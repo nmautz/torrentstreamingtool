@@ -1,0 +1,604 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>StreamLink v2.0</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>
+    tailwind.config = { darkMode: 'class' }
+  </script>
+  <style>
+    :root { color-scheme: dark; }
+    ::-webkit-scrollbar { width: 5px; }
+    ::-webkit-scrollbar-track { background: #111827; }
+    ::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #4b5563; }
+
+    @keyframes fadeSlideIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0);   }
+    }
+    .result-row { animation: fadeSlideIn 0.12s ease-out both; }
+
+    @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
+    .blink { animation: blink 1.8s ease-in-out infinite; }
+
+    @keyframes pulseRing {
+      0%   { box-shadow: 0 0 0 0 rgba(239,68,68,.7); }
+      70%  { box-shadow: 0 0 0 12px rgba(239,68,68,0); }
+      100% { box-shadow: 0 0 0 0 rgba(239,68,68,0); }
+    }
+    .pulse-ring { animation: pulseRing 1.5s ease-out infinite; }
+  </style>
+</head>
+<body class="dark bg-gray-950 text-gray-100 min-h-screen flex flex-col">
+
+<!-- ── VPN Disconnected Overlay ───────────────────────────────────────────── -->
+<div id="vpnOverlay"
+  class="hidden fixed inset-0 z-50 bg-red-950/97 backdrop-blur-md
+         flex flex-col items-center justify-center gap-6 text-center px-6">
+  <div class="w-24 h-24 rounded-full bg-red-600/20 border-2 border-red-500
+              flex items-center justify-center pulse-ring">
+    <svg class="w-12 h-12 text-red-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+        d="M12 9v2m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0
+           000-3L12.72 3.86a2 2 0 00-3.43 0z"/>
+    </svg>
+  </div>
+  <div>
+    <h1 class="text-4xl sm:text-5xl font-black text-red-300 tracking-tight leading-none">
+      VPN DISCONNECTED
+    </h1>
+    <p class="text-xl text-red-400 font-semibold mt-3">
+      NETWORK HALTED — qBittorrent Terminated
+    </p>
+    <p class="text-gray-500 text-sm mt-3 max-w-md">
+      Reconnect Mullvad VPN to resume operations.
+      All active downloads have been stopped.
+    </p>
+    <p id="vpnOverlayDetail" class="font-mono text-red-600 text-xs mt-4"></p>
+  </div>
+</div>
+
+<!-- ── Navbar ─────────────────────────────────────────────────────────────── -->
+<header class="sticky top-0 z-40 bg-gray-900/95 backdrop-blur
+               border-b border-gray-800 px-4 py-3 flex-shrink-0">
+  <div class="max-w-5xl mx-auto flex items-center justify-between gap-4">
+
+    <div class="flex items-center gap-2.5 min-w-0">
+      <div class="font-black text-xl tracking-tight whitespace-nowrap">
+        <span class="text-indigo-400">Stream</span><span class="text-white">Link</span>
+      </div>
+      <span class="hidden sm:block text-[10px] font-mono text-gray-600
+                   bg-gray-800 border border-gray-700 px-1.5 py-0.5 rounded">v2.0</span>
+    </div>
+
+    <div class="flex items-center gap-3">
+      <!-- Live indicator -->
+      <div class="flex items-center gap-1.5">
+        <div id="sseDot" class="w-1.5 h-1.5 rounded-full bg-gray-700 transition-colors"></div>
+        <span id="sseLabel" class="text-[11px] text-gray-600 hidden sm:block">connecting</span>
+      </div>
+
+      <!-- VPN pill -->
+      <div id="vpnPill"
+        class="flex items-center gap-2 px-3 py-1.5 rounded-full
+               bg-gray-800 border border-gray-700 transition-all">
+        <div id="vpnDot" class="w-2 h-2 rounded-full bg-gray-600 transition-colors flex-shrink-0"></div>
+        <span id="vpnLabel" class="text-xs font-medium text-gray-500 whitespace-nowrap">VPN: checking</span>
+      </div>
+    </div>
+
+  </div>
+</header>
+
+<!-- ── Main ───────────────────────────────────────────────────────────────── -->
+<main class="flex-1 pb-28 overflow-y-auto">
+  <div class="max-w-5xl mx-auto px-4 py-6">
+
+    <!-- Search bar -->
+    <div class="mb-6">
+      <div class="flex gap-2">
+        <input id="searchInput" type="search" autocomplete="off"
+          placeholder="Search public domain archives, open-source media…"
+          class="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-4 py-3
+                 text-sm placeholder-gray-600 focus:outline-none
+                 focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/40
+                 transition-all" />
+        <button id="searchBtn"
+          class="bg-indigo-600 hover:bg-indigo-500 active:scale-95
+                 px-5 py-3 rounded-xl text-sm font-semibold transition-all
+                 disabled:opacity-40 disabled:cursor-not-allowed disabled:active:scale-100
+                 whitespace-nowrap">
+          Search
+        </button>
+      </div>
+      <div class="flex justify-between mt-1.5 px-0.5">
+        <span id="resultCount" class="text-[11px] text-gray-700"></span>
+        <span id="searchHint" class="text-[11px] text-gray-700">
+          Results sorted by seeders
+        </span>
+      </div>
+    </div>
+
+    <!-- Alert banner -->
+    <div id="alert" class="hidden mb-4 px-4 py-2.5 rounded-lg border text-sm"></div>
+
+    <!-- Results table -->
+    <div id="resultsWrap" class="hidden">
+      <div class="overflow-x-auto rounded-xl border border-gray-800">
+        <table class="w-full text-sm border-collapse">
+          <thead>
+            <tr class="bg-gray-900 border-b border-gray-800 text-gray-500 text-xs uppercase tracking-wider">
+              <th class="text-left px-4 py-2.5 font-medium">Title</th>
+              <th class="text-right px-4 py-2.5 font-medium hidden sm:table-cell">Size</th>
+              <th class="text-right px-4 py-2.5 font-medium">Seeds</th>
+              <th class="text-right px-4 py-2.5 font-medium hidden md:table-cell">Peers</th>
+              <th class="px-4 py-2.5"></th>
+            </tr>
+          </thead>
+          <tbody id="resultsTbody" class="divide-y divide-gray-800/60"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- Empty / loading states -->
+    <div id="emptyState" class="flex flex-col items-center justify-center py-20 text-center">
+      <div class="w-16 h-16 rounded-2xl bg-gray-800 border border-gray-700
+                  flex items-center justify-center mb-4">
+        <svg class="w-8 h-8 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+            d="M21 21l-4.35-4.35m0 0A7.5 7.5 0 104.5 4.5a7.5 7.5 0 0012.15 12.15z"/>
+        </svg>
+      </div>
+      <p class="text-gray-500 font-medium">Search for public media</p>
+      <p class="text-gray-700 text-xs mt-1">Public domain archives, open-source video, and more</p>
+    </div>
+
+  </div>
+</main>
+
+<!-- ── Player Footer ──────────────────────────────────────────────────────── -->
+<footer class="fixed bottom-0 left-0 right-0 z-40 bg-gray-900 border-t border-gray-800">
+  <!-- Progress bar -->
+  <div class="w-full bg-gray-800 h-0.5">
+    <div id="progressBar" class="h-0.5 bg-indigo-500 transition-all duration-700" style="width:0%"></div>
+  </div>
+
+  <div class="max-w-5xl mx-auto px-4 py-2.5 flex items-center gap-3">
+    <!-- Status dot -->
+    <div id="playerDot" class="w-2 h-2 rounded-full bg-gray-700 flex-shrink-0"></div>
+
+    <!-- Now playing info -->
+    <div class="flex-1 min-w-0">
+      <div id="nowPlaying" class="text-sm font-medium text-gray-400 truncate">
+        No active stream
+      </div>
+      <div class="flex items-center gap-3 flex-wrap mt-0.5">
+        <span id="streamInfo" class="text-[11px] text-gray-600"></span>
+        <span id="speedInfo"  class="text-[11px] text-gray-700 font-mono"></span>
+      </div>
+    </div>
+
+    <!-- Status badge -->
+    <div id="statusBadge" class="hidden text-[11px] font-semibold px-2 py-0.5 rounded-full
+                                  border flex-shrink-0"></div>
+
+    <!-- Controls -->
+    <div class="flex items-center gap-0.5 flex-shrink-0">
+
+      <button onclick="vlcVolume('down')" title="Volume Down"
+        class="p-2 rounded-lg hover:bg-gray-800 text-gray-500 hover:text-gray-200
+               transition-all active:scale-95">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M11 5L6 9H2v6h4l5 4V5zM15 9a3 3 0 010 6"/>
+        </svg>
+      </button>
+
+      <button id="pauseBtn" onclick="vlcPause()" title="Pause / Resume"
+        class="p-2 rounded-lg hover:bg-gray-800 text-gray-500 hover:text-gray-200
+               transition-all active:scale-95">
+        <svg id="pauseIcon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M10 9v6m4-6v6"/>
+        </svg>
+      </button>
+
+      <button onclick="stopStream()" title="Stop &amp; delete download"
+        class="p-2 rounded-lg hover:bg-gray-800 text-red-600 hover:text-red-400
+               transition-all active:scale-95">
+        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+          <rect x="5" y="5" width="14" height="14" rx="1"/>
+        </svg>
+      </button>
+
+      <button onclick="vlcVolume('up')" title="Volume Up"
+        class="p-2 rounded-lg hover:bg-gray-800 text-gray-500 hover:text-gray-200
+               transition-all active:scale-95">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M11 5L6 9H2v6h4l5 4V5zM15 9a3 3 0 010 6M18.364 5.636a9 9 0 010 12.728"/>
+        </svg>
+      </button>
+
+    </div>
+  </div>
+</footer>
+
+<!-- ── JavaScript ─────────────────────────────────────────────────────────── -->
+<script>
+"use strict";
+
+// ── App state (mirrors backend) ────────────────────────────────────────────
+let app = {
+  vpn_secure: true,
+  vpn_status: "Checking…",
+  stream_status: "idle",
+  active_title: null,
+  progress: 0,
+  downloaded_mb: 0,
+  total_mb: 0,
+  dl_speed_bps: 0,
+  ul_speed_bps: 0,
+};
+
+// ── Formatting ─────────────────────────────────────────────────────────────
+function fmtSize(bytes) {
+  const u = ["B","KB","MB","GB","TB"];
+  let i = 0;
+  while (bytes >= 1024 && i < u.length - 1) { bytes /= 1024; i++; }
+  return `${bytes.toFixed(1)} ${u[i]}`;
+}
+function fmtSpeed(bps) { return bps > 0 ? fmtSize(bps) + "/s" : "—"; }
+
+// ── Alert ──────────────────────────────────────────────────────────────────
+const ALERT_STYLES = {
+  error:   "bg-red-950/80 border-red-800 text-red-300",
+  warn:    "bg-yellow-950/80 border-yellow-800 text-yellow-300",
+  info:    "bg-blue-950/80 border-blue-800 text-blue-300",
+  success: "bg-green-950/80 border-green-800 text-green-300",
+};
+let alertTimer;
+function showAlert(msg, type = "error") {
+  const el = document.getElementById("alert");
+  el.className = `mb-4 px-4 py-2.5 rounded-lg border text-sm ${ALERT_STYLES[type] || ALERT_STYLES.error}`;
+  el.textContent = msg;
+  el.classList.remove("hidden");
+  clearTimeout(alertTimer);
+  if (type !== "error") alertTimer = setTimeout(() => el.classList.add("hidden"), 5000);
+}
+function hideAlert() { document.getElementById("alert").classList.add("hidden"); }
+
+// ── VPN UI ─────────────────────────────────────────────────────────────────
+function renderVpn(secure, statusText) {
+  const dot     = document.getElementById("vpnDot");
+  const label   = document.getElementById("vpnLabel");
+  const pill    = document.getElementById("vpnPill");
+  const overlay = document.getElementById("vpnOverlay");
+  const detail  = document.getElementById("vpnOverlayDetail");
+
+  if (secure) {
+    dot.className   = "w-2 h-2 rounded-full bg-green-500 flex-shrink-0 transition-colors";
+    label.className = "text-xs font-medium text-green-400 whitespace-nowrap";
+    label.textContent = "VPN: Connected";
+    pill.classList.remove("border-red-800");
+    overlay.classList.add("hidden");
+  } else {
+    dot.className   = "w-2 h-2 rounded-full bg-red-500 flex-shrink-0 transition-colors blink";
+    label.className = "text-xs font-medium text-red-400 whitespace-nowrap";
+    label.textContent = "VPN: DISCONNECTED";
+    pill.classList.add("border-red-800");
+    overlay.classList.remove("hidden");
+    if (statusText) detail.textContent = statusText;
+  }
+}
+
+// ── Player footer UI ───────────────────────────────────────────────────────
+const BADGE = {
+  buffering: "bg-yellow-900/50 text-yellow-400 border-yellow-800",
+  playing:   "bg-green-900/50  text-green-400  border-green-800",
+  error:     "bg-red-900/50    text-red-400    border-red-800",
+};
+const BAR_COLOR = {
+  buffering: "bg-yellow-500",
+  playing:   "bg-green-500",
+  error:     "bg-red-500",
+  idle:      "bg-indigo-500",
+};
+const DOT_COLOR = {
+  buffering: "bg-yellow-500 blink",
+  playing:   "bg-green-500",
+  error:     "bg-red-500",
+  idle:      "bg-gray-700",
+};
+
+function renderPlayer(s) {
+  const nowPlaying  = document.getElementById("nowPlaying");
+  const streamInfo  = document.getElementById("streamInfo");
+  const speedInfo   = document.getElementById("speedInfo");
+  const bar         = document.getElementById("progressBar");
+  const badge       = document.getElementById("statusBadge");
+  const playerDot   = document.getElementById("playerDot");
+
+  // Progress bar
+  bar.style.width = `${Math.min(100, s.progress || 0)}%`;
+  const barCls = BAR_COLOR[s.stream_status] || BAR_COLOR.idle;
+  bar.className = `h-0.5 transition-all duration-700 ${barCls}`;
+
+  // Status dot
+  playerDot.className = `w-2 h-2 rounded-full flex-shrink-0 ${DOT_COLOR[s.stream_status] || DOT_COLOR.idle}`;
+
+  // Title
+  nowPlaying.textContent = s.active_title || "No active stream";
+  nowPlaying.className = `text-sm font-medium truncate ${s.active_title ? "text-gray-200" : "text-gray-500"}`;
+
+  // Info line
+  if (s.stream_status === "buffering") {
+    streamInfo.textContent = s.total_mb > 0
+      ? `${s.downloaded_mb.toFixed(1)} MB / ${s.total_mb.toFixed(1)} MB (${s.progress.toFixed(1)}%)`
+      : "Connecting…";
+  } else if (s.stream_status === "playing") {
+    streamInfo.textContent = s.total_mb > 0
+      ? `${s.downloaded_mb.toFixed(1)} / ${s.total_mb.toFixed(1)} MB`
+      : "Downloading…";
+  } else {
+    streamInfo.textContent = "";
+  }
+
+  // Speed
+  speedInfo.textContent = (s.dl_speed_bps > 0 && s.stream_status !== "idle")
+    ? `▼ ${fmtSpeed(s.dl_speed_bps)}  ▲ ${fmtSpeed(s.ul_speed_bps)}`
+    : "";
+
+  // Badge
+  if (s.stream_status in BADGE) {
+    const labels = { buffering: "Buffering…", playing: "▶ Playing", error: "Error" };
+    badge.className = `text-[11px] font-semibold px-2 py-0.5 rounded-full border ${BADGE[s.stream_status]}`;
+    badge.textContent = labels[s.stream_status];
+    badge.classList.remove("hidden");
+  } else {
+    badge.classList.add("hidden");
+  }
+}
+
+// ── SSE connection ─────────────────────────────────────────────────────────
+function connectSSE() {
+  const sseDot   = document.getElementById("sseDot");
+  const sseLabel = document.getElementById("sseLabel");
+  const es = new EventSource("/api/events");
+
+  es.addEventListener("open", () => {
+    sseDot.className  = "w-1.5 h-1.5 rounded-full bg-green-500 blink transition-colors";
+    sseLabel.textContent = "live";
+    sseLabel.className   = "text-[11px] text-green-600 hidden sm:block";
+  });
+
+  es.addEventListener("state", (e) => {
+    const d = JSON.parse(e.data);
+    Object.assign(app, d);
+    renderVpn(d.vpn_secure, d.vpn_status);
+    renderPlayer(app);
+  });
+
+  es.addEventListener("vpn_status", (e) => {
+    const d = JSON.parse(e.data);
+    app.vpn_secure = d.secure;
+    app.vpn_status = d.status;
+    renderVpn(d.secure, d.status);
+    if (!d.secure) showAlert("VPN disconnected — qBittorrent has been terminated.", "error");
+  });
+
+  es.addEventListener("stream_status", (e) => {
+    const d = JSON.parse(e.data);
+    app.stream_status = d.status;
+    if (d.progress    !== undefined) app.progress      = d.progress;
+    if (d.downloaded_mb !== undefined) app.downloaded_mb = d.downloaded_mb;
+    if (d.total_mb    !== undefined) app.total_mb      = d.total_mb;
+    if (d.dl_speed_bps !== undefined) app.dl_speed_bps = d.dl_speed_bps;
+    if (d.ul_speed_bps !== undefined) app.ul_speed_bps = d.ul_speed_bps;
+    if (d.message) document.getElementById("streamInfo").textContent = d.message;
+    renderPlayer(app);
+
+    if (d.status === "error")   showAlert(`Stream error: ${d.message}`, "error");
+    if (d.status === "playing") showAlert(`Now playing in VLC: ${d.message}`, "success");
+    if (d.status === "idle")    hideAlert();
+  });
+
+  es.addEventListener("error", () => {
+    sseDot.className  = "w-1.5 h-1.5 rounded-full bg-red-600 transition-colors";
+    sseLabel.textContent = "reconnecting";
+    sseLabel.className   = "text-[11px] text-red-600 hidden sm:block";
+    // EventSource reconnects automatically
+  });
+}
+
+// ── Search ─────────────────────────────────────────────────────────────────
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;")
+    .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+}
+
+async function doSearch(q) {
+  q = q.trim();
+  if (!q) return;
+
+  const btn   = document.getElementById("searchBtn");
+  const tbody = document.getElementById("resultsTbody");
+  const wrap  = document.getElementById("resultsWrap");
+  const empty = document.getElementById("emptyState");
+  const count = document.getElementById("resultCount");
+
+  btn.disabled = true;
+  btn.textContent = "Searching…";
+  tbody.innerHTML = "";
+  wrap.classList.add("hidden");
+  empty.classList.add("hidden");
+  hideAlert();
+
+  try {
+    const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({ detail: "Search failed" }));
+      throw new Error(err.detail || `HTTP ${r.status}`);
+    }
+    const data = await r.json();
+    const items = data.results || [];
+
+    count.textContent = items.length ? `${items.length} results` : "";
+
+    if (items.length === 0) {
+      empty.classList.remove("hidden");
+      empty.innerHTML = `
+        <div class="w-16 h-16 rounded-2xl bg-gray-800 border border-gray-700
+                    flex items-center justify-center mb-4">
+          <svg class="w-8 h-8 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+              d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01
+                 M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+          </svg>
+        </div>
+        <p class="text-gray-500 font-medium">No results for "${escHtml(q)}"</p>
+        <p class="text-gray-700 text-xs mt-1">Try different keywords or check your indexer</p>`;
+      return;
+    }
+
+    items.forEach((item, i) => {
+      const tr = document.createElement("tr");
+      tr.className = "result-row group bg-gray-950 hover:bg-gray-900 transition-colors";
+      tr.style.animationDelay = `${i * 18}ms`;
+
+      const seederCls = item.seeders > 30
+        ? "text-green-400" : item.seeders > 8
+        ? "text-yellow-400" : "text-red-400";
+
+      tr.innerHTML = `
+        <td class="px-4 py-3 max-w-[220px] sm:max-w-xs">
+          <span class="block truncate text-gray-300 group-hover:text-white text-xs sm:text-sm
+                       transition-colors" title="${escHtml(item.title)}">
+            ${escHtml(item.title)}
+          </span>
+          ${item.tracker
+            ? `<span class="text-[10px] text-gray-700">${escHtml(item.tracker)}</span>`
+            : ""}
+        </td>
+        <td class="px-4 py-3 text-right text-xs text-gray-500 whitespace-nowrap hidden sm:table-cell">
+          ${escHtml(item.size_human)}
+        </td>
+        <td class="px-4 py-3 text-right text-xs font-mono ${seederCls} whitespace-nowrap">
+          ${item.seeders}
+        </td>
+        <td class="px-4 py-3 text-right text-xs text-gray-700 whitespace-nowrap hidden md:table-cell">
+          ${item.peers}
+        </td>
+        <td class="px-4 py-3 text-right">
+          <button
+            class="play-btn bg-indigo-600 hover:bg-indigo-500 active:scale-95
+                   text-white text-xs font-semibold px-3.5 py-1.5 rounded-lg
+                   transition-all disabled:opacity-40 disabled:cursor-not-allowed
+                   disabled:active:scale-100 whitespace-nowrap"
+            data-magnet="${escHtml(item.magnet)}"
+            data-title="${escHtml(item.title)}">
+            ▶ Play
+          </button>
+        </td>`;
+
+      tr.querySelector(".play-btn").addEventListener("click", (e) => {
+        const b = e.currentTarget;
+        playItem(b.dataset.magnet, b.dataset.title, b);
+      });
+      tbody.appendChild(tr);
+    });
+
+    wrap.classList.remove("hidden");
+  } catch (err) {
+    showAlert(err.message, "error");
+    empty.classList.remove("hidden");
+  } finally {
+    btn.disabled = false;
+    btn.textContent = "Search";
+  }
+}
+
+// ── Play ───────────────────────────────────────────────────────────────────
+async function playItem(magnet, title, btn) {
+  if (!app.vpn_secure) {
+    showAlert("VPN not connected — streaming blocked.", "error");
+    return;
+  }
+
+  // Optimistic UI
+  const allBtns = document.querySelectorAll(".play-btn");
+  allBtns.forEach(b => {
+    b.disabled = true;
+    if (b !== btn) b.textContent = "▶ Play";
+  });
+  btn.textContent = "Starting…";
+  hideAlert();
+
+  try {
+    const r = await fetch("/api/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ magnet, title }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({ detail: "Unknown error" }));
+      throw new Error(err.detail || `HTTP ${r.status}`);
+    }
+    btn.textContent = "▶ Loading…";
+    // SSE stream_status events will drive the rest of the UI
+  } catch (err) {
+    showAlert(err.message, "error");
+    btn.textContent = "▶ Play";
+    btn.disabled = false;
+  } finally {
+    // Re-enable other buttons; leave the active one until SSE confirms state
+    setTimeout(() => {
+      allBtns.forEach(b => {
+        if (b !== btn) { b.disabled = false; }
+      });
+    }, 1500);
+  }
+}
+
+// ── VLC Controls ───────────────────────────────────────────────────────────
+async function vlcPause() {
+  await fetch("/api/vlc/pause", { method: "POST" }).catch(() => {});
+}
+async function vlcVolume(dir) {
+  await fetch(`/api/vlc/volume/${dir}`, { method: "POST" }).catch(() => {});
+}
+async function stopStream() {
+  await fetch("/api/stop", { method: "POST" }).catch(() => {});
+  // Re-enable all play buttons
+  document.querySelectorAll(".play-btn").forEach(b => {
+    b.disabled = false;
+    b.textContent = "▶ Play";
+  });
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+document.addEventListener("DOMContentLoaded", () => {
+  const input = document.getElementById("searchInput");
+  const btn   = document.getElementById("searchBtn");
+
+  btn.addEventListener("click", () => doSearch(input.value));
+  input.addEventListener("keydown", (e) => { if (e.key === "Enter") doSearch(input.value); });
+
+  // Debounced auto-search after 600 ms of inactivity
+  let debounceTimer;
+  input.addEventListener("input", () => {
+    clearTimeout(debounceTimer);
+    if (input.value.length >= 3) {
+      debounceTimer = setTimeout(() => doSearch(input.value), 600);
+    }
+  });
+
+  connectSSE();
+});
+</script>
+</body>
+</html>
