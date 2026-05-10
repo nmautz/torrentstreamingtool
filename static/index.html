@@ -34,6 +34,8 @@
     /* Prevent double-tap zoom on buttons */
     button { touch-action: manipulation; }
     select { touch-action: manipulation; }
+    /* Fullscreen controls open — block all pointer events on background */
+    body.fc-open > *:not(#fullscreenControls) { pointer-events: none !important; }
   </style>
 </head>
 <body class="dark bg-gray-950 text-gray-100 min-h-screen flex flex-col">
@@ -859,7 +861,18 @@ async function vlcSetVolume(val){
   await fetch(`/api/vlc/volume/set?volume=${val}`,{method:"POST"}).catch(()=>{});
 }
 
+function _lockBackground(lock){
+  document.body.classList.toggle('fc-open', lock);
+  // setAttribute/removeAttribute has broader support than el.inert property
+  for(const el of document.body.children){
+    if(el.id==='fullscreenControls') continue;
+    if(lock) el.setAttribute('inert','');
+    else     el.removeAttribute('inert');
+  }
+}
+
 function openFullscreenControls(){
+  _lockBackground(true);
   const fc=document.getElementById("fullscreenControls");
   // Populate title and current state immediately
   const title=document.getElementById("fcTitle");
@@ -884,6 +897,7 @@ function openFullscreenControls(){
 
 function closeFullscreenControls(){
   document.getElementById("fullscreenControls").classList.add("hidden");
+  _lockBackground(false);
 }
 
 // ── Tabs ───────────────────────────────────────────────────────────────────
