@@ -6,5 +6,76 @@
       "color": "indigo"
     }
   ],
-  "items": []
+  "items": [
+    {
+      "id": "15d4f1f3-785e-4b0f-a912-4c1d0ace5d1e",
+      "title": "The.Boys.S04.COMPLETE.720p.AMZN.WEBRip.x264-GalaxyTV",
+      "series": "The Boys",
+      "season": 0,
+      "episode": 0,
+      "files": [
+        {
+          "name": "The.Boys.S04E01.720p.AMZN.WEBRip.x264-GalaxyTV.mkv",
+          "path": "/Users/nathanmautz/Downloads/StreamLink/The.Boys.S04.COMPLETE.720p.AMZN.WEBRip.x264-GalaxyTV[TGx]/The.Boys.S04E01.720p.AMZN.WEBRip.x264-GalaxyTV.mkv",
+          "size_bytes": 362338676,
+          "season": 4,
+          "episode": 1
+        },
+        {
+          "name": "The.Boys.S04E02.720p.AMZN.WEBRip.x264-GalaxyTV.mkv",
+          "path": "/Users/nathanmautz/Downloads/StreamLink/The.Boys.S04.COMPLETE.720p.AMZN.WEBRip.x264-GalaxyTV[TGx]/The.Boys.S04E02.720p.AMZN.WEBRip.x264-GalaxyTV.mkv",
+          "size_bytes": 399973091,
+          "season": 4,
+          "episode": 2
+        },
+        {
+          "name": "The.Boys.S04E03.720p.AMZN.WEBRip.x264-GalaxyTV.mkv",
+          "path": "/Users/nathanmautz/Downloads/StreamLink/The.Boys.S04.COMPLETE.720p.AMZN.WEBRip.x264-GalaxyTV[TGx]/The.Boys.S04E03.720p.AMZN.WEBRip.x264-GalaxyTV.mkv",
+          "size_bytes": 326827477,
+          "season": 4,
+          "episode": 3
+        },
+        {
+          "name": "The.Boys.S04E04.720p.AMZN.WEBRip.x264-GalaxyTV.mkv",
+          "path": "/Users/nathanmautz/Downloads/StreamLink/The.Boys.S04.COMPLETE.720p.AMZN.WEBRip.x264-GalaxyTV[TGx]/The.Boys.S04E04.720p.AMZN.WEBRip.x264-GalaxyTV.mkv",
+          "size_bytes": 348645611,
+          "season": 4,
+          "episode": 4
+        },
+        {
+          "name": "The.Boys.S04E05.720p.AMZN.WEBRip.x264-GalaxyTV.mkv",
+          "path": "/Users/nathanmautz/Downloads/StreamLink/The.Boys.S04.COMPLETE.720p.AMZN.WEBRip.x264-GalaxyTV[TGx]/The.Boys.S04E05.720p.AMZN.WEBRip.x264-GalaxyTV.mkv",
+          "size_bytes": 360776908,
+          "season": 4,
+          "episode": 5
+        },
+        {
+          "name": "The.Boys.S04E06.720p.AMZN.WEBRip.x264-GalaxyTV.mkv",
+          "path": "/Users/nathanmautz/Downloads/StreamLink/The.Boys.S04.COMPLETE.720p.AMZN.WEBRip.x264-GalaxyTV[TGx]/The.Boys.S04E06.720p.AMZN.WEBRip.x264-GalaxyTV.mkv",
+          "size_bytes": 315151254,
+          "season": 4,
+          "episode": 6
+        },
+        {
+          "name": "The.Boys.S04E07.720p.AMZN.WEBRip.x264-GalaxyTV.mkv",
+          "path": "/Users/nathanmautz/Downloads/StreamLink/The.Boys.S04.COMPLETE.720p.AMZN.WEBRip.x264-GalaxyTV[TGx]/The.Boys.S04E07.720p.AMZN.WEBRip.x264-GalaxyTV.mkv",
+          "size_bytes": 361437813,
+          "season": 4,
+          "episode": 7
+        },
+        {
+          "name": "The.Boys.S04E08.720p.AMZN.WEBRip.x264-GalaxyTV.mkv",
+          "path": "/Users/nathanmautz/Downloads/StreamLink/The.Boys.S04.COMPLETE.720p.AMZN.WEBRip.x264-GalaxyTV[TGx]/The.Boys.S04E08.720p.AMZN.WEBRip.x264-GalaxyTV.mkv",
+          "size_bytes": 347345060,
+          "season": 4,
+          "episode": 8
+        }
+      ],
+      "size_bytes": 2822495890,
+      "added_at": "2026-05-10T15:15:59+00:00",
+      "status": "downloading",
+      "torrent_hash": "5c41cdd5ba7fa0ebdf5d948a173ceb6312020ed2",
+      "progress": {}
+    }
+  ]
 }

@@ -101,24 +101,90 @@
 
 <!-- ── Download Modal ─────────────────────────────────────────────────────── -->
 <div id="downloadModal"
-  class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-sm
-         flex items-center justify-center px-4">
-  <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6 w-full max-w-sm fade-in">
-    <h2 class="text-lg font-bold mb-1">Download for Later</h2>
-    <p id="dlModalTitle" class="text-xs text-gray-500 mb-4 truncate"></p>
-    <label class="block text-xs text-gray-500 mb-1">Series name <span class="text-gray-700">(optional)</span></label>
-    <input id="dlSeries" type="text" placeholder="e.g. Breaking Bad"
-      class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm
-             focus:outline-none focus:border-indigo-500 mb-3" />
-    <label class="block text-xs text-gray-500 mb-1">Episode <span class="text-gray-700">(optional, e.g. S01E03)</span></label>
-    <input id="dlEpisode" type="text" placeholder="S01E03"
-      class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm
-             focus:outline-none focus:border-indigo-500 mb-5" />
-    <div class="flex gap-2">
+  class="hidden fixed inset-0 z-50 bg-black/75 backdrop-blur-sm
+         flex items-center justify-center px-4 py-6">
+  <div class="bg-gray-900 border border-gray-800 rounded-2xl w-full max-w-md fade-in">
+    <!-- Header -->
+    <div class="px-6 pt-5 pb-4 border-b border-gray-800">
+      <div class="flex items-start justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-base font-bold">Add to Library</h2>
+          <p id="dlModalTitle" class="text-xs text-gray-500 mt-0.5 truncate"></p>
+        </div>
+        <button onclick="closeDownloadModal()"
+          class="text-gray-600 hover:text-gray-300 transition-colors flex-shrink-0 mt-0.5">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+
+    <!-- Body -->
+    <div class="px-6 py-4 space-y-4">
+      <!-- Save path -->
+      <div>
+        <label class="flex items-center justify-between mb-1.5">
+          <span class="text-xs font-medium text-gray-400">Save location</span>
+          <button onclick="resetSavePath()" class="text-[11px] text-gray-600 hover:text-indigo-400 transition-colors">Reset to default</button>
+        </label>
+        <div class="flex items-center gap-2 bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5">
+          <svg class="w-3.5 h-3.5 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/>
+          </svg>
+          <input id="dlSavePath" type="text"
+            class="flex-1 bg-transparent text-xs text-gray-300 focus:outline-none min-w-0 font-mono" />
+        </div>
+      </div>
+
+      <!-- Divider -->
+      <div class="border-t border-gray-800"></div>
+
+      <!-- Series / episode metadata -->
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-xs font-medium text-gray-400 mb-1.5">
+            Series <span class="text-gray-600 font-normal">(optional)</span>
+          </label>
+          <input id="dlSeries" type="text" placeholder="e.g. Breaking Bad"
+            class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm
+                   focus:outline-none focus:border-indigo-500 transition-colors placeholder-gray-700" />
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-400 mb-1.5">
+            Episode <span class="text-gray-600 font-normal">(optional)</span>
+          </label>
+          <input id="dlEpisode" type="text" placeholder="S01E03"
+            class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm
+                   focus:outline-none focus:border-indigo-500 transition-colors placeholder-gray-700" />
+        </div>
+      </div>
+
+      <!-- Info row -->
+      <div class="flex items-center gap-2 text-[11px] text-gray-600 bg-gray-800/50 rounded-lg px-3 py-2">
+        <svg class="w-3.5 h-3.5 flex-shrink-0 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+        Files download in the background. Track progress in the Library tab.
+      </div>
+    </div>
+
+    <!-- Footer -->
+    <div class="px-6 pb-5 flex gap-2">
       <button onclick="closeDownloadModal()"
-        class="flex-1 bg-gray-800 hover:bg-gray-700 rounded-lg py-2 text-sm font-medium transition-colors">Cancel</button>
-      <button onclick="submitDownload()"
-        class="flex-1 bg-green-700 hover:bg-green-600 rounded-lg py-2 text-sm font-semibold transition-colors">Download</button>
+        class="flex-1 bg-gray-800 hover:bg-gray-700 rounded-xl py-2.5 text-sm font-medium transition-colors">
+        Cancel
+      </button>
+      <button onclick="submitDownload()" id="dlSubmitBtn"
+        class="flex-1 bg-green-700 hover:bg-green-600 rounded-xl py-2.5 text-sm font-semibold transition-colors flex items-center justify-center gap-2">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+        </svg>
+        Download
+      </button>
     </div>
   </div>
 </div>
@@ -197,6 +263,16 @@
       <div id="navProfileAvatar"
         class="w-6 h-6 rounded-full bg-indigo-600 flex items-center justify-center text-xs font-bold text-white flex-shrink-0">?</div>
       <span id="navProfileName" class="hidden sm:block text-gray-400 max-w-[80px] truncate text-xs"></span>
+    </button>
+    <!-- Download badge -->
+    <button id="dlBadge" onclick="switchTab('library')"
+      class="hidden items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-green-900/40 border border-green-800/60
+             hover:bg-green-900/60 transition-colors flex-shrink-0">
+      <svg class="w-3.5 h-3.5 text-green-400 blink" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+          d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+      </svg>
+      <span id="dlBadgeCount" class="text-xs font-semibold text-green-300"></span>
     </button>
     <!-- Live dot -->
     <div class="flex items-center gap-1.5 flex-shrink-0">
@@ -882,34 +958,99 @@ async function epPlay(){
 }
 
 // ── Download modal ─────────────────────────────────────────────────────────
-function openDownloadModal(magnet,title){
+let _defaultSavePath="";
+
+async function ensureDefaultSavePath(){
+  if(_defaultSavePath) return;
+  try{
+    const r=await fetch("/api/settings/download-path");
+    if(r.ok){ const d=await r.json(); _defaultSavePath=d.path||""; }
+  } catch(_){}
+}
+
+async function openDownloadModal(magnet,title){
   downloadTarget={magnet,title};
+  await ensureDefaultSavePath();
+
   document.getElementById("dlModalTitle").textContent=title;
+
+  // Save path
+  document.getElementById("dlSavePath").value=_defaultSavePath;
+
+  // Auto-detect series/episode from title
   const epMatch=title.match(/[Ss](\d{1,2})[Ee](\d{1,2})/);
   document.getElementById("dlEpisode").value=epMatch?epMatch[0].toUpperCase():"";
-  const seriesGuess=title.replace(/[Ss]\d{1,2}[Ee]\d{1,2}.*/,"")
-                         .replace(/\b(720p|1080p|2160p|BluRay|WEB|HDTV|x264|x265|HEVC)\b.*/i,"")
-                         .replace(/[._-]+/g," ").trim();
+  const seriesGuess=title
+    .replace(/[Ss]\d{1,2}[Ee]\d{1,2}.*/,"")
+    .replace(/\b(720p|1080p|2160p|4K|BluRay|WEB[-.]?DL|WEBRip|HDTV|x264|x265|HEVC|h\.?264|h\.?265|AAC|DD5|DDP5|Atmos)\b.*/i,"")
+    .replace(/[._-]+/g," ").trim();
   document.getElementById("dlSeries").value=epMatch?seriesGuess:"";
+
   document.getElementById("downloadModal").classList.remove("hidden");
   document.getElementById("dlSeries").focus();
 }
-function closeDownloadModal(){ downloadTarget=null; document.getElementById("downloadModal").classList.add("hidden"); }
+
+function closeDownloadModal(){
+  downloadTarget=null;
+  document.getElementById("downloadModal").classList.add("hidden");
+}
+
+function resetSavePath(){
+  document.getElementById("dlSavePath").value=_defaultSavePath;
+}
+
 function parseEp(s){
   const m=s.match(/[Ss](\d{1,2})[Ee](\d{1,2})/);
   return m?{season:parseInt(m[1]),episode:parseInt(m[2])}:{season:0,episode:0};
 }
+
 async function submitDownload(){
   if(!downloadTarget) return;
-  const series=document.getElementById("dlSeries").value.trim();
+  const series   =document.getElementById("dlSeries").value.trim();
+  const savePath =document.getElementById("dlSavePath").value.trim();
   const {season,episode}=parseEp(document.getElementById("dlEpisode").value.trim());
-  closeDownloadModal();
-  const r=await fetch("/api/library/download",{
-    method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({magnet:downloadTarget.magnet,title:downloadTarget.title,series,season,episode}),
-  });
-  if(r.ok){ showAlert("Added to library — downloading in background.","success"); if(activeTab==="library") loadLibrary(); }
-  else { const e=await r.json().catch(()=>({detail:"Unknown error"})); showAlert(e.detail||"Download failed.","error"); }
+
+  const btn=document.getElementById("dlSubmitBtn");
+  btn.disabled=true; btn.textContent="Adding…";
+
+  try{
+    const r=await fetch("/api/library/download",{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({
+        magnet:downloadTarget.magnet,title:downloadTarget.title,
+        series,season,episode,save_path:savePath,
+      }),
+    });
+    if(r.ok){
+      closeDownloadModal();
+      showAlert("Downloading — switch to Library to track progress.","success");
+      // Flash the Library tab and switch to it
+      switchTab("library");
+    } else {
+      const e=await r.json().catch(()=>({detail:"Unknown error"}));
+      showAlert(e.detail||"Download failed.","error");
+    }
+  } finally {
+    btn.disabled=false;
+    btn.innerHTML=`<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+        d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+    </svg>Download`;
+  }
+}
+
+// ── Download badge ─────────────────────────────────────────────────────────
+function updateDlBadge(count){
+  const badge=document.getElementById("dlBadge");
+  const label=document.getElementById("dlBadgeCount");
+  if(count>0){
+    label.textContent=count===1?"1 downloading":`${count} downloading`;
+    badge.classList.remove("hidden");
+    badge.classList.add("flex");
+  } else {
+    badge.classList.add("hidden");
+    badge.classList.remove("flex");
+  }
 }
 
 // ── Search ─────────────────────────────────────────────────────────────────
@@ -950,10 +1091,15 @@ async function doSearch(q){
         <td class="px-4 py-3 text-right text-xs text-gray-700 whitespace-nowrap hidden md:table-cell">${item.peers}</td>
         <td class="px-4 py-3 text-right">
           <div class="flex items-center gap-1.5 justify-end">
-            <button class="dl-btn text-[11px] bg-gray-800 hover:bg-gray-700 border border-gray-700
-                           text-gray-400 hover:text-gray-200 px-2.5 py-1.5 rounded-lg transition-all
-                           active:scale-95 whitespace-nowrap"
-              data-magnet="${escHtml(item.magnet)}" data-title="${escHtml(item.title)}">↓</button>
+            <button class="dl-btn text-[11px] bg-green-900/40 hover:bg-green-900/70 border border-green-800/60
+                           text-green-400 hover:text-green-200 px-2.5 py-1.5 rounded-lg transition-all
+                           active:scale-95 whitespace-nowrap flex items-center gap-1"
+              data-magnet="${escHtml(item.magnet)}" data-title="${escHtml(item.title)}">
+              <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5"
+                  d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+              </svg>Save
+            </button>
             <button class="play-btn bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white
                            text-xs font-semibold px-3.5 py-1.5 rounded-lg transition-all
                            disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
@@ -1059,6 +1205,7 @@ function connectSSE(){
   es.addEventListener("state",e=>{
     const d=JSON.parse(e.data); Object.assign(app,d);
     renderVpn(d.vpn_secure,d.vpn_status); renderPlayer(app);
+    updateDlBadge(d.downloading_count||0);
   });
   es.addEventListener("vpn_status",e=>{
     const d=JSON.parse(e.data); app.vpn_secure=d.secure; app.vpn_status=d.status;
@@ -1078,7 +1225,16 @@ function connectSSE(){
     if(d.status==="playing") showAlert(`Now playing in VLC: ${d.message}`,"success");
     if(d.status==="idle")    hideAlert();
   });
-  es.addEventListener("library_update",()=>{ if(activeTab==="library") loadLibrary(); });
+  es.addEventListener("library_update",e=>{
+    const d=JSON.parse(e.data||"{}");
+    // Always refresh if on library tab; otherwise just update the badge via next state event
+    if(activeTab==="library") loadLibrary();
+    // If an item just became ready, decrement the local badge immediately (state event confirms it)
+    if(d.status==="ready"||d.status==="error"){
+      app.downloading_count=Math.max(0,(app.downloading_count||0)-1);
+      updateDlBadge(app.downloading_count);
+    }
+  });
   es.addEventListener("progress_saved",e=>{
     // Re-render library silently when episode progress is saved
     if(activeTab==="library") loadLibrary();
@@ -1100,6 +1256,9 @@ document.addEventListener("keydown",e=>{
 
 // ── Init ───────────────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded",async()=>{
+  // Pre-fetch default download path so modal opens instantly
+  ensureDefaultSavePath();
+
   // Search wiring
   const input=document.getElementById("searchInput"),btn=document.getElementById("searchBtn");
   btn.addEventListener("click",()=>doSearch(input.value));
@@ -1110,6 +1269,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
     if(input.value.length>=3) dbt=setTimeout(()=>doSearch(input.value),600);
   });
   document.getElementById("dlEpisode").addEventListener("keydown",e=>{if(e.key==="Enter") submitDownload();});
+  document.getElementById("dlSeries").addEventListener("keydown",e=>{if(e.key==="Enter") document.getElementById("dlEpisode").focus();});
   document.getElementById("profileNameInput").addEventListener("keydown",e=>{if(e.key==="Enter") submitProfile();});
 
   // Restore profile from localStorage

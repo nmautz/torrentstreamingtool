@@ -129,6 +129,7 @@ class AppState:
     library_profile_id: Optional[str] = None
     library_playlist: list = field(default_factory=list)  # ordered file paths
     library_current_file: Optional[str] = None            # path VLC is playing now
+    downloading_count: int = 0                            # active library downloads
     sse_queues: list = field(default_factory=list)
 
 
@@ -161,6 +162,7 @@ def state_snapshot() -> dict:
         "total_mb": round(state.total_mb, 2),
         "dl_speed_bps": state.dl_speed_bps,
         "ul_speed_bps": state.ul_speed_bps,
+        "downloading_count": state.downloading_count,
     }
 
 
@@ -516,6 +518,7 @@ async def library_download_monitor() -> None:
         try:
             lib = await get_library()
             pending = [it for it in lib["items"] if it.get("status") == "downloading"]
+            state.downloading_count = len(pending)
             if not pending:
                 continue
             changed = False
@@ -538,10 +541,12 @@ async def library_download_monitor() -> None:
                 qstate = info.get("state", "")
                 if qstate in ("uploading", "stalledUP", "pausedUP", "queuedUP", "forcedUP"):
                     item["status"] = "ready"
+                    state.downloading_count = max(0, state.downloading_count - 1)
                     changed = True
                     await broadcast("library_update", {"item_id": item["id"], "status": "ready"})
                 elif qstate in ("error", "missingFiles"):
                     item["status"] = "error"
+                    state.downloading_count = max(0, state.downloading_count - 1)
                     changed = True
                     await broadcast("library_update", {"item_id": item["id"], "status": "error"})
                 else:
@@ -682,10 +687,10 @@ async def stream_pipeline(magnet: str, title: str) -> None:
 
 # ── Library Download Pipeline (keep file, no auto-delete) ─────────────────────
 
-async def library_download_pipeline(item_id: str, magnet: str) -> None:
+async def library_download_pipeline(item_id: str, magnet: str, save_path: str = "") -> None:
     """Add magnet to qBit for a full download; no streaming mode, never auto-deleted."""
     try:
-        h = await qbit_add_magnet(magnet)
+        h = await qbit_add_magnet(magnet, save_path=save_path or None)
         if not h:
             lib = await get_library()
             for it in lib["items"]:
@@ -768,6 +773,7 @@ class DownloadReq(BaseModel):
     series: str = ""
     season: int = 0
     episode: int = 0
+    save_path: str = ""  # empty → use default from settings
 
 
 class ProfileReq(BaseModel):
@@ -909,8 +915,11 @@ async def library_download(req: DownloadReq) -> JSONResponse:
     }
     lib["items"].append(item)
     await put_library(lib)
-    asyncio.create_task(library_download_pipeline(item["id"], req.magnet))
-    return JSONResponse({"ok": True, "item_id": item["id"]})
+    state.downloading_count += 1
+    save_path = req.save_path.strip() or settings.qbit_download_path
+    asyncio.create_task(library_download_pipeline(item["id"], req.magnet, save_path))
+    return JSONResponse({"ok": True, "item_id": item["id"],
+                         "default_save_path": settings.qbit_download_path})
 
 
 @app.delete("/api/library/{item_id}")
@@ -1173,6 +1182,11 @@ async def set_subtitle_track(track_id: int) -> JSONResponse:
 @app.get("/api/state")
 async def get_state() -> JSONResponse:
     return JSONResponse(state_snapshot())
+
+
+@app.get("/api/settings/download-path")
+async def get_download_path() -> JSONResponse:
+    return JSONResponse({"path": settings.qbit_download_path})
 
 
 @app.get("/api/events")
