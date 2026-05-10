@@ -315,17 +315,65 @@ def check_mullvad() -> bool:
 
 # ── Network info ───────────────────────────────────────────────────────────
 def get_local_ip() -> str:
-    """Return the LAN IP this machine is advertising — the address phones should use."""
+    """Return the LAN IP phones should use to connect.
+
+    The UDP-connect trick (connect to 8.8.8.8, read local address) is unreliable
+    when a VPN is active: the OS routes through the VPN tunnel and getsockname()
+    returns the VPN's internal address instead of the router LAN address.
+
+    Instead, we walk all interfaces via psutil, skip known VPN/tunnel adapters by
+    name, then prefer 192.168.x.x > 10.x.x.x > 172.16-31.x.x.  The UDP trick
+    is kept as a last-resort fallback.
+    """
+    # Name prefixes / substrings that indicate VPN, tunnel, or virtual adapters
+    _VPN_STARTS = ("utun", "tun", "tap", "wg", "ppp", "lo")
+    _VPN_SUBS   = ("mullvad", "wireguard", "vpn", "virtual",
+                   "vmware", "vbox", "hyper-v", "loopback")
+
+    def _is_lan(ip: str) -> bool:
+        return (ip.startswith("192.168.") or
+                ip.startswith("10.") or
+                bool(re.match(r"^172\.(1[6-9]|2\d|3[01])\.", ip)))
+
     try:
-        # Opens a UDP socket without sending anything; getsockname returns the
-        # outbound interface the OS would use to reach the public internet.
+        import psutil
+        buckets: list[list[str]] = [[], [], []]  # 192.168 / 10. / 172.16-31
+        for iface, addrs in psutil.net_if_addrs().items():
+            n = iface.lower()
+            if any(n.startswith(p) for p in _VPN_STARTS):
+                continue
+            if any(p in n for p in _VPN_SUBS):
+                continue
+            for addr in addrs:
+                if addr.family != socket.AF_INET:
+                    continue
+                ip = addr.address
+                if not _is_lan(ip):
+                    continue
+                if ip.startswith("192.168."):
+                    buckets[0].append(ip)
+                elif ip.startswith("10."):
+                    buckets[1].append(ip)
+                else:
+                    buckets[2].append(ip)
+        for bucket in buckets:
+            if bucket:
+                return bucket[0]
+    except Exception:
+        pass
+
+    # Fallback: UDP trick (may return VPN IP when VPN routes all traffic)
+    try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
         ip = s.getsockname()[0]
         s.close()
-        return ip
+        if _is_lan(ip):
+            return ip
     except Exception:
-        return ""
+        pass
+
+    return ""
 
 
 def get_wifi_ssid() -> str:
