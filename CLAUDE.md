@@ -93,7 +93,7 @@ Persistent storage in `library.json` at the project root (created automatically)
 
 **Watch progress** — `vlc_progress_tracker` polls VLC's `/requests/status.json` every 15 s while `state.library_item_id` is set, saving `{position_sec, duration_sec, completed}` per profile per item. Completed threshold is >92%. Resume via `/api/library/{id}/play` with `seek_to=null` — backend reads saved position and issues a VLC `seek` command 3 s after playback starts (to let VLC open the file first).
 
-**Sequential download fix** — `qbit_streaming_mode` checks `f_l_piece_prio` before calling `toggleFirstLastPiecePrio`, because the toggle would turn priority OFF if it was already on. Sequential download + first/last piece priority must both be ON for streaming.
+**Sequential download** — `qbit_streaming_mode` calls only `setSequentialDownload` (pieces arrive in order 0 → N). First/last piece priority (`toggleFirstLastPiecePrio`) is a separate, independent flag and is explicitly **not** set — it causes qBittorrent to fetch out-of-order chunks early, which breaks piece-order streaming.
 
 ### Frontend (`static/index.html`)
 

@@ -11,6 +11,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator, Optional
+from urllib.parse import unquote, urlparse
 
 import httpx
 import psutil
@@ -49,10 +50,42 @@ _lib_lock: asyncio.Lock  # initialised in lifespan
 
 # ── Library Storage ───────────────────────────────────────────────────────────
 
+def _migrate_item(item: dict) -> dict:
+    """Upgrade items written by older versions of the server in-place."""
+    # v2.0 → v2.1: flat file_path → files list
+    if not item.get("files") and item.get("file_path"):
+        item["files"] = [{
+            "name": Path(item["file_path"]).name,
+            "path": item["file_path"],
+            "size_bytes": item.get("size_bytes", 0),
+            "season": item.get("season", 0),
+            "episode": item.get("episode", 0),
+        }]
+    # v2.0 → v2.1: flat per-profile progress → per-file progress
+    for prof_id, prog in list(item.get("progress", {}).items()):
+        if isinstance(prog, dict) and "file_progress" not in prog and "position_sec" in prog:
+            file_path = item.get("file_path", "")
+            if file_path:
+                item["progress"][prof_id] = {
+                    "last_file": file_path,
+                    "file_progress": {
+                        file_path: {
+                            "position_sec": prog.get("position_sec", 0),
+                            "duration_sec": prog.get("duration_sec", 0),
+                            "completed": prog.get("completed", False),
+                            "updated_at": prog.get("updated_at", ""),
+                        }
+                    },
+                }
+    return item
+
+
 def _load_lib_raw() -> dict:
     if LIBRARY_FILE.exists():
         try:
-            return json.loads(LIBRARY_FILE.read_text(encoding="utf-8"))
+            raw = json.loads(LIBRARY_FILE.read_text(encoding="utf-8"))
+            raw["items"] = [_migrate_item(it) for it in raw.get("items", [])]
+            return raw
         except Exception:
             pass
     return {"profiles": [], "items": []}
@@ -92,8 +125,10 @@ class AppState:
     dl_speed_bps: int = 0
     ul_speed_bps: int = 0
     stream_task: Optional[asyncio.Task] = None
-    library_item_id: Optional[str] = None   # item currently playing from library
+    library_item_id: Optional[str] = None
     library_profile_id: Optional[str] = None
+    library_playlist: list = field(default_factory=list)  # ordered file paths
+    library_current_file: Optional[str] = None            # path VLC is playing now
     sse_queues: list = field(default_factory=list)
 
 
@@ -154,24 +189,32 @@ async def qreq(method: str, path: str, **kw) -> Optional[httpx.Response]:
         return None
 
 
-async def qbit_add_magnet(magnet: str, save_path: Optional[str] = None) -> Optional[str]:
+async def qbit_add_magnet(
+    magnet: str,
+    save_path: Optional[str] = None,
+    sequential: bool = False,
+) -> Optional[str]:
     h = extract_hash(magnet)
-    data = {"urls": magnet, "savepath": save_path or settings.qbit_download_path}
+    data: dict = {"urls": magnet, "savepath": save_path or settings.qbit_download_path}
+    if sequential:
+        # Set sequential download at add-time so it applies before any pieces download.
+        # This is the qBittorrent /add API field, separate from the toggle endpoint.
+        data["sequentialDownload"] = "true"
     r = await qreq("POST", "/api/v2/torrents/add", data=data)
     return h if (r and r.text.strip() == "Ok.") else None
 
 
 async def qbit_streaming_mode(h: str) -> None:
-    """Enable sequential download and ensure first/last piece priority is ON.
+    """Ensure sequential download is on.
 
-    toggleFirstLastPiecePrio is a toggle — calling it on a torrent that already
-    has it enabled would turn it OFF.  We read current state first to avoid that.
+    The correct API endpoint is toggleSequentialDownload (not setSequentialDownload,
+    which does not exist).  Because it is a toggle, we read seq_dl from torrent info
+    first and only call it when sequential is currently off.  This is a belt-and-
+    suspenders check — sequential=true is already passed at add-time via qbit_add_magnet.
     """
-    await qreq("POST", "/api/v2/torrents/setSequentialDownload",
-                data={"hashes": h, "enable": "true"})
     info = await qbit_info(h)
-    if info is not None and not info.get("f_l_piece_prio", False):
-        await qreq("POST", "/api/v2/torrents/toggleFirstLastPiecePrio",
+    if info is not None and not info.get("seq_dl", False):
+        await qreq("POST", "/api/v2/torrents/toggleSequentialDownload",
                    data={"hashes": h})
 
 
@@ -224,6 +267,66 @@ async def vlc_status() -> Optional[dict]:
     return None
 
 
+async def vlc_status_xml_fields() -> dict:
+    """Fetch the VLC XML status and extract current audio/subtitle track IDs.
+
+    The JSON status exposes stream metadata but not which track is currently
+    selected — the XML status has explicit <audiotrack> and <subtitletrack> nodes.
+    """
+    try:
+        async with httpx.AsyncClient() as c:
+            r = await c.get(
+                f"{settings.vlc_url}/requests/status.xml",
+                auth=httpx.BasicAuth("", settings.vlc_password),
+                timeout=3.0,
+            )
+            if r.status_code == 200:
+                def _tag(name: str) -> Optional[str]:
+                    m = re.search(rf"<{name}>(.*?)</{name}>", r.text, re.DOTALL)
+                    return m.group(1).strip() if m else None
+                audio_raw = _tag("audiotrack")
+                sub_raw   = _tag("subtitletrack")
+                return {
+                    "current_audio":    int(audio_raw) if audio_raw is not None else -1,
+                    "current_subtitle": int(sub_raw)   if sub_raw   is not None else -1,
+                }
+    except Exception:
+        pass
+    return {"current_audio": -1, "current_subtitle": -1}
+
+
+async def vlc_playlist_uri() -> Optional[str]:
+    """Return the file:// URI of the currently active VLC playlist item."""
+    try:
+        async with httpx.AsyncClient() as c:
+            r = await c.get(
+                f"{settings.vlc_url}/requests/playlist.json",
+                auth=httpx.BasicAuth("", settings.vlc_password),
+                timeout=3.0,
+            )
+            if r.status_code == 200:
+                def _find_current(node: dict) -> Optional[str]:
+                    if node.get("current") == "current":
+                        return node.get("uri")
+                    for child in node.get("children", []):
+                        found = _find_current(child)
+                        if found:
+                            return found
+                    return None
+                return _find_current(r.json())
+    except Exception:
+        pass
+    return None
+
+
+def uri_to_path(uri: str) -> str:
+    """Convert a file:// URI back to an absolute file path."""
+    path = unquote(urlparse(uri).path)
+    if platform.system() == "Windows":
+        path = path.lstrip("/")
+    return path
+
+
 # ── Utilities ─────────────────────────────────────────────────────────────────
 
 def extract_hash(magnet: str) -> Optional[str]:
@@ -240,9 +343,41 @@ def extract_hash(magnet: str) -> Optional[str]:
     return h.lower()
 
 
+def parse_season_episode(name: str) -> tuple[int, int]:
+    """Extract (season, episode) from filenames like S01E03, s2e5, 1x03, etc."""
+    m = re.search(r"[Ss](\d{1,2})[Ee](\d{1,2})", name)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    m = re.search(r"\b(\d{1,2})x(\d{2})\b", name)
+    if m:
+        return int(m.group(1)), int(m.group(2))
+    return 0, 0
+
+
+VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".m2ts", ".webm"}
+
+
+def build_file_list(qbit_file_list: list, save_path: str) -> list[dict]:
+    """Build a sorted video-file list from qBittorrent's files API response."""
+    result = []
+    for f in qbit_file_list:
+        rel = f.get("name", "")
+        if Path(rel).suffix.lower() not in VIDEO_EXTS:
+            continue
+        season, episode = parse_season_episode(rel)
+        result.append({
+            "name": Path(rel).name,
+            "path": str(Path(save_path) / rel),
+            "size_bytes": f.get("size", 0),
+            "season": season,
+            "episode": episode,
+        })
+    result.sort(key=lambda x: (x["season"] or 9999, x["episode"] or 9999, x["name"]))
+    return result
+
+
 def largest_video(files: list) -> Optional[dict]:
-    VIDEO = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".m2ts", ".webm"}
-    videos = [f for f in files if Path(f["name"]).suffix.lower() in VIDEO]
+    videos = [f for f in files if Path(f["name"]).suffix.lower() in VIDEO_EXTS]
     pool = videos or files
     return max(pool, key=lambda f: f.get("size", 0), default=None)
 
@@ -253,6 +388,64 @@ def human_size(n: int) -> str:
             return f"{n:.1f} {unit}"
         n /= 1024
     return f"{n:.1f} PB"
+
+
+def _file_progress(item: dict, profile_id: str, file_path: str) -> Optional[dict]:
+    """Return per-file progress dict for a given profile and path, or None."""
+    prof = item.get("progress", {}).get(profile_id, {})
+    return prof.get("file_progress", {}).get(file_path)
+
+
+def find_resume_hint(item: dict, profile_id: str) -> Optional[dict]:
+    """Return the best file+position to resume for a profile, or None."""
+    if not profile_id:
+        return None
+    files = item.get("files", [])
+    if not files:
+        return None
+    prof = item.get("progress", {}).get(profile_id, {})
+    file_progs = prof.get("file_progress", {})
+    last_file = prof.get("last_file")
+
+    # Prefer the last-watched file if it has meaningful in-progress position
+    if last_file:
+        fp = file_progs.get(last_file, {})
+        if not fp.get("completed") and fp.get("position_sec", 0) > 5:
+            dur = fp.get("duration_sec", 0)
+            pos = fp.get("position_sec", 0)
+            return {
+                "file_path": last_file,
+                "episode_name": Path(last_file).name,
+                "position_sec": pos,
+                "duration_sec": dur,
+                "pct": round(pos / dur * 100, 1) if dur else 0,
+            }
+
+    # Walk files in order — return first that isn't completed
+    for f in files:
+        path = f.get("path", "")
+        fp = file_progs.get(path, {})
+        if not fp.get("completed"):
+            pos = fp.get("position_sec", 0)
+            dur = fp.get("duration_sec", 0)
+            return {
+                "file_path": path,
+                "episode_name": f.get("name", Path(path).name),
+                "position_sec": pos,
+                "duration_sec": dur,
+                "pct": round(pos / dur * 100, 1) if dur else 0,
+            }
+
+    # All completed — point back to first so user can rewatch
+    f = files[0]
+    return {
+        "file_path": f.get("path", ""),
+        "episode_name": f.get("name", ""),
+        "position_sec": 0,
+        "duration_sec": 0,
+        "pct": 100,
+        "all_completed": True,
+    }
 
 
 # ── Background Task: Mullvad Guard ───────────────────────────────────────────
@@ -333,16 +526,27 @@ async def library_download_monitor() -> None:
                 info = await qbit_info(h)
                 if not info:
                     continue
+
+                # Refresh file list now that sizes are final
+                qfiles = await qbit_files(h)
+                save_path = info.get("save_path", settings.qbit_download_path)
+                new_files = build_file_list(qfiles, save_path)
+                if new_files:
+                    item["files"] = new_files
+                    item["size_bytes"] = sum(f["size_bytes"] for f in new_files)
+
                 qstate = info.get("state", "")
                 if qstate in ("uploading", "stalledUP", "pausedUP", "queuedUP", "forcedUP"):
                     item["status"] = "ready"
-                    item["size_bytes"] = info.get("size", 0)
                     changed = True
                     await broadcast("library_update", {"item_id": item["id"], "status": "ready"})
                 elif qstate in ("error", "missingFiles"):
                     item["status"] = "error"
                     changed = True
                     await broadcast("library_update", {"item_id": item["id"], "status": "error"})
+                else:
+                    changed = True  # file list updated
+
             if changed:
                 await put_library(lib)
         except Exception:
@@ -352,7 +556,7 @@ async def library_download_monitor() -> None:
 # ── Background Task: VLC Progress Tracker ────────────────────────────────────
 
 async def vlc_progress_tracker() -> None:
-    """Save watch progress for library items playing in VLC every 15 s."""
+    """Save per-episode watch progress for library items playing in VLC, every 15 s."""
     while True:
         await asyncio.sleep(15)
         if not state.library_item_id or not state.library_profile_id:
@@ -366,22 +570,36 @@ async def vlc_progress_tracker() -> None:
             if dur_sec < 10:
                 continue
 
+            # Detect which playlist item VLC is currently playing
+            current_uri = await vlc_playlist_uri()
+            if current_uri and current_uri.startswith("file://"):
+                state.library_current_file = uri_to_path(current_uri)
+
+            current_file = state.library_current_file
+            if not current_file:
+                continue
+
             lib = await get_library()
             item = next((it for it in lib["items"] if it["id"] == state.library_item_id), None)
             if not item:
                 continue
 
             pct = pos_sec / dur_sec
-            item.setdefault("progress", {})[state.library_profile_id] = {
+            prof_prog = item.setdefault("progress", {}).setdefault(state.library_profile_id, {})
+            prof_prog["last_file"] = current_file
+            prof_prog.setdefault("file_progress", {})[current_file] = {
                 "position_sec": round(pos_sec, 1),
                 "duration_sec": round(dur_sec, 1),
                 "completed": pct > 0.92,
                 "updated_at": _now_iso(),
             }
             await put_library(lib)
+
             await broadcast("progress_saved", {
                 "item_id": state.library_item_id,
                 "profile_id": state.library_profile_id,
+                "file_path": current_file,
+                "episode_name": Path(current_file).name,
                 "position_sec": pos_sec,
                 "duration_sec": dur_sec,
                 "pct": round(pct * 100, 1),
@@ -398,7 +616,7 @@ async def stream_pipeline(magnet: str, title: str) -> None:
         state.stream_status = "buffering"
         await broadcast("stream_status", {"status": "buffering", "message": "Adding torrent to qBittorrent…"})
 
-        h = await qbit_add_magnet(magnet)
+        h = await qbit_add_magnet(magnet, sequential=True)
         if not h:
             raise RuntimeError("qBittorrent rejected the magnet (is it running on port 8081?)")
         state.active_hash = h
@@ -465,7 +683,7 @@ async def stream_pipeline(magnet: str, title: str) -> None:
 # ── Library Download Pipeline (keep file, no auto-delete) ─────────────────────
 
 async def library_download_pipeline(item_id: str, magnet: str) -> None:
-    """Add magnet to qBit for a full download; no streaming mode, no auto-delete."""
+    """Add magnet to qBit for a full download; no streaming mode, never auto-deleted."""
     try:
         h = await qbit_add_magnet(magnet)
         if not h:
@@ -485,26 +703,22 @@ async def library_download_pipeline(item_id: str, magnet: str) -> None:
                 break
         await put_library(lib)
 
-        # Wait for torrent to appear, then resolve the file path
+        # Wait for torrent metadata to appear, then build the file list immediately
         for _ in range(30):
             await asyncio.sleep(2)
             info = await qbit_info(h)
             if info:
                 break
 
-        files = await qbit_files(h)
-        vid = largest_video(files)
-        if vid:
-            info = await qbit_info(h)
-            save_path = (info or {}).get("save_path", settings.qbit_download_path)
-            file_path = str(Path(save_path) / vid["name"])
-            size_bytes = info.get("size", 0) if info else 0
-
+        if info := await qbit_info(h):
+            save_path = info.get("save_path", settings.qbit_download_path)
+            qfiles = await qbit_files(h)
+            files = build_file_list(qfiles, save_path)
             lib = await get_library()
             for it in lib["items"]:
                 if it["id"] == item_id:
-                    it["file_path"] = file_path
-                    it["size_bytes"] = size_bytes
+                    it["files"] = files
+                    it["size_bytes"] = info.get("size", 0)
                     break
             await put_library(lib)
 
@@ -563,13 +777,15 @@ class ProfileReq(BaseModel):
 
 class ProgressReq(BaseModel):
     profile_id: str
+    file_path: str
     position_sec: float
     duration_sec: float
 
 
 class LibraryPlayReq(BaseModel):
     profile_id: str
-    seek_to: Optional[float] = None  # explicit seek in seconds; None = resume from saved
+    files: list[str] = []         # ordered list of absolute paths to play as a playlist
+    seek_first_to: Optional[float] = None  # seek into the first file (seconds)
 
 
 # ── Routes: Profiles ─────────────────────────────────────────────────────────
@@ -608,20 +824,21 @@ async def list_library(profile_id: str = "") -> JSONResponse:
     lib = await get_library()
     items = []
     for it in lib["items"]:
-        prof_prog = it.get("progress", {}).get(profile_id, {}) if profile_id else {}
+        files = it.get("files", [])
+        resume = find_resume_hint(it, profile_id) if profile_id else None
         items.append({
             "id": it["id"],
             "title": it["title"],
             "series": it.get("series", ""),
             "season": it.get("season", 0),
             "episode": it.get("episode", 0),
-            "file_path": it.get("file_path", ""),
+            "file_count": len(files),
             "size_bytes": it.get("size_bytes", 0),
             "size_human": human_size(it.get("size_bytes", 0)),
             "added_at": it.get("added_at", ""),
             "status": it.get("status", "ready"),
             "torrent_hash": it.get("torrent_hash", ""),
-            "progress": prof_prog,
+            "resume": resume,
         })
     items.sort(key=lambda x: (
         x["series"] or "\xff" + x["title"],
@@ -630,6 +847,46 @@ async def list_library(profile_id: str = "") -> JSONResponse:
         x["added_at"],
     ))
     return JSONResponse({"items": items})
+
+
+@app.get("/api/library/{item_id}/files")
+async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
+    """Return the video file list for a library item with per-profile progress."""
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+
+    file_progs = (
+        item.get("progress", {}).get(profile_id, {}).get("file_progress", {})
+        if profile_id else {}
+    )
+
+    out = []
+    for f in item.get("files", []):
+        path = f.get("path", "")
+        fp = file_progs.get(path)
+        if fp:
+            dur = fp.get("duration_sec", 0)
+            pos = fp.get("position_sec", 0)
+            progress = {
+                "position_sec": pos,
+                "duration_sec": dur,
+                "completed": fp.get("completed", False),
+                "pct": round(pos / dur * 100, 1) if dur else 0,
+            }
+        else:
+            progress = None
+        out.append({
+            "name": f.get("name", Path(path).name),
+            "path": path,
+            "size_bytes": f.get("size_bytes", 0),
+            "size_human": human_size(f.get("size_bytes", 0)),
+            "season": f.get("season", 0),
+            "episode": f.get("episode", 0),
+            "progress": progress,
+        })
+    return JSONResponse({"files": out, "item_status": item.get("status", "ready")})
 
 
 @app.post("/api/library/download")
@@ -643,7 +900,7 @@ async def library_download(req: DownloadReq) -> JSONResponse:
         "series": req.series,
         "season": req.season,
         "episode": req.episode,
-        "file_path": "",
+        "files": [],
         "size_bytes": 0,
         "added_at": _now_iso(),
         "status": "downloading",
@@ -677,27 +934,51 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     if not item:
         raise HTTPException(404, "Item not found.")
 
-    file_path = item.get("file_path", "")
-    if not file_path or not Path(file_path).exists():
-        raise HTTPException(400, f"File not found on disk: {file_path or '(no path recorded)'}")
+    # Resolve playlist — if caller passed explicit files use those, else auto-select
+    playlist = req.files
+    if not playlist:
+        hint = find_resume_hint(item, req.profile_id)
+        if hint and hint.get("file_path"):
+            # Build playlist starting from the resume file
+            all_paths = [f["path"] for f in item.get("files", [])]
+            try:
+                start_idx = all_paths.index(hint["file_path"])
+                playlist = all_paths[start_idx:]
+            except ValueError:
+                playlist = all_paths
+        else:
+            playlist = [f["path"] for f in item.get("files", [])]
 
-    fp = Path(file_path)
-    await vlc("in_play", input=fp.resolve().as_uri())
+    if not playlist:
+        raise HTTPException(400, "No video files available for this item.")
+
+    # Validate all files exist
+    missing = [p for p in playlist if not Path(p).exists()]
+    if missing:
+        raise HTTPException(400, f"Files not found on disk: {', '.join(Path(p).name for p in missing[:3])}")
+
+    # Build VLC playlist: play first, enqueue the rest
+    first = Path(playlist[0])
+    await vlc("in_play", input=first.resolve().as_uri())
+    for p in playlist[1:]:
+        await vlc("in_enqueue", input=Path(p).resolve().as_uri())
+
+    # Update app state
     state.stream_status = "playing"
     state.active_title = item["title"]
-    state.active_file = fp
+    state.active_file = first
     state.active_hash = item.get("torrent_hash") or None
     state.library_item_id = item_id
     state.library_profile_id = req.profile_id
+    state.library_playlist = playlist
+    state.library_current_file = playlist[0]
 
-    # Determine seek target
-    saved = item.get("progress", {}).get(req.profile_id, {})
-    seek_sec = req.seek_to
+    # Seek into the first file after VLC has had time to open it
+    seek_sec = req.seek_first_to
     if seek_sec is None:
-        pos = saved.get("position_sec", 0)
-        dur = saved.get("duration_sec", 0)
-        if pos > 5 and dur > 0 and (pos / dur) < 0.92:
-            seek_sec = pos
+        hint = find_resume_hint(item, req.profile_id)
+        if hint and hint.get("position_sec", 0) > 5 and not hint.get("all_completed"):
+            seek_sec = hint["position_sec"]
 
     if seek_sec and seek_sec > 5:
         async def _delayed_seek(s: float) -> None:
@@ -705,8 +986,8 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
             await vlc("seek", val=str(int(s)))
         asyncio.create_task(_delayed_seek(seek_sec))
 
-    await broadcast("stream_status", {"status": "playing", "message": f"Playing: {fp.name}"})
-    return JSONResponse({"ok": True, "seek_to": seek_sec})
+    await broadcast("stream_status", {"status": "playing", "message": f"Playing: {first.name}"})
+    return JSONResponse({"ok": True, "playlist_count": len(playlist), "seek_to": seek_sec})
 
 
 @app.post("/api/library/{item_id}/progress")
@@ -717,7 +998,9 @@ async def update_progress(item_id: str, req: ProgressReq) -> JSONResponse:
         raise HTTPException(404, "Item not found.")
     dur = req.duration_sec
     pct = req.position_sec / dur if dur else 0
-    item.setdefault("progress", {})[req.profile_id] = {
+    prof_prog = item.setdefault("progress", {}).setdefault(req.profile_id, {})
+    prof_prog["last_file"] = req.file_path
+    prof_prog.setdefault("file_progress", {})[req.file_path] = {
         "position_sec": round(req.position_sec, 1),
         "duration_sec": round(req.duration_sec, 1),
         "completed": pct > 0.92,
@@ -782,6 +1065,8 @@ async def stream_now(req: StreamReq) -> JSONResponse:
     state.active_file = None
     state.library_item_id = None
     state.library_profile_id = None
+    state.library_playlist = []
+    state.library_current_file = None
     state.stream_task = asyncio.create_task(stream_pipeline(req.magnet, req.title))
     return JSONResponse({"ok": True})
 
@@ -790,7 +1075,6 @@ async def stream_now(req: StreamReq) -> JSONResponse:
 async def stop() -> JSONResponse:
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
-    # Only auto-delete the torrent for stream-now sessions, not library downloads
     if state.active_hash and not state.library_item_id:
         await qbit_delete(state.active_hash)
     await vlc("pl_stop")
@@ -801,6 +1085,8 @@ async def stop() -> JSONResponse:
     state.stream_status = "idle"
     state.library_item_id = None
     state.library_profile_id = None
+    state.library_playlist = []
+    state.library_current_file = None
     state.progress = 0.0
     state.downloaded_mb = 0.0
     state.total_mb = 0.0
@@ -822,6 +1108,65 @@ async def volume(direction: str) -> JSONResponse:
     if direction not in ("up", "down"):
         raise HTTPException(400, "direction must be 'up' or 'down'")
     await vlc("volume", val="+26" if direction == "up" else "-26")
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/vlc/seek")
+async def seek(delta: float) -> JSONResponse:
+    """Seek relative to current position.  delta is seconds; negative = rewind."""
+    sign = "+" if delta >= 0 else ""
+    await vlc("seek", val=f"{sign}{int(delta)}s")
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/vlc/tracks")
+async def get_tracks() -> JSONResponse:
+    """Return available audio/subtitle tracks and which are currently selected."""
+    vs = await vlc_status()
+    xml_fields = await vlc_status_xml_fields()
+
+    audio: list[dict] = []
+    subtitle: list[dict] = [{"id": -1, "label": "Off", "language": ""}]
+    audio_idx = 1
+    sub_idx   = 1
+
+    if vs:
+        cat = vs.get("information", {}).get("category", {})
+        for key in sorted(cat.keys()):
+            if not key.startswith("Stream"):
+                continue
+            s    = cat[key]
+            typ  = s.get("Type", "")
+            lang = s.get("Language", s.get("language", ""))
+            codec = s.get("Codec", s.get("codec", ""))
+            if typ == "Audio":
+                label = lang or codec or f"Track {audio_idx}"
+                audio.append({"id": audio_idx, "label": label, "language": lang, "codec": codec})
+                audio_idx += 1
+            elif typ == "Subtitle":
+                label = lang or codec or f"Track {sub_idx}"
+                subtitle.append({"id": sub_idx, "label": label, "language": lang, "codec": codec})
+                sub_idx += 1
+
+    return JSONResponse({
+        "audio": audio,
+        "subtitle": subtitle,
+        "current_audio":    xml_fields["current_audio"],
+        "current_subtitle": xml_fields["current_subtitle"],
+        "time":   vs.get("time",   0) if vs else 0,
+        "length": vs.get("length", 0) if vs else 0,
+    })
+
+
+@app.post("/api/vlc/track/audio/{track_id}")
+async def set_audio_track(track_id: int) -> JSONResponse:
+    await vlc("audio_track", val=str(track_id))
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/vlc/track/subtitle/{track_id}")
+async def set_subtitle_track(track_id: int) -> JSONResponse:
+    await vlc("subtitle_track", val=str(track_id))
     return JSONResponse({"ok": True})
 
 

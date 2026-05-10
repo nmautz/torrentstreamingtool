@@ -12,28 +12,21 @@
     ::-webkit-scrollbar-track { background: #111827; }
     ::-webkit-scrollbar-thumb { background: #374151; border-radius: 3px; }
     ::-webkit-scrollbar-thumb:hover { background: #4b5563; }
-
-    @keyframes fadeSlideIn {
-      from { opacity: 0; transform: translateY(6px); }
-      to   { opacity: 1; transform: translateY(0); }
-    }
+    @keyframes fadeSlideIn { from{opacity:0;transform:translateY(6px)} to{opacity:1;transform:translateY(0)} }
     .result-row { animation: fadeSlideIn 0.12s ease-out both; }
-
     @keyframes blink { 0%,100%{opacity:1} 50%{opacity:.3} }
     .blink { animation: blink 1.8s ease-in-out infinite; }
-
     @keyframes pulseRing {
-      0%   { box-shadow: 0 0 0 0 rgba(239,68,68,.7); }
-      70%  { box-shadow: 0 0 0 12px rgba(239,68,68,0); }
-      100% { box-shadow: 0 0 0 0 rgba(239,68,68,0); }
+      0%  { box-shadow:0 0 0 0 rgba(239,68,68,.7); }
+      70% { box-shadow:0 0 0 12px rgba(239,68,68,0); }
+      100%{ box-shadow:0 0 0 0 rgba(239,68,68,0); }
     }
     .pulse-ring { animation: pulseRing 1.5s ease-out infinite; }
-
     @keyframes fadeIn { from{opacity:0} to{opacity:1} }
-    .fade-in { animation: fadeIn 0.2s ease both; }
-
-    .profile-card:hover .profile-avatar { transform: scale(1.06); }
-    .profile-avatar { transition: transform 0.15s ease; }
+    .fade-in { animation: fadeIn 0.18s ease both; }
+    .profile-card:hover .profile-avatar { transform:scale(1.06); }
+    .profile-avatar { transition:transform 0.15s ease; }
+    .ep-row:hover { background:rgba(255,255,255,.03); }
   </style>
 </head>
 <body class="dark bg-gray-950 text-gray-100 min-h-screen flex flex-col">
@@ -51,12 +44,10 @@
     </svg>
   </div>
   <div>
-    <h1 class="text-4xl sm:text-5xl font-black text-red-300 tracking-tight leading-none">
-      VPN DISCONNECTED
-    </h1>
+    <h1 class="text-4xl sm:text-5xl font-black text-red-300 tracking-tight">VPN DISCONNECTED</h1>
     <p class="text-xl text-red-400 font-semibold mt-3">NETWORK HALTED — qBittorrent Terminated</p>
     <p class="text-gray-500 text-sm mt-3 max-w-md">
-      Reconnect Mullvad VPN to resume operations. All active downloads have been stopped.
+      Reconnect Mullvad VPN to resume operations.
     </p>
     <p id="vpnOverlayDetail" class="font-mono text-red-600 text-xs mt-4"></p>
   </div>
@@ -65,20 +56,20 @@
 <!-- ── Profile Picker ─────────────────────────────────────────────────────── -->
 <div id="profilePicker"
   class="hidden fixed inset-0 z-40 bg-gray-950 flex flex-col items-center justify-center gap-10 px-6 fade-in">
-  <div>
-    <div class="font-black text-3xl tracking-tight text-center mb-1">
+  <div class="text-center">
+    <div class="font-black text-3xl tracking-tight mb-1">
       <span class="text-indigo-400">Stream</span><span class="text-white">Link</span>
     </div>
-    <p class="text-gray-500 text-sm text-center">Who's watching?</p>
+    <p class="text-gray-500 text-sm">Who's watching?</p>
   </div>
   <div id="profileGrid" class="flex flex-wrap justify-center gap-6 max-w-lg"></div>
-  <button id="manageProfilesBtn" onclick="toggleManageProfiles()"
+  <button onclick="openProfileModal()"
     class="text-xs text-gray-600 hover:text-gray-400 underline transition-colors">
     Manage profiles
   </button>
 </div>
 
-<!-- ── Add / Manage Profiles Modal ───────────────────────────────────────── -->
+<!-- ── Profile Modal (add / delete) ──────────────────────────────────────── -->
 <div id="profileModal"
   class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-sm
          flex items-center justify-center px-4">
@@ -87,30 +78,23 @@
     <input id="profileNameInput" type="text" maxlength="30" placeholder="Name"
       class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm
              focus:outline-none focus:border-indigo-500 mb-4" />
-    <div class="flex gap-2 mb-5 flex-wrap">
-      <!-- Color swatches -->
+    <div class="flex gap-2 mb-5">
       <button onclick="selectColor('indigo')"  data-color="indigo"  class="color-swatch w-7 h-7 rounded-full bg-indigo-600 ring-2 ring-offset-2 ring-offset-gray-900 ring-indigo-400"></button>
-      <button onclick="selectColor('purple')"  data-color="purple"  class="color-swatch w-7 h-7 rounded-full bg-purple-600 ring-0"></button>
-      <button onclick="selectColor('green')"   data-color="green"   class="color-swatch w-7 h-7 rounded-full bg-green-600  ring-0"></button>
-      <button onclick="selectColor('red')"     data-color="red"     class="color-swatch w-7 h-7 rounded-full bg-red-600    ring-0"></button>
-      <button onclick="selectColor('orange')"  data-color="orange"  class="color-swatch w-7 h-7 rounded-full bg-orange-500 ring-0"></button>
-      <button onclick="selectColor('pink')"    data-color="pink"    class="color-swatch w-7 h-7 rounded-full bg-pink-600   ring-0"></button>
+      <button onclick="selectColor('purple')"  data-color="purple"  class="color-swatch w-7 h-7 rounded-full bg-purple-600"></button>
+      <button onclick="selectColor('green')"   data-color="green"   class="color-swatch w-7 h-7 rounded-full bg-green-600"></button>
+      <button onclick="selectColor('red')"     data-color="red"     class="color-swatch w-7 h-7 rounded-full bg-red-600"></button>
+      <button onclick="selectColor('orange')"  data-color="orange"  class="color-swatch w-7 h-7 rounded-full bg-orange-500"></button>
+      <button onclick="selectColor('pink')"    data-color="pink"    class="color-swatch w-7 h-7 rounded-full bg-pink-600"></button>
     </div>
-    <div class="flex gap-2">
+    <div class="flex gap-2 mb-5">
       <button onclick="closeProfileModal()"
-        class="flex-1 bg-gray-800 hover:bg-gray-700 rounded-lg py-2 text-sm font-medium transition-colors">
-        Cancel
-      </button>
+        class="flex-1 bg-gray-800 hover:bg-gray-700 rounded-lg py-2 text-sm font-medium transition-colors">Cancel</button>
       <button onclick="submitProfile()"
-        class="flex-1 bg-indigo-600 hover:bg-indigo-500 rounded-lg py-2 text-sm font-semibold transition-colors">
-        Add Profile
-      </button>
+        class="flex-1 bg-indigo-600 hover:bg-indigo-500 rounded-lg py-2 text-sm font-semibold transition-colors">Add</button>
     </div>
-
-    <!-- Existing profiles for deletion -->
-    <div id="profileDeleteList" class="mt-5 border-t border-gray-800 pt-4 hidden">
-      <p class="text-xs text-gray-600 mb-3 uppercase tracking-wider">Existing profiles</p>
-      <div id="profileDeleteItems" class="space-y-2"></div>
+    <div id="existingProfilesList" class="border-t border-gray-800 pt-4 hidden">
+      <p class="text-xs text-gray-600 uppercase tracking-wider mb-3">Existing profiles</p>
+      <div id="existingProfilesItems" class="space-y-2"></div>
     </div>
   </div>
 </div>
@@ -121,7 +105,7 @@
          flex items-center justify-center px-4">
   <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6 w-full max-w-sm fade-in">
     <h2 class="text-lg font-bold mb-1">Download for Later</h2>
-    <p id="downloadModalTitle" class="text-xs text-gray-500 mb-4 truncate"></p>
+    <p id="dlModalTitle" class="text-xs text-gray-500 mb-4 truncate"></p>
     <label class="block text-xs text-gray-500 mb-1">Series name <span class="text-gray-700">(optional)</span></label>
     <input id="dlSeries" type="text" placeholder="e.g. Breaking Bad"
       class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm
@@ -132,69 +116,98 @@
              focus:outline-none focus:border-indigo-500 mb-5" />
     <div class="flex gap-2">
       <button onclick="closeDownloadModal()"
-        class="flex-1 bg-gray-800 hover:bg-gray-700 rounded-lg py-2 text-sm font-medium transition-colors">
+        class="flex-1 bg-gray-800 hover:bg-gray-700 rounded-lg py-2 text-sm font-medium transition-colors">Cancel</button>
+      <button onclick="submitDownload()"
+        class="flex-1 bg-green-700 hover:bg-green-600 rounded-lg py-2 text-sm font-semibold transition-colors">Download</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Episode Picker Modal ───────────────────────────────────────────────── -->
+<div id="episodeModal"
+  class="hidden fixed inset-0 z-50 bg-black/75 backdrop-blur-sm
+         flex items-center justify-center px-4 py-6">
+  <div class="bg-gray-900 border border-gray-800 rounded-2xl w-full max-w-lg
+              flex flex-col max-h-[85vh] fade-in">
+    <!-- Header -->
+    <div class="px-5 pt-5 pb-3 border-b border-gray-800 flex-shrink-0">
+      <div class="flex items-start justify-between gap-3">
+        <div>
+          <h2 id="epModalTitle" class="text-base font-bold truncate">Select Episodes</h2>
+          <p id="epModalSubtitle" class="text-xs text-gray-500 mt-0.5"></p>
+        </div>
+        <button onclick="closeEpisodeModal()"
+          class="text-gray-600 hover:text-gray-300 transition-colors flex-shrink-0 mt-0.5">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+      <!-- Quick actions -->
+      <div class="flex gap-2 mt-3 flex-wrap">
+        <button onclick="epSelectAll(true)"
+          class="text-xs px-2.5 py-1 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">
+          Select all
+        </button>
+        <button onclick="epSelectAll(false)"
+          class="text-xs px-2.5 py-1 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">
+          Clear
+        </button>
+        <button onclick="epSelectUnwatched()"
+          class="text-xs px-2.5 py-1 rounded-lg bg-gray-800 hover:bg-gray-700 text-gray-400 transition-colors">
+          Unwatched only
+        </button>
+      </div>
+    </div>
+
+    <!-- Episode list -->
+    <div id="epList" class="flex-1 overflow-y-auto px-3 py-2"></div>
+
+    <!-- Footer -->
+    <div class="px-5 pb-5 pt-3 border-t border-gray-800 flex-shrink-0 flex gap-2">
+      <button onclick="closeEpisodeModal()"
+        class="flex-1 bg-gray-800 hover:bg-gray-700 rounded-lg py-2.5 text-sm font-medium transition-colors">
         Cancel
       </button>
-      <button onclick="submitDownload()"
-        class="flex-1 bg-green-700 hover:bg-green-600 rounded-lg py-2 text-sm font-semibold transition-colors">
-        Download
+      <button onclick="epPlay()"
+        class="flex-1 bg-indigo-600 hover:bg-indigo-500 rounded-lg py-2.5 text-sm font-semibold transition-colors">
+        ▶ Play Selected (<span id="epSelectedCount">0</span>)
       </button>
     </div>
   </div>
 </div>
 
 <!-- ── Navbar ─────────────────────────────────────────────────────────────── -->
-<header class="sticky top-0 z-40 bg-gray-900/95 backdrop-blur
-               border-b border-gray-800 px-4 py-3 flex-shrink-0">
+<header class="sticky top-0 z-40 bg-gray-900/95 backdrop-blur border-b border-gray-800 px-4 py-3 flex-shrink-0">
   <div class="max-w-5xl mx-auto flex items-center gap-3">
-
-    <!-- Logo -->
     <div class="font-black text-xl tracking-tight whitespace-nowrap mr-1">
       <span class="text-indigo-400">Stream</span><span class="text-white">Link</span>
     </div>
-
     <!-- Tabs -->
     <div class="flex gap-1 bg-gray-800/60 rounded-lg p-0.5 flex-shrink-0">
       <button id="tabSearch" onclick="switchTab('search')"
-        class="tab-btn px-3 py-1 rounded-md text-sm font-medium transition-all
-               bg-gray-700 text-white">
-        Search
-      </button>
+        class="tab-btn px-3 py-1 rounded-md text-sm font-medium transition-all bg-gray-700 text-white">Search</button>
       <button id="tabLibrary" onclick="switchTab('library')"
-        class="tab-btn px-3 py-1 rounded-md text-sm font-medium transition-all
-               text-gray-400 hover:text-gray-200">
-        Library
-      </button>
+        class="tab-btn px-3 py-1 rounded-md text-sm font-medium transition-all text-gray-400 hover:text-gray-200">Library</button>
     </div>
-
     <div class="flex-1"></div>
-
-    <!-- Profile switcher -->
-    <button id="profileSwitchBtn" onclick="showProfilePicker()"
-      class="flex items-center gap-2 px-2.5 py-1.5 rounded-lg
-             hover:bg-gray-800 transition-colors text-sm flex-shrink-0">
+    <!-- Profile -->
+    <button onclick="showProfilePicker()"
+      class="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-gray-800 transition-colors flex-shrink-0">
       <div id="navProfileAvatar"
-        class="w-6 h-6 rounded-full bg-indigo-600 flex items-center justify-center
-               text-xs font-bold text-white flex-shrink-0">
-        ?
-      </div>
+        class="w-6 h-6 rounded-full bg-indigo-600 flex items-center justify-center text-xs font-bold text-white flex-shrink-0">?</div>
       <span id="navProfileName" class="hidden sm:block text-gray-400 max-w-[80px] truncate text-xs"></span>
     </button>
-
     <!-- Live dot -->
     <div class="flex items-center gap-1.5 flex-shrink-0">
       <div id="sseDot" class="w-1.5 h-1.5 rounded-full bg-gray-700 transition-colors"></div>
       <span id="sseLabel" class="text-[11px] text-gray-600 hidden sm:block">connecting</span>
     </div>
-
-    <!-- VPN pill -->
-    <div id="vpnPill"
-      class="flex items-center gap-2 px-3 py-1.5 rounded-full
-             bg-gray-800 border border-gray-700 transition-all flex-shrink-0">
+    <!-- VPN -->
+    <div id="vpnPill" class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-gray-800 border border-gray-700 transition-all flex-shrink-0">
       <div id="vpnDot" class="w-2 h-2 rounded-full bg-gray-600 transition-colors flex-shrink-0"></div>
       <span id="vpnLabel" class="text-xs font-medium text-gray-500 whitespace-nowrap">VPN: checking</span>
     </div>
-
   </div>
 </header>
 
@@ -202,31 +215,26 @@
 <main class="flex-1 pb-28 overflow-y-auto">
   <div class="max-w-5xl mx-auto px-4 py-6">
 
-    <!-- ── Search tab ──────────────────────────────────────────────────── -->
+    <!-- Search tab -->
     <div id="searchTab">
       <div class="mb-6">
         <div class="flex gap-2">
           <input id="searchInput" type="search" autocomplete="off"
             placeholder="Search public domain archives, open-source media…"
-            class="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-4 py-3
-                   text-sm placeholder-gray-600 focus:outline-none
-                   focus:border-indigo-500 focus:ring-1 focus:ring-indigo-500/40
-                   transition-all" />
+            class="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-sm
+                   placeholder-gray-600 focus:outline-none focus:border-indigo-500
+                   focus:ring-1 focus:ring-indigo-500/40 transition-all" />
           <button id="searchBtn"
-            class="bg-indigo-600 hover:bg-indigo-500 active:scale-95
-                   px-5 py-3 rounded-xl text-sm font-semibold transition-all
-                   disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap">
-            Search
-          </button>
+            class="bg-indigo-600 hover:bg-indigo-500 active:scale-95 px-5 py-3 rounded-xl
+                   text-sm font-semibold transition-all disabled:opacity-40
+                   disabled:cursor-not-allowed whitespace-nowrap">Search</button>
         </div>
         <div class="flex justify-between mt-1.5 px-0.5">
           <span id="resultCount" class="text-[11px] text-gray-700"></span>
-          <span class="text-[11px] text-gray-700">Results sorted by seeders</span>
+          <span class="text-[11px] text-gray-700">Sorted by seeders</span>
         </div>
       </div>
-
       <div id="alert" class="hidden mb-4 px-4 py-2.5 rounded-lg border text-sm"></div>
-
       <div id="resultsWrap" class="hidden">
         <div class="overflow-x-auto rounded-xl border border-gray-800">
           <table class="w-full text-sm border-collapse">
@@ -243,10 +251,8 @@
           </table>
         </div>
       </div>
-
       <div id="emptyState" class="flex flex-col items-center justify-center py-20 text-center">
-        <div class="w-16 h-16 rounded-2xl bg-gray-800 border border-gray-700
-                    flex items-center justify-center mb-4">
+        <div class="w-16 h-16 rounded-2xl bg-gray-800 border border-gray-700 flex items-center justify-center mb-4">
           <svg class="w-8 h-8 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
               d="M21 21l-4.35-4.35m0 0A7.5 7.5 0 104.5 4.5a7.5 7.5 0 0012.15 12.15z"/>
@@ -257,7 +263,7 @@
       </div>
     </div>
 
-    <!-- ── Library tab ─────────────────────────────────────────────────── -->
+    <!-- Library tab -->
     <div id="libraryTab" class="hidden">
       <div class="flex items-center justify-between mb-5">
         <h2 class="text-lg font-bold">My Library</h2>
@@ -265,25 +271,11 @@
           class="text-xs text-gray-600 hover:text-gray-300 transition-colors flex items-center gap-1">
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-              d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003
-                 8.003 0 01-15.357-2m15.357 2H15"/>
-          </svg>
-          Refresh
+              d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+          </svg> Refresh
         </button>
       </div>
-      <div id="libraryContent">
-        <div class="flex flex-col items-center justify-center py-20 text-center">
-          <div class="w-16 h-16 rounded-2xl bg-gray-800 border border-gray-700
-                      flex items-center justify-center mb-4">
-            <svg class="w-8 h-8 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
-                d="M5 3v18l7-3 7 3V3H5z"/>
-            </svg>
-          </div>
-          <p class="text-gray-500 font-medium">No downloads yet</p>
-          <p class="text-gray-700 text-xs mt-1">Click Download on any search result to save it here</p>
-        </div>
-      </div>
+      <div id="libraryContent"></div>
     </div>
 
   </div>
@@ -291,9 +283,32 @@
 
 <!-- ── Player Footer ──────────────────────────────────────────────────────── -->
 <footer class="fixed bottom-0 left-0 right-0 z-40 bg-gray-900 border-t border-gray-800">
+  <!-- Progress bar -->
   <div class="w-full bg-gray-800 h-0.5">
     <div id="progressBar" class="h-0.5 bg-indigo-500 transition-all duration-700" style="width:0%"></div>
   </div>
+  <!-- Track selectors — visible only while playing -->
+  <div id="trackControls" class="hidden border-b border-gray-800/60">
+    <div class="max-w-5xl mx-auto px-4 py-1.5 flex items-center gap-5 flex-wrap">
+      <div class="flex items-center gap-1.5">
+        <span class="text-[11px] text-gray-600 whitespace-nowrap">Audio</span>
+        <select id="audioSelect" onchange="setAudioTrack(this.value)"
+          class="bg-gray-800 border border-gray-700 text-[11px] text-gray-300 rounded-lg px-2 py-0.5
+                 focus:outline-none focus:border-indigo-500 max-w-[180px] cursor-pointer">
+          <option>—</option>
+        </select>
+      </div>
+      <div class="flex items-center gap-1.5">
+        <span class="text-[11px] text-gray-600 whitespace-nowrap">Subtitles</span>
+        <select id="subtitleSelect" onchange="setSubtitleTrack(this.value)"
+          class="bg-gray-800 border border-gray-700 text-[11px] text-gray-300 rounded-lg px-2 py-0.5
+                 focus:outline-none focus:border-indigo-500 max-w-[180px] cursor-pointer">
+          <option value="-1">Off</option>
+        </select>
+      </div>
+    </div>
+  </div>
+  <!-- Main player row -->
   <div class="max-w-5xl mx-auto px-4 py-2.5 flex items-center gap-3">
     <div id="playerDot" class="w-2 h-2 rounded-full bg-gray-700 flex-shrink-0"></div>
     <div class="flex-1 min-w-0">
@@ -303,17 +318,24 @@
         <span id="speedInfo"  class="text-[11px] text-gray-700 font-mono"></span>
       </div>
     </div>
-    <div id="statusBadge" class="hidden text-[11px] font-semibold px-2 py-0.5 rounded-full
-                                  border flex-shrink-0"></div>
+    <div id="statusBadge" class="hidden text-[11px] font-semibold px-2 py-0.5 rounded-full border flex-shrink-0"></div>
     <div class="flex items-center gap-0.5 flex-shrink-0">
+      <!-- Skip back -->
+      <button onclick="vlcSeek(-30)" title="Skip back 30s"
+        class="px-1.5 py-2 rounded-lg hover:bg-gray-800 text-gray-600 hover:text-gray-300 transition-all active:scale-95 text-[11px] font-mono leading-none">
+        ‹30
+      </button>
+      <button onclick="vlcSeek(-10)" title="Skip back 10s"
+        class="px-1.5 py-2 rounded-lg hover:bg-gray-800 text-gray-600 hover:text-gray-300 transition-all active:scale-95 text-[11px] font-mono leading-none">
+        ‹10
+      </button>
       <button onclick="vlcVolume('down')" title="Volume Down"
         class="p-2 rounded-lg hover:bg-gray-800 text-gray-500 hover:text-gray-200 transition-all active:scale-95">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M11 5L6 9H2v6h4l5 4V5zM15 9a3 3 0 010 6"/>
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5L6 9H2v6h4l5 4V5zM15 9a3 3 0 010 6"/>
         </svg>
       </button>
-      <button id="pauseBtn" onclick="vlcPause()" title="Pause / Resume"
+      <button onclick="vlcPause()" title="Pause / Resume"
         class="p-2 rounded-lg hover:bg-gray-800 text-gray-500 hover:text-gray-200 transition-all active:scale-95">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6"/>
@@ -321,9 +343,7 @@
       </button>
       <button onclick="stopStream()" title="Stop"
         class="p-2 rounded-lg hover:bg-gray-800 text-red-600 hover:text-red-400 transition-all active:scale-95">
-        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-          <rect x="5" y="5" width="14" height="14" rx="1"/>
-        </svg>
+        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="1"/></svg>
       </button>
       <button onclick="vlcVolume('up')" title="Volume Up"
         class="p-2 rounded-lg hover:bg-gray-800 text-gray-500 hover:text-gray-200 transition-all active:scale-95">
@@ -331,6 +351,15 @@
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
             d="M11 5L6 9H2v6h4l5 4V5zM15 9a3 3 0 010 6M18.364 5.636a9 9 0 010 12.728"/>
         </svg>
+      </button>
+      <!-- Skip forward -->
+      <button onclick="vlcSeek(10)" title="Skip forward 10s"
+        class="px-1.5 py-2 rounded-lg hover:bg-gray-800 text-gray-600 hover:text-gray-300 transition-all active:scale-95 text-[11px] font-mono leading-none">
+        10›
+      </button>
+      <button onclick="vlcSeek(30)" title="Skip forward 30s"
+        class="px-1.5 py-2 rounded-lg hover:bg-gray-800 text-gray-600 hover:text-gray-300 transition-all active:scale-95 text-[11px] font-mono leading-none">
+        30›
       </button>
     </div>
   </div>
@@ -342,710 +371,760 @@
 
 // ── Constants ──────────────────────────────────────────────────────────────
 const PROFILE_COLORS = {
-  indigo: { bg: "bg-indigo-600", ring: "ring-indigo-400" },
-  purple: { bg: "bg-purple-600", ring: "ring-purple-400" },
-  green:  { bg: "bg-green-600",  ring: "ring-green-400" },
-  red:    { bg: "bg-red-600",    ring: "ring-red-400" },
-  orange: { bg: "bg-orange-500", ring: "ring-orange-400" },
-  pink:   { bg: "bg-pink-600",   ring: "ring-pink-400" },
+  indigo: { bg:"bg-indigo-600", ring:"ring-indigo-400" },
+  purple: { bg:"bg-purple-600", ring:"ring-purple-400" },
+  green:  { bg:"bg-green-600",  ring:"ring-green-400"  },
+  red:    { bg:"bg-red-600",    ring:"ring-red-400"    },
+  orange: { bg:"bg-orange-500", ring:"ring-orange-400" },
+  pink:   { bg:"bg-pink-600",   ring:"ring-pink-400"   },
 };
 
 // ── App state ──────────────────────────────────────────────────────────────
 let app = {
-  vpn_secure: true, vpn_status: "Checking…",
-  stream_status: "idle", active_title: null,
-  progress: 0, downloaded_mb: 0, total_mb: 0,
-  dl_speed_bps: 0, ul_speed_bps: 0,
+  vpn_secure:true, vpn_status:"Checking…", stream_status:"idle",
+  active_title:null, progress:0, downloaded_mb:0, total_mb:0,
+  dl_speed_bps:0, ul_speed_bps:0,
 };
-let profile = { id: "", name: "", color: "indigo" };
-let activeTab = "search";
+let profile      = { id:"", name:"", color:"indigo" };
+let allProfiles  = [];
+let activeTab    = "search";
 let selectedColor = "indigo";
-let downloadTarget = null;   // {magnet, title}
-let allProfiles = [];
+let downloadTarget = null;
+// Episode picker state
+let epItemId  = null;
+let epFiles   = [];   // full file objects from API
+let epChecked = new Set();  // checked file paths
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function escHtml(s) {
-  return String(s)
-    .replace(/&/g,"&amp;").replace(/</g,"&lt;")
-    .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
+  return String(s).replace(/&/g,"&amp;").replace(/</g,"&lt;")
+                  .replace(/>/g,"&gt;").replace(/"/g,"&quot;");
 }
-function fmtSize(bytes) {
-  const u = ["B","KB","MB","GB","TB"]; let i = 0;
-  while (bytes >= 1024 && i < u.length-1) { bytes /= 1024; i++; }
-  return `${bytes.toFixed(1)} ${u[i]}`;
+function fmtSize(b) {
+  const u=["B","KB","MB","GB","TB"]; let i=0;
+  while(b>=1024&&i<u.length-1){b/=1024;i++;} return `${b.toFixed(1)} ${u[i]}`;
 }
-function fmtSpeed(bps) { return bps > 0 ? fmtSize(bps)+"/s" : "—"; }
-function fmtDuration(sec) {
-  if (!sec) return "";
-  const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = Math.floor(sec%60);
-  return h > 0 ? `${h}h ${m}m` : `${m}m ${s}s`;
+function fmtSpeed(bps){ return bps>0 ? fmtSize(bps)+"/s" : "—"; }
+function fmtTime(sec) {
+  if(!sec) return "";
+  const h=Math.floor(sec/3600), m=Math.floor((sec%3600)/60), s=Math.floor(sec%60);
+  return h>0 ? `${h}h ${m}m` : m>0 ? `${m}m ${s}s` : `${s}s`;
 }
-function avatarBg(color) { return (PROFILE_COLORS[color] || PROFILE_COLORS.indigo).bg; }
+function avatarBg(c) { return (PROFILE_COLORS[c]||PROFILE_COLORS.indigo).bg; }
+function pad2(n)      { return String(n).padStart(2,"0"); }
+function epLabel(f)   {
+  if(f.season && f.episode) return `S${pad2(f.season)}E${pad2(f.episode)}`;
+  if(f.episode) return `E${pad2(f.episode)}`;
+  return f.name;
+}
 
 // ── Alert ──────────────────────────────────────────────────────────────────
 const ALERT_STYLES = {
-  error:   "bg-red-950/80 border-red-800 text-red-300",
-  warn:    "bg-yellow-950/80 border-yellow-800 text-yellow-300",
-  info:    "bg-blue-950/80 border-blue-800 text-blue-300",
-  success: "bg-green-950/80 border-green-800 text-green-300",
+  error:"bg-red-950/80 border-red-800 text-red-300",
+  warn:"bg-yellow-950/80 border-yellow-800 text-yellow-300",
+  info:"bg-blue-950/80 border-blue-800 text-blue-300",
+  success:"bg-green-950/80 border-green-800 text-green-300",
 };
 let alertTimer;
-function showAlert(msg, type="error") {
-  const el = document.getElementById("alert");
-  el.className = `mb-4 px-4 py-2.5 rounded-lg border text-sm ${ALERT_STYLES[type]||ALERT_STYLES.error}`;
-  el.textContent = msg;
-  el.classList.remove("hidden");
+function showAlert(msg,type="error") {
+  const el=document.getElementById("alert");
+  el.className=`mb-4 px-4 py-2.5 rounded-lg border text-sm ${ALERT_STYLES[type]||ALERT_STYLES.error}`;
+  el.textContent=msg; el.classList.remove("hidden");
   clearTimeout(alertTimer);
-  if (type !== "error") alertTimer = setTimeout(()=>el.classList.add("hidden"), 5000);
+  if(type!=="error") alertTimer=setTimeout(()=>el.classList.add("hidden"),5000);
 }
-function hideAlert() { document.getElementById("alert").classList.add("hidden"); }
+function hideAlert(){ document.getElementById("alert").classList.add("hidden"); }
 
 // ── VPN UI ─────────────────────────────────────────────────────────────────
-function renderVpn(secure, statusText) {
-  const dot=document.getElementById("vpnDot"), label=document.getElementById("vpnLabel");
-  const pill=document.getElementById("vpnPill"), overlay=document.getElementById("vpnOverlay");
+function renderVpn(secure,statusText){
+  const dot=document.getElementById("vpnDot"),label=document.getElementById("vpnLabel");
+  const pill=document.getElementById("vpnPill"),overlay=document.getElementById("vpnOverlay");
   const detail=document.getElementById("vpnOverlayDetail");
-  if (secure) {
-    dot.className   = "w-2 h-2 rounded-full bg-green-500 flex-shrink-0 transition-colors";
-    label.className = "text-xs font-medium text-green-400 whitespace-nowrap";
-    label.textContent = "VPN: Connected";
-    pill.classList.remove("border-red-800");
+  if(secure){
+    dot.className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0 transition-colors";
+    label.className="text-xs font-medium text-green-400 whitespace-nowrap";
+    label.textContent="VPN: Connected"; pill.classList.remove("border-red-800");
     overlay.classList.add("hidden");
   } else {
-    dot.className   = "w-2 h-2 rounded-full bg-red-500 flex-shrink-0 transition-colors blink";
-    label.className = "text-xs font-medium text-red-400 whitespace-nowrap";
-    label.textContent = "VPN: DISCONNECTED";
-    pill.classList.add("border-red-800");
+    dot.className="w-2 h-2 rounded-full bg-red-500 flex-shrink-0 transition-colors blink";
+    label.className="text-xs font-medium text-red-400 whitespace-nowrap";
+    label.textContent="VPN: DISCONNECTED"; pill.classList.add("border-red-800");
     overlay.classList.remove("hidden");
-    if (statusText) detail.textContent = statusText;
+    if(statusText) detail.textContent=statusText;
   }
 }
 
 // ── Player footer ──────────────────────────────────────────────────────────
-const BADGE = {
-  buffering: "bg-yellow-900/50 text-yellow-400 border-yellow-800",
-  playing:   "bg-green-900/50  text-green-400  border-green-800",
-  error:     "bg-red-900/50    text-red-400    border-red-800",
-};
-const BAR_COLOR  = { buffering:"bg-yellow-500", playing:"bg-green-500", error:"bg-red-500", idle:"bg-indigo-500" };
-const DOT_COLOR  = { buffering:"bg-yellow-500 blink", playing:"bg-green-500", error:"bg-red-500", idle:"bg-gray-700" };
+const BADGE={buffering:"bg-yellow-900/50 text-yellow-400 border-yellow-800",
+             playing:"bg-green-900/50 text-green-400 border-green-800",
+             error:"bg-red-900/50 text-red-400 border-red-800"};
+const BAR_COLOR={buffering:"bg-yellow-500",playing:"bg-green-500",error:"bg-red-500",idle:"bg-indigo-500"};
+const DOT_COLOR={buffering:"bg-yellow-500 blink",playing:"bg-green-500",error:"bg-red-500",idle:"bg-gray-700"};
 
-function renderPlayer(s) {
-  const nowPlaying=document.getElementById("nowPlaying"), streamInfo=document.getElementById("streamInfo");
-  const speedInfo=document.getElementById("speedInfo"), bar=document.getElementById("progressBar");
-  const badge=document.getElementById("statusBadge"), playerDot=document.getElementById("playerDot");
-
-  bar.style.width = `${Math.min(100, s.progress||0)}%`;
-  bar.className   = `h-0.5 transition-all duration-700 ${BAR_COLOR[s.stream_status]||BAR_COLOR.idle}`;
-  playerDot.className = `w-2 h-2 rounded-full flex-shrink-0 ${DOT_COLOR[s.stream_status]||DOT_COLOR.idle}`;
-  nowPlaying.textContent = s.active_title || "No active stream";
-  nowPlaying.className   = `text-sm font-medium truncate ${s.active_title?"text-gray-200":"text-gray-500"}`;
-
-  if (s.stream_status === "buffering") {
-    streamInfo.textContent = s.total_mb > 0
-      ? `${s.downloaded_mb.toFixed(1)} MB / ${s.total_mb.toFixed(1)} MB (${s.progress.toFixed(1)}%)`
-      : "Connecting…";
-  } else if (s.stream_status === "playing") {
-    streamInfo.textContent = s.total_mb > 0 ? `${s.downloaded_mb.toFixed(1)} / ${s.total_mb.toFixed(1)} MB` : "";
-  } else {
-    streamInfo.textContent = "";
-  }
-
-  speedInfo.textContent = (s.dl_speed_bps > 0 && s.stream_status !== "idle")
-    ? `▼ ${fmtSpeed(s.dl_speed_bps)}  ▲ ${fmtSpeed(s.ul_speed_bps)}` : "";
-
-  if (s.stream_status in BADGE) {
-    const labels = { buffering:"Buffering…", playing:"▶ Playing", error:"Error" };
-    badge.className = `text-[11px] font-semibold px-2 py-0.5 rounded-full border ${BADGE[s.stream_status]}`;
-    badge.textContent = labels[s.stream_status];
-    badge.classList.remove("hidden");
-  } else {
-    badge.classList.add("hidden");
-  }
+function renderPlayer(s){
+  const np=document.getElementById("nowPlaying"),si=document.getElementById("streamInfo");
+  const sp=document.getElementById("speedInfo"),bar=document.getElementById("progressBar");
+  const badge=document.getElementById("statusBadge"),dot=document.getElementById("playerDot");
+  bar.style.width=`${Math.min(100,s.progress||0)}%`;
+  bar.className=`h-0.5 transition-all duration-700 ${BAR_COLOR[s.stream_status]||BAR_COLOR.idle}`;
+  dot.className=`w-2 h-2 rounded-full flex-shrink-0 ${DOT_COLOR[s.stream_status]||DOT_COLOR.idle}`;
+  np.textContent=s.active_title||"No active stream";
+  np.className=`text-sm font-medium truncate ${s.active_title?"text-gray-200":"text-gray-500"}`;
+  if(s.stream_status==="buffering")
+    si.textContent=s.total_mb>0?`${s.downloaded_mb.toFixed(1)} MB / ${s.total_mb.toFixed(1)} MB (${s.progress.toFixed(1)}%)`:"Connecting…";
+  else if(s.stream_status==="playing")
+    si.textContent=s.total_mb>0?`${s.downloaded_mb.toFixed(1)} / ${s.total_mb.toFixed(1)} MB`:"";
+  else si.textContent="";
+  sp.textContent=(s.dl_speed_bps>0&&s.stream_status!=="idle")?`▼ ${fmtSpeed(s.dl_speed_bps)}  ▲ ${fmtSpeed(s.ul_speed_bps)}`:"";
+  if(s.stream_status in BADGE){
+    const labels={buffering:"Buffering…",playing:"▶ Playing",error:"Error"};
+    badge.className=`text-[11px] font-semibold px-2 py-0.5 rounded-full border ${BADGE[s.stream_status]}`;
+    badge.textContent=labels[s.stream_status]; badge.classList.remove("hidden");
+  } else { badge.classList.add("hidden"); }
+  // Show audio/subtitle controls only while playing
+  const tc=document.getElementById("trackControls");
+  if(s.stream_status==="playing"){ tc.classList.remove("hidden"); startTrackPoll(); }
+  else { tc.classList.add("hidden"); stopTrackPoll(); }
 }
 
 // ── Tabs ───────────────────────────────────────────────────────────────────
-function switchTab(tab) {
-  activeTab = tab;
-  const isSearch = tab === "search";
-  document.getElementById("searchTab").classList.toggle("hidden", !isSearch);
-  document.getElementById("libraryTab").classList.toggle("hidden", isSearch);
-  document.getElementById("tabSearch").className = `tab-btn px-3 py-1 rounded-md text-sm font-medium transition-all ${isSearch ? "bg-gray-700 text-white" : "text-gray-400 hover:text-gray-200"}`;
-  document.getElementById("tabLibrary").className = `tab-btn px-3 py-1 rounded-md text-sm font-medium transition-all ${!isSearch ? "bg-gray-700 text-white" : "text-gray-400 hover:text-gray-200"}`;
-  if (!isSearch) loadLibrary();
+function switchTab(tab){
+  activeTab=tab;
+  const isS=tab==="search";
+  document.getElementById("searchTab").classList.toggle("hidden",!isS);
+  document.getElementById("libraryTab").classList.toggle("hidden",isS);
+  document.getElementById("tabSearch").className=`tab-btn px-3 py-1 rounded-md text-sm font-medium transition-all ${isS?"bg-gray-700 text-white":"text-gray-400 hover:text-gray-200"}`;
+  document.getElementById("tabLibrary").className=`tab-btn px-3 py-1 rounded-md text-sm font-medium transition-all ${!isS?"bg-gray-700 text-white":"text-gray-400 hover:text-gray-200"}`;
+  if(!isS) loadLibrary();
 }
 
-// ── Profile picker ─────────────────────────────────────────────────────────
-async function fetchProfiles() {
-  const r = await fetch("/api/profiles");
-  const d = await r.json();
-  allProfiles = d.profiles || [];
+// ── Profiles ───────────────────────────────────────────────────────────────
+async function fetchProfiles(){
+  const r=await fetch("/api/profiles");
+  allProfiles=(await r.json()).profiles||[];
   return allProfiles;
 }
-
-function renderProfileGrid() {
-  const grid = document.getElementById("profileGrid");
-  grid.innerHTML = "";
-
-  allProfiles.forEach(p => {
-    const bg = avatarBg(p.color);
-    const card = document.createElement("button");
-    card.className = "profile-card flex flex-col items-center gap-2 p-2 rounded-xl hover:bg-gray-800 transition-colors";
-    card.innerHTML = `
-      <div class="profile-avatar w-20 h-20 rounded-2xl ${bg}
-                  flex items-center justify-center text-3xl font-black text-white select-none">
+function renderProfileGrid(){
+  const grid=document.getElementById("profileGrid"); grid.innerHTML="";
+  allProfiles.forEach(p=>{
+    const bg=avatarBg(p.color);
+    const card=document.createElement("button");
+    card.className="profile-card flex flex-col items-center gap-2 p-2 rounded-xl hover:bg-gray-800 transition-colors";
+    card.innerHTML=`
+      <div class="profile-avatar w-20 h-20 rounded-2xl ${bg} flex items-center justify-center text-3xl font-black text-white select-none">
         ${escHtml(p.name.charAt(0).toUpperCase())}
       </div>
       <span class="text-sm text-gray-300">${escHtml(p.name)}</span>`;
-    card.onclick = () => selectProfile(p);
+    card.onclick=()=>selectProfile(p);
     grid.appendChild(card);
   });
-
-  // Add Profile card
-  const addCard = document.createElement("button");
-  addCard.className = "profile-card flex flex-col items-center gap-2 p-2 rounded-xl hover:bg-gray-800 transition-colors";
-  addCard.innerHTML = `
-    <div class="profile-avatar w-20 h-20 rounded-2xl border-2 border-dashed border-gray-700
-                flex items-center justify-center text-3xl text-gray-600 select-none">+</div>
+  const add=document.createElement("button");
+  add.className="profile-card flex flex-col items-center gap-2 p-2 rounded-xl hover:bg-gray-800 transition-colors";
+  add.innerHTML=`
+    <div class="profile-avatar w-20 h-20 rounded-2xl border-2 border-dashed border-gray-700 flex items-center justify-center text-3xl text-gray-600 select-none">+</div>
     <span class="text-sm text-gray-600">Add Profile</span>`;
-  addCard.onclick = () => openProfileModal();
-  grid.appendChild(addCard);
+  add.onclick=()=>openProfileModal();
+  grid.appendChild(add);
 }
-
-async function showProfilePicker() {
-  await fetchProfiles();
-  renderProfileGrid();
+async function showProfilePicker(){
+  await fetchProfiles(); renderProfileGrid();
   document.getElementById("profilePicker").classList.remove("hidden");
 }
-
-function selectProfile(p) {
-  profile = p;
-  localStorage.setItem("streamlink_profile", JSON.stringify(p));
+function selectProfile(p){
+  profile=p; localStorage.setItem("streamlink_profile",JSON.stringify(p));
   document.getElementById("profilePicker").classList.add("hidden");
   renderNavProfile();
-  if (activeTab === "library") loadLibrary();
+  if(activeTab==="library") loadLibrary();
 }
-
-function renderNavProfile() {
-  const av = document.getElementById("navProfileAvatar");
-  const nm = document.getElementById("navProfileName");
-  if (profile.id) {
-    av.className = `w-6 h-6 rounded-full ${avatarBg(profile.color)} flex items-center justify-center text-xs font-bold text-white flex-shrink-0`;
-    av.textContent = profile.name.charAt(0).toUpperCase();
-    nm.textContent = profile.name;
-    nm.classList.remove("hidden");
+function renderNavProfile(){
+  const av=document.getElementById("navProfileAvatar"),nm=document.getElementById("navProfileName");
+  if(profile.id){
+    av.className=`w-6 h-6 rounded-full ${avatarBg(profile.color)} flex items-center justify-center text-xs font-bold text-white flex-shrink-0`;
+    av.textContent=profile.name.charAt(0).toUpperCase();
+    nm.textContent=profile.name; nm.classList.remove("hidden");
   }
 }
-
-// ── Profile modal ──────────────────────────────────────────────────────────
-function openProfileModal() {
-  document.getElementById("profileNameInput").value = "";
-  selectColor("indigo");
-  renderProfileDeleteList();
+function openProfileModal(){
+  document.getElementById("profileNameInput").value="";
+  selectColor("indigo"); renderExistingProfilesList();
   document.getElementById("profileModal").classList.remove("hidden");
 }
-function closeProfileModal() {
-  document.getElementById("profileModal").classList.add("hidden");
-}
-function toggleManageProfiles() {
-  openProfileModal();
-}
-
-function renderProfileDeleteList() {
-  const list = document.getElementById("profileDeleteList");
-  const items = document.getElementById("profileDeleteItems");
-  if (allProfiles.length === 0) { list.classList.add("hidden"); return; }
-  list.classList.remove("hidden");
-  items.innerHTML = "";
-  allProfiles.forEach(p => {
-    const bg = avatarBg(p.color);
-    const row = document.createElement("div");
-    row.className = "flex items-center justify-between gap-2";
-    row.innerHTML = `
+function closeProfileModal(){ document.getElementById("profileModal").classList.add("hidden"); }
+function renderExistingProfilesList(){
+  const wrap=document.getElementById("existingProfilesList");
+  const items=document.getElementById("existingProfilesItems");
+  if(!allProfiles.length){ wrap.classList.add("hidden"); return; }
+  wrap.classList.remove("hidden"); items.innerHTML="";
+  allProfiles.forEach(p=>{
+    const row=document.createElement("div");
+    row.className="flex items-center justify-between gap-2";
+    row.innerHTML=`
       <div class="flex items-center gap-2">
-        <div class="w-7 h-7 rounded-full ${bg} flex items-center justify-center text-xs font-bold text-white">
-          ${escHtml(p.name.charAt(0).toUpperCase())}
-        </div>
+        <div class="w-7 h-7 rounded-full ${avatarBg(p.color)} flex items-center justify-center text-xs font-bold text-white">${escHtml(p.name.charAt(0).toUpperCase())}</div>
         <span class="text-sm text-gray-300">${escHtml(p.name)}</span>
       </div>
-      <button class="text-xs text-red-500 hover:text-red-300 transition-colors" data-id="${escHtml(p.id)}">
-        Delete
-      </button>`;
-    row.querySelector("button").onclick = async () => {
-      if (!confirm(`Delete profile "${p.name}"? This removes their watch history.`)) return;
-      await fetch(`/api/profiles/${p.id}`, { method: "DELETE" });
-      if (profile.id === p.id) {
-        profile = { id: "", name: "", color: "indigo" };
-        localStorage.removeItem("streamlink_profile");
-      }
-      await fetchProfiles();
-      renderProfileGrid();
-      renderProfileDeleteList();
+      <button class="text-xs text-red-500 hover:text-red-300 transition-colors" data-id="${escHtml(p.id)}">Delete</button>`;
+    row.querySelector("button").onclick=async()=>{
+      if(!confirm(`Delete profile "${p.name}"? This removes their watch history.`)) return;
+      await fetch(`/api/profiles/${p.id}`,{method:"DELETE"});
+      if(profile.id===p.id){ profile={id:"",name:"",color:"indigo"}; localStorage.removeItem("streamlink_profile"); }
+      await fetchProfiles(); renderProfileGrid(); renderExistingProfilesList();
     };
     items.appendChild(row);
   });
 }
-
-function selectColor(c) {
-  selectedColor = c;
-  document.querySelectorAll(".color-swatch").forEach(btn => {
-    const bc = btn.dataset.color;
-    const ring = (PROFILE_COLORS[bc]||PROFILE_COLORS.indigo).ring;
-    btn.className = `color-swatch w-7 h-7 rounded-full ${avatarBg(bc)} ${bc===c ? `ring-2 ring-offset-2 ring-offset-gray-900 ${ring}` : "ring-0"}`;
+function selectColor(c){
+  selectedColor=c;
+  document.querySelectorAll(".color-swatch").forEach(btn=>{
+    const bc=btn.dataset.color;
+    const ring=(PROFILE_COLORS[bc]||PROFILE_COLORS.indigo).ring;
+    btn.className=`color-swatch w-7 h-7 rounded-full ${avatarBg(bc)} ${bc===c?`ring-2 ring-offset-2 ring-offset-gray-900 ${ring}`:""}`;
   });
 }
-
-async function submitProfile() {
-  const name = document.getElementById("profileNameInput").value.trim();
-  if (!name) { document.getElementById("profileNameInput").focus(); return; }
-  const r = await fetch("/api/profiles", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ name, color: selectedColor }),
-  });
-  if (!r.ok) { alert("Could not create profile."); return; }
-  const d = await r.json();
-  closeProfileModal();
-  allProfiles = [...allProfiles, d.profile];
-  renderProfileGrid();
-  selectProfile(d.profile);
+async function submitProfile(){
+  const name=document.getElementById("profileNameInput").value.trim();
+  if(!name){ document.getElementById("profileNameInput").focus(); return; }
+  const r=await fetch("/api/profiles",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,color:selectedColor})});
+  if(!r.ok){ alert("Could not create profile."); return; }
+  const d=await r.json(); closeProfileModal();
+  allProfiles=[...allProfiles,d.profile]; renderProfileGrid(); selectProfile(d.profile);
 }
 
 // ── Library ────────────────────────────────────────────────────────────────
-async function loadLibrary() {
-  const pid = profile.id ? `?profile_id=${profile.id}` : "";
-  const r   = await fetch(`/api/library${pid}`);
-  const d   = await r.json();
-  renderLibrary(d.items || []);
+async function loadLibrary(){
+  const pid=profile.id?`?profile_id=${profile.id}`:"";
+  const r=await fetch(`/api/library${pid}`);
+  renderLibrary((await r.json()).items||[]);
 }
 
-function watchPct(prog) {
-  if (!prog || !prog.duration_sec) return 0;
-  return Math.round(prog.position_sec / prog.duration_sec * 100);
-}
+function watchPctOf(prog){ return (!prog||!prog.duration_sec)?0:Math.round(prog.position_sec/prog.duration_sec*100); }
 
-function renderLibrary(items) {
-  const el = document.getElementById("libraryContent");
-  if (items.length === 0) {
-    el.innerHTML = `
+function renderLibrary(items){
+  const el=document.getElementById("libraryContent");
+  if(!items.length){
+    el.innerHTML=`
       <div class="flex flex-col items-center justify-center py-20 text-center">
-        <div class="w-16 h-16 rounded-2xl bg-gray-800 border border-gray-700
-                    flex items-center justify-center mb-4">
+        <div class="w-16 h-16 rounded-2xl bg-gray-800 border border-gray-700 flex items-center justify-center mb-4">
           <svg class="w-8 h-8 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 3v18l7-3 7 3V3H5z"/>
           </svg>
         </div>
         <p class="text-gray-500 font-medium">No downloads yet</p>
-        <p class="text-gray-700 text-xs mt-1">Click Download on any search result to save it here</p>
-      </div>`;
-    return;
+        <p class="text-gray-700 text-xs mt-1">Click ↓ on any search result to save for later</p>
+      </div>`; return;
   }
 
-  // Group by series (items with no series go under their own title as standalone)
-  const groups = new Map();  // key → {label, items[]}
-  items.forEach(item => {
-    const key = item.series || "\x00" + item.id;
-    const label = item.series || "";
-    if (!groups.has(key)) groups.set(key, { label, items: [] });
+  // Group by series (standalone items use sentinel key)
+  const groups=new Map();
+  items.forEach(item=>{
+    const key=item.series||"\x00"+item.id;
+    if(!groups.has(key)) groups.set(key,{label:item.series||"",items:[]});
     groups.get(key).items.push(item);
   });
 
-  let html = "";
-  groups.forEach(({ label, items: gItems }) => {
-    const isSeries = !!label;
-    if (isSeries) {
-      html += `<div class="mb-6">
-        <h3 class="text-sm font-semibold text-gray-400 uppercase tracking-wider mb-3
-                   flex items-center gap-2">
-          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-              d="M7 4v16M17 4v16M3 8h4m10 0h4M3 16h4m10 0h4"/>
-          </svg>
-          ${escHtml(label)}
-        </h3>
-        <div class="space-y-2">`;
+  let html="";
+  groups.forEach(({label,items:gItems})=>{
+    if(label){
+      html+=`<div class="mb-6">
+        <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2 flex items-center gap-2">
+          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 4v16M17 4v16M3 8h4m10 0h4M3 16h4m10 0h4"/>
+          </svg>${escHtml(label)}</h3><div class="space-y-2">`;
     } else {
-      html += `<div class="mb-2"><div class="space-y-2">`;
+      html+=`<div class="mb-2"><div class="space-y-2">`;
     }
 
-    gItems.forEach(item => {
-      const pct  = watchPct(item.progress);
-      const prog = item.progress || {};
-      const isDownloading = item.status === "downloading";
-      const isError       = item.status === "error";
-      const isReady       = item.status === "ready" && !!item.file_path;
-      const completed     = prog.completed;
-      const hasProgress   = pct > 3 && !completed;
+    gItems.forEach(item=>{
+      const isDownloading=item.status==="downloading";
+      const isError=item.status==="error";
+      const isReady=item.status==="ready";
+      const isMulti=item.file_count>1;
+      const resume=item.resume;
+      const pct=resume?resume.pct:0;
+      const hasProgress=resume&&pct>3&&!resume.all_completed;
+      const allDone=resume&&resume.all_completed;
 
-      const epLabel = (item.season && item.episode)
-        ? `S${String(item.season).padStart(2,"0")}E${String(item.episode).padStart(2,"0")} · `
-        : "";
+      // Episode label for single-episode items
+      const epPrefix=(item.season&&item.episode)?`S${pad2(item.season)}E${pad2(item.episode)} · `:"";
 
-      const statusBadge = isDownloading
-        ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-yellow-900/50 text-yellow-400 border border-yellow-800 blink">Downloading</span>`
-        : isError
-        ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-red-900/50 text-red-400 border border-red-800">Error</span>`
-        : completed
-        ? `<span class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-500 border border-gray-700">Completed</span>`
-        : "";
+      const statusBadge=isDownloading
+        ?`<span class="text-[10px] px-1.5 py-0.5 rounded bg-yellow-900/50 text-yellow-400 border border-yellow-800 blink">↓ Downloading</span>`
+        :isError?`<span class="text-[10px] px-1.5 py-0.5 rounded bg-red-900/50 text-red-400 border border-red-800">Error</span>`
+        :allDone?`<span class="text-[10px] px-1.5 py-0.5 rounded bg-gray-800 text-gray-500 border border-gray-700">✓ All watched</span>`:"";
 
-      const resumeBtn = isReady && hasProgress
-        ? `<button onclick="playLibraryItem('${item.id}', false)"
+      // Buttons — multi-episode vs single
+      let buttons="";
+      if(isReady){
+        if(isMulti){
+          // Continue button (from resume hint)
+          const contLabel=hasProgress
+            ?`↩ Continue ${resume.episode_name.replace(/\.[^.]+$/,"")} · ${Math.round(pct)}%`
+            :`▶ Play All`;
+          buttons+=`<button onclick="openEpisodePicker('${item.id}')"
+            class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white
+                   px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap font-medium">
+            ☰ Episodes
+          </button>
+          <button onclick="continueLibraryItem('${item.id}')"
+            class="text-xs ${hasProgress?'bg-green-900/50 hover:bg-green-800/60 text-green-300 border border-green-800':'bg-indigo-700 hover:bg-indigo-600 text-white border-0'}
+                   px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap font-medium">
+            ${escHtml(contLabel)}
+          </button>`;
+        } else {
+          // Single-file: resume or play
+          if(hasProgress){
+            buttons+=`<button onclick="continueLibraryItem('${item.id}')"
               class="text-xs bg-green-900/50 hover:bg-green-800/60 text-green-300 border border-green-800
                      px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap font-medium">
-              ↩ Resume ${pct}%
-           </button>`
-        : "";
+              ↩ Resume ${Math.round(pct)}%
+            </button>
+            <button onclick="playLibraryFiles('${item.id}',['${resume.file_path}'],0)"
+              class="text-xs bg-indigo-700 hover:bg-indigo-600 text-white px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap">
+              ▶ Restart
+            </button>`;
+          } else {
+            buttons+=`<button onclick="continueLibraryItem('${item.id}')"
+              class="text-xs bg-indigo-700 hover:bg-indigo-600 text-white px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap font-medium">
+              ▶ Play
+            </button>`;
+          }
+        }
+      }
 
-      const playBtn = isReady
-        ? `<button onclick="playLibraryItem('${item.id}', true)"
-              class="text-xs bg-indigo-700 hover:bg-indigo-600 text-white
-                     px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap font-medium">
-              ${hasProgress ? "▶ Restart" : "▶ Play"}
-           </button>`
-        : "";
-
-      const deleteBtn = `<button onclick="deleteLibraryItem('${item.id}')"
-        class="text-xs text-gray-600 hover:text-red-400 px-2 py-1.5 rounded-lg
-               hover:bg-red-950/30 transition-colors">
+      // Delete button
+      buttons+=`<button onclick="deleteLibraryItem('${item.id}')"
+        class="text-xs text-gray-600 hover:text-red-400 px-2 py-1.5 rounded-lg hover:bg-red-950/30 transition-colors">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5
-               7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+            d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
         </svg>
       </button>`;
 
-      const progressBar = hasProgress
-        ? `<div class="w-full bg-gray-800 rounded-full h-0.5 mt-1.5">
-             <div class="bg-green-500 h-0.5 rounded-full" style="width:${pct}%"></div>
-           </div>`
-        : "";
+      // Progress bar
+      const progBar=hasProgress
+        ?`<div class="w-full bg-gray-800 rounded-full h-0.5 mt-1.5">
+            <div class="bg-green-500 h-0.5 rounded-full" style="width:${Math.round(pct)}%"></div>
+          </div>`:""
 
-      const sizeStr = item.size_bytes > 0 ? ` · ${item.size_human}` : "";
-      const durStr  = prog.duration_sec ? ` · ${fmtDuration(prog.duration_sec)}` : "";
+      const meta=[
+        item.file_count>1?`${item.file_count} episodes`:"",
+        item.size_bytes>0?item.size_human:"",
+      ].filter(Boolean).join(" · ");
 
-      html += `
-        <div class="bg-gray-900 border border-gray-800 rounded-xl px-4 py-3
-                    flex items-center gap-3" data-item-id="${item.id}">
-          <div class="flex-1 min-w-0">
-            <div class="flex items-center gap-2 flex-wrap">
-              <span class="text-sm font-medium text-gray-200 truncate">
-                ${epLabel}${escHtml(item.title)}
-              </span>
-              ${statusBadge}
-            </div>
-            <div class="text-[11px] text-gray-600 mt-0.5">${escHtml(item.size_human || "")}${durStr}</div>
-            ${progressBar}
+      html+=`<div class="bg-gray-900 border border-gray-800 rounded-xl px-4 py-3 flex items-center gap-3" data-item-id="${item.id}">
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-2 flex-wrap">
+            <span class="text-sm font-medium text-gray-200 truncate">${epPrefix}${escHtml(item.title)}</span>
+            ${statusBadge}
           </div>
-          <div class="flex items-center gap-1.5 flex-shrink-0">
-            ${resumeBtn}
-            ${playBtn}
-            ${deleteBtn}
-          </div>
-        </div>`;
+          <div class="text-[11px] text-gray-600 mt-0.5">${escHtml(meta)}</div>
+          ${progBar}
+        </div>
+        <div class="flex items-center gap-1.5 flex-shrink-0">${buttons}</div>
+      </div>`;
     });
-
-    html += `</div></div>`;
+    html+=`</div></div>`;
   });
-
-  el.innerHTML = html;
+  el.innerHTML=html;
 }
 
-async function playLibraryItem(itemId, fromStart) {
-  if (!profile.id) { showAlert("Select a profile first.", "warn"); return; }
-  const body = { profile_id: profile.id, seek_to: fromStart ? 0 : null };
-  const r = await fetch(`/api/library/${itemId}/play`, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+// "Continue" — auto-selects best file and position
+async function continueLibraryItem(itemId){
+  if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
+  // Call play with empty files list — backend resolves resume file
+  const r=await fetch(`/api/library/${itemId}/play`,{
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({profile_id:profile.id,files:[],seek_first_to:null}),
   });
-  if (!r.ok) {
-    const e = await r.json().catch(()=>({detail:"Unknown error"}));
-    showAlert(e.detail || "Playback failed.", "error");
+  if(!r.ok){
+    const e=await r.json().catch(()=>({detail:"Playback failed"}));
+    showAlert(e.detail||"Playback failed.","error");
   }
 }
 
-async function deleteLibraryItem(itemId) {
-  if (!confirm("Remove from library and delete the file?")) return;
-  const r = await fetch(`/api/library/${itemId}?delete_file=true`, { method: "DELETE" });
-  if (r.ok) loadLibrary();
-  else showAlert("Could not delete item.", "error");
+// Play a specific ordered list of files with optional seek on first
+async function playLibraryFiles(itemId,files,seekTo){
+  if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
+  const body={profile_id:profile.id,files,seek_first_to:seekTo||null};
+  const r=await fetch(`/api/library/${itemId}/play`,{
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(body),
+  });
+  if(!r.ok){
+    const e=await r.json().catch(()=>({detail:"Playback failed"}));
+    showAlert(e.detail||"Playback failed.","error");
+  }
+}
+
+async function deleteLibraryItem(itemId){
+  if(!confirm("Remove from library and delete the file(s)?")) return;
+  const r=await fetch(`/api/library/${itemId}?delete_file=true`,{method:"DELETE"});
+  if(r.ok) loadLibrary();
+  else showAlert("Could not delete item.","error");
+}
+
+// ── Episode Picker ─────────────────────────────────────────────────────────
+async function openEpisodePicker(itemId){
+  epItemId=itemId;
+  epFiles=[]; epChecked=new Set();
+  document.getElementById("episodeModal").classList.remove("hidden");
+  document.getElementById("epList").innerHTML=`<p class="text-gray-600 text-sm text-center py-8">Loading…</p>`;
+
+  const pid=profile.id?`?profile_id=${profile.id}`:"";
+  const r=await fetch(`/api/library/${itemId}/files${pid}`);
+  if(!r.ok){ document.getElementById("epList").innerHTML=`<p class="text-red-400 text-sm text-center py-8">Could not load files.</p>`; return; }
+  const d=await r.json();
+  epFiles=d.files||[];
+
+  // Pre-check all unwatched files
+  epFiles.forEach(f=>{ if(!f.progress?.completed) epChecked.add(f.path); });
+
+  // Header subtitle
+  const seasons=[...new Set(epFiles.map(f=>f.season).filter(Boolean))];
+  document.getElementById("epModalSubtitle").textContent=
+    epFiles.length===1?epFiles[0].name
+    :seasons.length>0?`${epFiles.length} episodes · ${seasons.length} season${seasons.length>1?"s":""}`
+    :`${epFiles.length} files`;
+
+  renderEpList();
+}
+
+function closeEpisodeModal(){
+  document.getElementById("episodeModal").classList.add("hidden");
+  epItemId=null; epFiles=[]; epChecked=new Set();
+}
+
+function renderEpList(){
+  const el=document.getElementById("epList");
+  if(!epFiles.length){ el.innerHTML=`<p class="text-gray-600 text-sm text-center py-8">No video files found.</p>`; return; }
+
+  // Group by season
+  const seasons=new Map();
+  epFiles.forEach(f=>{
+    const key=f.season||0;
+    if(!seasons.has(key)) seasons.set(key,[]);
+    seasons.get(key).push(f);
+  });
+
+  let html="";
+  seasons.forEach((files,season)=>{
+    if(season>0) html+=`<div class="px-1 pt-3 pb-1 text-xs font-semibold text-gray-500 uppercase tracking-wider">Season ${season}</div>`;
+
+    files.forEach(f=>{
+      const checked=epChecked.has(f.path);
+      const prog=f.progress;
+      const pct=prog?Math.round(prog.position_sec/(prog.duration_sec||1)*100):0;
+      const isComplete=prog?.completed;
+      const inProgress=prog&&!isComplete&&pct>2;
+
+      const progressBar=inProgress?`<div class="w-full bg-gray-800 rounded-full h-0.5 mt-1">
+        <div class="bg-green-500 h-0.5 rounded-full" style="width:${pct}%"></div></div>`:"";
+
+      const badge=isComplete
+        ?`<span class="text-[10px] text-green-600 ml-1">✓</span>`
+        :inProgress?`<span class="text-[10px] text-yellow-600 ml-1">${pct}%</span>`:"";
+
+      const label=epLabel(f);
+      const displayName=f.season&&f.episode?f.name:f.name;  // full name when no S/E
+
+      html+=`<label class="ep-row flex items-start gap-3 px-2 py-2.5 rounded-lg cursor-pointer transition-colors" data-path="${escHtml(f.path)}">
+        <input type="checkbox" class="ep-check mt-0.5 flex-shrink-0 accent-indigo-500 w-4 h-4"
+          ${checked?"checked":""} data-path="${escHtml(f.path)}" onchange="epToggle(this)" />
+        <div class="flex-1 min-w-0">
+          <div class="flex items-center gap-1.5 flex-wrap">
+            ${f.season&&f.episode?`<span class="text-[10px] font-mono text-indigo-400 bg-indigo-950/50 px-1.5 py-0.5 rounded">${escHtml(label)}</span>`:""}
+            <span class="text-sm text-gray-300 truncate">${escHtml(displayName)}</span>
+            ${badge}
+          </div>
+          <div class="text-[10px] text-gray-700 mt-0.5">${escHtml(f.size_human)}</div>
+          ${progressBar}
+        </div>
+      </label>`;
+    });
+  });
+
+  el.innerHTML=html;
+  updateEpCount();
+}
+
+function epToggle(cb){
+  const path=cb.dataset.path;
+  if(cb.checked) epChecked.add(path); else epChecked.delete(path);
+  updateEpCount();
+}
+function updateEpCount(){ document.getElementById("epSelectedCount").textContent=epChecked.size; }
+function epSelectAll(v){
+  epFiles.forEach(f=>{ if(v) epChecked.add(f.path); else epChecked.delete(f.path); });
+  document.querySelectorAll(".ep-check").forEach(cb=>{ cb.checked=v; }); updateEpCount();
+}
+function epSelectUnwatched(){
+  epChecked=new Set();
+  epFiles.forEach(f=>{ if(!f.progress?.completed) epChecked.add(f.path); });
+  document.querySelectorAll(".ep-check").forEach(cb=>{ cb.checked=epChecked.has(cb.dataset.path); });
+  updateEpCount();
+}
+
+async function epPlay(){
+  if(!epChecked.size){ showAlert("Select at least one episode.","warn"); return; }
+  if(!epItemId) return;
+
+  // Preserve order from epFiles, filter to checked only
+  const ordered=epFiles.filter(f=>epChecked.has(f.path)).map(f=>f.path);
+
+  // Determine seek for first file (resume if it's in-progress)
+  const firstFile=epFiles.find(f=>f.path===ordered[0]);
+  let seekTo=null;
+  if(firstFile?.progress && !firstFile.progress.completed && firstFile.progress.position_sec>5)
+    seekTo=firstFile.progress.position_sec;
+
+  closeEpisodeModal();
+  await playLibraryFiles(epItemId, ordered, seekTo);
 }
 
 // ── Download modal ─────────────────────────────────────────────────────────
-function openDownloadModal(magnet, title) {
-  downloadTarget = { magnet, title };
-  document.getElementById("downloadModalTitle").textContent = title;
-  // Auto-detect series / episode from title
-  const epMatch = title.match(/[Ss](\d{1,2})[Ee](\d{1,2})/);
-  document.getElementById("dlEpisode").value = epMatch ? epMatch[0].toUpperCase() : "";
-  // Strip episode code and quality tags for series name guess
-  const seriesGuess = title.replace(/[Ss]\d{1,2}[Ee]\d{1,2}.*/,"")
-                           .replace(/\b(720p|1080p|2160p|BluRay|WEB|HDTV|x264|x265|HEVC)\b.*/i,"")
-                           .replace(/[._-]+/g," ").trim();
-  document.getElementById("dlSeries").value = epMatch ? seriesGuess : "";
+function openDownloadModal(magnet,title){
+  downloadTarget={magnet,title};
+  document.getElementById("dlModalTitle").textContent=title;
+  const epMatch=title.match(/[Ss](\d{1,2})[Ee](\d{1,2})/);
+  document.getElementById("dlEpisode").value=epMatch?epMatch[0].toUpperCase():"";
+  const seriesGuess=title.replace(/[Ss]\d{1,2}[Ee]\d{1,2}.*/,"")
+                         .replace(/\b(720p|1080p|2160p|BluRay|WEB|HDTV|x264|x265|HEVC)\b.*/i,"")
+                         .replace(/[._-]+/g," ").trim();
+  document.getElementById("dlSeries").value=epMatch?seriesGuess:"";
   document.getElementById("downloadModal").classList.remove("hidden");
   document.getElementById("dlSeries").focus();
 }
-function closeDownloadModal() {
-  downloadTarget = null;
-  document.getElementById("downloadModal").classList.add("hidden");
+function closeDownloadModal(){ downloadTarget=null; document.getElementById("downloadModal").classList.add("hidden"); }
+function parseEp(s){
+  const m=s.match(/[Ss](\d{1,2})[Ee](\d{1,2})/);
+  return m?{season:parseInt(m[1]),episode:parseInt(m[2])}:{season:0,episode:0};
 }
-
-function parseEpisode(s) {
-  const m = s.match(/[Ss](\d{1,2})[Ee](\d{1,2})/);
-  return m ? { season: parseInt(m[1]), episode: parseInt(m[2]) } : { season: 0, episode: 0 };
-}
-
-async function submitDownload() {
-  if (!downloadTarget) return;
-  const series  = document.getElementById("dlSeries").value.trim();
-  const epStr   = document.getElementById("dlEpisode").value.trim();
-  const { season, episode } = parseEpisode(epStr);
-  const body = { magnet: downloadTarget.magnet, title: downloadTarget.title, series, season, episode };
+async function submitDownload(){
+  if(!downloadTarget) return;
+  const series=document.getElementById("dlSeries").value.trim();
+  const {season,episode}=parseEp(document.getElementById("dlEpisode").value.trim());
   closeDownloadModal();
-  const r = await fetch("/api/library/download", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
+  const r=await fetch("/api/library/download",{
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({magnet:downloadTarget.magnet,title:downloadTarget.title,series,season,episode}),
   });
-  if (r.ok) {
-    showAlert("Added to library — downloading in background.", "success");
-    if (activeTab === "library") loadLibrary();
-  } else {
-    const e = await r.json().catch(()=>({detail:"Unknown error"}));
-    showAlert(e.detail || "Download failed.", "error");
-  }
+  if(r.ok){ showAlert("Added to library — downloading in background.","success"); if(activeTab==="library") loadLibrary(); }
+  else { const e=await r.json().catch(()=>({detail:"Unknown error"})); showAlert(e.detail||"Download failed.","error"); }
 }
 
 // ── Search ─────────────────────────────────────────────────────────────────
-async function doSearch(q) {
-  q = q.trim();
-  if (!q) return;
-  const btn   = document.getElementById("searchBtn");
-  const tbody = document.getElementById("resultsTbody");
-  const wrap  = document.getElementById("resultsWrap");
-  const empty = document.getElementById("emptyState");
-  const count = document.getElementById("resultCount");
-
-  btn.disabled = true; btn.textContent = "Searching…";
-  tbody.innerHTML = ""; wrap.classList.add("hidden"); empty.classList.add("hidden");
-  hideAlert();
-
-  try {
-    const r = await fetch(`/api/search?q=${encodeURIComponent(q)}`);
-    if (!r.ok) {
-      const err = await r.json().catch(()=>({detail:"Search failed"}));
-      throw new Error(err.detail || `HTTP ${r.status}`);
-    }
-    const data  = await r.json();
-    const items = data.results || [];
-    count.textContent = items.length ? `${items.length} results` : "";
-
-    if (items.length === 0) {
+async function doSearch(q){
+  q=q.trim(); if(!q) return;
+  const btn=document.getElementById("searchBtn"),tbody=document.getElementById("resultsTbody");
+  const wrap=document.getElementById("resultsWrap"),empty=document.getElementById("emptyState");
+  const count=document.getElementById("resultCount");
+  btn.disabled=true; btn.textContent="Searching…";
+  tbody.innerHTML=""; wrap.classList.add("hidden"); empty.classList.add("hidden"); hideAlert();
+  try{
+    const r=await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+    if(!r.ok){ const e=await r.json().catch(()=>({detail:"Search failed"})); throw new Error(e.detail||`HTTP ${r.status}`); }
+    const items=(await r.json()).results||[];
+    count.textContent=items.length?`${items.length} results`:"";
+    if(!items.length){
       empty.classList.remove("hidden");
-      empty.innerHTML = `
-        <div class="w-16 h-16 rounded-2xl bg-gray-800 border border-gray-700
-                    flex items-center justify-center mb-4">
-          <svg class="w-8 h-8 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
-              d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-          </svg>
-        </div>
+      empty.innerHTML=`<div class="w-16 h-16 rounded-2xl bg-gray-800 border border-gray-700 flex items-center justify-center mb-4">
+        <svg class="w-8 h-8 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg></div>
         <p class="text-gray-500 font-medium">No results for "${escHtml(q)}"</p>
         <p class="text-gray-700 text-xs mt-1">Try different keywords or check your indexer</p>`;
       return;
     }
-
-    items.forEach((item, i) => {
-      const tr = document.createElement("tr");
-      tr.className = "result-row group bg-gray-950 hover:bg-gray-900 transition-colors";
-      tr.style.animationDelay = `${i * 18}ms`;
-      const seederCls = item.seeders>30?"text-green-400":item.seeders>8?"text-yellow-400":"text-red-400";
-      tr.innerHTML = `
+    items.forEach((item,i)=>{
+      const tr=document.createElement("tr");
+      tr.className="result-row group bg-gray-950 hover:bg-gray-900 transition-colors";
+      tr.style.animationDelay=`${i*18}ms`;
+      const sc=item.seeders>30?"text-green-400":item.seeders>8?"text-yellow-400":"text-red-400";
+      tr.innerHTML=`
         <td class="px-4 py-3 max-w-[220px] sm:max-w-xs">
-          <span class="block truncate text-gray-300 group-hover:text-white text-xs sm:text-sm
-                       transition-colors" title="${escHtml(item.title)}">${escHtml(item.title)}</span>
+          <span class="block truncate text-gray-300 group-hover:text-white text-xs sm:text-sm transition-colors" title="${escHtml(item.title)}">${escHtml(item.title)}</span>
           ${item.tracker?`<span class="text-[10px] text-gray-700">${escHtml(item.tracker)}</span>`:""}
         </td>
-        <td class="px-4 py-3 text-right text-xs text-gray-500 whitespace-nowrap hidden sm:table-cell">
-          ${escHtml(item.size_human)}
-        </td>
-        <td class="px-4 py-3 text-right text-xs font-mono ${seederCls} whitespace-nowrap">
-          ${item.seeders}
-        </td>
-        <td class="px-4 py-3 text-right text-xs text-gray-700 whitespace-nowrap hidden md:table-cell">
-          ${item.peers}
-        </td>
+        <td class="px-4 py-3 text-right text-xs text-gray-500 whitespace-nowrap hidden sm:table-cell">${escHtml(item.size_human)}</td>
+        <td class="px-4 py-3 text-right text-xs font-mono ${sc} whitespace-nowrap">${item.seeders}</td>
+        <td class="px-4 py-3 text-right text-xs text-gray-700 whitespace-nowrap hidden md:table-cell">${item.peers}</td>
         <td class="px-4 py-3 text-right">
           <div class="flex items-center gap-1.5 justify-end">
             <button class="dl-btn text-[11px] bg-gray-800 hover:bg-gray-700 border border-gray-700
-                           text-gray-400 hover:text-gray-200 px-2.5 py-1.5 rounded-lg
-                           transition-all active:scale-95 whitespace-nowrap"
-              data-magnet="${escHtml(item.magnet)}" data-title="${escHtml(item.title)}">
-              ↓
-            </button>
-            <button class="play-btn bg-indigo-600 hover:bg-indigo-500 active:scale-95
-                           text-white text-xs font-semibold px-3.5 py-1.5 rounded-lg
-                           transition-all disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
-              data-magnet="${escHtml(item.magnet)}" data-title="${escHtml(item.title)}">
-              ▶ Play
-            </button>
+                           text-gray-400 hover:text-gray-200 px-2.5 py-1.5 rounded-lg transition-all
+                           active:scale-95 whitespace-nowrap"
+              data-magnet="${escHtml(item.magnet)}" data-title="${escHtml(item.title)}">↓</button>
+            <button class="play-btn bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white
+                           text-xs font-semibold px-3.5 py-1.5 rounded-lg transition-all
+                           disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
+              data-magnet="${escHtml(item.magnet)}" data-title="${escHtml(item.title)}">▶ Play</button>
           </div>
         </td>`;
-
-      tr.querySelector(".play-btn").addEventListener("click", (e) => {
-        const b = e.currentTarget;
-        playItem(b.dataset.magnet, b.dataset.title, b);
+      tr.querySelector(".play-btn").addEventListener("click",e=>{
+        const b=e.currentTarget; playItem(b.dataset.magnet,b.dataset.title,b);
       });
-      tr.querySelector(".dl-btn").addEventListener("click", (e) => {
-        const b = e.currentTarget;
-        openDownloadModal(b.dataset.magnet, b.dataset.title);
+      tr.querySelector(".dl-btn").addEventListener("click",e=>{
+        const b=e.currentTarget; openDownloadModal(b.dataset.magnet,b.dataset.title);
       });
       tbody.appendChild(tr);
     });
-
     wrap.classList.remove("hidden");
-  } catch (err) {
-    showAlert(err.message, "error");
-    empty.classList.remove("hidden");
+  } catch(err){
+    showAlert(err.message,"error"); empty.classList.remove("hidden");
   } finally {
-    btn.disabled = false; btn.textContent = "Search";
+    btn.disabled=false; btn.textContent="Search";
   }
 }
 
-// ── Play (stream now) ──────────────────────────────────────────────────────
-async function playItem(magnet, title, btn) {
-  if (!app.vpn_secure) { showAlert("VPN not connected — streaming blocked.", "error"); return; }
-  const allBtns = document.querySelectorAll(".play-btn");
-  allBtns.forEach(b => { b.disabled=true; if(b!==btn) b.textContent="▶ Play"; });
-  btn.textContent = "Starting…"; hideAlert();
-  try {
-    const r = await fetch("/api/stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ magnet, title }),
-    });
-    if (!r.ok) {
-      const err = await r.json().catch(()=>({detail:"Unknown error"}));
-      throw new Error(err.detail || `HTTP ${r.status}`);
-    }
-    btn.textContent = "▶ Loading…";
-  } catch (err) {
-    showAlert(err.message, "error");
-    btn.textContent = "▶ Play"; btn.disabled = false;
+// ── Stream now ─────────────────────────────────────────────────────────────
+async function playItem(magnet,title,btn){
+  if(!app.vpn_secure){ showAlert("VPN not connected — streaming blocked.","error"); return; }
+  const all=document.querySelectorAll(".play-btn");
+  all.forEach(b=>{b.disabled=true; if(b!==btn) b.textContent="▶ Play";});
+  btn.textContent="Starting…"; hideAlert();
+  try{
+    const r=await fetch("/api/stream",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({magnet,title})});
+    if(!r.ok){ const e=await r.json().catch(()=>({detail:"Unknown error"})); throw new Error(e.detail||`HTTP ${r.status}`); }
+    btn.textContent="▶ Loading…";
+  } catch(err){
+    showAlert(err.message,"error"); btn.textContent="▶ Play"; btn.disabled=false;
   } finally {
-    setTimeout(() => { allBtns.forEach(b => { if(b!==btn) b.disabled=false; }); }, 1500);
+    setTimeout(()=>{ all.forEach(b=>{if(b!==btn) b.disabled=false;}); },1500);
   }
 }
 
 // ── VLC Controls ───────────────────────────────────────────────────────────
-async function vlcPause()     { await fetch("/api/vlc/pause",       { method:"POST" }).catch(()=>{}); }
-async function vlcVolume(dir) { await fetch(`/api/vlc/volume/${dir}`,{ method:"POST" }).catch(()=>{}); }
-async function stopStream() {
-  await fetch("/api/stop", { method:"POST" }).catch(()=>{});
-  document.querySelectorAll(".play-btn").forEach(b => { b.disabled=false; b.textContent="▶ Play"; });
+async function vlcPause()     { await fetch("/api/vlc/pause",       {method:"POST"}).catch(()=>{}); }
+async function vlcVolume(dir) { await fetch(`/api/vlc/volume/${dir}`,{method:"POST"}).catch(()=>{}); }
+async function stopStream(){
+  await fetch("/api/stop",{method:"POST"}).catch(()=>{});
+  document.querySelectorAll(".play-btn").forEach(b=>{b.disabled=false;b.textContent="▶ Play";});
+}
+
+// ── Skip & Track controls ───────────────────────────────────────────────────
+async function vlcSeek(delta){
+  await fetch(`/api/vlc/seek?delta=${delta}`,{method:"POST"}).catch(()=>{});
+}
+
+async function setAudioTrack(id){
+  await fetch(`/api/vlc/track/audio/${id}`,{method:"POST"}).catch(()=>{});
+}
+
+async function setSubtitleTrack(id){
+  await fetch(`/api/vlc/track/subtitle/${id}`,{method:"POST"}).catch(()=>{});
+}
+
+let _trackPollTimer=null;
+
+async function loadTracks(){
+  try{
+    const r=await fetch("/api/vlc/tracks");
+    if(!r.ok) return;
+    const d=await r.json();
+
+    const audioSel=document.getElementById("audioSelect");
+    const subSel=document.getElementById("subtitleSelect");
+
+    // Rebuild audio select without disrupting user interaction mid-change
+    const curAudio=audioSel.value;
+    audioSel.innerHTML=d.audio.length
+      ?d.audio.map(t=>`<option value="${t.id}"${String(t.id)===String(d.current_audio)?" selected":""}>${escHtml(t.label)}</option>`).join("")
+      :`<option>—</option>`;
+
+    // Rebuild subtitle select (backend already includes {id:-1, label:"Off"} as first entry)
+    subSel.innerHTML=d.subtitle.map(t=>
+      `<option value="${t.id}"${String(t.id)===String(d.current_subtitle)?" selected":""}>${escHtml(t.label)}</option>`
+    ).join("")||`<option value="-1">Off</option>`;
+  } catch(_){}
+}
+
+function startTrackPoll(){
+  if(_trackPollTimer) return;
+  loadTracks();
+  _trackPollTimer=setInterval(loadTracks,5000);
+}
+
+function stopTrackPoll(){
+  if(_trackPollTimer){ clearInterval(_trackPollTimer); _trackPollTimer=null; }
 }
 
 // ── SSE ────────────────────────────────────────────────────────────────────
-function connectSSE() {
-  const sseDot=document.getElementById("sseDot"), sseLabel=document.getElementById("sseLabel");
-  const es = new EventSource("/api/events");
-
-  es.addEventListener("open", () => {
-    sseDot.className = "w-1.5 h-1.5 rounded-full bg-green-500 blink transition-colors";
+function connectSSE(){
+  const sseDot=document.getElementById("sseDot"),sseLabel=document.getElementById("sseLabel");
+  const es=new EventSource("/api/events");
+  es.addEventListener("open",()=>{
+    sseDot.className="w-1.5 h-1.5 rounded-full bg-green-500 blink transition-colors";
     sseLabel.textContent="live"; sseLabel.className="text-[11px] text-green-600 hidden sm:block";
   });
-  es.addEventListener("state", (e) => {
+  es.addEventListener("state",e=>{
     const d=JSON.parse(e.data); Object.assign(app,d);
-    renderVpn(d.vpn_secure, d.vpn_status); renderPlayer(app);
+    renderVpn(d.vpn_secure,d.vpn_status); renderPlayer(app);
   });
-  es.addEventListener("vpn_status", (e) => {
+  es.addEventListener("vpn_status",e=>{
     const d=JSON.parse(e.data); app.vpn_secure=d.secure; app.vpn_status=d.status;
-    renderVpn(d.secure, d.status);
+    renderVpn(d.secure,d.status);
     if(!d.secure) showAlert("VPN disconnected — qBittorrent has been terminated.","error");
   });
-  es.addEventListener("stream_status", (e) => {
+  es.addEventListener("stream_status",e=>{
     const d=JSON.parse(e.data); app.stream_status=d.status;
-    if(d.progress!==undefined)     app.progress=d.progress;
+    if(d.progress!==undefined) app.progress=d.progress;
     if(d.downloaded_mb!==undefined) app.downloaded_mb=d.downloaded_mb;
-    if(d.total_mb!==undefined)      app.total_mb=d.total_mb;
-    if(d.dl_speed_bps!==undefined)  app.dl_speed_bps=d.dl_speed_bps;
-    if(d.ul_speed_bps!==undefined)  app.ul_speed_bps=d.ul_speed_bps;
+    if(d.total_mb!==undefined) app.total_mb=d.total_mb;
+    if(d.dl_speed_bps!==undefined) app.dl_speed_bps=d.dl_speed_bps;
+    if(d.ul_speed_bps!==undefined) app.ul_speed_bps=d.ul_speed_bps;
     if(d.message) document.getElementById("streamInfo").textContent=d.message;
     renderPlayer(app);
     if(d.status==="error")   showAlert(`Stream error: ${d.message}`,"error");
     if(d.status==="playing") showAlert(`Now playing in VLC: ${d.message}`,"success");
     if(d.status==="idle")    hideAlert();
   });
-  es.addEventListener("library_update", () => {
+  es.addEventListener("library_update",()=>{ if(activeTab==="library") loadLibrary(); });
+  es.addEventListener("progress_saved",e=>{
+    // Re-render library silently when episode progress is saved
     if(activeTab==="library") loadLibrary();
   });
-  es.addEventListener("error", () => {
+  es.addEventListener("error",()=>{
     sseDot.className="w-1.5 h-1.5 rounded-full bg-red-600 transition-colors";
     sseLabel.textContent="reconnecting"; sseLabel.className="text-[11px] text-red-600 hidden sm:block";
   });
 }
 
 // ── Keyboard shortcuts ─────────────────────────────────────────────────────
-document.addEventListener("keydown", (e) => {
-  // Escape closes modals
-  if (e.key === "Escape") {
-    closeDownloadModal();
-    closeProfileModal();
-    if (!document.getElementById("profilePicker").classList.contains("hidden") && allProfiles.length > 0)
-      document.getElementById("profilePicker").classList.add("hidden");
+document.addEventListener("keydown",e=>{
+  if(e.key==="Escape"){
+    closeDownloadModal(); closeProfileModal(); closeEpisodeModal();
+    const pp=document.getElementById("profilePicker");
+    if(!pp.classList.contains("hidden")&&allProfiles.length) pp.classList.add("hidden");
   }
 });
 
 // ── Init ───────────────────────────────────────────────────────────────────
-document.addEventListener("DOMContentLoaded", async () => {
-  // Wire search
-  const input = document.getElementById("searchInput");
-  const btn   = document.getElementById("searchBtn");
-  btn.addEventListener("click", () => doSearch(input.value));
-  input.addEventListener("keydown", (e) => { if(e.key==="Enter") doSearch(input.value); });
-  let debounceTimer;
-  input.addEventListener("input", () => {
-    clearTimeout(debounceTimer);
-    if(input.value.length >= 3) debounceTimer = setTimeout(()=>doSearch(input.value), 600);
+document.addEventListener("DOMContentLoaded",async()=>{
+  // Search wiring
+  const input=document.getElementById("searchInput"),btn=document.getElementById("searchBtn");
+  btn.addEventListener("click",()=>doSearch(input.value));
+  input.addEventListener("keydown",e=>{if(e.key==="Enter") doSearch(input.value);});
+  let dbt;
+  input.addEventListener("input",()=>{
+    clearTimeout(dbt);
+    if(input.value.length>=3) dbt=setTimeout(()=>doSearch(input.value),600);
   });
-
-  // Download modal keyboard
-  document.getElementById("dlEpisode").addEventListener("keydown", (e) => {
-    if(e.key==="Enter") submitDownload();
-  });
-  document.getElementById("profileNameInput").addEventListener("keydown", (e) => {
-    if(e.key==="Enter") submitProfile();
-  });
+  document.getElementById("dlEpisode").addEventListener("keydown",e=>{if(e.key==="Enter") submitDownload();});
+  document.getElementById("profileNameInput").addEventListener("keydown",e=>{if(e.key==="Enter") submitProfile();});
 
   // Restore profile from localStorage
-  const saved = localStorage.getItem("streamlink_profile");
-  if (saved) {
-    try {
-      const p = JSON.parse(saved);
-      // Validate profile still exists
-      const profiles = await fetchProfiles();
-      const found = profiles.find(x => x.id === p.id);
-      if (found) {
-        profile = found;
-        renderNavProfile();
-        connectSSE();
-        return;
-      }
-    } catch (_) {}
+  const saved=localStorage.getItem("streamlink_profile");
+  if(saved){
+    try{
+      const p=JSON.parse(saved);
+      const profiles=await fetchProfiles();
+      const found=profiles.find(x=>x.id===p.id);
+      if(found){ profile=found; renderNavProfile(); connectSSE(); return; }
+    } catch(_){}
   }
-
-  // No valid profile — show picker
   await fetchProfiles();
-  if (allProfiles.length === 0) {
-    // No profiles yet — show picker so user can add one
-    renderProfileGrid();
-    document.getElementById("profilePicker").classList.remove("hidden");
-  } else {
-    renderProfileGrid();
-    document.getElementById("profilePicker").classList.remove("hidden");
-  }
+  renderProfileGrid();
+  document.getElementById("profilePicker").classList.remove("hidden");
   connectSSE();
 });
 </script>
