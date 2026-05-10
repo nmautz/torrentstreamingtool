@@ -382,15 +382,18 @@ async def search(q: str, limit: int = 30) -> JSONResponse:
     if not q.strip():
         return JSONResponse({"results": []})
 
+    params: dict = {"apikey": settings.indexer_api_key, "Query": q}
+    # Omit Category[] when set to "0" — Jackett treats 0 as an unknown category
+    # (not "all"), which returns 0 results. Omitting it returns everything.
+    cats = settings.indexer_categories.strip()
+    if cats and cats != "0":
+        params["Category[]"] = cats
+
     try:
         async with httpx.AsyncClient(timeout=15.0) as c:
             r = await c.get(
                 f"{settings.indexer_url}/api/v2.0/indexers/all/results",
-                params={
-                    "apikey": settings.indexer_api_key,
-                    "Query": q,
-                    "Category[]": settings.indexer_categories,
-                },
+                params=params,
             )
         items = r.json().get("Results", [])
     except Exception as e:

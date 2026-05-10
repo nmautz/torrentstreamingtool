@@ -123,8 +123,8 @@ def mullvad_candidates() -> list[str]:
 def check_python():
     header("Python")
     vi = sys.version_info
-    if vi < (3, 10):
-        fail(f"Python 3.10+ required, found {vi.major}.{vi.minor}")
+    if vi < (3, 9):
+        fail(f"Python 3.9+ required, found {vi.major}.{vi.minor}")
     ok(f"Python {vi.major}.{vi.minor}.{vi.micro}")
 
 
@@ -196,6 +196,15 @@ def gather_config() -> dict:
     print(f"  {BOLD}Buffer thresholds (stream starts when either is met){RESET}")
     cfg["BUFFER_MIN_MB"]      = ask("Min MB",  "15.0")
     cfg["BUFFER_MIN_PCT"]     = ask("Min %",   "1.0")
+
+    # Warn if qBittorrent and VLC are configured on the same port
+    import re as _re
+    def _port(url: str, default: int) -> int:
+        m = _re.search(r":(\d+)", url)
+        return int(m.group(1)) if m else default
+    if _port(cfg["QBIT_URL"], 8081) == _port(cfg["VLC_URL"], 8080):
+        warn("qBittorrent and VLC are both on the same port — one of them will fail to bind.")
+        warn("Edit QBIT_URL or VLC_URL so they use different ports.")
 
     return cfg
 

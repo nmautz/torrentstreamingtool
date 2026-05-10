@@ -56,6 +56,8 @@ Cancelling the task (on `/api/stop` or new Play) also triggers qBit deletion.
 
 **qBittorrent auth** — `setup.py` writes `WebUI\LocalHostAuth=false` to the qBit ini, so localhost requests never need a session cookie. `qreq()` still calls login on startup and retries on 403 for safety.
 
+**Jackett category search** — the `Category[]` query parameter is omitted entirely when `INDEXER_CATEGORIES` is `"0"`. Passing `Category[]=0` to Jackett returns zero results because Jackett treats `0` as an unknown category ID rather than "all". The correct behavior for "all categories" is to send no `Category[]` parameter at all.
+
 ### `setup.py` — one-time configurator
 
 Runs under system Python (no venv). Steps in order:
@@ -68,6 +70,10 @@ Runs under system Python (no venv). Steps in order:
 ### `run.py` — launcher
 
 Runs under system Python but immediately `os.execv`s itself into `.venv/bin/python` so psutil and other venv packages are available for the rest of execution.
+
+**venv detection** uses `Path(sys.prefix).resolve() != VENV.resolve()` — **not** a comparison of executable paths. On Homebrew/pyenv macOS, both `python3` and `.venv/bin/python` can resolve through symlinks to the same underlying binary, making path comparison always equal and exec never firing. `sys.prefix` is always set to the venv root when running inside a venv, so it's the correct signal.
+
+**psutil pre-flight check**: after the venv relaunch, `run.py` imports `psutil` immediately and exits with a clear message if it's missing. This catches the case where the venv was created but `pip install` never completed (e.g. because `setup.py` crashed earlier).
 
 Service start order: VLC → qBittorrent → Jackett → Mullvad check → uvicorn.
 
