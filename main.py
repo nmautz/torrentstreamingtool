@@ -36,6 +36,9 @@ class Settings(BaseSettings):
     qbit_username: str = "admin"
     qbit_password: str = "adminadmin"
     qbit_download_path: str = str(Path.home() / "Downloads" / "StreamLink")
+    library_path_2: str = ""   # optional extra storage locations (LIBRARY_PATH_2 in .env)
+    library_path_3: str = ""
+    library_path_4: str = ""
 
     vlc_url: str = "http://localhost:8080"
     vlc_password: str = "vlcpassword"
@@ -1770,27 +1773,82 @@ async def get_state() -> JSONResponse:
     return JSONResponse(state_snapshot())
 
 
+async def _all_library_paths() -> list[dict]:
+    """All configured library paths: static (.env) + dynamic (UI-added via library.json)."""
+    lib = await get_library()
+    dynamic: list[str] = lib.get("settings", {}).get("library_paths", [])
+    seen: set[str] = set()
+    result = []
+    for raw, is_static in [
+        (settings.qbit_download_path, True),
+        (settings.library_path_2, True),
+        (settings.library_path_3, True),
+        (settings.library_path_4, True),
+        *((p, False) for p in dynamic),
+    ]:
+        p = (raw or "").strip()
+        if p and p not in seen:
+            seen.add(p)
+            result.append({"path": p, "label": Path(p).name or p, "static": is_static})
+    return result
+
+
 @app.get("/api/settings/download-path")
 async def get_download_path() -> JSONResponse:
     return JSONResponse({"path": settings.qbit_download_path})
 
 
+@app.get("/api/settings/library-paths")
+async def get_library_paths_api() -> JSONResponse:
+    return JSONResponse({"paths": await _all_library_paths()})
+
+
+@app.post("/api/settings/library-paths")
+async def add_library_path(path: str) -> JSONResponse:
+    p = path.strip()
+    if not p:
+        raise HTTPException(400, "Path cannot be empty.")
+    if not Path(p).is_dir():
+        raise HTTPException(400, f"Directory does not exist: {p}")
+    lib = await get_library()
+    existing = [info["path"] for info in await _all_library_paths()]
+    if p in existing:
+        raise HTTPException(400, "Path is already configured.")
+    lib.setdefault("settings", {}).setdefault("library_paths", []).append(p)
+    await put_library(lib)
+    return JSONResponse({"ok": True})
+
+
+@app.delete("/api/settings/library-paths")
+async def remove_library_path(path: str) -> JSONResponse:
+    lib = await get_library()
+    paths: list = lib.get("settings", {}).get("library_paths", [])
+    if path not in paths:
+        raise HTTPException(404, "Path not found in UI-configured paths (static .env paths cannot be removed here).")
+    paths.remove(path)
+    await put_library(lib)
+    return JSONResponse({"ok": True})
+
+
 @app.get("/api/settings/disk-space")
 async def get_disk_space() -> JSONResponse:
-    path = settings.qbit_download_path
-    try:
-        usage = shutil.disk_usage(path)
-        return JSONResponse({
-            "path": path,
-            "total_bytes": usage.total,
-            "used_bytes":  usage.used,
-            "free_bytes":  usage.free,
-            "total_human": human_size(usage.total),
-            "free_human":  human_size(usage.free),
-            "free_pct":    round(usage.free / usage.total * 100, 1) if usage.total else 0,
-        })
-    except Exception as e:
-        raise HTTPException(500, f"Could not read disk usage: {e}")
+    disks = []
+    for info in await _all_library_paths():
+        try:
+            usage = shutil.disk_usage(info["path"])
+            disks.append({
+                "path":        info["path"],
+                "label":       info["label"],
+                "total_bytes": usage.total,
+                "free_bytes":  usage.free,
+                "total_human": human_size(usage.total),
+                "free_human":  human_size(usage.free),
+                "free_pct":    round(usage.free / usage.total * 100, 1) if usage.total else 0,
+            })
+        except Exception as e:
+            disks.append({"path": info["path"], "label": info["label"], "error": str(e)})
+    primary = disks[0] if disks else {}
+    return JSONResponse({**primary, "disks": disks})
 
 
 @app.get("/api/library/{item_id}/download")
