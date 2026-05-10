@@ -131,6 +131,8 @@ class AppState:
     library_playlist: list = field(default_factory=list)  # ordered file paths
     library_current_file: Optional[str] = None            # path VLC is playing now
     downloading_count: int = 0                            # active library downloads
+    play_when_ready_item_id: Optional[str] = None        # auto-play this item on download complete
+    play_when_ready_profile_id: Optional[str] = None
     current_audio_track: int = -1                         # last track ID sent to VLC
     current_subtitle_track: int = -1                      # last track ID sent to VLC
     vlc_time: int = 0                                     # VLC current position (seconds)
@@ -183,6 +185,7 @@ def state_snapshot() -> dict:
         "library_current_index": cur_idx,
         "library_current_file": current,
         "is_library_playback": state.library_item_id is not None,
+        "play_when_ready_item_id": state.play_when_ready_item_id,
     }
 
 
@@ -526,6 +529,50 @@ async def stat_broadcaster() -> None:
         await asyncio.sleep(2)
 
 
+async def _auto_play_item(item: dict, profile_id: str) -> None:
+    """Trigger playback for a library item that just finished downloading (Play When Ready)."""
+    try:
+        hint = find_resume_hint(item, profile_id)
+        all_paths = [f["path"] for f in item.get("files", [])]
+        if hint and hint.get("file_path") and not hint.get("all_completed"):
+            try:
+                start_idx = all_paths.index(hint["file_path"])
+                playlist = all_paths[start_idx:]
+            except ValueError:
+                playlist = all_paths
+        else:
+            playlist = all_paths
+
+        if not playlist:
+            return
+
+        # Wait up to 10 s for files to appear on disk after qBit marks complete
+        for _ in range(10):
+            if all(Path(p).exists() for p in playlist):
+                break
+            await asyncio.sleep(1)
+
+        first = Path(playlist[0])
+        await vlc("in_play", input=first.resolve().as_uri())
+        for p in playlist[1:]:
+            await vlc("in_enqueue", input=Path(p).resolve().as_uri())
+
+        state.stream_status = "playing"
+        state.active_title = item["title"]
+        state.active_file = first
+        state.current_audio_track = -1
+        state.current_subtitle_track = -1
+        state.active_hash = item.get("torrent_hash") or None
+        state.library_item_id = item["id"]
+        state.library_profile_id = profile_id
+        state.library_playlist = playlist
+        state.library_current_file = playlist[0]
+
+        await broadcast("stream_status", {"status": "playing", "message": f"Auto-playing: {first.name}"})
+    except Exception:
+        pass
+
+
 # ── Background Task: Library Download Monitor ─────────────────────────────────
 
 async def library_download_monitor() -> None:
@@ -561,6 +608,11 @@ async def library_download_monitor() -> None:
                     state.downloading_count = max(0, state.downloading_count - 1)
                     changed = True
                     await broadcast("library_update", {"item_id": item["id"], "status": "ready"})
+                    if state.play_when_ready_item_id == item["id"]:
+                        pwr_profile = state.play_when_ready_profile_id
+                        state.play_when_ready_item_id = None
+                        state.play_when_ready_profile_id = None
+                        asyncio.create_task(_auto_play_item(item, pwr_profile or ""))
                 elif qstate in ("error", "missingFiles"):
                     item["status"] = "error"
                     state.downloading_count = max(0, state.downloading_count - 1)
@@ -1012,6 +1064,35 @@ async def delete_library_item(item_id: str, delete_file: bool = True) -> JSONRes
         await qbit_delete(h, delete_files=delete_file)
     lib["items"] = [it for it in lib["items"] if it["id"] != item_id]
     await put_library(lib)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/library/{item_id}/queue-play")
+async def queue_play(item_id: str, profile_id: str = "") -> JSONResponse:
+    """Queue an in-progress download to auto-play as soon as it finishes."""
+    if not profile_id:
+        raise HTTPException(400, "profile_id required.")
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    if item.get("status") != "downloading":
+        raise HTTPException(400, "Item is not currently downloading.")
+    state.play_when_ready_item_id = item_id
+    state.play_when_ready_profile_id = profile_id
+    # Bump to top of qBit queue so it finishes sooner
+    h = item.get("torrent_hash")
+    if h:
+        await qreq("POST", "/api/v2/torrents/topPrio", data={"hashes": h})
+    return JSONResponse({"ok": True})
+
+
+@app.delete("/api/library/{item_id}/queue-play")
+async def cancel_queue_play(item_id: str) -> JSONResponse:
+    """Cancel a pending Play When Ready for this item."""
+    if state.play_when_ready_item_id == item_id:
+        state.play_when_ready_item_id = None
+        state.play_when_ready_profile_id = None
     return JSONResponse({"ok": True})
 
 

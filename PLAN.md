@@ -35,7 +35,7 @@
 ## Milestone 4 — Core Functional Fixes *(backend-heavy)*
 
 - [x] **4.1** Cleanup: auto-delete torrent + temp files when a new stream replaces the current one
-- [ ] **4.2** Priority Downloads: expose qBit priority controls; "Play when ready" for queued items
+- [x] **4.2** Priority Downloads: expose qBit priority controls; "Play when ready" for queued items
 - [ ] **4.3** Multi-Disk Support: configure multiple `LIBRARY_PATH_*` entries; show per-disk free space
 
 ---

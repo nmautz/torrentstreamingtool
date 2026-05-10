@@ -686,6 +686,7 @@ let app = {
   vlc_time:0, vlc_duration:0, vlc_volume:100,
   library_playlist_count:0, library_current_index:-1, library_current_file:null,
   is_library_playback:false,
+  play_when_ready_item_id:null,
 };
 const libDownloadStats = new Map(); // item_id → latest library_progress payload
 let profile      = { id:"", name:"", color:"indigo" };
@@ -1192,6 +1193,20 @@ function renderLibrary(items){
 
       // Buttons — multi-episode vs single
       let buttons="";
+      if(isDownloading){
+        const isQueued=app.play_when_ready_item_id===item.id;
+        if(isQueued){
+          buttons+=`<button onclick="cancelQueuePlay('${item.id}')"
+            class="text-sm bg-indigo-900/50 border border-indigo-700 text-indigo-300 flex-1 py-2.5 rounded-xl transition-colors font-medium min-h-[44px]">
+            ⏳ Queued — tap to cancel
+          </button>`;
+        } else {
+          buttons+=`<button onclick="queuePlay('${item.id}')"
+            class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white flex-1 py-2.5 rounded-xl transition-colors font-medium min-h-[44px]">
+            ▶ Play When Ready
+          </button>`;
+        }
+      }
       if(isReady){
         if(isMulti){
           const contLabel=hasProgress?`↩ Resume ${Math.round(pct)}%`:`▶ Play All`;
@@ -1316,6 +1331,25 @@ async function deleteLibraryItem(itemId){
   const r=await fetch(`/api/library/${itemId}?delete_file=true`,{method:"DELETE"});
   if(r.ok) loadLibrary();
   else showAlert("Could not delete item.","error");
+}
+
+async function queuePlay(itemId){
+  if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
+  const r=await fetch(`/api/library/${itemId}/queue-play?profile_id=${encodeURIComponent(profile.id)}`,{method:"POST"});
+  if(r.ok){
+    app.play_when_ready_item_id=itemId;
+    loadLibrary();
+    showAlert("Queued — will auto-play when download finishes.","success");
+  } else {
+    const e=await r.json().catch(()=>({detail:"Could not queue."}));
+    showAlert(e.detail||"Could not queue.","error");
+  }
+}
+
+async function cancelQueuePlay(itemId){
+  await fetch(`/api/library/${itemId}/queue-play`,{method:"DELETE"});
+  app.play_when_ready_item_id=null;
+  loadLibrary();
 }
 
 // ── Episode Picker ─────────────────────────────────────────────────────────
@@ -1922,6 +1956,10 @@ function connectSSE(){
     if(d.status==="ready"||d.status==="error"){
       app.downloading_count=Math.max(0,(app.downloading_count||0)-1);
       updateDlBadge(app.downloading_count);
+    }
+    // Clear local queued state when the server auto-plays the item
+    if(d.item_id&&app.play_when_ready_item_id===d.item_id&&d.status==="ready"){
+      app.play_when_ready_item_id=null;
     }
   });
   es.addEventListener("progress_saved",e=>{
