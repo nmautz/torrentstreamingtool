@@ -130,6 +130,8 @@ class AppState:
     library_playlist: list = field(default_factory=list)  # ordered file paths
     library_current_file: Optional[str] = None            # path VLC is playing now
     downloading_count: int = 0                            # active library downloads
+    current_audio_track: int = -1                         # last track ID sent to VLC
+    current_subtitle_track: int = -1                      # last track ID sent to VLC
     sse_queues: list = field(default_factory=list)
 
 
@@ -268,33 +270,6 @@ async def vlc_status() -> Optional[dict]:
         pass
     return None
 
-
-async def vlc_status_xml_fields() -> dict:
-    """Fetch the VLC XML status and extract current audio/subtitle track IDs.
-
-    The JSON status exposes stream metadata but not which track is currently
-    selected — the XML status has explicit <audiotrack> and <subtitletrack> nodes.
-    """
-    try:
-        async with httpx.AsyncClient() as c:
-            r = await c.get(
-                f"{settings.vlc_url}/requests/status.xml",
-                auth=httpx.BasicAuth("", settings.vlc_password),
-                timeout=3.0,
-            )
-            if r.status_code == 200:
-                def _tag(name: str) -> Optional[str]:
-                    m = re.search(rf"<{name}>(.*?)</{name}>", r.text, re.DOTALL)
-                    return m.group(1).strip() if m else None
-                audio_raw = _tag("audiotrack")
-                sub_raw   = _tag("subtitletrack")
-                return {
-                    "current_audio":    int(audio_raw) if audio_raw is not None else -1,
-                    "current_subtitle": int(sub_raw)   if sub_raw   is not None else -1,
-                }
-    except Exception:
-        pass
-    return {"current_audio": -1, "current_subtitle": -1}
 
 
 async def vlc_playlist_uri() -> Optional[str]:
@@ -619,6 +594,8 @@ async def stream_pipeline(magnet: str, title: str) -> None:
     try:
         state.active_title = title
         state.stream_status = "buffering"
+        state.current_audio_track = -1
+        state.current_subtitle_track = -1
         await broadcast("stream_status", {"status": "buffering", "message": "Adding torrent to qBittorrent…"})
 
         h = await qbit_add_magnet(magnet, sequential=True)
@@ -976,6 +953,8 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     state.stream_status = "playing"
     state.active_title = item["title"]
     state.active_file = first
+    state.current_audio_track = -1
+    state.current_subtitle_track = -1
     state.active_hash = item.get("torrent_hash") or None
     state.library_item_id = item_id
     state.library_profile_id = req.profile_id
@@ -1130,38 +1109,53 @@ async def seek(delta: float) -> JSONResponse:
 
 @app.get("/api/vlc/tracks")
 async def get_tracks() -> JSONResponse:
-    """Return available audio/subtitle tracks and which are currently selected."""
+    """Return available audio/subtitle tracks and which are currently selected.
+
+    Track IDs are the actual ES (elementary stream) IDs from VLC — the number N
+    in each 'Stream N' key.  VLC's audio_track / subtitle_track commands accept
+    these same ES IDs, so sending the wrong sequential counter silently fails.
+    The <audiotrack> / <subtitletrack> XML values are also ES IDs, so they must
+    be compared against the same ES IDs for the 'current' highlight to work.
+    """
     vs = await vlc_status()
-    xml_fields = await vlc_status_xml_fields()
 
     audio: list[dict] = []
     subtitle: list[dict] = [{"id": -1, "label": "Off", "language": ""}]
-    audio_idx = 1
-    sub_idx   = 1
+    audio_n = 1   # display-only counter for fallback labels
+    sub_n   = 1
 
     if vs:
         cat = vs.get("information", {}).get("category", {})
-        for key in sorted(cat.keys()):
-            if not key.startswith("Stream"):
+        # Sort numerically by stream index so we process in file order
+        stream_keys = sorted(
+            (k for k in cat if k.startswith("Stream")),
+            key=lambda k: int(k.split()[-1]) if k.split()[-1].isdigit() else 999,
+        )
+        for key in stream_keys:
+            try:
+                es_id = int(key.split()[-1])   # the actual ES ID VLC uses
+            except (ValueError, IndexError):
                 continue
-            s    = cat[key]
-            typ  = s.get("Type", "")
-            lang = s.get("Language", s.get("language", ""))
+            s     = cat[key]
+            typ   = s.get("Type", "")
+            lang  = s.get("Language", s.get("language", ""))
             codec = s.get("Codec", s.get("codec", ""))
             if typ == "Audio":
-                label = lang or codec or f"Track {audio_idx}"
-                audio.append({"id": audio_idx, "label": label, "language": lang, "codec": codec})
-                audio_idx += 1
+                label = lang or codec or f"Track {audio_n}"
+                audio.append({"id": es_id, "label": label, "language": lang, "codec": codec})
+                audio_n += 1
             elif typ == "Subtitle":
-                label = lang or codec or f"Track {sub_idx}"
-                subtitle.append({"id": sub_idx, "label": label, "language": lang, "codec": codec})
-                sub_idx += 1
+                label = lang or codec or f"Track {sub_n}"
+                subtitle.append({"id": es_id, "label": label, "language": lang, "codec": codec})
+                sub_n += 1
 
+    # VLC 3.x does not expose current track selection in its HTTP API
+    # (no <audiotrack>/<subtitletrack> in status.xml). We track it ourselves.
     return JSONResponse({
-        "audio": audio,
+        "audio":    audio,
         "subtitle": subtitle,
-        "current_audio":    xml_fields["current_audio"],
-        "current_subtitle": xml_fields["current_subtitle"],
+        "current_audio":    state.current_audio_track,
+        "current_subtitle": state.current_subtitle_track,
         "time":   vs.get("time",   0) if vs else 0,
         "length": vs.get("length", 0) if vs else 0,
     })
@@ -1169,12 +1163,14 @@ async def get_tracks() -> JSONResponse:
 
 @app.post("/api/vlc/track/audio/{track_id}")
 async def set_audio_track(track_id: int) -> JSONResponse:
+    state.current_audio_track = track_id
     await vlc("audio_track", val=str(track_id))
     return JSONResponse({"ok": True})
 
 
 @app.post("/api/vlc/track/subtitle/{track_id}")
 async def set_subtitle_track(track_id: int) -> JSONResponse:
+    state.current_subtitle_track = track_id
     await vlc("subtitle_track", val=str(track_id))
     return JSONResponse({"ok": True})
 

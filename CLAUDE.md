@@ -95,6 +95,8 @@ Persistent storage in `library.json` at the project root (created automatically)
 
 **Sequential download** — `qbit_streaming_mode` calls only `setSequentialDownload` (pieces arrive in order 0 → N). First/last piece priority (`toggleFirstLastPiecePrio`) is a separate, independent flag and is explicitly **not** set — it causes qBittorrent to fetch out-of-order chunks early, which breaks piece-order streaming.
 
+**VLC track IDs** — `GET /api/vlc/tracks` must use the actual ES (elementary stream) ID as each track's `id` — the number N extracted from the `"Stream N"` key in VLC's JSON status. VLC's `audio_track` and `subtitle_track` commands accept ES IDs, and the `<audiotrack>`/`<subtitletrack>` values in the XML status are also ES IDs. Using sequential per-type counters (1, 2, 3…) instead will send the wrong ID, causing commands to silently do nothing and the "current" highlight in the dropdown to never match.
+
 ### Frontend (`static/index.html`)
 
 Vanilla JS, Tailwind CDN, no build step. A single `EventSource('/api/events')` drives all real-time UI. SSE event types:
