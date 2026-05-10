@@ -1007,23 +1007,23 @@ function epSelectUnwatched(){
 async function epPlay(){
   if(!epChecked.size){ showAlert("Select at least one episode.","warn"); return; }
   if(!epItemId) return;
+  const itemId=epItemId; // capture before closeEpisodeModal resets it to null
 
-  // Preserve order from epFiles, filter to checked only
   const ordered=epFiles.filter(f=>epChecked.has(f.path)).map(f=>f.path);
-
-  // Determine seek for first file (resume if it's in-progress)
   const firstFile=epFiles.find(f=>f.path===ordered[0]);
   let seekTo=null;
   if(firstFile?.progress && !firstFile.progress.completed && firstFile.progress.position_sec>5)
     seekTo=firstFile.progress.position_sec;
 
   closeEpisodeModal();
-  await playLibraryFiles(epItemId, ordered, seekTo);
+  await playLibraryFiles(itemId, ordered, seekTo);
 }
 
 // Play from a specific episode, continuing sequentially through all remaining
 async function epPlayFrom(filePath){
   if(!epItemId) return;
+  const itemId=epItemId; // capture before closeEpisodeModal resets it to null
+
   const idx=epFiles.findIndex(f=>f.path===filePath);
   if(idx<0) return;
   const ordered=epFiles.slice(idx).map(f=>f.path);
@@ -1032,7 +1032,7 @@ async function epPlayFrom(filePath){
   if(firstFile?.progress && !firstFile.progress.completed && firstFile.progress.position_sec>5)
     seekTo=firstFile.progress.position_sec;
   closeEpisodeModal();
-  await playLibraryFiles(epItemId, ordered, seekTo);
+  await playLibraryFiles(itemId, ordered, seekTo);
 }
 
 // ── Download modal ─────────────────────────────────────────────────────────
