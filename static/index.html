@@ -385,12 +385,12 @@
 <!-- ── Player Footer ──────────────────────────────────────────────────────── -->
 <footer class="fixed bottom-0 left-0 right-0 z-40 bg-gray-900 border-t border-gray-800 safe-bottom">
   <!-- Seek bar — taller touch target, clickable for absolute seek, tooltip on hover/scrub -->
-  <div id="seekBarWrapper" class="relative w-full py-1.5 cursor-pointer group"
+  <div id="seekBarWrapper" class="relative w-full py-3 cursor-pointer group"
        onclick="handleSeekBarClick(event, this)"
        onmousemove="handleSeekBarHover(event, this)"
        onmouseleave="handleSeekBarLeave()"
-       ontouchmove="handleSeekBarHover(event, this);handleSeekBarClick(event, this)"
-       ontouchend="handleSeekBarLeave()"
+       ontouchmove="handleSeekBarHover(event, this)"
+       ontouchend="handleSeekBarClick(event, this);handleSeekBarLeave()"
        style="touch-action:none;">
     <div class="w-full bg-gray-800 h-1 group-active:h-1.5 transition-all">
       <div id="progressBar" class="h-full bg-indigo-500 transition-all duration-700 pointer-events-none" style="width:0%"></div>
@@ -446,18 +446,20 @@
              text-gray-600 hover:text-gray-300 active:bg-gray-800 transition-all">
       <span class="text-xs font-bold leading-none">‹10</span>
     </button>
-    <!-- Volume slider (replaces up/down buttons) -->
+    <!-- Volume slider with ±5% step buttons -->
     <div class="flex items-center gap-1 flex-[2] px-1 py-1.5">
-      <svg class="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5L6 9H2v6h4l5 4V5zM15 9a3 3 0 010 6"/>
-      </svg>
+      <button onclick="vlcVolumeStep(-5)" title="-5%"
+        class="w-6 h-6 flex items-center justify-center rounded text-gray-500 hover:text-gray-200
+               active:scale-90 transition-all text-base font-bold flex-shrink-0 leading-none">−</button>
       <input type="range" id="volumeSlider" min="0" max="200" value="100"
         class="flex-1 h-1 rounded-full appearance-none cursor-pointer accent-indigo-500"
-        oninput="vlcSetVolume(this.value)" style="min-width:0">
-      <svg class="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-          d="M11 5L6 9H2v6h4l5 4V5zM15 9a3 3 0 010 6M18.364 5.636a9 9 0 010 12.728"/>
-      </svg>
+        oninput="updateVolumeDisplay(this.value)"
+        onmouseup="vlcSetVolume(this.value)"
+        ontouchend="vlcSetVolume(this.value)"
+        style="min-width:0;touch-action:none">
+      <button onclick="vlcVolumeStep(5)" title="+5%"
+        class="w-6 h-6 flex items-center justify-center rounded text-gray-500 hover:text-gray-200
+               active:scale-90 transition-all text-base font-bold flex-shrink-0 leading-none">+</button>
     </div>
     <button onclick="vlcPause()" title="Pause / Resume"
       class="flex items-center justify-center flex-1 py-2.5 rounded-xl
@@ -522,8 +524,8 @@
          onclick="handleSeekBarClick(event, this)"
          onmousemove="handleSeekBarHover(event, this)"
          onmouseleave="handleSeekBarLeave()"
-         ontouchmove="handleSeekBarHover(event, this);handleSeekBarClick(event, this)"
-         ontouchend="handleSeekBarLeave()"
+         ontouchmove="handleSeekBarHover(event, this)"
+         ontouchend="handleSeekBarClick(event, this);handleSeekBarLeave()"
          style="touch-action:none;">
       <div class="w-full bg-gray-800 h-2 rounded-full group-active:h-3 transition-all">
         <div id="fcProgressBar" class="h-full bg-indigo-500 rounded-full transition-all duration-700 pointer-events-none" style="width:0%"></div>
@@ -574,18 +576,22 @@
       </button>
     </div>
 
-    <!-- Volume slider -->
+    <!-- Volume slider with ±5% step buttons -->
     <div class="flex items-center gap-3 w-full max-w-sm">
-      <svg class="w-5 h-5 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5L6 9H2v6h4l5 4V5zM15 9a3 3 0 010 6"/>
-      </svg>
+      <button onclick="vlcVolumeStep(-5)" title="-5%"
+        class="w-10 h-10 flex items-center justify-center rounded-xl text-gray-500
+               hover:text-gray-200 hover:bg-gray-800 active:scale-90 transition-all
+               text-xl font-bold flex-shrink-0">−</button>
       <input type="range" id="fcVolumeSlider" min="0" max="200" value="100"
         class="flex-1 accent-indigo-500 cursor-pointer"
-        oninput="vlcSetVolume(this.value)">
-      <svg class="w-5 h-5 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-          d="M11 5L6 9H2v6h4l5 4V5zM15 9a3 3 0 010 6M18.364 5.636a9 9 0 010 12.728"/>
-      </svg>
+        oninput="updateVolumeDisplay(this.value)"
+        onmouseup="vlcSetVolume(this.value)"
+        ontouchend="vlcSetVolume(this.value)"
+        style="touch-action:none">
+      <button onclick="vlcVolumeStep(5)" title="+5%"
+        class="w-10 h-10 flex items-center justify-center rounded-xl text-gray-500
+               hover:text-gray-200 hover:bg-gray-800 active:scale-90 transition-all
+               text-xl font-bold flex-shrink-0">+</button>
       <span id="fcVolumeLabel" class="text-xs font-mono text-gray-600 w-10 text-right flex-shrink-0">100%</span>
     </div>
 
@@ -852,11 +858,32 @@ function handleSeekBarLeave(){
   document.getElementById("fcSeekTooltip")?.classList.add("hidden");
 }
 
-async function vlcSetVolume(val){
+function updateVolumeDisplay(val){
   val=Math.max(0,Math.min(200,parseInt(val,10)));
   const fvl=document.getElementById("fcVolumeLabel");
   if(fvl) fvl.textContent=val+"%";
+  // Sync the other slider so both stay in step visually
+  const vs=document.getElementById("volumeSlider");
+  const fvs=document.getElementById("fcVolumeSlider");
+  if(document.activeElement===vs  && fvs) fvs.value=val;
+  if(document.activeElement===fvs && vs)  vs.value=val;
+}
+
+async function vlcSetVolume(val){
+  val=Math.max(0,Math.min(200,parseInt(val,10)));
+  updateVolumeDisplay(val);
   await fetch(`/api/vlc/volume/set?volume=${val}`,{method:"POST"}).catch(()=>{});
+}
+
+async function vlcVolumeStep(delta){
+  const vs=document.getElementById("volumeSlider");
+  const fvs=document.getElementById("fcVolumeSlider");
+  const current=parseInt(vs?.value||app.vlc_volume||100,10);
+  const next=Math.max(0,Math.min(200,current+delta));
+  if(vs)  vs.value=next;
+  if(fvs) fvs.value=next;
+  updateVolumeDisplay(next);
+  await fetch(`/api/vlc/volume/set?volume=${next}`,{method:"POST"}).catch(()=>{});
 }
 
 function openFullscreenControls(){
@@ -1013,11 +1040,13 @@ function renderLibrary(items){
       </div>`; return;
   }
 
-  // Group by series (standalone items use sentinel key)
+  // Group by series. Multi-file items without a series name fall back to the
+  // torrent title so the series header is always visible.
   const groups=new Map();
   items.forEach(item=>{
     const key=item.series||"\x00"+item.id;
-    if(!groups.has(key)) groups.set(key,{label:item.series||"",items:[]});
+    const label=item.series||(item.file_count>1?item.title:"");
+    if(!groups.has(key)) groups.set(key,{label,items:[]});
     groups.get(key).items.push(item);
   });
 
