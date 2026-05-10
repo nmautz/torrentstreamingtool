@@ -25,7 +25,7 @@
 ## Milestone 3 — Library Enhancements *(backend + frontend)*
 
 - [x] **3.1** Disk Space Utility: show free/total space for the download path in the UI
-- [ ] **3.2** "Add to Library": button while streaming to save the active torrent file to persistent library
+- [x] **3.2** "Add to Library": button while streaming to save the active torrent file to persistent library
 - [ ] **3.3** Upload System: web UI for uploading local files/folders directly to the library
 - [ ] **3.4** Precision Selection: folder/subfolder/file picker for library downloads (not just full torrent)
 - [x] **3.5** Web Downloads: browser "Download" button to pull a library file back to the client

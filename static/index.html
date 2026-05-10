@@ -509,6 +509,15 @@
           d="M4 8V4m0 0h4M4 4l5 5m11-5h-4m4 0v4m0-4l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"/>
       </svg>
     </button>
+    <button id="saveStreamBtn" onclick="openSaveStreamModal()" title="Save to Library"
+      class="hidden items-center justify-center flex-1 py-2.5 rounded-xl
+             text-indigo-400 hover:text-indigo-200 active:bg-indigo-950/40 transition-all">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+          d="M5 5a2 2 0 012-2h7l5 5v11a2 2 0 01-2 2H7a2 2 0 01-2-2V5z"/>
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 3v5h-5"/>
+      </svg>
+    </button>
   </div>
 </footer>
 
@@ -630,13 +639,25 @@
       <span id="fcVolumeLabel" class="text-xs font-mono text-gray-600 w-10 text-right flex-shrink-0">100%</span>
     </div>
 
-    <!-- Stop -->
-    <button onclick="stopStream();closeFullscreenControls()"
-      class="flex items-center gap-2 px-6 py-2.5 rounded-xl border border-red-900/60
-             text-red-500 hover:text-red-300 hover:bg-red-950/40 transition-all text-sm font-medium">
-      <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
-      Stop Playback
-    </button>
+    <!-- Stop + Save row -->
+    <div class="flex items-center gap-3">
+      <button id="fcSaveBtn" onclick="openSaveStreamModal();closeFullscreenControls()"
+        class="hidden items-center gap-2 px-6 py-2.5 rounded-xl border border-indigo-900/60
+               text-indigo-400 hover:text-indigo-200 hover:bg-indigo-950/40 transition-all text-sm font-medium">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M5 5a2 2 0 012-2h7l5 5v11a2 2 0 01-2 2H7a2 2 0 01-2-2V5z"/>
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 3v5h-5"/>
+        </svg>
+        Save to Library
+      </button>
+      <button onclick="stopStream();closeFullscreenControls()"
+        class="flex items-center gap-2 px-6 py-2.5 rounded-xl border border-red-900/60
+               text-red-500 hover:text-red-300 hover:bg-red-950/40 transition-all text-sm font-medium">
+        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+        Stop Playback
+      </button>
+    </div>
   </div>
 
   <!-- Bottom safe area -->
@@ -664,6 +685,7 @@ let app = {
   dl_speed_bps:0, ul_speed_bps:0,
   vlc_time:0, vlc_duration:0, vlc_volume:100,
   library_playlist_count:0, library_current_index:-1, library_current_file:null,
+  is_library_playback:false,
 };
 const libDownloadStats = new Map(); // item_id → latest library_progress payload
 let profile      = { id:"", name:"", color:"indigo" };
@@ -851,6 +873,13 @@ function renderPlayer(s){
     badge.className=`text-[11px] font-semibold px-2 py-0.5 rounded-full border ${BADGE[s.stream_status]}`;
     badge.textContent=labels[s.stream_status]; badge.classList.remove("hidden");
   } else { badge.classList.add("hidden"); }
+
+  // Save-to-library button (footer + fullscreen): visible while streaming a non-library torrent
+  const canSave=(s.stream_status==="playing"||s.stream_status==="buffering")&&!s.is_library_playback;
+  const ssb=document.getElementById("saveStreamBtn");
+  if(ssb){ ssb.classList.toggle("hidden",!canSave); ssb.classList.toggle("flex",canSave); }
+  const fcsb=document.getElementById("fcSaveBtn");
+  if(fcsb){ fcsb.classList.toggle("hidden",!canSave); fcsb.classList.toggle("flex",canSave); }
 
   // Prev / Next episode buttons (footer)
   const hasList=isPlaying&&(s.library_playlist_count||0)>1;
@@ -1439,6 +1468,7 @@ async function epPlayFrom(fileIndex){
 
 // ── Download modal ─────────────────────────────────────────────────────────
 let _defaultSavePath="";
+let _saveStreamMode=false; // true when adopting the active stream rather than adding a new magnet
 
 async function ensureDefaultSavePath(){
   if(_defaultSavePath) return;
@@ -1471,8 +1501,39 @@ async function openDownloadModal(magnet,title){
 }
 
 function closeDownloadModal(){
-  downloadTarget=null;
+  downloadTarget=null; _saveStreamMode=false;
   document.getElementById("downloadModal").classList.add("hidden");
+  // Restore default modal heading / button label
+  const h2=document.querySelector("#downloadModal h2");
+  if(h2) h2.textContent="Add to Library";
+  const btn=document.getElementById("dlSubmitBtn");
+  if(btn) btn.innerHTML=`<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+      d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>Download`;
+}
+
+async function openSaveStreamModal(){
+  _saveStreamMode=true;
+  await ensureDefaultSavePath();
+  const title=app.active_title||"";
+  document.getElementById("dlModalTitle").textContent=title;
+  document.getElementById("dlSavePath").value=_defaultSavePath;
+  const epMatch=title.match(/[Ss](\d{1,2})[Ee](\d{1,2})/);
+  document.getElementById("dlEpisode").value=epMatch?epMatch[0].toUpperCase():"";
+  const seriesGuess=title
+    .replace(/[Ss]\d{1,2}[Ee]\d{1,2}.*/,"")
+    .replace(/\b(720p|1080p|2160p|4K|BluRay|WEB[-.]?DL|WEBRip|HDTV|x264|x265|HEVC|h\.?264|h\.?265|AAC|DD5|DDP5|Atmos)\b.*/i,"")
+    .replace(/[._-]+/g," ").trim();
+  document.getElementById("dlSeries").value=epMatch?seriesGuess:"";
+  const h2=document.querySelector("#downloadModal h2");
+  if(h2) h2.textContent="Save Stream to Library";
+  const btn=document.getElementById("dlSubmitBtn");
+  if(btn) btn.innerHTML=`<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+      d="M5 5a2 2 0 012-2h7l5 5v11a2 2 0 01-2 2H7a2 2 0 01-2-2V5z"/>
+    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 3v5h-5"/></svg>Keep &amp; Save`;
+  document.getElementById("downloadModal").classList.remove("hidden");
+  document.getElementById("dlSeries").focus();
 }
 
 function resetSavePath(){
@@ -1485,37 +1546,40 @@ function parseEp(s){
 }
 
 async function submitDownload(){
-  if(!downloadTarget) return;
+  if(!_saveStreamMode && !downloadTarget) return;
   const series   =document.getElementById("dlSeries").value.trim();
   const savePath =document.getElementById("dlSavePath").value.trim();
   const {season,episode}=parseEp(document.getElementById("dlEpisode").value.trim());
+  const title    =_saveStreamMode?(app.active_title||""):(downloadTarget?.title||"");
 
   const btn=document.getElementById("dlSubmitBtn");
-  btn.disabled=true; btn.textContent="Adding…";
+  btn.disabled=true;
 
   try{
-    const r=await fetch("/api/library/download",{
-      method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({
-        magnet:downloadTarget.magnet,title:downloadTarget.title,
-        series,season,episode,save_path:savePath,
-      }),
-    });
+    let r;
+    if(_saveStreamMode){
+      r=await fetch("/api/stream/save-to-library",{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({title,series,season,episode,save_path:savePath}),
+      });
+    } else {
+      r=await fetch("/api/library/download",{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({
+          magnet:downloadTarget.magnet,title,series,season,episode,save_path:savePath,
+        }),
+      });
+    }
     if(r.ok){
       closeDownloadModal();
-      showAlert("Downloading — switch to Library to track progress.","success");
-      // Flash the Library tab and switch to it
+      showAlert(_saveStreamMode?"Stream saved — visible in Library tab.":"Downloading — switch to Library to track progress.","success");
       switchTab("library");
     } else {
       const e=await r.json().catch(()=>({detail:"Unknown error"}));
-      showAlert(e.detail||"Download failed.","error");
+      showAlert(e.detail||"Failed.","error");
     }
   } finally {
     btn.disabled=false;
-    btn.innerHTML=`<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-        d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
-    </svg>Download`;
   }
 }
 

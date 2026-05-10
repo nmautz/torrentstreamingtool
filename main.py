@@ -182,6 +182,7 @@ def state_snapshot() -> dict:
         "library_playlist_count": len(playlist),
         "library_current_index": cur_idx,
         "library_current_file": current,
+        "is_library_playback": state.library_item_id is not None,
     }
 
 
@@ -1223,6 +1224,64 @@ async def stream_now(req: StreamReq) -> JSONResponse:
         stream_pipeline(req.magnet, req.title, req.file_index, req.torrent_hash)
     )
     return JSONResponse({"ok": True})
+
+
+class SaveToLibraryReq(BaseModel):
+    title: str = ""
+    series: str = ""
+    season: int = 0
+    episode: int = 0
+    save_path: str = ""
+
+
+@app.post("/api/stream/save-to-library")
+async def save_stream_to_library(req: SaveToLibraryReq) -> JSONResponse:
+    """Adopt the currently streaming torrent into the persistent library.
+
+    Restores all file priorities to 1 so the full torrent continues downloading,
+    then creates a library entry and sets state.library_item_id so /api/stop
+    will no longer auto-delete the torrent.
+    """
+    if not state.active_hash:
+        raise HTTPException(400, "No active stream.")
+    if state.library_item_id:
+        raise HTTPException(400, "Stream is already saved to library.")
+
+    h = state.active_hash
+
+    # Restore all file priorities (streaming mode may have skipped some)
+    all_files = await qbit_files(h)
+    if all_files:
+        all_ids = [f.get("index", i) for i, f in enumerate(all_files)]
+        await qbit_set_file_priority(h, all_ids, 1)
+
+    info = await qbit_info(h)
+    save_path = req.save_path.strip() or (info.get("save_path") if info else None) or settings.qbit_download_path
+    files = build_file_list(all_files, save_path) if all_files else []
+
+    item: dict = {
+        "id": str(uuid.uuid4()),
+        "title": req.title.strip() or state.active_title or "Unknown",
+        "series": req.series,
+        "season": req.season,
+        "episode": req.episode,
+        "files": files,
+        "size_bytes": info.get("size", 0) if info else 0,
+        "added_at": _now_iso(),
+        "status": "downloading",
+        "torrent_hash": h,
+        "progress": {},
+    }
+
+    lib = await get_library()
+    lib["items"].append(item)
+    await put_library(lib)
+    state.downloading_count += 1
+    state.library_item_id = item["id"]  # prevents auto-delete on stop
+
+    await broadcast("library_update", {"item_id": item["id"], "status": "downloading"})
+    return JSONResponse({"ok": True, "item_id": item["id"],
+                         "default_save_path": settings.qbit_download_path})
 
 
 @app.post("/api/stop")
