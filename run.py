@@ -6,6 +6,7 @@ StreamLink Launcher — starts all services then the dashboard.
 This script auto-relaunches itself inside the virtualenv so psutil
 and other venv packages are available without manual activation.
 """
+from __future__ import annotations
 
 import os
 import platform
@@ -23,8 +24,11 @@ VENV   = HERE / ".venv"
 SYSTEM = platform.system()
 
 # ── Auto-relaunch inside venv (transparent to the user) ───────────────────
+# Use sys.prefix rather than comparing resolved executable paths: two different
+# Python invocations can resolve to the same binary yet have different site-packages
+# (system vs. venv). sys.prefix is always set to the venv root when inside one.
 _VENV_PY = VENV / ("Scripts/python.exe" if SYSTEM == "Windows" else "bin/python")
-if _VENV_PY.exists() and Path(sys.executable).resolve() != _VENV_PY.resolve():
+if _VENV_PY.exists() and Path(sys.prefix).resolve() != VENV.resolve():
     os.execv(str(_VENV_PY), [str(_VENV_PY)] + sys.argv)
 
 # ── Color output ──────────────────────────────────────────────────────────
@@ -320,6 +324,14 @@ def main():
     if not (HERE / ".env").exists():
         print(f"\n  {RED}✗{RESET}  .env not found.")
         print(f"  Run {BOLD}python3 setup.py{RESET} first.")
+        sys.exit(1)
+
+    try:
+        import psutil  # noqa: F401
+    except ModuleNotFoundError:
+        print(f"\n  {RED}✗{RESET}  Python packages not installed in the virtualenv.")
+        print(f"  The venv exists but pip install did not complete.")
+        print(f"  Run {BOLD}python3 setup.py{RESET} again to finish installation.")
         sys.exit(1)
 
     print(f"\n{BOLD}{CYN}  StreamLink v2.0 — Starting up{RESET}\n")

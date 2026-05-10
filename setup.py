@@ -3,6 +3,7 @@
 StreamLink Setup — run once to configure everything automatically.
     python3 setup.py
 """
+from __future__ import annotations
 
 import hashlib
 import os
