@@ -134,6 +134,7 @@ class AppState:
     current_subtitle_track: int = -1                      # last track ID sent to VLC
     vlc_time: int = 0                                     # VLC current position (seconds)
     vlc_duration: int = 0                                 # VLC total duration (seconds)
+    prepare_hash: Optional[str] = None                    # hash added by /stream/prepare, pending user selection
     sse_queues: list = field(default_factory=list)
 
 
@@ -210,6 +211,16 @@ async def qbit_add_magnet(
         data["sequentialDownload"] = "true"
     r = await qreq("POST", "/api/v2/torrents/add", data=data)
     return h if (r and r.text.strip() == "Ok.") else None
+
+
+async def qbit_set_file_priority(h: str, indices: list[int], priority: int) -> None:
+    """Set qBit file priority for a list of file indices. priority 0=skip, 1=normal, 6=high."""
+    if not indices:
+        return
+    await qreq(
+        "POST", "/api/v2/torrents/filePrio",
+        data={"hash": h, "id": "|".join(str(i) for i in indices), "priority": str(priority)},
+    )
 
 
 async def qbit_streaming_mode(h: str) -> None:
@@ -355,6 +366,14 @@ def build_file_list(qbit_file_list: list, save_path: str) -> list[dict]:
         })
     result.sort(key=lambda x: (x["season"] or 9999, x["episode"] or 9999, x["name"]))
     return result
+
+
+def _file_by_index(files: list, idx: int) -> Optional[dict]:
+    """Return the file dict whose 'index' field equals idx (falls back to enumerate position)."""
+    for i, f in enumerate(files):
+        if f.get("index", i) == idx:
+            return f
+    return None
 
 
 def largest_video(files: list) -> Optional[dict]:
@@ -599,7 +618,12 @@ async def vlc_progress_tracker() -> None:
 
 # ── Stream Pipeline (stream-now, torrent auto-deleted on stop) ────────────────
 
-async def stream_pipeline(magnet: str, title: str) -> None:
+async def stream_pipeline(
+    magnet: str,
+    title: str,
+    file_index: Optional[int] = None,
+    torrent_hash: Optional[str] = None,
+) -> None:
     try:
         state.active_title = title
         state.stream_status = "buffering"
@@ -607,51 +631,89 @@ async def stream_pipeline(magnet: str, title: str) -> None:
         state.current_subtitle_track = -1
         await broadcast("stream_status", {"status": "buffering", "message": "Adding torrent to qBittorrent…"})
 
-        h = await qbit_add_magnet(magnet, sequential=True)
-        if not h:
-            raise RuntimeError("qBittorrent rejected the magnet (is it running on port 8081?)")
-        state.active_hash = h
-
-        for _ in range(30):
-            await asyncio.sleep(1)
-            if await qbit_info(h):
-                break
+        if torrent_hash:
+            # Torrent already added by /stream/prepare — use existing hash directly
+            h = torrent_hash
+            state.active_hash = h
         else:
-            raise RuntimeError("Torrent did not appear in qBittorrent after 30 s.")
+            h = await qbit_add_magnet(magnet, sequential=True)
+            if not h:
+                raise RuntimeError("qBittorrent rejected the magnet (is it running on port 8081?)")
+            state.active_hash = h
+            for _ in range(30):
+                await asyncio.sleep(1)
+                if await qbit_info(h):
+                    break
+            else:
+                raise RuntimeError("Torrent did not appear in qBittorrent after 30 s.")
 
         await qbit_streaming_mode(h)
-        await broadcast("stream_status", {"status": "buffering", "message": "Sequential mode set. Buffering first pieces…"})
 
+        if file_index is not None:
+            # Skip all files except the selected one
+            all_files = await qbit_files(h)
+            skip_ids = [f.get("index", i) for i, f in enumerate(all_files)
+                        if f.get("index", i) != file_index]
+            if skip_ids:
+                await qbit_set_file_priority(h, skip_ids, 0)
+            await broadcast("stream_status", {
+                "status": "buffering", "message": "File selected. Buffering first pieces…",
+            })
+        else:
+            await broadcast("stream_status", {
+                "status": "buffering", "message": "Sequential mode set. Buffering first pieces…",
+            })
+
+        # Buffer loop — track per-file progress when a specific file is selected
         while True:
-            info = await qbit_info(h)
-            if info:
-                total = info.get("size", 1) or 1
-                done = info.get("completed", 0)
-                pct = done / total * 100
-                mb = done / 1_048_576
-                state.progress = pct
-                state.downloaded_mb = mb
-                state.total_mb = total / 1_048_576
-                state.dl_speed_bps = info.get("dlspeed", 0)
-                state.ul_speed_bps = info.get("upspeed", 0)
-
-                await broadcast("stream_status", {
-                    "status": "buffering",
-                    "message": f"Buffering {mb:.1f} MB / {state.total_mb:.1f} MB ({pct:.1f}%)",
-                    "progress": pct,
-                    "downloaded_mb": mb,
-                    "total_mb": state.total_mb,
-                    "dl_speed_bps": state.dl_speed_bps,
-                    "ul_speed_bps": state.ul_speed_bps,
-                })
-
-                if mb >= settings.buffer_min_mb or pct >= settings.buffer_min_pct:
-                    break
-
+            if file_index is not None:
+                file_list = await qbit_files(h)
+                target = _file_by_index(file_list, file_index)
+                info = await qbit_info(h)
+                if target and info:
+                    f_size = target.get("size", 1) or 1
+                    f_prog = target.get("progress", 0)
+                    mb = f_size * f_prog / 1_048_576
+                    pct = f_prog * 100
+                    total_mb = f_size / 1_048_576
+                    state.progress = pct
+                    state.downloaded_mb = mb
+                    state.total_mb = total_mb
+                    state.dl_speed_bps = info.get("dlspeed", 0)
+                    state.ul_speed_bps = info.get("upspeed", 0)
+                    await broadcast("stream_status", {
+                        "status": "buffering",
+                        "message": f"Buffering {mb:.1f} MB / {total_mb:.1f} MB ({pct:.1f}%)",
+                        "progress": pct, "downloaded_mb": mb, "total_mb": total_mb,
+                        "dl_speed_bps": state.dl_speed_bps, "ul_speed_bps": state.ul_speed_bps,
+                    })
+                    if mb >= settings.buffer_min_mb or pct >= settings.buffer_min_pct:
+                        break
+            else:
+                info = await qbit_info(h)
+                if info:
+                    total = info.get("size", 1) or 1
+                    done = info.get("completed", 0)
+                    pct = done / total * 100
+                    mb = done / 1_048_576
+                    state.progress = pct
+                    state.downloaded_mb = mb
+                    state.total_mb = total / 1_048_576
+                    state.dl_speed_bps = info.get("dlspeed", 0)
+                    state.ul_speed_bps = info.get("upspeed", 0)
+                    await broadcast("stream_status", {
+                        "status": "buffering",
+                        "message": f"Buffering {mb:.1f} MB / {state.total_mb:.1f} MB ({pct:.1f}%)",
+                        "progress": pct, "downloaded_mb": mb, "total_mb": state.total_mb,
+                        "dl_speed_bps": state.dl_speed_bps, "ul_speed_bps": state.ul_speed_bps,
+                    })
+                    if mb >= settings.buffer_min_mb or pct >= settings.buffer_min_pct:
+                        break
             await asyncio.sleep(1)
 
+        # Resolve the file to play
         files = await qbit_files(h)
-        vid = largest_video(files)
+        vid = _file_by_index(files, file_index) if file_index is not None else largest_video(files)
         if not vid:
             raise RuntimeError("No recognisable video file found in torrent.")
 
@@ -748,9 +810,16 @@ app = FastAPI(title="P2P StreamLink", version="2.0", lifespan=lifespan)
 
 # ── Request Models ────────────────────────────────────────────────────────────
 
+class StreamPrepareReq(BaseModel):
+    magnet: str
+    title: str
+
+
 class StreamReq(BaseModel):
     magnet: str
     title: str
+    file_index: Optional[int] = None     # specific file to stream (None = largest video)
+    torrent_hash: Optional[str] = None   # hash from /stream/prepare (skips re-adding)
 
 
 class DownloadReq(BaseModel):
@@ -1048,6 +1117,65 @@ async def search(q: str, limit: int = 30) -> JSONResponse:
     return JSONResponse({"results": results[:limit]})
 
 
+@app.post("/api/stream/prepare")
+async def stream_prepare(req: StreamPrepareReq) -> JSONResponse:
+    """Add magnet to qBit, wait for file metadata, return file list for the picker UI.
+
+    The caller is responsible for either proceeding with /api/stream (using the returned
+    hash) or cancelling with DELETE /api/stream/cancel?hash=... if the user dismisses
+    the picker.  The torrent is stored in state.prepare_hash so /api/stop also cleans it up.
+    """
+    if not state.vpn_secure:
+        raise HTTPException(403, "VPN not connected — streaming blocked.")
+
+    h = await qbit_add_magnet(req.magnet)
+    if not h:
+        raise HTTPException(500, "qBittorrent rejected the magnet.")
+
+    state.prepare_hash = h
+
+    # Wait for torrent to appear (metadata download)
+    for _ in range(30):
+        await asyncio.sleep(1)
+        if await qbit_info(h):
+            break
+    else:
+        await qbit_delete(h, delete_files=True)
+        state.prepare_hash = None
+        raise HTTPException(504, "Torrent metadata timed out — check connectivity and try again.")
+
+    # Wait for file list (may need another moment after info appears)
+    for _ in range(30):
+        files = await qbit_files(h)
+        if files:
+            break
+        await asyncio.sleep(1)
+    else:
+        await qbit_delete(h, delete_files=True)
+        state.prepare_hash = None
+        raise HTTPException(504, "Could not fetch file list — torrent may have no seeds.")
+
+    result = [
+        {
+            "index": f.get("index", i),
+            "name": f.get("name", ""),
+            "size_bytes": f.get("size", 0),
+            "size_human": human_size(f.get("size", 0)),
+        }
+        for i, f in enumerate(files)
+    ]
+    return JSONResponse({"hash": h, "files": result})
+
+
+@app.delete("/api/stream/cancel")
+async def stream_cancel(hash: str) -> JSONResponse:
+    """Delete a torrent that was added by /stream/prepare but never started streaming."""
+    await qbit_delete(hash, delete_files=True)
+    if state.prepare_hash == hash:
+        state.prepare_hash = None
+    return JSONResponse({"ok": True})
+
+
 @app.post("/api/stream")
 async def stream_now(req: StreamReq) -> JSONResponse:
     if not state.vpn_secure:
@@ -1058,13 +1186,19 @@ async def stream_now(req: StreamReq) -> JSONResponse:
         if state.active_hash and not state.library_item_id:
             await qbit_delete(state.active_hash)
 
+    # The prepare hash is now the active stream — clear the prepare slot
+    if req.torrent_hash and state.prepare_hash == req.torrent_hash:
+        state.prepare_hash = None
+
     state.active_hash = None
     state.active_file = None
     state.library_item_id = None
     state.library_profile_id = None
     state.library_playlist = []
     state.library_current_file = None
-    state.stream_task = asyncio.create_task(stream_pipeline(req.magnet, req.title))
+    state.stream_task = asyncio.create_task(
+        stream_pipeline(req.magnet, req.title, req.file_index, req.torrent_hash)
+    )
     return JSONResponse({"ok": True})
 
 
@@ -1074,6 +1208,9 @@ async def stop() -> JSONResponse:
         state.stream_task.cancel()
     if state.active_hash and not state.library_item_id:
         await qbit_delete(state.active_hash)
+    if state.prepare_hash:
+        await qbit_delete(state.prepare_hash, delete_files=True)
+        state.prepare_hash = None
     await vlc("pl_stop")
 
     state.active_hash = None

@@ -250,6 +250,32 @@
   </div>
 </div>
 
+<!-- ── Stream File Picker Modal ────────────────────────────────────────────── -->
+<div id="streamPickerModal"
+  class="hidden fixed inset-0 z-50 bg-black/75 backdrop-blur-sm
+         flex items-end sm:items-center justify-center sm:px-4 sm:py-6">
+  <div class="bg-gray-900 border border-gray-800 rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg
+              flex flex-col max-h-[85vh] fade-in">
+    <!-- Header -->
+    <div class="px-5 pt-5 pb-3 border-b border-gray-800 flex-shrink-0">
+      <div class="flex items-start justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-base font-bold">Select File to Stream</h2>
+          <p id="streamPickerSubtitle" class="text-xs text-gray-500 mt-0.5"></p>
+        </div>
+        <button onclick="closeStreamPicker(true)"
+          class="text-gray-600 hover:text-gray-300 transition-colors flex-shrink-0 mt-0.5">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+    <!-- File list -->
+    <div id="streamPickerList" class="flex-1 overflow-y-auto"></div>
+  </div>
+</div>
+
 <!-- ── Global Toast (visible from any tab) ────────────────────────────────── -->
 <div id="globalToast"
   class="hidden fixed top-16 inset-x-0 z-45 px-4 pointer-events-none">
@@ -480,6 +506,9 @@ let downloadTarget = null;
 let epItemId  = null;
 let epFiles   = [];   // full file objects from API
 let epChecked = new Set();  // checked file paths
+// Stream file picker state
+let streamPrepData = null;   // {hash, files, magnet, title} from /stream/prepare
+let streamPrepAbort = null;  // AbortController for the in-flight prepare request
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function escHtml(s) {
@@ -1131,6 +1160,147 @@ function updateDlBadge(count){
   }
 }
 
+// ── Stream File Picker ─────────────────────────────────────────────────────
+const VIDEO_RE = /\.(mkv|mp4|avi|mov|wmv|m4v|ts|m2ts|webm)$/i;
+
+function isVideoFile(name){ return VIDEO_RE.test(name); }
+
+function closeStreamPicker(cancel=true){
+  document.getElementById("streamPickerModal").classList.add("hidden");
+  if(streamPrepAbort){ streamPrepAbort.abort(); streamPrepAbort=null; }
+  if(cancel && streamPrepData?.hash){
+    fetch(`/api/stream/cancel?hash=${encodeURIComponent(streamPrepData.hash)}`,
+          {method:"DELETE"}).catch(()=>{});
+  }
+  streamPrepData=null;
+}
+
+function renderStreamPickerList(files){
+  const el=document.getElementById("streamPickerList");
+  // Video files first, then by name
+  const sorted=[...files].sort((a,b)=>{
+    const av=isVideoFile(a.name), bv=isVideoFile(b.name);
+    if(av!==bv) return bv-av;
+    return a.name.localeCompare(b.name);
+  });
+  el.innerHTML=sorted.map(f=>{
+    const isVid=isVideoFile(f.name);
+    // Show last 2 path segments for nested files
+    const parts=f.name.replace(/\\/g,"/").split("/");
+    const display=parts.length>2?parts.slice(-2).join("/"):f.name;
+    if(isVid){
+      return `<button onclick="selectStreamFile(${f.index})"
+        class="w-full flex items-center gap-3 px-4 py-3.5 border-b border-gray-800/60
+               hover:bg-gray-800 active:bg-gray-800/80 transition-colors text-left">
+        <svg class="w-5 h-5 text-indigo-400 flex-shrink-0" fill="currentColor" viewBox="0 0 24 24">
+          <path d="M8 5v14l11-7z"/>
+        </svg>
+        <div class="flex-1 min-w-0">
+          <div class="text-sm text-gray-200 break-all leading-snug">${escHtml(display)}</div>
+          <div class="text-xs text-gray-600 mt-0.5">${escHtml(f.size_human)}</div>
+        </div>
+        <svg class="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+        </svg>
+      </button>`;
+    }
+    return `<div class="flex items-center gap-3 px-4 py-3 border-b border-gray-800/40 opacity-35">
+      <svg class="w-5 h-5 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+          d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+      </svg>
+      <div class="flex-1 min-w-0">
+        <div class="text-sm text-gray-500 truncate">${escHtml(display)}</div>
+        <div class="text-xs text-gray-700 mt-0.5">${escHtml(f.size_human)}</div>
+      </div>
+    </div>`;
+  }).join("");
+}
+
+async function selectStreamFile(fileIndex){
+  if(!streamPrepData) return;
+  const magnet=streamPrepData.magnet, title=streamPrepData.title, hash=streamPrepData.hash;
+  closeStreamPicker(false); // close without cancelling — we're using this torrent
+  const r=await fetch("/api/stream",{
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({magnet, title, file_index:fileIndex, torrent_hash:hash}),
+  });
+  if(!r.ok){
+    const e=await r.json().catch(()=>({detail:"Stream failed"}));
+    showAlert(e.detail||"Could not start stream.","error");
+  }
+}
+
+async function openStreamPicker(magnet, title, btn){
+  if(!app.vpn_secure){ showAlert("VPN not connected — streaming blocked.","error"); return; }
+
+  // Show modal immediately with loading state
+  streamPrepData=null;
+  document.getElementById("streamPickerSubtitle").textContent="Connecting to peers…";
+  document.getElementById("streamPickerList").innerHTML=
+    `<div class="flex flex-col items-center justify-center py-14 gap-3 text-gray-600">
+      <svg class="w-8 h-8 animate-spin" fill="none" viewBox="0 0 24 24">
+        <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"></circle>
+        <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"></path>
+      </svg>
+      <span class="text-sm">Fetching file list…</span>
+    </div>`;
+  document.getElementById("streamPickerModal").classList.remove("hidden");
+
+  document.querySelectorAll(".play-btn").forEach(b=>{b.disabled=true;});
+  btn.textContent="Fetching…";
+  streamPrepAbort=new AbortController();
+
+  try{
+    const r=await fetch("/api/stream/prepare",{
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({magnet,title}),
+      signal:streamPrepAbort.signal,
+    });
+
+    if(!r.ok){
+      const e=await r.json().catch(()=>({detail:"Failed to fetch file list"}));
+      throw new Error(e.detail);
+    }
+    const d=await r.json();
+
+    // If modal was closed while we waited, cancel the torrent and bail
+    if(document.getElementById("streamPickerModal").classList.contains("hidden")){
+      fetch(`/api/stream/cancel?hash=${encodeURIComponent(d.hash)}`,{method:"DELETE"}).catch(()=>{});
+      return;
+    }
+
+    streamPrepData={...d, magnet, title};
+    const videoFiles=d.files.filter(f=>isVideoFile(f.name));
+
+    if(videoFiles.length===0){
+      closeStreamPicker(true);
+      showAlert("No video files found in this torrent.","error");
+      return;
+    }
+
+    // Single video file: skip picker and start immediately
+    if(videoFiles.length===1){
+      await selectStreamFile(videoFiles[0].index);
+      return;
+    }
+
+    // Multiple video files: show picker
+    document.getElementById("streamPickerSubtitle").textContent=
+      `${videoFiles.length} video files · tap one to stream`;
+    renderStreamPickerList(d.files);
+
+  } catch(err){
+    if(err.name==="AbortError") return; // user cancelled via close button
+    document.getElementById("streamPickerModal").classList.add("hidden");
+    showAlert(err.message,"error");
+  } finally{
+    streamPrepAbort=null;
+    btn.textContent="▶ Play";
+    document.querySelectorAll(".play-btn").forEach(b=>{b.disabled=false;});
+  }
+}
+
 // ── Search ─────────────────────────────────────────────────────────────────
 async function doSearch(q){
   q=q.trim(); if(!q) return;
@@ -1189,7 +1359,7 @@ async function doSearch(q){
           </button>
         </div>`;
       card.querySelector(".play-btn").addEventListener("click",e=>{
-        const b=e.currentTarget; playItem(b.dataset.magnet,b.dataset.title,b);
+        const b=e.currentTarget; openStreamPicker(b.dataset.magnet,b.dataset.title,b);
       });
       card.querySelector(".dl-btn").addEventListener("click",e=>{
         const b=e.currentTarget; openDownloadModal(b.dataset.magnet,b.dataset.title);
@@ -1201,23 +1371,6 @@ async function doSearch(q){
     showAlert(err.message,"error"); empty.classList.remove("hidden");
   } finally {
     btn.disabled=false; btn.textContent="Search";
-  }
-}
-
-// ── Stream now ─────────────────────────────────────────────────────────────
-async function playItem(magnet,title,btn){
-  if(!app.vpn_secure){ showAlert("VPN not connected — streaming blocked.","error"); return; }
-  const all=document.querySelectorAll(".play-btn");
-  all.forEach(b=>{b.disabled=true; if(b!==btn) b.textContent="▶ Play";});
-  btn.textContent="Starting…"; hideAlert();
-  try{
-    const r=await fetch("/api/stream",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({magnet,title})});
-    if(!r.ok){ const e=await r.json().catch(()=>({detail:"Unknown error"})); throw new Error(e.detail||`HTTP ${r.status}`); }
-    btn.textContent="▶ Loading…";
-  } catch(err){
-    showAlert(err.message,"error"); btn.textContent="▶ Play"; btn.disabled=false;
-  } finally {
-    setTimeout(()=>{ all.forEach(b=>{if(b!==btn) b.disabled=false;}); },1500);
   }
 }
 
@@ -1331,6 +1484,7 @@ function connectSSE(){
 document.addEventListener("keydown",e=>{
   if(e.key==="Escape"){
     closeDownloadModal(); closeProfileModal(); closeEpisodeModal();
+    closeStreamPicker(true);
     const pp=document.getElementById("profilePicker");
     if(!pp.classList.contains("hidden")&&allProfiles.length) pp.classList.add("hidden");
   }
