@@ -313,6 +313,60 @@ def check_mullvad() -> bool:
         return False
 
 
+# ── Network info ───────────────────────────────────────────────────────────
+def get_local_ip() -> str:
+    """Return the LAN IP this machine is advertising — the address phones should use."""
+    try:
+        # Opens a UDP socket without sending anything; getsockname returns the
+        # outbound interface the OS would use to reach the public internet.
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return ""
+
+
+def get_wifi_ssid() -> str:
+    """Best-effort: return the current Wi-Fi SSID or empty string."""
+    try:
+        if SYSTEM == "Darwin":
+            airport = (
+                "/System/Library/PrivateFrameworks/Apple80211.framework"
+                "/Versions/Current/Resources/airport"
+            )
+            r = subprocess.run([airport, "-I"], capture_output=True, text=True, timeout=5)
+            for line in r.stdout.splitlines():
+                line = line.strip()
+                # Match "  SSID: MyNetwork" but not "  BSSID: ..."
+                if re.match(r"^SSID\s*:", line) and "BSSID" not in line:
+                    return line.split(":", 1)[1].strip()
+            # Fallback: try networksetup on common Wi-Fi interfaces
+            for iface in ("en0", "en1", "en2"):
+                r = subprocess.run(
+                    ["networksetup", "-getairportnetwork", iface],
+                    capture_output=True, text=True, timeout=5,
+                )
+                if "Current Wi-Fi Network:" in r.stdout:
+                    return r.stdout.split("Current Wi-Fi Network:", 1)[1].strip()
+        elif SYSTEM == "Linux":
+            r = subprocess.run(["iwgetid", "-r"], capture_output=True, text=True, timeout=5)
+            if r.stdout.strip():
+                return r.stdout.strip()
+        elif SYSTEM == "Windows":
+            r = subprocess.run(
+                ["netsh", "wlan", "show", "interfaces"],
+                capture_output=True, text=True, timeout=5,
+            )
+            for line in r.stdout.splitlines():
+                if "SSID" in line and "BSSID" not in line:
+                    return line.split(":", 1)[1].strip()
+    except Exception:
+        pass
+    return ""
+
+
 # ── Main ───────────────────────────────────────────────────────────────────
 def main():
     # Pre-flight checks
@@ -360,19 +414,30 @@ def main():
         print()
 
     # ── Launch dashboard ──────────────────────────────────────────────────
-    dashboard_url = "http://127.0.0.1:7000"
+    PORT          = 7000
+    local_url     = f"http://127.0.0.1:{PORT}"
+    lan_ip        = get_local_ip()
+    lan_url       = f"http://{lan_ip}:{PORT}" if lan_ip else ""
+    ssid          = get_wifi_ssid()
     uvicorn_bin   = VENV / ("Scripts/uvicorn.exe" if SYSTEM == "Windows" else "bin/uvicorn")
 
     print(f"{BOLD}  Dashboard{RESET}")
-    ok(f"Serving at {CYN}{dashboard_url}{RESET}")
-    info("Press Ctrl+C to stop everything")
+    ok(f"Local  →  {CYN}{local_url}{RESET}")
+    if lan_url:
+        ssid_note = f"  {BLU}({ssid}){RESET}" if ssid else ""
+        ok(f"Phone  →  {CYN}{lan_url}{RESET}{ssid_note}")
+        if ssid:
+            print(f"          {BLU}Connect your phone to Wi-Fi: {BOLD}{ssid}{RESET}")
+    else:
+        warn("Could not detect LAN IP — phone access may not work")
+    info("Press Ctrl+C to stop")
     print()
 
     # Give browser a moment then open
     def _open_browser():
         time.sleep(1.5)
         try:
-            webbrowser.open(dashboard_url)
+            webbrowser.open(local_url)
         except Exception:
             pass
 
@@ -383,8 +448,8 @@ def main():
         subprocess.run(
             [
                 str(uvicorn_bin), "main:app",
-                "--host", "127.0.0.1",
-                "--port", "7000",
+                "--host", "0.0.0.0",   # bind on all interfaces so phones can reach it
+                "--port", str(PORT),
                 "--log-level", "warning",
             ],
             cwd=str(HERE),

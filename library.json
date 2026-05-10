@@ -4,6 +4,11 @@
       "id": "b9a4969e-2ac3-4815-8570-cb2ff7af5c90",
       "name": "Nathan",
       "color": "indigo"
+    },
+    {
+      "id": "847937d1-80e0-41d3-8920-27cdf444951c",
+      "name": "Nia",
+      "color": "red"
     }
   ],
   "items": [
@@ -73,9 +78,21 @@
       ],
       "size_bytes": 2822495890,
       "added_at": "2026-05-10T15:15:59+00:00",
-      "status": "downloading",
+      "status": "ready",
       "torrent_hash": "5c41cdd5ba7fa0ebdf5d948a173ceb6312020ed2",
-      "progress": {}
+      "progress": {
+        "b9a4969e-2ac3-4815-8570-cb2ff7af5c90": {
+          "last_file": "/Users/nathanmautz/Downloads/StreamLink/The.Boys.S04.COMPLETE.720p.AMZN.WEBRip.x264-GalaxyTV[TGx]/The.Boys.S04E01.720p.AMZN.WEBRip.x264-GalaxyTV.mkv",
+          "file_progress": {
+            "/Users/nathanmautz/Downloads/StreamLink/The.Boys.S04.COMPLETE.720p.AMZN.WEBRip.x264-GalaxyTV[TGx]/The.Boys.S04E01.720p.AMZN.WEBRip.x264-GalaxyTV.mkv": {
+              "position_sec": 10.0,
+              "duration_sec": 3906.0,
+              "completed": false,
+              "updated_at": "2026-05-10T15:34:24+00:00"
+            }
+          }
+        }
+      }
     }
   ]
 }

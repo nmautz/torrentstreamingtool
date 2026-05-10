@@ -13,6 +13,9 @@ build/
 # Downloaded media (configured via QBIT_DOWNLOAD_PATH)
 Downloads/
 
+# User library database (profiles + watch history)
+library.json
+
 # macOS
 .DS_Store
 ._*

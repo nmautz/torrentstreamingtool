@@ -2,7 +2,9 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="apple-mobile-web-app-capable" content="yes" />
+  <meta name="mobile-web-app-capable" content="yes" />
   <title>StreamLink v2.0</title>
   <script src="https://cdn.tailwindcss.com"></script>
   <script>tailwind.config = { darkMode: 'class' }</script>
@@ -27,6 +29,11 @@
     .profile-card:hover .profile-avatar { transform:scale(1.06); }
     .profile-avatar { transition:transform 0.15s ease; }
     .ep-row:hover { background:rgba(255,255,255,.03); }
+    /* Safe area insets for iPhone notch / home indicator */
+    .safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }
+    /* Prevent double-tap zoom on buttons */
+    button { touch-action: manipulation; }
+    select { touch-action: manipulation; }
   </style>
 </head>
 <body class="dark bg-gray-950 text-gray-100 min-h-screen flex flex-col">
@@ -72,8 +79,8 @@
 <!-- ── Profile Modal (add / delete) ──────────────────────────────────────── -->
 <div id="profileModal"
   class="hidden fixed inset-0 z-50 bg-black/70 backdrop-blur-sm
-         flex items-center justify-center px-4">
-  <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6 w-full max-w-sm fade-in">
+         flex items-end sm:items-center justify-center sm:px-4">
+  <div class="bg-gray-900 border border-gray-800 rounded-t-2xl sm:rounded-2xl p-6 w-full sm:max-w-sm fade-in">
     <h2 class="text-lg font-bold mb-4">Add Profile</h2>
     <input id="profileNameInput" type="text" maxlength="30" placeholder="Name"
       class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2.5 text-sm
@@ -102,8 +109,8 @@
 <!-- ── Download Modal ─────────────────────────────────────────────────────── -->
 <div id="downloadModal"
   class="hidden fixed inset-0 z-50 bg-black/75 backdrop-blur-sm
-         flex items-center justify-center px-4 py-6">
-  <div class="bg-gray-900 border border-gray-800 rounded-2xl w-full max-w-md fade-in">
+         flex items-end sm:items-center justify-center sm:px-4 sm:py-6">
+  <div class="bg-gray-900 border border-gray-800 rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md fade-in">
     <!-- Header -->
     <div class="px-6 pt-5 pb-4 border-b border-gray-800">
       <div class="flex items-start justify-between gap-3">
@@ -172,13 +179,13 @@
     </div>
 
     <!-- Footer -->
-    <div class="px-6 pb-5 flex gap-2">
+    <div class="px-4 pb-4 flex gap-2">
       <button onclick="closeDownloadModal()"
-        class="flex-1 bg-gray-800 hover:bg-gray-700 rounded-xl py-2.5 text-sm font-medium transition-colors">
+        class="flex-1 bg-gray-800 hover:bg-gray-700 rounded-xl py-3.5 text-sm font-medium transition-colors min-h-[52px]">
         Cancel
       </button>
       <button onclick="submitDownload()" id="dlSubmitBtn"
-        class="flex-1 bg-green-700 hover:bg-green-600 rounded-xl py-2.5 text-sm font-semibold transition-colors flex items-center justify-center gap-2">
+        class="flex-1 bg-green-700 hover:bg-green-600 rounded-xl py-3.5 text-sm font-semibold transition-colors flex items-center justify-center gap-2 min-h-[52px]">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
             d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
@@ -192,9 +199,9 @@
 <!-- ── Episode Picker Modal ───────────────────────────────────────────────── -->
 <div id="episodeModal"
   class="hidden fixed inset-0 z-50 bg-black/75 backdrop-blur-sm
-         flex items-center justify-center px-4 py-6">
-  <div class="bg-gray-900 border border-gray-800 rounded-2xl w-full max-w-lg
-              flex flex-col max-h-[85vh] fade-in">
+         flex items-end sm:items-center justify-center sm:px-4 sm:py-6">
+  <div class="bg-gray-900 border border-gray-800 rounded-t-2xl sm:rounded-2xl w-full sm:max-w-lg
+              flex flex-col max-h-[90vh] sm:max-h-[85vh] fade-in">
     <!-- Header -->
     <div class="px-5 pt-5 pb-3 border-b border-gray-800 flex-shrink-0">
       <div class="flex items-start justify-between gap-3">
@@ -230,13 +237,13 @@
     <div id="epList" class="flex-1 overflow-y-auto px-3 py-2"></div>
 
     <!-- Footer -->
-    <div class="px-5 pb-5 pt-3 border-t border-gray-800 flex-shrink-0 flex gap-2">
+    <div class="px-4 pb-4 pt-3 border-t border-gray-800 flex-shrink-0 flex gap-2">
       <button onclick="closeEpisodeModal()"
-        class="flex-1 bg-gray-800 hover:bg-gray-700 rounded-lg py-2.5 text-sm font-medium transition-colors">
+        class="flex-1 bg-gray-800 hover:bg-gray-700 rounded-xl py-3.5 text-sm font-medium transition-colors min-h-[52px]">
         Cancel
       </button>
       <button onclick="epPlay()"
-        class="flex-1 bg-indigo-600 hover:bg-indigo-500 rounded-lg py-2.5 text-sm font-semibold transition-colors">
+        class="flex-1 bg-indigo-600 hover:bg-indigo-500 rounded-xl py-3.5 text-sm font-semibold transition-colors min-h-[52px]">
         ▶ Play Selected (<span id="epSelectedCount">0</span>)
       </button>
     </div>
@@ -244,88 +251,73 @@
 </div>
 
 <!-- ── Navbar ─────────────────────────────────────────────────────────────── -->
-<header class="sticky top-0 z-40 bg-gray-900/95 backdrop-blur border-b border-gray-800 px-4 py-3 flex-shrink-0">
-  <div class="max-w-5xl mx-auto flex items-center gap-3">
-    <div class="font-black text-xl tracking-tight whitespace-nowrap mr-1">
+<header class="sticky top-0 z-40 bg-gray-900/95 backdrop-blur border-b border-gray-800 flex-shrink-0">
+  <div class="max-w-5xl mx-auto px-3 h-14 flex items-center gap-2">
+    <!-- Logo -->
+    <div class="font-black text-lg tracking-tight whitespace-nowrap">
       <span class="text-indigo-400">Stream</span><span class="text-white">Link</span>
     </div>
     <!-- Tabs -->
-    <div class="flex gap-1 bg-gray-800/60 rounded-lg p-0.5 flex-shrink-0">
+    <div class="flex gap-0.5 bg-gray-800/60 rounded-lg p-0.5 flex-shrink-0 ml-1">
       <button id="tabSearch" onclick="switchTab('search')"
-        class="tab-btn px-3 py-1 rounded-md text-sm font-medium transition-all bg-gray-700 text-white">Search</button>
+        class="tab-btn px-3 py-1.5 rounded-md text-sm font-medium transition-all bg-gray-700 text-white min-h-[36px]">Search</button>
       <button id="tabLibrary" onclick="switchTab('library')"
-        class="tab-btn px-3 py-1 rounded-md text-sm font-medium transition-all text-gray-400 hover:text-gray-200">Library</button>
+        class="tab-btn px-3 py-1.5 rounded-md text-sm font-medium transition-all text-gray-400 hover:text-gray-200 min-h-[36px]">Library</button>
     </div>
     <div class="flex-1"></div>
-    <!-- Profile -->
-    <button onclick="showProfilePicker()"
-      class="flex items-center gap-2 px-2.5 py-1.5 rounded-lg hover:bg-gray-800 transition-colors flex-shrink-0">
-      <div id="navProfileAvatar"
-        class="w-6 h-6 rounded-full bg-indigo-600 flex items-center justify-center text-xs font-bold text-white flex-shrink-0">?</div>
-      <span id="navProfileName" class="hidden sm:block text-gray-400 max-w-[80px] truncate text-xs"></span>
-    </button>
     <!-- Download badge -->
     <button id="dlBadge" onclick="switchTab('library')"
       class="hidden items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-green-900/40 border border-green-800/60
-             hover:bg-green-900/60 transition-colors flex-shrink-0">
+             hover:bg-green-900/60 transition-colors flex-shrink-0 min-h-[36px]">
       <svg class="w-3.5 h-3.5 text-green-400 blink" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
           d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
       </svg>
-      <span id="dlBadgeCount" class="text-xs font-semibold text-green-300"></span>
+      <span id="dlBadgeCount" class="text-xs font-semibold text-green-300 hidden sm:inline"></span>
     </button>
-    <!-- Live dot -->
-    <div class="flex items-center gap-1.5 flex-shrink-0">
-      <div id="sseDot" class="w-1.5 h-1.5 rounded-full bg-gray-700 transition-colors"></div>
-      <span id="sseLabel" class="text-[11px] text-gray-600 hidden sm:block">connecting</span>
-    </div>
-    <!-- VPN -->
-    <div id="vpnPill" class="flex items-center gap-2 px-3 py-1.5 rounded-full bg-gray-800 border border-gray-700 transition-all flex-shrink-0">
+    <!-- VPN pill -->
+    <div id="vpnPill" class="flex items-center gap-1.5 px-2.5 py-1.5 rounded-full bg-gray-800 border border-gray-700 transition-all flex-shrink-0">
       <div id="vpnDot" class="w-2 h-2 rounded-full bg-gray-600 transition-colors flex-shrink-0"></div>
-      <span id="vpnLabel" class="text-xs font-medium text-gray-500 whitespace-nowrap">VPN: checking</span>
+      <span id="vpnLabel" class="text-xs font-medium text-gray-500 whitespace-nowrap hidden sm:inline">VPN: checking</span>
     </div>
+    <!-- Live dot -->
+    <div id="sseDot" class="w-2 h-2 rounded-full bg-gray-700 transition-colors flex-shrink-0"></div>
+    <!-- Profile -->
+    <button onclick="showProfilePicker()"
+      class="flex items-center gap-1.5 pl-1 pr-2 py-1 rounded-lg hover:bg-gray-800 transition-colors flex-shrink-0 min-h-[36px]">
+      <div id="navProfileAvatar"
+        class="w-7 h-7 rounded-full bg-indigo-600 flex items-center justify-center text-xs font-bold text-white flex-shrink-0">?</div>
+      <span id="navProfileName" class="hidden md:block text-gray-400 max-w-[80px] truncate text-xs"></span>
+    </button>
   </div>
 </header>
 
 <!-- ── Main ───────────────────────────────────────────────────────────────── -->
-<main class="flex-1 pb-28 overflow-y-auto">
+<main class="flex-1 pb-36 overflow-y-auto">
   <div class="max-w-5xl mx-auto px-4 py-6">
 
     <!-- Search tab -->
     <div id="searchTab">
-      <div class="mb-6">
+      <div class="mb-4">
         <div class="flex gap-2">
           <input id="searchInput" type="search" autocomplete="off"
-            placeholder="Search public domain archives, open-source media…"
-            class="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-4 py-3 text-sm
+            placeholder="Search for movies, shows…"
+            class="flex-1 bg-gray-800 border border-gray-700 rounded-xl px-4 py-3.5 text-base
                    placeholder-gray-600 focus:outline-none focus:border-indigo-500
                    focus:ring-1 focus:ring-indigo-500/40 transition-all" />
           <button id="searchBtn"
-            class="bg-indigo-600 hover:bg-indigo-500 active:scale-95 px-5 py-3 rounded-xl
+            class="bg-indigo-600 hover:bg-indigo-500 active:scale-95 px-5 py-3.5 rounded-xl
                    text-sm font-semibold transition-all disabled:opacity-40
-                   disabled:cursor-not-allowed whitespace-nowrap">Search</button>
+                   disabled:cursor-not-allowed whitespace-nowrap min-w-[72px]">Search</button>
         </div>
-        <div class="flex justify-between mt-1.5 px-0.5">
-          <span id="resultCount" class="text-[11px] text-gray-700"></span>
-          <span class="text-[11px] text-gray-700">Sorted by seeders</span>
+        <div class="flex justify-between mt-2 px-0.5">
+          <span id="resultCount" class="text-[11px] text-gray-600"></span>
+          <span class="text-[11px] text-gray-700">↑ sorted by seeders</span>
         </div>
       </div>
-      <div id="alert" class="hidden mb-4 px-4 py-2.5 rounded-lg border text-sm"></div>
+      <div id="alert" class="hidden mb-4 px-4 py-3 rounded-xl border text-sm"></div>
       <div id="resultsWrap" class="hidden">
-        <div class="overflow-x-auto rounded-xl border border-gray-800">
-          <table class="w-full text-sm border-collapse">
-            <thead>
-              <tr class="bg-gray-900 border-b border-gray-800 text-gray-500 text-xs uppercase tracking-wider">
-                <th class="text-left px-4 py-2.5 font-medium">Title</th>
-                <th class="text-right px-4 py-2.5 font-medium hidden sm:table-cell">Size</th>
-                <th class="text-right px-4 py-2.5 font-medium">Seeds</th>
-                <th class="text-right px-4 py-2.5 font-medium hidden md:table-cell">Peers</th>
-                <th class="px-4 py-2.5"></th>
-              </tr>
-            </thead>
-            <tbody id="resultsTbody" class="divide-y divide-gray-800/60"></tbody>
-          </table>
-        </div>
+        <div id="resultsGrid" class="space-y-2.5"></div>
       </div>
       <div id="emptyState" class="flex flex-col items-center justify-center py-20 text-center">
         <div class="w-16 h-16 rounded-2xl bg-gray-800 border border-gray-700 flex items-center justify-center mb-4">
@@ -334,7 +326,7 @@
               d="M21 21l-4.35-4.35m0 0A7.5 7.5 0 104.5 4.5a7.5 7.5 0 0012.15 12.15z"/>
           </svg>
         </div>
-        <p class="text-gray-500 font-medium">Search for public media</p>
+        <p class="text-gray-500 font-medium">Search for media</p>
         <p class="text-gray-700 text-xs mt-1">Public domain archives, open-source video, and more</p>
       </div>
     </div>
@@ -358,86 +350,93 @@
 </main>
 
 <!-- ── Player Footer ──────────────────────────────────────────────────────── -->
-<footer class="fixed bottom-0 left-0 right-0 z-40 bg-gray-900 border-t border-gray-800">
+<footer class="fixed bottom-0 left-0 right-0 z-40 bg-gray-900 border-t border-gray-800 safe-bottom">
   <!-- Progress bar -->
-  <div class="w-full bg-gray-800 h-0.5">
-    <div id="progressBar" class="h-0.5 bg-indigo-500 transition-all duration-700" style="width:0%"></div>
+  <div class="w-full bg-gray-800 h-1">
+    <div id="progressBar" class="h-1 bg-indigo-500 transition-all duration-700" style="width:0%"></div>
   </div>
-  <!-- Track selectors — visible only while playing -->
+  <!-- Track selectors — only while playing -->
   <div id="trackControls" class="hidden border-b border-gray-800/60">
-    <div class="max-w-5xl mx-auto px-4 py-1.5 flex items-center gap-5 flex-wrap">
-      <div class="flex items-center gap-1.5">
-        <span class="text-[11px] text-gray-600 whitespace-nowrap">Audio</span>
+    <div class="max-w-5xl mx-auto px-3 py-2 flex items-center gap-3">
+      <div class="flex items-center gap-1.5 flex-1 min-w-0">
+        <span class="text-[11px] text-gray-600 whitespace-nowrap flex-shrink-0">🎵</span>
         <select id="audioSelect" onchange="setAudioTrack(this.value)"
-          class="bg-gray-800 border border-gray-700 text-[11px] text-gray-300 rounded-lg px-2 py-0.5
-                 focus:outline-none focus:border-indigo-500 max-w-[180px] cursor-pointer">
+          class="flex-1 min-w-0 bg-gray-800 border border-gray-700 text-xs text-gray-300 rounded-lg px-2 py-1.5
+                 focus:outline-none focus:border-indigo-500 cursor-pointer">
           <option>—</option>
         </select>
       </div>
-      <div class="flex items-center gap-1.5">
-        <span class="text-[11px] text-gray-600 whitespace-nowrap">Subtitles</span>
+      <div class="flex items-center gap-1.5 flex-1 min-w-0">
+        <span class="text-[11px] text-gray-600 whitespace-nowrap flex-shrink-0">💬</span>
         <select id="subtitleSelect" onchange="setSubtitleTrack(this.value)"
-          class="bg-gray-800 border border-gray-700 text-[11px] text-gray-300 rounded-lg px-2 py-0.5
-                 focus:outline-none focus:border-indigo-500 max-w-[180px] cursor-pointer">
+          class="flex-1 min-w-0 bg-gray-800 border border-gray-700 text-xs text-gray-300 rounded-lg px-2 py-1.5
+                 focus:outline-none focus:border-indigo-500 cursor-pointer">
           <option value="-1">Off</option>
         </select>
       </div>
     </div>
   </div>
-  <!-- Main player row -->
-  <div class="max-w-5xl mx-auto px-4 py-2.5 flex items-center gap-3">
+  <!-- Now-playing info row -->
+  <div class="max-w-5xl mx-auto px-3 pt-2.5 pb-1 flex items-center gap-2">
     <div id="playerDot" class="w-2 h-2 rounded-full bg-gray-700 flex-shrink-0"></div>
     <div class="flex-1 min-w-0">
-      <div id="nowPlaying" class="text-sm font-medium text-gray-500 truncate">No active stream</div>
-      <div class="flex items-center gap-3 flex-wrap mt-0.5">
-        <span id="streamInfo" class="text-[11px] text-gray-600"></span>
-        <span id="speedInfo"  class="text-[11px] text-gray-700 font-mono"></span>
+      <div id="nowPlaying" class="text-sm font-semibold text-gray-500 truncate">No active stream</div>
+      <div class="flex items-center gap-2 mt-0.5">
+        <span id="streamInfo" class="text-[11px] text-gray-600 truncate"></span>
+        <span id="speedInfo"  class="text-[11px] text-gray-700 font-mono flex-shrink-0"></span>
       </div>
     </div>
-    <div id="statusBadge" class="hidden text-[11px] font-semibold px-2 py-0.5 rounded-full border flex-shrink-0"></div>
-    <div class="flex items-center gap-0.5 flex-shrink-0">
-      <!-- Skip back -->
-      <button onclick="vlcSeek(-30)" title="Skip back 30s"
-        class="px-1.5 py-2 rounded-lg hover:bg-gray-800 text-gray-600 hover:text-gray-300 transition-all active:scale-95 text-[11px] font-mono leading-none">
-        ‹30
-      </button>
-      <button onclick="vlcSeek(-10)" title="Skip back 10s"
-        class="px-1.5 py-2 rounded-lg hover:bg-gray-800 text-gray-600 hover:text-gray-300 transition-all active:scale-95 text-[11px] font-mono leading-none">
-        ‹10
-      </button>
-      <button onclick="vlcVolume('down')" title="Volume Down"
-        class="p-2 rounded-lg hover:bg-gray-800 text-gray-500 hover:text-gray-200 transition-all active:scale-95">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5L6 9H2v6h4l5 4V5zM15 9a3 3 0 010 6"/>
-        </svg>
-      </button>
-      <button onclick="vlcPause()" title="Pause / Resume"
-        class="p-2 rounded-lg hover:bg-gray-800 text-gray-500 hover:text-gray-200 transition-all active:scale-95">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6"/>
-        </svg>
-      </button>
-      <button onclick="stopStream()" title="Stop"
-        class="p-2 rounded-lg hover:bg-gray-800 text-red-600 hover:text-red-400 transition-all active:scale-95">
-        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="1"/></svg>
-      </button>
-      <button onclick="vlcVolume('up')" title="Volume Up"
-        class="p-2 rounded-lg hover:bg-gray-800 text-gray-500 hover:text-gray-200 transition-all active:scale-95">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M11 5L6 9H2v6h4l5 4V5zM15 9a3 3 0 010 6M18.364 5.636a9 9 0 010 12.728"/>
-        </svg>
-      </button>
-      <!-- Skip forward -->
-      <button onclick="vlcSeek(10)" title="Skip forward 10s"
-        class="px-1.5 py-2 rounded-lg hover:bg-gray-800 text-gray-600 hover:text-gray-300 transition-all active:scale-95 text-[11px] font-mono leading-none">
-        10›
-      </button>
-      <button onclick="vlcSeek(30)" title="Skip forward 30s"
-        class="px-1.5 py-2 rounded-lg hover:bg-gray-800 text-gray-600 hover:text-gray-300 transition-all active:scale-95 text-[11px] font-mono leading-none">
-        30›
-      </button>
-    </div>
+    <div id="statusBadge" class="hidden text-[10px] font-semibold px-2 py-0.5 rounded-full border flex-shrink-0"></div>
+  </div>
+  <!-- Controls row — big touch targets -->
+  <div class="max-w-5xl mx-auto px-1 pb-1 flex items-center justify-around">
+    <button onclick="vlcSeek(-30)" title="−30s"
+      class="flex flex-col items-center justify-center flex-1 py-2.5 rounded-xl
+             text-gray-600 hover:text-gray-300 active:bg-gray-800 transition-all">
+      <span class="text-xs font-bold leading-none">‹30</span>
+    </button>
+    <button onclick="vlcSeek(-10)" title="−10s"
+      class="flex flex-col items-center justify-center flex-1 py-2.5 rounded-xl
+             text-gray-600 hover:text-gray-300 active:bg-gray-800 transition-all">
+      <span class="text-xs font-bold leading-none">‹10</span>
+    </button>
+    <button onclick="vlcVolume('down')" title="Volume −"
+      class="flex items-center justify-center flex-1 py-2.5 rounded-xl
+             text-gray-500 hover:text-gray-200 active:bg-gray-800 transition-all">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5L6 9H2v6h4l5 4V5zM15 9a3 3 0 010 6"/>
+      </svg>
+    </button>
+    <button onclick="vlcPause()" title="Pause / Resume"
+      class="flex items-center justify-center flex-1 py-2.5 rounded-xl
+             text-white active:bg-gray-800 transition-all">
+      <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6"/>
+      </svg>
+    </button>
+    <button onclick="stopStream()" title="Stop"
+      class="flex items-center justify-center flex-1 py-2.5 rounded-xl
+             text-red-600 hover:text-red-400 active:bg-red-950/40 transition-all">
+      <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+    </button>
+    <button onclick="vlcVolume('up')" title="Volume +"
+      class="flex items-center justify-center flex-1 py-2.5 rounded-xl
+             text-gray-500 hover:text-gray-200 active:bg-gray-800 transition-all">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+          d="M11 5L6 9H2v6h4l5 4V5zM15 9a3 3 0 010 6M18.364 5.636a9 9 0 010 12.728"/>
+      </svg>
+    </button>
+    <button onclick="vlcSeek(10)" title="+10s"
+      class="flex flex-col items-center justify-center flex-1 py-2.5 rounded-xl
+             text-gray-600 hover:text-gray-300 active:bg-gray-800 transition-all">
+      <span class="text-xs font-bold leading-none">10›</span>
+    </button>
+    <button onclick="vlcSeek(30)" title="+30s"
+      class="flex flex-col items-center justify-center flex-1 py-2.5 rounded-xl
+             text-gray-600 hover:text-gray-300 active:bg-gray-800 transition-all">
+      <span class="text-xs font-bold leading-none">30›</span>
+    </button>
   </div>
 </footer>
 
@@ -518,12 +517,12 @@ function renderVpn(secure,statusText){
   const detail=document.getElementById("vpnOverlayDetail");
   if(secure){
     dot.className="w-2 h-2 rounded-full bg-green-500 flex-shrink-0 transition-colors";
-    label.className="text-xs font-medium text-green-400 whitespace-nowrap";
+    label.className="text-xs font-medium text-green-400 whitespace-nowrap hidden sm:inline";
     label.textContent="VPN: Connected"; pill.classList.remove("border-red-800");
     overlay.classList.add("hidden");
   } else {
     dot.className="w-2 h-2 rounded-full bg-red-500 flex-shrink-0 transition-colors blink";
-    label.className="text-xs font-medium text-red-400 whitespace-nowrap";
+    label.className="text-xs font-medium text-red-400 whitespace-nowrap hidden sm:inline";
     label.textContent="VPN: DISCONNECTED"; pill.classList.add("border-red-800");
     overlay.classList.remove("hidden");
     if(statusText) detail.textContent=statusText;
@@ -732,35 +731,33 @@ function renderLibrary(items){
       let buttons="";
       if(isReady){
         if(isMulti){
-          // Continue button (from resume hint)
           const contLabel=hasProgress
-            ?`↩ Continue ${resume.episode_name.replace(/\.[^.]+$/,"")} · ${Math.round(pct)}%`
+            ?`↩ ${resume.episode_name.replace(/\.[^.]+$/,"").substring(0,22)}… ${Math.round(pct)}%`
             :`▶ Play All`;
           buttons+=`<button onclick="openEpisodePicker('${item.id}')"
-            class="text-xs bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white
-                   px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap font-medium">
+            class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white
+                   px-3 py-2.5 rounded-xl transition-colors whitespace-nowrap font-medium min-h-[44px]">
             ☰ Episodes
           </button>
           <button onclick="continueLibraryItem('${item.id}')"
-            class="text-xs ${hasProgress?'bg-green-900/50 hover:bg-green-800/60 text-green-300 border border-green-800':'bg-indigo-700 hover:bg-indigo-600 text-white border-0'}
-                   px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap font-medium">
+            class="text-sm ${hasProgress?'bg-green-900/50 hover:bg-green-800/60 text-green-300 border border-green-800':'bg-indigo-700 hover:bg-indigo-600 text-white border-0'}
+                   px-3 py-2.5 rounded-xl transition-colors whitespace-nowrap font-medium min-h-[44px]">
             ${escHtml(contLabel)}
           </button>`;
         } else {
-          // Single-file: resume or play
           if(hasProgress){
             buttons+=`<button onclick="continueLibraryItem('${item.id}')"
-              class="text-xs bg-green-900/50 hover:bg-green-800/60 text-green-300 border border-green-800
-                     px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap font-medium">
+              class="text-sm bg-green-900/50 hover:bg-green-800/60 text-green-300 border border-green-800
+                     px-3 py-2.5 rounded-xl transition-colors whitespace-nowrap font-medium min-h-[44px]">
               ↩ Resume ${Math.round(pct)}%
             </button>
             <button onclick="playLibraryFiles('${item.id}',['${resume.file_path}'],0)"
-              class="text-xs bg-indigo-700 hover:bg-indigo-600 text-white px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap">
+              class="text-sm bg-indigo-700 hover:bg-indigo-600 text-white px-3 py-2.5 rounded-xl transition-colors whitespace-nowrap min-h-[44px]">
               ▶ Restart
             </button>`;
           } else {
             buttons+=`<button onclick="continueLibraryItem('${item.id}')"
-              class="text-xs bg-indigo-700 hover:bg-indigo-600 text-white px-3 py-1.5 rounded-lg transition-colors whitespace-nowrap font-medium">
+              class="text-sm bg-indigo-700 hover:bg-indigo-600 text-white px-4 py-2.5 rounded-xl transition-colors whitespace-nowrap font-medium min-h-[44px]">
               ▶ Play
             </button>`;
           }
@@ -769,7 +766,7 @@ function renderLibrary(items){
 
       // Delete button
       buttons+=`<button onclick="deleteLibraryItem('${item.id}')"
-        class="text-xs text-gray-600 hover:text-red-400 px-2 py-1.5 rounded-lg hover:bg-red-950/30 transition-colors">
+        class="text-gray-600 hover:text-red-400 p-2.5 rounded-xl hover:bg-red-950/30 transition-colors min-h-[44px] min-w-[44px] flex items-center justify-center">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
             d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
@@ -1056,11 +1053,12 @@ function updateDlBadge(count){
 // ── Search ─────────────────────────────────────────────────────────────────
 async function doSearch(q){
   q=q.trim(); if(!q) return;
-  const btn=document.getElementById("searchBtn"),tbody=document.getElementById("resultsTbody");
+  const btn=document.getElementById("searchBtn");
+  const grid=document.getElementById("resultsGrid");
   const wrap=document.getElementById("resultsWrap"),empty=document.getElementById("emptyState");
   const count=document.getElementById("resultCount");
-  btn.disabled=true; btn.textContent="Searching…";
-  tbody.innerHTML=""; wrap.classList.add("hidden"); empty.classList.add("hidden"); hideAlert();
+  btn.disabled=true; btn.textContent="…";
+  grid.innerHTML=""; wrap.classList.add("hidden"); empty.classList.add("hidden"); hideAlert();
   try{
     const r=await fetch(`/api/search?q=${encodeURIComponent(q)}`);
     if(!r.ok){ const e=await r.json().catch(()=>({detail:"Search failed"})); throw new Error(e.detail||`HTTP ${r.status}`); }
@@ -1077,42 +1075,45 @@ async function doSearch(q){
       return;
     }
     items.forEach((item,i)=>{
-      const tr=document.createElement("tr");
-      tr.className="result-row group bg-gray-950 hover:bg-gray-900 transition-colors";
-      tr.style.animationDelay=`${i*18}ms`;
+      const card=document.createElement("div");
+      card.className="result-row bg-gray-900 border border-gray-800 rounded-2xl p-4 transition-colors";
+      card.style.animationDelay=`${i*18}ms`;
       const sc=item.seeders>30?"text-green-400":item.seeders>8?"text-yellow-400":"text-red-400";
-      tr.innerHTML=`
-        <td class="px-4 py-3 max-w-[220px] sm:max-w-xs">
-          <span class="block truncate text-gray-300 group-hover:text-white text-xs sm:text-sm transition-colors" title="${escHtml(item.title)}">${escHtml(item.title)}</span>
-          ${item.tracker?`<span class="text-[10px] text-gray-700">${escHtml(item.tracker)}</span>`:""}
-        </td>
-        <td class="px-4 py-3 text-right text-xs text-gray-500 whitespace-nowrap hidden sm:table-cell">${escHtml(item.size_human)}</td>
-        <td class="px-4 py-3 text-right text-xs font-mono ${sc} whitespace-nowrap">${item.seeders}</td>
-        <td class="px-4 py-3 text-right text-xs text-gray-700 whitespace-nowrap hidden md:table-cell">${item.peers}</td>
-        <td class="px-4 py-3 text-right">
-          <div class="flex items-center gap-1.5 justify-end">
-            <button class="dl-btn text-[11px] bg-green-900/40 hover:bg-green-900/70 border border-green-800/60
-                           text-green-400 hover:text-green-200 px-2.5 py-1.5 rounded-lg transition-all
-                           active:scale-95 whitespace-nowrap flex items-center gap-1"
-              data-magnet="${escHtml(item.magnet)}" data-title="${escHtml(item.title)}">
-              <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2.5"
-                  d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
-              </svg>Save
-            </button>
-            <button class="play-btn bg-indigo-600 hover:bg-indigo-500 active:scale-95 text-white
-                           text-xs font-semibold px-3.5 py-1.5 rounded-lg transition-all
-                           disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap"
-              data-magnet="${escHtml(item.magnet)}" data-title="${escHtml(item.title)}">▶ Play</button>
-          </div>
-        </td>`;
-      tr.querySelector(".play-btn").addEventListener("click",e=>{
+      card.innerHTML=`
+        <p class="text-sm font-semibold text-gray-200 leading-snug mb-1 line-clamp-2">${escHtml(item.title)}</p>
+        <div class="flex items-center gap-2 mb-3 flex-wrap">
+          <span class="text-xs text-gray-500">${escHtml(item.size_human)}</span>
+          <span class="text-gray-700">·</span>
+          <span class="text-xs font-mono font-semibold ${sc}">${item.seeders} ↑</span>
+          ${item.peers?`<span class="text-gray-700">·</span><span class="text-xs text-gray-700">${item.peers} peers</span>`:""}
+          ${item.tracker?`<span class="text-gray-700">·</span><span class="text-[11px] text-gray-700 truncate max-w-[120px]">${escHtml(item.tracker)}</span>`:""}
+        </div>
+        <div class="flex gap-2">
+          <button class="dl-btn flex-1 flex items-center justify-center gap-1.5
+                         bg-gray-800 hover:bg-gray-700 border border-gray-700
+                         text-gray-300 hover:text-white text-sm font-medium
+                         py-3 rounded-xl transition-all active:scale-95"
+            data-magnet="${escHtml(item.magnet)}" data-title="${escHtml(item.title)}">
+            <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+            </svg>Save
+          </button>
+          <button class="play-btn flex-1 flex items-center justify-center gap-1.5
+                         bg-indigo-600 hover:bg-indigo-500 text-white
+                         text-sm font-semibold py-3 rounded-xl transition-all active:scale-95
+                         disabled:opacity-40 disabled:cursor-not-allowed"
+            data-magnet="${escHtml(item.magnet)}" data-title="${escHtml(item.title)}">
+            ▶ Play
+          </button>
+        </div>`;
+      card.querySelector(".play-btn").addEventListener("click",e=>{
         const b=e.currentTarget; playItem(b.dataset.magnet,b.dataset.title,b);
       });
-      tr.querySelector(".dl-btn").addEventListener("click",e=>{
+      card.querySelector(".dl-btn").addEventListener("click",e=>{
         const b=e.currentTarget; openDownloadModal(b.dataset.magnet,b.dataset.title);
       });
-      tbody.appendChild(tr);
+      grid.appendChild(card);
     });
     wrap.classList.remove("hidden");
   } catch(err){
