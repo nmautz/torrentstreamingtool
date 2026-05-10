@@ -134,6 +134,7 @@ class AppState:
     current_subtitle_track: int = -1                      # last track ID sent to VLC
     vlc_time: int = 0                                     # VLC current position (seconds)
     vlc_duration: int = 0                                 # VLC total duration (seconds)
+    vlc_volume: int = 100                                 # VLC volume 0-200 (100 = normal)
     prepare_hash: Optional[str] = None                    # hash added by /stream/prepare, pending user selection
     sse_queues: list = field(default_factory=list)
 
@@ -170,6 +171,7 @@ def state_snapshot() -> dict:
         "downloading_count": state.downloading_count,
         "vlc_time": state.vlc_time,
         "vlc_duration": state.vlc_duration,
+        "vlc_volume": state.vlc_volume,
     }
 
 
@@ -508,6 +510,7 @@ async def stat_broadcaster() -> None:
             if vs:
                 state.vlc_time = int(vs.get("time", 0))
                 state.vlc_duration = int(vs.get("length", 0))
+                state.vlc_volume = round(int(vs.get("volume", 256)) / 256 * 100)
         await broadcast("state", state_snapshot())
         await asyncio.sleep(2)
 
@@ -515,9 +518,9 @@ async def stat_broadcaster() -> None:
 # ── Background Task: Library Download Monitor ─────────────────────────────────
 
 async def library_download_monitor() -> None:
-    """Poll qBit every 10 s for pending library downloads and mark them complete."""
+    """Poll qBit every 5 s for pending library downloads and mark them complete."""
     while True:
-        await asyncio.sleep(10)
+        await asyncio.sleep(5)
         try:
             lib = await get_library()
             pending = [it for it in lib["items"] if it.get("status") == "downloading"]
@@ -553,6 +556,16 @@ async def library_download_monitor() -> None:
                     changed = True
                     await broadcast("library_update", {"item_id": item["id"], "status": "error"})
                 else:
+                    # Still downloading — push live stats to the UI
+                    eta = info.get("eta", 8640000)
+                    await broadcast("library_progress", {
+                        "item_id": item["id"],
+                        "speed_bps": info.get("dlspeed", 0),
+                        "downloaded_bytes": info.get("completed", 0),
+                        "total_bytes": info.get("size", 0),
+                        "progress_pct": round(info.get("completed", 0) / max(info.get("size", 1), 1) * 100, 1),
+                        "eta_secs": eta if eta < 8640000 else -1,
+                    })
                     changed = True  # file list updated
 
             if changed:
@@ -1234,6 +1247,15 @@ async def stop() -> JSONResponse:
 @app.post("/api/vlc/pause")
 async def pause() -> JSONResponse:
     await vlc("pl_pause")
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/vlc/volume/set")
+async def volume_set(volume: int) -> JSONResponse:
+    # volume is 0-200 (100 = normal); VLC uses 0-512 (256 = 100%)
+    raw = max(0, min(512, round(volume / 100 * 256)))
+    await vlc("volume", val=str(raw))
+    state.vlc_volume = max(0, min(200, volume))
     return JSONResponse({"ok": True})
 
 

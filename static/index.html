@@ -384,12 +384,21 @@
 
 <!-- ── Player Footer ──────────────────────────────────────────────────────── -->
 <footer class="fixed bottom-0 left-0 right-0 z-40 bg-gray-900 border-t border-gray-800 safe-bottom">
-  <!-- Seek bar — taller touch target, clickable for absolute seek -->
-  <div id="seekBarWrapper" class="w-full py-1.5 cursor-pointer group"
-       onclick="handleSeekBarClick(event, this)" style="touch-action:none;">
+  <!-- Seek bar — taller touch target, clickable for absolute seek, tooltip on hover/scrub -->
+  <div id="seekBarWrapper" class="relative w-full py-1.5 cursor-pointer group"
+       onclick="handleSeekBarClick(event, this)"
+       onmousemove="handleSeekBarHover(event, this)"
+       onmouseleave="handleSeekBarLeave()"
+       ontouchmove="handleSeekBarHover(event, this);handleSeekBarClick(event, this)"
+       ontouchend="handleSeekBarLeave()"
+       style="touch-action:none;">
     <div class="w-full bg-gray-800 h-1 group-active:h-1.5 transition-all">
       <div id="progressBar" class="h-full bg-indigo-500 transition-all duration-700 pointer-events-none" style="width:0%"></div>
     </div>
+    <div id="seekTooltip"
+         class="hidden absolute -top-8 bg-gray-800 border border-gray-700 text-[11px] font-mono
+                text-gray-200 px-2 py-0.5 rounded pointer-events-none -translate-x-1/2 whitespace-nowrap shadow-lg"
+         style="left:50%"></div>
   </div>
   <!-- Track selectors — only while playing -->
   <div id="trackControls" class="hidden border-b border-gray-800/60">
@@ -437,13 +446,19 @@
              text-gray-600 hover:text-gray-300 active:bg-gray-800 transition-all">
       <span class="text-xs font-bold leading-none">‹10</span>
     </button>
-    <button onclick="vlcVolume('down')" title="Volume −"
-      class="flex items-center justify-center flex-1 py-2.5 rounded-xl
-             text-gray-500 hover:text-gray-200 active:bg-gray-800 transition-all">
-      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+    <!-- Volume slider (replaces up/down buttons) -->
+    <div class="flex items-center gap-1 flex-[2] px-1 py-1.5">
+      <svg class="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5L6 9H2v6h4l5 4V5zM15 9a3 3 0 010 6"/>
       </svg>
-    </button>
+      <input type="range" id="volumeSlider" min="0" max="200" value="100"
+        class="flex-1 h-1 rounded-full appearance-none cursor-pointer accent-indigo-500"
+        oninput="vlcSetVolume(this.value)" style="min-width:0">
+      <svg class="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+          d="M11 5L6 9H2v6h4l5 4V5zM15 9a3 3 0 010 6M18.364 5.636a9 9 0 010 12.728"/>
+      </svg>
+    </div>
     <button onclick="vlcPause()" title="Pause / Resume"
       class="flex items-center justify-center flex-1 py-2.5 rounded-xl
              text-white active:bg-gray-800 transition-all">
@@ -456,14 +471,6 @@
              text-red-600 hover:text-red-400 active:bg-red-950/40 transition-all">
       <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
     </button>
-    <button onclick="vlcVolume('up')" title="Volume +"
-      class="flex items-center justify-center flex-1 py-2.5 rounded-xl
-             text-gray-500 hover:text-gray-200 active:bg-gray-800 transition-all">
-      <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-          d="M11 5L6 9H2v6h4l5 4V5zM15 9a3 3 0 010 6M18.364 5.636a9 9 0 010 12.728"/>
-      </svg>
-    </button>
     <button onclick="vlcSeek(10)" title="+10s"
       class="flex flex-col items-center justify-center flex-1 py-2.5 rounded-xl
              text-gray-600 hover:text-gray-300 active:bg-gray-800 transition-all">
@@ -474,8 +481,126 @@
              text-gray-600 hover:text-gray-300 active:bg-gray-800 transition-all">
       <span class="text-xs font-bold leading-none">30›</span>
     </button>
+    <button onclick="openFullscreenControls()" id="fullscreenBtn" title="Fullscreen controls"
+      class="flex items-center justify-center flex-1 py-2.5 rounded-xl
+             text-gray-600 hover:text-gray-300 active:bg-gray-800 transition-all">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+          d="M4 8V4m0 0h4M4 4l5 5m11-5h-4m4 0v4m0-4l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"/>
+      </svg>
+    </button>
   </div>
 </footer>
+
+<!-- ── Fullscreen Player Controls ──────────────────────────────────────────── -->
+<div id="fullscreenControls"
+  class="hidden fixed inset-0 z-50 bg-gray-950/97 backdrop-blur-md flex flex-col">
+
+  <!-- Header bar -->
+  <div class="flex items-center justify-between px-5 pt-6 pb-2 flex-shrink-0">
+    <button onclick="closeFullscreenControls()"
+      class="w-10 h-10 flex items-center justify-center rounded-xl text-gray-500
+             hover:text-white hover:bg-gray-800 transition-all text-lg">✕</button>
+    <span class="text-[11px] uppercase tracking-widest text-gray-600 font-semibold">Now Playing</span>
+    <div class="w-10"></div>
+  </div>
+
+  <!-- Title -->
+  <div class="px-8 pb-2 flex-shrink-0 text-center">
+    <div id="fcTitle" class="text-lg font-bold text-gray-100 leading-snug line-clamp-2"></div>
+    <div id="fcStatus" class="text-xs text-gray-600 mt-1"></div>
+  </div>
+
+  <!-- Main area — grows to fill screen -->
+  <div class="flex-1 flex flex-col items-center justify-center px-6 gap-6 min-h-0">
+
+    <!-- Time display -->
+    <div id="fcTime" class="text-2xl font-mono font-bold text-gray-300 tabular-nums"></div>
+
+    <!-- Seek bar (full width, taller) -->
+    <div class="relative w-full py-4 cursor-pointer group"
+         onclick="handleSeekBarClick(event, this)"
+         onmousemove="handleSeekBarHover(event, this)"
+         onmouseleave="handleSeekBarLeave()"
+         ontouchmove="handleSeekBarHover(event, this);handleSeekBarClick(event, this)"
+         ontouchend="handleSeekBarLeave()"
+         style="touch-action:none;">
+      <div class="w-full bg-gray-800 h-2 rounded-full group-active:h-3 transition-all">
+        <div id="fcProgressBar" class="h-full bg-indigo-500 rounded-full transition-all duration-700 pointer-events-none" style="width:0%"></div>
+      </div>
+      <div id="fcSeekTooltip"
+           class="hidden absolute -top-8 bg-gray-800 border border-gray-700 text-[12px] font-mono
+                  text-gray-200 px-2 py-0.5 rounded pointer-events-none -translate-x-1/2 whitespace-nowrap shadow-lg"
+           style="left:50%"></div>
+    </div>
+
+    <!-- Skip buttons + big pause/play -->
+    <div class="flex items-center justify-center gap-6 w-full">
+      <button onclick="vlcSeek(-30)"
+        class="flex flex-col items-center gap-1 text-gray-500 hover:text-gray-200 active:scale-90 transition-all px-4 py-2">
+        <svg class="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 5V3m0 2a7 7 0 100 14 7 7 0 000-14zm-4 7l4-3v6l-4-3z"/>
+        </svg>
+        <span class="text-[10px] font-bold">30s</span>
+      </button>
+      <button onclick="vlcSeek(-10)"
+        class="flex flex-col items-center gap-1 text-gray-400 hover:text-gray-200 active:scale-90 transition-all px-3 py-2">
+        <svg class="w-9 h-9" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 5V3m0 2a7 7 0 100 14 7 7 0 000-14zm-4 7l4-3v6l-4-3z"/>
+        </svg>
+        <span class="text-[10px] font-bold">10s</span>
+      </button>
+      <!-- Big pause/play -->
+      <button onclick="vlcPause()" id="fcPauseBtn"
+        class="w-20 h-20 rounded-full bg-indigo-600 hover:bg-indigo-500 active:scale-90
+               flex items-center justify-center text-white shadow-lg shadow-indigo-900/40 transition-all">
+        <svg class="w-9 h-9" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6"/>
+        </svg>
+      </button>
+      <button onclick="vlcSeek(10)"
+        class="flex flex-col items-center gap-1 text-gray-400 hover:text-gray-200 active:scale-90 transition-all px-3 py-2">
+        <svg class="w-9 h-9" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 5V3m0 2a7 7 0 100 14 7 7 0 000-14zm4-4l-4 3v-6l4 3z"/>
+        </svg>
+        <span class="text-[10px] font-bold">10s</span>
+      </button>
+      <button onclick="vlcSeek(30)"
+        class="flex flex-col items-center gap-1 text-gray-500 hover:text-gray-200 active:scale-90 transition-all px-4 py-2">
+        <svg class="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 5V3m0 2a7 7 0 100 14 7 7 0 000-14zm4-4l-4 3v-6l4 3z"/>
+        </svg>
+        <span class="text-[10px] font-bold">30s</span>
+      </button>
+    </div>
+
+    <!-- Volume slider -->
+    <div class="flex items-center gap-3 w-full max-w-sm">
+      <svg class="w-5 h-5 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5L6 9H2v6h4l5 4V5zM15 9a3 3 0 010 6"/>
+      </svg>
+      <input type="range" id="fcVolumeSlider" min="0" max="200" value="100"
+        class="flex-1 accent-indigo-500 cursor-pointer"
+        oninput="vlcSetVolume(this.value)">
+      <svg class="w-5 h-5 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+          d="M11 5L6 9H2v6h4l5 4V5zM15 9a3 3 0 010 6M18.364 5.636a9 9 0 010 12.728"/>
+      </svg>
+      <span id="fcVolumeLabel" class="text-xs font-mono text-gray-600 w-10 text-right flex-shrink-0">100%</span>
+    </div>
+
+    <!-- Stop -->
+    <button onclick="stopStream();closeFullscreenControls()"
+      class="flex items-center gap-2 px-6 py-2.5 rounded-xl border border-red-900/60
+             text-red-500 hover:text-red-300 hover:bg-red-950/40 transition-all text-sm font-medium">
+      <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
+      Stop Playback
+    </button>
+  </div>
+
+  <!-- Bottom safe area -->
+  <div class="flex-shrink-0 safe-bottom h-4"></div>
+</div>
 
 <!-- ── JavaScript ─────────────────────────────────────────────────────────── -->
 <script>
@@ -496,7 +621,9 @@ let app = {
   vpn_secure:true, vpn_status:"Checking…", stream_status:"idle",
   active_title:null, progress:0, downloaded_mb:0, total_mb:0,
   dl_speed_bps:0, ul_speed_bps:0,
+  vlc_time:0, vlc_duration:0, vlc_volume:100,
 };
+const libDownloadStats = new Map(); // item_id → latest library_progress payload
 let profile      = { id:"", name:"", color:"indigo" };
 let allProfiles  = [];
 let activeTab    = "search";
@@ -532,6 +659,13 @@ function fmtTimeSecs(sec) {
   return `${m}:${String(s).padStart(2,"0")}`;
 }
 function avatarBg(c) { return (PROFILE_COLORS[c]||PROFILE_COLORS.indigo).bg; }
+function formatDlStat(d){
+  const parts=[];
+  if(d.total_bytes>0) parts.push(`${fmtSize(d.downloaded_bytes)} / ${fmtSize(d.total_bytes)} (${d.progress_pct}%)`);
+  if(d.speed_bps>0) parts.push(`↓ ${fmtSpeed(d.speed_bps)}`);
+  if(d.eta_secs>0) parts.push(`ETA ${fmtTime(d.eta_secs)}`);
+  return parts.join(" · ");
+}
 function pad2(n)      { return String(n).padStart(2,"0"); }
 function epLabel(f)   {
   if(f.season && f.episode) return `S${pad2(f.season)}E${pad2(f.episode)}`;
@@ -620,12 +754,41 @@ function renderPlayer(s){
     si.textContent=`${s.downloaded_mb.toFixed(1)} / ${s.total_mb.toFixed(1)} MB`;
   else if(!isPlaying) si.textContent="";
 
-  // VLC time display
-  if(hasVlcTime){
-    td.textContent=`${fmtTimeSecs(s.vlc_time)} / ${fmtTimeSecs(s.vlc_duration)}`;
+  // VLC time display — show whenever we have a playback position
+  const hasVlcPos=isPlaying&&(s.vlc_time||0)>0;
+  if(hasVlcPos){
+    td.textContent=(s.vlc_duration||0)>0
+      ?`${fmtTimeSecs(s.vlc_time)} / ${fmtTimeSecs(s.vlc_duration)}`
+      :fmtTimeSecs(s.vlc_time);
     td.classList.remove("hidden");
-    si.textContent="";
+    if(hasVlcTime) si.textContent="";
   } else { td.classList.add("hidden"); }
+
+  // Sync volume slider (don't move while user is dragging)
+  const vol=s.vlc_volume??100;
+  const vs=document.getElementById("volumeSlider");
+  if(vs&&document.activeElement!==vs) vs.value=vol;
+  const fvs=document.getElementById("fcVolumeSlider");
+  if(fvs&&document.activeElement!==fvs) fvs.value=vol;
+  const fvl=document.getElementById("fcVolumeLabel");
+  if(fvl) fvl.textContent=`${vol}%`;
+
+  // Fullscreen controls live sync (only pays the DOM cost when overlay is open)
+  const fc=document.getElementById("fullscreenControls");
+  if(!fc.classList.contains("hidden")){
+    const fct=document.getElementById("fcTime");
+    if(fct) fct.textContent=hasVlcPos
+      ?((s.vlc_duration||0)>0?`${fmtTimeSecs(s.vlc_time)} / ${fmtTimeSecs(s.vlc_duration)}`:fmtTimeSecs(s.vlc_time))
+      :"";
+    const fcpb=document.getElementById("fcProgressBar");
+    if(fcpb) fcpb.style.width=`${barPct}%`;
+    const fcst=document.getElementById("fcStatus");
+    if(fcst) fcst.textContent=s.stream_status==="buffering"?"Buffering…":s.stream_status==="playing"?"▶ Playing":"";
+    const fct2=document.getElementById("fcTitle");
+    if(fct2&&s.active_title) fct2.textContent=s.active_title;
+    // Hide fullscreen overlay if stream becomes idle
+    if(s.stream_status==="idle") closeFullscreenControls();
+  }
 
   sp.textContent=(s.dl_speed_bps>0&&s.stream_status!=="idle")?`▼ ${fmtSpeed(s.dl_speed_bps)}  ▲ ${fmtSpeed(s.ul_speed_bps)}`:"";
   if(s.stream_status in BADGE){
@@ -647,11 +810,80 @@ function renderPlayer(s){
 function handleSeekBarClick(e, el){
   if(app.stream_status!=="playing") return;
   const rect=el.getBoundingClientRect();
-  const x=(e.touches?e.touches[0].clientX:e.clientX)-rect.left;
+  const cx=e.touches?e.touches[0].clientX:e.clientX;
+  const x=cx-rect.left;
   const pct=Math.max(0,Math.min(100,(x/rect.width)*100));
   fetch(`/api/vlc/seek/to?position_pct=${pct.toFixed(1)}`,{method:"POST"}).catch(()=>{});
-  // Optimistic update
   document.getElementById("progressBar").style.width=pct+"%";
+  const fcpb=document.getElementById("fcProgressBar");
+  if(fcpb) fcpb.style.width=pct+"%";
+}
+
+function _seekTooltipPct(e, el){
+  const rect=el.getBoundingClientRect();
+  const cx=e.touches?e.touches[0].clientX:e.clientX;
+  return Math.max(0,Math.min(100,(cx-rect.left)/rect.width*100));
+}
+
+function _showSeekTooltip(tooltipEl, pct, el){
+  if(!tooltipEl) return;
+  const dur=app.vlc_duration||0;
+  tooltipEl.textContent=dur>0?fmtTimeSecs(Math.round(pct/100*dur)):`${pct.toFixed(0)}%`;
+  // Clamp left so tooltip never overflows bar
+  const half=tooltipEl.offsetWidth/2;
+  const barW=el.getBoundingClientRect().width;
+  const left=Math.max(half, Math.min(barW-half, pct/100*barW));
+  tooltipEl.style.left=left+"px";
+  tooltipEl.classList.remove("hidden");
+}
+
+function handleSeekBarHover(e, el){
+  if(app.stream_status!=="playing") return;
+  const pct=_seekTooltipPct(e,el);
+  // Show on both the footer bar and fc bar — determine which one we're hovering
+  const tip=el.closest("#fullscreenControls")
+    ?document.getElementById("fcSeekTooltip")
+    :document.getElementById("seekTooltip");
+  _showSeekTooltip(tip, pct, el);
+}
+
+function handleSeekBarLeave(){
+  document.getElementById("seekTooltip")?.classList.add("hidden");
+  document.getElementById("fcSeekTooltip")?.classList.add("hidden");
+}
+
+async function vlcSetVolume(val){
+  val=Math.max(0,Math.min(200,parseInt(val,10)));
+  const fvl=document.getElementById("fcVolumeLabel");
+  if(fvl) fvl.textContent=val+"%";
+  await fetch(`/api/vlc/volume/set?volume=${val}`,{method:"POST"}).catch(()=>{});
+}
+
+function openFullscreenControls(){
+  const fc=document.getElementById("fullscreenControls");
+  // Populate title and current state immediately
+  const title=document.getElementById("fcTitle");
+  if(title) title.textContent=app.active_title||"";
+  const fcst=document.getElementById("fcStatus");
+  if(fcst) fcst.textContent=app.stream_status==="buffering"?"Buffering…":app.stream_status==="playing"?"Playing":"";
+  const fct=document.getElementById("fcTime");
+  const dur=app.vlc_duration||0, t=app.vlc_time||0;
+  if(fct) fct.textContent=(t>0)?(dur>0?`${fmtTimeSecs(t)} / ${fmtTimeSecs(dur)}`:fmtTimeSecs(t)):"";
+  const fcpb=document.getElementById("fcProgressBar");
+  if(fcpb){
+    const barPct=dur>0?(t/dur*100):Math.min(100,app.progress||0);
+    fcpb.style.width=`${barPct}%`;
+  }
+  const vol=app.vlc_volume??100;
+  const fvs=document.getElementById("fcVolumeSlider");
+  if(fvs) fvs.value=vol;
+  const fvl=document.getElementById("fcVolumeLabel");
+  if(fvl) fvl.textContent=vol+"%";
+  fc.classList.remove("hidden");
+}
+
+function closeFullscreenControls(){
+  document.getElementById("fullscreenControls").classList.add("hidden");
 }
 
 // ── Tabs ───────────────────────────────────────────────────────────────────
@@ -874,6 +1106,10 @@ function renderLibrary(items){
         item.size_bytes>0?item.size_human:"",
       ].filter(Boolean).join(" · ");
 
+      const dlStat=isDownloading&&libDownloadStats.has(item.id)
+        ?`<div id="dl-stat-${item.id}" class="text-[11px] text-gray-500 font-mono mt-0.5">${formatDlStat(libDownloadStats.get(item.id))}</div>`
+        :isDownloading?`<div id="dl-stat-${item.id}" class="text-[11px] text-gray-500 font-mono mt-0.5"></div>`
+        :"";
       html+=`<div class="bg-gray-900 border border-gray-800 rounded-xl px-4 py-3 flex flex-col gap-2" data-item-id="${item.id}">
         <div class="min-w-0">
           <div class="flex items-center gap-2 flex-wrap">
@@ -881,6 +1117,7 @@ function renderLibrary(items){
             ${statusBadge}
           </div>
           <div class="text-[11px] text-gray-600 mt-0.5">${escHtml(meta)}</div>
+          ${dlStat}
           ${progBar}
         </div>
         ${buttons?"<div class='flex items-center gap-2'>"+buttons+"</div>":""}
@@ -1460,8 +1697,17 @@ function connectSSE(){
     if(d.status==="playing") showAlert(`Now playing in VLC: ${d.message}`,"success");
     if(d.status==="idle")    hideAlert();
   });
+  es.addEventListener("library_progress",e=>{
+    const d=JSON.parse(e.data||"{}");
+    if(!d.item_id) return;
+    libDownloadStats.set(d.item_id, d);
+    const el=document.getElementById(`dl-stat-${d.item_id}`);
+    if(el) el.textContent=formatDlStat(d);
+  });
   es.addEventListener("library_update",e=>{
     const d=JSON.parse(e.data||"{}");
+    // Clear cached stats for items that finished
+    if(d.item_id&&(d.status==="ready"||d.status==="error")) libDownloadStats.delete(d.item_id);
     // Always refresh if on library tab; otherwise just update the badge via next state event
     if(activeTab==="library") loadLibrary();
     // If an item just became ready, decrement the local badge immediately (state event confirms it)
@@ -1483,6 +1729,7 @@ function connectSSE(){
 // ── Keyboard shortcuts ─────────────────────────────────────────────────────
 document.addEventListener("keydown",e=>{
   if(e.key==="Escape"){
+    closeFullscreenControls();
     closeDownloadModal(); closeProfileModal(); closeEpisodeModal();
     closeStreamPicker(true);
     const pp=document.getElementById("profilePicker");
