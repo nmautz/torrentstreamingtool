@@ -1152,6 +1152,11 @@ async def stream_prepare(req: StreamPrepareReq) -> JSONResponse:
     if not state.vpn_secure:
         raise HTTPException(403, "VPN not connected — streaming blocked.")
 
+    # Clean up any previous prepare torrent that the user didn't explicitly cancel
+    if state.prepare_hash:
+        await qbit_delete(state.prepare_hash, delete_files=True)
+        state.prepare_hash = None
+
     h = await qbit_add_magnet(req.magnet)
     if not h:
         raise HTTPException(500, "qBittorrent rejected the magnet.")
@@ -1207,11 +1212,16 @@ async def stream_now(req: StreamReq) -> JSONResponse:
 
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
-        if state.active_hash and not state.library_item_id:
-            await qbit_delete(state.active_hash)
 
-    # The prepare hash is now the active stream — clear the prepare slot
-    if req.torrent_hash and state.prepare_hash == req.torrent_hash:
+    # Delete old torrent whether the previous task was still running or already done
+    if state.active_hash and not state.library_item_id:
+        await qbit_delete(state.active_hash)
+
+    # Clean up orphaned prepare torrent that isn't the one being started now
+    if state.prepare_hash and state.prepare_hash != req.torrent_hash:
+        await qbit_delete(state.prepare_hash, delete_files=True)
+        state.prepare_hash = None
+    elif req.torrent_hash and state.prepare_hash == req.torrent_hash:
         state.prepare_hash = None
 
     state.active_hash = None
