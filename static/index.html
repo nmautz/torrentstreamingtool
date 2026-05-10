@@ -1368,7 +1368,7 @@ function renderLibrary(items){
   groups.forEach(({label,items:gItems},key)=>{
     if(label){
       // "Analyze Intros" button — only for proper series groups with 2+ ready files
-      const isSeries=!key.startsWith("\x00");
+      const isSeries=gItems.some(it=>!!it.series);
       const readyFiles=gItems.filter(it=>it.status==="ready").reduce((s,it)=>s+(it.file_count||0),0);
       const hasSegs=gItems.some(it=>it.has_skip_segments);
       const isAnalyzing=app.analyzing_series===label;

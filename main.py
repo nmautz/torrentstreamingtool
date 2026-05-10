@@ -929,7 +929,7 @@ async def run_fpcalc(file_path: str, length: int = 600) -> Optional[dict]:
         return None
     try:
         proc = await asyncio.create_subprocess_exec(
-            "fpcalc", "-json", "-length", str(length), file_path,
+            "fpcalc", "-json", "-raw", "-length", str(length), file_path,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
         )
