@@ -15,9 +15,10 @@
 
 ## Milestone 2 — Player Enhancements *(frontend + minor backend)*
 
-- [ ] **2.1** Add Next / Previous episode buttons in the player footer
-- [ ] **2.2** Highlight "currently playing" episode in the Episode Picker modal (poll VLC filename via state)
-- [ ] **2.3** Playback Fix: "Play" on a specific episode selection reliably starts that file
+- [x] **2.1** Add Next / Previous episode buttons in the player footer
+- [x] **2.2** Highlight "currently playing" episode in the Episode Picker modal (poll VLC filename via state)
+- [x] **2.3** Playback Fix: "Play" on a specific episode selection reliably starts that file
+  - ⚠️ **Restart button not visible in testing** — button only renders for single-file items that have >3 % watch progress saved for the active profile. Multi-episode items and unwatched items don't show it. Needs investigation: should the button appear under broader conditions (e.g. always for ready single-file items, or for the first file in a multi-episode item)? Defer to a later pass.
 
 ---
 

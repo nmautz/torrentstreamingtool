@@ -158,6 +158,12 @@ async def broadcast(event: str, data: dict) -> None:
 
 
 def state_snapshot() -> dict:
+    playlist = state.library_playlist
+    current  = state.library_current_file
+    try:
+        cur_idx = playlist.index(current) if (current and current in playlist) else -1
+    except (ValueError, AttributeError):
+        cur_idx = -1
     return {
         "vpn_secure": state.vpn_secure,
         "vpn_status": state.vpn_status_text,
@@ -172,6 +178,9 @@ def state_snapshot() -> dict:
         "vlc_time": state.vlc_time,
         "vlc_duration": state.vlc_duration,
         "vlc_volume": state.vlc_volume,
+        "library_playlist_count": len(playlist),
+        "library_current_index": cur_idx,
+        "library_current_file": current,
     }
 
 
@@ -1280,6 +1289,60 @@ async def seek_to(position_pct: float) -> JSONResponse:
     """Seek to an absolute position (0–100 %)."""
     pct = max(0.0, min(100.0, position_pct))
     await vlc("seek", val=f"{pct:.2f}%")
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/vlc/prev")
+async def vlc_prev() -> JSONResponse:
+    """Jump to the previous file in the active library playlist."""
+    playlist = state.library_playlist
+    current  = state.library_current_file
+    if not playlist:
+        raise HTTPException(400, "No active playlist.")
+    try:
+        idx = playlist.index(current) if current else 0
+    except ValueError:
+        idx = 0
+    prev_idx = idx - 1
+    if prev_idx < 0:
+        raise HTTPException(400, "Already at first item.")
+    prev_file = playlist[prev_idx]
+    if not Path(prev_file).exists():
+        raise HTTPException(400, f"File not found: {Path(prev_file).name}")
+    state.library_current_file = prev_file
+    state.current_audio_track = -1
+    state.current_subtitle_track = -1
+    await vlc("in_play", input=Path(prev_file).resolve().as_uri())
+    for p in playlist[prev_idx + 1:]:
+        await vlc("in_enqueue", input=Path(p).resolve().as_uri())
+    await broadcast("stream_status", {"status": "playing", "message": f"Playing: {Path(prev_file).name}"})
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/vlc/next")
+async def vlc_next() -> JSONResponse:
+    """Jump to the next file in the active library playlist."""
+    playlist = state.library_playlist
+    current  = state.library_current_file
+    if not playlist:
+        raise HTTPException(400, "No active playlist.")
+    try:
+        idx = playlist.index(current) if current else -1
+    except ValueError:
+        idx = -1
+    next_idx = idx + 1
+    if next_idx >= len(playlist):
+        raise HTTPException(400, "Already at last item.")
+    next_file = playlist[next_idx]
+    if not Path(next_file).exists():
+        raise HTTPException(400, f"File not found: {Path(next_file).name}")
+    state.library_current_file = next_file
+    state.current_audio_track = -1
+    state.current_subtitle_track = -1
+    await vlc("in_play", input=Path(next_file).resolve().as_uri())
+    for p in playlist[next_idx + 1:]:
+        await vlc("in_enqueue", input=Path(p).resolve().as_uri())
+    await broadcast("stream_status", {"status": "playing", "message": f"Playing: {Path(next_file).name}"})
     return JSONResponse({"ok": True})
 
 
