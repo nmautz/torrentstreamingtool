@@ -803,7 +803,10 @@ let app = {
   library_playlist_count:0, library_current_index:-1, library_current_file:null,
   is_library_playback:false,
   play_when_ready_item_id:null,
+  play_when_ready_file_path:null,
 };
+const expandedDownloads=new Set();   // item IDs whose file lists are currently expanded
+const downloadFilesData=new Map();   // item_id → files array (cached from /files endpoint)
 const libDownloadStats = new Map(); // item_id → latest library_progress payload
 let profile      = { id:"", name:"", color:"indigo" };
 let allProfiles  = [];
@@ -1230,6 +1233,10 @@ async function loadLibrary(){
     loadDiskSpace(),
   ]);
   renderLibrary((await libRes.json()).items||[]);
+  // Re-expand any file lists that were open before the re-render
+  for(const itemId of expandedDownloads){
+    await showDownloadFiles(itemId);
+  }
 }
 
 async function loadDiskSpace(){
@@ -1310,8 +1317,17 @@ function renderLibrary(items){
       // Buttons — multi-episode vs single
       let buttons="";
       if(isDownloading){
-        const isQueued=app.play_when_ready_item_id===item.id;
-        if(isQueued){
+        // "Files" toggle — expands per-file priority/play controls
+        buttons+=`<button id="dl-files-btn-${item.id}" onclick="toggleDownloadFiles('${item.id}')"
+          class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 hover:text-white px-3 py-2.5 rounded-xl transition-colors min-h-[44px] flex items-center gap-1.5 flex-shrink-0">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M4 6h16M4 10h16M4 14h16M4 18h16"/>
+          </svg><span class="dl-files-label text-xs">Files</span>
+        </button>`;
+        // Whole-item Play When Ready (only shown as queued when no specific file is targeted)
+        const isItemQueued=app.play_when_ready_item_id===item.id&&!app.play_when_ready_file_path;
+        if(isItemQueued){
           buttons+=`<button onclick="cancelQueuePlay('${item.id}')"
             class="text-sm bg-indigo-900/50 border border-indigo-700 text-indigo-300 flex-1 py-2.5 rounded-xl transition-colors font-medium min-h-[44px]">
             ⏳ Queued — tap to cancel
@@ -1319,7 +1335,7 @@ function renderLibrary(items){
         } else {
           buttons+=`<button onclick="queuePlay('${item.id}')"
             class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white flex-1 py-2.5 rounded-xl transition-colors font-medium min-h-[44px]">
-            ▶ Play When Ready
+            ▶ When Ready
           </button>`;
         }
       }
@@ -1403,6 +1419,7 @@ function renderLibrary(items){
           ${progBar}
         </div>
         ${buttons?"<div class='flex items-center gap-2'>"+buttons+"</div>":""}
+        ${isDownloading?`<div id="dl-files-${item.id}" class="hidden"></div>`:""}
       </div>`;
     });
     html+=`</div></div>`;
@@ -1445,8 +1462,11 @@ async function playLibraryFiles(itemId,files,seekTo){
 async function deleteLibraryItem(itemId){
   if(!confirm("Remove from library and delete the file(s)?")) return;
   const r=await fetch(`/api/library/${itemId}?delete_file=true`,{method:"DELETE"});
-  if(r.ok) loadLibrary();
-  else showAlert("Could not delete item.","error");
+  if(r.ok){
+    expandedDownloads.delete(itemId);
+    downloadFilesData.delete(itemId);
+    loadLibrary();
+  } else showAlert("Could not delete item.","error");
 }
 
 async function queuePlay(itemId){
@@ -1454,6 +1474,7 @@ async function queuePlay(itemId){
   const r=await fetch(`/api/library/${itemId}/queue-play?profile_id=${encodeURIComponent(profile.id)}`,{method:"POST"});
   if(r.ok){
     app.play_when_ready_item_id=itemId;
+    app.play_when_ready_file_path=null;
     loadLibrary();
     showAlert("Queued — will auto-play when download finishes.","success");
   } else {
@@ -1465,7 +1486,131 @@ async function queuePlay(itemId){
 async function cancelQueuePlay(itemId){
   await fetch(`/api/library/${itemId}/queue-play`,{method:"DELETE"});
   app.play_when_ready_item_id=null;
+  app.play_when_ready_file_path=null;
+  const files=downloadFilesData.get(itemId);
+  if(files&&expandedDownloads.has(itemId)) renderDownloadFiles(itemId,files);
   loadLibrary();
+}
+
+// ── Per-file download controls ─────────────────────────────────────────────
+async function toggleDownloadFiles(itemId){
+  const el=document.getElementById(`dl-files-${itemId}`);
+  if(!el) return;
+  if(expandedDownloads.has(itemId)){
+    expandedDownloads.delete(itemId);
+    el.classList.add("hidden");
+    const lbl=document.querySelector(`#dl-files-btn-${itemId} .dl-files-label`);
+    if(lbl) lbl.textContent="Files";
+  } else {
+    expandedDownloads.add(itemId);
+    await showDownloadFiles(itemId);
+  }
+}
+
+async function showDownloadFiles(itemId){
+  const el=document.getElementById(`dl-files-${itemId}`);
+  if(!el) return;
+  el.classList.remove("hidden");
+  const lbl=document.querySelector(`#dl-files-btn-${itemId} .dl-files-label`);
+  if(lbl) lbl.textContent="Files ▴";
+  el.innerHTML=`<div class="flex items-center justify-center py-4 gap-2 text-gray-600">
+    <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+    </svg><span class="text-xs">Loading…</span></div>`;
+  try{
+    const pid=profile.id?`?profile_id=${encodeURIComponent(profile.id)}`:"";
+    const r=await fetch(`/api/library/${itemId}/files${pid}`);
+    if(!r.ok) throw new Error("Failed to load files");
+    const {files}=await r.json();
+    downloadFilesData.set(itemId,files);
+    renderDownloadFiles(itemId,files);
+  }catch(err){
+    el.innerHTML=`<p class="text-xs text-red-400 text-center py-3">${escHtml(err.message)}</p>`;
+  }
+}
+
+function renderDownloadFiles(itemId,files){
+  const el=document.getElementById(`dl-files-${itemId}`);
+  if(!el) return;
+  if(!files.length){
+    el.innerHTML=`<p class="text-xs text-gray-600 text-center py-3">No video files found yet.</p>`;
+    return;
+  }
+  el.innerHTML=`<div class="rounded-lg border border-gray-800 divide-y divide-gray-800/50 overflow-hidden">
+    ${files.map((f,i)=>{
+      const isFileQueued=app.play_when_ready_item_id===itemId&&app.play_when_ready_file_path===f.path;
+      return `<label class="flex items-center gap-2 px-3 py-2 hover:bg-gray-800/50 cursor-pointer select-none">
+        <input type="checkbox" class="dl-prio-cb flex-shrink-0 accent-indigo-500"
+               data-item="${escHtml(itemId)}" data-idx="${i}">
+        <div class="flex-1 min-w-0">
+          <div class="text-xs text-gray-300 truncate">${escHtml(f.name)}</div>
+          <div class="text-[11px] text-gray-600">${escHtml(f.size_human)}</div>
+        </div>
+        <button class="dl-file-pwr-btn flex-shrink-0 p-1.5 rounded transition-colors ${isFileQueued?'text-indigo-400 hover:text-red-400':'text-gray-600 hover:text-indigo-300'}"
+                data-item="${escHtml(itemId)}" data-idx="${i}"
+                title="${isFileQueued?'Cancel queue':'Play this file when ready'}">
+          ${isFileQueued?'⏳':'▶'}
+        </button>
+      </label>`;
+    }).join("")}
+  </div>
+  <div class="flex items-center gap-2 mt-1.5 pb-0.5">
+    <button class="dl-boost-btn text-xs bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 hover:text-white px-3 py-1.5 rounded-lg transition-colors flex items-center gap-1.5"
+            data-item="${escHtml(itemId)}">
+      <svg class="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 10l7-7 7 7M12 3v18"/>
+      </svg>Prioritize Selected
+    </button>
+  </div>`;
+  const cached=downloadFilesData.get(itemId)||files;
+  el.querySelectorAll(".dl-file-pwr-btn").forEach(btn=>{
+    btn.addEventListener("click",e=>{
+      e.preventDefault();
+      const f=cached[parseInt(btn.dataset.idx)];
+      if(!f) return;
+      if(app.play_when_ready_item_id===itemId&&app.play_when_ready_file_path===f.path){
+        cancelQueuePlay(itemId);
+      } else {
+        queuePlayFile(itemId,f.path);
+      }
+    });
+  });
+  el.querySelectorAll(".dl-boost-btn").forEach(btn=>{
+    btn.addEventListener("click",()=>boostSelected(itemId));
+  });
+}
+
+async function queuePlayFile(itemId,filePath){
+  if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
+  const params=new URLSearchParams({profile_id:profile.id,file_path:filePath});
+  const r=await fetch(`/api/library/${itemId}/queue-play?${params}`,{method:"POST"});
+  if(r.ok){
+    app.play_when_ready_item_id=itemId;
+    app.play_when_ready_file_path=filePath;
+    const files=downloadFilesData.get(itemId);
+    if(files) renderDownloadFiles(itemId,files);
+    showAlert("Queued — will auto-play when this file finishes downloading.","success");
+  } else {
+    const e=await r.json().catch(()=>({detail:"Could not queue."}));
+    showAlert(e.detail||"Could not queue.","error");
+  }
+}
+
+async function boostSelected(itemId){
+  const cbs=document.querySelectorAll(`.dl-prio-cb[data-item="${itemId}"]`);
+  const files=downloadFilesData.get(itemId)||[];
+  const paths=Array.from(cbs).filter(c=>c.checked).map(c=>files[parseInt(c.dataset.idx)]?.path).filter(Boolean);
+  if(!paths.length){ showAlert("Select at least one file first.","warn"); return; }
+  const r=await fetch(`/api/library/${itemId}/file-priority`,{
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({file_paths:paths,priority:7}),
+  });
+  if(r.ok) showAlert(`Prioritized ${paths.length} file${paths.length>1?"s":""}.`,"success");
+  else {
+    const e=await r.json().catch(()=>({detail:"Failed."}));
+    showAlert(e.detail||"Failed.","error");
+  }
 }
 
 // ── Episode Picker ─────────────────────────────────────────────────────────

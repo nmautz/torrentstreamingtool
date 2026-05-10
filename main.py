@@ -133,6 +133,7 @@ class AppState:
     downloading_count: int = 0                            # active library downloads
     play_when_ready_item_id: Optional[str] = None        # auto-play this item on download complete
     play_when_ready_profile_id: Optional[str] = None
+    play_when_ready_file_path: Optional[str] = None      # if set, wait for this specific file
     current_audio_track: int = -1                         # last track ID sent to VLC
     current_subtitle_track: int = -1                      # last track ID sent to VLC
     vlc_time: int = 0                                     # VLC current position (seconds)
@@ -186,6 +187,7 @@ def state_snapshot() -> dict:
         "library_current_file": current,
         "is_library_playback": state.library_item_id is not None,
         "play_when_ready_item_id": state.play_when_ready_item_id,
+        "play_when_ready_file_path": state.play_when_ready_file_path,
     }
 
 
@@ -529,19 +531,23 @@ async def stat_broadcaster() -> None:
         await asyncio.sleep(2)
 
 
-async def _auto_play_item(item: dict, profile_id: str) -> None:
-    """Trigger playback for a library item that just finished downloading (Play When Ready)."""
+async def _auto_play_item(item: dict, profile_id: str, file_path: str = "") -> None:
+    """Trigger playback for a library item (or specific file) that just finished downloading."""
     try:
-        hint = find_resume_hint(item, profile_id)
         all_paths = [f["path"] for f in item.get("files", [])]
-        if hint and hint.get("file_path") and not hint.get("all_completed"):
-            try:
-                start_idx = all_paths.index(hint["file_path"])
-                playlist = all_paths[start_idx:]
-            except ValueError:
-                playlist = all_paths
+        if file_path and file_path in all_paths:
+            start_idx = all_paths.index(file_path)
+            playlist = all_paths[start_idx:]
         else:
-            playlist = all_paths
+            hint = find_resume_hint(item, profile_id)
+            if hint and hint.get("file_path") and not hint.get("all_completed"):
+                try:
+                    start_idx = all_paths.index(hint["file_path"])
+                    playlist = all_paths[start_idx:]
+                except ValueError:
+                    playlist = all_paths
+            else:
+                playlist = all_paths
 
         if not playlist:
             return
@@ -610,9 +616,11 @@ async def library_download_monitor() -> None:
                     await broadcast("library_update", {"item_id": item["id"], "status": "ready"})
                     if state.play_when_ready_item_id == item["id"]:
                         pwr_profile = state.play_when_ready_profile_id
+                        pwr_fp = state.play_when_ready_file_path
                         state.play_when_ready_item_id = None
                         state.play_when_ready_profile_id = None
-                        asyncio.create_task(_auto_play_item(item, pwr_profile or ""))
+                        state.play_when_ready_file_path = None
+                        asyncio.create_task(_auto_play_item(item, pwr_profile or "", pwr_fp or ""))
                 elif qstate in ("error", "missingFiles"):
                     item["status"] = "error"
                     state.downloading_count = max(0, state.downloading_count - 1)
@@ -630,6 +638,19 @@ async def library_download_monitor() -> None:
                         "eta_secs": eta if eta < 8640000 else -1,
                     })
                     changed = True  # file list updated
+                    # Check if a specific queued file finished (even while torrent is still going)
+                    if (state.play_when_ready_item_id == item["id"]
+                            and state.play_when_ready_file_path and qfiles):
+                        pwr_path = state.play_when_ready_file_path
+                        for qf in qfiles:
+                            full = str(Path(save_path) / qf.get("name", ""))
+                            if full == pwr_path and qf.get("progress", 0) >= 1.0:
+                                pwr_profile = state.play_when_ready_profile_id
+                                state.play_when_ready_item_id = None
+                                state.play_when_ready_profile_id = None
+                                state.play_when_ready_file_path = None
+                                asyncio.create_task(_auto_play_item(item, pwr_profile or "", pwr_path))
+                                break
 
             if changed:
                 await put_library(lib)
@@ -1097,8 +1118,8 @@ async def delete_library_item(item_id: str, delete_file: bool = True) -> JSONRes
 
 
 @app.post("/api/library/{item_id}/queue-play")
-async def queue_play(item_id: str, profile_id: str = "") -> JSONResponse:
-    """Queue an in-progress download to auto-play as soon as it finishes."""
+async def queue_play(item_id: str, profile_id: str = "", file_path: str = "") -> JSONResponse:
+    """Queue an in-progress download to auto-play when it (or a specific file) finishes."""
     if not profile_id:
         raise HTTPException(400, "profile_id required.")
     lib = await get_library()
@@ -1109,10 +1130,21 @@ async def queue_play(item_id: str, profile_id: str = "") -> JSONResponse:
         raise HTTPException(400, "Item is not currently downloading.")
     state.play_when_ready_item_id = item_id
     state.play_when_ready_profile_id = profile_id
-    # Bump to top of qBit queue so it finishes sooner
+    state.play_when_ready_file_path = file_path or None
     h = item.get("torrent_hash")
     if h:
-        await qreq("POST", "/api/v2/torrents/topPrio", data={"hashes": h})
+        if file_path:
+            # Boost the specific file to max priority
+            qfiles = await qbit_files(h)
+            info = await qbit_info(h)
+            if qfiles and info:
+                sp = info.get("save_path", settings.qbit_download_path)
+                idx = [qf.get("index", i) for i, qf in enumerate(qfiles)
+                       if str(Path(sp) / qf.get("name", "")) == file_path]
+                if idx:
+                    await qbit_set_file_priority(h, idx, 7)
+        else:
+            await qreq("POST", "/api/v2/torrents/topPrio", data={"hashes": h})
     return JSONResponse({"ok": True})
 
 
@@ -1123,6 +1155,37 @@ async def cancel_queue_play(item_id: str) -> JSONResponse:
         state.play_when_ready_item_id = None
         state.play_when_ready_profile_id = None
     return JSONResponse({"ok": True})
+
+
+class FilePriorityReq(BaseModel):
+    file_paths: list[str]
+    priority: int = 7   # 7=max, 1=normal, 0=skip
+
+
+@app.post("/api/library/{item_id}/file-priority")
+async def set_file_priority_for_item(item_id: str, req: FilePriorityReq) -> JSONResponse:
+    """Set qBit download priority for specific files within a library item's torrent."""
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    h = item.get("torrent_hash")
+    if not h:
+        raise HTTPException(400, "Item has no associated torrent.")
+    qfiles = await qbit_files(h)
+    info = await qbit_info(h)
+    if not qfiles or not info:
+        raise HTTPException(400, "Torrent not found in qBittorrent.")
+    sp = info.get("save_path", settings.qbit_download_path)
+    target_set = set(req.file_paths)
+    indices = [
+        qf.get("index", i) for i, qf in enumerate(qfiles)
+        if str(Path(sp) / qf.get("name", "")) in target_set
+    ]
+    if not indices:
+        raise HTTPException(400, "No matching files found in this torrent.")
+    await qbit_set_file_priority(h, indices, req.priority)
+    return JSONResponse({"ok": True, "updated": len(indices)})
 
 
 @app.post("/api/library/{item_id}/play")
