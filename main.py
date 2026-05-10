@@ -139,6 +139,7 @@ class AppState:
     play_when_ready_file_path: Optional[str] = None      # if set, wait for this specific file
     skip_segments_cache: dict = field(default_factory=dict)  # file_path → {intro_start, intro_end}
     analyzing_series: Optional[str] = None               # series name currently being fingerprinted
+    analyze_queue: list = field(default_factory=list)    # series names waiting to be fingerprinted
     current_audio_track: int = -1                         # last track ID sent to VLC
     current_subtitle_track: int = -1                      # last track ID sent to VLC
     vlc_time: int = 0                                     # VLC current position (seconds)
@@ -627,6 +628,15 @@ async def library_download_monitor() -> None:
                     state.downloading_count = max(0, state.downloading_count - 1)
                     changed = True
                     await broadcast("library_update", {"item_id": item["id"], "status": "ready"})
+                    # Auto-queue intro analysis when a series gains a new ready episode
+                    if item.get("series"):
+                        ready_files = sum(
+                            len(it.get("files", []))
+                            for it in lib["items"]
+                            if it.get("series") == item["series"] and it.get("status") == "ready"
+                        )
+                        if ready_files >= 2:
+                            _queue_series_for_analysis(item["series"])
                     if state.play_when_ready_item_id == item["id"]:
                         pwr_profile = state.play_when_ready_profile_id
                         pwr_fp = state.play_when_ready_file_path
@@ -1060,6 +1070,51 @@ async def analyze_series_intros(series_name: str) -> None:
         state.analyzing_series = None
 
 
+def _queue_series_for_analysis(series_name: str) -> None:
+    """Enqueue a series for fingerprint analysis if eligible and not already queued."""
+    if not series_name or not shutil.which("fpcalc"):
+        return
+    if series_name not in state.analyze_queue and state.analyzing_series != series_name:
+        state.analyze_queue.append(series_name)
+
+
+async def auto_analyze_worker() -> None:
+    """Drain analyze_queue one series at a time, waiting for each to finish."""
+    while True:
+        await asyncio.sleep(3)
+        if state.analyze_queue and not state.analyzing_series:
+            series = state.analyze_queue.pop(0)
+            await analyze_series_intros(series)
+
+
+async def auto_analyze_checker() -> None:
+    """
+    Periodically find series that have 2+ ready files but no skip_segments yet
+    and enqueue them for analysis.  Runs at startup (after a short settle delay)
+    and then every 5 minutes.
+    """
+    await asyncio.sleep(15)   # let the server settle before the first pass
+    while True:
+        try:
+            lib = await get_library()
+            # Group ready files by series name
+            series_info: dict[str, dict] = {}   # series → {file_count, has_any_segs}
+            for item in lib["items"]:
+                series = item.get("series", "")
+                if not series or item.get("status") != "ready":
+                    continue
+                entry = series_info.setdefault(series, {"file_count": 0, "has_any_segs": False})
+                entry["file_count"] += len(item.get("files", []))
+                if item.get("skip_segments"):
+                    entry["has_any_segs"] = True
+            for series, info in series_info.items():
+                if info["file_count"] >= 2 and not info["has_any_segs"]:
+                    _queue_series_for_analysis(series)
+        except Exception:
+            pass
+        await asyncio.sleep(300)   # re-check every 5 minutes
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
     global qbit, _lib_lock
@@ -1073,14 +1128,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         for _path, _seg in _item.get("skip_segments", {}).items():
             state.skip_segments_cache[_path] = _seg
 
-    guard       = asyncio.create_task(vpn_guard())
-    broadcaster = asyncio.create_task(stat_broadcaster())
-    dl_monitor  = asyncio.create_task(library_download_monitor())
-    vlc_tracker = asyncio.create_task(vlc_progress_tracker())
+    guard          = asyncio.create_task(vpn_guard())
+    broadcaster    = asyncio.create_task(stat_broadcaster())
+    dl_monitor     = asyncio.create_task(library_download_monitor())
+    vlc_tracker    = asyncio.create_task(vlc_progress_tracker())
+    analyze_worker = asyncio.create_task(auto_analyze_worker())
+    analyze_check  = asyncio.create_task(auto_analyze_checker())
 
     yield
 
-    for t in (guard, broadcaster, dl_monitor, vlc_tracker):
+    for t in (guard, broadcaster, dl_monitor, vlc_tracker, analyze_worker, analyze_check):
         t.cancel()
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
@@ -1266,6 +1323,28 @@ async def library_download(req: DownloadReq) -> JSONResponse:
     ))
     return JSONResponse({"ok": True, "item_id": item["id"],
                          "default_save_path": settings.qbit_download_path})
+
+
+class LibraryItemUpdateReq(BaseModel):
+    title: str
+    series: str = ""
+    season: int = 0
+    episode: int = 0
+
+
+@app.patch("/api/library/{item_id}")
+async def update_library_item(item_id: str, req: LibraryItemUpdateReq) -> JSONResponse:
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    item["title"]   = req.title.strip()
+    item["series"]  = req.series.strip()
+    item["season"]  = req.season
+    item["episode"] = req.episode
+    await put_library(lib)
+    await broadcast("library_update", {"item_id": item_id})
+    return JSONResponse({"ok": True})
 
 
 @app.delete("/api/library/{item_id}")
