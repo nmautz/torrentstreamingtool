@@ -138,9 +138,11 @@ def setup_venv():
         subprocess.run([sys.executable, "-m", "venv", str(VENV)], check=True)
         ok("venv created")
 
-    pip = VENV / ("Scripts/pip.exe" if SYSTEM == "Windows" else "bin/pip")
+    python = VENV / ("Scripts/python.exe" if SYSTEM == "Windows" else "bin/python")
+    pip    = VENV / ("Scripts/pip.exe"    if SYSTEM == "Windows" else "bin/pip")
     note("Installing dependencies (may take a moment) …")
-    subprocess.run([str(pip), "install", "-q", "--upgrade", "pip"], check=True)
+    # Use 'python -m pip' to upgrade pip — calling pip.exe directly fails on Windows
+    subprocess.run([str(python), "-m", "pip", "install", "-q", "--upgrade", "pip"], check=True)
     subprocess.run([str(pip), "install", "-q", "-r", str(HERE / "requirements.txt")], check=True)
     ok("All Python packages installed")
 
