@@ -928,9 +928,10 @@ async def library_download_pipeline(
 
 # ── Smart Skip — audio fingerprinting ────────────────────────────────────────
 
-_FP_SUBSAMPLE       = 6    # compare every 6th frame (~3.1 s per sub-sampled frame)
-_FP_MIN_MATCH_SEC   = 20.0 # intro must last at least 20 s to be accepted
-_FP_BIT_THRESHOLD   = 10   # allow up to 10 differing bits out of 32 per frame
+_FP_SUBSAMPLE       = 3    # every 3rd frame → ~1.6 s resolution
+_FP_MIN_MATCH_SEC   = 15.0 # intro must last at least 15 s
+_FP_BIT_THRESHOLD   = 14   # allow up to 14/32 differing bits (Jellyfin-validated threshold)
+_FP_MAX_GAP         = 3    # consecutive misses allowed before a run ends
 
 
 async def run_fpcalc(file_path: str, length: int = 600) -> Optional[dict]:
@@ -969,7 +970,7 @@ def _find_longest_match(fp_a: dict, fp_b: dict) -> tuple[float, float, float]:
     avg_sub = (sub_a + sub_b) / 2
     min_frames = max(3, int(_FP_MIN_MATCH_SEC / avg_sub))
 
-    best_ia, best_ib, best_len = 0, 0, 0
+    best_ia = best_ib = best_matches = best_span = 0
 
     # Walk every diagonal (offset = j - i)
     for offset in range(-(len(sa) - 1), len(sb)):
@@ -978,21 +979,29 @@ def _find_longest_match(fp_a: dict, fp_b: dict) -> tuple[float, float, float]:
         n  = min(len(sa) - i0, len(sb) - j0)
         if n < min_frames:
             continue
-        run_ia = run_ib = run_len = 0
-        for k in range(n):
-            if bin(sa[i0 + k] ^ sb[j0 + k]).count("1") <= _FP_BIT_THRESHOLD:
-                if run_len == 0:
-                    run_ia, run_ib = i0 + k, j0 + k
-                run_len += 1
-                if run_len > best_len:
-                    best_ia, best_ib, best_len = run_ia, run_ib, run_len
-            else:
-                run_len = 0
 
-    if best_len < min_frames:
+        run_ia = run_ib = run_k0 = run_matches = gap = 0
+        for k in range(n):
+            # Mask to 32-bit unsigned before counting — Python bin() of a negative int
+            # uses sign-magnitude ('-0b1…'), so .count('1') is wrong without the mask.
+            if bin((sa[i0 + k] ^ sb[j0 + k]) & 0xFFFFFFFF).count("1") <= _FP_BIT_THRESHOLD:
+                if run_matches == 0:
+                    run_ia, run_ib, run_k0 = i0 + k, j0 + k, k
+                run_matches += 1
+                gap = 0
+                if run_matches > best_matches:
+                    best_matches = run_matches
+                    best_ia, best_ib = run_ia, run_ib
+                    best_span = k - run_k0 + 1   # span includes gap frames
+            else:
+                gap += 1
+                if gap > _FP_MAX_GAP:             # too many consecutive misses → end run
+                    run_matches = gap = 0
+
+    if best_matches < min_frames:
         return 0.0, 0.0, 0.0
 
-    return best_ia * sub_a, best_ib * sub_b, best_len * avg_sub
+    return best_ia * sub_a, best_ib * sub_b, best_span * avg_sub
 
 
 async def analyze_series_intros(series_name: str) -> None:
