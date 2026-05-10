@@ -83,11 +83,29 @@ Service start order: VLC → qBittorrent → Jackett → Mullvad check → uvico
 
 `port_open(port, host="127.0.0.1")` and `wait_for_port(port, timeout, label, host="127.0.0.1")` take an explicit host so remote Jackett checks use the correct address.
 
+### Library system
+
+Persistent storage in `library.json` at the project root (created automatically). Structure: `{"profiles": [...], "items": [...]}`. Accessed via `asyncio.Lock` — never read/write raw from multiple coroutines.
+
+**Profiles** — up to 6, no passwords, Netflix-style picker on first load. Profile ID stored in `localStorage`. ID is passed as a query param or request body field on every library API call; the server is stateless w.r.t. which profile is "active".
+
+**Library items** — added via `/api/library/download`. Download runs in a background `asyncio.Task` (`library_download_pipeline`) which adds the magnet to qBit, waits for the torrent to appear, then resolves the file path. `library_download_monitor` polls qBit every 10 s and marks items `ready` when qBit state transitions to `uploading`/`stalledUP`/etc. Items are never auto-deleted on stop — only on explicit DELETE request.
+
+**Watch progress** — `vlc_progress_tracker` polls VLC's `/requests/status.json` every 15 s while `state.library_item_id` is set, saving `{position_sec, duration_sec, completed}` per profile per item. Completed threshold is >92%. Resume via `/api/library/{id}/play` with `seek_to=null` — backend reads saved position and issues a VLC `seek` command 3 s after playback starts (to let VLC open the file first).
+
+**Sequential download fix** — `qbit_streaming_mode` checks `f_l_piece_prio` before calling `toggleFirstLastPiecePrio`, because the toggle would turn priority OFF if it was already on. Sequential download + first/last piece priority must both be ON for streaming.
+
 ### Frontend (`static/index.html`)
 
-Vanilla JS, Tailwind CDN, no build step. A single `EventSource('/api/events')` drives all real-time UI. Three event types:
+Vanilla JS, Tailwind CDN, no build step. A single `EventSource('/api/events')` drives all real-time UI. SSE event types:
 - `state` — full snapshot pushed every 2 s by `stat_broadcaster`
 - `vpn_status` — pushed immediately on VPN connect/disconnect
 - `stream_status` — pushed by the stream pipeline at each phase transition
+- `library_update` — pushed when a download status changes; triggers library refresh in the UI
+- `progress_saved` — pushed every 15 s while a library item is playing
+
+**Two tabs**: Search (stream-now, with a Download button that opens a metadata modal) and Library (shows items grouped by series, with Resume/Play/Delete actions and per-profile watch progress bars).
+
+**Profile picker**: full-screen overlay shown on first load (or when no valid profile in localStorage). Profiles stored in `library.json` on the server; selected profile ID stored in `localStorage.streamlink_profile`.
 
 The VPN-disconnected overlay is a fixed full-screen div toggled by CSS `hidden` class. Play buttons disable optimistically on click and re-enable if the API call fails.

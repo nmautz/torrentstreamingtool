@@ -5,8 +5,10 @@ import base64
 import json
 import platform
 import re
+import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 
@@ -41,6 +43,37 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+LIBRARY_FILE = Path(__file__).parent / "library.json"
+_lib_lock: asyncio.Lock  # initialised in lifespan
+
+
+# ── Library Storage ───────────────────────────────────────────────────────────
+
+def _load_lib_raw() -> dict:
+    if LIBRARY_FILE.exists():
+        try:
+            return json.loads(LIBRARY_FILE.read_text(encoding="utf-8"))
+        except Exception:
+            pass
+    return {"profiles": [], "items": []}
+
+
+def _save_lib_raw(data: dict) -> None:
+    LIBRARY_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+
+
+async def get_library() -> dict:
+    async with _lib_lock:
+        return _load_lib_raw()
+
+
+async def put_library(data: dict) -> None:
+    async with _lib_lock:
+        _save_lib_raw(data)
+
+
+def _now_iso() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
 # ── Global State ──────────────────────────────────────────────────────────────
@@ -59,6 +92,8 @@ class AppState:
     dl_speed_bps: int = 0
     ul_speed_bps: int = 0
     stream_task: Optional[asyncio.Task] = None
+    library_item_id: Optional[str] = None   # item currently playing from library
+    library_profile_id: Optional[str] = None
     sse_queues: list = field(default_factory=list)
 
 
@@ -119,20 +154,25 @@ async def qreq(method: str, path: str, **kw) -> Optional[httpx.Response]:
         return None
 
 
-async def qbit_add_magnet(magnet: str) -> Optional[str]:
+async def qbit_add_magnet(magnet: str, save_path: Optional[str] = None) -> Optional[str]:
     h = extract_hash(magnet)
-    r = await qreq(
-        "POST", "/api/v2/torrents/add",
-        data={"urls": magnet, "savepath": settings.qbit_download_path},
-    )
+    data = {"urls": magnet, "savepath": save_path or settings.qbit_download_path}
+    r = await qreq("POST", "/api/v2/torrents/add", data=data)
     return h if (r and r.text.strip() == "Ok.") else None
 
 
 async def qbit_streaming_mode(h: str) -> None:
+    """Enable sequential download and ensure first/last piece priority is ON.
+
+    toggleFirstLastPiecePrio is a toggle — calling it on a torrent that already
+    has it enabled would turn it OFF.  We read current state first to avoid that.
+    """
     await qreq("POST", "/api/v2/torrents/setSequentialDownload",
                 data={"hashes": h, "enable": "true"})
-    await qreq("POST", "/api/v2/torrents/toggleFirstLastPiecePrio",
-                data={"hashes": h})
+    info = await qbit_info(h)
+    if info is not None and not info.get("f_l_piece_prio", False):
+        await qreq("POST", "/api/v2/torrents/toggleFirstLastPiecePrio",
+                   data={"hashes": h})
 
 
 async def qbit_info(h: str) -> Optional[dict]:
@@ -148,9 +188,9 @@ async def qbit_files(h: str) -> list:
     return r.json() if (r and r.status_code == 200) else []
 
 
-async def qbit_delete(h: str) -> None:
+async def qbit_delete(h: str, delete_files: bool = True) -> None:
     await qreq("POST", "/api/v2/torrents/delete",
-                data={"hashes": h, "deleteFiles": "true"})
+                data={"hashes": h, "deleteFiles": "true" if delete_files else "false"})
 
 
 # ── VLC Client ────────────────────────────────────────────────────────────────
@@ -165,7 +205,23 @@ async def vlc(command: str, **params) -> None:
                 timeout=5.0,
             )
     except Exception:
-        pass  # VLC may not be open yet; non-fatal
+        pass
+
+
+async def vlc_status() -> Optional[dict]:
+    """Return VLC's current status JSON (includes 'time' and 'length' in seconds)."""
+    try:
+        async with httpx.AsyncClient() as c:
+            r = await c.get(
+                f"{settings.vlc_url}/requests/status.json",
+                auth=httpx.BasicAuth("", settings.vlc_password),
+                timeout=3.0,
+            )
+            if r.status_code == 200:
+                return r.json()
+    except Exception:
+        pass
+    return None
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
@@ -258,25 +314,95 @@ async def stat_broadcaster() -> None:
         await asyncio.sleep(2)
 
 
-# ── Stream Pipeline ───────────────────────────────────────────────────────────
+# ── Background Task: Library Download Monitor ─────────────────────────────────
+
+async def library_download_monitor() -> None:
+    """Poll qBit every 10 s for pending library downloads and mark them complete."""
+    while True:
+        await asyncio.sleep(10)
+        try:
+            lib = await get_library()
+            pending = [it for it in lib["items"] if it.get("status") == "downloading"]
+            if not pending:
+                continue
+            changed = False
+            for item in pending:
+                h = item.get("torrent_hash")
+                if not h:
+                    continue
+                info = await qbit_info(h)
+                if not info:
+                    continue
+                qstate = info.get("state", "")
+                if qstate in ("uploading", "stalledUP", "pausedUP", "queuedUP", "forcedUP"):
+                    item["status"] = "ready"
+                    item["size_bytes"] = info.get("size", 0)
+                    changed = True
+                    await broadcast("library_update", {"item_id": item["id"], "status": "ready"})
+                elif qstate in ("error", "missingFiles"):
+                    item["status"] = "error"
+                    changed = True
+                    await broadcast("library_update", {"item_id": item["id"], "status": "error"})
+            if changed:
+                await put_library(lib)
+        except Exception:
+            pass
+
+
+# ── Background Task: VLC Progress Tracker ────────────────────────────────────
+
+async def vlc_progress_tracker() -> None:
+    """Save watch progress for library items playing in VLC every 15 s."""
+    while True:
+        await asyncio.sleep(15)
+        if not state.library_item_id or not state.library_profile_id:
+            continue
+        try:
+            vs = await vlc_status()
+            if not vs:
+                continue
+            pos_sec = float(vs.get("time", 0))
+            dur_sec = float(vs.get("length", 0))
+            if dur_sec < 10:
+                continue
+
+            lib = await get_library()
+            item = next((it for it in lib["items"] if it["id"] == state.library_item_id), None)
+            if not item:
+                continue
+
+            pct = pos_sec / dur_sec
+            item.setdefault("progress", {})[state.library_profile_id] = {
+                "position_sec": round(pos_sec, 1),
+                "duration_sec": round(dur_sec, 1),
+                "completed": pct > 0.92,
+                "updated_at": _now_iso(),
+            }
+            await put_library(lib)
+            await broadcast("progress_saved", {
+                "item_id": state.library_item_id,
+                "profile_id": state.library_profile_id,
+                "position_sec": pos_sec,
+                "duration_sec": dur_sec,
+                "pct": round(pct * 100, 1),
+            })
+        except Exception:
+            pass
+
+
+# ── Stream Pipeline (stream-now, torrent auto-deleted on stop) ────────────────
 
 async def stream_pipeline(magnet: str, title: str) -> None:
-    """
-    Full stream-now pipeline.  Runs as a detached asyncio Task so it never
-    blocks the FastAPI event loop.  All progress is pushed via SSE.
-    """
     try:
         state.active_title = title
         state.stream_status = "buffering"
         await broadcast("stream_status", {"status": "buffering", "message": "Adding torrent to qBittorrent…"})
 
-        # ① Add magnet
         h = await qbit_add_magnet(magnet)
         if not h:
             raise RuntimeError("qBittorrent rejected the magnet (is it running on port 8081?)")
         state.active_hash = h
 
-        # ② Wait up to 30 s for torrent to appear in qBit's list
         for _ in range(30):
             await asyncio.sleep(1)
             if await qbit_info(h):
@@ -284,11 +410,9 @@ async def stream_pipeline(magnet: str, title: str) -> None:
         else:
             raise RuntimeError("Torrent did not appear in qBittorrent after 30 s.")
 
-        # ③ Force streaming download order
         await qbit_streaming_mode(h)
         await broadcast("stream_status", {"status": "buffering", "message": "Sequential mode set. Buffering first pieces…"})
 
-        # ④ Dynamic buffer check — asyncio.sleep is non-blocking
         while True:
             info = await qbit_info(h)
             if info:
@@ -317,7 +441,6 @@ async def stream_pipeline(magnet: str, title: str) -> None:
 
             await asyncio.sleep(1)
 
-        # ⑤ Locate the largest video file in the torrent
         files = await qbit_files(h)
         vid = largest_video(files)
         if not vid:
@@ -325,17 +448,12 @@ async def stream_pipeline(magnet: str, title: str) -> None:
 
         info = await qbit_info(h)
         save_path = (info or {}).get("save_path", settings.qbit_download_path)
-        # vid["name"] may include a sub-directory for multi-file torrents
         file_path = Path(save_path) / vid["name"]
         state.active_file = file_path
 
-        # ⑥ Hand off to VLC — pathlib.as_uri() handles Windows C:\ and Unix /
         await vlc("in_play", input=file_path.resolve().as_uri())
         state.stream_status = "playing"
-        await broadcast("stream_status", {
-            "status": "playing",
-            "message": f"Playing: {file_path.name}",
-        })
+        await broadcast("stream_status", {"status": "playing", "message": f"Playing: {file_path.name}"})
 
     except asyncio.CancelledError:
         pass
@@ -344,22 +462,77 @@ async def stream_pipeline(magnet: str, title: str) -> None:
         await broadcast("stream_status", {"status": "error", "message": str(e)})
 
 
+# ── Library Download Pipeline (keep file, no auto-delete) ─────────────────────
+
+async def library_download_pipeline(item_id: str, magnet: str) -> None:
+    """Add magnet to qBit for a full download; no streaming mode, no auto-delete."""
+    try:
+        h = await qbit_add_magnet(magnet)
+        if not h:
+            lib = await get_library()
+            for it in lib["items"]:
+                if it["id"] == item_id:
+                    it["status"] = "error"
+                    break
+            await put_library(lib)
+            await broadcast("library_update", {"item_id": item_id, "status": "error"})
+            return
+
+        lib = await get_library()
+        for it in lib["items"]:
+            if it["id"] == item_id:
+                it["torrent_hash"] = h
+                break
+        await put_library(lib)
+
+        # Wait for torrent to appear, then resolve the file path
+        for _ in range(30):
+            await asyncio.sleep(2)
+            info = await qbit_info(h)
+            if info:
+                break
+
+        files = await qbit_files(h)
+        vid = largest_video(files)
+        if vid:
+            info = await qbit_info(h)
+            save_path = (info or {}).get("save_path", settings.qbit_download_path)
+            file_path = str(Path(save_path) / vid["name"])
+            size_bytes = info.get("size", 0) if info else 0
+
+            lib = await get_library()
+            for it in lib["items"]:
+                if it["id"] == item_id:
+                    it["file_path"] = file_path
+                    it["size_bytes"] = size_bytes
+                    break
+            await put_library(lib)
+
+        await broadcast("library_update", {"item_id": item_id, "status": "downloading"})
+
+    except Exception as exc:
+        await broadcast("library_update", {"item_id": item_id, "status": "error", "message": str(exc)})
+
+
 # ── FastAPI App ───────────────────────────────────────────────────────────────
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
-    global qbit
+    global qbit, _lib_lock
+    _lib_lock = asyncio.Lock()
     qbit = httpx.AsyncClient(timeout=10.0)
     await qbit_login()
     Path(settings.qbit_download_path).mkdir(parents=True, exist_ok=True)
 
-    guard = asyncio.create_task(vpn_guard())
+    guard       = asyncio.create_task(vpn_guard())
     broadcaster = asyncio.create_task(stat_broadcaster())
+    dl_monitor  = asyncio.create_task(library_download_monitor())
+    vlc_tracker = asyncio.create_task(vlc_progress_tracker())
 
     yield
 
-    guard.cancel()
-    broadcaster.cancel()
+    for t in (guard, broadcaster, dl_monitor, vlc_tracker):
+        t.cancel()
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
     await qbit.aclose()
@@ -375,7 +548,186 @@ class StreamReq(BaseModel):
     title: str
 
 
-# ── Routes ────────────────────────────────────────────────────────────────────
+class DownloadReq(BaseModel):
+    magnet: str
+    title: str
+    series: str = ""
+    season: int = 0
+    episode: int = 0
+
+
+class ProfileReq(BaseModel):
+    name: str
+    color: str = "indigo"
+
+
+class ProgressReq(BaseModel):
+    profile_id: str
+    position_sec: float
+    duration_sec: float
+
+
+class LibraryPlayReq(BaseModel):
+    profile_id: str
+    seek_to: Optional[float] = None  # explicit seek in seconds; None = resume from saved
+
+
+# ── Routes: Profiles ─────────────────────────────────────────────────────────
+
+@app.get("/api/profiles")
+async def list_profiles() -> JSONResponse:
+    lib = await get_library()
+    return JSONResponse({"profiles": lib["profiles"]})
+
+
+@app.post("/api/profiles")
+async def create_profile(req: ProfileReq) -> JSONResponse:
+    lib = await get_library()
+    if len(lib["profiles"]) >= 6:
+        raise HTTPException(400, "Maximum 6 profiles reached.")
+    profile = {"id": str(uuid.uuid4()), "name": req.name.strip()[:30], "color": req.color}
+    lib["profiles"].append(profile)
+    await put_library(lib)
+    return JSONResponse({"profile": profile})
+
+
+@app.delete("/api/profiles/{profile_id}")
+async def delete_profile(profile_id: str) -> JSONResponse:
+    lib = await get_library()
+    lib["profiles"] = [p for p in lib["profiles"] if p["id"] != profile_id]
+    for item in lib["items"]:
+        item.get("progress", {}).pop(profile_id, None)
+    await put_library(lib)
+    return JSONResponse({"ok": True})
+
+
+# ── Routes: Library ───────────────────────────────────────────────────────────
+
+@app.get("/api/library")
+async def list_library(profile_id: str = "") -> JSONResponse:
+    lib = await get_library()
+    items = []
+    for it in lib["items"]:
+        prof_prog = it.get("progress", {}).get(profile_id, {}) if profile_id else {}
+        items.append({
+            "id": it["id"],
+            "title": it["title"],
+            "series": it.get("series", ""),
+            "season": it.get("season", 0),
+            "episode": it.get("episode", 0),
+            "file_path": it.get("file_path", ""),
+            "size_bytes": it.get("size_bytes", 0),
+            "size_human": human_size(it.get("size_bytes", 0)),
+            "added_at": it.get("added_at", ""),
+            "status": it.get("status", "ready"),
+            "torrent_hash": it.get("torrent_hash", ""),
+            "progress": prof_prog,
+        })
+    items.sort(key=lambda x: (
+        x["series"] or "\xff" + x["title"],
+        x["season"],
+        x["episode"],
+        x["added_at"],
+    ))
+    return JSONResponse({"items": items})
+
+
+@app.post("/api/library/download")
+async def library_download(req: DownloadReq) -> JSONResponse:
+    if not state.vpn_secure:
+        raise HTTPException(403, "VPN not connected — download blocked.")
+    lib = await get_library()
+    item: dict = {
+        "id": str(uuid.uuid4()),
+        "title": req.title,
+        "series": req.series,
+        "season": req.season,
+        "episode": req.episode,
+        "file_path": "",
+        "size_bytes": 0,
+        "added_at": _now_iso(),
+        "status": "downloading",
+        "torrent_hash": "",
+        "progress": {},
+    }
+    lib["items"].append(item)
+    await put_library(lib)
+    asyncio.create_task(library_download_pipeline(item["id"], req.magnet))
+    return JSONResponse({"ok": True, "item_id": item["id"]})
+
+
+@app.delete("/api/library/{item_id}")
+async def delete_library_item(item_id: str, delete_file: bool = True) -> JSONResponse:
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    h = item.get("torrent_hash")
+    if h:
+        await qbit_delete(h, delete_files=delete_file)
+    lib["items"] = [it for it in lib["items"] if it["id"] != item_id]
+    await put_library(lib)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/library/{item_id}/play")
+async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+
+    file_path = item.get("file_path", "")
+    if not file_path or not Path(file_path).exists():
+        raise HTTPException(400, f"File not found on disk: {file_path or '(no path recorded)'}")
+
+    fp = Path(file_path)
+    await vlc("in_play", input=fp.resolve().as_uri())
+    state.stream_status = "playing"
+    state.active_title = item["title"]
+    state.active_file = fp
+    state.active_hash = item.get("torrent_hash") or None
+    state.library_item_id = item_id
+    state.library_profile_id = req.profile_id
+
+    # Determine seek target
+    saved = item.get("progress", {}).get(req.profile_id, {})
+    seek_sec = req.seek_to
+    if seek_sec is None:
+        pos = saved.get("position_sec", 0)
+        dur = saved.get("duration_sec", 0)
+        if pos > 5 and dur > 0 and (pos / dur) < 0.92:
+            seek_sec = pos
+
+    if seek_sec and seek_sec > 5:
+        async def _delayed_seek(s: float) -> None:
+            await asyncio.sleep(3)
+            await vlc("seek", val=str(int(s)))
+        asyncio.create_task(_delayed_seek(seek_sec))
+
+    await broadcast("stream_status", {"status": "playing", "message": f"Playing: {fp.name}"})
+    return JSONResponse({"ok": True, "seek_to": seek_sec})
+
+
+@app.post("/api/library/{item_id}/progress")
+async def update_progress(item_id: str, req: ProgressReq) -> JSONResponse:
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    dur = req.duration_sec
+    pct = req.position_sec / dur if dur else 0
+    item.setdefault("progress", {})[req.profile_id] = {
+        "position_sec": round(req.position_sec, 1),
+        "duration_sec": round(req.duration_sec, 1),
+        "completed": pct > 0.92,
+        "updated_at": _now_iso(),
+    }
+    await put_library(lib)
+    return JSONResponse({"ok": True})
+
+
+# ── Routes: Search & Stream ───────────────────────────────────────────────────
 
 @app.get("/api/search")
 async def search(q: str, limit: int = 30) -> JSONResponse:
@@ -383,8 +735,6 @@ async def search(q: str, limit: int = 30) -> JSONResponse:
         return JSONResponse({"results": []})
 
     params: dict = {"apikey": settings.indexer_api_key, "Query": q}
-    # Omit Category[] when set to "0" — Jackett treats 0 as an unknown category
-    # (not "all"), which returns 0 results. Omitting it returns everything.
     cats = settings.indexer_categories.strip()
     if cats and cats != "0":
         params["Category[]"] = cats
@@ -425,11 +775,13 @@ async def stream_now(req: StreamReq) -> JSONResponse:
 
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
-        if state.active_hash:
+        if state.active_hash and not state.library_item_id:
             await qbit_delete(state.active_hash)
 
     state.active_hash = None
     state.active_file = None
+    state.library_item_id = None
+    state.library_profile_id = None
     state.stream_task = asyncio.create_task(stream_pipeline(req.magnet, req.title))
     return JSONResponse({"ok": True})
 
@@ -438,7 +790,8 @@ async def stream_now(req: StreamReq) -> JSONResponse:
 async def stop() -> JSONResponse:
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
-    if state.active_hash:
+    # Only auto-delete the torrent for stream-now sessions, not library downloads
+    if state.active_hash and not state.library_item_id:
         await qbit_delete(state.active_hash)
     await vlc("pl_stop")
 
@@ -446,6 +799,8 @@ async def stop() -> JSONResponse:
     state.active_file = None
     state.active_title = None
     state.stream_status = "idle"
+    state.library_item_id = None
+    state.library_profile_id = None
     state.progress = 0.0
     state.downloaded_mb = 0.0
     state.total_mb = 0.0
@@ -466,7 +821,6 @@ async def pause() -> JSONResponse:
 async def volume(direction: str) -> JSONResponse:
     if direction not in ("up", "down"):
         raise HTTPException(400, "direction must be 'up' or 'down'")
-    # VLC volume range 0–512 where 256 = 100%.  +26/-26 ≈ 10% steps.
     await vlc("volume", val="+26" if direction == "up" else "-26")
     return JSONResponse({"ok": True})
 
