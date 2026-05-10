@@ -455,8 +455,9 @@
       <div id="vpnDot" class="w-2 h-2 rounded-full bg-gray-600 transition-colors flex-shrink-0"></div>
       <span id="vpnLabel" class="text-xs font-medium text-gray-500 whitespace-nowrap hidden sm:inline">VPN: checking</span>
     </div>
-    <!-- Live dot -->
+    <!-- Live dot + label -->
     <div id="sseDot" class="w-2 h-2 rounded-full bg-gray-700 transition-colors flex-shrink-0"></div>
+    <span id="sseLabel" class="text-[11px] text-gray-600 hidden sm:block"></span>
     <!-- Profile -->
     <button onclick="showProfilePicker()"
       class="flex items-center gap-1.5 pl-1 pr-2 py-1 rounded-lg hover:bg-gray-800 transition-colors flex-shrink-0 min-h-[36px]">
@@ -584,6 +585,15 @@
         </select>
       </div>
     </div>
+  </div>
+  <!-- Skip Intro row — visible only when in the detected intro range -->
+  <div id="skipIntroRow" class="hidden max-w-5xl mx-auto px-3 pt-1 items-center gap-2">
+    <button onclick="skipIntro()"
+      class="text-xs font-semibold px-4 py-1.5 rounded-full
+             bg-yellow-900/60 border border-yellow-700 text-yellow-300
+             hover:bg-yellow-800/80 active:scale-95 transition-all shadow-sm">
+      ⏭ Skip Intro
+    </button>
   </div>
   <!-- Now-playing info row -->
   <div class="max-w-5xl mx-auto px-3 pt-1 pb-1 flex items-center gap-2">
@@ -776,6 +786,16 @@
       </button>
     </div>
 
+    <!-- Skip Intro (fullscreen) -->
+    <div id="fcSkipIntroRow" class="hidden items-center justify-center w-full">
+      <button onclick="skipIntro()"
+        class="text-sm font-semibold px-6 py-2 rounded-full
+               bg-yellow-900/60 border border-yellow-700 text-yellow-300
+               hover:bg-yellow-800/80 active:scale-95 transition-all shadow-md">
+        ⏭ Skip Intro
+      </button>
+    </div>
+
     <!-- Volume slider with ±5% step buttons -->
     <div class="flex items-center gap-3 w-full max-w-sm">
       <button onclick="vlcVolumeStep(-5)" title="-5%"
@@ -844,6 +864,9 @@ let app = {
   is_library_playback:false,
   play_when_ready_item_id:null,
   play_when_ready_file_path:null,
+  analyzing_series:null,
+  skip_intro_start:null,
+  skip_intro_end:null,
 };
 const expandedDownloads=new Set();   // item IDs whose file lists are currently expanded
 const downloadFilesData=new Map();   // item_id → files array (cached from /files endpoint)
@@ -1060,6 +1083,16 @@ function renderPlayer(s){
   const tc=document.getElementById("trackControls");
   if(isPlaying){ tc.classList.remove("hidden"); startTrackPoll(); }
   else { tc.classList.add("hidden"); stopTrackPoll(); }
+
+  // Skip Intro button — shown when VLC time is within detected intro range
+  const t=s.vlc_time||0;
+  const inIntro=isPlaying
+    &&s.skip_intro_start!=null&&s.skip_intro_end!=null
+    &&t>=s.skip_intro_start&&t<s.skip_intro_end;
+  const sir=document.getElementById("skipIntroRow");
+  if(sir){ sir.classList.toggle("hidden",!inIntro); sir.classList.toggle("flex",inIntro); }
+  const fcSir=document.getElementById("fcSkipIntroRow");
+  if(fcSir){ fcSir.classList.toggle("hidden",!inIntro); fcSir.classList.toggle("flex",inIntro); }
 }
 
 function handleSeekBarClick(e, el){
@@ -1332,13 +1365,27 @@ function renderLibrary(items){
   });
 
   let html="";
-  groups.forEach(({label,items:gItems})=>{
+  groups.forEach(({label,items:gItems},key)=>{
     if(label){
+      // "Analyze Intros" button — only for proper series groups with 2+ ready files
+      const isSeries=!key.startsWith("\x00");
+      const readyFiles=gItems.filter(it=>it.status==="ready").reduce((s,it)=>s+(it.file_count||0),0);
+      const hasSegs=gItems.some(it=>it.has_skip_segments);
+      const isAnalyzing=app.analyzing_series===label;
+      const analyzeBtn=isSeries&&readyFiles>=2?`
+        <button class="analyze-intro-btn ml-auto flex items-center gap-1 text-[10px] px-2 py-1 rounded-lg border
+          ${hasSegs?'border-green-800/60 text-green-600 hover:bg-green-900/30':'border-gray-700 text-gray-600 hover:text-gray-300 hover:bg-gray-800'}
+          transition-colors flex-shrink-0" data-series="${escHtml(label)}"
+          title="${hasSegs?'Intro segments detected — re-analyze to refresh':'Detect intro using audio fingerprinting (requires fpcalc)'}">
+          ${isAnalyzing
+            ?`<svg class="w-2.5 h-2.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg>Analyzing…`
+            :hasSegs?`✓ Intros`:`⊕ Analyze Intros`}
+        </button>`:"";
       html+=`<div class="mb-6">
         <h3 class="text-xs font-semibold text-gray-500 uppercase tracking-wider mb-2 flex items-center gap-2">
           <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 4v16M17 4v16M3 8h4m10 0h4M3 16h4m10 0h4"/>
-          </svg>${escHtml(label)}</h3><div class="space-y-2">`;
+          </svg>${escHtml(label)}${analyzeBtn}</h3><div class="space-y-2">`;
     } else {
       html+=`<div class="mb-2"><div class="space-y-2">`;
     }
@@ -1475,6 +1522,10 @@ function renderLibrary(items){
   // Wire restart buttons via data attributes so paths never need JS-string escaping
   el.querySelectorAll(".lib-restart-btn").forEach(btn=>{
     btn.addEventListener("click",()=>playLibraryFiles(btn.dataset.itemId,[btn.dataset.path],0));
+  });
+  // Wire analyze-intro buttons
+  el.querySelectorAll(".analyze-intro-btn").forEach(btn=>{
+    btn.addEventListener("click",()=>analyzeIntros(btn.dataset.series));
   });
 }
 
@@ -2455,6 +2506,44 @@ async function vlcSeek(delta){
   await fetch(`/api/vlc/seek?delta=${delta}`,{method:"POST"}).catch(()=>{});
 }
 
+async function skipIntro(){
+  const end=app.skip_intro_end;
+  const dur=app.vlc_duration||0;
+  if(end==null||dur<=0) return;
+  const pct=Math.min(99,(end/dur)*100);
+  await fetch(`/api/vlc/seek/to?position_pct=${pct.toFixed(1)}`,{method:"POST"}).catch(()=>{});
+}
+
+// ── Smart Skip — intro analysis ─────────────────────────────────────────────
+let _fpcalcAvailable=null;  // cached: true/false/null(unchecked)
+
+async function ensureFpcalc(){
+  if(_fpcalcAvailable!==null) return _fpcalcAvailable;
+  try{
+    const r=await fetch("/api/library/fpcalc-check");
+    const d=await r.json();
+    _fpcalcAvailable=d.available;
+    if(!d.available){
+      showAlert(`fpcalc not found — install Chromaprint to enable intro detection: ${d.install_hint}`,"warn");
+    }
+  }catch(_){_fpcalcAvailable=false;}
+  return _fpcalcAvailable;
+}
+
+async function analyzeIntros(seriesName){
+  const ok=await ensureFpcalc();
+  if(!ok) return;
+  const r=await fetch(`/api/library/analyze-intros?series=${encodeURIComponent(seriesName)}`,{method:"POST"});
+  if(!r.ok){
+    const e=await r.json().catch(()=>({detail:"Failed"}));
+    showAlert(e.detail||"Analysis failed.","error");
+    return;
+  }
+  app.analyzing_series=seriesName;
+  showAlert(`Analyzing intros for "${seriesName}"…`,"info");
+  if(activeTab==="library") loadLibrary();
+}
+
 async function setAudioTrack(id){
   await fetch(`/api/vlc/track/audio/${id}`,{method:"POST"}).catch(()=>{});
 }
@@ -2554,6 +2643,21 @@ function connectSSE(){
   es.addEventListener("progress_saved",e=>{
     // Re-render library silently when episode progress is saved
     if(activeTab==="library") loadLibrary();
+  });
+  es.addEventListener("analyze_status",e=>{
+    const d=JSON.parse(e.data||"{}");
+    if(d.done){
+      app.analyzing_series=null;
+      showAlert(`Intro detection complete for "${d.series}" — ${d.updated||0} file(s) updated.`,"success");
+      if(activeTab==="library") loadLibrary();
+    } else if(d.error){
+      app.analyzing_series=null;
+      showAlert(`Intro analysis failed: ${d.error}`,"error");
+      if(activeTab==="library") loadLibrary();
+    } else if(d.analyzing){
+      app.analyzing_series=d.series;
+      if(activeTab==="library") loadLibrary();
+    }
   });
   es.addEventListener("error",()=>{
     sseDot.className="w-1.5 h-1.5 rounded-full bg-red-600 transition-colors";

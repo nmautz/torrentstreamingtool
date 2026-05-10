@@ -137,6 +137,8 @@ class AppState:
     play_when_ready_item_id: Optional[str] = None        # auto-play this item on download complete
     play_when_ready_profile_id: Optional[str] = None
     play_when_ready_file_path: Optional[str] = None      # if set, wait for this specific file
+    skip_segments_cache: dict = field(default_factory=dict)  # file_path → {intro_start, intro_end}
+    analyzing_series: Optional[str] = None               # series name currently being fingerprinted
     current_audio_track: int = -1                         # last track ID sent to VLC
     current_subtitle_track: int = -1                      # last track ID sent to VLC
     vlc_time: int = 0                                     # VLC current position (seconds)
@@ -191,6 +193,14 @@ def state_snapshot() -> dict:
         "is_library_playback": state.library_item_id is not None,
         "play_when_ready_item_id": state.play_when_ready_item_id,
         "play_when_ready_file_path": state.play_when_ready_file_path,
+        "analyzing_series": state.analyzing_series,
+        **({
+            "skip_intro_start": state.skip_segments_cache[state.library_current_file].get("intro_start"),
+            "skip_intro_end":   state.skip_segments_cache[state.library_current_file].get("intro_end"),
+        } if state.library_current_file and state.library_current_file in state.skip_segments_cache else {
+            "skip_intro_start": None,
+            "skip_intro_end":   None,
+        }),
     }
 
 
@@ -906,6 +916,150 @@ async def library_download_pipeline(
 
 # ── FastAPI App ───────────────────────────────────────────────────────────────
 
+# ── Smart Skip — audio fingerprinting ────────────────────────────────────────
+
+_FP_SUBSAMPLE       = 6    # compare every 6th frame (~3.1 s per sub-sampled frame)
+_FP_MIN_MATCH_SEC   = 20.0 # intro must last at least 20 s to be accepted
+_FP_BIT_THRESHOLD   = 10   # allow up to 10 differing bits out of 32 per frame
+
+
+async def run_fpcalc(file_path: str, length: int = 600) -> Optional[dict]:
+    """Run fpcalc on a file; return {frames, frame_dur} or None on failure."""
+    if not shutil.which("fpcalc"):
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "fpcalc", "-json", "-length", str(length), file_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=120.0)
+        data = json.loads(stdout.decode())
+        fp  = data.get("fingerprint", [])
+        dur = data.get("duration", 0.0)
+        if not fp or dur <= 0:
+            return None
+        return {"frames": fp, "duration": dur, "frame_dur": dur / len(fp)}
+    except Exception:
+        return None
+
+
+def _find_longest_match(fp_a: dict, fp_b: dict) -> tuple[float, float, float]:
+    """
+    Find the longest common audio segment between two fingerprint dicts.
+
+    Returns (start_sec_a, start_sec_b, duration_sec).
+    Uses a sub-sampled diagonal scan so the full comparison is O(N²/S²)
+    where S=_FP_SUBSAMPLE, keeping it fast even for 10-minute windows.
+    """
+    sa = fp_a["frames"][::_FP_SUBSAMPLE]
+    sb = fp_b["frames"][::_FP_SUBSAMPLE]
+    sub_a = fp_a["frame_dur"] * _FP_SUBSAMPLE
+    sub_b = fp_b["frame_dur"] * _FP_SUBSAMPLE
+    avg_sub = (sub_a + sub_b) / 2
+    min_frames = max(3, int(_FP_MIN_MATCH_SEC / avg_sub))
+
+    best_ia, best_ib, best_len = 0, 0, 0
+
+    # Walk every diagonal (offset = j - i)
+    for offset in range(-(len(sa) - 1), len(sb)):
+        i0 = max(0, -offset)
+        j0 = max(0, offset)
+        n  = min(len(sa) - i0, len(sb) - j0)
+        if n < min_frames:
+            continue
+        run_ia = run_ib = run_len = 0
+        for k in range(n):
+            if bin(sa[i0 + k] ^ sb[j0 + k]).count("1") <= _FP_BIT_THRESHOLD:
+                if run_len == 0:
+                    run_ia, run_ib = i0 + k, j0 + k
+                run_len += 1
+                if run_len > best_len:
+                    best_ia, best_ib, best_len = run_ia, run_ib, run_len
+            else:
+                run_len = 0
+
+    if best_len < min_frames:
+        return 0.0, 0.0, 0.0
+
+    return best_ia * sub_a, best_ib * sub_b, best_len * avg_sub
+
+
+async def analyze_series_intros(series_name: str) -> None:
+    """
+    Background task: fingerprint every ready episode in a series, find the
+    common intro segment, and write {intro_start, intro_end} per file into
+    library.json["items"][*]["skip_segments"].
+    """
+    state.analyzing_series = series_name
+    await broadcast("analyze_status", {"analyzing": True, "series": series_name})
+    try:
+        lib  = await get_library()
+        eps  = [it for it in lib["items"]
+                if it.get("series") == series_name and it.get("status") == "ready"]
+
+        # Fingerprint every file across all matching items
+        file_fps: dict[str, dict] = {}
+        for item in eps:
+            for f in item.get("files", []):
+                path = f.get("path", "")
+                if path and Path(path).exists() and path not in file_fps:
+                    fp = await run_fpcalc(path)
+                    if fp:
+                        file_fps[path] = fp
+                await asyncio.sleep(0)
+
+        paths = list(file_fps.keys())
+        if len(paths) < 2:
+            await broadcast("analyze_status", {
+                "analyzing": False, "series": series_name,
+                "error": "Need at least 2 analysable files.",
+            })
+            return
+
+        # Pair-wise matching
+        match_votes: dict[str, list] = {}
+        for i in range(len(paths)):
+            for j in range(i + 1, len(paths)):
+                pa, pb = paths[i], paths[j]
+                sa, sb, dur = _find_longest_match(file_fps[pa], file_fps[pb])
+                if dur >= _FP_MIN_MATCH_SEC:
+                    match_votes.setdefault(pa, []).append((sa, sa + dur))
+                    match_votes.setdefault(pb, []).append((sb, sb + dur))
+                await asyncio.sleep(0)
+
+        # Persist averaged timestamps into library.json
+        lib = await get_library()
+        updated = 0
+        for item in lib["items"]:
+            if item.get("series") != series_name:
+                continue
+            segs = item.setdefault("skip_segments", {})
+            for f in item.get("files", []):
+                path = f.get("path", "")
+                votes = match_votes.get(path, [])
+                if votes:
+                    avg_start = sum(v[0] for v in votes) / len(votes)
+                    avg_end   = sum(v[1] for v in votes) / len(votes)
+                    segs[path] = {
+                        "intro_start": round(avg_start, 1),
+                        "intro_end":   round(avg_end,   1),
+                    }
+                    state.skip_segments_cache[path] = segs[path]
+                    updated += 1
+        await put_library(lib)
+        await broadcast("analyze_status", {
+            "analyzing": False, "series": series_name, "done": True, "updated": updated,
+        })
+        await broadcast("library_update", {})
+    except Exception as exc:
+        await broadcast("analyze_status", {
+            "analyzing": False, "series": series_name, "error": str(exc),
+        })
+    finally:
+        state.analyzing_series = None
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
     global qbit, _lib_lock
@@ -913,6 +1067,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     qbit = httpx.AsyncClient(timeout=10.0)
     await qbit_login()
     Path(settings.qbit_download_path).mkdir(parents=True, exist_ok=True)
+
+    # Pre-populate skip-segment cache so state_snapshot() can serve it without I/O
+    for _item in _load_lib_raw().get("items", []):
+        for _path, _seg in _item.get("skip_segments", {}).items():
+            state.skip_segments_cache[_path] = _seg
 
     guard       = asyncio.create_task(vpn_guard())
     broadcaster = asyncio.create_task(stat_broadcaster())
@@ -1012,6 +1171,8 @@ async def list_library(profile_id: str = "") -> JSONResponse:
     for it in lib["items"]:
         files = it.get("files", [])
         resume = find_resume_hint(it, profile_id) if profile_id else None
+        segs = it.get("skip_segments", {})
+        has_skip = any(segs.get(f.get("path", "")) for f in files)
         items.append({
             "id": it["id"],
             "title": it["title"],
@@ -1025,6 +1186,7 @@ async def list_library(profile_id: str = "") -> JSONResponse:
             "status": it.get("status", "ready"),
             "torrent_hash": it.get("torrent_hash", ""),
             "resume": resume,
+            "has_skip_segments": has_skip,
         })
     items.sort(key=lambda x: (
         x["series"] or "\xff" + x["title"],
@@ -1828,6 +1990,26 @@ async def remove_library_path(path: str) -> JSONResponse:
     paths.remove(path)
     await put_library(lib)
     return JSONResponse({"ok": True})
+
+
+@app.get("/api/library/fpcalc-check")
+async def fpcalc_check() -> JSONResponse:
+    available = shutil.which("fpcalc") is not None
+    hint = "brew install chromaprint" if platform.system() == "Darwin" else "apt install libchromaprint-tools  # or: brew install chromaprint"
+    return JSONResponse({"available": available, "install_hint": hint})
+
+
+@app.post("/api/library/analyze-intros")
+async def start_analyze_intros(series: str) -> JSONResponse:
+    """Kick off background intro detection for all ready episodes in a series."""
+    if not shutil.which("fpcalc"):
+        raise HTTPException(400, "fpcalc not installed. Run: brew install chromaprint")
+    if not series.strip():
+        raise HTTPException(400, "series name required")
+    if state.analyzing_series:
+        raise HTTPException(409, f"Already analyzing: {state.analyzing_series}")
+    asyncio.create_task(analyze_series_intros(series.strip()))
+    return JSONResponse({"ok": True, "series": series.strip()})
 
 
 @app.get("/api/settings/disk-space")

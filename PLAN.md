@@ -43,7 +43,7 @@
 ## Milestone 5 — Advanced / Power Features
 
 - [ ] **5.1** Local DNS: configure mDNS so the tool is accessible at `http://tool.local`
-- [ ] **5.2** Smart Skip: audio fingerprinting to detect and skip intro/credit sequences on library files
+- [x] **5.2** Smart Skip: audio fingerprinting to detect and skip intro/credit sequences on library files
 - [ ] **5.3** Control API: documented JSON POST endpoints for external play/pause/seek/volume control
 
 ---

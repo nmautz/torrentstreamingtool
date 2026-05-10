@@ -119,6 +119,29 @@ def mullvad_candidates() -> list[str]:
     return ["/usr/bin/mullvad", "mullvad"]
 
 
+def fpcalc_candidates() -> list[str]:
+    if SYSTEM == "Darwin":
+        return [
+            "/opt/homebrew/bin/fpcalc",
+            "/usr/local/bin/fpcalc",
+            "fpcalc",
+        ]
+    if SYSTEM == "Windows":
+        return [
+            r"C:\Program Files\Chromaprint\fpcalc.exe",
+            "fpcalc",
+        ]
+    return ["/usr/bin/fpcalc", "/usr/local/bin/fpcalc", "fpcalc"]
+
+
+def fpcalc_install_hint() -> str:
+    if SYSTEM == "Darwin":
+        return "brew install chromaprint"
+    if SYSTEM == "Windows":
+        return "choco install chromaprint  (or download from acoustid.org/chromaprint)"
+    return "apt install libchromaprint-tools  (Debian/Ubuntu) | dnf install chromaprint-tools  (Fedora)"
+
+
 # ── Step 1: Python version ─────────────────────────────────────────────────
 def check_python():
     header("Python")
@@ -167,7 +190,33 @@ def detect_tools() -> dict:
         else:
             warn(f"{label} not found — download: {url}")
 
+    # Optional: fpcalc (Chromaprint) — needed for Smart Skip intro detection
+    fpcalc = find_exe(*fpcalc_candidates())
+    tools["fpcalc"] = fpcalc
+    if fpcalc:
+        ok(f"fpcalc (Chromaprint): {fpcalc}")
+    else:
+        warn(f"fpcalc not found — Smart Skip intro detection will be unavailable")
+        note(f"Install: {fpcalc_install_hint()}")
+
     return tools
+
+
+# ── Step 3b: Check if .env is already valid ───────────────────────────────
+_REQUIRED_ENV_KEYS = {"INDEXER_URL", "QBIT_URL", "VLC_URL", "QBIT_DOWNLOAD_PATH"}
+
+def env_is_valid() -> bool:
+    if not ENV.exists():
+        return False
+    try:
+        keys = {
+            line.split("=", 1)[0].strip()
+            for line in ENV.read_text(encoding="utf-8").splitlines()
+            if "=" in line and not line.lstrip().startswith("#")
+        }
+        return _REQUIRED_ENV_KEYS.issubset(keys)
+    except Exception:
+        return False
 
 
 # ── Step 4: Interactive configuration ─────────────────────────────────────
@@ -315,20 +364,35 @@ def main():
     check_python()
     setup_venv()
     tools = detect_tools()
-    cfg   = gather_config()
-    configure_qbittorrent(cfg)
-    write_env(cfg, tools)
-    ensure_download_dir(cfg)
+
+    if env_is_valid():
+        header("Existing Configuration")
+        ok(f".env found at {ENV}")
+        if ask_bool("Recreate .env and qBittorrent config?", default=False):
+            cfg = gather_config()
+            configure_qbittorrent(cfg)
+            write_env(cfg, tools)
+            ensure_download_dir(cfg)
+        else:
+            ok("Keeping existing .env — skipping configuration.")
+    else:
+        cfg = gather_config()
+        configure_qbittorrent(cfg)
+        write_env(cfg, tools)
+        ensure_download_dir(cfg)
 
     header("Done")
     ok("Setup complete!")
     print()
 
-    missing = [k for k, v in tools.items() if not v]
+    required = ["vlc", "qbit", "jackett", "mullvad"]
+    missing  = [k for k in required if not tools.get(k)]
     if missing:
         warn(f"Still needs manual install: {', '.join(missing)}")
     if not tools.get("mullvad"):
         note("VPN guard will be inactive until Mullvad CLI is in PATH.")
+    if not tools.get("fpcalc"):
+        note(f"Smart Skip disabled — install fpcalc later: {fpcalc_install_hint()}")
 
     print()
     note(f"Start everything:   {BOLD}python3 run.py{RESET}")
