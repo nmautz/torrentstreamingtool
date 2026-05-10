@@ -16,7 +16,7 @@ from urllib.parse import unquote, urlparse
 
 import httpx
 import psutil
-from fastapi import FastAPI, HTTPException, Request
+from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -811,19 +811,28 @@ async def stream_pipeline(
 
 # ── Library Download Pipeline (keep file, no auto-delete) ─────────────────────
 
-async def library_download_pipeline(item_id: str, magnet: str, save_path: str = "") -> None:
+async def library_download_pipeline(
+    item_id: str,
+    magnet: str,
+    save_path: str = "",
+    torrent_hash: str = "",
+    selected_file_indices: Optional[list[int]] = None,
+) -> None:
     """Add magnet to qBit for a full download; no streaming mode, never auto-deleted."""
     try:
-        h = await qbit_add_magnet(magnet, save_path=save_path or None)
-        if not h:
-            lib = await get_library()
-            for it in lib["items"]:
-                if it["id"] == item_id:
-                    it["status"] = "error"
-                    break
-            await put_library(lib)
-            await broadcast("library_update", {"item_id": item_id, "status": "error"})
-            return
+        if torrent_hash:
+            h = torrent_hash
+        else:
+            h = await qbit_add_magnet(magnet, save_path=save_path or None)
+            if not h:
+                lib = await get_library()
+                for it in lib["items"]:
+                    if it["id"] == item_id:
+                        it["status"] = "error"
+                        break
+                await put_library(lib)
+                await broadcast("library_update", {"item_id": item_id, "status": "error"})
+                return
 
         lib = await get_library()
         for it in lib["items"]:
@@ -832,7 +841,7 @@ async def library_download_pipeline(item_id: str, magnet: str, save_path: str = 
                 break
         await put_library(lib)
 
-        # Wait for torrent metadata to appear, then build the file list immediately
+        # Wait for torrent metadata to appear, then build the file list
         for _ in range(30):
             await asyncio.sleep(2)
             info = await qbit_info(h)
@@ -842,7 +851,21 @@ async def library_download_pipeline(item_id: str, magnet: str, save_path: str = 
         if info := await qbit_info(h):
             save_path = info.get("save_path", settings.qbit_download_path)
             qfiles = await qbit_files(h)
-            files = build_file_list(qfiles, save_path)
+
+            if selected_file_indices:
+                # Skip non-selected files to avoid downloading them
+                selected_set = set(selected_file_indices)
+                skip_ids = [
+                    f.get("index", i) for i, f in enumerate(qfiles)
+                    if f.get("index", i) not in selected_set
+                ]
+                if skip_ids:
+                    await qbit_set_file_priority(h, skip_ids, 0)
+                sel_qfiles = [f for i, f in enumerate(qfiles) if f.get("index", i) in selected_set]
+                files = build_file_list(sel_qfiles, save_path)
+            else:
+                files = build_file_list(qfiles, save_path)
+
             lib = await get_library()
             for it in lib["items"]:
                 if it["id"] == item_id:
@@ -904,7 +927,9 @@ class DownloadReq(BaseModel):
     series: str = ""
     season: int = 0
     episode: int = 0
-    save_path: str = ""  # empty → use default from settings
+    save_path: str = ""
+    torrent_hash: str = ""          # pre-added hash from /api/library/prepare
+    selected_file_indices: list[int] = []  # if non-empty, skip all other files
 
 
 class ProfileReq(BaseModel):
@@ -1048,7 +1073,11 @@ async def library_download(req: DownloadReq) -> JSONResponse:
     await put_library(lib)
     state.downloading_count += 1
     save_path = req.save_path.strip() or settings.qbit_download_path
-    asyncio.create_task(library_download_pipeline(item["id"], req.magnet, save_path))
+    asyncio.create_task(library_download_pipeline(
+        item["id"], req.magnet, save_path,
+        torrent_hash=req.torrent_hash,
+        selected_file_indices=req.selected_file_indices or None,
+    ))
     return JSONResponse({"ok": True, "item_id": item["id"],
                          "default_save_path": settings.qbit_download_path})
 
@@ -1284,6 +1313,114 @@ async def stream_cancel(hash: str) -> JSONResponse:
     if state.prepare_hash == hash:
         state.prepare_hash = None
     return JSONResponse({"ok": True})
+
+
+@app.post("/api/library/prepare")
+async def library_prepare(req: StreamPrepareReq) -> JSONResponse:
+    """Fetch the file list for a torrent so the library file-picker UI can show checkboxes.
+
+    Unlike /stream/prepare this does NOT touch state.prepare_hash — the caller is
+    responsible for either completing the download (passing the returned hash to
+    /api/library/download) or cancelling with DELETE /api/stream/cancel?hash=...
+    """
+    if not state.vpn_secure:
+        raise HTTPException(403, "VPN not connected — download blocked.")
+
+    h = await qbit_add_magnet(req.magnet)
+    if not h:
+        raise HTTPException(500, "qBittorrent rejected the magnet.")
+
+    for _ in range(30):
+        await asyncio.sleep(1)
+        if await qbit_info(h):
+            break
+    else:
+        await qbit_delete(h, delete_files=True)
+        raise HTTPException(504, "Torrent metadata timed out — check connectivity and try again.")
+
+    for _ in range(30):
+        files = await qbit_files(h)
+        if files:
+            break
+        await asyncio.sleep(1)
+    else:
+        await qbit_delete(h, delete_files=True)
+        raise HTTPException(504, "Could not fetch file list — torrent may have no seeds.")
+
+    result = [
+        {
+            "index": f.get("index", i),
+            "name": f.get("name", ""),
+            "size_bytes": f.get("size", 0),
+            "size_human": human_size(f.get("size", 0)),
+        }
+        for i, f in enumerate(files)
+    ]
+    return JSONResponse({"hash": h, "files": result})
+
+
+@app.post("/api/library/upload")
+async def upload_to_library(
+    files: list[UploadFile] = File(...),
+    title: str = Form(""),
+    series: str = Form(""),
+    season: int = Form(0),
+    episode: int = Form(0),
+    save_path: str = Form(""),
+) -> JSONResponse:
+    """Accept one or more local video files and add them directly to the library."""
+    if not files:
+        raise HTTPException(400, "No files provided.")
+    dest_dir = Path(save_path.strip() or settings.qbit_download_path)
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        raise HTTPException(500, f"Cannot create save directory: {e}")
+
+    saved_files = []
+    for upload in files:
+        filename = Path(upload.filename or "upload").name
+        if not filename or Path(filename).suffix.lower() not in VIDEO_EXTS:
+            continue
+        dest = dest_dir / filename
+        stem, suffix = Path(filename).stem, Path(filename).suffix
+        counter = 1
+        while dest.exists():
+            dest = dest_dir / f"{stem}_{counter}{suffix}"
+            counter += 1
+        with open(dest, "wb") as f:
+            while chunk := await upload.read(1024 * 1024):
+                f.write(chunk)
+        s, ep = parse_season_episode(filename)
+        saved_files.append({
+            "name": dest.name,
+            "path": str(dest),
+            "size_bytes": dest.stat().st_size,
+            "season": s,
+            "episode": ep,
+        })
+
+    if not saved_files:
+        raise HTTPException(400, "No supported video files were uploaded.")
+
+    item: dict = {
+        "id": str(uuid.uuid4()),
+        "title": title.strip() or (Path(saved_files[0]["name"]).stem if len(saved_files) == 1 else "Uploaded Files"),
+        "series": series.strip(),
+        "season": season,
+        "episode": episode,
+        "files": saved_files,
+        "size_bytes": sum(f["size_bytes"] for f in saved_files),
+        "added_at": _now_iso(),
+        "status": "ready",
+        "torrent_hash": "",
+        "progress": {},
+    }
+    lib = await get_library()
+    lib["items"].append(item)
+    await put_library(lib)
+    await broadcast("library_update", {"item_id": item["id"], "status": "ready"})
+    return JSONResponse({"ok": True, "item_id": item["id"], "file_count": len(saved_files)})
 
 
 @app.post("/api/stream")

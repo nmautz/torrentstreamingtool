@@ -168,6 +168,23 @@
         </div>
       </div>
 
+      <!-- File selection (M3.4) — hidden in save-stream mode -->
+      <div id="dlFilePickerRow">
+        <button id="dlPickFilesToggle" onclick="toggleDlFilePicker()"
+          class="text-[11px] text-gray-600 hover:text-indigo-400 transition-colors flex items-center gap-1">
+          <svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/>
+          </svg>
+          <span id="dlPickFilesLabel">Select specific files (optional)</span>
+        </button>
+        <div id="dlFilePickerSection" class="hidden mt-2">
+          <div id="dlFilePickerList"
+            class="max-h-44 overflow-y-auto rounded-lg border border-gray-800 divide-y divide-gray-800/50"></div>
+          <p id="dlFilePickerCount" class="text-[11px] text-gray-600 mt-1.5"></p>
+        </div>
+      </div>
+
       <!-- Info row -->
       <div class="flex items-center gap-2 text-[11px] text-gray-600 bg-gray-800/50 rounded-lg px-3 py-2">
         <svg class="w-3.5 h-3.5 flex-shrink-0 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -191,6 +208,96 @@
             d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
         </svg>
         Download
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Upload Modal ───────────────────────────────────────────────────────── -->
+<div id="uploadModal"
+  class="hidden fixed inset-0 z-50 bg-black/75 backdrop-blur-sm
+         flex items-end sm:items-center justify-center sm:px-4 sm:py-6">
+  <div class="bg-gray-900 border border-gray-800 rounded-t-2xl sm:rounded-2xl w-full sm:max-w-md fade-in">
+    <div class="px-6 pt-5 pb-4 border-b border-gray-800">
+      <div class="flex items-start justify-between gap-3">
+        <h2 class="text-base font-bold">Upload to Library</h2>
+        <button onclick="closeUploadModal()"
+          class="text-gray-600 hover:text-gray-300 transition-colors flex-shrink-0 mt-0.5">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+    <div class="px-6 py-4 space-y-4">
+      <!-- Drop zone -->
+      <div id="uploadDropZone"
+        class="border-2 border-dashed border-gray-700 rounded-xl p-6 text-center cursor-pointer hover:border-indigo-600 transition-colors"
+        onclick="document.getElementById('uploadFileInput').click()"
+        ondragover="event.preventDefault();this.classList.add('border-indigo-500','bg-indigo-950/20')"
+        ondragleave="this.classList.remove('border-indigo-500','bg-indigo-950/20')"
+        ondrop="event.preventDefault();this.classList.remove('border-indigo-500','bg-indigo-950/20');handleUploadFiles(event.dataTransfer.files)">
+        <div id="uploadDropHint">
+          <svg class="w-8 h-8 text-gray-600 mx-auto mb-2" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+              d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+          </svg>
+          <p class="text-sm text-gray-400">Click to select video files</p>
+          <p class="text-xs text-gray-600 mt-1">or drag and drop here</p>
+        </div>
+        <div id="uploadFileList" class="hidden text-left space-y-1"></div>
+      </div>
+      <input type="file" id="uploadFileInput" multiple
+        accept="video/*,.mkv,.mp4,.avi,.mov,.wmv,.m4v,.ts,.m2ts,.webm" class="hidden"
+        onchange="handleUploadFiles(this.files)">
+
+      <!-- Title -->
+      <div>
+        <label class="block text-xs font-medium text-gray-400 mb-1.5">
+          Title <span class="text-gray-600 font-normal">(optional)</span>
+        </label>
+        <input id="uploadTitle" type="text" placeholder="Defaults to filename"
+          class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm
+                 focus:outline-none focus:border-indigo-500 transition-colors placeholder-gray-700"/>
+      </div>
+
+      <!-- Series / Episode -->
+      <div class="grid grid-cols-2 gap-3">
+        <div>
+          <label class="block text-xs font-medium text-gray-400 mb-1.5">
+            Series <span class="text-gray-600 font-normal">(optional)</span>
+          </label>
+          <input id="uploadSeries" type="text" placeholder="e.g. Breaking Bad"
+            class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm
+                   focus:outline-none focus:border-indigo-500 transition-colors placeholder-gray-700"/>
+        </div>
+        <div>
+          <label class="block text-xs font-medium text-gray-400 mb-1.5">
+            Episode <span class="text-gray-600 font-normal">(optional)</span>
+          </label>
+          <input id="uploadEpisode" type="text" placeholder="S01E03"
+            class="w-full bg-gray-800 border border-gray-700 rounded-lg px-3 py-2 text-sm
+                   focus:outline-none focus:border-indigo-500 transition-colors placeholder-gray-700"/>
+        </div>
+      </div>
+
+      <!-- Progress bar -->
+      <div id="uploadProgressWrap" class="hidden">
+        <div class="w-full bg-gray-800 rounded-full h-1.5">
+          <div id="uploadProgressFill" class="bg-indigo-600 h-1.5 rounded-full transition-all" style="width:0%"></div>
+        </div>
+        <p id="uploadProgressLabel" class="text-[11px] text-gray-500 mt-1.5 font-mono"></p>
+      </div>
+    </div>
+    <div class="px-4 pb-4 flex gap-2">
+      <button onclick="closeUploadModal()"
+        class="flex-1 bg-gray-800 hover:bg-gray-700 rounded-xl py-3.5 text-sm font-medium transition-colors min-h-[52px]">
+        Cancel
+      </button>
+      <button onclick="submitUpload()" id="uploadSubmitBtn" disabled
+        class="flex-1 bg-indigo-700 hover:bg-indigo-600 disabled:opacity-40 disabled:cursor-not-allowed
+               rounded-xl py-3.5 text-sm font-semibold transition-colors min-h-[52px]">
+        ⬆ Upload
       </button>
     </div>
   </div>
@@ -376,13 +483,22 @@
             <span id="diskSpaceLabel" class="text-[11px] text-gray-600 font-mono"></span>
           </div>
         </div>
-        <button onclick="loadLibrary()"
-          class="text-xs text-gray-600 hover:text-gray-300 transition-colors flex items-center gap-1">
-          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-              d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-          </svg> Refresh
-        </button>
+        <div class="flex items-center gap-3">
+          <button onclick="openUploadModal()"
+            class="text-xs text-gray-600 hover:text-indigo-300 transition-colors flex items-center gap-1">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
+            </svg> Upload
+          </button>
+          <button onclick="loadLibrary()"
+            class="text-xs text-gray-600 hover:text-gray-300 transition-colors flex items-center gap-1">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+            </svg> Refresh
+          </button>
+        </div>
       </div>
       <div id="libraryContent"></div>
     </div>
@@ -1502,7 +1618,14 @@ async function epPlayFrom(fileIndex){
 
 // ── Download modal ─────────────────────────────────────────────────────────
 let _defaultSavePath="";
-let _saveStreamMode=false; // true when adopting the active stream rather than adding a new magnet
+let _saveStreamMode=false;
+// M3.4 — library file picker state
+let _libPrepData=null;   // {hash, files} returned by /api/library/prepare
+let _libPrepAbort=null;  // AbortController for the in-flight prepare request
+let _libPickerOpen=false;
+// M3.3 — upload state
+let _uploadFiles=null;
+let _uploadXHR=null;
 
 async function ensureDefaultSavePath(){
   if(_defaultSavePath) return;
@@ -1514,6 +1637,7 @@ async function ensureDefaultSavePath(){
 
 async function openDownloadModal(magnet,title){
   downloadTarget={magnet,title};
+  document.getElementById("dlFilePickerRow").classList.remove("hidden");
   await ensureDefaultSavePath();
 
   document.getElementById("dlModalTitle").textContent=title;
@@ -1536,8 +1660,15 @@ async function openDownloadModal(magnet,title){
 
 function closeDownloadModal(){
   downloadTarget=null; _saveStreamMode=false;
+  // Cancel any in-flight library prepare
+  if(_libPrepAbort){ _libPrepAbort.abort(); _libPrepAbort=null; }
+  if(_libPrepData?.hash){
+    fetch(`/api/stream/cancel?hash=${encodeURIComponent(_libPrepData.hash)}`,{method:"DELETE"}).catch(()=>{});
+  }
+  _libPrepData=null; _libPickerOpen=false;
+  document.getElementById("dlFilePickerSection").classList.add("hidden");
+  document.getElementById("dlPickFilesLabel").textContent="Select specific files (optional)";
   document.getElementById("downloadModal").classList.add("hidden");
-  // Restore default modal heading / button label
   const h2=document.querySelector("#downloadModal h2");
   if(h2) h2.textContent="Add to Library";
   const btn=document.getElementById("dlSubmitBtn");
@@ -1548,6 +1679,7 @@ function closeDownloadModal(){
 
 async function openSaveStreamModal(){
   _saveStreamMode=true;
+  document.getElementById("dlFilePickerRow").classList.add("hidden");
   await ensureDefaultSavePath();
   const title=app.active_title||"";
   document.getElementById("dlModalTitle").textContent=title;
@@ -1574,6 +1706,149 @@ function resetSavePath(){
   document.getElementById("dlSavePath").value=_defaultSavePath;
 }
 
+// ── Library File Picker (M3.4) ─────────────────────────────────────────────
+async function toggleDlFilePicker(){
+  if(_libPickerOpen){
+    if(_libPrepAbort){ _libPrepAbort.abort(); _libPrepAbort=null; }
+    if(_libPrepData?.hash){
+      fetch(`/api/stream/cancel?hash=${encodeURIComponent(_libPrepData.hash)}`,{method:"DELETE"}).catch(()=>{});
+    }
+    _libPrepData=null; _libPickerOpen=false;
+    document.getElementById("dlFilePickerSection").classList.add("hidden");
+    document.getElementById("dlPickFilesLabel").textContent="Select specific files (optional)";
+    return;
+  }
+  _libPickerOpen=true;
+  document.getElementById("dlFilePickerSection").classList.remove("hidden");
+  document.getElementById("dlPickFilesLabel").textContent="✕ Cancel file selection";
+  const list=document.getElementById("dlFilePickerList");
+  list.innerHTML=`<div class="flex items-center justify-center py-5 gap-2 text-gray-600">
+    <svg class="w-4 h-4 animate-spin" fill="none" viewBox="0 0 24 24">
+      <circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/>
+      <path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/>
+    </svg><span class="text-xs">Fetching file list…</span></div>`;
+  _libPrepAbort=new AbortController();
+  try{
+    const r=await fetch("/api/library/prepare",{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({magnet:downloadTarget.magnet,title:downloadTarget.title}),
+      signal:_libPrepAbort.signal,
+    });
+    if(!r.ok){ const e=await r.json().catch(()=>({detail:"Failed"})); throw new Error(e.detail); }
+    const d=await r.json();
+    _libPrepData=d;
+    const videoFiles=d.files.filter(f=>isVideoFile(f.name));
+    if(!videoFiles.length){
+      list.innerHTML=`<p class="text-xs text-gray-500 text-center py-4">No video files found in this torrent.</p>`;
+      return;
+    }
+    list.innerHTML=videoFiles.map(f=>{
+      const parts=f.name.replace(/\\/g,"/").split("/");
+      const display=parts.length>2?parts.slice(-2).join("/"):f.name;
+      return `<label class="flex items-center gap-3 px-3 py-2.5 hover:bg-gray-800/70 cursor-pointer">
+        <input type="checkbox" class="dl-file-cb flex-shrink-0 rounded accent-indigo-500" checked
+               data-index="${f.index}" onchange="updateDlFileCount()">
+        <div class="flex-1 min-w-0">
+          <div class="text-xs text-gray-300 break-all leading-snug">${escHtml(display)}</div>
+          <div class="text-[11px] text-gray-600 mt-0.5">${escHtml(f.size_human)}</div>
+        </div></label>`;
+    }).join("");
+    updateDlFileCount();
+  }catch(err){
+    if(err.name==="AbortError") return;
+    list.innerHTML=`<p class="text-xs text-red-400 text-center py-4">${escHtml(err.message)}</p>`;
+  }finally{ _libPrepAbort=null; }
+}
+
+function updateDlFileCount(){
+  const cbs=document.querySelectorAll(".dl-file-cb");
+  const n=Array.from(cbs).filter(c=>c.checked).length;
+  document.getElementById("dlFilePickerCount").textContent=
+    `${n} of ${cbs.length} file${cbs.length!==1?"s":""} selected`;
+}
+
+// ── Upload Modal (M3.3) ────────────────────────────────────────────────────
+function openUploadModal(){
+  _uploadFiles=null; _uploadXHR=null;
+  document.getElementById("uploadTitle").value="";
+  document.getElementById("uploadSeries").value="";
+  document.getElementById("uploadEpisode").value="";
+  document.getElementById("uploadDropHint").classList.remove("hidden");
+  const fl=document.getElementById("uploadFileList");
+  fl.innerHTML=""; fl.classList.add("hidden");
+  document.getElementById("uploadProgressWrap").classList.add("hidden");
+  document.getElementById("uploadProgressFill").style.width="0%";
+  document.getElementById("uploadProgressLabel").textContent="";
+  document.getElementById("uploadFileInput").value="";
+  document.getElementById("uploadSubmitBtn").disabled=true;
+  document.getElementById("uploadModal").classList.remove("hidden");
+}
+
+function closeUploadModal(){
+  if(_uploadXHR){ _uploadXHR.abort(); _uploadXHR=null; }
+  document.getElementById("uploadModal").classList.add("hidden");
+}
+
+function handleUploadFiles(fileList){
+  _uploadFiles=Array.from(fileList);
+  if(!_uploadFiles.length) return;
+  if(!document.getElementById("uploadTitle").value && _uploadFiles.length===1){
+    document.getElementById("uploadTitle").value=_uploadFiles[0].name.replace(/\.[^.]+$/,"");
+  }
+  const list=document.getElementById("uploadFileList");
+  list.innerHTML=_uploadFiles.map(f=>`
+    <div class="flex items-center gap-2 text-xs py-1">
+      <svg class="w-3.5 h-3.5 text-indigo-400 flex-shrink-0" fill="currentColor" viewBox="0 0 24 24">
+        <path d="M8 5v14l11-7z"/>
+      </svg>
+      <span class="text-gray-300 truncate flex-1">${escHtml(f.name)}</span>
+      <span class="text-gray-600 flex-shrink-0">${fmtSize(f.size)}</span>
+    </div>`).join("");
+  document.getElementById("uploadDropHint").classList.add("hidden");
+  list.classList.remove("hidden");
+  document.getElementById("uploadSubmitBtn").disabled=false;
+}
+
+function submitUpload(){
+  if(!_uploadFiles?.length){ showAlert("No files selected.","warn"); return; }
+  const epM=document.getElementById("uploadEpisode").value.trim().match(/[Ss](\d+)[Ee](\d+)/);
+  const fd=new FormData();
+  _uploadFiles.forEach(f=>fd.append("files",f));
+  fd.append("title",document.getElementById("uploadTitle").value.trim());
+  fd.append("series",document.getElementById("uploadSeries").value.trim());
+  fd.append("season",String(epM?parseInt(epM[1]):0));
+  fd.append("episode",String(epM?parseInt(epM[2]):0));
+  const btn=document.getElementById("uploadSubmitBtn");
+  btn.disabled=true; btn.textContent="Uploading…";
+  document.getElementById("uploadProgressWrap").classList.remove("hidden");
+  const xhr=new XMLHttpRequest();
+  _uploadXHR=xhr;
+  xhr.upload.onprogress=e=>{
+    if(!e.lengthComputable) return;
+    const pct=Math.round(e.loaded/e.total*100);
+    document.getElementById("uploadProgressFill").style.width=pct+"%";
+    document.getElementById("uploadProgressLabel").textContent=
+      `${fmtSize(e.loaded)} / ${fmtSize(e.total)} (${pct}%)`;
+  };
+  xhr.onreadystatechange=()=>{
+    if(xhr.readyState!==4) return;
+    _uploadXHR=null;
+    if(xhr.status>=200&&xhr.status<300){
+      closeUploadModal();
+      showAlert("Uploaded and added to library.","success");
+      if(activeTab==="library") loadLibrary();
+    } else if(xhr.status===0){
+      // aborted
+    } else {
+      btn.disabled=false; btn.textContent="⬆ Upload";
+      try{ showAlert(JSON.parse(xhr.responseText).detail||"Upload failed.","error"); }
+      catch{ showAlert("Upload failed.","error"); }
+    }
+  };
+  xhr.open("POST","/api/library/upload");
+  xhr.send(fd);
+}
+
 function parseEp(s){
   const m=s.match(/[Ss](\d{1,2})[Ee](\d{1,2})/);
   return m?{season:parseInt(m[1]),episode:parseInt(m[2])}:{season:0,episode:0};
@@ -1597,11 +1872,16 @@ async function submitDownload(){
         body:JSON.stringify({title,series,season,episode,save_path:savePath}),
       });
     } else {
+      const body={magnet:downloadTarget.magnet,title,series,season,episode,save_path:savePath};
+      if(_libPickerOpen && _libPrepData){
+        const cbs=document.querySelectorAll(".dl-file-cb");
+        body.selected_file_indices=Array.from(cbs).filter(c=>c.checked).map(c=>parseInt(c.dataset.index));
+        body.torrent_hash=_libPrepData.hash;
+        _libPrepData=null; _libPickerOpen=false; // consumed — don't cancel on close
+      }
       r=await fetch("/api/library/download",{
         method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({
-          magnet:downloadTarget.magnet,title,series,season,episode,save_path:savePath,
-        }),
+        body:JSON.stringify(body),
       });
     }
     if(r.ok){
