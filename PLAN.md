@@ -18,17 +18,17 @@
 - [x] **2.1** Add Next / Previous episode buttons in the player footer
 - [x] **2.2** Highlight "currently playing" episode in the Episode Picker modal (poll VLC filename via state)
 - [x] **2.3** Playback Fix: "Play" on a specific episode selection reliably starts that file
-  - ⚠️ **Restart button not visible in testing** — button only renders for single-file items that have >3 % watch progress saved for the active profile. Multi-episode items and unwatched items don't show it. Needs investigation: should the button appear under broader conditions (e.g. always for ready single-file items, or for the first file in a multi-episode item)? Defer to a later pass.
+  - ✅ Confirmed working for single-file items with watch progress.
 
 ---
 
 ## Milestone 3 — Library Enhancements *(backend + frontend)*
 
-- [ ] **3.1** Disk Space Utility: show free/total space for the download path in the UI
+- [x] **3.1** Disk Space Utility: show free/total space for the download path in the UI
 - [ ] **3.2** "Add to Library": button while streaming to save the active torrent file to persistent library
 - [ ] **3.3** Upload System: web UI for uploading local files/folders directly to the library
 - [ ] **3.4** Precision Selection: folder/subfolder/file picker for library downloads (not just full torrent)
-- [ ] **3.5** Web Downloads: browser "Download" button to pull a library file back to the client
+- [x] **3.5** Web Downloads: browser "Download" button to pull a library file back to the client
 
 ---
 

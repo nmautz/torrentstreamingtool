@@ -367,7 +367,15 @@
     <!-- Library tab -->
     <div id="libraryTab" class="hidden">
       <div class="flex items-center justify-between mb-5">
-        <h2 class="text-lg font-bold">My Library</h2>
+        <div>
+          <h2 class="text-lg font-bold">My Library</h2>
+          <div id="diskSpaceBar" class="hidden mt-1 flex items-center gap-2">
+            <div class="w-24 h-1 bg-gray-800 rounded-full overflow-hidden flex-shrink-0">
+              <div id="diskSpaceFill" class="h-full bg-indigo-600 rounded-full transition-all"></div>
+            </div>
+            <span id="diskSpaceLabel" class="text-[11px] text-gray-600 font-mono"></span>
+          </div>
+        </div>
         <button onclick="loadLibrary()"
           class="text-xs text-gray-600 hover:text-gray-300 transition-colors flex items-center gap-1">
           <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1071,8 +1079,29 @@ async function submitProfile(){
 // ── Library ────────────────────────────────────────────────────────────────
 async function loadLibrary(){
   const pid=profile.id?`?profile_id=${profile.id}`:"";
-  const r=await fetch(`/api/library${pid}`);
-  renderLibrary((await r.json()).items||[]);
+  const [libRes] = await Promise.all([
+    fetch(`/api/library${pid}`),
+    loadDiskSpace(),
+  ]);
+  renderLibrary((await libRes.json()).items||[]);
+}
+
+async function loadDiskSpace(){
+  try{
+    const r=await fetch("/api/settings/disk-space");
+    if(!r.ok) return;
+    const d=await r.json();
+    const usedPct=100-d.free_pct;
+    const bar=document.getElementById("diskSpaceFill");
+    const label=document.getElementById("diskSpaceLabel");
+    const wrap=document.getElementById("diskSpaceBar");
+    if(!bar||!label||!wrap) return;
+    bar.style.width=`${Math.min(100,usedPct)}%`;
+    bar.className=`h-full rounded-full transition-all ${usedPct>90?"bg-red-500":usedPct>70?"bg-yellow-500":"bg-indigo-600"}`;
+    label.textContent=`${d.free_human} free of ${d.total_human}`;
+    wrap.classList.remove("hidden");
+    wrap.classList.add("flex");
+  } catch(_){}
 }
 
 function watchPctOf(prog){ return (!prog||!prog.duration_sec)?0:Math.round(prog.position_sec/prog.duration_sec*100); }
@@ -1165,6 +1194,18 @@ function renderLibrary(items){
             </button>`;
           }
         }
+      }
+
+      // Download button — single-file ready items only (multi-file handled per-file in episode picker)
+      if(isReady && !isMulti){
+        buttons+=`<a href="/api/library/${item.id}/download" download
+          class="text-gray-500 hover:text-indigo-300 p-2.5 rounded-xl hover:bg-indigo-950/40 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0"
+          title="Download to device">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+          </svg>
+        </a>`;
       }
 
       // Delete button (fixed width, doesn't flex-grow)
@@ -1333,6 +1374,15 @@ function renderEpList(){
           class="flex-shrink-0 w-9 h-9 flex items-center justify-center rounded-lg
                  bg-indigo-900/60 hover:bg-indigo-700 text-indigo-300 hover:text-white
                  text-xs font-bold transition-colors" title="Play from here">▶</button>
+        <a href="/api/library/${escHtml(epItemId)}/download?file_path=${encodeURIComponent(f.path)}" download="${escHtml(f.name)}"
+          class="flex-shrink-0 w-9 h-9 flex items-center justify-center rounded-lg
+                 text-gray-600 hover:text-indigo-300 hover:bg-indigo-950/40 transition-colors"
+          title="Download to device">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+          </svg>
+        </a>
       </div>`;
     });
   });

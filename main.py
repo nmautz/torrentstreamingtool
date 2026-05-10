@@ -5,6 +5,7 @@ import base64
 import json
 import platform
 import re
+import shutil
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -16,7 +17,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 import psutil
 from fastapi import FastAPI, HTTPException, Request
-from fastapi.responses import JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -1422,6 +1423,60 @@ async def get_state() -> JSONResponse:
 @app.get("/api/settings/download-path")
 async def get_download_path() -> JSONResponse:
     return JSONResponse({"path": settings.qbit_download_path})
+
+
+@app.get("/api/settings/disk-space")
+async def get_disk_space() -> JSONResponse:
+    path = settings.qbit_download_path
+    try:
+        usage = shutil.disk_usage(path)
+        return JSONResponse({
+            "path": path,
+            "total_bytes": usage.total,
+            "used_bytes":  usage.used,
+            "free_bytes":  usage.free,
+            "total_human": human_size(usage.total),
+            "free_human":  human_size(usage.free),
+            "free_pct":    round(usage.free / usage.total * 100, 1) if usage.total else 0,
+        })
+    except Exception as e:
+        raise HTTPException(500, f"Could not read disk usage: {e}")
+
+
+@app.get("/api/library/{item_id}/download")
+async def download_library_file(item_id: str, file_path: str = "") -> FileResponse:
+    """Stream a library file to the browser for download.
+
+    For single-file items the path can be omitted; for multi-file items pass
+    the absolute file_path as a query parameter.
+    """
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+
+    files = item.get("files", [])
+    if not files:
+        raise HTTPException(404, "No files associated with this item.")
+
+    if file_path:
+        target = next((f for f in files if f["path"] == file_path), None)
+        if not target:
+            raise HTTPException(404, "File not found in this item.")
+        path = Path(target["path"])
+    else:
+        if len(files) != 1:
+            raise HTTPException(400, "Multiple files — pass file_path query parameter.")
+        path = Path(files[0]["path"])
+
+    if not path.exists():
+        raise HTTPException(404, f"File not on disk: {path.name}")
+
+    return FileResponse(
+        path=str(path),
+        filename=path.name,
+        media_type="application/octet-stream",
+    )
 
 
 @app.get("/api/events")
