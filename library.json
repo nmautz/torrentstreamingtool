@@ -85,10 +85,10 @@
           "last_file": "/Users/nathanmautz/Downloads/StreamLink/The.Boys.S04.COMPLETE.720p.AMZN.WEBRip.x264-GalaxyTV[TGx]/The.Boys.S04E01.720p.AMZN.WEBRip.x264-GalaxyTV.mkv",
           "file_progress": {
             "/Users/nathanmautz/Downloads/StreamLink/The.Boys.S04.COMPLETE.720p.AMZN.WEBRip.x264-GalaxyTV[TGx]/The.Boys.S04E01.720p.AMZN.WEBRip.x264-GalaxyTV.mkv": {
-              "position_sec": 419.0,
+              "position_sec": 426.0,
               "duration_sec": 3906.0,
               "completed": false,
-              "updated_at": "2026-05-10T15:59:56+00:00"
+              "updated_at": "2026-05-10T16:15:23+00:00"
             }
           }
         }
@@ -265,9 +265,21 @@
       ],
       "size_bytes": 12076706404,
       "added_at": "2026-05-10T15:40:45+00:00",
-      "status": "downloading",
+      "status": "ready",
       "torrent_hash": "b33c5ffdd7a0c01de20736df6016532d731814b5",
-      "progress": {}
+      "progress": {
+        "b9a4969e-2ac3-4815-8570-cb2ff7af5c90": {
+          "last_file": "/Users/nathanmautz/Downloads/StreamLink/[Clara] Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e/[Clara] Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e 01 - What is evil？ Whatever springs from weakness. [D3AE9C49].mkv",
+          "file_progress": {
+            "/Users/nathanmautz/Downloads/StreamLink/[Clara] Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e/[Clara] Youkoso Jitsuryoku Shijou Shugi no Kyoushitsu e 01 - What is evil？ Whatever springs from weakness. [D3AE9C49].mkv": {
+              "position_sec": 963.0,
+              "duration_sec": 1440.0,
+              "completed": false,
+              "updated_at": "2026-05-10T16:17:38+00:00"
+            }
+          }
+        }
+      }
     }
   ]
 }

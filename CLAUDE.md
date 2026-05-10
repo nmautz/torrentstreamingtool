@@ -38,14 +38,16 @@ VLC, qBittorrent, and the dashboard all run on the same machine. Jackett can be 
 
 **Settings** — `pydantic-settings` reads `.env` into a `Settings` singleton. All service URLs, credentials, and buffer thresholds come from here.
 
-**AppState** — a module-level `@dataclass` holding all mutable runtime state: VPN status, active torrent hash, stream pipeline status, progress figures, and the list of SSE queues. There is no database; state is in-memory only.
+**AppState** — a module-level `@dataclass` holding all mutable runtime state: VPN status, active torrent hash, stream pipeline status, progress figures, VLC playback position (`vlc_time`/`vlc_duration` in seconds), track selection, and the list of SSE queues. There is no database; state is in-memory only.
 
-**SSE broadcast** — each `/api/events` connection gets its own `asyncio.Queue`. `broadcast(event, data)` fans out to all queues. The two background tasks (`vpn_guard`, `stat_broadcaster`) push events this way; the stream pipeline task does too.
+**SSE broadcast** — each `/api/events` connection gets its own `asyncio.Queue`. `broadcast(event, data)` fans out to all queues. The background tasks (`vpn_guard`, `stat_broadcaster`, `vlc_progress_tracker`) push events this way; the stream pipeline task does too.
+
+**`stat_broadcaster`** — runs every 2 s. When `stream_status` is `buffering` or `playing`, polls qBit for download progress. Additionally, when `stream_status == "playing"`, calls `vlc_status()` to update `state.vlc_time`/`state.vlc_duration` (VLC playback position). These are included in every `state` snapshot and used by the frontend seek bar.
 
 **Stream pipeline** — `/api/stream` immediately returns 202 and creates an `asyncio.Task` stored in `state.stream_task`. The task:
-1. Adds the magnet to qBittorrent
+1. Adds the magnet to qBittorrent with `sequentialDownload=true` at add-time
 2. Waits up to 30 s for the torrent to appear
-3. Sets sequential download + first/last piece priority
+3. Calls `qbit_streaming_mode()` to verify sequential is on (belt-and-suspenders)
 4. Polls `qbit_info()` with `asyncio.sleep(1)` (never `time.sleep`) until `BUFFER_MIN_MB` or `BUFFER_MIN_PCT` is crossed
 5. Resolves the video file path with `Path.as_uri()` (handles Windows `file:///C:/…` and macOS `file:///…` automatically)
 6. Sends `in_play` to VLC's HTTP interface
@@ -97,6 +99,10 @@ Persistent storage in `library.json` at the project root (created automatically)
 
 **VLC track IDs** — `GET /api/vlc/tracks` must use the actual ES (elementary stream) ID as each track's `id` — the number N extracted from the `"Stream N"` key in VLC's JSON status. VLC's `audio_track` and `subtitle_track` commands accept ES IDs, and the `<audiotrack>`/`<subtitletrack>` values in the XML status are also ES IDs. Using sequential per-type counters (1, 2, 3…) instead will send the wrong ID, causing commands to silently do nothing and the "current" highlight in the dropdown to never match.
 
+**VLC 3.x current track limitation** — VLC 3.x does not include `<audiotrack>` or `<subtitletrack>` in its XML status response. Current track selection is tracked server-side in `state.current_audio_track` / `state.current_subtitle_track` (set by the `POST /api/vlc/track/*` endpoints, reset to -1 on new playback).
+
+**Absolute seek** — `POST /api/vlc/seek/to?position_pct=N` sends `val=N%` to VLC's `seek` command (percentage-based absolute position). The relative-seek endpoint `POST /api/vlc/seek?delta=N` uses `val=+Ns` / `val=-Ns` format. Do not confuse the two — VLC treats `val=N` (no suffix) as a fraction (0.0–1.0), not seconds.
+
 ### Frontend (`static/index.html`)
 
 Vanilla JS, Tailwind CDN, no build step. A single `EventSource('/api/events')` drives all real-time UI. SSE event types:
@@ -110,4 +116,12 @@ Vanilla JS, Tailwind CDN, no build step. A single `EventSource('/api/events')` d
 
 **Profile picker**: full-screen overlay shown on first load (or when no valid profile in localStorage). Profiles stored in `library.json` on the server; selected profile ID stored in `localStorage.streamlink_profile`.
 
+**Alert / toast** — `showAlert(msg, type)` writes to two places simultaneously: `#alert` (an inline div inside `#searchTab`) and `#globalToast` (a fixed-position element below the navbar, always visible regardless of active tab). This means errors from library playback are visible even when the Search tab is hidden. `hideAlert()` clears both. Auto-dismiss fires after 4 s (non-error) or 7 s (error).
+
+**Seek bar** — the player footer seek bar (`#seekBarWrapper`) responds to click/tap. When `stream_status === "playing"` and `vlc_duration > 0`, the bar shows VLC playback position (from `vlc_time`/`vlc_duration` in the state snapshot) and clicking calls `POST /api/vlc/seek/to`. Otherwise it shows download progress from `state.progress`. `renderPlayer()` handles both modes.
+
+**Episode picker** — each row has a per-episode ▶ button (calls `epPlayFrom(filePath)`) that selects that episode and all following ones in order, then plays immediately without needing to use the "Play Selected" button. `epPlayFrom` slices `epFiles` from the tapped index forward, respects resume position on the first file, and closes the modal.
+
 The VPN-disconnected overlay is a fixed full-screen div toggled by CSS `hidden` class. Play buttons disable optimistically on click and re-enable if the API call fails.
+
+**`run.py` startup output** — binds uvicorn to `0.0.0.0` (not `127.0.0.1`) so mobile devices on the same LAN can connect. On startup, prints both the localhost URL and the LAN URL with the current Wi-Fi SSID (detected via `airport -I` on macOS, with `networksetup` fallback).

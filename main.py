@@ -132,6 +132,8 @@ class AppState:
     downloading_count: int = 0                            # active library downloads
     current_audio_track: int = -1                         # last track ID sent to VLC
     current_subtitle_track: int = -1                      # last track ID sent to VLC
+    vlc_time: int = 0                                     # VLC current position (seconds)
+    vlc_duration: int = 0                                 # VLC total duration (seconds)
     sse_queues: list = field(default_factory=list)
 
 
@@ -165,6 +167,8 @@ def state_snapshot() -> dict:
         "dl_speed_bps": state.dl_speed_bps,
         "ul_speed_bps": state.ul_speed_bps,
         "downloading_count": state.downloading_count,
+        "vlc_time": state.vlc_time,
+        "vlc_duration": state.vlc_duration,
     }
 
 
@@ -480,6 +484,11 @@ async def stat_broadcaster() -> None:
                 state.total_mb = total / 1_048_576
                 state.dl_speed_bps = info.get("dlspeed", 0)
                 state.ul_speed_bps = info.get("upspeed", 0)
+        if state.stream_status == "playing":
+            vs = await vlc_status()
+            if vs:
+                state.vlc_time = int(vs.get("time", 0))
+                state.vlc_duration = int(vs.get("length", 0))
         await broadcast("state", state_snapshot())
         await asyncio.sleep(2)
 
@@ -1104,6 +1113,14 @@ async def seek(delta: float) -> JSONResponse:
     """Seek relative to current position.  delta is seconds; negative = rewind."""
     sign = "+" if delta >= 0 else ""
     await vlc("seek", val=f"{sign}{int(delta)}s")
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/vlc/seek/to")
+async def seek_to(position_pct: float) -> JSONResponse:
+    """Seek to an absolute position (0–100 %)."""
+    pct = max(0.0, min(100.0, position_pct))
+    await vlc("seek", val=f"{pct:.2f}%")
     return JSONResponse({"ok": True})
 
 

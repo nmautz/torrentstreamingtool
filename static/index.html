@@ -250,6 +250,13 @@
   </div>
 </div>
 
+<!-- ── Global Toast (visible from any tab) ────────────────────────────────── -->
+<div id="globalToast"
+  class="hidden fixed top-16 inset-x-0 z-45 px-4 pointer-events-none">
+  <div id="globalToastInner"
+    class="max-w-2xl mx-auto px-4 py-2.5 rounded-xl border text-sm text-center shadow-xl fade-in"></div>
+</div>
+
 <!-- ── Navbar ─────────────────────────────────────────────────────────────── -->
 <header class="sticky top-0 z-40 bg-gray-900/95 backdrop-blur border-b border-gray-800 flex-shrink-0">
   <div class="max-w-5xl mx-auto px-3 h-14 flex items-center gap-2">
@@ -351,9 +358,12 @@
 
 <!-- ── Player Footer ──────────────────────────────────────────────────────── -->
 <footer class="fixed bottom-0 left-0 right-0 z-40 bg-gray-900 border-t border-gray-800 safe-bottom">
-  <!-- Progress bar -->
-  <div class="w-full bg-gray-800 h-1">
-    <div id="progressBar" class="h-1 bg-indigo-500 transition-all duration-700" style="width:0%"></div>
+  <!-- Seek bar — taller touch target, clickable for absolute seek -->
+  <div id="seekBarWrapper" class="w-full py-1.5 cursor-pointer group"
+       onclick="handleSeekBarClick(event, this)" style="touch-action:none;">
+    <div class="w-full bg-gray-800 h-1 group-active:h-1.5 transition-all">
+      <div id="progressBar" class="h-full bg-indigo-500 transition-all duration-700 pointer-events-none" style="width:0%"></div>
+    </div>
   </div>
   <!-- Track selectors — only while playing -->
   <div id="trackControls" class="hidden border-b border-gray-800/60">
@@ -377,12 +387,13 @@
     </div>
   </div>
   <!-- Now-playing info row -->
-  <div class="max-w-5xl mx-auto px-3 pt-2.5 pb-1 flex items-center gap-2">
+  <div class="max-w-5xl mx-auto px-3 pt-1 pb-1 flex items-center gap-2">
     <div id="playerDot" class="w-2 h-2 rounded-full bg-gray-700 flex-shrink-0"></div>
     <div class="flex-1 min-w-0">
       <div id="nowPlaying" class="text-sm font-semibold text-gray-500 truncate">No active stream</div>
-      <div class="flex items-center gap-2 mt-0.5">
+      <div class="flex items-center gap-2 mt-0.5 flex-wrap">
         <span id="streamInfo" class="text-[11px] text-gray-600 truncate"></span>
+        <span id="vlcTimeDisplay" class="hidden text-[11px] font-mono text-gray-500 flex-shrink-0"></span>
         <span id="speedInfo"  class="text-[11px] text-gray-700 font-mono flex-shrink-0"></span>
       </div>
     </div>
@@ -485,6 +496,12 @@ function fmtTime(sec) {
   const h=Math.floor(sec/3600), m=Math.floor((sec%3600)/60), s=Math.floor(sec%60);
   return h>0 ? `${h}h ${m}m` : m>0 ? `${m}m ${s}s` : `${s}s`;
 }
+function fmtTimeSecs(sec) {
+  sec=Math.floor(sec||0);
+  const h=Math.floor(sec/3600), m=Math.floor((sec%3600)/60), s=sec%60;
+  if(h>0) return `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`;
+  return `${m}:${String(s).padStart(2,"0")}`;
+}
 function avatarBg(c) { return (PROFILE_COLORS[c]||PROFILE_COLORS.indigo).bg; }
 function pad2(n)      { return String(n).padStart(2,"0"); }
 function epLabel(f)   {
@@ -502,13 +519,26 @@ const ALERT_STYLES = {
 };
 let alertTimer;
 function showAlert(msg,type="error") {
+  // In-tab alert (search tab)
   const el=document.getElementById("alert");
   el.className=`mb-4 px-4 py-2.5 rounded-lg border text-sm ${ALERT_STYLES[type]||ALERT_STYLES.error}`;
   el.textContent=msg; el.classList.remove("hidden");
+  // Global toast (always visible regardless of active tab)
+  const toast=document.getElementById("globalToast");
+  const inner=document.getElementById("globalToastInner");
+  inner.className=`px-4 py-2.5 rounded-xl border text-sm text-center shadow-xl ${ALERT_STYLES[type]||ALERT_STYLES.error}`;
+  inner.textContent=msg; toast.classList.remove("hidden");
   clearTimeout(alertTimer);
-  if(type!=="error") alertTimer=setTimeout(()=>el.classList.add("hidden"),5000);
+  const delay=type==="error"?7000:4000;
+  alertTimer=setTimeout(()=>{
+    el.classList.add("hidden");
+    toast.classList.add("hidden");
+  },delay);
 }
-function hideAlert(){ document.getElementById("alert").classList.add("hidden"); }
+function hideAlert(){
+  document.getElementById("alert").classList.add("hidden");
+  document.getElementById("globalToast").classList.add("hidden");
+}
 
 // ── VPN UI ─────────────────────────────────────────────────────────────────
 function renderVpn(secure,statusText){
@@ -540,26 +570,59 @@ function renderPlayer(s){
   const np=document.getElementById("nowPlaying"),si=document.getElementById("streamInfo");
   const sp=document.getElementById("speedInfo"),bar=document.getElementById("progressBar");
   const badge=document.getElementById("statusBadge"),dot=document.getElementById("playerDot");
-  bar.style.width=`${Math.min(100,s.progress||0)}%`;
-  bar.className=`h-0.5 transition-all duration-700 ${BAR_COLOR[s.stream_status]||BAR_COLOR.idle}`;
+  const td=document.getElementById("vlcTimeDisplay");
+
+  // Seek bar: use VLC playback position when playing with known duration; else download progress
+  const isPlaying=s.stream_status==="playing";
+  const hasVlcTime=isPlaying&&(s.vlc_duration||0)>0;
+  const barPct=hasVlcTime
+    ?(s.vlc_time/s.vlc_duration*100)
+    :Math.min(100,s.progress||0);
+
+  bar.style.width=`${barPct}%`;
+  bar.className=`h-full transition-all duration-700 ${BAR_COLOR[s.stream_status]||BAR_COLOR.idle}`;
   dot.className=`w-2 h-2 rounded-full flex-shrink-0 ${DOT_COLOR[s.stream_status]||DOT_COLOR.idle}`;
   np.textContent=s.active_title||"No active stream";
   np.className=`text-sm font-medium truncate ${s.active_title?"text-gray-200":"text-gray-500"}`;
+
   if(s.stream_status==="buffering")
     si.textContent=s.total_mb>0?`${s.downloaded_mb.toFixed(1)} MB / ${s.total_mb.toFixed(1)} MB (${s.progress.toFixed(1)}%)`:"Connecting…";
-  else if(s.stream_status==="playing")
-    si.textContent=s.total_mb>0?`${s.downloaded_mb.toFixed(1)} / ${s.total_mb.toFixed(1)} MB`:"";
-  else si.textContent="";
+  else if(isPlaying&&!hasVlcTime&&s.total_mb>0)
+    si.textContent=`${s.downloaded_mb.toFixed(1)} / ${s.total_mb.toFixed(1)} MB`;
+  else if(!isPlaying) si.textContent="";
+
+  // VLC time display
+  if(hasVlcTime){
+    td.textContent=`${fmtTimeSecs(s.vlc_time)} / ${fmtTimeSecs(s.vlc_duration)}`;
+    td.classList.remove("hidden");
+    si.textContent="";
+  } else { td.classList.add("hidden"); }
+
   sp.textContent=(s.dl_speed_bps>0&&s.stream_status!=="idle")?`▼ ${fmtSpeed(s.dl_speed_bps)}  ▲ ${fmtSpeed(s.ul_speed_bps)}`:"";
   if(s.stream_status in BADGE){
     const labels={buffering:"Buffering…",playing:"▶ Playing",error:"Error"};
     badge.className=`text-[11px] font-semibold px-2 py-0.5 rounded-full border ${BADGE[s.stream_status]}`;
     badge.textContent=labels[s.stream_status]; badge.classList.remove("hidden");
   } else { badge.classList.add("hidden"); }
+
+  // Enable seek bar click only while playing
+  const sw=document.getElementById("seekBarWrapper");
+  sw.style.cursor=isPlaying?"pointer":"default";
+
   // Show audio/subtitle controls only while playing
   const tc=document.getElementById("trackControls");
-  if(s.stream_status==="playing"){ tc.classList.remove("hidden"); startTrackPoll(); }
+  if(isPlaying){ tc.classList.remove("hidden"); startTrackPoll(); }
   else { tc.classList.add("hidden"); stopTrackPoll(); }
+}
+
+function handleSeekBarClick(e, el){
+  if(app.stream_status!=="playing") return;
+  const rect=el.getBoundingClientRect();
+  const x=(e.touches?e.touches[0].clientX:e.clientX)-rect.left;
+  const pct=Math.max(0,Math.min(100,(x/rect.width)*100));
+  fetch(`/api/vlc/seek/to?position_pct=${pct.toFixed(1)}`,{method:"POST"}).catch(()=>{});
+  // Optimistic update
+  document.getElementById("progressBar").style.width=pct+"%";
 }
 
 // ── Tabs ───────────────────────────────────────────────────────────────────
@@ -731,42 +794,40 @@ function renderLibrary(items){
       let buttons="";
       if(isReady){
         if(isMulti){
-          const contLabel=hasProgress
-            ?`↩ ${resume.episode_name.replace(/\.[^.]+$/,"").substring(0,22)}… ${Math.round(pct)}%`
-            :`▶ Play All`;
+          const contLabel=hasProgress?`↩ Resume ${Math.round(pct)}%`:`▶ Play All`;
           buttons+=`<button onclick="openEpisodePicker('${item.id}')"
             class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white
-                   px-3 py-2.5 rounded-xl transition-colors whitespace-nowrap font-medium min-h-[44px]">
+                   flex-1 py-2.5 rounded-xl transition-colors font-medium min-h-[44px]">
             ☰ Episodes
           </button>
           <button onclick="continueLibraryItem('${item.id}')"
             class="text-sm ${hasProgress?'bg-green-900/50 hover:bg-green-800/60 text-green-300 border border-green-800':'bg-indigo-700 hover:bg-indigo-600 text-white border-0'}
-                   px-3 py-2.5 rounded-xl transition-colors whitespace-nowrap font-medium min-h-[44px]">
+                   flex-1 py-2.5 rounded-xl transition-colors font-medium min-h-[44px]">
             ${escHtml(contLabel)}
           </button>`;
         } else {
           if(hasProgress){
             buttons+=`<button onclick="continueLibraryItem('${item.id}')"
               class="text-sm bg-green-900/50 hover:bg-green-800/60 text-green-300 border border-green-800
-                     px-3 py-2.5 rounded-xl transition-colors whitespace-nowrap font-medium min-h-[44px]">
+                     flex-1 py-2.5 rounded-xl transition-colors font-medium min-h-[44px]">
               ↩ Resume ${Math.round(pct)}%
             </button>
             <button onclick="playLibraryFiles('${item.id}',['${resume.file_path}'],0)"
-              class="text-sm bg-indigo-700 hover:bg-indigo-600 text-white px-3 py-2.5 rounded-xl transition-colors whitespace-nowrap min-h-[44px]">
+              class="text-sm bg-indigo-700 hover:bg-indigo-600 text-white flex-1 py-2.5 rounded-xl transition-colors min-h-[44px]">
               ▶ Restart
             </button>`;
           } else {
             buttons+=`<button onclick="continueLibraryItem('${item.id}')"
-              class="text-sm bg-indigo-700 hover:bg-indigo-600 text-white px-4 py-2.5 rounded-xl transition-colors whitespace-nowrap font-medium min-h-[44px]">
+              class="text-sm bg-indigo-700 hover:bg-indigo-600 text-white flex-1 py-2.5 rounded-xl transition-colors font-medium min-h-[44px]">
               ▶ Play
             </button>`;
           }
         }
       }
 
-      // Delete button
+      // Delete button (fixed width, doesn't flex-grow)
       buttons+=`<button onclick="deleteLibraryItem('${item.id}')"
-        class="text-gray-600 hover:text-red-400 p-2.5 rounded-xl hover:bg-red-950/30 transition-colors min-h-[44px] min-w-[44px] flex items-center justify-center">
+        class="text-gray-600 hover:text-red-400 p-2.5 rounded-xl hover:bg-red-950/30 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
             d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
@@ -780,12 +841,12 @@ function renderLibrary(items){
           </div>`:""
 
       const meta=[
-        item.file_count>1?`${item.file_count} episodes`:"",
+        item.file_count>1?`${item.file_count} ep`:"",
         item.size_bytes>0?item.size_human:"",
       ].filter(Boolean).join(" · ");
 
-      html+=`<div class="bg-gray-900 border border-gray-800 rounded-xl px-4 py-3 flex items-center gap-3" data-item-id="${item.id}">
-        <div class="flex-1 min-w-0">
+      html+=`<div class="bg-gray-900 border border-gray-800 rounded-xl px-4 py-3 flex flex-col gap-2" data-item-id="${item.id}">
+        <div class="min-w-0">
           <div class="flex items-center gap-2 flex-wrap">
             <span class="text-sm font-medium text-gray-200 truncate">${epPrefix}${escHtml(item.title)}</span>
             ${statusBadge}
@@ -793,7 +854,7 @@ function renderLibrary(items){
           <div class="text-[11px] text-gray-600 mt-0.5">${escHtml(meta)}</div>
           ${progBar}
         </div>
-        <div class="flex items-center gap-1.5 flex-shrink-0">${buttons}</div>
+        ${buttons?"<div class='flex items-center gap-2'>"+buttons+"</div>":""}
       </div>`;
     });
     html+=`</div></div>`;
@@ -900,19 +961,25 @@ function renderEpList(){
       const label=epLabel(f);
       const displayName=f.season&&f.episode?f.name:f.name;  // full name when no S/E
 
-      html+=`<label class="ep-row flex items-start gap-3 px-2 py-2.5 rounded-lg cursor-pointer transition-colors" data-path="${escHtml(f.path)}">
-        <input type="checkbox" class="ep-check mt-0.5 flex-shrink-0 accent-indigo-500 w-4 h-4"
-          ${checked?"checked":""} data-path="${escHtml(f.path)}" onchange="epToggle(this)" />
-        <div class="flex-1 min-w-0">
-          <div class="flex items-center gap-1.5 flex-wrap">
-            ${f.season&&f.episode?`<span class="text-[10px] font-mono text-indigo-400 bg-indigo-950/50 px-1.5 py-0.5 rounded">${escHtml(label)}</span>`:""}
-            <span class="text-sm text-gray-300 truncate">${escHtml(displayName)}</span>
-            ${badge}
+      html+=`<div class="ep-row flex items-center gap-1 px-1 py-1 rounded-lg transition-colors" data-path="${escHtml(f.path)}">
+        <label class="flex items-start gap-2.5 flex-1 min-w-0 cursor-pointer px-1 py-1.5">
+          <input type="checkbox" class="ep-check mt-0.5 flex-shrink-0 accent-indigo-500 w-4 h-4"
+            ${checked?"checked":""} data-path="${escHtml(f.path)}" onchange="epToggle(this)" />
+          <div class="flex-1 min-w-0">
+            <div class="flex items-center gap-1.5 flex-wrap">
+              ${f.season&&f.episode?`<span class="text-[10px] font-mono text-indigo-400 bg-indigo-950/50 px-1.5 py-0.5 rounded">${escHtml(label)}</span>`:""}
+              <span class="text-sm text-gray-300 truncate">${escHtml(displayName)}</span>
+              ${badge}
+            </div>
+            <div class="text-[10px] text-gray-700 mt-0.5">${escHtml(f.size_human)}</div>
+            ${progressBar}
           </div>
-          <div class="text-[10px] text-gray-700 mt-0.5">${escHtml(f.size_human)}</div>
-          ${progressBar}
-        </div>
-      </label>`;
+        </label>
+        <button onclick="epPlayFrom('${escHtml(f.path)}')"
+          class="flex-shrink-0 w-9 h-9 flex items-center justify-center rounded-lg
+                 bg-indigo-900/60 hover:bg-indigo-700 text-indigo-300 hover:text-white
+                 text-xs font-bold transition-colors" title="Play from here">▶</button>
+      </div>`;
     });
   });
 
@@ -950,6 +1017,20 @@ async function epPlay(){
   if(firstFile?.progress && !firstFile.progress.completed && firstFile.progress.position_sec>5)
     seekTo=firstFile.progress.position_sec;
 
+  closeEpisodeModal();
+  await playLibraryFiles(epItemId, ordered, seekTo);
+}
+
+// Play from a specific episode, continuing sequentially through all remaining
+async function epPlayFrom(filePath){
+  if(!epItemId) return;
+  const idx=epFiles.findIndex(f=>f.path===filePath);
+  if(idx<0) return;
+  const ordered=epFiles.slice(idx).map(f=>f.path);
+  const firstFile=epFiles[idx];
+  let seekTo=null;
+  if(firstFile?.progress && !firstFile.progress.completed && firstFile.progress.position_sec>5)
+    seekTo=firstFile.progress.position_sec;
   closeEpisodeModal();
   await playLibraryFiles(epItemId, ordered, seekTo);
 }
