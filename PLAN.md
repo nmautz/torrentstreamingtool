@@ -54,6 +54,13 @@
 - [x] **9.2** CSS design system: `.tab-active`/`.tab-inactive` underline indicator, all square status dots, no `backdrop-blur`
 - [x] **9.3** HTML structural sections: navbar, footer, all modals converted to flat bottom-sheet style with top accent stripe
 - [x] **9.4** JS-generated HTML: search results, library cards, episode picker, profile grids, alerts/toasts all converted to Metro classes
+- [ ] **9.5** Metro UI for bottom player footer controls (seek bar row, control tiles, status row)
+
+---
+
+## Milestone 10 — Reliability & Visibility
+
+- [ ] **10.1** UI warning if any dependency/service is unreachable (VLC, qBittorrent, Jackett): currently only shown at startup in the terminal; surface these as persistent in-app banners so users on mobile know why things aren't working
 
 ---
 
