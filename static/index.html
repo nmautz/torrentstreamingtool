@@ -836,7 +836,27 @@
       </button>
     </div>
 
-    <!-- Row D: Stop (always) + Save (streaming torrent only, toggled by JS) -->
+    <!-- Row D: Track selectors — audio + subtitle -->
+    <div class="flex flex-1 border-b border-gray-800 min-h-0">
+      <div class="fc-tile flex flex-1 border-r border-gray-800 gap-1.5 px-4">
+        <span class="text-[11px] text-gray-600 flex-shrink-0">🎵 Audio</span>
+        <select id="fcAudioSelect" onchange="setAudioTrack(this.value)"
+          class="w-full bg-gray-900 border border-gray-700 text-xs text-gray-300 rounded-lg px-2 py-1.5
+                 focus:outline-none focus:border-indigo-500 cursor-pointer">
+          <option>—</option>
+        </select>
+      </div>
+      <div class="fc-tile flex flex-1 gap-1.5 px-4">
+        <span class="text-[11px] text-gray-600 flex-shrink-0">💬 Subs</span>
+        <select id="fcSubtitleSelect" onchange="setSubtitleTrack(this.value)"
+          class="w-full bg-gray-900 border border-gray-700 text-xs text-gray-300 rounded-lg px-2 py-1.5
+                 focus:outline-none focus:border-indigo-500 cursor-pointer">
+          <option value="-1">Off</option>
+        </select>
+      </div>
+    </div>
+
+    <!-- Row E: Stop (always) + Save (streaming torrent only, toggled by JS) -->
     <div class="flex flex-1 min-h-0">
       <button onclick="stopStream();closeFullscreenControls()"
         class="fc-tile flex flex-1 bg-red-950/15 hover:bg-red-950/45
@@ -2576,19 +2596,22 @@ async function loadTracks(){
     if(!r.ok) return;
     const d=await r.json();
 
-    const audioSel=document.getElementById("audioSelect");
-    const subSel=document.getElementById("subtitleSelect");
-
-    // Rebuild audio select without disrupting user interaction mid-change
-    const curAudio=audioSel.value;
-    audioSel.innerHTML=d.audio.length
+    const audioHtml=d.audio.length
       ?d.audio.map(t=>`<option value="${t.id}"${String(t.id)===String(d.current_audio)?" selected":""}>${escHtml(t.label)}</option>`).join("")
       :`<option>—</option>`;
-
-    // Rebuild subtitle select (backend already includes {id:-1, label:"Off"} as first entry)
-    subSel.innerHTML=d.subtitle.map(t=>
+    const subHtml=d.subtitle.map(t=>
       `<option value="${t.id}"${String(t.id)===String(d.current_subtitle)?" selected":""}>${escHtml(t.label)}</option>`
     ).join("")||`<option value="-1">Off</option>`;
+
+    // Populate footer + fullscreen selects from the same data
+    const audioSel=document.getElementById("audioSelect");
+    const subSel=document.getElementById("subtitleSelect");
+    const fcAudioSel=document.getElementById("fcAudioSelect");
+    const fcSubSel=document.getElementById("fcSubtitleSelect");
+    if(audioSel) audioSel.innerHTML=audioHtml;
+    if(fcAudioSel) fcAudioSel.innerHTML=audioHtml;
+    if(subSel) subSel.innerHTML=subHtml;
+    if(fcSubSel) fcSubSel.innerHTML=subHtml;
   } catch(_){}
 }
 
