@@ -906,6 +906,9 @@ let epChecked = new Set();  // checked file paths
 // Stream file picker state
 let streamPrepData = null;   // {hash, files, magnet, title} from /stream/prepare
 let streamPrepAbort = null;  // AbortController for the in-flight prepare request
+// 8.4 — fullscreen auto-open state
+let _fcAutoTitle  = "";    // title active the last time we auto-opened
+let _fcDismissed  = false; // user manually closed fullscreen for the current track
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function escHtml(s) {
@@ -941,6 +944,54 @@ function epLabel(f)   {
   if(f.season && f.episode) return `S${pad2(f.season)}E${pad2(f.episode)}`;
   if(f.episode) return `E${pad2(f.episode)}`;
   return f.name;
+}
+
+// 8.6 — parse S01E03-style info from a raw title/filename
+function parseEpisodeInfo(raw) {
+  if (!raw) return null;
+  let name = raw;
+  try {
+    // strip path and extension so we work on just the filename stem
+    name = decodeURIComponent(raw.split(/[/\\]/).pop().replace(/\.\w{2,5}$/, ""));
+  } catch (_) {}
+  const m = name.match(/[Ss](\d{1,2})[Ee](\d{1,2})(.*)/);
+  if (!m) return null;
+  const season = parseInt(m[1], 10);
+  const ep     = parseInt(m[2], 10);
+  const epName = m[3]
+    .replace(/\[.*?\]/g, "")
+    .replace(/\(.*?\)/g, "")
+    // strip common quality/codec tags and everything after them
+    .replace(/\b(2160p|1080p|720p|480p|4K|BluRay|BDRip|WEB|WEBRip|HDTV|x264|x265|HEVC|H\.?264|AAC|AC3|DTS)\b.*/i, "")
+    .replace(/[._\-]+/g, " ")
+    .trim();
+  return { season, ep, name: epName || null };
+}
+
+// 8.6 — render episode metadata (or plain title) into #fcTitle
+// filePath = library_current_file (real filename with S01E03 pattern)
+// title    = active_title (item/torrent name — only used when no filePath)
+function setFcTitle(title, filePath) {
+  const el = document.getElementById("fcTitle");
+  if (!el) return;
+  // Parse episode info from the file path first (has the real episode filename),
+  // then try the title for stream-only torrents that happen to include SxxExx.
+  const info = parseEpisodeInfo(filePath) || parseEpisodeInfo(title);
+  if (info) {
+    el.innerHTML =
+      `<span class="text-xs font-mono text-indigo-400 tracking-wide font-normal">S${info.season} &middot; E${info.ep}</span>`
+      + (info.name ? `<br><span>${escHtml(info.name)}</span>` : "");
+  } else if (filePath) {
+    // No SxxExx found — show the cleaned filename, not the item/torrent title
+    let fname = filePath;
+    try {
+      fname = decodeURIComponent(filePath.split(/[/\\]/).pop().replace(/\.\w{2,5}$/, ""));
+      fname = fname.replace(/[._]+/g, " ").trim();
+    } catch (_) {}
+    el.textContent = fname || title || "";
+  } else {
+    el.textContent = title || "";
+  }
 }
 
 // ── Alert ──────────────────────────────────────────────────────────────────
@@ -1061,8 +1112,7 @@ function renderPlayer(s){
     if(fcpb) fcpb.style.width=`${barPct}%`;
     const fcst=document.getElementById("fcStatus");
     if(fcst) fcst.textContent=s.stream_status==="buffering"?"Buffering…":s.stream_status==="playing"?"▶ Playing":"";
-    const fct2=document.getElementById("fcTitle");
-    if(fct2&&s.active_title) fct2.textContent=s.active_title;
+    setFcTitle(s.active_title||"", s.library_current_file||"");
     if(s.stream_status==="idle") closeFullscreenControls();
 
     // Episode nav row in fullscreen
@@ -1073,6 +1123,18 @@ function renderPlayer(s){
     }
     const fcCtr=document.getElementById("fcEpCounter");
     if(fcCtr) fcCtr.textContent=hasList&&total>1?`${curIdx+1} / ${total}`:"";
+  }
+
+  // 8.4 — Auto-open fullscreen on mobile (<768 px) when a new track starts playing
+  {
+    const curTitle = s.active_title || "";
+    if (curTitle && curTitle !== _fcAutoTitle) {
+      _fcAutoTitle = curTitle;
+      _fcDismissed = false; // new track → reset dismiss so it can auto-open again
+    }
+    if (isPlaying && window.innerWidth < 768 && !_fcDismissed && fc.classList.contains("hidden")) {
+      openFullscreenControls();
+    }
   }
 
   sp.textContent=(s.dl_speed_bps>0&&s.stream_status!=="idle")?`▼ ${fmtSpeed(s.dl_speed_bps)}  ▲ ${fmtSpeed(s.ul_speed_bps)}`:"";
@@ -1181,8 +1243,7 @@ async function vlcVolumeStep(delta){
 function openFullscreenControls(){
   const fc=document.getElementById("fullscreenControls");
   // Populate title and current state immediately
-  const title=document.getElementById("fcTitle");
-  if(title) title.textContent=app.active_title||"";
+  setFcTitle(app.active_title||"", app.library_current_file||"");
   const fcst=document.getElementById("fcStatus");
   if(fcst) fcst.textContent=app.stream_status==="buffering"?"Buffering…":app.stream_status==="playing"?"Playing":"";
   const fct=document.getElementById("fcTime");
@@ -1203,6 +1264,7 @@ function openFullscreenControls(){
 
 function closeFullscreenControls(){
   document.getElementById("fullscreenControls").classList.add("hidden");
+  _fcDismissed = true;
 }
 
 // ── Tabs ───────────────────────────────────────────────────────────────────
