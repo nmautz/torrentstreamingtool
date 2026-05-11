@@ -1,7 +1,10 @@
 #!/usr/bin/env python3
 """
 StreamLink Launcher — starts all services then the dashboard.
-    python3 run.py
+    python3 run.py              # normal interactive launch
+    python3 run.py --install    # register as a system service (7.1)
+    python3 run.py --uninstall  # remove the system service
+    python3 run.py --status     # show service registration status
 
 This script auto-relaunches itself inside the virtualenv so psutil
 and other venv packages are available without manual activation.
@@ -315,17 +318,7 @@ def check_mullvad() -> bool:
 
 # ── Network info ───────────────────────────────────────────────────────────
 def get_local_ip() -> str:
-    """Return the LAN IP phones should use to connect.
-
-    The UDP-connect trick (connect to 8.8.8.8, read local address) is unreliable
-    when a VPN is active: the OS routes through the VPN tunnel and getsockname()
-    returns the VPN's internal address instead of the router LAN address.
-
-    Instead, we walk all interfaces via psutil, skip known VPN/tunnel adapters by
-    name, then prefer 192.168.x.x > 10.x.x.x > 172.16-31.x.x.  The UDP trick
-    is kept as a last-resort fallback.
-    """
-    # Name prefixes / substrings that indicate VPN, tunnel, or virtual adapters
+    """Return the LAN IP phones should use to connect."""
     _VPN_STARTS = ("utun", "tun", "tap", "wg", "ppp", "lo")
     _VPN_SUBS   = ("mullvad", "wireguard", "vpn", "virtual",
                    "vmware", "vbox", "hyper-v", "loopback")
@@ -337,7 +330,7 @@ def get_local_ip() -> str:
 
     try:
         import psutil
-        buckets: list[list[str]] = [[], [], []]  # 192.168 / 10. / 172.16-31
+        buckets: list[list[str]] = [[], [], []]
         for iface, addrs in psutil.net_if_addrs().items():
             n = iface.lower()
             if any(n.startswith(p) for p in _VPN_STARTS):
@@ -362,7 +355,6 @@ def get_local_ip() -> str:
     except Exception:
         pass
 
-    # Fallback: UDP trick (may return VPN IP when VPN routes all traffic)
     try:
         s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
         s.connect(("8.8.8.8", 80))
@@ -387,10 +379,8 @@ def get_wifi_ssid() -> str:
             r = subprocess.run([airport, "-I"], capture_output=True, text=True, timeout=5)
             for line in r.stdout.splitlines():
                 line = line.strip()
-                # Match "  SSID: MyNetwork" but not "  BSSID: ..."
                 if re.match(r"^SSID\s*:", line) and "BSSID" not in line:
                     return line.split(":", 1)[1].strip()
-            # Fallback: try networksetup on common Wi-Fi interfaces
             for iface in ("en0", "en1", "en2"):
                 r = subprocess.run(
                     ["networksetup", "-getairportnetwork", iface],
@@ -417,6 +407,27 @@ def get_wifi_ssid() -> str:
 
 # ── Main ───────────────────────────────────────────────────────────────────
 def main():
+    # ── Handle --install / --uninstall / --status flags (7.1) ────────────
+    if len(sys.argv) > 1:
+        flag = sys.argv[1].lstrip("-").lower()
+        if flag in ("install", "uninstall", "status"):
+            # These may be called before the venv is active; ensure it is.
+            if not VENV.exists():
+                print(f"\n  Run python3 setup.py first.")
+                sys.exit(1)
+            from daemon import install, uninstall, status
+            if flag == "install":
+                sys.exit(0 if install() else 1)
+            elif flag == "uninstall":
+                sys.exit(0 if uninstall() else 1)
+            else:
+                status()
+                sys.exit(0)
+        else:
+            print(f"Unknown flag: {sys.argv[1]}")
+            print("Usage: python3 run.py [--install | --uninstall | --status]")
+            sys.exit(1)
+
     # Pre-flight checks
     if not VENV.exists():
         print(f"\n  {RED}✗{RESET}  Virtual environment not found.")
@@ -461,6 +472,15 @@ def main():
             sys.exit(0)
         print()
 
+    # ── Start watchdog (7.2) ──────────────────────────────────────────────
+    try:
+        from watchdog import start_watchdog
+        start_watchdog()
+        ok("Watchdog started — VLC, qBittorrent, and Jackett will be auto-restarted if they crash")
+    except ImportError:
+        warn("watchdog.py not found — auto-restart disabled")
+    print()
+
     # ── Launch dashboard ──────────────────────────────────────────────────
     PORT          = 7000
     local_url     = f"http://127.0.0.1:{PORT}"
@@ -496,7 +516,7 @@ def main():
         subprocess.run(
             [
                 str(uvicorn_bin), "main:app",
-                "--host", "0.0.0.0",   # bind on all interfaces so phones can reach it
+                "--host", "0.0.0.0",
                 "--port", str(PORT),
                 "--log-level", "warning",
             ],
