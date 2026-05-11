@@ -1674,28 +1674,67 @@ async def seek_to(position_pct: float) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+async def _item_all_paths() -> list[str]:
+    """Return the full sorted file path list for the currently playing library item."""
+    if not state.library_item_id:
+        return []
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == state.library_item_id), None)
+    return [f["path"] for f in item.get("files", [])] if item else []
+
+
+def _find_in_paths(current: str, paths: list[str]) -> int:
+    """Return the index of current in paths, trying exact match then resolved match."""
+    try:
+        return paths.index(current)
+    except ValueError:
+        pass
+    try:
+        resolved = Path(current).resolve()
+        for i, p in enumerate(paths):
+            try:
+                if Path(p).resolve() == resolved:
+                    return i
+            except Exception:
+                continue
+    except Exception:
+        pass
+    return -1
+
+
 @app.post("/api/vlc/prev")
 async def vlc_prev() -> JSONResponse:
-    """Jump to the previous file in the active library playlist."""
-    playlist = state.library_playlist
-    current  = state.library_current_file
-    if not playlist:
-        raise HTTPException(400, "No active playlist.")
-    try:
-        idx = playlist.index(current) if current else 0
-    except ValueError:
-        idx = 0
-    prev_idx = idx - 1
-    if prev_idx < 0:
-        raise HTTPException(400, "Already at first item.")
-    prev_file = playlist[prev_idx]
+    """Jump to the previous episode in series order, regardless of how playback was started."""
+    current = state.library_current_file
+    if not current:
+        raise HTTPException(400, "No active playback.")
+
+    # Try the active playlist first, then fall back to the item's full file list
+    prev_file: Optional[str] = None
+    new_tail: list[str] = []
+
+    idx = _find_in_paths(current, state.library_playlist)
+    if idx > 0:
+        prev_file = state.library_playlist[idx - 1]
+        new_tail  = state.library_playlist[idx - 1:]
+    else:
+        all_paths = await _item_all_paths()
+        item_idx  = _find_in_paths(current, all_paths)
+        if item_idx > 0:
+            prev_file = all_paths[item_idx - 1]
+            new_tail  = all_paths[item_idx - 1:]
+
+    if not prev_file:
+        raise HTTPException(400, "Already at first episode.")
     if not Path(prev_file).exists():
         raise HTTPException(400, f"File not found: {Path(prev_file).name}")
+
+    state.library_playlist    = new_tail
     state.library_current_file = prev_file
     state.current_audio_track = -1
     state.current_subtitle_track = -1
     await vlc("in_play", input=Path(prev_file).resolve().as_uri())
-    for p in playlist[prev_idx + 1:]:
+    for p in new_tail[1:]:
         await vlc("in_enqueue", input=Path(p).resolve().as_uri())
     await broadcast("stream_status", {"status": "playing", "message": f"Playing: {Path(prev_file).name}"})
     return JSONResponse({"ok": True})
@@ -1703,26 +1742,37 @@ async def vlc_prev() -> JSONResponse:
 
 @app.post("/api/vlc/next")
 async def vlc_next() -> JSONResponse:
-    """Jump to the next file in the active library playlist."""
-    playlist = state.library_playlist
-    current  = state.library_current_file
-    if not playlist:
-        raise HTTPException(400, "No active playlist.")
-    try:
-        idx = playlist.index(current) if current else -1
-    except ValueError:
-        idx = -1
-    next_idx = idx + 1
-    if next_idx >= len(playlist):
-        raise HTTPException(400, "Already at last item.")
-    next_file = playlist[next_idx]
+    """Jump to the next episode in series order, regardless of how playback was started."""
+    current = state.library_current_file
+    if not current:
+        raise HTTPException(400, "No active playback.")
+
+    # Try the active playlist first, then fall back to the item's full file list
+    next_file: Optional[str] = None
+    new_tail: list[str] = []
+
+    idx = _find_in_paths(current, state.library_playlist)
+    if 0 <= idx < len(state.library_playlist) - 1:
+        next_file = state.library_playlist[idx + 1]
+        new_tail  = state.library_playlist[idx + 1:]
+    else:
+        all_paths = await _item_all_paths()
+        item_idx  = _find_in_paths(current, all_paths)
+        if 0 <= item_idx < len(all_paths) - 1:
+            next_file = all_paths[item_idx + 1]
+            new_tail  = all_paths[item_idx + 1:]
+
+    if not next_file:
+        raise HTTPException(400, "Already at last episode.")
     if not Path(next_file).exists():
         raise HTTPException(400, f"File not found: {Path(next_file).name}")
+
+    state.library_playlist    = new_tail
     state.library_current_file = next_file
     state.current_audio_track = -1
     state.current_subtitle_track = -1
     await vlc("in_play", input=Path(next_file).resolve().as_uri())
-    for p in playlist[next_idx + 1:]:
+    for p in new_tail[1:]:
         await vlc("in_enqueue", input=Path(p).resolve().as_uri())
     await broadcast("stream_status", {"status": "playing", "message": f"Playing: {Path(next_file).name}"})
     return JSONResponse({"ok": True})
