@@ -417,6 +417,28 @@ def _file_progress(item: dict, profile_id: str, file_path: str) -> Optional[dict
     return prof.get("file_progress", {}).get(file_path)
 
 
+def _canonical_item_path(vlc_path: str, item: dict) -> str:
+    """Return the item["files"] path that resolves to the same file as vlc_path.
+
+    VLC receives Path(p).resolve().as_uri() which follows symlinks.  The stored
+    path may not be resolved, so we compare resolved forms and return the stored
+    path so progress keys always match what get_item_files and find_resume_hint
+    expect.  Falls back to vlc_path if no match is found.
+    """
+    try:
+        target = Path(vlc_path).resolve()
+    except Exception:
+        return vlc_path
+    for f in item.get("files", []):
+        stored = f.get("path", "")
+        try:
+            if Path(stored).resolve() == target:
+                return stored
+        except Exception:
+            continue
+    return vlc_path
+
+
 def find_resume_hint(item: dict, profile_id: str) -> Optional[dict]:
     """Return the best file+position to resume for a profile, or None."""
     if not profile_id:
@@ -691,6 +713,11 @@ async def vlc_progress_tracker() -> None:
             item = next((it for it in lib["items"] if it["id"] == state.library_item_id), None)
             if not item:
                 continue
+
+            # Normalize to the stored item path so progress keys always match
+            # what get_item_files and find_resume_hint look up by.
+            current_file = _canonical_item_path(current_file, item)
+            state.library_current_file = current_file
 
             pct = pos_sec / dur_sec
             prof_prog = item.setdefault("progress", {}).setdefault(state.library_profile_id, {})
@@ -1216,10 +1243,11 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     if not playlist:
         raise HTTPException(400, "No video files available for this item.")
 
-    # Validate all files exist
-    missing = [p for p in playlist if not Path(p).exists()]
-    if missing:
-        raise HTTPException(400, f"Files not found on disk: {', '.join(Path(p).name for p in missing[:3])}")
+    # Filter to files that are on disk — partial downloads may not have all files yet
+    existing = [p for p in playlist if Path(p).exists()]
+    if not existing:
+        raise HTTPException(400, f"File(s) not yet downloaded: {', '.join(Path(p).name for p in playlist[:3])}")
+    playlist = existing
 
     # Build VLC playlist: play first, enqueue the rest
     first = Path(playlist[0])
