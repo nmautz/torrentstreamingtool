@@ -131,6 +131,7 @@ class AppState:
     stream_task: Optional[asyncio.Task] = None
     library_item_id: Optional[str] = None
     library_profile_id: Optional[str] = None
+    library_item_file_count: int = 0                     # total files in the playing item
     library_playlist: list = field(default_factory=list)  # ordered file paths
     library_current_file: Optional[str] = None            # path VLC is playing now
     downloading_count: int = 0                            # active library downloads
@@ -188,6 +189,7 @@ def state_snapshot() -> dict:
         "library_playlist_count": len(playlist),
         "library_current_index": cur_idx,
         "library_current_file": current,
+        "library_item_file_count": state.library_item_file_count,
         "is_library_playback": state.library_item_id is not None,
         "play_when_ready_item_id": state.play_when_ready_item_id,
         "play_when_ready_file_path": state.play_when_ready_file_path,
@@ -596,6 +598,7 @@ async def _auto_play_item(item: dict, profile_id: str, file_path: str = "") -> N
         state.active_hash = item.get("torrent_hash") or None
         state.library_item_id = item["id"]
         state.library_profile_id = profile_id
+        state.library_item_file_count = len(item.get("files", []))
         state.library_playlist = playlist
         state.library_current_file = playlist[0]
 
@@ -1264,6 +1267,7 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     state.active_hash = item.get("torrent_hash") or None
     state.library_item_id = item_id
     state.library_profile_id = req.profile_id
+    state.library_item_file_count = len(item.get("files", []))
     state.library_playlist = playlist
     state.library_current_file = playlist[0]
 
@@ -1540,6 +1544,7 @@ async def stream_now(req: StreamReq) -> JSONResponse:
     state.active_file = None
     state.library_item_id = None
     state.library_profile_id = None
+    state.library_item_file_count = 0
     state.library_playlist = []
     state.library_current_file = None
     state.stream_task = asyncio.create_task(
@@ -1623,6 +1628,7 @@ async def stop() -> JSONResponse:
     state.stream_status = "idle"
     state.library_item_id = None
     state.library_profile_id = None
+    state.library_item_file_count = 0
     state.library_playlist = []
     state.library_current_file = None
     state.progress = 0.0

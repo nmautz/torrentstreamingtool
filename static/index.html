@@ -31,9 +31,13 @@
     .ep-row:hover { background:rgba(255,255,255,.03); }
     /* Safe area insets for iPhone notch / home indicator */
     .safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }
+    .safe-top    { padding-top:    env(safe-area-inset-top,    0px); }
     /* Prevent double-tap zoom on buttons */
     button { touch-action: manipulation; }
     select { touch-action: manipulation; }
+    /* Fullscreen tile base — display set by Tailwind flex/hidden toggle */
+    .fc-tile { flex-direction:column; align-items:center; justify-content:center;
+               user-select:none; -webkit-tap-highlight-color:transparent; }
   </style>
 </head>
 <body class="dark bg-gray-950 text-gray-100 min-h-screen flex flex-col">
@@ -679,145 +683,187 @@
 
 <!-- ── Fullscreen Player Controls ──────────────────────────────────────────── -->
 <div id="fullscreenControls"
-  class="hidden fixed inset-0 z-50 bg-gray-950/97 backdrop-blur-md flex flex-col">
+  class="hidden fixed inset-0 z-50 bg-gray-950 flex flex-col">
 
-  <!-- Header bar -->
-  <div class="flex items-center justify-between px-5 pt-6 pb-2 flex-shrink-0">
-    <button onclick="closeFullscreenControls()"
-      class="w-10 h-10 flex items-center justify-center rounded-xl text-gray-500
-             hover:text-white hover:bg-gray-800 transition-all text-lg">✕</button>
-    <span class="text-[11px] uppercase tracking-widest text-gray-600 font-semibold">Now Playing</span>
-    <div class="w-10"></div>
-  </div>
-
-  <!-- Title -->
-  <div class="px-8 pb-2 flex-shrink-0 text-center">
-    <div id="fcTitle" class="text-lg font-bold text-gray-100 leading-snug line-clamp-2"></div>
-    <div id="fcStatus" class="text-xs text-gray-600 mt-1"></div>
-  </div>
-
-  <!-- Main area — grows to fill screen -->
-  <div class="flex-1 flex flex-col items-center justify-center px-6 gap-6 min-h-0">
-
-    <!-- Time display -->
-    <div id="fcTime" class="text-2xl font-mono font-bold text-gray-300 tabular-nums"></div>
-
-    <!-- Seek bar (full width, taller) -->
-    <div class="relative w-full py-4 cursor-pointer group"
-         onclick="handleSeekBarClick(event, this)"
-         onmousemove="handleSeekBarHover(event, this)"
-         onmouseleave="handleSeekBarLeave()"
-         ontouchmove="handleSeekBarHover(event, this)"
-         ontouchend="handleSeekBarClick(event, this);handleSeekBarLeave()"
-         style="touch-action:none;">
-      <div class="w-full bg-gray-800 h-2 rounded-full group-active:h-3 transition-all">
-        <div id="fcProgressBar" class="h-full bg-indigo-500 rounded-full transition-all duration-700 pointer-events-none" style="width:0%"></div>
-      </div>
-      <div id="fcSeekTooltip"
-           class="hidden absolute -top-8 bg-gray-800 border border-gray-700 text-[12px] font-mono
-                  text-gray-200 px-2 py-0.5 rounded pointer-events-none -translate-x-1/2 whitespace-nowrap shadow-lg"
-           style="left:50%"></div>
-    </div>
-
-    <!-- Skip buttons + big pause/play -->
-    <div class="flex items-center justify-center gap-6 w-full">
-      <button onclick="vlcSeek(-30)"
-        class="flex flex-col items-center gap-1 text-gray-500 hover:text-gray-200 active:scale-90 transition-all px-4 py-2">
-        <svg class="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 5V3m0 2a7 7 0 100 14 7 7 0 000-14zm-4 7l4-3v6l-4-3z"/>
+  <!-- Header — safe-top clears the notch / Dynamic Island -->
+  <div class="safe-top flex-shrink-0">
+    <div class="flex items-center h-12 border-b border-gray-800">
+      <button onclick="closeFullscreenControls()"
+        class="h-full px-5 flex items-center gap-2 text-gray-500 hover:text-white
+               hover:bg-gray-800 active:bg-gray-700 transition-colors text-xs font-bold
+               uppercase tracking-wide flex-shrink-0">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
         </svg>
-        <span class="text-[10px] font-bold">30s</span>
+        Close
+      </button>
+      <div class="flex-1 text-center pointer-events-none">
+        <span class="text-[11px] uppercase tracking-widest text-gray-600 font-bold">Now Playing</span>
+      </div>
+      <!-- Balancing spacer equal to close button width -->
+      <div class="px-5 flex-shrink-0 invisible" aria-hidden="true">
+        <span class="text-xs font-bold uppercase tracking-wide">Close</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Title + time info -->
+  <div class="flex-shrink-0 flex items-center gap-3 px-4 py-2 border-b border-gray-800 min-h-[48px]">
+    <div class="flex-1 min-w-0">
+      <div id="fcTitle" class="text-sm font-bold text-gray-100 leading-snug line-clamp-2"></div>
+      <div id="fcStatus" class="text-xs text-indigo-500 mt-0.5"></div>
+    </div>
+    <div id="fcTime" class="text-base font-mono font-bold text-gray-400 tabular-nums flex-shrink-0 text-right"></div>
+  </div>
+
+  <!-- Seek bar — full width, generously tall touch target -->
+  <div class="flex-shrink-0 border-b border-gray-800 relative cursor-pointer"
+       onclick="handleSeekBarClick(event, this)"
+       onmousemove="handleSeekBarHover(event, this)"
+       onmouseleave="handleSeekBarLeave()"
+       ontouchmove="handleSeekBarHover(event, this)"
+       ontouchend="handleSeekBarClick(event, this);handleSeekBarLeave()"
+       style="touch-action:none; height:44px;">
+    <div class="absolute inset-x-4 top-1/2 -translate-y-1/2 bg-gray-800 rounded-full"
+         style="height:5px">
+      <div id="fcProgressBar"
+           class="h-full bg-indigo-500 rounded-full transition-all duration-700"
+           style="width:0%"></div>
+    </div>
+    <div id="fcSeekTooltip"
+         class="hidden absolute top-1 bg-gray-800 border border-gray-700 text-[12px] font-mono
+                text-gray-200 px-2 py-0.5 rounded pointer-events-none -translate-x-1/2 whitespace-nowrap shadow-lg"
+         style="left:50%"></div>
+  </div>
+
+  <!-- Tile grid — all remaining space between seek bar and safe-bottom -->
+  <div class="flex-1 flex flex-col min-h-0">
+
+    <!-- Row A: Rewind / Play-Pause / Forward — 5 tiles, play is wider -->
+    <div class="flex flex-1 border-b border-gray-800 min-h-0">
+      <button onclick="vlcSeek(-30)"
+        class="fc-tile flex flex-1 border-r border-gray-800
+               hover:bg-gray-800/60 active:bg-gray-700/80 text-gray-500 transition-colors">
+        <svg class="w-7 h-7 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+            d="M12 5V3m0 2a7 7 0 100 14 7 7 0 000-14zm-4 7l4-3v6l-4-3z"/>
+        </svg>
+        <span class="text-[11px] font-bold">30s</span>
       </button>
       <button onclick="vlcSeek(-10)"
-        class="flex flex-col items-center gap-1 text-gray-400 hover:text-gray-200 active:scale-90 transition-all px-3 py-2">
-        <svg class="w-9 h-9" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 5V3m0 2a7 7 0 100 14 7 7 0 000-14zm-4 7l4-3v6l-4-3z"/>
+        class="fc-tile flex flex-1 border-r border-gray-800
+               hover:bg-gray-800/60 active:bg-gray-700/80 text-gray-400 transition-colors">
+        <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+            d="M12 5V3m0 2a7 7 0 100 14 7 7 0 000-14zm-4 7l4-3v6l-4-3z"/>
         </svg>
-        <span class="text-[10px] font-bold">10s</span>
+        <span class="text-[11px] font-bold">10s</span>
       </button>
-      <!-- Big pause/play -->
+      <!-- Play/Pause — 40% wider than sibling tiles, accent background -->
       <button onclick="vlcPause()" id="fcPauseBtn"
-        class="w-20 h-20 rounded-full bg-indigo-600 hover:bg-indigo-500 active:scale-90
-               flex items-center justify-center text-white shadow-lg shadow-indigo-900/40 transition-all">
-        <svg class="w-9 h-9" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        class="fc-tile flex flex-[1.4] border-r border-gray-800
+               bg-indigo-900/25 hover:bg-indigo-900/50 active:bg-indigo-900/80
+               text-indigo-400 transition-colors">
+        <svg class="w-11 h-11" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6"/>
         </svg>
       </button>
       <button onclick="vlcSeek(10)"
-        class="flex flex-col items-center gap-1 text-gray-400 hover:text-gray-200 active:scale-90 transition-all px-3 py-2">
-        <svg class="w-9 h-9" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 5V3m0 2a7 7 0 100 14 7 7 0 000-14zm4-4l-4 3v-6l4 3z"/>
+        class="fc-tile flex flex-1 border-r border-gray-800
+               hover:bg-gray-800/60 active:bg-gray-700/80 text-gray-400 transition-colors">
+        <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+            d="M12 5V3m0 2a7 7 0 100 14 7 7 0 000-14zm4-4l-4 3v-6l4 3z"/>
         </svg>
-        <span class="text-[10px] font-bold">10s</span>
+        <span class="text-[11px] font-bold">10s</span>
       </button>
       <button onclick="vlcSeek(30)"
-        class="flex flex-col items-center gap-1 text-gray-500 hover:text-gray-200 active:scale-90 transition-all px-4 py-2">
-        <svg class="w-7 h-7" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 5V3m0 2a7 7 0 100 14 7 7 0 000-14zm4-4l-4 3v-6l4 3z"/>
+        class="fc-tile flex flex-1
+               hover:bg-gray-800/60 active:bg-gray-700/80 text-gray-500 transition-colors">
+        <svg class="w-7 h-7 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+            d="M12 5V3m0 2a7 7 0 100 14 7 7 0 000-14zm4-4l-4 3v-6l4 3z"/>
         </svg>
-        <span class="text-[10px] font-bold">30s</span>
+        <span class="text-[11px] font-bold">30s</span>
       </button>
     </div>
 
-    <!-- Episode navigation (visible only when playlist has multiple files) -->
-    <div id="fcEpNav" class="hidden items-center justify-center gap-6 w-full max-w-sm">
+    <!-- Row B: Episode nav — hidden by default; JS shows as flex when library item has >1 file -->
+    <div id="fcEpNav" class="hidden flex-1 border-b border-gray-800 min-h-0">
       <button id="fcPrevBtn" onclick="vlcPrev()"
-        class="flex items-center gap-1.5 px-4 py-2 rounded-xl text-gray-500
-               hover:text-gray-200 hover:bg-gray-800 active:scale-90 transition-all
-               text-sm font-medium disabled:opacity-30 disabled:pointer-events-none">
-        <span class="text-base leading-none">⏮</span> Prev
+        class="fc-tile flex flex-1 border-r border-gray-800
+               hover:bg-indigo-950/40 active:bg-indigo-950/70 text-indigo-400 transition-colors">
+        <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M11 19l-7-7 7-7M18 12H5"/>
+        </svg>
+        <span class="text-xs font-bold">Prev</span>
       </button>
-      <span id="fcEpCounter" class="text-xs font-mono text-gray-600 tabular-nums min-w-[3rem] text-center"></span>
+      <div class="flex items-center justify-center px-3 flex-shrink-0 pointer-events-none">
+        <span id="fcEpCounter" class="text-xs font-mono text-gray-600 tabular-nums text-center"></span>
+      </div>
       <button id="fcNextBtn" onclick="vlcNext()"
-        class="flex items-center gap-1.5 px-4 py-2 rounded-xl text-gray-500
-               hover:text-gray-200 hover:bg-gray-800 active:scale-90 transition-all
-               text-sm font-medium disabled:opacity-30 disabled:pointer-events-none">
-        Next <span class="text-base leading-none">⏭</span>
+        class="fc-tile flex flex-1 hover:bg-indigo-950/40 active:bg-indigo-950/70 text-indigo-400 transition-colors">
+        <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M13 5l7 7-7 7M6 12h13"/>
+        </svg>
+        <span class="text-xs font-bold">Next</span>
       </button>
     </div>
 
-    <!-- Volume slider with ±5% step buttons -->
-    <div class="flex items-center gap-3 w-full max-w-sm">
-      <button onclick="vlcVolumeStep(-5)" title="-5%"
-        class="w-10 h-10 flex items-center justify-center rounded-xl text-gray-500
-               hover:text-gray-200 hover:bg-gray-800 active:scale-90 transition-all
-               text-xl font-bold flex-shrink-0">−</button>
-      <input type="range" id="fcVolumeSlider" min="0" max="200" value="100"
-        class="flex-1 accent-indigo-500 cursor-pointer"
-        oninput="updateVolumeDisplay(this.value)"
-        onmouseup="vlcSetVolume(this.value)"
-        ontouchend="vlcSetVolume(this.value)"
-        style="touch-action:none">
-      <button onclick="vlcVolumeStep(5)" title="+5%"
-        class="w-10 h-10 flex items-center justify-center rounded-xl text-gray-500
-               hover:text-gray-200 hover:bg-gray-800 active:scale-90 transition-all
-               text-xl font-bold flex-shrink-0">+</button>
-      <span id="fcVolumeLabel" class="text-xs font-mono text-gray-600 w-10 text-right flex-shrink-0">100%</span>
+    <!-- Row C: Volume − / label+slider / + -->
+    <div class="flex flex-1 border-b border-gray-800 min-h-0">
+      <button onclick="vlcVolumeStep(-5)"
+        class="fc-tile flex flex-1 border-r border-gray-800
+               hover:bg-gray-800/60 active:bg-gray-700/80 text-gray-400 transition-colors">
+        <span class="text-4xl font-thin leading-none mb-1" style="line-height:1">−</span>
+        <span class="text-[11px] text-gray-600">Vol</span>
+      </button>
+      <div class="fc-tile flex flex-[2.5] border-r border-gray-800 gap-2 px-5">
+        <span id="fcVolumeLabel" class="text-2xl font-mono font-bold text-gray-300 tabular-nums">100%</span>
+        <input type="range" id="fcVolumeSlider" min="0" max="200" value="100"
+          class="w-full accent-indigo-500 cursor-pointer"
+          oninput="updateVolumeDisplay(this.value)"
+          onmouseup="vlcSetVolume(this.value)"
+          ontouchend="vlcSetVolume(this.value)"
+          style="touch-action:none">
+      </div>
+      <button onclick="vlcVolumeStep(5)"
+        class="fc-tile flex flex-1 hover:bg-gray-800/60 active:bg-gray-700/80 text-gray-400 transition-colors">
+        <span class="text-4xl font-thin leading-none mb-1" style="line-height:1">+</span>
+        <span class="text-[11px] text-gray-600">Vol</span>
+      </button>
     </div>
 
-    <!-- Stop + Save row -->
-    <div class="flex items-center gap-3">
+    <!-- Row D: Stop (always) + Save (streaming torrent only, toggled by JS) -->
+    <div class="flex flex-1 min-h-0">
+      <button onclick="stopStream();closeFullscreenControls()"
+        class="fc-tile flex flex-1 bg-red-950/15 hover:bg-red-950/45
+               active:bg-red-950/70 text-red-500 transition-colors">
+        <svg class="w-8 h-8 mb-1" fill="currentColor" viewBox="0 0 24 24">
+          <rect x="5" y="5" width="14" height="14" rx="2"/>
+        </svg>
+        <span class="text-xs font-bold">Stop</span>
+      </button>
+      <!-- border-l so no orphan line when Save is hidden -->
       <button id="fcSaveBtn" onclick="openSaveStreamModal();closeFullscreenControls()"
-        class="hidden items-center gap-2 px-6 py-2.5 rounded-xl border border-indigo-900/60
-               text-indigo-400 hover:text-indigo-200 hover:bg-indigo-950/40 transition-all text-sm font-medium">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        class="hidden fc-tile flex-1 border-l border-gray-800 bg-emerald-950/15
+               hover:bg-emerald-950/45 active:bg-emerald-950/70 text-emerald-400 transition-colors">
+        <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
             d="M5 5a2 2 0 012-2h7l5 5v11a2 2 0 01-2 2H7a2 2 0 01-2-2V5z"/>
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 3v5h-5"/>
         </svg>
-        Save to Library
-      </button>
-      <button onclick="stopStream();closeFullscreenControls()"
-        class="flex items-center gap-2 px-6 py-2.5 rounded-xl border border-red-900/60
-               text-red-500 hover:text-red-300 hover:bg-red-950/40 transition-all text-sm font-medium">
-        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14" rx="2"/></svg>
-        Stop Playback
+        <span class="text-xs font-bold">Save</span>
       </button>
     </div>
-  </div>
 
-  <!-- Bottom safe area -->
-  <div class="flex-shrink-0 safe-bottom h-4"></div>
+  </div><!-- /.flex-1 tile grid -->
+
+  <!-- Safe bottom — respects home indicator on iOS -->
+  <div class="safe-bottom flex-shrink-0"></div>
+
 </div>
 
 <!-- ── JavaScript ─────────────────────────────────────────────────────────── -->
@@ -841,7 +887,7 @@ let app = {
   dl_speed_bps:0, ul_speed_bps:0,
   vlc_time:0, vlc_duration:0, vlc_volume:100,
   library_playlist_count:0, library_current_index:-1, library_current_file:null,
-  is_library_playback:false,
+  library_item_file_count:0, is_library_playback:false,
   play_when_ready_item_id:null,
   play_when_ready_file_path:null,
 };
@@ -997,6 +1043,13 @@ function renderPlayer(s){
   const fvl=document.getElementById("fcVolumeLabel");
   if(fvl) fvl.textContent=`${vol}%`;
 
+  // Episode nav state — computed once, used in both fullscreen and footer blocks
+  // Use library_item_file_count (total files in item) so nav shows even when
+  // the active playlist was built from a single-episode play or Restart.
+  const hasList=isPlaying&&s.is_library_playback&&(s.library_item_file_count||0)>1;
+  const curIdx=s.library_current_index??-1;
+  const total=s.library_playlist_count||0;
+
   // Fullscreen controls live sync (only pays the DOM cost when overlay is open)
   const fc=document.getElementById("fullscreenControls");
   if(!fc.classList.contains("hidden")){
@@ -1010,21 +1063,16 @@ function renderPlayer(s){
     if(fcst) fcst.textContent=s.stream_status==="buffering"?"Buffering…":s.stream_status==="playing"?"▶ Playing":"";
     const fct2=document.getElementById("fcTitle");
     if(fct2&&s.active_title) fct2.textContent=s.active_title;
-    // Hide fullscreen overlay if stream becomes idle
     if(s.stream_status==="idle") closeFullscreenControls();
 
-    // Episode nav visibility in fullscreen
+    // Episode nav row in fullscreen
     const fcEpNav=document.getElementById("fcEpNav");
     if(fcEpNav){
       fcEpNav.classList.toggle("hidden",!hasList);
       fcEpNav.classList.toggle("flex",hasList);
     }
-    const fcPrev=document.getElementById("fcPrevBtn");
-    const fcNext=document.getElementById("fcNextBtn");
     const fcCtr=document.getElementById("fcEpCounter");
-    if(fcPrev) fcPrev.disabled=!(hasList&&curIdx>0);
-    if(fcNext) fcNext.disabled=!(hasList&&curIdx<total-1);
-    if(fcCtr&&hasList) fcCtr.textContent=`${curIdx+1} / ${total}`;
+    if(fcCtr) fcCtr.textContent=hasList&&total>1?`${curIdx+1} / ${total}`:"";
   }
 
   sp.textContent=(s.dl_speed_bps>0&&s.stream_status!=="idle")?`▼ ${fmtSpeed(s.dl_speed_bps)}  ▲ ${fmtSpeed(s.ul_speed_bps)}`:"";
@@ -1041,16 +1089,11 @@ function renderPlayer(s){
   const fcsb=document.getElementById("fcSaveBtn");
   if(fcsb){ fcsb.classList.toggle("hidden",!canSave); fcsb.classList.toggle("flex",canSave); }
 
-  // Prev / Next episode buttons (footer)
-  const hasList=isPlaying&&(s.library_playlist_count||0)>1;
-  const curIdx=s.library_current_index??-1;
-  const total=s.library_playlist_count||0;
+  // Prev / Next episode buttons (footer) — show whenever library item has multiple files
   const prevBtn=document.getElementById("prevEpBtn");
   const nextBtn=document.getElementById("nextEpBtn");
-  if(prevBtn) prevBtn.classList.toggle("hidden",!(hasList&&curIdx>0));
-  if(prevBtn) prevBtn.classList.toggle("flex",   hasList&&curIdx>0);
-  if(nextBtn) nextBtn.classList.toggle("hidden",!(hasList&&curIdx<total-1));
-  if(nextBtn) nextBtn.classList.toggle("flex",   hasList&&curIdx<total-1);
+  if(prevBtn){ prevBtn.classList.toggle("hidden",!hasList); prevBtn.classList.toggle("flex",hasList); }
+  if(nextBtn){ nextBtn.classList.toggle("hidden",!hasList); nextBtn.classList.toggle("flex",hasList); }
 
   // Enable seek bar click only while playing
   const sw=document.getElementById("seekBarWrapper");
