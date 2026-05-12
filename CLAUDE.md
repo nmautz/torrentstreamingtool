@@ -105,7 +105,7 @@ Persistent storage in `library.json` at the project root (created automatically)
 
 ### Frontend (`static/index.html`)
 
-Vanilla JS, Tailwind CDN, no build step. A single `EventSource('/api/events')` drives all real-time UI. SSE event types:
+Vanilla JS, Tailwind CDN, no build step. **The project follows the Metro UI design language (flat tiles, typography-focused, high contrast) throughout** A single `EventSource('/api/events')` drives all real-time UI. SSE event types:
 - `state` — full snapshot pushed every 2 s by `stat_broadcaster`
 - `vpn_status` — pushed immediately on VPN connect/disconnect
 - `stream_status` — pushed by the stream pipeline at each phase transition

@@ -29,6 +29,7 @@
 - [x] **3.3** Upload System: web UI for uploading local files/folders directly to the library
 - [x] **3.4** Precision Selection: folder/subfolder/file picker for library downloads (not just full torrent)
 - [x] **3.5** Web Downloads: browser "Download" button to pull a library file back to the client
+- [ ] **3.6** Mark as Watched: Ability to mark an episode(or multiple from a clean selector UI), season, series, or torrent as watched. 
 
 ---
 
@@ -44,7 +45,7 @@
 
 - [ ] **5.1** Local DNS: configure mDNS so the tool is accessible at `http://tool.local`
 - [-] **5.2** Smart Skip: audio fingerprinting to detect and skip intro/credit sequences on library files *(backlogged — more complex than expected)*
-- [ ] **5.3** Control API: documented JSON POST endpoints for external play/pause/seek/volume control
+- [-] **5.3** Control API: documented JSON POST endpoints for external play/pause/seek/volume control
 
 ---
 
@@ -77,7 +78,7 @@
 
 ## Milestone 6 — Admin & Security
 
-- [ ] **6.1** Admin Dashboard: password-protected `/admin` panel (no HTTPS needed for LAN, flag it)
+- [ ] **6.1** Admin Dashboard: password-protected `/admin` panel (HTTPS needed, flag it)
 - [ ] **6.2** Content Lock: "admin-only" flag on library items, hidden from standard profiles
 - [ ] **6.3** Profile PINs: optional 4-digit PIN per profile, prompted before access
 - [ ] **6.4** Indexer Management: admin UI to view/add/remove Jackett indexers without editing `.env`
@@ -86,17 +87,8 @@
 
 ## Milestone 7 — System & Daemon
 
-- [ ] **7.1** Daemonization: `run.py --install` registers a launchd/systemd service for startup launch
-- [ ] **7.2** Watchdog: background process monitors VLC, qBit, Jackett; auto-restarts crashed services
+- [x] **7.1** Daemonization: `run.py --install` registers a launchd/systemd service for startup launch
+- [x] **7.2** Watchdog: background process monitors VLC, qBit, Jackett; auto-restarts crashed services
 
 ---
 
-## Suggested First Chunk → Milestone 1 (all four tasks)
-
-All four M1 tasks are **frontend-only** changes to `static/index.html`. No server restart is needed — a browser refresh is sufficient after each sub-task.
-
-**Why start here:**
-- Highest impact-to-risk ratio (no backend changes, no data migration)
-- Volume lag fix (1.3) and fullscreen hitbox fix (1.1) are actively annoying UX bugs
-- Library series fix (1.4) prevents content from disappearing for users without metadata
-- All four can be verified instantly in the browser with the server already running
