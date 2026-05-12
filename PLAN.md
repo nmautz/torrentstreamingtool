@@ -4,7 +4,7 @@
 
 ---
 
-## Milestone 1 — Quick UI Fixes *(frontend-only, low risk)*
+## Milestone 1 — Quick UI Fixes
 
 - [x] **1.1** Fix Fullscreen UI: correct hitboxes on buttons and fix seek/volume slider accuracy
 - [x] **1.2** Add Volume ±5% increment buttons flanking the volume slider
@@ -13,7 +13,7 @@
 
 ---
 
-## Milestone 2 — Player Enhancements *(frontend + minor backend)*
+## Milestone 2 — Player Enhancements 
 
 - [x] **2.1** Add Next / Previous episode buttons in the player footer
 - [x] **2.2** Highlight "currently playing" episode in the Episode Picker modal (poll VLC filename via state)
@@ -22,7 +22,7 @@
 
 ---
 
-## Milestone 3 — Library Enhancements *(backend + frontend)*
+## Milestone 3 — Library Enhancements 
 
 - [x] **3.1** Disk Space Utility: show free/total space for the download path in the UI
 - [x] **3.2** "Add to Library": button while streaming to save the active torrent file to persistent library
@@ -33,11 +33,12 @@
 
 ---
 
-## Milestone 4 — Core Functional Fixes *(backend-heavy)*
+## Milestone 4 — Core Functional Fixes 
 
 - [x] **4.1** Cleanup: auto-delete torrent + temp files when a new stream replaces the current one
 - [x] **4.2** Priority Downloads: expose qBit priority controls; "Play when ready" for queued items
 - [x] **4.3** Multi-Disk Support: configure multiple `LIBRARY_PATH_*` entries; show per-disk free space
+- [ ] **4.4** Retry Playback: VLC can run into issues if the file is not fully ready, add a button next to stop in the fullscreen controls UI to relanch VLC and retry playback
 
 ---
 
@@ -49,7 +50,7 @@
 
 ---
 
-## Milestone 9 — Metro UI Redesign *(frontend-only)*
+## Milestone 9 — Metro UI Redesign 
 
 - [x] **9.1** Full Metro/Win8 design language: flat tiles, no rounded corners, bold uppercase type, accent colors throughout
 - [x] **9.2** CSS design system: `.tab-active`/`.tab-inactive` underline indicator, all square status dots, no `backdrop-blur`
@@ -65,7 +66,7 @@
 
 ---
 
-## Milestone 8 — Mobile UX & Playback Fixes *(new batch)*
+## Milestone 8 — Mobile UX & Playback Fixes 
 
 - [x] **8.1** Fullscreen UI: buttons fill the entire screen with no gaps; reserve space at top/bottom for device safe-area cutouts (env(safe-area-inset-*))
 - [x] **8.2** Bug — Partial download playback: if the first file in a torrent hasn't downloaded yet, "Play All" and individual file play both fail silently; handle this gracefully
