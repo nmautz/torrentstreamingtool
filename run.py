@@ -328,6 +328,34 @@ def get_local_ip() -> str:
                 ip.startswith("10.") or
                 bool(re.match(r"^172\.(1[6-9]|2\d|3[01])\.", ip)))
 
+    # Subnets used by virtual adapters (VirtualBox host-only, Docker Machine,
+    # Windows ICS/Mobile Hotspot, APIPA link-local). These addresses route only
+    # to the host that owns them — never advertise them on mDNS.
+    _VIRTUAL_PREFIXES = (
+        "192.168.56.",   # VirtualBox host-only default
+        "192.168.99.",   # Docker Machine default
+        "192.168.137.",  # Windows ICS / Mobile Hotspot default
+        "169.254.",      # APIPA / link-local
+    )
+
+    def _is_virtual(ip: str) -> bool:
+        return any(ip.startswith(p) for p in _VIRTUAL_PREFIXES)
+
+    # Primary: use the routing table. connect() on a UDP socket doesn't send
+    # any packet, but the kernel sets the source IP to whatever interface
+    # would be used to reach the destination — i.e. the genuinely reachable
+    # LAN IP, not some virtual host-only adapter that happens to enumerate first.
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if _is_lan(ip) and not _is_virtual(ip):
+            return ip
+    except Exception:
+        pass
+
+    # Fallback: enumerate interfaces and pick a real-looking one.
     try:
         import psutil
         buckets: list[list[str]] = [[], [], []]
@@ -341,7 +369,7 @@ def get_local_ip() -> str:
                 if addr.family != socket.AF_INET:
                     continue
                 ip = addr.address
-                if not _is_lan(ip):
+                if not _is_lan(ip) or _is_virtual(ip):
                     continue
                 if ip.startswith("192.168."):
                     buckets[0].append(ip)
@@ -352,16 +380,6 @@ def get_local_ip() -> str:
         for bucket in buckets:
             if bucket:
                 return bucket[0]
-    except Exception:
-        pass
-
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        if _is_lan(ip):
-            return ip
     except Exception:
         pass
 
