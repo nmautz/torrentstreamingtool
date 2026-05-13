@@ -10,6 +10,8 @@
 - [x] **1.2** Add Volume ±5% increment buttons flanking the volume slider
 - [x] **1.3** Fix Volume lag: fire `POST /api/vlc/volume/set` only on `mouseup`/`touchend`, not every `input` event
 - [x] **1.4** Library Logic Fix: show series grouping even when `series_name` metadata is empty/null
+- [x] **1.5** Don't open web UI on server start
+
 
 ---
 

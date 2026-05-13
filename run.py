@@ -328,9 +328,9 @@ def get_local_ip() -> str:
                 ip.startswith("10.") or
                 bool(re.match(r"^172\.(1[6-9]|2\d|3[01])\.", ip)))
 
-    # Subnets used by virtual adapters (VirtualBox host-only, Docker Machine,
-    # Windows ICS/Mobile Hotspot, APIPA link-local). These addresses route only
-    # to the host that owns them — never advertise them on mDNS.
+    # Subnets used by virtual adapters whose friendly names don't always reveal
+    # them on Windows (e.g. VirtualBox Host-Only shows up as "Ethernet 2").
+    # These IPs route only to the owning host — never advertise on mDNS.
     _VIRTUAL_PREFIXES = (
         "192.168.56.",   # VirtualBox host-only default
         "192.168.99.",   # Docker Machine default
@@ -341,24 +341,12 @@ def get_local_ip() -> str:
     def _is_virtual(ip: str) -> bool:
         return any(ip.startswith(p) for p in _VIRTUAL_PREFIXES)
 
-    # Primary: use the routing table. connect() on a UDP socket doesn't send
-    # any packet, but the kernel sets the source IP to whatever interface
-    # would be used to reach the destination — i.e. the genuinely reachable
-    # LAN IP, not some virtual host-only adapter that happens to enumerate first.
-    try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        if _is_lan(ip) and not _is_virtual(ip):
-            return ip
-    except Exception:
-        pass
-
-    # Fallback: enumerate interfaces and pick a real-looking one.
+    # Step 1: enumerate physical interfaces, dropping VPN and virtual adapters
+    # by name AND by IP subnet. This yields the set of IPs we'd ever want to
+    # advertise on mDNS.
+    candidates: list[tuple[int, str]] = []  # (priority, ip)
     try:
         import psutil
-        buckets: list[list[str]] = [[], [], []]
         for iface, addrs in psutil.net_if_addrs().items():
             n = iface.lower()
             if any(n.startswith(p) for p in _VPN_STARTS):
@@ -372,18 +360,36 @@ def get_local_ip() -> str:
                 if not _is_lan(ip) or _is_virtual(ip):
                     continue
                 if ip.startswith("192.168."):
-                    buckets[0].append(ip)
+                    candidates.append((0, ip))
                 elif ip.startswith("10."):
-                    buckets[1].append(ip)
+                    candidates.append((1, ip))
                 else:
-                    buckets[2].append(ip)
-        for bucket in buckets:
-            if bucket:
-                return bucket[0]
+                    candidates.append((2, ip))
     except Exception:
         pass
 
-    return ""
+    if not candidates:
+        return ""
+
+    candidate_ips = {ip for _, ip in candidates}
+
+    # Step 2: prefer whichever candidate the OS routing table picks. The UDP
+    # connect() doesn't send a packet but sets the source IP to whatever
+    # interface would reach the destination — useful on multi-NIC hosts. We
+    # gate it through `candidate_ips` so an active VPN (e.g. Mullvad capturing
+    # the default route) can never win.
+    try:
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        if ip in candidate_ips:
+            return ip
+    except Exception:
+        pass
+
+    candidates.sort()
+    return candidates[0][1]
 
 
 def get_wifi_ssid() -> str:
