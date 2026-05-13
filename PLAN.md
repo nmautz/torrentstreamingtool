@@ -39,6 +39,8 @@
 - [x] **4.2** Priority Downloads: expose qBit priority controls; "Play when ready" for queued items
 - [x] **4.3** Multi-Disk Support: configure multiple `LIBRARY_PATH_*` entries; show per-disk free space
 - [ ] **4.4** Retry Playback: VLC can run into issues if the file is not fully ready, add a button next to stop in the fullscreen controls UI to relanch VLC and retry playback
+- [ ] **4.5** VLC Focus: On playback, VLC is focused and set to fullscreen
+
 
 ---
 
