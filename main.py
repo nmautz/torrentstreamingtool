@@ -402,6 +402,65 @@ def _vlc_focus_windows() -> None:
         pass
 
 
+def _vlc_minimize_windows() -> None:
+    """Minimize the VLC window on Windows using ctypes."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+
+        found: list = []
+        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+        def _cb(hwnd, _):
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length > 0:
+                buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buf, length + 1)
+                if "vlc" in buf.value.lower():
+                    found.append(hwnd)
+            return True
+
+        user32.EnumWindows(EnumWindowsProc(_cb), 0)
+        for hwnd in found:
+            user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
+    except Exception:
+        pass
+
+
+async def vlc_minimize() -> None:
+    """Minimize VLC on all platforms. Best-effort; never raises."""
+    system = platform.system()
+    try:
+        if system == "Windows":
+            await asyncio.get_event_loop().run_in_executor(None, _vlc_minimize_windows)
+        elif system == "Darwin":
+            proc = await asyncio.create_subprocess_exec(
+                "osascript", "-e",
+                'tell application "VLC" to set miniaturized of every window to true',
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+        elif system == "Linux":
+            if shutil.which("xdotool"):
+                proc = await asyncio.create_subprocess_exec(
+                    "xdotool", "search", "--name", "VLC", "windowminimize", "--sync",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await proc.wait()
+            elif shutil.which("wmctrl"):
+                proc = await asyncio.create_subprocess_exec(
+                    "wmctrl", "-r", "VLC", "-b", "add,hidden",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await proc.wait()
+    except Exception:
+        pass
+
+
 async def vlc_focus_and_fullscreen() -> None:
     """Bring VLC to the foreground and enable fullscreen. Best-effort; never raises."""
     await asyncio.sleep(1.5)
@@ -1788,6 +1847,7 @@ async def stop() -> JSONResponse:
         await qbit_delete(state.prepare_hash, delete_files=True)
         state.prepare_hash = None
     await vlc("pl_stop")
+    asyncio.create_task(vlc_minimize())
 
     state.active_hash = None
     state.active_file = None
