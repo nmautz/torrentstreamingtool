@@ -367,63 +367,71 @@ def _find_vlc_bin() -> Optional[str]:
     return shutil.which("vlc")
 
 
-def _vlc_focus_windows() -> None:
-    """Bring the VLC window to the foreground on Windows using ctypes."""
+def _find_vlc_hwnd_windows() -> Optional[int]:
+    """Return the main visible window handle of the VLC process, or None.
+
+    Uses psutil for PID lookup (reliable) + GetWindowThreadProcessId for matching
+    (avoids title-matching and keeps the EnumWindowsProc ref alive to prevent GC).
+    """
     try:
         import ctypes
         from ctypes import wintypes
-        user32 = ctypes.windll.user32
 
+        vlc_pid: Optional[int] = None
+        for p in psutil.process_iter(["name", "pid"]):
+            if (p.info["name"] or "").lower().startswith("vlc"):
+                vlc_pid = p.info["pid"]
+                break
+        if not vlc_pid:
+            return None
+
+        user32 = ctypes.windll.user32
         found: list = []
         EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
 
         def _cb(hwnd, _):
-            length = user32.GetWindowTextLengthW(hwnd)
-            if length > 0:
-                buf = ctypes.create_unicode_buffer(length + 1)
-                user32.GetWindowTextW(hwnd, buf, length + 1)
-                if "vlc" in buf.value.lower():
+            if user32.IsWindowVisible(hwnd):
+                pid = wintypes.DWORD()
+                user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if pid.value == vlc_pid:
                     found.append(hwnd)
             return True
 
-        user32.EnumWindows(EnumWindowsProc(_cb), 0)
-        if found:
-            hwnd = found[0]
-            # Attach to the current foreground thread to bypass Windows focus restrictions
-            fg_thread = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
-            my_thread = ctypes.windll.kernel32.GetCurrentThreadId()
-            if fg_thread != my_thread:
-                user32.AttachThreadInput(my_thread, fg_thread, True)
-            user32.ShowWindow(hwnd, 9)   # SW_RESTORE
-            user32.SetForegroundWindow(hwnd)
-            if fg_thread != my_thread:
-                user32.AttachThreadInput(my_thread, fg_thread, False)
+        cb = EnumWindowsProc(_cb)   # keep ref alive — ctypes GC pitfall
+        user32.EnumWindows(cb, 0)
+        return found[0] if found else None
+    except Exception:
+        return None
+
+
+def _vlc_focus_windows() -> None:
+    """Bring the VLC window to the foreground on Windows using ctypes."""
+    hwnd = _find_vlc_hwnd_windows()
+    if not hwnd:
+        return
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        fg_thread = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
+        my_thread = ctypes.windll.kernel32.GetCurrentThreadId()
+        if fg_thread != my_thread:
+            user32.AttachThreadInput(my_thread, fg_thread, True)
+        user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+        user32.SetForegroundWindow(hwnd)
+        if fg_thread != my_thread:
+            user32.AttachThreadInput(my_thread, fg_thread, False)
     except Exception:
         pass
 
 
 def _vlc_minimize_windows() -> None:
     """Minimize the VLC window on Windows using ctypes."""
+    hwnd = _find_vlc_hwnd_windows()
+    if not hwnd:
+        return
     try:
         import ctypes
-        from ctypes import wintypes
-        user32 = ctypes.windll.user32
-
-        found: list = []
-        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
-
-        def _cb(hwnd, _):
-            length = user32.GetWindowTextLengthW(hwnd)
-            if length > 0:
-                buf = ctypes.create_unicode_buffer(length + 1)
-                user32.GetWindowTextW(hwnd, buf, length + 1)
-                if "vlc" in buf.value.lower():
-                    found.append(hwnd)
-            return True
-
-        user32.EnumWindows(EnumWindowsProc(_cb), 0)
-        for hwnd in found:
-            user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
+        ctypes.windll.user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
     except Exception:
         pass
 
