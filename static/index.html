@@ -529,35 +529,35 @@
 
 <!-- ── Player Footer ──────────────────────────────────────────────────────── -->
 <footer class="fixed bottom-0 left-0 right-0 z-40 bg-gray-950 border-t-2 border-gray-800 safe-bottom">
-  <!-- Seek bar -->
-  <div id="seekBarWrapper" class="relative w-full py-3 cursor-pointer group"
+  <!-- Seek bar — flat Metro track -->
+  <div id="seekBarWrapper" class="relative w-full cursor-pointer"
        onclick="handleSeekBarClick(event, this)"
        onmousemove="handleSeekBarHover(event, this)"
        onmouseleave="handleSeekBarLeave()"
        ontouchmove="handleSeekBarHover(event, this)"
        ontouchend="handleSeekBarClick(event, this);handleSeekBarLeave()"
-       style="touch-action:none;">
-    <div class="w-full bg-gray-800 h-1.5 group-active:h-2 transition-all">
+       style="touch-action:none; height:36px;">
+    <div class="absolute inset-x-0 top-1/2 -translate-y-1/2 bg-gray-800" style="height:3px">
       <div id="progressBar" class="h-full bg-indigo-500 transition-all duration-700 pointer-events-none" style="width:0%"></div>
     </div>
     <div id="seekTooltip"
-         class="hidden absolute -top-8 bg-gray-800 border border-gray-700 text-[11px] font-mono
-                text-gray-200 px-2 py-0.5 pointer-events-none -translate-x-1/2 whitespace-nowrap shadow-lg"
+         class="hidden absolute -top-7 bg-gray-800 border border-gray-700 text-[11px] font-mono
+                text-gray-200 px-2 py-0.5 pointer-events-none -translate-x-1/2 whitespace-nowrap"
          style="left:50%"></div>
   </div>
   <!-- Track selectors — only while playing -->
-  <div id="trackControls" class="hidden border-b border-gray-800/60">
+  <div id="trackControls" class="hidden border-b border-gray-800">
     <div class="max-w-5xl mx-auto px-3 py-2 flex items-center gap-3">
-      <div class="flex items-center gap-1.5 flex-1 min-w-0">
-        <span class="text-[11px] text-gray-600 whitespace-nowrap flex-shrink-0">🎵</span>
+      <div class="flex items-center gap-2 flex-1 min-w-0">
+        <span class="text-[9px] font-black uppercase tracking-widest text-gray-600 whitespace-nowrap flex-shrink-0">AUDIO</span>
         <select id="audioSelect" onchange="setAudioTrack(this.value)"
           class="flex-1 min-w-0 bg-gray-900 border-b border-gray-700 text-xs text-gray-300 px-2 py-1.5
                  focus:outline-none focus:border-indigo-500 cursor-pointer">
           <option>—</option>
         </select>
       </div>
-      <div class="flex items-center gap-1.5 flex-1 min-w-0">
-        <span class="text-[11px] text-gray-600 whitespace-nowrap flex-shrink-0">💬</span>
+      <div class="flex items-center gap-2 flex-1 min-w-0">
+        <span class="text-[9px] font-black uppercase tracking-widest text-gray-600 whitespace-nowrap flex-shrink-0">SUBS</span>
         <select id="subtitleSelect" onchange="setSubtitleTrack(this.value)"
           class="flex-1 min-w-0 bg-gray-900 border-b border-gray-700 text-xs text-gray-300 px-2 py-1.5
                  focus:outline-none focus:border-indigo-500 cursor-pointer">
@@ -566,7 +566,7 @@
       </div>
     </div>
   </div>
-  <!-- Now-playing info row -->
+  <!-- Status row — title + badge -->
   <div class="max-w-5xl mx-auto px-3 pt-1.5 pb-1 flex items-center gap-2">
     <div id="playerDot" class="w-2 h-2 bg-gray-700 flex-shrink-0"></div>
     <div class="flex-1 min-w-0">
@@ -579,76 +579,84 @@
     </div>
     <div id="statusBadge" class="hidden text-[10px] font-black px-2 py-0.5 border flex-shrink-0 uppercase tracking-wide"></div>
   </div>
-  <!-- Controls row — flat metro tiles -->
+  <!-- Controls row — Metro tiles with dividers -->
   <div class="max-w-5xl mx-auto px-0 pb-1 flex items-stretch">
     <button onclick="vlcSeek(-30)" title="−30s"
-      class="flex flex-col items-center justify-center flex-1 py-2.5
-             text-gray-600 hover:text-gray-300 hover:bg-gray-900 active:bg-gray-800 transition-all">
-      <span class="text-xs font-black leading-none">‹30</span>
+      class="flex flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
+             text-gray-600 hover:text-gray-300 hover:bg-gray-900 active:bg-gray-800 transition-colors">
+      <span class="text-xs font-black leading-none">−30</span>
+      <span class="text-[9px] text-gray-700 font-bold uppercase leading-none mt-0.5">sec</span>
     </button>
     <button onclick="vlcSeek(-10)" title="−10s"
-      class="flex flex-col items-center justify-center flex-1 py-2.5
-             text-gray-600 hover:text-gray-300 hover:bg-gray-900 active:bg-gray-800 transition-all">
-      <span class="text-xs font-black leading-none">‹10</span>
+      class="flex flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
+             text-gray-600 hover:text-gray-300 hover:bg-gray-900 active:bg-gray-800 transition-colors">
+      <span class="text-xs font-black leading-none">−10</span>
+      <span class="text-[9px] text-gray-700 font-bold uppercase leading-none mt-0.5">sec</span>
     </button>
     <!-- Volume -->
-    <div class="flex items-center flex-[2]">
-      <button onclick="vlcVolumeStep(-5)"
-        class="h-full w-8 flex items-center justify-center hover:bg-gray-900 text-gray-500 hover:text-gray-200
-               active:scale-90 transition-all text-lg font-black flex-shrink-0">−</button>
-      <input type="range" id="volumeSlider" min="0" max="200" value="100"
-        class="flex-1 h-1 appearance-none cursor-pointer accent-indigo-500"
-        oninput="updateVolumeDisplay(this.value)"
-        onmouseup="vlcSetVolume(this.value)"
-        ontouchend="vlcSetVolume(this.value)"
-        style="min-width:0;touch-action:none">
-      <button onclick="vlcVolumeStep(5)"
-        class="h-full w-8 flex items-center justify-center hover:bg-gray-900 text-gray-500 hover:text-gray-200
-               active:scale-90 transition-all text-lg font-black flex-shrink-0">+</button>
-    </div>
+    <button onclick="vlcVolumeStep(-5)" title="Volume −5%"
+      class="flex flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
+             text-gray-600 hover:text-gray-300 hover:bg-gray-900 active:bg-gray-800 transition-colors">
+      <span class="text-lg font-black leading-none">−</span>
+      <span class="text-[9px] text-gray-700 font-bold uppercase leading-none">vol</span>
+    </button>
+    <button onclick="vlcVolumeStep(5)" title="Volume +5%"
+      class="flex flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
+             text-gray-600 hover:text-gray-300 hover:bg-gray-900 active:bg-gray-800 transition-colors">
+      <span class="text-lg font-black leading-none">+</span>
+      <span class="text-[9px] text-gray-700 font-bold uppercase leading-none">vol</span>
+    </button>
     <button onclick="vlcPause()" title="Pause / Resume"
-      class="flex items-center justify-center flex-1 py-2.5
-             bg-indigo-900/25 hover:bg-indigo-900/50 active:bg-indigo-900/80 text-white transition-all">
+      class="flex items-center justify-center flex-1 py-2.5 border-r border-gray-800
+             bg-indigo-900/25 hover:bg-indigo-900/50 active:bg-indigo-900/80 text-white transition-colors">
       <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6"/>
       </svg>
     </button>
     <button onclick="stopStream()" title="Stop"
-      class="flex items-center justify-center flex-1 py-2.5
-             text-red-600 hover:text-red-400 hover:bg-red-950/30 active:bg-red-950/50 transition-all">
+      class="flex items-center justify-center flex-1 py-2.5 border-r border-gray-800
+             text-red-600 hover:text-red-400 hover:bg-red-950/30 active:bg-red-950/50 transition-colors">
       <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14"/></svg>
     </button>
     <button id="prevEpBtn" onclick="vlcPrev()" title="Previous episode"
-      class="hidden flex-col items-center justify-center flex-1 py-2.5
-             text-gray-500 hover:text-gray-200 hover:bg-gray-900 active:bg-gray-800 transition-all">
-      <span class="text-xs font-black leading-none">⏮</span>
+      class="hidden flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
+             text-indigo-400 hover:text-indigo-200 hover:bg-indigo-950/30 active:bg-indigo-950/50 transition-colors">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7M18 12H5"/>
+      </svg>
+      <span class="text-[9px] font-bold uppercase tracking-wide leading-none mt-0.5">Prev</span>
     </button>
     <button id="nextEpBtn" onclick="vlcNext()" title="Next episode"
-      class="hidden flex-col items-center justify-center flex-1 py-2.5
-             text-gray-500 hover:text-gray-200 hover:bg-gray-900 active:bg-gray-800 transition-all">
-      <span class="text-xs font-black leading-none">⏭</span>
+      class="hidden flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
+             text-indigo-400 hover:text-indigo-200 hover:bg-indigo-950/30 active:bg-indigo-950/50 transition-colors">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M6 12h13"/>
+      </svg>
+      <span class="text-[9px] font-bold uppercase tracking-wide leading-none mt-0.5">Next</span>
     </button>
     <button onclick="vlcSeek(10)" title="+10s"
-      class="flex flex-col items-center justify-center flex-1 py-2.5
-             text-gray-600 hover:text-gray-300 hover:bg-gray-900 active:bg-gray-800 transition-all">
-      <span class="text-xs font-black leading-none">10›</span>
+      class="flex flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
+             text-gray-600 hover:text-gray-300 hover:bg-gray-900 active:bg-gray-800 transition-colors">
+      <span class="text-xs font-black leading-none">+10</span>
+      <span class="text-[9px] text-gray-700 font-bold uppercase leading-none mt-0.5">sec</span>
     </button>
     <button onclick="vlcSeek(30)" title="+30s"
-      class="flex flex-col items-center justify-center flex-1 py-2.5
-             text-gray-600 hover:text-gray-300 hover:bg-gray-900 active:bg-gray-800 transition-all">
-      <span class="text-xs font-black leading-none">30›</span>
+      class="flex flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
+             text-gray-600 hover:text-gray-300 hover:bg-gray-900 active:bg-gray-800 transition-colors">
+      <span class="text-xs font-black leading-none">+30</span>
+      <span class="text-[9px] text-gray-700 font-bold uppercase leading-none mt-0.5">sec</span>
     </button>
     <button onclick="openFullscreenControls()" id="fullscreenBtn" title="Fullscreen controls"
       class="flex items-center justify-center flex-[2] py-2.5
-             text-indigo-400 hover:text-indigo-200 hover:bg-indigo-950/40 active:bg-indigo-950/70 transition-all">
+             text-indigo-400 hover:text-indigo-200 hover:bg-indigo-950/40 active:bg-indigo-950/70 transition-colors">
       <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
           d="M4 8V4m0 0h4M4 4l5 5m11-5h-4m4 0v4m0-4l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"/>
       </svg>
     </button>
     <button id="saveStreamBtn" onclick="openSaveStreamModal()" title="Save to Library"
-      class="hidden items-center justify-center flex-1 py-2.5
-             text-indigo-400 hover:text-indigo-200 hover:bg-indigo-950/30 active:bg-indigo-950/50 transition-all">
+      class="hidden items-center justify-center flex-1 py-2.5 border-l border-gray-800
+             text-emerald-400 hover:text-emerald-200 hover:bg-emerald-950/30 active:bg-emerald-950/50 transition-colors">
       <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
           d="M5 5a2 2 0 012-2h7l5 5v11a2 2 0 01-2 2H7a2 2 0 01-2-2V5z"/>
@@ -1072,7 +1080,7 @@ function renderPlayer(s){
   bar.className=`h-full transition-all duration-700 ${BAR_COLOR[s.stream_status]||BAR_COLOR.idle}`;
   dot.className=`w-2 h-2 flex-shrink-0 ${DOT_COLOR[s.stream_status]||DOT_COLOR.idle}`;
   np.textContent=s.active_title||"No active stream";
-  np.className=`text-sm font-medium truncate ${s.active_title?"text-gray-200":"text-gray-500"}`;
+  np.className=`text-sm font-bold truncate uppercase tracking-wide ${s.active_title?"text-gray-200":"text-gray-500"}`;
 
   if(s.stream_status==="buffering")
     si.textContent=s.total_mb>0?`${s.downloaded_mb.toFixed(1)} MB / ${s.total_mb.toFixed(1)} MB (${s.progress.toFixed(1)}%)`:"Connecting…";

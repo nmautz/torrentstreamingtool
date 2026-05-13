@@ -60,7 +60,7 @@
 - [x] **9.2** CSS design system: `.tab-active`/`.tab-inactive` underline indicator, all square status dots, no `backdrop-blur`
 - [x] **9.3** HTML structural sections: navbar, footer, all modals converted to flat bottom-sheet style with top accent stripe
 - [x] **9.4** JS-generated HTML: search results, library cards, episode picker, profile grids, alerts/toasts all converted to Metro classes
-- [ ] **9.5** Metro UI for bottom player footer controls (seek bar row, control tiles, status row)
+- [x] **9.5** Metro UI for bottom player footer controls (seek bar row, control tiles, status row)
 
 ---
 
