@@ -412,23 +412,38 @@ async function loadProfilePins(){
     return;
   }
   el.innerHTML = profiles.map(p=>`
-    <div class="flex items-center justify-between px-5 py-4 gap-3">
-      <div class="flex items-center gap-3 min-w-0">
-        <div class="w-9 h-9 ${avatarBg(p.color)} flex items-center justify-center text-sm font-black text-white flex-shrink-0">
-          ${escHtml(p.name.charAt(0).toUpperCase())}
-        </div>
-        <div class="min-w-0">
-          <div class="text-sm font-bold text-gray-200">${escHtml(p.name)}</div>
-          <div class="text-xs mt-0.5 ${p.has_pin?'text-indigo-400 font-bold':'text-gray-600'}">
-            ${p.has_pin ? '🔑 PIN set' : 'No PIN'}
+    <div class="px-5 py-4 space-y-3">
+      <div class="flex items-center justify-between gap-3">
+        <div class="flex items-center gap-3 min-w-0">
+          <div class="w-9 h-9 ${avatarBg(p.color)} flex items-center justify-center text-sm font-black text-white flex-shrink-0">
+            ${escHtml(p.name.charAt(0).toUpperCase())}
+          </div>
+          <div class="min-w-0">
+            <div class="text-sm font-bold text-gray-200">${escHtml(p.name)}</div>
+            <div class="text-xs mt-0.5 ${p.has_pin?'text-indigo-400 font-bold':'text-gray-600'}">
+              ${p.has_pin ? '🔑 PIN set' : 'No PIN'}
+            </div>
           </div>
         </div>
+        <button onclick="openPinModal('${escHtml(p.id)}','${escHtml(p.name)}',${p.has_pin})"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border
+                 border-gray-700 bg-gray-800 hover:text-white transition-colors text-gray-400">
+          ${p.has_pin ? 'Change / Clear' : 'Set PIN'}
+        </button>
       </div>
-      <button onclick="openPinModal('${escHtml(p.id)}','${escHtml(p.name)}',${p.has_pin})"
-        class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border
-               border-gray-700 bg-gray-800 hover:text-white transition-colors text-gray-400">
-        ${p.has_pin ? 'Change / Clear' : 'Set PIN'}
-      </button>
+      <div class="flex items-center justify-between pl-12 gap-3">
+        <div>
+          <div class="text-xs font-bold text-gray-400 uppercase tracking-wide">Restricted Content</div>
+          <div class="text-[11px] text-gray-600 mt-0.5">Allow this profile to see admin-only library items</div>
+        </div>
+        <button onclick="toggleElevated('${escHtml(p.id)}',${!p.elevated},this)"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+                 ${p.elevated
+                   ? 'bg-indigo-900 border-indigo-700 text-indigo-300 hover:bg-indigo-800'
+                   : 'bg-gray-800 border-gray-700 text-gray-500 hover:text-white'}">
+          ${p.elevated ? '✓ Allowed' : 'Blocked'}
+        </button>
+      </div>
     </div>`).join("");
 }
 
@@ -472,6 +487,21 @@ async function submitPin(){
   closePinModal();
   showToast(pin ? "PIN saved." : "PIN cleared.");
   loadProfilePins();
+}
+
+async function toggleElevated(profileId, newValue, btn){
+  btn.disabled = true;
+  const r = await fetch(`/api/profiles/${profileId}/set-elevated`,{
+    method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+    body: JSON.stringify({elevated: newValue}),
+  });
+  btn.disabled = false;
+  if(r.ok){
+    showToast(newValue ? "Restricted content access granted." : "Access revoked.");
+    loadProfilePins();
+  } else {
+    showToast("Failed to update.", true);
+  }
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────

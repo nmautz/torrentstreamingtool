@@ -104,6 +104,41 @@
   </div>
 </div>
 
+<!-- ── Change PIN Modal ───────────────────────────────────────────────────── -->
+<div id="changePinModal"
+  class="hidden fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center sm:px-4">
+  <div class="bg-gray-900 w-full sm:max-w-xs fade-in border-t-[3px] border-indigo-600">
+    <div class="px-5 pt-5 pb-4 border-b border-gray-800">
+      <h2 class="text-lg font-black uppercase tracking-wide" id="changePinTitle">Set PIN</h2>
+      <p class="text-xs text-gray-500 mt-0.5" id="changePinSub">Protect this profile with a 4-digit PIN</p>
+    </div>
+    <div class="px-5 py-4 space-y-3">
+      <div id="changePinCurrentWrap" class="hidden">
+        <label class="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Current PIN</label>
+        <input id="changePinCurrent" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="4"
+          placeholder="••••"
+          class="w-full bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500
+                 px-3 py-3 text-center text-xl font-mono tracking-widest focus:outline-none transition-colors"/>
+      </div>
+      <div>
+        <label class="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">New PIN <span class="text-gray-600 normal-case font-normal">(leave blank to clear)</span></label>
+        <input id="changePinNew" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="4"
+          placeholder="••••"
+          class="w-full bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500
+                 px-3 py-3 text-center text-xl font-mono tracking-widest focus:outline-none transition-colors"
+          onkeydown="if(event.key==='Enter') submitChangePinModal()"/>
+      </div>
+      <div id="changePinError" class="hidden text-red-400 text-xs font-bold uppercase tracking-wide text-center pt-1"></div>
+    </div>
+    <div class="px-4 pb-4 safe-bottom flex gap-2">
+      <button onclick="closeChangePinModal()"
+        class="flex-1 bg-gray-800 hover:bg-gray-700 py-4 text-sm font-bold uppercase tracking-wide transition-colors">Cancel</button>
+      <button onclick="submitChangePinModal()"
+        class="flex-1 bg-indigo-600 hover:bg-indigo-500 py-4 text-sm font-black uppercase tracking-wide transition-colors">Save PIN</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Profile Picker ─────────────────────────────────────────────────────── -->
 <div id="profilePicker"
   class="hidden fixed inset-0 z-40 bg-gray-950 flex flex-col items-center justify-center gap-8 px-6 fade-in">
@@ -1464,14 +1499,23 @@ function renderExistingProfilesList(){
   wrap.classList.remove("hidden"); items.innerHTML="";
   allProfiles.forEach(p=>{
     const row=document.createElement("div");
-    row.className="flex items-center justify-between gap-2";
+    row.className="flex items-center justify-between gap-2 py-1";
     row.innerHTML=`
-      <div class="flex items-center gap-2">
-        <div class="w-7 h-7 ${avatarBg(p.color)} flex items-center justify-center text-xs font-bold text-white">${escHtml(p.name.charAt(0).toUpperCase())}</div>
-        <span class="text-sm text-gray-300">${escHtml(p.name)}</span>
+      <div class="flex items-center gap-2 min-w-0">
+        <div class="w-7 h-7 ${avatarBg(p.color)} flex items-center justify-center text-xs font-bold text-white flex-shrink-0">${escHtml(p.name.charAt(0).toUpperCase())}</div>
+        <div class="min-w-0">
+          <span class="text-sm text-gray-300">${escHtml(p.name)}</span>
+          ${p.has_pin?'<span class="ml-1.5 text-[10px] text-indigo-400 font-bold">🔑 PIN</span>':''}
+        </div>
       </div>
-      <button class="text-xs text-red-500 hover:text-red-300 transition-colors" data-id="${escHtml(p.id)}">Delete</button>`;
-    row.querySelector("button").onclick=async()=>{
+      <div class="flex items-center gap-2 flex-shrink-0">
+        <button class="pin-btn text-xs text-indigo-400 hover:text-indigo-300 transition-colors" data-id="${escHtml(p.id)}" data-name="${escHtml(p.name)}" data-haspin="${p.has_pin?'1':'0'}">
+          ${p.has_pin?'Change PIN':'Set PIN'}
+        </button>
+        <button class="del-btn text-xs text-red-500 hover:text-red-300 transition-colors" data-id="${escHtml(p.id)}">Delete</button>
+      </div>`;
+    row.querySelector(".pin-btn").onclick=()=>openChangePinModal(p);
+    row.querySelector(".del-btn").onclick=async()=>{
       if(!confirm(`Delete profile "${p.name}"? This removes their watch history.`)) return;
       await fetch(`/api/profiles/${p.id}`,{method:"DELETE"});
       if(profile.id===p.id){ profile={id:"",name:"",color:"indigo"}; localStorage.removeItem("streamlink_profile"); }
@@ -1479,6 +1523,57 @@ function renderExistingProfilesList(){
     };
     items.appendChild(row);
   });
+}
+
+// ── Change PIN Modal (self-service) ───────────────────────────────────────
+let _changePinTarget=null;
+function openChangePinModal(p){
+  _changePinTarget=p;
+  document.getElementById("changePinTitle").textContent=p.has_pin?`Change PIN — ${p.name}`:`Set PIN — ${p.name}`;
+  document.getElementById("changePinSub").textContent=p.has_pin
+    ? "Enter your current PIN and a new 4-digit PIN (blank = clear PIN)."
+    : "Set a 4-digit PIN to protect this profile.";
+  const cw=document.getElementById("changePinCurrentWrap");
+  if(p.has_pin){ cw.classList.remove("hidden"); } else { cw.classList.add("hidden"); }
+  document.getElementById("changePinCurrent").value="";
+  document.getElementById("changePinNew").value="";
+  document.getElementById("changePinError").classList.add("hidden");
+  document.getElementById("changePinModal").classList.remove("hidden");
+  setTimeout(()=>{
+    const f=p.has_pin?document.getElementById("changePinCurrent"):document.getElementById("changePinNew");
+    f.focus();
+  },50);
+}
+function closeChangePinModal(){
+  _changePinTarget=null;
+  document.getElementById("changePinModal").classList.add("hidden");
+}
+async function submitChangePinModal(){
+  if(!_changePinTarget) return;
+  const p=_changePinTarget;
+  const currentPin=document.getElementById("changePinCurrent").value.trim();
+  const newPin=document.getElementById("changePinNew").value.trim();
+  const errEl=document.getElementById("changePinError");
+  errEl.classList.add("hidden");
+  if(newPin && (newPin.length!==4||!/^\d{4}$/.test(newPin))){
+    errEl.textContent="New PIN must be exactly 4 digits."; errEl.classList.remove("hidden"); return;
+  }
+  if(p.has_pin && !currentPin){
+    errEl.textContent="Enter your current PIN to continue."; errEl.classList.remove("hidden"); return;
+  }
+  const body={pin:newPin};
+  if(p.has_pin) body.current_pin=currentPin;
+  const r=await fetch(`/api/profiles/${p.id}/set-pin`,{
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body:JSON.stringify(body),
+  });
+  if(r.ok){
+    closeChangePinModal();
+    await fetchProfiles(); renderProfileGrid(); renderExistingProfilesList();
+  } else {
+    const d=await r.json().catch(()=>({}));
+    errEl.textContent=d.detail||"Failed to update PIN."; errEl.classList.remove("hidden");
+  }
 }
 function selectColor(c){
   selectedColor=c;

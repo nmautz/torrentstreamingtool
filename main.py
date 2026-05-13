@@ -1376,7 +1376,12 @@ class AdminSettingsReq(BaseModel):
 
 
 class ProfilePinReq(BaseModel):
-    pin: str   # 4 digits to set, "" to clear
+    pin: str          # 4 digits to set, "" to clear
+    current_pin: str = ""  # required when changing an existing PIN without admin token
+
+
+class ProfileElevatedReq(BaseModel):
+    elevated: bool    # whether this profile can view admin-only library items
 
 
 # ── Routes: Profiles ─────────────────────────────────────────────────────────
@@ -1390,6 +1395,7 @@ async def list_profiles() -> JSONResponse:
             "name": p["name"],
             "color": p.get("color", "indigo"),
             "has_pin": bool(p.get("pin_hash", "")),
+            "elevated": bool(p.get("elevated", False)),
         }
         for p in lib["profiles"]
     ]
@@ -1423,9 +1429,11 @@ async def delete_profile(profile_id: str) -> JSONResponse:
 async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
     is_admin = _check_admin(request)
     lib = await get_library()
+    elevated_ids = {p["id"] for p in lib["profiles"] if p.get("elevated")}
+    is_elevated  = bool(profile_id) and profile_id in elevated_ids
     items = []
     for it in lib["items"]:
-        if it.get("admin_only") and not is_admin:
+        if it.get("admin_only") and not is_admin and not is_elevated:
             continue
         files = it.get("files", [])
         resume = find_resume_hint(it, profile_id) if profile_id else None
@@ -2597,7 +2605,13 @@ async def admin_list_library(request: Request) -> JSONResponse:
 
 @app.post("/api/profiles/{profile_id}/set-pin")
 async def set_profile_pin(profile_id: str, request: Request, req: ProfilePinReq) -> JSONResponse:
-    _require_admin(request)
+    """Set or clear a profile PIN.
+
+    Admin token: always allowed.
+    No token: allowed if the profile has no existing PIN (first-time set).
+              If the profile already has a PIN, `current_pin` must be provided and correct.
+    """
+    is_admin = _check_admin(request)
     pin = req.pin.strip()
     if pin and (len(pin) != 4 or not pin.isdigit()):
         raise HTTPException(400, "PIN must be exactly 4 digits, or empty to clear.")
@@ -2605,12 +2619,34 @@ async def set_profile_pin(profile_id: str, request: Request, req: ProfilePinReq)
     profile = next((p for p in lib["profiles"] if p["id"] == profile_id), None)
     if not profile:
         raise HTTPException(404, "Profile not found.")
+    if not is_admin:
+        existing = profile.get("pin_hash", "")
+        if existing:
+            current = req.current_pin.strip()
+            if not current or _pin_hash(current) != existing:
+                raise HTTPException(403, "Current PIN is incorrect.")
     if pin:
         profile["pin_hash"] = _pin_hash(pin)
     else:
         profile.pop("pin_hash", None)
     await put_library(lib)
     return JSONResponse({"ok": True, "has_pin": bool(pin)})
+
+
+@app.post("/api/profiles/{profile_id}/set-elevated")
+async def set_profile_elevated(profile_id: str, request: Request, req: ProfileElevatedReq) -> JSONResponse:
+    """Grant or revoke access to admin-only library items for a profile (admin only)."""
+    _require_admin(request)
+    lib = await get_library()
+    profile = next((p for p in lib["profiles"] if p["id"] == profile_id), None)
+    if not profile:
+        raise HTTPException(404, "Profile not found.")
+    if req.elevated:
+        profile["elevated"] = True
+    else:
+        profile.pop("elevated", None)
+    await put_library(lib)
+    return JSONResponse({"ok": True, "elevated": req.elevated})
 
 
 @app.post("/api/profiles/{profile_id}/verify-pin")
