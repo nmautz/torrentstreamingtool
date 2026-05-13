@@ -19,6 +19,8 @@
 - [x] **2.2** Highlight "currently playing" episode in the Episode Picker modal (poll VLC filename via state)
 - [x] **2.3** Playback Fix: "Play" on a specific episode selection reliably starts that file
   - ✅ Confirmed working for single-file items with watch progress.
+- [ ] **2.4** Audio/Sub Track State Mem: Remember what audio track and subtitle track were selected for an episode and select those when playing it again
+
 
 ---
 
