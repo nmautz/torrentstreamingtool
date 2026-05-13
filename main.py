@@ -2,12 +2,15 @@
 
 import asyncio
 import base64
+import hashlib
 import json
 import platform
 import re
+import secrets
 import shutil
 import socket
 import subprocess
+import time
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -19,7 +22,7 @@ from urllib.parse import unquote, urlparse
 import httpx
 import psutil
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -47,6 +50,8 @@ class Settings(BaseSettings):
 
     buffer_min_mb: float = 15.0
     buffer_min_pct: float = 1.0
+
+    admin_password: str = ""   # if empty, admin panel is disabled
 
 
 settings = Settings()
@@ -152,6 +157,7 @@ class AppState:
 
 state = AppState()
 qbit: Optional[httpx.AsyncClient] = None
+_admin_sessions: dict[str, float] = {}   # token → expiry Unix timestamp
 
 
 # ── SSE Helpers ───────────────────────────────────────────────────────────────
@@ -197,6 +203,37 @@ def state_snapshot() -> dict:
         "play_when_ready_item_id": state.play_when_ready_item_id,
         "play_when_ready_file_path": state.play_when_ready_file_path,
     }
+
+
+# ── Admin Auth ────────────────────────────────────────────────────────────────
+
+def _check_admin(request: Request) -> bool:
+    """Return True if the request carries a valid admin session token."""
+    if not settings.admin_password:
+        return False
+    token: Optional[str] = None
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        token = auth[7:].strip()
+    if not token:
+        token = request.headers.get("x-admin-token", "").strip() or None
+    if not token:
+        token = request.query_params.get("admin_token", "").strip() or None
+    if not token or token not in _admin_sessions:
+        return False
+    if time.time() > _admin_sessions[token]:
+        _admin_sessions.pop(token, None)
+        return False
+    return True
+
+
+def _require_admin(request: Request) -> None:
+    if not _check_admin(request):
+        raise HTTPException(401, "Admin authentication required.")
+
+
+def _pin_hash(pin: str) -> str:
+    return hashlib.sha256(pin.encode()).hexdigest()
 
 
 # ── qBittorrent Client ────────────────────────────────────────────────────────
@@ -1264,6 +1301,18 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
 app = FastAPI(title="P2P StreamLink", version="2.0", lifespan=lifespan)
 
 
+@app.middleware("http")
+async def admin_https_redirect(request: Request, call_next):
+    """Redirect /admin and /api/admin/* to HTTPS when accessed over plain HTTP."""
+    path = request.url.path
+    if (path == "/admin" or path.startswith("/admin/") or path.startswith("/api/admin")):
+        if request.url.scheme == "http":
+            host = request.url.hostname
+            qs   = ("?" + request.url.query) if request.url.query else ""
+            return RedirectResponse(f"https://{host}{path}{qs}", status_code=301)
+    return await call_next(request)
+
+
 # ── Request Models ────────────────────────────────────────────────────────────
 
 class StreamPrepareReq(BaseModel):
@@ -1314,12 +1363,37 @@ class MarkWatchedReq(BaseModel):
     season: Optional[int] = None  # if set (and file_paths empty), filter to this season
 
 
+class AdminLoginReq(BaseModel):
+    password: str
+
+
+class AdminItemLockReq(BaseModel):
+    admin_only: bool
+
+
+class AdminSettingsReq(BaseModel):
+    indexer_categories: Optional[str] = None
+
+
+class ProfilePinReq(BaseModel):
+    pin: str   # 4 digits to set, "" to clear
+
+
 # ── Routes: Profiles ─────────────────────────────────────────────────────────
 
 @app.get("/api/profiles")
 async def list_profiles() -> JSONResponse:
     lib = await get_library()
-    return JSONResponse({"profiles": lib["profiles"]})
+    profiles = [
+        {
+            "id": p["id"],
+            "name": p["name"],
+            "color": p.get("color", "indigo"),
+            "has_pin": bool(p.get("pin_hash", "")),
+        }
+        for p in lib["profiles"]
+    ]
+    return JSONResponse({"profiles": profiles})
 
 
 @app.post("/api/profiles")
@@ -1346,10 +1420,13 @@ async def delete_profile(profile_id: str) -> JSONResponse:
 # ── Routes: Library ───────────────────────────────────────────────────────────
 
 @app.get("/api/library")
-async def list_library(profile_id: str = "") -> JSONResponse:
+async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
+    is_admin = _check_admin(request)
     lib = await get_library()
     items = []
     for it in lib["items"]:
+        if it.get("admin_only") and not is_admin:
+            continue
         files = it.get("files", [])
         resume = find_resume_hint(it, profile_id) if profile_id else None
         items.append({
@@ -1679,8 +1756,10 @@ async def search(q: str, limit: int = 30) -> JSONResponse:
     if not q.strip():
         return JSONResponse({"results": []})
 
+    lib = await get_library()
+    cats_override = lib.get("settings", {}).get("admin_overrides", {}).get("indexer_categories")
+    cats = (cats_override if cats_override is not None else settings.indexer_categories).strip()
     params: dict = {"apikey": settings.indexer_api_key, "Query": q}
-    cats = settings.indexer_categories.strip()
     if cats and cats != "0":
         params["Category[]"] = cats
 
@@ -2394,6 +2473,158 @@ async def events(request: Request) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ── Routes: Admin Panel ───────────────────────────────────────────────────────
+
+@app.get("/admin", include_in_schema=False)
+async def admin_page() -> FileResponse:
+    return FileResponse(str(Path(__file__).parent / "static" / "admin.html"))
+
+
+@app.get("/api/admin/status")
+async def admin_status() -> JSONResponse:
+    return JSONResponse({"enabled": bool(settings.admin_password)})
+
+
+@app.post("/api/admin/login")
+async def admin_login(req: AdminLoginReq) -> JSONResponse:
+    if not settings.admin_password:
+        raise HTTPException(503, "Admin panel is not configured (set ADMIN_PASSWORD in .env).")
+    if req.password != settings.admin_password:
+        raise HTTPException(401, "Incorrect admin password.")
+    token = secrets.token_hex(32)
+    _admin_sessions[token] = time.time() + 86400   # 24-hour session
+    return JSONResponse({"ok": True, "token": token})
+
+
+@app.post("/api/admin/logout")
+async def admin_logout(request: Request) -> JSONResponse:
+    auth = request.headers.get("authorization", "")
+    token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
+    _admin_sessions.pop(token, None)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/admin/indexers")
+async def admin_list_indexers(request: Request) -> JSONResponse:
+    _require_admin(request)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.get(
+                f"{settings.indexer_url}/api/v2.0/indexers",
+                params={"configured": "true", "apikey": settings.indexer_api_key},
+            )
+        return JSONResponse({"indexers": r.json() if r.status_code == 200 else []})
+    except Exception as e:
+        raise HTTPException(502, f"Could not reach Jackett: {e}")
+
+
+@app.delete("/api/admin/indexers/{indexer_id}")
+async def admin_delete_indexer(indexer_id: str, request: Request) -> JSONResponse:
+    _require_admin(request)
+    try:
+        async with httpx.AsyncClient(timeout=10.0) as c:
+            r = await c.delete(
+                f"{settings.indexer_url}/api/v2.0/indexers/{indexer_id}",
+                params={"apikey": settings.indexer_api_key},
+            )
+        return JSONResponse({"ok": r.status_code < 300})
+    except Exception as e:
+        raise HTTPException(502, f"Could not reach Jackett: {e}")
+
+
+@app.get("/api/admin/settings")
+async def admin_get_settings(request: Request) -> JSONResponse:
+    _require_admin(request)
+    lib = await get_library()
+    overrides = lib.get("settings", {}).get("admin_overrides", {})
+    return JSONResponse({
+        "indexer_url": settings.indexer_url,
+        "indexer_api_key": settings.indexer_api_key,
+        "indexer_categories": overrides.get("indexer_categories", settings.indexer_categories),
+        "jackett_ui_url": settings.indexer_url,
+    })
+
+
+@app.post("/api/admin/settings")
+async def admin_update_settings(request: Request, req: AdminSettingsReq) -> JSONResponse:
+    _require_admin(request)
+    lib = await get_library()
+    overrides = lib.setdefault("settings", {}).setdefault("admin_overrides", {})
+    if req.indexer_categories is not None:
+        overrides["indexer_categories"] = req.indexer_categories.strip()
+    await put_library(lib)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/library/{item_id}/admin-lock")
+async def admin_lock_item(item_id: str, request: Request, req: AdminItemLockReq) -> JSONResponse:
+    _require_admin(request)
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    item["admin_only"] = req.admin_only
+    await put_library(lib)
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/admin/library")
+async def admin_list_library(request: Request) -> JSONResponse:
+    """Return ALL library items including admin-only ones (admin auth required)."""
+    _require_admin(request)
+    lib = await get_library()
+    items = []
+    for it in lib["items"]:
+        files = it.get("files", [])
+        items.append({
+            "id": it["id"],
+            "title": it["title"],
+            "series": it.get("series", ""),
+            "season": it.get("season", 0),
+            "episode": it.get("episode", 0),
+            "file_count": len(files),
+            "size_human": human_size(it.get("size_bytes", 0)),
+            "status": it.get("status", "ready"),
+            "admin_only": it.get("admin_only", False),
+        })
+    items.sort(key=lambda x: (x["series"] or "\xff" + x["title"], x["season"], x["episode"]))
+    return JSONResponse({"items": items})
+
+
+# ── Routes: Profile PINs ──────────────────────────────────────────────────────
+
+@app.post("/api/profiles/{profile_id}/set-pin")
+async def set_profile_pin(profile_id: str, request: Request, req: ProfilePinReq) -> JSONResponse:
+    _require_admin(request)
+    pin = req.pin.strip()
+    if pin and (len(pin) != 4 or not pin.isdigit()):
+        raise HTTPException(400, "PIN must be exactly 4 digits, or empty to clear.")
+    lib = await get_library()
+    profile = next((p for p in lib["profiles"] if p["id"] == profile_id), None)
+    if not profile:
+        raise HTTPException(404, "Profile not found.")
+    if pin:
+        profile["pin_hash"] = _pin_hash(pin)
+    else:
+        profile.pop("pin_hash", None)
+    await put_library(lib)
+    return JSONResponse({"ok": True, "has_pin": bool(pin)})
+
+
+@app.post("/api/profiles/{profile_id}/verify-pin")
+async def verify_profile_pin(profile_id: str, req: ProfilePinReq) -> JSONResponse:
+    lib = await get_library()
+    profile = next((p for p in lib["profiles"] if p["id"] == profile_id), None)
+    if not profile:
+        raise HTTPException(404, "Profile not found.")
+    stored = profile.get("pin_hash", "")
+    if not stored:
+        return JSONResponse({"ok": True})   # no PIN set — always pass
+    if _pin_hash(req.pin.strip()) != stored:
+        raise HTTPException(403, "Incorrect PIN.")
+    return JSONResponse({"ok": True})
 
 
 # Static files must be mounted last so API routes take priority

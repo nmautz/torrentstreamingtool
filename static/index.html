@@ -61,6 +61,49 @@
   </div>
 </div>
 
+<!-- ── Profile PIN Prompt ─────────────────────────────────────────────────── -->
+<div id="pinPromptModal"
+  class="hidden fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center sm:px-4">
+  <div class="bg-gray-900 w-full sm:max-w-xs fade-in border-t-[3px] border-indigo-600">
+    <div class="px-5 pt-5 pb-4 border-b border-gray-800">
+      <h2 class="text-lg font-black uppercase tracking-wide">Enter PIN</h2>
+      <p id="pinPromptSub" class="text-xs text-gray-500 mt-0.5">Enter the 4-digit PIN to continue</p>
+    </div>
+    <div class="px-5 py-4 space-y-4">
+      <!-- Dots display -->
+      <div class="flex justify-center gap-4 py-2" id="pinDots">
+        <div class="pin-dot w-4 h-4 border-2 border-gray-600"></div>
+        <div class="pin-dot w-4 h-4 border-2 border-gray-600"></div>
+        <div class="pin-dot w-4 h-4 border-2 border-gray-600"></div>
+        <div class="pin-dot w-4 h-4 border-2 border-gray-600"></div>
+      </div>
+      <!-- Hidden real input for keyboard -->
+      <input id="pinPromptInput" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="4"
+        class="sr-only" oninput="updatePinDots()" onkeydown="if(event.key==='Enter') submitPinPrompt()"/>
+      <!-- Numpad -->
+      <div class="grid grid-cols-3 gap-1.5">
+        <script>
+          [1,2,3,4,5,6,7,8,9,"",0,"⌫"].forEach(k=>{
+            document.currentScript.insertAdjacentHTML("afterend",
+              k===""
+              ? `<div></div>`
+              : `<button onclick="${k==='⌫'?'pinBackspace()':'pinDigit('+k+')'}"
+                  class="bg-gray-800 hover:bg-gray-700 active:bg-gray-600 py-4 text-lg font-bold
+                         text-gray-200 transition-colors">${k}</button>`);
+          });
+        </script>
+      </div>
+      <div id="pinPromptError" class="hidden text-red-400 text-xs font-bold uppercase tracking-wide text-center"></div>
+    </div>
+    <div class="px-4 pb-4 safe-bottom">
+      <button onclick="closePinPrompt()"
+        class="w-full bg-gray-800 hover:bg-gray-700 py-4 text-sm font-bold uppercase tracking-wide transition-colors">
+        Cancel
+      </button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Profile Picker ─────────────────────────────────────────────────────── -->
 <div id="profilePicker"
   class="hidden fixed inset-0 z-40 bg-gray-950 flex flex-col items-center justify-center gap-8 px-6 fade-in">
@@ -71,10 +114,16 @@
     <p class="text-gray-600 text-xs uppercase tracking-widest">Who's watching</p>
   </div>
   <div id="profileGrid" class="flex flex-wrap justify-center gap-3 max-w-lg"></div>
-  <button onclick="openProfileModal()"
-    class="text-xs text-gray-700 hover:text-gray-400 uppercase tracking-wider transition-colors">
-    Manage profiles
-  </button>
+  <div class="flex items-center gap-4">
+    <button onclick="openProfileModal()"
+      class="text-xs text-gray-700 hover:text-gray-400 uppercase tracking-wider transition-colors">
+      Manage profiles
+    </button>
+    <a id="adminPanelLink" href="/admin"
+      class="hidden text-xs text-gray-700 hover:text-indigo-400 uppercase tracking-wider transition-colors">
+      Admin
+    </a>
+  </div>
 </div>
 
 <!-- ── Profile Modal (add / delete) ──────────────────────────────────────── -->
@@ -1332,10 +1381,67 @@ async function showProfilePicker(){
   document.getElementById("profilePicker").classList.remove("hidden");
 }
 function selectProfile(p){
+  if(p.has_pin){
+    openPinPrompt(p);
+    return;
+  }
+  _doSelectProfile(p);
+}
+function _doSelectProfile(p){
   profile=p; localStorage.setItem("streamlink_profile",JSON.stringify(p));
   document.getElementById("profilePicker").classList.add("hidden");
+  document.getElementById("pinPromptModal").classList.add("hidden");
   renderNavProfile();
   if(activeTab==="library") loadLibrary();
+}
+
+let _pinTarget=null;
+function openPinPrompt(p){
+  _pinTarget=p;
+  document.getElementById("pinPromptSub").textContent=`Enter PIN for ${p.name}`;
+  document.getElementById("pinPromptInput").value="";
+  document.getElementById("pinPromptError").classList.add("hidden");
+  updatePinDots();
+  document.getElementById("pinPromptModal").classList.remove("hidden");
+  setTimeout(()=>document.getElementById("pinPromptInput").focus(),50);
+}
+function closePinPrompt(){
+  _pinTarget=null;
+  document.getElementById("pinPromptModal").classList.add("hidden");
+}
+function pinDigit(d){
+  const inp=document.getElementById("pinPromptInput");
+  if(inp.value.length<4){ inp.value+=d; updatePinDots(); }
+  if(inp.value.length===4) setTimeout(submitPinPrompt,80);
+}
+function pinBackspace(){
+  const inp=document.getElementById("pinPromptInput");
+  inp.value=inp.value.slice(0,-1); updatePinDots();
+}
+function updatePinDots(){
+  const v=document.getElementById("pinPromptInput").value;
+  document.querySelectorAll(".pin-dot").forEach((dot,i)=>{
+    dot.className=`pin-dot w-4 h-4 border-2 ${i<v.length?"bg-indigo-500 border-indigo-500":"border-gray-600"}`;
+  });
+}
+async function submitPinPrompt(){
+  if(!_pinTarget) return;
+  const pin=document.getElementById("pinPromptInput").value;
+  const errEl=document.getElementById("pinPromptError");
+  errEl.classList.add("hidden");
+  if(pin.length!==4){ errEl.textContent="Enter all 4 digits."; errEl.classList.remove("hidden"); return; }
+  const r=await fetch(`/api/profiles/${_pinTarget.id}/verify-pin`,{
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({pin}),
+  });
+  if(r.ok){
+    _doSelectProfile(_pinTarget);
+  } else {
+    errEl.textContent="Incorrect PIN. Try again.";
+    errEl.classList.remove("hidden");
+    document.getElementById("pinPromptInput").value="";
+    updatePinDots();
+  }
 }
 function renderNavProfile(){
   const av=document.getElementById("navProfileAvatar"),nm=document.getElementById("navProfileName");
@@ -2756,6 +2862,11 @@ document.addEventListener("DOMContentLoaded",async()=>{
   document.getElementById("dlEpisode").addEventListener("keydown",e=>{if(e.key==="Enter") submitDownload();});
   document.getElementById("dlSeries").addEventListener("keydown",e=>{if(e.key==="Enter") document.getElementById("dlEpisode").focus();});
   document.getElementById("profileNameInput").addEventListener("keydown",e=>{if(e.key==="Enter") submitProfile();});
+
+  // Show admin link if admin is configured
+  fetch("/api/admin/status").then(r=>r.json()).then(d=>{
+    if(d.enabled) document.getElementById("adminPanelLink").classList.remove("hidden");
+  }).catch(()=>{});
 
   // Restore profile from localStorage
   const saved=localStorage.getItem("streamlink_profile");

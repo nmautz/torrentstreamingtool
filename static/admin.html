@@ -1,0 +1,481 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8"/>
+  <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+  <title>StreamLink Admin</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script>tailwind.config={darkMode:'class'}</script>
+  <style>
+    :root{color-scheme:dark;}
+    ::-webkit-scrollbar{width:4px;}
+    ::-webkit-scrollbar-track{background:#030712;}
+    ::-webkit-scrollbar-thumb{background:#1f2937;}
+    .tab-active  {border-bottom:3px solid #4f46e5;color:white;}
+    .tab-inactive{border-bottom:3px solid transparent;color:#6b7280;}
+    .tab-inactive:hover{color:#d1d5db;}
+  </style>
+</head>
+<body class="dark bg-gray-950 text-gray-100 min-h-screen flex flex-col">
+
+<!-- ── Login Overlay ─────────────────────────────────────────────────────────── -->
+<div id="loginOverlay"
+  class="fixed inset-0 z-50 bg-gray-950 flex flex-col items-center justify-center gap-8 px-6">
+  <div class="text-center">
+    <div class="font-black text-4xl tracking-wide uppercase mb-1">
+      <span class="text-indigo-500">Stream</span><span class="text-white">Link</span>
+    </div>
+    <p class="text-gray-600 text-xs uppercase tracking-widest">Admin Panel</p>
+  </div>
+  <div class="w-full max-w-xs space-y-4">
+    <input id="loginPassword" type="password" placeholder="Admin password"
+      class="w-full bg-gray-900 border-0 border-b-2 border-gray-700 focus:border-indigo-500
+             px-4 py-4 text-sm focus:outline-none transition-colors"
+      onkeydown="if(event.key==='Enter') doLogin()"/>
+    <div id="loginError" class="hidden text-red-400 text-xs font-bold uppercase tracking-wide text-center"></div>
+    <button onclick="doLogin()"
+      class="w-full bg-indigo-600 hover:bg-indigo-500 py-4 text-sm font-black uppercase tracking-wide transition-colors">
+      Sign In
+    </button>
+    <a href="/" class="block text-center text-xs text-gray-700 hover:text-gray-400 transition-colors uppercase tracking-wider">
+      ← Back to StreamLink
+    </a>
+  </div>
+  <div id="loginDisabledMsg" class="hidden text-center max-w-xs">
+    <p class="text-yellow-400 font-bold text-sm uppercase tracking-wide mb-2">Admin Not Configured</p>
+    <p class="text-gray-500 text-xs">Set <code class="text-gray-400 font-mono">ADMIN_PASSWORD</code> in your <code class="text-gray-400 font-mono">.env</code> file and restart the server.</p>
+  </div>
+</div>
+
+<!-- ── Main Dashboard ─────────────────────────────────────────────────────────── -->
+<div id="dashboard" class="hidden flex flex-col min-h-screen">
+
+  <!-- Navbar -->
+  <nav class="bg-gray-900 border-b border-gray-800 px-4 h-14 flex items-center justify-between flex-shrink-0">
+    <div class="font-black text-lg tracking-wide uppercase">
+      <span class="text-indigo-500">Stream</span><span class="text-white">Link</span>
+      <span class="text-gray-600 text-xs ml-2 font-normal">ADMIN</span>
+    </div>
+    <div class="flex items-center gap-3">
+      <a href="/" class="text-xs text-gray-500 hover:text-gray-300 transition-colors uppercase tracking-wide">Main App</a>
+      <button onclick="doLogout()"
+        class="text-xs text-red-500 hover:text-red-400 transition-colors uppercase tracking-wide font-bold">
+        Sign Out
+      </button>
+    </div>
+  </nav>
+
+  <!-- Tabs -->
+  <div class="bg-gray-900 border-b border-gray-800 flex flex-shrink-0">
+    <button onclick="switchTab('indexers')" id="tab-indexers"
+      class="tab-active px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors">
+      Indexers
+    </button>
+    <button onclick="switchTab('content')" id="tab-content"
+      class="tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors">
+      Content Lock
+    </button>
+    <button onclick="switchTab('profiles')" id="tab-profiles"
+      class="tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors">
+      Profile PINs
+    </button>
+  </div>
+
+  <!-- Toast -->
+  <div id="toast"
+    class="hidden fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-5 py-3
+           text-sm font-bold uppercase tracking-wide bg-indigo-600 text-white shadow-xl">
+  </div>
+
+  <!-- ── Indexers Tab ──────────────────────────────────────────────────────────── -->
+  <div id="panelIndexers" class="flex-1 overflow-y-auto p-5 space-y-6 max-w-2xl mx-auto w-full">
+
+    <!-- Categories override -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-sm font-black uppercase tracking-wide">Search Categories</h2>
+        <p class="text-xs text-gray-500 mt-0.5">Override the Jackett category filter (comma-separated IDs, or 0 for all). Restart not required.</p>
+      </div>
+      <div class="px-5 py-4 flex gap-3 items-end">
+        <div class="flex-1">
+          <label class="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Categories</label>
+          <input id="catInput" type="text" placeholder="e.g. 2000,5000 or 0 for all"
+            class="w-full bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500
+                   px-3 py-3 text-sm font-mono focus:outline-none transition-colors"/>
+        </div>
+        <button onclick="saveCategories()"
+          class="bg-indigo-600 hover:bg-indigo-500 px-5 py-3 text-sm font-black uppercase tracking-wide transition-colors flex-shrink-0">
+          Save
+        </button>
+      </div>
+    </div>
+
+    <!-- Jackett indexers list -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between">
+        <div>
+          <h2 class="text-sm font-black uppercase tracking-wide">Configured Indexers</h2>
+          <p class="text-xs text-gray-500 mt-0.5">Indexers currently set up in Jackett.</p>
+        </div>
+        <div class="flex gap-2">
+          <button onclick="loadIndexers()"
+            class="text-xs text-indigo-400 hover:text-indigo-300 uppercase tracking-wide font-bold transition-colors">
+            Refresh
+          </button>
+          <a id="jackettUiLink" href="#" target="_blank"
+            class="text-xs text-gray-500 hover:text-gray-300 uppercase tracking-wide transition-colors border border-gray-700 px-3 py-1.5">
+            Open Jackett UI ↗
+          </a>
+        </div>
+      </div>
+      <div id="indexerList" class="divide-y divide-gray-800">
+        <div class="px-5 py-8 text-center text-gray-600 text-sm">Loading indexers…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Content Lock Tab ─────────────────────────────────────────────────────── -->
+  <div id="panelContent" class="hidden flex-1 overflow-y-auto p-5 max-w-2xl mx-auto w-full">
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-sm font-black uppercase tracking-wide">Content Lock</h2>
+        <p class="text-xs text-gray-500 mt-0.5">Admin-only items are hidden from all regular profiles.</p>
+      </div>
+      <div id="contentList" class="divide-y divide-gray-800">
+        <div class="px-5 py-8 text-center text-gray-600 text-sm">Loading library…</div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Profile PINs Tab ─────────────────────────────────────────────────────── -->
+  <div id="panelProfiles" class="hidden flex-1 overflow-y-auto p-5 max-w-2xl mx-auto w-full">
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-sm font-black uppercase tracking-wide">Profile PINs</h2>
+        <p class="text-xs text-gray-500 mt-0.5">4-digit PINs are prompted when a profile is selected.</p>
+      </div>
+      <div id="profilePinList" class="divide-y divide-gray-800">
+        <div class="px-5 py-8 text-center text-gray-600 text-sm">Loading profiles…</div>
+      </div>
+    </div>
+  </div>
+
+</div>
+
+<!-- ── PIN Set Modal ───────────────────────────────────────────────────────────── -->
+<div id="pinModal" class="hidden fixed inset-0 z-50 bg-black/60 flex items-end sm:items-center justify-center sm:px-4">
+  <div class="bg-gray-900 w-full sm:max-w-xs border-t-[3px] border-indigo-600">
+    <div class="px-5 pt-5 pb-4 border-b border-gray-800">
+      <h2 class="text-lg font-black uppercase tracking-wide" id="pinModalTitle">Set PIN</h2>
+      <p class="text-xs text-gray-500 mt-0.5" id="pinModalSub">Enter 4-digit PIN</p>
+    </div>
+    <div class="px-5 py-4 space-y-4">
+      <input id="pinInput" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="4"
+        placeholder="4-digit PIN (leave blank to clear)"
+        class="w-full bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500
+               px-3 py-3 text-sm font-mono focus:outline-none transition-colors tracking-widest text-center text-xl"
+        onkeydown="if(event.key==='Enter') submitPin()"/>
+      <div id="pinError" class="hidden text-red-400 text-xs font-bold uppercase tracking-wide text-center"></div>
+    </div>
+    <div class="px-4 pb-4 flex gap-2">
+      <button onclick="closePinModal()"
+        class="flex-1 bg-gray-800 hover:bg-gray-700 py-4 text-sm font-bold uppercase tracking-wide transition-colors">
+        Cancel
+      </button>
+      <button onclick="submitPin()"
+        class="flex-1 bg-indigo-600 hover:bg-indigo-500 py-4 text-sm font-black uppercase tracking-wide transition-colors">
+        Save
+      </button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────────
+let adminToken = localStorage.getItem("streamlink_admin_token") || "";
+let activeTab  = "indexers";
+let pinTarget  = null;   // { id, name } of profile being PIN-edited
+
+const AVATAR_BG = {
+  indigo:"bg-indigo-600", purple:"bg-purple-600", green:"bg-green-600",
+  red:"bg-red-600", orange:"bg-orange-500", pink:"bg-pink-600",
+};
+function avatarBg(c){ return AVATAR_BG[c] || AVATAR_BG.indigo; }
+
+function escHtml(s){
+  return String(s||"")
+    .replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;")
+    .replace(/"/g,"&quot;").replace(/'/g,"&#039;");
+}
+
+function showToast(msg, isErr=false){
+  const el=document.getElementById("toast");
+  el.textContent=msg;
+  el.className=`fixed bottom-6 left-1/2 -translate-x-1/2 z-50 px-5 py-3
+    text-sm font-bold uppercase tracking-wide shadow-xl
+    ${isErr?"bg-red-700":"bg-indigo-600"} text-white`;
+  el.classList.remove("hidden");
+  clearTimeout(el._t);
+  el._t=setTimeout(()=>el.classList.add("hidden"), 3000);
+}
+
+// ── Auth ──────────────────────────────────────────────────────────────────────
+function authHeader(){
+  return adminToken ? {"Authorization":`Bearer ${adminToken}`} : {};
+}
+
+async function checkAuth(){
+  const res = await fetch("/api/admin/status");
+  const d   = await res.json();
+  if(!d.enabled){
+    document.getElementById("loginDisabledMsg").classList.remove("hidden");
+    document.getElementById("loginPassword").classList.add("hidden");
+    document.querySelector("#loginOverlay button").classList.add("hidden");
+    return;
+  }
+  if(!adminToken){ return; }
+  // Validate stored token by hitting a protected endpoint
+  const r = await fetch("/api/admin/settings", {headers: authHeader()});
+  if(r.ok){
+    showDashboard();
+  } else {
+    adminToken = "";
+    localStorage.removeItem("streamlink_admin_token");
+  }
+}
+
+async function doLogin(){
+  const pw = document.getElementById("loginPassword").value;
+  const errEl = document.getElementById("loginError");
+  errEl.classList.add("hidden");
+  const r = await fetch("/api/admin/login",{
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({password: pw}),
+  });
+  if(!r.ok){
+    const d = await r.json().catch(()=>({}));
+    errEl.textContent = d.detail || "Incorrect password.";
+    errEl.classList.remove("hidden");
+    return;
+  }
+  const d = await r.json();
+  adminToken = d.token;
+  localStorage.setItem("streamlink_admin_token", adminToken);
+  showDashboard();
+}
+
+async function doLogout(){
+  await fetch("/api/admin/logout",{method:"POST", headers: authHeader()}).catch(()=>{});
+  adminToken = "";
+  localStorage.removeItem("streamlink_admin_token");
+  location.reload();
+}
+
+function showDashboard(){
+  document.getElementById("loginOverlay").classList.add("hidden");
+  document.getElementById("dashboard").classList.remove("hidden");
+  loadAdminSettings();
+  loadIndexers();
+}
+
+// ── Tabs ──────────────────────────────────────────────────────────────────────
+function switchTab(tab){
+  activeTab = tab;
+  ["indexers","content","profiles"].forEach(t=>{
+    document.getElementById(`tab-${t}`).className =
+      t===tab ? "tab-active px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors"
+               : "tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors";
+    document.getElementById(`panel${t.charAt(0).toUpperCase()+t.slice(1)}`).classList.toggle("hidden", t!==tab);
+  });
+  if(tab==="content")  loadContentList();
+  if(tab==="profiles") loadProfilePins();
+}
+
+// ── Indexers ──────────────────────────────────────────────────────────────────
+async function loadAdminSettings(){
+  const r = await fetch("/api/admin/settings", {headers: authHeader()});
+  if(!r.ok) return;
+  const d = await r.json();
+  document.getElementById("catInput").value = d.indexer_categories || "";
+  const link = document.getElementById("jackettUiLink");
+  link.href = d.jackett_ui_url || "#";
+}
+
+async function saveCategories(){
+  const cats = document.getElementById("catInput").value.trim();
+  const r = await fetch("/api/admin/settings",{
+    method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+    body: JSON.stringify({indexer_categories: cats}),
+  });
+  showToast(r.ok ? "Categories saved." : "Save failed.", !r.ok);
+}
+
+async function loadIndexers(){
+  const el = document.getElementById("indexerList");
+  el.innerHTML = `<div class="px-5 py-8 text-center text-gray-600 text-sm">Loading…</div>`;
+  const r = await fetch("/api/admin/indexers", {headers: authHeader()});
+  if(!r.ok){
+    el.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Could not reach Jackett.</div>`;
+    return;
+  }
+  const {indexers} = await r.json();
+  if(!indexers || !indexers.length){
+    el.innerHTML = `<div class="px-5 py-8 text-center text-gray-600 text-sm">No configured indexers found.</div>`;
+    return;
+  }
+  el.innerHTML = indexers.map(ix=>`
+    <div class="flex items-center justify-between px-5 py-4 gap-3" id="ix-${escHtml(ix.id)}">
+      <div class="min-w-0">
+        <div class="text-sm font-bold text-gray-200 truncate">${escHtml(ix.name||ix.id)}</div>
+        <div class="text-xs text-gray-600 font-mono mt-0.5">${escHtml(ix.id)}</div>
+      </div>
+      <button onclick="deleteIndexer('${escHtml(ix.id)}','${escHtml(ix.name||ix.id)}')"
+        class="text-xs text-red-500 hover:text-red-300 font-bold uppercase tracking-wide transition-colors flex-shrink-0 px-3 py-2 border border-red-900 hover:border-red-700">
+        Remove
+      </button>
+    </div>`).join("");
+}
+
+async function deleteIndexer(id, name){
+  if(!confirm(`Remove indexer "${name}" from Jackett?`)) return;
+  const r = await fetch(`/api/admin/indexers/${encodeURIComponent(id)}`,{
+    method:"DELETE", headers: authHeader(),
+  });
+  if(r.ok){
+    document.getElementById(`ix-${id}`)?.remove();
+    showToast(`Removed ${name}.`);
+  } else {
+    showToast("Failed to remove indexer.", true);
+  }
+}
+
+// ── Content Lock ──────────────────────────────────────────────────────────────
+async function loadContentList(){
+  const el = document.getElementById("contentList");
+  el.innerHTML = `<div class="px-5 py-8 text-center text-gray-600 text-sm">Loading…</div>`;
+  const r = await fetch("/api/admin/library", {headers: authHeader()});
+  if(!r.ok){
+    el.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Failed to load library.</div>`;
+    return;
+  }
+  const {items} = await r.json();
+  if(!items.length){
+    el.innerHTML = `<div class="px-5 py-8 text-center text-gray-600 text-sm">Library is empty.</div>`;
+    return;
+  }
+  el.innerHTML = items.map(it=>`
+    <div class="flex items-center justify-between px-5 py-4 gap-3">
+      <div class="min-w-0 flex-1">
+        <div class="text-sm font-bold text-gray-200 truncate">${escHtml(it.title)}</div>
+        <div class="text-xs text-gray-600 mt-0.5">
+          ${it.series?escHtml(it.series)+' · ':''}${it.file_count} file${it.file_count!==1?'s':''}
+          · ${escHtml(it.size_human)} · <span class="uppercase">${escHtml(it.status)}</span>
+        </div>
+      </div>
+      <button onclick="toggleLock('${escHtml(it.id)}',${!it.admin_only},this)"
+        class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+               ${it.admin_only
+                 ? 'bg-red-950 border-red-800 text-red-400 hover:bg-red-900'
+                 : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white'}">
+        ${it.admin_only ? '🔒 Admin Only' : 'Unlocked'}
+      </button>
+    </div>`).join("");
+}
+
+async function toggleLock(itemId, newValue, btn){
+  btn.disabled = true;
+  const r = await fetch(`/api/library/${itemId}/admin-lock`,{
+    method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+    body: JSON.stringify({admin_only: newValue}),
+  });
+  btn.disabled = false;
+  if(r.ok){
+    showToast(newValue ? "Item locked (admin only)." : "Item unlocked.");
+    loadContentList();
+  } else {
+    showToast("Failed to update.", true);
+  }
+}
+
+// ── Profile PINs ──────────────────────────────────────────────────────────────
+async function loadProfilePins(){
+  const el = document.getElementById("profilePinList");
+  el.innerHTML = `<div class="px-5 py-8 text-center text-gray-600 text-sm">Loading…</div>`;
+  const r = await fetch("/api/profiles");
+  if(!r.ok){
+    el.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Failed to load profiles.</div>`;
+    return;
+  }
+  const {profiles} = await r.json();
+  if(!profiles.length){
+    el.innerHTML = `<div class="px-5 py-8 text-center text-gray-600 text-sm">No profiles found.</div>`;
+    return;
+  }
+  el.innerHTML = profiles.map(p=>`
+    <div class="flex items-center justify-between px-5 py-4 gap-3">
+      <div class="flex items-center gap-3 min-w-0">
+        <div class="w-9 h-9 ${avatarBg(p.color)} flex items-center justify-center text-sm font-black text-white flex-shrink-0">
+          ${escHtml(p.name.charAt(0).toUpperCase())}
+        </div>
+        <div class="min-w-0">
+          <div class="text-sm font-bold text-gray-200">${escHtml(p.name)}</div>
+          <div class="text-xs mt-0.5 ${p.has_pin?'text-indigo-400 font-bold':'text-gray-600'}">
+            ${p.has_pin ? '🔑 PIN set' : 'No PIN'}
+          </div>
+        </div>
+      </div>
+      <button onclick="openPinModal('${escHtml(p.id)}','${escHtml(p.name)}',${p.has_pin})"
+        class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border
+               border-gray-700 bg-gray-800 hover:text-white transition-colors text-gray-400">
+        ${p.has_pin ? 'Change / Clear' : 'Set PIN'}
+      </button>
+    </div>`).join("");
+}
+
+function openPinModal(profileId, name, hasPin){
+  pinTarget = {id: profileId, name};
+  document.getElementById("pinModalTitle").textContent = hasPin ? `Change PIN — ${name}` : `Set PIN — ${name}`;
+  document.getElementById("pinModalSub").textContent = hasPin
+    ? "Enter new 4-digit PIN, or leave blank to clear."
+    : "Enter a 4-digit PIN.";
+  document.getElementById("pinInput").value = "";
+  document.getElementById("pinError").classList.add("hidden");
+  document.getElementById("pinModal").classList.remove("hidden");
+  setTimeout(()=>document.getElementById("pinInput").focus(), 50);
+}
+
+function closePinModal(){
+  pinTarget = null;
+  document.getElementById("pinModal").classList.add("hidden");
+}
+
+async function submitPin(){
+  if(!pinTarget) return;
+  const pin = document.getElementById("pinInput").value.trim();
+  const errEl = document.getElementById("pinError");
+  errEl.classList.add("hidden");
+  if(pin && (pin.length !== 4 || !/^\d{4}$/.test(pin))){
+    errEl.textContent = "PIN must be exactly 4 digits.";
+    errEl.classList.remove("hidden");
+    return;
+  }
+  const r = await fetch(`/api/profiles/${pinTarget.id}/set-pin`,{
+    method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+    body: JSON.stringify({pin}),
+  });
+  if(!r.ok){
+    const d = await r.json().catch(()=>({}));
+    errEl.textContent = d.detail || "Failed to save PIN.";
+    errEl.classList.remove("hidden");
+    return;
+  }
+  closePinModal();
+  showToast(pin ? "PIN saved." : "PIN cleared.");
+  loadProfilePins();
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+checkAuth();
+</script>
+</body>
+</html>

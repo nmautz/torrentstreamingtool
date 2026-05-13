@@ -460,22 +460,37 @@ def setup_windows_firewall(port: int) -> None:
 
 
 # ── mDNS ──────────────────────────────────────────────────────────────────
-def start_mdns(lan_ip: str, port: int):
-    """Register remote.local via mDNS so LAN devices can reach the dashboard by name."""
+def start_mdns(lan_ip: str, http_port: int, https_port: int = 0):
+    """Register remote.local via mDNS (HTTP, and optionally HTTPS) for LAN access."""
     try:
         from zeroconf import ServiceInfo, Zeroconf
         import socket as _socket
         zc = Zeroconf(interfaces=[lan_ip])
-        info = ServiceInfo(
+        addr = [_socket.inet_aton(lan_ip)]
+
+        http_info = ServiceInfo(
             "_http._tcp.local.",
             "StreamLink._http._tcp.local.",
-            addresses=[_socket.inet_aton(lan_ip)],
-            port=port,
+            addresses=addr,
+            port=http_port,
             properties={},
             server="remote.local.",
         )
-        zc.register_service(info)
-        ok("mDNS: http://remote.local registered")
+        zc.register_service(http_info)
+        ok(f"mDNS: http://remote.local registered")
+
+        if https_port:
+            https_info = ServiceInfo(
+                "_https._tcp.local.",
+                "StreamLink Admin._https._tcp.local.",
+                addresses=addr,
+                port=https_port,
+                properties={},
+                server="remote.local.",
+            )
+            zc.register_service(https_info)
+            ok(f"mDNS: https://remote.local registered (admin panel)")
+
         return zc
     except ImportError:
         warn("zeroconf not installed — run python3 setup.py to update dependencies")
@@ -563,12 +578,16 @@ def main():
 
     # ── Launch dashboard ──────────────────────────────────────────────────
     PORT          = 80
+    ADMIN_PORT    = 443
+    CERT          = HERE / "cert.pem"
+    KEY           = HERE / "key.pem"
     local_url     = "http://127.0.0.1"
     mdns_url      = "http://remote.local"
     lan_ip        = get_local_ip()
     lan_url       = f"http://{lan_ip}" if lan_ip else ""
     ssid          = get_wifi_ssid()
     uvicorn_bin   = VENV / ("Scripts/uvicorn.exe" if SYSTEM == "Windows" else "bin/uvicorn")
+    has_cert      = CERT.exists() and KEY.exists()
 
     print(f"{BOLD}  Dashboard{RESET}")
     ok(f"Local  →  {CYN}{local_url}{RESET}")
@@ -580,25 +599,34 @@ def main():
     else:
         warn("Could not detect LAN IP — phone access may not work")
 
-    if PORT < 1024 and SYSTEM in ("Darwin", "Linux"):
-        try:
-            if os.geteuid() != 0:
-                warn(f"Port {PORT} is privileged — if startup fails, retry with: sudo python3 run.py")
-        except AttributeError:
-            pass
+    if has_cert:
+        ok(f"Admin  →  {CYN}https://127.0.0.1/admin{RESET}  or  {CYN}https://remote.local/admin{RESET}")
+    else:
+        warn("No SSL cert found — admin panel served over HTTP only. Run setup.py to generate cert.")
+
+    for port in (PORT, ADMIN_PORT if has_cert else None):
+        if port and port < 1024 and SYSTEM in ("Darwin", "Linux"):
+            try:
+                if os.geteuid() != 0:
+                    warn(f"Port {port} is privileged — if startup fails, retry with: sudo python3 run.py")
+                    break
+            except AttributeError:
+                break
 
     info("Press Ctrl+C to stop")
     print()
 
-    # ── Windows: open firewall for port 80 and mDNS ──────────────────────
+    # ── Windows: open firewall for port 80, 443, and mDNS ────────────────
     if SYSTEM == "Windows":
         print(f"{BOLD}  Firewall{RESET}")
         setup_windows_firewall(PORT)
+        if has_cert:
+            setup_windows_firewall(ADMIN_PORT)
         print()
 
-    # Register mDNS hostname (remote.local)
+    # Register mDNS hostname (remote.local) for HTTP + HTTPS
     print(f"{BOLD}  mDNS{RESET}")
-    _zc = start_mdns(lan_ip, PORT) if lan_ip else None
+    _zc = start_mdns(lan_ip, PORT, ADMIN_PORT if has_cert else 0) if lan_ip else None
     print()
 
     # Give browser a moment then open
@@ -611,6 +639,21 @@ def main():
 
     import threading
     threading.Thread(target=_open_browser, daemon=True).start()
+
+    # ── HTTPS admin process (port 443) ────────────────────────────────────
+    _https_proc = None
+    if has_cert:
+        _https_proc = subprocess.Popen(
+            [
+                str(uvicorn_bin), "main:app",
+                "--host", "0.0.0.0",
+                "--port", str(ADMIN_PORT),
+                "--ssl-certfile", str(CERT),
+                "--ssl-keyfile", str(KEY),
+                "--log-level", "warning",
+            ],
+            cwd=str(HERE),
+        )
 
     try:
         subprocess.run(
@@ -625,6 +668,12 @@ def main():
     except KeyboardInterrupt:
         print(f"\n  {GRN}✓{RESET}  StreamLink stopped.")
     finally:
+        if _https_proc:
+            try:
+                _https_proc.terminate()
+                _https_proc.wait(timeout=5)
+            except Exception:
+                pass
         if _zc:
             try:
                 _zc.close()

@@ -198,6 +198,9 @@ def gather_config() -> dict:
     print(f"  {BOLD}Buffer thresholds (stream starts when either is met){RESET}")
     cfg["BUFFER_MIN_MB"]      = ask("Min MB",  "15.0")
     cfg["BUFFER_MIN_PCT"]     = ask("Min %",   "1.0")
+    print()
+    print(f"  {BOLD}Admin panel{RESET}")
+    cfg["ADMIN_PASSWORD"]     = ask("Admin password (leave blank to disable)", "", secret=True)
 
     # Warn if qBittorrent and VLC are configured on the same port
     import re as _re
@@ -277,6 +280,95 @@ def configure_qbittorrent(cfg: dict) -> None:
         note("Restart qBittorrent if it is already running to pick up changes.")
 
 
+# ── Step 5b: Generate SSL certificate ────────────────────────────────────
+def generate_ssl_cert() -> bool:
+    """Generate a self-signed CA + server cert for https://remote.local.
+
+    Returns True if certs were created or already exist; False on error.
+    cert.pem / key.pem are read by uvicorn.
+    ca.pem should be added to the system/browser trust store.
+    """
+    header("SSL Certificate (HTTPS admin panel)")
+    cert = HERE / "cert.pem"
+    key  = HERE / "key.pem"
+    ca   = HERE / "ca.pem"
+
+    if cert.exists() and key.exists() and ca.exists():
+        ok("SSL certs already exist — skipping generation")
+        return True
+
+    try:
+        import ipaddress as _ip
+        from datetime import datetime as _dt, timedelta as _td, timezone as _tz
+        from cryptography import x509 as _x509
+        from cryptography.x509.oid import NameOID as _OID
+        from cryptography.hazmat.primitives import hashes as _hashes, serialization as _ser
+        from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
+    except ImportError:
+        warn("cryptography package not found — cannot generate SSL cert.")
+        warn("Run: pip install cryptography  (or re-run setup.py to install it)")
+        return False
+
+    note("Generating self-signed CA and server certificate…")
+    now = _dt.now(_tz.utc)
+    expire = now + _td(days=3650)
+
+    # CA
+    ca_key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    ca_name = _x509.Name([_x509.NameAttribute(_OID.COMMON_NAME, "StreamLink Local CA")])
+    ca_cert = (
+        _x509.CertificateBuilder()
+        .subject_name(ca_name).issuer_name(ca_name)
+        .public_key(ca_key.public_key())
+        .serial_number(_x509.random_serial_number())
+        .not_valid_before(now).not_valid_after(expire)
+        .add_extension(_x509.BasicConstraints(ca=True, path_length=None), critical=True)
+        .sign(ca_key, _hashes.SHA256())
+    )
+
+    # Server cert
+    srv_key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    san = _x509.SubjectAlternativeName([
+        _x509.DNSName("remote.local"),
+        _x509.DNSName("localhost"),
+        _x509.IPAddress(_ip.IPv4Address("127.0.0.1")),
+    ])
+    srv_cert = (
+        _x509.CertificateBuilder()
+        .subject_name(_x509.Name([_x509.NameAttribute(_OID.COMMON_NAME, "remote.local")]))
+        .issuer_name(ca_name)
+        .public_key(srv_key.public_key())
+        .serial_number(_x509.random_serial_number())
+        .not_valid_before(now).not_valid_after(expire)
+        .add_extension(san, critical=False)
+        .sign(ca_key, _hashes.SHA256())
+    )
+
+    cert.write_bytes(srv_cert.public_bytes(_ser.Encoding.PEM))
+    key.write_bytes(srv_key.private_bytes(
+        _ser.Encoding.PEM, _ser.PrivateFormat.TraditionalOpenSSL, _ser.NoEncryption()))
+    ca.write_bytes(ca_cert.public_bytes(_ser.Encoding.PEM))
+
+    ok(f"cert.pem  →  {cert}")
+    ok(f"key.pem   →  {key}")
+    ok(f"ca.pem    →  {ca}")
+    print()
+
+    if SYSTEM == "Darwin":
+        note("To make browsers trust the cert (no warning), run:")
+        note(f'  sudo security add-trusted-cert -d -r trustRoot \\')
+        note(f'       -k /Library/Keychains/System.keychain "{ca}"')
+    elif SYSTEM == "Linux":
+        note("To trust the cert system-wide:")
+        note(f'  sudo cp "{ca}" /usr/local/share/ca-certificates/streamlink-ca.crt')
+        note(f'  sudo update-ca-certificates')
+    elif SYSTEM == "Windows":
+        note("To trust the cert (run in an elevated PowerShell):")
+        note(f'  Import-Certificate -FilePath "{ca}" -CertStoreLocation Cert:\\LocalMachine\\Root')
+
+    return True
+
+
 # ── Step 6: Write .env ────────────────────────────────────────────────────
 def write_env(cfg: dict, tools: dict) -> None:
     header("Writing .env")
@@ -319,6 +411,7 @@ def main():
     configure_qbittorrent(cfg)
     write_env(cfg, tools)
     ensure_download_dir(cfg)
+    generate_ssl_cert()
 
     header("Done")
     ok("Setup complete!")
