@@ -19,7 +19,7 @@
 - [x] **2.2** Highlight "currently playing" episode in the Episode Picker modal (poll VLC filename via state)
 - [x] **2.3** Playback Fix: "Play" on a specific episode selection reliably starts that file
   - ✅ Confirmed working for single-file items with watch progress.
-- [ ] **2.4** Audio/Sub Track State Mem: Remember what audio track and subtitle track were selected for an episode and select those when playing it again
+- [x] **2.4** Audio/Sub Track State Mem: Remember what audio track and subtitle track were selected for an episode and select those when playing it again
 
 
 ---
@@ -31,7 +31,7 @@
 - [x] **3.3** Upload System: web UI for uploading local files/folders directly to the library
 - [x] **3.4** Precision Selection: folder/subfolder/file picker for library downloads (not just full torrent)
 - [x] **3.5** Web Downloads: browser "Download" button to pull a library file back to the client
-- [ ] **3.6** Mark as Watched: Ability to mark an episode(or multiple from a clean selector UI), season, series, or torrent as watched. 
+- [x] **3.6** Mark as Watched: Ability to mark an episode(or multiple from a clean selector UI), season, series, or torrent as watched. 
 
 ---
 

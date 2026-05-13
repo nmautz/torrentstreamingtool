@@ -142,6 +142,7 @@ class AppState:
     play_when_ready_file_path: Optional[str] = None      # if set, wait for this specific file
     current_audio_track: int = -1                         # last track ID sent to VLC
     current_subtitle_track: int = -1                      # last track ID sent to VLC
+    track_pref_applied_file: Optional[str] = None         # path for which track prefs were last applied
     vlc_time: int = 0                                     # VLC current position (seconds)
     vlc_duration: int = 0                                 # VLC total duration (seconds)
     vlc_volume: int = 100                                 # VLC volume 0-200 (100 = normal)
@@ -731,6 +732,59 @@ def find_resume_hint(item: dict, profile_id: str) -> Optional[dict]:
     }
 
 
+# ── Track Preference Helpers ──────────────────────────────────────────────────
+
+async def _save_track_pref(
+    item_id: str, profile_id: str, file_path: str,
+    audio: Optional[int] = None, subtitle: Optional[int] = None,
+) -> None:
+    """Persist audio/subtitle track preference for a file into library.json."""
+    try:
+        async with _lib_lock:
+            lib = _load_lib_raw()
+            item = next((it for it in lib["items"] if it["id"] == item_id), None)
+            if not item:
+                return
+            fp = (item.setdefault("progress", {})
+                      .setdefault(profile_id, {})
+                      .setdefault("file_progress", {})
+                      .setdefault(file_path, {}))
+            if audio is not None:
+                fp["audio_track"] = audio
+            if subtitle is not None:
+                fp["subtitle_track"] = subtitle
+            _save_lib_raw(lib)
+    except Exception:
+        pass
+
+
+async def _apply_track_prefs(
+    item_id: str, profile_id: str, file_path: str, delay: float = 2.0,
+) -> None:
+    """Apply saved audio/subtitle track prefs for a file after a short delay."""
+    try:
+        await asyncio.sleep(delay)
+        lib = await get_library()
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        if not item:
+            return
+        fp = (item.get("progress", {})
+                  .get(profile_id, {})
+                  .get("file_progress", {})
+                  .get(file_path, {}))
+        audio = fp.get("audio_track")
+        subtitle = fp.get("subtitle_track")
+        if audio is not None:
+            state.current_audio_track = audio
+            await vlc("audio_track", val=str(audio))
+        if subtitle is not None:
+            state.current_subtitle_track = subtitle
+            await vlc("subtitle_track", val=str(subtitle))
+        state.track_pref_applied_file = file_path
+    except Exception:
+        pass
+
+
 # ── Background Task: Mullvad Guard ───────────────────────────────────────────
 
 async def vpn_guard() -> None:
@@ -959,7 +1013,16 @@ async def vlc_progress_tracker() -> None:
             # Normalize to the stored item path so progress keys always match
             # what get_item_files and find_resume_hint look up by.
             current_file = _canonical_item_path(current_file, item)
+            prev_file = state.library_current_file
             state.library_current_file = current_file
+
+            # Apply saved track prefs when VLC advances to a new episode
+            if (current_file != state.track_pref_applied_file and
+                    state.library_item_id and state.library_profile_id):
+                state.track_pref_applied_file = current_file
+                asyncio.create_task(_apply_track_prefs(
+                    state.library_item_id, state.library_profile_id, current_file, delay=2.0,
+                ))
 
             pct = pos_sec / dur_sec
             prof_prog = item.setdefault("progress", {}).setdefault(state.library_profile_id, {})
@@ -1244,6 +1307,13 @@ class LibraryPlayReq(BaseModel):
     seek_first_to: Optional[float] = None  # seek into the first file (seconds)
 
 
+class MarkWatchedReq(BaseModel):
+    profile_id: str
+    watched: bool
+    file_paths: list[str] = []    # specific paths; empty = all files in item
+    season: Optional[int] = None  # if set (and file_paths empty), filter to this season
+
+
 # ── Routes: Profiles ─────────────────────────────────────────────────────────
 
 @app.get("/api/profiles")
@@ -1505,6 +1575,7 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     state.active_file = first
     state.current_audio_track = -1
     state.current_subtitle_track = -1
+    state.track_pref_applied_file = playlist[0]  # mark as applied so tracker doesn't double-apply
     state.active_hash = item.get("torrent_hash") or None
     state.library_item_id = item_id
     state.library_profile_id = req.profile_id
@@ -1524,6 +1595,9 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
             await asyncio.sleep(3)
             await vlc("seek", val=str(int(s)))
         asyncio.create_task(_delayed_seek(seek_sec))
+
+    # Apply saved track prefs for the first file (after VLC opens it)
+    asyncio.create_task(_apply_track_prefs(item_id, req.profile_id, playlist[0], delay=3.5))
 
     await broadcast("stream_status", {"status": "playing", "message": f"Playing: {first.name}"})
     return JSONResponse({"ok": True, "playlist_count": len(playlist), "seek_to": seek_sec})
@@ -1547,6 +1621,55 @@ async def update_progress(item_id: str, req: ProgressReq) -> JSONResponse:
     }
     await put_library(lib)
     return JSONResponse({"ok": True})
+
+
+@app.post("/api/library/{item_id}/mark-watched")
+async def mark_watched(item_id: str, req: MarkWatchedReq) -> JSONResponse:
+    """Mark or unmark episodes as watched for a profile."""
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+
+    files = item.get("files", [])
+    if req.file_paths:
+        targets = {p for p in req.file_paths}
+        target_files = [f for f in files if f.get("path", "") in targets]
+    elif req.season is not None:
+        target_files = [f for f in files if f.get("season", 0) == req.season]
+    else:
+        target_files = files
+
+    prof_prog = item.setdefault("progress", {}).setdefault(req.profile_id, {})
+    file_prog = prof_prog.setdefault("file_progress", {})
+
+    for f in target_files:
+        path = f.get("path", "")
+        if not path:
+            continue
+        existing = file_prog.get(path, {})
+        if req.watched:
+            file_prog[path] = {
+                "position_sec": existing.get("duration_sec", 0),
+                "duration_sec": existing.get("duration_sec", 0),
+                "completed": True,
+                "updated_at": _now_iso(),
+                **{k: v for k, v in existing.items()
+                   if k in ("audio_track", "subtitle_track")},
+            }
+        else:
+            file_prog[path] = {
+                "position_sec": 0,
+                "duration_sec": existing.get("duration_sec", 0),
+                "completed": False,
+                "updated_at": _now_iso(),
+                **{k: v for k, v in existing.items()
+                   if k in ("audio_track", "subtitle_track")},
+            }
+
+    await put_library(lib)
+    await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "ready")})
+    return JSONResponse({"ok": True, "updated": len(target_files)})
 
 
 # ── Routes: Search & Stream ───────────────────────────────────────────────────
@@ -1995,9 +2118,14 @@ async def vlc_prev() -> JSONResponse:
     state.library_current_file = prev_file
     state.current_audio_track = -1
     state.current_subtitle_track = -1
+    state.track_pref_applied_file = prev_file
     await vlc("in_play", input=Path(prev_file).resolve().as_uri())
     for p in new_tail[1:]:
         await vlc("in_enqueue", input=Path(p).resolve().as_uri())
+    if state.library_item_id and state.library_profile_id:
+        asyncio.create_task(_apply_track_prefs(
+            state.library_item_id, state.library_profile_id, prev_file, delay=2.0,
+        ))
     await broadcast("stream_status", {"status": "playing", "message": f"Playing: {Path(prev_file).name}"})
     return JSONResponse({"ok": True})
 
@@ -2033,9 +2161,14 @@ async def vlc_next() -> JSONResponse:
     state.library_current_file = next_file
     state.current_audio_track = -1
     state.current_subtitle_track = -1
+    state.track_pref_applied_file = next_file
     await vlc("in_play", input=Path(next_file).resolve().as_uri())
     for p in new_tail[1:]:
         await vlc("in_enqueue", input=Path(p).resolve().as_uri())
+    if state.library_item_id and state.library_profile_id:
+        asyncio.create_task(_apply_track_prefs(
+            state.library_item_id, state.library_profile_id, next_file, delay=2.0,
+        ))
     await broadcast("stream_status", {"status": "playing", "message": f"Playing: {Path(next_file).name}"})
     return JSONResponse({"ok": True})
 
@@ -2098,6 +2231,11 @@ async def get_tracks() -> JSONResponse:
 async def set_audio_track(track_id: int) -> JSONResponse:
     state.current_audio_track = track_id
     await vlc("audio_track", val=str(track_id))
+    if state.library_item_id and state.library_profile_id and state.library_current_file:
+        asyncio.create_task(_save_track_pref(
+            state.library_item_id, state.library_profile_id,
+            state.library_current_file, audio=track_id,
+        ))
     return JSONResponse({"ok": True})
 
 
@@ -2105,6 +2243,11 @@ async def set_audio_track(track_id: int) -> JSONResponse:
 async def set_subtitle_track(track_id: int) -> JSONResponse:
     state.current_subtitle_track = track_id
     await vlc("subtitle_track", val=str(track_id))
+    if state.library_item_id and state.library_profile_id and state.library_current_file:
+        asyncio.create_task(_save_track_pref(
+            state.library_item_id, state.library_profile_id,
+            state.library_current_file, subtitle=track_id,
+        ))
     return JSONResponse({"ok": True})
 
 

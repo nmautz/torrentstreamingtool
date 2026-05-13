@@ -349,6 +349,14 @@
           class="text-xs px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 uppercase tracking-wide transition-colors">
           Unwatched only
         </button>
+        <button onclick="epMarkWatched(true)"
+          class="text-xs px-3 py-1.5 bg-gray-800 hover:bg-green-900/60 text-gray-400 hover:text-green-400 uppercase tracking-wide transition-colors">
+          ✓ Mark watched
+        </button>
+        <button onclick="epMarkWatched(false)"
+          class="text-xs px-3 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 uppercase tracking-wide transition-colors">
+          ✗ Mark unwatched
+        </button>
       </div>
     </div>
 
@@ -1947,6 +1955,14 @@ function renderEpList(){
           class="flex-shrink-0 w-9 h-9 flex items-center justify-center
                  bg-indigo-900/60 hover:bg-indigo-700 text-indigo-300 hover:text-white
                  text-xs font-bold transition-colors" title="Play from here">▶</button>
+        <button onclick="epToggleWatched(${JSON.stringify(f.path)},${isComplete})"
+          class="flex-shrink-0 w-9 h-9 flex items-center justify-center transition-colors
+                 ${isComplete?'text-green-600 hover:text-gray-500 hover:bg-gray-800/60':'text-gray-700 hover:text-green-500 hover:bg-green-950/40'}"
+          title="${isComplete?'Mark unwatched':'Mark watched'}">
+          <svg class="w-4 h-4" fill="${isComplete?'currentColor':'none'}" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
+          </svg>
+        </button>
         <a href="/api/library/${escHtml(epItemId)}/download?file_path=${encodeURIComponent(f.path)}" download="${escHtml(f.name)}"
           class="flex-shrink-0 w-9 h-9 flex items-center justify-center
                  text-gray-600 hover:text-indigo-300 hover:bg-indigo-950/40 transition-colors"
@@ -1979,6 +1995,34 @@ function epSelectUnwatched(){
   epFiles.forEach(f=>{ if(!f.progress?.completed) epChecked.add(f.path); });
   document.querySelectorAll(".ep-check").forEach(cb=>{ cb.checked=epChecked.has(cb.dataset.path); });
   updateEpCount();
+}
+
+async function epMarkWatched(watched){
+  if(!epChecked.size){ showAlert("Select at least one episode.","warn"); return; }
+  if(!epItemId) return;
+  if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
+  const paths=[...epChecked];
+  const r=await fetch(`/api/library/${epItemId}/mark-watched`,{
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({profile_id:profile.id,watched,file_paths:paths}),
+  });
+  if(r.ok){
+    showAlert(`Marked ${paths.length} episode${paths.length>1?"s":""} as ${watched?"watched":"unwatched"}.`,"success");
+    await openEpisodePicker(epItemId);
+  } else {
+    const e=await r.json().catch(()=>({detail:"Failed."}));
+    showAlert(e.detail||"Failed.","error");
+  }
+}
+
+async function epToggleWatched(path,wasWatched){
+  if(!epItemId||!profile.id) return;
+  const r=await fetch(`/api/library/${epItemId}/mark-watched`,{
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({profile_id:profile.id,watched:!wasWatched,file_paths:[path]}),
+  });
+  if(r.ok) await openEpisodePicker(epItemId);
+  else showAlert("Failed to update watch status.","error");
 }
 
 async function epPlay(){
