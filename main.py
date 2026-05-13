@@ -6,6 +6,8 @@ import json
 import platform
 import re
 import shutil
+import socket
+import subprocess
 import uuid
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -342,6 +344,168 @@ def uri_to_path(uri: str) -> str:
     return path
 
 
+def _find_vlc_bin() -> Optional[str]:
+    """Locate the VLC binary, checking .env first then well-known paths."""
+    env_file = Path(__file__).parent / ".env"
+    if env_file.exists():
+        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line.startswith("_VLC_BIN="):
+                val = line[9:].strip()
+                if val and Path(val).exists():
+                    return val
+    candidates: list[str] = {
+        "Darwin":  ["/Applications/VLC.app/Contents/MacOS/VLC"],
+        "Windows": [
+            r"C:\Program Files\VideoLAN\VLC\vlc.exe",
+            r"C:\Program Files (x86)\VideoLAN\VLC\vlc.exe",
+        ],
+    }.get(platform.system(), ["/usr/bin/vlc"])
+    for c in candidates:
+        if Path(c).exists():
+            return c
+    return shutil.which("vlc")
+
+
+def _vlc_focus_windows() -> None:
+    """Bring the VLC window to the foreground on Windows using ctypes."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+
+        found: list = []
+        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+        def _cb(hwnd, _):
+            length = user32.GetWindowTextLengthW(hwnd)
+            if length > 0:
+                buf = ctypes.create_unicode_buffer(length + 1)
+                user32.GetWindowTextW(hwnd, buf, length + 1)
+                if "vlc" in buf.value.lower():
+                    found.append(hwnd)
+            return True
+
+        user32.EnumWindows(EnumWindowsProc(_cb), 0)
+        if found:
+            hwnd = found[0]
+            # Attach to the current foreground thread to bypass Windows focus restrictions
+            fg_thread = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
+            my_thread = ctypes.windll.kernel32.GetCurrentThreadId()
+            if fg_thread != my_thread:
+                user32.AttachThreadInput(my_thread, fg_thread, True)
+            user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+            user32.SetForegroundWindow(hwnd)
+            if fg_thread != my_thread:
+                user32.AttachThreadInput(my_thread, fg_thread, False)
+    except Exception:
+        pass
+
+
+async def vlc_focus_and_fullscreen() -> None:
+    """Bring VLC to the foreground and enable fullscreen. Best-effort; never raises."""
+    await asyncio.sleep(1.5)
+    system = platform.system()
+    try:
+        if system == "Windows":
+            await asyncio.get_event_loop().run_in_executor(None, _vlc_focus_windows)
+        elif system == "Darwin":
+            proc = await asyncio.create_subprocess_exec(
+                "osascript", "-e", 'tell application "VLC" to activate',
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+        elif system == "Linux":
+            # Best-effort via wmctrl if available; silently skip if not installed
+            if shutil.which("wmctrl"):
+                proc = await asyncio.create_subprocess_exec(
+                    "wmctrl", "-a", "VLC",
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await proc.wait()
+    except Exception:
+        pass
+    try:
+        vs = await vlc_status()
+        if vs and not vs.get("fullscreen"):
+            await vlc("fullscreen")
+    except Exception:
+        pass
+
+
+async def _restart_vlc_process() -> bool:
+    """Kill any running VLC processes, relaunch with HTTP interface. Returns True when port opens."""
+    for p in psutil.process_iter(["name"]):
+        if (p.info["name"] or "").lower().startswith("vlc"):
+            try:
+                p.kill()
+            except Exception:
+                pass
+
+    await asyncio.sleep(1.5)
+
+    vlc_bin = _find_vlc_bin()
+    if not vlc_bin:
+        return False
+
+    vlc_port = int(urlparse(settings.vlc_url).port or 8080)
+
+    kw: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if platform.system() == "Windows":
+        kw["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        kw["start_new_session"] = True
+    subprocess.Popen(
+        [vlc_bin, "--extraintf=http", "--http-host=localhost",
+         f"--http-port={vlc_port}", f"--http-password={settings.vlc_password}", "--no-random"],
+        **kw,
+    )
+
+    deadline = asyncio.get_event_loop().time() + 15
+    while asyncio.get_event_loop().time() < deadline:
+        await asyncio.sleep(0.5)
+        try:
+            with socket.create_connection(("127.0.0.1", vlc_port), timeout=0.5):
+                await asyncio.sleep(0.8)
+                return True
+        except OSError:
+            pass
+    return False
+
+
+async def _retry_task(file_path: Path) -> None:
+    """Background task: restart VLC and replay the current file + remainder of playlist."""
+    try:
+        await broadcast("stream_status", {"status": state.stream_status, "message": "Relaunching VLC…"})
+        ok = await _restart_vlc_process()
+        if not ok:
+            state.stream_status = "error"
+            await broadcast("stream_status", {"status": "error", "message": "VLC could not be relaunched."})
+            return
+
+        await vlc("in_play", input=file_path.resolve().as_uri())
+
+        if state.library_playlist and state.library_current_file:
+            try:
+                cur = str(state.library_current_file)
+                idx = state.library_playlist.index(cur)
+                for p in state.library_playlist[idx + 1:]:
+                    await vlc("in_enqueue", input=Path(p).resolve().as_uri())
+            except (ValueError, Exception):
+                pass
+
+        state.stream_status = "playing"
+        state.current_audio_track = -1
+        state.current_subtitle_track = -1
+        asyncio.create_task(vlc_focus_and_fullscreen())
+        await broadcast("stream_status", {"status": "playing", "message": f"Retrying: {file_path.name}"})
+    except Exception as exc:
+        state.stream_status = "error"
+        await broadcast("stream_status", {"status": "error", "message": f"Retry failed: {exc}"})
+
+
 # ── Utilities ─────────────────────────────────────────────────────────────────
 
 def extract_hash(magnet: str) -> Optional[str]:
@@ -589,6 +753,7 @@ async def _auto_play_item(item: dict, profile_id: str, file_path: str = "") -> N
         await vlc("in_play", input=first.resolve().as_uri())
         for p in playlist[1:]:
             await vlc("in_enqueue", input=Path(p).resolve().as_uri())
+        asyncio.create_task(vlc_focus_and_fullscreen())
 
         state.stream_status = "playing"
         state.active_title = item["title"]
@@ -853,6 +1018,7 @@ async def stream_pipeline(
         state.active_file = file_path
 
         await vlc("in_play", input=file_path.resolve().as_uri())
+        asyncio.create_task(vlc_focus_and_fullscreen())
         state.stream_status = "playing"
         await broadcast("stream_status", {"status": "playing", "message": f"Playing: {file_path.name}"})
 
@@ -1257,6 +1423,7 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     await vlc("in_play", input=first.resolve().as_uri())
     for p in playlist[1:]:
         await vlc("in_enqueue", input=Path(p).resolve().as_uri())
+    asyncio.create_task(vlc_focus_and_fullscreen())
 
     # Update app state
     state.stream_status = "playing"
@@ -1638,6 +1805,20 @@ async def stop() -> JSONResponse:
     state.ul_speed_bps = 0
 
     await broadcast("stream_status", {"status": "idle", "message": "Stopped."})
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/retry")
+async def retry_playback() -> JSONResponse:
+    """Relaunch VLC and replay the current file (handles VLC freezes / crashes)."""
+    file_path: Optional[Path] = None
+    if state.library_current_file:
+        file_path = Path(state.library_current_file)
+    elif state.active_file:
+        file_path = state.active_file
+    if not file_path:
+        raise HTTPException(400, "Nothing to retry.")
+    asyncio.create_task(_retry_task(file_path))
     return JSONResponse({"ok": True})
 
 

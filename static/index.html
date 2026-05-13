@@ -833,7 +833,7 @@
       </div>
     </div>
 
-    <!-- Row E: Stop (always) + Save (streaming torrent only, toggled by JS) -->
+    <!-- Row E: Stop (always) + Retry (while playing, toggled by JS) + Save (streaming torrent only, toggled by JS) -->
     <div class="flex flex-1 min-h-0">
       <button onclick="stopStream();closeFullscreenControls()"
         class="fc-tile flex flex-1 bg-red-950/15 hover:bg-red-950/45
@@ -842,6 +842,14 @@
           <rect x="5" y="5" width="14" height="14" rx="2"/>
         </svg>
         <span class="text-xs font-bold">Stop</span>
+      </button>
+      <button id="fcRetryBtn" onclick="retryPlayback()"
+        class="fc-tile flex flex-1 border-l border-gray-800 bg-amber-950/15
+               hover:bg-amber-950/45 active:bg-amber-950/70 text-amber-400 transition-colors">
+        <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+        </svg>
+        <span class="text-xs font-bold">Retry</span>
       </button>
       <!-- border-l so no orphan line when Save is hidden -->
       <button id="fcSaveBtn" onclick="openSaveStreamModal();closeFullscreenControls()"
@@ -2548,6 +2556,10 @@ async function vlcNext(){
 async function stopStream(){
   await fetch("/api/stop",{method:"POST"}).catch(()=>{});
   document.querySelectorAll(".play-btn").forEach(b=>{b.disabled=false;b.textContent="▶ Play";});
+}
+async function retryPlayback(){
+  const r=await fetch("/api/retry",{method:"POST"}).catch(()=>null);
+  if(r&&!r.ok){ const e=await r.json().catch(()=>({})); showAlert(e.detail||"Retry failed.","error"); }
 }
 
 // ── Skip & Track controls ───────────────────────────────────────────────────
