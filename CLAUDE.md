@@ -16,7 +16,7 @@ make setup
 make run
 
 # Run the dashboard directly (requires .venv active and services already running)
-.venv/bin/uvicorn main:app --host 127.0.0.1 --port 7000 --reload
+sudo .venv/bin/uvicorn main:app --host 0.0.0.0 --port 80 --reload
 ```
 
 `setup.py` and `run.py` must be run with the **system** Python (not the venv) — they include `from __future__ import annotations` for Python 3.9 compatibility. `main.py` runs inside the venv and can use 3.10+ syntax freely.
@@ -26,7 +26,7 @@ make run
 ### Service topology
 
 ```
-Browser ←SSE/HTTP→ FastAPI (main.py :7000)
+Browser ←SSE/HTTP→ FastAPI (main.py :80, mDNS: remote.local)
                        ├── httpx → qBittorrent Web UI (:8081)
                        ├── httpx → VLC Lua HTTP (:8080)
                        └── httpx → Jackett (:9117, may be remote)

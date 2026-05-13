@@ -405,6 +405,32 @@ def get_wifi_ssid() -> str:
     return ""
 
 
+# ── mDNS ──────────────────────────────────────────────────────────────────
+def start_mdns(lan_ip: str, port: int):
+    """Register remote.local via mDNS so LAN devices can reach the dashboard by name."""
+    try:
+        from zeroconf import ServiceInfo, Zeroconf
+        import socket as _socket
+        zc = Zeroconf()
+        info = ServiceInfo(
+            "_http._tcp.local.",
+            "StreamLink._http._tcp.local.",
+            addresses=[_socket.inet_aton(lan_ip)],
+            port=port,
+            properties={},
+            server="remote.local.",
+        )
+        zc.register_service(info)
+        ok("mDNS: http://remote.local registered")
+        return zc
+    except ImportError:
+        warn("zeroconf not installed — run python3 setup.py to update dependencies")
+        return None
+    except Exception as exc:
+        warn(f"mDNS registration failed: {exc}")
+        return None
+
+
 # ── Main ───────────────────────────────────────────────────────────────────
 def main():
     # ── Handle --install / --uninstall / --status flags (7.1) ────────────
@@ -482,10 +508,11 @@ def main():
     print()
 
     # ── Launch dashboard ──────────────────────────────────────────────────
-    PORT          = 7000
-    local_url     = f"http://127.0.0.1:{PORT}"
+    PORT          = 80
+    local_url     = "http://127.0.0.1"
+    mdns_url      = "http://remote.local"
     lan_ip        = get_local_ip()
-    lan_url       = f"http://{lan_ip}:{PORT}" if lan_ip else ""
+    lan_url       = f"http://{lan_ip}" if lan_ip else ""
     ssid          = get_wifi_ssid()
     uvicorn_bin   = VENV / ("Scripts/uvicorn.exe" if SYSTEM == "Windows" else "bin/uvicorn")
 
@@ -493,12 +520,25 @@ def main():
     ok(f"Local  →  {CYN}{local_url}{RESET}")
     if lan_url:
         ssid_note = f"  {BLU}({ssid}){RESET}" if ssid else ""
-        ok(f"Phone  →  {CYN}{lan_url}{RESET}{ssid_note}")
+        ok(f"Phone  →  {CYN}{mdns_url}{RESET}  or  {CYN}{lan_url}{RESET}{ssid_note}")
         if ssid:
             print(f"          {BLU}Connect your phone to Wi-Fi: {BOLD}{ssid}{RESET}")
     else:
         warn("Could not detect LAN IP — phone access may not work")
+
+    if PORT < 1024 and SYSTEM in ("Darwin", "Linux"):
+        try:
+            if os.geteuid() != 0:
+                warn(f"Port {PORT} is privileged — if startup fails, retry with: sudo python3 run.py")
+        except AttributeError:
+            pass
+
     info("Press Ctrl+C to stop")
+    print()
+
+    # Register mDNS hostname (remote.local)
+    print(f"{BOLD}  mDNS{RESET}")
+    _zc = start_mdns(lan_ip, PORT) if lan_ip else None
     print()
 
     # Give browser a moment then open
@@ -524,6 +564,12 @@ def main():
         )
     except KeyboardInterrupt:
         print(f"\n  {GRN}✓{RESET}  StreamLink stopped.")
+    finally:
+        if _zc:
+            try:
+                _zc.close()
+            except Exception:
+                pass
 
 
 if __name__ == "__main__":

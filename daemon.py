@@ -73,7 +73,7 @@ start_watchdog()
 
 # Block on uvicorn (the dashboard)
 proc = subprocess.run(
-    [str(_UV), "main:app", "--host", "0.0.0.0", "--port", "7000", "--log-level", "warning"],
+    [str(_UV), "main:app", "--host", "0.0.0.0", "--port", "80", "--log-level", "warning"],
     cwd=str(HERE),
 )
 sys.exit(proc.returncode)
@@ -183,7 +183,7 @@ def _macos_install() -> bool:
         fail(f"launchctl load failed: {result.stderr.strip()}")
         return False
     ok("Service loaded via launchctl — StreamLink will start at login")
-    info(f"Dashboard will be at http://127.0.0.1:7000")
+    info(f"Dashboard will be at http://remote.local  (or http://127.0.0.1)")
     info(f"Logs: {HERE / 'logs' / 'streamlink.log'}")
     return True
 
@@ -345,7 +345,7 @@ def _windows_install() -> bool:
         ok("Task started immediately")
     else:
         warn("Task registered but could not start immediately — it will run at next logon")
-    info("Dashboard → http://127.0.0.1:7000")
+    info("Dashboard → http://remote.local  (or http://127.0.0.1)")
     return True
 
 
