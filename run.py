@@ -441,7 +441,7 @@ def start_mdns(lan_ip: str, port: int):
     try:
         from zeroconf import ServiceInfo, Zeroconf
         import socket as _socket
-        zc = Zeroconf()
+        zc = Zeroconf(interfaces=[lan_ip])
         info = ServiceInfo(
             "_http._tcp.local.",
             "StreamLink._http._tcp.local.",
