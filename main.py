@@ -367,23 +367,22 @@ def _find_vlc_bin() -> Optional[str]:
     return shutil.which("vlc")
 
 
-def _find_vlc_hwnd_windows() -> Optional[int]:
-    """Return the main visible window handle of the VLC process, or None.
+def _find_vlc_hwnds_windows() -> list:
+    """Return all visible top-level window handles belonging to any VLC process.
 
-    Uses psutil for PID lookup (reliable) + GetWindowThreadProcessId for matching
-    (avoids title-matching and keeps the EnumWindowsProc ref alive to prevent GC).
+    Uses psutil for PID lookup + GetWindowThreadProcessId for matching.
+    The cb variable keeps the EnumWindowsProc wrapper alive to prevent ctypes GC.
     """
     try:
         import ctypes
         from ctypes import wintypes
 
-        vlc_pid: Optional[int] = None
+        vlc_pids: set = set()
         for p in psutil.process_iter(["name", "pid"]):
             if (p.info["name"] or "").lower().startswith("vlc"):
-                vlc_pid = p.info["pid"]
-                break
-        if not vlc_pid:
-            return None
+                vlc_pids.add(p.info["pid"])
+        if not vlc_pids:
+            return []
 
         user32 = ctypes.windll.user32
         found: list = []
@@ -393,22 +392,23 @@ def _find_vlc_hwnd_windows() -> Optional[int]:
             if user32.IsWindowVisible(hwnd):
                 pid = wintypes.DWORD()
                 user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
-                if pid.value == vlc_pid:
+                if pid.value in vlc_pids:
                     found.append(hwnd)
             return True
 
         cb = EnumWindowsProc(_cb)   # keep ref alive — ctypes GC pitfall
         user32.EnumWindows(cb, 0)
-        return found[0] if found else None
+        return found
     except Exception:
-        return None
+        return []
 
 
 def _vlc_focus_windows() -> None:
-    """Bring the VLC window to the foreground on Windows using ctypes."""
-    hwnd = _find_vlc_hwnd_windows()
-    if not hwnd:
+    """Bring the main VLC window to the foreground on Windows using ctypes."""
+    hwnds = _find_vlc_hwnds_windows()
+    if not hwnds:
         return
+    hwnd = hwnds[0]
     try:
         import ctypes
         user32 = ctypes.windll.user32
@@ -425,13 +425,20 @@ def _vlc_focus_windows() -> None:
 
 
 def _vlc_minimize_windows() -> None:
-    """Minimize the VLC window on Windows using ctypes."""
-    hwnd = _find_vlc_hwnd_windows()
-    if not hwnd:
+    """Minimize all VLC windows on Windows using ctypes."""
+    hwnds = _find_vlc_hwnds_windows()
+    if not hwnds:
         return
     try:
         import ctypes
-        ctypes.windll.user32.ShowWindow(hwnd, 6)  # SW_MINIMIZE
+        user32 = ctypes.windll.user32
+        WM_SYSCOMMAND = 0x0112
+        SC_MINIMIZE    = 0xF020
+        for hwnd in hwnds:
+            # PostMessage puts SC_MINIMIZE into VLC's own message queue (UI-thread safe).
+            user32.PostMessageW(hwnd, WM_SYSCOMMAND, SC_MINIMIZE, 0)
+            # SW_FORCEMINIMIZE (11) is designed for cross-process/thread minimization.
+            user32.ShowWindow(hwnd, 11)
     except Exception:
         pass
 
@@ -441,7 +448,7 @@ async def vlc_minimize() -> None:
     system = platform.system()
     try:
         if system == "Windows":
-            await asyncio.get_event_loop().run_in_executor(None, _vlc_minimize_windows)
+            await asyncio.get_running_loop().run_in_executor(None, _vlc_minimize_windows)
         elif system == "Darwin":
             proc = await asyncio.create_subprocess_exec(
                 "osascript", "-e",
