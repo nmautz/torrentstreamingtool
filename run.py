@@ -405,6 +405,36 @@ def get_wifi_ssid() -> str:
     return ""
 
 
+# ── Windows Firewall ──────────────────────────────────────────────────────
+def setup_windows_firewall(port: int) -> None:
+    """Add inbound firewall rules for the dashboard port and mDNS (idempotent)."""
+    rules = [
+        (f"StreamLink HTTP {port}", "TCP", str(port)),
+        ("StreamLink mDNS",         "UDP", "5353"),
+    ]
+    for name, proto, lport in rules:
+        check = subprocess.run(
+            ["netsh", "advfirewall", "firewall", "show", "rule", f"name={name}"],
+            capture_output=True, text=True,
+        )
+        if check.returncode == 0 and name in check.stdout:
+            ok(f"Firewall rule already exists: {name}")
+            continue
+        result = subprocess.run(
+            [
+                "netsh", "advfirewall", "firewall", "add", "rule",
+                f"name={name}", f"protocol={proto}", "dir=in",
+                f"localport={lport}", "action=allow",
+            ],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            ok(f"Firewall: allowed inbound {proto} port {lport} ({name})")
+        else:
+            warn(f"Firewall rule failed for {name} — run as Administrator to add it")
+            warn(f"  netsh advfirewall firewall add rule name=\"{name}\" protocol={proto} dir=in localport={lport} action=allow")
+
+
 # ── mDNS ──────────────────────────────────────────────────────────────────
 def start_mdns(lan_ip: str, port: int):
     """Register remote.local via mDNS so LAN devices can reach the dashboard by name."""
@@ -535,6 +565,12 @@ def main():
 
     info("Press Ctrl+C to stop")
     print()
+
+    # ── Windows: open firewall for port 80 and mDNS ──────────────────────
+    if SYSTEM == "Windows":
+        print(f"{BOLD}  Firewall{RESET}")
+        setup_windows_firewall(PORT)
+        print()
 
     # Register mDNS hostname (remote.local)
     print(f"{BOLD}  mDNS{RESET}")
