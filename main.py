@@ -56,6 +56,7 @@ class Settings(BaseSettings):
     buffer_min_pct: float = 1.0
 
     admin_password: str = ""   # if empty, admin panel is disabled
+    jackett_password: str = ""  # Jackett UI login password for indexer management
 
 
 settings = Settings()
@@ -162,6 +163,41 @@ class AppState:
 state = AppState()
 qbit: Optional[httpx.AsyncClient] = None
 _admin_sessions: dict[str, float] = {}   # token → expiry Unix timestamp
+
+# ── Jackett Session ───────────────────────────────────────────────────────────
+_jackett_cookie: str = ""
+_jackett_cookie_expiry: float = 0.0
+_jackett_cookie_lock: asyncio.Lock  # initialised in lifespan
+
+
+async def _jackett_login() -> str:
+    """Login to Jackett and return the session cookie value."""
+    async with httpx.AsyncClient(follow_redirects=True, timeout=10.0) as tmp:
+        await tmp.get(f"{settings.indexer_url}/UI/Login")
+        r = await tmp.post(
+            f"{settings.indexer_url}/UI/Dashboard",
+            data={"password": settings.jackett_password},
+            follow_redirects=False,
+        )
+    cookie = r.cookies.get("Jackett")
+    if not cookie:
+        raise HTTPException(502, "Could not authenticate with Jackett — check JACKETT_PASSWORD in .env")
+    return cookie
+
+
+@asynccontextmanager
+async def _jackett_admin():
+    """Yield an httpx client authenticated to Jackett's admin API."""
+    global _jackett_cookie, _jackett_cookie_expiry
+    cookies: dict[str, str] = {}
+    if settings.jackett_password:
+        async with _jackett_cookie_lock:
+            if not _jackett_cookie or time.time() >= _jackett_cookie_expiry:
+                _jackett_cookie = await _jackett_login()
+                _jackett_cookie_expiry = time.time() + 3600
+        cookies = {"Jackett": _jackett_cookie}
+    async with httpx.AsyncClient(cookies=cookies, timeout=15.0) as c:
+        yield c
 
 
 # ── SSE Helpers ───────────────────────────────────────────────────────────────
@@ -1282,8 +1318,9 @@ async def library_download_pipeline(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
-    global qbit, _lib_lock
+    global qbit, _lib_lock, _jackett_cookie_lock
     _lib_lock = asyncio.Lock()
+    _jackett_cookie_lock = asyncio.Lock()
     qbit = httpx.AsyncClient(timeout=10.0)
     await qbit_login()
     Path(settings.qbit_download_path).mkdir(parents=True, exist_ok=True)
@@ -2581,12 +2618,64 @@ async def admin_logout(request: Request) -> JSONResponse:
 async def admin_list_indexers(request: Request) -> JSONResponse:
     _require_admin(request)
     try:
-        async with httpx.AsyncClient(timeout=10.0) as c:
+        async with _jackett_admin() as c:
             r = await c.get(
                 f"{settings.indexer_url}/api/v2.0/indexers",
-                params={"configured": "true", "apikey": settings.indexer_api_key},
+                params={"configured": "true"},
             )
         return JSONResponse({"indexers": r.json() if r.status_code == 200 else []})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Could not reach Jackett: {e}")
+
+
+@app.get("/api/admin/indexers/available")
+async def admin_list_available_indexers(request: Request) -> JSONResponse:
+    _require_admin(request)
+    try:
+        async with _jackett_admin() as c:
+            r = await c.get(
+                f"{settings.indexer_url}/api/v2.0/indexers",
+                params={"configured": "false"},
+            )
+        return JSONResponse({"indexers": r.json() if r.status_code == 200 else []})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Could not reach Jackett: {e}")
+
+
+@app.get("/api/admin/indexers/{indexer_id}/config")
+async def admin_get_indexer_config(indexer_id: str, request: Request) -> JSONResponse:
+    _require_admin(request)
+    try:
+        async with _jackett_admin() as c:
+            r = await c.get(f"{settings.indexer_url}/api/v2.0/indexers/{indexer_id}/config")
+        if r.status_code != 200:
+            raise HTTPException(502, f"Jackett returned {r.status_code}")
+        return JSONResponse({"config": r.json()})
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Could not reach Jackett: {e}")
+
+
+@app.post("/api/admin/indexers/{indexer_id}/config")
+async def admin_save_indexer_config(indexer_id: str, request: Request) -> JSONResponse:
+    _require_admin(request)
+    body = await request.json()
+    try:
+        async with _jackett_admin() as c:
+            r = await c.post(
+                f"{settings.indexer_url}/api/v2.0/indexers/{indexer_id}/config",
+                json=body,
+            )
+        if r.status_code >= 300:
+            raise HTTPException(502, f"Jackett returned {r.status_code}")
+        return JSONResponse({"ok": True})
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(502, f"Could not reach Jackett: {e}")
 
@@ -2595,12 +2684,11 @@ async def admin_list_indexers(request: Request) -> JSONResponse:
 async def admin_delete_indexer(indexer_id: str, request: Request) -> JSONResponse:
     _require_admin(request)
     try:
-        async with httpx.AsyncClient(timeout=10.0) as c:
-            r = await c.delete(
-                f"{settings.indexer_url}/api/v2.0/indexers/{indexer_id}",
-                params={"apikey": settings.indexer_api_key},
-            )
+        async with _jackett_admin() as c:
+            r = await c.delete(f"{settings.indexer_url}/api/v2.0/indexers/{indexer_id}")
         return JSONResponse({"ok": r.status_code < 300})
+    except HTTPException:
+        raise
     except Exception as e:
         raise HTTPException(502, f"Could not reach Jackett: {e}")
 
@@ -2614,7 +2702,6 @@ async def admin_get_settings(request: Request) -> JSONResponse:
         "indexer_url": settings.indexer_url,
         "indexer_api_key": settings.indexer_api_key,
         "indexer_categories": overrides.get("indexer_categories", settings.indexer_categories),
-        "jackett_ui_url": settings.indexer_url,
     })
 
 

@@ -183,6 +183,7 @@ def gather_config() -> dict:
     print(f"  {BOLD}Jackett (indexer){RESET}")
     cfg["INDEXER_URL"]        = ask("URL",               "http://localhost:9117")
     cfg["INDEXER_API_KEY"]    = ask("API key",           "")
+    cfg["JACKETT_PASSWORD"]   = ask("Admin password (for indexer management, leave blank if none)", "", secret=True)
     cfg["INDEXER_CATEGORIES"] = ask("Categories (0=all, 2000=Movies, 5000=TV)", "0")
     print()
     print(f"  {BOLD}qBittorrent{RESET}")

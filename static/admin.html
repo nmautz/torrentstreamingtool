@@ -122,10 +122,10 @@
             class="text-xs text-indigo-400 hover:text-indigo-300 uppercase tracking-wide font-bold transition-colors">
             Refresh
           </button>
-          <a id="jackettUiLink" href="#" target="_blank"
-            class="text-xs text-gray-500 hover:text-gray-300 uppercase tracking-wide transition-colors border border-gray-700 px-3 py-1.5">
-            Open Jackett UI ↗
-          </a>
+          <button onclick="openAddIndexer()"
+            class="text-xs text-indigo-400 hover:text-indigo-300 uppercase tracking-wide font-bold transition-colors border border-indigo-800 hover:border-indigo-600 px-3 py-1.5">
+            + Add Indexer
+          </button>
         </div>
       </div>
       <div id="indexerList" class="divide-y divide-gray-800">
@@ -160,6 +160,50 @@
     </div>
   </div>
 
+</div>
+
+<!-- ── Add Indexer Modal ──────────────────────────────────────────────────────── -->
+<div id="addIndexerModal" class="hidden fixed inset-0 z-50 bg-black/60 flex items-end sm:items-center justify-center sm:px-4">
+  <div class="bg-gray-900 w-full sm:max-w-xl border-t-[3px] border-indigo-600 flex flex-col" style="max-height:88vh">
+    <div class="px-5 pt-5 pb-4 border-b border-gray-800 flex items-center gap-3 flex-shrink-0">
+      <button id="aiBackBtn" onclick="showIndexerBrowse()"
+        class="hidden text-gray-500 hover:text-gray-300 transition-colors text-lg font-bold leading-none">←</button>
+      <div class="min-w-0 flex-1">
+        <h2 class="text-lg font-black uppercase tracking-wide" id="aiTitle">Add Indexer</h2>
+        <p class="text-xs text-gray-500 mt-0.5" id="aiSub">Browse and add indexers from Jackett</p>
+      </div>
+      <button onclick="closeAddIndexer()" class="text-gray-600 hover:text-gray-300 transition-colors text-xl font-bold leading-none">✕</button>
+    </div>
+
+    <!-- Browse view -->
+    <div id="aiBrowseView" class="flex flex-col flex-1 min-h-0">
+      <div class="px-5 py-3 border-b border-gray-800 flex-shrink-0">
+        <input id="aiSearch" type="text" placeholder="Filter indexers…"
+          class="w-full bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500
+                 px-3 py-2.5 text-sm focus:outline-none transition-colors"
+          oninput="filterIndexers(this.value)"/>
+      </div>
+      <div id="aiBrowseList" class="overflow-y-auto flex-1 divide-y divide-gray-800">
+        <div class="px-5 py-8 text-center text-gray-600 text-sm">Loading…</div>
+      </div>
+    </div>
+
+    <!-- Configure view -->
+    <div id="aiConfigView" class="hidden flex flex-col flex-1 min-h-0">
+      <div id="aiConfigFields" class="overflow-y-auto flex-1 px-5 py-4 space-y-4"></div>
+      <div id="aiConfigError" class="hidden px-5 py-2 text-red-400 text-xs font-bold uppercase tracking-wide flex-shrink-0"></div>
+      <div class="px-4 pb-4 pt-3 flex gap-2 border-t border-gray-800 flex-shrink-0">
+        <button onclick="showIndexerBrowse()"
+          class="flex-1 bg-gray-800 hover:bg-gray-700 py-4 text-sm font-bold uppercase tracking-wide transition-colors">
+          Back
+        </button>
+        <button id="aiSaveBtn" onclick="saveIndexerConfig()"
+          class="flex-1 bg-indigo-600 hover:bg-indigo-500 py-4 text-sm font-black uppercase tracking-wide transition-colors">
+          Add Indexer
+        </button>
+      </div>
+    </div>
+  </div>
 </div>
 
 <!-- ── PIN Set Modal ───────────────────────────────────────────────────────────── -->
@@ -297,8 +341,6 @@ async function loadAdminSettings(){
   if(!r.ok) return;
   const d = await r.json();
   document.getElementById("catInput").value = d.indexer_categories || "";
-  const link = document.getElementById("jackettUiLink");
-  link.href = d.jackett_ui_url || "#";
 }
 
 async function saveCategories(){
@@ -501,6 +543,182 @@ async function toggleElevated(profileId, newValue, btn){
     loadProfilePins();
   } else {
     showToast("Failed to update.", true);
+  }
+}
+
+// ── Add Indexer Modal ─────────────────────────────────────────────────────────
+let availableIndexers = [];
+let currentIndexerConfig = [];
+let currentIndexerId = null;
+
+function openAddIndexer(){
+  document.getElementById("addIndexerModal").classList.remove("hidden");
+  showIndexerBrowse();
+  loadAvailableIndexers();
+}
+
+function closeAddIndexer(){
+  document.getElementById("addIndexerModal").classList.add("hidden");
+  currentIndexerId = null;
+  currentIndexerConfig = [];
+}
+
+function showIndexerBrowse(){
+  document.getElementById("aiTitle").textContent = "Add Indexer";
+  document.getElementById("aiSub").textContent = "Browse and add indexers from Jackett";
+  document.getElementById("aiBackBtn").classList.add("hidden");
+  document.getElementById("aiBrowseView").classList.remove("hidden");
+  document.getElementById("aiConfigView").classList.add("hidden");
+}
+
+function showIndexerConfigView(indexer){
+  document.getElementById("aiTitle").textContent = indexer.name || indexer.id;
+  document.getElementById("aiSub").textContent = indexer.type === "public" ? "Public Indexer" : "Private Indexer";
+  document.getElementById("aiBackBtn").classList.remove("hidden");
+  document.getElementById("aiBrowseView").classList.add("hidden");
+  document.getElementById("aiConfigView").classList.remove("hidden");
+  document.getElementById("aiConfigError").classList.add("hidden");
+}
+
+async function loadAvailableIndexers(){
+  const el = document.getElementById("aiBrowseList");
+  el.innerHTML = `<div class="px-5 py-8 text-center text-gray-600 text-sm">Loading…</div>`;
+  const r = await fetch("/api/admin/indexers/available", {headers: authHeader()});
+  if(!r.ok){
+    el.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Could not reach Jackett.</div>`;
+    return;
+  }
+  const {indexers} = await r.json();
+  availableIndexers = indexers || [];
+  document.getElementById("aiSearch").value = "";
+  renderIndexerList(availableIndexers);
+}
+
+function filterIndexers(q){
+  const lower = q.toLowerCase();
+  renderIndexerList(availableIndexers.filter(ix =>
+    (ix.name||ix.id).toLowerCase().includes(lower) ||
+    (ix.description||"").toLowerCase().includes(lower)
+  ));
+}
+
+function renderIndexerList(list){
+  const el = document.getElementById("aiBrowseList");
+  if(!list.length){
+    el.innerHTML = `<div class="px-5 py-8 text-center text-gray-600 text-sm">No indexers found.</div>`;
+    return;
+  }
+  el.innerHTML = list.map(ix=>`
+    <div class="flex items-center justify-between px-5 py-3.5 gap-3 cursor-pointer hover:bg-gray-800 transition-colors"
+         onclick="selectIndexer('${escHtml(ix.id)}')">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="text-sm font-bold text-gray-200">${escHtml(ix.name||ix.id)}</span>
+          <span class="text-[10px] font-bold uppercase tracking-wide px-1.5 py-0.5
+            ${ix.type==='public'?'text-green-400 bg-green-950':'text-yellow-400 bg-yellow-950'}">
+            ${escHtml(ix.type||"public")}
+          </span>
+        </div>
+        ${ix.description?`<div class="text-xs text-gray-600 mt-0.5 truncate">${escHtml(ix.description)}</div>`:''}
+      </div>
+      <span class="text-gray-600 flex-shrink-0">›</span>
+    </div>`).join("");
+}
+
+async function selectIndexer(id){
+  const indexer = availableIndexers.find(ix=>ix.id===id) || {id, name:id, type:"public"};
+  currentIndexerId = id;
+  showIndexerConfigView(indexer);
+
+  const fieldsEl = document.getElementById("aiConfigFields");
+  const saveBtn = document.getElementById("aiSaveBtn");
+  fieldsEl.innerHTML = `<div class="py-4 text-center text-gray-600 text-sm">Loading configuration…</div>`;
+  saveBtn.disabled = true;
+
+  const r = await fetch(`/api/admin/indexers/${encodeURIComponent(id)}/config`, {headers: authHeader()});
+  if(!r.ok){
+    fieldsEl.innerHTML = `<div class="py-4 text-center text-red-400 text-sm">Failed to load configuration.</div>`;
+    return;
+  }
+  const {config} = await r.json();
+  currentIndexerConfig = config || [];
+  renderConfigFields(currentIndexerConfig);
+  saveBtn.disabled = false;
+}
+
+const DISPLAY_ONLY_TYPES = ["displayimage","hiddendata","alternativesitelinks"];
+
+function renderConfigFields(config){
+  const el = document.getElementById("aiConfigFields");
+  const fields = config.filter(f=>!DISPLAY_ONLY_TYPES.includes(f.type));
+  if(!fields.length){
+    el.innerHTML = `<div class="py-4 text-center text-gray-500 text-sm">No configuration required — click Add Indexer to proceed.</div>`;
+    return;
+  }
+  el.innerHTML = fields.map(f=>renderConfigField(f)).join("");
+}
+
+function renderConfigField(f){
+  const fid = `aicf-${f.id}`;
+  const label = `<label for="${fid}" class="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1">${escHtml(f.name)}</label>`;
+  if(f.type==="displayinfo"){
+    return `<div>${label}<div class="text-xs text-gray-500 border border-gray-800 px-3 py-2">${f.value||""}</div></div>`;
+  }
+  if(f.type==="inputbool"){
+    return `<div class="flex items-center gap-3">
+      <input id="${fid}" data-field-id="${escHtml(f.id)}" type="checkbox" ${f.value?"checked":""}
+        class="w-4 h-4 accent-indigo-500"/>
+      <label for="${fid}" class="text-sm text-gray-300">${escHtml(f.name)}</label>
+    </div>`;
+  }
+  if(f.type==="inputselect"){
+    const opts = Object.entries(f.options||{}).map(([val,lbl])=>
+      `<option value="${escHtml(val)}"${f.value===val?" selected":""}>${escHtml(lbl)}</option>`
+    ).join("");
+    return `<div>${label}<select id="${fid}" data-field-id="${escHtml(f.id)}"
+      class="w-full bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500
+             px-3 py-2.5 text-sm focus:outline-none transition-colors">${opts}</select></div>`;
+  }
+  const inputType = f.type==="password" ? "password" : "text";
+  const val = f.value!=null ? escHtml(String(f.value)) : "";
+  return `<div>${label}<input id="${fid}" data-field-id="${escHtml(f.id)}" type="${inputType}" value="${val}"
+    class="w-full bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500
+           px-3 py-2.5 text-sm font-mono focus:outline-none transition-colors"/></div>`;
+}
+
+async function saveIndexerConfig(){
+  if(!currentIndexerId) return;
+  const btn = document.getElementById("aiSaveBtn");
+  const errEl = document.getElementById("aiConfigError");
+  btn.disabled = true;
+  btn.textContent = "Adding…";
+  errEl.classList.add("hidden");
+
+  const values = {};
+  document.querySelectorAll("#aiConfigFields [data-field-id]").forEach(el=>{
+    values[el.dataset.fieldId] = el.type==="checkbox" ? el.checked : el.value;
+  });
+
+  const updatedConfig = currentIndexerConfig.map(f=>({
+    ...f, value: f.id in values ? values[f.id] : f.value
+  }));
+
+  const r = await fetch(`/api/admin/indexers/${encodeURIComponent(currentIndexerId)}/config`,{
+    method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+    body: JSON.stringify(updatedConfig),
+  });
+
+  btn.disabled = false;
+  btn.textContent = "Add Indexer";
+
+  if(r.ok){
+    closeAddIndexer();
+    showToast(`Added ${currentIndexerId}.`);
+    loadIndexers();
+  } else {
+    const d = await r.json().catch(()=>({}));
+    errEl.textContent = d.detail || "Failed to add indexer.";
+    errEl.classList.remove("hidden");
   }
 }
 

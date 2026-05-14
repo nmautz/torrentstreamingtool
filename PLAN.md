@@ -88,7 +88,7 @@
 - [x] **6.1** Admin Dashboard: password-protected `/admin` panel (HTTPS needed, flag it)
 - [x] **6.2** Content Lock: "admin-only" flag on library items, hidden from standard profiles
 - [x] **6.3** Profile PINs: optional 4-digit PIN per profile, prompted before access
-- [x] **6.4** Indexer Management: admin UI to view/add/remove Jackett indexers without editing `.env`
+- [/] **6.4** Indexer Management: admin UI to view/add/remove Jackett indexers without editing `.env`
 
 ---
 
