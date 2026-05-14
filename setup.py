@@ -145,6 +145,130 @@ def chromaprint_install_hint() -> str:
     return "install ffmpeg and chromaprint via your package manager"
 
 
+# ── Portable binary download (Windows fallback) ───────────────────────────
+TOOLS_DIR = HERE / "tools"
+FFMPEG_WIN_URL  = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.zip"
+FPCALC_WIN_URL  = "https://github.com/acoustid/chromaprint/releases/download/v1.5.1/chromaprint-fpcalc-1.5.1-windows-x86_64.zip"
+FPCALC_LINUX_URL = "https://github.com/acoustid/chromaprint/releases/download/v1.5.1/chromaprint-fpcalc-1.5.1-linux-x86_64.tar.gz"
+FPCALC_MAC_URL   = "https://github.com/acoustid/chromaprint/releases/download/v1.5.1/chromaprint-fpcalc-1.5.1-macos-x86_64.tar.gz"
+
+
+def _download_with_progress(url: str, dest: Path) -> bool:
+    """Download a URL to dest with a simple progress bar. Returns True on success."""
+    import urllib.request
+    try:
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        note(f"Downloading {url.rsplit('/', 1)[-1]} …")
+        last_pct = [-1]
+        def _hook(blocks, blocksize, total):
+            if total <= 0 or not _TTY:
+                return
+            done = blocks * blocksize
+            pct = min(100, int(done / total * 100))
+            if pct != last_pct[0]:
+                last_pct[0] = pct
+                bar = "█" * (pct // 4) + "░" * (25 - pct // 4)
+                sys.stdout.write(f"\r     [{bar}] {pct}%")
+                sys.stdout.flush()
+        urllib.request.urlretrieve(url, dest, reporthook=_hook)
+        if _TTY:
+            sys.stdout.write("\r" + " " * 50 + "\r")
+            sys.stdout.flush()
+        return True
+    except Exception as e:
+        warn(f"Download failed: {e}")
+        return False
+
+
+def _extract_archive(archive: Path, dest_dir: Path) -> bool:
+    """Extract .zip or .tar.gz to dest_dir. Returns True on success."""
+    import zipfile, tarfile
+    try:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        if archive.suffix == ".zip":
+            with zipfile.ZipFile(archive) as zf:
+                zf.extractall(dest_dir)
+        elif archive.name.endswith(".tar.gz") or archive.suffix == ".gz":
+            with tarfile.open(archive, "r:gz") as tf:
+                tf.extractall(dest_dir)
+        else:
+            warn(f"Unknown archive type: {archive.name}")
+            return False
+        return True
+    except Exception as e:
+        warn(f"Extraction failed: {e}")
+        return False
+
+
+def _find_in_tree(root: Path, names: list[str]) -> Optional[str]:
+    """Walk a directory tree and return the first matching exe path."""
+    for p in root.rglob("*"):
+        if p.is_file() and p.name.lower() in [n.lower() for n in names]:
+            return str(p)
+    return None
+
+
+def _portable_install_windows() -> dict:
+    """Download ffmpeg + fpcalc zips and extract under ./tools/.
+
+    Returns {"ffmpeg": path or None, "fpcalc": path or None}.
+    """
+    result: dict = {"ffmpeg": None, "fpcalc": None}
+    TOOLS_DIR.mkdir(exist_ok=True)
+    tmp_zip = TOOLS_DIR / "_dl.zip"
+
+    # ── ffmpeg ─────────────────────────────────────────────────────────────
+    ff_dir = TOOLS_DIR / "ffmpeg"
+    if _download_with_progress(FFMPEG_WIN_URL, tmp_zip):
+        if _extract_archive(tmp_zip, ff_dir):
+            ff_path = _find_in_tree(ff_dir, ["ffmpeg.exe"])
+            if ff_path:
+                result["ffmpeg"] = ff_path
+                ok(f"ffmpeg.exe → {ff_path}")
+            else:
+                warn("ffmpeg.exe not found inside the extracted archive.")
+        tmp_zip.unlink(missing_ok=True)
+
+    # ── fpcalc ─────────────────────────────────────────────────────────────
+    fp_dir = TOOLS_DIR / "chromaprint"
+    if _download_with_progress(FPCALC_WIN_URL, tmp_zip):
+        if _extract_archive(tmp_zip, fp_dir):
+            fp_path = _find_in_tree(fp_dir, ["fpcalc.exe"])
+            if fp_path:
+                result["fpcalc"] = fp_path
+                ok(f"fpcalc.exe → {fp_path}")
+            else:
+                warn("fpcalc.exe not found inside the extracted archive.")
+        tmp_zip.unlink(missing_ok=True)
+
+    return result
+
+
+def _portable_install_unix(system: str) -> dict:
+    """Linux/macOS fallback when no package manager is available. fpcalc only —
+    ffmpeg static builds are too platform-fragmented to download reliably."""
+    result: dict = {"ffmpeg": None, "fpcalc": None}
+    TOOLS_DIR.mkdir(exist_ok=True)
+    tmp_tar = TOOLS_DIR / "_dl.tar.gz"
+
+    url = FPCALC_LINUX_URL if system == "Linux" else FPCALC_MAC_URL
+    fp_dir = TOOLS_DIR / "chromaprint"
+    if _download_with_progress(url, tmp_tar):
+        if _extract_archive(tmp_tar, fp_dir):
+            fp_path = _find_in_tree(fp_dir, ["fpcalc"])
+            if fp_path:
+                # Ensure it's executable on Unix
+                try:
+                    os.chmod(fp_path, 0o755)
+                except OSError:
+                    pass
+                result["fpcalc"] = fp_path
+                ok(f"fpcalc → {fp_path}")
+        tmp_tar.unlink(missing_ok=True)
+
+    return result
+
+
 # ── Auto-install ffmpeg + chromaprint (Smart Skip deps) ────────────────────
 def install_smart_skip_deps(tools: dict) -> dict:
     """Offer to install ffmpeg/fpcalc via the host's package manager.
@@ -205,34 +329,26 @@ def install_smart_skip_deps(tools: dict) -> dict:
             return tools
 
     elif SYSTEM == "Windows":
-        winget = find_exe("winget", r"C:\Windows\System32\winget.exe")
-        if not winget:
-            warn("winget not available — manual install required.")
-            note(f"Install: {chromaprint_install_hint()}")
-            return tools
-        if not ask_bool("Run winget to install ffmpeg + chromaprint?", default=True):
+        # Skip winget entirely — it's flaky on stock Windows installs.  Just
+        # download the official portable zips for ffmpeg + chromaprint.
+        if not ask_bool("Download portable ffmpeg.exe + fpcalc.exe into ./tools/ (~85 MB total)?",
+                        default=True):
             note(f"Skipped. Install later with: {chromaprint_install_hint()}")
             return tools
-        note("Running winget install …")
-        try:
-            if not tools.get("ffmpeg"):
-                subprocess.run([winget, "install", "--silent",
-                                "--accept-package-agreements", "--accept-source-agreements",
-                                "Gyan.FFmpeg"], check=True)
-            if not tools.get("fpcalc"):
-                subprocess.run([winget, "install", "--silent",
-                                "--accept-package-agreements", "--accept-source-agreements",
-                                "AcoustID.Chromaprint"], check=False)
-        except subprocess.CalledProcessError as e:
-            warn(f"winget install failed (exit {e.returncode})")
-            note(f"Install manually: {chromaprint_install_hint()}")
-            return tools
+        portable = _portable_install_windows()
+        refreshed = dict(tools)
+        if portable.get("ffmpeg"): refreshed["ffmpeg"] = portable["ffmpeg"]
+        if portable.get("fpcalc"): refreshed["fpcalc"] = portable["fpcalc"]
+        if not refreshed.get("ffmpeg") or not refreshed.get("fpcalc"):
+            warn("Portable install did not produce both binaries.")
+            note(f"Install manually if Smart Skip is needed: {chromaprint_install_hint()}")
+        return refreshed
     else:
         warn(f"Auto-install not implemented for {SYSTEM}.")
         note(f"Install manually: {chromaprint_install_hint()}")
         return tools
 
-    # Re-detect after install
+    # Re-detect after install (package-manager path on Darwin / Linux)
     refreshed = dict(tools)
     refreshed["ffmpeg"] = find_exe(*ffmpeg_candidates())
     refreshed["fpcalc"] = find_exe(*fpcalc_candidates())
@@ -244,6 +360,14 @@ def install_smart_skip_deps(tools: dict) -> dict:
         ok(f"fpcalc: {refreshed['fpcalc']}")
     else:
         warn("fpcalc still not found after install — check PATH")
+
+    # Last-resort: portable fpcalc download on Unix if package manager didn't
+    # provide it (some distros lack a libchromaprint-tools package).
+    if not refreshed.get("fpcalc") and SYSTEM in ("Linux", "Darwin"):
+        if ask_bool("Download portable fpcalc into ./tools/ as a fallback?", default=True):
+            portable = _portable_install_unix(SYSTEM)
+            if portable.get("fpcalc"):
+                refreshed["fpcalc"] = portable["fpcalc"]
     return refreshed
 
 

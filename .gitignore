@@ -29,3 +29,6 @@ library.json
 # Logs
 *.log
 uvicorn*.log
+
+# Portable Smart Skip binaries downloaded by setup.py
+tools/
