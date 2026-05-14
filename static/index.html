@@ -448,15 +448,25 @@
     <div id="epList" class="flex-1 overflow-y-auto px-3 py-2"></div>
 
     <!-- Footer -->
-    <div class="px-4 pb-4 safe-bottom pt-3 border-t border-gray-800 flex-shrink-0 flex gap-2">
-      <button onclick="closeEpisodeModal()"
-        class="flex-1 bg-gray-800 hover:bg-gray-700 py-4 text-sm font-bold uppercase tracking-wide transition-colors min-h-[52px]">
-        Cancel
-      </button>
-      <button onclick="epPlay()"
-        class="flex-1 bg-indigo-600 hover:bg-indigo-500 py-4 text-sm font-black uppercase tracking-wide transition-colors min-h-[52px]">
-        ▶ Play (<span id="epSelectedCount">0</span>)
-      </button>
+    <div class="px-4 pb-4 safe-bottom pt-3 border-t border-gray-800 flex-shrink-0 flex flex-col gap-2">
+      <div class="flex gap-2">
+        <button onclick="closeEpisodeModal()"
+          class="flex-1 bg-gray-800 hover:bg-gray-700 py-3 text-sm font-bold uppercase tracking-wide transition-colors min-h-[44px]">
+          Cancel
+        </button>
+        <button onclick="epDownloadSelected()"
+          class="flex-1 bg-gray-800 hover:bg-indigo-900/60 text-gray-400 hover:text-indigo-300 py-3 text-sm font-bold uppercase tracking-wide transition-colors min-h-[44px] flex items-center justify-center gap-1.5">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+          </svg>
+          Download (<span id="epSelectedCount">0</span>)
+        </button>
+        <button onclick="epPlay()"
+          class="flex-1 bg-indigo-600 hover:bg-indigo-500 py-3 text-sm font-black uppercase tracking-wide transition-colors min-h-[44px]">
+          ▶ Play
+        </button>
+      </div>
     </div>
   </div>
 </div>
@@ -1713,7 +1723,7 @@ function renderLibrary(items){
       if(isReady){
         if(isMulti){
           const contLabel=hasProgress?`↩ Resume ${Math.round(pct)}%`:`▶ Play All`;
-          buttons+=`<button onclick="openEpisodePicker('${item.id}')"
+          buttons+=`<button onclick="openEpisodePicker('${item.id}',${escHtml(JSON.stringify(item.title))})"
             class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white
                    flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
             ☰ Episodes
@@ -1743,16 +1753,27 @@ function renderLibrary(items){
         }
       }
 
-      // Download button — single-file ready items only (multi-file handled per-file in episode picker)
-      if(isReady && !isMulti){
-        buttons+=`<a href="/api/library/${item.id}/download" download
-          class="text-gray-500 hover:text-indigo-300 p-2.5 hover:bg-indigo-950/40 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0"
-          title="Download to device">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-              d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
-          </svg>
-        </a>`;
+      // Download button — single file uses direct link; multi-file uses ZIP endpoint
+      if(isReady){
+        if(isMulti){
+          buttons+=`<button onclick="epDownloadAll('${item.id}',${escHtml(JSON.stringify(item.title))})"
+            class="text-gray-500 hover:text-indigo-300 p-2.5 hover:bg-indigo-950/40 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0"
+            title="Download all to device (ZIP)">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+            </svg>
+          </button>`;
+        } else {
+          buttons+=`<a href="/api/library/${item.id}/download" download
+            class="text-gray-500 hover:text-indigo-300 p-2.5 hover:bg-indigo-950/40 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0"
+            title="Download to device">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+            </svg>
+          </a>`;
+        }
       }
 
       // Delete button (fixed width, doesn't flex-grow)
@@ -2072,10 +2093,11 @@ async function boostSelected(itemId){
 }
 
 // ── Episode Picker ─────────────────────────────────────────────────────────
-async function openEpisodePicker(itemId){
+async function openEpisodePicker(itemId, title){
   epItemId=itemId;
   epFiles=[]; epChecked=new Set();
   document.getElementById("episodeModal").classList.remove("hidden");
+  document.getElementById("epModalTitle").textContent=title||"Select Episodes";
   document.getElementById("epList").innerHTML=`<p class="text-gray-600 text-sm text-center py-8">Loading…</p>`;
 
   const pid=profile.id?`?profile_id=${profile.id}`:"";
@@ -2099,6 +2121,7 @@ async function openEpisodePicker(itemId){
 
 function closeEpisodeModal(){
   document.getElementById("episodeModal").classList.add("hidden");
+  document.getElementById("epModalTitle").textContent="Select Episodes";
   epItemId=null; epFiles=[]; epChecked=new Set();
 }
 
@@ -2116,7 +2139,20 @@ function renderEpList(){
 
   let html="";
   seasons.forEach((files,season)=>{
-    if(season>0) html+=`<div class="px-1 pt-3 pb-1 text-xs font-black text-gray-600 uppercase tracking-widest border-l-2 border-indigo-800 pl-2">Season ${season}</div>`;
+    if(season>0){
+      html+=`<div class="px-1 pt-3 pb-1 flex items-center justify-between gap-2" data-season="${season}">
+        <span class="text-xs font-black text-gray-600 uppercase tracking-widest border-l-2 border-indigo-800 pl-2">Season ${season}</span>
+        <button onclick="epDownloadSeason(${season})"
+          class="text-[11px] text-gray-600 hover:text-indigo-300 hover:bg-indigo-950/40 px-2 py-1 flex items-center gap-1 transition-colors"
+          title="Download Season ${season} to device">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+          </svg>
+          Season ${season}
+        </button>
+      </div>`;
+    }
 
     files.forEach(f=>{
       const epIdx=epFiles.indexOf(f); // global index — safe to embed as a number
@@ -2196,6 +2232,73 @@ function epSelectUnwatched(){
   epFiles.forEach(f=>{ if(!f.progress?.completed) epChecked.add(f.path); });
   document.querySelectorAll(".ep-check").forEach(cb=>{ cb.checked=epChecked.has(cb.dataset.path); });
   updateEpCount();
+}
+
+// ── Download helpers ───────────────────────────────────────────────────────
+
+async function _triggerZipDownload(itemId, filePaths, label){
+  showAlert(`Preparing ZIP for "${label}"…`,"success");
+  try {
+    const r=await fetch(`/api/library/${itemId}/download-zip`,{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({file_paths:filePaths}),
+    });
+    if(!r.ok){
+      const e=await r.json().catch(()=>({detail:"Failed."}));
+      showAlert(e.detail||"ZIP download failed.","error"); return;
+    }
+    const blob=await r.blob();
+    const url=URL.createObjectURL(blob);
+    const a=document.createElement("a");
+    const cd=r.headers.get("Content-Disposition")||"";
+    const m=cd.match(/filename="([^"]+)"/);
+    a.href=url; a.download=m?m[1]:`${label}.zip`;
+    document.body.appendChild(a); a.click();
+    setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); },1000);
+    showAlert(`Download started.`,"success");
+  } catch(e){
+    showAlert("ZIP download failed.","error");
+  }
+}
+
+function epDownloadSelected(){
+  if(!epChecked.size){ showAlert("Select at least one episode.","warn"); return; }
+  if(!epItemId) return;
+  const paths=[...epChecked];
+  if(paths.length===1){
+    const f=epFiles.find(fi=>fi.path===paths[0]);
+    if(f){
+      const a=document.createElement("a");
+      a.href=`/api/library/${epItemId}/download?file_path=${encodeURIComponent(f.path)}`;
+      a.download=f.name; document.body.appendChild(a); a.click(); a.remove(); return;
+    }
+  }
+  const label=document.getElementById("epModalTitle")?.textContent||"download";
+  _triggerZipDownload(epItemId, paths, label);
+}
+
+function epDownloadPaths(paths, label){
+  if(!epItemId) return;
+  if(paths.length===1){
+    const f=epFiles.find(fi=>fi.path===paths[0]);
+    if(f){
+      const a=document.createElement("a");
+      a.href=`/api/library/${epItemId}/download?file_path=${encodeURIComponent(f.path)}`;
+      a.download=f.name; document.body.appendChild(a); a.click(); a.remove(); return;
+    }
+  }
+  _triggerZipDownload(epItemId, paths, label);
+}
+
+function epDownloadSeason(season){
+  if(!epItemId) return;
+  const paths=epFiles.filter(f=>f.season===season).map(f=>f.path);
+  const title=document.getElementById("epModalTitle")?.textContent||"download";
+  epDownloadPaths(paths, `${title} Season ${season}`);
+}
+
+function epDownloadAll(itemId, title){
+  _triggerZipDownload(itemId, [], title||"download");
 }
 
 async function epMarkWatched(watched){

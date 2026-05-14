@@ -3,15 +3,19 @@
 import asyncio
 import base64
 import hashlib
+import io
 import json
+import os
 import platform
 import re
 import secrets
 import shutil
 import socket
 import subprocess
+import threading
 import time
 import uuid
+import zipfile
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -2454,6 +2458,65 @@ async def download_library_file(item_id: str, file_path: str = "") -> FileRespon
         path=str(path),
         filename=path.name,
         media_type="application/octet-stream",
+    )
+
+
+class ZipDownloadReq(BaseModel):
+    file_paths: list[str] = []   # empty = all files in item
+
+
+@app.post("/api/library/{item_id}/download-zip")
+async def download_library_zip(item_id: str, req: ZipDownloadReq) -> StreamingResponse:
+    """Stream a ZIP of selected (or all) library files to the browser.
+
+    Uses a pipe so the ZIP is streamed without buffering entire video files in memory.
+    ZIP_STORED is used — video files are already compressed.
+    """
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+
+    all_files = item.get("files", [])
+    if req.file_paths:
+        valid_paths = {f["path"] for f in all_files}
+        targets = [p for p in req.file_paths if p in valid_paths and Path(p).exists()]
+    else:
+        targets = [f["path"] for f in all_files if Path(f["path"]).exists()]
+
+    if not targets:
+        raise HTTPException(404, "No files available for download.")
+
+    zip_name = re.sub(r'[\\/*?:"<>|]', "_", item["title"]) + ".zip"
+
+    r_fd, w_fd = os.pipe()
+
+    def _write_zip() -> None:
+        try:
+            with os.fdopen(w_fd, "wb") as wf, zipfile.ZipFile(wf, "w", zipfile.ZIP_STORED) as zf:
+                for path_str in targets:
+                    p = Path(path_str)
+                    zf.write(str(p), p.name)
+        except Exception:
+            pass  # reader will get EOF; any partial data is discarded by the browser
+
+    threading.Thread(target=_write_zip, daemon=True).start()
+
+    async def _read_pipe() -> AsyncGenerator[bytes, None]:
+        rf = os.fdopen(r_fd, "rb")
+        try:
+            while True:
+                chunk = await asyncio.to_thread(rf.read, 65536)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            rf.close()
+
+    return StreamingResponse(
+        _read_pipe(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{zip_name}"'},
     )
 
 
