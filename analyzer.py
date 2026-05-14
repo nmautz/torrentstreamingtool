@@ -1,0 +1,473 @@
+"""Smart Skip — audio fingerprinting for intro/credits detection.
+
+Uses ffmpeg (audio decode) + chromaprint/fpcalc (fingerprinting) to find audio
+segments that repeat across episodes of a series. The repeating segment near
+the start of each file is the intro; the one near the end (if present) is the
+credits/outro. Falls back to ffmpeg blackdetect + a 92% heuristic when
+chromaprint cannot find a clean repeating outro.
+
+All blocking work runs in threads (asyncio.to_thread). The orchestrator runs
+one series at a time, with a per-series asyncio.Lock to prevent re-entry.
+"""
+from __future__ import annotations
+
+import asyncio
+import os
+import re
+import shutil
+import subprocess
+from pathlib import Path
+from typing import Optional
+
+ANALYZER_VERSION = 1
+
+# Chromaprint emits ~7.8 fingerprint frames per second (8192 samples @ 11025 Hz).
+# Each frame is one 32-bit integer.
+FP_FRAMES_PER_SEC = 7.8
+
+# Search windows
+INTRO_SEARCH_SECS = 360       # look for intro in first 6 minutes
+OUTRO_SEARCH_SECS = 600       # look for outro/credits in last 10 minutes
+MIN_INTRO_SEC     = 15        # smallest segment we'll call an intro
+MAX_INTRO_SEC     = 180       # cap to avoid runaway matches
+MIN_OUTRO_SEC     = 15
+MAX_OUTRO_SEC     = 180
+
+# Matching thresholds
+FRAME_HAMMING_MAX = 6         # ≤6 bits differ = "same" frame (32-bit hash)
+MIN_MATCH_FRAMES  = int(MIN_INTRO_SEC * FP_FRAMES_PER_SEC)
+CREDITS_FALLBACK_PCT = 0.92   # if no outro found, mark credits at 92%
+
+
+def _env_bin(env_key: str) -> Optional[str]:
+    """Read a binary path from the .env file. Falls back to PATH lookup."""
+    env_file = Path(__file__).parent / ".env"
+    if env_file.exists():
+        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line.startswith(f"{env_key}="):
+                val = line.split("=", 1)[1].strip()
+                if val and Path(val).exists():
+                    return val
+    return shutil.which(env_key.replace("_BIN", "").replace("_", "").lower())
+
+
+def fpcalc_bin() -> Optional[str]:
+    return _env_bin("_FPCALC_BIN") or shutil.which("fpcalc")
+
+
+def ffmpeg_bin() -> Optional[str]:
+    return _env_bin("_FFMPEG_BIN") or shutil.which("ffmpeg")
+
+
+def is_available() -> bool:
+    return bool(fpcalc_bin() and ffmpeg_bin())
+
+
+# ── Fingerprinting ───────────────────────────────────────────────────────────
+
+def _fpcalc_raw(file_path: str, length_sec: int, start_sec: int = 0) -> list[int]:
+    """Run fpcalc and return the raw fingerprint as a list of 32-bit ints.
+
+    Uses -raw to get the integer sequence directly. The first FP_FRAMES_PER_SEC
+    integers correspond to roughly the first second of audio.
+
+    fpcalc has a -ts flag for seeking; for chunks that don't start at 0 we
+    pre-decode with ffmpeg and pipe WAV to stdin (fpcalc accepts `-` as a
+    pseudo-path on most builds, but piping via ffmpeg is more portable).
+    """
+    binp = fpcalc_bin()
+    if not binp:
+        return []
+    if start_sec <= 0:
+        proc = subprocess.run(
+            [binp, "-raw", "-length", str(length_sec), file_path],
+            capture_output=True, text=True, timeout=120,
+        )
+    else:
+        ff = ffmpeg_bin()
+        if not ff:
+            return []
+        # Pipe a mono 11025 Hz WAV chunk through ffmpeg → fpcalc on stdin
+        ff_proc = subprocess.Popen(
+            [ff, "-loglevel", "error", "-ss", str(start_sec), "-t", str(length_sec),
+             "-i", file_path, "-ac", "1", "-ar", "11025", "-f", "wav", "pipe:1"],
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+        )
+        proc = subprocess.run(
+            [binp, "-raw", "-length", str(length_sec), "-"],
+            input=ff_proc.stdout.read() if ff_proc.stdout else b"",
+            capture_output=True, timeout=120,
+        )
+        ff_proc.wait(timeout=10)
+        proc = subprocess.CompletedProcess(
+            proc.args, proc.returncode,
+            stdout=proc.stdout.decode("utf-8", errors="replace") if proc.stdout else "",
+            stderr=proc.stderr.decode("utf-8", errors="replace") if proc.stderr else "",
+        )
+
+    if proc.returncode != 0:
+        return []
+    fp_line = ""
+    for line in proc.stdout.splitlines():
+        if line.startswith("FINGERPRINT="):
+            fp_line = line[len("FINGERPRINT="):].strip()
+            break
+    if not fp_line:
+        return []
+    try:
+        return [int(x) for x in fp_line.split(",") if x]
+    except ValueError:
+        return []
+
+
+def _media_duration(file_path: str) -> Optional[float]:
+    """Return duration in seconds via ffprobe (shipped with ffmpeg)."""
+    ff = ffmpeg_bin()
+    if not ff:
+        return None
+    ffprobe = ff.replace("ffmpeg", "ffprobe") if "ffmpeg" in ff else None
+    if not ffprobe or not Path(ffprobe).exists():
+        ffprobe = shutil.which("ffprobe")
+    if not ffprobe:
+        # Fall back to parsing ffmpeg's stderr
+        proc = subprocess.run(
+            [ff, "-i", file_path], capture_output=True, text=True, timeout=15,
+        )
+        m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", proc.stderr)
+        if m:
+            h, mn, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
+            return h * 3600 + mn * 60 + s
+        return None
+    proc = subprocess.run(
+        [ffprobe, "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", file_path],
+        capture_output=True, text=True, timeout=15,
+    )
+    try:
+        return float(proc.stdout.strip())
+    except (ValueError, TypeError):
+        return None
+
+
+# ── Matching algorithm ───────────────────────────────────────────────────────
+
+def _popcount32(x: int) -> int:
+    return bin(x & 0xFFFFFFFF).count("1")
+
+
+def _find_longest_match(fp_a: list[int], fp_b: list[int],
+                        min_frames: int, max_frames: int) -> Optional[tuple[int, int, int]]:
+    """Find the longest run of approximately-matching frames between two fingerprints.
+
+    Returns (offset_a, offset_b, length_frames) — the start positions in each
+    fingerprint and how many frames matched. Returns None if no run >= min_frames.
+
+    Uses a sliding alignment: for each offset d = -W..W between the two
+    sequences, scan and find the longest consecutive run where Hamming
+    distance per frame <= FRAME_HAMMING_MAX. This is O(N^2) over a bounded
+    window; for ~6 minutes at 7.8 fps that's ~3000^2 = 9M ops, ~1s in C and
+    ~10-20s in pure Python. Acceptable for a background task.
+    """
+    if not fp_a or not fp_b:
+        return None
+
+    best: Optional[tuple[int, int, int]] = None
+
+    # Search alignments within ±half the shorter fingerprint
+    max_shift = min(len(fp_a), len(fp_b)) - min_frames
+    if max_shift < 1:
+        return None
+
+    for shift in range(-max_shift, max_shift + 1):
+        if shift >= 0:
+            i_start, j_start = shift, 0
+        else:
+            i_start, j_start = 0, -shift
+        run_len = 0
+        run_i = i_start
+        run_j = j_start
+        i, j = i_start, j_start
+        while i < len(fp_a) and j < len(fp_b):
+            if _popcount32(fp_a[i] ^ fp_b[j]) <= FRAME_HAMMING_MAX:
+                run_len += 1
+                if run_len >= min_frames and (best is None or run_len > best[2]):
+                    # Capture the running match window
+                    best = (i - run_len + 1, j - run_len + 1, run_len)
+            else:
+                run_len = 0
+                run_i = i + 1
+                run_j = j + 1
+            i += 1
+            j += 1
+            if run_len >= max_frames:
+                break
+
+    return best
+
+
+def _intersect_match(matches: list[tuple[int, int, int]],
+                     min_frames: int) -> Optional[tuple[int, int]]:
+    """Given per-pair matches with the same anchor file, return (start, length)
+    of the intersection. Each tuple is (offset_in_anchor, _, length)."""
+    if not matches:
+        return None
+    starts = [m[0] for m in matches]
+    ends   = [m[0] + m[2] for m in matches]
+    s = max(starts)
+    e = min(ends)
+    if e - s >= min_frames:
+        return (s, e - s)
+    return None
+
+
+# ── Public API ───────────────────────────────────────────────────────────────
+
+def frames_to_seconds(frames: int) -> float:
+    return frames / FP_FRAMES_PER_SEC
+
+
+def _detect_blackframe(file_path: str, start_at_sec: float,
+                       scan_duration_sec: float = 300.0) -> Optional[float]:
+    """Use ffmpeg blackdetect to find the first long black segment after start_at_sec.
+
+    Scans at most scan_duration_sec of video (default 5 minutes) — long enough
+    to catch the credits transition on virtually any show but short enough that
+    a single episode finishes in seconds, not minutes. Decoding the full tail
+    of a long episode here is what made the analyzer appear to hang at 100%.
+
+    Returns absolute seconds at which the credits/black-fade begins, or None.
+    """
+    ff = ffmpeg_bin()
+    if not ff:
+        return None
+    # Two-pass strategy: keyframes-only first (~1-2s per episode) for the
+    # common case where credits start with a clear black fade aligned to a
+    # keyframe boundary. If that misses, fall back to a full-decode pass at
+    # 4 fps which is ~10x faster than realtime decode.
+    proc = subprocess.run(
+        [ff, "-skip_frame", "nokey",
+         "-ss", str(int(start_at_sec)), "-t", str(int(scan_duration_sec)),
+         "-i", file_path,
+         "-vf", "scale=64:-2,blackdetect=d=0.2:pix_th=0.10",
+         "-an", "-sn", "-f", "null", "-"],
+        capture_output=True, text=True, timeout=120,
+    )
+    matches = re.findall(r"black_start:(\d+(?:\.\d+)?)\s+black_end:(\d+(?:\.\d+)?)", proc.stderr)
+    if not matches:
+        proc = subprocess.run(
+            [ff, "-ss", str(int(start_at_sec)), "-t", str(int(scan_duration_sec)),
+             "-i", file_path,
+             "-vf", "scale=64:-2,fps=4,blackdetect=d=0.4:pix_th=0.10",
+             "-an", "-sn", "-f", "null", "-"],
+            capture_output=True, text=True, timeout=120,
+        )
+    # ffmpeg prints lines like:  [blackdetect @ 0x..] black_start:120.5 black_end:122.0 black_duration:1.5
+    matches = re.findall(r"black_start:(\d+(?:\.\d+)?)\s+black_end:(\d+(?:\.\d+)?)", proc.stderr)
+    if not matches:
+        return None
+    # First substantial black segment past start_at_sec is our credits start
+    for m in matches:
+        bs = float(m[0]) + start_at_sec
+        return bs
+    return None
+
+
+async def analyze_series(items: list[dict], progress_cb=None) -> dict:
+    """Analyze a series of items, returning per-file intro/credits ranges.
+
+    Input: a list of library items belonging to the same series, each with a
+    "files" list of dicts containing "path".
+
+    Output: a dict keyed by absolute file path:
+        { path: {"intro": {"start": s, "end": s}, "credits_start": s,
+                 "analysis": {"version": N, "source": "auto"}} }
+
+    Only paths that exist on disk and have at least one peer episode in the
+    same series are analyzed. Movies (1 file, no peers) get the 92% credits
+    heuristic only.
+
+    progress_cb is an optional async callable invoked with kwargs:
+        stage:    "fingerprinting" | "matching-intros" | "matching-outros" | "finalizing"
+        current:  int (1-based item being processed)
+        total:    int (total items in this stage)
+        message:  short human-readable string
+        episode_name: optional basename of file being processed
+    """
+    if not is_available():
+        return {}
+
+    async def _emit(**kw):
+        if progress_cb is None:
+            return
+        try:
+            await progress_cb(**kw)
+        except Exception:
+            pass
+
+    # Flatten to a list of (item_idx, file_idx, path, item) tuples
+    episodes: list[dict] = []
+    for item in items:
+        for f in item.get("files", []):
+            path = f.get("path", "")
+            if path and Path(path).exists():
+                episodes.append({"path": path, "item_id": item.get("id", ""), "file": f})
+
+    if len(episodes) < 2:
+        # No peers — return fallback credits only
+        result: dict = {}
+        for idx, ep in enumerate(episodes, start=1):
+            await _emit(stage="finalizing", current=idx, total=len(episodes),
+                        message="No peers — applying credits fallback",
+                        episode_name=Path(ep["path"]).name)
+            dur = await asyncio.to_thread(_media_duration, ep["path"])
+            if dur and dur > 60:
+                result[ep["path"]] = {
+                    "intro": None,
+                    "credits_start": round(dur * CREDITS_FALLBACK_PCT, 1),
+                    "analysis": {"version": ANALYZER_VERSION, "source": "auto-fallback"},
+                }
+        return result
+
+    # Compute fingerprints for the head and tail of each episode in parallel chunks
+    head_fps: list[list[int]] = []
+    tail_fps: list[list[int]] = []
+    durations: list[Optional[float]] = []
+    total_eps = len(episodes)
+
+    for idx, ep in enumerate(episodes, start=1):
+        ep_name = Path(ep["path"]).name
+        await _emit(stage="fingerprinting", current=idx, total=total_eps,
+                    message=f"Fingerprinting episode {idx} of {total_eps}",
+                    episode_name=ep_name)
+        dur = await asyncio.to_thread(_media_duration, ep["path"])
+        durations.append(dur)
+        head = await asyncio.to_thread(_fpcalc_raw, ep["path"], INTRO_SEARCH_SECS, 0)
+        head_fps.append(head)
+
+        if dur and dur > OUTRO_SEARCH_SECS + 60:
+            tail_start = int(dur - OUTRO_SEARCH_SECS)
+            tail = await asyncio.to_thread(_fpcalc_raw, ep["path"], OUTRO_SEARCH_SECS, tail_start)
+        else:
+            tail = []
+        tail_fps.append(tail)
+
+    # ── Intro: pairwise match against anchor (episode 0). Keep a dict
+    # keyed by episode index so failed-match episodes don't shift positions
+    # of later episodes' matches. ─────────────────────────────────────────────
+    intro_match_by_ep: dict[int, tuple[int, int, int]] = {}
+    if head_fps[0]:
+        max_intro_frames = int(MAX_INTRO_SEC * FP_FRAMES_PER_SEC)
+        pair_count = len(episodes) - 1
+        for i in range(1, len(episodes)):
+            await _emit(stage="matching-intros", current=i, total=pair_count,
+                        message=f"Matching intros {i} of {pair_count}",
+                        episode_name=Path(episodes[i]["path"]).name)
+            if not head_fps[i]:
+                continue
+            m = await asyncio.to_thread(
+                _find_longest_match, head_fps[0], head_fps[i],
+                MIN_MATCH_FRAMES, max_intro_frames,
+            )
+            if m:
+                intro_match_by_ep[i] = m
+
+    intro_anchor_range = _intersect_match(list(intro_match_by_ep.values()),
+                                          MIN_MATCH_FRAMES) if intro_match_by_ep else None
+
+    # ── Outro: same shape ────────────────────────────────────────────────────
+    outro_match_by_ep: dict[int, tuple[int, int, int]] = {}
+    if tail_fps and tail_fps[0]:
+        max_outro_frames = int(MAX_OUTRO_SEC * FP_FRAMES_PER_SEC)
+        pair_count = len(episodes) - 1
+        for i in range(1, len(episodes)):
+            await _emit(stage="matching-outros", current=i, total=pair_count,
+                        message=f"Matching credits {i} of {pair_count}",
+                        episode_name=Path(episodes[i]["path"]).name)
+            if not tail_fps[i]:
+                continue
+            m = await asyncio.to_thread(
+                _find_longest_match, tail_fps[0], tail_fps[i],
+                MIN_MATCH_FRAMES, max_outro_frames,
+            )
+            if m:
+                outro_match_by_ep[i] = m
+
+    outro_anchor_range = _intersect_match(list(outro_match_by_ep.values()),
+                                          MIN_MATCH_FRAMES) if outro_match_by_ep else None
+
+    # ── Build per-episode result. The anchor (ep 0) range is canonical.
+    # For other episodes, use the pairwise match position. ─────────────────
+    result: dict = {}
+    for idx, ep in enumerate(episodes):
+        path = ep["path"]
+        dur = durations[idx]
+        ep_name = Path(path).name
+
+        await _emit(stage="finalizing", current=idx + 1, total=total_eps,
+                    message=f"Finalizing episode {idx + 1} of {total_eps}",
+                    episode_name=ep_name)
+
+        intro: Optional[dict] = None
+        if idx == 0 and intro_anchor_range:
+            s_fr, l_fr = intro_anchor_range
+            intro = {
+                "start": round(frames_to_seconds(s_fr), 1),
+                "end":   round(frames_to_seconds(s_fr + l_fr), 1),
+            }
+        elif idx in intro_match_by_ep:
+            _, offset_b, length = intro_match_by_ep[idx]
+            intro = {
+                "start": round(frames_to_seconds(offset_b), 1),
+                "end":   round(frames_to_seconds(offset_b + length), 1),
+            }
+
+        # Credits
+        credits_start: Optional[float] = None
+        source = "auto-fallback"
+        if idx == 0 and outro_anchor_range and dur:
+            s_fr, _ = outro_anchor_range
+            tail_start = dur - OUTRO_SEARCH_SECS
+            credits_start = round(tail_start + frames_to_seconds(s_fr), 1)
+            source = "auto"
+        elif idx in outro_match_by_ep and dur:
+            _, offset_b, _ = outro_match_by_ep[idx]
+            tail_start = dur - OUTRO_SEARCH_SECS
+            credits_start = round(tail_start + frames_to_seconds(offset_b), 1)
+            source = "auto"
+        elif dur and dur > 60:
+            # Blackdetect fallback — scan only the last 5 minutes to keep this snappy
+            search_at = max(dur * 0.85, dur - 300)
+            black = await asyncio.to_thread(_detect_blackframe, path, search_at, 300.0)
+            if black and black < dur - 5:
+                credits_start = round(black, 1)
+                source = "auto-blackframe"
+            else:
+                credits_start = round(dur * CREDITS_FALLBACK_PCT, 1)
+                source = "auto-fallback"
+
+        if intro or credits_start is not None:
+            result[path] = {
+                "intro": intro,
+                "credits_start": credits_start,
+                "analysis": {
+                    "version": ANALYZER_VERSION,
+                    "source": "auto" if intro else source,
+                },
+            }
+
+    return result
+
+
+# Per-series locks live in the parent process; analyzer just exposes a helper
+_series_locks: dict[str, asyncio.Lock] = {}
+
+
+def lock_for_series(key: str) -> asyncio.Lock:
+    """Return a per-series lock so concurrent analyze calls for the same
+    series serialize. Different series can run in parallel."""
+    lock = _series_locks.get(key)
+    if lock is None:
+        lock = asyncio.Lock()
+        _series_locks[key] = lock
+    return lock

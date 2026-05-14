@@ -139,6 +139,46 @@
   </div>
 </div>
 
+<!-- ── Profile Settings Modal (auto-skip toggles) ─────────────────────────── -->
+<div id="profileSettingsModal"
+  class="hidden fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center sm:px-4">
+  <div class="bg-gray-900 w-full sm:max-w-sm fade-in border-t-[3px] border-indigo-600">
+    <div class="px-5 pt-5 pb-4 border-b border-gray-800 flex items-center justify-between">
+      <h2 class="text-lg font-black uppercase tracking-wide">Profile Settings</h2>
+      <button onclick="closeProfileSettings()" class="text-gray-600 hover:text-gray-300 text-xl leading-none">✕</button>
+    </div>
+    <div class="px-5 py-4 space-y-3">
+      <p class="text-[11px] text-gray-500 uppercase tracking-widest" id="psProfileLabel"></p>
+
+      <label class="flex items-center justify-between gap-3 bg-gray-800/60 px-4 py-3 cursor-pointer hover:bg-gray-800 transition-colors">
+        <div class="min-w-0">
+          <div class="text-sm font-bold text-gray-200 uppercase tracking-wide">Auto-Skip Intro</div>
+          <div class="text-[11px] text-gray-500 mt-0.5">Skip detected intros automatically.</div>
+        </div>
+        <input id="psAutoSkipIntro" type="checkbox" onchange="saveAutoSkip()"
+          class="w-5 h-5 accent-indigo-500 cursor-pointer flex-shrink-0"/>
+      </label>
+
+      <label class="flex items-center justify-between gap-3 bg-gray-800/60 px-4 py-3 cursor-pointer hover:bg-gray-800 transition-colors">
+        <div class="min-w-0">
+          <div class="text-sm font-bold text-gray-200 uppercase tracking-wide">Auto-Skip Credits</div>
+          <div class="text-[11px] text-gray-500 mt-0.5">Jump straight to the next episode when credits start.</div>
+        </div>
+        <input id="psAutoSkipCredits" type="checkbox" onchange="saveAutoSkip()"
+          class="w-5 h-5 accent-indigo-500 cursor-pointer flex-shrink-0"/>
+      </label>
+
+      <p id="psStatus" class="text-[10px] text-gray-600 uppercase tracking-widest pt-1">Manual skip button is always available.</p>
+    </div>
+    <div class="px-4 pb-4 safe-bottom">
+      <button onclick="closeProfileSettings()"
+        class="w-full bg-gray-800 hover:bg-gray-700 py-4 text-sm font-bold uppercase tracking-wide transition-colors">
+        Done
+      </button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Profile Picker ─────────────────────────────────────────────────────── -->
 <div id="profilePicker"
   class="hidden fixed inset-0 z-40 bg-gray-950 flex flex-col items-center justify-center gap-8 px-6 fade-in">
@@ -546,6 +586,14 @@
             class="w-7 h-7 bg-indigo-600 flex items-center justify-center text-xs font-black text-white flex-shrink-0">?</div>
           <span id="navProfileName" class="hidden md:block text-gray-400 max-w-[80px] truncate text-xs"></span>
         </button>
+        <button id="navSettingsBtn" onclick="openProfileSettings()" title="Profile settings"
+          class="hidden p-1.5 hover:bg-gray-800 transition-colors flex-shrink-0 text-gray-500 hover:text-gray-200">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M10.325 4.317a1.724 1.724 0 013.35 0c.13.598.625 1.041 1.235 1.106.61.064 1.097.524 1.193 1.13l.082.51c.097.605.582 1.066 1.193 1.13.61.065 1.105.508 1.235 1.106.13.598-.024 1.226-.402 1.69-.378.463-.401 1.115-.057 1.602.345.487.345 1.135 0 1.622-.344.487-.32 1.139.057 1.602.378.463.532 1.092.402 1.69-.13.598-.625 1.041-1.235 1.106-.61.064-1.096.525-1.193 1.13l-.082.51c-.096.606-.582 1.066-1.193 1.13-.61.065-1.105.508-1.235 1.107a1.724 1.724 0 01-3.35 0c-.13-.599-.625-1.042-1.235-1.107-.61-.064-1.097-.524-1.193-1.13l-.082-.51c-.096-.605-.582-1.066-1.193-1.13-.61-.065-1.105-.508-1.235-1.106-.13-.598.024-1.227.402-1.69.378-.463.401-1.115.057-1.602-.345-.487-.345-1.135 0-1.622.344-.487.32-1.139-.057-1.602-.378-.464-.532-1.092-.402-1.69.13-.598.625-1.042 1.235-1.107.61-.064 1.097-.524 1.193-1.13l.082-.51c.096-.605.582-1.065 1.193-1.13.61-.064 1.105-.508 1.235-1.106z"/>
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+          </svg>
+        </button>
       </div>
     </div>
   </div>
@@ -628,6 +676,28 @@
 
   </div>
 </main>
+
+<!-- ── Smart Skip overlay — floats above the player footer/fullscreen ────── -->
+<div id="skipOffer"
+  class="hidden fixed left-0 right-0 z-[60] flex items-stretch bg-amber-900/95 border-t-2 border-amber-500 shadow-2xl"
+  style="bottom:calc(env(safe-area-inset-bottom) + 200px); min-height:64px;">
+  <button id="skipOfferBtn" onclick="triggerSkip()"
+    class="flex-1 flex items-center justify-center gap-3 px-5 py-3
+           text-amber-50 hover:bg-amber-800 active:bg-amber-700 transition-colors
+           text-base font-black uppercase tracking-widest">
+    <svg class="w-7 h-7 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+        d="M13 5l7 7-7 7M6 12h13"/>
+    </svg>
+    <span id="skipOfferLabel">Skip Intro</span>
+  </button>
+  <button onclick="dismissSkip()" title="Dismiss"
+    class="px-4 border-l-2 border-amber-700 text-amber-200 hover:text-white hover:bg-amber-800 active:bg-amber-700 transition-colors">
+    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+    </svg>
+  </button>
+</div>
 
 <!-- ── Player Footer ──────────────────────────────────────────────────────── -->
 <footer class="fixed bottom-0 left-0 right-0 z-40 bg-gray-950 border-t-2 border-gray-800 safe-bottom">
@@ -1005,6 +1075,7 @@ let app = {
   library_item_file_count:0, is_library_playback:false,
   play_when_ready_item_id:null,
   play_when_ready_file_path:null,
+  skip_offer:null,
 };
 const expandedDownloads=new Set();   // item IDs whose file lists are currently expanded
 const downloadFilesData=new Map();   // item_id → files array (cached from /files endpoint)
@@ -1276,6 +1347,9 @@ function renderPlayer(s){
   const sw=document.getElementById("seekBarWrapper");
   sw.style.cursor=isPlaying?"pointer":"default";
 
+  // Smart Skip — render the floating skip offer based on state.skip_offer
+  renderSkipOffer(s.skip_offer || null);
+
   // Show audio/subtitle controls only while playing
   const tc=document.getElementById("trackControls");
   if(isPlaying){ tc.classList.remove("hidden"); startTrackPoll(); }
@@ -1380,6 +1454,55 @@ function openFullscreenControls(){
 function closeFullscreenControls(){
   document.getElementById("fullscreenControls").classList.add("hidden");
   _fcDismissed = true;
+}
+
+// ── Smart Skip ─────────────────────────────────────────────────────────────
+function renderSkipOffer(offer){
+  const el = document.getElementById("skipOffer");
+  if(!el) return;
+  if(!offer || !offer.type){
+    el.classList.add("hidden");
+    return;
+  }
+  const lbl = document.getElementById("skipOfferLabel");
+  if(offer.type === "intro"){
+    lbl.textContent = "Skip Intro";
+  } else if(offer.type === "credits"){
+    lbl.textContent = offer.has_next ? "Skip to Next Episode" : "Skip Credits";
+  }
+  // Position above either the fullscreen overlay or the footer
+  const fc = document.getElementById("fullscreenControls");
+  const inFC = fc && !fc.classList.contains("hidden");
+  el.style.zIndex = inFC ? 60 : 60;
+  el.style.bottom = inFC
+    ? "calc(env(safe-area-inset-bottom) + 12px)"
+    : "calc(env(safe-area-inset-bottom) + 200px)";
+  el.classList.remove("hidden");
+}
+
+async function triggerSkip(){
+  const offer = app.skip_offer;
+  if(!offer || !offer.type) return;
+  const btn = document.getElementById("skipOfferBtn");
+  if(btn) btn.disabled = true;
+  try {
+    const r = await fetch("/api/skip-now", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({type: offer.type}),
+    });
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      showAlert(d.detail || "Skip failed.", "error");
+    }
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function dismissSkip(){
+  app.skip_offer = null;
+  renderSkipOffer(null);
+  await fetch("/api/skip-now", {method:"DELETE"}).catch(()=>{});
 }
 
 // ── Tabs ───────────────────────────────────────────────────────────────────
@@ -1494,6 +1617,48 @@ function renderNavProfile(){
     av.className=`w-7 h-7 ${avatarBg(profile.color)} flex items-center justify-center text-xs font-black text-white flex-shrink-0`;
     av.textContent=profile.name.charAt(0).toUpperCase();
     nm.textContent=profile.name; nm.classList.remove("hidden");
+    document.getElementById("navSettingsBtn")?.classList.remove("hidden");
+  }
+}
+
+// ── Profile settings (per-profile auto-skip toggles) ─────────────────────
+async function openProfileSettings(){
+  if(!profile.id) return;
+  document.getElementById("psProfileLabel").textContent = profile.name;
+  // Refetch the current profile from server to get freshest auto-skip values
+  try{
+    const profs = await fetchProfiles();
+    const me = profs.find(p=>p.id===profile.id) || {};
+    document.getElementById("psAutoSkipIntro").checked   = !!me.auto_skip_intro;
+    document.getElementById("psAutoSkipCredits").checked = !!me.auto_skip_credits;
+  }catch(_){
+    document.getElementById("psAutoSkipIntro").checked = false;
+    document.getElementById("psAutoSkipCredits").checked = false;
+  }
+  document.getElementById("profileSettingsModal").classList.remove("hidden");
+}
+
+function closeProfileSettings(){
+  document.getElementById("profileSettingsModal").classList.add("hidden");
+}
+
+async function saveAutoSkip(){
+  if(!profile.id) return;
+  const intro   = document.getElementById("psAutoSkipIntro").checked;
+  const credits = document.getElementById("psAutoSkipCredits").checked;
+  const r = await fetch(`/api/profiles/${profile.id}/auto-skip`,{
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({auto_skip_intro: intro, auto_skip_credits: credits}),
+  }).catch(()=>null);
+  const s = document.getElementById("psStatus");
+  if(s){
+    s.textContent = r && r.ok ? "Saved." : "Save failed.";
+    s.className = "text-[10px] uppercase tracking-widest pt-1 " + (r && r.ok ? "text-emerald-500" : "text-red-500");
+    clearTimeout(s._t);
+    s._t = setTimeout(()=>{
+      s.textContent = "Manual skip button is always available.";
+      s.className = "text-[10px] text-gray-600 uppercase tracking-widest pt-1";
+    }, 2500);
   }
 }
 function openProfileModal(){

@@ -103,6 +103,28 @@ Persistent storage in `library.json` at the project root (created automatically)
 
 **Absolute seek** — `POST /api/vlc/seek/to?position_pct=N` sends `val=N%` to VLC's `seek` command (percentage-based absolute position). The relative-seek endpoint `POST /api/vlc/seek?delta=N` uses `val=+Ns` / `val=-Ns` format. Do not confuse the two — VLC treats `val=N` (no suffix) as a fraction (0.0–1.0), not seconds.
 
+### Smart Skip (`analyzer.py`)
+
+Audio-fingerprint-driven intro/credits detection for library items. Requires `ffmpeg` and `fpcalc` (chromaprint) on the host; `setup.py` detects both and prints a platform-specific install hint if missing — does NOT auto-install. `pyacoustid` is a pip dependency, but the actual fingerprinting calls shell out to `fpcalc -raw` for speed. If either binary is missing, `analyzer.is_available()` returns False and the feature degrades to manual entry only (the admin editor still works).
+
+**Series grouping** — `_series_key(item)` returns `series:<lowercased series field>` when set, otherwise `item:<id>` (movies and one-offs are their own bucket). Cross-episode matching only works within a non-empty series bucket; single-item buckets get the credits fallback only.
+
+**Algorithm** — chromaprint emits ~7.8 32-bit hash frames per second. The intro detector slices the first 6 min of each episode; the outro detector the last 10 min. For each pair (anchor, other), `_find_longest_match` does a sliding alignment within ±half-the-shorter-fingerprint and counts consecutive frames with Hamming distance ≤ 6 bits. The longest run ≥ `MIN_MATCH_FRAMES` (~15 s) per pair is kept. `_intersect_match` takes the intersection across all pairs anchored on episode 0 — that's the canonical intro/outro range. Per-non-anchor episodes use the pairwise match position in their own fingerprint, so cold opens of varying length still align correctly.
+
+**Credits fallback chain** — when no repeated outro fingerprint is found: (1) ffmpeg `blackdetect` between 85% and end-of-runtime, take the first ≥0.5 s black segment as the credits start; (2) if no usable black frame, default `credits_start = duration × 0.92` (matches the existing completion threshold so progress and credits agree).
+
+**Trigger** — `library_download_monitor` calls `_schedule_series_analysis_if_eligible` whenever an item flips to `ready`. It only fires if at least one file in the series bucket still lacks `skip_data` — prevents infinite re-runs. Per-series `asyncio.Lock` in `analyzer.lock_for_series` serializes analyses for the same series; different series run in parallel. Admins force re-runs via `POST /api/admin/library/{item_id}/analyze`.
+
+**Storage** — under each item: `skip_data: { <file_path>: { intro: {start, end}|null, credits_start: N|null, analysis: {version, source} } }`. `source` is `auto`, `auto-blackframe`, `auto-fallback`, or `manual`. Per-profile prefs `auto_skip_intro` and `auto_skip_credits` live on the profile object (defaults False).
+
+**Runtime detection** — `vlc_progress_tracker` runs the skip-window check every 2 s; the progress-save half of the same task still runs every 15 s, guarded by a timestamp. When VLC position enters `[intro.start - 2s, intro.end]` or crosses `credits_start - 2s`, `_maybe_emit_skip_offer` either auto-executes the skip (if the profile pref is on) or sets `state.skip_offer = {type, end_at?, file_path, has_next, next_file_path}` and broadcasts a fresh state snapshot. Reconnecting mobile clients see the offer immediately because it's part of every `state` SSE event.
+
+**Skip execution** — `POST /api/skip-now {type: "intro"|"credits"}` calls VLC seek for intro, or `vlc_next_file` for credits (or `pl_stop` if no next episode exists). After executing, `state.skip_offer_file` gets a `#intro-done` / `#credits-done` suffix so the same offer doesn't re-emit on the next tick. `DELETE /api/skip-now` dismisses without acting, also setting the done marker.
+
+**Frontend** — fixed-position amber skip tile at the bottom of the viewport, ≥64 px tall, full-width. Positioned via `bottom: env(safe-area-inset-bottom) + offset` so it respects iOS home indicator. Renders whenever `state.skip_offer` is non-null, both in normal and fullscreen mode. The profile-settings modal (gear icon next to nav avatar) toggles per-profile auto-skip prefs.
+
+**Admin panel** — `Smart Skip` tab in `/admin` lists library items with `Analyze` (runs `POST /api/admin/library/{id}/analyze`) and `Edit` buttons. Edit opens an inline per-file editor with three numeric inputs (intro start, intro end, credits start) — values in seconds, blank to clear. Manual edits record `analysis.source = "manual"`.
+
 ### Frontend (`static/index.html`)
 
 Vanilla JS, Tailwind CDN, no build step. **The project follows the Metro UI design language (flat tiles, typography-focused, high contrast) throughout** A single `EventSource('/api/events')` drives all real-time UI. SSE event types:

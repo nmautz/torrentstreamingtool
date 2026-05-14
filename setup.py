@@ -119,6 +119,32 @@ def mullvad_candidates() -> list[str]:
     return ["/usr/bin/mullvad", "mullvad"]
 
 
+def ffmpeg_candidates() -> list[str]:
+    if SYSTEM == "Darwin":
+        return ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "ffmpeg"]
+    if SYSTEM == "Windows":
+        return [r"C:\ffmpeg\bin\ffmpeg.exe", "ffmpeg"]
+    return ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "ffmpeg"]
+
+
+def fpcalc_candidates() -> list[str]:
+    if SYSTEM == "Darwin":
+        return ["/opt/homebrew/bin/fpcalc", "/usr/local/bin/fpcalc", "fpcalc"]
+    if SYSTEM == "Windows":
+        return [r"C:\chromaprint\fpcalc.exe", "fpcalc"]
+    return ["/usr/bin/fpcalc", "/usr/local/bin/fpcalc", "fpcalc"]
+
+
+def chromaprint_install_hint() -> str:
+    if SYSTEM == "Darwin":
+        return "brew install ffmpeg chromaprint"
+    if SYSTEM == "Linux":
+        return "sudo apt install ffmpeg libchromaprint-tools  (or: dnf install ffmpeg chromaprint-tools)"
+    if SYSTEM == "Windows":
+        return "winget install Gyan.FFmpeg ; winget install Chromaprint  (or download fpcalc.exe from https://acoustid.org/chromaprint)"
+    return "install ffmpeg and chromaprint via your package manager"
+
+
 # ── Step 1: Python version ─────────────────────────────────────────────────
 def check_python():
     header("Python")
@@ -157,6 +183,8 @@ def detect_tools() -> dict:
         ("qbit",    "qBittorrent",   qbit_candidates(),    "https://qbittorrent.org/"),
         ("mullvad", "Mullvad CLI",   mullvad_candidates(), "https://mullvad.net/"),
         ("jackett", "Jackett",       jackett_candidates(), "https://github.com/Jackett/Jackett/releases"),
+        ("ffmpeg",  "ffmpeg",        ffmpeg_candidates(),  "https://ffmpeg.org/download.html"),
+        ("fpcalc",  "fpcalc (chromaprint)", fpcalc_candidates(), "https://acoustid.org/chromaprint"),
     ]
 
     for key, label, candidates, url in checks:
@@ -166,6 +194,10 @@ def detect_tools() -> dict:
             ok(f"{label}: {path}")
         else:
             warn(f"{label} not found — download: {url}")
+
+    if not tools.get("ffmpeg") or not tools.get("fpcalc"):
+        note(f"Smart Skip (intro/credits auto-detection) needs both ffmpeg and fpcalc.")
+        note(f"Install: {chromaprint_install_hint()}")
 
     return tools
 
@@ -383,7 +415,8 @@ def write_env(cfg: dict, tools: dict) -> None:
 
     lines += ["", "# Auto-detected binary paths (used by run.py)"]
     mapping = {"vlc": "_VLC_BIN", "qbit": "_QBIT_BIN",
-               "jackett": "_JACKETT_BIN", "mullvad": "_MULLVAD_BIN"}
+               "jackett": "_JACKETT_BIN", "mullvad": "_MULLVAD_BIN",
+               "ffmpeg": "_FFMPEG_BIN", "fpcalc": "_FPCALC_BIN"}
     for key, env_key in mapping.items():
         if tools.get(key):
             lines.append(f"{env_key}={tools[key]}")
@@ -399,6 +432,67 @@ def ensure_download_dir(cfg: dict) -> None:
     ok(f"Download folder ready → {p}")
 
 
+# ── .env parsing for reuse path ───────────────────────────────────────────
+def parse_existing_env() -> dict:
+    """Read the existing .env into a flat dict of key/value strings."""
+    cfg: dict[str, str] = {}
+    if not ENV.exists():
+        return cfg
+    for line in ENV.read_text(encoding="utf-8", errors="replace").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, _, v = line.partition("=")
+        cfg[k.strip()] = v.strip()
+    return cfg
+
+
+def merge_tool_paths(tools: dict) -> None:
+    """When reusing .env, refresh just the auto-detected _*_BIN entries.
+
+    Existing user settings stay untouched; only the binary paths are kept
+    current so newly-installed tools (e.g. ffmpeg/fpcalc) are picked up
+    without forcing a full re-prompt.
+    """
+    if not ENV.exists():
+        return
+    lines = ENV.read_text(encoding="utf-8", errors="replace").splitlines()
+    mapping = {"vlc": "_VLC_BIN", "qbit": "_QBIT_BIN",
+               "jackett": "_JACKETT_BIN", "mullvad": "_MULLVAD_BIN",
+               "ffmpeg": "_FFMPEG_BIN", "fpcalc": "_FPCALC_BIN"}
+    desired = {env_key: tools[key] for key, env_key in mapping.items() if tools.get(key)}
+
+    out: list[str] = []
+    seen: set[str] = set()
+    for raw in lines:
+        stripped = raw.strip()
+        if "=" in stripped and not stripped.startswith("#"):
+            k = stripped.split("=", 1)[0].strip()
+            if k in desired:
+                out.append(f"{k}={desired[k]}")
+                seen.add(k)
+                continue
+            if k in mapping.values() and k not in desired:
+                # Path no longer detected — drop the stale entry
+                continue
+        out.append(raw)
+
+    # Append any newly-detected bins not already present
+    new_keys = [k for k in desired if k not in seen]
+    if new_keys:
+        if out and out[-1].strip():
+            out.append("")
+        out.append("# Auto-detected binary paths (refreshed)")
+        for k in new_keys:
+            out.append(f"{k}={desired[k]}")
+
+    ENV.write_text("\n".join(out) + "\n", encoding="utf-8")
+    if new_keys:
+        ok(f"Refreshed tool paths in .env: {', '.join(new_keys)}")
+    else:
+        ok("Tool paths in .env are up to date")
+
+
 # ── Main ───────────────────────────────────────────────────────────────────
 def main():
     print(f"\n{BOLD}{CYN}  ┌──────────────────────────────┐")
@@ -408,10 +502,24 @@ def main():
     check_python()
     setup_venv()
     tools = detect_tools()
-    cfg   = gather_config()
-    configure_qbittorrent(cfg)
-    write_env(cfg, tools)
-    ensure_download_dir(cfg)
+
+    reuse_env = False
+    if ENV.exists():
+        header("Existing .env detected")
+        note(f"Found {ENV}")
+        reuse_env = ask_bool("Reuse existing .env without re-prompting?", default=True)
+
+    if reuse_env:
+        cfg = parse_existing_env()
+        merge_tool_paths(tools)
+        ok("Skipped interactive configuration")
+    else:
+        cfg = gather_config()
+        configure_qbittorrent(cfg)
+        write_env(cfg, tools)
+
+    if cfg.get("QBIT_DOWNLOAD_PATH"):
+        ensure_download_dir(cfg)
     generate_ssl_cert()
 
     header("Done")

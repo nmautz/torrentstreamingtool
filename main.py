@@ -31,6 +31,8 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+import analyzer
+
 
 # ── Settings ──────────────────────────────────────────────────────────────────
 
@@ -157,6 +159,9 @@ class AppState:
     vlc_duration: int = 0                                 # VLC total duration (seconds)
     vlc_volume: int = 100                                 # VLC volume 0-200 (100 = normal)
     prepare_hash: Optional[str] = None                    # hash added by /stream/prepare, pending user selection
+    skip_offer: Optional[dict] = None                     # {"type": "intro"|"credits", "end_at": s, "next_item_id": id?, "next_file_path": p?}
+    skip_offer_file: Optional[str] = None                 # path the current skip offer corresponds to
+    analysis_jobs: dict = field(default_factory=dict)     # series_key → {status, stage, current, total, message, item_ids, started_at, finished_at}
     sse_queues: list = field(default_factory=list)
 
 
@@ -242,6 +247,8 @@ def state_snapshot() -> dict:
         "is_library_playback": state.library_item_id is not None,
         "play_when_ready_item_id": state.play_when_ready_item_id,
         "play_when_ready_file_path": state.play_when_ready_file_path,
+        "skip_offer": state.skip_offer,
+        "analysis_jobs": state.analysis_jobs,
     }
 
 
@@ -1012,6 +1019,7 @@ async def library_download_monitor() -> None:
                     state.downloading_count = max(0, state.downloading_count - 1)
                     changed = True
                     await broadcast("library_update", {"item_id": item["id"], "status": "ready"})
+                    _schedule_series_analysis_if_eligible(item, lib)
                     if state.play_when_ready_item_id == item["id"]:
                         pwr_profile = state.play_when_ready_profile_id
                         pwr_fp = state.play_when_ready_file_path
@@ -1056,13 +1064,286 @@ async def library_download_monitor() -> None:
             pass
 
 
+# ── Smart Skip helpers ────────────────────────────────────────────────────────
+
+def _series_key(item: dict) -> str:
+    """Group items by series for cross-episode fingerprinting.
+
+    Items with a non-empty series field group together; everything else is
+    grouped by item ID (a single-item bucket) so movies and one-offs still
+    get the credits fallback.
+    """
+    s = (item.get("series") or "").strip()
+    return f"series:{s.lower()}" if s else f"item:{item.get('id', '')}"
+
+
+def _items_for_series_key(lib: dict, key: str) -> list[dict]:
+    return [it for it in lib["items"] if _series_key(it) == key]
+
+
+def _skip_settings_for_profile(lib: dict, profile_id: str) -> dict:
+    """Return {auto_skip_intro, auto_skip_credits} for a profile (defaults False)."""
+    if not profile_id:
+        return {"auto_skip_intro": False, "auto_skip_credits": False}
+    prof = next((p for p in lib.get("profiles", []) if p["id"] == profile_id), None)
+    if not prof:
+        return {"auto_skip_intro": False, "auto_skip_credits": False}
+    return {
+        "auto_skip_intro":   bool(prof.get("auto_skip_intro", False)),
+        "auto_skip_credits": bool(prof.get("auto_skip_credits", False)),
+    }
+
+
+def _next_file_in_item(item: dict, current_path: str) -> Optional[str]:
+    """Return the next file path in this item after current_path, or None."""
+    files = item.get("files", [])
+    paths = [f.get("path", "") for f in files]
+    try:
+        idx = paths.index(current_path)
+    except ValueError:
+        return None
+    return paths[idx + 1] if idx + 1 < len(paths) else None
+
+
+def _find_file_meta(item: dict, file_path: str) -> Optional[dict]:
+    """Return the per-file analysis dict (intro/credits_start) if present."""
+    skip_data = item.get("skip_data", {})
+    return skip_data.get(file_path)
+
+
+async def _set_analysis_status(series_key: str, **patch) -> None:
+    """Update state.analysis_jobs[series_key] and broadcast the change."""
+    job = state.analysis_jobs.setdefault(series_key, {})
+    job.update(patch)
+    await broadcast("analysis_status", {"series_key": series_key, "job": job})
+
+
+async def _run_series_analysis(series_key: str) -> None:
+    """Background task: analyze a series, save results, broadcast progress."""
+    if not analyzer.is_available():
+        await _set_analysis_status(
+            series_key, status="failed",
+            stage="error", message="ffmpeg/fpcalc not available",
+            current=0, total=0, finished_at=_now_iso(),
+        )
+        return
+
+    lock = analyzer.lock_for_series(series_key)
+    async with lock:
+        lib = await get_library()
+        items = _items_for_series_key(lib, series_key)
+        ready_items = [it for it in items if it.get("status") == "ready"]
+        item_ids = [it["id"] for it in ready_items]
+        if not ready_items:
+            return
+
+        # Start
+        await _set_analysis_status(
+            series_key, status="running",
+            stage="starting", current=0, total=0,
+            message="Preparing analysis…",
+            item_ids=item_ids,
+            started_at=_now_iso(),
+            finished_at=None,
+        )
+
+        async def _on_progress(**kw):
+            await _set_analysis_status(series_key, status="running", **kw)
+
+        try:
+            results = await analyzer.analyze_series(ready_items, progress_cb=_on_progress)
+        except Exception as exc:
+            await _set_analysis_status(
+                series_key, status="failed",
+                stage="error", message=f"Analysis failed: {exc}",
+                finished_at=_now_iso(),
+            )
+            return
+
+        if not results:
+            await _set_analysis_status(
+                series_key, status="failed",
+                stage="error", message="No analyzable episodes found",
+                finished_at=_now_iso(),
+            )
+            return
+
+        # Persist results back into library.json under each item
+        files_updated = 0
+        lib = await get_library()
+        for it in lib["items"]:
+            if _series_key(it) != series_key:
+                continue
+            skip_data = it.setdefault("skip_data", {})
+            changed = False
+            for f in it.get("files", []):
+                p = f.get("path", "")
+                if p in results:
+                    skip_data[p] = results[p]
+                    files_updated += 1
+                    changed = True
+            if changed:
+                await broadcast("library_update", {"item_id": it["id"], "status": it.get("status", "ready")})
+        await put_library(lib)
+
+        await _set_analysis_status(
+            series_key, status="complete",
+            stage="done", message=f"Updated {files_updated} file(s)",
+            current=files_updated, total=files_updated,
+            finished_at=_now_iso(),
+        )
+
+
+def _schedule_series_analysis_if_eligible(item: dict, lib: dict) -> None:
+    """When an item flips to 'ready', kick off series analysis if 2+ ready episodes
+    exist in the same series and no analysis has been run yet for this series.
+    Single-item buckets still run (to populate the credits fallback)."""
+    if not analyzer.is_available():
+        return
+    key = _series_key(item)
+    peers = [it for it in _items_for_series_key(lib, key) if it.get("status") == "ready"]
+    # Avoid re-analyzing if every file in every peer already has skip_data
+    needs_run = False
+    for peer in peers:
+        sk = peer.get("skip_data", {})
+        for f in peer.get("files", []):
+            if f.get("path", "") not in sk:
+                needs_run = True
+                break
+        if needs_run:
+            break
+    if needs_run:
+        asyncio.create_task(_run_series_analysis(key))
+
+
+# Pre-roll: show the skip button this many seconds before the range starts so
+# the user has visual time to react when entering the window.
+SKIP_PREROLL_SEC = 2.0
+
+
+async def _maybe_emit_skip_offer(
+    item: dict, file_path: str, meta: Optional[dict],
+    prefs: dict, pos_sec: float, dur_sec: float,
+) -> None:
+    """Set or clear state.skip_offer based on current playback position.
+
+    Auto-skip behavior: if the profile has auto_skip_* enabled, this helper
+    issues the seek/advance directly and does NOT show the offer in the UI.
+    """
+    if not meta:
+        await _clear_skip_offer(file_path)
+        return
+
+    # Intro window: position within [start - PREROLL, end]
+    intro = meta.get("intro")
+    if intro and intro.get("end", 0) > intro.get("start", 0):
+        start = float(intro.get("start", 0))
+        end   = float(intro.get("end",   0))
+        if (start - SKIP_PREROLL_SEC) <= pos_sec < end:
+            if prefs.get("auto_skip_intro") and end - pos_sec > 1.0:
+                # Only auto-skip if the offer hasn't already been auto-handled
+                if state.skip_offer_file != f"{file_path}#intro-done":
+                    state.skip_offer_file = f"{file_path}#intro-done"
+                    state.skip_offer = None
+                    await vlc("seek", val=str(int(end) + 1))
+                    await broadcast("state", state_snapshot())
+                return
+            offer = {"type": "intro", "end_at": round(end, 1), "file_path": file_path}
+            if state.skip_offer != offer:
+                state.skip_offer = offer
+                state.skip_offer_file = file_path
+                await broadcast("state", state_snapshot())
+            return
+        elif pos_sec >= end and state.skip_offer and state.skip_offer.get("type") == "intro":
+            await _clear_skip_offer(file_path)
+
+    # Credits window: position past credits_start
+    credits_start = meta.get("credits_start")
+    if credits_start and pos_sec >= float(credits_start) - SKIP_PREROLL_SEC and pos_sec < dur_sec - 1:
+        next_path = _next_file_in_item(item, file_path)
+        next_exists = bool(next_path) and Path(next_path).exists()
+        if prefs.get("auto_skip_credits") and (pos_sec >= float(credits_start)):
+            # Only auto-skip once per file
+            done_marker = f"{file_path}#credits-done"
+            if state.skip_offer_file != done_marker:
+                state.skip_offer_file = done_marker
+                state.skip_offer = None
+                await broadcast("state", state_snapshot())
+                if next_exists:
+                    await vlc_next_file(file_path, item)
+                else:
+                    await vlc("pl_stop")
+            return
+        offer = {
+            "type": "credits",
+            "credits_start": round(float(credits_start), 1),
+            "file_path": file_path,
+            "has_next": next_exists,
+            "next_file_path": next_path if next_exists else None,
+        }
+        if state.skip_offer != offer:
+            state.skip_offer = offer
+            state.skip_offer_file = file_path
+            await broadcast("state", state_snapshot())
+        return
+
+    # Outside any window — clear if one was set for this file
+    await _clear_skip_offer(file_path)
+
+
+async def _clear_skip_offer(file_path: str) -> None:
+    if state.skip_offer is not None and state.skip_offer.get("file_path") == file_path:
+        state.skip_offer = None
+        # don't reset skip_offer_file — it carries the done marker
+        await broadcast("state", state_snapshot())
+    elif state.skip_offer is not None:
+        # Different file (e.g. user advanced manually) — drop the offer
+        state.skip_offer = None
+        await broadcast("state", state_snapshot())
+
+
+async def vlc_next_file(current_file: str, item: dict) -> None:
+    """Internal helper: advance VLC to the next file in this item's playlist."""
+    next_path = _next_file_in_item(item, current_file)
+    if not next_path or not Path(next_path).exists():
+        return
+    all_paths = [f.get("path", "") for f in item.get("files", [])]
+    try:
+        idx = all_paths.index(next_path)
+        new_tail = all_paths[idx:]
+    except ValueError:
+        new_tail = [next_path]
+    state.library_playlist = new_tail
+    state.library_current_file = next_path
+    state.current_audio_track = -1
+    state.current_subtitle_track = -1
+    state.track_pref_applied_file = next_path
+    await vlc("in_play", input=Path(next_path).resolve().as_uri())
+    for p in new_tail[1:]:
+        await vlc("in_enqueue", input=Path(p).resolve().as_uri())
+    if state.library_item_id and state.library_profile_id:
+        asyncio.create_task(_apply_track_prefs(
+            state.library_item_id, state.library_profile_id, next_path, delay=2.0,
+        ))
+
+
 # ── Background Task: VLC Progress Tracker ────────────────────────────────────
 
 async def vlc_progress_tracker() -> None:
-    """Save per-episode watch progress for library items playing in VLC, every 15 s."""
+    """Save watch progress + manage Smart Skip offers. Two cadences:
+
+    - skip-offer detection runs every 2 s while a library item is playing
+    - progress save runs every 15 s
+    """
+    last_progress_save = 0.0
     while True:
-        await asyncio.sleep(15)
+        await asyncio.sleep(2)
         if not state.library_item_id or not state.library_profile_id:
+            # Clear any stale skip offer when playback ends
+            if state.skip_offer is not None:
+                state.skip_offer = None
+                state.skip_offer_file = None
+                await broadcast("state", state_snapshot())
             continue
         try:
             vs = await vlc_status()
@@ -1073,25 +1354,29 @@ async def vlc_progress_tracker() -> None:
             if dur_sec < 10:
                 continue
 
-            # Detect which playlist item VLC is currently playing
+            # Resolve which file is playing and look up its skip metadata
             current_uri = await vlc_playlist_uri()
             if current_uri and current_uri.startswith("file://"):
                 state.library_current_file = uri_to_path(current_uri)
+            cur_file = state.library_current_file
+            if cur_file:
+                lib_q = await get_library()
+                item_q = next((it for it in lib_q["items"] if it["id"] == state.library_item_id), None)
+                if item_q:
+                    cur_file = _canonical_item_path(cur_file, item_q)
+                    state.library_current_file = cur_file
+                    meta = _find_file_meta(item_q, cur_file)
+                    prefs = _skip_settings_for_profile(lib_q, state.library_profile_id)
+                    await _maybe_emit_skip_offer(item_q, cur_file, meta, prefs, pos_sec, dur_sec)
+
+            now = asyncio.get_event_loop().time()
+            if now - last_progress_save < 15:
+                continue
+            last_progress_save = now
 
             current_file = state.library_current_file
             if not current_file:
                 continue
-
-            lib = await get_library()
-            item = next((it for it in lib["items"] if it["id"] == state.library_item_id), None)
-            if not item:
-                continue
-
-            # Normalize to the stored item path so progress keys always match
-            # what get_item_files and find_resume_hint look up by.
-            current_file = _canonical_item_path(current_file, item)
-            prev_file = state.library_current_file
-            state.library_current_file = current_file
 
             # Apply saved track prefs when VLC advances to a new episode
             if (current_file != state.track_pref_applied_file and
@@ -1100,6 +1385,11 @@ async def vlc_progress_tracker() -> None:
                 asyncio.create_task(_apply_track_prefs(
                     state.library_item_id, state.library_profile_id, current_file, delay=2.0,
                 ))
+
+            lib = await get_library()
+            item = next((it for it in lib["items"] if it["id"] == state.library_item_id), None)
+            if not item:
+                continue
 
             pct = pos_sec / dur_sec
             prof_prog = item.setdefault("progress", {}).setdefault(state.library_profile_id, {})
@@ -1425,6 +1715,22 @@ class ProfileElevatedReq(BaseModel):
     elevated: bool    # whether this profile can view admin-only library items
 
 
+class ProfileAutoSkipReq(BaseModel):
+    auto_skip_intro: Optional[bool] = None
+    auto_skip_credits: Optional[bool] = None
+
+
+class SkipNowReq(BaseModel):
+    type: str         # "intro" or "credits"
+
+
+class AdminSkipDataReq(BaseModel):
+    file_path: str
+    intro_start: Optional[float] = None    # null = clear intro
+    intro_end:   Optional[float] = None
+    credits_start: Optional[float] = None  # null = clear credits
+
+
 # ── Routes: Profiles ─────────────────────────────────────────────────────────
 
 @app.get("/api/profiles")
@@ -1437,6 +1743,8 @@ async def list_profiles() -> JSONResponse:
             "color": p.get("color", "indigo"),
             "has_pin": bool(p.get("pin_hash", "")),
             "elevated": bool(p.get("elevated", False)),
+            "auto_skip_intro":   bool(p.get("auto_skip_intro", False)),
+            "auto_skip_credits": bool(p.get("auto_skip_credits", False)),
         }
         for p in lib["profiles"]
     ]
@@ -1708,6 +2016,8 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     state.library_item_file_count = len(item.get("files", []))
     state.library_playlist = playlist
     state.library_current_file = playlist[0]
+    state.skip_offer = None
+    state.skip_offer_file = None
 
     # Seek into the first file after VLC has had time to open it
     seek_sec = req.seek_first_to
@@ -2129,6 +2439,8 @@ async def stop() -> JSONResponse:
     state.total_mb = 0.0
     state.dl_speed_bps = 0
     state.ul_speed_bps = 0
+    state.skip_offer = None
+    state.skip_offer_file = None
 
     await broadcast("stream_status", {"status": "idle", "message": "Stopped."})
     return JSONResponse({"ok": True})
@@ -2247,6 +2559,8 @@ async def vlc_prev() -> JSONResponse:
     state.current_audio_track = -1
     state.current_subtitle_track = -1
     state.track_pref_applied_file = prev_file
+    state.skip_offer = None
+    state.skip_offer_file = None
     await vlc("in_play", input=Path(prev_file).resolve().as_uri())
     for p in new_tail[1:]:
         await vlc("in_enqueue", input=Path(p).resolve().as_uri())
@@ -2290,6 +2604,8 @@ async def vlc_next() -> JSONResponse:
     state.current_audio_track = -1
     state.current_subtitle_track = -1
     state.track_pref_applied_file = next_file
+    state.skip_offer = None
+    state.skip_offer_file = None
     await vlc("in_play", input=Path(next_file).resolve().as_uri())
     for p in new_tail[1:]:
         await vlc("in_enqueue", input=Path(p).resolve().as_uri())
@@ -2736,6 +3052,9 @@ async def admin_list_library(request: Request) -> JSONResponse:
     items = []
     for it in lib["items"]:
         files = it.get("files", [])
+        series_key = _series_key(it)
+        skip_data = it.get("skip_data", {})
+        files_with_skip = sum(1 for f in files if f.get("path", "") in skip_data)
         items.append({
             "id": it["id"],
             "title": it["title"],
@@ -2746,9 +3065,12 @@ async def admin_list_library(request: Request) -> JSONResponse:
             "size_human": human_size(it.get("size_bytes", 0)),
             "status": it.get("status", "ready"),
             "admin_only": it.get("admin_only", False),
+            "series_key": series_key,
+            "files_with_skip": files_with_skip,
+            "analysis_job": state.analysis_jobs.get(series_key),
         })
     items.sort(key=lambda x: (x["series"] or "\xff" + x["title"], x["season"], x["episode"]))
-    return JSONResponse({"items": items})
+    return JSONResponse({"items": items, "jobs": state.analysis_jobs})
 
 
 # ── Routes: Profile PINs ──────────────────────────────────────────────────────
@@ -2811,6 +3133,166 @@ async def verify_profile_pin(profile_id: str, req: ProfilePinReq) -> JSONRespons
     if _pin_hash(req.pin.strip()) != stored:
         raise HTTPException(403, "Incorrect PIN.")
     return JSONResponse({"ok": True})
+
+
+# ── Routes: Smart Skip ────────────────────────────────────────────────────────
+
+@app.post("/api/profiles/{profile_id}/auto-skip")
+async def set_profile_auto_skip(profile_id: str, req: ProfileAutoSkipReq) -> JSONResponse:
+    """Toggle the per-profile auto-skip preferences for intro and credits."""
+    lib = await get_library()
+    profile = next((p for p in lib["profiles"] if p["id"] == profile_id), None)
+    if not profile:
+        raise HTTPException(404, "Profile not found.")
+    if req.auto_skip_intro is not None:
+        if req.auto_skip_intro:
+            profile["auto_skip_intro"] = True
+        else:
+            profile.pop("auto_skip_intro", None)
+    if req.auto_skip_credits is not None:
+        if req.auto_skip_credits:
+            profile["auto_skip_credits"] = True
+        else:
+            profile.pop("auto_skip_credits", None)
+    await put_library(lib)
+    return JSONResponse({
+        "ok": True,
+        "auto_skip_intro":   bool(profile.get("auto_skip_intro", False)),
+        "auto_skip_credits": bool(profile.get("auto_skip_credits", False)),
+    })
+
+
+@app.post("/api/skip-now")
+async def skip_now(req: SkipNowReq) -> JSONResponse:
+    """Execute the current Smart Skip offer (called by the client's Skip button)."""
+    offer = state.skip_offer
+    if not offer or offer.get("type") != req.type:
+        raise HTTPException(400, "No matching skip offer is active.")
+
+    if req.type == "intro":
+        end_at = float(offer.get("end_at", 0))
+        if end_at <= 0:
+            raise HTTPException(400, "Invalid intro end position.")
+        await vlc("seek", val=str(int(end_at) + 1))
+        # Mark this file's intro as handled so the offer doesn't re-show
+        if state.skip_offer_file:
+            state.skip_offer_file = f"{state.skip_offer_file}#intro-done"
+        state.skip_offer = None
+        await broadcast("state", state_snapshot())
+        return JSONResponse({"ok": True, "action": "seek"})
+
+    if req.type == "credits":
+        next_path = offer.get("next_file_path")
+        cur_file = offer.get("file_path", "")
+        if next_path and Path(next_path).exists():
+            lib = await get_library()
+            item = next((it for it in lib["items"] if it["id"] == state.library_item_id), None)
+            if not item:
+                raise HTTPException(404, "Item not found.")
+            await vlc_next_file(cur_file, item)
+            state.skip_offer = None
+            state.skip_offer_file = f"{cur_file}#credits-done"
+            await broadcast("state", state_snapshot())
+            return JSONResponse({"ok": True, "action": "next_episode"})
+        # No next file — just stop playback
+        await vlc("pl_stop")
+        state.skip_offer = None
+        state.skip_offer_file = f"{cur_file}#credits-done"
+        await broadcast("state", state_snapshot())
+        return JSONResponse({"ok": True, "action": "stop"})
+
+    raise HTTPException(400, "Unknown skip type.")
+
+
+@app.delete("/api/skip-now")
+async def dismiss_skip_offer() -> JSONResponse:
+    """Dismiss the current Smart Skip offer without acting on it.
+
+    Marks the offer as handled for the current file so it doesn't re-show on
+    the next progress tick. The user can still hit Next/Stop manually.
+    """
+    if state.skip_offer_file and not state.skip_offer_file.endswith("#dismissed"):
+        offer_type = (state.skip_offer or {}).get("type", "intro")
+        state.skip_offer_file = f"{state.skip_offer_file}#{offer_type}-done"
+    state.skip_offer = None
+    await broadcast("state", state_snapshot())
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/admin/library/{item_id}/skip-data")
+async def admin_get_skip_data(item_id: str, request: Request) -> JSONResponse:
+    """Return per-file intro/credits times for an item (admin manual editor)."""
+    _require_admin(request)
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    skip_data = item.get("skip_data", {})
+    files_out = []
+    for f in item.get("files", []):
+        path = f.get("path", "")
+        entry = skip_data.get(path) or {}
+        intro = entry.get("intro") or {}
+        files_out.append({
+            "name": f.get("name", Path(path).name),
+            "path": path,
+            "intro_start":   intro.get("start"),
+            "intro_end":     intro.get("end"),
+            "credits_start": entry.get("credits_start"),
+            "source":        (entry.get("analysis") or {}).get("source", ""),
+        })
+    return JSONResponse({"files": files_out, "series_key": _series_key(item)})
+
+
+@app.patch("/api/admin/library/{item_id}/skip-data")
+async def admin_set_skip_data(item_id: str, request: Request, req: AdminSkipDataReq) -> JSONResponse:
+    """Manual override: set intro/credits times for one file in an item."""
+    _require_admin(request)
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    paths = {f.get("path", "") for f in item.get("files", [])}
+    if req.file_path not in paths:
+        raise HTTPException(400, "file_path is not in this item.")
+    skip_data = item.setdefault("skip_data", {})
+    entry = skip_data.setdefault(req.file_path, {})
+    if req.intro_start is not None and req.intro_end is not None and req.intro_end > req.intro_start:
+        entry["intro"] = {"start": round(req.intro_start, 1), "end": round(req.intro_end, 1)}
+    elif req.intro_start is None and req.intro_end is None:
+        entry.pop("intro", None)
+    if req.credits_start is not None:
+        entry["credits_start"] = round(req.credits_start, 1) if req.credits_start > 0 else None
+        if entry["credits_start"] is None:
+            entry.pop("credits_start", None)
+    entry["analysis"] = {"version": analyzer.ANALYZER_VERSION, "source": "manual"}
+    await put_library(lib)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/admin/library/{item_id}/analyze")
+async def admin_analyze_series(item_id: str, request: Request) -> JSONResponse:
+    """Force a (re-)analysis of the series this item belongs to."""
+    _require_admin(request)
+    if not analyzer.is_available():
+        raise HTTPException(503, "ffmpeg/fpcalc not available on this host.")
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    key = _series_key(item)
+    asyncio.create_task(_run_series_analysis(key))
+    return JSONResponse({"ok": True, "series_key": key})
+
+
+@app.get("/api/admin/analyzer-status")
+async def admin_analyzer_status(request: Request) -> JSONResponse:
+    _require_admin(request)
+    return JSONResponse({
+        "available": analyzer.is_available(),
+        "ffmpeg":    analyzer.ffmpeg_bin(),
+        "fpcalc":    analyzer.fpcalc_bin(),
+    })
 
 
 # Static files must be mounted last so API routes take priority
