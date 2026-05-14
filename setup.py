@@ -145,6 +145,108 @@ def chromaprint_install_hint() -> str:
     return "install ffmpeg and chromaprint via your package manager"
 
 
+# ── Auto-install ffmpeg + chromaprint (Smart Skip deps) ────────────────────
+def install_smart_skip_deps(tools: dict) -> dict:
+    """Offer to install ffmpeg/fpcalc via the host's package manager.
+
+    Returns an updated tools dict with refreshed ffmpeg/fpcalc paths if the
+    install succeeded.  No-op if both are already detected.
+    """
+    if tools.get("ffmpeg") and tools.get("fpcalc"):
+        return tools
+
+    header("Smart Skip Dependencies (ffmpeg + chromaprint)")
+    missing = []
+    if not tools.get("ffmpeg"): missing.append("ffmpeg")
+    if not tools.get("fpcalc"): missing.append("fpcalc")
+    warn(f"Missing: {', '.join(missing)}")
+
+    if SYSTEM == "Darwin":
+        brew = find_exe("brew", "/opt/homebrew/bin/brew", "/usr/local/bin/brew")
+        if not brew:
+            warn("Homebrew not found — install it from https://brew.sh, then re-run setup.py")
+            note(f"Or install manually: {chromaprint_install_hint()}")
+            return tools
+        if not ask_bool(f"Run `{brew} install ffmpeg chromaprint` now?", default=True):
+            note(f"Skipped. Install later with: {chromaprint_install_hint()}")
+            return tools
+        note("Running brew install (this may take a few minutes) …")
+        try:
+            subprocess.run([brew, "install", "ffmpeg", "chromaprint"], check=True)
+        except subprocess.CalledProcessError as e:
+            warn(f"brew install failed (exit {e.returncode})")
+            note(f"Install manually: {chromaprint_install_hint()}")
+            return tools
+
+    elif SYSTEM == "Linux":
+        # Detect the package manager and propose the matching command
+        apt = find_exe("apt", "apt-get")
+        dnf = find_exe("dnf", "yum")
+        pacman = find_exe("pacman")
+        if apt:
+            cmd = ["sudo", apt, "install", "-y", "ffmpeg", "libchromaprint-tools"]
+        elif dnf:
+            cmd = ["sudo", dnf, "install", "-y", "ffmpeg", "chromaprint-tools"]
+        elif pacman:
+            cmd = ["sudo", pacman, "-S", "--noconfirm", "ffmpeg", "chromaprint"]
+        else:
+            warn("No supported package manager found (apt/dnf/pacman).")
+            note(f"Install manually: {chromaprint_install_hint()}")
+            return tools
+        if not ask_bool(f"Run `{' '.join(cmd)}` now?", default=True):
+            note(f"Skipped. Install later with: {chromaprint_install_hint()}")
+            return tools
+        note("Running package install (you may be prompted for your sudo password) …")
+        try:
+            subprocess.run(cmd, check=True)
+        except subprocess.CalledProcessError as e:
+            warn(f"Install failed (exit {e.returncode})")
+            note(f"Install manually: {chromaprint_install_hint()}")
+            return tools
+
+    elif SYSTEM == "Windows":
+        winget = find_exe("winget", r"C:\Windows\System32\winget.exe")
+        if not winget:
+            warn("winget not available — manual install required.")
+            note(f"Install: {chromaprint_install_hint()}")
+            return tools
+        if not ask_bool("Run winget to install ffmpeg + chromaprint?", default=True):
+            note(f"Skipped. Install later with: {chromaprint_install_hint()}")
+            return tools
+        note("Running winget install …")
+        try:
+            if not tools.get("ffmpeg"):
+                subprocess.run([winget, "install", "--silent",
+                                "--accept-package-agreements", "--accept-source-agreements",
+                                "Gyan.FFmpeg"], check=True)
+            if not tools.get("fpcalc"):
+                subprocess.run([winget, "install", "--silent",
+                                "--accept-package-agreements", "--accept-source-agreements",
+                                "AcoustID.Chromaprint"], check=False)
+        except subprocess.CalledProcessError as e:
+            warn(f"winget install failed (exit {e.returncode})")
+            note(f"Install manually: {chromaprint_install_hint()}")
+            return tools
+    else:
+        warn(f"Auto-install not implemented for {SYSTEM}.")
+        note(f"Install manually: {chromaprint_install_hint()}")
+        return tools
+
+    # Re-detect after install
+    refreshed = dict(tools)
+    refreshed["ffmpeg"] = find_exe(*ffmpeg_candidates())
+    refreshed["fpcalc"] = find_exe(*fpcalc_candidates())
+    if refreshed["ffmpeg"]:
+        ok(f"ffmpeg: {refreshed['ffmpeg']}")
+    else:
+        warn("ffmpeg still not found after install — check PATH")
+    if refreshed["fpcalc"]:
+        ok(f"fpcalc: {refreshed['fpcalc']}")
+    else:
+        warn("fpcalc still not found after install — check PATH")
+    return refreshed
+
+
 # ── Step 1: Python version ─────────────────────────────────────────────────
 def check_python():
     header("Python")
@@ -502,6 +604,7 @@ def main():
     check_python()
     setup_venv()
     tools = detect_tools()
+    tools = install_smart_skip_deps(tools)
 
     reuse_env = False
     if ENV.exists():
