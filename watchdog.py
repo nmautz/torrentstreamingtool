@@ -158,16 +158,16 @@ def _start_jackett_service_windows() -> bool:
 
 
 def _build_jackett_args(bin_path: str) -> list[str]:
-    """Return the launch args for the Jackett binary.
+    """Return the launch command for Jackett.
 
-    On Windows the canonical Jackett service is launched via `sc start` first
-    (the service serves port 9117); the tray exe is then started so the user
-    has a visible icon. `--NoRestart` is only valid for `JackettConsole.exe`.
+    On Windows we always go through the Service Control Manager — the
+    Jackett Windows service is the canonical thing serving port 9117 and
+    `sc start` is idempotent (returns 1056 if already running). Relaunching
+    `JackettTray.exe` on every back-off cycle pops a 'JackettTray is already
+    running' dialog, so we never do that from the watchdog.
     """
     if SYSTEM == "Windows":
-        _start_jackett_service_windows()
-        if Path(bin_path).name.lower() == "jacketttray.exe":
-            return [bin_path]
+        return ["sc", "start", "Jackett"]
     return [bin_path, "--NoRestart"]
 
 

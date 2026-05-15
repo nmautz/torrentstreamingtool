@@ -332,17 +332,19 @@ def start_jackett() -> bool:
 
     if SYSTEM == "Windows":
         # The Windows installer registers a "Jackett" service that actually
-        # serves port 9117. Start it directly; the tray exe is launched only
-        # to put the notification-area icon up.
+        # serves port 9117. Start that — it's idempotent. The tray exe is
+        # purely cosmetic and launched once if not already running.
         if _start_jackett_service_windows():
             info("Started Jackett Windows service")
-        is_tray = Path(jackett_bin).name.lower() == "jacketttray.exe"
-        if is_tray:
+        else:
+            r = subprocess.run(["sc", "query", "Jackett"], capture_output=True, text=True)
+            if r.returncode != 0:
+                warn("Jackett Windows service is not installed.")
+                info("Re-run 'python setup.py' from an Administrator PowerShell to install it,")
+                info("or open the Jackett tray icon → 'Start background service'.")
+        if Path(jackett_bin).name.lower() == "jacketttray.exe" and not is_running("JackettTray"):
             info("Launching JackettTray.exe …")
             launch_bg([jackett_bin])
-        else:
-            info("Starting Jackett …")
-            launch_bg([jackett_bin, "--NoRestart"])
     else:
         info("Starting Jackett …")
         launch_bg([jackett_bin, "--NoRestart"])

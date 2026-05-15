@@ -546,21 +546,25 @@ def _jackett_service_installed() -> bool:
     return r.returncode == 0
 
 
-def _find_jackett_console() -> str | None:
-    """JackettConsole.exe — required for --Install (the tray app shells out
-    to this same exe under the hood)."""
+def _find_jackett_install_dir() -> Path | None:
+    """Return the directory that contains Jackett's executables."""
     if SYSTEM != "Windows":
         return None
     for c in _windows_jackett_candidates():
-        if Path(c).name.lower() == "jackettconsole.exe" and Path(c).exists():
-            return c
+        if Path(c).exists():
+            return Path(c).parent
     return None
 
 
 def install_jackett_service() -> None:
     """Install and start the 'Jackett' Windows service so it runs as a
-    background service from boot — the same action as clicking 'Start
-    background service' in the Jackett tray menu, just automated."""
+    background service from boot — the same action as the tray's
+    'Start background service' menu item, just automated.
+
+    Strategy: try `JackettConsole.exe --Install` first (canonical Jackett
+    installer), fall back to `sc create` pointing at `JackettService.exe`
+    if the console exe isn't present.
+    """
     if SYSTEM != "Windows":
         return
 
@@ -574,29 +578,31 @@ def install_jackett_service() -> None:
             pass
         return
 
-    console = _find_jackett_console()
-    if not console:
-        warn("JackettConsole.exe not found — cannot install the service.")
-        note("Run setup.py again after Jackett finishes installing,")
-        note("or open the Jackett tray icon → 'Start background service'.")
+    jackett_dir = _find_jackett_install_dir()
+    if not jackett_dir:
+        warn("Jackett install directory not found — cannot install the service.")
+        note("Re-run setup.py after Jackett finishes installing, or open the")
+        note("Jackett tray icon → 'Start background service'.")
         return
 
-    note("Installing 'Jackett' as a Windows service so it auto-starts on boot.")
+    console = jackett_dir / "JackettConsole.exe"
+    service = jackett_dir / "JackettService.exe"
 
-    if _is_windows_admin():
-        try:
-            subprocess.run([console, "--Install"], check=True,
-                           cwd=str(Path(console).parent))
-        except subprocess.CalledProcessError as exc:
-            warn(f"JackettConsole.exe --Install failed (exit {exc.returncode})")
+    note(f"Installing 'Jackett' as a Windows service from {jackett_dir}")
+
+    # ── Elevate if we're not admin ────────────────────────────────────────
+    if not _is_windows_admin():
+        target = console if console.exists() else service
+        if not target.exists():
+            warn(f"Neither JackettConsole.exe nor JackettService.exe under {jackett_dir}")
+            note("Open the Jackett tray icon → 'Start background service' manually.")
             return
-    else:
         warn("Administrator rights are required for service install.")
         info("Requesting elevation — accept the UAC prompt …")
         try:
             import ctypes
             rc = ctypes.windll.shell32.ShellExecuteW(
-                None, "runas", console, "--Install", str(Path(console).parent), 1
+                None, "runas", str(target), "--Install", str(jackett_dir), 1
             )
             if rc <= 32:
                 warn(f"Elevation declined or failed (ShellExecute code {rc}).")
@@ -605,13 +611,38 @@ def install_jackett_service() -> None:
         except Exception as exc:
             warn(f"Could not request elevation: {exc}")
             return
-
         # ShellExecuteW returns immediately; poll until the service shows up.
         import time as _time
         for _ in range(30):   # up to ~15 s
             _time.sleep(0.5)
             if _jackett_service_installed():
                 break
+    else:
+        # We have admin — run --Install in-process, falling back to sc create.
+        installed = False
+        if console.exists():
+            try:
+                subprocess.run([str(console), "--Install"], check=True,
+                               cwd=str(jackett_dir))
+                installed = True
+            except subprocess.CalledProcessError as exc:
+                warn(f"JackettConsole.exe --Install failed (exit {exc.returncode})")
+        if not installed and service.exists():
+            note("Falling back to: sc create Jackett …")
+            try:
+                subprocess.run([
+                    "sc", "create", "Jackett",
+                    f"binPath={service}",
+                    "start=auto",
+                    "DisplayName=Jackett",
+                ], check=True)
+                installed = True
+            except subprocess.CalledProcessError as exc:
+                warn(f"sc create Jackett failed (exit {exc.returncode})")
+        if not installed:
+            warn("Could not register the service automatically.")
+            note(f"Files in {jackett_dir}: open it and verify the exes are present.")
+            return
 
     if _jackett_service_installed():
         ok("Jackett service installed.")
