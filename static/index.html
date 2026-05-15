@@ -759,9 +759,11 @@
     </svg>
     <span id="resumeOfferLabel">Resume from 0:00</span>
   </button>
-  <button onclick="dismissResume()" title="Start from beginning"
-    class="px-5 border-l-2 border-teal-700 text-teal-200 hover:text-white hover:bg-teal-800 active:bg-teal-700 transition-colors text-xs font-bold uppercase tracking-wide">
-    From Start
+  <button onclick="dismissResume()" title="Dismiss"
+    class="px-4 border-l-2 border-teal-700 text-teal-200 hover:text-white hover:bg-teal-800 active:bg-teal-700 transition-colors">
+    <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+    </svg>
   </button>
 </div>
 
@@ -1588,9 +1590,13 @@ async function dismissSkip(){
 }
 
 // ── Resume Offer ────────────────────────────────────────────────────────────
+let _resumeOfferTimer = null;
+
 function renderResumeOffer(offer){
   const el = document.getElementById("resumeOffer");
   if(!el) return;
+  clearTimeout(_resumeOfferTimer);
+  _resumeOfferTimer = null;
   if(!offer || !offer.position_sec){
     el.classList.add("hidden");
     return;
@@ -1605,6 +1611,7 @@ function renderResumeOffer(offer){
     ? `calc(env(safe-area-inset-bottom) + ${12 + stackOffset}px)`
     : `calc(env(safe-area-inset-bottom) + ${200 + stackOffset}px)`;
   el.classList.remove("hidden");
+  _resumeOfferTimer = setTimeout(() => dismissResume(), 60000);
 }
 
 async function triggerResume(){
