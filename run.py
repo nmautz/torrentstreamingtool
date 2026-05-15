@@ -171,7 +171,10 @@ def find_qbit() -> str | None:
 
 
 def _windows_jackett_candidates() -> list[str]:
-    """Every location the Jackett Windows installer / winget may use."""
+    """Every location the Jackett Windows installer / winget may use.
+
+    `JackettTray.exe` first — it shows the tray icon and starts the service.
+    """
     roots = [
         os.environ.get("ProgramFiles", r"C:\Program Files"),
         os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
@@ -183,6 +186,7 @@ def _windows_jackett_candidates() -> list[str]:
     for r in roots:
         for sub in ("Jackett", os.path.join("Programs", "Jackett")):
             base = Path(r) / sub
+            out.append(str(base / "JackettTray.exe"))
             out.append(str(base / "JackettConsole.exe"))
             out.append(str(base / "jackett.exe"))
     return out
@@ -279,6 +283,26 @@ def start_qbittorrent() -> bool:
     return wait_for_port(qbit_port, 30.0, "qBittorrent Web UI")
 
 
+def _start_jackett_service_windows() -> bool:
+    """Best-effort: start the 'Jackett' Windows service.
+
+    Returns True if the call succeeded (or the service is already running).
+    `sc start` returns 1056 (ALREADY_RUNNING) and 1060 (SERVICE_NOT_INSTALLED)
+    — the former counts as success, the latter falls through to launching
+    the tray exe as a regular process.
+    """
+    try:
+        r = subprocess.run(["sc", "start", "Jackett"], capture_output=True, text=True, timeout=10)
+    except Exception:
+        return False
+    out = (r.stdout + r.stderr).upper()
+    if r.returncode == 0:
+        return True
+    if "1056" in out or "ALREADY" in out:   # already running
+        return True
+    return False
+
+
 def start_jackett() -> bool:
     indexer_url  = e("INDEXER_URL", "http://localhost:9117")
     jackett_port = extract_port(indexer_url, 9117)
@@ -306,8 +330,22 @@ def start_jackett() -> bool:
         info("Download: https://github.com/Jackett/Jackett/releases")
         return False
 
-    info("Starting Jackett …")
-    launch_bg([jackett_bin, "--NoRestart"])
+    if SYSTEM == "Windows":
+        # The Windows installer registers a "Jackett" service that actually
+        # serves port 9117. Start it directly; the tray exe is launched only
+        # to put the notification-area icon up.
+        if _start_jackett_service_windows():
+            info("Started Jackett Windows service")
+        is_tray = Path(jackett_bin).name.lower() == "jacketttray.exe"
+        if is_tray:
+            info("Launching JackettTray.exe …")
+            launch_bg([jackett_bin])
+        else:
+            info("Starting Jackett …")
+            launch_bg([jackett_bin, "--NoRestart"])
+    else:
+        info("Starting Jackett …")
+        launch_bg([jackett_bin, "--NoRestart"])
     return wait_for_port(jackett_port, 25.0, "Jackett", jackett_host)
 
 

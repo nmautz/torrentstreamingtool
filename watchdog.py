@@ -121,7 +121,10 @@ def find_qbit() -> str | None:
 
 
 def _windows_jackett_candidates() -> list[str]:
-    """Every location the Jackett Windows installer / winget may use."""
+    """Every location the Jackett Windows installer / winget may use.
+
+    `JackettTray.exe` first — it shows the tray icon and starts the service.
+    """
     roots = [
         os.environ.get("ProgramFiles", r"C:\Program Files"),
         os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
@@ -133,9 +136,39 @@ def _windows_jackett_candidates() -> list[str]:
     for r in roots:
         for sub in ("Jackett", os.path.join("Programs", "Jackett")):
             base = Path(r) / sub
+            out.append(str(base / "JackettTray.exe"))
             out.append(str(base / "JackettConsole.exe"))
             out.append(str(base / "jackett.exe"))
     return out
+
+
+def _start_jackett_service_windows() -> bool:
+    """Best-effort: start the 'Jackett' Windows service. Returns True on
+    success or if it's already running; False if the service isn't installed."""
+    try:
+        r = subprocess.run(["sc", "start", "Jackett"], capture_output=True, text=True, timeout=10)
+    except Exception:
+        return False
+    out = (r.stdout + r.stderr).upper()
+    if r.returncode == 0:
+        return True
+    if "1056" in out or "ALREADY" in out:
+        return True
+    return False
+
+
+def _build_jackett_args(bin_path: str) -> list[str]:
+    """Return the launch args for the Jackett binary.
+
+    On Windows the canonical Jackett service is launched via `sc start` first
+    (the service serves port 9117); the tray exe is then started so the user
+    has a visible icon. `--NoRestart` is only valid for `JackettConsole.exe`.
+    """
+    if SYSTEM == "Windows":
+        _start_jackett_service_windows()
+        if Path(bin_path).name.lower() == "jacketttray.exe":
+            return [bin_path]
+    return [bin_path, "--NoRestart"]
 
 
 def find_jackett() -> str | None:
@@ -423,7 +456,7 @@ def _build_specs() -> tuple[list[ServiceSpec], ServiceSpec]:
             port=jackett_port,
             host="127.0.0.1",
             find_bin=find_jackett,
-            build_args=lambda b: [b, "--NoRestart"],
+            build_args=_build_jackett_args,
             startup_timeout=25.0,
             back_off=5.0,
         ))

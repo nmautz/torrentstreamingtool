@@ -98,9 +98,10 @@ def qbit_candidates() -> list[str]:
 def _windows_jackett_candidates() -> list[str]:
     """All the places the Jackett Windows installer (and winget) may drop it.
 
-    Jackett ships both `JackettConsole.exe` (the `--NoRestart` console runner
-    run.py launches) and `jackett.exe` (the tray app); installs land in
-    Program Files when elevated and under the user profile otherwise.
+    Preferred entry-point is `JackettTray.exe` — launching it puts the icon
+    in the notification area AND auto-starts the Jackett Windows service that
+    actually serves port 9117. `JackettConsole.exe` / `jackett.exe` are
+    fallbacks for setups where the tray app isn't installed.
     """
     roots = [
         os.environ.get("ProgramFiles", r"C:\Program Files"),
@@ -113,6 +114,7 @@ def _windows_jackett_candidates() -> list[str]:
     for r in roots:
         for sub in ("Jackett", os.path.join("Programs", "Jackett")):
             base = Path(r) / sub
+            out.append(str(base / "JackettTray.exe"))
             out.append(str(base / "JackettConsole.exe"))
             out.append(str(base / "jackett.exe"))
     return out
