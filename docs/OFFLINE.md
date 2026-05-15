@@ -30,7 +30,7 @@ The frontend stores the per-item summary in `prepStats: Map<itemId,summary>` and
 
 ### Save for offline
 
-1. User taps the save icon on an episode-picker row → `saveForOffline(itemId, filePath, fileName, fileLabel)`.
+1. User taps the save icon on an episode-picker row → `saveForOffline(itemId, filePath, fileName, fileLabel)`. For multi-file saves, the picker footer has a **Save Offline (N)** button that runs `epSaveSelectedOffline()` — it iterates the checked rows sequentially through `saveForOffline`, skipping anything already saved. Cancelling the per-file modal stops the chain (the next file is not started).
 2. Frontend opens `#offlineSaveModal` and POSTs `/api/library/{id}/offline-prepare {file_path}`.
 3. Backend `_ffprobe_codec` reads codec info via ffprobe.
    - **Fast path** (`_safari_compatible`): video is `h264`/`hevc`, audio is `aac`/`mp3`, container is `.mp4`/`.m4v`/`.mov`. Returns `{ready:true, video_url}` pointing at the existing `/api/library/{id}/download` URL. No file is created.

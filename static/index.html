@@ -615,6 +615,14 @@
           </svg>
           Download (<span id="epSelectedCount">0</span>)
         </button>
+        <button onclick="epSaveSelectedOffline()"
+          class="flex-1 bg-gray-800 hover:bg-emerald-900/60 text-gray-400 hover:text-emerald-300 py-3 text-sm font-bold uppercase tracking-wide transition-colors min-h-[44px] flex items-center justify-center gap-1.5">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M5 5a2 2 0 012-2h7l5 5v11a2 2 0 01-2 2H7a2 2 0 01-2-2V5z"/>
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 11v6m-3-3l3 3 3-3"/>
+          </svg>
+          Save Offline (<span id="epSelectedCountOff">0</span>)
+        </button>
         <button onclick="epPlay()"
           class="flex-1 bg-indigo-600 hover:bg-indigo-500 py-3 text-sm font-black uppercase tracking-wide transition-colors min-h-[44px]">
           ▶ Play
@@ -2921,7 +2929,12 @@ function epToggle(cb){
   if(cb.checked) epChecked.add(path); else epChecked.delete(path);
   updateEpCount();
 }
-function updateEpCount(){ document.getElementById("epSelectedCount").textContent=epChecked.size; }
+function updateEpCount(){
+  const n=epChecked.size;
+  document.getElementById("epSelectedCount").textContent=n;
+  const off=document.getElementById("epSelectedCountOff");
+  if(off) off.textContent=n;
+}
 function epSelectAll(v){
   epFiles.forEach(f=>{ if(v) epChecked.add(f.path); else epChecked.delete(f.path); });
   document.querySelectorAll(".ep-check").forEach(cb=>{ cb.checked=v; }); updateEpCount();
@@ -2998,6 +3011,25 @@ function epDownloadSeason(season){
 
 function epDownloadAll(itemId, title){
   _triggerZipDownload(itemId, [], title||"download");
+}
+
+async function epSaveSelectedOffline(){
+  if(!epChecked.size){ showAlert("Select at least one episode.","warn"); return; }
+  if(!epItemId) return;
+  if(!navigator.onLine){ showAlert("Cannot save offline while disconnected.","error"); return; }
+  const itemId=epItemId;
+  const paths=[...epChecked];
+  const targets=paths
+    .map(p=>epFiles.find(f=>f.path===p))
+    .filter(f=>f && !offlineSaved.has(offKey(itemId,f.path)));
+  if(!targets.length){ showAlert("All selected episodes are already saved.","warn"); return; }
+  let saved=0;
+  for(const f of targets){
+    await saveForOffline(itemId, f.path, f.name, epLabel(f)+' — '+f.name);
+    if(!offlineSaved.has(offKey(itemId,f.path))) break; // user cancelled or it failed
+    saved++;
+  }
+  if(saved>1) showAlert(`Saved ${saved} episode${saved>1?"s":""} for offline playback.`,"success");
 }
 
 async function epMarkWatched(watched){
