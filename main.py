@@ -1315,12 +1315,20 @@ def _schedule_series_analysis_if_eligible(item: dict, lib: dict) -> None:
         return
     key = _series_key(item)
     peers = [it for it in _items_for_series_key(lib, key) if it.get("status") == "ready"]
-    # Avoid re-analyzing if every file in every peer already has skip_data
+
+    def _needs_reanalysis(file_data: Optional[dict]) -> bool:
+        if not file_data:
+            return True
+        analysis = file_data.get("analysis") or {}
+        if analysis.get("source") == "manual":
+            return False
+        return analysis.get("version", 0) < analyzer.ANALYZER_VERSION
+
     needs_run = False
     for peer in peers:
         sk = peer.get("skip_data", {})
         for f in peer.get("files", []):
-            if f.get("path", "") not in sk:
+            if _needs_reanalysis(sk.get(f.get("path", ""))):
                 needs_run = True
                 break
         if needs_run:

@@ -19,7 +19,7 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-ANALYZER_VERSION = 1
+ANALYZER_VERSION = 2
 
 # Chromaprint emits ~7.8 fingerprint frames per second (8192 samples @ 11025 Hz).
 # Each frame is one 32-bit integer.
@@ -221,6 +221,37 @@ def _intersect_match(matches: list[tuple[int, int, int]],
     return None
 
 
+def _resolve_offset_in_cluster(idx: int, cluster: dict) -> Optional[tuple[int, int]]:
+    """Return (offset_frames, length_frames) of the shared segment in episode idx
+    within the given cluster, or None if idx isn't a member."""
+    if idx == cluster["anchor_idx"]:
+        rng = cluster.get("anchor_range")
+        if rng:
+            return rng
+        # Intersection collapsed — anchor still belongs to the cluster, so fall
+        # back to the median (offset_in_anchor, length) across pair matches.
+        pairs = list(cluster["matches"].values())
+        if not pairs:
+            return None
+        offsets_a = sorted(m[0] for m in pairs)
+        lengths   = sorted(m[2] for m in pairs)
+        return (offsets_a[len(offsets_a) // 2], lengths[len(lengths) // 2])
+    m = cluster["matches"].get(idx)
+    if m is None:
+        return None
+    return (m[1], m[2])
+
+
+def _build_ep_offset_map(clusters: list[dict]) -> dict[int, tuple[int, int]]:
+    out: dict[int, tuple[int, int]] = {}
+    for cluster in clusters:
+        for idx in (cluster["anchor_idx"], *cluster["matches"].keys()):
+            pos = _resolve_offset_in_cluster(idx, cluster)
+            if pos is not None:
+                out[idx] = pos
+    return out
+
+
 # ── Public API ───────────────────────────────────────────────────────────────
 
 def frames_to_seconds(frames: int) -> float:
@@ -271,6 +302,74 @@ def _detect_blackframe(file_path: str, start_at_sec: float,
         bs = float(m[0]) + start_at_sec
         return bs
     return None
+
+
+async def _build_clusters_async(
+    fps: list[list[int]],
+    min_frames: int,
+    max_frames: int,
+    episodes: list[dict],
+    progress_cb,
+    stage_label: str,
+) -> list[dict]:
+    """Greedy clustering of episodes that share a fingerprint segment.
+
+    Picks the first un-clustered episode as anchor, pairwise-matches every
+    remaining episode against it, then recurses on the unmatched leftovers.
+    An anchor that matches nothing is treated as a singleton (special/OVA/
+    episode with a unique opening) and is silently dropped.
+
+    Returns a list of clusters, each:
+        anchor_idx:   episode index of the cluster anchor
+        matches:      dict[ep_idx -> (offset_in_anchor, offset_in_ep, length_frames)]
+        anchor_range: Optional[(offset_frames, length_frames)] — intersection
+                      of anchor-side windows across this cluster's matches,
+                      or None if intersection collapsed below min_frames
+    """
+    remaining = [i for i in range(len(fps)) if fps[i]]
+    clusters: list[dict] = []
+    pairs_done = 0
+    total_estimate = max(1, len(remaining) - 1)
+
+    while len(remaining) >= 2:
+        anchor = remaining[0]
+        rest   = remaining[1:]
+        total_estimate = max(total_estimate, pairs_done + len(rest))
+        matches: dict[int, tuple[int, int, int]] = {}
+        unmatched: list[int] = []
+        for i in rest:
+            pairs_done += 1
+            ep_name = Path(episodes[i]["path"]).name if 0 <= i < len(episodes) else ""
+            try:
+                await progress_cb(
+                    stage=stage_label,
+                    current=pairs_done,
+                    total=total_estimate,
+                    message=f"Matching {pairs_done} of {total_estimate}",
+                    episode_name=ep_name,
+                )
+            except Exception:
+                pass
+            m = await asyncio.to_thread(
+                _find_longest_match, fps[anchor], fps[i], min_frames, max_frames,
+            )
+            if m:
+                matches[i] = m
+            else:
+                unmatched.append(i)
+
+        if matches:
+            anchor_range = _intersect_match(list(matches.values()), min_frames)
+            clusters.append({
+                "anchor_idx":   anchor,
+                "matches":      matches,
+                "anchor_range": anchor_range,
+            })
+        # else: anchor was a singleton — drop it, don't form a one-episode cluster
+
+        remaining = unmatched
+
+    return clusters
 
 
 async def analyze_series(items: list[dict], progress_cb=None) -> dict:
@@ -352,52 +451,33 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
             tail = []
         tail_fps.append(tail)
 
-    # ── Intro: pairwise match against anchor (episode 0). Keep a dict
-    # keyed by episode index so failed-match episodes don't shift positions
-    # of later episodes' matches. ─────────────────────────────────────────────
-    intro_match_by_ep: dict[int, tuple[int, int, int]] = {}
-    if head_fps[0]:
-        max_intro_frames = int(MAX_INTRO_SEC * FP_FRAMES_PER_SEC)
-        pair_count = len(episodes) - 1
-        for i in range(1, len(episodes)):
-            await _emit(stage="matching-intros", current=i, total=pair_count,
-                        message=f"Matching intros {i} of {pair_count}",
-                        episode_name=Path(episodes[i]["path"]).name)
-            if not head_fps[i]:
-                continue
-            m = await asyncio.to_thread(
-                _find_longest_match, head_fps[0], head_fps[i],
-                MIN_MATCH_FRAMES, max_intro_frames,
-            )
-            if m:
-                intro_match_by_ep[i] = m
+    # ── Cluster intros and outros independently.
+    #
+    # Greedy clustering: pick the first un-clustered episode as anchor, match
+    # every other un-clustered episode against it, then recurse on whatever's
+    # left. This naturally handles three failure modes the old single-anchor
+    # approach couldn't:
+    #   • Specials/OVAs mixed into the torrent — they match nothing, form no
+    #     cluster, and get no false intro skip.
+    #   • Mid-season intro changes — eps with the new opening drop out of the
+    #     first cluster and form their own on the second pass.
+    #   • Episode 0 being a special — first pass finds an empty cluster and
+    #     moves on; the real intro group still gets detected from ep 1+.
+    max_intro_frames = int(MAX_INTRO_SEC * FP_FRAMES_PER_SEC)
+    intro_clusters = await _build_clusters_async(
+        head_fps, MIN_MATCH_FRAMES, max_intro_frames,
+        episodes, _emit, "matching-intros",
+    )
+    intro_by_ep = _build_ep_offset_map(intro_clusters)
 
-    intro_anchor_range = _intersect_match(list(intro_match_by_ep.values()),
-                                          MIN_MATCH_FRAMES) if intro_match_by_ep else None
+    max_outro_frames = int(MAX_OUTRO_SEC * FP_FRAMES_PER_SEC)
+    outro_clusters = await _build_clusters_async(
+        tail_fps, MIN_MATCH_FRAMES, max_outro_frames,
+        episodes, _emit, "matching-outros",
+    )
+    outro_by_ep = _build_ep_offset_map(outro_clusters)
 
-    # ── Outro: same shape ────────────────────────────────────────────────────
-    outro_match_by_ep: dict[int, tuple[int, int, int]] = {}
-    if tail_fps and tail_fps[0]:
-        max_outro_frames = int(MAX_OUTRO_SEC * FP_FRAMES_PER_SEC)
-        pair_count = len(episodes) - 1
-        for i in range(1, len(episodes)):
-            await _emit(stage="matching-outros", current=i, total=pair_count,
-                        message=f"Matching credits {i} of {pair_count}",
-                        episode_name=Path(episodes[i]["path"]).name)
-            if not tail_fps[i]:
-                continue
-            m = await asyncio.to_thread(
-                _find_longest_match, tail_fps[0], tail_fps[i],
-                MIN_MATCH_FRAMES, max_outro_frames,
-            )
-            if m:
-                outro_match_by_ep[i] = m
-
-    outro_anchor_range = _intersect_match(list(outro_match_by_ep.values()),
-                                          MIN_MATCH_FRAMES) if outro_match_by_ep else None
-
-    # ── Build per-episode result. The anchor (ep 0) range is canonical.
-    # For other episodes, use the pairwise match position. ─────────────────
+    # ── Build per-episode result ─────────────────────────────────────────────
     result: dict = {}
     for idx, ep in enumerate(episodes):
         path = ep["path"]
@@ -409,31 +489,19 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
                     episode_name=ep_name)
 
         intro: Optional[dict] = None
-        if idx == 0 and intro_anchor_range:
-            s_fr, l_fr = intro_anchor_range
+        if idx in intro_by_ep:
+            s_fr, l_fr = intro_by_ep[idx]
             intro = {
                 "start": round(frames_to_seconds(s_fr), 1),
                 "end":   round(frames_to_seconds(s_fr + l_fr), 1),
             }
-        elif idx in intro_match_by_ep:
-            _, offset_b, length = intro_match_by_ep[idx]
-            intro = {
-                "start": round(frames_to_seconds(offset_b), 1),
-                "end":   round(frames_to_seconds(offset_b + length), 1),
-            }
 
-        # Credits
         credits_start: Optional[float] = None
         source = "auto-fallback"
-        if idx == 0 and outro_anchor_range and dur:
-            s_fr, _ = outro_anchor_range
+        if idx in outro_by_ep and dur:
+            offset_fr, _ = outro_by_ep[idx]
             tail_start = dur - OUTRO_SEARCH_SECS
-            credits_start = round(tail_start + frames_to_seconds(s_fr), 1)
-            source = "auto"
-        elif idx in outro_match_by_ep and dur:
-            _, offset_b, _ = outro_match_by_ep[idx]
-            tail_start = dur - OUTRO_SEARCH_SECS
-            credits_start = round(tail_start + frames_to_seconds(offset_b), 1)
+            credits_start = round(tail_start + frames_to_seconds(offset_fr), 1)
             source = "auto"
         elif dur and dur > 60:
             # Blackdetect fallback — scan only the last 5 minutes to keep this snappy
