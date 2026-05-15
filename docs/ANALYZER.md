@@ -1,0 +1,119 @@
+# Smart Skip (`analyzer.py` + orchestration in `main.py`)
+
+Audio-fingerprint-driven intro/credits detection. Runs per-series; results stored as `skip_data` on each item.
+
+## Dependencies
+
+- **`ffmpeg`** — audio decode + ffprobe duration + blackdetect fallback
+- **`fpcalc`** (chromaprint) — fingerprinting (`-raw` mode emits integer frames)
+- Both are detected by `setup.py` and stored as `_FFMPEG_BIN` / `_FPCALC_BIN` in `.env`
+- `analyzer.is_available()` returns False if either is missing — feature degrades to manual entry only (admin editor still works)
+
+## Algorithm overview
+
+Chromaprint emits ~7.8 32-bit hash frames per second of audio.
+
+1. **Fingerprint** ([analyzer.py:69](../analyzer.py#L69)): For each episode, call `fpcalc -raw -length 360 <path>` for the head (first 6 min) and `ffmpeg -ss <tail_start> -t 600 | fpcalc -raw -length 600 -` for the tail (last 10 min)
+2. **Greedy clustering** ([analyzer.py:307](../analyzer.py#L307)): pick first un-clustered episode as anchor; pairwise `_find_longest_match` against every other. The longest run ≥ `MIN_MATCH_FRAMES` (~15 s) with Hamming distance ≤ 6 bits per frame is kept. Unmatched episodes recurse on the next pass (new anchor)
+3. **Intersection** ([analyzer.py:209](../analyzer.py#L209)): within a cluster, the anchor's intro/outro range is the intersection of anchor-side windows across all pair matches. Per-non-anchor episodes use the `offset_in_other` from their pair match — so cold opens of different lengths still align correctly
+4. **Credits fallback chain** ([analyzer.py:480](../analyzer.py#L480)):
+   - Outro cluster matched → `credits_start = tail_start + frames_to_seconds(offset)`, `source="auto"`
+   - No outro cluster → `_detect_blackframe` scans the last 5 min for the first ≥0.5 s black segment, `source="auto-blackframe"`
+   - Nothing → `credits_start = duration * 0.92`, `source="auto-fallback"` (matches the 92 % completion threshold so progress and credits agree)
+
+## Constants ([analyzer.py:22](../analyzer.py#L22))
+
+| Name | Value | Meaning |
+|------|-------|---------|
+| `ANALYZER_VERSION` | 2 | Bumped to force re-analysis when the algorithm changes |
+| `FP_FRAMES_PER_SEC` | 7.8 | Chromaprint's emission rate |
+| `INTRO_SEARCH_SECS` | 360 | Look for intro in first 6 min |
+| `OUTRO_SEARCH_SECS` | 600 | Look for outro in last 10 min |
+| `MIN_INTRO_SEC` | 15 | Smallest segment we'll call an intro |
+| `MAX_INTRO_SEC` | 180 | Cap to avoid runaway matches |
+| `MIN_OUTRO_SEC` | 15 | Same for credits |
+| `MAX_OUTRO_SEC` | 180 | |
+| `FRAME_HAMMING_MAX` | 6 | ≤6 bits differ in a 32-bit hash → "same" frame |
+| `MIN_MATCH_FRAMES` | int(15 × 7.8) | Minimum consecutive frames for a match |
+| `CREDITS_FALLBACK_PCT` | 0.92 | Time-based fallback when no outro is found |
+
+## Greedy clustering ([analyzer.py:307](../analyzer.py#L307))
+
+The greedy approach handles three failure modes the original single-anchor approach couldn't:
+- **Specials/OVAs** mixed into the torrent — they match nothing, form no cluster, get no false intro skip
+- **Mid-season intro changes** — eps with the new opening drop out of the first cluster and form their own on the second pass
+- **Episode 0 is a special** — first pass finds an empty cluster and moves on; the real intro group still gets detected from ep 1+
+
+## Concurrency
+
+- One series at a time within a series — `lock_for_series(key)` returns a per-series `asyncio.Lock`
+- Different series can run in parallel (different locks)
+- All blocking work (subprocess calls) goes through `asyncio.to_thread` so the event loop stays responsive
+
+## Progress reporting
+
+`analyze_series(items, progress_cb)` invokes `progress_cb(stage, current, total, message, episode_name)` at each step. `main.py`'s `_set_analysis_status` broadcasts these as SSE `analysis_status` events. Stages: `starting` → `fingerprinting` → `matching-intros` → `matching-outros` → `finalizing` → `done`.
+
+## Trigger flow (in `main.py`)
+
+1. `library_download_monitor` flips an item to `status="ready"`
+2. Calls `_schedule_series_analysis_if_eligible(item, lib)` ([main.py:1320](../main.py#L1320))
+3. Checks: analyzer available? AND at least one file in this series bucket still needs analysis (no `skip_data`, or stale `analysis.version`)? AND user did NOT manually mark it (manual entries are never overwritten)
+4. If yes, `asyncio.create_task(_run_series_analysis(key))`
+5. `_run_series_analysis` ([main.py:1244](../main.py#L1244)) acquires the lock, calls `analyzer.analyze_series`, writes results back into `library.json` under each item's `skip_data`, broadcasts `analysis_status`
+
+## `_series_key` ([main.py:1192](../main.py#L1192))
+
+- Items with non-empty `series` field → `series:<lowercased>` (cross-episode matching)
+- Empty `series` → `item:<id>` (movies / one-offs get their own singleton bucket → credits fallback only)
+
+## Runtime offer logic ([main.py:1355](../main.py#L1355))
+
+`vlc_progress_tracker` runs every 2 s. For the current file:
+1. Look up `_find_file_meta(item, file_path)` from `skip_data`
+2. **Intro window**: if `start - 2s ≤ pos < end`, either auto-skip (profile pref + still has >1 s left) or set `state.skip_offer = {type:"intro", end_at, file_path}` and broadcast
+3. **Credits window**: if `pos ≥ credits_start - 2s` and not at the very end, either auto-skip (profile pref + `pos ≥ credits_start`) or set `state.skip_offer = {type:"credits", credits_start, file_path, has_next, next_file_path}`
+4. **Outside any window** → clear offer
+
+The `SKIP_PREROLL_SEC = 2.0` ([main.py:1352](../main.py#L1352)) gives the user 2 s of visual time to react before the range starts.
+
+`state.skip_offer_file` carries the file path while an offer is active. After acting/dismissing, it gets a `#intro-done` / `#credits-done` suffix so the same offer doesn't re-emit on the next tick.
+
+## Endpoints
+
+User-facing:
+- `POST /api/skip-now {type}` — execute. Intro = seek to `end_at + 1`. Credits = `vlc_next_file` (or `pl_stop`)
+- `DELETE /api/skip-now` — dismiss without acting
+
+Admin:
+- `GET /api/admin/library/{id}/skip-data` — per-file editor data
+- `PATCH /api/admin/library/{id}/skip-data` — manual override (sets `analysis.source="manual"`)
+- `POST /api/admin/library/{id}/analyze` — force re-run for the item's series
+- `GET /api/admin/analyzer-status` — `{available, ffmpeg, fpcalc}`
+
+## Skip data shape (stored per item)
+
+```jsonc
+"skip_data": {
+  "<absolute file path>": {
+    "intro": { "start": 12.0, "end": 105.0 },     // or null
+    "credits_start": 2940.0,                       // or null
+    "analysis": {
+      "version": 2,
+      "source": "auto" | "auto-blackframe" | "auto-fallback" | "manual"
+    }
+  }
+}
+```
+
+## Frontend
+
+`renderSkipOffer(offer)` displays a fixed-position amber tile at the bottom of the viewport (above the player footer / fullscreen controls). Renders whenever `state.skip_offer` is non-null. The label is "Skip intro" or "Skip credits" depending on `offer.type`. `triggerSkip()` POSTs `/api/skip-now`; `dismissSkip()` DELETEs.
+
+Per-profile `auto_skip_intro` / `auto_skip_credits` toggles live in the profile-settings modal (gear icon next to the navbar avatar).
+
+## See also
+
+- [BACKEND.md](BACKEND.md) — `vlc_progress_tracker` and `_maybe_emit_skip_offer`
+- [LIBRARY_DATA.md](LIBRARY_DATA.md) — full skip_data schema in context
+- [ADMIN.md](ADMIN.md) — the Smart Skip admin tab
