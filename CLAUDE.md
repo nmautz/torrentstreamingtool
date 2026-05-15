@@ -103,6 +103,14 @@ Persistent storage in `library.json` at the project root (created automatically)
 
 **Absolute seek** — `POST /api/vlc/seek/to?position_pct=N` sends `val=N%` to VLC's `seek` command (percentage-based absolute position). The relative-seek endpoint `POST /api/vlc/seek?delta=N` uses `val=+Ns` / `val=-Ns` format. Do not confuse the two — VLC treats `val=N` (no suffix) as a fraction (0.0–1.0), not seconds.
 
+### Subtitle download
+
+`GET /api/subtitles/search` and `POST /api/subtitles/download` find and load external subtitles for whatever VLC is currently playing (works for both stream and library playback). `_current_playback_path()` resolves the playing file from VLC's `playlist.json` `current` entry, falling back to `state.library_current_file` / `state.active_file`.
+
+**OpenSubtitles** — uses the keyless legacy REST API at `rest.opensubtitles.org`. No API key or account is needed — only a `User-Agent` header (`OPENSUBTITLES_USER_AGENT` in `.env`, defaults to `"TemporaryUserAgent"`). Search runs twice: by movie hash (`_opensubtitles_hash` — 64-bit sum of filesize + first/last 64 KB, the standard OpenSubtitles algorithm) for exact matches, and by name as a fallback. Results are merged, deduped on download link, and sorted hash-matches-first.
+
+**Apply** — `download_subtitle` validates the link host is `*.opensubtitles.org`, downloads the (gzipped) subtitle, gunzips it, and saves it as `<video-stem>.<lang>.srt` next to the video file. It then calls VLC's `addsubtitle` command (`val=` absolute path) and selects the newly added track by taking the highest subtitle ES ID from a fresh `vlc_status()` — `addsubtitle` does not report the new track's ID. The selection is persisted as a track pref when in library playback.
+
 ### Smart Skip (`analyzer.py`)
 
 Audio-fingerprint-driven intro/credits detection for library items. Requires `ffmpeg` and `fpcalc` (chromaprint) on the host; `setup.py` detects both and prints a platform-specific install hint if missing — does NOT auto-install. `pyacoustid` is a pip dependency, but the actual fingerprinting calls shell out to `fpcalc -raw` for speed. If either binary is missing, `analyzer.is_available()` returns False and the feature degrades to manual entry only (the admin editor still works).

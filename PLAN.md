@@ -53,6 +53,7 @@
 - [x] **5.1** Local DNS: configure mDNS so the tool is accessible at `http://remote.local`, update project to use port 80 (or 443 if https is enabled)
 - [x] **5.2** Smart Skip: audio fingerprinting to detect and skip intro/credit sequences on library files
 - [-] **5.3** Control API: documented JSON POST endpoints for external play/pause/seek/volume control
+- [x] **5.4** Subtitle Download: Find subtitles for the track by hash or name
 
 ---
 

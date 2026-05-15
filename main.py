@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import gzip
 import hashlib
 import io
 import json
@@ -11,6 +12,7 @@ import re
 import secrets
 import shutil
 import socket
+import struct
 import subprocess
 import threading
 import time
@@ -21,7 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import AsyncGenerator, Optional
-from urllib.parse import unquote, urlparse
+from urllib.parse import quote, unquote, urlparse
 
 import httpx
 import psutil
@@ -59,6 +61,10 @@ class Settings(BaseSettings):
 
     admin_password: str = ""   # if empty, admin panel is disabled
     jackett_password: str = ""  # Jackett UI login password for indexer management
+
+    # OpenSubtitles legacy REST API (rest.opensubtitles.org) needs no key, only a
+    # User-Agent. "TemporaryUserAgent" is OpenSubtitles' documented testing UA.
+    opensubtitles_user_agent: str = "TemporaryUserAgent"
 
 
 settings = Settings()
@@ -427,6 +433,111 @@ def uri_to_path(uri: str) -> str:
     if platform.system() == "Windows":
         path = path.lstrip("/")
     return path
+
+
+# ── Subtitle Download (OpenSubtitles) ─────────────────────────────────────────
+
+def _opensubtitles_hash(path: Path) -> Optional[str]:
+    """Compute the OpenSubtitles movie hash: 64-bit sum of filesize + first 64 KB
+    + last 64 KB, read as little-endian 8-byte ints. Returns 16-char hex."""
+    try:
+        fmt = "<q"
+        chunk = 65536
+        bsize = struct.calcsize(fmt)
+        filesize = path.stat().st_size
+        if filesize < chunk * 2:
+            return None
+        h = filesize
+        with path.open("rb") as f:
+            for _ in range(chunk // bsize):
+                (val,) = struct.unpack(fmt, f.read(bsize))
+                h = (h + val) & 0xFFFFFFFFFFFFFFFF
+            f.seek(filesize - chunk, 0)
+            for _ in range(chunk // bsize):
+                (val,) = struct.unpack(fmt, f.read(bsize))
+                h = (h + val) & 0xFFFFFFFFFFFFFFFF
+        return f"{h:016x}"
+    except Exception:
+        return None
+
+
+async def _current_playback_path() -> Optional[Path]:
+    """Resolve the file VLC is actually playing, regardless of how it started."""
+    uri = await vlc_playlist_uri()
+    if uri and uri.startswith("file:"):
+        try:
+            p = Path(uri_to_path(uri))
+            if p.exists():
+                return p
+        except Exception:
+            pass
+    for cand in (state.library_current_file, state.active_file):
+        if cand:
+            try:
+                p = Path(cand)
+                if p.exists():
+                    return p
+            except Exception:
+                pass
+    return None
+
+
+def _trim_subtitle_result(s: dict) -> dict:
+    return {
+        "name": s.get("SubFileName") or s.get("MovieReleaseName") or "subtitle",
+        "lang": s.get("ISO639") or "",
+        "lang_name": s.get("LanguageName") or s.get("SubLanguageID") or "Unknown",
+        "downloads": int(s.get("SubDownloadsCount") or 0),
+        "matched_by": s.get("MatchedBy") or "",
+        "release": s.get("MovieReleaseName") or "",
+        "download_link": s.get("SubDownloadLink") or "",
+    }
+
+
+async def _opensubtitles_search(
+    file_hash: Optional[str], file_size: Optional[int],
+    query: str, lang: str,
+) -> list[dict]:
+    """Query the keyless rest.opensubtitles.org API by hash and/or text. Hash
+    matches are exact; text matches are a fallback. Results are merged."""
+    headers = {
+        "User-Agent": settings.opensubtitles_user_agent,
+        "X-User-Agent": settings.opensubtitles_user_agent,
+    }
+    lang_seg = f"/sublanguageid-{quote(lang)}" if lang else ""
+    urls: list[str] = []
+    if file_hash and file_size:
+        urls.append(
+            f"https://rest.opensubtitles.org/search"
+            f"/moviebytesize-{file_size}/moviehash-{file_hash}{lang_seg}"
+        )
+    if query:
+        urls.append(
+            f"https://rest.opensubtitles.org/search/query-{quote(query)}{lang_seg}"
+        )
+    raw: list[dict] = []
+    async with httpx.AsyncClient(timeout=20.0, follow_redirects=True) as c:
+        for url in urls:
+            try:
+                r = await c.get(url, headers=headers)
+                if r.status_code == 200 and isinstance(r.json(), list):
+                    raw.extend(r.json())
+            except Exception:
+                pass
+    # Dedup by download link, prefer hash matches, then by download count
+    seen: set[str] = set()
+    trimmed: list[dict] = []
+    for s in raw:
+        t = _trim_subtitle_result(s)
+        link = t["download_link"]
+        if not link or link in seen:
+            continue
+        seen.add(link)
+        trimmed.append(t)
+    trimmed.sort(
+        key=lambda t: (0 if t["matched_by"] == "moviehash" else 1, -t["downloads"])
+    )
+    return trimmed[:40]
 
 
 def _find_vlc_bin() -> Optional[str]:
@@ -2693,6 +2804,90 @@ async def set_subtitle_track(track_id: int) -> JSONResponse:
             state.library_current_file, subtitle=track_id,
         ))
     return JSONResponse({"ok": True})
+
+
+@app.get("/api/subtitles/search")
+async def search_subtitles(query: str = "", lang: str = "") -> JSONResponse:
+    """Find subtitles for the file VLC is playing — by movie hash (exact) and by
+    name (fallback). `query` overrides the auto-derived name; `lang` is an
+    optional 3-letter OpenSubtitles language id (blank = all languages)."""
+    video = await _current_playback_path()
+    file_hash: Optional[str] = None
+    file_size: Optional[int] = None
+    file_name = ""
+    if video:
+        file_name = video.name
+        file_size = video.stat().st_size
+        file_hash = await asyncio.to_thread(_opensubtitles_hash, video)
+    q = query.strip() or (video.stem if video else "")
+    if not file_hash and not q:
+        raise HTTPException(409, "Nothing is playing and no search query was given.")
+    results = await _opensubtitles_search(file_hash, file_size, q, lang.strip())
+    return JSONResponse({"file": file_name, "hash": file_hash, "results": results})
+
+
+class SubtitleDownloadReq(BaseModel):
+    download_link: str
+    lang: str = ""
+
+
+@app.post("/api/subtitles/download")
+async def download_subtitle(req: SubtitleDownloadReq) -> JSONResponse:
+    """Download a chosen subtitle, save it next to the playing video, and load it
+    into VLC as a new (and selected) subtitle track."""
+    link = req.download_link.strip()
+    host = (urlparse(link).hostname or "").lower()
+    if not (host == "opensubtitles.org" or host.endswith(".opensubtitles.org")):
+        raise HTTPException(400, "Invalid subtitle source.")
+    video = await _current_playback_path()
+    if not video:
+        raise HTTPException(409, "No file is currently playing.")
+
+    headers = {"User-Agent": settings.opensubtitles_user_agent}
+    try:
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as c:
+            r = await c.get(link, headers=headers)
+        r.raise_for_status()
+        data = r.content
+        if data[:2] == b"\x1f\x8b":   # gzip magic — OpenSubtitles serves .gz
+            data = gzip.decompress(data)
+    except Exception as e:
+        raise HTTPException(502, f"Subtitle download failed: {e}")
+
+    lang = re.sub(r"[^a-zA-Z]", "", req.lang)[:5].lower() or "sub"
+    dest = video.with_name(f"{video.stem}.{lang}.srt")
+    n = 2
+    while dest.exists():
+        dest = video.with_name(f"{video.stem}.{lang}.{n}.srt")
+        n += 1
+    try:
+        dest.write_bytes(data)
+    except Exception as e:
+        raise HTTPException(500, f"Could not save subtitle file: {e}")
+
+    # Load into VLC, then select the newly added subtitle track.
+    await vlc("addsubtitle", val=str(dest.resolve()))
+    await asyncio.sleep(0.6)
+    new_id: Optional[int] = None
+    vs = await vlc_status()
+    if vs:
+        cat = vs.get("information", {}).get("category", {})
+        sub_ids = [
+            int(k.split()[-1])
+            for k, v in cat.items()
+            if k.startswith("Stream") and k.split()[-1].isdigit()
+            and v.get("Type") == "Subtitle"
+        ]
+        if sub_ids:
+            new_id = max(sub_ids)
+            state.current_subtitle_track = new_id
+            await vlc("subtitle_track", val=str(new_id))
+            if state.library_item_id and state.library_profile_id and state.library_current_file:
+                asyncio.create_task(_save_track_pref(
+                    state.library_item_id, state.library_profile_id,
+                    state.library_current_file, subtitle=new_id,
+                ))
+    return JSONResponse({"ok": True, "saved": dest.name, "subtitle_track": new_id})
 
 
 @app.get("/api/state")

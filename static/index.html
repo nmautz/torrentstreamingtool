@@ -536,6 +536,40 @@
   </div>
 </div>
 
+<!-- ── Subtitle Search Modal ──────────────────────────────────────────────── -->
+<!-- z-[60]: must sit above the z-50 fullscreen controls overlay -->
+<div id="subtitleModal"
+  class="hidden fixed inset-0 z-[60] bg-black/60
+         flex items-end sm:items-center justify-center sm:px-4 sm:py-6">
+  <div class="bg-gray-900 w-full sm:max-w-lg flex flex-col max-h-[90vh] sm:max-h-[85vh] fade-in border-t-[3px] border-indigo-600">
+    <div class="px-5 pt-5 pb-3 border-b border-gray-800 flex items-center justify-between flex-shrink-0">
+      <div class="min-w-0">
+        <h2 class="text-lg font-black uppercase tracking-wide">Find Subtitles</h2>
+        <p id="subModalFile" class="text-xs text-gray-500 mt-0.5 truncate font-mono"></p>
+      </div>
+      <button onclick="closeSubtitleModal()"
+        class="text-gray-500 hover:text-white transition-colors flex-shrink-0 p-1">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+    <div class="px-5 py-3 border-b border-gray-800 flex-shrink-0">
+      <div class="flex gap-0">
+        <input id="subSearchQuery" type="text" placeholder="Title or filename"
+          onkeydown="if(event.key==='Enter') runSubtitleSearch()"
+          class="flex-1 min-w-0 bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500
+                 px-3 py-2.5 text-sm focus:outline-none transition-colors placeholder-gray-700"/>
+        <button onclick="runSubtitleSearch()"
+          class="bg-indigo-700 hover:bg-indigo-600 text-white text-sm font-black uppercase tracking-wide px-5 py-2.5 transition-colors flex-shrink-0">
+          Search
+        </button>
+      </div>
+    </div>
+    <div id="subResults" class="flex-1 overflow-y-auto px-5 py-3 space-y-2"></div>
+  </div>
+</div>
+
 <!-- ── Global Toast (visible from any tab) ────────────────────────────────── -->
 <div id="globalToast"
   class="hidden fixed top-16 inset-x-0 z-45 px-4 pointer-events-none">
@@ -735,6 +769,13 @@
                  focus:outline-none focus:border-indigo-500 cursor-pointer">
           <option value="-1">Off</option>
         </select>
+        <button onclick="openSubtitleModal()" title="Find subtitles online"
+          class="flex-shrink-0 px-2 py-1.5 bg-gray-900 border-b border-gray-700
+                 text-gray-500 hover:text-indigo-400 transition-colors">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <circle cx="11" cy="11" r="7"/><path stroke-linecap="round" d="M21 21l-4.3-4.3"/>
+          </svg>
+        </button>
       </div>
     </div>
   </div>
@@ -1010,6 +1051,13 @@
                  focus:outline-none focus:border-indigo-500 cursor-pointer">
           <option value="-1">Off</option>
         </select>
+        <button onclick="openSubtitleModal()" title="Find subtitles online"
+          class="flex-shrink-0 px-2 bg-gray-900 border border-gray-700 rounded-lg
+                 text-gray-500 hover:text-indigo-400 transition-colors">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <circle cx="11" cy="11" r="7"/><path stroke-linecap="round" d="M21 21l-4.3-4.3"/>
+          </svg>
+        </button>
       </div>
     </div>
 
@@ -3131,6 +3179,79 @@ function startTrackPoll(){
 
 function stopTrackPoll(){
   if(_trackPollTimer){ clearInterval(_trackPollTimer); _trackPollTimer=null; }
+}
+
+// ── Subtitle search & download ──────────────────────────────────────────────
+let _subResults=[];
+
+function openSubtitleModal(){
+  document.getElementById("subtitleModal").classList.remove("hidden");
+  document.getElementById("subSearchQuery").value="";
+  document.getElementById("subModalFile").textContent="";
+  runSubtitleSearch();
+}
+function closeSubtitleModal(){
+  document.getElementById("subtitleModal").classList.add("hidden");
+}
+
+async function runSubtitleSearch(){
+  const q=document.getElementById("subSearchQuery").value.trim();
+  const box=document.getElementById("subResults");
+  box.innerHTML='<p class="text-xs text-gray-600 uppercase tracking-widest text-center py-6">Searching…</p>';
+  try{
+    const r=await fetch(`/api/subtitles/search?query=${encodeURIComponent(q)}`);
+    if(!r.ok){
+      const e=await r.json().catch(()=>({}));
+      box.innerHTML=`<p class="text-xs text-red-400 text-center py-6">${escHtml(e.detail||"Search failed.")}</p>`;
+      return;
+    }
+    const d=await r.json();
+    _subResults=d.results||[];
+    if(d.file) document.getElementById("subModalFile").textContent=d.file;
+    if(!_subResults.length){
+      box.innerHTML='<p class="text-xs text-gray-600 uppercase tracking-widest text-center py-6">No subtitles found.</p>';
+      return;
+    }
+    box.innerHTML=_subResults.map((s,i)=>{
+      const exact=s.matched_by==="moviehash";
+      return `<button onclick="applySubtitle(${i})"
+        class="w-full text-left bg-gray-800 hover:bg-gray-700 active:bg-gray-600 border-l-2
+               ${exact?"border-green-600":"border-gray-700"} px-3 py-2.5 transition-colors">
+        <div class="flex items-center gap-2">
+          <span class="text-[10px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-indigo-900 text-indigo-300 flex-shrink-0">${escHtml(s.lang_name)}</span>
+          ${exact?'<span class="text-[9px] font-black uppercase tracking-widest text-green-500 flex-shrink-0">Exact Match</span>':""}
+          <span class="text-[10px] text-gray-600 ml-auto flex-shrink-0">${s.downloads.toLocaleString()} dl</span>
+        </div>
+        <div class="text-xs text-gray-300 mt-1 truncate">${escHtml(s.name)}</div>
+        ${s.release?`<div class="text-[10px] text-gray-600 mt-0.5 truncate font-mono">${escHtml(s.release)}</div>`:""}
+      </button>`;
+    }).join("");
+  }catch(_){
+    box.innerHTML='<p class="text-xs text-red-400 text-center py-6">Search failed.</p>';
+  }
+}
+
+async function applySubtitle(i){
+  const s=_subResults[i]; if(!s) return;
+  const box=document.getElementById("subResults");
+  box.innerHTML='<p class="text-xs text-gray-600 uppercase tracking-widest text-center py-6">Downloading subtitle…</p>';
+  try{
+    const r=await fetch("/api/subtitles/download",{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({download_link:s.download_link,lang:s.lang}),
+    });
+    closeSubtitleModal();
+    if(!r.ok){
+      const e=await r.json().catch(()=>({}));
+      showAlert(e.detail||"Subtitle download failed.","error");
+      return;
+    }
+    showAlert("Subtitle added and selected.","success");
+    loadTracks();
+  }catch(_){
+    closeSubtitleModal();
+    showAlert("Subtitle download failed.","error");
+  }
 }
 
 // ── SSE ────────────────────────────────────────────────────────────────────
