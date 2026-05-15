@@ -142,20 +142,39 @@ def mullvad_candidates() -> list[str]:
     return ["/usr/bin/mullvad", "mullvad"]
 
 
+def _portable_matches(subdir: str, *exe_names: str) -> list[str]:
+    """Resolve already-extracted portable binaries under ./tools/<subdir>/.
+
+    The portable archives extract into version-stamped subdirectories
+    (e.g. tools/ffmpeg/ffmpeg-8.1.1-essentials_build/bin/ffmpeg.exe), so a
+    plain candidate path can't match — walk the tree instead. Listed first
+    so a re-run of setup.py reuses the download instead of fetching it again.
+    """
+    base = TOOLS_DIR / subdir
+    if not base.exists():
+        return []
+    out: list[str] = []
+    for name in exe_names:
+        out.extend(str(p) for p in base.rglob(name) if p.is_file())
+    return out
+
+
 def ffmpeg_candidates() -> list[str]:
+    portable = _portable_matches("ffmpeg", "ffmpeg.exe", "ffmpeg")
     if SYSTEM == "Darwin":
-        return ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "ffmpeg"]
+        return portable + ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "ffmpeg"]
     if SYSTEM == "Windows":
-        return [r"C:\ffmpeg\bin\ffmpeg.exe", "ffmpeg"]
-    return ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "ffmpeg"]
+        return portable + [r"C:\ffmpeg\bin\ffmpeg.exe", "ffmpeg"]
+    return portable + ["/usr/bin/ffmpeg", "/usr/local/bin/ffmpeg", "ffmpeg"]
 
 
 def fpcalc_candidates() -> list[str]:
+    portable = _portable_matches("chromaprint", "fpcalc.exe", "fpcalc")
     if SYSTEM == "Darwin":
-        return ["/opt/homebrew/bin/fpcalc", "/usr/local/bin/fpcalc", "fpcalc"]
+        return portable + ["/opt/homebrew/bin/fpcalc", "/usr/local/bin/fpcalc", "fpcalc"]
     if SYSTEM == "Windows":
-        return [r"C:\chromaprint\fpcalc.exe", "fpcalc"]
-    return ["/usr/bin/fpcalc", "/usr/local/bin/fpcalc", "fpcalc"]
+        return portable + [r"C:\chromaprint\fpcalc.exe", "fpcalc"]
+    return portable + ["/usr/bin/fpcalc", "/usr/local/bin/fpcalc", "fpcalc"]
 
 
 def chromaprint_install_hint() -> str:
