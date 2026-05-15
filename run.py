@@ -363,8 +363,13 @@ def start_jackett() -> bool:
         q = vrun(["sc.exe", "query", "Jackett"])
         service_installed = q.returncode == 0
         vlog(f"Jackett service installed: {service_installed}")
+        if VERBOSE and service_installed:
+            vrun(["sc.exe", "qc", "Jackett"])      # show binPath
+            vrun(["netstat", "-ano", "-p", "TCP"], timeout=5)
         if service_installed and _start_jackett_service_windows():
             info("Started Jackett Windows service")
+            if VERBOSE:
+                _diagnose_jackett_service_state()
         elif not service_installed:
             warn("Jackett Windows service is not installed.")
             info("Re-run 'python setup.py' from an Administrator PowerShell to install it,")
@@ -378,6 +383,50 @@ def start_jackett() -> bool:
         info("Starting Jackett …")
         launch_bg([jackett_bin, "--NoRestart"])
     return wait_for_port(jackett_port, 25.0, "Jackett", jackett_host)
+
+
+def _diagnose_jackett_service_state() -> None:
+    """Poll `sc query Jackett` for a few seconds and report crash exit code.
+
+    The service can register, accept `sc start`, transition to START_PENDING,
+    and then crash — visible only on a follow-up query (state back to STOPPED
+    with a non-zero WIN32_EXIT_CODE / SERVICE_EXIT_CODE). Also tail Jackett's
+    own log to surface the actual error.
+    """
+    vlog("Polling service state for 8s after start …")
+    for i in range(8):
+        time.sleep(1)
+        r = subprocess.run(["sc.exe", "query", "Jackett"], capture_output=True, text=True)
+        state = ""
+        for line in r.stdout.splitlines():
+            if "STATE" in line and ":" in line:
+                state = line.split(":", 1)[1].strip()
+                break
+        vlog(f"  t+{i+1}s: STATE = {state}")
+        if "STOPPED" in state:
+            for line in r.stdout.splitlines():
+                ls = line.strip()
+                if ls.startswith(("WIN32_EXIT_CODE", "SERVICE_EXIT_CODE")):
+                    vlog(f"  {ls}")
+            break
+        if "RUNNING" in state:
+            return
+    # Tail Jackett's log if we can find it
+    candidates = [
+        Path(r"C:\ProgramData\Jackett\log.txt"),
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Jackett" / "log.txt",
+        Path(os.environ.get("APPDATA", "")) / "Jackett" / "log.txt",
+    ]
+    for p in candidates:
+        try:
+            if p.exists():
+                vlog(f"Tailing {p} (last 30 lines):")
+                lines = p.read_text(encoding="utf-8", errors="replace").splitlines()[-30:]
+                for line in lines:
+                    vlog(f"  | {line}")
+                break
+        except Exception as exc:
+            vlog(f"Could not read {p}: {exc}")
 
 
 def check_mullvad() -> bool:
