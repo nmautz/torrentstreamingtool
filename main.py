@@ -378,6 +378,16 @@ async def qbit_delete(h: str, delete_files: bool = True) -> None:
 async def vlc(command: str, **params) -> None:
     try:
         async with httpx.AsyncClient() as c:
+            if command == "in_play":
+                # Force VLC to the current (already-capped) volume BEFORE playback
+                # starts, so VLC's own default doesn't blast at a loud level.
+                raw = max(0, min(512, round(state.vlc_volume / 100 * 256)))
+                await c.get(
+                    f"{settings.vlc_url}/requests/status.xml",
+                    auth=httpx.BasicAuth("", settings.vlc_password),
+                    params={"command": "volume", "val": str(raw)},
+                    timeout=5.0,
+                )
             await c.get(
                 f"{settings.vlc_url}/requests/status.xml",
                 auth=httpx.BasicAuth("", settings.vlc_password),
@@ -1851,6 +1861,10 @@ class ProfileResumeModeReq(BaseModel):
     resume_mode: str  # "auto" | "prompt" | "off"
 
 
+class ProfileMaxVolumeReq(BaseModel):
+    max_volume: int   # 0-200; 200 = no cap
+
+
 class SkipNowReq(BaseModel):
     type: str         # "intro" or "credits"
 
@@ -1877,6 +1891,7 @@ async def list_profiles() -> JSONResponse:
             "auto_skip_intro":   bool(p.get("auto_skip_intro", False)),
             "auto_skip_credits": bool(p.get("auto_skip_credits", False)),
             "resume_mode":       p.get("resume_mode", "auto"),
+            "max_volume":        int(p.get("max_volume", 200)),
         }
         for p in lib["profiles"]
     ]
@@ -2612,21 +2627,39 @@ async def pause() -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+async def _profile_max_volume(profile_id: str) -> int:
+    """Return the max-volume cap for a profile (0-200). Defaults to 200 = no cap."""
+    if not profile_id:
+        return 200
+    lib = await get_library()
+    p = next((p for p in lib.get("profiles", []) if p["id"] == profile_id), None)
+    if not p:
+        return 200
+    return max(0, min(200, int(p.get("max_volume", 200))))
+
+
 @app.post("/api/vlc/volume/set")
-async def volume_set(volume: int) -> JSONResponse:
+async def volume_set(volume: int, profile_id: str = "") -> JSONResponse:
     # volume is 0-200 (100 = normal); VLC uses 0-512 (256 = 100%)
-    raw = max(0, min(512, round(volume / 100 * 256)))
+    cap = await _profile_max_volume(profile_id)
+    capped = max(0, min(cap, max(0, min(200, volume))))
+    raw = max(0, min(512, round(capped / 100 * 256)))
     await vlc("volume", val=str(raw))
-    state.vlc_volume = max(0, min(200, volume))
-    return JSONResponse({"ok": True})
+    state.vlc_volume = capped
+    return JSONResponse({"ok": True, "volume": capped, "max_volume": cap})
 
 
 @app.post("/api/vlc/volume/{direction}")
-async def volume(direction: str) -> JSONResponse:
+async def volume(direction: str, profile_id: str = "") -> JSONResponse:
     if direction not in ("up", "down"):
         raise HTTPException(400, "direction must be 'up' or 'down'")
-    await vlc("volume", val="+26" if direction == "up" else "-26")
-    return JSONResponse({"ok": True})
+    cap = await _profile_max_volume(profile_id)
+    step = 10 if direction == "up" else -10
+    next_vol = max(0, min(cap, state.vlc_volume + step))
+    raw = max(0, min(512, round(next_vol / 100 * 256)))
+    await vlc("volume", val=str(raw))
+    state.vlc_volume = next_vol
+    return JSONResponse({"ok": True, "volume": next_vol, "max_volume": cap})
 
 
 @app.post("/api/vlc/seek")
@@ -3403,6 +3436,23 @@ async def set_profile_resume_mode(profile_id: str, req: ProfileResumeModeReq) ->
     profile["resume_mode"] = req.resume_mode
     await put_library(lib)
     return JSONResponse({"ok": True, "resume_mode": req.resume_mode})
+
+
+@app.post("/api/profiles/{profile_id}/max-volume")
+async def set_profile_max_volume(profile_id: str, req: ProfileMaxVolumeReq) -> JSONResponse:
+    capped = max(0, min(200, int(req.max_volume)))
+    lib = await get_library()
+    profile = next((p for p in lib.get("profiles", []) if p["id"] == profile_id), None)
+    if not profile:
+        raise HTTPException(404, "Profile not found.")
+    profile["max_volume"] = capped
+    await put_library(lib)
+    if state.vlc_volume > capped:
+        raw = max(0, min(512, round(capped / 100 * 256)))
+        await vlc("volume", val=str(raw))
+        state.vlc_volume = capped
+        await broadcast("state", state_snapshot())
+    return JSONResponse({"ok": True, "max_volume": capped})
 
 
 @app.post("/api/skip-now")
