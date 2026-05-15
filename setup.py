@@ -529,6 +529,102 @@ def install_core_deps(tools: dict) -> dict:
     return refreshed
 
 
+# ── Jackett Windows service install ───────────────────────────────────────
+def _is_windows_admin() -> bool:
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+def _jackett_service_installed() -> bool:
+    try:
+        r = subprocess.run(["sc", "query", "Jackett"], capture_output=True, text=True, timeout=5)
+    except Exception:
+        return False
+    return r.returncode == 0
+
+
+def _find_jackett_console() -> str | None:
+    """JackettConsole.exe — required for --Install (the tray app shells out
+    to this same exe under the hood)."""
+    if SYSTEM != "Windows":
+        return None
+    for c in _windows_jackett_candidates():
+        if Path(c).name.lower() == "jackettconsole.exe" and Path(c).exists():
+            return c
+    return None
+
+
+def install_jackett_service() -> None:
+    """Install and start the 'Jackett' Windows service so it runs as a
+    background service from boot — the same action as clicking 'Start
+    background service' in the Jackett tray menu, just automated."""
+    if SYSTEM != "Windows":
+        return
+
+    header("Jackett Windows Service")
+
+    if _jackett_service_installed():
+        ok("Jackett service already installed.")
+        try:
+            subprocess.run(["sc", "start", "Jackett"], capture_output=True, timeout=10)
+        except Exception:
+            pass
+        return
+
+    console = _find_jackett_console()
+    if not console:
+        warn("JackettConsole.exe not found — cannot install the service.")
+        note("Run setup.py again after Jackett finishes installing,")
+        note("or open the Jackett tray icon → 'Start background service'.")
+        return
+
+    note("Installing 'Jackett' as a Windows service so it auto-starts on boot.")
+
+    if _is_windows_admin():
+        try:
+            subprocess.run([console, "--Install"], check=True,
+                           cwd=str(Path(console).parent))
+        except subprocess.CalledProcessError as exc:
+            warn(f"JackettConsole.exe --Install failed (exit {exc.returncode})")
+            return
+    else:
+        warn("Administrator rights are required for service install.")
+        info("Requesting elevation — accept the UAC prompt …")
+        try:
+            import ctypes
+            rc = ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", console, "--Install", str(Path(console).parent), 1
+            )
+            if rc <= 32:
+                warn(f"Elevation declined or failed (ShellExecute code {rc}).")
+                note("Open the Jackett tray icon → 'Start background service'.")
+                return
+        except Exception as exc:
+            warn(f"Could not request elevation: {exc}")
+            return
+
+        # ShellExecuteW returns immediately; poll until the service shows up.
+        import time as _time
+        for _ in range(30):   # up to ~15 s
+            _time.sleep(0.5)
+            if _jackett_service_installed():
+                break
+
+    if _jackett_service_installed():
+        ok("Jackett service installed.")
+        try:
+            subprocess.run(["sc", "start", "Jackett"], capture_output=True, timeout=10)
+            ok("Jackett service started.")
+        except Exception:
+            pass
+    else:
+        warn("Jackett service didn't appear — install may have been declined.")
+        note("Open the Jackett tray icon → 'Start background service' manually.")
+
+
 # ── Register StreamLink as a system service ───────────────────────────────
 def offer_service_install() -> bool:
     """Offer to register StreamLink as a system service so it starts on boot.
@@ -917,6 +1013,7 @@ def main():
     setup_venv()
     tools = detect_tools()
     tools = install_core_deps(tools)
+    install_jackett_service()
     tools = install_smart_skip_deps(tools)
 
     reuse_env = False
