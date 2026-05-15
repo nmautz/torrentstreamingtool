@@ -95,6 +95,29 @@ def qbit_candidates() -> list[str]:
     return ["/usr/bin/qbittorrent", "qbittorrent"]
 
 
+def _windows_jackett_candidates() -> list[str]:
+    """All the places the Jackett Windows installer (and winget) may drop it.
+
+    Jackett ships both `JackettConsole.exe` (the `--NoRestart` console runner
+    run.py launches) and `jackett.exe` (the tray app); installs land in
+    Program Files when elevated and under the user profile otherwise.
+    """
+    roots = [
+        os.environ.get("ProgramFiles", r"C:\Program Files"),
+        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+        os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")),
+        os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")),
+        os.environ.get("ProgramData", r"C:\ProgramData"),
+    ]
+    out: list[str] = []
+    for r in roots:
+        for sub in ("Jackett", os.path.join("Programs", "Jackett")):
+            base = Path(r) / sub
+            out.append(str(base / "JackettConsole.exe"))
+            out.append(str(base / "jackett.exe"))
+    return out
+
+
 def jackett_candidates() -> list[str]:
     if SYSTEM == "Darwin":
         return [
@@ -104,7 +127,7 @@ def jackett_candidates() -> list[str]:
             "jackett",
         ]
     if SYSTEM == "Windows":
-        return [r"C:\Program Files\Jackett\Jackett.exe"]
+        return _windows_jackett_candidates()
     return [str(Path.home() / "Downloads/Jackett/jackett"), "/opt/jackett/jackett", "jackett"]
 
 
@@ -396,6 +419,14 @@ _CORE_RESCAN = {
     "jackett": jackett_candidates,
     "mullvad": mullvad_candidates,
 }
+# winget exit codes that mean "nothing to do" rather than a real failure.
+# Listed in both unsigned and signed-32-bit forms because subprocess can
+# surface either on Windows.
+_WINGET_OK_CODES = {
+    0,
+    0x8A15002B, 0x8A15002B - 0x100000000,   # UPDATE_NOT_APPLICABLE (already current)
+    0x8A150061, 0x8A150061 - 0x100000000,   # PACKAGE_ALREADY_INSTALLED
+}
 
 
 def install_core_deps(tools: dict) -> dict:
@@ -430,15 +461,14 @@ def install_core_deps(tools: dict) -> dict:
         for k in missing:
             pkg = _WINGET_IDS[k]
             note(f"winget install {pkg} …")
-            try:
-                subprocess.run(
-                    [winget, "install", "--id", pkg, "-e", "--silent",
-                     "--accept-package-agreements", "--accept-source-agreements"],
-                    check=True,
-                )
+            proc = subprocess.run(
+                [winget, "install", "--id", pkg, "-e", "--silent",
+                 "--accept-package-agreements", "--accept-source-agreements"],
+            )
+            if proc.returncode in _WINGET_OK_CODES:
                 ok(f"{_CORE_LABELS[k]} installed")
-            except subprocess.CalledProcessError as exc:
-                warn(f"winget install {pkg} failed (exit {exc.returncode})")
+            else:
+                warn(f"winget install {pkg} failed (exit {proc.returncode})")
 
     elif SYSTEM == "Darwin":
         brew = find_exe("brew", "/opt/homebrew/bin/brew", "/usr/local/bin/brew")

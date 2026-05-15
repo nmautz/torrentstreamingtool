@@ -55,8 +55,9 @@
 - [-] **5.3** Control API: documented JSON POST endpoints for external play/pause/seek/volume control
 - [x] **5.4** Subtitle Download: Find subtitles for the track by hash or name
 - [x] **5.5** Windows targetted Full Setup and Startup Automation: Setup should install ALL dependencies including optional ones. setup should also install the service and the service should be able to startup all depencies on its own. (assuming vpn handles itself starting, just dont start qbittorrent until vpn is on and connected)
-  - `setup.py` now auto-installs core apps (VLC/qBittorrent/Jackett/Mullvad) via winget on Windows (brew casks on macOS), in addition to the existing ffmpeg/fpcalc install.
-  - `setup.py` offers to register the system service at the end (defaults to yes on Windows); the service's watchdog starts all deps on its own, gating qBittorrent on VPN connection.
+  - `setup.py` now auto-installs core apps (VLC/qBittorrent/Jackett/Mullvad) via winget on Windows (brew casks on macOS), in addition to the existing ffmpeg/fpcalc install. winget "already installed / no upgrade" exit codes are treated as success.
+  - Jackett detection (setup.py, run.py, watchdog.py) now scans every Program Files / LocalAppData / ProgramData location the Windows installer may use, for both `JackettConsole.exe` and `jackett.exe`.
+  - `setup.py` offers to register the system service at the end (defaults to yes on Windows); on Windows, service install self-elevates via UAC when not run from an admin shell. The service's watchdog starts all deps on its own, gating qBittorrent on VPN connection.
 
 
 ---

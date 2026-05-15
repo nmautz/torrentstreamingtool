@@ -312,9 +312,42 @@ def _linux_status() -> None:
 # ══════════════════════════════════════════════════════════════════════════
 _WIN_TASK_NAME = "StreamLink"
 
+
+def _is_windows_admin() -> bool:
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
 def _windows_install() -> bool:
     if not _check_venv():
         return False
+
+    # schtasks /Create with /RL HIGHEST needs an elevated token. If we're not
+    # elevated, relaunch `run.py --install` through the UAC prompt — it
+    # re-enters this function as admin and finishes the job.
+    if not _is_windows_admin():
+        warn("Administrator rights are required to register the scheduled task.")
+        info("Requesting elevation — accept the UAC prompt …")
+        try:
+            import ctypes
+            script = str(HERE / "run.py")
+            rc = ctypes.windll.shell32.ShellExecuteW(
+                None, "runas", sys.executable, f'"{script}" --install', str(HERE), 1
+            )
+            if rc <= 32:
+                fail(f"Elevation was declined or failed (ShellExecute code {rc}).")
+                info("Re-run from an Administrator PowerShell:  python run.py --install")
+                return False
+            ok("Elevated installer launched in a new window — watch it for the result.")
+            return True
+        except Exception as exc:
+            fail(f"Could not request elevation: {exc}")
+            info("Re-run from an Administrator PowerShell:  python run.py --install")
+            return False
+
     if not _write_wrapper():
         return False
 

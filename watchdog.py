@@ -120,6 +120,24 @@ def find_qbit() -> str | None:
     }, ["/usr/bin/qbittorrent", "qbittorrent"])
 
 
+def _windows_jackett_candidates() -> list[str]:
+    """Every location the Jackett Windows installer / winget may use."""
+    roots = [
+        os.environ.get("ProgramFiles", r"C:\Program Files"),
+        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+        os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")),
+        os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")),
+        os.environ.get("ProgramData", r"C:\ProgramData"),
+    ]
+    out: list[str] = []
+    for r in roots:
+        for sub in ("Jackett", os.path.join("Programs", "Jackett")):
+            base = Path(r) / sub
+            out.append(str(base / "JackettConsole.exe"))
+            out.append(str(base / "jackett.exe"))
+    return out
+
+
 def find_jackett() -> str | None:
     return _find("_JACKETT_BIN", {
         "Darwin":  [
@@ -128,7 +146,7 @@ def find_jackett() -> str | None:
             str(Path.home() / "Downloads/Jackett/jackett"),
             "jackett",
         ],
-        "Windows": [r"C:\Program Files\Jackett\Jackett.exe"],
+        "Windows": _windows_jackett_candidates(),
     }, [str(Path.home() / "Downloads/Jackett/jackett"), "jackett"])
 
 
