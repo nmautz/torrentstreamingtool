@@ -14,6 +14,7 @@ import shutil
 import socket
 import struct
 import subprocess
+import sys
 import threading
 import time
 import uuid
@@ -3657,6 +3658,14 @@ OFFLINE_CACHE_VERSION = "v2"
 # without this, ffmpeg pegs all cores and the dashboard becomes unresponsive.
 # Only used on the CPU (libx264) path; NVENC offloads to the GPU and ignores it.
 OFFLINE_FFMPEG_THREADS = 2
+
+# Windows-only: lower ffmpeg's process priority so it can't crowd the foreground
+# UI or amplify the NVIDIA driver's DPC/ISR storm that pegs "System Interrupts"
+# during a fast NVENC encode. BELOW_NORMAL_PRIORITY_CLASS == 0x00004000. The flag
+# only exists on the win32 subprocess module; on Linux/macOS we pass nothing.
+_FFMPEG_SUBPROCESS_KW: dict = {}
+if sys.platform == "win32":
+    _FFMPEG_SUBPROCESS_KW["creationflags"] = 0x00004000  # BELOW_NORMAL_PRIORITY_CLASS
 # Lazy-probed once per process: True if this ffmpeg can open an h264_nvenc session
 # on the host's GPU. Pascal (GTX 10xx) and newer all qualify; the only failure
 # modes are (a) ffmpeg built without --enable-nvenc, (b) no NVIDIA driver loaded,
@@ -3860,7 +3869,15 @@ async def _run_offline_job(job_id: str) -> None:
                                  "-progress", "pipe:1", "-nostats"]
         if not use_nvenc:
             common_pre += ["-threads", str(OFFLINE_FFMPEG_THREADS)]
-        common_pre += ["-i", str(src)]
+        # Larger input buffers coalesce disk reads — without these, ffmpeg can
+        # generate enough read syscalls per second to dominate kernel time on
+        # Windows ("System Interrupts" pegs a core via the storage stack's DPCs).
+        # `-thread_queue_size` is per-input (must be BEFORE the `-i`).
+        common_pre += [
+            "-thread_queue_size", "1024",
+            "-rtbufsize", "64M",
+            "-i", str(src),
+        ]
         if job["operation"] == "remux":
             args = common_pre + ["-map", "0:v:0", "-map", "0:a:0?",
                                  "-c", "copy", "-bsf:a", "aac_adtstoasc",
@@ -3903,6 +3920,7 @@ async def _run_offline_job(job_id: str) -> None:
             *args,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            **_FFMPEG_SUBPROCESS_KW,
         )
 
         # Drain -progress stdout: each block is several `key=value` lines ending
