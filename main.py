@@ -3630,14 +3630,25 @@ async def admin_analyzer_status(request: Request) -> JSONResponse:
 # See docs/OFFLINE.md for the full design and docs/GOTCHAS.md for Safari quirks.
 
 OFFLINE_CACHE = Path(__file__).parent / ".offline_cache"
+# Bump this when offline-output requirements change (codec rules, ffmpeg args)
+# so previously-cached MP4s built by older logic get rebuilt on next request.
+OFFLINE_CACHE_VERSION = "v2"
 _offline_jobs: dict[str, dict] = {}   # job_id → {id, src, out, status, operation, progress, error, started_at}
 
-# Codecs Safari iOS plays natively from a <video> element with src=blob:
-_SAFARI_VIDEO_CODECS = {"h264", "hevc"}
-_SAFARI_AUDIO_CODECS = {"aac", "mp3"}
-_REMUX_VIDEO_CODECS  = {"h264", "hevc"}      # already-compatible streams that just need MP4 wrapping
-_REMUX_AUDIO_CODECS  = {"aac", "mp3", "ac3"} # ac3 is borderline but ffmpeg can passthrough; transcode handles it
-_SAFARI_CONTAINERS   = (".mp4", ".m4v", ".mov")
+# Safari iOS is much pickier than the headline list suggests:
+#   • Video stream MUST be H.264 (HEVC works on hardware but profile/level/tag
+#     mismatches cause silent black-video; not worth the surface area). For H.264
+#     the profile must be Baseline / Main / High (NOT High 10) and the pixel
+#     format must be yuv420p — 10-bit content (Hi10P / yuv420p10le) decodes
+#     audio fine but renders black.
+#   • Audio stream MUST be AAC or MP3.
+#   • Container MUST be MP4/M4V/MOV with the moov atom up-front (faststart).
+# Anything else: transcode to H.264-yuv420p / AAC.
+_SAFARI_VIDEO_CODECS  = {"h264"}
+_SAFARI_AUDIO_CODECS  = {"aac", "mp3"}
+_SAFARI_PIX_FMT       = "yuv420p"
+_SAFARI_BAD_PROFILES  = {"high 10", "high 4:2:2", "high 4:4:4 predictive"}
+_SAFARI_CONTAINERS    = (".mp4", ".m4v", ".mov")
 
 
 def _ffprobe_bin() -> Optional[str]:
@@ -3651,7 +3662,7 @@ def _ffprobe_bin() -> Optional[str]:
 
 
 def _ffprobe_codec(path: str) -> dict:
-    """Return {video_codec, audio_codec, duration_sec, container} for a file."""
+    """Return {video_codec, audio_codec, video_profile, pix_fmt, duration_sec, container}."""
     binp = _ffprobe_bin()
     if not binp:
         return {}
@@ -3666,24 +3677,45 @@ def _ffprobe_codec(path: str) -> dict:
         audio = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), {})
         fmt   = data.get("format", {}) or {}
         return {
-            "video_codec": video.get("codec_name", ""),
-            "audio_codec": audio.get("codec_name", ""),
-            "container":   fmt.get("format_name", ""),
-            "duration_sec": float(fmt.get("duration", 0) or 0),
+            "video_codec":   video.get("codec_name", ""),
+            "video_profile": (video.get("profile", "") or "").lower(),
+            "pix_fmt":       (video.get("pix_fmt", "") or "").lower(),
+            "audio_codec":   audio.get("codec_name", ""),
+            "container":     fmt.get("format_name", ""),
+            "duration_sec":  float(fmt.get("duration", 0) or 0),
         }
     except Exception:
         return {}
 
 
+def _video_decodable_in_safari(info: dict) -> bool:
+    """True iff the video stream itself is something Safari iOS can render.
+
+    Audio-plays-but-video-black is almost always one of these failing:
+    non-H.264 codec, High 10 profile (10-bit), or non-yuv420p pixel format.
+    """
+    if info.get("video_codec", "") not in _SAFARI_VIDEO_CODECS:
+        return False
+    if info.get("video_profile", "") in _SAFARI_BAD_PROFILES:
+        return False
+    pf = info.get("pix_fmt", "")
+    # Empty pix_fmt means we couldn't probe; be safe and re-encode.
+    if not pf or pf != _SAFARI_PIX_FMT:
+        return False
+    return True
+
+
 def _safari_compatible(info: dict, ext: str) -> bool:
+    """True iff the file can be served as-is to Safari (no ffmpeg work needed)."""
     return (ext.lower() in _SAFARI_CONTAINERS
-            and info.get("video_codec", "") in _SAFARI_VIDEO_CODECS
+            and _video_decodable_in_safari(info)
             and info.get("audio_codec", "") in _SAFARI_AUDIO_CODECS)
 
 
 def _can_remux(info: dict) -> bool:
-    return (info.get("video_codec", "") in _REMUX_VIDEO_CODECS
-            and info.get("audio_codec", "") in _REMUX_AUDIO_CODECS)
+    """True iff codecs are already Safari-decodable; only the container needs MP4 wrapping."""
+    return (_video_decodable_in_safari(info)
+            and info.get("audio_codec", "") in _SAFARI_AUDIO_CODECS)
 
 
 def _list_sidecar_subs(src: Path, item_id: str) -> list[dict]:
@@ -3720,7 +3752,8 @@ def _srt_to_vtt(srt: str) -> str:
 
 def _offline_cache_key(src: Path) -> str:
     st = src.stat()
-    return hashlib.sha256(f"{src}|{int(st.st_mtime)}|{st.st_size}".encode()).hexdigest()[:24]
+    raw = f"{OFFLINE_CACHE_VERSION}|{src}|{int(st.st_mtime)}|{st.st_size}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
 
 async def _run_offline_job(job_id: str) -> None:
@@ -3743,10 +3776,15 @@ async def _run_offline_job(job_id: str) -> None:
                     "-c", "copy", "-bsf:a", "aac_adtstoasc",
                     "-movflags", "+faststart", str(tmp)]
         else:
+            # Force baseline-friendly H.264: yuv420p (8-bit) + High profile up to
+            # level 4.1, which every iPhone/iPad since iPhone 5s decodes in HW.
+            # Pulldown to High profile fixes the "audio plays, video black" case
+            # where the source is Hi10P or Main10 HEVC.
             args = [ffmpeg, "-y", "-i", str(src),
                     "-map", "0:v:0", "-map", "0:a:0?",
                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                    "-c:a", "aac", "-b:a", "160k",
+                    "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
+                    "-c:a", "aac", "-b:a", "160k", "-ac", "2",
                     "-movflags", "+faststart", str(tmp)]
         proc = await asyncio.create_subprocess_exec(
             *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
