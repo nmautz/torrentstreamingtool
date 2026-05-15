@@ -12,6 +12,7 @@ build/
 
 # Downloaded media (configured via QBIT_DOWNLOAD_PATH)
 Downloads/
+.offline_cache/
 
 # User library database (profiles + watch history)
 library.json
