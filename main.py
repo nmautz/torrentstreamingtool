@@ -3618,6 +3618,18 @@ async def admin_analyzer_status(request: Request) -> JSONResponse:
     })
 
 
+@app.get("/api/admin/offline-encoder")
+async def admin_offline_encoder(request: Request) -> JSONResponse:
+    """Report which encoder offline transcodes will use (GPU vs CPU)."""
+    _require_admin(request)
+    nvenc = await _has_nvenc()
+    return JSONResponse({
+        "nvenc_available": nvenc,
+        "encoder":         "h264_nvenc" if nvenc else "libx264",
+        "ffmpeg":          analyzer.ffmpeg_bin(),
+    })
+
+
 # ── Routes: Offline / Handoff to Device ──────────────────────────────────────
 #
 # Browser-side offline playback. The flow is:

@@ -168,6 +168,7 @@ All require admin auth.
 | PATCH | `/api/admin/library/{id}/skip-data` | `{file_path, intro_start?, intro_end?, credits_start?}` — manual override; sets `analysis.source="manual"` |
 | POST | `/api/admin/library/{id}/analyze` | Force re-run of series analysis |
 | GET | `/api/admin/analyzer-status` | `{available, ffmpeg, fpcalc}` |
+| GET | `/api/admin/offline-encoder` | `{nvenc_available, encoder, ffmpeg}` — which encoder offline Save Offline jobs use (h264_nvenc when an NVIDIA GPU + NVENC-built ffmpeg are present, else libx264). Result is cached for the process lifetime. |
 
 ## Admin HTTPS redirect
 

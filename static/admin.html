@@ -57,6 +57,9 @@
       <span class="text-gray-600 text-xs ml-2 font-normal">ADMIN</span>
     </div>
     <div class="flex items-center gap-3">
+      <span id="encoderBadge"
+        class="hidden text-[10px] font-bold uppercase tracking-widest px-2 py-1 border"
+        title="Encoder used by offline Save Offline transcodes">…</span>
       <a href="/" class="text-xs text-gray-500 hover:text-gray-300 transition-colors uppercase tracking-wide">Main App</a>
       <button onclick="doLogout()"
         class="text-xs text-red-500 hover:text-red-400 transition-colors uppercase tracking-wide font-bold">
@@ -351,6 +354,29 @@ function showDashboard(){
   document.getElementById("dashboard").classList.remove("hidden");
   loadAdminSettings();
   loadIndexers();
+  loadOfflineEncoder();
+}
+
+async function loadOfflineEncoder(){
+  const el = document.getElementById("encoderBadge");
+  if(!el) return;
+  try{
+    const r = await fetch("/api/admin/offline-encoder", {headers: authHeader()});
+    if(!r.ok) throw new Error("status "+r.status);
+    const d = await r.json();
+    el.classList.remove("hidden");
+    if(d.nvenc_available){
+      el.textContent = "GPU: NVENC";
+      el.className = "text-[10px] font-bold uppercase tracking-widest px-2 py-1 border border-emerald-700 text-emerald-400 bg-emerald-950/40";
+      el.title = "Offline transcodes will run on the NVIDIA GPU (h264_nvenc).";
+    } else {
+      el.textContent = "CPU: libx264";
+      el.className = "text-[10px] font-bold uppercase tracking-widest px-2 py-1 border border-amber-800 text-amber-400 bg-amber-950/40";
+      el.title = "No NVENC-capable GPU detected. Offline transcodes will use libx264 on the CPU.";
+    }
+  }catch(_){
+    el.classList.add("hidden");
+  }
 }
 
 // ── Tabs ──────────────────────────────────────────────────────────────────────
