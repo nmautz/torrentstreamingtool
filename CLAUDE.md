@@ -65,9 +65,12 @@ Cancelling the task (on `/api/stop` or new Play) also triggers qBit deletion.
 Runs under system Python (no venv). Steps in order:
 1. Creates `.venv`, installs `requirements.txt`
 2. Detects VLC / qBittorrent / Mullvad / Jackett at platform-specific default paths; saves found paths to `.env` as `_VLC_BIN`, `_QBIT_BIN`, etc.
-3. Interactive prompts (Enter = accept default) for all service URLs and passwords
-4. Merges settings into `qBittorrent.ini` directly (parses existing ini, injects `Preferences` and `BitTorrent` keys, writes back preserving other sections)
-5. Writes `.env`; creates the download directory
+3. `install_core_deps()` — installs any missing core apps (VLC, qBittorrent, Jackett, Mullvad). Windows uses `winget` (the documented full-automation target), macOS uses Homebrew casks, Linux prints a package-manager hint. Re-detects paths after install.
+4. `install_smart_skip_deps()` — installs the optional Smart Skip deps (ffmpeg + fpcalc) the same way (winget portable zips on Windows, brew/apt/dnf/pacman elsewhere).
+5. Interactive prompts (Enter = accept default) for all service URLs and passwords
+6. Merges settings into `qBittorrent.ini` directly (parses existing ini, injects `Preferences` and `BitTorrent` keys, writes back preserving other sections)
+7. Writes `.env`; creates the download directory
+8. `offer_service_install()` — offers to register the system service (delegates to `daemon.install()`). Defaults to yes on Windows. The installed service runs the watchdog, which starts VLC / Jackett / the dashboard on its own and starts qBittorrent only once Mullvad VPN reports Connected.
 
 ### `run.py` — launcher
 

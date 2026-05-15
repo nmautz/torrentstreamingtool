@@ -54,6 +54,10 @@
 - [x] **5.2** Smart Skip: audio fingerprinting to detect and skip intro/credit sequences on library files
 - [-] **5.3** Control API: documented JSON POST endpoints for external play/pause/seek/volume control
 - [x] **5.4** Subtitle Download: Find subtitles for the track by hash or name
+- [x] **5.5** Windows targetted Full Setup and Startup Automation: Setup should install ALL dependencies including optional ones. setup should also install the service and the service should be able to startup all depencies on its own. (assuming vpn handles itself starting, just dont start qbittorrent until vpn is on and connected)
+  - `setup.py` now auto-installs core apps (VLC/qBittorrent/Jackett/Mullvad) via winget on Windows (brew casks on macOS), in addition to the existing ffmpeg/fpcalc install.
+  - `setup.py` offers to register the system service at the end (defaults to yes on Windows); the service's watchdog starts all deps on its own, gating qBittorrent on VPN connection.
+
 
 ---
 

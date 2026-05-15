@@ -371,6 +371,143 @@ def install_smart_skip_deps(tools: dict) -> dict:
     return refreshed
 
 
+# ── Auto-install core applications (VLC, qBittorrent, Jackett, Mullvad) ────
+_CORE_LABELS = {
+    "vlc":     "VLC",
+    "qbit":    "qBittorrent",
+    "jackett": "Jackett",
+    "mullvad": "Mullvad VPN",
+}
+_WINGET_IDS = {
+    "vlc":     "VideoLAN.VLC",
+    "qbit":    "qBittorrent.qBittorrent",
+    "jackett": "Jackett.Jackett",
+    "mullvad": "MullvadVPN.MullvadVPN",
+}
+_BREW_CASKS = {
+    "vlc":     "vlc",
+    "qbit":    "qbittorrent",
+    "jackett": "jackett",
+    "mullvad": "mullvad-vpn",
+}
+_CORE_RESCAN = {
+    "vlc":     vlc_candidates,
+    "qbit":    qbit_candidates,
+    "jackett": jackett_candidates,
+    "mullvad": mullvad_candidates,
+}
+
+
+def install_core_deps(tools: dict) -> dict:
+    """Install the core applications that weren't detected.
+
+    Windows uses winget (the documented target for full automation); macOS
+    uses Homebrew casks; Linux prints a package-manager hint because desktop
+    app packaging varies too much to automate safely.  Returns an updated
+    tools dict with refreshed paths for anything that got installed.
+    """
+    core_keys = ["vlc", "qbit", "jackett", "mullvad"]
+    missing = [k for k in core_keys if not tools.get(k)]
+    if not missing:
+        return tools
+
+    header("Core Applications")
+    warn(f"Missing: {', '.join(_CORE_LABELS[k] for k in missing)}")
+
+    if SYSTEM == "Windows":
+        winget = find_exe("winget")
+        if not winget:
+            warn("winget not found — install 'App Installer' from the Microsoft Store, then re-run setup.py")
+            for k in missing:
+                note(f"Or install {_CORE_LABELS[k]} manually.")
+            return tools
+        if not ask_bool(
+            f"Install {', '.join(_CORE_LABELS[k] for k in missing)} via winget now?",
+            default=True,
+        ):
+            note("Skipped core application install.")
+            return tools
+        for k in missing:
+            pkg = _WINGET_IDS[k]
+            note(f"winget install {pkg} …")
+            try:
+                subprocess.run(
+                    [winget, "install", "--id", pkg, "-e", "--silent",
+                     "--accept-package-agreements", "--accept-source-agreements"],
+                    check=True,
+                )
+                ok(f"{_CORE_LABELS[k]} installed")
+            except subprocess.CalledProcessError as exc:
+                warn(f"winget install {pkg} failed (exit {exc.returncode})")
+
+    elif SYSTEM == "Darwin":
+        brew = find_exe("brew", "/opt/homebrew/bin/brew", "/usr/local/bin/brew")
+        if not brew:
+            warn("Homebrew not found — install it from https://brew.sh, then re-run setup.py")
+            return tools
+        casks = [_BREW_CASKS[k] for k in missing]
+        if not ask_bool(f"Run `{brew} install --cask {' '.join(casks)}` now?", default=True):
+            note("Skipped core application install.")
+            return tools
+        for k in missing:
+            cask = _BREW_CASKS[k]
+            note(f"brew install --cask {cask} …")
+            try:
+                subprocess.run([brew, "install", "--cask", cask], check=True)
+                ok(f"{_CORE_LABELS[k]} installed")
+            except subprocess.CalledProcessError as exc:
+                warn(f"brew install --cask {cask} failed (exit {exc.returncode})")
+
+    else:  # Linux
+        warn("Automatic core-app install isn't supported on Linux.")
+        note("Install via your package manager, for example:")
+        note("  sudo apt install vlc qbittorrent")
+        note("  Mullvad: https://mullvad.net/download/vpn/linux")
+        note("  Jackett: https://github.com/Jackett/Jackett/releases")
+        return tools
+
+    # Re-detect anything that was missing (a new shell/PATH may be needed)
+    refreshed = dict(tools)
+    for k in missing:
+        path = find_exe(*_CORE_RESCAN[k]())
+        refreshed[k] = path
+        if path:
+            ok(f"{_CORE_LABELS[k]}: {path}")
+        else:
+            warn(f"{_CORE_LABELS[k]} still not found — a reboot or new shell may be needed for PATH changes")
+    return refreshed
+
+
+# ── Register StreamLink as a system service ───────────────────────────────
+def offer_service_install() -> bool:
+    """Offer to register StreamLink as a system service so it starts on boot.
+
+    Delegates to daemon.install(); the installed service runs the watchdog,
+    which starts VLC / Jackett / the dashboard on its own and starts
+    qBittorrent only once Mullvad VPN reports Connected.
+    """
+    header("Startup Automation")
+    note("Register StreamLink as a system service so it starts automatically on")
+    note("boot/login. The service runs the watchdog — which starts VLC, Jackett,")
+    note("and the dashboard, and starts qBittorrent only once Mullvad VPN connects.")
+    default = SYSTEM == "Windows"
+    if not ask_bool("Install StreamLink as a system service now?", default=default):
+        note("Skipped. Install later with: python3 run.py --install")
+        return False
+    try:
+        import daemon as _daemon
+    except Exception as exc:
+        warn(f"Could not import daemon.py: {exc}")
+        note("Install later with: python3 run.py --install")
+        return False
+    try:
+        return bool(_daemon.install())
+    except Exception as exc:
+        warn(f"Service install failed: {exc}")
+        note("Install later with: python3 run.py --install")
+        return False
+
+
 # ── Step 1: Python version ─────────────────────────────────────────────────
 def check_python():
     header("Python")
@@ -728,6 +865,7 @@ def main():
     check_python()
     setup_venv()
     tools = detect_tools()
+    tools = install_core_deps(tools)
     tools = install_smart_skip_deps(tools)
 
     reuse_env = False
@@ -749,6 +887,8 @@ def main():
         ensure_download_dir(cfg)
     generate_ssl_cert()
 
+    service_installed = offer_service_install()
+
     header("Done")
     ok("Setup complete!")
     print()
@@ -760,7 +900,11 @@ def main():
         note("VPN guard will be inactive until Mullvad CLI is in PATH.")
 
     print()
-    note(f"Start everything:   {BOLD}python3 run.py{RESET}")
+    if service_installed:
+        note(f"StreamLink is registered as a system service and is starting now.")
+        note(f"Manage it with: {BOLD}python3 run.py --status{RESET} / {BOLD}--uninstall{RESET}")
+    else:
+        note(f"Start everything:   {BOLD}python3 run.py{RESET}")
     print()
 
 
