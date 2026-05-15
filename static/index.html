@@ -3023,6 +3023,14 @@ async function epSaveSelectedOffline(){
     .map(p=>epFiles.find(f=>f.path===p))
     .filter(f=>f && !offlineSaved.has(offKey(itemId,f.path)));
   if(!targets.length){ showAlert("All selected episodes are already saved.","warn"); return; }
+  // Each episode that needs transcoding can take minutes of ffmpeg on the host.
+  // Confirm before a big batch so a stray click doesn't kick off hours of CPU work.
+  if(targets.length>=3 && !confirm(
+      `Save ${targets.length} episodes for offline playback?\n\n`+
+      `Episodes that aren't already MP4/H.264 will be transcoded on the host one `+
+      `at a time. This can take a long time and will use server CPU throughout.`)){
+    return;
+  }
   let saved=0;
   for(const f of targets){
     await saveForOffline(itemId, f.path, f.name, epLabel(f)+' — '+f.name);

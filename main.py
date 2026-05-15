@@ -3640,6 +3640,10 @@ OFFLINE_CACHE = Path(__file__).parent / ".offline_cache"
 # Bump this when offline-output requirements change (codec rules, ffmpeg args)
 # so previously-cached MP4s built by older logic get rebuilt on next request.
 OFFLINE_CACHE_VERSION = "v2"
+# Cap ffmpeg worker threads for offline prep so bulk Save Offline on a 30+ episode
+# show can't saturate every core on the host. The browser and OS need headroom —
+# without this, ffmpeg pegs all cores and the dashboard becomes unresponsive.
+OFFLINE_FFMPEG_THREADS = 2
 _offline_jobs: dict[str, dict] = {}   # job_id → {id, src, out, status, operation, progress, error, started_at}
 
 # Safari iOS is much pickier than the headline list suggests:
@@ -3785,6 +3789,10 @@ async def _run_offline_job(job_id: str) -> None:
                       # pipe:1 = stdout. We tail it for accurate %, instead of guessing
                       # from output-file size growth (which is wildly off for transcode).
                       "-progress", "pipe:1", "-nostats",
+                      # Cap decoder threads. The encoder cap below is what really
+                      # matters for libx264, but limiting decode too keeps a HEVC
+                      # source from briefly spiking all cores before encode starts.
+                      "-threads", str(OFFLINE_FFMPEG_THREADS),
                       "-i", str(src)]
         if job["operation"] == "remux":
             args = common_pre + ["-map", "0:v:0", "-map", "0:a:0?",
@@ -3797,6 +3805,10 @@ async def _run_offline_job(job_id: str) -> None:
             # where the source is Hi10P or Main10 HEVC.
             args = common_pre + ["-map", "0:v:0", "-map", "0:a:0?",
                                  "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                                 # Output-side -threads caps libx264 worker threads.
+                                 # Without this, x264 fans out to every available core
+                                 # and the host becomes unresponsive during bulk saves.
+                                 "-threads", str(OFFLINE_FFMPEG_THREADS),
                                  "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
                                  "-c:a", "aac", "-b:a", "160k", "-ac", "2",
                                  "-movflags", "+faststart", str(tmp)]
