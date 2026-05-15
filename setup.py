@@ -540,7 +540,7 @@ def _is_windows_admin() -> bool:
 
 def _jackett_service_installed() -> bool:
     try:
-        r = subprocess.run(["sc", "query", "Jackett"], capture_output=True, text=True, timeout=5)
+        r = subprocess.run(["sc.exe", "query", "Jackett"], capture_output=True, text=True, timeout=5)
     except Exception:
         return False
     return r.returncode == 0
@@ -573,7 +573,7 @@ def install_jackett_service() -> None:
     if _jackett_service_installed():
         ok("Jackett service already installed.")
         try:
-            subprocess.run(["sc", "start", "Jackett"], capture_output=True, timeout=10)
+            subprocess.run(["sc.exe", "start", "Jackett"], capture_output=True, timeout=10)
         except Exception:
             pass
         return
@@ -631,7 +631,7 @@ def install_jackett_service() -> None:
             note("Falling back to: sc create Jackett …")
             try:
                 subprocess.run([
-                    "sc", "create", "Jackett",
+                    "sc.exe", "create", "Jackett",
                     f"binPath={service}",
                     "start=auto",
                     "DisplayName=Jackett",
@@ -647,7 +647,7 @@ def install_jackett_service() -> None:
     if _jackett_service_installed():
         ok("Jackett service installed.")
         try:
-            subprocess.run(["sc", "start", "Jackett"], capture_output=True, timeout=10)
+            subprocess.run(["sc.exe", "start", "Jackett"], capture_output=True, timeout=10)
             ok("Jackett service started.")
         except Exception:
             pass

@@ -146,7 +146,7 @@ def _start_jackett_service_windows() -> bool:
     """Best-effort: start the 'Jackett' Windows service. Returns True on
     success or if it's already running; False if the service isn't installed."""
     try:
-        r = subprocess.run(["sc", "start", "Jackett"], capture_output=True, text=True, timeout=10)
+        r = subprocess.run(["sc.exe", "start", "Jackett"], capture_output=True, text=True, timeout=10)
     except Exception:
         return False
     out = (r.stdout + r.stderr).upper()
@@ -167,7 +167,7 @@ def _build_jackett_args(bin_path: str) -> list[str]:
     running' dialog, so we never do that from the watchdog.
     """
     if SYSTEM == "Windows":
-        return ["sc", "start", "Jackett"]
+        return ["sc.exe", "start", "Jackett"]
     return [bin_path, "--NoRestart"]
 
 

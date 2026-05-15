@@ -292,7 +292,7 @@ def _start_jackett_service_windows() -> bool:
     the tray exe as a regular process.
     """
     try:
-        r = subprocess.run(["sc", "start", "Jackett"], capture_output=True, text=True, timeout=10)
+        r = subprocess.run(["sc.exe", "start", "Jackett"], capture_output=True, text=True, timeout=10)
     except Exception:
         return False
     out = (r.stdout + r.stderr).upper()
@@ -337,7 +337,7 @@ def start_jackett() -> bool:
         if _start_jackett_service_windows():
             info("Started Jackett Windows service")
         else:
-            r = subprocess.run(["sc", "query", "Jackett"], capture_output=True, text=True)
+            r = subprocess.run(["sc.exe", "query", "Jackett"], capture_output=True, text=True)
             if r.returncode != 0:
                 warn("Jackett Windows service is not installed.")
                 info("Re-run 'python setup.py' from an Administrator PowerShell to install it,")
