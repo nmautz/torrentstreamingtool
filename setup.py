@@ -19,17 +19,45 @@ VENV   = HERE / ".venv"
 ENV    = HERE / ".env"
 SYSTEM = platform.system()
 
+# ── Verbose flag (consume early so the rest of argv stays clean) ──────────
+VERBOSE = any(a in ("-v", "--verbose") for a in sys.argv[1:])
+if VERBOSE:
+    sys.argv = [sys.argv[0]] + [a for a in sys.argv[1:] if a not in ("-v", "--verbose")]
+
 # ── Color output (disabled on non-TTY) ────────────────────────────────────
 _TTY = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
 def _c(n): return f"\033[{n}m" if _TTY else ""
 RESET = _c(0); BOLD = _c(1)
-RED = _c(91); GRN = _c(92); YLW = _c(93); BLU = _c(94); CYN = _c(96)
+RED = _c(91); GRN = _c(92); YLW = _c(93); BLU = _c(94); CYN = _c(96); MAG = _c(95)
 
 def header(t): print(f"\n{BOLD}{BLU}━━  {t}  ━━{RESET}")
 def ok(t):     print(f"  {GRN}✓{RESET}  {t}")
 def warn(t):   print(f"  {YLW}⚠{RESET}  {t}")
 def fail(t):   print(f"  {RED}✗{RESET}  {t}"); sys.exit(1)
 def note(t):   print(f"     {CYN}{t}{RESET}")
+def vlog(t):
+    if VERBOSE:
+        print(f"     {MAG}[v]{RESET} {t}")
+
+
+def vrun(cmd, **kwargs) -> subprocess.CompletedProcess:
+    """subprocess.run + verbose dump of the command and its output."""
+    kwargs.setdefault("capture_output", True)
+    kwargs.setdefault("text", True)
+    if VERBOSE:
+        vlog(f"$ {' '.join(str(c) for c in cmd)}")
+    proc = subprocess.run(cmd, **kwargs)
+    if VERBOSE:
+        vlog(f"  exit={proc.returncode}")
+        out = (proc.stdout or "").strip()
+        err = (proc.stderr or "").strip()
+        if out:
+            for line in out.splitlines():
+                vlog(f"  stdout: {line}")
+        if err:
+            for line in err.splitlines():
+                vlog(f"  stderr: {line}")
+    return proc
 
 
 def ask(prompt, default="", secret=False):
@@ -540,8 +568,9 @@ def _is_windows_admin() -> bool:
 
 def _jackett_service_installed() -> bool:
     try:
-        r = subprocess.run(["sc.exe", "query", "Jackett"], capture_output=True, text=True, timeout=5)
-    except Exception:
+        r = vrun(["sc.exe", "query", "Jackett"], timeout=5)
+    except Exception as exc:
+        vlog(f"sc.exe query Jackett raised: {exc}")
         return False
     return r.returncode == 0
 
@@ -550,8 +579,13 @@ def _find_jackett_install_dir() -> Path | None:
     """Return the directory that contains Jackett's executables."""
     if SYSTEM != "Windows":
         return None
-    for c in _windows_jackett_candidates():
-        if Path(c).exists():
+    candidates = _windows_jackett_candidates()
+    vlog(f"Checking {len(candidates)} Jackett candidate paths …")
+    for c in candidates:
+        exists = Path(c).exists()
+        if VERBOSE:
+            vlog(f"  {'FOUND' if exists else '   - '} {c}")
+        if exists:
             return Path(c).parent
     return None
 
@@ -573,9 +607,9 @@ def install_jackett_service() -> None:
     if _jackett_service_installed():
         ok("Jackett service already installed.")
         try:
-            subprocess.run(["sc.exe", "start", "Jackett"], capture_output=True, timeout=10)
-        except Exception:
-            pass
+            vrun(["sc.exe", "start", "Jackett"], timeout=10)
+        except Exception as exc:
+            vlog(f"sc.exe start raised: {exc}")
         return
 
     jackett_dir = _find_jackett_install_dir()
@@ -589,6 +623,17 @@ def install_jackett_service() -> None:
     service = jackett_dir / "JackettService.exe"
 
     note(f"Installing 'Jackett' as a Windows service from {jackett_dir}")
+    if VERBOSE:
+        try:
+            files = sorted(p.name for p in jackett_dir.iterdir() if p.is_file())
+            vlog(f"Files in {jackett_dir}:")
+            for f in files:
+                vlog(f"  {f}")
+        except Exception as exc:
+            vlog(f"Could not list {jackett_dir}: {exc}")
+        vlog(f"JackettConsole.exe present: {console.exists()}")
+        vlog(f"JackettService.exe present: {service.exists()}")
+        vlog(f"Running as admin: {_is_windows_admin()}")
 
     # ── Elevate if we're not admin ────────────────────────────────────────
     if not _is_windows_admin():
@@ -621,36 +666,45 @@ def install_jackett_service() -> None:
         # We have admin — run --Install in-process, falling back to sc create.
         installed = False
         if console.exists():
-            try:
-                subprocess.run([str(console), "--Install"], check=True,
-                               cwd=str(jackett_dir))
+            proc = vrun([str(console), "--Install"], cwd=str(jackett_dir))
+            if proc.returncode == 0:
                 installed = True
-            except subprocess.CalledProcessError as exc:
-                warn(f"JackettConsole.exe --Install failed (exit {exc.returncode})")
+            else:
+                warn(f"JackettConsole.exe --Install failed (exit {proc.returncode})")
         if not installed and service.exists():
-            note("Falling back to: sc create Jackett …")
-            try:
-                subprocess.run([
-                    "sc.exe", "create", "Jackett",
-                    f"binPath={service}",
-                    "start=auto",
-                    "DisplayName=Jackett",
-                ], check=True)
+            note("Falling back to: JackettService.exe --install …")
+            proc = vrun([str(service), "--install"], cwd=str(jackett_dir))
+            if proc.returncode == 0:
                 installed = True
-            except subprocess.CalledProcessError as exc:
-                warn(f"sc create Jackett failed (exit {exc.returncode})")
+            else:
+                warn(f"JackettService.exe --install failed (exit {proc.returncode})")
+        if not installed and service.exists():
+            note("Falling back to: sc.exe create Jackett …")
+            proc = vrun([
+                "sc.exe", "create", "Jackett",
+                f"binPath={service}",
+                "start=auto",
+                "DisplayName=Jackett",
+            ])
+            if proc.returncode == 0:
+                installed = True
+            else:
+                warn(f"sc.exe create Jackett failed (exit {proc.returncode})")
         if not installed:
             warn("Could not register the service automatically.")
-            note(f"Files in {jackett_dir}: open it and verify the exes are present.")
+            note(f"Inspect {jackett_dir} — verify Jackett exes are present.")
             return
 
     if _jackett_service_installed():
         ok("Jackett service installed.")
         try:
-            subprocess.run(["sc.exe", "start", "Jackett"], capture_output=True, timeout=10)
-            ok("Jackett service started.")
-        except Exception:
-            pass
+            r = vrun(["sc.exe", "start", "Jackett"], timeout=10)
+            if r.returncode == 0 or "1056" in (r.stdout + r.stderr):
+                ok("Jackett service started.")
+            else:
+                warn(f"sc.exe start Jackett returned {r.returncode}")
+        except Exception as exc:
+            vlog(f"sc.exe start raised: {exc}")
     else:
         warn("Jackett service didn't appear — install may have been declined.")
         note("Open the Jackett tray icon → 'Start background service' manually.")

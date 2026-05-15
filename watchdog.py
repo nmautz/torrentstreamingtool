@@ -157,17 +157,34 @@ def _start_jackett_service_windows() -> bool:
     return False
 
 
-def _build_jackett_args(bin_path: str) -> list[str]:
-    """Return the launch command for Jackett.
-
-    On Windows we always go through the Service Control Manager — the
-    Jackett Windows service is the canonical thing serving port 9117 and
-    `sc start` is idempotent (returns 1056 if already running). Relaunching
-    `JackettTray.exe` on every back-off cycle pops a 'JackettTray is already
-    running' dialog, so we never do that from the watchdog.
-    """
+def _build_jackett_args(bin_path: str):
+    """Return the launch command for Jackett — or None when the start was
+    handled synchronously here (Windows path)."""
     if SYSTEM == "Windows":
-        return ["sc.exe", "start", "Jackett"]
+        # Check the service first so we can log it explicitly.
+        q = subprocess.run(["sc.exe", "query", "Jackett"], capture_output=True, text=True)
+        log.debug("sc.exe query Jackett → exit=%d", q.returncode)
+        if q.stdout:
+            for line in q.stdout.strip().splitlines():
+                log.debug("  stdout: %s", line)
+        if q.stderr:
+            for line in q.stderr.strip().splitlines():
+                log.debug("  stderr: %s", line)
+        if q.returncode != 0:
+            log.warning(
+                "Jackett Windows service is not installed — sc.exe query returned %d. "
+                "Re-run setup.py from an Administrator PowerShell.", q.returncode
+            )
+            return None
+        r = subprocess.run(["sc.exe", "start", "Jackett"], capture_output=True, text=True, timeout=10)
+        log.info("sc.exe start Jackett → exit=%d", r.returncode)
+        if r.stdout:
+            for line in r.stdout.strip().splitlines():
+                log.info("  stdout: %s", line)
+        if r.stderr:
+            for line in r.stderr.strip().splitlines():
+                log.info("  stderr: %s", line)
+        return None
     return [bin_path, "--NoRestart"]
 
 
@@ -278,8 +295,13 @@ class ServiceSpec:
             log.warning("%s binary not found — cannot start", self.name)
             return False
         args = self.build_args(bin_path)
-        log.info("Starting %s: %s", self.name, " ".join(str(a) for a in args))
-        _launch_bg(args)
+        if args is None:
+            # build_args ran the start command itself (e.g. sc.exe with
+            # logging on Windows); nothing left to launch in the background.
+            log.info("Starting %s (handled inline)", self.name)
+        else:
+            log.info("Starting %s: %s", self.name, " ".join(str(a) for a in args))
+            _launch_bg(args)
         alive = _wait_port(self.port, self.host, self.startup_timeout)
         if alive:
             log.info("%s is up on port %d", self.name, self.port)

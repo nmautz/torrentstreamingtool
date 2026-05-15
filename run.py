@@ -34,16 +34,40 @@ _VENV_PY = VENV / ("Scripts/python.exe" if SYSTEM == "Windows" else "bin/python"
 if _VENV_PY.exists() and Path(sys.prefix).resolve() != VENV.resolve():
     os.execv(str(_VENV_PY), [str(_VENV_PY)] + sys.argv)
 
+# ── Verbose flag (consume early so existing arg handling is unaffected) ──
+VERBOSE = any(a in ("-v", "--verbose") for a in sys.argv[1:])
+if VERBOSE:
+    sys.argv = [sys.argv[0]] + [a for a in sys.argv[1:] if a not in ("-v", "--verbose")]
+
 # ── Color output ──────────────────────────────────────────────────────────
 _TTY = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
 def _c(n): return f"\033[{n}m" if _TTY else ""
 RESET = _c(0); BOLD = _c(1)
-RED = _c(91); GRN = _c(92); YLW = _c(93); BLU = _c(94); CYN = _c(96)
+RED = _c(91); GRN = _c(92); YLW = _c(93); BLU = _c(94); CYN = _c(96); MAG = _c(95)
 
 def ok(t):   print(f"  {GRN}✓{RESET}  {t}")
 def warn(t): print(f"  {YLW}⚠{RESET}  {t}")
 def fail(t): print(f"  {RED}✗{RESET}  {t}")
 def info(t): print(f"  {BLU}→{RESET}  {t}")
+def vlog(t):
+    if VERBOSE:
+        print(f"  {MAG}[v]{RESET} {t}")
+
+
+def vrun(cmd, **kwargs) -> subprocess.CompletedProcess:
+    """subprocess.run + verbose dump of the command and its output."""
+    kwargs.setdefault("capture_output", True)
+    kwargs.setdefault("text", True)
+    if VERBOSE:
+        vlog(f"$ {' '.join(str(c) for c in cmd)}")
+    proc = subprocess.run(cmd, **kwargs)
+    if VERBOSE:
+        vlog(f"  exit={proc.returncode}")
+        for line in (proc.stdout or "").strip().splitlines():
+            vlog(f"  stdout: {line}")
+        for line in (proc.stderr or "").strip().splitlines():
+            vlog(f"  stderr: {line}")
+    return proc
 
 
 # ── Load .env ─────────────────────────────────────────────────────────────
@@ -292,8 +316,9 @@ def _start_jackett_service_windows() -> bool:
     the tray exe as a regular process.
     """
     try:
-        r = subprocess.run(["sc.exe", "start", "Jackett"], capture_output=True, text=True, timeout=10)
-    except Exception:
+        r = vrun(["sc.exe", "start", "Jackett"], timeout=10)
+    except Exception as exc:
+        vlog(f"sc.exe start raised: {exc}")
         return False
     out = (r.stdout + r.stderr).upper()
     if r.returncode == 0:
@@ -329,20 +354,24 @@ def start_jackett() -> bool:
         warn("Jackett not found locally — search will be unavailable")
         info("Download: https://github.com/Jackett/Jackett/releases")
         return False
+    vlog(f"Jackett binary resolved to: {jackett_bin}")
 
     if SYSTEM == "Windows":
         # The Windows installer registers a "Jackett" service that actually
         # serves port 9117. Start that — it's idempotent. The tray exe is
         # purely cosmetic and launched once if not already running.
-        if _start_jackett_service_windows():
+        q = vrun(["sc.exe", "query", "Jackett"])
+        service_installed = q.returncode == 0
+        vlog(f"Jackett service installed: {service_installed}")
+        if service_installed and _start_jackett_service_windows():
             info("Started Jackett Windows service")
-        else:
-            r = subprocess.run(["sc.exe", "query", "Jackett"], capture_output=True, text=True)
-            if r.returncode != 0:
-                warn("Jackett Windows service is not installed.")
-                info("Re-run 'python setup.py' from an Administrator PowerShell to install it,")
-                info("or open the Jackett tray icon → 'Start background service'.")
-        if Path(jackett_bin).name.lower() == "jacketttray.exe" and not is_running("JackettTray"):
+        elif not service_installed:
+            warn("Jackett Windows service is not installed.")
+            info("Re-run 'python setup.py' from an Administrator PowerShell to install it,")
+            info("or open the Jackett tray icon → 'Start background service'.")
+        tray_running = is_running("JackettTray")
+        vlog(f"JackettTray running: {tray_running}")
+        if Path(jackett_bin).name.lower() == "jacketttray.exe" and not tray_running:
             info("Launching JackettTray.exe …")
             launch_bg([jackett_bin])
     else:
@@ -578,7 +607,7 @@ def main():
                 sys.exit(0)
         else:
             print(f"Unknown flag: {sys.argv[1]}")
-            print("Usage: python3 run.py [--install | --uninstall | --status]")
+            print("Usage: python3 run.py [--install | --uninstall | --status] [-v|--verbose]")
             sys.exit(1)
 
     # Pre-flight checks
@@ -628,6 +657,10 @@ def main():
     # ── Start watchdog (7.2) ──────────────────────────────────────────────
     try:
         from watchdog import start_watchdog
+        if VERBOSE:
+            import logging as _logging
+            _logging.getLogger("streamlink.watchdog").setLevel(_logging.DEBUG)
+            _logging.getLogger().setLevel(_logging.DEBUG)
         start_watchdog()
         ok("Watchdog started — VLC, qBittorrent, and Jackett will be auto-restarted if they crash")
     except ImportError:
