@@ -3388,13 +3388,12 @@ async def set_profile_auto_skip(profile_id: str, req: ProfileAutoSkipReq) -> JSO
 async def set_profile_resume_mode(profile_id: str, req: ProfileResumeModeReq) -> JSONResponse:
     if req.resume_mode not in ("auto", "prompt", "off"):
         raise HTTPException(400, "resume_mode must be 'auto', 'prompt', or 'off'.")
-    async with library_lock:
-        lib = await get_library()
-        profile = next((p for p in lib.get("profiles", []) if p["id"] == profile_id), None)
-        if not profile:
-            raise HTTPException(404, "Profile not found.")
-        profile["resume_mode"] = req.resume_mode
-        await put_library(lib)
+    lib = await get_library()
+    profile = next((p for p in lib.get("profiles", []) if p["id"] == profile_id), None)
+    if not profile:
+        raise HTTPException(404, "Profile not found.")
+    profile["resume_mode"] = req.resume_mode
+    await put_library(lib)
     return JSONResponse({"ok": True, "resume_mode": req.resume_mode})
 
 
