@@ -417,38 +417,67 @@ def _windows_install() -> bool:
             info("Re-run from an Administrator PowerShell:  python run.py --install")
             return False
 
-    if not _write_wrapper():
-        return False
+    # ── Running as admin (elevated child process) ─────────────────────────
+    # The elevated console window closes the instant we exit, so wrap everything
+    # in try/finally and pause at the end so the user can read the output.
+    # Also reconfigure stdout/stderr for UTF-8 in case the new console opened
+    # with a legacy code page (cp437, cp1252) that can't render ✓ / ⚠ / →.
+    try:
+        import sys as _sys
+        if hasattr(_sys.stdout, "reconfigure"):
+            _sys.stdout.reconfigure(encoding="utf-8", errors="replace")
+        if hasattr(_sys.stderr, "reconfigure"):
+            _sys.stderr.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
 
-    py  = str(_VENV_PY)
-    scr = str(_WRAPPER_PATH)
+    try:
+        if not _write_wrapper():
+            return False
 
-    # schtasks /Create — run at logon, any user session, highest privileges
-    cmd = [
-        "schtasks", "/Create", "/F",
-        "/TN", _WIN_TASK_NAME,
-        "/TR", f'"{py}" "{scr}"',
-        "/SC", "ONLOGON",
-        "/RL", "HIGHEST",
-        "/RU", os.environ.get("USERNAME", ""),
-    ]
-    result = subprocess.run(cmd, capture_output=True, text=True, shell=False)
-    if result.returncode != 0:
-        fail(f"schtasks /Create failed:\n{result.stderr.strip()}")
-        return False
-    ok(f"Task '{_WIN_TASK_NAME}' created in Task Scheduler")
+        py  = str(_VENV_PY)
+        scr = str(_WRAPPER_PATH)
 
-    # Start it now
-    start = subprocess.run(
-        ["schtasks", "/Run", "/TN", _WIN_TASK_NAME],
-        capture_output=True, text=True,
-    )
-    if start.returncode == 0:
-        ok("Task started immediately")
-    else:
-        warn("Task registered but could not start immediately — it will run at next logon")
-    info("Dashboard → http://remote.local  (or http://127.0.0.1)")
-    return True
+        # schtasks /Create — run at logon, any user session, highest privileges.
+        # stdin=DEVNULL prevents schtasks from hanging if it ever prompts for a
+        # password (e.g. on certain domain configurations).
+        cmd = [
+            "schtasks", "/Create", "/F",
+            "/TN", _WIN_TASK_NAME,
+            "/TR", f'"{py}" "{scr}"',
+            "/SC", "ONLOGON",
+            "/RL", "HIGHEST",
+            "/RU", os.environ.get("USERNAME", ""),
+        ]
+        result = subprocess.run(
+            cmd, capture_output=True, text=True, shell=False,
+            stdin=subprocess.DEVNULL,
+        )
+        if result.returncode != 0:
+            fail(f"schtasks /Create failed:\n{result.stderr.strip()}")
+            return False
+        ok(f"Task '{_WIN_TASK_NAME}' created in Task Scheduler")
+
+        # Start it now
+        start = subprocess.run(
+            ["schtasks", "/Run", "/TN", _WIN_TASK_NAME],
+            capture_output=True, text=True,
+            stdin=subprocess.DEVNULL,
+        )
+        if start.returncode == 0:
+            ok("Task started immediately")
+        else:
+            warn("Task registered but could not start immediately — it will run at next logon")
+        info("Dashboard -> http://remote.local  (or http://127.0.0.1)")
+        info("Service log -> logs\\streamlink_service.log")
+        return True
+
+    finally:
+        # Keep the elevated window open so the user can read the result.
+        try:
+            input("\n  Press Enter to close this window …\n")
+        except EOFError:
+            pass
 
 
 def _windows_uninstall() -> bool:
