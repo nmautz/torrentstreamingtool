@@ -365,7 +365,18 @@ def start_jackett() -> bool:
         vlog(f"Jackett service installed: {service_installed}")
         if VERBOSE and service_installed:
             vrun(["sc.exe", "qc", "Jackett"])      # show binPath
-            vrun(["netstat", "-ano", "-p", "TCP"], timeout=5)
+            try:
+                ns = subprocess.run(["netstat", "-ano", "-p", "TCP"],
+                                    capture_output=True, text=True, timeout=5)
+                hits = [l for l in ns.stdout.splitlines() if ":9117" in l]
+                if hits:
+                    vlog("Port 9117 bindings:")
+                    for l in hits:
+                        vlog(f"  {l.strip()}")
+                else:
+                    vlog("Nothing currently listening on port 9117.")
+            except Exception as exc:
+                vlog(f"netstat failed: {exc}")
         if service_installed and _start_jackett_service_windows():
             info("Started Jackett Windows service")
             if VERBOSE:
@@ -411,22 +422,71 @@ def _diagnose_jackett_service_state() -> None:
             break
         if "RUNNING" in state:
             return
-    # Tail Jackett's log if we can find it
+    # The service runs as LocalSystem, so its data folder is under
+    # C:\Windows\System32\config\systemprofile — NOT the interactive user's
+    # AppData. Search both, plus ProgramData (the installer default).
+    sysprofile = Path(r"C:\Windows\System32\config\systemprofile")
     candidates = [
-        Path(r"C:\ProgramData\Jackett\log.txt"),
+        Path(r"C:\ProgramData\Jackett") / "log.txt",
+        sysprofile / "AppData" / "Roaming" / "Jackett" / "log.txt",
+        sysprofile / "AppData" / "Local"   / "Jackett" / "log.txt",
         Path(os.environ.get("LOCALAPPDATA", "")) / "Jackett" / "log.txt",
-        Path(os.environ.get("APPDATA", "")) / "Jackett" / "log.txt",
+        Path(os.environ.get("APPDATA", ""))     / "Jackett" / "log.txt",
     ]
+    # Locate Jackett's config dir(s) — knowing which one the service uses
+    # matters because LocalSystem has its own AppData under
+    # C:\Windows\System32\config\systemprofile, not the interactive user.
+    vlog("Searching for Jackett ServerConfig.json …")
+    cfg_candidates = [
+        Path(r"C:\ProgramData\Jackett"),
+        sysprofile / "AppData" / "Roaming" / "Jackett",
+        sysprofile / "AppData" / "Local"   / "Jackett",
+        Path(os.environ.get("LOCALAPPDATA", "")) / "Jackett",
+        Path(os.environ.get("APPDATA", ""))     / "Jackett",
+    ]
+    for d in cfg_candidates:
+        cfg = d / "ServerConfig.json"
+        vlog(f"  {'FOUND' if cfg.exists() else '   - '} {cfg}")
+
+    vlog("Looking for Jackett log file …")
+    found = False
     for p in candidates:
         try:
             if p.exists():
-                vlog(f"Tailing {p} (last 30 lines):")
-                lines = p.read_text(encoding="utf-8", errors="replace").splitlines()[-30:]
+                vlog(f"  FOUND {p}")
+                lines = p.read_text(encoding="utf-8", errors="replace").splitlines()[-40:]
+                vlog(f"  Last {len(lines)} lines:")
                 for line in lines:
-                    vlog(f"  | {line}")
+                    vlog(f"    | {line}")
+                found = True
                 break
+            else:
+                vlog(f"     -  {p}")
         except Exception as exc:
-            vlog(f"Could not read {p}: {exc}")
+            vlog(f"  Could not read {p}: {exc}")
+    if not found:
+        vlog("No Jackett log.txt found in any standard location.")
+
+    # Pull the most recent Service Control Manager error from the event log
+    vlog("Querying Application/System event log for recent Jackett errors …")
+    ps_cmd = (
+        "Get-WinEvent -FilterHashtable @{LogName='System'; ProviderName='Service Control Manager'} "
+        "-MaxEvents 50 | Where-Object { $_.Message -match 'Jackett' } | "
+        "Select-Object -First 5 | Format-List TimeCreated, LevelDisplayName, Message"
+    )
+    try:
+        ev = subprocess.run(
+            ["powershell", "-NoProfile", "-Command", ps_cmd],
+            capture_output=True, text=True, timeout=15,
+        )
+        out = (ev.stdout or "").strip()
+        if out:
+            for line in out.splitlines():
+                vlog(f"  evt: {line}")
+        else:
+            vlog("  (no Jackett-related events in last 50 SCM entries)")
+    except Exception as exc:
+        vlog(f"  event log query failed: {exc}")
 
 
 def check_mullvad() -> bool:
