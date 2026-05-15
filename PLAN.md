@@ -75,6 +75,7 @@
 ## Milestone 10 — Reliability & Visibility
 
 - [ ] **10.1** UI warning if any dependency/service is unreachable (VLC, qBittorrent, Jackett): currently only shown at startup in the terminal; surface these as persistent in-app banners so users on mobile know why things aren't working
+- [/] **10.2** Per-control in-flight indicators for VLC controls: when a request is slow (busy CPU / weak network), show a per-button loading state and ignore further clicks of that same control until it resolves. Other controls remain clickable independently (e.g. clicking volume-up shows it loading while pause stays usable). Applies to pause, seek ±, volume ± / slider, prev / next, stop, retry, audio / subtitle selects, seek bar click, and the skip / resume offer buttons.
 
 ---
 

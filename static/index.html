@@ -38,6 +38,17 @@
     .tab-active   { border-bottom: 3px solid #4f46e5; color: white; }
     .tab-inactive { border-bottom: 3px solid transparent; color: #6b7280; }
     .tab-inactive:hover { color: #d1d5db; }
+    /* In-flight VLC control state — buttons get a spinner overlay; selects/sliders just dim+disable */
+    @keyframes ctrl-spin { to { transform: rotate(360deg); } }
+    .ctrl-loading { position: relative; opacity: 0.55; cursor: not-allowed !important; pointer-events: none; }
+    .ctrl-loading::after {
+      content: ""; position: absolute; top: 50%; left: 50%;
+      width: 18px; height: 18px; margin: -9px 0 0 -9px;
+      border: 2px solid rgba(255,255,255,0.25);
+      border-top-color: #818cf8; border-radius: 50%;
+      animation: ctrl-spin 0.7s linear infinite; pointer-events: none; z-index: 5;
+    }
+    .ctrl-loading-form { opacity: 0.55; cursor: not-allowed !important; }
   </style>
 </head>
 <body class="dark bg-gray-950 text-gray-100 min-h-screen flex flex-col">
@@ -804,7 +815,7 @@
     <div class="max-w-5xl mx-auto px-3 py-2 flex items-center gap-3">
       <div class="flex items-center gap-2 flex-1 min-w-0">
         <span class="text-[9px] font-black uppercase tracking-widest text-gray-600 whitespace-nowrap flex-shrink-0">AUDIO</span>
-        <select id="audioSelect" onchange="setAudioTrack(this.value)"
+        <select id="audioSelect" onchange="setAudioTrack(this.value, this)"
           class="flex-1 min-w-0 bg-gray-900 border-b border-gray-700 text-xs text-gray-300 px-2 py-1.5
                  focus:outline-none focus:border-indigo-500 cursor-pointer">
           <option>—</option>
@@ -812,7 +823,7 @@
       </div>
       <div class="flex items-center gap-2 flex-1 min-w-0">
         <span class="text-[9px] font-black uppercase tracking-widest text-gray-600 whitespace-nowrap flex-shrink-0">SUBS</span>
-        <select id="subtitleSelect" onchange="setSubtitleTrack(this.value)"
+        <select id="subtitleSelect" onchange="setSubtitleTrack(this.value, this)"
           class="flex-1 min-w-0 bg-gray-900 border-b border-gray-700 text-xs text-gray-300 px-2 py-1.5
                  focus:outline-none focus:border-indigo-500 cursor-pointer">
           <option value="-1">Off</option>
@@ -842,44 +853,44 @@
   </div>
   <!-- Controls row — Metro tiles with dividers -->
   <div class="max-w-5xl mx-auto px-0 pb-1 flex items-stretch">
-    <button onclick="vlcSeek(-30)" title="−30s"
+    <button onclick="vlcSeek(-30, this)" title="−30s"
       class="flex flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
              text-gray-600 hover:text-gray-300 hover:bg-gray-900 active:bg-gray-800 transition-colors">
       <span class="text-xs font-black leading-none">−30</span>
       <span class="text-[9px] text-gray-700 font-bold uppercase leading-none mt-0.5">sec</span>
     </button>
-    <button onclick="vlcSeek(-10)" title="−10s"
+    <button onclick="vlcSeek(-10, this)" title="−10s"
       class="flex flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
              text-gray-600 hover:text-gray-300 hover:bg-gray-900 active:bg-gray-800 transition-colors">
       <span class="text-xs font-black leading-none">−10</span>
       <span class="text-[9px] text-gray-700 font-bold uppercase leading-none mt-0.5">sec</span>
     </button>
     <!-- Volume -->
-    <button onclick="vlcVolumeStep(-5)" title="Volume −5%"
+    <button onclick="vlcVolumeStep(-5, this)" title="Volume −5%"
       class="flex flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
              text-gray-600 hover:text-gray-300 hover:bg-gray-900 active:bg-gray-800 transition-colors">
       <span class="text-lg font-black leading-none">−</span>
       <span class="text-[9px] text-gray-700 font-bold uppercase leading-none">vol</span>
     </button>
-    <button onclick="vlcVolumeStep(5)" title="Volume +5%"
+    <button onclick="vlcVolumeStep(5, this)" title="Volume +5%"
       class="flex flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
              text-gray-600 hover:text-gray-300 hover:bg-gray-900 active:bg-gray-800 transition-colors">
       <span class="text-lg font-black leading-none">+</span>
       <span class="text-[9px] text-gray-700 font-bold uppercase leading-none">vol</span>
     </button>
-    <button onclick="vlcPause()" title="Pause / Resume"
+    <button onclick="vlcPause(this)" title="Pause / Resume"
       class="flex items-center justify-center flex-1 py-2.5 border-r border-gray-800
              bg-indigo-900/25 hover:bg-indigo-900/50 active:bg-indigo-900/80 text-white transition-colors">
       <svg class="w-6 h-6" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6"/>
       </svg>
     </button>
-    <button onclick="stopStream()" title="Stop"
+    <button onclick="stopStream(this)" title="Stop"
       class="flex items-center justify-center flex-1 py-2.5 border-r border-gray-800
              text-red-600 hover:text-red-400 hover:bg-red-950/30 active:bg-red-950/50 transition-colors">
       <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14"/></svg>
     </button>
-    <button id="prevEpBtn" onclick="vlcPrev()" title="Previous episode"
+    <button id="prevEpBtn" onclick="vlcPrev(this)" title="Previous episode"
       class="hidden flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
              text-indigo-400 hover:text-indigo-200 hover:bg-indigo-950/30 active:bg-indigo-950/50 transition-colors">
       <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -887,7 +898,7 @@
       </svg>
       <span class="text-[9px] font-bold uppercase tracking-wide leading-none mt-0.5">Prev</span>
     </button>
-    <button id="nextEpBtn" onclick="vlcNext()" title="Next episode"
+    <button id="nextEpBtn" onclick="vlcNext(this)" title="Next episode"
       class="hidden flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
              text-indigo-400 hover:text-indigo-200 hover:bg-indigo-950/30 active:bg-indigo-950/50 transition-colors">
       <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -895,13 +906,13 @@
       </svg>
       <span class="text-[9px] font-bold uppercase tracking-wide leading-none mt-0.5">Next</span>
     </button>
-    <button onclick="vlcSeek(10)" title="+10s"
+    <button onclick="vlcSeek(10, this)" title="+10s"
       class="flex flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
              text-gray-600 hover:text-gray-300 hover:bg-gray-900 active:bg-gray-800 transition-colors">
       <span class="text-xs font-black leading-none">+10</span>
       <span class="text-[9px] text-gray-700 font-bold uppercase leading-none mt-0.5">sec</span>
     </button>
-    <button onclick="vlcSeek(30)" title="+30s"
+    <button onclick="vlcSeek(30, this)" title="+30s"
       class="flex flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
              text-gray-600 hover:text-gray-300 hover:bg-gray-900 active:bg-gray-800 transition-colors">
       <span class="text-xs font-black leading-none">+30</span>
@@ -987,7 +998,7 @@
 
     <!-- Row A: Rewind / Play-Pause / Forward — 5 tiles, play is wider -->
     <div class="flex flex-1 border-b border-gray-800 min-h-0">
-      <button onclick="vlcSeek(-30)"
+      <button onclick="vlcSeek(-30, this)"
         class="fc-tile flex flex-1 border-r border-gray-800
                hover:bg-gray-800/60 active:bg-gray-700/80 text-gray-500 transition-colors">
         <svg class="w-7 h-7 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -996,7 +1007,7 @@
         </svg>
         <span class="text-[11px] font-bold">30s</span>
       </button>
-      <button onclick="vlcSeek(-10)"
+      <button onclick="vlcSeek(-10, this)"
         class="fc-tile flex flex-1 border-r border-gray-800
                hover:bg-gray-800/60 active:bg-gray-700/80 text-gray-400 transition-colors">
         <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1006,7 +1017,7 @@
         <span class="text-[11px] font-bold">10s</span>
       </button>
       <!-- Play/Pause — 40% wider than sibling tiles, accent background -->
-      <button onclick="vlcPause()" id="fcPauseBtn"
+      <button onclick="vlcPause(this)" id="fcPauseBtn"
         class="fc-tile flex flex-[1.4] border-r border-gray-800
                bg-indigo-900/25 hover:bg-indigo-900/50 active:bg-indigo-900/80
                text-indigo-400 transition-colors">
@@ -1014,7 +1025,7 @@
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6"/>
         </svg>
       </button>
-      <button onclick="vlcSeek(10)"
+      <button onclick="vlcSeek(10, this)"
         class="fc-tile flex flex-1 border-r border-gray-800
                hover:bg-gray-800/60 active:bg-gray-700/80 text-gray-400 transition-colors">
         <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1023,7 +1034,7 @@
         </svg>
         <span class="text-[11px] font-bold">10s</span>
       </button>
-      <button onclick="vlcSeek(30)"
+      <button onclick="vlcSeek(30, this)"
         class="fc-tile flex flex-1
                hover:bg-gray-800/60 active:bg-gray-700/80 text-gray-500 transition-colors">
         <svg class="w-7 h-7 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1036,7 +1047,7 @@
 
     <!-- Row B: Episode nav — hidden by default; JS shows as flex when library item has >1 file -->
     <div id="fcEpNav" class="hidden flex-1 border-b border-gray-800 min-h-0">
-      <button id="fcPrevBtn" onclick="vlcPrev()"
+      <button id="fcPrevBtn" onclick="vlcPrev(this)"
         class="fc-tile flex flex-1 border-r border-gray-800
                hover:bg-indigo-950/40 active:bg-indigo-950/70 text-indigo-400 transition-colors">
         <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1048,7 +1059,7 @@
       <div class="flex items-center justify-center px-3 flex-shrink-0 pointer-events-none">
         <span id="fcEpCounter" class="text-xs font-mono text-gray-600 tabular-nums text-center"></span>
       </div>
-      <button id="fcNextBtn" onclick="vlcNext()"
+      <button id="fcNextBtn" onclick="vlcNext(this)"
         class="fc-tile flex flex-1 hover:bg-indigo-950/40 active:bg-indigo-950/70 text-indigo-400 transition-colors">
         <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -1060,7 +1071,7 @@
 
     <!-- Row C: Volume − / label+slider / + -->
     <div class="flex flex-1 border-b border-gray-800 min-h-0">
-      <button onclick="vlcVolumeStep(-5)"
+      <button onclick="vlcVolumeStep(-5, this)"
         class="fc-tile flex flex-1 border-r border-gray-800
                hover:bg-gray-800/60 active:bg-gray-700/80 text-gray-400 transition-colors">
         <span class="text-4xl font-thin leading-none mb-1" style="line-height:1">−</span>
@@ -1071,11 +1082,11 @@
         <input type="range" id="fcVolumeSlider" min="0" max="200" value="100"
           class="w-full accent-indigo-500 cursor-pointer"
           oninput="updateVolumeDisplay(this.value)"
-          onmouseup="vlcSetVolume(this.value)"
-          ontouchend="vlcSetVolume(this.value)"
+          onmouseup="vlcSetVolume(this.value, this)"
+          ontouchend="vlcSetVolume(this.value, this)"
           style="touch-action:none">
       </div>
-      <button onclick="vlcVolumeStep(5)"
+      <button onclick="vlcVolumeStep(5, this)"
         class="fc-tile flex flex-1 hover:bg-gray-800/60 active:bg-gray-700/80 text-gray-400 transition-colors">
         <span class="text-4xl font-thin leading-none mb-1" style="line-height:1">+</span>
         <span class="text-[11px] text-gray-600">Vol</span>
@@ -1086,7 +1097,7 @@
     <div class="flex flex-1 border-b border-gray-800 min-h-0">
       <div class="fc-tile flex flex-1 border-r border-gray-800 gap-1.5 px-4">
         <span class="text-[11px] text-gray-600 flex-shrink-0">🎵 Audio</span>
-        <select id="fcAudioSelect" onchange="setAudioTrack(this.value)"
+        <select id="fcAudioSelect" onchange="setAudioTrack(this.value, this)"
           class="w-full bg-gray-900 border border-gray-700 text-xs text-gray-300 rounded-lg px-2 py-1.5
                  focus:outline-none focus:border-indigo-500 cursor-pointer">
           <option>—</option>
@@ -1094,7 +1105,7 @@
       </div>
       <div class="fc-tile flex flex-1 gap-1.5 px-4">
         <span class="text-[11px] text-gray-600 flex-shrink-0">💬 Subs</span>
-        <select id="fcSubtitleSelect" onchange="setSubtitleTrack(this.value)"
+        <select id="fcSubtitleSelect" onchange="setSubtitleTrack(this.value, this)"
           class="w-full bg-gray-900 border border-gray-700 text-xs text-gray-300 rounded-lg px-2 py-1.5
                  focus:outline-none focus:border-indigo-500 cursor-pointer">
           <option value="-1">Off</option>
@@ -1111,7 +1122,7 @@
 
     <!-- Row E: Stop (always) + Retry (while playing, toggled by JS) + Save (streaming torrent only, toggled by JS) -->
     <div class="flex flex-1 min-h-0">
-      <button onclick="stopStream();closeFullscreenControls()"
+      <button onclick="stopStream(this);closeFullscreenControls()"
         class="fc-tile flex flex-1 bg-red-950/15 hover:bg-red-950/45
                active:bg-red-950/70 text-red-500 transition-colors">
         <svg class="w-8 h-8 mb-1" fill="currentColor" viewBox="0 0 24 24">
@@ -1119,7 +1130,7 @@
         </svg>
         <span class="text-xs font-bold">Stop</span>
       </button>
-      <button id="fcRetryBtn" onclick="retryPlayback()"
+      <button id="fcRetryBtn" onclick="retryPlayback(this)"
         class="fc-tile flex flex-1 border-l border-gray-800 bg-amber-950/15
                hover:bg-amber-950/45 active:bg-amber-950/70 text-amber-400 transition-colors">
         <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -1454,16 +1465,18 @@ function renderPlayer(s){
   else { tc.classList.add("hidden"); stopTrackPoll(); }
 }
 
-function handleSeekBarClick(e, el){
+async function handleSeekBarClick(e, el){
   if(app.stream_status!=="playing") return;
   const rect=el.getBoundingClientRect();
   const cx=e.touches?e.touches[0].clientX:e.clientX;
   const x=cx-rect.left;
   const pct=Math.max(0,Math.min(100,(x/rect.width)*100));
-  fetch(`/api/vlc/seek/to?position_pct=${pct.toFixed(1)}`,{method:"POST"}).catch(()=>{});
   document.getElementById("progressBar").style.width=pct+"%";
   const fcpb=document.getElementById("fcProgressBar");
   if(fcpb) fcpb.style.width=pct+"%";
+  await withInflight("seek_to", el, async () => {
+    await fetch(`/api/vlc/seek/to?position_pct=${pct.toFixed(1)}`,{method:"POST"}).catch(()=>{});
+  });
 }
 
 function _seekTooltipPct(e, el){
@@ -1515,23 +1528,27 @@ function updateVolumeDisplay(val){
   if(document.activeElement===fvs && vs)  vs.value=val;
 }
 
-async function vlcSetVolume(val){
+async function vlcSetVolume(val, slider){
   val=Math.max(0,Math.min(_maxVol(),parseInt(val,10)));
   updateVolumeDisplay(val);
   const pid = profile && profile.id ? `&profile_id=${encodeURIComponent(profile.id)}` : "";
-  await fetch(`/api/vlc/volume/set?volume=${val}${pid}`,{method:"POST"}).catch(()=>{});
+  await withInflight("volume_set", slider, async () => {
+    await fetch(`/api/vlc/volume/set?volume=${val}${pid}`,{method:"POST"}).catch(()=>{});
+  });
 }
 
-async function vlcVolumeStep(delta){
-  const vs=document.getElementById("volumeSlider");
-  const fvs=document.getElementById("fcVolumeSlider");
-  const current=parseInt(vs?.value||app.vlc_volume||100,10);
-  const next=Math.max(0,Math.min(_maxVol(),current+delta));
-  if(vs)  vs.value=next;
-  if(fvs) fvs.value=next;
-  updateVolumeDisplay(next);
-  const pid = profile && profile.id ? `&profile_id=${encodeURIComponent(profile.id)}` : "";
-  await fetch(`/api/vlc/volume/set?volume=${next}${pid}`,{method:"POST"}).catch(()=>{});
+async function vlcVolumeStep(delta, btn){
+  await withInflight(`vol_step_${delta>0?"up":"down"}`, btn, async () => {
+    const vs=document.getElementById("volumeSlider");
+    const fvs=document.getElementById("fcVolumeSlider");
+    const current=parseInt(vs?.value||app.vlc_volume||100,10);
+    const next=Math.max(0,Math.min(_maxVol(),current+delta));
+    if(vs)  vs.value=next;
+    if(fvs) fvs.value=next;
+    updateVolumeDisplay(next);
+    const pid = profile && profile.id ? `&profile_id=${encodeURIComponent(profile.id)}` : "";
+    await fetch(`/api/vlc/volume/set?volume=${next}${pid}`,{method:"POST"}).catch(()=>{});
+  });
 }
 
 function openFullscreenControls(){
@@ -1589,8 +1606,7 @@ async function triggerSkip(){
   const offer = app.skip_offer;
   if(!offer || !offer.type) return;
   const btn = document.getElementById("skipOfferBtn");
-  if(btn) btn.disabled = true;
-  try {
+  await withInflight("skip", btn, async () => {
     const r = await fetch("/api/skip-now", {
       method:"POST", headers:{"Content-Type":"application/json"},
       body: JSON.stringify({type: offer.type}),
@@ -1599,9 +1615,7 @@ async function triggerSkip(){
       const d = await r.json().catch(()=>({}));
       showAlert(d.detail || "Skip failed.", "error");
     }
-  } finally {
-    if(btn) btn.disabled = false;
-  }
+  });
 }
 
 async function dismissSkip(){
@@ -1637,16 +1651,13 @@ function renderResumeOffer(offer){
 
 async function triggerResume(){
   const btn = document.getElementById("resumeOfferBtn");
-  if(btn) btn.disabled = true;
-  try{
+  await withInflight("resume", btn, async () => {
     const r = await fetch("/api/resume-now", {method:"POST"});
     if(!r.ok){
       const d = await r.json().catch(()=>({}));
       showAlert(d.detail || "Resume failed.", "error");
     }
-  } finally {
-    if(btn) btn.disabled = false;
-  }
+  });
 }
 
 async function dismissResume(){
@@ -3286,36 +3297,87 @@ async function doSearch(q){
 }
 
 // ── VLC Controls ───────────────────────────────────────────────────────────
-async function vlcPause()     { await fetch("/api/vlc/pause",       {method:"POST"}).catch(()=>{}); }
-async function vlcVolume(dir) { await fetch(`/api/vlc/volume/${dir}`,{method:"POST"}).catch(()=>{}); }
-async function vlcPrev(){
-  const r=await fetch("/api/vlc/prev",{method:"POST"}).catch(()=>null);
-  if(r&&!r.ok){ const e=await r.json().catch(()=>({})); showAlert(e.detail||"No previous episode.","warn"); }
+// In-flight tracking: per-action lock so slow requests can't pile up.
+// While `key` is in flight, repeat clicks on the same control are dropped and
+// the element is dimmed with a spinner overlay (or disabled, for form ctls).
+const _inflightActions = new Set();
+function _markLoading(el, on){
+  if(!el) return;
+  const isFormCtl = (el.tagName === "SELECT" || el.tagName === "INPUT");
+  const cls = isFormCtl ? "ctrl-loading-form" : "ctrl-loading";
+  if(on){
+    el.classList.add(cls);
+    el.setAttribute("aria-busy","true");
+    if(isFormCtl) el.disabled = true;
+  } else {
+    el.classList.remove(cls);
+    el.removeAttribute("aria-busy");
+    if(isFormCtl) el.disabled = false;
+  }
 }
-async function vlcNext(){
-  const r=await fetch("/api/vlc/next",{method:"POST"}).catch(()=>null);
-  if(r&&!r.ok){ const e=await r.json().catch(()=>({})); showAlert(e.detail||"No next episode.","warn"); }
+async function withInflight(key, el, fn){
+  if(_inflightActions.has(key)) return;
+  _inflightActions.add(key);
+  _markLoading(el, true);
+  try { return await fn(); }
+  finally {
+    _inflightActions.delete(key);
+    _markLoading(el, false);
+  }
 }
-async function stopStream(){
-  await fetch("/api/stop",{method:"POST"}).catch(()=>{});
-  document.querySelectorAll(".play-btn").forEach(b=>{b.disabled=false;b.textContent="▶ Play";});
+
+async function vlcPause(btn){
+  await withInflight("pause", btn, async () => {
+    await fetch("/api/vlc/pause", {method:"POST"}).catch(()=>{});
+  });
 }
-async function retryPlayback(){
-  const r=await fetch("/api/retry",{method:"POST"}).catch(()=>null);
-  if(r&&!r.ok){ const e=await r.json().catch(()=>({})); showAlert(e.detail||"Retry failed.","error"); }
+async function vlcVolume(dir, btn){
+  await withInflight(`vlcVolume_${dir}`, btn, async () => {
+    await fetch(`/api/vlc/volume/${dir}`,{method:"POST"}).catch(()=>{});
+  });
+}
+async function vlcPrev(btn){
+  await withInflight("prev_ep", btn, async () => {
+    const r=await fetch("/api/vlc/prev",{method:"POST"}).catch(()=>null);
+    if(r&&!r.ok){ const e=await r.json().catch(()=>({})); showAlert(e.detail||"No previous episode.","warn"); }
+  });
+}
+async function vlcNext(btn){
+  await withInflight("next_ep", btn, async () => {
+    const r=await fetch("/api/vlc/next",{method:"POST"}).catch(()=>null);
+    if(r&&!r.ok){ const e=await r.json().catch(()=>({})); showAlert(e.detail||"No next episode.","warn"); }
+  });
+}
+async function stopStream(btn){
+  await withInflight("stop", btn, async () => {
+    await fetch("/api/stop",{method:"POST"}).catch(()=>{});
+    document.querySelectorAll(".play-btn").forEach(b=>{b.disabled=false;b.textContent="▶ Play";});
+  });
+}
+async function retryPlayback(btn){
+  await withInflight("retry", btn, async () => {
+    const r=await fetch("/api/retry",{method:"POST"}).catch(()=>null);
+    if(r&&!r.ok){ const e=await r.json().catch(()=>({})); showAlert(e.detail||"Retry failed.","error"); }
+  });
 }
 
 // ── Skip & Track controls ───────────────────────────────────────────────────
-async function vlcSeek(delta){
-  await fetch(`/api/vlc/seek?delta=${delta}`,{method:"POST"}).catch(()=>{});
+async function vlcSeek(delta, btn){
+  await withInflight(`seek_${delta}`, btn, async () => {
+    await fetch(`/api/vlc/seek?delta=${delta}`,{method:"POST"}).catch(()=>{});
+  });
 }
 
-async function setAudioTrack(id){
-  await fetch(`/api/vlc/track/audio/${id}`,{method:"POST"}).catch(()=>{});
+async function setAudioTrack(id, sel){
+  await withInflight("audio_track", sel, async () => {
+    await fetch(`/api/vlc/track/audio/${id}`,{method:"POST"}).catch(()=>{});
+  });
 }
 
-async function setSubtitleTrack(id){
-  await fetch(`/api/vlc/track/subtitle/${id}`,{method:"POST"}).catch(()=>{});
+async function setSubtitleTrack(id, sel){
+  await withInflight("subtitle_track", sel, async () => {
+    await fetch(`/api/vlc/track/subtitle/${id}`,{method:"POST"}).catch(()=>{});
+  });
 }
 
 let _trackPollTimer=null;
