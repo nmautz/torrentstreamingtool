@@ -32,7 +32,9 @@ The frontend stores the per-item summary in `prepStats: Map<itemId,summary>` and
 
 1. User taps the save icon on an episode-picker row → `saveForOffline(itemId, filePath, fileName, fileLabel)`. For multi-file saves, the picker footer has a **Save Offline (N)** button that runs `epSaveSelectedOffline()` — it iterates the checked rows sequentially through `saveForOffline`, skipping anything already saved. Cancelling the per-file modal stops the chain (the next file is not started). When N ≥ 3 the bulk path shows a confirm dialog before starting, because each non-MP4/H.264 file forces a server-side transcode and bulk runs can occupy the host for hours.
 
-> Server-CPU note: `_run_offline_job` caps ffmpeg with `-threads {OFFLINE_FFMPEG_THREADS}` (currently 2) on both decoder and encoder. Without that cap, libx264 fans out to every core and the dashboard becomes unresponsive while a bulk Save Offline runs.
+> Server-CPU note: `_run_offline_job` caps ffmpeg with `-threads {OFFLINE_FFMPEG_THREADS}` (currently 2) on both decoder and encoder **on the libx264 path only**. Without that cap, libx264 fans out to every core and the dashboard becomes unresponsive while a bulk Save Offline runs.
+>
+> NVIDIA NVENC: `_has_nvenc()` is probed once per process. If the host has a Pascal-or-newer NVIDIA GPU (GTX 1060 / 10xx series qualify) and an NVENC-enabled ffmpeg build, the transcode swaps `libx264 -preset veryfast -crf 23` for `h264_nvenc -preset medium -rc vbr -cq 23 -b:v 0` and runs on the GPU. The encoder choice is recorded in `_offline_jobs[id]["encoder"]`. Output codec/profile/level/pixel-format are identical to the CPU path, so Safari compatibility is unchanged.
 2. Frontend opens `#offlineSaveModal` and POSTs `/api/library/{id}/offline-prepare {file_path}`.
 3. Backend `_ffprobe_codec` reads codec info via ffprobe.
    - **Fast path** (`_safari_compatible`): video is `h264`/`hevc`, audio is `aac`/`mp3`, container is `.mp4`/`.m4v`/`.mov`. Returns `{ready:true, video_url}` pointing at the existing `/api/library/{id}/download` URL. No file is created.

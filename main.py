@@ -3643,8 +3643,60 @@ OFFLINE_CACHE_VERSION = "v2"
 # Cap ffmpeg worker threads for offline prep so bulk Save Offline on a 30+ episode
 # show can't saturate every core on the host. The browser and OS need headroom —
 # without this, ffmpeg pegs all cores and the dashboard becomes unresponsive.
+# Only used on the CPU (libx264) path; NVENC offloads to the GPU and ignores it.
 OFFLINE_FFMPEG_THREADS = 2
+# Lazy-probed once per process: True if this ffmpeg can open an h264_nvenc session
+# on the host's GPU. Pascal (GTX 10xx) and newer all qualify; the only failure
+# modes are (a) ffmpeg built without --enable-nvenc, (b) no NVIDIA driver loaded,
+# (c) headless containers without /dev/nvidia*. We fall back to libx264 silently.
+_nvenc_probe: dict[str, bool] = {}
 _offline_jobs: dict[str, dict] = {}   # job_id → {id, src, out, status, operation, progress, error, started_at}
+
+
+async def _has_nvenc() -> bool:
+    """Detect whether ffmpeg can actually open an h264_nvenc session right now."""
+    if "result" in _nvenc_probe:
+        return _nvenc_probe["result"]
+    ffmpeg = analyzer.ffmpeg_bin()
+    if not ffmpeg:
+        _nvenc_probe["result"] = False
+        return False
+    # Step 1: is the encoder compiled in at all?
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            ffmpeg, "-hide_banner", "-encoders",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+        if b"h264_nvenc" not in (out or b""):
+            _nvenc_probe["result"] = False
+            print("[offline] h264_nvenc not compiled into ffmpeg — using libx264.")
+            return False
+    except Exception:
+        _nvenc_probe["result"] = False
+        return False
+    # Step 2: can we actually open a session? An encoder can be listed even when
+    # the driver/library is missing, so we try a 1-frame dummy encode.
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            ffmpeg, "-hide_banner", "-loglevel", "error",
+            "-f", "lavfi", "-i", "color=size=64x64:duration=0.04:rate=25",
+            "-c:v", "h264_nvenc", "-frames:v", "1", "-f", "null", "-",
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        _, err = await proc.communicate()
+        ok = proc.returncode == 0
+        if not ok:
+            tail = (err or b"").decode("utf-8", "replace").strip().splitlines()[-1:]
+            print(f"[offline] NVENC probe failed — using libx264. ({'; '.join(tail) or 'no detail'})")
+    except Exception:
+        ok = False
+    _nvenc_probe["result"] = ok
+    if ok:
+        print("[offline] NVENC available — H.264 encodes will run on the GPU.")
+    return ok
 
 # Safari iOS is much pickier than the headline list suggests:
 #   • Video stream MUST be H.264 (HEVC works on hardware but profile/level/tag
@@ -3784,20 +3836,42 @@ async def _run_offline_job(job_id: str) -> None:
     info = await asyncio.to_thread(_ffprobe_codec, str(src))
     duration = float(info.get("duration_sec", 0) or 0)
     try:
-        common_pre = [ffmpeg, "-y",
-                      # -progress writes machine-readable key=value to the given target;
-                      # pipe:1 = stdout. We tail it for accurate %, instead of guessing
-                      # from output-file size growth (which is wildly off for transcode).
-                      "-progress", "pipe:1", "-nostats",
-                      # Cap decoder threads. The encoder cap below is what really
-                      # matters for libx264, but limiting decode too keeps a HEVC
-                      # source from briefly spiking all cores before encode starts.
-                      "-threads", str(OFFLINE_FFMPEG_THREADS),
-                      "-i", str(src)]
+        use_nvenc = job["operation"] != "remux" and await _has_nvenc()
+        # `-threads` only matters for the CPU path. NVENC ignores it (the encoder
+        # runs on the GPU) and a low cap on the decoder makes HEVC software decode
+        # the bottleneck. So we only set -threads when we're staying on libx264.
+        common_pre: list[str] = [ffmpeg, "-y",
+                                 # -progress writes machine-readable key=value to the given
+                                 # target; pipe:1 = stdout. We tail it for accurate %, instead
+                                 # of guessing from output-file size growth (wildly off on
+                                 # transcode).
+                                 "-progress", "pipe:1", "-nostats"]
+        if not use_nvenc:
+            common_pre += ["-threads", str(OFFLINE_FFMPEG_THREADS)]
+        common_pre += ["-i", str(src)]
         if job["operation"] == "remux":
             args = common_pre + ["-map", "0:v:0", "-map", "0:a:0?",
                                  "-c", "copy", "-bsf:a", "aac_adtstoasc",
                                  "-movflags", "+faststart", str(tmp)]
+        elif use_nvenc:
+            # Pascal (GTX 1060) NVENC: H.264 High @ L4.1 yuv420p, which matches
+            # exactly what Safari wants. `-rc vbr -cq 23 -b:v 0` is the NVENC
+            # equivalent of x264 `-crf 23` — constant-quality VBR with no bitrate
+            # cap. `-preset medium` is the cross-version-stable preset name (the
+            # newer p1..p7 API exists too but older ffmpeg builds reject it).
+            # 10-bit HEVC sources get tone-mapped to 8-bit by the default scaler
+            # because NVENC h264 only encodes 8-bit (yuv420p) — same outcome as
+            # the libx264 path.
+            args = common_pre + ["-map", "0:v:0", "-map", "0:a:0?",
+                                 "-c:v", "h264_nvenc",
+                                 "-preset", "medium",
+                                 "-rc", "vbr", "-cq", "23",
+                                 "-b:v", "0", "-maxrate", "0",
+                                 "-profile:v", "high", "-level", "4.1",
+                                 "-pix_fmt", "yuv420p",
+                                 "-c:a", "aac", "-b:a", "160k", "-ac", "2",
+                                 "-movflags", "+faststart", str(tmp)]
+            job["encoder"] = "h264_nvenc"
         else:
             # Force baseline-friendly H.264: yuv420p (8-bit) + High profile up to
             # level 4.1, which every iPhone/iPad since iPhone 5s decodes in HW.
@@ -3812,6 +3886,7 @@ async def _run_offline_job(job_id: str) -> None:
                                  "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
                                  "-c:a", "aac", "-b:a", "160k", "-ac", "2",
                                  "-movflags", "+faststart", str(tmp)]
+            job["encoder"] = "libx264"
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
