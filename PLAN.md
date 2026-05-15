@@ -92,6 +92,7 @@
 - [x] **11.9** Local player wires skip-intro / skip-credits offers (mirrors backend `_maybe_emit_skip_offer`), subtitle selector, watch-progress saves every 15 s, and auto-advance to the next saved offline episode when a file ends.
 - [x] **11.10** Outbox queue: when `navigator.onLine === false`, progress writes go to IndexedDB; the `online` event flushes them to `/api/library/{id}/progress`.
 - [x] **11.11** "Prep Offline" button on each library card. POSTs `/api/library/{id}/prep-all` to pre-run remux/transcode for every file in the item; status chip below the title polls `/prep-status` every 3 s. Subsequent device-side Save Offline taps then fetch the cached MP4 instantly instead of waiting for ffmpeg on demand.
+- [x] **11.12** Burn-in subtitles. The browser-side `<track>` approach was unreliable across Safari + Chrome (silent CORS-vs-blob drops, late-mode-flip races). New flow: user picks a subtitle source once per item via a modal (sidecar SRT/VTT or embedded stream); ffmpeg's `subtitles=...` filter burns it into every offline output. Smart matcher (`_resolve_subtitle_source`) finds the same track on every other episode by language code + filename pattern, so the user only picks once per series. Cache key includes the resolved sub source so swapping subs invalidates the cache.
 
 ---
 

@@ -3637,9 +3637,10 @@ async def admin_analyzer_status(request: Request) -> JSONResponse:
 # See docs/OFFLINE.md for the full design and docs/GOTCHAS.md for Safari quirks.
 
 OFFLINE_CACHE = Path(__file__).parent / ".offline_cache"
-# Bump this when offline-output requirements change (codec rules, ffmpeg args)
-# so previously-cached MP4s built by older logic get rebuilt on next request.
-OFFLINE_CACHE_VERSION = "v2"
+# Bump this when offline-output requirements change (codec rules, ffmpeg args,
+# subtitle burn-in policy) so previously-cached MP4s built by older logic get
+# rebuilt on next request.
+OFFLINE_CACHE_VERSION = "v5-burnsub-libass"
 _offline_jobs: dict[str, dict] = {}   # job_id → {id, src, out, status, operation, progress, error, started_at}
 
 # Safari iOS is much pickier than the headline list suggests:
@@ -3726,7 +3727,13 @@ def _can_remux(info: dict) -> bool:
 
 
 def _list_sidecar_subs(src: Path, item_id: str) -> list[dict]:
-    """Find .srt/.vtt files next to a video file. Match either exact stem or stem.<lang>."""
+    """Find .srt/.vtt files next to a video file. Match either exact stem or stem.<lang>.
+
+    `stem_suffix` is the part appended to the video's stem to form the sub name
+    (e.g. ".eng.srt"). We persist this in the per-item offline_prefs so when the
+    user prepares another episode, we look for `<other_stem><stem_suffix>` to
+    find its matching sidecar without needing to re-prompt.
+    """
     out: list[dict] = []
     if not src.parent.exists():
         return out
@@ -3737,13 +3744,17 @@ def _list_sidecar_subs(src: Path, item_id: str) -> list[dict]:
                 continue
             if p.stem == stem:
                 lang = ""
+                stem_suffix = p.suffix
             elif p.stem.startswith(stem + "."):
                 lang = p.stem[len(stem) + 1:].split(".")[0]
+                stem_suffix = p.name[len(stem):]
             else:
                 continue
             out.append({
                 "name": p.name,
                 "lang": lang or "und",
+                "stem_suffix": stem_suffix,
+                "path": str(p),
                 "url": f"/api/library/{item_id}/subtitle?file={quote(p.name)}",
             })
     except OSError:
@@ -3751,15 +3762,200 @@ def _list_sidecar_subs(src: Path, item_id: str) -> list[dict]:
     return out
 
 
+def _enumerate_embedded_subs(path: str) -> list[dict]:
+    """Return embedded subtitle streams in a video file.
+
+    `si` is the 0-based index *within subtitle streams only* (what the ffmpeg
+    `subtitles=...:si=N` filter expects), not the global stream index. Bitmap
+    formats (PGS / DVD) are still listed but flagged `bitmap=True` so the UI can
+    warn that burning may need overlay-style filtering.
+    """
+    binp = _ffprobe_bin()
+    if not binp:
+        return []
+    try:
+        r = subprocess.run(
+            [binp, "-v", "error", "-print_format", "json",
+             "-show_streams", path],
+            capture_output=True, text=True, timeout=15,
+        )
+        data = json.loads(r.stdout or "{}")
+    except Exception:
+        return []
+    out: list[dict] = []
+    si = 0
+    for s in data.get("streams", []):
+        if s.get("codec_type") != "subtitle":
+            continue
+        tags = s.get("tags", {}) or {}
+        codec = (s.get("codec_name", "") or "").lower()
+        out.append({
+            "si": si,
+            "global_index": s.get("index"),
+            "codec": codec,
+            "lang":  (tags.get("language", "") or "").lower(),
+            "title": tags.get("title", "") or "",
+            "bitmap": codec in ("dvd_subtitle", "dvb_subtitle", "hdmv_pgs_subtitle"),
+        })
+        si += 1
+    return out
+
+
+def _ff_escape_filter_arg(s: str) -> str:
+    """Escape a path/string for use as an ffmpeg `-vf` argument value.
+
+    Order matters: backslash first, then the libavfilter metas. Even with this,
+    libass (used by the `subtitles=` filter) is fragile with complex paths
+    (parens, spaces, dots together can defeat the escaping in practice). The
+    safer pattern in `_run_offline_job` is `_extract_sub_for_burn`, which
+    materialises the chosen subtitle as a temp file with an alphanumeric name.
+    """
+    s = s.replace("\\", "\\\\")
+    for ch in (":", "'", "[", "]", ",", ";"):
+        s = s.replace(ch, "\\" + ch)
+    return s
+
+
+_ffmpeg_filter_cache: dict[str, set[str]] = {}
+
+
+def _ffmpeg_has_filter(name: str) -> bool:
+    """True iff `ffmpeg -filters` lists a filter with this name.
+
+    The `subtitles` filter requires libass; many stripped-down ffmpeg builds
+    (some Homebrew taps, lite static binaries) ship without it. Without this
+    probe we get a cryptic 'Error parsing filterchain ... Error opening output
+    files: Invalid argument' that's very hard to diagnose.
+    """
+    binp = analyzer.ffmpeg_bin()
+    if not binp:
+        return False
+    cached = _ffmpeg_filter_cache.get(binp)
+    if cached is None:
+        cached = set()
+        try:
+            r = subprocess.run([binp, "-hide_banner", "-filters"],
+                               capture_output=True, text=True, timeout=8)
+            for line in (r.stdout or "").splitlines():
+                # Lines look like:  T.. subtitles         V->V       Render text subtitles ...
+                parts = line.split()
+                if len(parts) >= 2 and re.fullmatch(r"[TSC.]{3,4}", parts[0]):
+                    cached.add(parts[1])
+        except Exception:
+            pass
+        _ffmpeg_filter_cache[binp] = cached
+    return name in cached
+
+
+async def _extract_sub_for_burn(src: Path, sub_src: dict, ffmpeg: str) -> Optional[Path]:
+    """Materialise the chosen subtitle as a clean-name SRT file the `subtitles`
+    filter can reliably open.
+
+    libass + libavfilter together choke on real-world paths (spaces, parens,
+    apostrophes, dotted dirnames) regardless of how cleanly we escape them.
+    Workaround: copy/extract to a hash-named SRT in OFFLINE_CACHE so the
+    filter argument is just `subtitles=<simple_path>`. Caller must clean up.
+    """
+    OFFLINE_CACHE.mkdir(exist_ok=True)
+    safe = OFFLINE_CACHE / f"sub_{secrets.token_hex(8)}.srt"
+    if sub_src.get("kind") == "sidecar":
+        sidecar = Path(sub_src["path"])
+        if not sidecar.exists():
+            return None
+        try:
+            shutil.copy(str(sidecar), str(safe))
+            return safe
+        except OSError:
+            return None
+    if sub_src.get("kind") == "embedded":
+        si = int(sub_src.get("si", 0))
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                ffmpeg, "-y", "-i", str(src),
+                "-map", f"0:s:{si}", "-c:s", "srt", str(safe),
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+            if proc.returncode == 0 and safe.exists() and safe.stat().st_size > 0:
+                return safe
+            safe.unlink(missing_ok=True)
+            return None
+        except Exception:
+            safe.unlink(missing_ok=True)
+            return None
+    return None
+
+
+def _resolve_subtitle_source(file_src: Path, pref: Optional[dict]) -> Optional[dict]:
+    """Pref → concrete sub source for THIS file. Smart-matches across episodes.
+
+    Sidecar: try `<other_stem><stem_suffix>` first; fall back to any sidecar in
+    the same dir whose lang code matches.
+    Embedded: prefer same lang+codec; then same lang; then the original `si` if
+    still in range. Returns None when nothing usable is found (caller treats as
+    "no subs to burn").
+    """
+    if not pref or not pref.get("kind") or pref.get("kind") == "none":
+        return None
+    kind = pref["kind"]
+    lang = (pref.get("lang") or "").lower()
+
+    if kind == "sidecar":
+        suffix = pref.get("stem_suffix") or ""
+        if suffix:
+            cand = file_src.parent / (file_src.stem + suffix)
+            if cand.exists() and cand.is_file():
+                return {"kind": "sidecar", "path": str(cand), "lang": lang}
+        # Fallback: same-language sidecar with a different naming convention.
+        for s in _list_sidecar_subs(file_src, ""):
+            if not lang or s["lang"] == lang:
+                return {"kind": "sidecar", "path": s["path"], "lang": s["lang"]}
+        return None
+
+    if kind == "embedded":
+        codec = (pref.get("codec") or "").lower()
+        subs  = _enumerate_embedded_subs(str(file_src))
+        if not subs:
+            return None
+        if lang:
+            for s in subs:
+                if s["lang"] == lang and s["codec"] == codec:
+                    return {"kind": "embedded", "si": s["si"], "lang": s["lang"], "codec": s["codec"]}
+            for s in subs:
+                if s["lang"] == lang:
+                    return {"kind": "embedded", "si": s["si"], "lang": s["lang"], "codec": s["codec"]}
+        si = pref.get("si")
+        if isinstance(si, int) and 0 <= si < len(subs):
+            return {"kind": "embedded", "si": si, "lang": subs[si]["lang"], "codec": subs[si]["codec"]}
+        return None
+
+    return None
+
+
 def _srt_to_vtt(srt: str) -> str:
-    """Convert SRT cues to WebVTT. SRT timestamps use a comma; VTT uses a period."""
-    body = re.sub(r"(\d\d:\d\d:\d\d),(\d\d\d)", r"\1.\2", srt)
-    return "WEBVTT\n\n" + body
+    """Convert SRT cues to WebVTT.
+
+    Browsers reject the file silently if any of these slip through:
+    - UTF-8 BOM at the head (must be stripped or follow WEBVTT signature)
+    - CRLF line endings mixed with single-blank-line cue separation
+    - SRT-style comma timestamps (must be periods in VTT)
+    """
+    if srt.startswith("﻿"):
+        srt = srt[1:]
+    srt = srt.replace("\r\n", "\n").replace("\r", "\n")
+    body = re.sub(r"(\d{2}:\d{2}:\d{2}),(\d{3})", r"\1.\2", srt)
+    return "WEBVTT\n\n" + body.lstrip("\n")
 
 
-def _offline_cache_key(src: Path) -> str:
+def _offline_cache_key(src: Path, sub_resolved: Optional[dict] = None) -> str:
+    """Cache key includes subtitle source so swapping subs invalidates the cache."""
     st = src.stat()
-    raw = f"{OFFLINE_CACHE_VERSION}|{src}|{int(st.st_mtime)}|{st.st_size}"
+    sub_part = "none"
+    if sub_resolved:
+        # Use sort_keys so dict ordering doesn't perturb the hash.
+        sub_part = json.dumps(sub_resolved, sort_keys=True)
+    raw = f"{OFFLINE_CACHE_VERSION}|{src}|{int(st.st_mtime)}|{st.st_size}|{sub_part}"
     return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
 
@@ -3779,14 +3975,47 @@ async def _run_offline_job(job_id: str) -> None:
     # Need duration for accurate progress reporting (out_time / duration).
     info = await asyncio.to_thread(_ffprobe_codec, str(src))
     duration = float(info.get("duration_sec", 0) or 0)
+    sub_src  = job.get("sub_src")  # {kind, path|si, lang, ...} or None
+    sub_burn_path: Optional[Path] = None
     try:
+        # Materialise the chosen subtitle into a clean-name SRT to bypass
+        # libass/libavfilter path-escaping fragility (paths with spaces, parens,
+        # apostrophes have all caused real-world prep failures).
+        if sub_src:
+            # Burn-in needs the libass-backed `subtitles` filter; many ffmpeg
+            # builds ship without it. Detect early so the user gets a useful
+            # error instead of a cryptic "Error opening output files".
+            if not _ffmpeg_has_filter("subtitles"):
+                job["status"] = "error"
+                job["error"]  = (
+                    "ffmpeg is missing the 'subtitles' filter (libass not "
+                    "compiled in). Reinstall ffmpeg with libass — on Homebrew "
+                    "macOS: `brew uninstall ffmpeg && brew install ffmpeg` (the "
+                    "default formula includes libass). Then retry."
+                )
+                return
+            sub_burn_path = await _extract_sub_for_burn(src, sub_src, ffmpeg)
+            if sub_burn_path is None:
+                job["status"] = "error"
+                job["error"]  = ("Could not materialise the selected subtitle "
+                                 "for burn-in. Try picking a different track.")
+                return
         common_pre = [ffmpeg, "-y",
                       # -progress writes machine-readable key=value to the given target;
                       # pipe:1 = stdout. We tail it for accurate %, instead of guessing
                       # from output-file size growth (which is wildly off for transcode).
                       "-progress", "pipe:1", "-nostats",
                       "-i", str(src)]
-        if job["operation"] == "remux":
+        # Burn-in subtitles via ffmpeg's `subtitles` filter. This requires a
+        # video re-encode — `-c copy` is incompatible with -vf — so any job that
+        # has a sub source becomes a transcode regardless of the original op.
+        vf_arg: Optional[str] = None
+        if sub_burn_path is not None:
+            # The temp path is alphanumeric only — no escaping required.
+            vf_arg = f"subtitles={sub_burn_path}"
+        force_transcode = vf_arg is not None
+        op = "transcode" if force_transcode else job["operation"]
+        if op == "remux":
             args = common_pre + ["-map", "0:v:0", "-map", "0:a:0?",
                                  "-c", "copy", "-bsf:a", "aac_adtstoasc",
                                  "-movflags", "+faststart", str(tmp)]
@@ -3795,11 +4024,16 @@ async def _run_offline_job(job_id: str) -> None:
             # level 4.1, which every iPhone/iPad since iPhone 5s decodes in HW.
             # Pulldown to High profile fixes the "audio plays, video black" case
             # where the source is Hi10P or Main10 HEVC.
-            args = common_pre + ["-map", "0:v:0", "-map", "0:a:0?",
-                                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                                 "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
-                                 "-c:a", "aac", "-b:a", "160k", "-ac", "2",
-                                 "-movflags", "+faststart", str(tmp)]
+            args = common_pre + ["-map", "0:v:0", "-map", "0:a:0?"]
+            if vf_arg:
+                args += ["-vf", vf_arg]
+            args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                     "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
+                     "-c:a", "aac", "-b:a", "160k", "-ac", "2",
+                     "-movflags", "+faststart", str(tmp)]
+        # Reflect the actual operation so the UI labels it correctly.
+        if op != job["operation"]:
+            job["operation"] = op
         proc = await asyncio.create_subprocess_exec(
             *args,
             stdout=asyncio.subprocess.PIPE,
@@ -3877,6 +4111,11 @@ async def _run_offline_job(job_id: str) -> None:
     except Exception as e:
         job["status"] = "error"; job["error"] = str(e)
         tmp.unlink(missing_ok=True)
+    finally:
+        # Always remove the temp burn-in subtitle, even on error/exception.
+        if sub_burn_path is not None:
+            try: sub_burn_path.unlink()
+            except OSError: pass
 
 
 class OfflinePrepareReq(BaseModel):
@@ -3885,11 +4124,11 @@ class OfflinePrepareReq(BaseModel):
 
 @app.post("/api/library/{item_id}/offline-prepare")
 async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
-    """Decide what (if any) processing a file needs for browser-side offline playback.
+    """Decide what processing a file needs for browser-side offline playback.
 
-    Fast path: returns ready=true with a direct download URL when the source is already
-    a Safari-friendly MP4. Otherwise, kicks off a background remux (just rewrap to MP4)
-    or transcode (re-encode to H.264/AAC) job and returns {ready:false, job_id}.
+    Burns the item's selected subtitle into the output (if any). Fast path
+    returns ready=true with a direct download URL only when no sub burn-in is
+    needed AND the source is already Safari-compatible.
     """
     lib = await get_library()
     item = next((it for it in lib["items"] if it["id"] == item_id), None)
@@ -3902,11 +4141,13 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
     if not src.exists():
         raise HTTPException(404, "File not on disk.")
 
+    pref = _item_sub_pref(item)
+    sub_src = await asyncio.to_thread(_resolve_subtitle_source, src, pref)
     info = await asyncio.to_thread(_ffprobe_codec, str(src))
     ext  = src.suffix
-    subs = _list_sidecar_subs(src, item_id)
 
-    if _safari_compatible(info, ext):
+    # No subs to burn AND source is already Safari-compatible → serve original.
+    if not sub_src and _safari_compatible(info, ext):
         return JSONResponse({
             "ready": True,
             "needs_processing": False,
@@ -3914,13 +4155,12 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
             "video_size_bytes": src.stat().st_size,
             "duration_sec": info.get("duration_sec", 0),
             "codec_info": info,
-            "subs": subs,
+            "burned_sub": None,
         })
 
-    OFFLINE_CACHE.mkdir(exist_ok=True)
-    key = _offline_cache_key(src)
-    out_path = OFFLINE_CACHE / f"{key}.mp4"
-    if out_path.exists():
+    state = await _maybe_start_prep_job(src, pref)
+    if state["status"] == "cached":
+        out_path = OFFLINE_CACHE / f"{_offline_cache_key(src, sub_src)}.mp4"
         return JSONResponse({
             "ready": True,
             "needs_processing": False,
@@ -3928,69 +4168,51 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
             "video_size_bytes": out_path.stat().st_size,
             "duration_sec": info.get("duration_sec", 0),
             "codec_info": info,
-            "subs": subs,
+            "burned_sub": sub_src,
         })
-
-    # Coalesce: if a job for this exact source is already running, return its id.
-    existing = next(
-        (j for j in _offline_jobs.values()
-         if j["src"] == str(src) and j["status"] in ("pending", "processing")),
-        None,
-    )
-    if existing:
+    if state["status"] == "processing":
         return JSONResponse({
             "ready": False,
             "needs_processing": True,
-            "job_id": existing["id"],
-            "operation": existing["operation"],
+            "job_id": state["job_id"],
+            "operation": state["operation"],
             "duration_sec": info.get("duration_sec", 0),
             "codec_info": info,
-            "subs": subs,
+            "burned_sub": sub_src,
         })
-
-    if not analyzer.ffmpeg_bin():
-        raise HTTPException(503, "ffmpeg is not available — cannot prepare this file for offline playback.")
-
-    operation = "remux" if _can_remux(info) else "transcode"
-    job_id = secrets.token_hex(8)
-    _offline_jobs[job_id] = {
-        "id": job_id, "src": str(src), "out": str(out_path),
-        "status": "pending", "operation": operation,
-        "progress": 0.0, "error": None,
-        "started_at": time.time(),
-    }
-    asyncio.create_task(_run_offline_job(job_id))
-    return JSONResponse({
-        "ready": False,
-        "needs_processing": True,
-        "job_id": job_id,
-        "operation": operation,
-        "duration_sec": info.get("duration_sec", 0),
-        "codec_info": info,
-        "subs": subs,
-    })
+    if state["status"] == "error":
+        raise HTTPException(503, state.get("error") or "Could not start preparation.")
+    # Should not reach here — _maybe_start_prep_job always either returns
+    # cached/processing/ready_native or kicks off a job. Be defensive.
+    raise HTTPException(500, f"Unexpected prep state: {state['status']}")
 
 
-async def _maybe_start_prep_job(src: Path) -> dict:
+async def _maybe_start_prep_job(src: Path, sub_pref: Optional[dict] = None) -> dict:
     """Per-file: return current prep state, starting a remux/transcode job if none exists.
 
+    Sub_pref (from item.offline_prefs.subtitle, may be None) is resolved per-file
+    via _resolve_subtitle_source so the same prep config produces matching subs
+    on every episode in the item.
+
     Returns one of:
-      {status:"ready_native"}                — already a Safari-compatible MP4 on disk
-      {status:"cached"}                      — output MP4 already in OFFLINE_CACHE
+      {status:"ready_native"}                — already a Safari-compatible MP4 AND no subs to burn
+      {status:"cached"}                      — output MP4 already in OFFLINE_CACHE for this exact (src, sub) combo
       {status:"processing", job_id, progress, operation}
       {status:"error", error}                — ffmpeg unavailable
     """
     info = await asyncio.to_thread(_ffprobe_codec, str(src))
     ext  = src.suffix
-    if _safari_compatible(info, ext):
+    sub_src = await asyncio.to_thread(_resolve_subtitle_source, src, sub_pref)
+    if not sub_src and _safari_compatible(info, ext):
         return {"status": "ready_native"}
     OFFLINE_CACHE.mkdir(exist_ok=True)
-    out_path = OFFLINE_CACHE / f"{_offline_cache_key(src)}.mp4"
+    out_path = OFFLINE_CACHE / f"{_offline_cache_key(src, sub_src)}.mp4"
     if out_path.exists():
         return {"status": "cached"}
     existing = next(
         (j for j in _offline_jobs.values()
-         if j["src"] == str(src) and j["status"] in ("pending", "processing")),
+         if j["src"] == str(src) and j.get("out") == str(out_path)
+         and j["status"] in ("pending", "processing")),
         None,
     )
     if existing:
@@ -3998,34 +4220,39 @@ async def _maybe_start_prep_job(src: Path) -> dict:
                 "progress": existing["progress"], "operation": existing["operation"]}
     if not analyzer.ffmpeg_bin():
         return {"status": "error", "error": "ffmpeg not available."}
-    operation = "remux" if _can_remux(info) else "transcode"
+    # Subs always force transcode (subtitles filter requires re-encode).
+    operation = "transcode" if sub_src else ("remux" if _can_remux(info) else "transcode")
     job_id = secrets.token_hex(8)
     _offline_jobs[job_id] = {
         "id": job_id, "src": str(src), "out": str(out_path),
         "status": "pending", "operation": operation,
         "progress": 0.0, "error": None,
         "started_at": time.time(),
+        "sub_src": sub_src,
     }
     asyncio.create_task(_run_offline_job(job_id))
     return {"status": "processing", "job_id": job_id, "progress": 0.0, "operation": operation}
 
 
-def _peek_prep_state(src: Path) -> dict:
+def _peek_prep_state(src: Path, sub_pref: Optional[dict] = None) -> dict:
     """Read-only sibling of _maybe_start_prep_job — never starts new work.
 
-    Used by /prep-status polling. Includes finished+errored jobs so the UI can
-    show a final result for a few seconds before the cache file is consulted.
+    Looks up the cache + jobs for the same (src, resolved-sub) pair the active
+    pref would produce.
     """
     info = _ffprobe_codec(str(src))
     ext  = src.suffix
-    if _safari_compatible(info, ext):
+    sub_src = _resolve_subtitle_source(src, sub_pref)
+    if not sub_src and _safari_compatible(info, ext):
         return {"status": "ready_native"}
-    out_path = OFFLINE_CACHE / f"{_offline_cache_key(src)}.mp4"
+    out_path = OFFLINE_CACHE / f"{_offline_cache_key(src, sub_src)}.mp4"
     if out_path.exists():
         return {"status": "cached"}
     # Pick the most recent matching job — done/error states still surface here
-    # so the UI can show "error" until the user retries.
-    matching = [j for j in _offline_jobs.values() if j["src"] == str(src)]
+    # so the UI can show "error" until the user retries. Filter by both src AND
+    # output path so two different sub choices for the same source don't conflate.
+    matching = [j for j in _offline_jobs.values()
+                if j["src"] == str(src) and j.get("out") == str(out_path)]
     if matching:
         j = max(matching, key=lambda x: x.get("started_at", 0))
         out: dict = {
@@ -4034,9 +4261,6 @@ def _peek_prep_state(src: Path) -> dict:
             "error": j["error"],
             "started_at": j.get("started_at", 0),
         }
-        # Per-file ETA: scale elapsed by (1-progress)/progress. Skip until we
-        # have at least 2s of elapsed AND >2% progress, otherwise the estimate
-        # is dominated by ffmpeg startup overhead and bounces wildly.
         if j["status"] in ("pending", "processing"):
             elapsed = max(0.0, time.time() - j.get("started_at", time.time()))
             p = float(j.get("progress", 0))
@@ -4047,23 +4271,29 @@ def _peek_prep_state(src: Path) -> dict:
     return {"status": "needs_prep"}
 
 
+def _item_sub_pref(item: dict) -> Optional[dict]:
+    return ((item.get("offline_prefs") or {}).get("subtitle")) or None
+
+
 @app.post("/api/library/{item_id}/prep-all")
 async def prep_all(item_id: str) -> JSONResponse:
     """Kick off (or coalesce with existing) remux/transcode jobs for every video file in an item.
 
-    Returns the current state of every file. The UI then polls /prep-status to track progress.
+    Subs from item.offline_prefs.subtitle are burned into each output. Returns
+    the current state of every file. The UI then polls /prep-status to track progress.
     """
     lib = await get_library()
     item = next((it for it in lib["items"] if it["id"] == item_id), None)
     if not item:
         raise HTTPException(404, "Item not found.")
+    pref = _item_sub_pref(item)
     out = []
     for f in item.get("files", []):
         p = Path(f.get("path", ""))
         if not p.exists():
             out.append({"file_path": f.get("path", ""), "name": f.get("name", ""), "status": "missing"})
             continue
-        st = await _maybe_start_prep_job(p)
+        st = await _maybe_start_prep_job(p, pref)
         out.append({"file_path": f["path"], "name": f.get("name", ""), **st})
     return JSONResponse({"files": out, **_prep_summary(out)})
 
@@ -4075,15 +4305,109 @@ async def prep_status(item_id: str) -> JSONResponse:
     item = next((it for it in lib["items"] if it["id"] == item_id), None)
     if not item:
         raise HTTPException(404, "Item not found.")
+    pref = _item_sub_pref(item)
     out = []
     for f in item.get("files", []):
         p = Path(f.get("path", ""))
         if not p.exists():
             out.append({"file_path": f.get("path", ""), "name": f.get("name", ""), "status": "missing"})
             continue
-        st = await asyncio.to_thread(_peek_prep_state, p)
+        st = await asyncio.to_thread(_peek_prep_state, p, pref)
         out.append({"file_path": f["path"], "name": f.get("name", ""), **st})
     return JSONResponse({"files": out, **_prep_summary(out)})
+
+
+@app.get("/api/library/{item_id}/subtitle-options")
+async def subtitle_options(item_id: str, file_path: str = "") -> JSONResponse:
+    """Enumerate sidecar + embedded subtitle sources for a file (defaults to first file).
+
+    Used by the "Pick subtitles for offline copies" modal — the user picks once
+    per item, and the smart matcher (_resolve_subtitle_source) finds the same
+    track on each remaining episode by lang + filename pattern.
+    """
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    files = item.get("files", [])
+    if not files:
+        return JSONResponse({"options": [], "current": _item_sub_pref(item)})
+    target_path = file_path or files[0].get("path", "")
+    target = next((f for f in files if f.get("path", "") == target_path), None)
+    if not target:
+        raise HTTPException(404, "File not in this item.")
+    src = Path(target["path"])
+    if not src.exists():
+        raise HTTPException(404, "File not on disk.")
+
+    options: list[dict] = []
+    for s in _list_sidecar_subs(src, item_id):
+        lang = s.get("lang") or "und"
+        options.append({
+            "kind": "sidecar",
+            "lang": lang,
+            "stem_suffix": s.get("stem_suffix") or "",
+            "label": f"Sidecar — {s['name']} ({lang.upper()})",
+        })
+    for sub in await asyncio.to_thread(_enumerate_embedded_subs, str(src)):
+        if sub["bitmap"]:
+            # Bitmap subs (PGS / DVD) need overlay-style filtering — skip in v1.
+            continue
+        bits = [f"Embedded #{sub['si']+1}"]
+        if sub["lang"]:  bits.append(sub["lang"].upper())
+        if sub["title"]: bits.append(sub["title"])
+        options.append({
+            "kind": "embedded",
+            "lang": sub["lang"] or "und",
+            "si": sub["si"],
+            "codec": sub["codec"],
+            "title": sub["title"],
+            "label": " — ".join(bits),
+        })
+    return JSONResponse({"options": options, "current": _item_sub_pref(item)})
+
+
+class OfflinePrefsReq(BaseModel):
+    # subtitle is the persisted pref. Pass {"kind":"none"} or null to clear.
+    subtitle: Optional[dict] = None
+
+
+@app.post("/api/library/{item_id}/offline-prefs")
+async def set_offline_prefs(item_id: str, req: OfflinePrefsReq) -> JSONResponse:
+    """Persist per-item offline preferences (currently just the subtitle choice).
+
+    The subtitle pref is consulted by every offline-prepare / prep-all run; the
+    smart matcher (_resolve_subtitle_source) figures out which actual sub source
+    matches that pref for each individual file.
+    """
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    prefs = item.setdefault("offline_prefs", {})
+    sub = req.subtitle
+    if not sub or sub.get("kind") in (None, "", "none"):
+        prefs.pop("subtitle", None)
+    else:
+        kind = sub.get("kind")
+        if kind not in ("sidecar", "embedded"):
+            raise HTTPException(400, "subtitle.kind must be 'sidecar', 'embedded', or 'none'.")
+        # Persist a normalized record — keep only the keys the matcher uses.
+        if kind == "sidecar":
+            prefs["subtitle"] = {
+                "kind": "sidecar",
+                "lang": (sub.get("lang") or "").lower(),
+                "stem_suffix": sub.get("stem_suffix") or "",
+            }
+        else:
+            prefs["subtitle"] = {
+                "kind": "embedded",
+                "lang": (sub.get("lang") or "").lower(),
+                "si":   int(sub.get("si") or 0),
+                "codec": (sub.get("codec") or "").lower(),
+            }
+    await put_library(lib)
+    return JSONResponse({"ok": True, "current": _item_sub_pref(item)})
 
 
 def _prep_summary(files: list[dict]) -> dict:

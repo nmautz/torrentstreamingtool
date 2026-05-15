@@ -19,6 +19,20 @@ For player-style UI changes that do not touch offline logic, see [FRONTEND.md](F
 
 ## Flow
 
+### Burn-in subtitles (per-item preference)
+
+The browser-side `<track>` element approach was unreliable across Safari + Chrome — `crossorigin="anonymous"` interacts badly with `blob:` URLs and the late-mode-flip from `disabled` to `showing` is a no-op in some browsers. The current design burns the chosen subtitle directly into the video stream during prep:
+
+1. First time the user clicks Prep Offline (or Save & Play Here) on an item with no preference set, the **subtitle picker modal** opens. Options come from `GET /api/library/{id}/subtitle-options` — that endpoint enumerates sidecar `.srt`/`.vtt` files next to the first file plus any embedded subtitle streams (skipping bitmap formats like PGS/DVD which need overlay-style filtering).
+2. The user picks one, or "None — burn nothing in". The choice is POSTed to `/api/library/{id}/offline-prefs` and persisted as `item.offline_prefs.subtitle` in `library.json`.
+3. Subsequent prep + save runs read this pref and call `_resolve_subtitle_source(file, pref)` to find the matching sub for **each** file in the item:
+   - **Sidecar**: try `<other_stem><stem_suffix>` (e.g. picked `Movie.S01E01.eng.srt` → looks for `Movie.S01E02.eng.srt`); fall back to any same-language sidecar.
+   - **Embedded**: prefer same `lang` + `codec`; fall back to same `lang`; fall back to original stream index.
+4. The job runner adds `-vf subtitles=<escaped path>:si=<N>` to the ffmpeg args. This forces a re-encode (the `subtitles` filter is incompatible with `-c copy`), so any sub burn-in becomes a transcode — even when the underlying codecs would otherwise be remux-eligible.
+5. Cache key includes the resolved sub source (`_offline_cache_key(src, sub_resolved)`), so swapping the pref invalidates the cache and triggers a fresh burn.
+
+To change a previously-chosen subtitle, click "Prep Offline" again — the modal reopens (because the picker calls `/subtitle-options`, which returns `current` so a future iteration could pre-select it; the v1 modal currently just shows the list every time).
+
 ### Pre-prep an item (server-side, before any device save)
 
 Library cards have a "Prep Offline" icon button. Clicking it POSTs `/api/library/{id}/prep-all`, which iterates all video files in the item and either:

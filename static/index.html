@@ -1272,6 +1272,28 @@
   </div>
 </div>
 
+<!-- ── Subtitle Picker (per-item, applied to every offline copy) ─────────── -->
+<div id="subPickerModal"
+  class="hidden fixed inset-0 z-[60] bg-black/70 flex items-end sm:items-center justify-center sm:px-4">
+  <div class="bg-gray-900 w-full sm:max-w-md flex flex-col max-h-[85vh] fade-in border-t-[3px] border-amber-600">
+    <div class="px-5 pt-5 pb-3 border-b border-gray-800 flex-shrink-0">
+      <h2 class="text-lg font-black uppercase tracking-wide">Burn-in subtitles</h2>
+      <p id="spmHint" class="text-xs text-gray-500 mt-1 leading-snug">
+        Pick once per series. The chosen track is burned into every offline copy
+        so subs always render — even when the device's player can't load
+        sidecar tracks.
+      </p>
+    </div>
+    <div id="spmList" class="flex-1 overflow-y-auto px-3 py-2"></div>
+    <div class="px-4 pb-4 safe-bottom pt-3 border-t border-gray-800 flex gap-2 flex-shrink-0">
+      <button onclick="closeSubPicker()"
+        class="flex-1 bg-gray-800 hover:bg-gray-700 py-3 text-sm font-bold uppercase tracking-wide transition-colors">Cancel</button>
+      <button id="spmConfirm" onclick="confirmSubPicker()" disabled
+        class="flex-1 bg-amber-600 hover:bg-amber-500 disabled:opacity-40 disabled:cursor-not-allowed py-3 text-sm font-black uppercase tracking-wide transition-colors">Use Selected</button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Save-for-Offline progress modal ────────────────────────────────────── -->
 <div id="offlineSaveModal"
   class="hidden fixed inset-0 z-[60] bg-black/70 flex items-end sm:items-center justify-center sm:px-4">
@@ -1407,6 +1429,7 @@ let lp = {
   itemId: null, filePath: null, name: "",
   videoUrl: null,        // blob: URL currently bound to <video>
   subUrls: [],           // blob: URLs for <track> elements (revoke on unload)
+  trackEls: [],          // <track> DOM nodes — we drive .track.mode on these directly
   duration: 0,
   playlist: [], pi: 0,    // ordered file paths within the active item, current index
   // Skip-offer logic (mirrors backend _maybe_emit_skip_offer)
@@ -1430,6 +1453,9 @@ let pcCtx = null;  // {itemId, files, seekTo, label, hasOffline}
 // Drives the chip rendered into #prep-stat-<itemId>.
 const prepStats = new Map();    // itemId → {ready, processing, errored, total, files[]}
 const prepPolling = new Set();  // itemIds currently being polled
+
+// Subtitle picker modal state — see ensureOfflinePrefs()
+let _spmCtx = null;             // {itemId, options[], current, selectedIdx, resolve, reject}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function escHtml(s) {
@@ -2381,7 +2407,8 @@ function renderLibrary(items){
           }
           // Direct "play on this device" button. Saves to IndexedDB on first
           // tap (with the existing offline-save modal), then launches the local
-          // player. If already saved, plays immediately.
+          // player. If already saved, plays immediately. A small sibling
+          // "remove from device" icon appears only when the file is saved.
           const onlyFile = item.first_file || null;
           const fpath  = (resume && resume.file_path) || (onlyFile && onlyFile.path) || "";
           const fname  = (onlyFile && onlyFile.name) || item.title || "";
@@ -2389,12 +2416,26 @@ function renderLibrary(items){
           if (fpath) {
             const isSaved = offlineSaved.has(offKey(item.id, fpath));
             const label   = isSaved ? "📱 On Device" : "📱 Save & Play Here";
-            buttons+=`<button onclick="saveAndPlayLocal(${escHtml(JSON.stringify(item.id))},${escHtml(JSON.stringify(fpath))},${escHtml(JSON.stringify(fname))},${escHtml(JSON.stringify(item.title||fname))},${fseek})"
+            const _id = escHtml(JSON.stringify(item.id));
+            const _fp = escHtml(JSON.stringify(fpath));
+            const _fn = escHtml(JSON.stringify(fname));
+            const _tl = escHtml(JSON.stringify(item.title || fname));
+            buttons+=`<button onclick="saveAndPlayLocal(${_id},${_fp},${_fn},${_tl},${fseek})"
               class="text-sm bg-emerald-900/50 hover:bg-emerald-800/60 text-emerald-200 border border-emerald-800
                      flex-1 py-2.5 transition-colors font-medium min-h-[44px]"
               title="${isSaved?'Play the saved offline copy on this device':'Download to this device, then play offline'}">
               ${label}
             </button>`;
+            if (isSaved) {
+              buttons+=`<button onclick="removeFromOffline(${_id},${_fp},${_fn})"
+                class="bg-emerald-900/50 hover:bg-red-900/60 text-emerald-300 hover:text-red-200 border border-emerald-800 hover:border-red-800
+                       p-2.5 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0"
+                title="Remove the saved offline copy from this device">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+                </svg>
+              </button>`;
+            }
           }
         }
       }
@@ -3964,10 +4005,18 @@ async function saveForOffline(itemId, filePath, fileName, fileLabel) {
   if (!navigator.onLine) {
     showAlert("Cannot save offline while disconnected.", "error"); return;
   }
+  // Item-level burn-in subtitle pref must be set first. If the user dismisses
+  // the picker we bail out — saving the unprepped file would leave them
+  // without subtitles silently.
+  try {
+    await ensureOfflinePrefs(itemId);
+  } catch (_) {
+    return;
+  }
   openOfflineSaveModal(fileLabel || fileName || "");
   osm.itemId = itemId; osm.filePath = filePath;
   try {
-    osmStage("Probing codec…");
+    osmStage("Probing codec + subs…");
     const prepRes = await fetch(`/api/library/${itemId}/offline-prepare`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ file_path: filePath }),
@@ -3977,14 +4026,16 @@ async function saveForOffline(itemId, filePath, fileName, fileLabel) {
       throw new Error(e.detail || "Prepare failed.");
     }
     const prep = await prepRes.json();
-    let videoUrl = prep.video_url;
-    let codecInfo = prep.codec_info || {};
-    let duration = prep.duration_sec || 0;
-    let subs = prep.subs || [];
+    let videoUrl  = prep.video_url;
+    const codecInfo = prep.codec_info || {};
+    const duration  = prep.duration_sec || 0;
+    const burnedSub = prep.burned_sub || null;
 
-    // If server is preparing (remux/transcode), poll until done.
+    // If server is preparing (remux/transcode/burn), poll until done.
     if (!prep.ready && prep.job_id) {
-      const op = prep.operation === "remux" ? "Remuxing to MP4" : "Transcoding to H.264 / AAC";
+      const op = prep.operation === "remux" ? "Remuxing to MP4"
+               : burnedSub ? "Transcoding + burning subs"
+               : "Transcoding to H.264 / AAC";
       osmStage(`${op}…`);
       while (true) {
         if (osm.cancelled) return;
@@ -3999,7 +4050,7 @@ async function saveForOffline(itemId, filePath, fileName, fileLabel) {
       }
     }
 
-    // Download the prepared MP4 with progress reporting.
+    // Download the prepared MP4 (subs are now baked into the video).
     osmStage("Downloading to device…");
     osm.abort = new AbortController();
     const resp = await fetch(videoUrl, { signal: osm.abort.signal });
@@ -4019,19 +4070,6 @@ async function saveForOffline(itemId, filePath, fileName, fileLabel) {
     }
     const blob = new Blob(chunks, { type: "video/mp4" });
 
-    // Download sidecar subs (SRT→VTT done on server) as Blobs in parallel.
-    osmStage("Saving subtitles + metadata…");
-    osmBar(96);
-    const subBlobs = await Promise.all((subs || []).map(async (s) => {
-      try {
-        const r = await fetch(s.url);
-        if (!r.ok) return null;
-        const text = await r.text();
-        return { lang: s.lang, name: s.name,
-                 blob: new Blob([text], { type: "text/vtt" }) };
-      } catch (_) { return null; }
-    }));
-
     // Pull skip-data so the local player can run skip-intro offline.
     let skipData = null;
     try {
@@ -4046,7 +4084,7 @@ async function saveForOffline(itemId, filePath, fileName, fileLabel) {
       name: fileName || filePath.split(/[/\\]/).pop(),
       blob, duration, sizeBytes: blob.size,
       codecInfo, sourceVideoUrl: videoUrl,
-      subs: subBlobs.filter(Boolean),
+      burnedSub,            // metadata only; subs are inside the video stream
       skipData, savedAt: Date.now(),
     });
     offlineSaved.add(offKey(itemId, filePath));
@@ -4168,39 +4206,22 @@ async function _lpLoadIndex(seekTo) {
   lp.videoUrl = URL.createObjectURL(rec.blob);
 
   const v = document.getElementById("lpVideo");
-  v.crossOrigin = "anonymous";
+  // Subtitles are burned into the video stream during prep — no <track>
+  // elements needed (browser sub support via blob: <track> is too unreliable
+  // across Safari + Chrome).
+  v.removeAttribute("crossorigin");
   while (v.firstChild) v.removeChild(v.firstChild);
   v.src = lp.videoUrl;
-  const subs = rec.subs || [];
-  const sel = document.getElementById("lpSubSelect");
-  sel.innerHTML = `<option value="-1">Off</option>`;
-  subs.forEach((s, i) => {
-    const url = URL.createObjectURL(s.blob);
-    lp.subUrls.push(url);
-    const t = document.createElement("track");
-    t.kind = "subtitles"; t.src = url; t.srclang = s.lang || "und"; t.label = s.lang || s.name || `Track ${i+1}`;
-    v.appendChild(t);
-    sel.insertAdjacentHTML("beforeend",
-      `<option value="${i}">${escHtml((s.lang||"und").toUpperCase())} — ${escHtml(s.name||"sub")}</option>`);
-  });
-  document.getElementById("lpTrackRow").classList.toggle("hidden", subs.length === 0);
-  // Default all subtitle tracks off until the user picks one.
-  setTimeout(() => {
-    if (v.textTracks) for (let i = 0; i < v.textTracks.length; i++) v.textTracks[i].mode = "disabled";
-  }, 50);
+  document.getElementById("lpTrackRow").classList.add("hidden");
 
   document.getElementById("lpTitle").textContent = lp.name;
   v.load();
   try { await v.play(); } catch (_) { /* iOS may block autoplay until user gesture */ }
 }
 
-function lpSetSubtitle(idx) {
-  const v = document.getElementById("lpVideo");
-  if (!v.textTracks) return;
-  for (let i = 0; i < v.textTracks.length; i++) {
-    v.textTracks[i].mode = (String(i) === String(idx)) ? "showing" : "disabled";
-  }
-}
+// Subs are now burned in — kept as a no-op so any stale onchange handler
+// doesn't throw. The dropdown row stays hidden via lpTrackRow.
+function lpSetSubtitle(_idx) { /* no-op; burn-in only */ }
 
 function lpMaximize() {
   lp.maximized = true;
@@ -4219,7 +4240,7 @@ async function lpUnloadCurrent() {
   v.load();
   if (lp.videoUrl) try { URL.revokeObjectURL(lp.videoUrl); } catch (_) {}
   lp.subUrls.forEach(u => { try { URL.revokeObjectURL(u); } catch (_) {} });
-  lp.videoUrl = null; lp.subUrls = [];
+  lp.videoUrl = null; lp.subUrls = []; lp.trackEls = [];
 }
 
 async function lpStop() {
@@ -4334,6 +4355,115 @@ async function registerServiceWorker() {
   }
 }
 
+// --- Subtitle picker (per-item burn-in preference) --------------------------
+//
+// On first prep / first save for an item we ask the user to pick a subtitle
+// track. The choice is stored on the server (item.offline_prefs.subtitle) and
+// applied to every episode in the item via the smart matcher. From then on,
+// no further prompts — until the user clicks "Subtitles…" again to change it.
+
+function _spmRenderList() {
+  const el = document.getElementById("spmList");
+  if (!_spmCtx) { el.innerHTML = ""; return; }
+  const opts = _spmCtx.options || [];
+  // Build "None" + each detected option. Selected row gets an indigo accent.
+  const rows = [{ kind: "none", label: "None — burn nothing in" }, ...opts];
+  let html = "";
+  rows.forEach((opt, i) => {
+    const sel = (i === _spmCtx.selectedIdx);
+    const accent = sel ? "border-amber-500 bg-amber-950/30" : "border-gray-800 hover:border-gray-700 hover:bg-gray-800/50";
+    html += `<button type="button" onclick="_spmPick(${i})"
+       class="w-full text-left px-3 py-3 mb-1.5 border-l-4 ${accent} transition-colors flex items-center gap-2">
+      <div class="w-3 h-3 ${sel?'bg-amber-500':'bg-gray-700'}" aria-hidden="true"></div>
+      <div class="flex-1 min-w-0">
+        <div class="text-sm font-bold text-gray-200 truncate">${escHtml(opt.label || opt.kind)}</div>
+        ${opt.kind!=="none" ? `<div class="text-[10px] text-gray-600 uppercase tracking-wider">${escHtml(opt.kind)}${opt.lang?` · ${escHtml((opt.lang||"").toUpperCase())}`:""}</div>`:""}
+      </div>
+    </button>`;
+  });
+  if (!opts.length) {
+    html += `<p class="text-xs text-gray-600 text-center mt-2">No subtitle tracks detected in the source file.</p>`;
+  }
+  el.innerHTML = html;
+  document.getElementById("spmConfirm").disabled = (_spmCtx.selectedIdx == null);
+}
+
+function _spmPick(idx) {
+  if (!_spmCtx) return;
+  _spmCtx.selectedIdx = idx;
+  _spmRenderList();
+}
+
+function closeSubPicker() {
+  document.getElementById("subPickerModal").classList.add("hidden");
+  if (_spmCtx && _spmCtx.reject) _spmCtx.reject(new Error("cancelled"));
+  _spmCtx = null;
+}
+
+async function confirmSubPicker() {
+  if (!_spmCtx) return;
+  const opts = [{ kind: "none" }, ...(_spmCtx.options || [])];
+  const choice = opts[_spmCtx.selectedIdx];
+  const itemId = _spmCtx.itemId;
+  const resolve = _spmCtx.resolve;
+  // Persist server-side first; only resolve once stored.
+  try {
+    const r = await fetch(`/api/library/${itemId}/offline-prefs`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ subtitle: choice.kind === "none" ? { kind: "none" } : choice }),
+    });
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({ detail: "Could not save preference." }));
+      throw new Error(e.detail || "Could not save preference.");
+    }
+    const data = await r.json();
+    document.getElementById("subPickerModal").classList.add("hidden");
+    _spmCtx = null;
+    resolve(data.current || null);
+  } catch (err) {
+    showAlert(err.message || "Could not save preference.", "error");
+  }
+}
+
+// Returns a Promise that resolves to the active subtitle pref. If the item
+// already has a stored pref, resolves immediately. Otherwise opens the modal
+// and resolves when the user confirms (rejects on cancel).
+async function ensureOfflinePrefs(itemId, hint) {
+  // Probe the server for existing pref + available options.
+  let payload;
+  try {
+    const r = await fetch(`/api/library/${itemId}/subtitle-options`);
+    if (!r.ok) throw new Error("Could not list subtitle tracks.");
+    payload = await r.json();
+  } catch (err) {
+    // If the probe fails, allow the rest of the flow to continue with no subs.
+    return null;
+  }
+  if (payload.current) return payload.current;
+  // No pref stored → open the modal.
+  return new Promise((resolve, reject) => {
+    _spmCtx = {
+      itemId,
+      options: payload.options || [],
+      current: null,
+      // Pre-select first English option, else first option, else "None" (idx 0).
+      selectedIdx: (() => {
+        const opts = payload.options || [];
+        const eng = opts.findIndex(o => (o.lang || "").toLowerCase() === "eng");
+        if (eng >= 0) return eng + 1;   // +1 because index 0 is "None"
+        if (opts.length) return 1;
+        return 0;
+      })(),
+      resolve, reject,
+    };
+    if (hint) {
+      document.getElementById("spmHint").textContent = hint;
+    }
+    document.getElementById("subPickerModal").classList.remove("hidden");
+    _spmRenderList();
+  });
+}
+
 // --- Prep-for-offline (per library item, server-side) -----------------------
 //
 // Library card has a "Prep Offline" button. Clicking it kicks off remux/transcode
@@ -4423,6 +4553,14 @@ function _renderPrepChip(itemId) {
 
 async function prepItemForOffline(itemId) {
   try {
+    // Make sure the item has a subtitle pref before kicking off any work; the
+    // selected sub is burned into every output. If the user cancels the picker
+    // we abort the prep entirely.
+    try {
+      await ensureOfflinePrefs(itemId);
+    } catch (_) {
+      return;   // user cancelled the picker
+    }
     const r = await fetch(`/api/library/${itemId}/prep-all`, { method: "POST" });
     if (!r.ok) {
       const e = await r.json().catch(() => ({ detail: "Prep failed." }));
