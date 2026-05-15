@@ -168,6 +168,19 @@
           class="w-5 h-5 accent-indigo-500 cursor-pointer flex-shrink-0"/>
       </label>
 
+      <div class="flex items-center justify-between gap-3 bg-gray-800/60 px-4 py-3">
+        <div class="min-w-0">
+          <div class="text-sm font-bold text-gray-200 uppercase tracking-wide">Resume Mode</div>
+          <div class="text-[11px] text-gray-500 mt-0.5">How to handle saved watch progress on playback.</div>
+        </div>
+        <select id="psResumeMode" onchange="saveResumeMode()"
+          class="bg-gray-700 text-gray-100 text-xs font-bold uppercase tracking-wide border-0 px-2 py-1.5 cursor-pointer focus:outline-none">
+          <option value="auto">Auto</option>
+          <option value="prompt">Prompt</option>
+          <option value="off">Off</option>
+        </select>
+      </div>
+
       <p id="psStatus" class="text-[10px] text-gray-600 uppercase tracking-widest pt-1">Manual skip button is always available.</p>
     </div>
     <div class="px-4 pb-4 safe-bottom">
@@ -733,6 +746,25 @@
   </button>
 </div>
 
+<!-- ── Resume Offer overlay — floats above the player footer/fullscreen ──── -->
+<div id="resumeOffer"
+  class="hidden fixed left-0 right-0 z-[61] flex items-stretch bg-teal-900/95 border-t-2 border-teal-500 shadow-2xl"
+  style="bottom:calc(env(safe-area-inset-bottom) + 200px); min-height:64px;">
+  <button id="resumeOfferBtn" onclick="triggerResume()"
+    class="flex-1 flex items-center justify-center gap-3 px-5 py-3
+           text-teal-50 hover:bg-teal-800 active:bg-teal-700 transition-colors
+           text-base font-black uppercase tracking-widest">
+    <svg class="w-7 h-7 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 3l14 9-14 9V3z"/>
+    </svg>
+    <span id="resumeOfferLabel">Resume from 0:00</span>
+  </button>
+  <button onclick="dismissResume()" title="Start from beginning"
+    class="px-5 border-l-2 border-teal-700 text-teal-200 hover:text-white hover:bg-teal-800 active:bg-teal-700 transition-colors text-xs font-bold uppercase tracking-wide">
+    From Start
+  </button>
+</div>
+
 <!-- ── Player Footer ──────────────────────────────────────────────────────── -->
 <footer class="fixed bottom-0 left-0 right-0 z-40 bg-gray-950 border-t-2 border-gray-800 safe-bottom">
   <!-- Seek bar — flat Metro track -->
@@ -1124,6 +1156,7 @@ let app = {
   play_when_ready_item_id:null,
   play_when_ready_file_path:null,
   skip_offer:null,
+  resume_offer:null,
 };
 const expandedDownloads=new Set();   // item IDs whose file lists are currently expanded
 const downloadFilesData=new Map();   // item_id → files array (cached from /files endpoint)
@@ -1397,6 +1430,7 @@ function renderPlayer(s){
 
   // Smart Skip — render the floating skip offer based on state.skip_offer
   renderSkipOffer(s.skip_offer || null);
+  renderResumeOffer(s.resume_offer || null);
 
   // Show audio/subtitle controls only while playing
   const tc=document.getElementById("trackControls");
@@ -1553,6 +1587,65 @@ async function dismissSkip(){
   await fetch("/api/skip-now", {method:"DELETE"}).catch(()=>{});
 }
 
+// ── Resume Offer ────────────────────────────────────────────────────────────
+function renderResumeOffer(offer){
+  const el = document.getElementById("resumeOffer");
+  if(!el) return;
+  if(!offer || !offer.position_sec){
+    el.classList.add("hidden");
+    return;
+  }
+  const lbl = document.getElementById("resumeOfferLabel");
+  lbl.textContent = "Resume from " + fmtTimeSecs(Math.round(offer.position_sec));
+  const fc = document.getElementById("fullscreenControls");
+  const inFC = fc && !fc.classList.contains("hidden");
+  const skipVisible = document.getElementById("skipOffer") && !document.getElementById("skipOffer").classList.contains("hidden");
+  const stackOffset = skipVisible ? 70 : 0; // stack above skip offer tile if both visible
+  el.style.bottom = inFC
+    ? `calc(env(safe-area-inset-bottom) + ${12 + stackOffset}px)`
+    : `calc(env(safe-area-inset-bottom) + ${200 + stackOffset}px)`;
+  el.classList.remove("hidden");
+}
+
+async function triggerResume(){
+  const btn = document.getElementById("resumeOfferBtn");
+  if(btn) btn.disabled = true;
+  try{
+    const r = await fetch("/api/resume-now", {method:"POST"});
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      showAlert(d.detail || "Resume failed.", "error");
+    }
+  } finally {
+    if(btn) btn.disabled = false;
+  }
+}
+
+async function dismissResume(){
+  app.resume_offer = null;
+  renderResumeOffer(null);
+  await fetch("/api/resume-now", {method:"DELETE"}).catch(()=>{});
+}
+
+async function saveResumeMode(){
+  if(!profile.id) return;
+  const mode = document.getElementById("psResumeMode").value;
+  const r = await fetch(`/api/profiles/${profile.id}/resume-mode`,{
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({resume_mode: mode}),
+  }).catch(()=>null);
+  const s = document.getElementById("psStatus");
+  if(s){
+    s.textContent = r && r.ok ? "Saved." : "Save failed.";
+    s.className = "text-[10px] uppercase tracking-widest pt-1 " + (r && r.ok ? "text-emerald-500" : "text-red-500");
+    clearTimeout(s._t);
+    s._t = setTimeout(()=>{
+      s.textContent = "Manual skip button is always available.";
+      s.className = "text-[10px] text-gray-600 uppercase tracking-widest pt-1";
+    }, 2500);
+  }
+}
+
 // ── Tabs ───────────────────────────────────────────────────────────────────
 function switchTab(tab){
   activeTab=tab;
@@ -1679,9 +1772,11 @@ async function openProfileSettings(){
     const me = profs.find(p=>p.id===profile.id) || {};
     document.getElementById("psAutoSkipIntro").checked   = !!me.auto_skip_intro;
     document.getElementById("psAutoSkipCredits").checked = !!me.auto_skip_credits;
+    document.getElementById("psResumeMode").value = me.resume_mode || "auto";
   }catch(_){
     document.getElementById("psAutoSkipIntro").checked = false;
     document.getElementById("psAutoSkipCredits").checked = false;
+    document.getElementById("psResumeMode").value = "auto";
   }
   document.getElementById("profileSettingsModal").classList.remove("hidden");
 }

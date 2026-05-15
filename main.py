@@ -167,6 +167,7 @@ class AppState:
     prepare_hash: Optional[str] = None                    # hash added by /stream/prepare, pending user selection
     skip_offer: Optional[dict] = None                     # {"type": "intro"|"credits", "end_at": s, "next_item_id": id?, "next_file_path": p?}
     skip_offer_file: Optional[str] = None                 # path the current skip offer corresponds to
+    resume_offer: Optional[dict] = None                   # {"position_sec": N, "file_path": "..."} when resume_mode="prompt"
     analysis_jobs: dict = field(default_factory=dict)     # series_key → {status, stage, current, total, message, item_ids, started_at, finished_at}
     sse_queues: list = field(default_factory=list)
 
@@ -254,6 +255,7 @@ def state_snapshot() -> dict:
         "play_when_ready_item_id": state.play_when_ready_item_id,
         "play_when_ready_file_path": state.play_when_ready_file_path,
         "skip_offer": state.skip_offer,
+        "resume_offer": state.resume_offer,
         "analysis_jobs": state.analysis_jobs,
     }
 
@@ -1450,10 +1452,16 @@ async def vlc_progress_tracker() -> None:
     while True:
         await asyncio.sleep(2)
         if not state.library_item_id or not state.library_profile_id:
-            # Clear any stale skip offer when playback ends
+            # Clear any stale skip/resume offers when playback ends
+            changed = False
             if state.skip_offer is not None:
                 state.skip_offer = None
                 state.skip_offer_file = None
+                changed = True
+            if state.resume_offer is not None:
+                state.resume_offer = None
+                changed = True
+            if changed:
                 await broadcast("state", state_snapshot())
             continue
         try:
@@ -1831,6 +1839,10 @@ class ProfileAutoSkipReq(BaseModel):
     auto_skip_credits: Optional[bool] = None
 
 
+class ProfileResumeModeReq(BaseModel):
+    resume_mode: str  # "auto" | "prompt" | "off"
+
+
 class SkipNowReq(BaseModel):
     type: str         # "intro" or "credits"
 
@@ -1856,6 +1868,7 @@ async def list_profiles() -> JSONResponse:
             "elevated": bool(p.get("elevated", False)),
             "auto_skip_intro":   bool(p.get("auto_skip_intro", False)),
             "auto_skip_credits": bool(p.get("auto_skip_credits", False)),
+            "resume_mode":       p.get("resume_mode", "auto"),
         }
         for p in lib["profiles"]
     ]
@@ -2129,19 +2142,31 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     state.library_current_file = playlist[0]
     state.skip_offer = None
     state.skip_offer_file = None
+    state.resume_offer = None
 
-    # Seek into the first file after VLC has had time to open it
+    # Resolve seek position and handle resume_mode
     seek_sec = req.seek_first_to
     if seek_sec is None:
         hint = find_resume_hint(item, req.profile_id)
         if hint and hint.get("position_sec", 0) > 5 and not hint.get("all_completed"):
             seek_sec = hint["position_sec"]
 
+    prof_obj = next((p for p in lib.get("profiles", []) if p["id"] == req.profile_id), {})
+    resume_mode = prof_obj.get("resume_mode", "auto")
+
     if seek_sec and seek_sec > 5:
-        async def _delayed_seek(s: float) -> None:
-            await asyncio.sleep(3)
-            await vlc("seek", val=str(int(s)))
-        asyncio.create_task(_delayed_seek(seek_sec))
+        if resume_mode == "auto":
+            async def _delayed_seek(s: float) -> None:
+                await asyncio.sleep(3)
+                await vlc("seek", val=str(int(s)))
+            asyncio.create_task(_delayed_seek(seek_sec))
+        elif resume_mode == "prompt":
+            async def _delayed_resume_offer(s: float, fp: str) -> None:
+                await asyncio.sleep(3)
+                state.resume_offer = {"position_sec": s, "file_path": fp}
+                await broadcast("state", state_snapshot())
+            asyncio.create_task(_delayed_resume_offer(seek_sec, playlist[0]))
+        # "off" → do nothing, start from beginning
 
     # Apply saved track prefs for the first file (after VLC opens it)
     asyncio.create_task(_apply_track_prefs(item_id, req.profile_id, playlist[0], delay=3.5))
@@ -2460,6 +2485,7 @@ async def stream_now(req: StreamReq) -> JSONResponse:
     state.library_item_file_count = 0
     state.library_playlist = []
     state.library_current_file = None
+    state.resume_offer = None
     state.stream_task = asyncio.create_task(
         stream_pipeline(req.magnet, req.title, req.file_index, req.torrent_hash)
     )
@@ -2552,6 +2578,7 @@ async def stop() -> JSONResponse:
     state.ul_speed_bps = 0
     state.skip_offer = None
     state.skip_offer_file = None
+    state.resume_offer = None
 
     await broadcast("stream_status", {"status": "idle", "message": "Stopped."})
     return JSONResponse({"ok": True})
@@ -3357,6 +3384,20 @@ async def set_profile_auto_skip(profile_id: str, req: ProfileAutoSkipReq) -> JSO
     })
 
 
+@app.post("/api/profiles/{profile_id}/resume-mode")
+async def set_profile_resume_mode(profile_id: str, req: ProfileResumeModeReq) -> JSONResponse:
+    if req.resume_mode not in ("auto", "prompt", "off"):
+        raise HTTPException(400, "resume_mode must be 'auto', 'prompt', or 'off'.")
+    async with library_lock:
+        lib = await get_library()
+        profile = next((p for p in lib.get("profiles", []) if p["id"] == profile_id), None)
+        if not profile:
+            raise HTTPException(404, "Profile not found.")
+        profile["resume_mode"] = req.resume_mode
+        await put_library(lib)
+    return JSONResponse({"ok": True, "resume_mode": req.resume_mode})
+
+
 @app.post("/api/skip-now")
 async def skip_now(req: SkipNowReq) -> JSONResponse:
     """Execute the current Smart Skip offer (called by the client's Skip button)."""
@@ -3410,6 +3451,29 @@ async def dismiss_skip_offer() -> JSONResponse:
         offer_type = (state.skip_offer or {}).get("type", "intro")
         state.skip_offer_file = f"{state.skip_offer_file}#{offer_type}-done"
     state.skip_offer = None
+    await broadcast("state", state_snapshot())
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/resume-now")
+async def resume_now() -> JSONResponse:
+    """Seek to the saved position from the active resume offer."""
+    offer = state.resume_offer
+    if not offer:
+        raise HTTPException(400, "No resume offer is active.")
+    pos = float(offer.get("position_sec", 0))
+    if pos <= 0:
+        raise HTTPException(400, "Invalid resume position.")
+    await vlc("seek", val=str(int(pos)))
+    state.resume_offer = None
+    await broadcast("state", state_snapshot())
+    return JSONResponse({"ok": True, "sought_to": pos})
+
+
+@app.delete("/api/resume-now")
+async def dismiss_resume_offer() -> JSONResponse:
+    """Dismiss the resume offer and start from the beginning."""
+    state.resume_offer = None
     await broadcast("state", state_snapshot())
     return JSONResponse({"ok": True})
 

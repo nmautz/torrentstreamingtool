@@ -86,6 +86,11 @@
 - [x] **8.4** Auto-open fullscreen player on mobile/small screens when something is already playing
 - [x] **8.5** Next Episode continuity: hitting Next Episode should always advance to the next episode in series order, regardless of how the current episode was started
 - [x] **8.6** Current track title display: show Season × Episode × and episode name (when name is unique to that episode) as the most prominent label for the playing track
+- [x] **8.7** Optional Resume: per-profile setting controlling resume behavior when replaying an episode that has saved watch progress. Three modes:
+  - **Auto** (default) — immediately seek to the saved position, no prompt
+  - **Prompt** — start from the beginning; after playback starts a dismissible "Resume from X:XX?" tile appears in the player controls (similar to the Smart Skip offer tile) so the user can choose to jump to the saved position or stay at the start
+  - **Off** — always start from the beginning, no prompt
+  - Setting lives in the profile object (`resume_mode: "auto" | "prompt" | "off"`, default `"auto"`) and is toggled in the profile-settings modal (gear icon). Backend `/api/library/{id}/play` reads `resume_mode` and either seeks immediately, skips seeking entirely, or returns `seek_to=null` and also sends a `resume_offer` SSE event. Frontend renders the offer tile and `POST /api/resume-now` / `DELETE /api/resume-now` to accept/dismiss.
 
 ---
 
