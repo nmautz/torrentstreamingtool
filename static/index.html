@@ -1426,6 +1426,10 @@ let lp = {
 let osm = { jobId: null, abort: null, itemId: null, filePath: null, cancelled: false };
 // Play-chooser modal state
 let pcCtx = null;  // {itemId, files, seekTo, label, hasOffline}
+// Per-item prep-offline state — populated as the user clicks Prep Offline on a card.
+// Drives the chip rendered into #prep-stat-<itemId>.
+const prepStats = new Map();    // itemId → {ready, processing, errored, total, files[]}
+const prepPolling = new Set();  // itemIds currently being polled
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function escHtml(s) {
@@ -2375,6 +2379,23 @@ function renderLibrary(items){
               ▶ Play
             </button>`;
           }
+          // Direct "play on this device" button. Saves to IndexedDB on first
+          // tap (with the existing offline-save modal), then launches the local
+          // player. If already saved, plays immediately.
+          const onlyFile = item.first_file || null;
+          const fpath  = (resume && resume.file_path) || (onlyFile && onlyFile.path) || "";
+          const fname  = (onlyFile && onlyFile.name) || item.title || "";
+          const fseek  = hasProgress ? (resume.position_sec || 0) : 0;
+          if (fpath) {
+            const isSaved = offlineSaved.has(offKey(item.id, fpath));
+            const label   = isSaved ? "📱 On Device" : "📱 Save & Play Here";
+            buttons+=`<button onclick="saveAndPlayLocal(${escHtml(JSON.stringify(item.id))},${escHtml(JSON.stringify(fpath))},${escHtml(JSON.stringify(fname))},${escHtml(JSON.stringify(item.title||fname))},${fseek})"
+              class="text-sm bg-emerald-900/50 hover:bg-emerald-800/60 text-emerald-200 border border-emerald-800
+                     flex-1 py-2.5 transition-colors font-medium min-h-[44px]"
+              title="${isSaved?'Play the saved offline copy on this device':'Download to this device, then play offline'}">
+              ${label}
+            </button>`;
+          }
         }
       }
 
@@ -2401,6 +2422,19 @@ function renderLibrary(items){
         }
       }
 
+      // "Prep Offline" — pre-runs remux/transcode on every video file in the
+      // item so a subsequent "Save Offline" tap fetches the cached MP4 instantly
+      // instead of waiting on ffmpeg. Status chip below shows progress.
+      if(isReady){
+        buttons+=`<button onclick="prepItemForOffline('${item.id}')"
+          title="Pre-convert all files to Safari-compatible MP4 (server-side)"
+          class="text-gray-500 hover:text-amber-300 p-2.5 hover:bg-amber-950/40 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 6V3m0 0L9 6m3-3l3 3M6 12H3m0 0l3-3m-3 3l3 3m12-3h3m0 0l-3-3m3 3l-3 3M12 18v3m0 0l-3-3m3 3l3-3"/>
+          </svg>
+        </button>`;
+      }
+
       // Delete button (fixed width, doesn't flex-grow)
       buttons+=`<button onclick="deleteLibraryItem('${item.id}')"
         class="text-gray-600 hover:text-red-400 p-2.5 hover:bg-red-950/30 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0">
@@ -2425,6 +2459,9 @@ function renderLibrary(items){
         ?`<div id="dl-stat-${item.id}" class="text-[11px] text-gray-500 font-mono mt-0.5">${formatDlStat(libDownloadStats.get(item.id))}</div>`
         :isDownloading?`<div id="dl-stat-${item.id}" class="text-[11px] text-gray-500 font-mono mt-0.5"></div>`
         :"";
+      const prepChip=prepStats.has(item.id)
+        ?`<div id="prep-stat-${item.id}" class="text-[11px] mt-0.5">${prepChipHtml(prepStats.get(item.id))}</div>`
+        :`<div id="prep-stat-${item.id}" class="hidden"></div>`;
       const borderAccent=isDownloading?"border-l-yellow-600":isError?"border-l-red-600":"border-l-indigo-800";
       html+=`<div class="bg-gray-900 border border-gray-800 border-l-4 ${borderAccent} px-4 py-3 flex flex-col gap-2" data-item-id="${item.id}">
         <div class="min-w-0">
@@ -2434,6 +2471,7 @@ function renderLibrary(items){
           </div>
           <div class="text-[11px] text-gray-600 mt-0.5">${escHtml(meta)}</div>
           ${dlStat}
+          ${prepChip}
           ${progBar}
         </div>
         ${buttons?"<div class='flex items-center gap-2'>"+buttons+"</div>":""}
@@ -4033,6 +4071,26 @@ async function removeFromOffline(itemId, filePath, fileName) {
   if (activeTab === "library") loadLibrary();
 }
 
+// Direct "play on this device" for a single file: saves to IndexedDB first if
+// it isn't there yet, then launches the local player. Used by the On Device
+// button on single-file library cards (multi-file items have per-row buttons
+// inside the episode picker that already cover this case).
+async function saveAndPlayLocal(itemId, filePath, fileName, fileLabel, seekTo) {
+  if (offlineSaved.has(offKey(itemId, filePath))) {
+    return lpPlay(itemId, [filePath], seekTo || 0, fileLabel || fileName || "");
+  }
+  if (!navigator.onLine) {
+    showAlert("Disconnected. Reconnect to download this file before playing.", "error");
+    return;
+  }
+  await saveForOffline(itemId, filePath, fileName, fileLabel);
+  // saveForOffline shows its own modal + alert. Only auto-launch the player
+  // when the save actually landed (offlineSaved gets populated on success).
+  if (offlineSaved.has(offKey(itemId, filePath))) {
+    await lpPlay(itemId, [filePath], seekTo || 0, fileLabel || fileName || "");
+  }
+}
+
 // --- Play chooser (VLC vs On Device) -----------------------------------------
 
 function _firstFileSavedOffline(itemId, files) {
@@ -4274,6 +4332,141 @@ async function registerServiceWorker() {
   } catch (e) {
     console.warn("SW register failed:", e);
   }
+}
+
+// --- Prep-for-offline (per library item, server-side) -----------------------
+//
+// Library card has a "Prep Offline" button. Clicking it kicks off remux/transcode
+// jobs for every video file in the item via /prep-all, then polls /prep-status
+// every 3 s until nothing is pending. Subsequent "Save Offline" taps on a
+// device skip the server-side ffmpeg step because the cache file is already on disk.
+
+// Aggregate "files done + how far through the running ones we are" into a
+// single 0-1 progress value the bar can render. Each finished file counts as 1;
+// each in-flight job contributes its `progress` (already 0-1, approximated from
+// ffmpeg output growth — see _run_offline_job).
+function _prepAggregatePct(s) {
+  const total = s.total || 0;
+  if (!total) return 0;
+  let done = s.ready || 0;
+  for (const f of (s.files || [])) {
+    if (f.status === "pending" || f.status === "processing") {
+      done += Number(f.progress || 0);
+    }
+  }
+  return Math.max(0, Math.min(1, done / total));
+}
+
+// Render an ETA in human form: "5s" / "1m 12s" / "2h 3m". Numbers under 5 s
+// degrade to "<5s" so the bouncing tail of an estimate doesn't show as "0s".
+function _fmtEta(sec) {
+  if (sec == null || !isFinite(sec) || sec < 0) return "—";
+  if (sec < 5) return "<5s";
+  sec = Math.round(sec);
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  if (h > 0) return `${h}h ${m}m`;
+  if (m > 0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+
+function prepChipHtml(s) {
+  if (!s) return "";
+  const total = s.total || 0;
+  const ready = s.ready || 0;
+  const processing = s.processing || 0;
+  const errored = s.errored || 0;
+  if (processing > 0) {
+    const pct = Math.round(_prepAggregatePct(s) * 100);
+    // Identify the currently-running file (first file in pending/processing) for the label.
+    const runningFile = (s.files || []).find(f => f.status === "pending" || f.status === "processing");
+    const opLabel = runningFile && runningFile.operation === "transcode" ? "Transcoding" : "Remuxing";
+    const fileNum = ready + 1;   // 1-based "currently working on file N"
+    const filePct = runningFile ? Math.round((Number(runningFile.progress || 0)) * 100) : 0;
+    const overallEta = (s.eta_secs != null) ? _fmtEta(s.eta_secs) : "starting…";
+    const fileEta    = runningFile && runningFile.eta_secs != null ? _fmtEta(runningFile.eta_secs) : null;
+    return `
+      <div class="flex items-center justify-between gap-2">
+        <span class="text-amber-400 font-bold">⚙ ${escHtml(opLabel)} ${fileNum}/${total}</span>
+        <span class="text-amber-400 font-mono tabular-nums">${pct}%</span>
+      </div>
+      <div class="w-full bg-gray-800 h-1 mt-1">
+        <div class="bg-amber-500 h-1 transition-all duration-500" style="width:${pct}%"></div>
+      </div>
+      <div class="flex items-center justify-between gap-2 text-[10px] mt-0.5">
+        <span class="text-gray-600 truncate">
+          ${runningFile ? escHtml(runningFile.name||"file") + ` · ${filePct}%` : ""}
+          ${fileEta ? ` · ${fileEta} left on this file` : ""}
+        </span>
+        <span class="text-gray-500 font-mono tabular-nums flex-shrink-0">ETA ${overallEta}</span>
+      </div>
+      ${errored ? `<div class="text-[10px] text-red-400 mt-0.5">${errored} errored</div>` : ""}
+    `;
+  }
+  if (errored > 0) {
+    return `<span class="text-red-400 font-bold">⚠ ${errored} prep error${errored>1?"s":""}</span>
+            <span class="text-gray-600 ml-1">${ready}/${total} ready</span>`;
+  }
+  if (ready === total && total > 0) {
+    return `<span class="text-emerald-400 font-bold">✓ All ${total} ready for offline</span>`;
+  }
+  return `<span class="text-gray-500">${ready}/${total} ready · ${total - ready} need prep</span>`;
+}
+
+function _renderPrepChip(itemId) {
+  const el = document.getElementById(`prep-stat-${itemId}`);
+  if (!el) return;
+  const s = prepStats.get(itemId);
+  if (!s) { el.classList.add("hidden"); el.innerHTML = ""; return; }
+  el.classList.remove("hidden");
+  el.innerHTML = prepChipHtml(s);
+}
+
+async function prepItemForOffline(itemId) {
+  try {
+    const r = await fetch(`/api/library/${itemId}/prep-all`, { method: "POST" });
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({ detail: "Prep failed." }));
+      showAlert(e.detail || "Prep failed.", "error"); return;
+    }
+    const summary = await r.json();
+    prepStats.set(itemId, summary);
+    _renderPrepChip(itemId);
+    if (summary.processing > 0) {
+      _startPrepPolling(itemId);
+      showAlert(`Prepping ${summary.processing} file${summary.processing>1?"s":""}…`, "info");
+    } else if (summary.ready === summary.total && summary.total > 0) {
+      showAlert("Already ready for offline.", "success");
+    }
+  } catch (err) {
+    showAlert(err.message || "Prep failed.", "error");
+  }
+}
+
+function _startPrepPolling(itemId) {
+  if (prepPolling.has(itemId)) return;
+  prepPolling.add(itemId);
+  const tick = async () => {
+    if (!prepPolling.has(itemId)) return;
+    try {
+      const r = await fetch(`/api/library/${itemId}/prep-status`);
+      if (r.ok) {
+        const s = await r.json();
+        prepStats.set(itemId, s);
+        _renderPrepChip(itemId);
+        if (s.processing === 0) {
+          prepPolling.delete(itemId);
+          if (s.errored === 0 && s.ready === s.total) {
+            showAlert(`Item is ready for offline (${s.total} file${s.total>1?"s":""}).`, "success");
+          } else if (s.errored > 0) {
+            showAlert(`Prep finished with ${s.errored} error${s.errored>1?"s":""}.`, "warn");
+          }
+          return;
+        }
+      }
+    } catch (_) { /* network blip; keep polling */ }
+    setTimeout(tick, 3000);
+  };
+  setTimeout(tick, 3000);
 }
 
 // --- Online/offline event handling ------------------------------------------

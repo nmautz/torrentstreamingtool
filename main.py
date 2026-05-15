@@ -1933,6 +1933,12 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
             continue
         files = it.get("files", [])
         resume = find_resume_hint(it, profile_id) if profile_id else None
+        # Slim "first_file" so single-file UI affordances (e.g. the On Device
+        # button) know the path without fetching /files. Cheap: 1 file × 2 keys.
+        first_file = None
+        if files:
+            f0 = files[0]
+            first_file = {"path": f0.get("path", ""), "name": f0.get("name", "")}
         items.append({
             "id": it["id"],
             "title": it["title"],
@@ -1946,6 +1952,7 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
             "status": it.get("status", "ready"),
             "torrent_hash": it.get("torrent_hash", ""),
             "resume": resume,
+            "first_file": first_file,
         })
     items.sort(key=lambda x: (
         x["series"] or "\xff" + x["title"],
@@ -3769,36 +3776,91 @@ async def _run_offline_job(job_id: str) -> None:
     if not ffmpeg:
         job["status"] = "error"; job["error"] = "ffmpeg not available."
         return
+    # Need duration for accurate progress reporting (out_time / duration).
+    info = await asyncio.to_thread(_ffprobe_codec, str(src))
+    duration = float(info.get("duration_sec", 0) or 0)
     try:
+        common_pre = [ffmpeg, "-y",
+                      # -progress writes machine-readable key=value to the given target;
+                      # pipe:1 = stdout. We tail it for accurate %, instead of guessing
+                      # from output-file size growth (which is wildly off for transcode).
+                      "-progress", "pipe:1", "-nostats",
+                      "-i", str(src)]
         if job["operation"] == "remux":
-            args = [ffmpeg, "-y", "-i", str(src),
-                    "-map", "0:v:0", "-map", "0:a:0?",
-                    "-c", "copy", "-bsf:a", "aac_adtstoasc",
-                    "-movflags", "+faststart", str(tmp)]
+            args = common_pre + ["-map", "0:v:0", "-map", "0:a:0?",
+                                 "-c", "copy", "-bsf:a", "aac_adtstoasc",
+                                 "-movflags", "+faststart", str(tmp)]
         else:
             # Force baseline-friendly H.264: yuv420p (8-bit) + High profile up to
             # level 4.1, which every iPhone/iPad since iPhone 5s decodes in HW.
             # Pulldown to High profile fixes the "audio plays, video black" case
             # where the source is Hi10P or Main10 HEVC.
-            args = [ffmpeg, "-y", "-i", str(src),
-                    "-map", "0:v:0", "-map", "0:a:0?",
-                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                    "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
-                    "-c:a", "aac", "-b:a", "160k", "-ac", "2",
-                    "-movflags", "+faststart", str(tmp)]
+            args = common_pre + ["-map", "0:v:0", "-map", "0:a:0?",
+                                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                                 "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
+                                 "-c:a", "aac", "-b:a", "160k", "-ac", "2",
+                                 "-movflags", "+faststart", str(tmp)]
         proc = await asyncio.create_subprocess_exec(
-            *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+            *args,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
         )
-        # Approximate progress by output file size growth — ffmpeg's -progress is
-        # awkward to consume; size growth is good enough for a UI spinner.
-        src_size = max(src.stat().st_size, 1)
-        while True:
-            try:
-                await asyncio.wait_for(proc.wait(), timeout=2.5)
-                break
-            except asyncio.TimeoutError:
-                if tmp.exists():
+
+        # Drain -progress stdout: each block is several `key=value` lines ending
+        # in `progress=continue` (or `progress=end`). out_time_ms is microseconds
+        # despite the name. Falling back to size growth when duration is unknown
+        # (some sources fail to report it).
+        async def _drain_progress() -> None:
+            assert proc.stdout is not None
+            while True:
+                try:
+                    line = await proc.stdout.readline()
+                except Exception:
+                    return
+                if not line:
+                    return
+                try:
+                    txt = line.decode("ascii", "replace").strip()
+                except Exception:
+                    continue
+                if not txt or "=" not in txt:
+                    continue
+                k, _, v = txt.partition("=")
+                if k == "out_time_ms" and duration > 0:
+                    try:
+                        out_us = int(v)
+                        job["progress"] = max(0.0, min(0.99, (out_us / 1_000_000.0) / duration))
+                    except ValueError:
+                        pass
+                elif k == "out_time_us" and duration > 0:
+                    # Newer ffmpeg uses out_time_us (always microseconds).
+                    try:
+                        out_us = int(v)
+                        job["progress"] = max(0.0, min(0.99, (out_us / 1_000_000.0) / duration))
+                    except ValueError:
+                        pass
+                elif k == "progress" and v == "end":
+                    job["progress"] = 1.0
+                    return
+
+        # Fallback for when -progress isn't producing useful values (very short
+        # files, container with no duration). Size growth is rough but non-zero.
+        async def _size_fallback() -> None:
+            src_size = max(src.stat().st_size, 1)
+            while proc.returncode is None:
+                await asyncio.sleep(2.5)
+                if tmp.exists() and duration <= 0:
                     job["progress"] = min(0.99, tmp.stat().st_size / src_size)
+
+        progress_task = asyncio.create_task(_drain_progress())
+        fallback_task = asyncio.create_task(_size_fallback())
+        try:
+            await proc.wait()
+        finally:
+            for t in (progress_task, fallback_task):
+                if not t.done():
+                    t.cancel()
+
         if proc.returncode != 0:
             err = ""
             try:
@@ -3907,6 +3969,170 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
         "codec_info": info,
         "subs": subs,
     })
+
+
+async def _maybe_start_prep_job(src: Path) -> dict:
+    """Per-file: return current prep state, starting a remux/transcode job if none exists.
+
+    Returns one of:
+      {status:"ready_native"}                — already a Safari-compatible MP4 on disk
+      {status:"cached"}                      — output MP4 already in OFFLINE_CACHE
+      {status:"processing", job_id, progress, operation}
+      {status:"error", error}                — ffmpeg unavailable
+    """
+    info = await asyncio.to_thread(_ffprobe_codec, str(src))
+    ext  = src.suffix
+    if _safari_compatible(info, ext):
+        return {"status": "ready_native"}
+    OFFLINE_CACHE.mkdir(exist_ok=True)
+    out_path = OFFLINE_CACHE / f"{_offline_cache_key(src)}.mp4"
+    if out_path.exists():
+        return {"status": "cached"}
+    existing = next(
+        (j for j in _offline_jobs.values()
+         if j["src"] == str(src) and j["status"] in ("pending", "processing")),
+        None,
+    )
+    if existing:
+        return {"status": "processing", "job_id": existing["id"],
+                "progress": existing["progress"], "operation": existing["operation"]}
+    if not analyzer.ffmpeg_bin():
+        return {"status": "error", "error": "ffmpeg not available."}
+    operation = "remux" if _can_remux(info) else "transcode"
+    job_id = secrets.token_hex(8)
+    _offline_jobs[job_id] = {
+        "id": job_id, "src": str(src), "out": str(out_path),
+        "status": "pending", "operation": operation,
+        "progress": 0.0, "error": None,
+        "started_at": time.time(),
+    }
+    asyncio.create_task(_run_offline_job(job_id))
+    return {"status": "processing", "job_id": job_id, "progress": 0.0, "operation": operation}
+
+
+def _peek_prep_state(src: Path) -> dict:
+    """Read-only sibling of _maybe_start_prep_job — never starts new work.
+
+    Used by /prep-status polling. Includes finished+errored jobs so the UI can
+    show a final result for a few seconds before the cache file is consulted.
+    """
+    info = _ffprobe_codec(str(src))
+    ext  = src.suffix
+    if _safari_compatible(info, ext):
+        return {"status": "ready_native"}
+    out_path = OFFLINE_CACHE / f"{_offline_cache_key(src)}.mp4"
+    if out_path.exists():
+        return {"status": "cached"}
+    # Pick the most recent matching job — done/error states still surface here
+    # so the UI can show "error" until the user retries.
+    matching = [j for j in _offline_jobs.values() if j["src"] == str(src)]
+    if matching:
+        j = max(matching, key=lambda x: x.get("started_at", 0))
+        out: dict = {
+            "status": j["status"], "job_id": j["id"],
+            "progress": j["progress"], "operation": j["operation"],
+            "error": j["error"],
+            "started_at": j.get("started_at", 0),
+        }
+        # Per-file ETA: scale elapsed by (1-progress)/progress. Skip until we
+        # have at least 2s of elapsed AND >2% progress, otherwise the estimate
+        # is dominated by ffmpeg startup overhead and bounces wildly.
+        if j["status"] in ("pending", "processing"):
+            elapsed = max(0.0, time.time() - j.get("started_at", time.time()))
+            p = float(j.get("progress", 0))
+            if elapsed > 2.0 and p > 0.02:
+                out["eta_secs"] = max(0.0, elapsed * (1 - p) / p)
+                out["elapsed_secs"] = elapsed
+        return out
+    return {"status": "needs_prep"}
+
+
+@app.post("/api/library/{item_id}/prep-all")
+async def prep_all(item_id: str) -> JSONResponse:
+    """Kick off (or coalesce with existing) remux/transcode jobs for every video file in an item.
+
+    Returns the current state of every file. The UI then polls /prep-status to track progress.
+    """
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    out = []
+    for f in item.get("files", []):
+        p = Path(f.get("path", ""))
+        if not p.exists():
+            out.append({"file_path": f.get("path", ""), "name": f.get("name", ""), "status": "missing"})
+            continue
+        st = await _maybe_start_prep_job(p)
+        out.append({"file_path": f["path"], "name": f.get("name", ""), **st})
+    return JSONResponse({"files": out, **_prep_summary(out)})
+
+
+@app.get("/api/library/{item_id}/prep-status")
+async def prep_status(item_id: str) -> JSONResponse:
+    """Aggregated read-only prep state for one library item — what /prep-all kicked off."""
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    out = []
+    for f in item.get("files", []):
+        p = Path(f.get("path", ""))
+        if not p.exists():
+            out.append({"file_path": f.get("path", ""), "name": f.get("name", ""), "status": "missing"})
+            continue
+        st = await asyncio.to_thread(_peek_prep_state, p)
+        out.append({"file_path": f["path"], "name": f.get("name", ""), **st})
+    return JSONResponse({"files": out, **_prep_summary(out)})
+
+
+def _prep_summary(files: list[dict]) -> dict:
+    """Roll up per-file states into the chip the UI shows on the library card.
+
+    `eta_secs` is for the whole item: ETA of the in-flight file plus an
+    extrapolated estimate for each file still queued (uses the in-flight file's
+    observed throughput as the per-file estimate). When no file is in flight
+    yet, returns None — the UI falls back to "starting…".
+    """
+    ready_states = ("ready_native", "cached", "done")
+    busy_states  = ("pending", "processing")
+    ready      = sum(1 for x in files if x["status"] in ready_states)
+    processing = sum(1 for x in files if x["status"] in busy_states)
+    errored    = sum(1 for x in files if x["status"] == "error")
+    needs_prep = sum(1 for x in files if x["status"] == "needs_prep")
+    missing    = sum(1 for x in files if x["status"] == "missing")
+
+    # Aggregate ETA: sum of the in-flight files' remaining time + (queued *
+    # estimated full-file time, derived from the busiest in-flight file).
+    eta_secs: Optional[float] = None
+    in_flight = [x for x in files if x["status"] in busy_states and x.get("eta_secs") is not None]
+    if in_flight:
+        in_flight_eta = sum(float(x["eta_secs"]) for x in in_flight)
+        # Per-file estimate from the most-progressed in-flight file
+        # (elapsed / progress = full-file estimate).
+        per_file_estimate = max(
+            (float(x["elapsed_secs"]) / max(float(x["progress"]), 0.01)
+             for x in in_flight if x.get("elapsed_secs") and x.get("progress")),
+            default=0.0,
+        )
+        # Files that have a job entry but aren't started yet contribute a full estimate each.
+        not_started = sum(
+            1 for x in files
+            if x["status"] in busy_states and x.get("eta_secs") is None
+        )
+        # Files that have not been touched at all (needs_prep) also contribute.
+        queued_full = not_started + needs_prep
+        eta_secs = in_flight_eta + queued_full * per_file_estimate
+
+    return {
+        "total":       len(files),
+        "ready":       ready,
+        "processing":  processing,
+        "errored":     errored,
+        "needs_prep":  needs_prep,
+        "missing":     missing,
+        "eta_secs":    eta_secs,
+    }
 
 
 @app.get("/api/library/offline-job/{job_id}")

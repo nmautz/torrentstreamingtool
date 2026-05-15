@@ -122,6 +122,10 @@ Up to 6 profiles. No passwords. Optional 4-digit PIN per profile.
 | GET | `/api/library/offline-cache/{name}` | Serves a prepared MP4 from `.offline_cache/`. The name is sha256(path \| mtime \| size)[:24]+`.mp4`. Path-traversal–rejected |
 | GET | `/api/library/{id}/subtitle?file=…` | Returns a sidecar `.srt`/`.vtt` next to a video file as `text/vtt` (SRT auto-converted by `_srt_to_vtt`). Filename only — no path traversal |
 | GET | `/api/library/{id}/skip-data?file_path=…` | Read-only intro/credits times for one file (or full map when `file_path` is omitted). Same shape as the admin editor but no auth — any profile that can play the item can read its skip data |
+| POST | `/api/library/{id}/prep-all` | Pre-runs remux/transcode for every video file in an item so subsequent device-side `Save Offline` taps fetch the cached MP4 instantly. Returns `{files:[{file_path,name,status,job_id?,progress?}], total, ready, processing, errored, needs_prep, missing}` with one row per file. Coalesces with any in-flight jobs |
+| GET | `/api/library/{id}/prep-status` | Same shape as `prep-all` but never starts new work — the UI polls this every 3 s while a prep is in progress |
+
+Per-file `status` values: `ready_native` (fast-path Safari MP4, no work needed), `cached` (already in `.offline_cache/`), `pending`/`processing` (job running, includes `progress` 0-1 + `operation`), `done` (job just finished), `error`, `needs_prep`, `missing` (file not on disk).
 
 The same MP4 is **not** cached by the service worker (videos go in client-side IndexedDB instead — see `static/sw.js`). See [OFFLINE.md](OFFLINE.md) for the full client/server flow.
 

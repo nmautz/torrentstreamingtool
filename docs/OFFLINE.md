@@ -19,6 +19,15 @@ For player-style UI changes that do not touch offline logic, see [FRONTEND.md](F
 
 ## Flow
 
+### Pre-prep an item (server-side, before any device save)
+
+Library cards have a "Prep Offline" icon button. Clicking it POSTs `/api/library/{id}/prep-all`, which iterates all video files in the item and either:
+- marks them `ready_native` (fast-path Safari MP4 — no work needed)
+- finds an existing `.offline_cache/<sha>.mp4` and returns `cached`
+- spawns a remux/transcode job and returns `processing` + `job_id`
+
+The frontend stores the per-item summary in `prepStats: Map<itemId,summary>` and renders a chip into `#prep-stat-<itemId>`. Polling (`/api/library/{id}/prep-status`) runs every 3 s while `summary.processing > 0`. When the user later taps Save Offline on a device, `offline-prepare` finds the cache file already on disk and returns `ready:true` with no waiting.
+
 ### Save for offline
 
 1. User taps the save icon on an episode-picker row → `saveForOffline(itemId, filePath, fileName, fileLabel)`.
