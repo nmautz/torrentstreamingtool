@@ -6,6 +6,8 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <title>StreamLink v2.0</title>
+  <link rel="manifest" href="/manifest.json" />
+  <meta name="theme-color" content="#4f46e5" />
   <script src="https://cdn.tailwindcss.com"></script>
   <script>tailwind.config = { darkMode: 'class' }</script>
   <style>
@@ -49,6 +51,79 @@
       animation: ctrl-spin 0.7s linear infinite; pointer-events: none; z-index: 5;
     }
     .ctrl-loading-form { opacity: 0.55; cursor: not-allowed !important; }
+    /* ── Local player (Handoff to Device) ───────────────────────────────────
+       Single <video> element. The container has two visual modes toggled via
+       a `.lp-tiny` class: full-screen overlay (default) and a tiny floating
+       tile bottom-right above the global footer with a huge "FULL" button.
+       Single element avoids iOS Safari's video-element budget + dual-audio
+       desync that two synchronized videos would create. */
+    #localPlayer {
+      position: fixed;
+      inset: 0;
+      z-index: 50;
+      background: #000;
+      display: none;     /* hidden until lpPlay() */
+      flex-direction: column;
+    }
+    #localPlayer.lp-active { display: flex; }
+    #lpVideo {
+      flex: 1;
+      width: 100%;
+      min-height: 0;
+      background: #000;
+    }
+    /* Tiny mode — overrides the fullscreen layout. The chrome rows hide; only
+       the video + huge fullscreen button + close button remain. */
+    #localPlayer.lp-tiny {
+      inset: auto;
+      right: env(safe-area-inset-right, 0px);
+      bottom: calc(env(safe-area-inset-bottom, 0px) + 100px);
+      width: auto;
+      max-width: 360px;
+      height: auto;
+      flex-direction: row;
+      border: 1px solid #1f2937;
+      border-right: none;
+    }
+    #localPlayer.lp-tiny .lp-chrome { display: none !important; }
+    #localPlayer.lp-tiny #lpVideo {
+      width: 96px;
+      height: 56px;
+      flex: 0 0 auto;
+      object-fit: cover;
+    }
+    .lp-tiny-only { display: none; }
+    #localPlayer.lp-tiny .lp-tiny-only { display: flex; }
+    #localPlayer.lp-tiny .lp-tiny-fs {
+      width: 96px;
+      background: #4338ca;
+      color: white;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      font-weight: 900;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      cursor: pointer;
+      border: none;
+    }
+    #localPlayer.lp-tiny .lp-tiny-fs:hover { background: #4f46e5; }
+    #localPlayer.lp-tiny .lp-tiny-fs:active { background: #3730a3; }
+    #localPlayer.lp-tiny .lp-tiny-close {
+      width: 36px;
+      background: #1f2937;
+      color: #6b7280;
+      border: none;
+      cursor: pointer;
+    }
+    #localPlayer.lp-tiny .lp-tiny-close:hover { color: #f87171; background: #111827; }
+    #lpSkipOffer {
+      position: absolute;
+      bottom: calc(env(safe-area-inset-bottom, 0px) + 132px);
+      right: 16px;
+      z-index: 55;
+    }
+    #localPlayer.lp-tiny #lpSkipOffer { display: none !important; }
   </style>
 </head>
 <body class="dark bg-gray-950 text-gray-100 min-h-screen flex flex-col">
@@ -1158,6 +1233,125 @@
 
 </div>
 
+<!-- ── Handoff: "Where to play?" chooser modal ────────────────────────────── -->
+<div id="playChooserModal"
+  class="hidden fixed inset-0 z-[60] bg-black/70 flex items-end sm:items-center justify-center sm:px-4">
+  <div class="bg-gray-900 w-full sm:max-w-sm fade-in border-t-[3px] border-indigo-600">
+    <div class="px-5 pt-5 pb-3 border-b border-gray-800">
+      <h2 class="text-lg font-black uppercase tracking-wide">Play where?</h2>
+      <p id="pcSubtitle" class="text-xs text-gray-500 mt-0.5 truncate"></p>
+    </div>
+    <div class="p-4 grid grid-cols-1 gap-2">
+      <button id="pcVlcBtn" onclick="pcChoose('vlc')"
+        class="bg-gray-800 hover:bg-gray-700 px-4 py-4 text-left transition-colors flex items-center gap-3 border-l-4 border-indigo-600">
+        <svg class="w-7 h-7 text-indigo-400 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+          <rect x="2" y="4" width="20" height="14" rx="0"/>
+          <path d="M8 20h8M12 18v2"/>
+        </svg>
+        <div class="min-w-0">
+          <div class="text-sm font-black uppercase tracking-wide">On TV (VLC)</div>
+          <div class="text-[11px] text-gray-500 mt-0.5">Stream to the host's VLC player</div>
+        </div>
+      </button>
+      <button id="pcLocalBtn" onclick="pcChoose('local')"
+        class="bg-gray-800 hover:bg-gray-700 px-4 py-4 text-left transition-colors flex items-center gap-3 border-l-4 border-emerald-600">
+        <svg class="w-7 h-7 text-emerald-400 flex-shrink-0" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+          <rect x="6" y="2" width="12" height="20" rx="2"/>
+          <path d="M11 18h2"/>
+        </svg>
+        <div class="min-w-0">
+          <div class="text-sm font-black uppercase tracking-wide">On This Device</div>
+          <div id="pcLocalSub" class="text-[11px] text-gray-500 mt-0.5">Play the saved offline copy</div>
+        </div>
+      </button>
+    </div>
+    <div class="px-4 pb-4 safe-bottom">
+      <button onclick="closePlayChooser()"
+        class="w-full bg-gray-800 hover:bg-gray-700 py-3 text-sm font-bold uppercase tracking-wide transition-colors">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Save-for-Offline progress modal ────────────────────────────────────── -->
+<div id="offlineSaveModal"
+  class="hidden fixed inset-0 z-[60] bg-black/70 flex items-end sm:items-center justify-center sm:px-4">
+  <div class="bg-gray-900 w-full sm:max-w-sm fade-in border-t-[3px] border-emerald-600">
+    <div class="px-5 pt-5 pb-3 border-b border-gray-800">
+      <h2 class="text-lg font-black uppercase tracking-wide">Saving for offline</h2>
+      <p id="osmFile" class="text-xs text-gray-500 mt-0.5 truncate font-mono"></p>
+    </div>
+    <div class="p-5 space-y-3">
+      <div id="osmStage" class="text-sm text-gray-300">Preparing…</div>
+      <div class="w-full h-2 bg-gray-800">
+        <div id="osmBar" class="h-full bg-emerald-500 transition-all duration-300" style="width:0%"></div>
+      </div>
+      <div id="osmDetail" class="text-[11px] text-gray-500 font-mono"></div>
+    </div>
+    <div class="px-4 pb-4 safe-bottom flex gap-2">
+      <button id="osmCancel" onclick="cancelOfflineSave()"
+        class="flex-1 bg-gray-800 hover:bg-gray-700 py-3 text-sm font-bold uppercase tracking-wide transition-colors">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Local Player — single <video>, two visual modes (full / tiny). ─────── -->
+<div id="localPlayer">
+  <!-- Fullscreen chrome: header bar (close + title) above the video -->
+  <div class="lp-chrome safe-top flex-shrink-0">
+    <div class="flex items-center h-12 border-b border-gray-800 bg-gray-950">
+      <button onclick="lpMinimize()"
+        class="h-full px-4 flex items-center gap-1.5 text-gray-500 hover:text-white hover:bg-gray-800 active:bg-gray-700 transition-colors text-xs font-bold uppercase tracking-wide">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 14l-7 7m0 0l-7-7m7 7V3"/>
+        </svg>
+        Min
+      </button>
+      <div class="flex-1 min-w-0 text-center px-2 pointer-events-none">
+        <div id="lpTitle" class="text-xs font-bold text-gray-200 truncate">—</div>
+        <div class="text-[10px] uppercase tracking-widest text-emerald-500 font-bold">On Device</div>
+      </div>
+      <button onclick="lpStop()"
+        class="h-full px-4 flex items-center gap-1.5 text-red-500 hover:text-red-300 hover:bg-red-950/40 active:bg-red-950/70 transition-colors text-xs font-bold uppercase tracking-wide">
+        Stop
+      </button>
+    </div>
+  </div>
+  <video id="lpVideo" controls playsinline crossorigin="anonymous" preload="auto"></video>
+  <!-- Skip offer floating tile (anchored above the controls row). Hidden in tiny mode by CSS. -->
+  <div id="lpSkipOffer" class="hidden">
+    <button id="lpSkipBtn" onclick="lpAcceptSkipOffer()"
+      class="bg-amber-500 hover:bg-amber-400 text-black px-5 py-3 font-black uppercase tracking-wide shadow-2xl border-2 border-amber-300 flex items-center gap-2">
+      <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M13 5l7 7-7 7M6 12h13"/>
+      </svg>
+      <span id="lpSkipLabel">Skip Intro</span>
+    </button>
+    <button onclick="lpDismissSkipOffer()"
+      class="block mt-1.5 mx-auto text-[10px] text-gray-400 hover:text-gray-200 uppercase tracking-wide">Hide</button>
+  </div>
+  <!-- Subtitle selector — only shown when sidecar VTT tracks exist -->
+  <div id="lpTrackRow" class="lp-chrome hidden border-t border-gray-800 bg-gray-950 px-3 py-2 flex items-center gap-3 flex-shrink-0">
+    <span class="text-[9px] font-black uppercase tracking-widest text-gray-600 flex-shrink-0">Subs</span>
+    <select id="lpSubSelect" onchange="lpSetSubtitle(this.value)"
+      class="flex-1 min-w-0 bg-gray-900 border-b border-gray-700 text-xs text-gray-300 px-2 py-1.5 focus:outline-none focus:border-indigo-500 cursor-pointer">
+      <option value="-1">Off</option>
+    </select>
+  </div>
+  <div class="lp-chrome safe-bottom flex-shrink-0 bg-gray-950"></div>
+  <!-- Tiny-only chrome: huge fullscreen button + close button. -->
+  <button class="lp-tiny-only lp-tiny-fs" onclick="lpMaximize()" title="Fullscreen">
+    <svg class="w-6 h-6 mb-1" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M4 8V4m0 0h4M4 4l5 5m11-5h-4m4 0v4m0-4l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"/>
+    </svg>
+    <span class="text-[11px]">Full</span>
+  </button>
+  <button class="lp-tiny-only lp-tiny-close" onclick="lpStop()" title="Stop">
+    <svg class="w-4 h-4 mx-auto" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M6 18L18 6M6 6l12 12"/>
+    </svg>
+  </button>
+</div>
+
 <!-- ── JavaScript ─────────────────────────────────────────────────────────── -->
 <script>
 "use strict";
@@ -1203,6 +1397,35 @@ let streamPrepAbort = null;  // AbortController for the in-flight prepare reques
 // 8.4 — fullscreen auto-open state
 let _fcAutoTitle  = "";    // title active the last time we auto-opened
 let _fcDismissed  = false; // user manually closed fullscreen for the current track
+
+// ── Handoff / offline-playback state ───────────────────────────────────────
+// Set of "<itemId>|<file_path>" keys that are currently saved in IndexedDB.
+// Populated on init from offlineList(); kept in sync as save/remove run.
+const offlineSaved = new Set();
+// Active local-player session: see lpPlay() / lpStop().
+let lp = {
+  itemId: null, filePath: null, name: "",
+  videoUrl: null,        // blob: URL currently bound to <video>
+  subUrls: [],           // blob: URLs for <track> elements (revoke on unload)
+  duration: 0,
+  playlist: [], pi: 0,    // ordered file paths within the active item, current index
+  // Skip-offer logic (mirrors backend _maybe_emit_skip_offer)
+  skipData: null,         // {intro:{start,end}, credits_start} for current file
+  skipOfferType: null,    // "intro"|"credits"|null
+  skipOfferEnd: 0,
+  skipDoneFor: new Set(),  // "<filePath>#intro" / "#credits" markers for dismissed offers
+  // Progress save throttling
+  lastSaveAt: 0,
+  // True while currently maximized; false when minimized to tiny mode
+  maximized: false,
+  // True after we've loaded the metadata once (so seek-to-resume only fires once)
+  resumeApplied: false,
+  resumeSec: 0,
+};
+// Offline save job state (foreground modal flow)
+let osm = { jobId: null, abort: null, itemId: null, filePath: null, cancelled: false };
+// Play-chooser modal state
+let pcCtx = null;  // {itemId, files, seekTo, label, hasOffline}
 
 // ── Helpers ────────────────────────────────────────────────────────────────
 function escHtml(s) {
@@ -2007,7 +2230,11 @@ async function loadLibrary(){
     fetch(`/api/library${pid}`),
     loadDiskSpace(),
   ]);
-  renderLibrary((await libRes.json()).items||[]);
+  const items=(await libRes.json()).items||[];
+  // Cache the latest library list so continueLibraryItem() can consult resume hints
+  // before deciding whether to show the local-vs-VLC chooser.
+  window._libCache = items;
+  renderLibrary(items);
   // Re-expand any file lists that were open before the re-render
   for(const itemId of expandedDownloads){
     await showDownloadFiles(itemId);
@@ -2218,14 +2445,25 @@ function renderLibrary(items){
   el.innerHTML=html;
   // Wire restart buttons via data attributes so paths never need JS-string escaping
   el.querySelectorAll(".lib-restart-btn").forEach(btn=>{
-    btn.addEventListener("click",()=>playLibraryFiles(btn.dataset.itemId,[btn.dataset.path],0));
+    btn.addEventListener("click",()=>playLibraryWithChooser(btn.dataset.itemId,[btn.dataset.path],0,""));
   });
 }
 
-// "Continue" — auto-selects best file and position
+// "Continue" — auto-selects best file and position. If we know (from the cached
+// library list) that the resume file is saved offline, route through the chooser
+// so the user gets the local-vs-VLC option; otherwise fall through to the
+// server-resolved VLC playback path.
 async function continueLibraryItem(itemId){
   if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
-  // Call play with empty files list — backend resolves resume file
+  const item = (window._libCache||[]).find(it=>it.id===itemId);
+  const resumePath = item && item.resume && item.resume.file_path;
+  if(resumePath && offlineSaved.has(offKey(itemId, resumePath))){
+    const seek = item.resume.all_completed ? 0 : (item.resume.position_sec||0);
+    return playLibraryWithChooser(itemId, [resumePath], seek, item.title||"");
+  }
+  if(!navigator.onLine){
+    showAlert("Disconnected. Save this episode for offline first.","error"); return;
+  }
   const r=await fetch(`/api/library/${itemId}/play`,{
     method:"POST", headers:{"Content-Type":"application/json"},
     body:JSON.stringify({profile_id:profile.id,files:[],seek_first_to:null}),
@@ -2572,6 +2810,29 @@ function renderEpList(){
       const label=epLabel(f);
       const rowBg=isNowPlaying?"bg-indigo-950/30 border border-indigo-900/40":"";
 
+      const isOffline=offlineSaved.has(offKey(epItemId,f.path));
+      // HTML-encode the JSON-quoted args so the embedded "..." doesn't
+      // prematurely close the surrounding onclick="..." attribute.
+      const _id=escHtml(JSON.stringify(epItemId));
+      const _p =escHtml(JSON.stringify(f.path));
+      const _n =escHtml(JSON.stringify(f.name));
+      const _lbl=escHtml(JSON.stringify(epLabel(f)+' — '+f.name));
+      const offlineBtn=isOffline
+        ?`<button onclick="removeFromOffline(${_id},${_p},${_n})"
+            class="flex-shrink-0 w-9 h-9 flex items-center justify-center text-emerald-400 hover:text-red-400 hover:bg-red-950/30 transition-colors"
+            title="Saved on this device — tap to remove">
+            <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+              <path d="M5 3a2 2 0 00-2 2v14l9-4 9 4V5a2 2 0 00-2-2H5z"/>
+            </svg>
+          </button>`
+        :`<button onclick="saveForOffline(${_id},${_p},${_n},${_lbl})"
+            class="flex-shrink-0 w-9 h-9 flex items-center justify-center text-gray-600 hover:text-emerald-400 hover:bg-emerald-950/30 transition-colors"
+            title="Save for offline playback on this device">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M5 5a2 2 0 012-2h7l5 5v11a2 2 0 01-2 2H7a2 2 0 01-2-2V5z"/>
+              <path stroke-linecap="round" stroke-linejoin="round" d="M12 11v6m-3-3l3 3 3-3"/>
+            </svg>
+          </button>`;
       html+=`<div class="ep-row flex items-center gap-1 px-1 py-1 transition-colors ${rowBg}" data-path="${escHtml(f.path)}">
         <label class="flex items-start gap-2.5 flex-1 min-w-0 cursor-pointer px-1 py-1.5">
           <input type="checkbox" class="ep-check mt-0.5 flex-shrink-0 accent-indigo-500 w-4 h-4"
@@ -2581,6 +2842,7 @@ function renderEpList(){
               ${f.season&&f.episode?`<span class="text-[10px] font-mono text-indigo-400 bg-indigo-950/50 px-1.5 py-0.5">${escHtml(label)}</span>`:""}
               <span class="text-sm text-gray-300 truncate">${escHtml(f.name)}</span>
               ${badge}
+              ${isOffline?'<span class="text-[10px] text-emerald-500 font-bold">● OFFLINE</span>':''}
             </div>
             <div class="text-[10px] text-gray-700 mt-0.5">${escHtml(f.size_human)}</div>
             ${progressBar}
@@ -2598,6 +2860,7 @@ function renderEpList(){
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
           </svg>
         </button>
+        ${offlineBtn}
         <a href="/api/library/${escHtml(epItemId)}/download?file_path=${encodeURIComponent(f.path)}" download="${escHtml(f.name)}"
           class="flex-shrink-0 w-9 h-9 flex items-center justify-center
                  text-gray-600 hover:text-indigo-300 hover:bg-indigo-950/40 transition-colors"
@@ -2738,8 +3001,9 @@ async function epPlay(){
   if(firstFile?.progress && !firstFile.progress.completed && firstFile.progress.position_sec>5)
     seekTo=firstFile.progress.position_sec;
 
+  const label=firstFile?(epLabel(firstFile)+" — "+firstFile.name):"";
   closeEpisodeModal();
-  await playLibraryFiles(itemId, ordered, seekTo);
+  await playLibraryWithChooser(itemId, ordered, seekTo, label);
 }
 
 // Play from a specific episode (by index in epFiles), continuing sequentially
@@ -2752,8 +3016,9 @@ async function epPlayFrom(fileIndex){
   let seekTo=null;
   if(firstFile?.progress && !firstFile.progress.completed && firstFile.progress.position_sec>5)
     seekTo=firstFile.progress.position_sec;
+  const label=firstFile?(epLabel(firstFile)+" — "+firstFile.name):"";
   closeEpisodeModal();
-  await playLibraryFiles(itemId, ordered, seekTo);
+  await playLibraryWithChooser(itemId, ordered, seekTo, label);
 }
 
 // ── Download modal ─────────────────────────────────────────────────────────
@@ -3491,6 +3756,544 @@ async function applySubtitle(i){
 }
 
 // ── SSE ────────────────────────────────────────────────────────────────────
+// ─────────────────────────────────────────────────────────────────────────────
+// HANDOFF / OFFLINE PLAYBACK
+//
+// Keeps a copy of any episode (video + subs + skip data + last-known progress)
+// in browser IndexedDB so the user can play it on this device with no server
+// reachable. Service worker handles the page-shell + library-list cache so the
+// app boots offline; this module handles the heavy media + play surface.
+// ─────────────────────────────────────────────────────────────────────────────
+
+// --- IndexedDB schema ---------------------------------------------------------
+// streamlink-offline DB:
+//   videos: keyPath "key" (= "<itemId>|<filePath>")
+//           {key, itemId, filePath, name, blob, duration, savedAt, sizeBytes,
+//            codecInfo, subs:[{lang,name,blob,vtt:true}], skipData,
+//            sourceVideoUrl}
+//   meta:   keyPath "key"  (small cached stuff: progress hints, last library list)
+//   outbox: keyPath "id" autoIncrement
+//           {id, itemId, profileId, filePath, position_sec, duration_sec, queuedAt}
+
+const IDB_NAME = "streamlink-offline";
+const IDB_VERSION = 1;
+let _idbPromise = null;
+
+function idb() {
+  if (_idbPromise) return _idbPromise;
+  _idbPromise = new Promise((resolve, reject) => {
+    const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+    req.onupgradeneeded = (e) => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains("videos")) db.createObjectStore("videos", { keyPath: "key" });
+      if (!db.objectStoreNames.contains("meta"))   db.createObjectStore("meta",   { keyPath: "key" });
+      if (!db.objectStoreNames.contains("outbox")) db.createObjectStore("outbox", { keyPath: "id", autoIncrement: true });
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror   = () => reject(req.error);
+  });
+  return _idbPromise;
+}
+
+function idbTx(stores, mode) {
+  return idb().then(db => db.transaction(stores, mode));
+}
+
+function idbReq(req) {
+  return new Promise((res, rej) => {
+    req.onsuccess = () => res(req.result);
+    req.onerror   = () => rej(req.error);
+  });
+}
+
+function offKey(itemId, filePath) { return `${itemId}|${filePath}`; }
+
+async function offlineList() {
+  // Return all keys without loading the (huge) blob payloads.
+  try {
+    const tx = await idbTx(["videos"], "readonly");
+    const store = tx.objectStore("videos");
+    return await idbReq(store.getAllKeys());
+  } catch (_) { return []; }
+}
+
+async function offlineGet(itemId, filePath) {
+  try {
+    const tx = await idbTx(["videos"], "readonly");
+    return await idbReq(tx.objectStore("videos").get(offKey(itemId, filePath)));
+  } catch (_) { return null; }
+}
+
+async function offlinePut(record) {
+  const tx = await idbTx(["videos"], "readwrite");
+  await idbReq(tx.objectStore("videos").put(record));
+}
+
+async function offlineDelete(itemId, filePath) {
+  try {
+    const tx = await idbTx(["videos"], "readwrite");
+    await idbReq(tx.objectStore("videos").delete(offKey(itemId, filePath)));
+    offlineSaved.delete(offKey(itemId, filePath));
+  } catch (_) {}
+}
+
+async function refreshOfflineSet() {
+  offlineSaved.clear();
+  for (const k of await offlineList()) offlineSaved.add(k);
+}
+
+// --- Outbox: queue progress writes when offline; flush on reconnect ----------
+
+async function outboxPush(payload) {
+  try {
+    const tx = await idbTx(["outbox"], "readwrite");
+    await idbReq(tx.objectStore("outbox").add({ ...payload, queuedAt: Date.now() }));
+  } catch (_) {}
+}
+
+async function outboxFlush() {
+  if (!navigator.onLine) return;
+  let entries = [];
+  try {
+    const tx = await idbTx(["outbox"], "readonly");
+    entries = await idbReq(tx.objectStore("outbox").getAll());
+  } catch (_) { return; }
+  for (const e of entries) {
+    try {
+      const r = await fetch(`/api/library/${e.itemId}/progress`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          profile_id: e.profileId, file_path: e.filePath,
+          position_sec: e.position_sec, duration_sec: e.duration_sec,
+        }),
+      });
+      if (r.ok) {
+        const tx2 = await idbTx(["outbox"], "readwrite");
+        await idbReq(tx2.objectStore("outbox").delete(e.id));
+      }
+    } catch (_) { /* still offline; leave entry in queue */ }
+  }
+}
+
+// Send a progress save — server when online, outbox when not.
+async function saveProgress(itemId, filePath, posSec, durSec) {
+  if (!profile.id) return;
+  const body = { profile_id: profile.id, file_path: filePath,
+                 position_sec: posSec, duration_sec: durSec };
+  if (navigator.onLine) {
+    try {
+      const r = await fetch(`/api/library/${itemId}/progress`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (r.ok) return;
+    } catch (_) {}
+  }
+  await outboxPush({ itemId, profileId: profile.id, filePath,
+                     position_sec: posSec, duration_sec: durSec });
+}
+
+// --- Save flow: prepare → poll → fetch blob → store -------------------------
+
+function openOfflineSaveModal(name) {
+  document.getElementById("osmFile").textContent = name;
+  document.getElementById("osmStage").textContent = "Preparing…";
+  document.getElementById("osmBar").style.width = "0%";
+  document.getElementById("osmDetail").textContent = "";
+  document.getElementById("osmCancel").disabled = false;
+  document.getElementById("offlineSaveModal").classList.remove("hidden");
+  osm.cancelled = false;
+}
+function closeOfflineSaveModal() {
+  document.getElementById("offlineSaveModal").classList.add("hidden");
+  osm.jobId = null; osm.abort = null; osm.itemId = null; osm.filePath = null;
+}
+function osmStage(text)  { document.getElementById("osmStage").textContent = text; }
+function osmBar(pct)     { document.getElementById("osmBar").style.width = `${Math.max(0,Math.min(100,pct))}%`; }
+function osmDetail(text) { document.getElementById("osmDetail").textContent = text; }
+
+function cancelOfflineSave() {
+  osm.cancelled = true;
+  if (osm.abort) try { osm.abort.abort(); } catch (_) {}
+  closeOfflineSaveModal();
+  showAlert("Save cancelled.", "warn");
+}
+
+async function saveForOffline(itemId, filePath, fileName, fileLabel) {
+  if (offlineSaved.has(offKey(itemId, filePath))) {
+    showAlert("Already saved on this device.", "warn"); return;
+  }
+  if (!navigator.onLine) {
+    showAlert("Cannot save offline while disconnected.", "error"); return;
+  }
+  openOfflineSaveModal(fileLabel || fileName || "");
+  osm.itemId = itemId; osm.filePath = filePath;
+  try {
+    osmStage("Probing codec…");
+    const prepRes = await fetch(`/api/library/${itemId}/offline-prepare`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file_path: filePath }),
+    });
+    if (!prepRes.ok) {
+      const e = await prepRes.json().catch(() => ({ detail: "Prepare failed." }));
+      throw new Error(e.detail || "Prepare failed.");
+    }
+    const prep = await prepRes.json();
+    let videoUrl = prep.video_url;
+    let codecInfo = prep.codec_info || {};
+    let duration = prep.duration_sec || 0;
+    let subs = prep.subs || [];
+
+    // If server is preparing (remux/transcode), poll until done.
+    if (!prep.ready && prep.job_id) {
+      const op = prep.operation === "remux" ? "Remuxing to MP4" : "Transcoding to H.264 / AAC";
+      osmStage(`${op}…`);
+      while (true) {
+        if (osm.cancelled) return;
+        await new Promise(r => setTimeout(r, 1500));
+        const sr = await fetch(`/api/library/offline-job/${prep.job_id}`);
+        if (!sr.ok) throw new Error("Lost track of preparation job.");
+        const s = await sr.json();
+        osmBar(s.progress * 30);  // first 30% = server-side prep
+        osmDetail(`${Math.round(s.progress * 100)}% on server`);
+        if (s.status === "done") { videoUrl = s.video_url; break; }
+        if (s.status === "error") throw new Error(s.error || "Preparation failed.");
+      }
+    }
+
+    // Download the prepared MP4 with progress reporting.
+    osmStage("Downloading to device…");
+    osm.abort = new AbortController();
+    const resp = await fetch(videoUrl, { signal: osm.abort.signal });
+    if (!resp.ok) throw new Error(`Download failed (${resp.status}).`);
+    const total = parseInt(resp.headers.get("Content-Length") || "0", 10);
+    const reader = resp.body.getReader();
+    const chunks = [];
+    let received = 0;
+    while (true) {
+      if (osm.cancelled) return;
+      const { done, value } = await reader.read();
+      if (done) break;
+      chunks.push(value); received += value.length;
+      const pct = total > 0 ? 30 + (received / total) * 65 : 30;
+      osmBar(pct);
+      osmDetail(`${fmtSize(received)}${total>0?" / "+fmtSize(total):""}`);
+    }
+    const blob = new Blob(chunks, { type: "video/mp4" });
+
+    // Download sidecar subs (SRT→VTT done on server) as Blobs in parallel.
+    osmStage("Saving subtitles + metadata…");
+    osmBar(96);
+    const subBlobs = await Promise.all((subs || []).map(async (s) => {
+      try {
+        const r = await fetch(s.url);
+        if (!r.ok) return null;
+        const text = await r.text();
+        return { lang: s.lang, name: s.name,
+                 blob: new Blob([text], { type: "text/vtt" }) };
+      } catch (_) { return null; }
+    }));
+
+    // Pull skip-data so the local player can run skip-intro offline.
+    let skipData = null;
+    try {
+      const sd = await fetch(`/api/library/${itemId}/skip-data?file_path=${encodeURIComponent(filePath)}`);
+      if (sd.ok) skipData = await sd.json();
+    } catch (_) {}
+
+    osmBar(99);
+    await offlinePut({
+      key: offKey(itemId, filePath),
+      itemId, filePath,
+      name: fileName || filePath.split(/[/\\]/).pop(),
+      blob, duration, sizeBytes: blob.size,
+      codecInfo, sourceVideoUrl: videoUrl,
+      subs: subBlobs.filter(Boolean),
+      skipData, savedAt: Date.now(),
+    });
+    offlineSaved.add(offKey(itemId, filePath));
+    osmBar(100);
+    osmStage("Saved.");
+    setTimeout(() => closeOfflineSaveModal(), 600);
+    showAlert("Saved for offline playback.", "success");
+    if (epItemId === itemId) renderEpList();
+    if (activeTab === "library") loadLibrary();
+  } catch (err) {
+    if (osm.cancelled) return;
+    closeOfflineSaveModal();
+    showAlert(err.message || "Save failed.", "error");
+  }
+}
+
+async function removeFromOffline(itemId, filePath, fileName) {
+  if (!confirm(`Remove "${fileName||"this episode"}" from this device?`)) return;
+  await offlineDelete(itemId, filePath);
+  showAlert("Removed from offline.", "success");
+  if (epItemId === itemId) renderEpList();
+  if (activeTab === "library") loadLibrary();
+}
+
+// --- Play chooser (VLC vs On Device) -----------------------------------------
+
+function _firstFileSavedOffline(itemId, files) {
+  if (!Array.isArray(files) || !files.length) return null;
+  return offlineSaved.has(offKey(itemId, files[0])) ? files[0] : null;
+}
+
+// Entry point used by Play buttons. Decides whether to show the chooser.
+async function playLibraryWithChooser(itemId, files, seekTo, label) {
+  const offlineFirst = _firstFileSavedOffline(itemId, files);
+  if (!navigator.onLine) {
+    if (!offlineFirst) {
+      showAlert("Disconnected. Save this episode for offline first.", "error"); return;
+    }
+    return lpPlay(itemId, files, seekTo, label);
+  }
+  if (offlineFirst) {
+    pcCtx = { itemId, files, seekTo, label };
+    document.getElementById("pcSubtitle").textContent = label || "";
+    document.getElementById("pcLocalSub").textContent = "Play the saved offline copy";
+    document.getElementById("pcLocalBtn").disabled = false;
+    document.getElementById("playChooserModal").classList.remove("hidden");
+    return;
+  }
+  return playLibraryFiles(itemId, files, seekTo);
+}
+
+function pcChoose(target) {
+  const ctx = pcCtx; closePlayChooser();
+  if (!ctx) return;
+  if (target === "vlc")  return playLibraryFiles(ctx.itemId, ctx.files, ctx.seekTo);
+  if (target === "local") return lpPlay(ctx.itemId, ctx.files, ctx.seekTo, ctx.label);
+}
+function closePlayChooser() {
+  document.getElementById("playChooserModal").classList.add("hidden");
+  pcCtx = null;
+}
+
+// --- Local player (browser-side <video>) -------------------------------------
+
+async function lpPlay(itemId, files, seekTo, label) {
+  // Resolve current file: walk the playlist to the first one we have offline.
+  let pi = 0;
+  while (pi < files.length && !offlineSaved.has(offKey(itemId, files[pi]))) pi++;
+  if (pi >= files.length) {
+    showAlert("None of the selected episodes are saved offline.", "warn"); return;
+  }
+  await lpUnloadCurrent();
+  lp.itemId = itemId; lp.playlist = files.slice(); lp.pi = pi;
+  lp.skipDoneFor = new Set();
+  lp.maximized = true;
+  await _lpLoadIndex(seekTo);
+  const c = document.getElementById("localPlayer");
+  c.classList.remove("lp-tiny");
+  c.classList.add("lp-active");
+}
+
+async function _lpLoadIndex(seekTo) {
+  const filePath = lp.playlist[lp.pi];
+  const rec = await offlineGet(lp.itemId, filePath);
+  if (!rec) {
+    showAlert("Offline copy not found — was it removed?", "error"); lpStop(); return;
+  }
+  lp.filePath = filePath;
+  lp.name = rec.name || filePath.split(/[/\\]/).pop();
+  lp.skipData = rec.skipData || null;
+  lp.skipOfferType = null; lp.skipOfferEnd = 0;
+  lp.resumeApplied = false; lp.resumeSec = seekTo || 0;
+
+  // Tear down old blob URLs from any prior load.
+  if (lp.videoUrl) try { URL.revokeObjectURL(lp.videoUrl); } catch (_) {}
+  lp.subUrls.forEach(u => { try { URL.revokeObjectURL(u); } catch (_) {} });
+  lp.subUrls = [];
+
+  lp.videoUrl = URL.createObjectURL(rec.blob);
+
+  const v = document.getElementById("lpVideo");
+  v.crossOrigin = "anonymous";
+  while (v.firstChild) v.removeChild(v.firstChild);
+  v.src = lp.videoUrl;
+  const subs = rec.subs || [];
+  const sel = document.getElementById("lpSubSelect");
+  sel.innerHTML = `<option value="-1">Off</option>`;
+  subs.forEach((s, i) => {
+    const url = URL.createObjectURL(s.blob);
+    lp.subUrls.push(url);
+    const t = document.createElement("track");
+    t.kind = "subtitles"; t.src = url; t.srclang = s.lang || "und"; t.label = s.lang || s.name || `Track ${i+1}`;
+    v.appendChild(t);
+    sel.insertAdjacentHTML("beforeend",
+      `<option value="${i}">${escHtml((s.lang||"und").toUpperCase())} — ${escHtml(s.name||"sub")}</option>`);
+  });
+  document.getElementById("lpTrackRow").classList.toggle("hidden", subs.length === 0);
+  // Default all subtitle tracks off until the user picks one.
+  setTimeout(() => {
+    if (v.textTracks) for (let i = 0; i < v.textTracks.length; i++) v.textTracks[i].mode = "disabled";
+  }, 50);
+
+  document.getElementById("lpTitle").textContent = lp.name;
+  v.load();
+  try { await v.play(); } catch (_) { /* iOS may block autoplay until user gesture */ }
+}
+
+function lpSetSubtitle(idx) {
+  const v = document.getElementById("lpVideo");
+  if (!v.textTracks) return;
+  for (let i = 0; i < v.textTracks.length; i++) {
+    v.textTracks[i].mode = (String(i) === String(idx)) ? "showing" : "disabled";
+  }
+}
+
+function lpMaximize() {
+  lp.maximized = true;
+  document.getElementById("localPlayer").classList.remove("lp-tiny");
+}
+
+function lpMinimize() {
+  lp.maximized = false;
+  document.getElementById("localPlayer").classList.add("lp-tiny");
+}
+
+async function lpUnloadCurrent() {
+  const v = document.getElementById("lpVideo");
+  try { v.pause(); } catch (_) {}
+  v.removeAttribute("src");
+  v.load();
+  if (lp.videoUrl) try { URL.revokeObjectURL(lp.videoUrl); } catch (_) {}
+  lp.subUrls.forEach(u => { try { URL.revokeObjectURL(u); } catch (_) {} });
+  lp.videoUrl = null; lp.subUrls = [];
+}
+
+async function lpStop() {
+  const v = document.getElementById("lpVideo");
+  const t = v.currentTime || 0; const d = v.duration || lp.duration || 0;
+  if (lp.itemId && lp.filePath && d > 0) {
+    saveProgress(lp.itemId, lp.filePath, t, d);
+  }
+  await lpUnloadCurrent();
+  const c = document.getElementById("localPlayer");
+  c.classList.remove("lp-active", "lp-tiny");
+  document.getElementById("lpSkipOffer").classList.add("hidden");
+  lp.itemId = null; lp.filePath = null; lp.playlist = []; lp.pi = 0;
+}
+
+// Skip-intro / skip-credits offer logic — mirrors backend _maybe_emit_skip_offer.
+function lpEvaluateSkipOffer(t) {
+  if (!lp.skipData) return;
+  const intro = lp.skipData.intro;
+  const creditsStart = lp.skipData.credits_start;
+  const fileKey = lp.filePath;
+  // Intro window
+  if (intro && intro.start != null && intro.end != null) {
+    if (t >= intro.start - 2 && t < intro.end - 2 && !lp.skipDoneFor.has(fileKey + "#intro")) {
+      lp.skipOfferType = "intro"; lp.skipOfferEnd = intro.end;
+      _lpShowSkipOffer("Skip Intro"); return;
+    }
+  }
+  // Credits window
+  if (creditsStart != null) {
+    if (t >= creditsStart - 1 && !lp.skipDoneFor.has(fileKey + "#credits")) {
+      lp.skipOfferType = "credits"; lp.skipOfferEnd = 0;
+      _lpShowSkipOffer(lp.pi < lp.playlist.length - 1 ? "Skip Credits" : "End"); return;
+    }
+  }
+  _lpHideSkipOffer();
+}
+
+function _lpShowSkipOffer(label) {
+  document.getElementById("lpSkipLabel").textContent = label;
+  document.getElementById("lpSkipOffer").classList.remove("hidden");
+}
+function _lpHideSkipOffer() {
+  if (lp.skipOfferType) {
+    lp.skipOfferType = null;
+    document.getElementById("lpSkipOffer").classList.add("hidden");
+  }
+}
+function lpAcceptSkipOffer() {
+  const v = document.getElementById("lpVideo");
+  if (lp.skipOfferType === "intro") {
+    v.currentTime = Math.max(0, lp.skipOfferEnd + 1);
+    lp.skipDoneFor.add(lp.filePath + "#intro");
+  } else if (lp.skipOfferType === "credits") {
+    lp.skipDoneFor.add(lp.filePath + "#credits");
+    _lpAdvanceOrEnd();
+  }
+  _lpHideSkipOffer();
+}
+function lpDismissSkipOffer() {
+  if (lp.skipOfferType) lp.skipDoneFor.add(lp.filePath + "#" + lp.skipOfferType);
+  _lpHideSkipOffer();
+}
+
+async function _lpAdvanceOrEnd() {
+  const v = document.getElementById("lpVideo");
+  const d = v.duration || lp.duration || 0;
+  if (d > 0) saveProgress(lp.itemId, lp.filePath, d, d);
+  let next = lp.pi + 1;
+  while (next < lp.playlist.length && !offlineSaved.has(offKey(lp.itemId, lp.playlist[next]))) next++;
+  if (next < lp.playlist.length) {
+    lp.pi = next;
+    await _lpLoadIndex(0);
+  } else {
+    lpStop();
+  }
+}
+
+function _lpAttachVideoEvents() {
+  const v = document.getElementById("lpVideo");
+  v.addEventListener("loadedmetadata", () => {
+    lp.duration = v.duration || 0;
+    if (!lp.resumeApplied && lp.resumeSec > 0 && lp.resumeSec < (v.duration||0) - 5) {
+      try { v.currentTime = lp.resumeSec; } catch (_) {}
+    }
+    lp.resumeApplied = true;
+  });
+  v.addEventListener("timeupdate", () => {
+    const t = v.currentTime || 0;
+    lpEvaluateSkipOffer(t);
+    // Throttle progress saves to once every 15 s (matches vlc_progress_tracker).
+    const now = Date.now();
+    if (now - lp.lastSaveAt > 15000 && (v.duration||0) > 0 && lp.itemId && lp.filePath) {
+      lp.lastSaveAt = now;
+      saveProgress(lp.itemId, lp.filePath, t, v.duration);
+    }
+  });
+  v.addEventListener("ended", () => { _lpAdvanceOrEnd(); });
+  v.addEventListener("error", () => {
+    showAlert("Local playback error — file may be corrupted; try removing and re-saving.", "error");
+  });
+}
+
+// --- Service worker registration --------------------------------------------
+
+async function registerServiceWorker() {
+  if (!("serviceWorker" in navigator)) return;
+  try {
+    await navigator.serviceWorker.register("/sw.js", { scope: "/" });
+  } catch (e) {
+    console.warn("SW register failed:", e);
+  }
+}
+
+// --- Online/offline event handling ------------------------------------------
+
+function _renderOnlineBadge() {
+  // Use the existing SSE dot/label when online; force them to a clear "OFFLINE"
+  // state when navigator says we're disconnected. The SSE handler will overwrite
+  // it again as soon as we reconnect.
+  const sseDot   = document.getElementById("sseDot");
+  const sseLabel = document.getElementById("sseLabel");
+  if (!sseDot || !sseLabel) return;
+  if (!navigator.onLine) {
+    sseDot.className = "w-2 h-2 bg-amber-500 transition-colors";
+    sseLabel.textContent = "offline"; sseLabel.className = "text-[11px] text-amber-500 hidden sm:block";
+  }
+}
+
+window.addEventListener("online",  () => { outboxFlush(); });
+window.addEventListener("offline", () => { _renderOnlineBadge(); });
+
 function connectSSE(){
   const sseDot=document.getElementById("sseDot"),sseLabel=document.getElementById("sseLabel");
   const es=new EventSource("/api/events");
@@ -3567,6 +4370,18 @@ document.addEventListener("keydown",e=>{
 
 // ── Init ───────────────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded",async()=>{
+  // Handoff bootstrap: register the service worker, scan IndexedDB so we know
+  // which episodes are saved (controls the offline icon + chooser), wire the
+  // local <video>'s timeupdate/ended handlers, and flush any queued progress
+  // writes that piled up while offline.
+  registerServiceWorker();
+  refreshOfflineSet().then(() => {
+    if (epItemId) renderEpList();
+    if (activeTab === "library") loadLibrary();
+  });
+  _lpAttachVideoEvents();
+  outboxFlush();
+  _renderOnlineBadge();
   // Pre-fetch default download path so modal opens instantly
   ensureDefaultSavePath();
 

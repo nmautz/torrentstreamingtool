@@ -79,6 +79,21 @@
 
 ---
 
+## Milestone 11 — Handoff to Device (Offline Playback)
+
+- [x] **11.1** Backend `/api/library/{id}/offline-prepare`: ffprobe the source file, fast-path Safari-compatible MP4s with a direct URL, otherwise spawn an ffmpeg remux (rewrap container, no re-encode) or transcode (H.264 + AAC) job. Job state polled via `/api/library/offline-job/{job_id}`; output served from `.offline_cache/<sha>.mp4`.
+- [x] **11.2** Backend `/api/library/{id}/subtitle?file=...` — sidecar SRT/VTT lookup; SRTs are converted to WebVTT on the fly so the browser `<track>` element can use them.
+- [x] **11.3** Backend `/api/library/{id}/skip-data?file_path=...` — non-admin read-only access to per-file intro/credits times so the local player can run skip-intro offline.
+- [x] **11.4** Service worker (`static/sw.js`) caches the app shell + the read-only library APIs (library list, files, profiles, skip-data, subtitle) so the dashboard boots even when the host is unreachable. Web app manifest at `/manifest.json` for "Add to Home Screen" PWA install on iOS.
+- [x] **11.5** IndexedDB store (`streamlink-offline`) with three object stores: `videos` (blob + subs + skipData per file), `meta` (small caches), `outbox` (queued progress writes). The save-for-offline flow downloads the prepared MP4 + sidecar VTTs + skip-data into `videos`; remove-from-offline deletes the row.
+- [x] **11.6** Episode-picker rows show an offline icon + `OFFLINE` pill, plus a Save / Remove toggle button. Library cards' Resume button routes through the chooser when the resume hint points at a saved-offline file.
+- [x] **11.7** "Where to play?" chooser modal — surfaces VLC vs On Device whenever a saved offline copy of the first file in the playlist exists. Disconnected device with offline copy auto-launches the local player.
+- [x] **11.8** Local player UI — single `<video id="lpVideo">` inside `#localPlayer`; CSS class `.lp-tiny` toggles the container between full-screen overlay (native browser controls) and a corner tile (small video + huge Fullscreen button). No element move on minimize → continuous playback. iOS Safari–compatible (`playsinline`, blob: URLs, `<track>` for VTT subs).
+- [x] **11.9** Local player wires skip-intro / skip-credits offers (mirrors backend `_maybe_emit_skip_offer`), subtitle selector, watch-progress saves every 15 s, and auto-advance to the next saved offline episode when a file ends.
+- [x] **11.10** Outbox queue: when `navigator.onLine === false`, progress writes go to IndexedDB; the `online` event flushes them to `/api/library/{id}/progress`.
+
+---
+
 ## Milestone 8 — Mobile UX & Playback Fixes 
 
 - [x] **8.1** Fullscreen UI: buttons fill the entire screen with no gaps; reserve space at top/bottom for device safe-area cutouts (env(safe-area-inset-*))

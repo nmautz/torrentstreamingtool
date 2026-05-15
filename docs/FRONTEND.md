@@ -82,6 +82,31 @@ Handles click + touch (`handleSeekBarClick`) and pre-click hover tooltip (`handl
 
 Per-episode ▶ button: slices `epFiles` from the tapped index forward, respects resume position on the first file, plays as a playlist. This means "press play on episode 3" plays 3 → 4 → 5 …, not just 3.
 
+### Handoff to Device (offline playback)
+
+The frontend keeps an `offlineSaved: Set<"itemId|filePath">` populated from IndexedDB on init. Episode-picker rows show a save/remove toggle and an `OFFLINE` pill when a key is present. All Play surfaces (`epPlay`, `epPlayFrom`, `continueLibraryItem`, the `lib-restart-btn` listener) route through `playLibraryWithChooser(itemId, files, seekTo, label)`:
+
+- If the device is offline → `lpPlay` directly (or error if no offline copy of the first file).
+- If the first file in the playlist is saved offline → open the chooser modal so the user picks "On TV (VLC)" vs "On This Device".
+- Otherwise → fall through to the existing `playLibraryFiles` (VLC).
+
+Local playback is handled by `lpPlay` / `_lpLoadIndex` / `lpStop` etc. There is **one** `<video id="lpVideo">` inside `#localPlayer`. The container has two visual modes toggled via class:
+- default (no `.lp-tiny`) — fullscreen overlay, uses native browser `<video>` controls.
+- `.lp-tiny` — corner tile (96×56 video + huge fullscreen button + close), repositioned via CSS only (no DOM move, no video re-load).
+
+Single-element design avoids iOS Safari's per-page video budget and the audio desync that two synchronized videos would create. iOS-friendly: `playsinline`, `<track>` for VTT subs, no MediaSource.
+
+The IndexedDB schema (`streamlink-offline`):
+- `videos` keyPath `key` = `"<itemId>|<filePath>"` — `{blob, subs[], skipData, codecInfo, sourceVideoUrl, savedAt, sizeBytes, name, duration}`.
+- `meta` — small caches (currently unused in v1; reserved for client-side hints).
+- `outbox` autoIncrement `id` — queued progress writes when offline.
+
+`saveProgress(itemId, filePath, posSec, durSec)` is called every 15 s by `#lpVideoFull`'s `timeupdate` handler. When `navigator.onLine === true` it POSTs `/api/library/{id}/progress`; otherwise it `outboxPush()`es. The window's `online` event fires `outboxFlush()`, which drains the outbox.
+
+The skip-intro / skip-credits offer logic in `lpEvaluateSkipOffer` mirrors the backend `_maybe_emit_skip_offer` (intro when `start-2 ≤ t < end-2`, credits when `t ≥ credits_start - 1`). Dismissed offers are remembered for the current `<filePath>#<type>` so they don't re-emit.
+
+The service worker is registered in `init` via `registerServiceWorker()` → `/sw.js` at root scope; see `static/sw.js` for the cache strategy.
+
 ### Init ([static/index.html:3569](../static/index.html#L3569))
 
 On `DOMContentLoaded`:

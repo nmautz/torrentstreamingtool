@@ -28,7 +28,7 @@ from urllib.parse import quote, unquote, urlparse
 import httpx
 import psutil
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
@@ -3609,6 +3609,339 @@ async def admin_analyzer_status(request: Request) -> JSONResponse:
         "ffmpeg":    analyzer.ffmpeg_bin(),
         "fpcalc":    analyzer.fpcalc_bin(),
     })
+
+
+# ── Routes: Offline / Handoff to Device ──────────────────────────────────────
+#
+# Browser-side offline playback. The flow is:
+#   1. Client POSTs /api/library/{id}/offline-prepare with a file_path.
+#   2. Server probes codecs. If already Safari-compatible MP4, returns video_url
+#      pointing at the existing /download endpoint immediately. Otherwise, kicks
+#      off a remux (codec compatible, just rewrap to MP4) or transcode (re-encode
+#      to H.264/AAC) job and returns {ready:false, job_id, operation}.
+#   3. Client polls /api/library/offline-job/{job_id} until status=="done", then
+#      uses the returned video_url to download the cached MP4.
+#   4. The client persists the resulting blob in IndexedDB, plus any sidecar
+#      subtitles fetched from /api/library/{id}/subtitle (SRT auto-converted
+#      to WebVTT) and the per-file skip_data fetched from
+#      /api/library/{id}/skip-data — those let the local player run intro skip,
+#      subtitles, and watch-history sync the same way the VLC pipeline does.
+#
+# See docs/OFFLINE.md for the full design and docs/GOTCHAS.md for Safari quirks.
+
+OFFLINE_CACHE = Path(__file__).parent / ".offline_cache"
+_offline_jobs: dict[str, dict] = {}   # job_id → {id, src, out, status, operation, progress, error, started_at}
+
+# Codecs Safari iOS plays natively from a <video> element with src=blob:
+_SAFARI_VIDEO_CODECS = {"h264", "hevc"}
+_SAFARI_AUDIO_CODECS = {"aac", "mp3"}
+_REMUX_VIDEO_CODECS  = {"h264", "hevc"}      # already-compatible streams that just need MP4 wrapping
+_REMUX_AUDIO_CODECS  = {"aac", "mp3", "ac3"} # ac3 is borderline but ffmpeg can passthrough; transcode handles it
+_SAFARI_CONTAINERS   = (".mp4", ".m4v", ".mov")
+
+
+def _ffprobe_bin() -> Optional[str]:
+    """Locate ffprobe alongside ffmpeg (or via PATH)."""
+    ffm = analyzer.ffmpeg_bin()
+    if ffm:
+        sib = Path(ffm).with_name("ffprobe" + Path(ffm).suffix)
+        if sib.exists():
+            return str(sib)
+    return shutil.which("ffprobe")
+
+
+def _ffprobe_codec(path: str) -> dict:
+    """Return {video_codec, audio_codec, duration_sec, container} for a file."""
+    binp = _ffprobe_bin()
+    if not binp:
+        return {}
+    try:
+        r = subprocess.run(
+            [binp, "-v", "error", "-print_format", "json",
+             "-show_streams", "-show_format", path],
+            capture_output=True, text=True, timeout=15,
+        )
+        data = json.loads(r.stdout or "{}")
+        video = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), {})
+        audio = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), {})
+        fmt   = data.get("format", {}) or {}
+        return {
+            "video_codec": video.get("codec_name", ""),
+            "audio_codec": audio.get("codec_name", ""),
+            "container":   fmt.get("format_name", ""),
+            "duration_sec": float(fmt.get("duration", 0) or 0),
+        }
+    except Exception:
+        return {}
+
+
+def _safari_compatible(info: dict, ext: str) -> bool:
+    return (ext.lower() in _SAFARI_CONTAINERS
+            and info.get("video_codec", "") in _SAFARI_VIDEO_CODECS
+            and info.get("audio_codec", "") in _SAFARI_AUDIO_CODECS)
+
+
+def _can_remux(info: dict) -> bool:
+    return (info.get("video_codec", "") in _REMUX_VIDEO_CODECS
+            and info.get("audio_codec", "") in _REMUX_AUDIO_CODECS)
+
+
+def _list_sidecar_subs(src: Path, item_id: str) -> list[dict]:
+    """Find .srt/.vtt files next to a video file. Match either exact stem or stem.<lang>."""
+    out: list[dict] = []
+    if not src.parent.exists():
+        return out
+    stem = src.stem
+    try:
+        for p in src.parent.iterdir():
+            if not p.is_file() or p.suffix.lower() not in (".srt", ".vtt"):
+                continue
+            if p.stem == stem:
+                lang = ""
+            elif p.stem.startswith(stem + "."):
+                lang = p.stem[len(stem) + 1:].split(".")[0]
+            else:
+                continue
+            out.append({
+                "name": p.name,
+                "lang": lang or "und",
+                "url": f"/api/library/{item_id}/subtitle?file={quote(p.name)}",
+            })
+    except OSError:
+        pass
+    return out
+
+
+def _srt_to_vtt(srt: str) -> str:
+    """Convert SRT cues to WebVTT. SRT timestamps use a comma; VTT uses a period."""
+    body = re.sub(r"(\d\d:\d\d:\d\d),(\d\d\d)", r"\1.\2", srt)
+    return "WEBVTT\n\n" + body
+
+
+def _offline_cache_key(src: Path) -> str:
+    st = src.stat()
+    return hashlib.sha256(f"{src}|{int(st.st_mtime)}|{st.st_size}".encode()).hexdigest()[:24]
+
+
+async def _run_offline_job(job_id: str) -> None:
+    """Run the actual ffmpeg remux/transcode for an offline-prepare job."""
+    job = _offline_jobs.get(job_id)
+    if not job:
+        return
+    job["status"] = "processing"
+    src = Path(job["src"])
+    out = Path(job["out"])
+    tmp = out.with_suffix(".part.mp4")
+    ffmpeg = analyzer.ffmpeg_bin()
+    if not ffmpeg:
+        job["status"] = "error"; job["error"] = "ffmpeg not available."
+        return
+    try:
+        if job["operation"] == "remux":
+            args = [ffmpeg, "-y", "-i", str(src),
+                    "-map", "0:v:0", "-map", "0:a:0?",
+                    "-c", "copy", "-bsf:a", "aac_adtstoasc",
+                    "-movflags", "+faststart", str(tmp)]
+        else:
+            args = [ffmpeg, "-y", "-i", str(src),
+                    "-map", "0:v:0", "-map", "0:a:0?",
+                    "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                    "-c:a", "aac", "-b:a", "160k",
+                    "-movflags", "+faststart", str(tmp)]
+        proc = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.PIPE,
+        )
+        # Approximate progress by output file size growth — ffmpeg's -progress is
+        # awkward to consume; size growth is good enough for a UI spinner.
+        src_size = max(src.stat().st_size, 1)
+        while True:
+            try:
+                await asyncio.wait_for(proc.wait(), timeout=2.5)
+                break
+            except asyncio.TimeoutError:
+                if tmp.exists():
+                    job["progress"] = min(0.99, tmp.stat().st_size / src_size)
+        if proc.returncode != 0:
+            err = ""
+            try:
+                err = (await proc.stderr.read()).decode("utf-8", "replace")
+            except Exception:
+                pass
+            job["status"] = "error"
+            job["error"]  = f"ffmpeg failed: {err.strip()[-300:] or 'unknown error'}"
+            tmp.unlink(missing_ok=True)
+            return
+        tmp.replace(out)
+        job["progress"] = 1.0
+        job["status"]   = "done"
+    except Exception as e:
+        job["status"] = "error"; job["error"] = str(e)
+        tmp.unlink(missing_ok=True)
+
+
+class OfflinePrepareReq(BaseModel):
+    file_path: str
+
+
+@app.post("/api/library/{item_id}/offline-prepare")
+async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
+    """Decide what (if any) processing a file needs for browser-side offline playback.
+
+    Fast path: returns ready=true with a direct download URL when the source is already
+    a Safari-friendly MP4. Otherwise, kicks off a background remux (just rewrap to MP4)
+    or transcode (re-encode to H.264/AAC) job and returns {ready:false, job_id}.
+    """
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    target = next((f for f in item.get("files", []) if f["path"] == req.file_path), None)
+    if not target:
+        raise HTTPException(404, "File not found in this item.")
+    src = Path(target["path"])
+    if not src.exists():
+        raise HTTPException(404, "File not on disk.")
+
+    info = await asyncio.to_thread(_ffprobe_codec, str(src))
+    ext  = src.suffix
+    subs = _list_sidecar_subs(src, item_id)
+
+    if _safari_compatible(info, ext):
+        return JSONResponse({
+            "ready": True,
+            "needs_processing": False,
+            "video_url": f"/api/library/{item_id}/download?file_path={quote(req.file_path)}",
+            "video_size_bytes": src.stat().st_size,
+            "duration_sec": info.get("duration_sec", 0),
+            "codec_info": info,
+            "subs": subs,
+        })
+
+    OFFLINE_CACHE.mkdir(exist_ok=True)
+    key = _offline_cache_key(src)
+    out_path = OFFLINE_CACHE / f"{key}.mp4"
+    if out_path.exists():
+        return JSONResponse({
+            "ready": True,
+            "needs_processing": False,
+            "video_url": f"/api/library/offline-cache/{out_path.name}",
+            "video_size_bytes": out_path.stat().st_size,
+            "duration_sec": info.get("duration_sec", 0),
+            "codec_info": info,
+            "subs": subs,
+        })
+
+    # Coalesce: if a job for this exact source is already running, return its id.
+    existing = next(
+        (j for j in _offline_jobs.values()
+         if j["src"] == str(src) and j["status"] in ("pending", "processing")),
+        None,
+    )
+    if existing:
+        return JSONResponse({
+            "ready": False,
+            "needs_processing": True,
+            "job_id": existing["id"],
+            "operation": existing["operation"],
+            "duration_sec": info.get("duration_sec", 0),
+            "codec_info": info,
+            "subs": subs,
+        })
+
+    if not analyzer.ffmpeg_bin():
+        raise HTTPException(503, "ffmpeg is not available — cannot prepare this file for offline playback.")
+
+    operation = "remux" if _can_remux(info) else "transcode"
+    job_id = secrets.token_hex(8)
+    _offline_jobs[job_id] = {
+        "id": job_id, "src": str(src), "out": str(out_path),
+        "status": "pending", "operation": operation,
+        "progress": 0.0, "error": None,
+        "started_at": time.time(),
+    }
+    asyncio.create_task(_run_offline_job(job_id))
+    return JSONResponse({
+        "ready": False,
+        "needs_processing": True,
+        "job_id": job_id,
+        "operation": operation,
+        "duration_sec": info.get("duration_sec", 0),
+        "codec_info": info,
+        "subs": subs,
+    })
+
+
+@app.get("/api/library/offline-job/{job_id}")
+async def offline_job_status(job_id: str) -> JSONResponse:
+    job = _offline_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found.")
+    out: dict = {
+        "status": job["status"],
+        "operation": job["operation"],
+        "progress": round(job["progress"], 3),
+        "error": job["error"],
+    }
+    if job["status"] == "done":
+        out["video_url"] = f"/api/library/offline-cache/{Path(job['out']).name}"
+        try:
+            out["video_size_bytes"] = Path(job["out"]).stat().st_size
+        except OSError:
+            out["video_size_bytes"] = 0
+    return JSONResponse(out)
+
+
+@app.get("/api/library/offline-cache/{name}")
+async def offline_cache_file(name: str) -> FileResponse:
+    """Serve a remuxed/transcoded MP4 from the offline cache directory."""
+    if "/" in name or "\\" in name or ".." in name:
+        raise HTTPException(400, "Invalid name.")
+    p = OFFLINE_CACHE / name
+    if not p.exists():
+        raise HTTPException(404, "Cached file not found.")
+    return FileResponse(str(p), media_type="video/mp4", filename=p.name)
+
+
+@app.get("/api/library/{item_id}/subtitle")
+async def get_subtitle(item_id: str, file: str) -> Response:
+    """Return a sidecar subtitle file as WebVTT. SRT files are converted on the fly."""
+    if "/" in file or "\\" in file or ".." in file:
+        raise HTTPException(400, "Invalid filename.")
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    seen_dirs: set[str] = set()
+    for vf in item.get("files", []):
+        vp = Path(vf.get("path", ""))
+        d  = str(vp.parent)
+        if d in seen_dirs:
+            continue
+        seen_dirs.add(d)
+        cand = vp.parent / file
+        if cand.exists() and cand.is_file() and cand.suffix.lower() in (".srt", ".vtt"):
+            text = cand.read_text(encoding="utf-8", errors="replace")
+            if cand.suffix.lower() == ".vtt":
+                return Response(text, media_type="text/vtt")
+            return Response(_srt_to_vtt(text), media_type="text/vtt")
+    raise HTTPException(404, "Subtitle not found.")
+
+
+@app.get("/api/library/{item_id}/skip-data")
+async def get_skip_data_for_play(item_id: str, file_path: str = "") -> JSONResponse:
+    """Return per-file intro/credits times so the local player can run skip-intro.
+
+    No admin auth — any profile that can play the item can read its skip data.
+    Returns the entry for one file when file_path is given, else the full map.
+    """
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    sd = item.get("skip_data", {}) or {}
+    if file_path:
+        return JSONResponse(sd.get(file_path) or {})
+    return JSONResponse(sd)
 
 
 # Static files must be mounted last so API routes take priority

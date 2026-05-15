@@ -121,6 +121,26 @@ Every `/api/events` connection creates its own `asyncio.Queue(maxsize=100)`. `br
 
 For admin SSE, the token is passed via `?admin_token=…` query param. The middleware accepts it from query string too.
 
+## Offline / Handoff to Device
+
+### Safari iOS will not play MKV from a `<video>` element
+
+Most torrents are MKV with H.264/AAC. Safari iOS's `<video>` element only accepts MP4/M4V/MOV containers with H.264 (or HEVC) + AAC. The offline-prepare endpoint detects this via ffprobe and runs an ffmpeg **remux** (rewrap to MP4 with `-c copy`, ~seconds) when the codecs are already compatible, or a full **transcode** to H.264/AAC (slow, CPU-bound) when they aren't. Don't change the fast-path branches in `_safari_compatible` without confirming the device matrix.
+
+### IndexedDB blob playback uses `URL.createObjectURL(blob)`
+
+The local player binds the single `<video id="lpVideo">` to a `blob:` URL constructed from the IndexedDB record. Tiny ↔ fullscreen toggling is pure CSS (`.lp-tiny` class on `#localPlayer`); we never move the video element or change `src` mid-playback. Always `URL.revokeObjectURL` on unload (`lpUnloadCurrent`), otherwise iOS will leak memory across episode changes.
+
+`<track src=blob:...>` for VTT subtitles only works because `crossorigin="anonymous"` is set on the `<video>` and the blob URL is same-origin. Don't drop the `crossorigin` attribute.
+
+### Service worker scope must be `/`
+
+`/sw.js` is intentionally served from root (not `/static/sw.js`) so its scope covers the whole app. iOS Safari will silently scope-restrict an SW to its serving directory. Keep the file at the root mount.
+
+### Page-shell offline boot needs a prior successful visit
+
+The SW intercepts `fetch` events only after it's installed for the origin. The user must have loaded `remote.local` at least once with the network reachable; subsequent visits work even when DNS for `remote.local` fails — Safari hits the SW cache for the navigation request.
+
 ## Settings
 
 ### Two layers of settings

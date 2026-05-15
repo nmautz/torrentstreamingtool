@@ -99,6 +99,20 @@ Cancellation: on new `/api/stream` or `/api/stop`, `state.stream_task.cancel()` 
 - Honours `selected_file_indices` (skip non-selected files via `qbit_set_file_priority`).
 - The item stays `status="downloading"` until `library_download_monitor` flips it.
 
+## Offline / Handoff to Device
+
+End of `main.py` (just before `app.mount`) has the offline subsystem:
+
+- `_ffprobe_codec(path)` shells out to ffprobe (located alongside `analyzer.ffmpeg_bin()`) for video/audio codec + duration.
+- `_safari_compatible(info, ext)` — true for `.mp4`/`.m4v`/`.mov` containers with `h264`/`hevc` video and `aac`/`mp3` audio (direct play).
+- `_can_remux(info)` — true for compatible codecs in any container (no re-encode, just rewrap to MP4).
+- `_offline_jobs: dict[job_id → {src, out, status, operation, progress, error}]` is a process-local job table. Keyed by random `secrets.token_hex(8)`. There is no persistence — restarting the dashboard discards all in-flight jobs (the cached MP4s on disk survive).
+- `_run_offline_job(job_id)` runs the actual ffmpeg call. Remux args use `-c copy -bsf:a aac_adtstoasc -movflags +faststart`; transcode args use `libx264 veryfast crf 23` + `aac 160k`. Progress is approximated by `tmp.stat().st_size / src.stat().st_size` because consuming `-progress` is awkward.
+- `OFFLINE_CACHE = repo/.offline_cache/` — sha256-keyed MP4s. The cache key is `sha256(path | mtime | size)[:24]`, so a re-encoded source invalidates the cache entry. There is **no automatic eviction**; users can clean it manually.
+- Sidecar subtitles: `_list_sidecar_subs(src, item_id)` finds `.srt`/`.vtt` whose stem matches the video stem (or `<stem>.<lang>`). The subtitle endpoint `/api/library/{id}/subtitle` converts SRT → VTT inline via `_srt_to_vtt`.
+
+The fast-path of `/offline-prepare` returns the existing `/api/library/{id}/download` URL — no new file is created. Only when remux/transcode is needed do we hit `OFFLINE_CACHE`.
+
 ## qBittorrent client notes
 
 - **Auth**: `qbit_login` calls `/api/v2/auth/login`. Because `setup.py` writes `WebUI\LocalHostAuth=false` to qBit's ini, localhost requests don't actually need a cookie — but `qreq` still retries on 403.

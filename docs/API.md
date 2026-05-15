@@ -113,6 +113,25 @@ Up to 6 profiles. No passwords. Optional 4-digit PIN per profile.
 | POST | `/api/resume-now` | Apply the current `resume_offer` (seek to saved position) |
 | DELETE | `/api/resume-now` | Dismiss; start from beginning |
 
+## Handoff to Device (offline playback)
+
+| Method | Path | Notes |
+|--------|------|-------|
+| POST | `/api/library/{id}/offline-prepare` | `{file_path}` → ffprobes the source. Fast path returns `{ready:true, video_url, subs[], codec_info, duration_sec}` for already-Safari-compatible MP4s (uses the existing `/download` URL). Otherwise spawns an ffmpeg remux/transcode job and returns `{ready:false, job_id, operation:"remux"\|"transcode", subs[]}` |
+| GET | `/api/library/offline-job/{job_id}` | Poll a prepare job — `{status:"pending"\|"processing"\|"done"\|"error", operation, progress (0-1), error, video_url?}` (progress is approximated from output-file growth; `-progress` flag is awkward to consume) |
+| GET | `/api/library/offline-cache/{name}` | Serves a prepared MP4 from `.offline_cache/`. The name is sha256(path \| mtime \| size)[:24]+`.mp4`. Path-traversal–rejected |
+| GET | `/api/library/{id}/subtitle?file=…` | Returns a sidecar `.srt`/`.vtt` next to a video file as `text/vtt` (SRT auto-converted by `_srt_to_vtt`). Filename only — no path traversal |
+| GET | `/api/library/{id}/skip-data?file_path=…` | Read-only intro/credits times for one file (or full map when `file_path` is omitted). Same shape as the admin editor but no auth — any profile that can play the item can read its skip data |
+
+The same MP4 is **not** cached by the service worker (videos go in client-side IndexedDB instead — see `static/sw.js`). See [OFFLINE.md](OFFLINE.md) for the full client/server flow.
+
+## PWA assets
+
+| Method | Path | Notes |
+|--------|------|-------|
+| GET | `/sw.js` | Service worker — registers at root scope. Caches app shell + read-only library APIs |
+| GET | `/manifest.json` | Web app manifest. `display: standalone`, indigo theme. SVG-data-URI icons |
+
 ## Settings
 
 | Method | Path | Notes |
