@@ -31,6 +31,10 @@ The frontend stores the per-item summary in `prepStats: Map<itemId,summary>` and
 ### Save for offline
 
 1. User taps the save icon on an episode-picker row → `saveForOffline(itemId, filePath, fileName, fileLabel)`. For multi-file saves, the picker footer has a **Save Offline (N)** button that runs `epSaveSelectedOffline()` — it iterates the checked rows sequentially through `saveForOffline`, skipping anything already saved. Cancelling the per-file modal stops the chain (the next file is not started). When N ≥ 3 the bulk path shows a confirm dialog before starting, because each non-MP4/H.264 file forces a server-side transcode and bulk runs can occupy the host for hours.
+>
+> Batch flicker fix: bulk mode sets `osm.batch = true` so `saveForOffline` skips its 600 ms auto-close between files — the modal stays open continuously through the chain, then closes in the `finally` block when the loop exits.
+>
+> Global indicator: `#globalPrepBar` is a fixed-position pill (top-right, amber) shown whenever **any** offline-prep job is running. `pollGlobalPrep` hits `/api/offline-active` every 3 s while jobs exist (8 s idle, paused while the tab is hidden), so the indicator survives page reloads and is visible even when the originating library card has scrolled off-screen. The card's per-file chip still shows finer detail when the card is visible.
 
 > Server-CPU note: `_run_offline_job` caps ffmpeg with `-threads {OFFLINE_FFMPEG_THREADS}` (currently 2) on both decoder and encoder **on the libx264 path only**. Without that cap, libx264 fans out to every core and the dashboard becomes unresponsive while a bulk Save Offline runs.
 >

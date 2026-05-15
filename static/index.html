@@ -128,6 +128,26 @@
 </head>
 <body class="dark bg-gray-950 text-gray-100 min-h-screen flex flex-col">
 
+<!-- ── Global Offline-Prep Indicator ──────────────────────────────────────────
+     Fixed-position pill that's visible whenever any /offline-prepare or
+     /prep-all job is running on the host, regardless of which tab the user is
+     on. Restored on page reload by polling /api/offline-active.
+-->
+<div id="globalPrepBar"
+  class="hidden fixed top-3 right-3 z-40 bg-amber-950/95 border border-amber-700
+         text-amber-200 text-xs px-3 py-2 min-w-[200px] max-w-[320px] shadow-lg
+         pointer-events-none font-mono select-none"
+  aria-live="polite">
+  <div class="flex items-center gap-2">
+    <span class="inline-block w-2 h-2 bg-amber-400 animate-pulse"></span>
+    <span id="globalPrepText" class="font-bold uppercase tracking-wide truncate">Prepping…</span>
+  </div>
+  <div class="w-full bg-amber-900/60 h-1 mt-1.5">
+    <div id="globalPrepFill" class="bg-amber-400 h-1 transition-all duration-500" style="width:0%"></div>
+  </div>
+  <div id="globalPrepDetail" class="text-[10px] text-amber-300/80 mt-1 truncate"></div>
+</div>
+
 <!-- ── VPN Disconnected Overlay ───────────────────────────────────────────── -->
 <div id="vpnOverlay"
   class="hidden fixed inset-0 z-50 bg-red-950
@@ -3032,10 +3052,16 @@ async function epSaveSelectedOffline(){
     return;
   }
   let saved=0;
-  for(const f of targets){
-    await saveForOffline(itemId, f.path, f.name, epLabel(f)+' — '+f.name);
-    if(!offlineSaved.has(offKey(itemId,f.path))) break; // user cancelled or it failed
-    saved++;
+  osm.batch = true; // keep the modal open between files; final iteration closes it
+  try{
+    for(const f of targets){
+      await saveForOffline(itemId, f.path, f.name, epLabel(f)+' — '+f.name);
+      if(!offlineSaved.has(offKey(itemId,f.path))) break; // user cancelled or it failed
+      saved++;
+    }
+  } finally {
+    osm.batch = false;
+    closeOfflineSaveModal();
   }
   if(saved>1) showAlert(`Saved ${saved} episode${saved>1?"s":""} for offline playback.`,"success");
 }
@@ -4092,7 +4118,11 @@ async function saveForOffline(itemId, filePath, fileName, fileLabel) {
     offlineSaved.add(offKey(itemId, filePath));
     osmBar(100);
     osmStage("Saved.");
-    setTimeout(() => closeOfflineSaveModal(), 600);
+    // In batch mode (epSaveSelectedOffline), the next iteration will reopen
+    // the modal immediately — closing+reopening produces a visible flicker
+    // and a 600 ms window where the user thinks nothing is happening, even
+    // though server-side ffmpeg has already started on the next file.
+    if (!osm.batch) setTimeout(() => closeOfflineSaveModal(), 600);
     showAlert("Saved for offline playback.", "success");
     if (epItemId === itemId) renderEpList();
     if (activeTab === "library") loadLibrary();
@@ -4527,6 +4557,93 @@ function _renderOnlineBadge() {
 window.addEventListener("online",  () => { outboxFlush(); });
 window.addEventListener("offline", () => { _renderOnlineBadge(); });
 
+// ── Global prep indicator ────────────────────────────────────────────────────
+// Polls /api/offline-active so any in-flight offline-prepare/prep-all transcode
+// surfaces a visible pill even when the originating library card is off-screen
+// or the page was reloaded mid-job. The chip on the card still shows per-file
+// detail; this bar is the always-visible "something is running" affordance.
+let _prepPollTimer = null;
+const _PREP_POLL_MS_BUSY = 3000;
+const _PREP_POLL_MS_IDLE = 8000;
+function _fmtPrepEta(sec){
+  if(sec==null || !isFinite(sec) || sec<0) return "";
+  sec = Math.round(sec);
+  const h = Math.floor(sec/3600), m = Math.floor((sec%3600)/60), s = sec%60;
+  if(h>0) return `${h}h ${m}m`;
+  if(m>0) return `${m}m ${s}s`;
+  return `${s}s`;
+}
+async function pollGlobalPrep(){
+  if(document.hidden){
+    _prepPollTimer = setTimeout(pollGlobalPrep, _PREP_POLL_MS_IDLE);
+    return;
+  }
+  let interval = _PREP_POLL_MS_IDLE;
+  try{
+    const r = await fetch("/api/offline-active");
+    if(r.ok){
+      const d = await r.json();
+      _renderGlobalPrep(d);
+      if(d.active){
+        interval = _PREP_POLL_MS_BUSY;
+        // Reawaken per-card pollers for any item whose card is visible — the
+        // chip won't be drawn until the user opens the library tab, but if
+        // they're already there we want detail right away.
+        for(const it of (d.items||[])){
+          if(it.item_id && !prepPolling.has(it.item_id)){
+            prepStats.set(it.item_id, {
+              total: it.processing, ready: 0,
+              processing: it.processing, errored: 0,
+              files: [], eta_secs: it.eta_secs,
+            });
+            _renderPrepChip(it.item_id);
+            _startPrepPolling(it.item_id);
+          }
+        }
+      }
+    }
+  }catch(_){ /* swallow — try again next tick */ }
+  _prepPollTimer = setTimeout(pollGlobalPrep, interval);
+}
+function _renderGlobalPrep(d){
+  const bar = document.getElementById("globalPrepBar");
+  if(!bar) return;
+  if(!d || !d.active){ bar.classList.add("hidden"); return; }
+  bar.classList.remove("hidden");
+  const text   = document.getElementById("globalPrepText");
+  const fill   = document.getElementById("globalPrepFill");
+  const detail = document.getElementById("globalPrepDetail");
+  const items = d.items || [];
+  const jobs  = d.total_jobs || items.reduce((a,b)=>a+(b.processing||0),0);
+  text.textContent = `Prepping ${jobs} file${jobs===1?"":"s"}…`;
+  // Average progress across all in-flight jobs for the bar.
+  const avg = items.length
+    ? items.reduce((a,b)=>a+(b.progress||0),0) / items.length
+    : 0;
+  fill.style.width = `${Math.round(avg*100)}%`;
+  // Longest ETA wins (it's the bottleneck).
+  const eta = items.reduce((m,b)=>(b.eta_secs!=null && b.eta_secs>m ? b.eta_secs : m), 0);
+  const first = items[0];
+  const title = first ? (first.title || "library item") : "";
+  const etaStr = eta>0 ? ` · ${_fmtPrepEta(eta)} left` : "";
+  detail.textContent = items.length>1
+    ? `${items.length} items${etaStr}`
+    : `${title}${etaStr}`;
+}
+function startGlobalPrepPoller(){
+  if(_prepPollTimer) return;
+  pollGlobalPrep();
+}
+document.addEventListener("visibilitychange", () => {
+  // Speed back up immediately when the tab returns to foreground so the user
+  // sees the indicator without waiting for the slow-cycle tick to expire.
+  if(!document.hidden && _prepPollTimer){
+    clearTimeout(_prepPollTimer);
+    _prepPollTimer = null;
+    startGlobalPrepPoller();
+  }
+});
+
 function connectSSE(){
   const sseDot=document.getElementById("sseDot"),sseLabel=document.getElementById("sseLabel");
   const es=new EventSource("/api/events");
@@ -4615,6 +4732,9 @@ document.addEventListener("DOMContentLoaded",async()=>{
   _lpAttachVideoEvents();
   outboxFlush();
   _renderOnlineBadge();
+  // Start polling for any in-flight prep jobs so the indicator is correct
+  // even when the page is reloaded mid-job (state is purely in-memory otherwise).
+  startGlobalPrepPoller();
   // Pre-fetch default download path so modal opens instantly
   ensureDefaultSavePath();
 

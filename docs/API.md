@@ -124,6 +124,7 @@ Up to 6 profiles. No passwords. Optional 4-digit PIN per profile.
 | GET | `/api/library/{id}/skip-data?file_path=…` | Read-only intro/credits times for one file (or full map when `file_path` is omitted). Same shape as the admin editor but no auth — any profile that can play the item can read its skip data |
 | POST | `/api/library/{id}/prep-all` | Pre-runs remux/transcode for every video file in an item so subsequent device-side `Save Offline` taps fetch the cached MP4 instantly. Returns `{files:[{file_path,name,status,job_id?,progress?}], total, ready, processing, errored, needs_prep, missing}` with one row per file. Coalesces with any in-flight jobs |
 | GET | `/api/library/{id}/prep-status` | Same shape as `prep-all` but never starts new work — the UI polls this every 3 s while a prep is in progress |
+| GET | `/api/offline-active` | Global view of every active job: `{active, total_jobs, items:[{item_id, title, processing, progress, eta_secs, operation}]}`. Drives the persistent `#globalPrepBar` indicator so the user can see preprocessing is running even after a page reload or when the originating card is off-screen. Polled at 3 s while jobs exist, 8 s while idle, paused when the tab is hidden |
 
 Per-file `status` values: `ready_native` (fast-path Safari MP4, no work needed), `cached` (already in `.offline_cache/`), `pending`/`processing` (job running, includes `progress` 0-1 + `operation`), `done` (job just finished), `error`, `needs_prep`, `missing` (file not on disk).
 

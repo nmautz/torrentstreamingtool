@@ -4057,6 +4057,7 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
         "status": "pending", "operation": operation,
         "progress": 0.0, "error": None,
         "started_at": time.time(),
+        "item_id": item_id,
     }
     asyncio.create_task(_run_offline_job(job_id))
     return JSONResponse({
@@ -4070,7 +4071,7 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
     })
 
 
-async def _maybe_start_prep_job(src: Path) -> dict:
+async def _maybe_start_prep_job(src: Path, item_id: str = "") -> dict:
     """Per-file: return current prep state, starting a remux/transcode job if none exists.
 
     Returns one of:
@@ -4104,6 +4105,7 @@ async def _maybe_start_prep_job(src: Path) -> dict:
         "status": "pending", "operation": operation,
         "progress": 0.0, "error": None,
         "started_at": time.time(),
+        "item_id": item_id,
     }
     asyncio.create_task(_run_offline_job(job_id))
     return {"status": "processing", "job_id": job_id, "progress": 0.0, "operation": operation}
@@ -4162,7 +4164,7 @@ async def prep_all(item_id: str) -> JSONResponse:
         if not p.exists():
             out.append({"file_path": f.get("path", ""), "name": f.get("name", ""), "status": "missing"})
             continue
-        st = await _maybe_start_prep_job(p)
+        st = await _maybe_start_prep_job(p, item_id)
         out.append({"file_path": f["path"], "name": f.get("name", ""), **st})
     return JSONResponse({"files": out, **_prep_summary(out)})
 
@@ -4232,6 +4234,57 @@ def _prep_summary(files: list[dict]) -> dict:
         "missing":     missing,
         "eta_secs":    eta_secs,
     }
+
+
+@app.get("/api/offline-active")
+async def offline_active() -> JSONResponse:
+    """Global view of every offline-prep job currently running.
+
+    The library card chip is only rendered when the card is on-screen, so prep
+    progress disappears the moment the user navigates away or reloads the page.
+    This endpoint surfaces ALL active jobs (across all items) so a persistent
+    indicator can stay visible regardless of which tab the user is on.
+
+    Active = status in (pending, processing). Done/error jobs are NOT returned;
+    those are still visible via the per-item /prep-status when the card mounts.
+    """
+    active = [j for j in _offline_jobs.values()
+              if j.get("status") in ("pending", "processing")]
+    if not active:
+        return JSONResponse({"active": False, "total_jobs": 0, "items": []})
+    # Group by item_id, falling back to "" for jobs created before item_id
+    # tagging existed (shouldn't happen after the upgrade, but be defensive).
+    by_item: dict[str, list[dict]] = {}
+    for j in active:
+        by_item.setdefault(j.get("item_id", ""), []).append(j)
+    lib = await get_library()
+    titles = {it["id"]: it.get("title", "") for it in lib.get("items", [])}
+    items_out: list[dict] = []
+    now = time.time()
+    for item_id, jobs in by_item.items():
+        total_progress = 0.0
+        eta_total = 0.0
+        eta_count = 0
+        for j in jobs:
+            p = float(j.get("progress", 0))
+            total_progress += p
+            elapsed = max(0.0, now - j.get("started_at", now))
+            if elapsed > 2.0 and p > 0.02:
+                eta_total += elapsed * (1 - p) / p
+                eta_count += 1
+        items_out.append({
+            "item_id":    item_id,
+            "title":      titles.get(item_id, ""),
+            "processing": len(jobs),
+            "progress":   round(total_progress / len(jobs), 3) if jobs else 0,
+            "eta_secs":   round(eta_total, 1) if eta_count > 0 else None,
+            "operation":  jobs[0].get("operation", "transcode"),
+        })
+    return JSONResponse({
+        "active": True,
+        "total_jobs": len(active),
+        "items": items_out,
+    })
 
 
 @app.get("/api/library/offline-job/{job_id}")
