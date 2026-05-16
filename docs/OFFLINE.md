@@ -60,6 +60,7 @@ The frontend stores the per-item summary in `prepStats: Map<itemId,summary>` and
 4. Else → fall through to the existing `playLibraryFiles` (VLC pipeline).
 5. `lpPlay` walks the playlist to the first saved-offline file, loads it via `_lpLoadIndex`, attaches sidecar `<track>` elements, and starts playback.
 6. There is one `<video id="lpVideo">` inside `#localPlayer`. The container toggles between fullscreen mode (default) and a corner tile via the `.lp-tiny` class — pure CSS, no DOM moves and no video reload. `lpMaximize`/`lpMinimize` toggle the class; `lpStop` removes both `.lp-active` and `.lp-tiny`.
+7. **Next-episode prefetch.** At the end of `_lpLoadIndex`, `_lpBgPrefetchNext` looks at `lp.playlist[lp.pi + 1]` and — if it isn't already saved, isn't already being prefetched, and the host is online — kicks off a silent `_lpBgSaveOffline`. This is the headless twin of `saveForOffline`: no modal, no alerts, all errors swallowed so the foreground player is never disturbed. In-flight prefetches are tracked in `lpBgPrefetch: Map<key, AbortController>`. Both `saveForOffline` (foreground re-save of the same file) and `removeFromOffline` abort the controller and drop the map entry, so deletes don't get re-created mid-prefetch. By the time the current episode ends, the next one is usually already in IndexedDB and `_lpAdvanceOrEnd` rolls straight into it.
 
 ### Skip-intro / credits
 

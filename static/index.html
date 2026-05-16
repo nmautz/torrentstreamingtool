@@ -1474,6 +1474,10 @@ let lp = {
 };
 // Offline save job state (foreground modal flow)
 let osm = { jobId: null, abort: null, itemId: null, filePath: null, cancelled: false };
+// In-flight background prefetches kicked off by the local player so the next
+// episode in a playlist is already saved by the time the user reaches it.
+// Keys are offKey(itemId, filePath); values are AbortControllers.
+const lpBgPrefetch = new Map();
 // Play-chooser modal state
 let pcCtx = null;  // {itemId, files, seekTo, label, hasOffline}
 // Per-item prep-offline state — populated as the user clicks Prep Offline on a card.
@@ -4056,6 +4060,10 @@ async function saveForOffline(itemId, filePath, fileName, fileLabel) {
   if (!navigator.onLine) {
     showAlert("Cannot save offline while disconnected.", "error"); return;
   }
+  // If a background prefetch is mid-flight for this same file, abort it so the
+  // foreground modal flow owns the work (and gets the progress UI + cancel).
+  const _bgCtl = lpBgPrefetch.get(offKey(itemId, filePath));
+  if (_bgCtl) { try { _bgCtl.abort(); } catch (_) {} lpBgPrefetch.delete(offKey(itemId, filePath)); }
   openOfflineSaveModal(fileLabel || fileName || "");
   osm.itemId = itemId; osm.filePath = filePath;
   try {
@@ -4161,6 +4169,10 @@ async function saveForOffline(itemId, filePath, fileName, fileLabel) {
 
 async function removeFromOffline(itemId, filePath, fileName) {
   if (!confirm(`Remove "${fileName||"this episode"}" from this device?`)) return;
+  // Cancel any background prefetch first — otherwise an in-flight prefetch
+  // would re-create the IDB row right after we delete it.
+  const _bgCtl = lpBgPrefetch.get(offKey(itemId, filePath));
+  if (_bgCtl) { try { _bgCtl.abort(); } catch (_) {} lpBgPrefetch.delete(offKey(itemId, filePath)); }
   await offlineDelete(itemId, filePath);
   showAlert("Removed from offline.", "success");
   if (epItemId === itemId) renderEpList();
@@ -4436,6 +4448,96 @@ async function _lpLoadIndex(seekTo) {
   document.getElementById("lpTitle").textContent = lp.name;
   v.load();
   try { await v.play(); } catch (_) { /* iOS may block autoplay until user gesture */ }
+  _lpBgPrefetchNext();
+}
+
+// Kick off a silent download of the next file in the active playlist when it
+// isn't already saved offline. Runs whenever the active file changes (initial
+// play + auto-advance) so by the time the current episode ends, the next one
+// is already in IndexedDB and _lpAdvanceOrEnd can roll straight into it.
+function _lpBgPrefetchNext() {
+  try {
+    if (!lp.itemId || !Array.isArray(lp.playlist)) return;
+    const next = lp.pi + 1;
+    if (next >= lp.playlist.length) return;
+    if (!navigator.onLine) return;
+    const nextPath = lp.playlist[next];
+    if (!nextPath) return;
+    const key = offKey(lp.itemId, nextPath);
+    if (offlineSaved.has(key)) return;
+    if (lpBgPrefetch.has(key)) return;
+    const nextName = nextPath.split(/[/\\]/).pop();
+    _lpBgSaveOffline(lp.itemId, nextPath, nextName).catch(() => {});
+  } catch (_) {}
+}
+
+// Headless variant of saveForOffline — no modal, no alerts, failures swallowed
+// so a background prefetch can never interrupt the active playback experience.
+// Mirrors the prepare → poll → download → store sequence in saveForOffline.
+async function _lpBgSaveOffline(itemId, filePath, fileName) {
+  const key = offKey(itemId, filePath);
+  if (offlineSaved.has(key) || lpBgPrefetch.has(key)) return;
+  if (!navigator.onLine) return;
+  const ctl = new AbortController();
+  lpBgPrefetch.set(key, ctl);
+  try {
+    const prepRes = await fetch(`/api/library/${itemId}/offline-prepare`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file_path: filePath }), signal: ctl.signal,
+    });
+    if (!prepRes.ok) return;
+    const prep = await prepRes.json();
+    let videoUrl = prep.video_url;
+    let duration = prep.duration_sec || 0;
+    let subs = prep.subs || [];
+    let codecInfo = prep.codec_info || {};
+    if (!prep.ready && prep.job_id) {
+      while (true) {
+        if (ctl.signal.aborted) return;
+        await new Promise(r => setTimeout(r, 3000));
+        const sr = await fetch(`/api/library/offline-job/${prep.job_id}`, { signal: ctl.signal });
+        if (!sr.ok) return;
+        const s = await sr.json();
+        if (s.status === "done")  { videoUrl = s.video_url; break; }
+        if (s.status === "error") return;
+      }
+    }
+    const resp = await fetch(videoUrl, { signal: ctl.signal });
+    if (!resp.ok) return;
+    const blob = await resp.blob();
+    const subBlobs = await Promise.all((subs || []).map(async (s) => {
+      try {
+        const r = await fetch(s.url, { signal: ctl.signal });
+        if (!r.ok) return null;
+        const text = await r.text();
+        return { lang: s.lang, name: s.name,
+                 blob: new Blob([text], { type: "text/vtt" }) };
+      } catch (_) { return null; }
+    }));
+    let skipData = null;
+    try {
+      const sd = await fetch(`/api/library/${itemId}/skip-data?file_path=${encodeURIComponent(filePath)}`,
+                             { signal: ctl.signal });
+      if (sd.ok) skipData = await sd.json();
+    } catch (_) {}
+    if (ctl.signal.aborted) return;
+    await offlinePut({
+      key, itemId, filePath,
+      name: fileName || filePath.split(/[/\\]/).pop(),
+      blob, duration, sizeBytes: blob.size,
+      codecInfo, sourceVideoUrl: videoUrl,
+      subs: subBlobs.filter(Boolean),
+      skipData, savedAt: Date.now(),
+    });
+    offlineSaved.add(key);
+    if (epItemId === itemId) { try { renderEpList(); } catch (_) {} }
+    if (activeTab === "library") { try { loadLibrary(); } catch (_) {} }
+    if (activeTab === "offline") { try { loadOfflineTab(); } catch (_) {} }
+  } catch (_) {
+    // Silent — background prefetch must never disrupt the foreground player.
+  } finally {
+    lpBgPrefetch.delete(key);
+  }
 }
 
 function lpSetSubtitle(idx) {
