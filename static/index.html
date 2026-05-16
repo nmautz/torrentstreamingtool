@@ -13,9 +13,6 @@
   <style>
     :root { color-scheme: dark; }
     html, body { overflow-x: hidden; max-width: 100vw; }
-    /* Logo visibility: hide on the very narrowest phones so the tab row fits */
-    .nav-logo { display: none; }
-    @media (min-width: 400px) { .nav-logo { display: block; } }
     ::-webkit-scrollbar { width: 4px; }
     ::-webkit-scrollbar-track { background: #030712; }
     ::-webkit-scrollbar-thumb { background: #1f2937; }
@@ -716,65 +713,70 @@
 </div>
 
 <!-- ── Global Toast (visible from any tab) ────────────────────────────────── -->
+<!-- top-24 on mobile (two-row navbar ≈ 92 px), top-16 on sm+ (single-row navbar ≈ 56 px). -->
 <div id="globalToast"
-  class="hidden fixed top-16 inset-x-0 z-45 px-4 pointer-events-none">
+  class="hidden fixed top-24 sm:top-16 inset-x-0 z-45 px-4 pointer-events-none">
   <div id="globalToastInner"
     class="max-w-2xl mx-auto px-4 py-2.5 text-sm text-center fade-in"></div>
 </div>
 
 <!-- ── Navbar ─────────────────────────────────────────────────────────────── -->
+<!-- Mobile portrait: wraps to two rows. Row 1 = logo + status + profile + settings; Row 2 = three full-width tabs.
+     sm+ : single row, same as before. ml-auto on the right block doubles as the desktop spacer. -->
 <header class="sticky top-0 z-40 bg-gray-950 border-b border-gray-800 flex-shrink-0">
   <div class="safe-top">
     <div class="max-w-5xl mx-auto px-2 sm:px-3">
-      <div class="h-14 flex items-center gap-1 sm:gap-2">
-        <!-- Logo — hidden on the smallest phones to make room for tabs -->
-        <div class="nav-logo font-black text-sm sm:text-lg tracking-wide uppercase whitespace-nowrap mr-0 sm:mr-1 flex-shrink-0">
+      <div class="flex items-center gap-1 sm:gap-2 flex-wrap sm:flex-nowrap">
+        <!-- Logo -->
+        <div class="font-black text-base sm:text-lg tracking-wide uppercase whitespace-nowrap flex-shrink-0 h-12 sm:h-14 flex items-center mr-0 sm:mr-1">
           <span class="text-indigo-500">Stream</span><span class="text-white">Link</span>
         </div>
-        <!-- Tabs -->
-        <div class="flex h-14 flex-shrink-0">
+        <!-- Tabs: order-3 + w-full on mobile (wraps to row 2), order-2 inline on sm+ -->
+        <div class="order-3 sm:order-2 w-full sm:w-auto flex sm:flex-shrink-0 h-11 sm:h-14 border-t border-gray-800 sm:border-t-0 -mx-2 sm:mx-0">
           <button id="tabSearch" onclick="switchTab('search')"
-            class="tab-btn tab-active px-2 sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors flex-shrink-0 whitespace-nowrap">Search</button>
+            class="tab-btn tab-active flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap">Search</button>
           <button id="tabLibrary" onclick="switchTab('library')"
-            class="tab-btn tab-inactive px-2 sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors flex-shrink-0 whitespace-nowrap">Library</button>
+            class="tab-btn tab-inactive flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap">Library</button>
           <button id="tabOffline" onclick="switchTab('offline')"
-            class="tab-btn tab-inactive px-2 sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors flex-shrink-0 whitespace-nowrap">Offline</button>
+            class="tab-btn tab-inactive flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap">Offline</button>
         </div>
-        <div class="flex-1"></div>
-        <!-- Download badge -->
-        <button id="dlBadge" onclick="switchTab('library')"
-          class="hidden items-center gap-1.5 px-2 py-1.5
-                 bg-green-900/40 border border-green-800/60
-                 hover:bg-green-900/60 transition-colors flex-shrink-0">
-          <svg class="w-3.5 h-3.5 text-green-400 blink" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-              d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
-          </svg>
-          <span id="dlBadgeCount" class="text-xs font-bold text-green-300 hidden sm:inline"></span>
-        </button>
-        <!-- VPN pill -->
-        <div id="vpnPill" class="flex items-center gap-1.5 px-2 py-1.5 bg-gray-900 border border-gray-800 transition-all flex-shrink-0">
-          <div id="vpnDot" class="w-2 h-2 bg-gray-600 transition-colors flex-shrink-0"></div>
-          <span id="vpnLabel" class="text-xs font-medium text-gray-500 whitespace-nowrap hidden sm:inline">VPN: checking</span>
+        <!-- Right cluster: order-2 on mobile (next to logo), order-3 on sm+. ml-auto acts as the spacer in both layouts. -->
+        <div class="order-2 sm:order-3 ml-auto flex items-center gap-1 sm:gap-2 h-12 sm:h-14 flex-shrink-0">
+          <!-- Download badge -->
+          <button id="dlBadge" onclick="switchTab('library')"
+            class="hidden items-center gap-1.5 px-2 py-1.5
+                   bg-green-900/40 border border-green-800/60
+                   hover:bg-green-900/60 transition-colors flex-shrink-0">
+            <svg class="w-3.5 h-3.5 text-green-400 blink" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+            </svg>
+            <span id="dlBadgeCount" class="text-xs font-bold text-green-300 hidden sm:inline"></span>
+          </button>
+          <!-- VPN pill -->
+          <div id="vpnPill" class="flex items-center gap-1.5 px-2 py-1.5 bg-gray-900 border border-gray-800 transition-all flex-shrink-0">
+            <div id="vpnDot" class="w-2 h-2 bg-gray-600 transition-colors flex-shrink-0"></div>
+            <span id="vpnLabel" class="text-xs font-medium text-gray-500 whitespace-nowrap hidden sm:inline">VPN: checking</span>
+          </div>
+          <!-- SSE dot -->
+          <div id="sseDot" class="w-2 h-2 bg-gray-700 transition-colors flex-shrink-0 hidden sm:block"></div>
+          <span id="sseLabel" class="text-[11px] text-gray-700 hidden sm:block"></span>
+          <!-- Profile -->
+          <button onclick="showProfilePicker()"
+            class="flex items-center gap-1.5 pl-1 pr-1 sm:pr-2 py-1 hover:bg-gray-800 transition-colors flex-shrink-0 min-h-[36px]">
+            <div id="navProfileAvatar"
+              class="w-7 h-7 bg-indigo-600 flex items-center justify-center text-xs font-black text-white flex-shrink-0">?</div>
+            <span id="navProfileName" class="hidden md:block text-gray-400 max-w-[80px] truncate text-xs"></span>
+          </button>
+          <button id="navSettingsBtn" onclick="openProfileSettings()" title="Profile settings"
+            class="hidden p-1.5 hover:bg-gray-800 transition-colors flex-shrink-0 text-gray-500 hover:text-gray-200">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M10.325 4.317a1.724 1.724 0 013.35 0c.13.598.625 1.041 1.235 1.106.61.064 1.097.524 1.193 1.13l.082.51c.097.605.582 1.066 1.193 1.13.61.065 1.105.508 1.235 1.106.13.598-.024 1.226-.402 1.69-.378.463-.401 1.115-.057 1.602.345.487.345 1.135 0 1.622-.344.487-.32 1.139.057 1.602.378.463.532 1.092.402 1.69-.13.598-.625 1.041-1.235 1.106-.61.064-1.096.525-1.193 1.13l-.082.51c-.096.606-.582 1.066-1.193 1.13-.61.065-1.105.508-1.235 1.107a1.724 1.724 0 01-3.35 0c-.13-.599-.625-1.042-1.235-1.107-.61-.064-1.097-.524-1.193-1.13l-.082-.51c-.096-.605-.582-1.066-1.193-1.13-.61-.065-1.105-.508-1.235-1.106-.13-.598.024-1.227.402-1.69.378-.463.401-1.115.057-1.602-.345-.487-.345-1.135 0-1.622.344-.487.32-1.139-.057-1.602-.378-.464-.532-1.092-.402-1.69.13-.598.625-1.042 1.235-1.107.61-.064 1.097-.524 1.193-1.13l.082-.51c.096-.605.582-1.065 1.193-1.13.61-.064 1.105-.508 1.235-1.106z"/>
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+            </svg>
+          </button>
         </div>
-        <!-- SSE dot -->
-        <div id="sseDot" class="w-2 h-2 bg-gray-700 transition-colors flex-shrink-0 hidden sm:block"></div>
-        <span id="sseLabel" class="text-[11px] text-gray-700 hidden sm:block"></span>
-        <!-- Profile -->
-        <button onclick="showProfilePicker()"
-          class="flex items-center gap-1.5 pl-1 pr-1 sm:pr-2 py-1 hover:bg-gray-800 transition-colors flex-shrink-0 min-h-[36px]">
-          <div id="navProfileAvatar"
-            class="w-7 h-7 bg-indigo-600 flex items-center justify-center text-xs font-black text-white flex-shrink-0">?</div>
-          <span id="navProfileName" class="hidden md:block text-gray-400 max-w-[80px] truncate text-xs"></span>
-        </button>
-        <button id="navSettingsBtn" onclick="openProfileSettings()" title="Profile settings"
-          class="hidden p-1.5 hover:bg-gray-800 transition-colors flex-shrink-0 text-gray-500 hover:text-gray-200">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-              d="M10.325 4.317a1.724 1.724 0 013.35 0c.13.598.625 1.041 1.235 1.106.61.064 1.097.524 1.193 1.13l.082.51c.097.605.582 1.066 1.193 1.13.61.065 1.105.508 1.235 1.106.13.598-.024 1.226-.402 1.69-.378.463-.401 1.115-.057 1.602.345.487.345 1.135 0 1.622-.344.487-.32 1.139.057 1.602.378.463.532 1.092.402 1.69-.13.598-.625 1.041-1.235 1.106-.61.064-1.096.525-1.193 1.13l-.082.51c-.096.606-.582 1.066-1.193 1.13-.61.065-1.105.508-1.235 1.107a1.724 1.724 0 01-3.35 0c-.13-.599-.625-1.042-1.235-1.107-.61-.064-1.097-.524-1.193-1.13l-.082-.51c-.096-.605-.582-1.066-1.193-1.13-.61-.065-1.105-.508-1.235-1.106-.13-.598.024-1.227.402-1.69.378-.463.401-1.115.057-1.602-.345-.487-.345-1.135 0-1.622.344-.487.32-1.139-.057-1.602-.378-.464-.532-1.092-.402-1.69.13-.598.625-1.042 1.235-1.107.61-.064 1.097-.524 1.193-1.13l.082-.51c.096-.605.582-1.065 1.193-1.13.61-.064 1.105-.508 1.235-1.106z"/>
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
-          </svg>
-        </button>
       </div>
     </div>
   </div>
@@ -2009,7 +2011,7 @@ function switchTab(tab){
   document.getElementById("searchTab").classList.toggle("hidden",!isS);
   document.getElementById("libraryTab").classList.toggle("hidden",!isL);
   document.getElementById("offlineTab").classList.toggle("hidden",!isO);
-  const cls=(on)=>`tab-btn px-4 text-sm font-black uppercase tracking-wide transition-colors h-14 ${on?"tab-active":"tab-inactive"}`;
+  const cls=(on)=>`tab-btn flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap ${on?"tab-active":"tab-inactive"}`;
   document.getElementById("tabSearch").className=cls(isS);
   document.getElementById("tabLibrary").className=cls(isL);
   document.getElementById("tabOffline").className=cls(isO);

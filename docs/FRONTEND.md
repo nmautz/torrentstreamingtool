@@ -24,8 +24,8 @@ Metro UI throughout — flat tiles, no rounded corners, bold uppercase typograph
 | 482–550 | Episode picker modal (per-episode play, mark-watched, ZIP download) |
 | 552–575 | Stream file picker modal (`/api/stream/prepare` picker) |
 | 577–609 | Subtitle search modal |
-| 611–615 | Global toast (visible from any tab — sits under navbar) |
-| 618–671 | Navbar (tabs, VPN pill, SSE dot, profile avatar, settings gear) |
+| 611–615 | Global toast (visible from any tab — sits under navbar). `top-24 sm:top-16` because the mobile navbar is two rows. |
+| 618–671 | Navbar (tabs, VPN pill, SSE dot, profile avatar, settings gear). On mobile portrait the row is `flex-wrap`: row 1 = logo + status/profile/settings, row 2 = the three tabs (each `flex-1`, full-width). `sm:` and up collapses back to a single row. `ml-auto` on the right cluster doubles as the desktop spacer. Tab order swaps via `order-3 sm:order-2` on tabs and `order-2 sm:order-3` on the right cluster. |
 | 677–750 | Search tab + Library tab containers |
 | 752–793 | Skip / Resume offer floating tiles |
 | 796–939 | Player footer (seek bar, track selectors, controls row) |
