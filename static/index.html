@@ -733,6 +733,8 @@
             class="tab-btn tab-active px-4 text-sm font-black uppercase tracking-wide transition-colors">Search</button>
           <button id="tabLibrary" onclick="switchTab('library')"
             class="tab-btn tab-inactive px-4 text-sm font-black uppercase tracking-wide transition-colors">Library</button>
+          <button id="tabOffline" onclick="switchTab('offline')"
+            class="tab-btn tab-inactive px-4 text-sm font-black uppercase tracking-wide transition-colors">Offline</button>
         </div>
         <div class="flex-1"></div>
         <!-- Download badge -->
@@ -847,6 +849,26 @@
         </div>
       </div>
       <div id="libraryContent"></div>
+    </div>
+
+    <!-- Offline tab -->
+    <div id="offlineTab" class="hidden">
+      <div class="flex items-center justify-between mb-5">
+        <div>
+          <h2 class="text-lg font-black uppercase tracking-wide">Offline</h2>
+          <div id="offlineTotalLine" class="text-[11px] text-gray-600 font-mono mt-1">No files saved to this device</div>
+        </div>
+        <div class="flex items-center gap-3">
+          <button onclick="loadOfflineTab()"
+            class="text-xs text-gray-600 hover:text-gray-300 transition-colors flex items-center gap-1 font-bold uppercase tracking-wide">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+            </svg>Refresh
+          </button>
+        </div>
+      </div>
+      <div id="offlineContent"></div>
     </div>
 
   </div>
@@ -1979,12 +2001,16 @@ async function saveResumeMode(){
 // ── Tabs ───────────────────────────────────────────────────────────────────
 function switchTab(tab){
   activeTab=tab;
-  const isS=tab==="search";
+  const isS=tab==="search", isL=tab==="library", isO=tab==="offline";
   document.getElementById("searchTab").classList.toggle("hidden",!isS);
-  document.getElementById("libraryTab").classList.toggle("hidden",isS);
-  document.getElementById("tabSearch").className=`tab-btn px-4 text-sm font-black uppercase tracking-wide transition-colors h-14 ${isS?"tab-active":"tab-inactive"}`;
-  document.getElementById("tabLibrary").className=`tab-btn px-4 text-sm font-black uppercase tracking-wide transition-colors h-14 ${!isS?"tab-active":"tab-inactive"}`;
-  if(!isS) loadLibrary();
+  document.getElementById("libraryTab").classList.toggle("hidden",!isL);
+  document.getElementById("offlineTab").classList.toggle("hidden",!isO);
+  const cls=(on)=>`tab-btn px-4 text-sm font-black uppercase tracking-wide transition-colors h-14 ${on?"tab-active":"tab-inactive"}`;
+  document.getElementById("tabSearch").className=cls(isS);
+  document.getElementById("tabLibrary").className=cls(isL);
+  document.getElementById("tabOffline").className=cls(isO);
+  if(isL) loadLibrary();
+  if(isO) loadOfflineTab();
 }
 
 // ── Profiles ───────────────────────────────────────────────────────────────
@@ -4139,6 +4165,139 @@ async function removeFromOffline(itemId, filePath, fileName) {
   showAlert("Removed from offline.", "success");
   if (epItemId === itemId) renderEpList();
   if (activeTab === "library") loadLibrary();
+  if (activeTab === "offline") loadOfflineTab();
+}
+
+// --- Offline tab -------------------------------------------------------------
+// IndexedDB Blob objects aren't loaded into memory by getAll() — the platform
+// keeps the bytes on disk until something reads from the blob — so pulling
+// every record here is safe even with multi-GB libraries.
+async function loadOfflineTab() {
+  const el = document.getElementById("offlineContent");
+  const totalLine = document.getElementById("offlineTotalLine");
+  if (!el) return;
+  let recs = [];
+  try {
+    const tx = await idbTx(["videos"], "readonly");
+    recs = await idbReq(tx.objectStore("videos").getAll()) || [];
+  } catch (_) { recs = []; }
+  renderOfflineTab(recs, el, totalLine);
+}
+
+function renderOfflineTab(recs, el, totalLine) {
+  if (!recs.length) {
+    totalLine.textContent = "No files saved to this device";
+    el.innerHTML = `
+      <div class="flex flex-col items-center justify-center py-20 text-center">
+        <div class="w-16 h-16 bg-gray-800 border border-gray-700 flex items-center justify-center mb-4">
+          <svg class="w-8 h-8 text-gray-600" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M5 5a2 2 0 012-2h7l5 5v11a2 2 0 01-2 2H7a2 2 0 01-2-2V5z"/>
+            <path stroke-linecap="round" stroke-linejoin="round" d="M12 11v6m-3-3l3 3 3-3"/>
+          </svg>
+        </div>
+        <p class="text-gray-500 font-medium">No offline files</p>
+        <p class="text-gray-700 text-xs mt-1">Save episodes from the Library tab to play them here without the host</p>
+      </div>`;
+    return;
+  }
+
+  // Group by itemId so a saved series collapses into a single card.
+  const groups = new Map();
+  let totalBytes = 0;
+  for (const r of recs) {
+    const sz = r.sizeBytes || (r.blob && r.blob.size) || 0;
+    totalBytes += sz;
+    if (!groups.has(r.itemId)) groups.set(r.itemId, []);
+    groups.get(r.itemId).push({ ...r, _size: sz });
+  }
+  // Newest-saved first by group max savedAt
+  const grouped = Array.from(groups.entries()).map(([itemId, files]) => {
+    files.sort((a,b)=> (a.name||"").localeCompare(b.name||"", undefined, {numeric:true}));
+    const maxSaved = files.reduce((m,f)=>Math.max(m, f.savedAt||0), 0);
+    const totalSize = files.reduce((s,f)=>s+f._size, 0);
+    return { itemId, files, maxSaved, totalSize };
+  }).sort((a,b)=> b.maxSaved - a.maxSaved);
+
+  totalLine.textContent =
+    `${recs.length} file${recs.length===1?"":"s"} · ${fmtSize(totalBytes)} on this device`;
+
+  // Best-effort group title: use cached library entry if we have one (loaded
+  // by /api/library on a recent Library-tab visit), else fall back to the
+  // parent directory of the first file's path, else its file name.
+  const libCache = window._libCache || [];
+  const libById = new Map(libCache.map(i => [i.id, i]));
+
+  let html = "";
+  grouped.forEach(g => {
+    const cached = libById.get(g.itemId);
+    const firstPath = g.files[0].filePath || "";
+    const parentDir = firstPath.split(/[/\\]/).slice(-2, -1)[0] || "";
+    const title = (cached && (cached.series || cached.title)) || parentDir || g.files[0].name || g.itemId;
+    const _gid = escHtml(JSON.stringify(g.itemId));
+    html += `<div class="mb-3 bg-gray-900 border-l-2 border-emerald-700">
+      <div class="px-3 py-2 border-b border-gray-800 flex items-center justify-between gap-2">
+        <div class="min-w-0">
+          <h3 class="text-sm font-black uppercase tracking-wide text-gray-200 truncate">${escHtml(title)}</h3>
+          <div class="text-[10px] text-gray-600 font-mono mt-0.5">${g.files.length} file${g.files.length===1?"":"s"} · ${fmtSize(g.totalSize)}</div>
+        </div>
+        <button onclick="offlineDeleteGroup(${_gid})"
+          title="Delete all files in this group"
+          class="text-[10px] px-2 py-1.5 bg-gray-800 hover:bg-red-900/60 border border-gray-700 hover:border-red-800 text-gray-500 hover:text-red-300 uppercase tracking-wide font-bold transition-colors flex-shrink-0">
+          Delete All
+        </button>
+      </div>
+      <div class="divide-y divide-gray-800/60">`;
+    g.files.forEach(f => {
+      const info = parseEpisodeInfo(f.filePath) || parseEpisodeInfo(f.name);
+      const label = info
+        ? `S${pad2(info.season)}E${pad2(info.episode)}${info.name?" · "+escHtml(info.name):""}`
+        : escHtml(f.name || f.filePath.split(/[/\\]/).pop() || "");
+      const _id = escHtml(JSON.stringify(f.itemId));
+      const _p  = escHtml(JSON.stringify(f.filePath));
+      const _n  = escHtml(JSON.stringify(f.name || ""));
+      html += `<div class="px-3 py-2 flex items-center gap-3">
+        <div class="min-w-0 flex-1">
+          <div class="text-sm text-gray-300 truncate">${label}</div>
+          <div class="text-[10px] text-gray-600 font-mono mt-0.5 truncate">${fmtSize(f._size)}${f.duration?" · "+fmtTime(f.duration):""}</div>
+        </div>
+        <button onclick="offlinePlayOne(${_id},${_p})"
+          title="Play on this device"
+          class="text-xs px-3 py-2 bg-indigo-700 hover:bg-indigo-600 text-white font-black uppercase tracking-wide transition-colors flex-shrink-0 min-h-[36px]">
+          ▶ Play
+        </button>
+        <button onclick="offlineDeleteOne(${_id},${_p},${_n})"
+          title="Delete this file"
+          class="text-xs px-3 py-2 bg-gray-800 hover:bg-red-900/60 border border-gray-700 hover:border-red-800 text-gray-500 hover:text-red-300 font-bold uppercase tracking-wide transition-colors flex-shrink-0 min-h-[36px]">
+          ✕
+        </button>
+      </div>`;
+    });
+    html += `</div></div>`;
+  });
+  el.innerHTML = html;
+}
+
+async function offlinePlayOne(itemId, filePath) {
+  const rec = await offlineGet(itemId, filePath);
+  if (!rec) { showAlert("Offline copy missing — refresh and try again.", "error"); loadOfflineTab(); return; }
+  await lpPlay(itemId, [filePath], 0, rec.name || filePath.split(/[/\\]/).pop());
+}
+
+async function offlineDeleteOne(itemId, filePath, fileName) {
+  await removeFromOffline(itemId, filePath, fileName);
+}
+
+async function offlineDeleteGroup(itemId) {
+  const keys = Array.from(offlineSaved).filter(k => k.startsWith(itemId + "|"));
+  if (!keys.length) { loadOfflineTab(); return; }
+  if (!confirm(`Delete all ${keys.length} saved file${keys.length===1?"":"s"} for this item?`)) return;
+  for (const k of keys) {
+    const filePath = k.slice(itemId.length + 1);
+    await offlineDelete(itemId, filePath);
+  }
+  showAlert("Removed from offline.", "success");
+  if (activeTab === "library") loadLibrary();
+  loadOfflineTab();
 }
 
 // Direct "play on this device" for a single file: saves to IndexedDB first if

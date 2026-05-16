@@ -86,6 +86,16 @@ Navigation requests are network-first with a fallback to the cached `/`. When `r
 
 ---
 
+## Offline tab
+
+The dashboard has an **Offline** tab next to Library. It enumerates every record in the `videos` IndexedDB store and groups them by `itemId`. Each row shows the file's parsed `S__E__ · Episode Name` (via `parseEpisodeInfo`), its `sizeBytes` and `duration`, a ▶ Play button (calls `lpPlay(itemId, [filePath], 0, name)` for direct local playback), and a ✕ delete button. Each group header shows the per-item total size and a Delete All button that drops every saved file for that item. The header line shows the device-wide total: `<N> files · <size> on this device`.
+
+`loadOfflineTab()` pulls records with `getAll()` — IDB Blob objects aren't eagerly loaded into memory by `getAll()` so this is safe with multi-GB libraries. Group title prefers the cached library entry (`window._libCache`) for nice series names, falling back to the parent directory of the first file's `filePath`.
+
+Routing through the tab is in `switchTab(tab)` ([static/index.html:1980](../static/index.html#L1980)). `removeFromOffline` reloads the Offline tab when active so deletions made elsewhere (episode picker) stay in sync.
+
+---
+
 ## Storage budget
 
 iOS Safari grants ~60% of device free space to the origin via the Storage API. Big movies are fine; the 50 MB legacy quota is gone on iOS 13+.

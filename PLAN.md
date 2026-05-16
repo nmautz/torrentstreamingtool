@@ -92,6 +92,7 @@
 - [x] **11.9** Local player wires skip-intro / skip-credits offers (mirrors backend `_maybe_emit_skip_offer`), subtitle selector, watch-progress saves every 15 s, and auto-advance to the next saved offline episode when a file ends.
 - [x] **11.10** Outbox queue: when `navigator.onLine === false`, progress writes go to IndexedDB; the `online` event flushes them to `/api/library/{id}/progress`.
 - [x] **11.11** "Prep Offline" button on each library card. POSTs `/api/library/{id}/prep-all` to pre-run remux/transcode for every file in the item; status chip below the title polls `/prep-status` every 3 s. Subsequent device-side Save Offline taps then fetch the cached MP4 instantly instead of waiting for ffmpeg on demand.
+- [x] **11.12** Dedicated **Offline** tab next to Library — lists every file saved to this device grouped by item, with per-file size + duration, ▶ Play (drives `lpPlay`), ✕ delete, and a per-group Delete All. Header line shows the device-wide total: `<N> files · <size> on this device`. Works fully offline (reads IndexedDB directly).
 
 ---
 

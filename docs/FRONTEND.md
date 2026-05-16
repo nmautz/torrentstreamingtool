@@ -45,7 +45,7 @@ let app = { vpn_secure, vpn_status, stream_status, active_title, progress,
 ```
 - `profile` — currently selected profile object (persisted to `localStorage.streamlink_profile`)
 - `allProfiles` — fetched list from `/api/profiles`
-- `activeTab` — `"search"` or `"library"`
+- `activeTab` — `"search"`, `"library"`, or `"offline"`
 - `expandedDownloads: Set<itemId>` — which library download cards have file list expanded
 - `downloadFilesData: Map<itemId, files[]>` — cached file lists
 - `libDownloadStats: Map<itemId, payload>` — latest `library_progress` event per item
@@ -95,6 +95,8 @@ Local playback is handled by `lpPlay` / `_lpLoadIndex` / `lpStop` etc. There is 
 - `.lp-tiny` — corner tile (96×56 video + huge fullscreen button + close), repositioned via CSS only (no DOM move, no video re-load).
 
 Single-element design avoids iOS Safari's per-page video budget and the audio desync that two synchronized videos would create. iOS-friendly: `playsinline`, `<track>` for VTT subs, no MediaSource.
+
+The **Offline tab** (`#offlineTab`) is a peer of Search/Library. `loadOfflineTab()` pulls all `videos` IDB rows, groups by `itemId`, and renders rows with size/duration plus Play/Delete buttons; see `renderOfflineTab` and `offlinePlayOne`/`offlineDeleteOne`/`offlineDeleteGroup`. Also see [OFFLINE.md](OFFLINE.md#offline-tab).
 
 The IndexedDB schema (`streamlink-offline`):
 - `videos` keyPath `key` = `"<itemId>|<filePath>"` — `{blob, subs[], skipData, codecInfo, sourceVideoUrl, savedAt, sizeBytes, name, duration}`.
