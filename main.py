@@ -3673,6 +3673,26 @@ if sys.platform == "win32":
 _nvenc_probe: dict[str, bool] = {}
 _offline_jobs: dict[str, dict] = {}   # job_id → {id, src, out, status, operation, progress, error, started_at}
 
+# Cap how many ffmpeg prep jobs can run AT THE SAME TIME. Without this,
+# /prep-all on a 77-episode pack fires asyncio.create_task for every file,
+# spawning 77 simultaneous ffmpeg processes — host CPU is pegged, and
+# consumer NVIDIA GPUs (Pascal/Turing) silently reject NVENC sessions past
+# their 2–3 concurrent-encoder limit, so most jobs error out before
+# emitting a single frame. Jobs stay in `pending` until they grab the
+# semaphore; pending jobs are still surfaced by /prep-status and
+# /api/offline-active so the UI shows the queue correctly.
+OFFLINE_JOB_CONCURRENCY = 1
+_OFFLINE_JOB_SEM: Optional[asyncio.Semaphore] = None
+
+def _offline_job_sem() -> asyncio.Semaphore:
+    # Lazily constructed so the semaphore binds to the running event loop on
+    # first use (asyncio.Semaphore() at import time would attach to whatever
+    # loop happened to be current, which uvicorn replaces on startup).
+    global _OFFLINE_JOB_SEM
+    if _OFFLINE_JOB_SEM is None:
+        _OFFLINE_JOB_SEM = asyncio.Semaphore(OFFLINE_JOB_CONCURRENCY)
+    return _OFFLINE_JOB_SEM
+
 
 async def _has_nvenc() -> bool:
     """Detect whether ffmpeg can actually open an h264_nvenc session right now."""
@@ -3845,155 +3865,168 @@ async def _run_offline_job(job_id: str) -> None:
     job = _offline_jobs.get(job_id)
     if not job:
         return
-    job["status"] = "processing"
-    src = Path(job["src"])
-    out = Path(job["out"])
-    tmp = out.with_suffix(".part.mp4")
-    ffmpeg = analyzer.ffmpeg_bin()
-    if not ffmpeg:
-        job["status"] = "error"; job["error"] = "ffmpeg not available."
-        return
-    # Need duration for accurate progress reporting (out_time / duration).
-    info = await asyncio.to_thread(_ffprobe_codec, str(src))
-    duration = float(info.get("duration_sec", 0) or 0)
-    try:
-        use_nvenc = job["operation"] != "remux" and await _has_nvenc()
-        # `-threads` only matters for the CPU path. NVENC ignores it (the encoder
-        # runs on the GPU) and a low cap on the decoder makes HEVC software decode
-        # the bottleneck. So we only set -threads when we're staying on libx264.
-        common_pre: list[str] = [ffmpeg, "-y",
-                                 # -progress writes machine-readable key=value to the given
-                                 # target; pipe:1 = stdout. We tail it for accurate %, instead
-                                 # of guessing from output-file size growth (wildly off on
-                                 # transcode).
-                                 "-progress", "pipe:1", "-nostats"]
-        if not use_nvenc:
-            common_pre += ["-threads", str(OFFLINE_FFMPEG_THREADS)]
-        # Larger input buffers coalesce disk reads — without these, ffmpeg can
-        # generate enough read syscalls per second to dominate kernel time on
-        # Windows ("System Interrupts" pegs a core via the storage stack's DPCs).
-        # `-thread_queue_size` is per-input (must be BEFORE the `-i`).
-        common_pre += [
-            "-thread_queue_size", "1024",
-            "-rtbufsize", "64M",
-            "-i", str(src),
-        ]
-        if job["operation"] == "remux":
-            args = common_pre + ["-map", "0:v:0", "-map", "0:a:0?",
-                                 "-c", "copy", "-bsf:a", "aac_adtstoasc",
-                                 "-movflags", "+faststart", str(tmp)]
-        elif use_nvenc:
-            # Pascal (GTX 1060) NVENC: H.264 High @ L4.1 yuv420p, which matches
-            # exactly what Safari wants. `-rc vbr -cq 23 -b:v 0` is the NVENC
-            # equivalent of x264 `-crf 23` — constant-quality VBR with no bitrate
-            # cap. `-preset medium` is the cross-version-stable preset name (the
-            # newer p1..p7 API exists too but older ffmpeg builds reject it).
-            # 10-bit HEVC sources get tone-mapped to 8-bit by the default scaler
-            # because NVENC h264 only encodes 8-bit (yuv420p) — same outcome as
-            # the libx264 path.
-            args = common_pre + ["-map", "0:v:0", "-map", "0:a:0?",
-                                 "-c:v", "h264_nvenc",
-                                 "-preset", "medium",
-                                 "-rc", "vbr", "-cq", "23",
-                                 "-b:v", "0", "-maxrate", "0",
-                                 "-profile:v", "high", "-level", "4.1",
-                                 "-pix_fmt", "yuv420p",
-                                 "-c:a", "aac", "-b:a", "160k", "-ac", "2",
-                                 "-movflags", "+faststart", str(tmp)]
-            job["encoder"] = "h264_nvenc"
-        else:
-            # Force baseline-friendly H.264: yuv420p (8-bit) + High profile up to
-            # level 4.1, which every iPhone/iPad since iPhone 5s decodes in HW.
-            # Pulldown to High profile fixes the "audio plays, video black" case
-            # where the source is Hi10P or Main10 HEVC.
-            args = common_pre + ["-map", "0:v:0", "-map", "0:a:0?",
-                                 "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                                 # Output-side -threads caps libx264 worker threads.
-                                 # Without this, x264 fans out to every available core
-                                 # and the host becomes unresponsive during bulk saves.
-                                 "-threads", str(OFFLINE_FFMPEG_THREADS),
-                                 "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
-                                 "-c:a", "aac", "-b:a", "160k", "-ac", "2",
-                                 "-movflags", "+faststart", str(tmp)]
-            job["encoder"] = "libx264"
-        proc = await asyncio.create_subprocess_exec(
-            *args,
-            stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-            **_FFMPEG_SUBPROCESS_KW,
-        )
-
-        # Drain -progress stdout: each block is several `key=value` lines ending
-        # in `progress=continue` (or `progress=end`). out_time_ms is microseconds
-        # despite the name. Falling back to size growth when duration is unknown
-        # (some sources fail to report it).
-        async def _drain_progress() -> None:
-            assert proc.stdout is not None
-            while True:
-                try:
-                    line = await proc.stdout.readline()
-                except Exception:
-                    return
-                if not line:
-                    return
-                try:
-                    txt = line.decode("ascii", "replace").strip()
-                except Exception:
-                    continue
-                if not txt or "=" not in txt:
-                    continue
-                k, _, v = txt.partition("=")
-                if k == "out_time_ms" and duration > 0:
-                    try:
-                        out_us = int(v)
-                        job["progress"] = max(0.0, min(0.99, (out_us / 1_000_000.0) / duration))
-                    except ValueError:
-                        pass
-                elif k == "out_time_us" and duration > 0:
-                    # Newer ffmpeg uses out_time_us (always microseconds).
-                    try:
-                        out_us = int(v)
-                        job["progress"] = max(0.0, min(0.99, (out_us / 1_000_000.0) / duration))
-                    except ValueError:
-                        pass
-                elif k == "progress" and v == "end":
-                    job["progress"] = 1.0
-                    return
-
-        # Fallback for when -progress isn't producing useful values (very short
-        # files, container with no duration). Size growth is rough but non-zero.
-        async def _size_fallback() -> None:
-            src_size = max(src.stat().st_size, 1)
-            while proc.returncode is None:
-                await asyncio.sleep(2.5)
-                if tmp.exists() and duration <= 0:
-                    job["progress"] = min(0.99, tmp.stat().st_size / src_size)
-
-        progress_task = asyncio.create_task(_drain_progress())
-        fallback_task = asyncio.create_task(_size_fallback())
-        try:
-            await proc.wait()
-        finally:
-            for t in (progress_task, fallback_task):
-                if not t.done():
-                    t.cancel()
-
-        if proc.returncode != 0:
-            err = ""
-            try:
-                err = (await proc.stderr.read()).decode("utf-8", "replace")
-            except Exception:
-                pass
-            job["status"] = "error"
-            job["error"]  = f"ffmpeg failed: {err.strip()[-300:] or 'unknown error'}"
-            tmp.unlink(missing_ok=True)
+    # Hold pending until the global concurrency slot frees up. This is what
+    # keeps a 77-file /prep-all from spawning 77 ffmpegs at once.
+    async with _offline_job_sem():
+        # A late check: the cache file may have been produced by a sibling job
+        # for the same source while we were queued (rare, but possible if the
+        # user triggered prep-all twice). Skip the encode in that case.
+        out = Path(job["out"])
+        if out.exists():
+            job["progress"] = 1.0
+            job["status"]   = "done"
             return
-        tmp.replace(out)
-        job["progress"] = 1.0
-        job["status"]   = "done"
-    except Exception as e:
-        job["status"] = "error"; job["error"] = str(e)
-        tmp.unlink(missing_ok=True)
+        job["status"] = "processing"
+        # Re-baseline started_at to when the work actually begins so per-job
+        # ETAs reflect real ffmpeg throughput, not queue wait time.
+        job["started_at"] = time.time()
+        src = Path(job["src"])
+        tmp = out.with_suffix(".part.mp4")
+        ffmpeg = analyzer.ffmpeg_bin()
+        if not ffmpeg:
+            job["status"] = "error"; job["error"] = "ffmpeg not available."
+            return
+        # Need duration for accurate progress reporting (out_time / duration).
+        info = await asyncio.to_thread(_ffprobe_codec, str(src))
+        duration = float(info.get("duration_sec", 0) or 0)
+        try:
+            use_nvenc = job["operation"] != "remux" and await _has_nvenc()
+            # `-threads` only matters for the CPU path. NVENC ignores it (the encoder
+            # runs on the GPU) and a low cap on the decoder makes HEVC software decode
+            # the bottleneck. So we only set -threads when we're staying on libx264.
+            common_pre: list[str] = [ffmpeg, "-y",
+                                     # -progress writes machine-readable key=value to the given
+                                     # target; pipe:1 = stdout. We tail it for accurate %, instead
+                                     # of guessing from output-file size growth (wildly off on
+                                     # transcode).
+                                     "-progress", "pipe:1", "-nostats"]
+            if not use_nvenc:
+                common_pre += ["-threads", str(OFFLINE_FFMPEG_THREADS)]
+            # Larger input buffers coalesce disk reads — without these, ffmpeg can
+            # generate enough read syscalls per second to dominate kernel time on
+            # Windows ("System Interrupts" pegs a core via the storage stack's DPCs).
+            # `-thread_queue_size` is per-input (must be BEFORE the `-i`).
+            common_pre += [
+                "-thread_queue_size", "1024",
+                "-rtbufsize", "64M",
+                "-i", str(src),
+            ]
+            if job["operation"] == "remux":
+                args = common_pre + ["-map", "0:v:0", "-map", "0:a:0?",
+                                     "-c", "copy", "-bsf:a", "aac_adtstoasc",
+                                     "-movflags", "+faststart", str(tmp)]
+            elif use_nvenc:
+                # Pascal (GTX 1060) NVENC: H.264 High @ L4.1 yuv420p, which matches
+                # exactly what Safari wants. `-rc vbr -cq 23 -b:v 0` is the NVENC
+                # equivalent of x264 `-crf 23` — constant-quality VBR with no bitrate
+                # cap. `-preset medium` is the cross-version-stable preset name (the
+                # newer p1..p7 API exists too but older ffmpeg builds reject it).
+                # 10-bit HEVC sources get tone-mapped to 8-bit by the default scaler
+                # because NVENC h264 only encodes 8-bit (yuv420p) — same outcome as
+                # the libx264 path.
+                args = common_pre + ["-map", "0:v:0", "-map", "0:a:0?",
+                                     "-c:v", "h264_nvenc",
+                                     "-preset", "medium",
+                                     "-rc", "vbr", "-cq", "23",
+                                     "-b:v", "0", "-maxrate", "0",
+                                     "-profile:v", "high", "-level", "4.1",
+                                     "-pix_fmt", "yuv420p",
+                                     "-c:a", "aac", "-b:a", "160k", "-ac", "2",
+                                     "-movflags", "+faststart", str(tmp)]
+                job["encoder"] = "h264_nvenc"
+            else:
+                # Force baseline-friendly H.264: yuv420p (8-bit) + High profile up to
+                # level 4.1, which every iPhone/iPad since iPhone 5s decodes in HW.
+                # Pulldown to High profile fixes the "audio plays, video black" case
+                # where the source is Hi10P or Main10 HEVC.
+                args = common_pre + ["-map", "0:v:0", "-map", "0:a:0?",
+                                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                                     # Output-side -threads caps libx264 worker threads.
+                                     # Without this, x264 fans out to every available core
+                                     # and the host becomes unresponsive during bulk saves.
+                                     "-threads", str(OFFLINE_FFMPEG_THREADS),
+                                     "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
+                                     "-c:a", "aac", "-b:a", "160k", "-ac", "2",
+                                     "-movflags", "+faststart", str(tmp)]
+                job["encoder"] = "libx264"
+            proc = await asyncio.create_subprocess_exec(
+                *args,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+                **_FFMPEG_SUBPROCESS_KW,
+            )
+
+            # Drain -progress stdout: each block is several `key=value` lines ending
+            # in `progress=continue` (or `progress=end`). out_time_ms is microseconds
+            # despite the name. Falling back to size growth when duration is unknown
+            # (some sources fail to report it).
+            async def _drain_progress() -> None:
+                assert proc.stdout is not None
+                while True:
+                    try:
+                        line = await proc.stdout.readline()
+                    except Exception:
+                        return
+                    if not line:
+                        return
+                    try:
+                        txt = line.decode("ascii", "replace").strip()
+                    except Exception:
+                        continue
+                    if not txt or "=" not in txt:
+                        continue
+                    k, _, v = txt.partition("=")
+                    if k == "out_time_ms" and duration > 0:
+                        try:
+                            out_us = int(v)
+                            job["progress"] = max(0.0, min(0.99, (out_us / 1_000_000.0) / duration))
+                        except ValueError:
+                            pass
+                    elif k == "out_time_us" and duration > 0:
+                        # Newer ffmpeg uses out_time_us (always microseconds).
+                        try:
+                            out_us = int(v)
+                            job["progress"] = max(0.0, min(0.99, (out_us / 1_000_000.0) / duration))
+                        except ValueError:
+                            pass
+                    elif k == "progress" and v == "end":
+                        job["progress"] = 1.0
+                        return
+
+            # Fallback for when -progress isn't producing useful values (very short
+            # files, container with no duration). Size growth is rough but non-zero.
+            async def _size_fallback() -> None:
+                src_size = max(src.stat().st_size, 1)
+                while proc.returncode is None:
+                    await asyncio.sleep(2.5)
+                    if tmp.exists() and duration <= 0:
+                        job["progress"] = min(0.99, tmp.stat().st_size / src_size)
+
+            progress_task = asyncio.create_task(_drain_progress())
+            fallback_task = asyncio.create_task(_size_fallback())
+            try:
+                await proc.wait()
+            finally:
+                for t in (progress_task, fallback_task):
+                    if not t.done():
+                        t.cancel()
+
+            if proc.returncode != 0:
+                err = ""
+                try:
+                    err = (await proc.stderr.read()).decode("utf-8", "replace")
+                except Exception:
+                    pass
+                job["status"] = "error"
+                job["error"]  = f"ffmpeg failed: {err.strip()[-300:] or 'unknown error'}"
+                tmp.unlink(missing_ok=True)
+                return
+            tmp.replace(out)
+            job["progress"] = 1.0
+            job["status"]   = "done"
+        except Exception as e:
+            job["status"] = "error"; job["error"] = str(e)
+            tmp.unlink(missing_ok=True)
 
 
 class OfflinePrepareReq(BaseModel):

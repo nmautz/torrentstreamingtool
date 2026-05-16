@@ -127,6 +127,14 @@ For admin SSE, the token is passed via `?admin_token=…` query param. The middl
 
 Most torrents are MKV with H.264/AAC. Safari iOS's `<video>` element only accepts MP4/M4V/MOV containers with H.264 (or HEVC) + AAC. The offline-prepare endpoint detects this via ffprobe and runs an ffmpeg **remux** (rewrap to MP4 with `-c copy`, ~seconds) when the codecs are already compatible, or a full **transcode** to H.264/AAC (slow, CPU-bound) when they aren't. Don't change the fast-path branches in `_safari_compatible` without confirming the device matrix.
 
+### `/prep-all` must serialize ffmpeg jobs
+
+`/api/library/{id}/prep-all` enumerates every video file in a library item. Without a global concurrency cap, that fires `asyncio.create_task(_run_offline_job(...))` for each file in one tight loop — a 77-episode pack instantly spawns 77 ffmpeg processes. Two failure modes both trip:
+1. **NVENC session limit.** Consumer NVIDIA encoders (Pascal/Turing) reject NVENC sessions past the driver's 2–3-encoder cap. Excess jobs ffmpeg-exit immediately with `Cannot load nvcuda.dll`-style errors, the job's `error` field is set, and the UI tallies them as "prep errors".
+2. **CPU/IO storm on the libx264 path.** Even with `-threads 2`, 77 concurrent ffmpegs is 150+ encoder threads plus 77 decoders fighting over the same disk, OOM-killing some and timing out others.
+
+Keep the `_offline_job_sem()` semaphore in place (`OFFLINE_JOB_CONCURRENCY = 1`). Jobs sit in `status="pending"` until they acquire it; both `/prep-status` and `/api/offline-active` already treat `pending` as in-progress, so the UI behaves correctly. If you ever raise the cap, also re-baseline `started_at` inside the semaphore (already done) so per-job ETAs don't include queue time.
+
 ### IndexedDB blob playback uses `URL.createObjectURL(blob)`
 
 The local player binds the single `<video id="lpVideo">` to a `blob:` URL constructed from the IndexedDB record. Tiny ↔ fullscreen toggling is pure CSS (`.lp-tiny` class on `#localPlayer`); we never move the video element or change `src` mid-playback. Always `URL.revokeObjectURL` on unload (`lpUnloadCurrent`), otherwise iOS will leak memory across episode changes.
