@@ -11,6 +11,12 @@ The only persistent server-side state. Lives at the project root. Accessed via `
   "settings": {
     "library_paths": [ … ],            // UI-added paths (POST /api/settings/library-paths)
     "max_volume": 200,                  // global VLC volume cap 0–200; default 200 (no cap)
+    "background_video": {               // idle background video (admin upload, .background/<name>)
+      "path":    "/abs/path/to/.background/loop.mp4",
+      "name":    "loop.mp4",
+      "volume":  50,                    // 0–200, separate from user playback volume
+      "enabled": true                   // when false, VLC stays idle on stop
+    },
     "admin_overrides": {
       "indexer_categories": "0"         // overrides .env INDEXER_CATEGORIES at search time
     }
@@ -36,6 +42,8 @@ The only persistent server-side state. Lives at the project root. Accessed via `
 PIN hash is plain SHA-256 of the 4-digit string (no salt). PIN protection is "soft" — anyone with filesystem access can read the JSON. It's a UI gate, not a security boundary.
 
 `settings.max_volume`: VLC is uncapped (0–200, where 200 % is overdrive). Capping it system-wide stops anyone from accidentally blowing the speakers. Lives under `settings` because it applies to the physical playback host, not to individual viewers. Enforced server-side in `_global_max_volume`.
+
+`settings.background_video`: managed by the **Background** admin tab (see [ADMIN.md](ADMIN.md)). The file lives under `.background/<name>` at the repo root; the directory is wiped on each upload so only one file ever exists. The `background_video_loop` task in `main.py` plays it on VLC any time VLC reports `stopped` and a stream pipeline isn't actively buffering. Any user `vlc("in_play", …)` replaces it and restores the user's pre-bg volume.
 
 `resume_mode`:
 - `"auto"` (default) — immediately seek to saved position

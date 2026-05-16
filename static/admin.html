@@ -90,6 +90,10 @@
       class="tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors">
       Offline Cache
     </button>
+    <button onclick="switchTab('background')" id="tab-background"
+      class="tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors">
+      Background
+    </button>
   </div>
 
   <!-- Toast -->
@@ -232,6 +236,69 @@
         </button>
       </div>
       <div id="offOrphanList" class="divide-y divide-gray-800"></div>
+    </div>
+  </div>
+
+  <!-- ── Background Video Tab ─────────────────────────────────────────────────── -->
+  <div id="panelBackground" class="hidden flex-1 overflow-y-auto p-5 max-w-2xl mx-auto w-full space-y-4">
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-sm font-black uppercase tracking-wide">Idle Background Video</h2>
+        <p class="text-xs text-gray-500 mt-0.5">Plays on the TV in VLC whenever nothing else is. Replaced automatically the moment any stream or library item starts.</p>
+      </div>
+
+      <!-- Current file -->
+      <div id="bgCurrent" class="px-5 py-4 border-b border-gray-800">
+        <div class="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Current File</div>
+        <div id="bgCurrentBody" class="text-sm text-gray-400">Loading…</div>
+      </div>
+
+      <!-- Upload -->
+      <div class="px-5 py-4 border-b border-gray-800 space-y-3">
+        <div class="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Upload Replacement</div>
+        <input id="bgFileInput" type="file"
+          accept=".mp4,.mkv,.mov,.m4v,.avi,.ts,.m2ts,.webm,.wmv"
+          class="block w-full text-xs text-gray-400
+                 file:mr-3 file:py-2.5 file:px-4 file:border-0
+                 file:bg-indigo-600 file:hover:bg-indigo-500 file:text-white
+                 file:text-xs file:font-bold file:uppercase file:tracking-wide file:cursor-pointer"/>
+        <div id="bgUploadProgress" class="hidden">
+          <div class="h-1 bg-gray-800 overflow-hidden">
+            <div id="bgUploadBar" class="h-1 bg-indigo-500 transition-all" style="width:0%"></div>
+          </div>
+          <div id="bgUploadPct" class="text-[10px] text-indigo-300 mt-1 font-mono">0%</div>
+        </div>
+        <button id="bgUploadBtn" onclick="uploadBackground()"
+          class="bg-indigo-600 hover:bg-indigo-500 px-5 py-3 text-sm font-black uppercase tracking-wide transition-colors disabled:opacity-50 disabled:cursor-not-allowed">
+          Upload
+        </button>
+      </div>
+
+      <!-- Volume -->
+      <div class="px-5 py-4 border-b border-gray-800 space-y-2">
+        <div class="flex items-center justify-between gap-3">
+          <div class="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Background Volume</div>
+          <span id="bgVolLabel" class="text-sm font-mono text-indigo-300">…</span>
+        </div>
+        <input id="bgVolSlider" type="range" min="0" max="200" value="50"
+          oninput="onBgVolInput(this.value)"
+          onchange="saveBgVolume(this.value)"
+          class="w-full accent-indigo-500"/>
+        <p class="text-[10px] text-gray-600">0 mutes the background. The global max-volume cap still applies.</p>
+      </div>
+
+      <!-- Enable / disable -->
+      <div class="px-5 py-4 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <div class="text-sm font-bold text-gray-200">Background Playback</div>
+          <div class="text-[11px] text-gray-600 mt-0.5">When off, VLC stays idle when nothing is playing.</div>
+        </div>
+        <button id="bgEnabledBtn" onclick="toggleBgEnabled()"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+                 bg-gray-800 border-gray-700 text-gray-400 hover:text-white">
+          …
+        </button>
+      </div>
     </div>
   </div>
 
@@ -423,16 +490,17 @@ async function loadOfflineEncoder(){
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 function switchTab(tab){
   activeTab = tab;
-  ["indexers","content","profiles","skip","offline"].forEach(t=>{
+  ["indexers","content","profiles","skip","offline","background"].forEach(t=>{
     document.getElementById(`tab-${t}`).className =
       t===tab ? "tab-active px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors"
                : "tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors";
     document.getElementById(`panel${t.charAt(0).toUpperCase()+t.slice(1)}`).classList.toggle("hidden", t!==tab);
   });
-  if(tab==="content")  loadContentList();
-  if(tab==="profiles") loadProfilePins();
-  if(tab==="skip")     loadSkipPanel();
-  if(tab==="offline")  loadOfflineCache();
+  if(tab==="content")    loadContentList();
+  if(tab==="profiles")   loadProfilePins();
+  if(tab==="skip")       loadSkipPanel();
+  if(tab==="offline")    loadOfflineCache();
+  if(tab==="background") loadBackgroundVideo();
 }
 
 // ── Smart Skip ────────────────────────────────────────────────────────────────
@@ -1305,6 +1373,151 @@ async function saveIndexerConfig(){
     const d = await r.json().catch(()=>({}));
     errEl.textContent = d.detail || "Failed to add indexer.";
     errEl.classList.remove("hidden");
+  }
+}
+
+// ── Background Video ──────────────────────────────────────────────────────────
+let _bgState = {volume: 50, enabled: true, exists: false};
+
+async function loadBackgroundVideo(){
+  const body = document.getElementById("bgCurrentBody");
+  const enabledBtn = document.getElementById("bgEnabledBtn");
+  body.textContent = "Loading…";
+  let r;
+  try{
+    r = await fetch("/api/admin/background-video", {headers: authHeader()});
+  }catch(_){
+    body.innerHTML = `<span class="text-red-400">Network error.</span>`;
+    return;
+  }
+  if(!r.ok){
+    body.innerHTML = `<span class="text-red-400">Failed to load (HTTP ${r.status}).</span>`;
+    return;
+  }
+  const d = await r.json();
+  _bgState = d;
+
+  if(d.exists){
+    const playing = d.currently_playing
+      ? `<span class="text-[10px] font-bold uppercase tracking-widest px-2 py-1 border bg-emerald-950 border-emerald-700 text-emerald-300 ml-2">On Screen</span>`
+      : "";
+    body.innerHTML = `
+      <div class="flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <div class="text-sm font-bold text-gray-200 truncate">${escHtml(d.name)} ${playing}</div>
+          <div class="text-xs text-gray-600 mt-0.5 font-mono">${_fmtBytes(d.size_bytes)}</div>
+        </div>
+        <button onclick="deleteBackground(this)"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border border-red-800 bg-red-950 text-red-300 hover:bg-red-900 transition-colors">
+          Remove
+        </button>
+      </div>`;
+  } else {
+    body.innerHTML = `<span class="text-gray-600 italic">No background file uploaded yet.</span>`;
+  }
+
+  document.getElementById("bgVolSlider").value = d.volume;
+  document.getElementById("bgVolLabel").textContent = `${d.volume}%`;
+
+  if(d.enabled){
+    enabledBtn.textContent = "✓ Enabled";
+    enabledBtn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-indigo-900 border-indigo-700 text-indigo-300 hover:bg-indigo-800";
+  } else {
+    enabledBtn.textContent = "Disabled";
+    enabledBtn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-500 hover:text-white";
+  }
+}
+
+function onBgVolInput(val){
+  document.getElementById("bgVolLabel").textContent = `${val}%`;
+}
+
+let _bgVolSaveTimer = null;
+function saveBgVolume(val){
+  // Debounce so dragging the slider only POSTs once per release
+  clearTimeout(_bgVolSaveTimer);
+  _bgVolSaveTimer = setTimeout(async ()=>{
+    const r = await fetch("/api/admin/background-video/volume",{
+      method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+      body: JSON.stringify({volume: parseInt(val, 10)}),
+    });
+    if(!r.ok) showToast("Failed to save volume.", true);
+  }, 150);
+}
+
+async function toggleBgEnabled(){
+  const newVal = !_bgState.enabled;
+  const r = await fetch("/api/admin/background-video/enabled",{
+    method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+    body: JSON.stringify({enabled: newVal}),
+  });
+  if(r.ok){
+    showToast(newVal ? "Background enabled." : "Background disabled.");
+    loadBackgroundVideo();
+  } else {
+    showToast("Failed to update.", true);
+  }
+}
+
+async function uploadBackground(){
+  const input = document.getElementById("bgFileInput");
+  const file = input.files && input.files[0];
+  if(!file){ showToast("Pick a file first.", true); return; }
+
+  const btn = document.getElementById("bgUploadBtn");
+  const prog = document.getElementById("bgUploadProgress");
+  const bar = document.getElementById("bgUploadBar");
+  const pct = document.getElementById("bgUploadPct");
+  btn.disabled = true;
+  btn.textContent = "Uploading…";
+  prog.classList.remove("hidden");
+  bar.style.width = "0%";
+  pct.textContent = "0%";
+
+  // XHR for upload progress; fetch() has no native progress API
+  const form = new FormData();
+  form.append("file", file);
+
+  const ok = await new Promise(resolve=>{
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/api/admin/background-video");
+    if(adminToken) xhr.setRequestHeader("Authorization", `Bearer ${adminToken}`);
+    xhr.upload.onprogress = e=>{
+      if(!e.lengthComputable) return;
+      const p = e.loaded / e.total * 100;
+      bar.style.width = p.toFixed(1) + "%";
+      pct.textContent = p.toFixed(0) + "%";
+    };
+    xhr.onload = ()=> resolve(xhr.status >= 200 && xhr.status < 300);
+    xhr.onerror = ()=> resolve(false);
+    xhr.send(form);
+  });
+
+  btn.disabled = false;
+  btn.textContent = "Upload";
+  prog.classList.add("hidden");
+  input.value = "";
+
+  if(ok){
+    showToast("Background uploaded.");
+    loadBackgroundVideo();
+  } else {
+    showToast("Upload failed.", true);
+  }
+}
+
+async function deleteBackground(btn){
+  if(!confirm("Remove the background video? VLC will go idle when nothing is playing.")) return;
+  btn.disabled = true;
+  const r = await fetch("/api/admin/background-video",{
+    method:"DELETE", headers: authHeader(),
+  });
+  btn.disabled = false;
+  if(r.ok){
+    showToast("Background removed.");
+    loadBackgroundVideo();
+  } else {
+    showToast("Failed to remove.", true);
   }
 }
 

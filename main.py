@@ -70,6 +70,7 @@ class Settings(BaseSettings):
 
 settings = Settings()
 LIBRARY_FILE = Path(__file__).parent / "library.json"
+BACKGROUND_DIR = Path(__file__).parent / ".background"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -170,6 +171,8 @@ class AppState:
     skip_offer_file: Optional[str] = None                 # path the current skip offer corresponds to
     resume_offer: Optional[dict] = None                   # {"position_sec": N, "file_path": "..."} when resume_mode="prompt"
     analysis_jobs: dict = field(default_factory=dict)     # series_key → {status, stage, current, total, message, item_ids, started_at, finished_at}
+    background_playing: bool = False                      # True when the idle background video is the active VLC playlist
+    user_volume_before_bg: int = 100                      # snapshot of state.vlc_volume taken when bg first took over
     sse_queues: list = field(default_factory=list)
 
 
@@ -380,6 +383,11 @@ async def vlc(command: str, **params) -> None:
     try:
         async with httpx.AsyncClient() as c:
             if command == "in_play":
+                # User content is taking over from the idle background video —
+                # restore the volume the user had before bg took the floor.
+                if state.background_playing:
+                    state.vlc_volume = state.user_volume_before_bg
+                    state.background_playing = False
                 # Force VLC to the current (already-capped) volume BEFORE playback
                 # starts, so VLC's own default doesn't blast at a loud level.
                 raw = max(0, min(512, round(state.vlc_volume / 100 * 256)))
@@ -1108,6 +1116,96 @@ async def _auto_play_item(item: dict, profile_id: str, file_path: str = "") -> N
         pass
 
 
+# ── Idle Background Video ─────────────────────────────────────────────────────
+
+async def _play_background_video() -> bool:
+    """Start the configured background video on VLC. Returns True on success.
+
+    Caller is responsible for deciding *when* to play; this just issues the
+    commands and resets the AppState fields so the rest of the system treats
+    the dashboard as idle (no library item, no skip offers, no resume tile).
+    """
+    lib = await get_library()
+    bg = lib.get("settings", {}).get("background_video") or {}
+    path_str = bg.get("path", "")
+    if not path_str:
+        return False
+    p = Path(path_str)
+    if not p.exists():
+        return False
+    cap = await _global_max_volume()
+    bg_vol = max(0, min(cap, max(0, min(200, int(bg.get("volume", 50))))))
+    raw = max(0, min(512, round(bg_vol / 100 * 256)))
+
+    # Snapshot the user's normal volume on the first transition into bg, so the
+    # next user-initiated `in_play` can restore it.
+    if not state.background_playing:
+        state.user_volume_before_bg = state.vlc_volume
+    state.vlc_volume = bg_vol
+    state.background_playing = True
+    # Reset playback state so SSE clients show "nothing is playing"
+    state.stream_status = "idle"
+    state.library_item_id = None
+    state.library_profile_id = None
+    state.library_item_file_count = 0
+    state.library_playlist = []
+    state.library_current_file = None
+    state.active_title = None
+    state.active_file = None
+    state.skip_offer = None
+    state.skip_offer_file = None
+    state.resume_offer = None
+
+    try:
+        async with httpx.AsyncClient() as c:
+            await c.get(
+                f"{settings.vlc_url}/requests/status.xml",
+                auth=httpx.BasicAuth("", settings.vlc_password),
+                params={"command": "volume", "val": str(raw)},
+                timeout=5.0,
+            )
+            await c.get(
+                f"{settings.vlc_url}/requests/status.xml",
+                auth=httpx.BasicAuth("", settings.vlc_password),
+                params={"command": "in_play", "input": p.resolve().as_uri()},
+                timeout=5.0,
+            )
+    except Exception:
+        return False
+    asyncio.create_task(vlc_focus_and_fullscreen())
+    await broadcast("state", state_snapshot())
+    return True
+
+
+async def background_video_loop() -> None:
+    """Poll every 3 s; (re)start the configured background video when VLC is idle.
+
+    Bg is naturally replaced by `vlc("in_play", ...)` from any user-initiated
+    playback, so we don't need to explicitly stop it. When VLC stops (a movie
+    ends, /api/stop is called, etc.) this loop picks up the slack within ~3 s.
+    """
+    while True:
+        await asyncio.sleep(3)
+        try:
+            lib = await get_library()
+            bg = lib.get("settings", {}).get("background_video") or {}
+            if not bg.get("path") or not bg.get("enabled", True):
+                state.background_playing = False
+                continue
+            # Don't fight an in-flight stream pipeline about to hand off to VLC
+            if state.stream_status == "buffering":
+                continue
+            vs = await vlc_status()
+            if vs is None:
+                continue
+            vlc_state = vs.get("state", "")
+            if vlc_state in ("playing", "paused"):
+                continue
+            await _play_background_video()
+        except Exception:
+            pass
+
+
 # ── Background Task: Library Download Monitor ─────────────────────────────────
 
 async def library_download_monitor() -> None:
@@ -1757,10 +1855,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     broadcaster = asyncio.create_task(stat_broadcaster())
     dl_monitor  = asyncio.create_task(library_download_monitor())
     vlc_tracker = asyncio.create_task(vlc_progress_tracker())
+    bg_loop     = asyncio.create_task(background_video_loop())
 
     yield
 
-    for t in (guard, broadcaster, dl_monitor, vlc_tracker):
+    for t in (guard, broadcaster, dl_monitor, vlc_tracker, bg_loop):
         t.cancel()
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
@@ -1875,6 +1974,14 @@ class AdminSkipDataReq(BaseModel):
     intro_start: Optional[float] = None    # null = clear intro
     intro_end:   Optional[float] = None
     credits_start: Optional[float] = None  # null = clear credits
+
+
+class BackgroundVolumeReq(BaseModel):
+    volume: int       # 0-200
+
+
+class BackgroundEnabledReq(BaseModel):
+    enabled: bool
 
 
 # ── Routes: Profiles ─────────────────────────────────────────────────────────
@@ -3626,6 +3733,117 @@ async def admin_offline_encoder(request: Request) -> JSONResponse:
         "encoder":         "h264_nvenc" if nvenc else "libx264",
         "ffmpeg":          analyzer.ffmpeg_bin(),
     })
+
+
+# ── Routes: Idle Background Video ─────────────────────────────────────────────
+
+@app.get("/api/admin/background-video")
+async def admin_get_background_video(request: Request) -> JSONResponse:
+    _require_admin(request)
+    lib = await get_library()
+    bg = lib.get("settings", {}).get("background_video") or {}
+    path = bg.get("path", "")
+    exists = bool(path) and Path(path).exists()
+    size = Path(path).stat().st_size if exists else 0
+    return JSONResponse({
+        "name":              bg.get("name", ""),
+        "volume":            int(bg.get("volume", 50)),
+        "enabled":           bool(bg.get("enabled", True)) if bg else False,
+        "exists":            exists,
+        "size_bytes":        size,
+        "currently_playing": state.background_playing,
+    })
+
+
+@app.post("/api/admin/background-video")
+async def admin_upload_background_video(
+    request: Request,
+    file: UploadFile = File(...),
+) -> JSONResponse:
+    _require_admin(request)
+    filename = Path(file.filename or "background").name
+    if not filename or Path(filename).suffix.lower() not in VIDEO_EXTS:
+        raise HTTPException(400, "File must be a supported video format.")
+    BACKGROUND_DIR.mkdir(parents=True, exist_ok=True)
+    # Wipe any existing background file(s) so disk usage stays bounded
+    for old in BACKGROUND_DIR.iterdir():
+        try:
+            old.unlink()
+        except Exception:
+            pass
+    dest = BACKGROUND_DIR / filename
+    with open(dest, "wb") as f:
+        while chunk := await file.read(1024 * 1024):
+            f.write(chunk)
+    lib = await get_library()
+    bg_settings = lib.setdefault("settings", {}).setdefault("background_video", {})
+    bg_settings["path"]    = str(dest.resolve())
+    bg_settings["name"]    = dest.name
+    bg_settings.setdefault("volume", 50)
+    bg_settings.setdefault("enabled", True)
+    await put_library(lib)
+    # If bg was already on screen, swap in the new file immediately
+    if state.background_playing:
+        asyncio.create_task(_play_background_video())
+    return JSONResponse({
+        "ok":         True,
+        "name":       dest.name,
+        "size_bytes": dest.stat().st_size,
+    })
+
+
+@app.delete("/api/admin/background-video")
+async def admin_delete_background_video(request: Request) -> JSONResponse:
+    _require_admin(request)
+    lib = await get_library()
+    bg = lib.get("settings", {}).get("background_video") or {}
+    path = bg.get("path", "")
+    if path:
+        try:
+            Path(path).unlink()
+        except Exception:
+            pass
+    if "background_video" in lib.get("settings", {}):
+        lib["settings"].pop("background_video", None)
+        await put_library(lib)
+    if state.background_playing:
+        state.background_playing = False
+        state.vlc_volume = state.user_volume_before_bg
+        await vlc("pl_stop")
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/admin/background-video/volume")
+async def admin_set_background_volume(request: Request, req: BackgroundVolumeReq) -> JSONResponse:
+    _require_admin(request)
+    capped = max(0, min(200, int(req.volume)))
+    lib = await get_library()
+    bg_settings = lib.setdefault("settings", {}).setdefault("background_video", {})
+    bg_settings["volume"] = capped
+    await put_library(lib)
+    # Apply the new volume live if bg is on screen right now
+    if state.background_playing:
+        cap = await _global_max_volume()
+        applied = min(capped, cap)
+        raw = max(0, min(512, round(applied / 100 * 256)))
+        await vlc("volume", val=str(raw))
+        state.vlc_volume = applied
+        await broadcast("state", state_snapshot())
+    return JSONResponse({"ok": True, "volume": capped})
+
+
+@app.post("/api/admin/background-video/enabled")
+async def admin_set_background_enabled(request: Request, req: BackgroundEnabledReq) -> JSONResponse:
+    _require_admin(request)
+    lib = await get_library()
+    bg_settings = lib.setdefault("settings", {}).setdefault("background_video", {})
+    bg_settings["enabled"] = bool(req.enabled)
+    await put_library(lib)
+    if not req.enabled and state.background_playing:
+        state.background_playing = False
+        state.vlc_volume = state.user_volume_before_bg
+        await vlc("pl_stop")
+    return JSONResponse({"ok": True, "enabled": bool(req.enabled)})
 
 
 # ── Routes: Offline / Handoff to Device ──────────────────────────────────────

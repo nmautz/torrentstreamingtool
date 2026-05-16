@@ -118,6 +118,7 @@
 - [x] **6.2** Content Lock: "admin-only" flag on library items, hidden from standard profiles
 - [x] **6.3** Profile PINs: optional 4-digit PIN per profile, prompted before access
 - [x] **6.4** Indexer Management: admin UI to view/add/remove Jackett indexers without editing `.env`
+- [x] **6.5** Idle Background Video: admin uploads a single video file (saved under `.background/`) that plays on the TV in VLC whenever nothing else is. Admin-tunable volume. Replaced automatically the moment any stream or library item starts; resumed by `background_video_loop` whenever VLC reports stopped/idle. Settings live under `library.json → settings.background_video`.
 
 ---
 
