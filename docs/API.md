@@ -66,10 +66,10 @@ Up to 6 profiles. No passwords. Optional 4-digit PIN per profile.
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/api/library?profile_id=…` | List items. Filters out `admin_only` items unless admin OR `profile.elevated`. Adds `resume` hint per item |
+| GET | `/api/library?profile_id=…` | List items. Filters out `admin_only` items unless admin OR `profile.elevated`. Adds `resume` hint and `hidden: bool` (per-profile visibility) per item |
 | GET | `/api/library/{id}/files?profile_id=…` | Per-file list with progress |
 | POST | `/api/library/prepare` | `{magnet, title}` → file list for the precision-selection picker (no `state.prepare_hash` side effect) |
-| POST | `/api/library/download` | `{magnet, title, series, season, episode, save_path, torrent_hash, selected_file_indices[]}` |
+| POST | `/api/library/download` | `{magnet, title, series, season, episode, save_path, torrent_hash, selected_file_indices[], default_visible_profiles[]}` — `default_visible_profiles` is optional; if non-empty, only those profile IDs see the item in the main list by default (others see it in the hidden tab) |
 | POST | `/api/library/upload` | multipart: `files[]`, `title`, `series`, `season`, `episode`, `save_path` — direct upload of local video files |
 | DELETE | `/api/library/{id}?delete_file=true` | Remove item; optionally also delete files from disk via qBit |
 | POST | `/api/library/{id}/play` | `{profile_id, files[], seek_first_to?}` → start VLC playback (resolves resume + applies resume_mode) |
@@ -164,6 +164,7 @@ All require admin auth.
 | GET | `/api/admin/indexers/{id}/config` | Indexer config schema for setup form |
 | POST | `/api/admin/indexers/{id}/config` | Persist indexer config (POSTs through to Jackett) |
 | DELETE | `/api/admin/indexers/{id}` | Remove indexer from Jackett |
+| POST | `/api/library/{id}/visibility` | `{profile_id, hidden: bool}` — toggle per-profile visibility. `hidden=true` moves the item to the user's hidden tab; `hidden=false` restores it to the main list. Distinct from `admin_only` (admin content lock) |
 | POST | `/api/library/{id}/admin-lock` | `{admin_only}` |
 | GET | `/api/admin/library/{id}/skip-data` | Per-file intro/credits times for the editor |
 | PATCH | `/api/admin/library/{id}/skip-data` | `{file_path, intro_start?, intro_end?, credits_start?}` — manual override; sets `analysis.source="manual"` |

@@ -2264,6 +2264,12 @@ class DownloadReq(BaseModel):
     save_path: str = ""
     torrent_hash: str = ""          # pre-added hash from /api/library/prepare
     selected_file_indices: list[int] = []  # if non-empty, skip all other files
+    default_visible_profiles: list[str] = []  # if non-empty, only these profiles see it by default
+
+
+class VisibilityReq(BaseModel):
+    profile_id: str
+    hidden: bool
 
 
 class ProfileReq(BaseModel):
@@ -2388,11 +2394,27 @@ async def delete_profile(profile_id: str) -> JSONResponse:
     lib["profiles"] = [p for p in lib["profiles"] if p["id"] != profile_id]
     for item in lib["items"]:
         item.get("progress", {}).pop(profile_id, None)
+        hvp = item.get("hidden_by_profiles", [])
+        if profile_id in hvp:
+            hvp.remove(profile_id)
+        dvp = item.get("default_visible_profiles", [])
+        if profile_id in dvp:
+            dvp.remove(profile_id)
     await put_library(lib)
     return JSONResponse({"ok": True})
 
 
 # ── Routes: Library ───────────────────────────────────────────────────────────
+
+def _item_hidden_for_profile(item: dict, profile_id: str) -> bool:
+    """Return True if this item should appear in the user's hidden tab."""
+    if not profile_id:
+        return False
+    if profile_id in item.get("hidden_by_profiles", []):
+        return True
+    dvp = item.get("default_visible_profiles", [])
+    return bool(dvp) and profile_id not in dvp
+
 
 @app.get("/api/library")
 async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
@@ -2426,6 +2448,7 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
             "torrent_hash": it.get("torrent_hash", ""),
             "resume": resume,
             "first_file": first_file,
+            "hidden": _item_hidden_for_profile(it, profile_id),
         })
     items.sort(key=lambda x: (
         x["series"] or "\xff" + x["title"],
@@ -2537,6 +2560,8 @@ async def library_download(req: DownloadReq) -> JSONResponse:
         "status": "downloading",
         "torrent_hash": "",
         "progress": {},
+        "default_visible_profiles": req.default_visible_profiles,
+        "hidden_by_profiles": [],
     }
     lib["items"].append(item)
     await put_library(lib)
@@ -2561,6 +2586,33 @@ async def delete_library_item(item_id: str, delete_file: bool = True) -> JSONRes
     if h:
         await qbit_delete(h, delete_files=delete_file)
     lib["items"] = [it for it in lib["items"] if it["id"] != item_id]
+    await put_library(lib)
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/library/{item_id}/visibility")
+async def set_item_visibility(item_id: str, req: VisibilityReq) -> JSONResponse:
+    """Toggle per-profile visibility. hidden=true moves item to the user's hidden tab;
+    hidden=false restores it to the main list."""
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    pid = req.profile_id
+    hidden_by: list = item.setdefault("hidden_by_profiles", [])
+    default_visible: list = item.setdefault("default_visible_profiles", [])
+    if req.hidden:
+        # Move to hidden: remove from explicit visible list (if present), else add to hidden list
+        if default_visible and pid in default_visible:
+            default_visible.remove(pid)
+        elif pid not in hidden_by:
+            hidden_by.append(pid)
+    else:
+        # Move to visible: remove from hidden list; if still restricted by default, grant access
+        if pid in hidden_by:
+            hidden_by.remove(pid)
+        if default_visible and pid not in default_visible:
+            default_visible.append(pid)
     await put_library(lib)
     return JSONResponse({"ok": True})
 

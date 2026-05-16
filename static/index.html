@@ -475,6 +475,12 @@
         </div>
       </div>
 
+      <!-- Visible to (hidden when only 1 profile) -->
+      <div id="dlVisibilityRow" class="hidden">
+        <div class="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-2">Visible to</div>
+        <div id="dlVisibilityProfiles" class="flex flex-wrap gap-2"></div>
+      </div>
+
       <div class="text-[11px] text-gray-500 bg-gray-800/50 px-3 py-2.5 border-l-4 border-indigo-900">
         Files download in the background. Track progress in the Library tab.
       </div>
@@ -891,6 +897,13 @@
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                 d="M7 16a4 4 0 01-.88-7.903A5 5 0 1115.9 6L16 6a5 5 0 011 9.9M15 13l-3-3m0 0l-3 3m3-3v12"/>
             </svg>Upload
+          </button>
+          <button id="libHiddenToggle" onclick="toggleLibHiddenView()"
+            class="hidden text-xs text-gray-600 hover:text-gray-300 transition-colors flex items-center gap-1 font-bold uppercase tracking-wide">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"/>
+            </svg><span id="libHiddenToggleLabel">Hidden</span>
           </button>
           <button onclick="loadLibrary()"
             class="text-xs text-gray-600 hover:text-gray-300 transition-colors flex items-center gap-1 font-bold uppercase tracking-wide">
@@ -1452,6 +1465,7 @@ let profile      = { id:"", name:"", color:"indigo" };
 let allProfiles  = [];
 let globalMaxVolume = 200;   // global VLC volume cap (0-200); fetched at startup
 let activeTab    = "search";
+let libShowHidden = false;   // true = library shows hidden items instead of main list
 let selectedColor = "indigo";
 let downloadTarget = null;
 // Episode picker state
@@ -2349,32 +2363,93 @@ async function loadDiskSpace(){
 
 function watchPctOf(prog){ return (!prog||!prog.duration_sec)?0:Math.round(prog.position_sec/prog.duration_sec*100); }
 
+async function toggleItemVisibility(itemId,makeHidden){
+  if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
+  const r=await fetch(`/api/library/${itemId}/visibility`,{
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({profile_id:profile.id,hidden:makeHidden}),
+  });
+  if(r.ok) loadLibrary();
+  else showAlert("Could not update visibility.","error");
+}
+
+function toggleLibHiddenView(){
+  libShowHidden=!libShowHidden;
+  loadLibrary();
+}
+
 function renderLibrary(items){
   const el=document.getElementById("libraryContent");
-  if(!items.length){
-    el.innerHTML=`
-      <div class="flex flex-col items-center justify-center py-20 text-center">
-        <div class="w-16 h-16 bg-gray-800 border border-gray-700 flex items-center justify-center mb-4">
-          <svg class="w-8 h-8 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 3v18l7-3 7 3V3H5z"/>
-          </svg>
-        </div>
-        <p class="text-gray-500 font-medium">No downloads yet</p>
-        <p class="text-gray-700 text-xs mt-1">Click ↓ on any search result to save for later</p>
-      </div>`; return;
+
+  // Split into visible and hidden based on the hidden flag from the API
+  const visibleItems=items.filter(i=>!i.hidden);
+  const hiddenItems=items.filter(i=>i.hidden);
+
+  // Compute effective view without mutating libShowHidden (it's the user's manual toggle choice
+  // and must not bleed across profile switches):
+  // - Only hidden items available → force hidden view
+  // - Only visible items available → force visible view
+  // - Both available → respect user's libShowHidden toggle
+  const effectiveShowHidden =
+    hiddenItems.length > 0 && visibleItems.length === 0 ? true :
+    hiddenItems.length === 0                            ? false :
+    libShowHidden;
+
+  // Show/hide the toggle only when both lists are non-empty (otherwise nothing to toggle to)
+  const toggleBtn=document.getElementById("libHiddenToggle");
+  const toggleLabel=document.getElementById("libHiddenToggleLabel");
+  if(hiddenItems.length>0 && visibleItems.length>0){
+    toggleBtn.classList.remove("hidden");
+    toggleBtn.classList.add("flex");
+    const label=effectiveShowHidden?`Visible (${visibleItems.length})`:`Hidden (${hiddenItems.length})`;
+    toggleLabel.textContent=label;
+    toggleBtn.classList.toggle("text-indigo-400",effectiveShowHidden);
+    toggleBtn.classList.toggle("text-gray-600",!effectiveShowHidden);
+  } else {
+    toggleBtn.classList.add("hidden");
+    toggleBtn.classList.remove("flex");
+  }
+
+  // Pick which set to render
+  const renderItems=effectiveShowHidden?hiddenItems:visibleItems;
+
+  if(!renderItems.length){
+    el.innerHTML=effectiveShowHidden
+      ?`<div class="flex flex-col items-center justify-center py-16 text-center">
+          <p class="text-gray-500 font-medium">No hidden items</p>
+        </div>`
+      :`<div class="flex flex-col items-center justify-center py-20 text-center">
+          <div class="w-16 h-16 bg-gray-800 border border-gray-700 flex items-center justify-center mb-4">
+            <svg class="w-8 h-8 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M5 3v18l7-3 7 3V3H5z"/>
+            </svg>
+          </div>
+          <p class="text-gray-500 font-medium">No downloads yet</p>
+          <p class="text-gray-700 text-xs mt-1">Click ↓ on any search result to save for later</p>
+        </div>`;
+    return;
+  }
+
+  let html="";
+  if(effectiveShowHidden){
+    const onlyHidden=visibleItems.length===0;
+    html+=`<div class="mb-4 px-3 py-2 bg-gray-800/60 border-l-4 border-gray-600 text-[11px] text-gray-500 uppercase tracking-widest">
+      ${onlyHidden
+        ? "These items are hidden from your main list. Click the eye icon next to any item to show it."
+        : "Hidden items — click the eye icon to restore to your main list."}
+    </div>`;
   }
 
   // Group by series. Multi-file items without a series name fall back to the
   // torrent title so the series header is always visible.
   const groups=new Map();
-  items.forEach(item=>{
+  renderItems.forEach(item=>{
     const key=item.series||"\x00"+item.id;
     const label=item.series||(item.file_count>1?item.title:"");
     if(!groups.has(key)) groups.set(key,{label,items:[]});
     groups.get(key).items.push(item);
   });
 
-  let html="";
   groups.forEach(({label,items:gItems})=>{
     if(label){
       html+=`<div class="mb-6">
@@ -2507,6 +2582,31 @@ function renderLibrary(items){
             <path stroke-linecap="round" stroke-linejoin="round" d="M12 6V3m0 0L9 6m3-3l3 3M6 12H3m0 0l3-3m-3 3l3 3m12-3h3m0 0l-3-3m3 3l-3 3M12 18v3m0 0l-3-3m3 3l3-3"/>
           </svg>
         </button>`;
+      }
+
+      // Hide/show eye button (per-profile; only when a profile is active)
+      if(profile.id){
+        if(item.hidden){
+          buttons+=`<button onclick="toggleItemVisibility('${item.id}',false)"
+            title="Show in main list"
+            class="text-gray-500 hover:text-indigo-300 p-2.5 hover:bg-indigo-950/40 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+            </svg>
+          </button>`;
+        } else {
+          buttons+=`<button onclick="toggleItemVisibility('${item.id}',true)"
+            title="Hide for me"
+            class="text-gray-600 hover:text-gray-400 p-2.5 hover:bg-gray-800/60 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"/>
+            </svg>
+          </button>`;
+        }
       }
 
       // Delete button (fixed width, doesn't flex-grow)
@@ -3507,8 +3607,27 @@ async function openDownloadModal(magnet,title){
     .replace(/[._-]+/g," ").trim();
   document.getElementById("dlSeries").value=epMatch?seriesGuess:"";
 
+  renderDlVisibilityProfiles();
   document.getElementById("downloadModal").classList.remove("hidden");
   document.getElementById("dlSeries").focus();
+}
+
+function renderDlVisibilityProfiles(){
+  const row=document.getElementById("dlVisibilityRow");
+  const container=document.getElementById("dlVisibilityProfiles");
+  if(!allProfiles||allProfiles.length<2){ row.classList.add("hidden"); return; }
+  row.classList.remove("hidden");
+  const colorMap={indigo:"bg-indigo-600",purple:"bg-purple-600",green:"bg-green-600",red:"bg-red-600",orange:"bg-orange-500",pink:"bg-pink-600"};
+  container.innerHTML=allProfiles.map(p=>{
+    const bg=colorMap[p.color]||"bg-indigo-600";
+    return `<label class="flex items-center gap-1.5 cursor-pointer select-none group">
+      <input type="checkbox" class="dl-vis-cb w-3.5 h-3.5 accent-indigo-500 cursor-pointer" data-profile-id="${p.id}" checked/>
+      <div class="w-4 h-4 ${bg} flex items-center justify-center text-[8px] font-black text-white flex-shrink-0">
+        ${escHtml(p.name.charAt(0).toUpperCase())}
+      </div>
+      <span class="text-[11px] text-gray-400 group-hover:text-gray-200 transition-colors">${escHtml(p.name)}</span>
+    </label>`;
+  }).join("");
 }
 
 function closeDownloadModal(){
@@ -3728,6 +3847,13 @@ async function submitDownload(){
       });
     } else {
       const body={magnet:downloadTarget.magnet,title,series,season,episode,save_path:savePath};
+      // Visibility: empty list = all profiles; non-empty = restricted to those IDs
+      const visCbs=document.querySelectorAll(".dl-vis-cb");
+      if(visCbs.length>0){
+        const checked=Array.from(visCbs).filter(c=>c.checked).map(c=>c.dataset.profileId);
+        const allChecked=checked.length===visCbs.length;
+        body.default_visible_profiles=allChecked?[]:checked;
+      }
       if(_libPickerOpen && _libPrepData){
         const cbs=document.querySelectorAll(".dl-file-cb");
         body.selected_file_indices=Array.from(cbs).filter(c=>c.checked).map(c=>parseInt(c.dataset.index));

@@ -67,6 +67,8 @@ PIN hash is plain SHA-256 of the 4-digit string (no salt). PIN protection is "so
   "torrent_hash": "abc123...",          // empty for uploaded items
   "progress": { /* per-profile; see below */ },
   "admin_only": false,                  // optional; hides from non-elevated profiles
+  "default_visible_profiles": [],       // optional; if non-empty, only these profile IDs see item by default
+  "hidden_by_profiles": [],            // optional; profile IDs that personally hid this item
   "skip_data": { /* per-file; see below */ },
   "metadata": { /* optional; TMDb cache — see below */ }
 }

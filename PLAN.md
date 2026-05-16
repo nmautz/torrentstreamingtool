@@ -165,3 +165,13 @@ device that quits playback abruptly resumes from the right spot on next play.
 
 ---
 
+## Milestone 14 — Per-Profile Visibility
+
+- [x] **14.1** Per-profile default visibility: when downloading a torrent the user can uncheck profiles who should not see it by default. Stored as `default_visible_profiles` on the library item. If empty, item is visible to all.
+- [x] **14.2** Hidden tab: profiles excluded by default (or who personally hide an item) see it in a "Hidden (N)" tab in the Library. The tab toggle shows/hides that view.
+- [x] **14.3** Per-item hide/show button (eye icon): any profile can hide a visible item (moves it to their hidden tab) or restore a hidden item to the main list. Distinct from admin content lock.
+- [x] **14.4** `POST /api/library/{id}/visibility` endpoint: `{profile_id, hidden}`. Stores overrides in `default_visible_profiles` / `hidden_by_profiles` on the library item.
+- [x] **14.5** Profile deletion cleans up visibility lists across all library items.
+
+---
+
