@@ -8,6 +8,8 @@ Off-LAN clients must clear three checks before any `/api/*` route responds:
 
 All three are enforced by a single FastAPI middleware: `network_access_gate` in `main.py`.
 
+The admin panel also exposes a **Remote Access tab** that lets an admin flip the gate on/off without editing `.env`. Disable kicks every active remote session immediately. The same tab surfaces a requirements checklist (password set, cert present, HTTPS process listening on 443) and refuses to let the toggle flip to *enable* until everything's green.
+
 ## Settings (`.env`)
 
 | Key | Default | Notes |
@@ -23,9 +25,11 @@ All three are enforced by a single FastAPI middleware: `network_access_gate` in 
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/api/site/status` | Always reachable. Returns `{enabled, is_local, authenticated, session_minutes}`. |
-| POST | `/api/site/login` | Body: `{password}`. Sets `streamlink_site` cookie (HttpOnly, Secure when over HTTPS, SameSite=Lax, `Path=/`, `Max-Age=session_minutes*60`). Brute-force protected. |
+| GET | `/api/site/status` | Always reachable. Returns `{enabled, is_local, authenticated, session_minutes}`. `enabled` reflects both `SITE_PASSWORD` and the admin toggle. |
+| POST | `/api/site/login` | Body: `{password}`. Sets `streamlink_site` cookie (HttpOnly, Secure when over HTTPS, SameSite=Lax, `Path=/`, `Max-Age=session_minutes*60`). Brute-force protected. 503 if admin has disabled the gate. |
 | POST | `/api/site/logout` | Revokes the token server-side and clears the cookie. |
+| GET | `/api/admin/remote-access` | **Admin (LAN-only).** `{admin_enabled, ready, active, session_minutes, requirements:{password_set, cert_present, https_listening}}`. |
+| POST | `/api/admin/remote-access` | **Admin (LAN-only).** Body: `{enabled: bool}`. Persists the toggle to `library.json` → `settings.admin_overrides.remote_access_enabled`. Disable also clears every active site session immediately. |
 
 ## Brute-force protection
 

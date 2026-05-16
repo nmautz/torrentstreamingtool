@@ -84,7 +84,21 @@ Endpoints:
 - `DELETE /api/admin/offline-cache/orphans` → `{deleted_count, bytes_freed}`
 - `DELETE /api/admin/library/{item_id}/offline-cache` → `{deleted_count, bytes_freed}`
 
-### 5. Profile PINs ([static/admin.html:182](../static/admin.html#L182))
+### 5. Remote Access
+
+Single-screen UI for the off-LAN gate described in [SITE_AUTH.md](SITE_AUTH.md).
+
+- **Toggle card** — big Enable / Disable button. Disable is always allowed (and clears every active remote session). Enable is disabled (greyed out) unless every requirement below is green.
+- **Requirements list** — three rows with green/red status pills:
+  - `password_set` — `SITE_PASSWORD` resolved from `.env`
+  - `cert_present` — `cert.pem` and `key.pem` both exist in the repo root
+  - `https_listening` — TCP probe to `127.0.0.1:443` succeeds (the HTTPS uvicorn process is launched by `run.py`, not the dashboard process, so we probe)
+  - Each red row includes a one-line fix hint
+- **Session card** — shows the `SITE_SESSION_MINUTES` value the cookie's `Max-Age` is set to.
+
+Endpoints: `GET /api/admin/remote-access`, `POST /api/admin/remote-access {enabled}`. The toggle is persisted in `library.json` → `settings.admin_overrides.remote_access_enabled` (default `true`).
+
+### 6. Profile PINs ([static/admin.html:182](../static/admin.html#L182))
 
 For each profile:
 - **Set PIN** — admin overrides the usual current-PIN check

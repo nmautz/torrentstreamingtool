@@ -340,6 +340,61 @@ def _login_lockout_remaining(ip: str) -> int:
     return max(remaining, 0)
 
 
+# ── Remote Access: admin toggle + requirements probe ─────────────────────────
+
+def _cert_files_present() -> bool:
+    base = Path(__file__).parent
+    return (base / "cert.pem").exists() and (base / "key.pem").exists()
+
+
+async def _https_listening_locally(timeout: float = 0.5) -> bool:
+    """Heuristic: try a TCP connect to 127.0.0.1:443. The HTTPS uvicorn process
+    is launched by run.py (not this process), so probing the socket is the only
+    way to tell from main.py whether it actually came up."""
+    try:
+        fut = asyncio.open_connection("127.0.0.1", 443)
+        _, writer = await asyncio.wait_for(fut, timeout=timeout)
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+        return True
+    except Exception:
+        return False
+
+
+async def _remote_access_admin_enabled() -> bool:
+    """The admin-panel toggle. Default True (no override = enabled, matching
+    pre-toggle behaviour). Disabled overrides cause the middleware to 503
+    every remote /api/* request even if a valid site token is presented."""
+    lib = await get_library()
+    overrides = lib.get("settings", {}).get("admin_overrides", {})
+    return bool(overrides.get("remote_access_enabled", True))
+
+
+async def _remote_access_status_payload() -> dict:
+    """Single source of truth for the admin panel + /api/site/status. Reports
+    the toggle state and a checklist of every requirement that must hold for
+    remote access to actually work end-to-end."""
+    admin_enabled = await _remote_access_admin_enabled()
+    password_set  = bool(settings.site_password)
+    cert_present  = _cert_files_present()
+    https_up      = await _https_listening_locally()
+    ready = password_set and cert_present and https_up
+    return {
+        "admin_enabled":   admin_enabled,
+        "ready":           ready,
+        "active":          admin_enabled and ready,
+        "session_minutes": int(settings.site_session_minutes),
+        "requirements": {
+            "password_set":    password_set,
+            "cert_present":    cert_present,
+            "https_listening": https_up,
+        },
+    }
+
+
 # ── Admin Auth ────────────────────────────────────────────────────────────────
 
 def _check_admin(request: Request) -> bool:
@@ -1908,6 +1963,11 @@ async def network_access_gate(request: Request, call_next):
                 {"detail": "Remote access disabled (SITE_PASSWORD not set)."},
                 status_code=503,
             )
+        if not await _remote_access_admin_enabled():
+            return JSONResponse(
+                {"detail": "Remote access has been disabled by the administrator."},
+                status_code=503,
+            )
         if not _check_site_token(request):
             return JSONResponse(
                 {"detail": "Site authentication required."},
@@ -1981,6 +2041,10 @@ class AdminItemLockReq(BaseModel):
 
 class AdminSettingsReq(BaseModel):
     indexer_categories: Optional[str] = None
+
+
+class AdminRemoteAccessReq(BaseModel):
+    enabled: bool
 
 
 class ProfilePinReq(BaseModel):
@@ -3320,9 +3384,10 @@ def _site_session_seconds() -> int:
 @app.get("/api/site/status")
 async def site_status(request: Request) -> JSONResponse:
     """Bootstrap info for the login overlay. Safe to call from anywhere."""
-    is_local = _is_local_request(request)
+    is_local      = _is_local_request(request)
+    admin_enabled = await _remote_access_admin_enabled()
     return JSONResponse({
-        "enabled":         bool(settings.site_password),
+        "enabled":         bool(settings.site_password) and admin_enabled,
         "is_local":        is_local,
         "authenticated":   is_local or _check_site_token(request),
         "session_minutes": int(settings.site_session_minutes),
@@ -3339,6 +3404,8 @@ async def site_login(request: Request, req: SiteLoginReq) -> JSONResponse:
     """
     if not settings.site_password:
         raise HTTPException(503, "Remote access is disabled (SITE_PASSWORD not set).")
+    if not await _remote_access_admin_enabled():
+        raise HTTPException(503, "Remote access has been disabled by the administrator.")
 
     ip = _client_ip(request) or "unknown"
     lock = _login_lockout_remaining(ip)
@@ -3525,6 +3592,30 @@ async def admin_update_settings(request: Request, req: AdminSettingsReq) -> JSON
         overrides["indexer_categories"] = req.indexer_categories.strip()
     await put_library(lib)
     return JSONResponse({"ok": True})
+
+
+@app.get("/api/admin/remote-access")
+async def admin_get_remote_access(request: Request) -> JSONResponse:
+    """Status payload for the Remote Access admin tab. Reports the toggle
+    state plus a checklist of every requirement that must hold for off-LAN
+    access to actually work end-to-end."""
+    _require_admin(request)
+    return JSONResponse(await _remote_access_status_payload())
+
+
+@app.post("/api/admin/remote-access")
+async def admin_set_remote_access(request: Request, req: AdminRemoteAccessReq) -> JSONResponse:
+    """Toggle the off-LAN access gate. Disable also kicks every active remote
+    session — the next request from each is 503'd immediately, not waiting
+    for the cookie's TTL to expire."""
+    _require_admin(request)
+    lib = await get_library()
+    overrides = lib.setdefault("settings", {}).setdefault("admin_overrides", {})
+    overrides["remote_access_enabled"] = bool(req.enabled)
+    await put_library(lib)
+    if not req.enabled:
+        _site_sessions.clear()
+    return JSONResponse(await _remote_access_status_payload())
 
 
 @app.post("/api/library/{item_id}/admin-lock")

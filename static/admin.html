@@ -90,6 +90,10 @@
       class="tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors">
       Offline Cache
     </button>
+    <button onclick="switchTab('remote')" id="tab-remote"
+      class="tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors">
+      Remote Access
+    </button>
   </div>
 
   <!-- Toast -->
@@ -232,6 +236,58 @@
         </button>
       </div>
       <div id="offOrphanList" class="divide-y divide-gray-800"></div>
+    </div>
+  </div>
+
+  <!-- ── Remote Access Tab ───────────────────────────────────────────────────── -->
+  <div id="panelRemote" class="hidden flex-1 overflow-y-auto p-5 max-w-2xl mx-auto w-full space-y-4">
+    <!-- Toggle card -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-sm font-black uppercase tracking-wide">Remote Access</h2>
+          <p class="text-xs text-gray-500 mt-0.5">Allow this dashboard to be reached from outside the local network. LAN clients are unaffected.</p>
+        </div>
+        <button onclick="loadRemoteAccess()"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 hover:text-white text-gray-400 transition-colors">
+          Refresh
+        </button>
+      </div>
+      <div class="px-5 py-5 flex items-center justify-between gap-4">
+        <div class="min-w-0">
+          <div id="raToggleLabel" class="text-base font-black uppercase tracking-wide">…</div>
+          <div id="raToggleSub" class="text-xs text-gray-500 mt-1">Loading status…</div>
+        </div>
+        <button id="raToggleBtn" onclick="toggleRemoteAccess()"
+          disabled
+          class="flex-shrink-0 min-w-[120px] text-sm font-black uppercase tracking-wide px-5 py-3 border bg-gray-800 border-gray-700 text-gray-500 transition-colors disabled:opacity-60 disabled:cursor-not-allowed">
+          …
+        </button>
+      </div>
+      <div id="raBlockedNotice" class="hidden px-5 py-3 border-t border-amber-900/60 bg-amber-950/40 text-amber-200 text-xs font-bold uppercase tracking-wide">
+        Cannot enable — fix the requirements below first.
+      </div>
+    </div>
+
+    <!-- Requirements card -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800">
+        <h3 class="text-sm font-black uppercase tracking-wide">Requirements</h3>
+        <p class="text-xs text-gray-500 mt-0.5">All three must be green for off-LAN clients to actually reach the dashboard.</p>
+      </div>
+      <div id="raReqList" class="divide-y divide-gray-800"></div>
+    </div>
+
+    <!-- Session info -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800">
+        <h3 class="text-sm font-black uppercase tracking-wide">Session</h3>
+        <p class="text-xs text-gray-500 mt-0.5">After a successful site login, the remote client carries an HttpOnly cookie for this long.</p>
+      </div>
+      <div class="px-5 py-4 flex items-center justify-between gap-3">
+        <span class="text-xs text-gray-500 uppercase tracking-widest font-bold">Session TTL</span>
+        <span id="raSessionTtl" class="text-sm font-mono font-bold text-indigo-300">…</span>
+      </div>
     </div>
   </div>
 
@@ -423,7 +479,7 @@ async function loadOfflineEncoder(){
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 function switchTab(tab){
   activeTab = tab;
-  ["indexers","content","profiles","skip","offline"].forEach(t=>{
+  ["indexers","content","profiles","skip","offline","remote"].forEach(t=>{
     document.getElementById(`tab-${t}`).className =
       t===tab ? "tab-active px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors"
                : "tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors";
@@ -433,6 +489,7 @@ function switchTab(tab){
   if(tab==="profiles") loadProfilePins();
   if(tab==="skip")     loadSkipPanel();
   if(tab==="offline")  loadOfflineCache();
+  if(tab==="remote")   loadRemoteAccess();
 }
 
 // ── Smart Skip ────────────────────────────────────────────────────────────────
@@ -1306,6 +1363,114 @@ async function saveIndexerConfig(){
     errEl.textContent = d.detail || "Failed to add indexer.";
     errEl.classList.remove("hidden");
   }
+}
+
+// ── Remote Access ─────────────────────────────────────────────────────────────
+const RA_REQ_LABELS = {
+  password_set:    {label:"Site password is set",      hint:"Set <code class='font-mono text-gray-400'>SITE_PASSWORD</code> in <code class='font-mono text-gray-400'>.env</code> and restart the dashboard."},
+  cert_present:    {label:"SSL certificate present",   hint:"<code class='font-mono text-gray-400'>cert.pem</code> + <code class='font-mono text-gray-400'>key.pem</code> must exist in the repo root. Re-run <code class='font-mono text-gray-400'>setup.py</code> to generate them."},
+  https_listening: {label:"HTTPS server on port 443",  hint:"The HTTPS uvicorn process must be running. Re-launch via <code class='font-mono text-gray-400'>run.py</code>; on macOS/Linux ports &lt; 1024 need root."},
+};
+
+let _raStatus = null;
+
+async function loadRemoteAccess(){
+  const r = await fetch("/api/admin/remote-access",{headers:authHeader()});
+  if(!r.ok){
+    showToast("Failed to load remote-access status.", true);
+    return;
+  }
+  _raStatus = await r.json();
+  renderRemoteAccess(_raStatus);
+}
+
+function renderRemoteAccess(d){
+  // Toggle card
+  const label  = document.getElementById("raToggleLabel");
+  const sub    = document.getElementById("raToggleSub");
+  const btn    = document.getElementById("raToggleBtn");
+  const notice = document.getElementById("raBlockedNotice");
+
+  if(d.admin_enabled && d.ready){
+    label.textContent = "Enabled · Active";
+    label.className   = "text-base font-black uppercase tracking-wide text-emerald-400";
+    sub.textContent   = "Off-LAN clients can reach the dashboard over HTTPS after entering the site password.";
+  } else if(d.admin_enabled && !d.ready){
+    label.textContent = "Enabled · Misconfigured";
+    label.className   = "text-base font-black uppercase tracking-wide text-amber-400";
+    sub.textContent   = "Toggle is on, but one or more requirements below are not met. Off-LAN clients will see a connection or 503 error.";
+  } else {
+    label.textContent = "Disabled";
+    label.className   = "text-base font-black uppercase tracking-wide text-gray-400";
+    sub.textContent   = "Off-LAN /api requests return 503. The admin panel is always reachable from the LAN.";
+  }
+
+  btn.disabled = false;
+  if(d.admin_enabled){
+    btn.textContent = "Disable";
+    btn.className   = "flex-shrink-0 min-w-[120px] text-sm font-black uppercase tracking-wide px-5 py-3 border bg-red-950 border-red-800 text-red-200 hover:bg-red-900 transition-colors";
+  } else {
+    btn.textContent = "Enable";
+    btn.className   = "flex-shrink-0 min-w-[120px] text-sm font-black uppercase tracking-wide px-5 py-3 border bg-emerald-900 border-emerald-700 text-emerald-100 hover:bg-emerald-800 transition-colors";
+    // Block enabling when requirements aren't met — server would honour the
+    // toggle but off-LAN access still wouldn't work, so make the failure
+    // explicit instead of letting the user toggle into a broken state.
+    if(!d.ready){
+      btn.disabled = true;
+      btn.className = "flex-shrink-0 min-w-[120px] text-sm font-black uppercase tracking-wide px-5 py-3 border bg-gray-800 border-gray-700 text-gray-500 transition-colors cursor-not-allowed";
+    }
+  }
+  notice.classList.toggle("hidden", d.admin_enabled || d.ready);
+
+  // Requirements list
+  const list = document.getElementById("raReqList");
+  list.innerHTML = "";
+  for(const [key, meta] of Object.entries(RA_REQ_LABELS)){
+    const ok = !!(d.requirements && d.requirements[key]);
+    const row = document.createElement("div");
+    row.className = "px-5 py-4 flex items-start gap-4";
+    row.innerHTML = `
+      <span class="flex-shrink-0 inline-block w-3 h-3 mt-1.5 ${ok ? "bg-emerald-500" : "bg-red-500"}" aria-hidden="true"></span>
+      <div class="min-w-0 flex-1">
+        <div class="text-sm font-bold ${ok ? "text-emerald-300" : "text-red-300"} uppercase tracking-wide">${escHtml(meta.label)}</div>
+        ${ok ? "" : `<div class="text-xs text-gray-400 mt-1">${meta.hint}</div>`}
+      </div>
+      <span class="flex-shrink-0 text-[10px] font-bold uppercase tracking-widest px-2 py-1 border ${ok ? "bg-emerald-950 border-emerald-700 text-emerald-300" : "bg-red-950 border-red-700 text-red-300"}">${ok ? "OK" : "Missing"}</span>
+    `;
+    list.appendChild(row);
+  }
+
+  // Session info
+  document.getElementById("raSessionTtl").textContent =
+    `${d.session_minutes||0} min`;
+}
+
+async function toggleRemoteAccess(){
+  if(!_raStatus) return;
+  const want = !_raStatus.admin_enabled;
+  if(want && !_raStatus.ready){
+    showToast("Resolve missing requirements before enabling.", true);
+    return;
+  }
+  const btn = document.getElementById("raToggleBtn");
+  btn.disabled = true;
+  const orig = btn.textContent;
+  btn.textContent = want ? "Enabling…" : "Disabling…";
+  const r = await fetch("/api/admin/remote-access",{
+    method:"POST",
+    headers:{...authHeader(),"Content-Type":"application/json"},
+    body: JSON.stringify({enabled: want}),
+  });
+  if(!r.ok){
+    btn.disabled = false;
+    btn.textContent = orig;
+    const d = await r.json().catch(()=>({}));
+    showToast(d.detail || "Toggle failed.", true);
+    return;
+  }
+  _raStatus = await r.json();
+  renderRemoteAccess(_raStatus);
+  showToast(want ? "Remote access enabled." : "Remote access disabled.");
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────────
