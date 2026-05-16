@@ -66,9 +66,13 @@ The frontend stores the per-item summary in `prepStats: Map<itemId,summary>` and
 - Credits window: `t ≥ credits_start - 1`. Show "Skip Credits" / "End" depending on whether there's a next file.
 - Dismissed offers add `<filePath>#intro` / `#credits` to `lp.skipDoneFor` so they don't re-emit.
 
+The offer (`#lpSkipOffer`) renders in the standard full-overlay player (`.lp-active`) and is hidden by CSS when the player is minimized to the floating tile (`.lp-tiny` — see line 126 of `static/index.html`). When the host is online, `_lpLoadIndex` re-fetches `/api/library/{id}/skip-data` and writes the fresh result back into the IndexedDB record, so files that were saved offline before the analyzer ran still surface offers on subsequent plays.
+
 ### Watch progress
 
-`#lpVideoFull`'s `timeupdate` calls `saveProgress(itemId, filePath, posSec, durSec)` at most once every 15 s (matches `vlc_progress_tracker`). Online → POST `/api/library/{id}/progress`. Offline → push to the IndexedDB `outbox` store.
+`#lpVideo`'s `timeupdate` calls `saveProgress(itemId, filePath, posSec, durSec)` at most once every 15 s (matches `vlc_progress_tracker`). Online → POST `/api/library/{id}/progress`. Offline → push to the IndexedDB `outbox` store.
+
+To stop the resume position drifting up to ~15 s behind on tab close, `_lpFlushProgress(useBeacon)` bypasses the throttle and runs at every user-driven exit/transition: `pause`, `seeked`, `visibilitychange`→hidden (fetch), and `pagehide` (`navigator.sendBeacon`, since fetch in-flight at unload is routinely cancelled). `lpStop` and `ended` still flush via `saveProgress` directly.
 
 The window's `online` event fires `outboxFlush()`, which drains the outbox and POSTs each entry. Successful POSTs delete the row.
 
