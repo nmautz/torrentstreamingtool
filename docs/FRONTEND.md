@@ -15,7 +15,7 @@ Metro UI throughout — flat tiles, no rounded corners, bold uppercase typograph
 | 56–73   | VPN-disconnected full-screen overlay (toggled by `renderVpn`) |
 | 75–116  | Profile PIN prompt modal (numpad, hidden keyboard input) |
 | 118–151 | Change PIN modal |
-| 153–218 | Profile settings modal (auto-skip toggles, resume mode, max-volume, change-PIN button) |
+| 153–218 | Profile settings modal (auto-skip toggles, resume mode, global max-volume, change-PIN button) |
 | 220–240 | Profile picker (full-screen on first load) |
 | 242–274 | Profile add/delete modal |
 | 276–372 | Download modal (with metadata fields + file picker) |
@@ -72,7 +72,7 @@ Single `EventSource('/api/events')`. Handlers:
 
 ### Volume
 
-VLC's volume slider is debounced — `oninput="updateVolumeDisplay"` updates label only, `onmouseup`/`ontouchend="vlcSetVolume"` sends the actual request. This was a fix for VLC lag when scrubbing the slider. Hard cap from the active profile's `max_volume`; `applyMaxVolumeToSliders` enforces this when a profile is selected.
+VLC's volume slider is debounced — `oninput="updateVolumeDisplay"` updates label only, `onmouseup`/`ontouchend="vlcSetVolume"` sends the actual request. This was a fix for VLC lag when scrubbing the slider. Hard cap is the global `settings.max_volume` (fetched once at startup into `globalMaxVolume`, also refreshed when the profile-settings modal opens); `applyMaxVolumeToSliders` enforces it on the slider `max` attribute.
 
 ### Seek bar
 

@@ -1434,6 +1434,7 @@ const downloadFilesData=new Map();   // item_id → files array (cached from /fi
 const libDownloadStats = new Map(); // item_id → latest library_progress payload
 let profile      = { id:"", name:"", color:"indigo" };
 let allProfiles  = [];
+let globalMaxVolume = 200;   // global VLC volume cap (0-200); fetched at startup
 let activeTab    = "search";
 let selectedColor = "indigo";
 let downloadTarget = null;
@@ -1794,8 +1795,7 @@ function handleSeekBarLeave(){
 }
 
 function _maxVol(){
-  const m = profile && profile.max_volume;
-  return (m==null) ? 200 : Math.max(0,Math.min(200,parseInt(m,10)));
+  return Math.max(0,Math.min(200,parseInt(globalMaxVolume,10)||200));
 }
 
 function updateVolumeDisplay(val){
@@ -1812,9 +1812,8 @@ function updateVolumeDisplay(val){
 async function vlcSetVolume(val, slider){
   val=Math.max(0,Math.min(_maxVol(),parseInt(val,10)));
   updateVolumeDisplay(val);
-  const pid = profile && profile.id ? `&profile_id=${encodeURIComponent(profile.id)}` : "";
   await withInflight("volume_set", slider, async () => {
-    await fetch(`/api/vlc/volume/set?volume=${val}${pid}`,{method:"POST"}).catch(()=>{});
+    await fetch(`/api/vlc/volume/set?volume=${val}`,{method:"POST"}).catch(()=>{});
   });
 }
 
@@ -1827,8 +1826,7 @@ async function vlcVolumeStep(delta, btn){
     if(vs)  vs.value=next;
     if(fvs) fvs.value=next;
     updateVolumeDisplay(next);
-    const pid = profile && profile.id ? `&profile_id=${encodeURIComponent(profile.id)}` : "";
-    await fetch(`/api/vlc/volume/set?volume=${next}${pid}`,{method:"POST"}).catch(()=>{});
+    await fetch(`/api/vlc/volume/set?volume=${next}`,{method:"POST"}).catch(()=>{});
   });
 }
 
@@ -1948,15 +1946,13 @@ async function dismissResume(){
 }
 
 async function saveMaxVolume(){
-  if(!profile.id) return;
   const v = Math.max(0,Math.min(200,parseInt(document.getElementById("psMaxVolume").value,10)));
-  const r = await fetch(`/api/profiles/${profile.id}/max-volume`,{
+  const r = await fetch(`/api/settings/max-volume`,{
     method:"POST", headers:{"Content-Type":"application/json"},
     body: JSON.stringify({max_volume: v}),
   }).catch(()=>null);
   if(r && r.ok){
-    profile.max_volume = v;
-    localStorage.setItem("streamlink_profile", JSON.stringify(profile));
+    globalMaxVolume = v;
     // If the current player volume is above the new cap, the server already
     // pushed VLC down; snap our sliders to match so the UI is consistent.
     const vs  = document.getElementById("volumeSlider");
@@ -2131,7 +2127,7 @@ function renderNavProfile(){
   }
 }
 
-// ── Profile settings (per-profile auto-skip toggles) ─────────────────────
+// ── Profile settings (per-profile auto-skip toggles + global max volume) ───
 async function openProfileSettings(){
   if(!profile.id) return;
   document.getElementById("psProfileLabel").textContent = profile.name;
@@ -2142,16 +2138,21 @@ async function openProfileSettings(){
     document.getElementById("psAutoSkipIntro").checked   = !!me.auto_skip_intro;
     document.getElementById("psAutoSkipCredits").checked = !!me.auto_skip_credits;
     document.getElementById("psResumeMode").value = me.resume_mode || "auto";
-    const mv = (me.max_volume==null) ? 200 : Math.max(0,Math.min(200,parseInt(me.max_volume,10)));
-    document.getElementById("psMaxVolume").value = mv;
-    document.getElementById("psMaxVolumeLabel").textContent = mv + "%";
-    profile.max_volume = mv;
   }catch(_){
     document.getElementById("psAutoSkipIntro").checked = false;
     document.getElementById("psAutoSkipCredits").checked = false;
     document.getElementById("psResumeMode").value = "auto";
-    document.getElementById("psMaxVolume").value = 200;
-    document.getElementById("psMaxVolumeLabel").textContent = "200%";
+  }
+  try{
+    const r = await fetch("/api/settings/max-volume");
+    const d = r.ok ? await r.json() : {};
+    const mv = (d.max_volume==null) ? 200 : Math.max(0,Math.min(200,parseInt(d.max_volume,10)));
+    globalMaxVolume = mv;
+    document.getElementById("psMaxVolume").value = mv;
+    document.getElementById("psMaxVolumeLabel").textContent = mv + "%";
+  }catch(_){
+    document.getElementById("psMaxVolume").value = globalMaxVolume;
+    document.getElementById("psMaxVolumeLabel").textContent = globalMaxVolume + "%";
   }
   document.getElementById("profileSettingsModal").classList.remove("hidden");
 }
@@ -5066,6 +5067,14 @@ document.addEventListener("DOMContentLoaded",async()=>{
   // Show admin link if admin is configured
   fetch("/api/admin/status").then(r=>r.json()).then(d=>{
     if(d.enabled) document.getElementById("adminPanelLink").classList.remove("hidden");
+  }).catch(()=>{});
+
+  // Fetch the global max-volume cap so sliders are clamped correctly
+  fetch("/api/settings/max-volume").then(r=>r.ok?r.json():null).then(d=>{
+    if(d && d.max_volume!=null){
+      globalMaxVolume = Math.max(0,Math.min(200,parseInt(d.max_volume,10)));
+      applyMaxVolumeToSliders();
+    }
   }).catch(()=>{});
 
   // Restore profile from localStorage

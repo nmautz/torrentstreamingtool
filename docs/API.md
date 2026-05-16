@@ -61,7 +61,6 @@ Up to 6 profiles. No passwords. Optional 4-digit PIN per profile.
 | POST | `/api/profiles/{id}/set-elevated` | `{elevated}` — admin only; grants view of `admin_only` items |
 | POST | `/api/profiles/{id}/auto-skip` | `{auto_skip_intro?, auto_skip_credits?}` |
 | POST | `/api/profiles/{id}/resume-mode` | `{resume_mode: "auto"|"prompt"|"off"}` |
-| POST | `/api/profiles/{id}/max-volume` | `{max_volume: 0-200}`; immediately enforces if current vol exceeds cap |
 
 ## Library
 
@@ -87,8 +86,8 @@ Up to 6 profiles. No passwords. Optional 4-digit PIN per profile.
 | Method | Path | Notes |
 |--------|------|-------|
 | POST | `/api/vlc/pause` | Toggle |
-| POST | `/api/vlc/volume/set?volume=0-200&profile_id=…` | Sets absolute volume; capped by profile `max_volume` |
-| POST | `/api/vlc/volume/{up\|down}?profile_id=…` | ±10 %, capped by profile |
+| POST | `/api/vlc/volume/set?volume=0-200` | Sets absolute volume; capped by global `settings.max_volume` |
+| POST | `/api/vlc/volume/{up\|down}` | ±10 %, capped by global `settings.max_volume` |
 | POST | `/api/vlc/seek?delta=N` | Relative — `val=±Ns` |
 | POST | `/api/vlc/seek/to?position_pct=N` | Absolute — `val=N%`. NOTE: VLC treats `val=N` (no suffix) as a 0–1 fraction. Don't confuse the two |
 | POST | `/api/vlc/prev` | Previous episode in series order. Uses `library_playlist` then `item.files` |
@@ -146,6 +145,8 @@ The same MP4 is **not** cached by the service worker (videos go in client-side I
 | POST | `/api/settings/library-paths?path=…` | Add a UI-managed path (must be an existing directory) |
 | DELETE | `/api/settings/library-paths?path=…` | Remove a dynamic path (static .env paths cannot be removed via API) |
 | GET | `/api/settings/disk-space` | Per-path `{total_bytes, free_bytes, free_pct}` |
+| GET | `/api/settings/max-volume` | `{max_volume}` — global VLC volume cap (0-200) |
+| POST | `/api/settings/max-volume` | `{max_volume: 0-200}` — immediately enforces if current VLC volume exceeds the new cap |
 
 ## Admin
 

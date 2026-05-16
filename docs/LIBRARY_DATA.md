@@ -10,6 +10,7 @@ The only persistent server-side state. Lives at the project root. Accessed via `
   "items":    [ … ],   // library entries
   "settings": {
     "library_paths": [ … ],            // UI-added paths (POST /api/settings/library-paths)
+    "max_volume": 200,                  // global VLC volume cap 0–200; default 200 (no cap)
     "admin_overrides": {
       "indexer_categories": "0"         // overrides .env INDEXER_CATEGORIES at search time
     }
@@ -28,14 +29,13 @@ The only persistent server-side state. Lives at the project root. Accessed via `
   "elevated": true,                     // optional; can view admin_only items
   "auto_skip_intro":   true,            // optional; default false
   "auto_skip_credits": true,            // optional; default false
-  "resume_mode": "auto|prompt|off",     // default "auto"
-  "max_volume": 100                     // 0–200; default 200 (no cap)
+  "resume_mode": "auto|prompt|off"      // default "auto"
 }
 ```
 
 PIN hash is plain SHA-256 of the 4-digit string (no salt). PIN protection is "soft" — anyone with filesystem access can read the JSON. It's a UI gate, not a security boundary.
 
-`max_volume`: VLC is uncapped (0–200, where 200 % is overdrive). Users with sensitive ears / cheap speakers can cap their profile so they don't accidentally blow their speakers. Enforced server-side in `_profile_max_volume`.
+`settings.max_volume`: VLC is uncapped (0–200, where 200 % is overdrive). Capping it system-wide stops anyone from accidentally blowing the speakers. Lives under `settings` because it applies to the physical playback host, not to individual viewers. Enforced server-side in `_global_max_volume`.
 
 `resume_mode`:
 - `"auto"` (default) — immediately seek to saved position

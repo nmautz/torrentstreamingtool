@@ -29,9 +29,9 @@ Always use `Path(p).resolve().as_uri()` when sending to VLC. This:
 
 ### Volume scale mismatch
 
-VLC uses 0–512 (256 = 100 %). Our API uses 0–200 (100 = normal). Conversion is `raw = volume / 100 * 256`. Profile `max_volume` is also 0–200. `state.vlc_volume` is in our scale.
+VLC uses 0–512 (256 = 100 %). Our API uses 0–200 (100 = normal). Conversion is `raw = volume / 100 * 256`. The global `settings.max_volume` cap is also 0–200. `state.vlc_volume` is in our scale.
 
-`vlc("in_play", ...)` pushes a `volume` command first so VLC's default doesn't blast briefly. Important for users with a low `max_volume` cap.
+`vlc("in_play", ...)` pushes a `volume` command first so VLC's default doesn't blast briefly. Important when the global cap is low.
 
 ### Restart-on-retry
 

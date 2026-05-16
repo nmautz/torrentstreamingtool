@@ -44,7 +44,7 @@
 | 3139–3162 | Route: `/api/events` (SSE) |
 | 3167–3336 | Routes: admin panel (login, indexers, settings, library, content lock) |
 | 3339–3398 | Routes: profile PINs (set/verify, elevated flag) |
-| 3401–3535 | Routes: profile prefs (auto-skip, resume mode, max volume) + skip-now/resume-now |
+| 3401–3535 | Routes: profile prefs (auto-skip, resume mode) + global max-volume setting + skip-now/resume-now |
 | 3538–3611 | Routes: admin Smart Skip (skip-data CRUD, force analyze, analyzer status) |
 | 3615    | `app.mount("/", StaticFiles…)` — must be last so API routes win |
 
