@@ -12,6 +12,7 @@
   <script>tailwind.config = { darkMode: 'class' }</script>
   <style>
     :root { color-scheme: dark; }
+    html, body { overflow-x: hidden; max-width: 100vw; }
     ::-webkit-scrollbar { width: 4px; }
     ::-webkit-scrollbar-track { background: #030712; }
     ::-webkit-scrollbar-thumb { background: #1f2937; }
@@ -721,25 +722,25 @@
 <!-- ── Navbar ─────────────────────────────────────────────────────────────── -->
 <header class="sticky top-0 z-40 bg-gray-950 border-b border-gray-800 flex-shrink-0">
   <div class="safe-top">
-    <div class="max-w-5xl mx-auto px-3">
-      <div class="h-14 flex items-center gap-2">
+    <div class="max-w-5xl mx-auto px-2 sm:px-3">
+      <div class="h-14 flex items-center gap-1 sm:gap-2 min-w-0">
         <!-- Logo -->
-        <div class="font-black text-lg tracking-wide uppercase whitespace-nowrap mr-1">
+        <div class="font-black text-base sm:text-lg tracking-wide uppercase whitespace-nowrap mr-0 sm:mr-1 flex-shrink-0">
           <span class="text-indigo-500">Stream</span><span class="text-white">Link</span>
         </div>
         <!-- Tabs -->
-        <div class="flex h-14 flex-shrink-0">
+        <div class="flex h-14 flex-shrink min-w-0">
           <button id="tabSearch" onclick="switchTab('search')"
-            class="tab-btn tab-active px-4 text-sm font-black uppercase tracking-wide transition-colors">Search</button>
+            class="tab-btn tab-active px-2.5 sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors">Search</button>
           <button id="tabLibrary" onclick="switchTab('library')"
-            class="tab-btn tab-inactive px-4 text-sm font-black uppercase tracking-wide transition-colors">Library</button>
+            class="tab-btn tab-inactive px-2.5 sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors">Library</button>
           <button id="tabOffline" onclick="switchTab('offline')"
-            class="tab-btn tab-inactive px-4 text-sm font-black uppercase tracking-wide transition-colors">Offline</button>
+            class="tab-btn tab-inactive px-2.5 sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors">Offline</button>
         </div>
         <div class="flex-1"></div>
         <!-- Download badge -->
         <button id="dlBadge" onclick="switchTab('library')"
-          class="hidden items-center gap-1.5 px-2.5 py-1.5
+          class="hidden items-center gap-1.5 px-2 py-1.5
                  bg-green-900/40 border border-green-800/60
                  hover:bg-green-900/60 transition-colors flex-shrink-0">
           <svg class="w-3.5 h-3.5 text-green-400 blink" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -749,16 +750,16 @@
           <span id="dlBadgeCount" class="text-xs font-bold text-green-300 hidden sm:inline"></span>
         </button>
         <!-- VPN pill -->
-        <div id="vpnPill" class="flex items-center gap-1.5 px-2.5 py-1.5 bg-gray-900 border border-gray-800 transition-all flex-shrink-0">
+        <div id="vpnPill" class="flex items-center gap-1.5 px-2 py-1.5 bg-gray-900 border border-gray-800 transition-all flex-shrink-0">
           <div id="vpnDot" class="w-2 h-2 bg-gray-600 transition-colors flex-shrink-0"></div>
           <span id="vpnLabel" class="text-xs font-medium text-gray-500 whitespace-nowrap hidden sm:inline">VPN: checking</span>
         </div>
         <!-- SSE dot -->
-        <div id="sseDot" class="w-2 h-2 bg-gray-700 transition-colors flex-shrink-0"></div>
+        <div id="sseDot" class="w-2 h-2 bg-gray-700 transition-colors flex-shrink-0 hidden sm:block"></div>
         <span id="sseLabel" class="text-[11px] text-gray-700 hidden sm:block"></span>
         <!-- Profile -->
         <button onclick="showProfilePicker()"
-          class="flex items-center gap-1.5 pl-1 pr-2 py-1 hover:bg-gray-800 transition-colors flex-shrink-0 min-h-[36px]">
+          class="flex items-center gap-1.5 pl-1 pr-1 sm:pr-2 py-1 hover:bg-gray-800 transition-colors flex-shrink-0 min-h-[36px]">
           <div id="navProfileAvatar"
             class="w-7 h-7 bg-indigo-600 flex items-center justify-center text-xs font-black text-white flex-shrink-0">?</div>
           <span id="navProfileName" class="hidden md:block text-gray-400 max-w-[80px] truncate text-xs"></span>
@@ -777,8 +778,8 @@
 </header>
 
 <!-- ── Main ───────────────────────────────────────────────────────────────── -->
-<main class="flex-1 pb-36 overflow-y-auto">
-  <div class="max-w-5xl mx-auto px-4 py-5">
+<main class="flex-1 pb-36 overflow-y-auto overflow-x-hidden">
+  <div class="max-w-5xl mx-auto px-3 sm:px-4 py-5">
 
     <!-- Search tab -->
     <div id="searchTab">
@@ -979,7 +980,7 @@
   <!-- Controls row — Metro tiles with dividers -->
   <div class="max-w-5xl mx-auto px-0 pb-1 flex items-stretch">
     <button onclick="vlcSeek(-30, this)" title="−30s"
-      class="flex flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
+      class="hidden sm:flex flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
              text-gray-600 hover:text-gray-300 hover:bg-gray-900 active:bg-gray-800 transition-colors">
       <span class="text-xs font-black leading-none">−30</span>
       <span class="text-[9px] text-gray-700 font-bold uppercase leading-none mt-0.5">sec</span>
@@ -990,15 +991,15 @@
       <span class="text-xs font-black leading-none">−10</span>
       <span class="text-[9px] text-gray-700 font-bold uppercase leading-none mt-0.5">sec</span>
     </button>
-    <!-- Volume -->
+    <!-- Volume — desktop only; mobile uses fullscreen overlay -->
     <button onclick="vlcVolumeStep(-5, this)" title="Volume −5%"
-      class="flex flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
+      class="hidden sm:flex flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
              text-gray-600 hover:text-gray-300 hover:bg-gray-900 active:bg-gray-800 transition-colors">
       <span class="text-lg font-black leading-none">−</span>
       <span class="text-[9px] text-gray-700 font-bold uppercase leading-none">vol</span>
     </button>
     <button onclick="vlcVolumeStep(5, this)" title="Volume +5%"
-      class="flex flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
+      class="hidden sm:flex flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
              text-gray-600 hover:text-gray-300 hover:bg-gray-900 active:bg-gray-800 transition-colors">
       <span class="text-lg font-black leading-none">+</span>
       <span class="text-[9px] text-gray-700 font-bold uppercase leading-none">vol</span>
@@ -1038,7 +1039,7 @@
       <span class="text-[9px] text-gray-700 font-bold uppercase leading-none mt-0.5">sec</span>
     </button>
     <button onclick="vlcSeek(30, this)" title="+30s"
-      class="flex flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
+      class="hidden sm:flex flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
              text-gray-600 hover:text-gray-300 hover:bg-gray-900 active:bg-gray-800 transition-colors">
       <span class="text-xs font-black leading-none">+30</span>
       <span class="text-[9px] text-gray-700 font-bold uppercase leading-none mt-0.5">sec</span>
@@ -1106,15 +1107,15 @@
        ontouchmove="handleSeekBarHover(event, this)"
        ontouchend="handleSeekBarClick(event, this);handleSeekBarLeave()"
        style="touch-action:none; height:44px;">
-    <div class="absolute inset-x-4 top-1/2 -translate-y-1/2 bg-gray-800 rounded-full"
+    <div class="absolute inset-x-4 top-1/2 -translate-y-1/2 bg-gray-800"
          style="height:5px">
       <div id="fcProgressBar"
-           class="h-full bg-indigo-500 rounded-full transition-all duration-700"
+           class="h-full bg-indigo-500 transition-all duration-700"
            style="width:0%"></div>
     </div>
     <div id="fcSeekTooltip"
          class="hidden absolute top-1 bg-gray-800 border border-gray-700 text-[12px] font-mono
-                text-gray-200 px-2 py-0.5 rounded pointer-events-none -translate-x-1/2 whitespace-nowrap shadow-lg"
+                text-gray-200 px-2 py-0.5 pointer-events-none -translate-x-1/2 whitespace-nowrap shadow-lg"
          style="left:50%"></div>
   </div>
 
@@ -1220,23 +1221,23 @@
 
     <!-- Row D: Track selectors — audio + subtitle -->
     <div class="flex flex-1 border-b border-gray-800 min-h-0">
-      <div class="fc-tile flex flex-1 border-r border-gray-800 gap-1.5 px-4">
-        <span class="text-[11px] text-gray-600 flex-shrink-0">🎵 Audio</span>
+      <div class="fc-tile flex flex-1 border-r border-gray-800 gap-1.5 px-3 sm:px-4">
+        <span class="text-[11px] text-gray-600 flex-shrink-0 uppercase tracking-wide font-bold">Audio</span>
         <select id="fcAudioSelect" onchange="setAudioTrack(this.value, this)"
-          class="w-full bg-gray-900 border border-gray-700 text-xs text-gray-300 rounded-lg px-2 py-1.5
+          class="w-full min-w-0 bg-gray-900 border border-gray-700 text-xs text-gray-300 px-2 py-1.5
                  focus:outline-none focus:border-indigo-500 cursor-pointer">
           <option>—</option>
         </select>
       </div>
-      <div class="fc-tile flex flex-1 gap-1.5 px-4">
-        <span class="text-[11px] text-gray-600 flex-shrink-0">💬 Subs</span>
+      <div class="fc-tile flex flex-1 gap-1.5 px-3 sm:px-4">
+        <span class="text-[11px] text-gray-600 flex-shrink-0 uppercase tracking-wide font-bold">Subs</span>
         <select id="fcSubtitleSelect" onchange="setSubtitleTrack(this.value, this)"
-          class="w-full bg-gray-900 border border-gray-700 text-xs text-gray-300 rounded-lg px-2 py-1.5
+          class="w-full min-w-0 bg-gray-900 border border-gray-700 text-xs text-gray-300 px-2 py-1.5
                  focus:outline-none focus:border-indigo-500 cursor-pointer">
           <option value="-1">Off</option>
         </select>
         <button onclick="openSubtitleModal()" title="Find subtitles online"
-          class="flex-shrink-0 px-2 bg-gray-900 border border-gray-700 rounded-lg
+          class="flex-shrink-0 px-2 bg-gray-900 border border-gray-700
                  text-gray-500 hover:text-indigo-400 transition-colors">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
             <circle cx="11" cy="11" r="7"/><path stroke-linecap="round" d="M21 21l-4.3-4.3"/>
@@ -2533,7 +2534,7 @@ function renderLibrary(items){
           ${prepChip}
           ${progBar}
         </div>
-        ${buttons?"<div class='flex items-center gap-2'>"+buttons+"</div>":""}
+        ${buttons?"<div class='flex items-center gap-2 flex-wrap'>"+buttons+"</div>":""}
         ${isDownloading?`<div id="dl-files-${item.id}" class="hidden"></div>`:""}
       </div>`;
     });

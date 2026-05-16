@@ -8,12 +8,16 @@
   <script>tailwind.config={darkMode:'class'}</script>
   <style>
     :root{color-scheme:dark;}
+    html, body { overflow-x: hidden; max-width: 100vw; }
     ::-webkit-scrollbar{width:4px;}
     ::-webkit-scrollbar-track{background:#030712;}
     ::-webkit-scrollbar-thumb{background:#1f2937;}
     .tab-active  {border-bottom:3px solid #4f46e5;color:white;}
     .tab-inactive{border-bottom:3px solid transparent;color:#6b7280;}
     .tab-inactive:hover{color:#d1d5db;}
+    /* Tab bar: horizontal scroll on narrow viewports, no scrollbar gutter */
+    .admin-tabs { scrollbar-width: none; -ms-overflow-style: none; }
+    .admin-tabs::-webkit-scrollbar { display: none; }
   </style>
 </head>
 <body class="dark bg-gray-950 text-gray-100 min-h-screen flex flex-col">
@@ -51,47 +55,47 @@
 <div id="dashboard" class="hidden flex flex-col min-h-screen">
 
   <!-- Navbar -->
-  <nav class="bg-gray-900 border-b border-gray-800 px-4 h-14 flex items-center justify-between flex-shrink-0">
-    <div class="font-black text-lg tracking-wide uppercase">
+  <nav class="bg-gray-900 border-b border-gray-800 px-3 sm:px-4 h-14 flex items-center justify-between flex-shrink-0 gap-2">
+    <div class="font-black text-base sm:text-lg tracking-wide uppercase min-w-0 truncate">
       <span class="text-indigo-500">Stream</span><span class="text-white">Link</span>
       <span class="text-gray-600 text-xs ml-2 font-normal">ADMIN</span>
     </div>
-    <div class="flex items-center gap-3">
+    <div class="flex items-center gap-2 sm:gap-3 flex-shrink-0">
       <span id="encoderBadge"
         class="hidden text-[10px] font-bold uppercase tracking-widest px-2 py-1 border"
         title="Encoder used by offline Save Offline transcodes">…</span>
-      <a href="/" class="text-xs text-gray-500 hover:text-gray-300 transition-colors uppercase tracking-wide">Main App</a>
+      <a href="/" class="text-xs text-gray-500 hover:text-gray-300 transition-colors uppercase tracking-wide whitespace-nowrap">Main</a>
       <button onclick="doLogout()"
-        class="text-xs text-red-500 hover:text-red-400 transition-colors uppercase tracking-wide font-bold">
+        class="text-xs text-red-500 hover:text-red-400 transition-colors uppercase tracking-wide font-bold whitespace-nowrap">
         Sign Out
       </button>
     </div>
   </nav>
 
-  <!-- Tabs -->
-  <div class="bg-gray-900 border-b border-gray-800 flex flex-shrink-0">
+  <!-- Tabs — horizontally scrollable on narrow viewports -->
+  <div class="admin-tabs bg-gray-900 border-b border-gray-800 flex flex-shrink-0 overflow-x-auto">
     <button onclick="switchTab('indexers')" id="tab-indexers"
-      class="tab-active px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors">
+      class="tab-active px-4 sm:px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors whitespace-nowrap flex-shrink-0">
       Indexers
     </button>
     <button onclick="switchTab('content')" id="tab-content"
-      class="tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors">
+      class="tab-inactive px-4 sm:px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors whitespace-nowrap flex-shrink-0">
       Content Lock
     </button>
     <button onclick="switchTab('profiles')" id="tab-profiles"
-      class="tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors">
+      class="tab-inactive px-4 sm:px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors whitespace-nowrap flex-shrink-0">
       Profile PINs
     </button>
     <button onclick="switchTab('skip')" id="tab-skip"
-      class="tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors">
+      class="tab-inactive px-4 sm:px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors whitespace-nowrap flex-shrink-0">
       Smart Skip
     </button>
     <button onclick="switchTab('offline')" id="tab-offline"
-      class="tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors">
+      class="tab-inactive px-4 sm:px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors whitespace-nowrap flex-shrink-0">
       Offline Cache
     </button>
     <button onclick="switchTab('background')" id="tab-background"
-      class="tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors">
+      class="tab-inactive px-4 sm:px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors whitespace-nowrap flex-shrink-0">
       Background
     </button>
   </div>
@@ -103,7 +107,7 @@
   </div>
 
   <!-- ── Indexers Tab ──────────────────────────────────────────────────────────── -->
-  <div id="panelIndexers" class="flex-1 overflow-y-auto p-5 space-y-6 max-w-2xl mx-auto w-full">
+  <div id="panelIndexers" class="flex-1 overflow-y-auto p-3 sm:p-5 space-y-6 max-w-2xl mx-auto w-full">
 
     <!-- Categories override -->
     <div class="bg-gray-900 border border-gray-800">
@@ -150,7 +154,7 @@
   </div>
 
   <!-- ── Content Lock Tab ─────────────────────────────────────────────────────── -->
-  <div id="panelContent" class="hidden flex-1 overflow-y-auto p-5 max-w-2xl mx-auto w-full">
+  <div id="panelContent" class="hidden flex-1 overflow-y-auto p-3 sm:p-5 max-w-2xl mx-auto w-full">
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800">
         <h2 class="text-sm font-black uppercase tracking-wide">Content Lock</h2>
@@ -163,7 +167,7 @@
   </div>
 
   <!-- ── Smart Skip Tab ───────────────────────────────────────────────────────── -->
-  <div id="panelSkip" class="hidden flex-1 overflow-y-auto p-5 max-w-3xl mx-auto w-full">
+  <div id="panelSkip" class="hidden flex-1 overflow-y-auto p-3 sm:p-5 max-w-3xl mx-auto w-full">
     <div class="bg-gray-900 border border-gray-800 mb-5">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
         <div class="min-w-0">
@@ -190,7 +194,7 @@
   </div>
 
   <!-- ── Profile PINs Tab ─────────────────────────────────────────────────────── -->
-  <div id="panelProfiles" class="hidden flex-1 overflow-y-auto p-5 max-w-2xl mx-auto w-full">
+  <div id="panelProfiles" class="hidden flex-1 overflow-y-auto p-3 sm:p-5 max-w-2xl mx-auto w-full">
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800">
         <h2 class="text-sm font-black uppercase tracking-wide">Profile PINs</h2>
@@ -203,7 +207,7 @@
   </div>
 
   <!-- ── Offline Cache Tab ────────────────────────────────────────────────────── -->
-  <div id="panelOffline" class="hidden flex-1 overflow-y-auto p-5 max-w-3xl mx-auto w-full space-y-4">
+  <div id="panelOffline" class="hidden flex-1 overflow-y-auto p-3 sm:p-5 max-w-3xl mx-auto w-full space-y-4">
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
         <div class="min-w-0">
@@ -240,7 +244,7 @@
   </div>
 
   <!-- ── Background Video Tab ─────────────────────────────────────────────────── -->
-  <div id="panelBackground" class="hidden flex-1 overflow-y-auto p-5 max-w-2xl mx-auto w-full space-y-4">
+  <div id="panelBackground" class="hidden flex-1 overflow-y-auto p-3 sm:p-5 max-w-2xl mx-auto w-full space-y-4">
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800">
         <h2 class="text-sm font-black uppercase tracking-wide">Idle Background Video</h2>
