@@ -1887,15 +1887,23 @@ async function vlcSetVolume(val, slider){
 }
 
 async function vlcVolumeStep(delta, btn){
-  await withInflight(`vol_step_${delta>0?"up":"down"}`, btn, async () => {
-    const vs=document.getElementById("volumeSlider");
-    const fvs=document.getElementById("fcVolumeSlider");
-    const current=parseInt(vs?.value||app.vlc_volume||100,10);
-    const next=Math.max(0,Math.min(_maxVol(),current+delta));
-    if(vs)  vs.value=next;
-    if(fvs) fvs.value=next;
-    updateVolumeDisplay(next);
-    await fetch(`/api/vlc/volume/set?volume=${next}`,{method:"POST"}).catch(()=>{});
+  // Send the *delta* to the server so an out-of-sync client (e.g. phone that
+  // just unlocked with a stale slider value) doesn't snap volume back to a
+  // wrong absolute. Server returns the new authoritative volume.
+  const dir = delta>0 ? "up" : "down";
+  const step = Math.abs(parseInt(delta,10))||0;
+  await withInflight(`vol_step_${dir}`, btn, async () => {
+    const r = await fetch(`/api/vlc/volume/${dir}?step=${step}`,{method:"POST"}).catch(()=>null);
+    if(r && r.ok){
+      const d = await r.json().catch(()=>null);
+      if(d && typeof d.volume === "number"){
+        const vs=document.getElementById("volumeSlider");
+        const fvs=document.getElementById("fcVolumeSlider");
+        if(vs)  vs.value=d.volume;
+        if(fvs) fvs.value=d.volume;
+        updateVolumeDisplay(d.volume);
+      }
+    }
   });
 }
 

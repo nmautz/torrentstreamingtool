@@ -89,7 +89,7 @@ Up to 6 profiles. No passwords. Optional 4-digit PIN per profile.
 |--------|------|-------|
 | POST | `/api/vlc/pause` | Toggle |
 | POST | `/api/vlc/volume/set?volume=0-200` | Sets absolute volume; capped by global `settings.max_volume` |
-| POST | `/api/vlc/volume/{up\|down}` | ±10 %, capped by global `settings.max_volume` |
+| POST | `/api/vlc/volume/{up\|down}?step=N` | Server-side relative adjust (default ±10 %), capped by global `settings.max_volume`. UI +/- buttons send this with `step=5` so out-of-sync clients can't snap volume to a stale absolute. |
 | POST | `/api/vlc/seek?delta=N` | Relative — `val=±Ns` |
 | POST | `/api/vlc/seek/to?position_pct=N` | Absolute — `val=N%`. NOTE: VLC treats `val=N` (no suffix) as a 0–1 fraction. Don't confuse the two |
 | POST | `/api/vlc/prev` | Previous episode in series order. Uses `library_playlist` then `item.files` |

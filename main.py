@@ -3170,12 +3170,16 @@ async def volume_set(volume: int) -> JSONResponse:
 
 
 @app.post("/api/vlc/volume/{direction}")
-async def volume(direction: str) -> JSONResponse:
+async def volume(direction: str, step: int = 10) -> JSONResponse:
     if direction not in ("up", "down"):
         raise HTTPException(400, "direction must be 'up' or 'down'")
+    # Server-authoritative relative adjustment so out-of-sync clients can't
+    # snap volume back to a stale value (e.g. phone unlocks showing 50 while
+    # actual is 35 — pressing − must apply -step to 35, not jump to 45).
+    magnitude = max(0, min(200, abs(int(step))))
+    delta = magnitude if direction == "up" else -magnitude
     cap = await _global_max_volume()
-    step = 10 if direction == "up" else -10
-    next_vol = max(0, min(cap, state.vlc_volume + step))
+    next_vol = max(0, min(cap, state.vlc_volume + delta))
     raw = max(0, min(512, round(next_vol / 100 * 256)))
     await vlc("volume", val=str(raw))
     state.vlc_volume = next_vol
