@@ -626,6 +626,39 @@ def _find_vlc_hwnds_windows() -> list:
         return []
 
 
+def _stop_vlc_flash_windows() -> None:
+    """Clear any taskbar attention flash on all VLC windows.
+
+    When Windows blocks SetForegroundWindow (focus-stealing prevention), it
+    falls back to flashing the target's taskbar icon — and a flashing icon
+    forces the taskbar to stay visible even over a fullscreen window. Calling
+    FlashWindowEx with FLASHW_STOP cancels that attention state.
+    """
+    hwnds = _find_vlc_hwnds_windows()
+    if not hwnds:
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class FLASHWINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", ctypes.c_uint),
+                ("hwnd", wintypes.HWND),
+                ("dwFlags", wintypes.DWORD),
+                ("uCount", wintypes.UINT),
+                ("dwTimeout", wintypes.DWORD),
+            ]
+
+        FLASHW_STOP = 0x00000000
+        user32 = ctypes.windll.user32
+        for hwnd in hwnds:
+            info = FLASHWINFO(ctypes.sizeof(FLASHWINFO), hwnd, FLASHW_STOP, 0, 0)
+            user32.FlashWindowEx(ctypes.byref(info))
+    except Exception:
+        pass
+
+
 def _minimize_other_windows_windows() -> None:
     """Minimize every visible top-level window that isn't owned by a VLC process.
 
@@ -672,7 +705,19 @@ def _minimize_other_windows_windows() -> None:
 
 
 def _vlc_focus_windows() -> None:
-    """Bring the main VLC window to the foreground on Windows using ctypes."""
+    """Bring the main VLC window to the foreground on Windows using ctypes.
+
+    Bypasses focus-stealing prevention with the standard cocktail:
+      1. Zero the foreground-lock timeout (SPI_SETFOREGROUNDLOCKTIMEOUT).
+      2. Send a synthetic ALT keypress — Windows resets the foreground lock
+         on any keystroke, which lets SetForegroundWindow succeed.
+      3. Attach our input queue to the current foreground thread.
+      4. SetForegroundWindow + BringWindowToTop.
+      5. FlashWindowEx(FLASHW_STOP) on every VLC hwnd to clear any taskbar
+         attention flash left over from a previous blocked focus attempt.
+    Without #2 and #5 the taskbar stays visible after retry/relaunch even
+    though VLC is fullscreen, because the flashing icon defeats auto-hide.
+    """
     hwnds = _find_vlc_hwnds_windows()
     if not hwnds:
         return
@@ -680,16 +725,29 @@ def _vlc_focus_windows() -> None:
     try:
         import ctypes
         user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        SPI_SETFOREGROUNDLOCKTIMEOUT = 0x2001
+        SPIF_SENDCHANGE = 0x02
+        user32.SystemParametersInfoW(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, 0, SPIF_SENDCHANGE)
+
+        VK_MENU = 0x12
+        KEYEVENTF_KEYUP = 0x0002
+        user32.keybd_event(VK_MENU, 0, 0, 0)
+        user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+
         fg_thread = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
-        my_thread = ctypes.windll.kernel32.GetCurrentThreadId()
+        my_thread = kernel32.GetCurrentThreadId()
         if fg_thread != my_thread:
             user32.AttachThreadInput(my_thread, fg_thread, True)
         user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+        user32.BringWindowToTop(hwnd)
         user32.SetForegroundWindow(hwnd)
         if fg_thread != my_thread:
             user32.AttachThreadInput(my_thread, fg_thread, False)
     except Exception:
         pass
+    _stop_vlc_flash_windows()
 
 
 def _vlc_minimize_windows() -> None:
@@ -777,6 +835,15 @@ async def vlc_focus_and_fullscreen() -> None:
             await vlc("fullscreen")
     except Exception:
         pass
+    # Belt-and-suspenders: after fullscreen toggle Explorer can re-raise the
+    # taskbar flash if our focus call was rejected. Clear it again so the
+    # taskbar can auto-hide.
+    if system == "Windows":
+        try:
+            await asyncio.sleep(0.4)
+            await asyncio.get_running_loop().run_in_executor(None, _stop_vlc_flash_windows)
+        except Exception:
+            pass
 
 
 async def _restart_vlc_process() -> bool:
