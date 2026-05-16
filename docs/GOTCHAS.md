@@ -158,6 +158,24 @@ The SW intercepts `fetch` events only after it's installed for the origin. The u
 
 `/api/search` reads `indexer_categories` from the admin override first, falling back to `.env`. Library paths are unioned across both.
 
+## Remote access (site auth)
+
+### `X-Forwarded-For` is deliberately ignored
+
+`_is_local_request` only consults `request.client.host`. The app is reached directly (no trusted reverse proxy) — honouring `X-Forwarded-For` would let a remote client spoof a LAN address and bypass both the admin-LAN check and the site-password gate. If you ever put this app behind a real reverse proxy, add a *trusted-proxy*-aware unwrap, don't naively trust the header.
+
+### The `streamlink_site` cookie must auto-flow to SSE
+
+The cookie is HttpOnly + SameSite=Lax + Path=/. Don't switch to a header-only scheme — `EventSource` can't add custom headers, so the `/api/events` stream would break for remote clients. Same reason the admin SSE accepts `?admin_token=` as a query param.
+
+### Off-LAN classification leaks if the LAN uses public IPs
+
+A host configured with a public IP on a public LAN (no NAT) will be treated as remote. Use RFC 1918 addresses on the trusted LAN; otherwise every client has to log in.
+
+### Lockout state is process-local
+
+`_site_login_attempts` lives in memory. Restarting the dashboard clears every IP's attempt counter, which is a footgun if you ever rely on it for sustained rate-limiting under restart. For the 5-attempts-in-15-min sliding window we ship, restart-as-reset is acceptable; if you tighten it, persist the dict.
+
 ## Python compatibility
 
 `setup.py` and `run.py` are run by **system Python** (any version 3.9+). They use `from __future__ import annotations` so they parse on 3.9. `main.py`, `analyzer.py`, `watchdog.py`, `daemon.py` run inside the venv (also 3.9+ baseline but the project doesn't pin newer syntax).

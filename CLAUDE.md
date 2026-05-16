@@ -30,7 +30,8 @@ Each entry is a short hook so future Claude instances can jump straight to the r
 | [docs/RUNTIME.md](docs/RUNTIME.md) | Changing `run.py` — venv relaunch, service launchers, LAN/SSID detection, mDNS, firewall, dashboard launch (HTTP + HTTPS). |
 | [docs/DAEMON_WATCHDOG.md](docs/DAEMON_WATCHDOG.md) | Working on `daemon.py` (system service install) or `watchdog.py` (crash supervisor + VPN-gated qBit). |
 | [docs/ANALYZER.md](docs/ANALYZER.md) | Touching Smart Skip — `analyzer.py`, the orchestrator in `main.py`, skip-offer UI logic, or the admin editor. Algorithm + thresholds + fallback chain. |
-| [docs/ADMIN.md](docs/ADMIN.md) | Working on `/admin` panel — auth flow, HTTPS redirect, Jackett admin auth, the four tabs, content-lock semantics. |
+| [docs/ADMIN.md](docs/ADMIN.md) | Working on `/admin` panel — auth flow, HTTPS redirect, Jackett admin auth, the four tabs, content-lock semantics. Admin is **LAN-only**. |
+| [docs/SITE_AUTH.md](docs/SITE_AUTH.md) | Working on off-LAN access — `SITE_PASSWORD`, HTTPS forcing, session cookie, brute-force lockout, LAN-vs-remote classification. |
 | [docs/OFFLINE.md](docs/OFFLINE.md) | Working on Handoff-to-Device / offline playback — `/offline-prepare`, `.offline_cache/`, the service worker, IndexedDB schema, the local `<video>` player, outbox queue. |
 | [docs/GOTCHAS.md](docs/GOTCHAS.md) | **Read before any non-trivial change.** VLC ES-ID quirks, qBit sequential-download traps, VPN dual-enforcement, Jackett `Category[]=0`, canonical path matching, etc. |
 

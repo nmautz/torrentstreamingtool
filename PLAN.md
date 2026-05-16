@@ -118,6 +118,7 @@
 - [x] **6.2** Content Lock: "admin-only" flag on library items, hidden from standard profiles
 - [x] **6.3** Profile PINs: optional 4-digit PIN per profile, prompted before access
 - [x] **6.4** Indexer Management: admin UI to view/add/remove Jackett indexers without editing `.env`
+- [x] **6.5** Off-LAN access gate: force HTTPS for non-LAN clients, require `SITE_PASSWORD` (`.env`) before any `/api/*` responds, mint a 60-min session cookie on login with per-IP brute-force lockout. Admin panel is now LAN-only (404 from off-LAN). See [docs/SITE_AUTH.md](docs/SITE_AUTH.md).
 
 ---
 

@@ -5,6 +5,7 @@ import base64
 import gzip
 import hashlib
 import io
+import ipaddress
 import json
 import os
 import platform
@@ -62,6 +63,14 @@ class Settings(BaseSettings):
 
     admin_password: str = ""   # if empty, admin panel is disabled
     jackett_password: str = ""  # Jackett UI login password for indexer management
+
+    # Remote (off-LAN) access gate. Requests from outside RFC1918 / loopback are:
+    #   1. forced from http → https (if cert.pem/key.pem exist),
+    #   2. required to present a valid site-session cookie before /api/* responds.
+    # Admin panel + /api/admin/* are LAN-only regardless of token state.
+    # If site_password is empty, remote /api/* access is blocked entirely.
+    site_password: str = ""
+    site_session_minutes: int = 60
 
     # OpenSubtitles legacy REST API (rest.opensubtitles.org) needs no key, only a
     # User-Agent. "TemporaryUserAgent" is OpenSubtitles' documented testing UA.
@@ -176,6 +185,12 @@ class AppState:
 state = AppState()
 qbit: Optional[httpx.AsyncClient] = None
 _admin_sessions: dict[str, float] = {}   # token → expiry Unix timestamp
+_site_sessions: dict[str, float] = {}    # token → expiry Unix timestamp (remote-access cookie)
+_site_login_attempts: dict[str, list[float]] = {}  # client IP → list of failed-attempt Unix timestamps
+SITE_COOKIE_NAME = "streamlink_site"
+SITE_LOGIN_MAX_ATTEMPTS = 5
+SITE_LOGIN_WINDOW_SEC = 900   # 15 minutes
+SITE_LOGIN_LOCKOUT_SEC = 900  # locked out for 15 min once over the threshold
 
 # ── Jackett Session ───────────────────────────────────────────────────────────
 _jackett_cookie: str = ""
@@ -261,11 +276,78 @@ def state_snapshot() -> dict:
     }
 
 
+# ── Network / Auth Helpers ────────────────────────────────────────────────────
+
+def _client_ip(request: Request) -> str:
+    """Best-effort client IP. We deliberately do NOT honour X-Forwarded-For —
+    there is no trusted reverse proxy in front of this app, so trusting that
+    header would let a remote client claim to be on the LAN."""
+    return (request.client.host if request.client else "") or ""
+
+
+def _is_local_request(request: Request) -> bool:
+    """True iff the request originated from loopback or a private (RFC 1918 /
+    link-local / unique-local) address. The HTTPS+site-password gate and the
+    LAN-only admin panel both key off this. Unparseable addresses (e.g. unix
+    sockets in tests) are treated as local for safety."""
+    host = _client_ip(request)
+    if not host:
+        return True
+    try:
+        ip = ipaddress.ip_address(host)
+    except ValueError:
+        return True
+    return bool(ip.is_loopback or ip.is_private or ip.is_link_local)
+
+
+def _site_token_from_request(request: Request) -> Optional[str]:
+    cookie = request.cookies.get(SITE_COOKIE_NAME, "").strip()
+    if cookie:
+        return cookie
+    hdr = request.headers.get("x-site-token", "").strip()
+    return hdr or None
+
+
+def _check_site_token(request: Request) -> bool:
+    """True iff the request carries a valid (unexpired) site session token."""
+    token = _site_token_from_request(request)
+    if not token or token not in _site_sessions:
+        return False
+    if time.time() > _site_sessions[token]:
+        _site_sessions.pop(token, None)
+        return False
+    return True
+
+
+def _prune_login_attempts(ip: str) -> list[float]:
+    """Drop attempts older than the sliding window for this IP, return remaining."""
+    now = time.time()
+    attempts = [t for t in _site_login_attempts.get(ip, []) if now - t < SITE_LOGIN_WINDOW_SEC]
+    if attempts:
+        _site_login_attempts[ip] = attempts
+    else:
+        _site_login_attempts.pop(ip, None)
+    return attempts
+
+
+def _login_lockout_remaining(ip: str) -> int:
+    """Seconds the IP is still locked out for, or 0 if not locked out."""
+    attempts = _prune_login_attempts(ip)
+    if len(attempts) < SITE_LOGIN_MAX_ATTEMPTS:
+        return 0
+    oldest_in_lockout = attempts[-SITE_LOGIN_MAX_ATTEMPTS]
+    remaining = int(oldest_in_lockout + SITE_LOGIN_LOCKOUT_SEC - time.time())
+    return max(remaining, 0)
+
+
 # ── Admin Auth ────────────────────────────────────────────────────────────────
 
 def _check_admin(request: Request) -> bool:
-    """Return True if the request carries a valid admin session token."""
+    """Return True if the request carries a valid admin session token AND
+    originates from the local network. Admin is LAN-only by policy."""
     if not settings.admin_password:
+        return False
+    if not _is_local_request(request):
         return False
     token: Optional[str] = None
     auth = request.headers.get("authorization", "")
@@ -1770,15 +1852,68 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
 app = FastAPI(title="P2P StreamLink", version="2.0", lifespan=lifespan)
 
 
+def _is_admin_path(path: str) -> bool:
+    # Both the /admin route and the StaticFiles-mounted /admin.html file expose
+    # the admin UI — gate both. Same for the /api/admin/* family.
+    return (
+        path == "/admin"
+        or path == "/admin.html"
+        or path.startswith("/admin/")
+        or path.startswith("/api/admin")
+    )
+
+
+# Paths that must remain reachable for a not-yet-authenticated remote client to
+# bootstrap the login overlay. Everything else under /api/* is gated.
+_SITE_AUTH_OPEN_API = frozenset({
+    "/api/site/status",
+    "/api/site/login",
+    "/api/site/logout",
+})
+
+
 @app.middleware("http")
-async def admin_https_redirect(request: Request, call_next):
-    """Redirect /admin and /api/admin/* to HTTPS when accessed over plain HTTP."""
+async def network_access_gate(request: Request, call_next):
+    """Single gate covering three policies that all key off the client's IP:
+
+    1. /admin and /api/admin/* are LAN-only. Remote requests get 404 so we
+       don't even disclose the panel's existence.
+    2. Remote requests over plain HTTP are 301-redirected to https://. (The
+       HTTPS uvicorn process is launched by run.py when cert.pem/key.pem exist.)
+    3. Remote requests to /api/* (other than the site login/status/logout
+       endpoints) require a valid site-session cookie. Unauthenticated remote
+       requests get 401.
+    """
     path = request.url.path
-    if (path == "/admin" or path.startswith("/admin/") or path.startswith("/api/admin")):
-        if request.url.scheme == "http":
-            host = request.url.hostname
-            qs   = ("?" + request.url.query) if request.url.query else ""
-            return RedirectResponse(f"https://{host}{path}{qs}", status_code=301)
+    is_local = _is_local_request(request)
+    is_admin = _is_admin_path(path)
+
+    # 1. LAN-only admin. Return 404 (not 403) so off-LAN scanners don't even
+    #    learn the admin panel exists.
+    if is_admin and not is_local:
+        return JSONResponse({"detail": "Not found"}, status_code=404)
+
+    # 2. Force HTTPS for (a) all remote requests and (b) admin from any origin.
+    #    The HTTPS uvicorn process is launched by run.py when cert.pem/key.pem
+    #    exist; the redirect assumes it's listening on 443.
+    if request.url.scheme == "http" and (not is_local or is_admin):
+        host = request.url.hostname or request.headers.get("host", "").split(":")[0]
+        qs   = ("?" + request.url.query) if request.url.query else ""
+        return RedirectResponse(f"https://{host}{path}{qs}", status_code=301)
+
+    # 3. Remote /api/* requires a valid site token (except the auth bootstrap).
+    if (not is_local) and path.startswith("/api/") and path not in _SITE_AUTH_OPEN_API:
+        if not settings.site_password:
+            return JSONResponse(
+                {"detail": "Remote access disabled (SITE_PASSWORD not set)."},
+                status_code=503,
+            )
+        if not _check_site_token(request):
+            return JSONResponse(
+                {"detail": "Site authentication required."},
+                status_code=401,
+            )
+
     return await call_next(request)
 
 
@@ -1833,6 +1968,10 @@ class MarkWatchedReq(BaseModel):
 
 
 class AdminLoginReq(BaseModel):
+    password: str
+
+
+class SiteLoginReq(BaseModel):
     password: str
 
 
@@ -3163,6 +3302,96 @@ async def events(request: Request) -> StreamingResponse:
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+# ── Routes: Site (remote-access) Auth ─────────────────────────────────────────
+#
+# When the dashboard is reached from off-LAN it must present a password before
+# any /api/* call (other than these three) returns data. The middleware enforces
+# the gate; these endpoints exist outside the gate's exclusion list.
+#
+# Token transport: HttpOnly cookie. SSE (EventSource) can't add headers, so a
+# cookie is the only mechanism that automatically covers every request type.
+
+def _site_session_seconds() -> int:
+    return max(1, int(settings.site_session_minutes)) * 60
+
+
+@app.get("/api/site/status")
+async def site_status(request: Request) -> JSONResponse:
+    """Bootstrap info for the login overlay. Safe to call from anywhere."""
+    is_local = _is_local_request(request)
+    return JSONResponse({
+        "enabled":         bool(settings.site_password),
+        "is_local":        is_local,
+        "authenticated":   is_local or _check_site_token(request),
+        "session_minutes": int(settings.site_session_minutes),
+    })
+
+
+@app.post("/api/site/login")
+async def site_login(request: Request, req: SiteLoginReq) -> JSONResponse:
+    """Verify the site password and issue a session cookie.
+
+    Brute-force protection: per-IP sliding window. After SITE_LOGIN_MAX_ATTEMPTS
+    failed attempts within SITE_LOGIN_WINDOW_SEC, returns 429 with Retry-After.
+    The password compare uses secrets.compare_digest for constant-time equality.
+    """
+    if not settings.site_password:
+        raise HTTPException(503, "Remote access is disabled (SITE_PASSWORD not set).")
+
+    ip = _client_ip(request) or "unknown"
+    lock = _login_lockout_remaining(ip)
+    if lock > 0:
+        return JSONResponse(
+            {"detail": f"Too many failed attempts. Try again in {lock} seconds."},
+            status_code=429,
+            headers={"Retry-After": str(lock)},
+        )
+
+    submitted = (req.password or "").encode("utf-8")
+    expected  = settings.site_password.encode("utf-8")
+    if not secrets.compare_digest(submitted, expected):
+        _site_login_attempts.setdefault(ip, []).append(time.time())
+        # Re-check lockout after recording — surface 429 immediately on the
+        # attempt that crosses the threshold rather than only on the NEXT one.
+        lock_after = _login_lockout_remaining(ip)
+        if lock_after > 0:
+            return JSONResponse(
+                {"detail": f"Too many failed attempts. Try again in {lock_after} seconds."},
+                status_code=429,
+                headers={"Retry-After": str(lock_after)},
+            )
+        raise HTTPException(401, "Incorrect password.")
+
+    # Success — clear the attempt counter, mint a token, set the cookie.
+    _site_login_attempts.pop(ip, None)
+    token = secrets.token_hex(32)
+    ttl = _site_session_seconds()
+    _site_sessions[token] = time.time() + ttl
+
+    secure_cookie = (request.url.scheme == "https")
+    resp = JSONResponse({"ok": True, "session_minutes": int(settings.site_session_minutes)})
+    resp.set_cookie(
+        key=SITE_COOKIE_NAME,
+        value=token,
+        max_age=ttl,
+        httponly=True,
+        secure=secure_cookie,
+        samesite="lax",
+        path="/",
+    )
+    return resp
+
+
+@app.post("/api/site/logout")
+async def site_logout(request: Request) -> JSONResponse:
+    token = _site_token_from_request(request)
+    if token:
+        _site_sessions.pop(token, None)
+    resp = JSONResponse({"ok": True})
+    resp.delete_cookie(SITE_COOKIE_NAME, path="/")
+    return resp
 
 
 # ── Routes: Admin Panel ───────────────────────────────────────────────────────

@@ -148,6 +148,36 @@
   <div id="globalPrepDetail" class="text-[10px] text-amber-300/80 mt-1 truncate"></div>
 </div>
 
+<!-- ── Site Password Overlay (remote access gate) ─────────────────────────────
+     Shown only when the server is reached from outside the LAN AND no valid
+     site-session cookie is present. Local clients (loopback / RFC1918) skip
+     this entirely — the server reports is_local=true on /api/site/status.
+-->
+<div id="siteLoginOverlay"
+  class="hidden fixed inset-0 z-[60] bg-gray-950 flex flex-col items-center justify-center gap-8 px-6">
+  <div class="text-center">
+    <div class="font-black text-4xl tracking-wide uppercase mb-1">
+      <span class="text-indigo-500">Stream</span><span class="text-white">Link</span>
+    </div>
+    <p class="text-gray-600 text-xs uppercase tracking-widest">Remote access</p>
+  </div>
+  <div class="w-full max-w-xs space-y-4">
+    <input id="sitePasswordInput" type="password" placeholder="Site password" autocomplete="current-password"
+      class="w-full bg-gray-900 border-0 border-b-2 border-gray-700 focus:border-indigo-500
+             px-4 py-4 text-sm focus:outline-none transition-colors"
+      onkeydown="if(event.key==='Enter') doSiteLogin()"/>
+    <div id="siteLoginError" class="hidden text-red-400 text-xs font-bold uppercase tracking-wide text-center"></div>
+    <button id="siteLoginBtn" onclick="doSiteLogin()"
+      class="w-full bg-indigo-600 hover:bg-indigo-500 py-4 text-sm font-black uppercase tracking-wide transition-colors disabled:opacity-50">
+      Sign In
+    </button>
+  </div>
+  <div id="siteLoginDisabledMsg" class="hidden text-center max-w-xs">
+    <p class="text-yellow-400 font-bold text-sm uppercase tracking-wide mb-2">Remote Access Disabled</p>
+    <p class="text-gray-500 text-xs">Set <code class="text-gray-400 font-mono">SITE_PASSWORD</code> in your <code class="text-gray-400 font-mono">.env</code> file and restart the server.</p>
+  </div>
+</div>
+
 <!-- ── VPN Disconnected Overlay ───────────────────────────────────────────── -->
 <div id="vpnOverlay"
   class="hidden fixed inset-0 z-50 bg-red-950
@@ -5031,8 +5061,75 @@ document.addEventListener("keydown",e=>{
   }
 });
 
+// ── Site Auth (remote-access gate) ────────────────────────────────────────
+// When reached from outside the LAN, /api/site/status reports is_local=false
+// and authenticated=false until the site password is entered. The cookie set
+// by /api/site/login auto-applies to all subsequent fetches (and SSE), so we
+// just reload the page on success and let the normal init flow run.
+async function ensureSiteAuth(){
+  let d;
+  try{
+    const r = await fetch("/api/site/status",{credentials:"same-origin"});
+    d = await r.json();
+  } catch(_){
+    // Network failure — let the normal init proceed; downstream fetches will
+    // surface the real error to the user.
+    return true;
+  }
+  if(d.is_local || d.authenticated) return true;
+  const overlay = document.getElementById("siteLoginOverlay");
+  if(!d.enabled){
+    document.getElementById("siteLoginDisabledMsg").classList.remove("hidden");
+    document.getElementById("sitePasswordInput").classList.add("hidden");
+    document.getElementById("siteLoginBtn").classList.add("hidden");
+  }
+  overlay.classList.remove("hidden");
+  setTimeout(()=>document.getElementById("sitePasswordInput")?.focus(), 50);
+  return false;
+}
+
+async function doSiteLogin(){
+  const inp = document.getElementById("sitePasswordInput");
+  const err = document.getElementById("siteLoginError");
+  const btn = document.getElementById("siteLoginBtn");
+  err.classList.add("hidden");
+  btn.disabled = true;
+  try{
+    const r = await fetch("/api/site/login",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      credentials:"same-origin",
+      body: JSON.stringify({password: inp.value}),
+    });
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      if(r.status===429){
+        err.textContent = d.detail || "Too many failed attempts. Try again later.";
+      } else {
+        err.textContent = d.detail || "Incorrect password.";
+      }
+      err.classList.remove("hidden");
+      inp.select();
+      return;
+    }
+    // Cookie set by server — full reload bootstraps the rest of the app
+    location.reload();
+  } catch(_){
+    err.textContent = "Login failed (network error).";
+    err.classList.remove("hidden");
+  } finally {
+    btn.disabled = false;
+  }
+}
+
 // ── Init ───────────────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded",async()=>{
+  // Gate everything else on the remote-access check. For LAN clients (or when
+  // already authenticated remotely) this is a single round-trip and returns
+  // true immediately; for unauthenticated remote clients we surface the login
+  // overlay and abort init until the page is reloaded post-login.
+  if(!(await ensureSiteAuth())) return;
+
   // Handoff bootstrap: register the service worker, scan IndexedDB so we know
   // which episodes are saved (controls the offline icon + chooser), wire the
   // local <video>'s timeupdate/ended handlers, and flush any queued progress

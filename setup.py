@@ -829,6 +829,11 @@ def gather_config() -> dict:
     print()
     print(f"  {BOLD}Admin panel{RESET}")
     cfg["ADMIN_PASSWORD"]     = ask("Admin password (leave blank to disable)", "", secret=True)
+    print()
+    print(f"  {BOLD}Remote access (off-LAN){RESET}")
+    print(f"  Set a site password to protect off-LAN access. LAN clients always skip this.")
+    cfg["SITE_PASSWORD"]      = ask("Site password (leave blank to block off-LAN access)", "", secret=True)
+    cfg["SITE_SESSION_MINUTES"] = ask("Session TTL in minutes", "60")
 
     # Warn if qBittorrent and VLC are configured on the same port
     import re as _re

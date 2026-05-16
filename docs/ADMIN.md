@@ -1,18 +1,22 @@
 # Admin Panel
 
-`/admin` — served by `static/admin.html` ([main.py:3167](../main.py#L3167)). Disabled if `ADMIN_PASSWORD` is empty in `.env`.
+`/admin` — served by `static/admin.html`. Disabled if `ADMIN_PASSWORD` is empty in `.env`.
 
-## Auth flow
+## LAN-only
+
+Admin is enforced as **local-network-only**. The `network_access_gate` middleware (see [SITE_AUTH.md](SITE_AUTH.md)) returns 404 for `/admin`, `/admin.html`, `/admin/*`, and `/api/admin/*` whenever the client's IP is not loopback / RFC 1918 / link-local. `_check_admin` also enforces the LAN check on its own, so even a stolen admin token cannot be used remotely. The dashboard's "Admin" link is auto-hidden for remote clients because `/api/admin/status` returns 404.
+
+## Auth flow (LAN client)
 
 1. `GET /api/admin/status` returns `{enabled: bool}`. If false, the login overlay shows "Admin disabled" and the dashboard hides the admin link
 2. `POST /api/admin/login {password}` → returns `{token}` (32 hex chars, `secrets.token_hex(32)`)
-3. Token stored client-side in `sessionStorage.admin_token`. Sent on every request via `Authorization: Bearer <token>`
-4. Server-side store: `_admin_sessions: dict[str, float]` — token → Unix-timestamp expiry. TTL is 24 h ([main.py:3184](../main.py#L3184))
+3. Token stored client-side in `localStorage.streamlink_admin_token`. Sent on every request via `Authorization: Bearer <token>`
+4. Server-side store: `_admin_sessions: dict[str, float]` — token → Unix-timestamp expiry. TTL is 24 h
 5. `_check_admin(request)` accepts token from `Authorization: Bearer`, `X-Admin-Token` header, or `?admin_token=` query param. The query-param form is needed for SSE because EventSource can't set headers
 
-## HTTPS redirect ([main.py:1772](../main.py#L1772))
+## HTTPS
 
-`admin_https_redirect` middleware: any HTTP request to `/admin*` or `/api/admin/*` returns a 301 to the same path on `https://<host>/`. Assumes the HTTPS process is listening on port 443 — `run.py` only launches it when `cert.pem`+`key.pem` exist.
+`network_access_gate` middleware 301-redirects any HTTP request to `/admin*` or `/api/admin/*` to `https://<host>/`, even from the LAN, so the admin password is never sent in the clear. The HTTPS uvicorn process is launched by `run.py` when `cert.pem`+`key.pem` exist.
 
 Browsers will show a warning until `ca.pem` is added to the system trust store. `setup.py` prints the platform-specific command:
 - macOS: `sudo security add-trusted-cert -d -r trustRoot -k /Library/Keychains/System.keychain ca.pem`
