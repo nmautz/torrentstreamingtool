@@ -2561,7 +2561,7 @@ function renderLibrary(items){
                    flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
             ☰ Episodes
           </button>
-          <button onclick="continueLibraryItem('${item.id}')"
+          <button onclick="resumeLibraryItemWithChooser('${item.id}')"
             class="text-sm ${hasProgress?'bg-green-900/50 hover:bg-green-800/60 text-green-300 border border-green-800':'bg-indigo-700 hover:bg-indigo-600 text-white border-0'}
                    flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
             ${escHtml(contLabel)}
@@ -4454,6 +4454,27 @@ async function prepForStreaming(itemId, filePath, fileName) {
 
 // --- Play chooser (VLC vs On Device) -----------------------------------------
 
+// Entry point for the library card Resume/Play buttons on multi-file items.
+// VLC path uses the backend's resume logic; device path plays the resume file directly.
+function resumeLibraryItemWithChooser(itemId) {
+  if (!profile.id) { showAlert("Select a profile first.", "warn"); return; }
+  if (!navigator.onLine) {
+    showAlert("Disconnected — playback needs the host to be reachable.", "error");
+    return;
+  }
+  const item = (window._libCache || []).find(it => it.id === itemId);
+  const resume = item && item.resume;
+  const hasProgress = resume && resume.pct > 3 && !resume.all_completed;
+  const resumeFile = hasProgress ? (resume.file_path || "") : "";
+  const seekTo     = hasProgress ? (resume.position_sec || 0) : 0;
+  const label      = (item && item.title) || "";
+  pcCtx = { itemId, files: resumeFile ? [resumeFile] : [], seekTo, label, _continueMode: true };
+  document.getElementById("pcSubtitle").textContent = label;
+  document.getElementById("pcLocalSub").textContent = "Stream to this device's browser";
+  document.getElementById("pcLocalBtn").disabled = false;
+  document.getElementById("playChooserModal").classList.remove("hidden");
+}
+
 // Entry point used by Play buttons. Shows the chooser modal when both VLC and
 // local-device playback are reachable; falls through to VLC otherwise.
 async function playLibraryWithChooser(itemId, files, seekTo, label) {
@@ -4481,11 +4502,21 @@ function pcChoose(target) {
       });
       return;
     }
+    if (ctx._continueMode) {
+      // Multi-file resume on VLC: let the backend pick up from the resume hint.
+      return continueLibraryItem(ctx.itemId);
+    }
     return playLibraryFiles(ctx.itemId, ctx.files, ctx.seekTo);
   }
   if (target === "local") {
     // Dismiss the server-side offer (VLC stays put; user is watching on device).
     if (ctx._isResume) fetch("/api/resume-now", {method:"DELETE"}).catch(()=>{});
+    if (ctx._continueMode && !ctx.files.length) {
+      // "Play All" with no resume file: pull file list from cache.
+      const item = (window._libCache || []).find(it => it.id === ctx.itemId);
+      const allFiles = item && item.files ? item.files.map(f => f.path).filter(Boolean) : [];
+      return lpPlay(ctx.itemId, allFiles, 0, ctx.label);
+    }
     return lpPlay(ctx.itemId, ctx.files, ctx.seekTo, ctx.label);
   }
 }
