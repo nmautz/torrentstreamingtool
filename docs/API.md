@@ -80,6 +80,8 @@ Up to 6 profiles. No passwords. Optional 4-digit PIN per profile.
 | POST | `/api/library/{id}/mark-watched` | `{profile_id, watched, file_paths[], season?}` — mass mark watched/unwatched |
 | GET | `/api/library/{id}/download?file_path=…` | Browser-side file download (single file) |
 | POST | `/api/library/{id}/download-zip` | `{file_paths[]}` → streamed ZIP (uses `os.pipe` + thread; ZIP_STORED — no compression) |
+| GET | `/api/library/{id}/metadata?refresh=0\|1` | Cached TMDb show metadata (auto-fetches on first call when an API key is configured). Always returns `{enabled, img_base, metadata}`. `enabled=false` when no TMDb key is set — UI falls back to filename parsing |
+| POST | `/api/library/{id}/metadata/refresh` | Admin-only. `{tmdb_id?, kind?}` — force a re-fetch; optional `{tmdb_id, kind:"tv"\|"movie"}` overrides the auto-match for items that grabbed the wrong show |
 
 ## VLC controls
 
@@ -157,8 +159,8 @@ All require admin auth.
 | GET | `/api/admin/status` | `{enabled}` — is `ADMIN_PASSWORD` set? |
 | POST | `/api/admin/login` | `{password}` → `{token}` |
 | POST | `/api/admin/logout` | Invalidates the bearer token |
-| GET | `/api/admin/settings` | Returns `INDEXER_URL`, `INDEXER_API_KEY`, current `indexer_categories` override |
-| POST | `/api/admin/settings` | `{indexer_categories}` — saved as `library.json` → `settings.admin_overrides.indexer_categories` |
+| GET | `/api/admin/settings` | Returns `INDEXER_URL`, `INDEXER_API_KEY`, current `indexer_categories` override, `tmdb_api_key`, and `tmdb_api_key_source ∈ {admin\|env\|unset}` |
+| POST | `/api/admin/settings` | `{indexer_categories?, tmdb_api_key?}` — both saved as `library.json` → `settings.admin_overrides.*` (admin override beats `.env`). Empty `tmdb_api_key` clears the override |
 | GET | `/api/admin/library` | All items including admin-only; includes `series_key`, `files_with_skip`, `analysis_job` for each |
 | GET | `/api/admin/indexers` | List configured Jackett indexers |
 | GET | `/api/admin/indexers/available` | List all Jackett-known indexers (configured + available) |

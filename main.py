@@ -67,6 +67,11 @@ class Settings(BaseSettings):
     # User-Agent. "TemporaryUserAgent" is OpenSubtitles' documented testing UA.
     opensubtitles_user_agent: str = "TemporaryUserAgent"
 
+    # TMDb v3 API. Empty → metadata features are disabled (falls back to filename
+    # parsing on the client). Key can also be set live from the admin panel and
+    # is persisted in library.json → settings.admin_overrides.tmdb_api_key.
+    tmdb_api_key: str = ""
+
 
 settings = Settings()
 LIBRARY_FILE = Path(__file__).parent / "library.json"
@@ -565,6 +570,230 @@ async def _opensubtitles_search(
         key=lambda t: (0 if t["matched_by"] == "moviehash" else 1, -t["downloads"])
     )
     return trimmed[:40]
+
+
+# ── TMDb (show / episode metadata) ────────────────────────────────────────────
+#
+# Optional integration. Provides episode titles, overviews, posters, and stills
+# for the Netflix-style episode picker. Requires a free TMDb v3 API key.
+#
+# Configure via `TMDB_API_KEY` in .env or via the admin panel (overrides .env).
+# All metadata is cached on the library item under `item["metadata"]` so the
+# UI loads instantly after the first fetch.
+
+TMDB_IMG_BASE = "https://image.tmdb.org/t/p"
+
+_tmdb_fetch_locks: dict[str, asyncio.Lock] = {}
+_tmdb_fetch_in_flight: set[str] = set()
+
+
+async def _tmdb_effective_key() -> str:
+    """Resolve the active TMDb API key. Admin override beats .env."""
+    lib = await get_library()
+    override = (
+        lib.get("settings", {})
+           .get("admin_overrides", {})
+           .get("tmdb_api_key", "")
+    )
+    return (override or settings.tmdb_api_key or "").strip()
+
+
+async def _tmdb_get(path: str, params: Optional[dict] = None) -> Optional[dict]:
+    key = await _tmdb_effective_key()
+    if not key:
+        return None
+    q = dict(params or {})
+    q["api_key"] = key
+    url = f"https://api.themoviedb.org/3{path}"
+    try:
+        async with httpx.AsyncClient(timeout=15.0) as c:
+            r = await c.get(url, params=q)
+            if r.status_code == 200:
+                return r.json()
+    except Exception:
+        pass
+    return None
+
+
+_YEAR_RE = re.compile(r"\b(19|20)\d{2}\b")
+
+
+def _strip_release_tags(name: str) -> str:
+    """Strip common release/quality tags from a torrent title so a TMDb search
+    has a shot at matching the canonical show name."""
+    if not name:
+        return ""
+    s = name
+    s = re.sub(r"\[[^\]]*\]", " ", s)
+    s = re.sub(r"\([^)]*\)", " ", s)
+    s = re.sub(
+        r"\b(2160p|1080p|720p|480p|4K|UHD|BluRay|BDRip|BRRip|DVDRip|WEB-?DL|WEBRip|"
+        r"HDTV|HDR|HDR10|HEVC|x264|x265|H\.?264|H\.?265|AAC|AC3|DTS|FLAC|EAC3|"
+        r"REMUX|REPACK|PROPER|EXTENDED|UNRATED|MULTi|DUAL|SUBBED|DUBBED|BATCH|"
+        r"COMPLETE|S\d{1,2}|Season\s*\d{1,2}|E\d{1,3})\b.*",
+        " ", s, flags=re.IGNORECASE,
+    )
+    s = re.sub(r"[._\-]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip(" -_.")
+    return s
+
+
+def _search_terms_for_item(item: dict) -> tuple[str, Optional[int]]:
+    """Build (query, year_hint?) for TMDb search from a library item."""
+    series = (item.get("series") or "").strip()
+    title  = (item.get("title")  or "").strip()
+    raw    = series or title
+    # Strip a trailing "S01" off the series field (it's how we group entries)
+    raw = re.sub(r"\s*S\d{1,2}\s*$", "", raw, flags=re.IGNORECASE)
+    cleaned = _strip_release_tags(raw)
+    year_m = _YEAR_RE.search(title)
+    year = int(year_m.group(0)) if year_m else None
+    return cleaned, year
+
+
+async def _tmdb_match_show(item: dict) -> Optional[dict]:
+    """Find the most plausible TMDb TV show for this library item. Movies are
+    treated as one-shot items and matched via /search/movie when there's only
+    one file and no season info."""
+    query, year = _search_terms_for_item(item)
+    if not query:
+        return None
+
+    files = item.get("files", [])
+    is_movieish = len(files) <= 1 and not item.get("season")
+
+    # TV first — most of our library is series.
+    tv = await _tmdb_get("/search/tv", {"query": query, "include_adult": "false"})
+    tv_results = (tv or {}).get("results", []) or []
+    # Prefer first result; year hint just biases nothing for TV (first-air-date
+    # isn't always present and the search ranks by popularity already).
+    if tv_results and not is_movieish:
+        r = tv_results[0]
+        return {"kind": "tv", "id": r["id"], "raw": r}
+
+    if is_movieish:
+        movie = await _tmdb_get(
+            "/search/movie",
+            {"query": query, "include_adult": "false",
+             **({"year": year} if year else {})},
+        )
+        mv_results = (movie or {}).get("results", []) or []
+        if mv_results:
+            r = mv_results[0]
+            return {"kind": "movie", "id": r["id"], "raw": r}
+
+    # Fall back to the TV result for series-shaped items even if movieish failed
+    if tv_results:
+        r = tv_results[0]
+        return {"kind": "tv", "id": r["id"], "raw": r}
+    return None
+
+
+async def _tmdb_fetch_tv(show_id: int, seasons: list[int]) -> dict:
+    """Fetch show details + each requested season's episodes. Returns the
+    cache-shaped dict (see _build_metadata_cache)."""
+    details = await _tmdb_get(f"/tv/{show_id}", {}) or {}
+    cache_seasons: dict[str, dict] = {}
+    # Default to season 1 if no seasons were detected on disk (so a one-off
+    # picker that opens before season parsing still gets *something*).
+    if not seasons:
+        seasons = [1]
+    for sn in seasons:
+        s = await _tmdb_get(f"/tv/{show_id}/season/{sn}", {}) or {}
+        eps = []
+        for ep in s.get("episodes", []) or []:
+            eps.append({
+                "season":      ep.get("season_number", sn),
+                "episode":     ep.get("episode_number", 0),
+                "name":        ep.get("name", "") or "",
+                "overview":    ep.get("overview", "") or "",
+                "still_path":  ep.get("still_path") or "",
+                "air_date":    ep.get("air_date", "") or "",
+                "runtime":     ep.get("runtime") or 0,
+            })
+        if eps or s.get("name"):
+            cache_seasons[str(sn)] = {
+                "name":     s.get("name", f"Season {sn}"),
+                "overview": s.get("overview", "") or "",
+                "poster_path": s.get("poster_path") or "",
+                "episodes": eps,
+            }
+    return {
+        "tmdb_id":       show_id,
+        "tmdb_kind":     "tv",
+        "title":         details.get("name") or "",
+        "overview":      details.get("overview") or "",
+        "poster_path":   details.get("poster_path") or "",
+        "backdrop_path": details.get("backdrop_path") or "",
+        "first_air_date": details.get("first_air_date") or "",
+        "vote_average":  details.get("vote_average") or 0,
+        "genres":        [g.get("name", "") for g in details.get("genres", []) or []],
+        "seasons":       cache_seasons,
+        "fetched_at":    _now_iso(),
+    }
+
+
+async def _tmdb_fetch_movie(movie_id: int) -> dict:
+    details = await _tmdb_get(f"/movie/{movie_id}", {}) or {}
+    return {
+        "tmdb_id":       movie_id,
+        "tmdb_kind":     "movie",
+        "title":         details.get("title") or "",
+        "overview":      details.get("overview") or "",
+        "poster_path":   details.get("poster_path") or "",
+        "backdrop_path": details.get("backdrop_path") or "",
+        "release_date":  details.get("release_date") or "",
+        "vote_average":  details.get("vote_average") or 0,
+        "runtime":       details.get("runtime") or 0,
+        "genres":        [g.get("name", "") for g in details.get("genres", []) or []],
+        "seasons":       {},
+        "fetched_at":    _now_iso(),
+    }
+
+
+async def _fetch_item_metadata(item_id: str, force: bool = False,
+                                override_tmdb_id: Optional[int] = None,
+                                override_kind: Optional[str] = None) -> Optional[dict]:
+    """Match an item against TMDb and cache the result on the item. Coalesces
+    concurrent fetches for the same item via a per-id lock."""
+    if not await _tmdb_effective_key():
+        return None
+
+    lock = _tmdb_fetch_locks.setdefault(item_id, asyncio.Lock())
+    async with lock:
+        lib = await get_library()
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        if not item:
+            return None
+        cached = item.get("metadata") or {}
+        if cached.get("tmdb_id") and not force and not override_tmdb_id:
+            return cached
+
+        if override_tmdb_id and override_kind:
+            match = {"kind": override_kind, "id": int(override_tmdb_id)}
+        else:
+            match = await _tmdb_match_show(item)
+        if not match:
+            return None
+
+        seasons = sorted({
+            int(f.get("season", 0)) for f in item.get("files", [])
+            if int(f.get("season", 0)) > 0
+        })
+
+        if match["kind"] == "tv":
+            data = await _tmdb_fetch_tv(match["id"], seasons)
+        else:
+            data = await _tmdb_fetch_movie(match["id"])
+
+        # Re-read the library before writing — analyzer / progress writers may
+        # have updated other fields while we were fetching from TMDb.
+        lib2 = await get_library()
+        it2 = next((x for x in lib2["items"] if x["id"] == item_id), None)
+        if it2:
+            it2["metadata"] = data
+            await put_library(lib2)
+        return data
 
 
 def _find_vlc_bin() -> Optional[str]:
@@ -2072,6 +2301,12 @@ class AdminItemLockReq(BaseModel):
 
 class AdminSettingsReq(BaseModel):
     indexer_categories: Optional[str] = None
+    tmdb_api_key: Optional[str] = None
+
+
+class MetadataRefreshReq(BaseModel):
+    tmdb_id: Optional[int] = None     # manual override; pairs with `kind`
+    kind: Optional[str] = None        # "tv" | "movie"
 
 
 class ProfilePinReq(BaseModel):
@@ -2239,6 +2474,50 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
             "progress": progress,
         })
     return JSONResponse({"files": out, "item_status": item.get("status", "ready")})
+
+
+@app.get("/api/library/{item_id}/metadata")
+async def get_item_metadata(item_id: str, refresh: int = 0) -> JSONResponse:
+    """Return cached TMDb metadata for an item; auto-fetches on first access.
+    Response always includes `enabled` so the UI can gracefully fall back to
+    filename parsing when no TMDb key is configured."""
+    key_present = bool(await _tmdb_effective_key())
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+
+    cached = item.get("metadata") or {}
+    if not cached and key_present:
+        cached = await _fetch_item_metadata(item_id) or {}
+    elif refresh and key_present:
+        cached = await _fetch_item_metadata(item_id, force=True) or cached
+
+    return JSONResponse({
+        "enabled":  key_present,
+        "img_base": TMDB_IMG_BASE,
+        "metadata": cached or None,
+    })
+
+
+@app.post("/api/library/{item_id}/metadata/refresh")
+async def refresh_item_metadata(item_id: str, request: Request,
+                                 req: MetadataRefreshReq) -> JSONResponse:
+    """Admin-only manual rematch / refresh. Accepts an optional `{tmdb_id, kind}`
+    to force-bind a specific TMDb entry (covers cases where auto-match picks
+    the wrong show)."""
+    _require_admin(request)
+    if not await _tmdb_effective_key():
+        raise HTTPException(400, "TMDb API key is not configured.")
+    data = await _fetch_item_metadata(
+        item_id,
+        force=True,
+        override_tmdb_id=req.tmdb_id,
+        override_kind=req.kind if req.kind in ("tv", "movie") else None,
+    )
+    if not data:
+        raise HTTPException(404, "No TMDb match found for this item.")
+    return JSONResponse({"ok": True, "metadata": data, "img_base": TMDB_IMG_BASE})
 
 
 @app.post("/api/library/download")
@@ -3522,6 +3801,9 @@ async def admin_get_settings(request: Request) -> JSONResponse:
         "indexer_url": settings.indexer_url,
         "indexer_api_key": settings.indexer_api_key,
         "indexer_categories": overrides.get("indexer_categories", settings.indexer_categories),
+        "tmdb_api_key": overrides.get("tmdb_api_key", settings.tmdb_api_key),
+        "tmdb_api_key_source": "admin" if overrides.get("tmdb_api_key") else
+                               ("env" if settings.tmdb_api_key else "unset"),
     })
 
 
@@ -3532,6 +3814,12 @@ async def admin_update_settings(request: Request, req: AdminSettingsReq) -> JSON
     overrides = lib.setdefault("settings", {}).setdefault("admin_overrides", {})
     if req.indexer_categories is not None:
         overrides["indexer_categories"] = req.indexer_categories.strip()
+    if req.tmdb_api_key is not None:
+        v = req.tmdb_api_key.strip()
+        if v:
+            overrides["tmdb_api_key"] = v
+        else:
+            overrides.pop("tmdb_api_key", None)
     await put_library(lib)
     return JSONResponse({"ok": True})
 

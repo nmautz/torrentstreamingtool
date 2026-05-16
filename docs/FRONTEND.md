@@ -21,7 +21,7 @@ Metro UI throughout — flat tiles, no rounded corners, bold uppercase typograph
 | 276–372 | Download modal (with metadata fields + file picker) |
 | 374–447 | Upload modal (drop zone, progress bar) |
 | 449–480 | Storage paths modal |
-| 482–550 | Episode picker modal (per-episode play, mark-watched, ZIP download) |
+| 482–550 | Episode page (full-screen, Netflix-style — hero / season tabs / episode cards / sticky action bar). Replaced the legacy bottom-sheet modal in Milestone 12 |
 | 552–575 | Stream file picker modal (`/api/stream/prepare` picker) |
 | 577–609 | Subtitle search modal |
 | 611–615 | Global toast (visible from any tab — sits under navbar). `top-24 sm:top-16` because the mobile navbar is two rows. |
@@ -79,9 +79,32 @@ VLC's volume slider is debounced — `oninput="updateVolumeDisplay"` updates lab
 
 Handles click + touch (`handleSeekBarClick`) and pre-click hover tooltip (`handleSeekBarHover`/`Leave`). Calls `POST /api/vlc/seek/to?position_pct=N` — VLC's `seek` uses `val=N%` for absolute and `val=±Ns` for relative. **Don't mix the two**.
 
-### Episode picker (`epPlayFrom`)
+### Episode page (`#episodePage`, full-screen)
 
-Per-episode ▶ button: slices `epFiles` from the tapped index forward, respects resume position on the first file, plays as a playlist. This means "press play on episode 3" plays 3 → 4 → 5 …, not just 3.
+Replaces the legacy `#episodeModal` (Milestone 12). `openEpisodePicker(itemId, title)` opens it; under the hood it now reveals a full-screen view. Key DOM:
+
+- `#epHero` — backdrop + poster + show title + meta line + 3–4-line overview. Backdrop uses TMDb `/w1280<backdrop_path>`; poster uses `/w342<poster_path>`. Painted by `renderEpHero`.
+- `#epSeasonTabs` — one button per detected season (hidden when 0 or 1 season). `epSwitchSeason(s)` updates `epCurrentSeason` and re-renders.
+- `#epList` — scrollable episode list. Each card is a 16:9 still (TMDb `/w300<still_path>` or "S01·E02" placeholder), headline `S01·E02 · Episode Title`, 2-line overview, watch-progress bar overlaid on the still, plus inline Watched / Offline / Download buttons. Tapping the still calls `epPlayFrom(idx)`.
+
+State additions:
+- `epMetadata` — cached TMDb payload for the open item (or `null`).
+- `epMetaImgBase` — TMDb image base URL returned by the metadata endpoint.
+- `epCurrentSeason` — visible season number, set by `pickDefaultSeason()` to the season containing the currently-playing file → first season with unwatched episodes → first available.
+- `epSeasonList` — sorted positive seasons present in `epFiles`.
+
+Per-episode ▶: `epPlayFrom(globalIndex)` slices `epFiles` from the tapped index forward (using the original full-list index, *not* the per-season filtered index), respects resume position on the first file, plays as a playlist. This means "press play on episode 3" plays 3 → 4 → 5 …, not just 3.
+
+`closeEpisodeModal()` is kept as a back-compat alias for `closeEpisodePage()` so existing callers (refreshEpFiles, mark-watched, keyboard Escape handler) continue to work without changes.
+
+#### TMDb metadata
+
+Loaded in parallel with `/files` inside `openEpisodePicker`. Returns `{enabled, img_base, metadata}`. When `enabled=false` (no TMDb API key configured) or no match was found, the page degrades gracefully:
+- No backdrop / poster / stills.
+- Episode headlines fall through to `parseEpisodeInfo` (filename parsing).
+- Season tabs still work because they're built from `f.season` parsed off disk, not from TMDb.
+
+Admin sets the key under **Admin → Indexers → TMDb Metadata** (`POST /api/admin/settings { tmdb_api_key }`).
 
 ### Handoff to Device (offline playback)
 

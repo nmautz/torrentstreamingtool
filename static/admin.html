@@ -129,6 +129,31 @@
       </div>
     </div>
 
+    <!-- TMDb metadata -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-sm font-black uppercase tracking-wide">TMDb Metadata</h2>
+        <p class="text-xs text-gray-500 mt-0.5">
+          Free <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener" class="text-indigo-400 hover:text-indigo-300 underline">TMDb v3 API key</a>
+          for show / episode titles, descriptions, and stills in the episode picker. Leave blank to disable (the UI falls back to filename parsing).
+        </p>
+      </div>
+      <div class="px-5 py-4 flex gap-3 items-end">
+        <div class="flex-1">
+          <label class="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">API Key
+            <span id="tmdbSrc" class="ml-1 text-gray-700 normal-case font-normal"></span>
+          </label>
+          <input id="tmdbInput" type="text" placeholder="paste TMDb v3 API key"
+            class="w-full bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500
+                   px-3 py-3 text-sm font-mono focus:outline-none transition-colors"/>
+        </div>
+        <button onclick="saveTmdbKey()"
+          class="bg-indigo-600 hover:bg-indigo-500 px-5 py-3 text-sm font-black uppercase tracking-wide transition-colors flex-shrink-0">
+          Save
+        </button>
+      </div>
+    </div>
+
     <!-- Jackett indexers list -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between">
@@ -742,6 +767,14 @@ async function loadAdminSettings(){
   if(!r.ok) return;
   const d = await r.json();
   document.getElementById("catInput").value = d.indexer_categories || "";
+  document.getElementById("tmdbInput").value = d.tmdb_api_key || "";
+  const src = d.tmdb_api_key_source || "unset";
+  const srcEl = document.getElementById("tmdbSrc");
+  if (srcEl) {
+    srcEl.textContent = src === "admin" ? "(admin override)"
+                       : src === "env"   ? "(from .env)"
+                       : "(not set)";
+  }
 }
 
 async function saveCategories(){
@@ -751,6 +784,16 @@ async function saveCategories(){
     body: JSON.stringify({indexer_categories: cats}),
   });
   showToast(r.ok ? "Categories saved." : "Save failed.", !r.ok);
+}
+
+async function saveTmdbKey(){
+  const key = document.getElementById("tmdbInput").value.trim();
+  const r = await fetch("/api/admin/settings",{
+    method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+    body: JSON.stringify({tmdb_api_key: key}),
+  });
+  if (r.ok) await loadAdminSettings();
+  showToast(r.ok ? (key ? "TMDb key saved." : "TMDb key cleared.") : "Save failed.", !r.ok);
 }
 
 async function loadIndexers(){

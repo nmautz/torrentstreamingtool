@@ -173,9 +173,23 @@ The SW intercepts `fetch` events only after it's installed for the origin. The u
 ### Two layers of settings
 
 1. **`.env`** (loaded by `pydantic-settings`) — service URLs, credentials, buffer thresholds, admin password
-2. **`library.json` → `settings`** — UI-managed library paths, admin overrides (`indexer_categories`)
+2. **`library.json` → `settings`** — UI-managed library paths, admin overrides (`indexer_categories`, `tmdb_api_key`)
 
-`/api/search` reads `indexer_categories` from the admin override first, falling back to `.env`. Library paths are unioned across both.
+`/api/search` reads `indexer_categories` from the admin override first, falling back to `.env`. Library paths are unioned across both. `_tmdb_effective_key()` follows the same admin-beats-env precedence.
+
+## TMDb metadata
+
+### Auto-match grabs the most-popular result
+
+`_tmdb_match_show` ([main.py](../main.py)) calls `/search/tv` (or `/search/movie` for single-file no-season items) and takes the **first** result. TMDb's search ranks by popularity, so for ambiguous titles ("Monster", "The Office", "It") the match may be the wrong show. Recovery path: an admin POSTs `/api/library/{id}/metadata/refresh` with `{tmdb_id: <correct>, kind: "tv"|"movie"}` to force-bind the item to a specific TMDb entry. The result is cached on `item["metadata"]` and only re-fetched on another `refresh=1`.
+
+### Season tab uses `f.season` parsed off disk
+
+The season list in the episode page (`epSeasonList`) is built from `parse_season_episode` on the file paths, not from TMDb. This is intentional — TMDb has the canonical seasons, but the **on-disk** files are what the user can actually play. A file with no parseable `SxxEyy` lands in season `0` and shows up in the no-season fallback branch. If TMDb says season 4 exists but the user only has files for seasons 1–3, season 4 never appears as a tab.
+
+### Episode stills are joined by (season, episode) pair
+
+`_tmdbEpisode(file)` matches the file's `(season, episode)` against `metadata.seasons[N].episodes[*]`. If the filenames are mis-labelled — e.g. an anime cour where the on-disk numbering restarts each cour but TMDb uses one continuous season — the still and overview will be wrong even though the show match is right. The TMDb episode overview is still better than nothing; the user can always rename files or override the match. Don't add complex episode-offset heuristics without a clear failure case.
 
 ## Python compatibility
 

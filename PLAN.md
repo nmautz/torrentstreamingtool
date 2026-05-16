@@ -62,6 +62,16 @@
 
 ---
 
+## Milestone 12 — Netflix-Style Episode Page
+
+- [x] **12.1** Replace the bottom-sheet episode-picker **modal** with a full-screen **page** (`#episodePage`) that uses the entire viewport on mobile and looks like a streaming-app season view. Hero banner (TMDb backdrop + poster + title + overview), season tabs row, scrollable episode list, sticky bulk-action footer (Close · Download · Offline · ▶ Play).
+- [x] **12.2** **TMDb integration** for show + episode metadata. Adds an optional `TMDB_API_KEY` setting (env or admin-panel override) and two endpoints: `GET /api/library/{id}/metadata` (auto-fetches + caches on first call) and `POST /api/library/{id}/metadata/refresh` (admin-only manual rematch). Cached on `library.json → items[].metadata` so the UI loads instantly after the first fetch.
+- [x] **12.3** Episode rows show a 16:9 still (TMDb `/w300<still_path>` when available, else a "S01·E02" placeholder tile), the headline `S01·E02 · Episode Title`, a 2-line episode overview, a green watch-progress bar, and per-row Watched / Offline / Download buttons. Tapping the still plays from that episode forward.
+- [x] **12.4** **Season tabs** (`#epSeasonTabs`) — one tab per detected season, hidden when an item has zero/one season. Default tab is the season of the currently-playing file → first season with unwatched episodes → first available.
+- [x] **12.5** Filename-only fallback: if TMDb is unconfigured or no match is found, the page still works using the existing `parseEpisodeInfo` filename parser. Backdrops / posters / stills simply don't render.
+
+---
+
 ## Milestone 9 — Metro UI Redesign 
 
 - [x] **9.1** Full Metro/Win8 design language: flat tiles, no rounded corners, bold uppercase type, accent colors throughout

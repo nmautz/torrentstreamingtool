@@ -18,7 +18,8 @@ The only persistent server-side state. Lives at the project root. Accessed via `
       "enabled": true                   // when false, VLC stays idle on stop
     },
     "admin_overrides": {
-      "indexer_categories": "0"         // overrides .env INDEXER_CATEGORIES at search time
+      "indexer_categories": "0",        // overrides .env INDEXER_CATEGORIES at search time
+      "tmdb_api_key": "abc123"          // overrides .env TMDB_API_KEY; set/cleared in admin UI
     }
   }
 }
@@ -66,7 +67,8 @@ PIN hash is plain SHA-256 of the 4-digit string (no salt). PIN protection is "so
   "torrent_hash": "abc123...",          // empty for uploaded items
   "progress": { /* per-profile; see below */ },
   "admin_only": false,                  // optional; hides from non-elevated profiles
-  "skip_data": { /* per-file; see below */ }
+  "skip_data": { /* per-file; see below */ },
+  "metadata": { /* optional; TMDb cache — see below */ }
 }
 ```
 
@@ -122,6 +124,40 @@ Written by `vlc_progress_tracker` every 15 s. `mark_watched` ([main.py:2221](../
 ```
 
 `source="manual"` entries are never overwritten by re-runs. Entries with `analysis.version < ANALYZER_VERSION` are eligible for re-analysis.
+
+### `metadata` (TMDb cache, optional)
+
+```jsonc
+"metadata": {
+  "tmdb_id":       12345,
+  "tmdb_kind":     "tv" | "movie",
+  "title":         "Monster",
+  "overview":      "...",
+  "poster_path":   "/abc.jpg",            // join with /api/library/{id}/metadata → img_base
+  "backdrop_path": "/xyz.jpg",
+  "first_air_date":"2004-04-07",          // tv only
+  "release_date":  "1999-09-30",          // movie only
+  "vote_average":  8.7,
+  "genres":        ["Drama", "Mystery"],
+  "seasons": {                             // tv only
+    "1": {
+      "name":     "Season 1",
+      "overview": "...",
+      "poster_path": "/season1.jpg",
+      "episodes": [
+        {"season": 1, "episode": 1, "name": "Herr Dr. Tenma",
+         "overview": "...", "still_path": "/...jpg",
+         "air_date": "2004-04-07", "runtime": 24}
+      ]
+    }
+  },
+  "fetched_at": "2026-05-15T01:23:45+00:00"
+}
+```
+
+Populated by `_fetch_item_metadata` ([main.py](../main.py)) on first hit of `GET /api/library/{id}/metadata`, then served from cache. Per-id `asyncio.Lock` coalesces concurrent first-loads. Force refresh via `POST /api/library/{id}/metadata/refresh` (admin); the same endpoint accepts an optional `{tmdb_id, kind}` to manually bind the item to a TMDb entry when auto-match picks the wrong show.
+
+When no TMDb API key is configured (env or admin override), the endpoint returns `{enabled: false}` and the frontend gracefully falls back to filename parsing.
 
 ## Migration ([main.py:77](../main.py#L77))
 
