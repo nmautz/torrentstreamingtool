@@ -13,6 +13,9 @@
   <style>
     :root { color-scheme: dark; }
     html, body { overflow-x: hidden; max-width: 100vw; }
+    /* Logo visibility: hide on the very narrowest phones so the tab row fits */
+    .nav-logo { display: none; }
+    @media (min-width: 400px) { .nav-logo { display: block; } }
     ::-webkit-scrollbar { width: 4px; }
     ::-webkit-scrollbar-track { background: #030712; }
     ::-webkit-scrollbar-thumb { background: #1f2937; }
@@ -723,19 +726,19 @@
 <header class="sticky top-0 z-40 bg-gray-950 border-b border-gray-800 flex-shrink-0">
   <div class="safe-top">
     <div class="max-w-5xl mx-auto px-2 sm:px-3">
-      <div class="h-14 flex items-center gap-1 sm:gap-2 min-w-0">
-        <!-- Logo -->
-        <div class="font-black text-base sm:text-lg tracking-wide uppercase whitespace-nowrap mr-0 sm:mr-1 flex-shrink-0">
+      <div class="h-14 flex items-center gap-1 sm:gap-2">
+        <!-- Logo — hidden on the smallest phones to make room for tabs -->
+        <div class="nav-logo font-black text-sm sm:text-lg tracking-wide uppercase whitespace-nowrap mr-0 sm:mr-1 flex-shrink-0">
           <span class="text-indigo-500">Stream</span><span class="text-white">Link</span>
         </div>
         <!-- Tabs -->
-        <div class="flex h-14 flex-shrink min-w-0">
+        <div class="flex h-14 flex-shrink-0">
           <button id="tabSearch" onclick="switchTab('search')"
-            class="tab-btn tab-active px-2.5 sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors">Search</button>
+            class="tab-btn tab-active px-2 sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors flex-shrink-0 whitespace-nowrap">Search</button>
           <button id="tabLibrary" onclick="switchTab('library')"
-            class="tab-btn tab-inactive px-2.5 sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors">Library</button>
+            class="tab-btn tab-inactive px-2 sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors flex-shrink-0 whitespace-nowrap">Library</button>
           <button id="tabOffline" onclick="switchTab('offline')"
-            class="tab-btn tab-inactive px-2.5 sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors">Offline</button>
+            class="tab-btn tab-inactive px-2 sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors flex-shrink-0 whitespace-nowrap">Offline</button>
         </div>
         <div class="flex-1"></div>
         <!-- Download badge -->
