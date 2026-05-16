@@ -16,8 +16,8 @@
 | 294–373 | qBittorrent client: `qreq`, `qbit_add_magnet`, `qbit_streaming_mode`, `qbit_info`, `qbit_files`, `qbit_delete`, `qbit_set_file_priority` |
 | 376–448 | VLC client: `vlc()`, `vlc_status`, `vlc_playlist_uri`, `uri_to_path` |
 | 450–552 | OpenSubtitles: `_opensubtitles_hash`, `_current_playback_path`, `_opensubtitles_search` |
-| 555–717 | VLC window control (Windows ctypes / macOS osascript / Linux xdotool): focus, fullscreen, minimize |
-| 720–788 | VLC restart + `_retry_task` |
+| 555–773 | VLC window control (Windows ctypes / macOS osascript / Linux xdotool): focus, fullscreen, minimize. Windows focus path first minimizes all non-VLC top-level windows so the player owns the screen on TV playback. |
+| 776–847 | VLC restart + `_retry_task` |
 | 793–940 | Utilities: `extract_hash`, `parse_season_episode`, `build_file_list`, `find_resume_hint` |
 | 942–992 | Track preference save/apply |
 | 995–1032 | `vpn_guard` (3 s `mullvad status` loop) |

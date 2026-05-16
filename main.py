@@ -620,6 +620,51 @@ def _find_vlc_hwnds_windows() -> list:
         return []
 
 
+def _minimize_other_windows_windows() -> None:
+    """Minimize every visible top-level window that isn't owned by a VLC process.
+
+    Called before focusing VLC so the player owns the screen on TV playback.
+    Skips system / chromeless windows (no title) and already-minimized windows.
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        vlc_pids: set = set()
+        for p in psutil.process_iter(["name", "pid"]):
+            if (p.info["name"] or "").lower().startswith("vlc"):
+                vlc_pids.add(p.info["pid"])
+
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        my_pid = kernel32.GetCurrentProcessId()
+        shell_hwnd = user32.GetShellWindow()
+
+        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+        def _cb(hwnd, _):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            if hwnd == shell_hwnd:
+                return True
+            if user32.IsIconic(hwnd):
+                return True
+            if user32.GetWindowTextLengthW(hwnd) == 0:
+                return True
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            if pid.value == 0 or pid.value == my_pid or pid.value in vlc_pids:
+                return True
+            # SW_FORCEMINIMIZE (11) is cross-thread / cross-process safe.
+            user32.ShowWindow(hwnd, 11)
+            return True
+
+        cb = EnumWindowsProc(_cb)   # keep ref alive — ctypes GC pitfall
+        user32.EnumWindows(cb, 0)
+    except Exception:
+        pass
+
+
 def _vlc_focus_windows() -> None:
     """Bring the main VLC window to the foreground on Windows using ctypes."""
     hwnds = _find_vlc_hwnds_windows()
@@ -699,7 +744,9 @@ async def vlc_focus_and_fullscreen() -> None:
     system = platform.system()
     try:
         if system == "Windows":
-            await asyncio.get_event_loop().run_in_executor(None, _vlc_focus_windows)
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, _minimize_other_windows_windows)
+            await loop.run_in_executor(None, _vlc_focus_windows)
         elif system == "Darwin":
             proc = await asyncio.create_subprocess_exec(
                 "osascript", "-e", 'tell application "VLC" to activate',
