@@ -59,14 +59,15 @@ Single `EventSource('/api/events')`. Handlers:
 - `stream_status` — phase transitions (`buffering`/`playing`/`error`/`idle`); push progress fields
 - `library_progress` — per-item dl speed/ETA (~every 5 s while item is downloading). Stored in `libDownloadStats` and rendered into `#dl-stat-<itemId>`
 - `library_update` — item status changed (`downloading`→`ready`/`error`); triggers `loadLibrary()` if on the Library tab
-- `progress_saved` — quiet refresh of the library tab so watch-progress bars update
+- `progress_saved` — quiet refresh of the library tab so watch-progress bars update. If the episode picker is open for the same item, also calls `refreshEpFiles()` so the picker never displays stale watch data once the server has new state
 
 ### Key render functions
 
 - `renderPlayer(s)` — drives the footer + fullscreen overlay. The seek bar shows **VLC position** when `stream_status==="playing"` and `vlc_duration > 0`; otherwise download progress.
 - `renderSkipOffer(offer)` / `renderResumeOffer(offer)` — manage the floating amber/blue offer tiles.
 - `renderLibrary(items)` — groups items by `series`, renders cards with Play/Resume/Delete; in-progress downloads show a live ETA chip.
-- `renderEpList()` — episode picker rows with progress bars, per-episode ▶ button, checkbox selection, watched toggle.
+- `renderEpList()` — episode picker rows with progress bars, per-episode ▶ button, checkbox selection, watched toggle. The watched toggle is an element-based handler (`epToggleWatched(this)` reading `data-path`/`data-watched`); the prior inline `JSON.stringify(f.path)` form blew up the `onclick="…"` quoting and broke the button silently.
+- `refreshEpFiles()` — re-fetches `/api/library/{id}/files` for the open picker and re-renders. Called after `epToggleWatched` and from the `progress_saved` SSE handler. Preserves `epChecked` selections that still exist; does not touch the modal title (so it's safe to call mid-session).
 - `setFcTitle(title, filePath)` — sets the fullscreen overlay's title. Uses `parseEpisodeInfo` to extract "S01E04 · Episode Name" when possible.
 - `renderVpn(secure, statusText)` — updates the navbar pill + toggles the full-screen red overlay.
 
@@ -103,7 +104,7 @@ The IndexedDB schema (`streamlink-offline`):
 - `meta` — small caches (currently unused in v1; reserved for client-side hints).
 - `outbox` autoIncrement `id` — queued progress writes when offline.
 
-`saveProgress(itemId, filePath, posSec, durSec)` is called every 15 s by `#lpVideoFull`'s `timeupdate` handler. When `navigator.onLine === true` it POSTs `/api/library/{id}/progress`; otherwise it `outboxPush()`es. The window's `online` event fires `outboxFlush()`, which drains the outbox.
+`saveProgress(itemId, filePath, posSec, durSec)` is called every 15 s by `#lpVideoFull`'s `timeupdate` handler. When `navigator.onLine === true` it POSTs `/api/library/{id}/progress`; otherwise it `outboxPush()`es. The window's `online` event fires `outboxFlush()`, which drains the outbox. **Writes with `posSec < 5` or `durSec ≤ 0` are dropped** — the server recomputes `completed` from `pct = position/duration`, so a t≈0 write would wipe a watched episode back to unwatched. The same guard lives in `_lpFlushProgress` for its sendBeacon path. `_lpLoadIndex` also seeds `lp.lastSaveAt = Date.now()` so the first throttle window starts at load, giving the resume seek time to land before any save can fire. See [GOTCHAS.md](GOTCHAS.md#frontend-drops-saveprogress-writes-under-t5-s).
 
 The skip-intro / skip-credits offer logic in `lpEvaluateSkipOffer` mirrors the backend `_maybe_emit_skip_offer` (intro when `start-2 ≤ t < end-2`, credits when `t ≥ credits_start - 1`). Dismissed offers are remembered for the current `<filePath>#<type>` so they don't re-emit.
 

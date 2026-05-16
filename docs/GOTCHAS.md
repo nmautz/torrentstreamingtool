@@ -111,6 +111,10 @@ VLC plays `Path(p).resolve().as_uri()` (resolved). The stored item file path may
 2. Walk `files` in order, return first not-completed file
 3. If all completed → return file[0] with `all_completed: true` (UI lets user rewatch from start)
 
+### Frontend drops saveProgress writes under t=5 s
+
+The server recomputes `completed` on every `/api/library/{id}/progress` write as `pct = position/duration > 0.92`. A save at `t≈0` therefore wipes a previously-watched episode back to unwatched. The local player can fire those near-zero writes from at least three places: the very first `timeupdate` event before the resume seek lands, the `pause` event that browsers fire during initial load, and `lpStop` if the user opens the player and closes immediately. `saveProgress` and `_lpFlushProgress` both early-return when `posSec < 5` to keep watched marks stable. The 5 s threshold matches the resume hint's "meaningful in-progress" cutoff, so dropping these writes also has no resume-UX cost.
+
 ## SSE
 
 ### Per-client queues, dead-queue cleanup

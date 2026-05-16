@@ -2953,12 +2953,17 @@ function renderEpList(){
           class="flex-shrink-0 w-9 h-9 flex items-center justify-center
                  bg-indigo-900/60 hover:bg-indigo-700 text-indigo-300 hover:text-white
                  text-xs font-bold transition-colors" title="Play from here">▶</button>
-        <button onclick="epToggleWatched(${JSON.stringify(f.path)},${isComplete})"
+        <button data-watch-toggle data-path="${escHtml(f.path)}" data-watched="${!!isComplete}"
+          onclick="epToggleWatched(this)"
           class="flex-shrink-0 w-9 h-9 flex items-center justify-center transition-colors
                  ${isComplete?'text-green-600 hover:text-gray-500 hover:bg-gray-800/60':'text-gray-700 hover:text-green-500 hover:bg-green-950/40'}"
           title="${isComplete?'Mark unwatched':'Mark watched'}">
-          <svg class="w-4 h-4" fill="${isComplete?'currentColor':'none'}" stroke="currentColor" viewBox="0 0 24 24">
+          <svg class="ep-watch-icon w-4 h-4" fill="${isComplete?'currentColor':'none'}" stroke="currentColor" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
+          </svg>
+          <svg class="ep-watch-spinner w-4 h-4 hidden animate-spin" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <circle cx="12" cy="12" r="9" stroke-width="2" stroke-opacity="0.25"></circle>
+            <path stroke-linecap="round" stroke-width="2" d="M21 12a9 9 0 0 1-9 9"></path>
           </svg>
         </button>
         ${offlineBtn}
@@ -3119,14 +3124,45 @@ async function epMarkWatched(watched){
   }
 }
 
-async function epToggleWatched(path,wasWatched){
+async function epToggleWatched(btn){
   if(!epItemId||!profile.id) return;
-  const r=await fetch(`/api/library/${epItemId}/mark-watched`,{
-    method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({profile_id:profile.id,watched:!wasWatched,file_paths:[path]}),
-  });
-  if(r.ok) await openEpisodePicker(epItemId);
-  else showAlert("Failed to update watch status.","error");
+  const path=btn?.dataset?.path;
+  if(!path) return;
+  const wasWatched=btn.dataset.watched==="true";
+  // Show loading spinner on the button until the server confirms.
+  btn.disabled=true;
+  const icon=btn.querySelector(".ep-watch-icon");
+  const spin=btn.querySelector(".ep-watch-spinner");
+  if(icon) icon.classList.add("hidden");
+  if(spin) spin.classList.remove("hidden");
+  btn.setAttribute("title","Updating…");
+  try{
+    const r=await fetch(`/api/library/${epItemId}/mark-watched`,{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({profile_id:profile.id,watched:!wasWatched,file_paths:[path]}),
+    });
+    if(!r.ok){ showAlert("Failed to update watch status.","error"); return; }
+    await refreshEpFiles();
+  } catch(_){
+    showAlert("Failed to update watch status.","error");
+  }
+}
+
+// Re-fetch the current episode picker's file list from the server and re-render.
+// Used after a watched-toggle, and from the progress_saved SSE handler so the
+// open picker never displays stale watch data once the server has new state.
+async function refreshEpFiles(){
+  if(!epItemId) return;
+  const pid=profile.id?`?profile_id=${profile.id}`:"";
+  try{
+    const r=await fetch(`/api/library/${epItemId}/files${pid}`);
+    if(!r.ok) return;
+    const d=await r.json();
+    epFiles=d.files||[];
+    // Drop any checked paths that are no longer in the file list.
+    epChecked=new Set([...epChecked].filter(p=>epFiles.some(f=>f.path===p)));
+    renderEpList();
+  } catch(_){}
 }
 
 async function epPlay(){
@@ -4017,6 +4053,11 @@ async function outboxFlush() {
 // Send a progress save — server when online, outbox when not.
 async function saveProgress(itemId, filePath, posSec, durSec) {
   if (!profile.id) return;
+  // Drop saves at or near t=0. The server treats `pct = position/duration` as
+  // the source of truth for `completed`, so a t≈0 write would wipe a fully-
+  // watched episode back to unwatched. The resume offer also ignores anything
+  // under 5 s, so saves below that threshold have no benefit either way.
+  if (!(durSec > 0) || posSec < 5) return;
   const body = { profile_id: profile.id, file_path: filePath,
                  position_sec: posSec, duration_sec: durSec };
   if (navigator.onLine) {
@@ -4420,6 +4461,10 @@ async function _lpLoadIndex(seekTo) {
     })();
   }
   lp.resumeApplied = false; lp.resumeSec = seekTo || 0;
+  // Push the throttle window forward so the first `timeupdate` after this load
+  // doesn't fire saveProgress before the resume seek has landed (otherwise we'd
+  // overwrite the server's watched state with t≈0).
+  lp.lastSaveAt = Date.now();
 
   // Tear down old blob URLs from any prior load.
   if (lp.videoUrl) try { URL.revokeObjectURL(lp.videoUrl); } catch (_) {}
@@ -4662,6 +4707,9 @@ function _lpFlushProgress(useBeacon) {
   const t = v.currentTime || 0;
   const d = v.duration || lp.duration || 0;
   if (d <= 0) return;
+  // Skip near-zero writes — same reason as in saveProgress(): the server
+  // recomputes `completed` from pct, so a t≈0 flush wipes watched state.
+  if (t < 5) return;
   lp.lastSaveAt = Date.now();
   if (useBeacon && navigator.onLine && navigator.sendBeacon) {
     try {
@@ -5017,6 +5065,14 @@ function connectSSE(){
   es.addEventListener("progress_saved",e=>{
     // Re-render library silently when episode progress is saved
     if(activeTab==="library") loadLibrary();
+    // Keep the open episode picker in sync with the server's authoritative state
+    // so previously-watched marks don't appear stale after a progress write.
+    if(epItemId){
+      try{
+        const d=JSON.parse(e.data||"{}");
+        if(!d.item_id||d.item_id===epItemId) refreshEpFiles();
+      } catch(_){ refreshEpFiles(); }
+    }
   });
   es.addEventListener("error",()=>{
     sseDot.className="w-2 h-2 bg-red-600 transition-colors";
