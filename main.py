@@ -3681,6 +3681,14 @@ async def download_library_zip(item_id: str, req: ZipDownloadReq) -> StreamingRe
 
     zip_name = re.sub(r'[\\/*?:"<>|]', "_", item["title"]) + ".zip"
 
+    # Compute expected ZIP size (ZIP_STORED = no compression, so size is predictable).
+    # Local header: 30 + len(name); central dir entry: 46 + len(name); EOCD: 22.
+    total_bytes = 22
+    for p_str in targets:
+        name_len = len(Path(p_str).name.encode())
+        size = Path(p_str).stat().st_size
+        total_bytes += size + (30 + name_len) + (46 + name_len)
+
     r_fd, w_fd = os.pipe()
 
     def _write_zip() -> None:
@@ -3708,7 +3716,11 @@ async def download_library_zip(item_id: str, req: ZipDownloadReq) -> StreamingRe
     return StreamingResponse(
         _read_pipe(),
         media_type="application/zip",
-        headers={"Content-Disposition": f'attachment; filename="{zip_name}"'},
+        headers={
+            "Content-Disposition": f'attachment; filename="{zip_name}"',
+            "X-Total-Bytes": str(total_bytes),
+            "Access-Control-Expose-Headers": "X-Total-Bytes",
+        },
     )
 
 

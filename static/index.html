@@ -1380,6 +1380,36 @@
   </div>
 </div>
 
+<!-- ── ZIP Download Progress modal ───────────────────────────────────────── -->
+<div id="zipProgressModal"
+  class="hidden fixed inset-0 z-[60] bg-black/70 flex items-end sm:items-center justify-center sm:px-4">
+  <div class="bg-gray-900 w-full sm:max-w-sm border-t-[3px] border-amber-500">
+    <div class="px-5 pt-5 pb-3 border-b border-gray-800">
+      <h2 class="text-lg font-black uppercase tracking-wide">Preparing ZIP</h2>
+      <p id="zpLabel" class="text-xs text-gray-500 mt-0.5 truncate"></p>
+    </div>
+    <div class="px-5 pt-4 pb-2">
+      <div class="flex justify-between text-xs font-mono text-gray-400 mb-2">
+        <span id="zpPct" class="text-amber-400 font-black text-sm">0%</span>
+        <span id="zpEta" class="text-gray-500">—</span>
+      </div>
+      <div class="w-full bg-gray-800 h-2">
+        <div id="zpBar" class="h-2 bg-amber-500 transition-all duration-300" style="width:0%"></div>
+      </div>
+      <div class="flex justify-between text-[11px] text-gray-600 mt-1.5">
+        <span id="zpReceived">0 MB</span>
+        <span id="zpSpeed"></span>
+      </div>
+    </div>
+    <div class="px-5 pb-5 pt-2">
+      <button id="zpCancelBtn" onclick="cancelZipDownload()"
+        class="w-full bg-gray-800 hover:bg-gray-700 py-3 text-sm font-bold uppercase tracking-wide transition-colors text-red-400 hover:text-red-300">
+        Cancel
+      </button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Local Player — single <video>, two visual modes (full / tiny). ─────── -->
 <div id="localPlayer">
   <!-- Fullscreen chrome: header bar (close + title) above the video -->
@@ -3436,28 +3466,96 @@ function epSelectUnwatched(){
 
 // ── Download helpers ───────────────────────────────────────────────────────
 
+let _zipAbortCtrl = null;
+
+function cancelZipDownload() {
+  if (_zipAbortCtrl) { _zipAbortCtrl.abort(); _zipAbortCtrl = null; }
+  document.getElementById("zipProgressModal").classList.add("hidden");
+}
+
+function _fmtBytes(b) {
+  if (b < 1024) return b + " B";
+  if (b < 1024 * 1024) return (b / 1024).toFixed(1) + " KB";
+  if (b < 1024 * 1024 * 1024) return (b / 1024 / 1024).toFixed(1) + " MB";
+  return (b / 1024 / 1024 / 1024).toFixed(2) + " GB";
+}
+
+function _fmtEta(secs) {
+  if (!isFinite(secs) || secs <= 0) return "—";
+  if (secs < 60) return Math.ceil(secs) + "s";
+  if (secs < 3600) return Math.floor(secs / 60) + "m " + Math.ceil(secs % 60) + "s";
+  return Math.floor(secs / 3600) + "h " + Math.floor((secs % 3600) / 60) + "m";
+}
+
 async function _triggerZipDownload(itemId, filePaths, label){
-  showAlert(`Preparing ZIP for "${label}"…`,"success");
+  _zipAbortCtrl = new AbortController();
+  const modal = document.getElementById("zipProgressModal");
+  document.getElementById("zpLabel").textContent = label;
+  document.getElementById("zpPct").textContent = "0%";
+  document.getElementById("zpBar").style.width = "0%";
+  document.getElementById("zpReceived").textContent = "0 MB";
+  document.getElementById("zpSpeed").textContent = "";
+  document.getElementById("zpEta").textContent = "—";
+  modal.classList.remove("hidden");
+
   try {
-    const r=await fetch(`/api/library/${itemId}/download-zip`,{
-      method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({file_paths:filePaths}),
+    const r = await fetch(`/api/library/${itemId}/download-zip`, {
+      method: "POST",
+      headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({file_paths: filePaths}),
+      signal: _zipAbortCtrl.signal,
     });
-    if(!r.ok){
-      const e=await r.json().catch(()=>({detail:"Failed."}));
-      showAlert(e.detail||"ZIP download failed.","error"); return;
+    if (!r.ok) {
+      modal.classList.add("hidden");
+      const e = await r.json().catch(()=>({detail:"Failed."}));
+      showAlert(e.detail || "ZIP download failed.", "error"); return;
     }
-    const blob=await r.blob();
-    const url=URL.createObjectURL(blob);
-    const a=document.createElement("a");
-    const cd=r.headers.get("Content-Disposition")||"";
-    const m=cd.match(/filename="([^"]+)"/);
-    a.href=url; a.download=m?m[1]:`${label}.zip`;
+
+    const total = parseInt(r.headers.get("X-Total-Bytes") || "0", 10);
+    const cd = r.headers.get("Content-Disposition") || "";
+    const m = cd.match(/filename="([^"]+)"/);
+    const filename = m ? m[1] : `${label}.zip`;
+
+    const reader = r.body.getReader();
+    const chunks = [];
+    let received = 0;
+    const startTime = Date.now();
+    let lastUpdate = 0;
+
+    while (true) {
+      const {done, value} = await reader.read();
+      if (done) break;
+      chunks.push(value);
+      received += value.length;
+
+      const now = Date.now();
+      if (now - lastUpdate > 200) {
+        lastUpdate = now;
+        const elapsed = (now - startTime) / 1000;
+        const speed = elapsed > 0 ? received / elapsed : 0;
+        const pct = total > 0 ? Math.min(100, (received / total) * 100) : 0;
+        const eta = speed > 0 && total > 0 ? (total - received) / speed : Infinity;
+        document.getElementById("zpPct").textContent = total > 0 ? Math.round(pct) + "%" : _fmtBytes(received);
+        document.getElementById("zpBar").style.width = pct + "%";
+        document.getElementById("zpReceived").textContent = _fmtBytes(received) + (total ? " / " + _fmtBytes(total) : "");
+        document.getElementById("zpSpeed").textContent = _fmtBytes(Math.round(speed)) + "/s";
+        document.getElementById("zpEta").textContent = "ETA " + _fmtEta(eta);
+      }
+    }
+
+    modal.classList.add("hidden");
+    const blob = new Blob(chunks, {type: "application/zip"});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url; a.download = filename;
     document.body.appendChild(a); a.click();
-    setTimeout(()=>{ URL.revokeObjectURL(url); a.remove(); },1000);
-    showAlert(`Download started.`,"success");
-  } catch(e){
-    showAlert("ZIP download failed.","error");
+    setTimeout(() => { URL.revokeObjectURL(url); a.remove(); }, 1000);
+    showAlert("Download started.", "success");
+  } catch(e) {
+    modal.classList.add("hidden");
+    if (e.name !== "AbortError") showAlert("ZIP download failed.", "error");
+  } finally {
+    _zipAbortCtrl = null;
   }
 }
 
