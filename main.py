@@ -2760,11 +2760,11 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
                 await vlc("seek", val=str(int(s)))
             asyncio.create_task(_delayed_seek(seek_sec))
         elif resume_mode == "prompt":
-            async def _delayed_resume_offer(s: float, fp: str) -> None:
+            async def _delayed_resume_offer(s: float, fp: str, iid: str, pl: list) -> None:
                 await asyncio.sleep(3)
-                state.resume_offer = {"position_sec": s, "file_path": fp}
+                state.resume_offer = {"position_sec": s, "file_path": fp, "item_id": iid, "playlist": pl}
                 await broadcast("state", state_snapshot())
-            asyncio.create_task(_delayed_resume_offer(seek_sec, playlist[0]))
+            asyncio.create_task(_delayed_resume_offer(seek_sec, playlist[0], item_id, playlist))
         # "off" → do nothing, start from beginning
 
     # Apply saved track prefs for the first file (after VLC opens it)

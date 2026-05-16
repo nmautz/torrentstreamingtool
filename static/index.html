@@ -1976,14 +1976,25 @@ function renderResumeOffer(offer){
 }
 
 async function triggerResume(){
-  const btn = document.getElementById("resumeOfferBtn");
-  await withInflight("resume", btn, async () => {
-    const r = await fetch("/api/resume-now", {method:"POST"});
-    if(!r.ok){
-      const d = await r.json().catch(()=>({}));
-      showAlert(d.detail || "Resume failed.", "error");
-    }
-  });
+  const offer = app.resume_offer;
+  if (!offer) return;
+  const seekTo = offer.position_sec || 0;
+  const files  = offer.playlist || (offer.file_path ? [offer.file_path] : []);
+  const itemId = offer.item_id || null;
+  const label  = "Resume from " + fmtTimeSecs(Math.round(seekTo));
+
+  pcCtx = {
+    itemId, files, seekTo, label,
+    _isResume: true,
+  };
+  // Hide the banner visually (don't delete the server-side offer yet —
+  // the VLC path needs it for /api/resume-now POST).
+  app.resume_offer = null;
+  renderResumeOffer(null);
+  document.getElementById("pcSubtitle").textContent = label;
+  document.getElementById("pcLocalSub").textContent = "Stream to this device's browser";
+  document.getElementById("pcLocalBtn").disabled = false;
+  document.getElementById("playChooserModal").classList.remove("hidden");
 }
 
 async function dismissResume(){
@@ -4458,14 +4469,32 @@ async function playLibraryWithChooser(itemId, files, seekTo, label) {
 }
 
 function pcChoose(target) {
-  const ctx = pcCtx; closePlayChooser();
-  if (!ctx) return;
-  if (target === "vlc")  return playLibraryFiles(ctx.itemId, ctx.files, ctx.seekTo);
-  if (target === "local") return lpPlay(ctx.itemId, ctx.files, ctx.seekTo, ctx.label);
-}
-function closePlayChooser() {
+  const ctx = pcCtx;
   document.getElementById("playChooserModal").classList.add("hidden");
   pcCtx = null;
+  if (!ctx) return;
+  if (target === "vlc") {
+    if (ctx._isResume) {
+      // Resume on VLC: seek the already-playing stream (offer still active server-side).
+      fetch("/api/resume-now", {method:"POST"}).then(r => {
+        if (!r.ok) r.json().catch(()=>({})).then(d => showAlert(d.detail || "Resume failed.", "error"));
+      });
+      return;
+    }
+    return playLibraryFiles(ctx.itemId, ctx.files, ctx.seekTo);
+  }
+  if (target === "local") {
+    // Dismiss the server-side offer (VLC stays put; user is watching on device).
+    if (ctx._isResume) fetch("/api/resume-now", {method:"DELETE"}).catch(()=>{});
+    return lpPlay(ctx.itemId, ctx.files, ctx.seekTo, ctx.label);
+  }
+}
+function closePlayChooser() {
+  const ctx = pcCtx;
+  document.getElementById("playChooserModal").classList.add("hidden");
+  pcCtx = null;
+  // Cancel: clean up the server-side resume offer if one was pending.
+  if (ctx && ctx._isResume) fetch("/api/resume-now", {method:"DELETE"}).catch(()=>{});
 }
 
 // --- Local player (browser-side <video>) -------------------------------------
