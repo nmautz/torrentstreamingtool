@@ -154,19 +154,29 @@ Most torrents are MKV with H.264/AAC. Safari iOS's `<video>` element only accept
 
 Keep the `_offline_job_sem()` semaphore in place (`OFFLINE_JOB_CONCURRENCY = 1`). Jobs sit in `status="pending"` until they acquire it; both `/prep-status` and `/api/offline-active` already treat `pending` as in-progress, so the UI behaves correctly. If you ever raise the cap, also re-baseline `started_at` inside the semaphore (already done) so per-job ETAs don't include queue time.
 
-### IndexedDB blob playback uses `URL.createObjectURL(blob)`
+### Local player streams the server URL — no client-side blob, no `URL.createObjectURL`
 
-The local player binds the single `<video id="lpVideo">` to a `blob:` URL constructed from the IndexedDB record. Tiny ↔ fullscreen toggling is pure CSS (`.lp-tiny` class on `#localPlayer`); we never move the video element or change `src` mid-playback. Always `URL.revokeObjectURL` on unload (`lpUnloadCurrent`), otherwise iOS will leak memory across episode changes.
+The local player sets `<video id="lpVideo">.src` directly to the `video_url`
+returned by `/offline-prepare` (either `/api/library/{id}/download…` for
+fast-path Safari MP4s or `/api/library/offline-cache/<sha>.mp4` after a remux/
+transcode). The browser issues HTTP Range requests; FastAPI's `FileResponse`
+honors them so seek-while-streaming works without extra plumbing. There is no
+client-side blob anymore — don't reintroduce one. Tiny ↔ fullscreen toggling
+is still pure CSS (`.lp-tiny` class on `#localPlayer`); the video element is
+never moved or re-`src`-ed mid-playback.
 
-`<track src=blob:...>` for VTT subtitles only works because `crossorigin="anonymous"` is set on the `<video>` and the blob URL is same-origin. Don't drop the `crossorigin` attribute.
+Subtitle `<track src=…>` URLs point at `/api/library/{id}/subtitle?file=…`,
+which is same-origin, so `crossorigin="anonymous"` on the `<video>` continues
+to be sufficient for them to load. Don't drop that attribute.
 
-### Service worker scope must be `/`
+### Service worker is an eviction stub — keep it that way
 
-`/sw.js` is intentionally served from root (not `/static/sw.js`) so its scope covers the whole app. iOS Safari will silently scope-restrict an SW to its serving directory. Keep the file at the root mount.
-
-### Page-shell offline boot needs a prior successful visit
-
-The SW intercepts `fetch` events only after it's installed for the origin. The user must have loaded `remote.local` at least once with the network reachable; subsequent visits work even when DNS for `remote.local` fails — Safari hits the SW cache for the navigation request.
+`static/sw.js` exists only to unregister itself and `caches.delete` everything
+it ever cached, so devices with the old "Handoff" SW installed don't stay
+pinned to a stale app shell. Don't reintroduce caching strategies, navigation
+fallbacks, or API caches in `sw.js`. Once enough time has passed that no
+device has the old SW alive, the file and the `evictLegacyServiceWorker` call
+in `index.html` can be deleted entirely.
 
 ## Settings
 

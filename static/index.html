@@ -6,7 +6,6 @@
   <meta name="apple-mobile-web-app-capable" content="yes" />
   <meta name="mobile-web-app-capable" content="yes" />
   <title>StreamLink v2.0</title>
-  <link rel="manifest" href="/manifest.json" />
   <meta name="theme-color" content="#4f46e5" />
   <script src="https://cdn.tailwindcss.com"></script>
   <script>tailwind.config = { darkMode: 'class' }</script>
@@ -156,6 +155,7 @@
       z-index: 55;
     }
     #localPlayer.lp-tiny #lpSkipOffer { display: none !important; }
+    #localPlayer.lp-tiny #lpPreparing { display: none !important; }
   </style>
 </head>
 <body class="dark bg-gray-950 text-gray-100 min-h-screen flex flex-col">
@@ -694,14 +694,6 @@
         </svg>
         <span class="hidden sm:inline">Download</span><span>(<span id="epSelectedCount">0</span>)</span>
       </button>
-      <button onclick="epSaveSelectedOffline()"
-        class="flex-1 bg-gray-800 hover:bg-emerald-900/60 text-gray-400 hover:text-emerald-300 py-3 text-xs sm:text-sm font-bold uppercase tracking-wide transition-colors min-h-[44px] flex items-center justify-center gap-1.5">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M5 5a2 2 0 012-2h7l5 5v11a2 2 0 01-2 2H7a2 2 0 01-2-2V5z"/>
-          <path stroke-linecap="round" stroke-linejoin="round" d="M12 11v6m-3-3l3 3 3-3"/>
-        </svg>
-        <span class="hidden sm:inline">Offline</span><span>(<span id="epSelectedCountOff">0</span>)</span>
-      </button>
       <button onclick="epPlay()"
         class="flex-[1.4] bg-indigo-600 hover:bg-indigo-500 py-3 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors min-h-[44px]">
         ▶ Play
@@ -794,8 +786,6 @@
             class="tab-btn tab-active flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap">Search</button>
           <button id="tabLibrary" onclick="switchTab('library')"
             class="tab-btn tab-inactive flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap">Library</button>
-          <button id="tabOffline" onclick="switchTab('offline')"
-            class="tab-btn tab-inactive flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap">Offline</button>
         </div>
         <!-- Right cluster: order-2 on mobile (next to logo), order-3 on sm+. ml-auto acts as the spacer in both layouts. -->
         <div class="order-2 sm:order-3 ml-auto flex items-center gap-1 sm:gap-2 h-12 sm:h-14 flex-shrink-0">
@@ -912,26 +902,6 @@
         </div>
       </div>
       <div id="libraryContent"></div>
-    </div>
-
-    <!-- Offline tab -->
-    <div id="offlineTab" class="hidden">
-      <div class="flex items-center justify-between mb-5">
-        <div>
-          <h2 class="text-lg font-black uppercase tracking-wide">Offline</h2>
-          <div id="offlineTotalLine" class="text-[11px] text-gray-600 font-mono mt-1">No files saved to this device</div>
-        </div>
-        <div class="flex items-center gap-3">
-          <button onclick="loadOfflineTab()"
-            class="text-xs text-gray-600 hover:text-gray-300 transition-colors flex items-center gap-1 font-bold uppercase tracking-wide">
-            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-            </svg>Refresh
-          </button>
-        </div>
-      </div>
-      <div id="offlineContent"></div>
     </div>
 
   </div>
@@ -1374,35 +1344,13 @@
         </svg>
         <div class="min-w-0">
           <div class="text-sm font-black uppercase tracking-wide">On This Device</div>
-          <div id="pcLocalSub" class="text-[11px] text-gray-500 mt-0.5">Play the saved offline copy</div>
+          <div id="pcLocalSub" class="text-[11px] text-gray-500 mt-0.5">Stream to this device's browser</div>
         </div>
       </button>
     </div>
     <div class="px-4 pb-4 safe-bottom">
       <button onclick="closePlayChooser()"
         class="w-full bg-gray-800 hover:bg-gray-700 py-3 text-sm font-bold uppercase tracking-wide transition-colors">Cancel</button>
-    </div>
-  </div>
-</div>
-
-<!-- ── Save-for-Offline progress modal ────────────────────────────────────── -->
-<div id="offlineSaveModal"
-  class="hidden fixed inset-0 z-[60] bg-black/70 flex items-end sm:items-center justify-center sm:px-4">
-  <div class="bg-gray-900 w-full sm:max-w-sm fade-in border-t-[3px] border-emerald-600">
-    <div class="px-5 pt-5 pb-3 border-b border-gray-800">
-      <h2 class="text-lg font-black uppercase tracking-wide">Saving for offline</h2>
-      <p id="osmFile" class="text-xs text-gray-500 mt-0.5 truncate font-mono"></p>
-    </div>
-    <div class="p-5 space-y-3">
-      <div id="osmStage" class="text-sm text-gray-300">Preparing…</div>
-      <div class="w-full h-2 bg-gray-800">
-        <div id="osmBar" class="h-full bg-emerald-500 transition-all duration-300" style="width:0%"></div>
-      </div>
-      <div id="osmDetail" class="text-[11px] text-gray-500 font-mono"></div>
-    </div>
-    <div class="px-4 pb-4 safe-bottom flex gap-2">
-      <button id="osmCancel" onclick="cancelOfflineSave()"
-        class="flex-1 bg-gray-800 hover:bg-gray-700 py-3 text-sm font-bold uppercase tracking-wide transition-colors">Cancel</button>
     </div>
   </div>
 </div>
@@ -1430,6 +1378,11 @@
     </div>
   </div>
   <video id="lpVideo" controls playsinline crossorigin="anonymous" preload="auto"></video>
+  <!-- Stream-prep overlay: visible while the server is remuxing/transcoding the source file. -->
+  <div id="lpPreparing"
+       class="hidden absolute inset-0 z-30 flex items-center justify-center bg-black/70 text-amber-300 text-sm font-bold uppercase tracking-widest pointer-events-none">
+    Preparing for streaming…
+  </div>
   <!-- Skip offer floating tile (anchored above the controls row). Hidden in tiny mode by CSS. -->
   <div id="lpSkipOffer" class="hidden">
     <button id="lpSkipBtn" onclick="lpAcceptSkipOffer()"
@@ -1516,15 +1469,10 @@ let streamPrepAbort = null;  // AbortController for the in-flight prepare reques
 let _fcAutoTitle  = "";    // title active the last time we auto-opened
 let _fcDismissed  = false; // user manually closed fullscreen for the current track
 
-// ── Handoff / offline-playback state ───────────────────────────────────────
-// Set of "<itemId>|<file_path>" keys that are currently saved in IndexedDB.
-// Populated on init from offlineList(); kept in sync as save/remove run.
-const offlineSaved = new Set();
+// ── Stream-to-Device state ─────────────────────────────────────────────────
 // Active local-player session: see lpPlay() / lpStop().
 let lp = {
   itemId: null, filePath: null, name: "",
-  videoUrl: null,        // blob: URL currently bound to <video>
-  subUrls: [],           // blob: URLs for <track> elements (revoke on unload)
   duration: 0,
   playlist: [], pi: 0,    // ordered file paths within the active item, current index
   // Skip-offer logic (mirrors backend _maybe_emit_skip_offer)
@@ -1540,15 +1488,10 @@ let lp = {
   resumeApplied: false,
   resumeSec: 0,
 };
-// Offline save job state (foreground modal flow)
-let osm = { jobId: null, abort: null, itemId: null, filePath: null, cancelled: false };
-// In-flight background prefetches kicked off by the local player so the next
-// episode in a playlist is already saved by the time the user reaches it.
-// Keys are offKey(itemId, filePath); values are AbortControllers.
-const lpBgPrefetch = new Map();
 // Play-chooser modal state
-let pcCtx = null;  // {itemId, files, seekTo, label, hasOffline}
-// Per-item prep-offline state — populated as the user clicks Prep Offline on a card.
+let pcCtx = null;  // {itemId, files, seekTo, label}
+// Per-item prep-for-streaming state — populated when the user clicks "Prep for
+// Streaming" on a library card or when /prep-status returns a fresh summary.
 // Drives the chip rendered into #prep-stat-<itemId>.
 const prepStats = new Map();    // itemId → {ready, processing, errored, total, files[]}
 const prepPolling = new Set();  // itemIds currently being polled
@@ -2078,16 +2021,13 @@ async function saveResumeMode(){
 // ── Tabs ───────────────────────────────────────────────────────────────────
 function switchTab(tab){
   activeTab=tab;
-  const isS=tab==="search", isL=tab==="library", isO=tab==="offline";
+  const isS=tab==="search", isL=tab==="library";
   document.getElementById("searchTab").classList.toggle("hidden",!isS);
   document.getElementById("libraryTab").classList.toggle("hidden",!isL);
-  document.getElementById("offlineTab").classList.toggle("hidden",!isO);
   const cls=(on)=>`tab-btn flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap ${on?"tab-active":"tab-inactive"}`;
   document.getElementById("tabSearch").className=cls(isS);
   document.getElementById("tabLibrary").className=cls(isL);
-  document.getElementById("tabOffline").className=cls(isO);
   if(isL) loadLibrary();
-  if(isO) loadOfflineTab();
 }
 
 // ── Profiles ───────────────────────────────────────────────────────────────
@@ -2515,21 +2455,18 @@ function renderLibrary(items){
               ▶ Play
             </button>`;
           }
-          // Direct "play on this device" button. Saves to IndexedDB on first
-          // tap (with the existing offline-save modal), then launches the local
-          // player. If already saved, plays immediately.
+          // Direct "Stream to this device" button — opens the chooser, where
+          // "On Device" hands the file off to the local browser <video>.
           const onlyFile = item.first_file || null;
           const fpath  = (resume && resume.file_path) || (onlyFile && onlyFile.path) || "";
           const fname  = (onlyFile && onlyFile.name) || item.title || "";
           const fseek  = hasProgress ? (resume.position_sec || 0) : 0;
           if (fpath) {
-            const isSaved = offlineSaved.has(offKey(item.id, fpath));
-            const label   = isSaved ? "📱 On Device" : "📱 Save & Play Here";
-            buttons+=`<button onclick="saveAndPlayLocal(${escHtml(JSON.stringify(item.id))},${escHtml(JSON.stringify(fpath))},${escHtml(JSON.stringify(fname))},${escHtml(JSON.stringify(item.title||fname))},${fseek})"
+            buttons+=`<button onclick="playLibraryWithChooser(${escHtml(JSON.stringify(item.id))},[${escHtml(JSON.stringify(fpath))}],${fseek},${escHtml(JSON.stringify(item.title||fname))})"
               class="text-sm bg-emerald-900/50 hover:bg-emerald-800/60 text-emerald-200 border border-emerald-800
                      flex-1 py-2.5 transition-colors font-medium min-h-[44px]"
-              title="${isSaved?'Play the saved offline copy on this device':'Download to this device, then play offline'}">
-              ${label}
+              title="Stream to this device or play on the host's VLC">
+              📱 On Device
             </button>`;
           }
         }
@@ -2558,12 +2495,12 @@ function renderLibrary(items){
         }
       }
 
-      // "Prep Offline" — pre-runs remux/transcode on every video file in the
-      // item so a subsequent "Save Offline" tap fetches the cached MP4 instantly
-      // instead of waiting on ffmpeg. Status chip below shows progress.
+      // "Prep for Streaming" — pre-runs remux/transcode on every video file in
+      // the item so a subsequent device-side Play taps a cached MP4 and the
+      // browser starts streaming immediately instead of waiting on ffmpeg.
       if(isReady){
-        buttons+=`<button onclick="prepItemForOffline('${item.id}')"
-          title="Pre-convert all files to Safari-compatible MP4 (server-side)"
+        buttons+=`<button onclick="prepItemForStreaming('${item.id}')"
+          title="Pre-convert all files to a stream-friendly MP4 (server-side)"
           class="text-gray-500 hover:text-amber-300 p-2.5 hover:bg-amber-950/40 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
             <path stroke-linecap="round" stroke-linejoin="round" d="M12 6V3m0 0L9 6m3-3l3 3M6 12H3m0 0l3-3m-3 3l3 3m12-3h3m0 0l-3-3m3 3l-3 3M12 18v3m0 0l-3-3m3 3l3-3"/>
@@ -2623,20 +2560,13 @@ function renderLibrary(items){
   });
 }
 
-// "Continue" — auto-selects best file and position. If we know (from the cached
-// library list) that the resume file is saved offline, route through the chooser
-// so the user gets the local-vs-VLC option; otherwise fall through to the
-// server-resolved VLC playback path.
+// "Continue" — auto-selects best file and position and starts VLC playback on
+// the host. (Streaming to the current device is offered separately via the
+// "On Device" button.)
 async function continueLibraryItem(itemId){
   if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
-  const item = (window._libCache||[]).find(it=>it.id===itemId);
-  const resumePath = item && item.resume && item.resume.file_path;
-  if(resumePath && offlineSaved.has(offKey(itemId, resumePath))){
-    const seek = item.resume.all_completed ? 0 : (item.resume.position_sec||0);
-    return playLibraryWithChooser(itemId, [resumePath], seek, item.title||"");
-  }
   if(!navigator.onLine){
-    showAlert("Disconnected. Save this episode for offline first.","error"); return;
+    showAlert("Disconnected — playback needs the host to be reachable.","error"); return;
   }
   const r=await fetch(`/api/library/${itemId}/play`,{
     method:"POST", headers:{"Content-Type":"application/json"},
@@ -2943,6 +2873,23 @@ async function openEpisodePicker(itemId, title){
     } catch(_){}
   }
 
+  // Stream-prep status: tells the per-row Prep buttons which files are
+  // already in the .offline_cache (or Safari-native) and which still need work.
+  // Best-effort — a slow /prep-status just leaves all rows showing "Prep".
+  (async () => {
+    try {
+      const r = await fetch(`/api/library/${itemId}/prep-status`);
+      if (!r.ok) return;
+      const s = await r.json();
+      if (epItemId !== itemId) return;
+      prepStats.set(itemId, s);
+      _ingestPrepStatusFiles(itemId, s.files);
+      _renderPrepChip(itemId);
+      renderEpList();
+      if (s.processing > 0) _startPrepPolling(itemId);
+    } catch (_) {}
+  })();
+
   // Build the season tab list — positive seasons sorted ascending. If we have
   // positive seasons AND season-0 files, append 0 as a trailing "Specials"
   // tab so those orphans are still reachable.
@@ -3172,27 +3119,33 @@ function renderEpList(){
       ? `<span class="text-[10px] text-green-500 font-bold uppercase tracking-widest">✓ Watched</span>`
       : inProgress ? `<span class="text-[10px] text-yellow-500 font-bold">${pct}%</span>` : "";
 
-    const isOffline=offlineSaved.has(offKey(epItemId,f.path));
+    const prepState = prepFileState.get(offKey(epItemId,f.path));
+    const isReady    = prepState === "ready";
+    const isPrepping = prepState === "prepping";
     // HTML-encode JSON-quoted args so embedded "..." don't break the onclick="..." attribute.
     const _id=escHtml(JSON.stringify(epItemId));
     const _p =escHtml(JSON.stringify(f.path));
     const _n =escHtml(JSON.stringify(f.name));
-    const _lbl=escHtml(JSON.stringify(label+' — '+f.name));
 
-    const offlineBtn=isOffline
-      ?`<button onclick="removeFromOffline(${_id},${_p},${_n})"
-          class="flex-shrink-0 w-9 h-9 flex items-center justify-center text-emerald-400 hover:text-red-400 hover:bg-red-950/30 transition-colors"
-          title="Saved on this device — tap to remove">
-          <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
-            <path d="M5 3a2 2 0 00-2 2v14l9-4 9 4V5a2 2 0 00-2-2H5z"/>
+    const offlineBtn = isReady
+      ? `<div class="flex-shrink-0 w-9 h-9 flex items-center justify-center text-emerald-400"
+            title="Ready to stream — preconverted on the host">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
           </svg>
-        </button>`
-      :`<button onclick="saveForOffline(${_id},${_p},${_n},${_lbl})"
+        </div>`
+      : isPrepping
+      ? `<div class="flex-shrink-0 w-9 h-9 flex items-center justify-center text-amber-400"
+            title="Prepping on the host…">
+          <svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+          </svg>
+        </div>`
+      : `<button onclick="prepForStreaming(${_id},${_p},${_n})"
           class="flex-shrink-0 w-9 h-9 flex items-center justify-center text-gray-600 hover:text-emerald-400 hover:bg-emerald-950/30 transition-colors"
-          title="Save for offline playback on this device">
+          title="Prep this file on the host for instant streaming">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M5 5a2 2 0 012-2h7l5 5v11a2 2 0 01-2 2H7a2 2 0 01-2-2V5z"/>
-            <path stroke-linecap="round" stroke-linejoin="round" d="M12 11v6m-3-3l3 3 3-3"/>
+            <path stroke-linecap="round" stroke-linejoin="round" d="M20 7l-8 4-8-4m16 0l-8-4-8 4m16 0v10l-8 4m0-10v10m0-10L4 7m0 0v10l8 4"/>
           </svg>
         </button>`;
 
@@ -3235,7 +3188,7 @@ function renderEpList(){
               ${headline}
               ${playingBadge}
               ${watchedBadge}
-              ${isOffline?'<span class="text-[10px] text-emerald-500 font-bold uppercase tracking-widest">● Offline</span>':''}
+              ${isReady?'<span class="text-[10px] text-emerald-500 font-bold uppercase tracking-widest">● Stream Ready</span>':''}
             </div>
             ${subOverview}
             <div class="text-[10px] text-gray-700 mt-1 font-mono">${escHtml(f.size_human)}${dur?` · ${fmtTime(dur)}`:""}</div>
@@ -3288,8 +3241,6 @@ function epToggle(cb){
 function updateEpCount(){
   const n=epChecked.size;
   document.getElementById("epSelectedCount").textContent=n;
-  const off=document.getElementById("epSelectedCountOff");
-  if(off) off.textContent=n;
 }
 function epSelectAll(v){
   epFiles.forEach(f=>{ if(v) epChecked.add(f.path); else epChecked.delete(f.path); });
@@ -3368,39 +3319,6 @@ function epDownloadSeason(season){
 
 function epDownloadAll(itemId, title){
   _triggerZipDownload(itemId, [], title||"download");
-}
-
-async function epSaveSelectedOffline(){
-  if(!epChecked.size){ showAlert("Select at least one episode.","warn"); return; }
-  if(!epItemId) return;
-  if(!navigator.onLine){ showAlert("Cannot save offline while disconnected.","error"); return; }
-  const itemId=epItemId;
-  const paths=[...epChecked];
-  const targets=paths
-    .map(p=>epFiles.find(f=>f.path===p))
-    .filter(f=>f && !offlineSaved.has(offKey(itemId,f.path)));
-  if(!targets.length){ showAlert("All selected episodes are already saved.","warn"); return; }
-  // Each episode that needs transcoding can take minutes of ffmpeg on the host.
-  // Confirm before a big batch so a stray click doesn't kick off hours of CPU work.
-  if(targets.length>=3 && !confirm(
-      `Save ${targets.length} episodes for offline playback?\n\n`+
-      `Episodes that aren't already MP4/H.264 will be transcoded on the host one `+
-      `at a time. This can take a long time and will use server CPU throughout.`)){
-    return;
-  }
-  let saved=0;
-  osm.batch = true; // keep the modal open between files; final iteration closes it
-  try{
-    for(const f of targets){
-      await saveForOffline(itemId, f.path, f.name, epLabel(f)+' — '+f.name);
-      if(!offlineSaved.has(offKey(itemId,f.path))) break; // user cancelled or it failed
-      saved++;
-    }
-  } finally {
-    osm.batch = false;
-    closeOfflineSaveModal();
-  }
-  if(saved>1) showAlert(`Saved ${saved} episode${saved>1?"s":""} for offline playback.`,"success");
 }
 
 async function epMarkWatched(watched){
@@ -4229,125 +4147,20 @@ async function applySubtitle(i){
 
 // ── SSE ────────────────────────────────────────────────────────────────────
 // ─────────────────────────────────────────────────────────────────────────────
-// HANDOFF / OFFLINE PLAYBACK
+// STREAM TO DEVICE
 //
-// Keeps a copy of any episode (video + subs + skip data + last-known progress)
-// in browser IndexedDB so the user can play it on this device with no server
-// reachable. Service worker handles the page-shell + library-list cache so the
-// app boots offline; this module handles the heavy media + play surface.
+// Plays library episodes directly in the device's browser via HTTP-range
+// streaming of the server's preconverted MP4 (`/api/library/{id}/offline-prepare`
+// returns either the original Safari-friendly file or a `.offline_cache/<sha>.mp4`).
+// Watch progress POSTs back to /api/library/{id}/progress so the server stays
+// the source of truth for resume position even after an abrupt tab close.
 // ─────────────────────────────────────────────────────────────────────────────
-
-// --- IndexedDB schema ---------------------------------------------------------
-// streamlink-offline DB:
-//   videos: keyPath "key" (= "<itemId>|<filePath>")
-//           {key, itemId, filePath, name, blob, duration, savedAt, sizeBytes,
-//            codecInfo, subs:[{lang,name,blob,vtt:true}], skipData,
-//            sourceVideoUrl}
-//   meta:   keyPath "key"  (small cached stuff: progress hints, last library list)
-//   outbox: keyPath "id" autoIncrement
-//           {id, itemId, profileId, filePath, position_sec, duration_sec, queuedAt}
-
-const IDB_NAME = "streamlink-offline";
-const IDB_VERSION = 1;
-let _idbPromise = null;
-
-function idb() {
-  if (_idbPromise) return _idbPromise;
-  _idbPromise = new Promise((resolve, reject) => {
-    const req = indexedDB.open(IDB_NAME, IDB_VERSION);
-    req.onupgradeneeded = (e) => {
-      const db = req.result;
-      if (!db.objectStoreNames.contains("videos")) db.createObjectStore("videos", { keyPath: "key" });
-      if (!db.objectStoreNames.contains("meta"))   db.createObjectStore("meta",   { keyPath: "key" });
-      if (!db.objectStoreNames.contains("outbox")) db.createObjectStore("outbox", { keyPath: "id", autoIncrement: true });
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror   = () => reject(req.error);
-  });
-  return _idbPromise;
-}
-
-function idbTx(stores, mode) {
-  return idb().then(db => db.transaction(stores, mode));
-}
-
-function idbReq(req) {
-  return new Promise((res, rej) => {
-    req.onsuccess = () => res(req.result);
-    req.onerror   = () => rej(req.error);
-  });
-}
 
 function offKey(itemId, filePath) { return `${itemId}|${filePath}`; }
 
-async function offlineList() {
-  // Return all keys without loading the (huge) blob payloads.
-  try {
-    const tx = await idbTx(["videos"], "readonly");
-    const store = tx.objectStore("videos");
-    return await idbReq(store.getAllKeys());
-  } catch (_) { return []; }
-}
-
-async function offlineGet(itemId, filePath) {
-  try {
-    const tx = await idbTx(["videos"], "readonly");
-    return await idbReq(tx.objectStore("videos").get(offKey(itemId, filePath)));
-  } catch (_) { return null; }
-}
-
-async function offlinePut(record) {
-  const tx = await idbTx(["videos"], "readwrite");
-  await idbReq(tx.objectStore("videos").put(record));
-}
-
-async function offlineDelete(itemId, filePath) {
-  try {
-    const tx = await idbTx(["videos"], "readwrite");
-    await idbReq(tx.objectStore("videos").delete(offKey(itemId, filePath)));
-    offlineSaved.delete(offKey(itemId, filePath));
-  } catch (_) {}
-}
-
-async function refreshOfflineSet() {
-  offlineSaved.clear();
-  for (const k of await offlineList()) offlineSaved.add(k);
-}
-
-// --- Outbox: queue progress writes when offline; flush on reconnect ----------
-
-async function outboxPush(payload) {
-  try {
-    const tx = await idbTx(["outbox"], "readwrite");
-    await idbReq(tx.objectStore("outbox").add({ ...payload, queuedAt: Date.now() }));
-  } catch (_) {}
-}
-
-async function outboxFlush() {
-  if (!navigator.onLine) return;
-  let entries = [];
-  try {
-    const tx = await idbTx(["outbox"], "readonly");
-    entries = await idbReq(tx.objectStore("outbox").getAll());
-  } catch (_) { return; }
-  for (const e of entries) {
-    try {
-      const r = await fetch(`/api/library/${e.itemId}/progress`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          profile_id: e.profileId, file_path: e.filePath,
-          position_sec: e.position_sec, duration_sec: e.duration_sec,
-        }),
-      });
-      if (r.ok) {
-        const tx2 = await idbTx(["outbox"], "readwrite");
-        await idbReq(tx2.objectStore("outbox").delete(e.id));
-      }
-    } catch (_) { /* still offline; leave entry in queue */ }
-  }
-}
-
-// Send a progress save — server when online, outbox when not.
+// POST a watch-progress update. Best-effort: a single failed POST is fine —
+// the next 15-second tick (or the `pause`/`visibilitychange`/`pagehide` flush)
+// will overwrite it, and the server's last persisted value is still authoritative.
 async function saveProgress(itemId, filePath, posSec, durSec) {
   if (!profile.id) return;
   // Drop saves at or near t=0. The server treats `pct = position/duration` as
@@ -4355,351 +4168,97 @@ async function saveProgress(itemId, filePath, posSec, durSec) {
   // watched episode back to unwatched. The resume offer also ignores anything
   // under 5 s, so saves below that threshold have no benefit either way.
   if (!(durSec > 0) || posSec < 5) return;
-  const body = { profile_id: profile.id, file_path: filePath,
-                 position_sec: posSec, duration_sec: durSec };
-  if (navigator.onLine) {
-    try {
-      const r = await fetch(`/api/library/${itemId}/progress`, {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (r.ok) return;
-    } catch (_) {}
-  }
-  await outboxPush({ itemId, profileId: profile.id, filePath,
-                     position_sec: posSec, duration_sec: durSec });
-}
-
-// --- Save flow: prepare → poll → fetch blob → store -------------------------
-
-function openOfflineSaveModal(name) {
-  document.getElementById("osmFile").textContent = name;
-  document.getElementById("osmStage").textContent = "Preparing…";
-  document.getElementById("osmBar").style.width = "0%";
-  document.getElementById("osmDetail").textContent = "";
-  document.getElementById("osmCancel").disabled = false;
-  document.getElementById("offlineSaveModal").classList.remove("hidden");
-  osm.cancelled = false;
-}
-function closeOfflineSaveModal() {
-  document.getElementById("offlineSaveModal").classList.add("hidden");
-  osm.jobId = null; osm.abort = null; osm.itemId = null; osm.filePath = null;
-}
-function osmStage(text)  { document.getElementById("osmStage").textContent = text; }
-function osmBar(pct)     { document.getElementById("osmBar").style.width = `${Math.max(0,Math.min(100,pct))}%`; }
-function osmDetail(text) { document.getElementById("osmDetail").textContent = text; }
-
-function cancelOfflineSave() {
-  osm.cancelled = true;
-  if (osm.abort) try { osm.abort.abort(); } catch (_) {}
-  closeOfflineSaveModal();
-  showAlert("Save cancelled.", "warn");
-}
-
-async function saveForOffline(itemId, filePath, fileName, fileLabel) {
-  if (offlineSaved.has(offKey(itemId, filePath))) {
-    showAlert("Already saved on this device.", "warn"); return;
-  }
-  if (!navigator.onLine) {
-    showAlert("Cannot save offline while disconnected.", "error"); return;
-  }
-  // If a background prefetch is mid-flight for this same file, abort it so the
-  // foreground modal flow owns the work (and gets the progress UI + cancel).
-  const _bgCtl = lpBgPrefetch.get(offKey(itemId, filePath));
-  if (_bgCtl) { try { _bgCtl.abort(); } catch (_) {} lpBgPrefetch.delete(offKey(itemId, filePath)); }
-  openOfflineSaveModal(fileLabel || fileName || "");
-  osm.itemId = itemId; osm.filePath = filePath;
   try {
-    osmStage("Probing codec…");
-    const prepRes = await fetch(`/api/library/${itemId}/offline-prepare`, {
+    await fetch(`/api/library/${itemId}/progress`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile_id: profile.id, file_path: filePath,
+                             position_sec: posSec, duration_sec: durSec }),
+    });
+  } catch (_) { /* swallow — next tick will retry */ }
+}
+
+// --- Per-file "Prep for Streaming" -------------------------------------------
+// Kicks off /offline-prepare for a single file so the cached MP4 is on disk by
+// the time the user taps Play. Updates per-file state in `prepFileState` so the
+// per-row button can reflect Prep → Prepping → Stream Ready without page reload.
+// Never downloads the video to the device — playback is a normal HTTP stream.
+
+// offKey → "ready" | "prepping" — drives the per-row button state.
+const prepFileState = new Map();
+
+function _prepStatusFromValue(v) {
+  if (!v) return null;
+  if (v === "ready_native" || v === "cached" || v === "done") return "ready";
+  if (v === "pending" || v === "processing") return "prepping";
+  return null;
+}
+
+// Merge the per-file list returned by /prep-status into prepFileState so the
+// per-row Prep buttons render correctly.
+function _ingestPrepStatusFiles(itemId, files) {
+  if (!Array.isArray(files)) return;
+  for (const f of files) {
+    const k = offKey(itemId, f.file_path || "");
+    const s = _prepStatusFromValue(f.status);
+    if (s) prepFileState.set(k, s);
+    else prepFileState.delete(k);
+  }
+}
+
+async function prepForStreaming(itemId, filePath, fileName) {
+  const k = offKey(itemId, filePath);
+  if (prepFileState.get(k) === "prepping" || prepFileState.get(k) === "ready") return;
+  prepFileState.set(k, "prepping");
+  if (epItemId === itemId) renderEpList();
+  try {
+    const r = await fetch(`/api/library/${itemId}/offline-prepare`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ file_path: filePath }),
     });
-    if (!prepRes.ok) {
-      const e = await prepRes.json().catch(() => ({ detail: "Prepare failed." }));
-      throw new Error(e.detail || "Prepare failed.");
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({ detail: "Prep failed." }));
+      throw new Error(e.detail || "Prep failed.");
     }
-    const prep = await prepRes.json();
-    let videoUrl = prep.video_url;
-    let codecInfo = prep.codec_info || {};
-    let duration = prep.duration_sec || 0;
-    let subs = prep.subs || [];
-
-    // If server is preparing (remux/transcode), poll until done.
-    if (!prep.ready && prep.job_id) {
-      const op = prep.operation === "remux" ? "Remuxing to MP4" : "Transcoding to H.264 / AAC";
-      osmStage(`${op}…`);
-      while (true) {
-        if (osm.cancelled) return;
-        await new Promise(r => setTimeout(r, 1500));
-        const sr = await fetch(`/api/library/offline-job/${prep.job_id}`);
-        if (!sr.ok) throw new Error("Lost track of preparation job.");
-        const s = await sr.json();
-        osmBar(s.progress * 30);  // first 30% = server-side prep
-        osmDetail(`${Math.round(s.progress * 100)}% on server`);
-        if (s.status === "done") { videoUrl = s.video_url; break; }
-        if (s.status === "error") throw new Error(s.error || "Preparation failed.");
-      }
+    const prep = await r.json();
+    if (prep.ready) {
+      prepFileState.set(k, "ready");
+      if (epItemId === itemId) renderEpList();
+      return;
     }
-
-    // Download the prepared MP4 with progress reporting.
-    osmStage("Downloading to device…");
-    osm.abort = new AbortController();
-    const resp = await fetch(videoUrl, { signal: osm.abort.signal });
-    if (!resp.ok) throw new Error(`Download failed (${resp.status}).`);
-    const total = parseInt(resp.headers.get("Content-Length") || "0", 10);
-    const reader = resp.body.getReader();
-    const chunks = [];
-    let received = 0;
+    if (!prep.job_id) throw new Error("Server did not return a job id.");
+    // Poll until done.
     while (true) {
-      if (osm.cancelled) return;
-      const { done, value } = await reader.read();
-      if (done) break;
-      chunks.push(value); received += value.length;
-      const pct = total > 0 ? 30 + (received / total) * 65 : 30;
-      osmBar(pct);
-      osmDetail(`${fmtSize(received)}${total>0?" / "+fmtSize(total):""}`);
+      await new Promise(res => setTimeout(res, 1500));
+      const sr = await fetch(`/api/library/offline-job/${prep.job_id}`);
+      if (!sr.ok) throw new Error("Lost track of prep job.");
+      const s = await sr.json();
+      if (s.status === "done")  break;
+      if (s.status === "error") throw new Error(s.error || "Prep failed.");
     }
-    const blob = new Blob(chunks, { type: "video/mp4" });
-
-    // Download sidecar subs (SRT→VTT done on server) as Blobs in parallel.
-    osmStage("Saving subtitles + metadata…");
-    osmBar(96);
-    const subBlobs = await Promise.all((subs || []).map(async (s) => {
-      try {
-        const r = await fetch(s.url);
-        if (!r.ok) return null;
-        const text = await r.text();
-        return { lang: s.lang, name: s.name,
-                 blob: new Blob([text], { type: "text/vtt" }) };
-      } catch (_) { return null; }
-    }));
-
-    // Pull skip-data so the local player can run skip-intro offline.
-    let skipData = null;
-    try {
-      const sd = await fetch(`/api/library/${itemId}/skip-data?file_path=${encodeURIComponent(filePath)}`);
-      if (sd.ok) skipData = await sd.json();
-    } catch (_) {}
-
-    osmBar(99);
-    await offlinePut({
-      key: offKey(itemId, filePath),
-      itemId, filePath,
-      name: fileName || filePath.split(/[/\\]/).pop(),
-      blob, duration, sizeBytes: blob.size,
-      codecInfo, sourceVideoUrl: videoUrl,
-      subs: subBlobs.filter(Boolean),
-      skipData, savedAt: Date.now(),
-    });
-    offlineSaved.add(offKey(itemId, filePath));
-    osmBar(100);
-    osmStage("Saved.");
-    // In batch mode (epSaveSelectedOffline), the next iteration will reopen
-    // the modal immediately — closing+reopening produces a visible flicker
-    // and a 600 ms window where the user thinks nothing is happening, even
-    // though server-side ffmpeg has already started on the next file.
-    if (!osm.batch) setTimeout(() => closeOfflineSaveModal(), 600);
-    showAlert("Saved for offline playback.", "success");
+    prepFileState.set(k, "ready");
     if (epItemId === itemId) renderEpList();
-    if (activeTab === "library") loadLibrary();
+    showAlert(`"${fileName||"Episode"}" is ready to stream.`, "success");
   } catch (err) {
-    if (osm.cancelled) return;
-    closeOfflineSaveModal();
-    showAlert(err.message || "Save failed.", "error");
-  }
-}
-
-async function removeFromOffline(itemId, filePath, fileName) {
-  if (!confirm(`Remove "${fileName||"this episode"}" from this device?`)) return;
-  // Cancel any background prefetch first — otherwise an in-flight prefetch
-  // would re-create the IDB row right after we delete it.
-  const _bgCtl = lpBgPrefetch.get(offKey(itemId, filePath));
-  if (_bgCtl) { try { _bgCtl.abort(); } catch (_) {} lpBgPrefetch.delete(offKey(itemId, filePath)); }
-  await offlineDelete(itemId, filePath);
-  showAlert("Removed from offline.", "success");
-  if (epItemId === itemId) renderEpList();
-  if (activeTab === "library") loadLibrary();
-  if (activeTab === "offline") loadOfflineTab();
-}
-
-// --- Offline tab -------------------------------------------------------------
-// IndexedDB Blob objects aren't loaded into memory by getAll() — the platform
-// keeps the bytes on disk until something reads from the blob — so pulling
-// every record here is safe even with multi-GB libraries.
-async function loadOfflineTab() {
-  const el = document.getElementById("offlineContent");
-  const totalLine = document.getElementById("offlineTotalLine");
-  if (!el) return;
-  let recs = [];
-  try {
-    const tx = await idbTx(["videos"], "readonly");
-    recs = await idbReq(tx.objectStore("videos").getAll()) || [];
-  } catch (_) { recs = []; }
-  renderOfflineTab(recs, el, totalLine);
-}
-
-function renderOfflineTab(recs, el, totalLine) {
-  if (!recs.length) {
-    totalLine.textContent = "No files saved to this device";
-    el.innerHTML = `
-      <div class="flex flex-col items-center justify-center py-20 text-center">
-        <div class="w-16 h-16 bg-gray-800 border border-gray-700 flex items-center justify-center mb-4">
-          <svg class="w-8 h-8 text-gray-600" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M5 5a2 2 0 012-2h7l5 5v11a2 2 0 01-2 2H7a2 2 0 01-2-2V5z"/>
-            <path stroke-linecap="round" stroke-linejoin="round" d="M12 11v6m-3-3l3 3 3-3"/>
-          </svg>
-        </div>
-        <p class="text-gray-500 font-medium">No offline files</p>
-        <p class="text-gray-700 text-xs mt-1">Save episodes from the Library tab to play them here without the host</p>
-      </div>`;
-    return;
-  }
-
-  // Group by itemId so a saved series collapses into a single card.
-  const groups = new Map();
-  let totalBytes = 0;
-  for (const r of recs) {
-    const sz = r.sizeBytes || (r.blob && r.blob.size) || 0;
-    totalBytes += sz;
-    if (!groups.has(r.itemId)) groups.set(r.itemId, []);
-    groups.get(r.itemId).push({ ...r, _size: sz });
-  }
-  // Newest-saved first by group max savedAt
-  const grouped = Array.from(groups.entries()).map(([itemId, files]) => {
-    files.sort((a,b)=> (a.name||"").localeCompare(b.name||"", undefined, {numeric:true}));
-    const maxSaved = files.reduce((m,f)=>Math.max(m, f.savedAt||0), 0);
-    const totalSize = files.reduce((s,f)=>s+f._size, 0);
-    return { itemId, files, maxSaved, totalSize };
-  }).sort((a,b)=> b.maxSaved - a.maxSaved);
-
-  totalLine.textContent =
-    `${recs.length} file${recs.length===1?"":"s"} · ${fmtSize(totalBytes)} on this device`;
-
-  // Best-effort group title: use cached library entry if we have one (loaded
-  // by /api/library on a recent Library-tab visit), else fall back to the
-  // parent directory of the first file's path, else its file name.
-  const libCache = window._libCache || [];
-  const libById = new Map(libCache.map(i => [i.id, i]));
-
-  let html = "";
-  grouped.forEach(g => {
-    const cached = libById.get(g.itemId);
-    const firstPath = g.files[0].filePath || "";
-    const parentDir = firstPath.split(/[/\\]/).slice(-2, -1)[0] || "";
-    const title = (cached && (cached.series || cached.title)) || parentDir || g.files[0].name || g.itemId;
-    const _gid = escHtml(JSON.stringify(g.itemId));
-    html += `<div class="mb-3 bg-gray-900 border-l-2 border-emerald-700">
-      <div class="px-3 py-2 border-b border-gray-800 flex items-center justify-between gap-2">
-        <div class="min-w-0">
-          <h3 class="text-sm font-black uppercase tracking-wide text-gray-200 truncate">${escHtml(title)}</h3>
-          <div class="text-[10px] text-gray-600 font-mono mt-0.5">${g.files.length} file${g.files.length===1?"":"s"} · ${fmtSize(g.totalSize)}</div>
-        </div>
-        <button onclick="offlineDeleteGroup(${_gid})"
-          title="Delete all files in this group"
-          class="text-[10px] px-2 py-1.5 bg-gray-800 hover:bg-red-900/60 border border-gray-700 hover:border-red-800 text-gray-500 hover:text-red-300 uppercase tracking-wide font-bold transition-colors flex-shrink-0">
-          Delete All
-        </button>
-      </div>
-      <div class="divide-y divide-gray-800/60">`;
-    g.files.forEach(f => {
-      const info = parseEpisodeInfo(f.filePath) || parseEpisodeInfo(f.name);
-      const label = info
-        ? `S${pad2(info.season)}E${pad2(info.episode)}${info.name?" · "+escHtml(info.name):""}`
-        : escHtml(f.name || f.filePath.split(/[/\\]/).pop() || "");
-      const _id = escHtml(JSON.stringify(f.itemId));
-      const _p  = escHtml(JSON.stringify(f.filePath));
-      const _n  = escHtml(JSON.stringify(f.name || ""));
-      html += `<div class="px-3 py-2 flex items-center gap-3">
-        <div class="min-w-0 flex-1">
-          <div class="text-sm text-gray-300 truncate">${label}</div>
-          <div class="text-[10px] text-gray-600 font-mono mt-0.5 truncate">${fmtSize(f._size)}${f.duration?" · "+fmtTime(f.duration):""}</div>
-        </div>
-        <button onclick="offlinePlayOne(${_id},${_p})"
-          title="Play on this device"
-          class="text-xs px-3 py-2 bg-indigo-700 hover:bg-indigo-600 text-white font-black uppercase tracking-wide transition-colors flex-shrink-0 min-h-[36px]">
-          ▶ Play
-        </button>
-        <button onclick="offlineDeleteOne(${_id},${_p},${_n})"
-          title="Delete this file"
-          class="text-xs px-3 py-2 bg-gray-800 hover:bg-red-900/60 border border-gray-700 hover:border-red-800 text-gray-500 hover:text-red-300 font-bold uppercase tracking-wide transition-colors flex-shrink-0 min-h-[36px]">
-          ✕
-        </button>
-      </div>`;
-    });
-    html += `</div></div>`;
-  });
-  el.innerHTML = html;
-}
-
-async function offlinePlayOne(itemId, filePath) {
-  const rec = await offlineGet(itemId, filePath);
-  if (!rec) { showAlert("Offline copy missing — refresh and try again.", "error"); loadOfflineTab(); return; }
-  await lpPlay(itemId, [filePath], 0, rec.name || filePath.split(/[/\\]/).pop());
-}
-
-async function offlineDeleteOne(itemId, filePath, fileName) {
-  await removeFromOffline(itemId, filePath, fileName);
-}
-
-async function offlineDeleteGroup(itemId) {
-  const keys = Array.from(offlineSaved).filter(k => k.startsWith(itemId + "|"));
-  if (!keys.length) { loadOfflineTab(); return; }
-  if (!confirm(`Delete all ${keys.length} saved file${keys.length===1?"":"s"} for this item?`)) return;
-  for (const k of keys) {
-    const filePath = k.slice(itemId.length + 1);
-    await offlineDelete(itemId, filePath);
-  }
-  showAlert("Removed from offline.", "success");
-  if (activeTab === "library") loadLibrary();
-  loadOfflineTab();
-}
-
-// Direct "play on this device" for a single file: saves to IndexedDB first if
-// it isn't there yet, then launches the local player. Used by the On Device
-// button on single-file library cards (multi-file items have per-row buttons
-// inside the episode picker that already cover this case).
-async function saveAndPlayLocal(itemId, filePath, fileName, fileLabel, seekTo) {
-  if (offlineSaved.has(offKey(itemId, filePath))) {
-    return lpPlay(itemId, [filePath], seekTo || 0, fileLabel || fileName || "");
-  }
-  if (!navigator.onLine) {
-    showAlert("Disconnected. Reconnect to download this file before playing.", "error");
-    return;
-  }
-  await saveForOffline(itemId, filePath, fileName, fileLabel);
-  // saveForOffline shows its own modal + alert. Only auto-launch the player
-  // when the save actually landed (offlineSaved gets populated on success).
-  if (offlineSaved.has(offKey(itemId, filePath))) {
-    await lpPlay(itemId, [filePath], seekTo || 0, fileLabel || fileName || "");
+    prepFileState.delete(k);
+    if (epItemId === itemId) renderEpList();
+    showAlert(err.message || "Prep failed.", "error");
   }
 }
 
 // --- Play chooser (VLC vs On Device) -----------------------------------------
 
-function _firstFileSavedOffline(itemId, files) {
-  if (!Array.isArray(files) || !files.length) return null;
-  return offlineSaved.has(offKey(itemId, files[0])) ? files[0] : null;
-}
-
-// Entry point used by Play buttons. Decides whether to show the chooser.
+// Entry point used by Play buttons. Shows the chooser modal when both VLC and
+// local-device playback are reachable; falls through to VLC otherwise.
 async function playLibraryWithChooser(itemId, files, seekTo, label) {
-  const offlineFirst = _firstFileSavedOffline(itemId, files);
   if (!navigator.onLine) {
-    if (!offlineFirst) {
-      showAlert("Disconnected. Save this episode for offline first.", "error"); return;
-    }
-    return lpPlay(itemId, files, seekTo, label);
-  }
-  if (offlineFirst) {
-    pcCtx = { itemId, files, seekTo, label };
-    document.getElementById("pcSubtitle").textContent = label || "";
-    document.getElementById("pcLocalSub").textContent = "Play the saved offline copy";
-    document.getElementById("pcLocalBtn").disabled = false;
-    document.getElementById("playChooserModal").classList.remove("hidden");
+    showAlert("Disconnected — playback needs the host to be reachable.", "error");
     return;
   }
-  return playLibraryFiles(itemId, files, seekTo);
+  pcCtx = { itemId, files, seekTo, label };
+  document.getElementById("pcSubtitle").textContent = label || "";
+  document.getElementById("pcLocalSub").textContent = "Stream to this device's browser";
+  document.getElementById("pcLocalBtn").disabled = false;
+  document.getElementById("playChooserModal").classList.remove("hidden");
 }
 
 function pcChoose(target) {
@@ -4714,74 +4273,130 @@ function closePlayChooser() {
 }
 
 // --- Local player (browser-side <video>) -------------------------------------
+//
+// Streams a server-prepared MP4 over HTTP. Loop:
+//   1. POST /offline-prepare to find or kick off a `.offline_cache/<sha>.mp4`.
+//   2. If the server is preparing, poll /offline-job/{id} until done and show
+//      a "Preparing…" overlay so the user knows what's happening.
+//   3. Set <video>.src to the returned URL; the browser issues Range requests.
+// Subtitle tracks come straight from /api/library/{id}/subtitle (server
+// converts SRT→VTT on the fly), so no client-side blob conversion is needed.
 
 async function lpPlay(itemId, files, seekTo, label) {
-  // Resolve current file: walk the playlist to the first one we have offline.
-  let pi = 0;
-  while (pi < files.length && !offlineSaved.has(offKey(itemId, files[pi]))) pi++;
-  if (pi >= files.length) {
-    showAlert("None of the selected episodes are saved offline.", "warn"); return;
+  if (!Array.isArray(files) || !files.length) {
+    showAlert("Nothing to play.", "warn"); return;
+  }
+  if (!navigator.onLine) {
+    showAlert("Disconnected — streaming needs the host to be reachable.", "error"); return;
   }
   await lpUnloadCurrent();
-  lp.itemId = itemId; lp.playlist = files.slice(); lp.pi = pi;
+  lp.itemId = itemId; lp.playlist = files.slice(); lp.pi = 0;
   lp.skipDoneFor = new Set();
   lp.maximized = true;
-  await _lpLoadIndex(seekTo);
   const c = document.getElementById("localPlayer");
   c.classList.remove("lp-tiny");
   c.classList.add("lp-active");
+  await _lpLoadIndex(seekTo);
+}
+
+function _lpShowPreparing(text) {
+  const el = document.getElementById("lpPreparing");
+  if (!el) return;
+  el.textContent = text;
+  el.classList.remove("hidden");
+}
+function _lpHidePreparing() {
+  const el = document.getElementById("lpPreparing");
+  if (el) el.classList.add("hidden");
 }
 
 async function _lpLoadIndex(seekTo) {
   const filePath = lp.playlist[lp.pi];
-  const rec = await offlineGet(lp.itemId, filePath);
-  if (!rec) {
-    showAlert("Offline copy not found — was it removed?", "error"); lpStop(); return;
-  }
+  if (!filePath) { lpStop(); return; }
   lp.filePath = filePath;
-  lp.name = rec.name || filePath.split(/[/\\]/).pop();
-  lp.skipData = rec.skipData || null;
+  lp.name = filePath.split(/[/\\]/).pop();
+  lp.skipData = null;
   lp.skipOfferType = null; lp.skipOfferEnd = 0;
-  // Skip data may have been generated by the analyzer AFTER this file was saved
-  // offline — refresh from the server when online so newly-analyzed series get
-  // their offers shown. Falls through silently when the host is unreachable.
-  if (navigator.onLine) {
-    (async () => {
-      try {
-        const r = await fetch(`/api/library/${lp.itemId}/skip-data?file_path=${encodeURIComponent(filePath)}`);
-        if (!r.ok) return;
-        const fresh = await r.json();
-        if (lp.filePath !== filePath) return;  // user moved on while we waited
-        lp.skipData = fresh || null;
-        try { await offlinePut({ ...rec, skipData: fresh }); } catch (_) {}
-      } catch (_) {}
-    })();
-  }
   lp.resumeApplied = false; lp.resumeSec = seekTo || 0;
   // Push the throttle window forward so the first `timeupdate` after this load
   // doesn't fire saveProgress before the resume seek has landed (otherwise we'd
   // overwrite the server's watched state with t≈0).
   lp.lastSaveAt = Date.now();
 
-  // Tear down old blob URLs from any prior load.
-  if (lp.videoUrl) try { URL.revokeObjectURL(lp.videoUrl); } catch (_) {}
-  lp.subUrls.forEach(u => { try { URL.revokeObjectURL(u); } catch (_) {} });
-  lp.subUrls = [];
+  document.getElementById("lpTitle").textContent = lp.name;
 
-  lp.videoUrl = URL.createObjectURL(rec.blob);
+  let prep;
+  _lpShowPreparing("Preparing for streaming…");
+  try {
+    const r = await fetch(`/api/library/${lp.itemId}/offline-prepare`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file_path: filePath }),
+    });
+    if (!r.ok) {
+      const e = await r.json().catch(() => ({ detail: "Prepare failed." }));
+      throw new Error(e.detail || "Prepare failed.");
+    }
+    prep = await r.json();
+  } catch (err) {
+    _lpHidePreparing();
+    showAlert(err.message || "Could not prepare this file for streaming.", "error");
+    lpStop(); return;
+  }
+
+  let videoUrl = prep.video_url;
+  if (!prep.ready && prep.job_id) {
+    const op = prep.operation === "remux" ? "Remuxing to MP4" : "Transcoding to H.264 / AAC";
+    try {
+      while (true) {
+        // Abort if the user moved on (lpStop or another _lpLoadIndex).
+        if (lp.filePath !== filePath) return;
+        await new Promise(res => setTimeout(res, 1500));
+        const sr = await fetch(`/api/library/offline-job/${prep.job_id}`);
+        if (!sr.ok) throw new Error("Lost track of prep job.");
+        const s = await sr.json();
+        const pct = Math.round((s.progress || 0) * 100);
+        _lpShowPreparing(`${op}… ${pct}%`);
+        if (s.status === "done")  { videoUrl = s.video_url; break; }
+        if (s.status === "error") throw new Error(s.error || "Prep failed.");
+      }
+    } catch (err) {
+      _lpHidePreparing();
+      showAlert(err.message || "Streaming prep failed.", "error");
+      lpStop(); return;
+    }
+  }
+  if (lp.filePath !== filePath) return;  // raced with a stop/advance
+  _lpHidePreparing();
+
+  // Mark the cache hit in prepFileState so per-row buttons reflect "Stream Ready".
+  prepFileState.set(offKey(lp.itemId, filePath), "ready");
+  if (epItemId === lp.itemId) { try { renderEpList(); } catch (_) {} }
+
+  // Fetch skip-data in parallel — fire-and-forget; skip-offer logic just runs
+  // off `lp.skipData` once it lands.
+  (async () => {
+    try {
+      const r = await fetch(`/api/library/${lp.itemId}/skip-data?file_path=${encodeURIComponent(filePath)}`);
+      if (!r.ok) return;
+      const fresh = await r.json();
+      if (lp.filePath === filePath) lp.skipData = fresh || null;
+    } catch (_) {}
+  })();
 
   const v = document.getElementById("lpVideo");
   v.crossOrigin = "anonymous";
   while (v.firstChild) v.removeChild(v.firstChild);
-  v.src = lp.videoUrl;
-  const subs = rec.subs || [];
+  v.src = videoUrl;
+
+  // Wire sidecar subtitle tracks straight from the server (SRT→VTT conversion
+  // happens server-side in /subtitle).
+  const subs = prep.subs || [];
   const sel = document.getElementById("lpSubSelect");
   sel.innerHTML = `<option value="-1">Off</option>`;
   subs.forEach((s, i) => {
-    const url = URL.createObjectURL(s.blob);
-    lp.subUrls.push(url);
     const t = document.createElement("track");
-    t.kind = "subtitles"; t.src = url; t.srclang = s.lang || "und"; t.label = s.lang || s.name || `Track ${i+1}`;
+    t.kind = "subtitles"; t.src = s.url; t.srclang = s.lang || "und";
+    t.label = s.lang || s.name || `Track ${i+1}`;
     v.appendChild(t);
     sel.insertAdjacentHTML("beforeend",
       `<option value="${i}">${escHtml((s.lang||"und").toUpperCase())} — ${escHtml(s.name||"sub")}</option>`);
@@ -4792,99 +4407,8 @@ async function _lpLoadIndex(seekTo) {
     if (v.textTracks) for (let i = 0; i < v.textTracks.length; i++) v.textTracks[i].mode = "disabled";
   }, 50);
 
-  document.getElementById("lpTitle").textContent = lp.name;
   v.load();
   try { await v.play(); } catch (_) { /* iOS may block autoplay until user gesture */ }
-  _lpBgPrefetchNext();
-}
-
-// Kick off a silent download of the next file in the active playlist when it
-// isn't already saved offline. Runs whenever the active file changes (initial
-// play + auto-advance) so by the time the current episode ends, the next one
-// is already in IndexedDB and _lpAdvanceOrEnd can roll straight into it.
-function _lpBgPrefetchNext() {
-  try {
-    if (!lp.itemId || !Array.isArray(lp.playlist)) return;
-    const next = lp.pi + 1;
-    if (next >= lp.playlist.length) return;
-    if (!navigator.onLine) return;
-    const nextPath = lp.playlist[next];
-    if (!nextPath) return;
-    const key = offKey(lp.itemId, nextPath);
-    if (offlineSaved.has(key)) return;
-    if (lpBgPrefetch.has(key)) return;
-    const nextName = nextPath.split(/[/\\]/).pop();
-    _lpBgSaveOffline(lp.itemId, nextPath, nextName).catch(() => {});
-  } catch (_) {}
-}
-
-// Headless variant of saveForOffline — no modal, no alerts, failures swallowed
-// so a background prefetch can never interrupt the active playback experience.
-// Mirrors the prepare → poll → download → store sequence in saveForOffline.
-async function _lpBgSaveOffline(itemId, filePath, fileName) {
-  const key = offKey(itemId, filePath);
-  if (offlineSaved.has(key) || lpBgPrefetch.has(key)) return;
-  if (!navigator.onLine) return;
-  const ctl = new AbortController();
-  lpBgPrefetch.set(key, ctl);
-  try {
-    const prepRes = await fetch(`/api/library/${itemId}/offline-prepare`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file_path: filePath }), signal: ctl.signal,
-    });
-    if (!prepRes.ok) return;
-    const prep = await prepRes.json();
-    let videoUrl = prep.video_url;
-    let duration = prep.duration_sec || 0;
-    let subs = prep.subs || [];
-    let codecInfo = prep.codec_info || {};
-    if (!prep.ready && prep.job_id) {
-      while (true) {
-        if (ctl.signal.aborted) return;
-        await new Promise(r => setTimeout(r, 3000));
-        const sr = await fetch(`/api/library/offline-job/${prep.job_id}`, { signal: ctl.signal });
-        if (!sr.ok) return;
-        const s = await sr.json();
-        if (s.status === "done")  { videoUrl = s.video_url; break; }
-        if (s.status === "error") return;
-      }
-    }
-    const resp = await fetch(videoUrl, { signal: ctl.signal });
-    if (!resp.ok) return;
-    const blob = await resp.blob();
-    const subBlobs = await Promise.all((subs || []).map(async (s) => {
-      try {
-        const r = await fetch(s.url, { signal: ctl.signal });
-        if (!r.ok) return null;
-        const text = await r.text();
-        return { lang: s.lang, name: s.name,
-                 blob: new Blob([text], { type: "text/vtt" }) };
-      } catch (_) { return null; }
-    }));
-    let skipData = null;
-    try {
-      const sd = await fetch(`/api/library/${itemId}/skip-data?file_path=${encodeURIComponent(filePath)}`,
-                             { signal: ctl.signal });
-      if (sd.ok) skipData = await sd.json();
-    } catch (_) {}
-    if (ctl.signal.aborted) return;
-    await offlinePut({
-      key, itemId, filePath,
-      name: fileName || filePath.split(/[/\\]/).pop(),
-      blob, duration, sizeBytes: blob.size,
-      codecInfo, sourceVideoUrl: videoUrl,
-      subs: subBlobs.filter(Boolean),
-      skipData, savedAt: Date.now(),
-    });
-    offlineSaved.add(key);
-    if (epItemId === itemId) { try { renderEpList(); } catch (_) {} }
-    if (activeTab === "library") { try { loadLibrary(); } catch (_) {} }
-    if (activeTab === "offline") { try { loadOfflineTab(); } catch (_) {} }
-  } catch (_) {
-    // Silent — background prefetch must never disrupt the foreground player.
-  } finally {
-    lpBgPrefetch.delete(key);
-  }
 }
 
 function lpSetSubtitle(idx) {
@@ -4910,9 +4434,6 @@ async function lpUnloadCurrent() {
   try { v.pause(); } catch (_) {}
   v.removeAttribute("src");
   v.load();
-  if (lp.videoUrl) try { URL.revokeObjectURL(lp.videoUrl); } catch (_) {}
-  lp.subUrls.forEach(u => { try { URL.revokeObjectURL(u); } catch (_) {} });
-  lp.videoUrl = null; lp.subUrls = [];
 }
 
 async function lpStop() {
@@ -4925,6 +4446,7 @@ async function lpStop() {
   const c = document.getElementById("localPlayer");
   c.classList.remove("lp-active", "lp-tiny");
   document.getElementById("lpSkipOffer").classList.add("hidden");
+  _lpHidePreparing();
   lp.itemId = null; lp.filePath = null; lp.playlist = []; lp.pi = 0;
 }
 
@@ -4981,8 +4503,7 @@ async function _lpAdvanceOrEnd() {
   const v = document.getElementById("lpVideo");
   const d = v.duration || lp.duration || 0;
   if (d > 0) saveProgress(lp.itemId, lp.filePath, d, d);
-  let next = lp.pi + 1;
-  while (next < lp.playlist.length && !offlineSaved.has(offKey(lp.itemId, lp.playlist[next]))) next++;
+  const next = lp.pi + 1;
   if (next < lp.playlist.length) {
     lp.pi = next;
     await _lpLoadIndex(0);
@@ -4991,13 +4512,13 @@ async function _lpAdvanceOrEnd() {
   }
 }
 
-// Flush the current playback position to the server (or outbox if offline).
-// Called from `pause`, `seeked`, `visibilitychange`→hidden, and `pagehide`.
-// Bypasses the 15 s throttle since these are user-driven exit/transition points
-// where losing the last 0–15 s of progress is the most common cause of "resume
-// landed in the wrong place". `useBeacon` switches to navigator.sendBeacon for
-// pagehide because fetch() requests in flight when the tab is closed are
-// frequently aborted by the browser.
+// Flush the current playback position to the server. Called from `pause`,
+// `seeked`, `visibilitychange`→hidden, and `pagehide`. Bypasses the 15 s
+// throttle since these are user-driven exit/transition points where losing the
+// last 0–15 s of progress is the most common cause of "resume landed in the
+// wrong place". `useBeacon` switches to navigator.sendBeacon for pagehide
+// because fetch() requests in flight when the tab is closed are frequently
+// aborted by the browser.
 function _lpFlushProgress(useBeacon) {
   if (!lp.itemId || !lp.filePath || !profile.id) return;
   const v = document.getElementById("lpVideo");
@@ -5008,7 +4529,7 @@ function _lpFlushProgress(useBeacon) {
   // recomputes `completed` from pct, so a t≈0 flush wipes watched state.
   if (t < 5) return;
   lp.lastSaveAt = Date.now();
-  if (useBeacon && navigator.onLine && navigator.sendBeacon) {
+  if (useBeacon && navigator.sendBeacon) {
     try {
       const body = JSON.stringify({
         profile_id: profile.id, file_path: lp.filePath,
@@ -5044,7 +4565,7 @@ function _lpAttachVideoEvents() {
   v.addEventListener("seeked", () => _lpFlushProgress(false));
   v.addEventListener("ended", () => { _lpAdvanceOrEnd(); });
   v.addEventListener("error", () => {
-    showAlert("Local playback error — file may be corrupted; try removing and re-saving.", "error");
+    showAlert("Stream playback error — check the host's network and try again.", "error");
   });
   // Tab backgrounded / phone screen locked → flush via fetch (still alive).
   document.addEventListener("visibilitychange", () => {
@@ -5055,23 +4576,28 @@ function _lpAttachVideoEvents() {
   window.addEventListener("pagehide", () => _lpFlushProgress(true));
 }
 
-// --- Service worker registration --------------------------------------------
+// --- Service-worker eviction stub -------------------------------------------
+// Older builds shipped a real SW that cached the app shell + read-only APIs to
+// support offline boot. Stream-to-Device doesn't need that, and stale caches
+// from the old SW can pin devices to obsolete builds. The current /sw.js is a
+// one-shot unregister-and-wipe stub; we still register it here so the browser
+// activates it (which triggers the eviction). Once enough time has passed that
+// no device has the old SW alive, this and /sw.js can both be deleted.
 
-async function registerServiceWorker() {
+async function evictLegacyServiceWorker() {
   if (!("serviceWorker" in navigator)) return;
   try {
     await navigator.serviceWorker.register("/sw.js", { scope: "/" });
-  } catch (e) {
-    console.warn("SW register failed:", e);
-  }
+  } catch (_) { /* nothing to do — the stub doesn't need to keep running */ }
 }
 
-// --- Prep-for-offline (per library item, server-side) -----------------------
+// --- Prep-for-Streaming (per library item, server-side) ---------------------
 //
-// Library card has a "Prep Offline" button. Clicking it kicks off remux/transcode
-// jobs for every video file in the item via /prep-all, then polls /prep-status
-// every 3 s until nothing is pending. Subsequent "Save Offline" taps on a
-// device skip the server-side ffmpeg step because the cache file is already on disk.
+// Library card has a "Prep for Streaming" button. Clicking it kicks off
+// remux/transcode jobs for every video file in the item via /prep-all, then
+// polls /prep-status every 3 s until nothing is pending. Subsequent device-side
+// Play taps the cached MP4 and starts streaming immediately instead of waiting
+// on ffmpeg.
 
 // Aggregate "files done + how far through the running ones we are" into a
 // single 0-1 progress value the bar can render. Each finished file counts as 1;
@@ -5139,7 +4665,7 @@ function prepChipHtml(s) {
             <span class="text-gray-600 ml-1">${ready}/${total} ready</span>`;
   }
   if (ready === total && total > 0) {
-    return `<span class="text-emerald-400 font-bold">✓ All ${total} ready for offline</span>`;
+    return `<span class="text-emerald-400 font-bold">✓ All ${total} ready to stream</span>`;
   }
   return `<span class="text-gray-500">${ready}/${total} ready · ${total - ready} need prep</span>`;
 }
@@ -5153,7 +4679,7 @@ function _renderPrepChip(itemId) {
   el.innerHTML = prepChipHtml(s);
 }
 
-async function prepItemForOffline(itemId) {
+async function prepItemForStreaming(itemId) {
   try {
     const r = await fetch(`/api/library/${itemId}/prep-all`, { method: "POST" });
     if (!r.ok) {
@@ -5162,12 +4688,14 @@ async function prepItemForOffline(itemId) {
     }
     const summary = await r.json();
     prepStats.set(itemId, summary);
+    _ingestPrepStatusFiles(itemId, summary.files);
     _renderPrepChip(itemId);
+    if (epItemId === itemId) { try { renderEpList(); } catch (_) {} }
     if (summary.processing > 0) {
       _startPrepPolling(itemId);
       showAlert(`Prepping ${summary.processing} file${summary.processing>1?"s":""}…`, "info");
     } else if (summary.ready === summary.total && summary.total > 0) {
-      showAlert("Already ready for offline.", "success");
+      showAlert("Already ready to stream.", "success");
     }
   } catch (err) {
     showAlert(err.message || "Prep failed.", "error");
@@ -5184,11 +4712,13 @@ function _startPrepPolling(itemId) {
       if (r.ok) {
         const s = await r.json();
         prepStats.set(itemId, s);
+        _ingestPrepStatusFiles(itemId, s.files);
         _renderPrepChip(itemId);
+        if (epItemId === itemId) { try { renderEpList(); } catch (_) {} }
         if (s.processing === 0) {
           prepPolling.delete(itemId);
           if (s.errored === 0 && s.ready === s.total) {
-            showAlert(`Item is ready for offline (${s.total} file${s.total>1?"s":""}).`, "success");
+            showAlert(`Item is ready to stream (${s.total} file${s.total>1?"s":""}).`, "success");
           } else if (s.errored > 0) {
             showAlert(`Prep finished with ${s.errored} error${s.errored>1?"s":""}.`, "warn");
           }
@@ -5216,7 +4746,6 @@ function _renderOnlineBadge() {
   }
 }
 
-window.addEventListener("online",  () => { outboxFlush(); });
 window.addEventListener("offline", () => { _renderOnlineBadge(); });
 
 // ── Global prep indicator ────────────────────────────────────────────────────
@@ -5390,17 +4919,11 @@ document.addEventListener("keydown",e=>{
 
 // ── Init ───────────────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded",async()=>{
-  // Handoff bootstrap: register the service worker, scan IndexedDB so we know
-  // which episodes are saved (controls the offline icon + chooser), wire the
-  // local <video>'s timeupdate/ended handlers, and flush any queued progress
-  // writes that piled up while offline.
-  registerServiceWorker();
-  refreshOfflineSet().then(() => {
-    if (epItemId) renderEpList();
-    if (activeTab === "library") loadLibrary();
-  });
+  // Stream-to-device bootstrap: kick off the one-shot SW eviction (drops any
+  // legacy cached app shell + frees the registration) and wire the local
+  // <video>'s timeupdate/ended/visibilitychange/pagehide handlers.
+  evictLegacyServiceWorker();
   _lpAttachVideoEvents();
-  outboxFlush();
   _renderOnlineBadge();
   // Start polling for any in-flight prep jobs so the indicator is correct
   // even when the page is reloaded mid-job (state is purely in-memory otherwise).

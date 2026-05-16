@@ -106,32 +106,61 @@ Loaded in parallel with `/files` inside `openEpisodePicker`. Returns `{enabled, 
 
 Admin sets the key under **Admin → Indexers → TMDb Metadata** (`POST /api/admin/settings { tmdb_api_key }`).
 
-### Handoff to Device (offline playback)
+### Stream to Device
 
-The frontend keeps an `offlineSaved: Set<"itemId|filePath">` populated from IndexedDB on init. Episode-picker rows show a save/remove toggle and an `OFFLINE` pill when a key is present. All Play surfaces (`epPlay`, `epPlayFrom`, `continueLibraryItem`, the `lib-restart-btn` listener) route through `playLibraryWithChooser(itemId, files, seekTo, label)`:
+All Play surfaces (`epPlay`, `epPlayFrom`, `continueLibraryItem`, the
+`lib-restart-btn` listener, the per-card "📱 On Device" button) route through
+`playLibraryWithChooser(itemId, files, seekTo, label)`. When the host is
+reachable it opens `#playChooserModal` — "On TV (VLC)" vs "On This Device".
+There is no offline-only fallback path; if `navigator.onLine === false` the
+function shows a toast and bails.
 
-- If the device is offline → `lpPlay` directly (or error if no offline copy of the first file).
-- If the first file in the playlist is saved offline → open the chooser modal so the user picks "On TV (VLC)" vs "On This Device".
-- Otherwise → fall through to the existing `playLibraryFiles` (VLC).
+"On This Device" calls `lpPlay`, which kicks off `_lpLoadIndex`. That POSTs
+`/api/library/{id}/offline-prepare` for the current file and either uses the
+returned `video_url` directly (Safari-native MP4 fast path or a cache hit) or
+polls `/api/library/offline-job/{id}` while the `#lpPreparing` overlay shows
+"Remuxing… 42%" / "Transcoding…". Once the URL is ready, `<video>.src` is set
+to it. The browser issues HTTP Range requests (`FileResponse` is range-aware),
+so seek-while-streaming works without client-side help.
 
-Local playback is handled by `lpPlay` / `_lpLoadIndex` / `lpStop` etc. There is **one** `<video id="lpVideo">` inside `#localPlayer`. The container has two visual modes toggled via class:
+Subtitle `<track>` elements are wired straight from the `subs[].url` entries
+in the prep response (each points at `/api/library/{id}/subtitle` — server
+converts SRT→VTT on the fly). Skip-data is fetched in parallel from
+`/api/library/{id}/skip-data?file_path=…` and assigned to `lp.skipData` for
+the skip-intro / skip-credits logic in `lpEvaluateSkipOffer`.
+
+There is **one** `<video id="lpVideo">` inside `#localPlayer`. The container
+has two visual modes toggled via class:
 - default (no `.lp-tiny`) — fullscreen overlay, uses native browser `<video>` controls.
 - `.lp-tiny` — corner tile (96×56 video + huge fullscreen button + close), repositioned via CSS only (no DOM move, no video re-load).
 
-Single-element design avoids iOS Safari's per-page video budget and the audio desync that two synchronized videos would create. iOS-friendly: `playsinline`, `<track>` for VTT subs, no MediaSource.
+Single-element design avoids iOS Safari's per-page video budget and the audio
+desync that two synchronized videos would create. iOS-friendly: `playsinline`,
+`<track>` for VTT subs, no MediaSource.
 
-The **Offline tab** (`#offlineTab`) is a peer of Search/Library. `loadOfflineTab()` pulls all `videos` IDB rows, groups by `itemId`, and renders rows with size/duration plus Play/Delete buttons; see `renderOfflineTab` and `offlinePlayOne`/`offlineDeleteOne`/`offlineDeleteGroup`. Also see [OFFLINE.md](OFFLINE.md#offline-tab).
+`saveProgress(itemId, filePath, posSec, durSec)` is called every 15 s by
+`#lpVideo`'s `timeupdate` handler and POSTs `/api/library/{id}/progress`.
+**Writes with `posSec < 5` or `durSec ≤ 0` are dropped** — the server
+recomputes `completed` from `pct = position/duration`, so a t≈0 write would
+wipe a watched episode back to unwatched. The same guard lives in
+`_lpFlushProgress` (which also fires on `pause`, `seeked`,
+`visibilitychange`→hidden, and `pagehide`, using `sendBeacon` for the last
+one). `_lpLoadIndex` seeds `lp.lastSaveAt = Date.now()` so the first throttle
+window starts at load, giving the resume seek time to land before any save
+can fire. There is no offline outbox — a single best-effort POST is the
+entire write path.
 
-The IndexedDB schema (`streamlink-offline`):
-- `videos` keyPath `key` = `"<itemId>|<filePath>"` — `{blob, subs[], skipData, codecInfo, sourceVideoUrl, savedAt, sizeBytes, name, duration}`.
-- `meta` — small caches (currently unused in v1; reserved for client-side hints).
-- `outbox` autoIncrement `id` — queued progress writes when offline.
+Per-file Prep state for the picker rows lives in `prepFileState:
+Map<offKey, "prepping"|"ready">`. `prepForStreaming(itemId, filePath, fileName)`
+POSTs `/offline-prepare`, polls `/offline-job/{id}` to completion, and
+flips the row to "Stream Ready". The map is also hydrated from
+`/api/library/{id}/prep-status` whenever the picker opens or `/prep-all` runs
+on the library card.
 
-`saveProgress(itemId, filePath, posSec, durSec)` is called every 15 s by `#lpVideoFull`'s `timeupdate` handler. When `navigator.onLine === true` it POSTs `/api/library/{id}/progress`; otherwise it `outboxPush()`es. The window's `online` event fires `outboxFlush()`, which drains the outbox. **Writes with `posSec < 5` or `durSec ≤ 0` are dropped** — the server recomputes `completed` from `pct = position/duration`, so a t≈0 write would wipe a watched episode back to unwatched. The same guard lives in `_lpFlushProgress` for its sendBeacon path. `_lpLoadIndex` also seeds `lp.lastSaveAt = Date.now()` so the first throttle window starts at load, giving the resume seek time to land before any save can fire. See [GOTCHAS.md](GOTCHAS.md#frontend-drops-saveprogress-writes-under-t5-s).
-
-The skip-intro / skip-credits offer logic in `lpEvaluateSkipOffer` mirrors the backend `_maybe_emit_skip_offer` (intro when `start-2 ≤ t < end-2`, credits when `t ≥ credits_start - 1`). Dismissed offers are remembered for the current `<filePath>#<type>` so they don't re-emit.
-
-The service worker is registered in `init` via `registerServiceWorker()` → `/sw.js` at root scope; see `static/sw.js` for the cache strategy.
+The service worker (`static/sw.js`) is now a one-shot eviction stub registered
+via `evictLegacyServiceWorker()` so devices that PWA-installed the old build
+drop their stale caches. See [STREAMING.md](STREAMING.md) and
+[GOTCHAS.md](GOTCHAS.md) for details.
 
 ### Init ([static/index.html:3569](../static/index.html#L3569))
 

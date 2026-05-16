@@ -4269,23 +4269,27 @@ async def admin_set_background_enabled(request: Request, req: BackgroundEnabledR
     return JSONResponse({"ok": True, "enabled": bool(req.enabled)})
 
 
-# ── Routes: Offline / Handoff to Device ──────────────────────────────────────
+# ── Routes: Stream-to-Device prep + streaming ────────────────────────────────
 #
-# Browser-side offline playback. The flow is:
+# These endpoints prepare a browser-friendly MP4 of any library file so the
+# device's local <video> can stream it directly over HTTP-range:
 #   1. Client POSTs /api/library/{id}/offline-prepare with a file_path.
 #   2. Server probes codecs. If already Safari-compatible MP4, returns video_url
 #      pointing at the existing /download endpoint immediately. Otherwise, kicks
 #      off a remux (codec compatible, just rewrap to MP4) or transcode (re-encode
 #      to H.264/AAC) job and returns {ready:false, job_id, operation}.
 #   3. Client polls /api/library/offline-job/{job_id} until status=="done", then
-#      uses the returned video_url to download the cached MP4.
-#   4. The client persists the resulting blob in IndexedDB, plus any sidecar
-#      subtitles fetched from /api/library/{id}/subtitle (SRT auto-converted
-#      to WebVTT) and the per-file skip_data fetched from
-#      /api/library/{id}/skip-data — those let the local player run intro skip,
-#      subtitles, and watch-history sync the same way the VLC pipeline does.
+#      sets <video>.src to the returned video_url. The browser issues Range
+#      requests against /api/library/offline-cache/<sha>.mp4 (FileResponse
+#      supports Range natively) so seek-while-streaming works without extra code.
+#   4. Subtitles and skip-data sit alongside the same /offline-prepare response
+#      as URLs (/api/library/{id}/subtitle, /api/library/{id}/skip-data); the
+#      client wires them straight into <track> elements / the skip-offer logic.
 #
-# See docs/OFFLINE.md for the full design and docs/GOTCHAS.md for Safari quirks.
+# The `offline` token in the endpoint paths is a historical artifact — these
+# powered the older "download to device" Handoff feature. The cache namespace
+# stays for backwards compatibility; the user-facing UX is now stream-to-device.
+# See docs/STREAMING.md for the full design.
 
 OFFLINE_CACHE = Path(__file__).parent / ".offline_cache"
 # Bump this when offline-output requirements change (codec rules, ffmpeg args)
@@ -4673,11 +4677,13 @@ class OfflinePrepareReq(BaseModel):
 
 @app.post("/api/library/{item_id}/offline-prepare")
 async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
-    """Decide what (if any) processing a file needs for browser-side offline playback.
+    """Decide what (if any) processing a file needs for browser-side streaming.
 
-    Fast path: returns ready=true with a direct download URL when the source is already
+    Fast path: returns ready=true with a direct video URL when the source is already
     a Safari-friendly MP4. Otherwise, kicks off a background remux (just rewrap to MP4)
     or transcode (re-encode to H.264/AAC) job and returns {ready:false, job_id}.
+    The returned URL is meant to be set as <video>.src — the file is served with
+    HTTP Range support so seek-while-streaming works without further client work.
     """
     lib = await get_library()
     item = next((it for it in lib["items"] if it["id"] == item_id), None)
@@ -4737,7 +4743,7 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
         })
 
     if not analyzer.ffmpeg_bin():
-        raise HTTPException(503, "ffmpeg is not available — cannot prepare this file for offline playback.")
+        raise HTTPException(503, "ffmpeg is not available — cannot prepare this file for streaming.")
 
     operation = "remux" if _can_remux(info) else "transcode"
     job_id = secrets.token_hex(8)

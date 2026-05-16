@@ -89,20 +89,46 @@
 
 ---
 
-## Milestone 11 — Handoff to Device (Offline Playback)
+## Milestone 11 — Handoff to Device (Offline Playback) **— superseded by Milestone 13**
+
+The downloaded-to-device variant was retired because the IndexedDB blob save
+frequently truncated long episodes (e.g. the first ~5 minutes were playable but
+the tail of the file was unreachable). Items 11.1–11.3 still describe the
+backend pieces that remain in use; items 11.4–11.12 are no longer current.
 
 - [x] **11.1** Backend `/api/library/{id}/offline-prepare`: ffprobe the source file, fast-path Safari-compatible MP4s with a direct URL, otherwise spawn an ffmpeg remux (rewrap container, no re-encode) or transcode (H.264 + AAC) job. Job state polled via `/api/library/offline-job/{job_id}`; output served from `.offline_cache/<sha>.mp4`.
 - [x] **11.2** Backend `/api/library/{id}/subtitle?file=...` — sidecar SRT/VTT lookup; SRTs are converted to WebVTT on the fly so the browser `<track>` element can use them.
-- [x] **11.3** Backend `/api/library/{id}/skip-data?file_path=...` — non-admin read-only access to per-file intro/credits times so the local player can run skip-intro offline.
-- [x] **11.4** Service worker (`static/sw.js`) caches the app shell + the read-only library APIs (library list, files, profiles, skip-data, subtitle) so the dashboard boots even when the host is unreachable. Web app manifest at `/manifest.json` for "Add to Home Screen" PWA install on iOS.
-- [x] **11.5** IndexedDB store (`streamlink-offline`) with three object stores: `videos` (blob + subs + skipData per file), `meta` (small caches), `outbox` (queued progress writes). The save-for-offline flow downloads the prepared MP4 + sidecar VTTs + skip-data into `videos`; remove-from-offline deletes the row.
-- [x] **11.6** Episode-picker rows show an offline icon + `OFFLINE` pill, plus a Save / Remove toggle button. Library cards' Resume button routes through the chooser when the resume hint points at a saved-offline file.
-- [x] **11.7** "Where to play?" chooser modal — surfaces VLC vs On Device whenever a saved offline copy of the first file in the playlist exists. Disconnected device with offline copy auto-launches the local player.
-- [x] **11.8** Local player UI — single `<video id="lpVideo">` inside `#localPlayer`; CSS class `.lp-tiny` toggles the container between full-screen overlay (native browser controls) and a corner tile (small video + huge Fullscreen button). No element move on minimize → continuous playback. iOS Safari–compatible (`playsinline`, blob: URLs, `<track>` for VTT subs).
-- [x] **11.9** Local player wires skip-intro / skip-credits offers (mirrors backend `_maybe_emit_skip_offer`), subtitle selector, watch-progress saves every 15 s, and auto-advance to the next saved offline episode when a file ends.
-- [x] **11.10** Outbox queue: when `navigator.onLine === false`, progress writes go to IndexedDB; the `online` event flushes them to `/api/library/{id}/progress`.
-- [x] **11.11** "Prep Offline" button on each library card. POSTs `/api/library/{id}/prep-all` to pre-run remux/transcode for every file in the item; status chip below the title polls `/prep-status` every 3 s. Subsequent device-side Save Offline taps then fetch the cached MP4 instantly instead of waiting for ffmpeg on demand.
-- [x] **11.12** Dedicated **Offline** tab next to Library — lists every file saved to this device grouped by item, with per-file size + duration, ▶ Play (drives `lpPlay`), ✕ delete, and a per-group Delete All. Header line shows the device-wide total: `<N> files · <size> on this device`. Works fully offline (reads IndexedDB directly).
+- [x] **11.3** Backend `/api/library/{id}/skip-data?file_path=...` — non-admin read-only access to per-file intro/credits times.
+- [-] **11.4** Service worker + manifest (replaced by Milestone 13.1 — a one-shot unregister/eviction SW now ships in its place).
+- [-] **11.5** IndexedDB `streamlink-offline` store (deleted in Milestone 13.2).
+- [-] **11.6** Per-row Save/Remove buttons (replaced by per-row Prep buttons in Milestone 13.3).
+- [-] **11.7** Chooser modal "saved offline copy" gate (replaced by Milestone 13.4 — chooser is always available online).
+- [-] **11.8** Local player wired against IndexedDB blobs (replaced by Milestone 13.5 — server URLs + HTTP range).
+- [-] **11.9** Skip-intro / subtitles / progress for offline blobs (Milestone 13.5 wires the same UI to streamed sources).
+- [-] **11.10** Outbox queue for offline progress writes (Milestone 13.6 drops the outbox — progress is always best-effort POST).
+- [x] **11.11** "Prep" button on each library card (kept; renamed "Prep for Streaming" in Milestone 13.3).
+- [-] **11.12** Dedicated Offline tab (deleted in Milestone 13.7 — there's nothing device-resident to list anymore).
+
+---
+
+## Milestone 13 — Stream to Device
+
+Replaces Milestone 11's "download episode to device" Handoff with HTTP-range
+streaming from the server's preconverted MP4. Keeps the existing
+`/offline-prepare` + `.offline_cache/<sha>.mp4` pipeline (it produces a
+browser-friendly file regardless), but the device's `<video>` plays the URL
+directly instead of fetching the blob into IndexedDB. Watch progress continues
+to POST to `/api/library/{id}/progress` every 15 s + on pause/seek/exit, so a
+device that quits playback abruptly resumes from the right spot on next play.
+
+- [x] **13.1** Service worker + PWA shell removed. `static/sw.js` now ships a one-shot eviction stub (`registration.unregister()` + `caches.keys().delete(*)` on activate); `/manifest.json` is gone, the `<link rel="manifest">` is dropped, and `index.html` registers the stub once on load so legacy devices get clean state on next visit.
+- [x] **13.2** IndexedDB / outbox / blob-URL plumbing removed from `static/index.html`. No more `streamlink-offline` DB, no `offlineSaved` Set, no `_lpBgPrefetch` map, no `osm*` modal helpers. `lp.videoUrl`/`lp.subUrls` blob-revoke logic dropped.
+- [x] **13.3** Per-row "Save Offline" toggle replaced with a per-file **Prep** button driven by the existing `/offline-prepare` + `/offline-job/{id}` endpoints. Tri-state UI: **Prep** (default), **Prepping…** (spinner while a job is in flight), **Stream Ready** (green check) once the cache file exists. State sourced from `/prep-status` so the picker reflects truth across reloads. Library-card bulk button renamed "Prep for Streaming"; `prepItemForStreaming` (was `prepItemForOffline`).
+- [x] **13.4** Chooser modal stays (VLC vs On Device); "On Device" is now always available when online. The "Saved offline copy" caption became "Stream to this device's browser".
+- [x] **13.5** Local player rewritten: `_lpLoadIndex` POSTs `/offline-prepare`, optionally polls `/offline-job/{id}` while an in-player "Preparing for streaming…" overlay shows, then sets `<video>.src` to the returned URL. Subtitle `<track>` elements load straight from `/subtitle` (server still converts SRT→VTT on the fly). Skip-intro, auto-advance, and resume logic all keep working unchanged against the streamed source.
+- [x] **13.6** `saveProgress` simplified — single best-effort POST, no outbox. `_lpFlushProgress` still flushes on `pause`/`seeked`/`visibilitychange`/`pagehide` (with `navigator.sendBeacon` for `pagehide`) so the server's resume position stays within 15 s of reality.
+- [x] **13.7** Offline tab + bulk "Save Offline (N)" footer button on the episode picker deleted. Tab nav is now Search + Library only.
+- [x] **13.8** `docs/OFFLINE.md` rewritten as `docs/STREAMING.md`; `docs/API.md`, `docs/FRONTEND.md`, `docs/GOTCHAS.md`, and `CLAUDE.md` updated. Backend left intact apart from docstring/log copy edits.
 
 ---
 

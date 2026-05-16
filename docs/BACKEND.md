@@ -100,9 +100,13 @@ Cancellation: on new `/api/stream` or `/api/stop`, `state.stream_task.cancel()` 
 - Honours `selected_file_indices` (skip non-selected files via `qbit_set_file_priority`).
 - The item stays `status="downloading"` until `library_download_monitor` flips it.
 
-## Offline / Handoff to Device
+## Stream-to-Device prep
 
-End of `main.py` (just before `app.mount`) has the offline subsystem:
+End of `main.py` (just before `app.mount`) has the prep subsystem that powers
+Stream-to-Device. The function names still say `offline_*` for backwards
+compatibility, but the live consumer is the browser `<video>` issuing HTTP
+Range requests against the cached MP4 — nothing is downloaded to the device
+anymore.
 
 - `_ffprobe_codec(path)` shells out to ffprobe (located alongside `analyzer.ffmpeg_bin()`) for video/audio codec + duration.
 - `_safari_compatible(info, ext)` — true for `.mp4`/`.m4v`/`.mov` containers with `h264`/`hevc` video and `aac`/`mp3` audio (direct play).

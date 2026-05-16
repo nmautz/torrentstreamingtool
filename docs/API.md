@@ -114,29 +114,26 @@ Up to 6 profiles. No passwords. Optional 4-digit PIN per profile.
 | POST | `/api/resume-now` | Apply the current `resume_offer` (seek to saved position) |
 | DELETE | `/api/resume-now` | Dismiss; start from beginning |
 
-## Handoff to Device (offline playback)
+## Stream to Device
+
+The endpoint paths still carry an `offline-*` prefix for backwards
+compatibility; the user-facing flow is now stream-to-device (the device's
+`<video>` plays the URL directly instead of saving it to IndexedDB).
 
 | Method | Path | Notes |
 |--------|------|-------|
-| POST | `/api/library/{id}/offline-prepare` | `{file_path}` → ffprobes the source. Fast path returns `{ready:true, video_url, subs[], codec_info, duration_sec}` for already-Safari-compatible MP4s (uses the existing `/download` URL). Otherwise spawns an ffmpeg remux/transcode job and returns `{ready:false, job_id, operation:"remux"\|"transcode", subs[]}` |
+| POST | `/api/library/{id}/offline-prepare` | `{file_path}` → ffprobes the source. Fast path returns `{ready:true, video_url, subs[], codec_info, duration_sec}` for already-Safari-compatible MP4s (uses the existing `/download` URL). Otherwise spawns an ffmpeg remux/transcode job and returns `{ready:false, job_id, operation:"remux"\|"transcode", subs[]}`. `video_url` is meant to be set as `<video>.src`; the file is served with HTTP Range support |
 | GET | `/api/library/offline-job/{job_id}` | Poll a prepare job — `{status:"pending"\|"processing"\|"done"\|"error", operation, progress (0-1), error, video_url?}` (progress is approximated from output-file growth; `-progress` flag is awkward to consume) |
-| GET | `/api/library/offline-cache/{name}` | Serves a prepared MP4 from `.offline_cache/`. The name is sha256(path \| mtime \| size)[:24]+`.mp4`. Path-traversal–rejected |
-| GET | `/api/library/{id}/subtitle?file=…` | Returns a sidecar `.srt`/`.vtt` next to a video file as `text/vtt` (SRT auto-converted by `_srt_to_vtt`). Filename only — no path traversal |
+| GET | `/api/library/offline-cache/{name}` | Serves a prepared MP4 from `.offline_cache/`. The name is sha256(path \| mtime \| size)[:24]+`.mp4`. Range-aware (`FileResponse`). Path-traversal–rejected |
+| GET | `/api/library/{id}/subtitle?file=…` | Returns a sidecar `.srt`/`.vtt` next to a video file as `text/vtt` (SRT auto-converted by `_srt_to_vtt`). Filename only — no path traversal. Wired straight into `<track src=…>` by the local player |
 | GET | `/api/library/{id}/skip-data?file_path=…` | Read-only intro/credits times for one file (or full map when `file_path` is omitted). Same shape as the admin editor but no auth — any profile that can play the item can read its skip data |
-| POST | `/api/library/{id}/prep-all` | Pre-runs remux/transcode for every video file in an item so subsequent device-side `Save Offline` taps fetch the cached MP4 instantly. Returns `{files:[{file_path,name,status,job_id?,progress?}], total, ready, processing, errored, needs_prep, missing}` with one row per file. Coalesces with any in-flight jobs |
-| GET | `/api/library/{id}/prep-status` | Same shape as `prep-all` but never starts new work — the UI polls this every 3 s while a prep is in progress |
+| POST | `/api/library/{id}/prep-all` | Pre-runs remux/transcode for every video file in an item so subsequent device-side Play taps a cached MP4 and starts streaming immediately. Returns `{files:[{file_path,name,status,job_id?,progress?}], total, ready, processing, errored, needs_prep, missing}` with one row per file. Coalesces with any in-flight jobs |
+| GET | `/api/library/{id}/prep-status` | Same shape as `prep-all` but never starts new work — the UI polls this every 3 s while a prep is in progress, and seeds `prepFileState` so per-row Prep buttons reflect "Stream Ready" |
 | GET | `/api/offline-active` | Global view of every active job: `{active, total_jobs, items:[{item_id, title, processing, progress, eta_secs, operation}]}`. Drives the persistent `#globalPrepBar` indicator so the user can see preprocessing is running even after a page reload or when the originating card is off-screen. Polled at 3 s while jobs exist, 8 s while idle, paused when the tab is hidden |
 
-Per-file `status` values: `ready_native` (fast-path Safari MP4, no work needed), `cached` (already in `.offline_cache/`), `pending`/`processing` (job running, includes `progress` 0-1 + `operation`), `done` (job just finished), `error`, `needs_prep`, `missing` (file not on disk).
+Per-file `status` values: `ready_native` (fast-path Safari MP4, no work needed), `cached` (already in `.offline_cache/`), `pending`/`processing` (job running, includes `progress` 0-1 + `operation`), `done` (job just finished), `error`, `needs_prep`, `missing` (file not on disk). The frontend collapses `ready_native`/`cached`/`done` into the single "Stream Ready" UI state.
 
-The same MP4 is **not** cached by the service worker (videos go in client-side IndexedDB instead — see `static/sw.js`). See [OFFLINE.md](OFFLINE.md) for the full client/server flow.
-
-## PWA assets
-
-| Method | Path | Notes |
-|--------|------|-------|
-| GET | `/sw.js` | Service worker — registers at root scope. Caches app shell + read-only library APIs |
-| GET | `/manifest.json` | Web app manifest. `display: standalone`, indigo theme. SVG-data-URI icons |
+See [STREAMING.md](STREAMING.md) for the full client/server flow.
 
 ## Settings
 
