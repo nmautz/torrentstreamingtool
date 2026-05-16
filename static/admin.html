@@ -429,9 +429,6 @@ function switchTab(tab){
                : "tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors";
     document.getElementById(`panel${t.charAt(0).toUpperCase()+t.slice(1)}`).classList.toggle("hidden", t!==tab);
   });
-  // Cancel the offline-cache poller whenever the operator leaves that tab so
-  // background polling doesn't keep firing once they've moved on.
-  if(tab !== "offline" && _offRefreshTimer){ clearTimeout(_offRefreshTimer); _offRefreshTimer = null; }
   if(tab==="content")  loadContentList();
   if(tab==="profiles") loadProfilePins();
   if(tab==="skip")     loadSkipPanel();
@@ -776,9 +773,6 @@ async function toggleLock(itemId, newValue, btn){
 // reloads of this tab so a Refresh after deleting one file doesn't collapse
 // every section the operator was working through.
 const _offExpanded = new Set();
-// Auto-refresh handle. When the inventory contains in-flight jobs we re-poll
-// every 3 s so progress bars and ETAs animate; we tear it down on tab change.
-let _offRefreshTimer = null;
 
 function _fmtBytes(n){
   if(!n || n < 1024) return `${n||0} B`;
@@ -847,14 +841,6 @@ async function loadOfflineCache(){
         </div>
       </div>`;
     }).join("");
-  }
-  // Auto-refresh while any item still has work in flight, so progress bars
-  // animate without the operator hitting Refresh.
-  const stillWorking = d.items.some(i => (i.processing_count + i.pending_count) > 0);
-  clearTimeout(_offRefreshTimer);
-  _offRefreshTimer = null;
-  if(stillWorking && activeTab === "offline"){
-    _offRefreshTimer = setTimeout(loadOfflineCache, 3000);
   }
 }
 
