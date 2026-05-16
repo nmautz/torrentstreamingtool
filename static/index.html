@@ -205,18 +205,20 @@
   <div class="bg-gray-900 w-full sm:max-w-xs fade-in border-t-[3px] border-indigo-600">
     <div class="px-5 pt-5 pb-4 border-b border-gray-800">
       <h2 class="text-lg font-black uppercase tracking-wide">Enter PIN</h2>
-      <p id="pinPromptSub" class="text-xs text-gray-500 mt-0.5">Enter the 4-digit PIN to continue</p>
+      <p id="pinPromptSub" class="text-xs text-gray-500 mt-0.5">Enter your 6-digit PIN</p>
     </div>
     <div class="px-5 py-4 space-y-4">
       <!-- Dots display -->
-      <div class="flex justify-center gap-4 py-2" id="pinDots">
+      <div class="flex justify-center gap-3 py-2" id="pinDots">
+        <div class="pin-dot w-4 h-4 border-2 border-gray-600"></div>
+        <div class="pin-dot w-4 h-4 border-2 border-gray-600"></div>
         <div class="pin-dot w-4 h-4 border-2 border-gray-600"></div>
         <div class="pin-dot w-4 h-4 border-2 border-gray-600"></div>
         <div class="pin-dot w-4 h-4 border-2 border-gray-600"></div>
         <div class="pin-dot w-4 h-4 border-2 border-gray-600"></div>
       </div>
       <!-- Hidden real input for keyboard -->
-      <input id="pinPromptInput" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="4"
+      <input id="pinPromptInput" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6"
         class="sr-only" oninput="updatePinDots()" onkeydown="if(event.key==='Enter') submitPinPrompt()"/>
       <!-- Numpad -->
       <div class="grid grid-cols-3 gap-1.5">
@@ -248,20 +250,20 @@
   <div class="bg-gray-900 w-full sm:max-w-xs fade-in border-t-[3px] border-indigo-600">
     <div class="px-5 pt-5 pb-4 border-b border-gray-800">
       <h2 class="text-lg font-black uppercase tracking-wide" id="changePinTitle">Set PIN</h2>
-      <p class="text-xs text-gray-500 mt-0.5" id="changePinSub">Protect this profile with a 4-digit PIN</p>
+      <p class="text-xs text-gray-500 mt-0.5" id="changePinSub">Protect this profile with a 6-digit PIN</p>
     </div>
     <div class="px-5 py-4 space-y-3">
       <div id="changePinCurrentWrap" class="hidden">
         <label class="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Current PIN</label>
-        <input id="changePinCurrent" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="4"
-          placeholder="••••"
+        <input id="changePinCurrent" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6"
+          placeholder="••••••"
           class="w-full bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500
                  px-3 py-3 text-center text-xl font-mono tracking-widest focus:outline-none transition-colors"/>
       </div>
       <div>
         <label class="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">New PIN <span class="text-gray-600 normal-case font-normal">(leave blank to clear)</span></label>
-        <input id="changePinNew" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="4"
-          placeholder="••••"
+        <input id="changePinNew" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6"
+          placeholder="••••••"
           class="w-full bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500
                  px-3 py-3 text-center text-xl font-mono tracking-widest focus:outline-none transition-colors"
           onkeydown="if(event.key==='Enter') submitChangePinModal()"/>
@@ -351,18 +353,28 @@
     <div class="font-black text-4xl tracking-wide uppercase mb-1">
       <span class="text-indigo-500">Stream</span><span class="text-white">Link</span>
     </div>
-    <p class="text-gray-600 text-xs uppercase tracking-widest">Who's watching</p>
+    <p id="profilePickerSub" class="text-gray-600 text-xs uppercase tracking-widest">Who's watching</p>
   </div>
   <div id="profileGrid" class="flex flex-wrap justify-center gap-3 max-w-lg"></div>
-  <div class="flex items-center gap-4">
-    <button onclick="openProfileModal()"
-      class="text-xs text-gray-700 hover:text-gray-400 uppercase tracking-wider transition-colors">
-      Manage profiles
+  <div class="flex flex-col items-center gap-3">
+    <button id="loginWithPinBtn" onclick="openPinPrompt()"
+      class="hidden text-xs text-gray-500 hover:text-indigo-400 uppercase tracking-wider transition-colors border border-gray-800 hover:border-indigo-700 px-4 py-2">
+      Log in with PIN
     </button>
-    <a id="adminPanelLink" href="/admin"
-      class="hidden text-xs text-gray-700 hover:text-indigo-400 uppercase tracking-wider transition-colors">
-      Admin
-    </a>
+    <button id="pinPickerBackBtn" onclick="closePinPicker()"
+      class="hidden text-xs text-gray-700 hover:text-gray-400 uppercase tracking-wider transition-colors">
+      ← Back
+    </button>
+    <div class="flex items-center gap-4">
+      <button id="manageProfilesBtn" onclick="openProfileModal()"
+        class="text-xs text-gray-700 hover:text-gray-400 uppercase tracking-wider transition-colors">
+        Manage profiles
+      </button>
+      <a id="adminPanelLink" href="/admin"
+        class="hidden text-xs text-gray-700 hover:text-indigo-400 uppercase tracking-wider transition-colors">
+        Admin
+      </a>
+    </div>
   </div>
 </div>
 
@@ -2051,41 +2063,66 @@ async function fetchProfiles(){
   allProfiles=(await r.json()).profiles||[];
   return allProfiles;
 }
+let _pinMatchedProfiles=null; // null=normal, array=profiles matched by PIN (already verified)
 function renderProfileGrid(){
   const grid=document.getElementById("profileGrid"); grid.innerHTML="";
-  allProfiles.forEach(p=>{
-    const bg=avatarBg(p.color);
-    const card=document.createElement("button");
-    card.className="profile-card flex flex-col items-center gap-2 p-3 hover:bg-gray-800/60 transition-colors";
-    card.innerHTML=`
-      <div class="profile-avatar w-20 h-20 ${bg} flex items-center justify-center text-3xl font-black text-white select-none">
-        ${escHtml(p.name.charAt(0).toUpperCase())}
-      </div>
-      <span class="text-sm font-bold text-gray-300 uppercase tracking-wide">${escHtml(p.name)}</span>`;
-    card.onclick=()=>selectProfile(p);
-    grid.appendChild(card);
-  });
-  const add=document.createElement("button");
-  add.className="profile-card flex flex-col items-center gap-2 p-3 hover:bg-gray-800/60 transition-colors";
-  add.innerHTML=`
-    <div class="profile-avatar w-20 h-20 border-2 border-dashed border-gray-700 flex items-center justify-center text-3xl text-gray-600 select-none">+</div>
-    <span class="text-sm text-gray-600 uppercase tracking-wide">Add Profile</span>`;
-  add.onclick=()=>openProfileModal();
-  grid.appendChild(add);
+  const hasPinProfiles=allProfiles.some(p=>p.has_pin);
+  if(_pinMatchedProfiles!==null){
+    // PIN already verified — let user pick from the matching profiles, no re-entry needed
+    _pinMatchedProfiles.forEach(p=>{
+      const bg=avatarBg(p.color);
+      const card=document.createElement("button");
+      card.className="profile-card flex flex-col items-center gap-2 p-3 hover:bg-gray-800/60 transition-colors";
+      card.innerHTML=`
+        <div class="profile-avatar w-20 h-20 ${bg} flex items-center justify-center text-3xl font-black text-white select-none">
+          ${escHtml(p.name.charAt(0).toUpperCase())}
+        </div>
+        <span class="text-sm font-bold text-gray-300 uppercase tracking-wide">${escHtml(p.name)}</span>`;
+      card.onclick=()=>_doSelectProfile(p);
+      grid.appendChild(card);
+    });
+    document.getElementById("profilePickerSub").textContent="Choose your profile";
+    document.getElementById("loginWithPinBtn").classList.add("hidden");
+    document.getElementById("pinPickerBackBtn").classList.remove("hidden");
+    document.getElementById("manageProfilesBtn").classList.add("hidden");
+  } else {
+    // Normal mode — hide PIN-protected profiles entirely
+    allProfiles.filter(p=>!p.has_pin).forEach(p=>{
+      const bg=avatarBg(p.color);
+      const card=document.createElement("button");
+      card.className="profile-card flex flex-col items-center gap-2 p-3 hover:bg-gray-800/60 transition-colors";
+      card.innerHTML=`
+        <div class="profile-avatar w-20 h-20 ${bg} flex items-center justify-center text-3xl font-black text-white select-none">
+          ${escHtml(p.name.charAt(0).toUpperCase())}
+        </div>
+        <span class="text-sm font-bold text-gray-300 uppercase tracking-wide">${escHtml(p.name)}</span>`;
+      card.onclick=()=>selectProfile(p);
+      grid.appendChild(card);
+    });
+    const add=document.createElement("button");
+    add.className="profile-card flex flex-col items-center gap-2 p-3 hover:bg-gray-800/60 transition-colors";
+    add.innerHTML=`
+      <div class="profile-avatar w-20 h-20 border-2 border-dashed border-gray-700 flex items-center justify-center text-3xl text-gray-600 select-none">+</div>
+      <span class="text-sm text-gray-600 uppercase tracking-wide">Add Profile</span>`;
+    add.onclick=()=>openProfileModal();
+    grid.appendChild(add);
+    document.getElementById("profilePickerSub").textContent="Who's watching";
+    document.getElementById("loginWithPinBtn").classList.toggle("hidden",!hasPinProfiles);
+    document.getElementById("pinPickerBackBtn").classList.add("hidden");
+    document.getElementById("manageProfilesBtn").classList.remove("hidden");
+  }
 }
+function closePinPicker(){ _pinMatchedProfiles=null; renderProfileGrid(); }
 async function showProfilePicker(){
   await fetchProfiles(); renderProfileGrid();
   document.getElementById("profilePicker").classList.remove("hidden");
 }
 function selectProfile(p){
-  if(p.has_pin){
-    openPinPrompt(p);
-    return;
-  }
   _doSelectProfile(p);
 }
 function _doSelectProfile(p){
   profile=p; localStorage.setItem("streamlink_profile",JSON.stringify(p));
+  _pinMatchedProfiles=null;
   document.getElementById("profilePicker").classList.add("hidden");
   document.getElementById("pinPromptModal").classList.add("hidden");
   renderNavProfile();
@@ -2101,10 +2138,8 @@ function applyMaxVolumeToSliders(){
   if(fvs) fvs.max = m;
 }
 
-let _pinTarget=null;
-function openPinPrompt(p){
-  _pinTarget=p;
-  document.getElementById("pinPromptSub").textContent=`Enter PIN for ${p.name}`;
+function openPinPrompt(){
+  document.getElementById("pinPromptSub").textContent="Enter your 6-digit PIN";
   document.getElementById("pinPromptInput").value="";
   document.getElementById("pinPromptError").classList.add("hidden");
   updatePinDots();
@@ -2112,13 +2147,12 @@ function openPinPrompt(p){
   setTimeout(()=>document.getElementById("pinPromptInput").focus(),50);
 }
 function closePinPrompt(){
-  _pinTarget=null;
   document.getElementById("pinPromptModal").classList.add("hidden");
 }
 function pinDigit(d){
   const inp=document.getElementById("pinPromptInput");
-  if(inp.value.length<4){ inp.value+=d; updatePinDots(); }
-  if(inp.value.length===4) setTimeout(submitPinPrompt,80);
+  if(inp.value.length<6){ inp.value+=d; updatePinDots(); }
+  if(inp.value.length===6) setTimeout(submitPinPrompt,80);
 }
 function pinBackspace(){
   const inp=document.getElementById("pinPromptInput");
@@ -2131,17 +2165,24 @@ function updatePinDots(){
   });
 }
 async function submitPinPrompt(){
-  if(!_pinTarget) return;
   const pin=document.getElementById("pinPromptInput").value;
   const errEl=document.getElementById("pinPromptError");
   errEl.classList.add("hidden");
-  if(pin.length!==4){ errEl.textContent="Enter all 4 digits."; errEl.classList.remove("hidden"); return; }
-  const r=await fetch(`/api/profiles/${_pinTarget.id}/verify-pin`,{
+  if(pin.length!==6){ errEl.textContent="Enter all 6 digits."; errEl.classList.remove("hidden"); return; }
+  const r=await fetch("/api/profiles/login-with-pin",{
     method:"POST", headers:{"Content-Type":"application/json"},
     body:JSON.stringify({pin}),
   });
   if(r.ok){
-    _doSelectProfile(_pinTarget);
+    const {profiles}=await r.json();
+    closePinPrompt();
+    if(profiles.length===1){
+      _doSelectProfile(profiles[0]);
+    } else {
+      // Multiple profiles share this PIN — let user choose
+      _pinMatchedProfiles=profiles;
+      renderProfileGrid();
+    }
   } else {
     errEl.textContent="Incorrect PIN. Try again.";
     errEl.classList.remove("hidden");
@@ -2257,8 +2298,8 @@ function openChangePinModal(p){
   _changePinTarget=p;
   document.getElementById("changePinTitle").textContent=p.has_pin?`Change PIN — ${p.name}`:`Set PIN — ${p.name}`;
   document.getElementById("changePinSub").textContent=p.has_pin
-    ? "Enter your current PIN and a new 4-digit PIN (blank = clear PIN)."
-    : "Set a 4-digit PIN to protect this profile.";
+    ? "Enter your current PIN and a new 6-digit PIN (blank = clear PIN)."
+    : "Set a 6-digit PIN to protect this profile.";
   const cw=document.getElementById("changePinCurrentWrap");
   if(p.has_pin){ cw.classList.remove("hidden"); } else { cw.classList.add("hidden"); }
   document.getElementById("changePinCurrent").value="";
@@ -2281,8 +2322,8 @@ async function submitChangePinModal(){
   const newPin=document.getElementById("changePinNew").value.trim();
   const errEl=document.getElementById("changePinError");
   errEl.classList.add("hidden");
-  if(newPin && (newPin.length!==4||!/^\d{4}$/.test(newPin))){
-    errEl.textContent="New PIN must be exactly 4 digits."; errEl.classList.remove("hidden"); return;
+  if(newPin && (newPin.length!==6||!/^\d{6}$/.test(newPin))){
+    errEl.textContent="New PIN must be exactly 6 digits."; errEl.classList.remove("hidden"); return;
   }
   if(p.has_pin && !currentPin){
     errEl.textContent="Enter your current PIN to continue."; errEl.classList.remove("hidden"); return;

@@ -3933,8 +3933,8 @@ async def set_profile_pin(profile_id: str, request: Request, req: ProfilePinReq)
     """
     is_admin = _check_admin(request)
     pin = req.pin.strip()
-    if pin and (len(pin) != 4 or not pin.isdigit()):
-        raise HTTPException(400, "PIN must be exactly 4 digits, or empty to clear.")
+    if pin and (len(pin) != 6 or not pin.isdigit()):
+        raise HTTPException(400, "PIN must be exactly 6 digits, or empty to clear.")
     lib = await get_library()
     profile = next((p for p in lib["profiles"] if p["id"] == profile_id), None)
     if not profile:
@@ -3981,6 +3981,37 @@ async def verify_profile_pin(profile_id: str, req: ProfilePinReq) -> JSONRespons
     if _pin_hash(req.pin.strip()) != stored:
         raise HTTPException(403, "Incorrect PIN.")
     return JSONResponse({"ok": True})
+
+
+class PinLoginReq(BaseModel):
+    pin: str
+
+@app.post("/api/profiles/login-with-pin")
+async def login_with_pin(req: PinLoginReq) -> JSONResponse:
+    """Find all profiles whose PIN matches. Returns matched profile objects (same shape as /api/profiles).
+    403 if no profiles match."""
+    pin = req.pin.strip()
+    if not pin or len(pin) != 6 or not pin.isdigit():
+        raise HTTPException(400, "PIN must be exactly 6 digits.")
+    h = _pin_hash(pin)
+    lib = await get_library()
+    matched = [
+        {
+            "id": p["id"],
+            "name": p["name"],
+            "color": p.get("color", "indigo"),
+            "has_pin": True,
+            "elevated": bool(p.get("elevated", False)),
+            "auto_skip_intro":   bool(p.get("auto_skip_intro", False)),
+            "auto_skip_credits": bool(p.get("auto_skip_credits", False)),
+            "resume_mode":       p.get("resume_mode", "auto"),
+        }
+        for p in lib["profiles"]
+        if p.get("pin_hash") == h
+    ]
+    if not matched:
+        raise HTTPException(403, "Incorrect PIN.")
+    return JSONResponse({"profiles": matched})
 
 
 # ── Routes: Smart Skip ────────────────────────────────────────────────────────

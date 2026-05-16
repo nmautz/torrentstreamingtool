@@ -223,7 +223,7 @@
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800">
         <h2 class="text-sm font-black uppercase tracking-wide">Profile PINs</h2>
-        <p class="text-xs text-gray-500 mt-0.5">4-digit PINs are prompted when a profile is selected.</p>
+        <p class="text-xs text-gray-500 mt-0.5">6-digit PINs hide the profile from the picker — users log in via "Log in with PIN".</p>
       </div>
       <div id="profilePinList" class="divide-y divide-gray-800">
         <div class="px-5 py-8 text-center text-gray-600 text-sm">Loading profiles…</div>
@@ -382,11 +382,11 @@
   <div class="bg-gray-900 w-full sm:max-w-xs border-t-[3px] border-indigo-600">
     <div class="px-5 pt-5 pb-4 border-b border-gray-800">
       <h2 class="text-lg font-black uppercase tracking-wide" id="pinModalTitle">Set PIN</h2>
-      <p class="text-xs text-gray-500 mt-0.5" id="pinModalSub">Enter 4-digit PIN</p>
+      <p class="text-xs text-gray-500 mt-0.5" id="pinModalSub">Enter 6-digit PIN</p>
     </div>
     <div class="px-5 py-4 space-y-4">
-      <input id="pinInput" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="4"
-        placeholder="4-digit PIN (leave blank to clear)"
+      <input id="pinInput" type="text" inputmode="numeric" pattern="[0-9]*" maxlength="6"
+        placeholder="6-digit PIN (leave blank to clear)"
         class="w-full bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500
                px-3 py-3 text-sm font-mono focus:outline-none transition-colors tracking-widest text-center text-xl"
         onkeydown="if(event.key==='Enter') submitPin()"/>
@@ -1194,8 +1194,8 @@ function openPinModal(profileId, name, hasPin){
   pinTarget = {id: profileId, name};
   document.getElementById("pinModalTitle").textContent = hasPin ? `Change PIN — ${name}` : `Set PIN — ${name}`;
   document.getElementById("pinModalSub").textContent = hasPin
-    ? "Enter new 4-digit PIN, or leave blank to clear."
-    : "Enter a 4-digit PIN.";
+    ? "Enter new 6-digit PIN, or leave blank to clear."
+    : "Enter a 6-digit PIN.";
   document.getElementById("pinInput").value = "";
   document.getElementById("pinError").classList.add("hidden");
   document.getElementById("pinModal").classList.remove("hidden");
@@ -1212,8 +1212,8 @@ async function submitPin(){
   const pin = document.getElementById("pinInput").value.trim();
   const errEl = document.getElementById("pinError");
   errEl.classList.add("hidden");
-  if(pin && (pin.length !== 4 || !/^\d{4}$/.test(pin))){
-    errEl.textContent = "PIN must be exactly 4 digits.";
+  if(pin && (pin.length !== 6 || !/^\d{6}$/.test(pin))){
+    errEl.textContent = "PIN must be exactly 6 digits.";
     errEl.classList.remove("hidden");
     return;
   }

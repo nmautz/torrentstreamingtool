@@ -32,7 +32,7 @@ The only persistent server-side state. Lives at the project root. Accessed via `
   "id": "uuid",
   "name": "Nathan",                    // max 30 chars
   "color": "indigo|purple|green|red|orange|pink",
-  "pin_hash": "sha256(pin)",            // optional; 4-digit pin
+  "pin_hash": "sha256(pin)",            // optional; 6-digit pin
   "elevated": true,                     // optional; can view admin_only items
   "auto_skip_intro":   true,            // optional; default false
   "auto_skip_credits": true,            // optional; default false
@@ -40,7 +40,7 @@ The only persistent server-side state. Lives at the project root. Accessed via `
 }
 ```
 
-PIN hash is plain SHA-256 of the 4-digit string (no salt). PIN protection is "soft" — anyone with filesystem access can read the JSON. It's a UI gate, not a security boundary.
+PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "soft" — anyone with filesystem access can read the JSON. It's a UI gate, not a security boundary. Profiles with a PIN are hidden from the normal profile picker; users select them via the "Log in with PIN" button.
 
 `settings.max_volume`: VLC is uncapped (0–200, where 200 % is overdrive). Capping it system-wide stops anyone from accidentally blowing the speakers. Lives under `settings` because it applies to the physical playback host, not to individual viewers. Enforced server-side in `_global_max_volume`.
 
