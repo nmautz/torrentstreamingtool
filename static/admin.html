@@ -86,6 +86,10 @@
       class="tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors">
       Smart Skip
     </button>
+    <button onclick="switchTab('offline')" id="tab-offline"
+      class="tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors">
+      Offline Cache
+    </button>
   </div>
 
   <!-- Toast -->
@@ -191,6 +195,43 @@
       <div id="profilePinList" class="divide-y divide-gray-800">
         <div class="px-5 py-8 text-center text-gray-600 text-sm">Loading profiles…</div>
       </div>
+    </div>
+  </div>
+
+  <!-- ── Offline Cache Tab ────────────────────────────────────────────────────── -->
+  <div id="panelOffline" class="hidden flex-1 overflow-y-auto p-5 max-w-3xl mx-auto w-full space-y-4">
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-sm font-black uppercase tracking-wide">Offline Cache</h2>
+          <p class="text-xs text-gray-500 mt-0.5">Preprocessed MP4s stored in <code class="font-mono text-gray-400" id="offCacheDir">.offline_cache/</code>. Source files that have been re-encoded or removed leave their entries as orphans.</p>
+        </div>
+        <button onclick="loadOfflineCache()"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 hover:text-white text-gray-400 transition-colors">
+          Refresh
+        </button>
+      </div>
+      <div class="px-5 py-3 border-b border-gray-800 flex items-center justify-between gap-3">
+        <span class="text-xs text-gray-500 uppercase tracking-widest font-bold">Total on disk</span>
+        <span id="offTotal" class="text-sm font-mono font-bold text-indigo-300">…</span>
+      </div>
+      <div id="offItemList" class="divide-y divide-gray-800">
+        <div class="px-5 py-8 text-center text-gray-600 text-sm">Loading cache inventory…</div>
+      </div>
+    </div>
+
+    <div id="offOrphanCard" class="hidden bg-gray-900 border border-amber-900/60">
+      <div class="px-5 py-4 border-b border-amber-900/60 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h3 class="text-sm font-black uppercase tracking-wide text-amber-300">Orphan Files</h3>
+          <p class="text-xs text-amber-200/70 mt-0.5">Cache entries with no matching library file (source removed or re-encoded). Safe to purge.</p>
+        </div>
+        <button onclick="purgeOfflineOrphans(this)"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border border-red-800 bg-red-950 text-red-300 hover:bg-red-900 transition-colors">
+          <span id="offOrphanBtnLabel">Purge All Orphans</span>
+        </button>
+      </div>
+      <div id="offOrphanList" class="divide-y divide-gray-800"></div>
     </div>
   </div>
 
@@ -382,15 +423,19 @@ async function loadOfflineEncoder(){
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 function switchTab(tab){
   activeTab = tab;
-  ["indexers","content","profiles","skip"].forEach(t=>{
+  ["indexers","content","profiles","skip","offline"].forEach(t=>{
     document.getElementById(`tab-${t}`).className =
       t===tab ? "tab-active px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors"
                : "tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors";
     document.getElementById(`panel${t.charAt(0).toUpperCase()+t.slice(1)}`).classList.toggle("hidden", t!==tab);
   });
+  // Cancel the offline-cache poller whenever the operator leaves that tab so
+  // background polling doesn't keep firing once they've moved on.
+  if(tab !== "offline" && _offRefreshTimer){ clearTimeout(_offRefreshTimer); _offRefreshTimer = null; }
   if(tab==="content")  loadContentList();
   if(tab==="profiles") loadProfilePins();
   if(tab==="skip")     loadSkipPanel();
+  if(tab==="offline")  loadOfflineCache();
 }
 
 // ── Smart Skip ────────────────────────────────────────────────────────────────
@@ -723,6 +768,274 @@ async function toggleLock(itemId, newValue, btn){
     loadContentList();
   } else {
     showToast("Failed to update.", true);
+  }
+}
+
+// ── Offline Cache ─────────────────────────────────────────────────────────────
+// Set of itemIds whose per-file list is currently expanded. Persisted across
+// reloads of this tab so a Refresh after deleting one file doesn't collapse
+// every section the operator was working through.
+const _offExpanded = new Set();
+// Auto-refresh handle. When the inventory contains in-flight jobs we re-poll
+// every 3 s so progress bars and ETAs animate; we tear it down on tab change.
+let _offRefreshTimer = null;
+
+function _fmtBytes(n){
+  if(!n || n < 1024) return `${n||0} B`;
+  const units = ["KB","MB","GB","TB"];
+  let v = n / 1024, i = 0;
+  while(v >= 1024 && i < units.length - 1){ v /= 1024; i++; }
+  return `${v.toFixed(v >= 100 ? 0 : v >= 10 ? 1 : 2)} ${units[i]}`;
+}
+
+async function loadOfflineCache(){
+  const list = document.getElementById("offItemList");
+  const totalEl = document.getElementById("offTotal");
+  list.innerHTML = `<div class="px-5 py-8 text-center text-gray-600 text-sm">Loading cache inventory…</div>`;
+  totalEl.textContent = "…";
+  let r;
+  try{
+    r = await fetch("/api/admin/offline-cache", {headers: authHeader()});
+  }catch(_){
+    list.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Network error — could not load inventory.</div>`;
+    return;
+  }
+  if(!r.ok){
+    list.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Failed to load inventory (HTTP ${r.status}).</div>`;
+    return;
+  }
+  const d = await r.json();
+  document.getElementById("offCacheDir").textContent = d.cache_dir;
+  totalEl.textContent = _fmtBytes(d.total_bytes);
+  // Per-item rows.
+  if(!d.items.length){
+    list.innerHTML = `<div class="px-5 py-8 text-center text-gray-600 text-sm">No preprocessed files yet. Run "Prep Offline" on a library item to populate the cache.</div>`;
+  } else {
+    list.innerHTML = d.items.map(_renderOffItem).join("");
+  }
+  // Orphans card.
+  const orphCard = document.getElementById("offOrphanCard");
+  const orphList = document.getElementById("offOrphanList");
+  const orphLabel = document.getElementById("offOrphanBtnLabel");
+  if(!d.orphans.length){
+    orphCard.classList.add("hidden");
+    orphList.innerHTML = "";
+  } else {
+    const orphTotal = d.orphans.reduce((s,o)=>s+o.bytes,0);
+    orphCard.classList.remove("hidden");
+    orphLabel.textContent = `Purge All (${d.orphans.length} · ${_fmtBytes(orphTotal)})`;
+    orphList.innerHTML = d.orphans.map(o=>{
+      const kindLabel = o.kind === "partial"
+        ? `<span class="text-[10px] font-bold uppercase tracking-widest px-1.5 py-0.5 bg-amber-950 text-amber-300">Partial</span>`
+        : `<span class="text-[10px] font-bold uppercase tracking-widest px-1.5 py-0.5 bg-gray-800 text-gray-400">Cached</span>`;
+      const fileExt = o.kind === "partial" ? ".part.mp4" : ".mp4";
+      return `
+      <div class="flex items-center justify-between px-5 py-3 gap-3">
+        <div class="min-w-0">
+          <div class="flex items-center gap-2">
+            ${kindLabel}
+            <code class="text-xs font-mono text-gray-400 truncate">${escHtml(o.cache_key)}${fileExt}</code>
+          </div>
+          <div class="text-[10px] text-gray-600 mt-0.5">modified ${new Date(o.mtime*1000).toLocaleString()}</div>
+        </div>
+        <div class="flex items-center gap-3 flex-shrink-0">
+          <span class="text-xs font-mono text-amber-300">${_fmtBytes(o.bytes)}</span>
+          <button onclick="deleteOfflineCacheFile('${escHtml(o.cache_key)}', this)"
+            class="text-[11px] font-bold uppercase tracking-wide px-2.5 py-1.5 border border-red-900 bg-red-950/60 text-red-300 hover:bg-red-900 transition-colors">
+            Delete
+          </button>
+        </div>
+      </div>`;
+    }).join("");
+  }
+  // Auto-refresh while any item still has work in flight, so progress bars
+  // animate without the operator hitting Refresh.
+  const stillWorking = d.items.some(i => (i.processing_count + i.pending_count) > 0);
+  clearTimeout(_offRefreshTimer);
+  _offRefreshTimer = null;
+  if(stillWorking && activeTab === "offline"){
+    _offRefreshTimer = setTimeout(loadOfflineCache, 3000);
+  }
+}
+
+// Status → {label, classes for the badge}. Used for both per-file and per-item summaries.
+const _OFF_STATUS_BADGE = {
+  cached:        ["Cached",     "bg-emerald-950 border-emerald-700 text-emerald-300"],
+  processing:    ["Processing", "bg-amber-950 border-amber-600 text-amber-200 blink"],
+  pending:       ["Queued",     "bg-gray-800 border-gray-600 text-gray-300"],
+  error:         ["Error",      "bg-red-950 border-red-700 text-red-300"],
+  partial_stale: ["Partial",    "bg-amber-950 border-amber-700 text-amber-300"],
+};
+
+function _offStatusBadge(status){
+  const [label, cls] = _OFF_STATUS_BADGE[status] || ["?", "bg-gray-800 border-gray-700 text-gray-500"];
+  return `<span class="text-[10px] font-bold uppercase tracking-widest px-2 py-1 border ${cls}">${label}</span>`;
+}
+
+function _fmtEta(sec){
+  if(!sec || sec < 1) return "";
+  if(sec < 60)   return `${Math.round(sec)}s left`;
+  if(sec < 3600) return `${Math.round(sec/60)}m left`;
+  return `${(sec/3600).toFixed(1)}h left`;
+}
+
+function _renderOffFile(f){
+  const sub = [];
+  if(f.operation) sub.push(escHtml(f.operation));
+  if(f.encoder)   sub.push(escHtml(f.encoder));
+  if(f.status === "cached" && f.mtime) sub.push("modified " + new Date(f.mtime*1000).toLocaleString());
+  if(f.status === "partial_stale" && f.mtime) sub.push("partial since " + new Date(f.mtime*1000).toLocaleString());
+  const subLine = sub.length ? `<div class="text-[10px] text-gray-600 mt-0.5">${sub.join(" · ")}</div>` : "";
+  // Progress bar for live encodes.
+  let progressHtml = "";
+  if(f.status === "processing"){
+    const pct = Math.max(0, Math.min(100, (f.progress||0) * 100));
+    const eta = _fmtEta(f.eta_secs);
+    progressHtml = `
+      <div class="mt-1.5">
+        <div class="h-1 bg-gray-800 overflow-hidden">
+          <div class="h-1 bg-amber-500 transition-all" style="width:${pct.toFixed(1)}%"></div>
+        </div>
+        <div class="text-[10px] text-amber-300/80 mt-1 font-mono">${pct.toFixed(0)}%${eta?" · "+eta:""}</div>
+      </div>`;
+  } else if(f.status === "pending"){
+    progressHtml = `<div class="text-[10px] text-gray-500 mt-1">Waiting for an encoder slot…</div>`;
+  } else if(f.status === "error" && f.error){
+    progressHtml = `<div class="text-[10px] text-red-300 mt-1 font-mono break-all whitespace-pre-wrap">${escHtml(f.error)}</div>`;
+  }
+  // Active jobs can't be deleted from disk — surface a disabled stop hint instead.
+  const isActive = f.status === "processing" || f.status === "pending";
+  const deleteBtn = isActive
+    ? `<span class="text-[10px] text-gray-600 italic px-2.5 py-1.5">running</span>`
+    : `<button onclick="deleteOfflineCacheFile('${escHtml(f.cache_key)}', this)"
+         class="text-[11px] font-bold uppercase tracking-wide px-2.5 py-1.5 border border-red-900 bg-red-950/60 text-red-300 hover:bg-red-900 transition-colors">
+         ${f.status === "error" ? "Clear" : "Delete"}
+       </button>`;
+  return `
+    <div class="px-5 py-2.5 bg-gray-950/40">
+      <div class="flex items-start justify-between gap-3">
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-2 flex-wrap">
+            ${_offStatusBadge(f.status)}
+            <span class="text-xs text-gray-300 truncate">${escHtml(f.name)}</span>
+          </div>
+          <div class="text-[10px] font-mono text-gray-600 mt-0.5 truncate">${escHtml(f.cache_key)}.mp4</div>
+          ${subLine}
+          ${progressHtml}
+        </div>
+        <div class="flex items-center gap-3 flex-shrink-0 pt-0.5">
+          <span class="text-xs font-mono text-gray-400">${f.bytes ? _fmtBytes(f.bytes) : "—"}</span>
+          ${deleteBtn}
+        </div>
+      </div>
+    </div>`;
+}
+
+function _renderOffItem(it){
+  const expanded = _offExpanded.has(it.item_id);
+  const filesHtml = expanded ? it.files.map(_renderOffFile).join("") : "";
+  // Per-item status pills: only render the non-zero ones to keep the row tidy.
+  const pills = [];
+  if(it.cached_count)     pills.push(`<span class="text-[10px] font-mono px-1.5 py-0.5 bg-emerald-950 text-emerald-300">${it.cached_count} cached</span>`);
+  if(it.processing_count) pills.push(`<span class="text-[10px] font-mono px-1.5 py-0.5 bg-amber-950 text-amber-200 blink">${it.processing_count} processing</span>`);
+  if(it.pending_count)    pills.push(`<span class="text-[10px] font-mono px-1.5 py-0.5 bg-gray-800 text-gray-300">${it.pending_count} queued</span>`);
+  if(it.error_count)      pills.push(`<span class="text-[10px] font-mono px-1.5 py-0.5 bg-red-950 text-red-300">${it.error_count} error</span>`);
+  if(it.partial_count)    pills.push(`<span class="text-[10px] font-mono px-1.5 py-0.5 bg-amber-950 text-amber-300">${it.partial_count} partial</span>`);
+  return `
+    <div>
+      <div class="flex items-center justify-between px-5 py-4 gap-3">
+        <button onclick="toggleOffItemExpand('${escHtml(it.item_id)}')"
+          class="min-w-0 flex-1 text-left">
+          <div class="text-sm font-bold text-gray-200 truncate flex items-center gap-2">
+            <span class="text-gray-600 font-mono text-xs flex-shrink-0">${expanded?"▾":"▸"}</span>
+            <span class="truncate">${escHtml(it.title)}</span>
+          </div>
+          <div class="text-xs text-gray-600 mt-1 pl-5 flex items-center gap-2 flex-wrap">
+            <span class="font-mono text-indigo-300">${_fmtBytes(it.total_bytes)}</span>
+            <span class="text-gray-700">·</span>
+            ${pills.join(" ")}
+          </div>
+        </button>
+        <button onclick="deleteOfflineCacheForItem('${escHtml(it.item_id)}','${escHtml(it.title).replace(/'/g,"\\'")}',this)"
+          class="flex-shrink-0 text-[11px] font-bold uppercase tracking-wide px-3 py-2 border border-red-800 bg-red-950 text-red-300 hover:bg-red-900 transition-colors">
+          Delete All
+        </button>
+      </div>
+      ${filesHtml}
+    </div>`;
+}
+
+function toggleOffItemExpand(itemId){
+  if(_offExpanded.has(itemId)) _offExpanded.delete(itemId);
+  else                         _offExpanded.add(itemId);
+  loadOfflineCache();
+}
+
+async function deleteOfflineCacheFile(cacheKey, btn){
+  btn.disabled = true;
+  let r;
+  try{
+    r = await fetch(`/api/admin/offline-cache/${encodeURIComponent(cacheKey)}`, {
+      method:"DELETE", headers: authHeader(),
+    });
+  }catch(_){
+    btn.disabled = false;
+    showToast("Network error.", true); return;
+  }
+  if(r.ok){
+    const d = await r.json();
+    showToast(`Deleted (${_fmtBytes(d.bytes_freed)} freed).`);
+    loadOfflineCache();
+  } else if(r.status === 409){
+    showToast("Skipped — file is being written by an active prep job.", true);
+    btn.disabled = false;
+  } else {
+    showToast(`Delete failed (HTTP ${r.status}).`, true);
+    btn.disabled = false;
+  }
+}
+
+async function deleteOfflineCacheForItem(itemId, title, btn){
+  if(!confirm(`Delete all preprocessed offline files for "${title}"? Source files are not affected — they can be re-prepped.`)) return;
+  btn.disabled = true;
+  let r;
+  try{
+    r = await fetch(`/api/admin/library/${encodeURIComponent(itemId)}/offline-cache`, {
+      method:"DELETE", headers: authHeader(),
+    });
+  }catch(_){
+    btn.disabled = false;
+    showToast("Network error.", true); return;
+  }
+  if(r.ok){
+    const d = await r.json();
+    showToast(`Deleted ${d.deleted_count} file${d.deleted_count!==1?"s":""} (${_fmtBytes(d.bytes_freed)} freed).`);
+    loadOfflineCache();
+  } else {
+    showToast(`Delete failed (HTTP ${r.status}).`, true);
+    btn.disabled = false;
+  }
+}
+
+async function purgeOfflineOrphans(btn){
+  if(!confirm("Delete every orphan cache file? These no longer correspond to any library file and are safe to remove.")) return;
+  btn.disabled = true;
+  let r;
+  try{
+    r = await fetch(`/api/admin/offline-cache/orphans`, {
+      method:"DELETE", headers: authHeader(),
+    });
+  }catch(_){
+    btn.disabled = false;
+    showToast("Network error.", true); return;
+  }
+  if(r.ok){
+    const d = await r.json();
+    showToast(`Purged ${d.deleted_count} orphan${d.deleted_count!==1?"s":""} (${_fmtBytes(d.bytes_freed)} freed).`);
+    loadOfflineCache();
+  } else {
+    showToast(`Purge failed (HTTP ${r.status}).`, true);
+    btn.disabled = false;
   }
 }
 

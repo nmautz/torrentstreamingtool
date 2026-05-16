@@ -4369,6 +4369,281 @@ async def offline_cache_file(name: str) -> FileResponse:
     return FileResponse(str(p), media_type="video/mp4", filename=p.name)
 
 
+# ── Admin: offline-cache inventory + cleanup ────────────────────────────────
+#
+# `.offline_cache/<cache_key>.mp4` accumulates indefinitely — there's no
+# automatic eviction, and re-encoding a source (mtime/size change) leaves the
+# old entry on disk as an orphan. These endpoints power an admin tab that
+# shows what's there, how much space it costs, and lets the operator delete
+# per-file, per-item, or every orphan in one shot.
+
+async def _build_offline_cache_inventory() -> dict:
+    """Walk OFFLINE_CACHE + the library + `_offline_jobs` and return the admin payload.
+
+    Each per-file entry has a `status` of:
+      cached         — `.offline_cache/<key>.mp4` exists, ready for offline play
+      processing     — ffmpeg is actively encoding now (progress + ETA included)
+      pending        — queued behind the OFFLINE_JOB_CONCURRENCY semaphore
+      error          — the most recent prep job failed; `error` carries the message
+      partial_stale  — a `<key>.part.mp4` exists with no live job (server crashed
+                       mid-encode, or the job entry was evicted from memory)
+    Only entries with one of those states are included; "no work has ever started
+    for this file" is just absent.
+    """
+    if not OFFLINE_CACHE.exists():
+        return {"total_bytes": 0, "cache_dir": str(OFFLINE_CACHE),
+                "items": [], "orphans": []}
+    # 1) Inventory the cache directory: distinguish completed `.mp4` from
+    #    in-flight `.part.mp4` staging files (both kinds count toward disk total).
+    PART_SUFFIX = ".part.mp4"
+    cached_files:  dict[str, dict] = {}   # cache_key → {bytes, mtime}
+    partial_files: dict[str, dict] = {}   # cache_key → {bytes, mtime}
+    total_bytes = 0
+    for p in OFFLINE_CACHE.iterdir():
+        if p.suffix != ".mp4":
+            continue
+        try:
+            st = p.stat()
+        except OSError:
+            continue
+        if p.name.endswith(PART_SUFFIX):
+            key = p.name[: -len(PART_SUFFIX)]
+            partial_files[key] = {"bytes": st.st_size, "mtime": st.st_mtime}
+        else:
+            cached_files[p.stem] = {"bytes": st.st_size, "mtime": st.st_mtime}
+        total_bytes += st.st_size
+    # 2) Index jobs by their output cache key. Keep only the most recent job per
+    #    key so a series of failed retries collapses to one row.
+    jobs_by_key: dict[str, dict] = {}
+    for j in _offline_jobs.values():
+        try:
+            key = Path(j.get("out", "")).stem
+        except Exception:
+            continue
+        if not key:
+            continue
+        prev = jobs_by_key.get(key)
+        if prev is None or j.get("started_at", 0) > prev.get("started_at", 0):
+            jobs_by_key[key] = j
+    # 3) For every library file still on disk, compute the cache key and combine
+    #    cache + partial + job state into one entry. Anything not referenced by
+    #    a current library file lands in `orphans` below.
+    lib = await get_library()
+    items_out: list[dict] = []
+    matched_keys: set[str] = set()
+    now = time.time()
+    for it in lib.get("items", []):
+        files_out: list[dict] = []
+        item_bytes = 0
+        cached_n = processing_n = pending_n = error_n = partial_n = 0
+        for f in it.get("files", []):
+            src = Path(f.get("path", ""))
+            try:
+                if not src.exists():
+                    continue
+                key = _offline_cache_key(src)
+            except OSError:
+                continue
+            cached  = cached_files.get(key)
+            partial = partial_files.get(key)
+            job     = jobs_by_key.get(key)
+            entry: dict = {
+                "file_path": f.get("path", ""),
+                "name":      f.get("name", "") or src.name,
+                "cache_key": key,
+                "bytes":     0,
+            }
+            if cached:
+                # Completed encode — what the original UI showed.
+                entry["status"] = "cached"
+                entry["bytes"]  = cached["bytes"]
+                entry["mtime"]  = cached["mtime"]
+                item_bytes += cached["bytes"]
+                cached_n   += 1
+                matched_keys.add(key)
+            elif job and job["status"] in ("pending", "processing"):
+                entry["status"]     = job["status"]
+                entry["progress"]   = float(job.get("progress", 0) or 0)
+                entry["operation"]  = job.get("operation", "transcode")
+                entry["encoder"]    = job.get("encoder", "")
+                entry["job_id"]     = job.get("id", "")
+                entry["started_at"] = job.get("started_at", 0)
+                if partial:
+                    entry["bytes"] = partial["bytes"]
+                    item_bytes += partial["bytes"]
+                # Per-file ETA (only meaningful once ffmpeg has been running long
+                # enough for the progress reading to stabilize).
+                elapsed = max(0.0, now - entry["started_at"])
+                if entry["status"] == "processing" and elapsed > 2.0 and entry["progress"] > 0.02:
+                    entry["eta_secs"] = elapsed * (1 - entry["progress"]) / entry["progress"]
+                if entry["status"] == "processing":
+                    processing_n += 1
+                else:
+                    pending_n    += 1
+                matched_keys.add(key)
+            elif job and job["status"] == "error":
+                entry["status"]     = "error"
+                entry["error"]      = job.get("error", "")
+                entry["operation"]  = job.get("operation", "transcode")
+                entry["encoder"]    = job.get("encoder", "")
+                entry["job_id"]     = job.get("id", "")
+                entry["started_at"] = job.get("started_at", 0)
+                if partial:
+                    entry["bytes"] = partial["bytes"]
+                    item_bytes += partial["bytes"]
+                error_n += 1
+                matched_keys.add(key)
+            elif partial:
+                # `.part.mp4` on disk with no remembered job — almost always a
+                # process crash mid-encode. Surface so the operator can clean up.
+                entry["status"] = "partial_stale"
+                entry["bytes"]  = partial["bytes"]
+                entry["mtime"]  = partial["mtime"]
+                item_bytes += partial["bytes"]
+                partial_n  += 1
+                matched_keys.add(key)
+            else:
+                # Nothing has ever happened for this file; don't render an empty row.
+                continue
+            files_out.append(entry)
+        if files_out:
+            items_out.append({
+                "item_id":          it["id"],
+                "title":            it.get("title", ""),
+                "file_count":       len(files_out),
+                "total_bytes":      item_bytes,
+                "cached_count":     cached_n,
+                "processing_count": processing_n,
+                "pending_count":    pending_n,
+                "error_count":      error_n,
+                "partial_count":    partial_n,
+                "files":            sorted(files_out, key=lambda x: x["name"].lower()),
+            })
+    items_out.sort(key=lambda x: x["total_bytes"], reverse=True)
+    # 4) Orphans: cache or partial entries whose source no longer maps to any
+    #    library file (re-encoded, deleted, or library item removed).
+    orphans: list[dict] = []
+    for k, v in cached_files.items():
+        if k not in matched_keys:
+            orphans.append({"cache_key": k, "kind": "cached",
+                            "bytes": v["bytes"], "mtime": v["mtime"]})
+    for k, v in partial_files.items():
+        if k not in matched_keys:
+            orphans.append({"cache_key": k, "kind": "partial",
+                            "bytes": v["bytes"], "mtime": v["mtime"]})
+    orphans.sort(key=lambda x: x["bytes"], reverse=True)
+    return {
+        "total_bytes": total_bytes,
+        "cache_dir":   str(OFFLINE_CACHE),
+        "items":       items_out,
+        "orphans":     orphans,
+    }
+
+
+def _delete_cache_artifacts(cache_key: str) -> int:
+    """Remove `<key>.mp4`, `<key>.part.mp4`, AND any error-state job entries
+    that target this cache key. Returns total bytes freed on disk. The caller
+    is responsible for the active-job 409 check.
+    """
+    bytes_freed = 0
+    for fname in (f"{cache_key}.mp4", f"{cache_key}.part.mp4"):
+        p = OFFLINE_CACHE / fname
+        try:
+            sz = p.stat().st_size
+            p.unlink()
+            bytes_freed += sz
+        except OSError:
+            pass
+    # Drop terminal job entries for this key so the UI doesn't keep showing the
+    # stale error after the operator has cleaned it up.
+    for jid, j in list(_offline_jobs.items()):
+        try:
+            if Path(j.get("out", "")).stem == cache_key and j.get("status") in ("done", "error"):
+                _offline_jobs.pop(jid, None)
+        except Exception:
+            pass
+    return bytes_freed
+
+
+def _offline_cache_path_active(p: Path) -> bool:
+    """True if a pending/processing prep job is currently writing to `p`."""
+    s = str(p)
+    return any(j.get("out") == s and j.get("status") in ("pending", "processing")
+               for j in _offline_jobs.values())
+
+
+@app.get("/api/admin/offline-cache")
+async def admin_offline_cache_list(request: Request) -> JSONResponse:
+    """Inventory: totals + per-item breakdown + orphans."""
+    _require_admin(request)
+    return JSONResponse(await _build_offline_cache_inventory())
+
+
+# Route order matters — declare /orphans BEFORE /{cache_key} so FastAPI doesn't
+# try to parse "orphans" as a 24-hex cache key.
+@app.delete("/api/admin/offline-cache/orphans")
+async def admin_offline_cache_purge_orphans(request: Request) -> JSONResponse:
+    """Delete every cache+partial file that no longer maps to any library file."""
+    _require_admin(request)
+    inv = await _build_offline_cache_inventory()
+    deleted = 0
+    bytes_freed = 0
+    for o in inv["orphans"]:
+        out_path = OFFLINE_CACHE / f"{o['cache_key']}.mp4"
+        if _offline_cache_path_active(out_path):
+            continue
+        freed = _delete_cache_artifacts(o["cache_key"])
+        if freed > 0:
+            deleted += 1
+            bytes_freed += freed
+    return JSONResponse({"deleted_count": deleted, "bytes_freed": bytes_freed})
+
+
+@app.delete("/api/admin/offline-cache/{cache_key}")
+async def admin_offline_cache_delete_one(cache_key: str, request: Request) -> JSONResponse:
+    """Delete everything for one cache key: `<key>.mp4`, `<key>.part.mp4`, AND
+    any terminal (done/error) job entry that targets it. 409 if a pending or
+    processing prep job is currently writing to it.
+    """
+    _require_admin(request)
+    # Cache keys are always sha256[:24] hex — anything else is a path-traversal attempt.
+    if len(cache_key) != 24 or not all(c in "0123456789abcdef" for c in cache_key):
+        raise HTTPException(400, "Invalid cache key.")
+    out_path = OFFLINE_CACHE / f"{cache_key}.mp4"
+    part_path = OFFLINE_CACHE / f"{cache_key}.part.mp4"
+    if _offline_cache_path_active(out_path):
+        raise HTTPException(409, "An active prep job is writing this file.")
+    if not (out_path.exists() or part_path.exists()
+            or any(Path(j.get("out", "")).stem == cache_key for j in _offline_jobs.values())):
+        raise HTTPException(404, "Nothing on disk and no job for that cache key.")
+    bytes_freed = _delete_cache_artifacts(cache_key)
+    return JSONResponse({"deleted": True, "bytes_freed": bytes_freed})
+
+
+@app.delete("/api/admin/library/{item_id}/offline-cache")
+async def admin_offline_cache_delete_for_item(item_id: str, request: Request) -> JSONResponse:
+    """Delete every cached/partial MP4 + clear every error-state job entry for
+    one library item. Active prep jobs are skipped (the operator can stop them
+    via the library card if they really want to abandon them).
+    """
+    _require_admin(request)
+    inv = await _build_offline_cache_inventory()
+    item = next((x for x in inv["items"] if x["item_id"] == item_id), None)
+    if not item:
+        return JSONResponse({"deleted_count": 0, "bytes_freed": 0})
+    deleted = 0
+    bytes_freed = 0
+    for f in item["files"]:
+        out_path = OFFLINE_CACHE / f"{f['cache_key']}.mp4"
+        if _offline_cache_path_active(out_path):
+            continue
+        freed = _delete_cache_artifacts(f["cache_key"])
+        if freed > 0 or f.get("status") == "error":
+            deleted += 1
+            bytes_freed += freed
+    return JSONResponse({"deleted_count": deleted, "bytes_freed": bytes_freed})
+
+
 @app.get("/api/library/{item_id}/subtitle")
 async def get_subtitle(item_id: str, file: str) -> Response:
     """Return a sidecar subtitle file as WebVTT. SRT files are converted on the fly."""

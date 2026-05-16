@@ -90,7 +90,7 @@ Navigation requests are network-first with a fallback to the cached `/`. When `r
 
 iOS Safari grants ~60% of device free space to the origin via the Storage API. Big movies are fine; the 50 MB legacy quota is gone on iOS 13+.
 
-The backend `.offline_cache/` directory has no automatic eviction. Cache keys are `sha256(path | mtime | size)[:24]` so re-encoding a source file invalidates the cache entry; deleting a library item leaves orphans that must be removed manually.
+The backend `.offline_cache/` directory has no automatic eviction. Cache keys are `sha256(VERSION | path | mtime | size)[:24]` so re-encoding a source file invalidates the cache entry; deleting a library item leaves orphans on disk. The **Offline Cache** admin tab ([docs/ADMIN.md](ADMIN.md)) lists per-item totals, per-file deletes, a "delete all for this item" button, and a one-click orphan purge — see also `GET /api/admin/offline-cache` and the `DELETE /api/admin/offline-cache/...` endpoints.
 
 ---
 

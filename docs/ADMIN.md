@@ -52,7 +52,35 @@ For each item:
 
 Admin SSE: `ensureAdminSSE()` opens `/api/events?admin_token=…` so the progress bars live-update.
 
-### 4. Profile PINs ([static/admin.html:182](../static/admin.html#L182))
+### 4. Offline Cache ([static/admin.html#panelOffline](../static/admin.html))
+
+Inventory + cleanup for `.offline_cache/<sha>.mp4` (the remuxed/transcoded outputs produced by `/prep-all` and Save Offline). The directory has no automatic eviction, so this tab is the only built-in way to reclaim space.
+
+Each per-file entry carries one of five statuses, surfaced as a coloured badge in the UI:
+
+| Status          | Meaning |
+|-----------------|---------|
+| `cached`        | `<key>.mp4` is on disk and ready for offline play |
+| `processing`    | ffmpeg is actively encoding now — UI shows a live progress bar + ETA |
+| `pending`       | Queued behind `OFFLINE_JOB_CONCURRENCY` semaphore; ffmpeg hasn't started yet |
+| `error`         | Most recent prep job failed; the ffmpeg stderr tail is rendered inline |
+| `partial_stale` | A `<key>.part.mp4` is on disk with no live job (server crashed mid-encode) — safe to delete |
+
+- **Top row** — total bytes on disk (sum of completed `.mp4` and `.part.mp4`), plus the cache directory path.
+- **Per-item rows** — every library item that has any kind of state (not just completed encodes). The summary row has small chips for the count of each status. Click the title to expand the per-file list. The header row's **Delete All** removes every completed/partial file and clears every error-state job entry for that item; active jobs are skipped (cancel them from the library card if you really want to abandon them).
+- **Orphan card** — appears whenever a cached or partial file's source no longer maps to any library file (re-encoded, deleted, or the library item itself removed). Each orphan row labels itself **Cached** or **Partial**. One-click **Purge All Orphans** drops them all.
+
+Active prep jobs are protected: any `pending`/`processing` job whose `out` path matches a cache file is skipped during deletion (the per-file endpoint returns 409; bulk endpoints just skip and continue). The page auto-refreshes every 3 s while any job is in flight so progress bars animate without a manual reload.
+
+Single-key deletes are atomic: clicking **Delete**/**Clear** on one row removes `<key>.mp4`, `<key>.part.mp4`, AND any terminal (`done`/`error`) job entries that target it, via `_delete_cache_artifacts` in main.py.
+
+Endpoints:
+- `GET /api/admin/offline-cache` → `{total_bytes, cache_dir, items:[…], orphans:[…]}` — see [API.md](API.md) for the per-file shape
+- `DELETE /api/admin/offline-cache/{cache_key}` → `{deleted, bytes_freed}` (409 if a job is writing the file)
+- `DELETE /api/admin/offline-cache/orphans` → `{deleted_count, bytes_freed}`
+- `DELETE /api/admin/library/{item_id}/offline-cache` → `{deleted_count, bytes_freed}`
+
+### 5. Profile PINs ([static/admin.html:182](../static/admin.html#L182))
 
 For each profile:
 - **Set PIN** — admin overrides the usual current-PIN check
