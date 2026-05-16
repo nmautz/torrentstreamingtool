@@ -1695,7 +1695,9 @@ function renderPlayer(s){
     const fcst=document.getElementById("fcStatus");
     if(fcst) fcst.textContent=s.stream_status==="buffering"?"Buffering…":s.stream_status==="playing"?"▶ Playing":"";
     setFcTitle(s.active_title||"", s.library_current_file||"");
-    if(s.stream_status==="idle") closeFullscreenControls();
+    // Intentionally do NOT auto-close on stream_status==="idle" — the server can
+    // take several seconds to publish the next track, and the user wants the
+    // fullscreen volume slider reachable in that window. Close is manual only.
 
     // Episode nav row in fullscreen
     const fcEpNav=document.getElementById("fcEpNav");

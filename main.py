@@ -388,8 +388,14 @@ async def vlc(command: str, **params) -> None:
                 if state.background_playing:
                     state.vlc_volume = state.user_volume_before_bg
                     state.background_playing = False
-                # Force VLC to the current (already-capped) volume BEFORE playback
-                # starts, so VLC's own default doesn't blast at a loud level.
+                # Clamp by the current max-volume cap. state.vlc_volume can drift
+                # above the cap: it's polled directly from VLC's reported volume
+                # (which is 100 at fresh start) and the user_volume_before_bg
+                # snapshot may have been taken before the cap was lowered. Without
+                # this clamp, in_play would blast at >cap until the user nudged
+                # the slider and tripped the server-side clamp.
+                cap = await _global_max_volume()
+                state.vlc_volume = max(0, min(cap, state.vlc_volume))
                 raw = max(0, min(512, round(state.vlc_volume / 100 * 256)))
                 await c.get(
                     f"{settings.vlc_url}/requests/status.xml",
@@ -1108,7 +1114,18 @@ async def stat_broadcaster() -> None:
             if vs:
                 state.vlc_time = int(vs.get("time", 0))
                 state.vlc_duration = int(vs.get("length", 0))
-                state.vlc_volume = round(int(vs.get("volume", 256)) / 256 * 100)
+                reported = round(int(vs.get("volume", 256)) / 256 * 100)
+                # Self-heal: VLC occasionally snaps volume back to 100 on
+                # playlist advance / track start. If it sits above the user's
+                # cap, push it back down immediately rather than waiting for
+                # the user to nudge the slider.
+                cap = await _global_max_volume()
+                if reported > cap:
+                    raw = max(0, min(512, round(cap / 100 * 256)))
+                    await vlc("volume", val=str(raw))
+                    state.vlc_volume = cap
+                else:
+                    state.vlc_volume = reported
         await broadcast("state", state_snapshot())
         await asyncio.sleep(2)
 
