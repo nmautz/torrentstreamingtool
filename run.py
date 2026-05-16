@@ -19,7 +19,6 @@ import socket
 import subprocess
 import sys
 import time
-import webbrowser
 from pathlib import Path
 
 HERE   = Path(__file__).parent
@@ -828,17 +827,6 @@ def main():
     print(f"{BOLD}  mDNS{RESET}")
     _zc = start_mdns(lan_ip, PORT, ADMIN_PORT if has_cert else 0) if lan_ip else None
     print()
-
-    # Give browser a moment then open
-    def _open_browser():
-        time.sleep(1.5)
-        try:
-            webbrowser.open(local_url)
-        except Exception:
-            pass
-
-    import threading
-    threading.Thread(target=_open_browser, daemon=True).start()
 
     # ── HTTPS admin process (port 443) ────────────────────────────────────
     _https_proc = None

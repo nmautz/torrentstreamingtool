@@ -56,6 +56,7 @@ After all services are up, `start_watchdog()` is called. It returns a daemon thr
 - Uvicorn binds to `0.0.0.0` so mobile devices on the same LAN can connect
 - The HTTPS process is launched separately (also via uvicorn) as a subprocess; the main `run.py` foreground process is the HTTP uvicorn
 - Both pointed at `main:app`. Same FastAPI app served over both — `admin_https_redirect` middleware ensures admin routes go through 443
+- No browser auto-open. `run.py` is a server launcher — the URL is printed for the operator, but `webbrowser.open` is intentionally not called so headless / service installs don't try to pop a UI on a box that may have no display.
 
 ## LAN detection ([run.py:516](../run.py#L516))
 
