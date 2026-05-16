@@ -1462,6 +1462,7 @@ let epMetadata = null;     // TMDb metadata cache for the open item, or null
 let epMetaImgBase = "";    // TMDb image base URL (image.tmdb.org/t/p)
 let epCurrentSeason = 0;   // active season tab; 0 = "all" / no season info
 let epSeasonList = [];     // sorted seasons present in epFiles (positive ints only)
+let epWatchedExpanded = new Set(); // season keys whose watched-episode section is expanded
 // Stream file picker state
 let streamPrepData = null;   // {hash, files, magnet, title} from /stream/prepare
 let streamPrepAbort = null;  // AbortController for the in-flight prepare request
@@ -3019,7 +3020,7 @@ function closeEpisodePage(){
   document.getElementById("episodePage").classList.add("hidden");
   document.body.style.overflow="";
   epItemId=null; epFiles=[]; epChecked=new Set();
-  epMetadata=null; epMetaImgBase=""; epCurrentSeason=0; epSeasonList=[];
+  epMetadata=null; epMetaImgBase=""; epCurrentSeason=0; epSeasonList=[]; epWatchedExpanded=new Set();
 }
 // Back-compat alias for existing callers (refreshEpFiles, mark-watched etc).
 function closeEpisodeModal(){ closeEpisodePage(); }
@@ -3047,132 +3048,87 @@ function _epDisplayTitle(file){
   return "";
 }
 
-function renderEpList(){
-  const el=document.getElementById("epList");
-  if(!epFiles.length){
-    el.innerHTML=`<p class="text-gray-600 text-sm text-center py-12">No video files found.</p>`;
-    return;
-  }
+function _epCardHtml(f){
+  const epIdx=epFiles.indexOf(f);
+  const checked=epChecked.has(f.path);
+  const prog=f.progress;
+  const dur=prog?.duration_sec||0;
+  const pct=prog?Math.round((prog.position_sec/(dur||1))*100):0;
+  const isComplete=prog?.completed;
+  const inProgress=prog&&!isComplete&&pct>2;
+  const isNowPlaying=app.library_current_file&&f.path===app.library_current_file;
 
-  // Pick the visible files: filter by epCurrentSeason if seasons exist; else show everything.
-  let visibleFiles;
-  if(epSeasonList.length){
-    visibleFiles = epFiles.filter(f=>(+f.season||0)===epCurrentSeason);
-    // Sort by episode number within season for predictable ordering
-    visibleFiles.sort((a,b)=>(+a.episode||0)-(+b.episode||0));
+  const label=epLabel(f);
+  const epName=_epDisplayTitle(f);
+  const tmdbEp=_tmdbEpisode(f);
+  const stillUrl=_stillUrl(tmdbEp?.still_path);
+  const overview=tmdbEp?.overview || "";
+
+  const progressBar = (inProgress || isComplete)
+    ? `<div class="ep-prog-bar"><div class="ep-prog-fill" style="width:${isComplete?100:pct}%"></div></div>`
+    : "";
+
+  const playingBadge = isNowPlaying
+    ? `<span class="text-[10px] text-indigo-300 font-bold uppercase tracking-widest">▶ Playing</span>`
+    : "";
+  const watchedBadge = isComplete
+    ? `<span class="text-[10px] text-green-500 font-bold uppercase tracking-widest">✓ Watched</span>`
+    : inProgress ? `<span class="text-[10px] text-yellow-500 font-bold">${pct}%</span>` : "";
+
+  const prepState = prepFileState.get(offKey(epItemId,f.path));
+  const isReady    = prepState === "ready";
+  const isPrepping = prepState === "prepping";
+  // HTML-encode JSON-quoted args so embedded "..." don't break the onclick="..." attribute.
+  const _id=escHtml(JSON.stringify(epItemId));
+  const _p =escHtml(JSON.stringify(f.path));
+  const _n =escHtml(JSON.stringify(f.name));
+
+  const offlineBtn = isReady
+    ? `<div class="flex-shrink-0 w-9 h-9 flex items-center justify-center text-emerald-400"
+          title="Ready to stream — preconverted on the host">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
+        </svg>
+      </div>`
+    : isPrepping
+    ? `<div class="flex-shrink-0 w-9 h-9 flex items-center justify-center text-amber-400"
+          title="Prepping on the host…">
+        <svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
+        </svg>
+      </div>`
+    : `<button onclick="prepForStreaming(${_id},${_p},${_n})"
+        class="flex-shrink-0 w-9 h-9 flex items-center justify-center text-gray-600 hover:text-emerald-400 hover:bg-emerald-950/30 transition-colors"
+        title="Prep this file on the host for instant streaming">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M20 7l-8 4-8-4m16 0l-8-4-8 4m16 0v10l-8 4m0-10v10m0-10L4 7m0 0v10l8 4"/>
+        </svg>
+      </button>`;
+
+  // Still / placeholder thumbnail. Tapping the still plays from this episode.
+  const stillBlock = stillUrl
+    ? `<img src="${escHtml(stillUrl)}" alt="" loading="lazy"/>`
+    : `<div class="flex items-center justify-center text-gray-700">
+         <span class="text-2xl font-black font-mono">${escHtml(label)}</span>
+       </div>`;
+
+  // Headline: "S01·E02 · Episode Title" if title present, else just "S01E02"
+  let headline;
+  if(f.season&&f.episode && epName){
+    headline = `<span class="text-[10px] sm:text-xs font-mono text-indigo-400 mr-1">S${pad2(f.season)}·E${pad2(f.episode)}</span><span class="text-sm sm:text-base font-bold text-gray-100">${escHtml(epName)}</span>`;
+  } else if(f.season&&f.episode){
+    headline = `<span class="text-sm sm:text-base font-mono font-bold text-gray-100">S${pad2(f.season)} · E${pad2(f.episode)}</span>`;
+  } else if(epName){
+    headline = `<span class="text-sm sm:text-base font-bold text-gray-100">${escHtml(epName)}</span>`;
   } else {
-    visibleFiles = epFiles;
+    headline = `<span class="text-sm sm:text-base text-gray-200 truncate">${escHtml(f.name)}</span>`;
   }
 
-  if(!visibleFiles.length){
-    el.innerHTML=`<p class="text-gray-600 text-sm text-center py-12">No episodes in this season.</p>`;
-    updateEpCount(); return;
-  }
+  const subOverview = overview
+    ? `<p class="text-[11px] sm:text-xs text-gray-400 mt-1 line-clamp-2">${escHtml(overview)}</p>`
+    : `<p class="text-[11px] text-gray-600 mt-1 truncate font-mono">${escHtml(f.name)}</p>`;
 
-  let html = "";
-  // Optional: season-level header with TMDb season overview when present
-  if(epSeasonList.length){
-    const sMeta = epMetadata?.seasons?.[String(epCurrentSeason)];
-    if(sMeta && (sMeta.overview || sMeta.name)){
-      html += `<div class="px-3 sm:px-5 py-3 border-b border-gray-800">
-        ${sMeta.overview ? `<p class="text-xs text-gray-400 line-clamp-3">${escHtml(sMeta.overview)}</p>` : ""}
-        <div class="flex items-center justify-between gap-2 mt-2">
-          <span class="text-[10px] font-black text-gray-600 uppercase tracking-widest">${visibleFiles.length} episode${visibleFiles.length===1?"":"s"}</span>
-          <button onclick="epDownloadSeason(${epCurrentSeason})"
-            class="text-[10px] text-gray-500 hover:text-indigo-300 hover:bg-indigo-950/40 px-2 py-1 flex items-center gap-1 transition-colors uppercase tracking-wide">
-            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
-            </svg>
-            Season ${epCurrentSeason}
-          </button>
-        </div>
-      </div>`;
-    }
-  }
-
-  html += `<div class="divide-y divide-gray-900">`;
-  visibleFiles.forEach(f=>{
-    const epIdx=epFiles.indexOf(f); // index in full list (preserves epPlayFrom continuity)
-    const checked=epChecked.has(f.path);
-    const prog=f.progress;
-    const dur=prog?.duration_sec||0;
-    const pct=prog?Math.round((prog.position_sec/(dur||1))*100):0;
-    const isComplete=prog?.completed;
-    const inProgress=prog&&!isComplete&&pct>2;
-    const isNowPlaying=app.library_current_file&&f.path===app.library_current_file;
-
-    const label=epLabel(f);
-    const epName=_epDisplayTitle(f);
-    const tmdbEp=_tmdbEpisode(f);
-    const stillUrl=_stillUrl(tmdbEp?.still_path);
-    const overview=tmdbEp?.overview || "";
-
-    const progressBar = (inProgress || isComplete)
-      ? `<div class="ep-prog-bar"><div class="ep-prog-fill" style="width:${isComplete?100:pct}%"></div></div>`
-      : "";
-
-    const playingBadge = isNowPlaying
-      ? `<span class="text-[10px] text-indigo-300 font-bold uppercase tracking-widest">▶ Playing</span>`
-      : "";
-    const watchedBadge = isComplete
-      ? `<span class="text-[10px] text-green-500 font-bold uppercase tracking-widest">✓ Watched</span>`
-      : inProgress ? `<span class="text-[10px] text-yellow-500 font-bold">${pct}%</span>` : "";
-
-    const prepState = prepFileState.get(offKey(epItemId,f.path));
-    const isReady    = prepState === "ready";
-    const isPrepping = prepState === "prepping";
-    // HTML-encode JSON-quoted args so embedded "..." don't break the onclick="..." attribute.
-    const _id=escHtml(JSON.stringify(epItemId));
-    const _p =escHtml(JSON.stringify(f.path));
-    const _n =escHtml(JSON.stringify(f.name));
-
-    const offlineBtn = isReady
-      ? `<div class="flex-shrink-0 w-9 h-9 flex items-center justify-center text-emerald-400"
-            title="Ready to stream — preconverted on the host">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2.5" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M5 13l4 4L19 7"/>
-          </svg>
-        </div>`
-      : isPrepping
-      ? `<div class="flex-shrink-0 w-9 h-9 flex items-center justify-center text-amber-400"
-            title="Prepping on the host…">
-          <svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-          </svg>
-        </div>`
-      : `<button onclick="prepForStreaming(${_id},${_p},${_n})"
-          class="flex-shrink-0 w-9 h-9 flex items-center justify-center text-gray-600 hover:text-emerald-400 hover:bg-emerald-950/30 transition-colors"
-          title="Prep this file on the host for instant streaming">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M20 7l-8 4-8-4m16 0l-8-4-8 4m16 0v10l-8 4m0-10v10m0-10L4 7m0 0v10l8 4"/>
-          </svg>
-        </button>`;
-
-    // Still / placeholder thumbnail. Tapping the still plays from this episode.
-    const stillBlock = stillUrl
-      ? `<img src="${escHtml(stillUrl)}" alt="" loading="lazy"/>`
-      : `<div class="flex items-center justify-center text-gray-700">
-           <span class="text-2xl font-black font-mono">${escHtml(label)}</span>
-         </div>`;
-
-    // Headline: "S01·E02 · Episode Title" if title present, else just "S01E02"
-    let headline;
-    if(f.season&&f.episode && epName){
-      headline = `<span class="text-[10px] sm:text-xs font-mono text-indigo-400 mr-1">S${pad2(f.season)}·E${pad2(f.episode)}</span><span class="text-sm sm:text-base font-bold text-gray-100">${escHtml(epName)}</span>`;
-    } else if(f.season&&f.episode){
-      headline = `<span class="text-sm sm:text-base font-mono font-bold text-gray-100">S${pad2(f.season)} · E${pad2(f.episode)}</span>`;
-    } else if(epName){
-      headline = `<span class="text-sm sm:text-base font-bold text-gray-100">${escHtml(epName)}</span>`;
-    } else {
-      headline = `<span class="text-sm sm:text-base text-gray-200 truncate">${escHtml(f.name)}</span>`;
-    }
-
-    const subOverview = overview
-      ? `<p class="text-[11px] sm:text-xs text-gray-400 mt-1 line-clamp-2">${escHtml(overview)}</p>`
-      : `<p class="text-[11px] text-gray-600 mt-1 truncate font-mono">${escHtml(f.name)}</p>`;
-
-    html+=`<div class="ep-card px-2 sm:px-5 ${isNowPlaying?'playing':''}" data-path="${escHtml(f.path)}">
+  return `<div class="ep-card px-2 sm:px-5 ${isNowPlaying?'playing':''}" data-path="${escHtml(f.path)}">
       <!-- Still / thumbnail; click plays from this episode -->
       <div class="ep-still" onclick="epPlayFrom(${epIdx})" role="button" aria-label="Play episode">
         ${stillBlock}
@@ -3226,11 +3182,84 @@ function renderEpList(){
         </div>
       </div>
     </div>`;
-  });
+}
+
+function renderEpList(){
+  const el=document.getElementById("epList");
+  if(!epFiles.length){
+    el.innerHTML=`<p class="text-gray-600 text-sm text-center py-12">No video files found.</p>`;
+    return;
+  }
+
+  // Pick the visible files: filter by epCurrentSeason if seasons exist; else show everything.
+  let visibleFiles;
+  if(epSeasonList.length){
+    visibleFiles = epFiles.filter(f=>(+f.season||0)===epCurrentSeason);
+    // Sort by episode number within season for predictable ordering
+    visibleFiles.sort((a,b)=>(+a.episode||0)-(+b.episode||0));
+  } else {
+    visibleFiles = epFiles;
+  }
+
+  if(!visibleFiles.length){
+    el.innerHTML=`<p class="text-gray-600 text-sm text-center py-12">No episodes in this season.</p>`;
+    updateEpCount(); return;
+  }
+
+  const unwatched = visibleFiles.filter(f=>!f.progress?.completed);
+  const watched   = visibleFiles.filter(f=> f.progress?.completed);
+  const seasonKey = epCurrentSeason;
+  const watchedExpanded = epWatchedExpanded.has(seasonKey);
+
+  let html = "";
+  // Optional: season-level header with TMDb season overview when present
+  if(epSeasonList.length){
+    const sMeta = epMetadata?.seasons?.[String(epCurrentSeason)];
+    if(sMeta && (sMeta.overview || sMeta.name)){
+      html += `<div class="px-3 sm:px-5 py-3 border-b border-gray-800">
+        ${sMeta.overview ? `<p class="text-xs text-gray-400 line-clamp-3">${escHtml(sMeta.overview)}</p>` : ""}
+        <div class="flex items-center justify-between gap-2 mt-2">
+          <span class="text-[10px] font-black text-gray-600 uppercase tracking-widest">${visibleFiles.length} episode${visibleFiles.length===1?"":"s"}</span>
+          <button onclick="epDownloadSeason(${epCurrentSeason})"
+            class="text-[10px] text-gray-500 hover:text-indigo-300 hover:bg-indigo-950/40 px-2 py-1 flex items-center gap-1 transition-colors uppercase tracking-wide">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+            </svg>
+            Season ${epCurrentSeason}
+          </button>
+        </div>
+      </div>`;
+    }
+  }
+
+  html += `<div class="divide-y divide-gray-900">`;
+  unwatched.forEach(f=>{ html += _epCardHtml(f); });
   html += `</div>`;
+
+  if(watched.length){
+    html += `<button class="w-full flex items-center justify-between px-3 sm:px-5 py-3 bg-gray-900/60 text-gray-500 hover:text-gray-300 hover:bg-gray-800/60 transition-colors border-t border-gray-800"
+               onclick="epToggleWatchedSection(${seasonKey})">
+               <span class="text-[11px] font-bold uppercase tracking-widest">✓ Watched · ${watched.length}</span>
+               <svg class="w-4 h-4 transition-transform ${watchedExpanded?'rotate-180':''}" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/>
+               </svg>
+             </button>`;
+    if(watchedExpanded){
+      html += `<div class="divide-y divide-gray-900 opacity-70">`;
+      watched.forEach(f=>{ html += _epCardHtml(f); });
+      html += `</div>`;
+    }
+  }
 
   el.innerHTML=html;
   updateEpCount();
+}
+
+function epToggleWatchedSection(seasonKey){
+  if(epWatchedExpanded.has(seasonKey)) epWatchedExpanded.delete(seasonKey);
+  else epWatchedExpanded.add(seasonKey);
+  renderEpList();
 }
 
 function epToggle(cb){
