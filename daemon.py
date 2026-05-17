@@ -476,6 +476,67 @@ def _is_windows_admin() -> bool:
         return False
 
 
+def _windows_console_user() -> str:
+    """Return the user interactively logged in to the console session, e.g.
+    'PC\\nathan' — empty string if we can't determine it.
+
+    Why this exists: when the user runs from an elevated Admin shell (UAC),
+    `os.environ['USERNAME']` is the *Admin* account, not the regular user
+    who's actually logged in. Registering a Task Scheduler entry with
+    `/RU Admin /SC ONLOGON` ties it to Admin's logon, so the task never fires
+    at the regular user's logon and the service silently fails to start.
+    We query the console session to find the real interactive user instead.
+    """
+    # First try: ctypes via WTSGetActiveConsoleSessionId + Win32 lookup.
+    # Works on every Windows edition incl. Home.
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        session_id = ctypes.windll.kernel32.WTSGetActiveConsoleSessionId()
+        if session_id != 0xFFFFFFFF:
+            WTS_CURRENT_SERVER_HANDLE = 0
+            WTSUserName = 5    # WTS_INFO_CLASS.WTSUserName
+            WTSDomainName = 7  # WTS_INFO_CLASS.WTSDomainName
+
+            def _query(info_class: int) -> str:
+                buf = ctypes.c_void_p()
+                length = wintypes.DWORD()
+                ok_ = ctypes.windll.wtsapi32.WTSQuerySessionInformationW(
+                    WTS_CURRENT_SERVER_HANDLE, session_id, info_class,
+                    ctypes.byref(buf), ctypes.byref(length),
+                )
+                if not ok_ or not buf.value:
+                    return ""
+                try:
+                    return ctypes.wstring_at(buf.value)
+                finally:
+                    ctypes.windll.wtsapi32.WTSFreeMemory(buf)
+
+            user = _query(WTSUserName)
+            if user:
+                domain = _query(WTSDomainName)
+                return f"{domain}\\{user}" if domain else user
+    except Exception:
+        pass
+
+    # Fallback: PowerShell CIM query. Returns DOMAIN\username.
+    try:
+        r = subprocess.run(
+            ["powershell", "-NoProfile", "-Command",
+             "(Get-CimInstance -ClassName Win32_ComputerSystem).UserName"],
+            capture_output=True, text=True, timeout=10,
+        )
+        if r.returncode == 0:
+            user = r.stdout.strip()
+            if user:
+                return user
+    except Exception:
+        pass
+
+    return ""
+
+
 def _windows_install() -> bool:
     if not _check_venv():
         return False
@@ -524,7 +585,38 @@ def _windows_install() -> bool:
         py  = str(_VENV_PY)
         scr = str(_WRAPPER_PATH)
 
-        # schtasks /Create — run at logon, any user session, highest privileges.
+        # Pick the user account the task will run as. When we elevated via UAC
+        # (or the user opened an Admin shell as a different account), USERNAME
+        # is the *admin* account, not the user actually sitting at the box.
+        # Registering /SC ONLOGON for the admin means the task only fires when
+        # the admin logs in — so the regular user sees no service. Query the
+        # console session to find the interactive user instead.
+        env_user = os.environ.get("USERNAME", "")
+        console_user = _windows_console_user()
+        if console_user:
+            run_user = console_user
+            # Drop the DOMAIN\\ prefix only when it matches COMPUTERNAME, so
+            # local accounts stay portable across renames. Keep domain prefix
+            # for actual domain accounts.
+            comp = os.environ.get("COMPUTERNAME", "")
+            if "\\" in console_user:
+                dom, _, name = console_user.partition("\\")
+                if comp and dom.upper() == comp.upper():
+                    run_user = name
+            if console_user.split("\\")[-1].lower() != env_user.lower():
+                info(f"Detected console user '{console_user}' differs from "
+                     f"current USERNAME '{env_user}' (likely UAC elevation).")
+            info(f"Service will run as: {run_user}")
+        else:
+            run_user = env_user
+            warn(f"Could not detect the console user — falling back to "
+                 f"USERNAME='{env_user}'. If you installed from an Admin "
+                 f"shell, the task may not fire at your regular user's logon. "
+                 f"Re-run --install while logged in as the account that "
+                 f"should run the service.")
+
+        # schtasks /Create — fires at the chosen user's logon, with highest
+        # privileges so the wrapper can bind port 80/443 and add firewall rules.
         # stdin=DEVNULL prevents schtasks from hanging if it ever prompts for a
         # password (e.g. on certain domain configurations).
         cmd = [
@@ -533,7 +625,7 @@ def _windows_install() -> bool:
             "/TR", f'"{py}" "{scr}"',
             "/SC", "ONLOGON",
             "/RL", "HIGHEST",
-            "/RU", os.environ.get("USERNAME", ""),
+            "/RU", run_user,
         ]
         result = subprocess.run(
             cmd, capture_output=True, text=True, shell=False,
@@ -542,9 +634,11 @@ def _windows_install() -> bool:
         if result.returncode != 0:
             fail(f"schtasks /Create failed:\n{result.stderr.strip()}")
             return False
-        ok(f"Task '{_WIN_TASK_NAME}' created in Task Scheduler")
+        ok(f"Task '{_WIN_TASK_NAME}' created in Task Scheduler (RunAs: {run_user})")
 
-        # Start it now
+        # Start it now. schtasks /Run respects /RU — if that user is logged
+        # in, the wrapper launches in their session. If not, it may report
+        # success but never actually start, so we don't over-trust the rc here.
         start = subprocess.run(
             ["schtasks", "/Run", "/TN", _WIN_TASK_NAME],
             capture_output=True, text=True,
@@ -556,6 +650,9 @@ def _windows_install() -> bool:
             warn("Task registered but could not start immediately — it will run at next logon")
         info("Dashboard -> http://remote.local  (or http://127.0.0.1)")
         info("Service log -> logs\\streamlink_service.log")
+        info("If the log is empty after a minute, the configured user "
+             "(see RunAs above) may not be the one currently logged in. "
+             "Sign in as that user, or re-run --install from their session.")
         return True
 
     finally:
