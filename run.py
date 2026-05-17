@@ -285,6 +285,10 @@ def start_vlc() -> bool:
         f"--http-port={vlc_port}",
         f"--http-password={vlc_pwd}",
         "--no-random",
+        # Mirror watchdog.py: come up fullscreen so the idle background video
+        # (and any subsequent playback) covers the screen reliably, even at
+        # boot when the post-play HTTP fullscreen toggle can race the desktop.
+        "--fullscreen",
     ])
     return wait_for_port(vlc_port, 20.0, "VLC")
 

@@ -455,6 +455,12 @@ def _build_specs() -> tuple[list[ServiceSpec], ServiceSpec]:
             f"--http-port={vlc_port}",
             f"--http-password={vlc_pwd}",
             "--no-random",
+            # Start fullscreen so the idle background video covers the screen
+            # on boot. Critical for the system-service path: at login, the
+            # post-`in_play` HTTP fullscreen toggle is unreliable because the
+            # desktop and VLC window aren't ready, so we ask VLC to come up
+            # fullscreen from the start instead of toggling later.
+            "--fullscreen",
         ],
         startup_timeout=20.0,
         back_off=5.0,

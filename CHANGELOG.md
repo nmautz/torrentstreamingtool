@@ -1,5 +1,8 @@
 # Changelog
 
+## [2.1.6] — 2026-05-17
+- **Bug fix:** Idle background video now reliably comes up fullscreen when StreamLink is launched as a system service at boot/login. VLC is now spawned with `--fullscreen` in all three launch paths (`run.py`, `watchdog.py`, `main.py:_restart_vlc_process`) so it owns the screen from the very first frame instead of relying on a post-`in_play` HTTP toggle that can race the desktop at boot. `vlc_focus_and_fullscreen` now also waits for VLC to report `state="playing"` and re-issues the fullscreen toggle up to six times if the first attempt didn't stick. On macOS the focus path additionally hides every other visible app via AppleScript so the player covers the screen — the counterpart to the existing Windows `_minimize_other_windows_windows` call.
+
 ## [2.1.5] — 2026-05-17
 - **Bug fix:** Setup and launcher prompts no longer hang when stdin is non-interactive (system service, piped invocation, etc.). `setup.py`'s `ask`/`ask_bool` now check `sys.stdin.isatty()` upfront and auto-apply the default if there's no console — previously they relied on `input()` raising `EOFError`, which does not always fire reliably under Windows Task Scheduler. The `.env`-reuse prompt now correctly defaults to "yes" in service contexts. `run.py`'s "Continue without VPN?" prompt is similarly gated and silently proceeds when non-interactive (safe because the watchdog already gates qBittorrent on VPN status).
 

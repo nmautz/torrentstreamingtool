@@ -1031,8 +1031,25 @@ async def vlc_minimize() -> None:
         pass
 
 
+_MACOS_HIDE_OTHERS_SCRIPT = (
+    'tell application "System Events" to '
+    'set visible of (every process whose visible is true and '
+    'name is not "VLC" and frontmost is false) to false'
+)
+
+
 async def vlc_focus_and_fullscreen() -> None:
-    """Bring VLC to the foreground and enable fullscreen. Best-effort; never raises."""
+    """Bring VLC to the foreground and enable fullscreen. Best-effort; never raises.
+
+    On macOS the post-play HTTP `fullscreen` toggle can race the window
+    server at boot (the system-service path starts VLC + plays the idle
+    background video before the desktop is fully ready), leaving VLC in a
+    small windowed view. We mitigate that here by waiting for VLC to report
+    `state == "playing"` and re-issuing the fullscreen toggle a few times if
+    the first one didn't stick. We also hide every other visible app via
+    AppleScript so the player owns the screen on TV playback — the macOS
+    counterpart to the Windows `_minimize_other_windows_windows` call below.
+    """
     await asyncio.sleep(1.5)
     system = platform.system()
     try:
@@ -1043,6 +1060,13 @@ async def vlc_focus_and_fullscreen() -> None:
         elif system == "Darwin":
             proc = await asyncio.create_subprocess_exec(
                 "osascript", "-e", 'tell application "VLC" to activate',
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            await proc.wait()
+            # Hide every other visible app so VLC owns the screen.
+            proc = await asyncio.create_subprocess_exec(
+                "osascript", "-e", _MACOS_HIDE_OTHERS_SCRIPT,
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
@@ -1058,12 +1082,29 @@ async def vlc_focus_and_fullscreen() -> None:
                 await proc.wait()
     except Exception:
         pass
-    try:
-        vs = await vlc_status()
-        if vs and not vs.get("fullscreen"):
-            await vlc("fullscreen")
-    except Exception:
-        pass
+
+    # Wait briefly for VLC to actually be playing before toggling fullscreen
+    # — at boot VLC may still be loading the input, and toggling fullscreen
+    # on an idle/stopped player is a no-op on macOS. We retry the toggle a
+    # handful of times so we don't get stuck in a small windowed view.
+    attempts = 0
+    while attempts < 6:
+        try:
+            vs = await vlc_status()
+        except Exception:
+            vs = None
+        if vs:
+            vlc_state = vs.get("state", "")
+            is_fs = bool(vs.get("fullscreen"))
+            if is_fs and vlc_state in ("playing", "paused"):
+                break
+            if vlc_state in ("playing", "paused") and not is_fs:
+                try:
+                    await vlc("fullscreen")
+                except Exception:
+                    pass
+        attempts += 1
+        await asyncio.sleep(0.5)
     # Belt-and-suspenders: after fullscreen toggle Explorer can re-raise the
     # taskbar flash if our focus call was rejected. Clear it again so the
     # taskbar can auto-hide.
@@ -1099,7 +1140,8 @@ async def _restart_vlc_process() -> bool:
         kw["start_new_session"] = True
     subprocess.Popen(
         [vlc_bin, "--extraintf=http", "--http-host=localhost",
-         f"--http-port={vlc_port}", f"--http-password={settings.vlc_password}", "--no-random"],
+         f"--http-port={vlc_port}", f"--http-password={settings.vlc_password}", "--no-random",
+         "--fullscreen"],
         **kw,
     )
 

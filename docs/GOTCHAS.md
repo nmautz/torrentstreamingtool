@@ -46,6 +46,17 @@ Don't drop either one thinking the other covers it — #1 is fast (no audible bl
 
 `POST /api/retry` ([main.py:2610](../main.py#L2610)) calls `_restart_vlc_process()` which kills all `vlc`/`VLC` processes, sleeps 1.5 s, relaunches with `--extraintf=http`, waits for the port. Then replays the current file + remainder of playlist. Used when VLC freezes on a partially-downloaded file.
 
+### Boot-time fullscreen — pass `--fullscreen`, don't rely on the post-play HTTP toggle
+
+When StreamLink launches via the system service at boot/login, the dashboard's `background_video_loop` kicks `in_play` to VLC within a few seconds of the desktop coming up, then calls `vlc_focus_and_fullscreen()` which used to just send VLC's HTTP `fullscreen` toggle. At login that toggle is unreliable — the desktop, Dock/taskbar, and VLC's window aren't fully ready, and the toggle either no-ops or is undone by the window server. The visible symptom is the idle background video playing in a small windowed view with other apps still on top.
+
+Defenses (all required):
+1. **VLC is launched with `--fullscreen`** in every spawn path (`run.py start_vlc`, `watchdog.py vlc_spec.build_args`, `main.py _restart_vlc_process`). This makes VLC come up fullscreen even before any media is loaded, so there's no race with the desktop.
+2. `vlc_focus_and_fullscreen` polls `vlc_status` until VLC reports `state in ("playing","paused")`, then re-issues the fullscreen toggle if it isn't already on, up to 6 attempts ~0.5 s apart. The toggle is a no-op on an idle/stopped player, which is exactly the state VLC is in for the first ~1–2 s after `in_play`.
+3. On macOS, `vlc_focus_and_fullscreen` also runs an AppleScript that hides every other visible app (`set visible of (every process whose visible is true and name is not "VLC" and frontmost is false) to false`). This is the macOS counterpart to the Windows `_minimize_other_windows_windows` call — without it, the user sees the menu bar / Dock / Finder windows on top of VLC.
+
+Don't drop any of the three thinking the others cover it: #1 fixes the cold-start race, #2 catches the case where VLC was relaunched mid-session and isn't yet playing, #3 is the only thing that keeps macOS from showing other apps over VLC.
+
 ### Windows window control needs ctypes
 
 `_find_vlc_hwnds_windows` uses `EnumWindows` via ctypes; the EnumWindowsProc wrapper must be kept alive (`cb = EnumWindowsProc(_cb)` and pass `cb`, not `_cb` directly) or ctypes will GC it and the callback will crash.
