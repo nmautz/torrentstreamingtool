@@ -51,6 +51,22 @@ Both `setup.py` and `run.py` must be invoked with the **system** Python — they
 
 ---
 
+## Versioning — mandatory on every change
+
+The version badge in `static/index.html` (bottom-right corner `<div>`) and the entry in `CHANGELOG.md` **must** be updated in the same patch as any code change.
+
+Scheme: **x.y.z**
+
+| Part | When to bump | Examples |
+|------|--------------|---------|
+| `x`  | Major feature — new top-level capability, architectural overhaul | new streaming mode, new admin tab |
+| `y`  | Minor feature — new user-visible behaviour within an existing subsystem | hold-to-large-step vol, new skip threshold option |
+| `z`  | Bug fix — correcting wrong behaviour, no new capability | off-by-one in seek, crash fix |
+
+Current version lives in the `<div>` at the very bottom of `static/index.html`. After bumping, add a bullet to `CHANGELOG.md` under the new version heading.
+
+---
+
 ## Style conventions
 
 - **Metro UI** throughout the frontend — flat tiles, no rounded corners, bold uppercase typography, square status dots, no `backdrop-blur`. See [docs/FRONTEND.md](docs/FRONTEND.md).

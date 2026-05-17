@@ -1254,7 +1254,7 @@
 
     <!-- Row C: Volume − / label+slider / + -->
     <div class="flex flex-1 border-b border-gray-800 min-h-0">
-      <button onclick="vlcVolumeStep(-5, this)"
+      <button onpointerdown="_fcVolDown(-5,this,event)" onpointerup="_fcVolUp(-5,this)" onpointerleave="_fcVolUp(-5,this)" onpointercancel="_fcVolUp(-5,this)"
         class="fc-tile flex flex-1 border-r border-gray-800
                hover:bg-gray-800/60 active:bg-gray-700/80 text-gray-400 transition-colors">
         <span class="text-4xl font-thin leading-none mb-1" style="line-height:1">−</span>
@@ -1269,7 +1269,7 @@
           ontouchend="vlcSetVolume(this.value, this)"
           style="touch-action:none">
       </div>
-      <button onclick="vlcVolumeStep(5, this)"
+      <button onpointerdown="_fcVolDown(5,this,event)" onpointerup="_fcVolUp(5,this)" onpointerleave="_fcVolUp(5,this)" onpointercancel="_fcVolUp(5,this)"
         class="fc-tile flex flex-1 hover:bg-gray-800/60 active:bg-gray-700/80 text-gray-400 transition-colors">
         <span class="text-4xl font-thin leading-none mb-1" style="line-height:1">+</span>
         <span class="text-[11px] text-gray-600">Vol</span>
@@ -1905,6 +1905,26 @@ async function vlcVolumeStep(delta, btn){
       }
     }
   });
+}
+
+// Hold-to-large-step for fullscreen vol buttons.
+// Short tap → step 5; hold (>400 ms) → step 15, repeating every 350 ms.
+let _volHoldTimer = null, _volHoldInterval = null, _volHoldActive = false;
+function _fcVolDown(delta, btn, e){
+  e.preventDefault();
+  _volHoldActive = false;
+  const bigDelta = delta > 0 ? 15 : -15;
+  _volHoldTimer = setTimeout(() => {
+    _volHoldActive = true;
+    vlcVolumeStep(bigDelta, btn);
+    _volHoldInterval = setInterval(() => vlcVolumeStep(bigDelta, btn), 350);
+  }, 400);
+}
+function _fcVolUp(delta, btn){
+  clearTimeout(_volHoldTimer); _volHoldTimer = null;
+  if(_volHoldInterval){ clearInterval(_volHoldInterval); _volHoldInterval = null; }
+  if(!_volHoldActive) vlcVolumeStep(delta, btn);
+  _volHoldActive = false;
 }
 
 function openFullscreenControls(){
@@ -5327,6 +5347,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">alpha2</div>
+<div style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">2.1.0</div>
 </body>
 </html>
