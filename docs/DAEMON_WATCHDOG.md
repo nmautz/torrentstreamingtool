@@ -11,12 +11,19 @@ Two related but distinct pieces:
 
 ### Wrapper script ([daemon.py:46](../daemon.py#L46))
 
-`streamlink_service.py` is a tiny generated Python file that:
+`streamlink_service.py` is a generated Python file that mirrors the network-facing startup of `python run.py` so the installed service and interactive launch behave identically:
 1. Sets up file logging (`logs/streamlink_service.log`) — the service has no console
-2. Adds the venv `site-packages` to `sys.path` so `watchdog.py` can import `psutil`. Handles both Windows (`Lib/site-packages`) and Unix (`lib/pythonX.Y/site-packages`) layouts
-3. Calls `start_watchdog()` (monitors VLC/qBit/Jackett)
-4. Supervises `uvicorn main:app --host 0.0.0.0 --port 80` in a restart loop
-5. Restart loop logic: clean exit (rc 0) → quit; non-zero → wait 5 s and retry. **Fast-death detection**: 5 consecutive crashes in under 15 s each → give up (prevents tight crash loops eating CPU)
+2. Adds the venv `site-packages` to `sys.path` so `watchdog.py` can import `psutil` and `run.py` helpers can import `zeroconf`. Handles both Windows (`Lib/site-packages`) and Unix (`lib/pythonX.Y/site-packages`) layouts
+3. Calls `start_watchdog()` (monitors VLC/qBit/Jackett — and launches them when missing)
+4. Calls `run.get_local_ip()` to detect the LAN IP for mDNS
+5. On Windows: calls `run.setup_windows_firewall(80)` and `(443)` if certs exist (idempotent — Task Scheduler runs the wrapper elevated so `netsh add rule` succeeds)
+6. Calls `run.start_mdns(lan_ip, 80, 443 if certs)` so `remote.local` resolves for LAN clients
+7. If `cert.pem` + `key.pem` exist: launches a separate `uvicorn … --port 443 --ssl-certfile … --ssl-keyfile …` subprocess for the admin panel (HTTPS), logging to `logs/uvicorn_https.log`. Not supervised — if it dies, only port 443 stops; the main HTTP service continues
+8. Supervises `uvicorn main:app --host 0.0.0.0 --port 80` in a restart loop
+9. Restart loop logic: clean exit (rc 0) → quit; non-zero → wait 5 s and retry. **Fast-death detection**: 5 consecutive crashes in under 15 s each → give up (prevents tight crash loops eating CPU)
+10. On any exit path the wrapper cleans up: terminates the HTTPS subprocess, closes the zeroconf instance
+
+The wrapper does **not** explicitly launch VLC / qBit / Jackett at boot — the watchdog detects them as down on its first tick and starts them itself. This matches the interactive `run.py` flow once you account for the watchdog also running there.
 
 ### Per-platform install
 
