@@ -615,16 +615,37 @@ def _windows_install() -> bool:
                  f"Re-run --install while logged in as the account that "
                  f"should run the service.")
 
-        # schtasks /Create — fires at the chosen user's logon, with highest
-        # privileges so the wrapper can bind port 80/443 and add firewall rules.
-        # stdin=DEVNULL prevents schtasks from hanging if it ever prompts for a
-        # password (e.g. on certain domain configurations).
+        # Add firewall rules now while we have an admin token (UAC just gave
+        # us one). The running task may be a Standard User — they can't add
+        # netsh rules, so we set them up here and they persist.
+        try:
+            sys.path.insert(0, str(HERE))
+            from run import setup_windows_firewall as _fw
+            _fw(80)
+            if (HERE / "cert.pem").exists() and (HERE / "key.pem").exists():
+                _fw(443)
+        except Exception as exc:
+            warn(f"Could not add firewall rules: {exc}")
+
+        # schtasks /Create — fires at the chosen user's logon.
+        #
+        # Note: we deliberately do NOT pass /RL HIGHEST. On Windows, the
+        # restriction on ports < 1024 is a Unix-ism — any user can bind port
+        # 80/443 as long as the port is free and not reserved by http.sys.
+        # Passing HIGHEST would make Task Scheduler try to elevate the user's
+        # token at trigger time, which fails silently for Standard Users
+        # (no admin rights to elevate to) — the task appears registered but
+        # never actually runs. Without HIGHEST, the task launches under the
+        # user's normal token and works for everyone.
+        #
+        # stdin=DEVNULL prevents schtasks from hanging if it ever prompts for
+        # a password (e.g. on certain domain configurations — ONLOGON tasks
+        # don't actually need one).
         cmd = [
             "schtasks", "/Create", "/F",
             "/TN", _WIN_TASK_NAME,
             "/TR", f'"{py}" "{scr}"',
             "/SC", "ONLOGON",
-            "/RL", "HIGHEST",
             "/RU", run_user,
         ]
         result = subprocess.run(
@@ -647,12 +668,13 @@ def _windows_install() -> bool:
         if start.returncode == 0:
             ok("Task started immediately")
         else:
-            warn("Task registered but could not start immediately — it will run at next logon")
+            warn(f"Task registered but could not start immediately:\n"
+                 f"  stdout: {(start.stdout or '').strip()}\n"
+                 f"  stderr: {(start.stderr or '').strip()}\n"
+                 f"  It will run at next logon for {run_user}.")
         info("Dashboard -> http://remote.local  (or http://127.0.0.1)")
         info("Service log -> logs\\streamlink_service.log")
-        info("If the log is empty after a minute, the configured user "
-             "(see RunAs above) may not be the one currently logged in. "
-             "Sign in as that user, or re-run --install from their session.")
+        info("If something seems wrong, run:  python run.py --diagnose")
         return True
 
     finally:

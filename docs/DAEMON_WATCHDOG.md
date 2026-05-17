@@ -44,9 +44,11 @@ The wrapper does **not** explicitly launch VLC / qBit / Jackett at boot — the 
 - Note about `loginctl enable-linger $USER` if you want it to start without an interactive login
 
 ### Windows ([daemon.py:393](../daemon.py#L393))
-- Requires admin token to register `/RL HIGHEST`. If not elevated, re-launches `run.py --install` through `ShellExecuteW "runas"` (UAC prompt). The elevated console reconfigures stdout to UTF-8 (legacy code pages can't render `✓`/`⚠`) and pauses at the end so the user can read the result
+- Requires admin token (for `netsh advfirewall` and to register a task under another account). If not elevated, re-launches `run.py --install` through `ShellExecuteW "runas"` (UAC prompt). The elevated console reconfigures stdout to UTF-8 (legacy code pages can't render `✓`/`⚠`) and pauses at the end so the user can read the result
+- While elevated, also adds Windows Firewall rules for TCP/80 (and /443 if `cert.pem` + `key.pem` exist) so a Standard-User-context task doesn't need to add them at runtime
 - **`/RU` is the console user, not `USERNAME`** — `_windows_console_user()` queries `WTSGetActiveConsoleSessionId` + `WTSQuerySessionInformationW` to find who's actually logged in at the keyboard. After UAC elevation, `os.environ['USERNAME']` is the *Admin* account, which would register a task that only fires at Admin's logon — invisible to the regular user. Falls back to PowerShell `Win32_ComputerSystem.UserName` if the WTS API call fails, then to `USERNAME` with a warning
-- `schtasks /Create /SC ONLOGON /RL HIGHEST /TN StreamLink /TR "<py> <wrapper>" /RU <console_user>`
+- **No `/RL HIGHEST`** — Windows doesn't restrict ports < 1024, so the wrapper doesn't need elevation to bind 80/443. HIGHEST on a Standard-User task fails silently (no admin token to elevate to), leaving the task registered but never running. See `docs/GOTCHAS.md` for the gory detail
+- `schtasks /Create /SC ONLOGON /TN StreamLink /TR "<py> <wrapper>" /RU <console_user>`
 - Then `schtasks /Run /TN StreamLink` to start immediately
 
 ### Public API

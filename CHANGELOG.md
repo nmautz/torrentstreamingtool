@@ -1,5 +1,10 @@
 # Changelog
 
+## [2.1.4] — 2026-05-16
+- **Bug fix (Windows):** Dropped `/RL HIGHEST` from the scheduled task created by `run.py --install`. On Windows, ports below 1024 do not require admin to bind (the "privileged ports" rule is Unix-only), so the wrapper doesn't need elevation. HIGHEST was actively harmful for Standard User accounts — it made Task Scheduler try to elevate their token at trigger time, which failed silently and left the task registered but never running. Firewall rules (which DO need admin) are now added during `_windows_install` while we hold the UAC-granted admin token.
+- **Setup warning:** `setup.py` now detects per-user Python installs on Windows (Microsoft Store python, `AppData\Local\Programs\Python`, etc.) and warns that the resulting venv will not be usable by any other Windows user account. This was the silent root cause of the service-doesn't-run case: when the scheduled task ran as a different user, the venv launcher couldn't read the base python in the installer's user profile and bailed with "Access is denied" before the wrapper could log anything.
+- **Docs:** New GOTCHAS entries for Microsoft Store Python and the `/RL HIGHEST` / `/RU` Windows-task pitfalls so the next person doesn't have to re-debug.
+
 ## [2.1.3] — 2026-05-16
 - **Bug fix (Windows):** `run.py --install` now registers the scheduled task to run as the *console* user (the one actually sitting at the keyboard), not the Admin account whose credentials were entered at the UAC prompt. Previously, installing from an elevated Admin shell while logged in as a regular user would tie the task to the Admin's logon, so the task never fired at the user's logon — the service appeared to install successfully but never started, with no logs written. Detection uses `WTSGetActiveConsoleSessionId` + `WTSQuerySessionInformationW` (works on all Windows editions), with a PowerShell `Win32_ComputerSystem.UserName` fallback. Install output now prints the detected `RunAs` user so it's clear which account the service is tied to.
 

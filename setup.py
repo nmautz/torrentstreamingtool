@@ -748,6 +748,33 @@ def check_python():
         fail(f"Python 3.9+ required, found {vi.major}.{vi.minor}")
     ok(f"Python {vi.major}.{vi.minor}.{vi.micro}")
 
+    # On Windows, warn loudly if this Python is installed per-user — a venv
+    # built from it can only be executed by the same user. Anyone else
+    # (including a scheduled-task account) gets "Access is denied" when the
+    # venv launcher tries to re-exec the base python, and the service
+    # silently fails. See docs/GOTCHAS.md "Microsoft Store Python".
+    if SYSTEM == "Windows":
+        exe = Path(sys.executable).resolve()
+        s   = str(exe).lower()
+        per_user_markers = (
+            r"\appdata\local\microsoft\windowsapps",
+            r"\appdata\local\programs\python",
+            r"\appdata\local\packages\pythonsoftwarefoundation",
+        )
+        if any(m in s for m in per_user_markers):
+            warn(f"Python is installed per-user ({exe}).")
+            warn("Other Windows accounts (including the scheduled task that")
+            warn("runs the service for non-admin users) will NOT be able to")
+            warn("execute the venv. Install Python from python.org with")
+            warn("'Install Python for all users' checked, then delete .venv")
+            warn("and re-run this setup. See docs/GOTCHAS.md for details.")
+            try:
+                answer = input("\n  Continue anyway? [y/N] ").strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = "n"
+            if not answer.startswith("y"):
+                sys.exit(1)
+
 
 # ── Step 2: Virtual environment + dependencies ────────────────────────────
 def setup_venv():
