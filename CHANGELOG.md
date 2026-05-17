@@ -1,5 +1,8 @@
 # Changelog
 
+## [2.1.7] — 2026-05-17
+- **Bug fix:** Fullscreen-controls overlay no longer lets users highlight (text-select) any of its labels, buttons, title, or time readout when long-pressing or drag-selecting on touch / desktop. Previously only `.fc-tile` elements had `user-select:none`; now the entire `#fullscreenControls` subtree disables selection and the iOS tap-highlight flash.
+
 ## [2.1.6] — 2026-05-17
 - **Bug fix:** Idle background video now reliably comes up fullscreen with the taskbar / Dock hidden and every other app minimized when StreamLink is launched as a system service at boot/login. Three-part fix:
   1. VLC is now spawned with `--fullscreen` in all three launch paths (`run.py`, `watchdog.py`, `main.py:_restart_vlc_process`) so it owns the screen from the very first frame instead of relying on a post-`in_play` HTTP toggle.
