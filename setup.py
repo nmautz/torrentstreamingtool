@@ -60,8 +60,18 @@ def vrun(cmd, **kwargs) -> subprocess.CompletedProcess:
     return proc
 
 
+# Whether we have an interactive stdin to read from. Task Scheduler / launchd
+# / systemd run setup.py without a console — sys.stdin.isatty() is False and
+# input() can block indefinitely (it doesn't always cleanly EOF on Windows
+# when the parent is a service), so we short-circuit to defaults up front.
+_STDIN_INTERACTIVE = bool(getattr(sys.stdin, "isatty", lambda: False)())
+
+
 def ask(prompt, default="", secret=False):
     hint = f"{CYN}{default}{RESET}"
+    if not _STDIN_INTERACTIVE:
+        print(f"  {BOLD}{prompt}{RESET} [{hint}]: (no stdin — using default)")
+        return default
     try:
         if secret and _TTY:
             import getpass
@@ -75,6 +85,10 @@ def ask(prompt, default="", secret=False):
 
 def ask_bool(prompt, default=True):
     choices = "Y/n" if default else "y/N"
+    if not _STDIN_INTERACTIVE:
+        answer = "yes" if default else "no"
+        print(f"  {BOLD}{prompt}{RESET} [{choices}]: (no stdin — defaulting to {answer})")
+        return default
     try:
         v = input(f"  {BOLD}{prompt}{RESET} [{choices}]: ").strip().lower()
     except (EOFError, KeyboardInterrupt):
@@ -768,11 +782,7 @@ def check_python():
             warn("execute the venv. Install Python from python.org with")
             warn("'Install Python for all users' checked, then delete .venv")
             warn("and re-run this setup. See docs/GOTCHAS.md for details.")
-            try:
-                answer = input("\n  Continue anyway? [y/N] ").strip().lower()
-            except (EOFError, KeyboardInterrupt):
-                answer = "n"
-            if not answer.startswith("y"):
+            if not ask_bool("Continue anyway?", default=False):
                 sys.exit(1)
 
 

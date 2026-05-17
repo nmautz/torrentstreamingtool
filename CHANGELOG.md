@@ -1,5 +1,8 @@
 # Changelog
 
+## [2.1.5] — 2026-05-17
+- **Bug fix:** Setup and launcher prompts no longer hang when stdin is non-interactive (system service, piped invocation, etc.). `setup.py`'s `ask`/`ask_bool` now check `sys.stdin.isatty()` upfront and auto-apply the default if there's no console — previously they relied on `input()` raising `EOFError`, which does not always fire reliably under Windows Task Scheduler. The `.env`-reuse prompt now correctly defaults to "yes" in service contexts. `run.py`'s "Continue without VPN?" prompt is similarly gated and silently proceeds when non-interactive (safe because the watchdog already gates qBittorrent on VPN status).
+
 ## [2.1.4] — 2026-05-16
 - **Bug fix (Windows):** Dropped `/RL HIGHEST` from the scheduled task created by `run.py --install`. On Windows, ports below 1024 do not require admin to bind (the "privileged ports" rule is Unix-only), so the wrapper doesn't need elevation. HIGHEST was actively harmful for Standard User accounts — it made Task Scheduler try to elevate their token at trigger time, which failed silently and left the task registered but never running. Firewall rules (which DO need admin) are now added during `_windows_install` while we hold the UAC-granted admin token.
 - **Setup warning:** `setup.py` now detects per-user Python installs on Windows (Microsoft Store python, `AppData\Local\Programs\Python`, etc.) and warns that the resulting venv will not be usable by any other Windows user account. This was the silent root cause of the service-doesn't-run case: when the scheduled task ran as a different user, the venv launcher couldn't read the base python in the installer's user profile and bailed with "Access is denied" before the wrapper could log anything.

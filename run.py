@@ -746,16 +746,24 @@ def main():
     _          = start_jackett()          # optional; don't block on failure
 
     if not mullvad_ok:
-        print(f"  {YLW}Continue anyway? VPN kill-switch will be inactive. [y/N]{RESET} ", end="")
-        try:
-            answer = input().strip().lower()
-        except (EOFError, KeyboardInterrupt):
-            answer = "n"
-        if not answer.startswith("y"):
+        # No-stdin context (system service / piped invocation) → continue
+        # without prompting. The watchdog gates qBit on VPN status, so
+        # silently proceeding is safe — qBit won't actually launch until
+        # Mullvad reconnects.
+        interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
+        if interactive:
+            print(f"  {YLW}Continue anyway? VPN kill-switch will be inactive. [y/N]{RESET} ", end="")
+            try:
+                answer = input().strip().lower()
+            except (EOFError, KeyboardInterrupt):
+                answer = "n"
+            if not answer.startswith("y"):
+                print()
+                info("Connect Mullvad and re-run.")
+                sys.exit(0)
             print()
-            info("Connect Mullvad and re-run.")
-            sys.exit(0)
-        print()
+        else:
+            info("Mullvad disconnected and stdin is non-interactive — continuing; watchdog will start qBit once VPN reconnects.")
         info("qBittorrent will not start — watchdog will launch it once Mullvad connects")
         qbit_ok = True   # intentionally skipped; watchdog gates it
     else:
