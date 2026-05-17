@@ -742,13 +742,8 @@ def main():
     # ── Services ──────────────────────────────────────────────────────────
     print(f"{BOLD}  Services{RESET}")
     vlc_ok     = start_vlc()
-    qbit_ok    = start_qbittorrent()
-    _          = start_jackett()          # optional; don't block on failure
     mullvad_ok = check_mullvad()
-    print()
-
-    if not vlc_ok or not qbit_ok:
-        fail("Required services could not start. Fix the errors above and try again.")
+    _          = start_jackett()          # optional; don't block on failure
 
     if not mullvad_ok:
         print(f"  {YLW}Continue anyway? VPN kill-switch will be inactive. [y/N]{RESET} ", end="")
@@ -761,6 +756,14 @@ def main():
             info("Connect Mullvad and re-run.")
             sys.exit(0)
         print()
+        info("qBittorrent will not start — watchdog will launch it once Mullvad connects")
+        qbit_ok = True   # intentionally skipped; watchdog gates it
+    else:
+        qbit_ok = start_qbittorrent()
+    print()
+
+    if not vlc_ok or not qbit_ok:
+        fail("Required services could not start. Fix the errors above and try again.")
 
     # ── Start watchdog (7.2) ──────────────────────────────────────────────
     try:
