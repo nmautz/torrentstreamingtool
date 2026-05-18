@@ -2046,10 +2046,8 @@ async function triggerResume(){
   // the VLC path needs it for /api/resume-now POST).
   app.resume_offer = null;
   renderResumeOffer(null);
-  document.getElementById("pcSubtitle").textContent = label;
-  document.getElementById("pcLocalSub").textContent = "Stream to this device's browser";
-  document.getElementById("pcLocalBtn").disabled = false;
-  document.getElementById("playChooserModal").classList.remove("hidden");
+  // Resume in whichever mode is currently active — no chooser.
+  pcChoose(lp.itemId ? "local" : "vlc");
 }
 
 async function dismissResume(){
@@ -5352,6 +5350,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">2.1.7</div>
+<div style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">2.1.8</div>
 </body>
 </html>

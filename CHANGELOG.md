@@ -1,5 +1,8 @@
 # Changelog
 
+## [2.1.8] — 2026-05-17
+- **Bug fix:** Resume popup now resumes playback in the same mode that is already active (VLC if no local player is open, local device player if it is), instead of always opening the "Play where?" chooser.
+
 ## [2.1.7] — 2026-05-17
 - **Bug fix:** Fullscreen-controls overlay no longer lets users highlight (text-select) any of its labels, buttons, title, or time readout when long-pressing or drag-selecting on touch / desktop. Previously only `.fc-tile` elements had `user-select:none`; now the entire `#fullscreenControls` subtree disables selection and the iOS tap-highlight flash.
 
