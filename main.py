@@ -2755,17 +2755,20 @@ async def _library_play_launch(
 ) -> None:
     """VLC handoff for a library play, run in the background.
 
-    Why: VLC HTTP roundtrips can take several seconds on slow networks. Driving
-    them inline blocks the Play response and leaves the UI silent. State has
-    already been flipped to 'buffering' before we get here, so the SSE-driven
-    UI paints immediately; we flip it to 'playing' once VLC has accepted the
-    first track.
+    Flow:
+    1. `in_play` the first file — this is what the user is about to watch.
+    2. Flip `stream_status` to "playing" and broadcast IMMEDIATELY — VLC is
+       already playing, so the UI must reflect that without waiting for the
+       rest of the playlist to be enqueued. (Previously the state flip ran
+       after a sequential `in_enqueue` loop for every remaining file, so a
+       50-episode resume left the UI showing "buffering" for many seconds
+       while VLC was already playing the first episode.)
+    3. Enqueue the rest in parallel via `asyncio.gather` so wall time is one
+       roundtrip max, regardless of playlist length.
     """
     try:
         first = Path(playlist[0])
         await vlc("in_play", input=first.resolve().as_uri())
-        for p in playlist[1:]:
-            await vlc("in_enqueue", input=Path(p).resolve().as_uri())
 
         state.stream_status = "playing"
         await broadcast("stream_status", {"status": "playing", "message": f"Playing: {first.name}"})
@@ -2787,6 +2790,13 @@ async def _library_play_launch(
                 asyncio.create_task(_delayed_resume_offer(seek_sec, playlist[0], item_id, playlist))
 
         asyncio.create_task(_apply_track_prefs(item_id, profile_id, playlist[0], delay=3.5))
+
+        rest = playlist[1:]
+        if rest:
+            await asyncio.gather(
+                *(vlc("in_enqueue", input=Path(p).resolve().as_uri()) for p in rest),
+                return_exceptions=True,
+            )
     except asyncio.CancelledError:
         raise
     except Exception as e:
@@ -3411,12 +3421,16 @@ def _find_in_paths(current: str, paths: list[str]) -> int:
 
 
 async def _vlc_relaunch_playlist(playlist: list[str], target_name: str) -> None:
-    """Background VLC handoff used by prev/next so slow VLC roundtrips don't block the response."""
+    """Background VLC handoff used by prev/next so slow VLC roundtrips don't block the response.
+
+    Flips `stream_status` to "playing" the moment VLC accepts the first track —
+    not after the whole playlist has been enqueued. The enqueue loop on a long
+    "remaining episodes" tail would otherwise pin the UI to "buffering" for
+    seconds while the user is already watching the new episode.
+    """
     try:
         first = Path(playlist[0])
         await vlc("in_play", input=first.resolve().as_uri())
-        for p in playlist[1:]:
-            await vlc("in_enqueue", input=Path(p).resolve().as_uri())
         state.stream_status = "playing"
         await broadcast("stream_status", {"status": "playing", "message": f"Playing: {target_name}"})
         await broadcast("state", state_snapshot())
@@ -3424,6 +3438,12 @@ async def _vlc_relaunch_playlist(playlist: list[str], target_name: str) -> None:
             asyncio.create_task(_apply_track_prefs(
                 state.library_item_id, state.library_profile_id, playlist[0], delay=2.0,
             ))
+        rest = playlist[1:]
+        if rest:
+            await asyncio.gather(
+                *(vlc("in_enqueue", input=Path(p).resolve().as_uri()) for p in rest),
+                return_exceptions=True,
+            )
     except asyncio.CancelledError:
         raise
     except Exception as e:

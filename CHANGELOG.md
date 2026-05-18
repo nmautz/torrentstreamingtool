@@ -1,5 +1,8 @@
 # Changelog
 
+## [2.2.1] — 2026-05-18
+- **Bug fix:** Player UI no longer gets stuck on "Loading…" / buffering after a library play, even though VLC is already playing. The 2.2.0 refactor of `/api/library/{id}/play` flipped `state.stream_status` to `"playing"` only *after* the full `in_play` + sequential `in_enqueue` loop completed — so a "continue watching" play that enqueued 50+ remaining episodes left the UI in buffering for many seconds even though VLC had been playing the first episode from the start. The state flip + broadcast now run the instant VLC accepts the first track (the only roundtrip that gates actual playback), and the remaining `in_enqueue` calls run in parallel via `asyncio.gather` so wall time is one roundtrip max regardless of playlist length. Same fix applied to `/api/vlc/prev` and `/api/vlc/next`'s `_vlc_relaunch_playlist` helper.
+
 ## [2.2.0] — 2026-05-18
 - **Minor feature: slow-network playback responsiveness.** On a slow or flaky link the app used to feel dead for several seconds between "user clicks Play" and "VLC actually opens the file" — the Play response was synchronous on the VLC HTTP roundtrips, the chooser modal closed immediately, and the player UI didn't paint until the SSE `playing` event arrived. Four-part fix:
   1. **Server: non-blocking playback handoff.** `/api/library/{id}/play`, `/api/vlc/prev`, `/api/vlc/next`, `/api/stop`, and `/api/stream` now broadcast a state event (`buffering` / `idle`) and return 202 immediately. The slow VLC `in_play` + `in_enqueue` work (and the qBit deletes on stop/stream) run in background tasks so the response no longer waits on the network at all. A new `state.library_play_task` is tracked and cancelled on subsequent Play / Stop so a slow handoff can't race a newer action.
