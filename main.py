@@ -156,6 +156,7 @@ class AppState:
     dl_speed_bps: int = 0
     ul_speed_bps: int = 0
     stream_task: Optional[asyncio.Task] = None
+    library_play_task: Optional[asyncio.Task] = None  # in-flight VLC handoff for a library play / prev / next
     library_item_id: Optional[str] = None
     library_profile_id: Optional[str] = None
     library_item_file_count: int = 0                     # total files in the playing item
@@ -2745,6 +2746,55 @@ async def set_file_priority_for_item(item_id: str, req: FilePriorityReq) -> JSON
     return JSONResponse({"ok": True, "updated": len(indices)})
 
 
+async def _library_play_launch(
+    playlist: list[str],
+    item_id: str,
+    profile_id: str,
+    seek_sec: Optional[float],
+    resume_mode: str,
+) -> None:
+    """VLC handoff for a library play, run in the background.
+
+    Why: VLC HTTP roundtrips can take several seconds on slow networks. Driving
+    them inline blocks the Play response and leaves the UI silent. State has
+    already been flipped to 'buffering' before we get here, so the SSE-driven
+    UI paints immediately; we flip it to 'playing' once VLC has accepted the
+    first track.
+    """
+    try:
+        first = Path(playlist[0])
+        await vlc("in_play", input=first.resolve().as_uri())
+        for p in playlist[1:]:
+            await vlc("in_enqueue", input=Path(p).resolve().as_uri())
+
+        state.stream_status = "playing"
+        await broadcast("stream_status", {"status": "playing", "message": f"Playing: {first.name}"})
+        await broadcast("state", state_snapshot())
+
+        asyncio.create_task(vlc_focus_and_fullscreen())
+
+        if seek_sec and seek_sec > 5:
+            if resume_mode == "auto":
+                async def _delayed_seek(s: float) -> None:
+                    await asyncio.sleep(3)
+                    await vlc("seek", val=str(int(s)))
+                asyncio.create_task(_delayed_seek(seek_sec))
+            elif resume_mode == "prompt":
+                async def _delayed_resume_offer(s: float, fp: str, iid: str, pl: list) -> None:
+                    await asyncio.sleep(3)
+                    state.resume_offer = {"position_sec": s, "file_path": fp, "item_id": iid, "playlist": pl}
+                    await broadcast("state", state_snapshot())
+                asyncio.create_task(_delayed_resume_offer(seek_sec, playlist[0], item_id, playlist))
+
+        asyncio.create_task(_apply_track_prefs(item_id, profile_id, playlist[0], delay=3.5))
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        state.stream_status = "error"
+        await broadcast("stream_status", {"status": "error", "message": f"Playback failed: {e}"})
+        await broadcast("state", state_snapshot())
+
+
 @app.post("/api/library/{item_id}/play")
 async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     lib = await get_library()
@@ -2775,21 +2825,30 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     if not existing:
         raise HTTPException(400, f"File(s) not yet downloaded: {', '.join(Path(p).name for p in playlist[:3])}")
     playlist = existing
-
-    # Build VLC playlist: play first, enqueue the rest
     first = Path(playlist[0])
-    await vlc("in_play", input=first.resolve().as_uri())
-    for p in playlist[1:]:
-        await vlc("in_enqueue", input=Path(p).resolve().as_uri())
-    asyncio.create_task(vlc_focus_and_fullscreen())
 
-    # Update app state
-    state.stream_status = "playing"
+    # Resolve seek position and resume mode synchronously
+    seek_sec = req.seek_first_to
+    if seek_sec is None:
+        hint = find_resume_hint(item, req.profile_id)
+        if hint and hint.get("position_sec", 0) > 5 and not hint.get("all_completed"):
+            seek_sec = hint["position_sec"]
+    prof_obj = next((p for p in lib.get("profiles", []) if p["id"] == req.profile_id), {})
+    resume_mode = prof_obj.get("resume_mode", "auto")
+
+    # If a prior library play is still mid-handoff, cancel it so we don't race VLC
+    prior = state.library_play_task
+    if prior and not prior.done():
+        prior.cancel()
+
+    # Flip state to buffering NOW so the SSE-driven UI paints loading state
+    # before the slow VLC roundtrips even start.
+    state.stream_status = "buffering"
     state.active_title = item["title"]
     state.active_file = first
     state.current_audio_track = -1
     state.current_subtitle_track = -1
-    state.track_pref_applied_file = playlist[0]  # mark as applied so tracker doesn't double-apply
+    state.track_pref_applied_file = playlist[0]
     state.active_hash = item.get("torrent_hash") or None
     state.library_item_id = item_id
     state.library_profile_id = req.profile_id
@@ -2800,35 +2859,17 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     state.skip_offer_file = None
     state.resume_offer = None
 
-    # Resolve seek position and handle resume_mode
-    seek_sec = req.seek_first_to
-    if seek_sec is None:
-        hint = find_resume_hint(item, req.profile_id)
-        if hint and hint.get("position_sec", 0) > 5 and not hint.get("all_completed"):
-            seek_sec = hint["position_sec"]
+    await broadcast("stream_status", {"status": "buffering", "message": f"Starting: {first.name}"})
+    await broadcast("state", state_snapshot())
 
-    prof_obj = next((p for p in lib.get("profiles", []) if p["id"] == req.profile_id), {})
-    resume_mode = prof_obj.get("resume_mode", "auto")
+    state.library_play_task = asyncio.create_task(_library_play_launch(
+        playlist, item_id, req.profile_id, seek_sec, resume_mode,
+    ))
 
-    if seek_sec and seek_sec > 5:
-        if resume_mode == "auto":
-            async def _delayed_seek(s: float) -> None:
-                await asyncio.sleep(3)
-                await vlc("seek", val=str(int(s)))
-            asyncio.create_task(_delayed_seek(seek_sec))
-        elif resume_mode == "prompt":
-            async def _delayed_resume_offer(s: float, fp: str, iid: str, pl: list) -> None:
-                await asyncio.sleep(3)
-                state.resume_offer = {"position_sec": s, "file_path": fp, "item_id": iid, "playlist": pl}
-                await broadcast("state", state_snapshot())
-            asyncio.create_task(_delayed_resume_offer(seek_sec, playlist[0], item_id, playlist))
-        # "off" → do nothing, start from beginning
-
-    # Apply saved track prefs for the first file (after VLC opens it)
-    asyncio.create_task(_apply_track_prefs(item_id, req.profile_id, playlist[0], delay=3.5))
-
-    await broadcast("stream_status", {"status": "playing", "message": f"Playing: {first.name}"})
-    return JSONResponse({"ok": True, "playlist_count": len(playlist), "seek_to": seek_sec})
+    return JSONResponse(
+        {"ok": True, "playlist_count": len(playlist), "seek_to": seek_sec},
+        status_code=202,
+    )
 
 
 @app.post("/api/library/{item_id}/progress")
@@ -3122,14 +3163,15 @@ async def stream_now(req: StreamReq) -> JSONResponse:
 
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
+    if state.library_play_task and not state.library_play_task.done():
+        state.library_play_task.cancel()
 
-    # Delete old torrent whether the previous task was still running or already done
-    if state.active_hash and not state.library_item_id:
-        await qbit_delete(state.active_hash)
-
-    # Clean up orphaned prepare torrent that isn't the one being started now
+    # Snapshot what needs cleaning up; the actual qBit delete runs in the
+    # background so we can flip UI state to "buffering" and return immediately.
+    prior_active = state.active_hash if not state.library_item_id else None
+    prior_prepare = None
     if state.prepare_hash and state.prepare_hash != req.torrent_hash:
-        await qbit_delete(state.prepare_hash, delete_files=True)
+        prior_prepare = state.prepare_hash
         state.prepare_hash = None
     elif req.torrent_hash and state.prepare_hash == req.torrent_hash:
         state.prepare_hash = None
@@ -3142,10 +3184,22 @@ async def stream_now(req: StreamReq) -> JSONResponse:
     state.library_playlist = []
     state.library_current_file = None
     state.resume_offer = None
+
+    if prior_active or prior_prepare:
+        async def _cleanup_prior(active: Optional[str], prepare: Optional[str]) -> None:
+            try:
+                if active:
+                    await qbit_delete(active)
+                if prepare:
+                    await qbit_delete(prepare, delete_files=True)
+            except Exception:
+                pass
+        asyncio.create_task(_cleanup_prior(prior_active, prior_prepare))
+
     state.stream_task = asyncio.create_task(
         stream_pipeline(req.magnet, req.title, req.file_index, req.torrent_hash)
     )
-    return JSONResponse({"ok": True})
+    return JSONResponse({"ok": True}, status_code=202)
 
 
 class SaveToLibraryReq(BaseModel):
@@ -3208,16 +3262,18 @@ async def save_stream_to_library(req: SaveToLibraryReq) -> JSONResponse:
 
 @app.post("/api/stop")
 async def stop() -> JSONResponse:
+    # Cancel any in-flight pipelines first so a buffering stream doesn't race the teardown
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
-    if state.active_hash and not state.library_item_id:
-        await qbit_delete(state.active_hash)
-    if state.prepare_hash:
-        await qbit_delete(state.prepare_hash, delete_files=True)
-        state.prepare_hash = None
-    await vlc("pl_stop")
-    asyncio.create_task(vlc_minimize())
+    if state.library_play_task and not state.library_play_task.done():
+        state.library_play_task.cancel()
 
+    # Snapshot the cleanup targets before clearing state so the background task knows what to do
+    active_hash = state.active_hash
+    library_item_id = state.library_item_id
+    prepare_hash = state.prepare_hash
+
+    # Clear state + broadcast idle immediately — the UI updates before slow qBit/VLC roundtrips run
     state.active_hash = None
     state.active_file = None
     state.active_title = None
@@ -3235,9 +3291,24 @@ async def stop() -> JSONResponse:
     state.skip_offer = None
     state.skip_offer_file = None
     state.resume_offer = None
+    state.prepare_hash = None
 
     await broadcast("stream_status", {"status": "idle", "message": "Stopped."})
-    return JSONResponse({"ok": True})
+    await broadcast("state", state_snapshot())
+
+    async def _stop_cleanup(ah: Optional[str], lid: Optional[str], ph: Optional[str]) -> None:
+        try:
+            if ah and not lid:
+                await qbit_delete(ah)
+            if ph:
+                await qbit_delete(ph, delete_files=True)
+            await vlc("pl_stop")
+            await vlc_minimize()
+        except Exception:
+            pass
+
+    asyncio.create_task(_stop_cleanup(active_hash, library_item_id, prepare_hash))
+    return JSONResponse({"ok": True}, status_code=202)
 
 
 @app.post("/api/retry")
@@ -3339,6 +3410,28 @@ def _find_in_paths(current: str, paths: list[str]) -> int:
     return -1
 
 
+async def _vlc_relaunch_playlist(playlist: list[str], target_name: str) -> None:
+    """Background VLC handoff used by prev/next so slow VLC roundtrips don't block the response."""
+    try:
+        first = Path(playlist[0])
+        await vlc("in_play", input=first.resolve().as_uri())
+        for p in playlist[1:]:
+            await vlc("in_enqueue", input=Path(p).resolve().as_uri())
+        state.stream_status = "playing"
+        await broadcast("stream_status", {"status": "playing", "message": f"Playing: {target_name}"})
+        await broadcast("state", state_snapshot())
+        if state.library_item_id and state.library_profile_id:
+            asyncio.create_task(_apply_track_prefs(
+                state.library_item_id, state.library_profile_id, playlist[0], delay=2.0,
+            ))
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        state.stream_status = "error"
+        await broadcast("stream_status", {"status": "error", "message": f"Playback failed: {e}"})
+        await broadcast("state", state_snapshot())
+
+
 @app.post("/api/vlc/prev")
 async def vlc_prev() -> JSONResponse:
     """Jump to the previous episode in series order, regardless of how playback was started."""
@@ -3366,22 +3459,24 @@ async def vlc_prev() -> JSONResponse:
     if not Path(prev_file).exists():
         raise HTTPException(400, f"File not found: {Path(prev_file).name}")
 
-    state.library_playlist    = new_tail
+    prior = state.library_play_task
+    if prior and not prior.done():
+        prior.cancel()
+
+    state.library_playlist     = new_tail
     state.library_current_file = prev_file
-    state.current_audio_track = -1
+    state.current_audio_track  = -1
     state.current_subtitle_track = -1
     state.track_pref_applied_file = prev_file
     state.skip_offer = None
     state.skip_offer_file = None
-    await vlc("in_play", input=Path(prev_file).resolve().as_uri())
-    for p in new_tail[1:]:
-        await vlc("in_enqueue", input=Path(p).resolve().as_uri())
-    if state.library_item_id and state.library_profile_id:
-        asyncio.create_task(_apply_track_prefs(
-            state.library_item_id, state.library_profile_id, prev_file, delay=2.0,
-        ))
-    await broadcast("stream_status", {"status": "playing", "message": f"Playing: {Path(prev_file).name}"})
-    return JSONResponse({"ok": True})
+    state.stream_status = "buffering"
+
+    await broadcast("stream_status", {"status": "buffering", "message": f"Loading: {Path(prev_file).name}"})
+    await broadcast("state", state_snapshot())
+
+    state.library_play_task = asyncio.create_task(_vlc_relaunch_playlist(new_tail, Path(prev_file).name))
+    return JSONResponse({"ok": True}, status_code=202)
 
 
 @app.post("/api/vlc/next")
@@ -3411,22 +3506,24 @@ async def vlc_next() -> JSONResponse:
     if not Path(next_file).exists():
         raise HTTPException(400, f"File not found: {Path(next_file).name}")
 
-    state.library_playlist    = new_tail
+    prior = state.library_play_task
+    if prior and not prior.done():
+        prior.cancel()
+
+    state.library_playlist     = new_tail
     state.library_current_file = next_file
-    state.current_audio_track = -1
+    state.current_audio_track  = -1
     state.current_subtitle_track = -1
     state.track_pref_applied_file = next_file
     state.skip_offer = None
     state.skip_offer_file = None
-    await vlc("in_play", input=Path(next_file).resolve().as_uri())
-    for p in new_tail[1:]:
-        await vlc("in_enqueue", input=Path(p).resolve().as_uri())
-    if state.library_item_id and state.library_profile_id:
-        asyncio.create_task(_apply_track_prefs(
-            state.library_item_id, state.library_profile_id, next_file, delay=2.0,
-        ))
-    await broadcast("stream_status", {"status": "playing", "message": f"Playing: {Path(next_file).name}"})
-    return JSONResponse({"ok": True})
+    state.stream_status = "buffering"
+
+    await broadcast("stream_status", {"status": "buffering", "message": f"Loading: {Path(next_file).name}"})
+    await broadcast("state", state_snapshot())
+
+    state.library_play_task = asyncio.create_task(_vlc_relaunch_playlist(new_tail, Path(next_file).name))
+    return JSONResponse({"ok": True}, status_code=202)
 
 
 @app.get("/api/vlc/tracks")

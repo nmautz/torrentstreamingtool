@@ -176,3 +176,12 @@ device that quits playback abruptly resumes from the right spot on next play.
 
 ---
 
+## Milestone 15 — Slow-Network Playback Responsiveness
+
+- [x] **15.1** Server: make `/api/library/{id}/play`, `/api/vlc/prev`, `/api/vlc/next`, `/api/stop`, and `/api/stream` non-blocking. They update state + broadcast a `buffering` (or `idle`) state event, then return 202 and run the VLC `in_play`/`in_enqueue` and qBit deletes in background tasks. New `state.library_play_task` is cancelled by subsequent Play / Stop so a slow handoff can't race a newer action.
+- [x] **15.2** Client: optimistic buffering UI. New `_optimisticBuffering(label, itemId)` flips the player UI to `buffering` the instant the user clicks Play; on mobile the fullscreen overlay opens immediately so the user always has visible feedback while the server is still mid-handoff.
+- [x] **15.3** Client: in-flight guards on Play. `continueLibraryItem` and `playLibraryFiles` run under `withInflight("play_${itemId}", …)` so double-taps during a slow handoff are dropped instead of racing extra `in_play` requests to VLC.
+- [x] **15.4** Client: visible SSE-connection state + Play guard. The navbar SSE pill (`LIVE` / `OFFLINE`) is no longer mobile-hidden, and after a 4 s reconnect grace the app blocks new Play actions and shows a "Lost connection to host — reconnecting…" toast until SSE re-opens.
+
+---
+

@@ -57,6 +57,7 @@
 | `stream_status` | `idle` \| `buffering` \| `playing` \| `error` |
 | `progress`, `downloaded_mb`, `total_mb`, `dl_speed_bps`, `ul_speed_bps` | Live torrent stats from qBit |
 | `stream_task` | The asyncio.Task running `stream_pipeline` — cancel on stop/replay |
+| `library_play_task` | The asyncio.Task running the VLC handoff for the active library play / prev / next. Cancelled by `/api/stop` and by any subsequent Play / prev / next so slow VLC roundtrips can't race a newer action |
 | `library_item_id`, `library_profile_id` | Non-None when active playback is a library item — prevents auto-delete on stop |
 | `library_item_file_count`, `library_playlist`, `library_current_file` | Multi-episode playlist state |
 | `downloading_count` | Driving the navbar download badge |
@@ -99,6 +100,10 @@ Cancellation: on new `/api/stream` or `/api/stop`, `state.stream_task.cancel()` 
 - Waits for metadata, populates `item["files"]` via `build_file_list(qfiles, save_path)`.
 - Honours `selected_file_indices` (skip non-selected files via `qbit_set_file_priority`).
 - The item stays `status="downloading"` until `library_download_monitor` flips it.
+
+### `_library_play_launch` / `_vlc_relaunch_playlist`
+- Background handoff used by `/api/library/{id}/play` and by `/api/vlc/prev`/`next`. The route handlers update `state` synchronously, broadcast `stream_status="buffering"` + a full `state` event, return 202, then create one of these tasks to run the VLC `in_play` + `in_enqueue` HTTP roundtrips and broadcast `playing` when done. Tracked on `state.library_play_task` so `/api/stop` and a subsequent Play can cancel an in-flight handoff (otherwise a slow VLC roundtrip could keep firing `in_play` after the user has already moved on).
+- Why: VLC's HTTP API is slow over flaky links; awaiting it inside the request kept the Play response stalled for seconds and starved the SSE-driven UI of any "I'm doing something" signal. Returning 202 + broadcasting buffering lets the client paint loading state immediately. See [GOTCHAS.md §Slow-network Play](GOTCHAS.md#slow-network-play-must-be-non-blocking).
 
 ## Stream-to-Device prep
 

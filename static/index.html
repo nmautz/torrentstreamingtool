@@ -1504,6 +1504,11 @@ let app = {
   play_when_ready_file_path:null,
   skip_offer:null,
   resume_offer:null,
+  // Client-only fields (not from /state) — drives immediate UI feedback before
+  // the server's confirming SSE event arrives. Slow networks made the app
+  // feel dead during the seconds between "user clicked Play" and "VLC opened
+  // the file".
+  _connected:true,
 };
 const expandedDownloads=new Set();   // item IDs whose file lists are currently expanded
 const downloadFilesData=new Map();   // item_id → files array (cached from /files endpoint)
@@ -1717,8 +1722,10 @@ function renderPlayer(s){
   np.textContent=s.active_title||"No active stream";
   np.className=`text-sm font-bold truncate uppercase tracking-wide ${s.active_title?"text-gray-200":"text-gray-500"}`;
 
-  if(s.stream_status==="buffering")
-    si.textContent=s.total_mb>0?`${s.downloaded_mb.toFixed(1)} MB / ${s.total_mb.toFixed(1)} MB (${s.progress.toFixed(1)}%)`:"Connecting…";
+  if(s.stream_status==="buffering"){
+    if(s.total_mb>0) si.textContent=`${s.downloaded_mb.toFixed(1)} MB / ${s.total_mb.toFixed(1)} MB (${s.progress.toFixed(1)}%)`;
+    else si.textContent=s.is_library_playback?"Starting playback…":"Connecting…";
+  }
   else if(isPlaying&&!hasVlcTime&&s.total_mb>0)
     si.textContent=`${s.downloaded_mb.toFixed(1)} / ${s.total_mb.toFixed(1)} MB`;
   else if(!isPlaying) si.textContent="";
@@ -1759,7 +1766,19 @@ function renderPlayer(s){
     const fcpb=document.getElementById("fcProgressBar");
     if(fcpb) fcpb.style.width=`${barPct}%`;
     const fcst=document.getElementById("fcStatus");
-    if(fcst) fcst.textContent=s.stream_status==="buffering"?"Buffering…":s.stream_status==="playing"?"▶ Playing":"";
+    if(fcst) {
+      // Library plays never wait on peer data — when they show "buffering" the
+      // delay is just the VLC HTTP handoff. Use a phrasing that matches reality
+      // so a slow VLC doesn't make users think a fully-downloaded episode is
+      // stuck on the network.
+      if (s.stream_status === "buffering") {
+        fcst.textContent = s.is_library_playback ? "Starting playback…" : "Buffering…";
+      } else if (s.stream_status === "playing") {
+        fcst.textContent = "▶ Playing";
+      } else {
+        fcst.textContent = "";
+      }
+    }
     setFcTitle(s.active_title||"", s.library_current_file||"");
     // Intentionally do NOT auto-close on stream_status==="idle" — the server can
     // take several seconds to publish the next track, and the user wants the
@@ -1775,21 +1794,26 @@ function renderPlayer(s){
     if(fcCtr) fcCtr.textContent=hasList&&total>1?`${curIdx+1} / ${total}`:"";
   }
 
-  // 8.4 — Auto-open fullscreen on mobile (<768 px) when a new track starts playing
+  // 8.4 — Auto-open fullscreen on mobile (<768 px) when a new track starts.
+  // We open on *buffering* too (not just `playing`) so that on slow networks
+  // the user sees a loading overlay the moment they hit Play, instead of
+  // staring at the library tab for several seconds while VLC opens the file.
   {
     const curTitle = s.active_title || "";
     if (curTitle && curTitle !== _fcAutoTitle) {
       _fcAutoTitle = curTitle;
       _fcDismissed = false; // new track → reset dismiss so it can auto-open again
     }
-    if (isPlaying && window.innerWidth < 768 && !_fcDismissed && fc.classList.contains("hidden")) {
+    const activelyEngaging = isPlaying || s.stream_status === "buffering";
+    if (activelyEngaging && window.innerWidth < 768 && !_fcDismissed && fc.classList.contains("hidden")) {
       openFullscreenControls();
     }
   }
 
   sp.textContent=(s.dl_speed_bps>0&&s.stream_status!=="idle")?`▼ ${fmtSpeed(s.dl_speed_bps)}  ▲ ${fmtSpeed(s.ul_speed_bps)}`:"";
   if(s.stream_status in BADGE){
-    const labels={buffering:"Buffering…",playing:"▶ Playing",error:"Error"};
+    const bufLabel = s.is_library_playback ? "Loading…" : "Buffering…";
+    const labels={buffering:bufLabel,playing:"▶ Playing",error:"Error"};
     badge.className=`text-[11px] font-black uppercase tracking-wide px-2 py-0.5 border ${BADGE[s.stream_status]}`;
     badge.textContent=labels[s.stream_status]; badge.classList.remove("hidden");
   } else { badge.classList.add("hidden"); }
@@ -2769,32 +2793,84 @@ function renderLibrary(items){
 // "Continue" — auto-selects best file and position and starts VLC playback on
 // the host. (Streaming to the current device is offered separately via the
 // "On Device" button.)
-async function continueLibraryItem(itemId){
+async function continueLibraryItem(itemId, label){
   if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
   if(!navigator.onLine){
     showAlert("Disconnected — playback needs the host to be reachable.","error"); return;
   }
-  const r=await fetch(`/api/library/${itemId}/play`,{
-    method:"POST", headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({profile_id:profile.id,files:[],seek_first_to:null}),
-  });
-  if(!r.ok){
-    const e=await r.json().catch(()=>({detail:"Playback failed"}));
-    showAlert(e.detail||"Playback failed.","error");
+  if(!app._connected){
+    showAlert("Reconnecting — try again in a moment.","warn"); return;
   }
+  await withInflight(`play_${itemId}`, null, async () => {
+    _optimisticBuffering(label || _libraryLabel(itemId), itemId);
+    const r=await fetch(`/api/library/${itemId}/play`,{
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({profile_id:profile.id,files:[],seek_first_to:null}),
+    });
+    if(!r.ok){
+      const e=await r.json().catch(()=>({detail:"Playback failed"}));
+      showAlert(e.detail||"Playback failed.","error");
+      _revertOptimistic();
+    }
+  });
 }
 
 // Play a specific ordered list of files with optional seek on first
-async function playLibraryFiles(itemId,files,seekTo){
+async function playLibraryFiles(itemId,files,seekTo,label){
   if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
-  const body={profile_id:profile.id,files,seek_first_to:seekTo||null};
-  const r=await fetch(`/api/library/${itemId}/play`,{
-    method:"POST", headers:{"Content-Type":"application/json"},
-    body:JSON.stringify(body),
+  if(!app._connected){
+    showAlert("Reconnecting — try again in a moment.","warn"); return;
+  }
+  await withInflight(`play_${itemId}`, null, async () => {
+    _optimisticBuffering(label || _libraryLabel(itemId), itemId);
+    const body={profile_id:profile.id,files,seek_first_to:seekTo||null};
+    const r=await fetch(`/api/library/${itemId}/play`,{
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(body),
+    });
+    if(!r.ok){
+      const e=await r.json().catch(()=>({detail:"Playback failed"}));
+      showAlert(e.detail||"Playback failed.","error");
+      _revertOptimistic();
+    }
   });
-  if(!r.ok){
-    const e=await r.json().catch(()=>({detail:"Playback failed"}));
-    showAlert(e.detail||"Playback failed.","error");
+}
+
+// Look up the cached library item title so the optimistic UI shows the right name
+function _libraryLabel(itemId){
+  const item = (window._libCache || []).find(it => it && it.id === itemId);
+  return (item && item.title) || "";
+}
+
+// Flip the UI to "buffering" immediately so the user sees feedback while
+// the server's slow VLC handoff is still in flight. The real `state` event
+// from SSE will overwrite these once the server catches up.
+function _optimisticBuffering(label, itemId){
+  // We may be passed an episode-specific label (e.g. "S01·E04 · Name"). The
+  // server, when its state event lands, will set active_title to the item's
+  // canonical title — so we seed _fcAutoTitle with that canonical title (not
+  // the optimistic label) to avoid renderPlayer thinking it's a new track and
+  // re-opening a fullscreen overlay the user just dismissed.
+  const canonical = (itemId && _libraryLabel(itemId)) || label || "";
+  app.stream_status = "buffering";
+  app.active_title  = label || canonical || "Loading…";
+  app.vlc_time     = 0;
+  app.vlc_duration = 0;
+  app.is_library_playback = true;
+  renderPlayer(app);
+  hideAlert();
+  _fcDismissed = false;
+  _fcAutoTitle = canonical || app.active_title;
+  if (window.innerWidth < 768) openFullscreenControls();
+}
+
+// Roll the optimistic buffering state back when the Play request errors before
+// the server flipped state itself.
+function _revertOptimistic(){
+  if (app.stream_status === "buffering") {
+    app.stream_status = "idle";
+    app.active_title  = null;
+    renderPlayer(app);
   }
 }
 
@@ -4625,9 +4701,9 @@ function pcChoose(target) {
     }
     if (ctx._continueMode) {
       // Multi-file resume on VLC: let the backend pick up from the resume hint.
-      return continueLibraryItem(ctx.itemId);
+      return continueLibraryItem(ctx.itemId, ctx.label);
     }
-    return playLibraryFiles(ctx.itemId, ctx.files, ctx.seekTo);
+    return playLibraryFiles(ctx.itemId, ctx.files, ctx.seekTo, ctx.label);
   }
   if (target === "local") {
     // Dismiss the server-side offer (VLC stays put; user is watching on device).
@@ -5212,12 +5288,19 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
+let _sseDisconnectTimer = null;
 function connectSSE(){
   const sseDot=document.getElementById("sseDot"),sseLabel=document.getElementById("sseLabel");
   const es=new EventSource("/api/events");
   es.addEventListener("open",()=>{
+    if(_sseDisconnectTimer){ clearTimeout(_sseDisconnectTimer); _sseDisconnectTimer = null; }
+    const wasOffline = !app._connected;
+    app._connected = true;
     sseDot.className="w-2 h-2 bg-green-500 blink transition-colors";
-    sseLabel.textContent="live"; sseLabel.className="text-[11px] text-green-600 hidden sm:block";
+    // Show "LIVE" on mobile too so the user can tell at a glance whether
+    // realtime updates are flowing. The label was previously sm:block only.
+    sseLabel.textContent="LIVE"; sseLabel.className="text-[10px] font-black uppercase tracking-wide text-green-500";
+    if(wasOffline) hideAlert();
   });
   es.addEventListener("state",e=>{
     const d=JSON.parse(e.data); Object.assign(app,d);
@@ -5279,7 +5362,19 @@ function connectSSE(){
   });
   es.addEventListener("error",()=>{
     sseDot.className="w-2 h-2 bg-red-600 transition-colors";
-    sseLabel.textContent="reconnecting"; sseLabel.className="text-[11px] text-red-600 hidden sm:block";
+    sseLabel.textContent="OFFLINE"; sseLabel.className="text-[10px] font-black uppercase tracking-wide text-red-500";
+    // Brief network hiccups happen all the time (especially on cell). Don't
+    // flag the app as offline immediately — wait a few seconds. While the
+    // grace timer is running, actions still go through and we just dim the
+    // status indicator. After the grace period, _connected flips false and
+    // the Play guards refuse new requests until SSE comes back.
+    if(!_sseDisconnectTimer){
+      _sseDisconnectTimer = setTimeout(()=>{
+        app._connected = false;
+        _sseDisconnectTimer = null;
+        showAlert("Lost connection to host — reconnecting…","warn");
+      }, 4000);
+    }
   });
 }
 
@@ -5350,6 +5445,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">2.1.8</div>
+<div style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">2.2.0</div>
 </body>
 </html>

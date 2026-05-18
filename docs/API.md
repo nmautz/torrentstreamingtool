@@ -42,8 +42,8 @@ Event types:
 |--------|------|-------|
 | POST | `/api/stream/prepare` | `{magnet, title}` → adds magnet, waits for metadata + file list, returns `{hash, files[]}`. Stores hash in `state.prepare_hash` |
 | DELETE | `/api/stream/cancel?hash=…` | Deletes a torrent added by `/stream/prepare` (e.g. user dismissed the picker) |
-| POST | `/api/stream` | `{magnet, title, file_index?, torrent_hash?}` → 202; spawns `stream_pipeline` task. `torrent_hash` reuses the `/prepare` torrent |
-| POST | `/api/stop` | Cancel pipeline, delete torrent + files (unless saved to library), VLC `pl_stop`, minimize VLC |
+| POST | `/api/stream` | `{magnet, title, file_index?, torrent_hash?}` → 202; clears `state` synchronously, kicks off `stream_pipeline`, and runs the prior-torrent qBit cleanup in a background task so the response never waits on qBit. `torrent_hash` reuses the `/prepare` torrent |
+| POST | `/api/stop` | Returns **202** — clears `state` and broadcasts `idle` synchronously, then runs the qBit delete + VLC `pl_stop` + minimize in a background task so the UI flips to idle immediately even when qBit/VLC roundtrips are slow. Cancels both `state.stream_task` and `state.library_play_task` first |
 | POST | `/api/retry` | Kill VLC, relaunch with HTTP interface, replay current file + remainder of playlist |
 | POST | `/api/stream/save-to-library` | `{title, series, season, episode, save_path}` → adopt the active stream into the library. Restores all file priorities to 1 so the full torrent continues. Sets `library_item_id` so `/api/stop` won't delete files |
 
@@ -72,7 +72,7 @@ Up to 6 profiles. No passwords. Optional 4-digit PIN per profile.
 | POST | `/api/library/download` | `{magnet, title, series, season, episode, save_path, torrent_hash, selected_file_indices[], default_visible_profiles[]}` — `default_visible_profiles` is optional; if non-empty, only those profile IDs see the item in the main list by default (others see it in the hidden tab) |
 | POST | `/api/library/upload` | multipart: `files[]`, `title`, `series`, `season`, `episode`, `save_path` — direct upload of local video files |
 | DELETE | `/api/library/{id}?delete_file=true` | Remove item; optionally also delete files from disk via qBit |
-| POST | `/api/library/{id}/play` | `{profile_id, files[], seek_first_to?}` → start VLC playback (resolves resume + applies resume_mode) |
+| POST | `/api/library/{id}/play` | `{profile_id, files[], seek_first_to?}` → returns **202** immediately. State flips to `buffering`, a `state` SSE event fires, and the VLC `in_play`/`in_enqueue` work runs in a background task (`state.library_play_task`) which broadcasts `playing` when VLC has accepted the first track. Re-issuing Play / prev / next / stop while a prior handoff is in flight cancels it |
 | POST | `/api/library/{id}/queue-play` | `?profile_id=…&file_path=…` — auto-play when download (or specific file) completes; boosts qBit priority |
 | DELETE | `/api/library/{id}/queue-play` | Cancel pending auto-play |
 | POST | `/api/library/{id}/file-priority` | `{file_paths[], priority: 0|1|7}` — qBit priority for specific files |
@@ -92,8 +92,8 @@ Up to 6 profiles. No passwords. Optional 4-digit PIN per profile.
 | POST | `/api/vlc/volume/{up\|down}?step=N` | Server-side relative adjust (default ±10 %), capped by global `settings.max_volume`. UI +/- buttons send this with `step=5` so out-of-sync clients can't snap volume to a stale absolute. |
 | POST | `/api/vlc/seek?delta=N` | Relative — `val=±Ns` |
 | POST | `/api/vlc/seek/to?position_pct=N` | Absolute — `val=N%`. NOTE: VLC treats `val=N` (no suffix) as a 0–1 fraction. Don't confuse the two |
-| POST | `/api/vlc/prev` | Previous episode in series order. Uses `library_playlist` then `item.files` |
-| POST | `/api/vlc/next` | Next episode in series order |
+| POST | `/api/vlc/prev` | Previous episode in series order. Uses `library_playlist` then `item.files`. Returns **202** — VLC handoff runs in background (`state.library_play_task`); buffering state is broadcast immediately, `playing` once VLC accepts the new track |
+| POST | `/api/vlc/next` | Next episode in series order. Same 202 + background-handoff pattern as `/prev` |
 | GET | `/api/vlc/tracks` | `{audio[], subtitle[], current_audio, current_subtitle, time, length}` — IDs are VLC ES IDs, not 1/2/3 counters |
 | POST | `/api/vlc/track/audio/{track_id}` | Switch audio. Saves as profile track-pref for the current file |
 | POST | `/api/vlc/track/subtitle/{track_id}` | Switch subtitle (`-1` = off). Saves as profile track-pref |
