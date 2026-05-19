@@ -1625,6 +1625,79 @@ async def background_video_loop() -> None:
             pass
 
 
+async def _sync_state_from_vlc() -> None:
+    """On lifespan startup, restore `state` from VLC's actual playback so SSE
+    clients see the correct "now playing" title after a server restart (admin
+    shutdown, watchdog kick, manual relaunch) while VLC kept running.
+
+    Without this, every `AppState` field is at its dataclass default —
+    `stream_status="idle"`, `active_title=None` — and `background_video_loop`
+    sees VLC already `state=playing` so it stays out of the way, leaving the
+    dashboard stuck on "No active stream" until someone calls /api/stop and
+    starts a new playback.
+
+    `library_profile_id` is intentionally left unset — the profile that
+    originally started the playback isn't recoverable, so `vlc_progress_tracker`
+    will skip progress saves and skip-offer logic for the restored session.
+    Playback control (next/prev/stop, title display) still works.
+    """
+    try:
+        vs = await vlc_status()
+        if not vs or vs.get("state") not in ("playing", "paused"):
+            return
+        uri = await vlc_playlist_uri()
+        if not uri or not uri.startswith("file://"):
+            return
+        cur_path = uri_to_path(uri)
+        try:
+            cur_resolved = Path(cur_path).resolve()
+        except Exception:
+            cur_resolved = Path(cur_path)
+
+        lib = await get_library()
+        bg_path = (lib.get("settings", {}).get("background_video") or {}).get("path", "")
+        if bg_path:
+            try:
+                if Path(bg_path).resolve() == cur_resolved:
+                    state.background_playing = True
+                    return
+            except Exception:
+                pass
+
+        matched_item: Optional[dict] = None
+        matched_path: Optional[str] = None
+        for item in lib.get("items", []):
+            for f in item.get("files", []):
+                stored = f.get("path", "")
+                if not stored:
+                    continue
+                try:
+                    if Path(stored).resolve() == cur_resolved:
+                        matched_item = item
+                        matched_path = stored
+                        break
+                except Exception:
+                    continue
+            if matched_item:
+                break
+
+        state.stream_status = "playing"
+        if matched_item and matched_path:
+            state.active_title = matched_item.get("title") or Path(cur_path).stem
+            state.library_item_id = matched_item["id"]
+            state.library_item_file_count = len(matched_item.get("files", []))
+            state.active_hash = matched_item.get("torrent_hash") or None
+            state.library_playlist = [
+                f.get("path", "") for f in matched_item.get("files", []) if f.get("path")
+            ]
+            state.library_current_file = matched_path
+        else:
+            state.active_title = Path(cur_path).stem
+            state.library_current_file = cur_path
+    except Exception:
+        pass
+
+
 # ── Background Task: Library Download Monitor ─────────────────────────────────
 
 async def library_download_monitor() -> None:
@@ -2277,6 +2350,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     state.user_volume_before_bg = _startup_vol
     _startup_raw = max(0, min(512, round(_startup_vol / 100 * 256)))
     await vlc("volume", val=str(_startup_raw))
+
+    # If uvicorn was just restarted (admin shutdown, watchdog, manual relaunch)
+    # while VLC kept playing, seed state from VLC so the dashboard doesn't sit
+    # at "No active stream" until someone presses Stop.
+    await _sync_state_from_vlc()
 
     guard       = asyncio.create_task(vpn_guard())
     broadcaster = asyncio.create_task(stat_broadcaster())
