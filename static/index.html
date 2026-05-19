@@ -1511,6 +1511,38 @@
 <script>
 "use strict";
 
+// ── UI version self-check ──────────────────────────────────────────────────
+// Reads the version baked into this page (from the badge in the bottom-right
+// <div data-ui-version>) and compares against /api/version. If the server has
+// a newer build, force a hard reload with a cache-buster so the browser stops
+// serving the cached HTML. sessionStorage guard prevents reload loops if the
+// fresh fetch somehow returns the same stale version.
+(function checkUiVersion(){
+  function parse(v){ return String(v||"").split(".").map(n=>parseInt(n,10)||0); }
+  function isOlder(a,b){
+    const x=parse(a), y=parse(b);
+    for(let i=0;i<Math.max(x.length,y.length);i++){
+      const ai=x[i]||0, bi=y[i]||0;
+      if(ai<bi) return true;
+      if(ai>bi) return false;
+    }
+    return false;
+  }
+  const badge=document.querySelector("[data-ui-version]");
+  const cached=(badge && badge.textContent || "").trim();
+  if(!cached) return;
+  fetch("/api/version",{cache:"no-store"}).then(r=>r.ok?r.json():null).then(d=>{
+    if(!d || !d.version) return;
+    if(!isOlder(cached, d.version)) return;
+    const reloadedFor=sessionStorage.getItem("streamlink_reloaded_for");
+    if(reloadedFor===d.version) return;   // already tried, avoid loop
+    sessionStorage.setItem("streamlink_reloaded_for", d.version);
+    const url=new URL(window.location.href);
+    url.searchParams.set("_v", d.version);
+    window.location.replace(url.toString());
+  }).catch(()=>{});
+})();
+
 // ── Constants ──────────────────────────────────────────────────────────────
 const PROFILE_COLORS = {
   indigo: { bg:"bg-indigo-600", ring:"ring-indigo-400" },
@@ -5489,6 +5521,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">2.4.4</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">2.5.0</div>
 </body>
 </html>

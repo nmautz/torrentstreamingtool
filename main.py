@@ -77,6 +77,11 @@ class Settings(BaseSettings):
 settings = Settings()
 LIBRARY_FILE = Path(__file__).parent / "library.json"
 BACKGROUND_DIR = Path(__file__).parent / ".background"
+
+# Keep in sync with the version badge at the bottom of static/index.html.
+# Clients fetch this via /api/version and force a hard reload when the cached
+# page's badge value is older than the server's value.
+UI_VERSION = "2.5.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -3798,6 +3803,15 @@ async def download_subtitle(req: SubtitleDownloadReq) -> JSONResponse:
 @app.get("/api/state")
 async def get_state() -> JSONResponse:
     return JSONResponse(state_snapshot())
+
+
+@app.get("/api/version")
+async def get_ui_version() -> JSONResponse:
+    # no-cache so an out-of-date browser can detect that its cached HTML is stale
+    return JSONResponse(
+        {"version": UI_VERSION},
+        headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
+    )
 
 
 async def _all_library_paths() -> list[dict]:

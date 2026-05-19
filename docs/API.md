@@ -24,11 +24,12 @@ Event types:
 | `progress_saved` | every 15 s while a library item is playing | `{item_id, profile_id, file_path, episode_name, position_sec, duration_sec, pct}` |
 | `analysis_status` | Smart Skip job progress | `{series_key, job: {status, stage, current, total, message, episode_name?, …}}` |
 
-## State
+## State / Version
 
 | Method | Path | Notes |
 |--------|------|-------|
 | GET | `/api/state` | Current full snapshot |
+| GET | `/api/version` | `{"version": "<semver>"}` — always `no-cache`. The UI fetches this on load and force-reloads with `?_v=<ver>` if the cached page is older (see `UI_VERSION` in `main.py` and the `[data-ui-version]` badge in `index.html`) |
 
 ## Search
 
