@@ -982,14 +982,17 @@ async function loadOfflineCache(){
     orphList.innerHTML = d.orphans.map(o=>{
       const kindLabel = o.kind === "partial"
         ? `<span class="text-[10px] font-bold uppercase tracking-widest px-1.5 py-0.5 bg-amber-950 text-amber-300">Partial</span>`
+        : o.kind === "legacy"
+        ? `<span class="text-[10px] font-bold uppercase tracking-widest px-1.5 py-0.5 bg-blue-950 text-blue-300">Legacy</span>`
         : `<span class="text-[10px] font-bold uppercase tracking-widest px-1.5 py-0.5 bg-gray-800 text-gray-400">Cached</span>`;
-      const fileExt = o.kind === "partial" ? ".part.mp4" : ".mp4";
+      const suffix = o.kind === "partial" ? ".part/" : o.kind === "legacy" ? "" : "/";
+      const label  = o.kind === "legacy" && o.name ? o.name : `${o.cache_key}${suffix}`;
       return `
       <div class="flex items-center justify-between px-5 py-3 gap-3">
         <div class="min-w-0">
           <div class="flex items-center gap-2">
             ${kindLabel}
-            <code class="text-xs font-mono text-gray-400 truncate">${escHtml(o.cache_key)}${fileExt}</code>
+            <code class="text-xs font-mono text-gray-400 truncate">${escHtml(label)}</code>
           </div>
           <div class="text-[10px] text-gray-600 mt-0.5">modified ${new Date(o.mtime*1000).toLocaleString()}</div>
         </div>
@@ -1066,7 +1069,7 @@ function _renderOffFile(f){
             ${_offStatusBadge(f.status)}
             <span class="text-xs text-gray-300 truncate">${escHtml(f.name)}</span>
           </div>
-          <div class="text-[10px] font-mono text-gray-600 mt-0.5 truncate">${escHtml(f.cache_key)}.mp4</div>
+          <div class="text-[10px] font-mono text-gray-600 mt-0.5 truncate">${escHtml(f.cache_key)}/</div>
           ${subLine}
           ${progressHtml}
         </div>

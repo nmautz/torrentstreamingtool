@@ -81,7 +81,7 @@ BACKGROUND_DIR = Path(__file__).parent / ".background"
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "2.5.0"
+UI_VERSION = "3.0.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -2984,13 +2984,54 @@ async def update_progress(item_id: str, req: ProgressReq) -> JSONResponse:
     pct = req.position_sec / dur if dur else 0
     prof_prog = item.setdefault("progress", {}).setdefault(req.profile_id, {})
     prof_prog["last_file"] = req.file_path
-    prof_prog.setdefault("file_progress", {})[req.file_path] = {
+    file_progress = prof_prog.setdefault("file_progress", {})
+    existing = file_progress.get(req.file_path, {})
+    file_progress[req.file_path] = {
         "position_sec": round(req.position_sec, 1),
         "duration_sec": round(req.duration_sec, 1),
         "completed": pct > 0.92,
         "updated_at": _now_iso(),
+        # Preserve VLC + local-player track picks across progress writes —
+        # these are sibling keys in the same file_progress dict.
+        **{k: v for k, v in existing.items()
+           if k in ("audio_track", "subtitle_track",
+                    "local_audio_idx", "local_subtitle_idx")},
     }
     await put_library(lib)
+    return JSONResponse({"ok": True})
+
+
+class LocalTracksReq(BaseModel):
+    profile_id: str
+    file_path: str
+    audio_idx: Optional[int] = None
+    subtitle_idx: Optional[int] = None   # -1 = subtitles off
+
+
+@app.post("/api/library/{item_id}/local-tracks")
+async def set_local_tracks(item_id: str, req: LocalTracksReq) -> JSONResponse:
+    """Persist the in-browser player's audio/subtitle picks for a file.
+
+    These are 0-based indices into the HLS bundle's audios/subtitles arrays
+    (the order seen in meta.json), distinct from the VLC `audio_track` /
+    `subtitle_track` ES IDs sitting next to them in the same file_progress
+    dict. The two systems use different addressing schemes that don't
+    interchange — that's why they're kept under separate keys.
+    """
+    async with _lib_lock:
+        lib = _load_lib_raw()
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        if not item:
+            raise HTTPException(404, "Item not found.")
+        fp = (item.setdefault("progress", {})
+                  .setdefault(req.profile_id, {})
+                  .setdefault("file_progress", {})
+                  .setdefault(req.file_path, {}))
+        if req.audio_idx is not None:
+            fp["local_audio_idx"] = req.audio_idx
+        if req.subtitle_idx is not None:
+            fp["local_subtitle_idx"] = req.subtitle_idx
+        _save_lib_raw(lib)
     return JSONResponse({"ok": True})
 
 
@@ -3026,7 +3067,8 @@ async def mark_watched(item_id: str, req: MarkWatchedReq) -> JSONResponse:
                 "completed": True,
                 "updated_at": _now_iso(),
                 **{k: v for k, v in existing.items()
-                   if k in ("audio_track", "subtitle_track")},
+                   if k in ("audio_track", "subtitle_track",
+                            "local_audio_idx", "local_subtitle_idx")},
             }
         else:
             file_prog[path] = {
@@ -3035,7 +3077,8 @@ async def mark_watched(item_id: str, req: MarkWatchedReq) -> JSONResponse:
                 "completed": False,
                 "updated_at": _now_iso(),
                 **{k: v for k, v in existing.items()
-                   if k in ("audio_track", "subtitle_track")},
+                   if k in ("audio_track", "subtitle_track",
+                            "local_audio_idx", "local_subtitle_idx")},
             }
 
     await put_library(lib)
@@ -4682,32 +4725,35 @@ async def admin_set_background_enabled(request: Request, req: BackgroundEnabledR
     return JSONResponse({"ok": True, "enabled": bool(req.enabled)})
 
 
-# ── Routes: Stream-to-Device prep + streaming ────────────────────────────────
+# ── Routes: Stream-to-Device prep + HLS streaming ────────────────────────────
 #
-# These endpoints prepare a browser-friendly MP4 of any library file so the
-# device's local <video> can stream it directly over HTTP-range:
+# These endpoints prepare an HLS bundle of any library file so the device's
+# local <video> can stream it via hls.js (Chrome/Firefox/Edge) or Safari
+# native HLS playback:
 #   1. Client POSTs /api/library/{id}/offline-prepare with a file_path.
-#   2. Server probes codecs. If already Safari-compatible MP4, returns video_url
-#      pointing at the existing /download endpoint immediately. Otherwise, kicks
-#      off a remux (codec compatible, just rewrap to MP4) or transcode (re-encode
-#      to H.264/AAC) job and returns {ready:false, job_id, operation}.
-#   3. Client polls /api/library/offline-job/{job_id} until status=="done", then
-#      sets <video>.src to the returned video_url. The browser issues Range
-#      requests against /api/library/offline-cache/<sha>.mp4 (FileResponse
-#      supports Range natively) so seek-while-streaming works without extra code.
-#   4. Subtitles and skip-data sit alongside the same /offline-prepare response
-#      as URLs (/api/library/{id}/subtitle, /api/library/{id}/skip-data); the
-#      client wires them straight into <track> elements / the skip-offer logic.
+#   2. Server hashes the source into a cache key. If a bundle directory
+#      `<sha>/master.m3u8` already exists, returns master_url + audios[] +
+#      subtitles[] from meta.json. Otherwise kicks off a single ffmpeg job
+#      that maps the video + every audio track + every text subtitle into
+#      one HLS bundle and returns {ready:false, job_id, operation:"hls"}.
+#   3. Client polls /api/library/offline-job/{job_id} until status=="done",
+#      then hands master_url to hls.js (or sets <video>.src on Safari).
+#      Per-rendition playlists + fmp4 segments are served from
+#      /api/library/offline-cache/<sha>/<filename>.
+#   4. Subtitles, skip-data, and the saved track picks all come back in the
+#      same /offline-prepare response; the client wires them into the audio
+#      / subtitle dropdowns and the skip-offer logic.
 #
 # The `offline` token in the endpoint paths is a historical artifact — these
 # powered the older "download to device" Handoff feature. The cache namespace
-# stays for backwards compatibility; the user-facing UX is now stream-to-device.
+# stays for backwards compatibility; the user-facing UX is stream-to-device.
 # See docs/STREAMING.md for the full design.
 
 OFFLINE_CACHE = Path(__file__).parent / ".offline_cache"
-# Bump this when offline-output requirements change (codec rules, ffmpeg args)
-# so previously-cached MP4s built by older logic get rebuilt on next request.
-OFFLINE_CACHE_VERSION = "v2"
+# Bump this when offline-output requirements change (codec rules, ffmpeg args,
+# cache layout) so previously-cached bundles built by older logic get rebuilt
+# on next request. v3-hls switched single-MP4 output to per-source HLS bundles.
+OFFLINE_CACHE_VERSION = "v3-hls"
 # Cap ffmpeg worker threads for offline prep so bulk Save Offline on a 30+ episode
 # show can't saturate every core on the host. The browser and OS need headroom —
 # without this, ffmpeg pegs all cores and the dashboard becomes unresponsive.
@@ -4794,20 +4840,28 @@ async def _has_nvenc() -> bool:
         print("[offline] NVENC available — H.264 encodes will run on the GPU.")
     return ok
 
-# Safari iOS is much pickier than the headline list suggests:
-#   • Video stream MUST be H.264 (HEVC works on hardware but profile/level/tag
-#     mismatches cause silent black-video; not worth the surface area). For H.264
-#     the profile must be Baseline / Main / High (NOT High 10) and the pixel
-#     format must be yuv420p — 10-bit content (Hi10P / yuv420p10le) decodes
-#     audio fine but renders black.
-#   • Audio stream MUST be AAC or MP3.
-#   • Container MUST be MP4/M4V/MOV with the moov atom up-front (faststart).
-# Anything else: transcode to H.264-yuv420p / AAC.
-_SAFARI_VIDEO_CODECS  = {"h264"}
-_SAFARI_AUDIO_CODECS  = {"aac", "mp3"}
-_SAFARI_PIX_FMT       = "yuv420p"
-_SAFARI_BAD_PROFILES  = {"high 10", "high 4:2:2", "high 4:4:4 predictive"}
-_SAFARI_CONTAINERS    = (".mp4", ".m4v", ".mov")
+# HLS prep target — H.264 yuv420p video, AAC stereo audio, WebVTT subtitles.
+#   • Video that's already H.264 yuv420p with a browser-safe profile is stream-copied
+#     (no re-encode). Anything else transcodes to libx264 / h264_nvenc.
+#   • Every audio track is transcoded to AAC stereo regardless of source — uniform
+#     codec across renditions, and Safari iOS won't play FLAC/Opus/DTS/TrueHD.
+#   • Text subtitles (subrip/ass/ssa) are remuxed to WebVTT. Image-based subs
+#     (PGS/VOBSUB/DVB) can't go into HTML5 video tracks; they're reported in
+#     meta.json as `skipped_image_subs` so the UI can flag them.
+_HLS_PROFILE_BAD = {"high 10", "high 4:2:2", "high 4:4:4 predictive"}
+_TEXT_SUB_CODECS  = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"}
+_IMAGE_SUB_CODECS = {"hdmv_pgs_subtitle", "pgssub", "dvd_subtitle", "dvdsub",
+                     "dvb_subtitle", "vobsub", "xsub"}
+
+# ffmpeg ≥ 4.3 is required for reliable multi-rendition HLS with var_stream_map
+# (subtitle groups and the agroup/sgroup tagging system are flaky on older builds).
+_FFMPEG_MIN_VERSION = (4, 3)
+_ffmpeg_version_probe: dict = {}
+
+# HLS segment duration. 6 s is the de-facto default — Safari and hls.js both
+# tune their buffering for this range, and segment-boundary seek granularity
+# stays under the user-perceptible threshold.
+HLS_SEGMENT_SECS = 6
 
 
 def _ffprobe_bin() -> Optional[str]:
@@ -4820,8 +4874,71 @@ def _ffprobe_bin() -> Optional[str]:
     return shutil.which("ffprobe")
 
 
-def _ffprobe_codec(path: str) -> dict:
-    """Return {video_codec, audio_codec, video_profile, pix_fmt, duration_sec, container}."""
+async def _ffmpeg_version() -> Optional[tuple[int, int]]:
+    """Return (major, minor) of the active ffmpeg binary, or None if unavailable.
+
+    Cached per process — `ffmpeg -version` is cheap but we hit this on every
+    prep job and there's no reason to re-spawn it.
+    """
+    if "result" in _ffmpeg_version_probe:
+        return _ffmpeg_version_probe["result"]
+    ffmpeg = analyzer.ffmpeg_bin()
+    if not ffmpeg:
+        _ffmpeg_version_probe["result"] = None
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            ffmpeg, "-version",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+        m = re.search(rb"ffmpeg version (\d+)\.(\d+)", out or b"")
+        ver: Optional[tuple[int, int]] = (int(m.group(1)), int(m.group(2))) if m else None
+    except Exception:
+        ver = None
+    _ffmpeg_version_probe["result"] = ver
+    return ver
+
+
+# Crude ISO 639-2/3-letter → display name. Anything not in the map falls back
+# to the upper-cased code (better than blank), so unknown tags still render
+# something the user can identify against the MKV's track list.
+_LANG_NAMES = {
+    "eng": "English", "jpn": "Japanese", "spa": "Spanish", "esp": "Spanish",
+    "fre": "French",  "fra": "French",  "ger": "German",   "deu": "German",
+    "ita": "Italian", "por": "Portuguese", "rus": "Russian",
+    "chi": "Chinese", "zho": "Chinese", "kor": "Korean",
+    "ara": "Arabic",  "hin": "Hindi",   "nld": "Dutch",
+    "swe": "Swedish", "fin": "Finnish", "nor": "Norwegian",
+    "dan": "Danish",  "pol": "Polish",  "tur": "Turkish",
+    "ukr": "Ukrainian", "tha": "Thai",  "vie": "Vietnamese",
+    "und": "",
+}
+
+
+def _track_label(track: dict, fallback: str) -> str:
+    """Build a user-facing label for an audio/sub track."""
+    lang = (track.get("language") or "und").lower()
+    base = _LANG_NAMES.get(lang, lang.upper())
+    title = (track.get("title") or "").strip()
+    if title and base:
+        return f"{base} ({title})"
+    return title or base or fallback
+
+
+def _ffprobe_full(path: str) -> dict:
+    """Enumerate every stream + container metadata.
+
+    Returns:
+      {
+        duration_sec, container,
+        video: {codec, profile, pix_fmt, width, height} | None,
+        audios:    [{idx, codec, language, title, channels, default}],
+        subtitles: [{idx, codec, language, title, default, image_based}],
+      }
+    `idx` is the index within the stream's own type — what ffmpeg `-map`
+    accepts as `0:a:<idx>` / `0:s:<idx>`.
+    """
     binp = _ffprobe_bin()
     if not binp:
         return {}
@@ -4832,49 +4949,62 @@ def _ffprobe_codec(path: str) -> dict:
             capture_output=True, text=True, timeout=15,
         )
         data = json.loads(r.stdout or "{}")
-        video = next((s for s in data.get("streams", []) if s.get("codec_type") == "video"), {})
-        audio = next((s for s in data.get("streams", []) if s.get("codec_type") == "audio"), {})
-        fmt   = data.get("format", {}) or {}
-        return {
-            "video_codec":   video.get("codec_name", ""),
-            "video_profile": (video.get("profile", "") or "").lower(),
-            "pix_fmt":       (video.get("pix_fmt", "") or "").lower(),
-            "audio_codec":   audio.get("codec_name", ""),
-            "container":     fmt.get("format_name", ""),
-            "duration_sec":  float(fmt.get("duration", 0) or 0),
-        }
     except Exception:
         return {}
+    fmt = data.get("format") or {}
+    out: dict = {
+        "duration_sec": float(fmt.get("duration", 0) or 0),
+        "container":    fmt.get("format_name", ""),
+        "video":        None,
+        "audios":       [],
+        "subtitles":    [],
+    }
+    audio_i = sub_i = 0
+    for s in data.get("streams") or []:
+        kind = s.get("codec_type")
+        tags = s.get("tags") or {}
+        disp = s.get("disposition") or {}
+        if kind == "video" and out["video"] is None:
+            out["video"] = {
+                "codec":   s.get("codec_name", ""),
+                "profile": (s.get("profile", "") or "").lower(),
+                "pix_fmt": (s.get("pix_fmt", "") or "").lower(),
+                "width":   s.get("width", 0),
+                "height":  s.get("height", 0),
+            }
+        elif kind == "audio":
+            out["audios"].append({
+                "idx":      audio_i,
+                "codec":    s.get("codec_name", ""),
+                "language": (tags.get("language") or "und").lower(),
+                "title":    tags.get("title", ""),
+                "channels": s.get("channels", 0),
+                "default":  bool(disp.get("default")),
+            })
+            audio_i += 1
+        elif kind == "subtitle":
+            codec = (s.get("codec_name", "") or "").lower()
+            out["subtitles"].append({
+                "idx":         sub_i,
+                "codec":       codec,
+                "language":    (tags.get("language") or "und").lower(),
+                "title":       tags.get("title", ""),
+                "default":     bool(disp.get("default")),
+                "image_based": codec in _IMAGE_SUB_CODECS,
+            })
+            sub_i += 1
+    return out
 
 
-def _video_decodable_in_safari(info: dict) -> bool:
-    """True iff the video stream itself is something Safari iOS can render.
-
-    Audio-plays-but-video-black is almost always one of these failing:
-    non-H.264 codec, High 10 profile (10-bit), or non-yuv420p pixel format.
+def _video_can_copy(v: Optional[dict]) -> bool:
+    """True iff the video stream is already H.264 / yuv420p / good profile —
+    safe to stream-copy into HLS instead of re-encoding.
     """
-    if info.get("video_codec", "") not in _SAFARI_VIDEO_CODECS:
+    if not v:
         return False
-    if info.get("video_profile", "") in _SAFARI_BAD_PROFILES:
-        return False
-    pf = info.get("pix_fmt", "")
-    # Empty pix_fmt means we couldn't probe; be safe and re-encode.
-    if not pf or pf != _SAFARI_PIX_FMT:
-        return False
-    return True
-
-
-def _safari_compatible(info: dict, ext: str) -> bool:
-    """True iff the file can be served as-is to Safari (no ffmpeg work needed)."""
-    return (ext.lower() in _SAFARI_CONTAINERS
-            and _video_decodable_in_safari(info)
-            and info.get("audio_codec", "") in _SAFARI_AUDIO_CODECS)
-
-
-def _can_remux(info: dict) -> bool:
-    """True iff codecs are already Safari-decodable; only the container needs MP4 wrapping."""
-    return (_video_decodable_in_safari(info)
-            and info.get("audio_codec", "") in _SAFARI_AUDIO_CODECS)
+    return (v.get("codec") == "h264"
+            and v.get("pix_fmt") == "yuv420p"
+            and v.get("profile") not in _HLS_PROFILE_BAD)
 
 
 def _list_sidecar_subs(src: Path, item_id: str) -> list[dict]:
@@ -4915,19 +5045,143 @@ def _offline_cache_key(src: Path) -> str:
     return hashlib.sha256(raw.encode()).hexdigest()[:24]
 
 
+def _build_hls_ffmpeg_args(
+    ffmpeg: str,
+    src: Path,
+    out_dir: Path,
+    info: dict,
+    use_nvenc: bool,
+) -> tuple[list[str], list[dict], list[dict]]:
+    """Construct the full ffmpeg invocation that emits one HLS bundle.
+
+    Returns (args, kept_audios, kept_subs) — the latter two are the audio /
+    text-sub tracks (from `info`) that were included in the output, in the
+    order they appear in the manifest. Image-based subs are filtered out.
+    """
+    audios = list(info.get("audios") or [])
+    subs   = [s for s in (info.get("subtitles") or []) if not s.get("image_based")]
+
+    # Exactly one audio rendition should be marked DEFAULT in the master
+    # playlist. Honor the source's disposition.default if any; otherwise the
+    # first audio is the default.
+    default_audio_i = next(
+        (i for i, a in enumerate(audios) if a.get("default")),
+        0 if audios else -1,
+    )
+
+    args: list[str] = [
+        ffmpeg, "-y",
+        # -progress emits machine-readable key=value to stdout — we tail it
+        # below for an accurate % instead of guessing from output-dir growth.
+        "-progress", "pipe:1", "-nostats",
+        # Larger input buffers coalesce disk reads; without these the Windows
+        # storage stack can dominate kernel time during a fast encode.
+        "-thread_queue_size", "1024",
+        "-rtbufsize", "64M",
+        "-i", str(src),
+    ]
+
+    # Stream mapping: one video + every audio + every text sub.
+    args += ["-map", "0:v:0"]
+    for a in audios:
+        args += ["-map", f"0:a:{a['idx']}"]
+    for s in subs:
+        args += ["-map", f"0:s:{s['idx']}"]
+
+    # Video codec — stream-copy when already H.264 yuv420p with a good profile.
+    # NVENC always re-encodes (it ignores codec-compat).
+    if _video_can_copy(info.get("video")) and not use_nvenc:
+        args += ["-c:v", "copy"]
+    elif use_nvenc:
+        args += [
+            "-c:v", "h264_nvenc",
+            "-preset", "medium",
+            "-rc", "vbr", "-cq", "23",
+            "-b:v", "0", "-maxrate", "0",
+            "-profile:v", "high", "-level", "4.1",
+            "-pix_fmt", "yuv420p",
+        ]
+    else:
+        args += [
+            "-c:v", "libx264",
+            "-preset", "veryfast", "-crf", "23",
+            # Caps x264 worker threads so the host stays responsive during bulk
+            # /prep-all runs. NVENC ignores this (runs on the GPU).
+            "-threads", str(OFFLINE_FFMPEG_THREADS),
+            "-pix_fmt", "yuv420p",
+            "-profile:v", "high", "-level", "4.1",
+        ]
+
+    # Audio: every track to AAC stereo, regardless of source. Safari iOS only
+    # plays AAC/MP3/AC3/EAC3 reliably and won't decode FLAC/Opus/DTS in MP4 —
+    # uniform AAC across renditions is the only safe lowest common denominator.
+    if audios:
+        args += ["-c:a", "aac", "-b:a", "160k", "-ac", "2"]
+
+    # Subs: HLS requires WebVTT for text renditions. ffmpeg converts subrip /
+    # ass / ssa transparently; ASS styling (karaoke, positioning, fonts) is
+    # lost in the conversion — that's a known tradeoff documented in GOTCHAS.
+    if subs:
+        args += ["-c:s", "webvtt"]
+
+    args += [
+        "-f", "hls",
+        "-hls_time", str(HLS_SEGMENT_SECS),
+        "-hls_playlist_type", "vod",
+        "-hls_segment_type", "fmp4",
+        # independent_segments: every segment starts on a keyframe so the
+        # player can switch renditions without an extra fetch round-trip.
+        "-hls_flags", "independent_segments",
+        "-hls_segment_filename", str(out_dir / "seg_%v_%05d.m4s"),
+        "-master_pl_name", "master.m3u8",
+    ]
+
+    # Build the var_stream_map. The video variant carries `agroup`/`sgroup`
+    # tags pointing at the audio/sub group ids. ffmpeg uses those to emit the
+    # right #EXT-X-MEDIA entries in master.m3u8.
+    v_parts = ["v:0"]
+    if audios:
+        v_parts.append("agroup:aud")
+    if subs:
+        v_parts.append("sgroup:sub")
+    v_parts.append("name:video")
+    parts: list[str] = [",".join(v_parts)]
+
+    for i, a in enumerate(audios):
+        p = [f"a:{i}", "agroup:aud", f"name:audio_{i}",
+             f"language:{a.get('language') or 'und'}"]
+        if i == default_audio_i:
+            p.append("default:yes")
+        parts.append(",".join(p))
+
+    for i, s in enumerate(subs):
+        parts.append(",".join([
+            f"s:{i}", "sgroup:sub", f"name:sub_{i}",
+            f"language:{s.get('language') or 'und'}",
+        ]))
+
+    args += ["-var_stream_map", " ".join(parts)]
+    # Per-rendition playlist template — %v expands to the `name:` tag above.
+    args += [str(out_dir / "%v.m3u8")]
+
+    return args, audios, subs
+
+
 async def _run_offline_job(job_id: str) -> None:
-    """Run the actual ffmpeg remux/transcode for an offline-prepare job."""
+    """Build an HLS bundle for one source file. The output is a directory
+    keyed by `_offline_cache_key(src)` under OFFLINE_CACHE containing the
+    master playlist, per-rendition playlists, segments, and meta.json.
+    """
     job = _offline_jobs.get(job_id)
     if not job:
         return
     # Hold pending until the global concurrency slot frees up. This is what
     # keeps a 77-file /prep-all from spawning 77 ffmpegs at once.
     async with _offline_job_sem():
-        # A late check: the cache file may have been produced by a sibling job
-        # for the same source while we were queued (rare, but possible if the
-        # user triggered prep-all twice). Skip the encode in that case.
-        out = Path(job["out"])
-        if out.exists():
+        out_dir = Path(job["out"])
+        # Sibling-job race: another worker may have produced this bundle while
+        # we sat in the queue. If so, exit fast.
+        if (out_dir / "master.m3u8").exists():
             job["progress"] = 1.0
             job["status"]   = "done"
             return
@@ -4936,74 +5190,40 @@ async def _run_offline_job(job_id: str) -> None:
         # ETAs reflect real ffmpeg throughput, not queue wait time.
         job["started_at"] = time.time()
         src = Path(job["src"])
-        tmp = out.with_suffix(".part.mp4")
+        tmp_dir = out_dir.with_name(out_dir.name + ".part")
         ffmpeg = analyzer.ffmpeg_bin()
         if not ffmpeg:
             job["status"] = "error"; job["error"] = "ffmpeg not available."
             return
-        # Need duration for accurate progress reporting (out_time / duration).
-        info = await asyncio.to_thread(_ffprobe_codec, str(src))
+        ver = await _ffmpeg_version()
+        if ver is None or ver < _FFMPEG_MIN_VERSION:
+            job["status"] = "error"
+            need = f"{_FFMPEG_MIN_VERSION[0]}.{_FFMPEG_MIN_VERSION[1]}"
+            have = (f"{ver[0]}.{ver[1]}" if ver else "unknown")
+            job["error"] = f"ffmpeg too old ({have}) — need ≥ {need} for HLS prep."
+            return
+        info = await asyncio.to_thread(_ffprobe_full, str(src))
         duration = float(info.get("duration_sec", 0) or 0)
+        if not info.get("video"):
+            job["status"] = "error"; job["error"] = "No video stream in source."
+            return
+
+        # Clean any leftover .part dir from a previous crashed run.
+        if tmp_dir.exists():
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+        tmp_dir.mkdir(parents=True, exist_ok=True)
+
         try:
-            use_nvenc = job["operation"] != "remux" and await _has_nvenc()
-            # `-threads` only matters for the CPU path. NVENC ignores it (the encoder
-            # runs on the GPU) and a low cap on the decoder makes HEVC software decode
-            # the bottleneck. So we only set -threads when we're staying on libx264.
-            common_pre: list[str] = [ffmpeg, "-y",
-                                     # -progress writes machine-readable key=value to the given
-                                     # target; pipe:1 = stdout. We tail it for accurate %, instead
-                                     # of guessing from output-file size growth (wildly off on
-                                     # transcode).
-                                     "-progress", "pipe:1", "-nostats"]
-            if not use_nvenc:
-                common_pre += ["-threads", str(OFFLINE_FFMPEG_THREADS)]
-            # Larger input buffers coalesce disk reads — without these, ffmpeg can
-            # generate enough read syscalls per second to dominate kernel time on
-            # Windows ("System Interrupts" pegs a core via the storage stack's DPCs).
-            # `-thread_queue_size` is per-input (must be BEFORE the `-i`).
-            common_pre += [
-                "-thread_queue_size", "1024",
-                "-rtbufsize", "64M",
-                "-i", str(src),
-            ]
-            if job["operation"] == "remux":
-                args = common_pre + ["-map", "0:v:0", "-map", "0:a:0?",
-                                     "-c", "copy", "-bsf:a", "aac_adtstoasc",
-                                     "-movflags", "+faststart", str(tmp)]
-            elif use_nvenc:
-                # Pascal (GTX 1060) NVENC: H.264 High @ L4.1 yuv420p, which matches
-                # exactly what Safari wants. `-rc vbr -cq 23 -b:v 0` is the NVENC
-                # equivalent of x264 `-crf 23` — constant-quality VBR with no bitrate
-                # cap. `-preset medium` is the cross-version-stable preset name (the
-                # newer p1..p7 API exists too but older ffmpeg builds reject it).
-                # 10-bit HEVC sources get tone-mapped to 8-bit by the default scaler
-                # because NVENC h264 only encodes 8-bit (yuv420p) — same outcome as
-                # the libx264 path.
-                args = common_pre + ["-map", "0:v:0", "-map", "0:a:0?",
-                                     "-c:v", "h264_nvenc",
-                                     "-preset", "medium",
-                                     "-rc", "vbr", "-cq", "23",
-                                     "-b:v", "0", "-maxrate", "0",
-                                     "-profile:v", "high", "-level", "4.1",
-                                     "-pix_fmt", "yuv420p",
-                                     "-c:a", "aac", "-b:a", "160k", "-ac", "2",
-                                     "-movflags", "+faststart", str(tmp)]
-                job["encoder"] = "h264_nvenc"
+            use_nvenc = await _has_nvenc()
+            args, kept_audios, kept_subs = _build_hls_ffmpeg_args(
+                ffmpeg, src, tmp_dir, info, use_nvenc,
+            )
+            # Record encoder for admin/UI display.
+            if _video_can_copy(info.get("video")) and not use_nvenc:
+                job["encoder"] = "copy"
             else:
-                # Force baseline-friendly H.264: yuv420p (8-bit) + High profile up to
-                # level 4.1, which every iPhone/iPad since iPhone 5s decodes in HW.
-                # Pulldown to High profile fixes the "audio plays, video black" case
-                # where the source is Hi10P or Main10 HEVC.
-                args = common_pre + ["-map", "0:v:0", "-map", "0:a:0?",
-                                     "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                                     # Output-side -threads caps libx264 worker threads.
-                                     # Without this, x264 fans out to every available core
-                                     # and the host becomes unresponsive during bulk saves.
-                                     "-threads", str(OFFLINE_FFMPEG_THREADS),
-                                     "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
-                                     "-c:a", "aac", "-b:a", "160k", "-ac", "2",
-                                     "-movflags", "+faststart", str(tmp)]
-                job["encoder"] = "libx264"
+                job["encoder"] = "h264_nvenc" if use_nvenc else "libx264"
+
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 stdout=asyncio.subprocess.PIPE,
@@ -5011,10 +5231,6 @@ async def _run_offline_job(job_id: str) -> None:
                 **_FFMPEG_SUBPROCESS_KW,
             )
 
-            # Drain -progress stdout: each block is several `key=value` lines ending
-            # in `progress=continue` (or `progress=end`). out_time_ms is microseconds
-            # despite the name. Falling back to size growth when duration is unknown
-            # (some sources fail to report it).
             async def _drain_progress() -> None:
                 assert proc.stdout is not None
                 while True:
@@ -5031,40 +5247,25 @@ async def _run_offline_job(job_id: str) -> None:
                     if not txt or "=" not in txt:
                         continue
                     k, _, v = txt.partition("=")
-                    if k == "out_time_ms" and duration > 0:
+                    if k in ("out_time_ms", "out_time_us") and duration > 0:
+                        # out_time_ms is microseconds despite the name on
+                        # older ffmpeg; out_time_us is always microseconds.
                         try:
                             out_us = int(v)
-                            job["progress"] = max(0.0, min(0.99, (out_us / 1_000_000.0) / duration))
-                        except ValueError:
-                            pass
-                    elif k == "out_time_us" and duration > 0:
-                        # Newer ffmpeg uses out_time_us (always microseconds).
-                        try:
-                            out_us = int(v)
-                            job["progress"] = max(0.0, min(0.99, (out_us / 1_000_000.0) / duration))
+                            job["progress"] = max(0.0, min(0.99,
+                                (out_us / 1_000_000.0) / duration))
                         except ValueError:
                             pass
                     elif k == "progress" and v == "end":
                         job["progress"] = 1.0
                         return
 
-            # Fallback for when -progress isn't producing useful values (very short
-            # files, container with no duration). Size growth is rough but non-zero.
-            async def _size_fallback() -> None:
-                src_size = max(src.stat().st_size, 1)
-                while proc.returncode is None:
-                    await asyncio.sleep(2.5)
-                    if tmp.exists() and duration <= 0:
-                        job["progress"] = min(0.99, tmp.stat().st_size / src_size)
-
             progress_task = asyncio.create_task(_drain_progress())
-            fallback_task = asyncio.create_task(_size_fallback())
             try:
                 await proc.wait()
             finally:
-                for t in (progress_task, fallback_task):
-                    if not t.done():
-                        t.cancel()
+                if not progress_task.done():
+                    progress_task.cancel()
 
             if proc.returncode != 0:
                 err = ""
@@ -5073,30 +5274,114 @@ async def _run_offline_job(job_id: str) -> None:
                 except Exception:
                     pass
                 job["status"] = "error"
-                job["error"]  = f"ffmpeg failed: {err.strip()[-300:] or 'unknown error'}"
-                tmp.unlink(missing_ok=True)
+                job["error"]  = f"ffmpeg failed: {err.strip()[-500:] or 'unknown error'}"
+                shutil.rmtree(tmp_dir, ignore_errors=True)
                 return
-            tmp.replace(out)
+
+            # Write meta.json with everything the UI needs to build dropdowns
+            # without re-probing the bundle. Held next to the manifest so a
+            # straight directory move keeps them in sync.
+            meta = {
+                "version":      OFFLINE_CACHE_VERSION,
+                "src":          str(src),
+                "duration_sec": duration,
+                "audios": [
+                    {
+                        "idx":      i,
+                        "playlist": f"audio_{i}.m3u8",
+                        "language": a.get("language") or "und",
+                        "title":    a.get("title") or "",
+                        "label":    _track_label(a, f"Audio {i+1}"),
+                        "default":  (i == 0) if all(not x.get("default") for x in kept_audios)
+                                    else bool(a.get("default")),
+                    }
+                    for i, a in enumerate(kept_audios)
+                ],
+                "subtitles": [
+                    {
+                        "idx":      i,
+                        "playlist": f"sub_{i}.m3u8",
+                        "language": s.get("language") or "und",
+                        "title":    s.get("title") or "",
+                        "label":    _track_label(s, f"Subtitles {i+1}"),
+                    }
+                    for i, s in enumerate(kept_subs)
+                ],
+                "skipped_image_subs": [
+                    {"codec": s["codec"], "language": s.get("language") or "und"}
+                    for s in (info.get("subtitles") or []) if s.get("image_based")
+                ],
+            }
+            (tmp_dir / "meta.json").write_text(json.dumps(meta, indent=2))
+
+            # Atomic-ish swap: rename .part dir into place. Path.rename onto an
+            # existing directory fails on every platform, so we drop any prior
+            # output first; the master.m3u8 guard at the top of this function
+            # handles the "another worker beat us" race separately.
+            if out_dir.exists():
+                shutil.rmtree(out_dir, ignore_errors=True)
+            tmp_dir.rename(out_dir)
+
             job["progress"] = 1.0
             job["status"]   = "done"
         except Exception as e:
             job["status"] = "error"; job["error"] = str(e)
-            tmp.unlink(missing_ok=True)
+            shutil.rmtree(tmp_dir, ignore_errors=True)
+
+
+def _read_meta(out_dir: Path) -> dict:
+    try:
+        return json.loads((out_dir / "meta.json").read_text())
+    except (OSError, ValueError):
+        return {}
+
+
+def _dir_size_bytes(p: Path) -> int:
+    """Sum the size of every file under `p` (one level deep is enough for HLS
+    bundles, but we recurse anyway for safety). Missing/unreadable files
+    contribute 0 — used by the admin cache view, where best-effort is fine.
+    """
+    total = 0
+    try:
+        for entry in p.rglob("*"):
+            try:
+                if entry.is_file():
+                    total += entry.stat().st_size
+            except OSError:
+                pass
+    except OSError:
+        pass
+    return total
+
+
+def _saved_local_tracks(item: dict, profile_id: str, file_path: str) -> dict:
+    """Return the local-player track picks saved for this profile + file."""
+    fp = (item.get("progress", {})
+              .get(profile_id, {})
+              .get("file_progress", {})
+              .get(file_path, {}))
+    out: dict = {}
+    if "local_audio_idx" in fp:
+        out["audio_idx"] = fp["local_audio_idx"]
+    if "local_subtitle_idx" in fp:
+        out["subtitle_idx"] = fp["local_subtitle_idx"]
+    return out
 
 
 class OfflinePrepareReq(BaseModel):
     file_path: str
+    profile_id: str = ""   # Optional: when set, response includes saved track picks.
 
 
 @app.post("/api/library/{item_id}/offline-prepare")
 async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
-    """Decide what (if any) processing a file needs for browser-side streaming.
+    """Decide what processing a file needs for HLS browser playback.
 
-    Fast path: returns ready=true with a direct video URL when the source is already
-    a Safari-friendly MP4. Otherwise, kicks off a background remux (just rewrap to MP4)
-    or transcode (re-encode to H.264/AAC) job and returns {ready:false, job_id}.
-    The returned URL is meant to be set as <video>.src — the file is served with
-    HTTP Range support so seek-while-streaming works without further client work.
+    Returns either {ready:true, master_url, audios, subtitles, ...} if the
+    bundle is already on disk, or {ready:false, job_id, operation:"hls"} after
+    spawning a background prep job. The master_url points at
+    /api/library/offline-cache/<sha>/master.m3u8 — both hls.js (Chrome /
+    Firefox / Edge) and Safari (native HLS) load it the same way.
     """
     lib = await get_library()
     item = next((it for it in lib["items"] if it["id"] == item_id), None)
@@ -5109,33 +5394,25 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
     if not src.exists():
         raise HTTPException(404, "File not on disk.")
 
-    info = await asyncio.to_thread(_ffprobe_codec, str(src))
-    ext  = src.suffix
-    subs = _list_sidecar_subs(src, item_id)
-
-    if _safari_compatible(info, ext):
-        return JSONResponse({
-            "ready": True,
-            "needs_processing": False,
-            "video_url": f"/api/library/{item_id}/download?file_path={quote(req.file_path)}",
-            "video_size_bytes": src.stat().st_size,
-            "duration_sec": info.get("duration_sec", 0),
-            "codec_info": info,
-            "subs": subs,
-        })
-
+    sidecar_subs = _list_sidecar_subs(src, item_id)
+    saved_tracks = (_saved_local_tracks(item, req.profile_id, req.file_path)
+                    if req.profile_id else {})
     OFFLINE_CACHE.mkdir(exist_ok=True)
     key = _offline_cache_key(src)
-    out_path = OFFLINE_CACHE / f"{key}.mp4"
-    if out_path.exists():
+    out_dir = OFFLINE_CACHE / key
+
+    if (out_dir / "master.m3u8").exists():
+        meta = _read_meta(out_dir)
         return JSONResponse({
-            "ready": True,
-            "needs_processing": False,
-            "video_url": f"/api/library/offline-cache/{out_path.name}",
-            "video_size_bytes": out_path.stat().st_size,
-            "duration_sec": info.get("duration_sec", 0),
-            "codec_info": info,
-            "subs": subs,
+            "ready":             True,
+            "needs_processing":  False,
+            "master_url":        f"/api/library/offline-cache/{key}/master.m3u8",
+            "duration_sec":      meta.get("duration_sec", 0),
+            "audios":            meta.get("audios", []),
+            "subtitles":         meta.get("subtitles", []),
+            "skipped_image_subs": meta.get("skipped_image_subs", []),
+            "subs":              sidecar_subs,
+            "saved_tracks":      saved_tracks,
         })
 
     # Coalesce: if a job for this exact source is already running, return its id.
@@ -5146,55 +5423,47 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
     )
     if existing:
         return JSONResponse({
-            "ready": False,
-            "needs_processing": True,
-            "job_id": existing["id"],
-            "operation": existing["operation"],
-            "duration_sec": info.get("duration_sec", 0),
-            "codec_info": info,
-            "subs": subs,
+            "ready":             False,
+            "needs_processing":  True,
+            "job_id":            existing["id"],
+            "operation":         existing["operation"],
+            "subs":              sidecar_subs,
+            "saved_tracks":      saved_tracks,
         })
 
     if not analyzer.ffmpeg_bin():
         raise HTTPException(503, "ffmpeg is not available — cannot prepare this file for streaming.")
 
-    operation = "remux" if _can_remux(info) else "transcode"
     job_id = secrets.token_hex(8)
     _offline_jobs[job_id] = {
-        "id": job_id, "src": str(src), "out": str(out_path),
-        "status": "pending", "operation": operation,
+        "id": job_id, "src": str(src), "out": str(out_dir),
+        "status": "pending", "operation": "hls",
         "progress": 0.0, "error": None,
         "started_at": time.time(),
         "item_id": item_id,
     }
     asyncio.create_task(_run_offline_job(job_id))
     return JSONResponse({
-        "ready": False,
-        "needs_processing": True,
-        "job_id": job_id,
-        "operation": operation,
-        "duration_sec": info.get("duration_sec", 0),
-        "codec_info": info,
-        "subs": subs,
+        "ready":             False,
+        "needs_processing":  True,
+        "job_id":            job_id,
+        "operation":         "hls",
+        "subs":              sidecar_subs,
+        "saved_tracks":      saved_tracks,
     })
 
 
 async def _maybe_start_prep_job(src: Path, item_id: str = "") -> dict:
-    """Per-file: return current prep state, starting a remux/transcode job if none exists.
+    """Per-file: return current prep state, starting an HLS job if none exists.
 
     Returns one of:
-      {status:"ready_native"}                — already a Safari-compatible MP4 on disk
-      {status:"cached"}                      — output MP4 already in OFFLINE_CACHE
+      {status:"cached"}                              — bundle already on disk
       {status:"processing", job_id, progress, operation}
-      {status:"error", error}                — ffmpeg unavailable
+      {status:"error", error}                        — ffmpeg unavailable
     """
-    info = await asyncio.to_thread(_ffprobe_codec, str(src))
-    ext  = src.suffix
-    if _safari_compatible(info, ext):
-        return {"status": "ready_native"}
     OFFLINE_CACHE.mkdir(exist_ok=True)
-    out_path = OFFLINE_CACHE / f"{_offline_cache_key(src)}.mp4"
-    if out_path.exists():
+    out_dir = OFFLINE_CACHE / _offline_cache_key(src)
+    if (out_dir / "master.m3u8").exists():
         return {"status": "cached"}
     existing = next(
         (j for j in _offline_jobs.values()
@@ -5206,31 +5475,26 @@ async def _maybe_start_prep_job(src: Path, item_id: str = "") -> dict:
                 "progress": existing["progress"], "operation": existing["operation"]}
     if not analyzer.ffmpeg_bin():
         return {"status": "error", "error": "ffmpeg not available."}
-    operation = "remux" if _can_remux(info) else "transcode"
     job_id = secrets.token_hex(8)
     _offline_jobs[job_id] = {
-        "id": job_id, "src": str(src), "out": str(out_path),
-        "status": "pending", "operation": operation,
+        "id": job_id, "src": str(src), "out": str(out_dir),
+        "status": "pending", "operation": "hls",
         "progress": 0.0, "error": None,
         "started_at": time.time(),
         "item_id": item_id,
     }
     asyncio.create_task(_run_offline_job(job_id))
-    return {"status": "processing", "job_id": job_id, "progress": 0.0, "operation": operation}
+    return {"status": "processing", "job_id": job_id, "progress": 0.0, "operation": "hls"}
 
 
 def _peek_prep_state(src: Path) -> dict:
     """Read-only sibling of _maybe_start_prep_job — never starts new work.
 
     Used by /prep-status polling. Includes finished+errored jobs so the UI can
-    show a final result for a few seconds before the cache file is consulted.
+    show a final result for a few seconds before the bundle is consulted.
     """
-    info = _ffprobe_codec(str(src))
-    ext  = src.suffix
-    if _safari_compatible(info, ext):
-        return {"status": "ready_native"}
-    out_path = OFFLINE_CACHE / f"{_offline_cache_key(src)}.mp4"
-    if out_path.exists():
+    out_dir = OFFLINE_CACHE / _offline_cache_key(src)
+    if (out_dir / "master.m3u8").exists():
         return {"status": "cached"}
     # Pick the most recent matching job — done/error states still surface here
     # so the UI can show "error" until the user retries.
@@ -5303,7 +5567,7 @@ def _prep_summary(files: list[dict]) -> dict:
     observed throughput as the per-file estimate). When no file is in flight
     yet, returns None — the UI falls back to "starting…".
     """
-    ready_states = ("ready_native", "cached", "done")
+    ready_states = ("cached", "done")
     busy_states  = ("pending", "processing")
     ready      = sum(1 for x in files if x["status"] in ready_states)
     processing = sum(1 for x in files if x["status"] in busy_states)
@@ -5401,29 +5665,54 @@ async def offline_job_status(job_id: str) -> JSONResponse:
     if not job:
         raise HTTPException(404, "Job not found.")
     out: dict = {
-        "status": job["status"],
+        "status":    job["status"],
         "operation": job["operation"],
-        "progress": round(job["progress"], 3),
-        "error": job["error"],
+        "progress":  round(job["progress"], 3),
+        "error":     job["error"],
     }
     if job["status"] == "done":
-        out["video_url"] = f"/api/library/offline-cache/{Path(job['out']).name}"
-        try:
-            out["video_size_bytes"] = Path(job["out"]).stat().st_size
-        except OSError:
-            out["video_size_bytes"] = 0
+        out_dir = Path(job["out"])
+        key = out_dir.name
+        meta = _read_meta(out_dir)
+        out["master_url"]        = f"/api/library/offline-cache/{key}/master.m3u8"
+        out["duration_sec"]      = meta.get("duration_sec", 0)
+        out["audios"]            = meta.get("audios", [])
+        out["subtitles"]         = meta.get("subtitles", [])
+        out["skipped_image_subs"] = meta.get("skipped_image_subs", [])
+        out["bundle_size_bytes"] = _dir_size_bytes(out_dir)
     return JSONResponse(out)
 
 
-@app.get("/api/library/offline-cache/{name}")
-async def offline_cache_file(name: str) -> FileResponse:
-    """Serve a remuxed/transcoded MP4 from the offline cache directory."""
-    if "/" in name or "\\" in name or ".." in name:
-        raise HTTPException(400, "Invalid name.")
-    p = OFFLINE_CACHE / name
-    if not p.exists():
+# Cache keys are sha256[:24] hex (24 chars). Bundle filenames are
+# manifest / segment / meta files — alnum, dot, underscore, dash only.
+_CACHE_KEY_RE = re.compile(r"^[a-f0-9]{24}$")
+_BUNDLE_FILE_RE = re.compile(r"^[A-Za-z0-9._-]+$")
+
+_HLS_MIME = {
+    ".m3u8": "application/vnd.apple.mpegurl",
+    ".m4s":  "video/iso.segment",
+    ".mp4":  "video/mp4",
+    ".vtt":  "text/vtt",
+    ".json": "application/json",
+}
+
+
+@app.get("/api/library/offline-cache/{cache_key}/{filename}")
+async def offline_cache_bundle_file(cache_key: str, filename: str) -> FileResponse:
+    """Serve one file from an HLS bundle directory.
+
+    Strict regex validation on both segments prevents path traversal: even
+    though FastAPI doesn't pass slashes through `{filename}` by default, ".."
+    or absolute filenames would still resolve outside the cache root via
+    Path arithmetic without the guard.
+    """
+    if not _CACHE_KEY_RE.match(cache_key) or not _BUNDLE_FILE_RE.match(filename):
+        raise HTTPException(400, "Invalid path.")
+    p = OFFLINE_CACHE / cache_key / filename
+    if not p.exists() or not p.is_file():
         raise HTTPException(404, "Cached file not found.")
-    return FileResponse(str(p), media_type="video/mp4", filename=p.name)
+    media = _HLS_MIME.get(p.suffix.lower(), "application/octet-stream")
+    return FileResponse(str(p), media_type=media, filename=p.name)
 
 
 # ── Admin: offline-cache inventory + cleanup ────────────────────────────────
@@ -5438,43 +5727,59 @@ async def _build_offline_cache_inventory() -> dict:
     """Walk OFFLINE_CACHE + the library + `_offline_jobs` and return the admin payload.
 
     Each per-file entry has a `status` of:
-      cached         — `.offline_cache/<key>.mp4` exists, ready for offline play
+      cached         — `<sha>/master.m3u8` exists, ready for HLS playback
       processing     — ffmpeg is actively encoding now (progress + ETA included)
       pending        — queued behind the OFFLINE_JOB_CONCURRENCY semaphore
       error          — the most recent prep job failed; `error` carries the message
-      partial_stale  — a `<key>.part.mp4` exists with no live job (server crashed
-                       mid-encode, or the job entry was evicted from memory)
+      partial_stale  — a `<sha>.part/` directory exists with no live job
+                       (process crashed mid-encode, or the job entry was evicted)
     Only entries with one of those states are included; "no work has ever started
     for this file" is just absent.
     """
     if not OFFLINE_CACHE.exists():
         return {"total_bytes": 0, "cache_dir": str(OFFLINE_CACHE),
                 "items": [], "orphans": []}
-    # 1) Inventory the cache directory: distinguish completed `.mp4` from
-    #    in-flight `.part.mp4` staging files (both kinds count toward disk total).
-    PART_SUFFIX = ".part.mp4"
-    cached_files:  dict[str, dict] = {}   # cache_key → {bytes, mtime}
-    partial_files: dict[str, dict] = {}   # cache_key → {bytes, mtime}
+    # 1) Inventory the cache directory: distinguish completed bundles (`<sha>/`)
+    #    from in-flight staging dirs (`<sha>.part/`). Both count toward total
+    #    bytes. We also include any leftover top-level `.mp4` files from
+    #    pre-v3-hls caches in the "orphan" pool so the operator can clear them.
+    PART_SUFFIX = ".part"
+    cached_dirs:  dict[str, dict] = {}   # cache_key → {bytes, mtime}
+    partial_dirs: dict[str, dict] = {}   # cache_key → {bytes, mtime}
+    legacy_files: list[dict] = []        # pre-v3-hls leftovers (.mp4 / .part.mp4)
     total_bytes = 0
     for p in OFFLINE_CACHE.iterdir():
-        if p.suffix != ".mp4":
-            continue
         try:
             st = p.stat()
         except OSError:
             continue
-        if p.name.endswith(PART_SUFFIX):
+        if p.is_dir() and _CACHE_KEY_RE.match(p.name):
+            sz = _dir_size_bytes(p)
+            cached_dirs[p.name] = {"bytes": sz, "mtime": st.st_mtime}
+            total_bytes += sz
+        elif p.is_dir() and p.name.endswith(PART_SUFFIX):
             key = p.name[: -len(PART_SUFFIX)]
-            partial_files[key] = {"bytes": st.st_size, "mtime": st.st_mtime}
-        else:
-            cached_files[p.stem] = {"bytes": st.st_size, "mtime": st.st_mtime}
-        total_bytes += st.st_size
+            if _CACHE_KEY_RE.match(key):
+                sz = _dir_size_bytes(p)
+                partial_dirs[key] = {"bytes": sz, "mtime": st.st_mtime}
+                total_bytes += sz
+        elif p.is_file() and p.suffix == ".mp4":
+            # Pre-v3-hls single-MP4 cache. Always orphan now — surface it so
+            # the operator can purge with one click.
+            legacy_files.append({
+                "cache_key": p.stem.removesuffix(".part"),
+                "name":      p.name,
+                "kind":      "legacy",
+                "bytes":     st.st_size,
+                "mtime":     st.st_mtime,
+            })
+            total_bytes += st.st_size
     # 2) Index jobs by their output cache key. Keep only the most recent job per
     #    key so a series of failed retries collapses to one row.
     jobs_by_key: dict[str, dict] = {}
     for j in _offline_jobs.values():
         try:
-            key = Path(j.get("out", "")).stem
+            key = Path(j.get("out", "")).name
         except Exception:
             continue
         if not key:
@@ -5501,8 +5806,8 @@ async def _build_offline_cache_inventory() -> dict:
                 key = _offline_cache_key(src)
             except OSError:
                 continue
-            cached  = cached_files.get(key)
-            partial = partial_files.get(key)
+            cached  = cached_dirs.get(key)
+            partial = partial_dirs.get(key)
             job     = jobs_by_key.get(key)
             entry: dict = {
                 "file_path": f.get("path", ""),
@@ -5511,7 +5816,6 @@ async def _build_offline_cache_inventory() -> dict:
                 "bytes":     0,
             }
             if cached:
-                # Completed encode — what the original UI showed.
                 entry["status"] = "cached"
                 entry["bytes"]  = cached["bytes"]
                 entry["mtime"]  = cached["mtime"]
@@ -5521,7 +5825,7 @@ async def _build_offline_cache_inventory() -> dict:
             elif job and job["status"] in ("pending", "processing"):
                 entry["status"]     = job["status"]
                 entry["progress"]   = float(job.get("progress", 0) or 0)
-                entry["operation"]  = job.get("operation", "transcode")
+                entry["operation"]  = job.get("operation", "hls")
                 entry["encoder"]    = job.get("encoder", "")
                 entry["job_id"]     = job.get("id", "")
                 entry["started_at"] = job.get("started_at", 0)
@@ -5541,7 +5845,7 @@ async def _build_offline_cache_inventory() -> dict:
             elif job and job["status"] == "error":
                 entry["status"]     = "error"
                 entry["error"]      = job.get("error", "")
-                entry["operation"]  = job.get("operation", "transcode")
+                entry["operation"]  = job.get("operation", "hls")
                 entry["encoder"]    = job.get("encoder", "")
                 entry["job_id"]     = job.get("id", "")
                 entry["started_at"] = job.get("started_at", 0)
@@ -5551,8 +5855,8 @@ async def _build_offline_cache_inventory() -> dict:
                 error_n += 1
                 matched_keys.add(key)
             elif partial:
-                # `.part.mp4` on disk with no remembered job — almost always a
-                # process crash mid-encode. Surface so the operator can clean up.
+                # `<sha>.part/` on disk with no remembered job — almost always
+                # a process crash mid-encode. Surface so the operator can clean.
                 entry["status"] = "partial_stale"
                 entry["bytes"]  = partial["bytes"]
                 entry["mtime"]  = partial["mtime"]
@@ -5560,7 +5864,6 @@ async def _build_offline_cache_inventory() -> dict:
                 partial_n  += 1
                 matched_keys.add(key)
             else:
-                # Nothing has ever happened for this file; don't render an empty row.
                 continue
             files_out.append(entry)
         if files_out:
@@ -5577,17 +5880,19 @@ async def _build_offline_cache_inventory() -> dict:
                 "files":            sorted(files_out, key=lambda x: x["name"].lower()),
             })
     items_out.sort(key=lambda x: x["total_bytes"], reverse=True)
-    # 4) Orphans: cache or partial entries whose source no longer maps to any
-    #    library file (re-encoded, deleted, or library item removed).
+    # 4) Orphans: cache/partial dirs whose source no longer maps to any library
+    #    file (re-encoded, deleted, or library item removed), plus legacy
+    #    single-MP4 files from the pre-HLS cache layout.
     orphans: list[dict] = []
-    for k, v in cached_files.items():
+    for k, v in cached_dirs.items():
         if k not in matched_keys:
             orphans.append({"cache_key": k, "kind": "cached",
                             "bytes": v["bytes"], "mtime": v["mtime"]})
-    for k, v in partial_files.items():
+    for k, v in partial_dirs.items():
         if k not in matched_keys:
             orphans.append({"cache_key": k, "kind": "partial",
                             "bytes": v["bytes"], "mtime": v["mtime"]})
+    orphans.extend(legacy_files)
     orphans.sort(key=lambda x: x["bytes"], reverse=True)
     return {
         "total_bytes": total_bytes,
@@ -5598,11 +5903,19 @@ async def _build_offline_cache_inventory() -> dict:
 
 
 def _delete_cache_artifacts(cache_key: str) -> int:
-    """Remove `<key>.mp4`, `<key>.part.mp4`, AND any error-state job entries
-    that target this cache key. Returns total bytes freed on disk. The caller
-    is responsible for the active-job 409 check.
+    """Remove `<key>/` and `<key>.part/` bundle directories, plus any legacy
+    pre-v3-hls `.mp4` files keyed by `cache_key`, AND any terminal job entries
+    targeting this cache key. Returns total bytes freed on disk. The caller is
+    responsible for the active-job 409 check.
     """
     bytes_freed = 0
+    for name in (cache_key, f"{cache_key}.part"):
+        d = OFFLINE_CACHE / name
+        if d.exists() and d.is_dir():
+            bytes_freed += _dir_size_bytes(d)
+            shutil.rmtree(d, ignore_errors=True)
+    # Legacy single-MP4 cache from v2 — orphaned by the v3 cache-key rebase,
+    # but still on disk until purged.
     for fname in (f"{cache_key}.mp4", f"{cache_key}.part.mp4"):
         p = OFFLINE_CACHE / fname
         try:
@@ -5615,17 +5928,17 @@ def _delete_cache_artifacts(cache_key: str) -> int:
     # stale error after the operator has cleaned it up.
     for jid, j in list(_offline_jobs.items()):
         try:
-            if Path(j.get("out", "")).stem == cache_key and j.get("status") in ("done", "error"):
+            if Path(j.get("out", "")).name == cache_key and j.get("status") in ("done", "error"):
                 _offline_jobs.pop(jid, None)
         except Exception:
             pass
     return bytes_freed
 
 
-def _offline_cache_path_active(p: Path) -> bool:
-    """True if a pending/processing prep job is currently writing to `p`."""
-    s = str(p)
-    return any(j.get("out") == s and j.get("status") in ("pending", "processing")
+def _offline_cache_path_active(cache_key: str) -> bool:
+    """True if a pending/processing prep job is currently writing to this key."""
+    return any(Path(j.get("out", "")).name == cache_key
+               and j.get("status") in ("pending", "processing")
                for j in _offline_jobs.values())
 
 
@@ -5640,14 +5953,13 @@ async def admin_offline_cache_list(request: Request) -> JSONResponse:
 # try to parse "orphans" as a 24-hex cache key.
 @app.delete("/api/admin/offline-cache/orphans")
 async def admin_offline_cache_purge_orphans(request: Request) -> JSONResponse:
-    """Delete every cache+partial file that no longer maps to any library file."""
+    """Delete every cache/partial dir + legacy MP4 that no longer maps to any library file."""
     _require_admin(request)
     inv = await _build_offline_cache_inventory()
     deleted = 0
     bytes_freed = 0
     for o in inv["orphans"]:
-        out_path = OFFLINE_CACHE / f"{o['cache_key']}.mp4"
-        if _offline_cache_path_active(out_path):
+        if _offline_cache_path_active(o["cache_key"]):
             continue
         freed = _delete_cache_artifacts(o["cache_key"])
         if freed > 0:
@@ -5658,20 +5970,20 @@ async def admin_offline_cache_purge_orphans(request: Request) -> JSONResponse:
 
 @app.delete("/api/admin/offline-cache/{cache_key}")
 async def admin_offline_cache_delete_one(cache_key: str, request: Request) -> JSONResponse:
-    """Delete everything for one cache key: `<key>.mp4`, `<key>.part.mp4`, AND
-    any terminal (done/error) job entry that targets it. 409 if a pending or
-    processing prep job is currently writing to it.
+    """Delete the HLS bundle dir, any `.part` staging dir, and any terminal
+    job entries targeting `cache_key`. 409 if an active job is writing it.
     """
     _require_admin(request)
-    # Cache keys are always sha256[:24] hex — anything else is a path-traversal attempt.
-    if len(cache_key) != 24 or not all(c in "0123456789abcdef" for c in cache_key):
+    if not _CACHE_KEY_RE.match(cache_key):
         raise HTTPException(400, "Invalid cache key.")
-    out_path = OFFLINE_CACHE / f"{cache_key}.mp4"
-    part_path = OFFLINE_CACHE / f"{cache_key}.part.mp4"
-    if _offline_cache_path_active(out_path):
-        raise HTTPException(409, "An active prep job is writing this file.")
-    if not (out_path.exists() or part_path.exists()
-            or any(Path(j.get("out", "")).stem == cache_key for j in _offline_jobs.values())):
+    if _offline_cache_path_active(cache_key):
+        raise HTTPException(409, "An active prep job is writing this bundle.")
+    out_dir   = OFFLINE_CACHE / cache_key
+    part_dir  = OFFLINE_CACHE / f"{cache_key}.part"
+    legacy_a  = OFFLINE_CACHE / f"{cache_key}.mp4"
+    legacy_b  = OFFLINE_CACHE / f"{cache_key}.part.mp4"
+    if not (out_dir.exists() or part_dir.exists() or legacy_a.exists() or legacy_b.exists()
+            or any(Path(j.get("out", "")).name == cache_key for j in _offline_jobs.values())):
         raise HTTPException(404, "Nothing on disk and no job for that cache key.")
     bytes_freed = _delete_cache_artifacts(cache_key)
     return JSONResponse({"deleted": True, "bytes_freed": bytes_freed})
@@ -5679,9 +5991,9 @@ async def admin_offline_cache_delete_one(cache_key: str, request: Request) -> JS
 
 @app.delete("/api/admin/library/{item_id}/offline-cache")
 async def admin_offline_cache_delete_for_item(item_id: str, request: Request) -> JSONResponse:
-    """Delete every cached/partial MP4 + clear every error-state job entry for
-    one library item. Active prep jobs are skipped (the operator can stop them
-    via the library card if they really want to abandon them).
+    """Delete every cached/partial bundle + clear every error-state job entry
+    for one library item. Active prep jobs are skipped (the operator can stop
+    them via the library card if they really want to abandon them).
     """
     _require_admin(request)
     inv = await _build_offline_cache_inventory()
@@ -5691,8 +6003,7 @@ async def admin_offline_cache_delete_for_item(item_id: str, request: Request) ->
     deleted = 0
     bytes_freed = 0
     for f in item["files"]:
-        out_path = OFFLINE_CACHE / f"{f['cache_key']}.mp4"
-        if _offline_cache_path_active(out_path):
+        if _offline_cache_path_active(f["cache_key"]):
             continue
         freed = _delete_cache_artifacts(f["cache_key"])
         if freed > 0 or f.get("status") == "error":

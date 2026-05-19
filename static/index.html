@@ -1484,13 +1484,22 @@
     <button onclick="lpDismissSkipOffer()"
       class="block mt-1.5 mx-auto text-[10px] text-gray-400 hover:text-gray-200 uppercase tracking-wide">Hide</button>
   </div>
-  <!-- Subtitle selector — only shown when sidecar VTT tracks exist -->
-  <div id="lpTrackRow" class="lp-chrome hidden border-t border-gray-800 bg-gray-950 px-3 py-2 flex items-center gap-3 flex-shrink-0">
-    <span class="text-[9px] font-black uppercase tracking-widest text-gray-600 flex-shrink-0">Subs</span>
-    <select id="lpSubSelect" onchange="lpSetSubtitle(this.value)"
-      class="flex-1 min-w-0 bg-gray-900 border-b border-gray-700 text-xs text-gray-300 px-2 py-1.5 focus:outline-none focus:border-indigo-500 cursor-pointer">
-      <option value="-1">Off</option>
-    </select>
+  <!-- Audio + subtitle selectors. Each row hides itself when only one track
+       exists for its type (or zero, in the case of subs). -->
+  <div id="lpTrackRow" class="lp-chrome hidden border-t border-gray-800 bg-gray-950 px-3 py-2 flex flex-col gap-2 flex-shrink-0">
+    <div id="lpAudioRow" class="hidden flex items-center gap-3">
+      <span class="text-[9px] font-black uppercase tracking-widest text-gray-600 flex-shrink-0 w-8">Aud</span>
+      <select id="lpAudioSelect" onchange="lpSetAudio(this.value)"
+        class="flex-1 min-w-0 bg-gray-900 border-b border-gray-700 text-xs text-gray-300 px-2 py-1.5 focus:outline-none focus:border-indigo-500 cursor-pointer">
+      </select>
+    </div>
+    <div id="lpSubRow" class="hidden flex items-center gap-3">
+      <span class="text-[9px] font-black uppercase tracking-widest text-gray-600 flex-shrink-0 w-8">Sub</span>
+      <select id="lpSubSelect" onchange="lpSetSubtitle(this.value)"
+        class="flex-1 min-w-0 bg-gray-900 border-b border-gray-700 text-xs text-gray-300 px-2 py-1.5 focus:outline-none focus:border-indigo-500 cursor-pointer">
+        <option value="-1">Off</option>
+      </select>
+    </div>
   </div>
   <div class="lp-chrome safe-bottom flex-shrink-0 bg-gray-950"></div>
   <!-- Tiny-only chrome: huge fullscreen button + close button. -->
@@ -1615,6 +1624,13 @@ let lp = {
   // True after we've loaded the metadata once (so seek-to-resume only fires once)
   resumeApplied: false,
   resumeSec: 0,
+  // HLS bundle state — set by _lpLoadIndex from /offline-prepare's meta.json
+  hls: null,              // active hls.js instance, null on Safari native
+  audios: [],             // [{idx,label,language,default}] from meta.json
+  subtitles: [],          // [{idx,label,language}] from meta.json
+  sidecarSubs: [],        // [{name,lang,url}] non-bundle subs served via /subtitle
+  pendingAudioIdx: 0,     // applied on MANIFEST_PARSED / loadedmetadata
+  pendingSubtitleIdx: -1, // -1 = off, integer = bundle idx, "sidecar:N" = sidecar idx
 };
 // Play-chooser modal state
 let pcCtx = null;  // {itemId, files, seekTo, label}
@@ -4668,7 +4684,7 @@ const prepFileState = new Map();
 
 function _prepStatusFromValue(v) {
   if (!v) return null;
-  if (v === "ready_native" || v === "cached" || v === "done") return "ready";
+  if (v === "cached" || v === "done") return "ready";
   if (v === "pending" || v === "processing") return "prepping";
   return null;
 }
@@ -4803,13 +4819,33 @@ function closePlayChooser() {
 
 // --- Local player (browser-side <video>) -------------------------------------
 //
-// Streams a server-prepared MP4 over HTTP. Loop:
-//   1. POST /offline-prepare to find or kick off a `.offline_cache/<sha>.mp4`.
+// Plays a server-prepared HLS bundle (master.m3u8 + per-rendition playlists +
+// fmp4 segments). Loop:
+//   1. POST /offline-prepare to find or kick off a `.offline_cache/<sha>/` bundle.
 //   2. If the server is preparing, poll /offline-job/{id} until done and show
 //      a "Preparing…" overlay so the user knows what's happening.
-//   3. Set <video>.src to the returned URL; the browser issues Range requests.
-// Subtitle tracks come straight from /api/library/{id}/subtitle (server
-// converts SRT→VTT on the fly), so no client-side blob conversion is needed.
+//   3. Hand the master_url to hls.js (Chrome / Firefox / Edge) or set
+//      <video>.src directly (Safari native HLS).
+// Audio/sub track switching uses hls.js's audioTrack/subtitleTrack setters on
+// MSE browsers, or AudioTrackList/TextTrackList.mode on Safari.
+
+// --- hls.js lazy loader. The library is ~100 KB gzipped — only fetched the
+// first time the local player is opened. The promise is cached so concurrent
+// opens share one fetch.
+let _hlsLibPromise = null;
+function _ensureHlsLib() {
+  if (window.Hls) return Promise.resolve(window.Hls);
+  if (_hlsLibPromise) return _hlsLibPromise;
+  _hlsLibPromise = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "/vendor/hls.min.js";
+    s.async = true;
+    s.onload  = () => resolve(window.Hls);
+    s.onerror = () => reject(new Error("Failed to load hls.js"));
+    document.head.appendChild(s);
+  });
+  return _hlsLibPromise;
+}
 
 async function lpPlay(itemId, files, seekTo, label) {
   if (!Array.isArray(files) || !files.length) {
@@ -4839,6 +4875,16 @@ function _lpHidePreparing() {
   if (el) el.classList.add("hidden");
 }
 
+// Tear down any prior hls.js instance. Calling it before `v.src=…` prevents
+// a leftover hls.js from re-attaching to the new media and fighting Safari's
+// native HLS pipeline.
+function _lpDestroyHls() {
+  if (lp.hls) {
+    try { lp.hls.destroy(); } catch (_) {}
+    lp.hls = null;
+  }
+}
+
 async function _lpLoadIndex(seekTo) {
   const filePath = lp.playlist[lp.pi];
   if (!filePath) { lpStop(); return; }
@@ -4847,6 +4893,7 @@ async function _lpLoadIndex(seekTo) {
   lp.skipData = null;
   lp.skipOfferType = null; lp.skipOfferEnd = 0;
   lp.resumeApplied = false; lp.resumeSec = seekTo || 0;
+  lp.audios = []; lp.subtitles = [];
   // Push the throttle window forward so the first `timeupdate` after this load
   // doesn't fire saveProgress before the resume seek has landed (otherwise we'd
   // overwrite the server's watched state with t≈0).
@@ -4859,7 +4906,7 @@ async function _lpLoadIndex(seekTo) {
   try {
     const r = await fetch(`/api/library/${lp.itemId}/offline-prepare`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file_path: filePath }),
+      body: JSON.stringify({ file_path: filePath, profile_id: profile.id || "" }),
     });
     if (!r.ok) {
       const e = await r.json().catch(() => ({ detail: "Prepare failed." }));
@@ -4872,9 +4919,8 @@ async function _lpLoadIndex(seekTo) {
     lpStop(); return;
   }
 
-  let videoUrl = prep.video_url;
+  let masterUrl = prep.master_url;
   if (!prep.ready && prep.job_id) {
-    const op = prep.operation === "remux" ? "Remuxing to MP4" : "Transcoding to H.264 / AAC";
     try {
       while (true) {
         // Abort if the user moved on (lpStop or another _lpLoadIndex).
@@ -4884,8 +4930,14 @@ async function _lpLoadIndex(seekTo) {
         if (!sr.ok) throw new Error("Lost track of prep job.");
         const s = await sr.json();
         const pct = Math.round((s.progress || 0) * 100);
-        _lpShowPreparing(`${op}… ${pct}%`);
-        if (s.status === "done")  { videoUrl = s.video_url; break; }
+        _lpShowPreparing(`Building stream… ${pct}%`);
+        if (s.status === "done") {
+          masterUrl    = s.master_url;
+          prep.audios  = s.audios || [];
+          prep.subtitles = s.subtitles || [];
+          prep.skipped_image_subs = s.skipped_image_subs || [];
+          break;
+        }
         if (s.status === "error") throw new Error(s.error || "Prep failed.");
       }
     } catch (err) {
@@ -4912,40 +4964,210 @@ async function _lpLoadIndex(seekTo) {
     } catch (_) {}
   })();
 
-  const v = document.getElementById("lpVideo");
-  v.crossOrigin = "anonymous";
-  while (v.firstChild) v.removeChild(v.firstChild);
-  v.src = videoUrl;
+  lp.audios     = prep.audios || [];
+  lp.subtitles  = prep.subtitles || [];
+  lp.sidecarSubs = prep.subs || [];
 
-  // Wire sidecar subtitle tracks straight from the server (SRT→VTT conversion
-  // happens server-side in /subtitle).
-  const subs = prep.subs || [];
-  const sel = document.getElementById("lpSubSelect");
-  sel.innerHTML = `<option value="-1">Off</option>`;
-  subs.forEach((s, i) => {
+  // Default selections: saved per-file picks (sent back by /offline-prepare
+  // when profile_id is provided), otherwise the rendition flagged `default`
+  // in the master playlist (which mirrors the source's disposition.default).
+  const saved = prep.saved_tracks || {};
+  const defAudioIdx = (saved.audio_idx != null) ? saved.audio_idx
+                    : (lp.audios.findIndex(a => a.default) >= 0
+                       ? lp.audios.findIndex(a => a.default) : 0);
+  const defSubIdx   = (saved.subtitle_idx != null) ? saved.subtitle_idx : -1;
+  lp.pendingAudioIdx    = defAudioIdx;
+  lp.pendingSubtitleIdx = defSubIdx;
+
+  const v = document.getElementById("lpVideo");
+  _lpDestroyHls();
+  while (v.firstChild) v.removeChild(v.firstChild);
+  v.removeAttribute("src");
+
+  await _ensureHlsLib().catch(() => { /* fall through to Safari native */ });
+
+  if (window.Hls && window.Hls.isSupported()) {
+    // Chrome / Firefox / Edge / Android Chrome path — hls.js owns playback.
+    const hls = new window.Hls({
+      // Default xhr-based loader is fine; we set lowLatencyMode off because
+      // VOD playback gets no benefit from LL-HLS and it doubles fetch volume.
+      lowLatencyMode: false,
+      // Cap forward buffer; without this hls.js can preload 60+ MB of segments
+      // on long files which hurts mobile data and stalls switching.
+      maxBufferLength: 60,
+    });
+    lp.hls = hls;
+    hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
+      if (lp.filePath !== filePath) return;
+      // hls.js exposes renditions in the same order as the master playlist —
+      // which is the order we built meta.json from, so indices align 1:1.
+      _lpApplyAudioIdx(lp.pendingAudioIdx);
+      _lpApplySubIdx(lp.pendingSubtitleIdx);
+      _lpRenderTrackRows();
+    });
+    hls.on(window.Hls.Events.ERROR, (_evt, data) => {
+      if (!data.fatal) return;
+      // Fatal errors on hls.js are typically media-source decoding crashes.
+      // Try to recover before bailing — `recoverMediaError` re-attaches the
+      // MSE buffer; if that fails, surface the error.
+      if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
+        try { hls.recoverMediaError(); return; } catch (_) {}
+      }
+      showAlert("Playback error: " + (data.details || data.type), "error");
+    });
+    hls.loadSource(masterUrl);
+    hls.attachMedia(v);
+  } else {
+    // Safari (iOS + macOS) native HLS path. AudioTrackList / TextTrackList
+    // exist for in-band tracks once the manifest is parsed.
+    v.crossOrigin = "anonymous";
+    v.src = masterUrl;
+    const onMeta = () => {
+      v.removeEventListener("loadedmetadata", onMeta);
+      if (lp.filePath !== filePath) return;
+      _lpApplyAudioIdx(lp.pendingAudioIdx);
+      _lpApplySubIdx(lp.pendingSubtitleIdx);
+      _lpRenderTrackRows();
+    };
+    v.addEventListener("loadedmetadata", onMeta);
+  }
+
+  // Sidecar `.srt`/`.vtt` files sit alongside the source on disk and aren't
+  // part of the HLS bundle — wire them as extra <track> children so they show
+  // up in the same subtitle dropdown via _lpRenderTrackRows below.
+  (lp.sidecarSubs || []).forEach((s, i) => {
     const t = document.createElement("track");
     t.kind = "subtitles"; t.src = s.url; t.srclang = s.lang || "und";
-    t.label = s.lang || s.name || `Track ${i+1}`;
+    t.label = s.name || s.lang || `Sidecar ${i+1}`;
     v.appendChild(t);
-    sel.insertAdjacentHTML("beforeend",
-      `<option value="${i}">${escHtml((s.lang||"und").toUpperCase())} — ${escHtml(s.name||"sub")}</option>`);
   });
-  document.getElementById("lpTrackRow").classList.toggle("hidden", subs.length === 0);
-  // Default all subtitle tracks off until the user picks one.
-  setTimeout(() => {
-    if (v.textTracks) for (let i = 0; i < v.textTracks.length; i++) v.textTracks[i].mode = "disabled";
-  }, 50);
 
-  v.load();
   try { await v.play(); } catch (_) { /* iOS may block autoplay until user gesture */ }
 }
 
-function lpSetSubtitle(idx) {
-  const v = document.getElementById("lpVideo");
-  if (!v.textTracks) return;
-  for (let i = 0; i < v.textTracks.length; i++) {
-    v.textTracks[i].mode = (String(i) === String(idx)) ? "showing" : "disabled";
+// Populate the audio + subtitle dropdowns once the manifest has parsed.
+function _lpRenderTrackRows() {
+  const audSel = document.getElementById("lpAudioSelect");
+  const subSel = document.getElementById("lpSubSelect");
+  audSel.innerHTML = "";
+  subSel.innerHTML = `<option value="-1">Off</option>`;
+
+  (lp.audios || []).forEach((a, i) => {
+    audSel.insertAdjacentHTML("beforeend",
+      `<option value="${i}">${escHtml(a.label || ("Audio " + (i+1)))}</option>`);
+  });
+  audSel.value = String(lp.pendingAudioIdx ?? 0);
+
+  // Subs from the HLS bundle first (indices 0..N-1), then sidecar files
+  // (negative indices to keep them off the bundle's index space).
+  (lp.subtitles || []).forEach((s, i) => {
+    subSel.insertAdjacentHTML("beforeend",
+      `<option value="${i}">${escHtml(s.label || ("Subtitles " + (i+1)))}</option>`);
+  });
+  (lp.sidecarSubs || []).forEach((s, i) => {
+    const label = (s.lang ? s.lang.toUpperCase() + " — " : "") + (s.name || "sub");
+    subSel.insertAdjacentHTML("beforeend",
+      `<option value="sidecar:${i}">${escHtml(label)}</option>`);
+  });
+  subSel.value = String(lp.pendingSubtitleIdx ?? -1);
+
+  const audN = (lp.audios || []).length;
+  const subN = (lp.subtitles || []).length + (lp.sidecarSubs || []).length;
+  document.getElementById("lpAudioRow").classList.toggle("hidden", audN <= 1);
+  document.getElementById("lpSubRow").classList.toggle("hidden", subN === 0);
+  document.getElementById("lpTrackRow").classList.toggle("hidden", audN <= 1 && subN === 0);
+}
+
+function _lpApplyAudioIdx(idx) {
+  idx = Number(idx);
+  if (!Number.isFinite(idx) || idx < 0) return;
+  if (lp.hls) {
+    // hls.js: setting `audioTrack` swaps the rendition mid-stream without a
+    // gap on Chrome/Firefox/Edge. Indices map 1:1 to meta.json.
+    try { lp.hls.audioTrack = idx; } catch (_) {}
+    return;
   }
+  // Safari native HLS. AudioTrackList exposes the renditions; flipping
+  // `enabled` on the chosen one (and clearing the others) is the canonical
+  // way to switch — Safari handles the actual stream cutover internally.
+  const v = document.getElementById("lpVideo");
+  const tracks = v.audioTracks;
+  if (!tracks || tracks.length === 0) return;
+  for (let i = 0; i < tracks.length; i++) {
+    tracks[i].enabled = (i === idx);
+  }
+}
+
+function _lpApplySubIdx(idx) {
+  const v = document.getElementById("lpVideo");
+  const sidecar = String(idx).startsWith("sidecar:");
+  const n = Number(sidecar ? -1 : idx);
+
+  if (lp.hls) {
+    // hls.js owns bundle subtitle renditions. Sidecar <track> children live on
+    // the <video> element directly and are controlled by their .mode flag.
+    try {
+      lp.hls.subtitleTrack = (sidecar || n < 0) ? -1 : n;
+      lp.hls.subtitleDisplay = !sidecar && n >= 0;
+    } catch (_) {}
+    // Toggle sidecar tracks on the element. They live AFTER any in-band
+    // tracks hls.js exposes, so we mark sidecar-N -> textTracks[bundleN + N].
+    if (v.textTracks) {
+      const bundleN = (lp.subtitles || []).length;
+      const sidecarN = sidecar ? Number(String(idx).split(":")[1]) : -1;
+      for (let i = bundleN; i < v.textTracks.length; i++) {
+        v.textTracks[i].mode = (sidecar && (i - bundleN) === sidecarN) ? "showing" : "disabled";
+      }
+    }
+    return;
+  }
+  // Safari native HLS path — bundle subs come through as textTracks too. We
+  // just toggle modes the same way the legacy player did.
+  if (!v.textTracks) return;
+  if (sidecar) {
+    const bundleN = (lp.subtitles || []).length;
+    const sidecarN = Number(String(idx).split(":")[1]);
+    for (let i = 0; i < v.textTracks.length; i++) {
+      v.textTracks[i].mode = (i === bundleN + sidecarN) ? "showing" : "disabled";
+    }
+  } else if (n < 0) {
+    for (let i = 0; i < v.textTracks.length; i++) v.textTracks[i].mode = "disabled";
+  } else {
+    for (let i = 0; i < v.textTracks.length; i++) {
+      v.textTracks[i].mode = (i === n) ? "showing" : "disabled";
+    }
+  }
+}
+
+function lpSetAudio(idx) {
+  lp.pendingAudioIdx = Number(idx);
+  _lpApplyAudioIdx(idx);
+  _lpSaveLocalTracks();
+}
+
+function lpSetSubtitle(idx) {
+  lp.pendingSubtitleIdx = idx;
+  _lpApplySubIdx(idx);
+  _lpSaveLocalTracks();
+}
+
+// Persist the user's track picks per-file so the same selection comes back
+// the next time they hit Play. Sidecar picks are saved as -1 (off) — they
+// aren't part of the HLS bundle index space.
+function _lpSaveLocalTracks() {
+  if (!lp.itemId || !lp.filePath || !profile.id) return;
+  const subIsBundle = lp.pendingSubtitleIdx != null
+                   && !String(lp.pendingSubtitleIdx).startsWith("sidecar:");
+  const payload = {
+    profile_id: profile.id,
+    file_path:  lp.filePath,
+    audio_idx:  Number.isFinite(Number(lp.pendingAudioIdx)) ? Number(lp.pendingAudioIdx) : null,
+    subtitle_idx: subIsBundle ? Number(lp.pendingSubtitleIdx) : -1,
+  };
+  fetch(`/api/library/${lp.itemId}/local-tracks`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload),
+  }).catch(() => {});
 }
 
 function lpMaximize() {
@@ -4961,6 +5183,7 @@ function lpMinimize() {
 async function lpUnloadCurrent() {
   const v = document.getElementById("lpVideo");
   try { v.pause(); } catch (_) {}
+  _lpDestroyHls();
   v.removeAttribute("src");
   v.load();
 }
@@ -5166,7 +5389,7 @@ function prepChipHtml(s) {
     const pct = Math.round(_prepAggregatePct(s) * 100);
     // Identify the currently-running file (first file in pending/processing) for the label.
     const runningFile = (s.files || []).find(f => f.status === "pending" || f.status === "processing");
-    const opLabel = runningFile && runningFile.operation === "transcode" ? "Transcoding" : "Remuxing";
+    const opLabel = "Building stream";
     const fileNum = ready + 1;   // 1-based "currently working on file N"
     const filePct = runningFile ? Math.round((Number(runningFile.progress || 0)) * 100) : 0;
     const overallEta = (s.eta_secs != null) ? _fmtEta(s.eta_secs) : "starting…";
@@ -5521,6 +5744,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">2.5.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">3.0.0</div>
 </body>
 </html>

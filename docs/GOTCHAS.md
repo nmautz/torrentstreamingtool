@@ -175,11 +175,43 @@ Why this ordering matters: VLC is local, but its HTTP API still serializes per c
 
 Failures inside the parallel `gather(..., return_exceptions=True)` are silently absorbed because the user-visible playback already started; a missing enqueue just means a future Next would fall through to `item.files`.
 
-## Offline / Handoff to Device
+## Stream to Device (HLS)
 
-### Safari iOS will not play MKV from a `<video>` element
+### Output is an HLS bundle directory — not a single MP4 anymore
 
-Most torrents are MKV with H.264/AAC. Safari iOS's `<video>` element only accepts MP4/M4V/MOV containers with H.264 (or HEVC) + AAC. The offline-prepare endpoint detects this via ffprobe and runs an ffmpeg **remux** (rewrap to MP4 with `-c copy`, ~seconds) when the codecs are already compatible, or a full **transcode** to H.264/AAC (slow, CPU-bound) when they aren't. Don't change the fast-path branches in `_safari_compatible` without confirming the device matrix.
+The cache layout switched in Milestone 16. Each prepped source produces `.offline_cache/<sha>/` with `master.m3u8`, per-rendition playlists, fmp4 segments, and `meta.json`. The pre-v3 single-MP4 cache (`<sha>.mp4`) is dead code on disk — surfaced as `kind: "legacy"` orphans in Admin → Offline Cache for purge. Don't reintroduce code that assumes "a prepped file is one MP4" — every endpoint, admin tool, and cleanup path now walks the directory.
+
+### ffmpeg ≥ 4.3 is required for multi-rendition HLS
+
+`-var_stream_map` with subtitle groups is unreliable on ffmpeg 4.0–4.2 — the master playlist sometimes drops audio renditions, sometimes mis-tags `agroup`. `_run_offline_job` calls `_ffmpeg_version()` (cached per process) and fail-fast errors the job before launching ffmpeg if the version is too old. Don't drop this check — the silent-bad-manifest failure mode is hard to diagnose from the UI side (the player just shows "no audio" or stalls on a missing rendition).
+
+### hls.js vs Safari native is a runtime branch, not a build-time pick
+
+`_lpLoadIndex` checks `window.Hls.isSupported()` (which returns true on every MSE-capable browser and false on iOS Safari, which has no MSE — Safari plays HLS via the platform stack instead). The two paths read/write **different APIs** for the same job:
+- **hls.js**: `hls.audioTrack = idx`, `hls.subtitleTrack = idx`, `hls.recoverMediaError()`. The actual `<video>.audioTracks` / `<video>.textTracks` on the element will be empty (or undefined) — hls.js owns the rendition selection.
+- **Safari native**: `<video>.audioTracks[i].enabled` and `<video>.textTracks[i].mode`. There is no hls.js instance — `lp.hls` is null.
+
+Don't try to unify by always populating both. The `lp.hls` field is the right runtime indicator — `if (lp.hls)` for the MSE path, `else` for Safari native.
+
+### Always destroy the previous hls.js instance before re-using `<video>`
+
+When advancing to the next episode or switching files, `_lpDestroyHls()` MUST run before assigning a new `<video>.src` or `attachMedia`-ing a fresh hls.js instance. Otherwise the old hls.js keeps a reference to the media element and can fight the new pipeline (especially on Safari, where a leftover hls.js error handler will fire on the new native-HLS playback). `lpUnloadCurrent` does this; if you add a new code path that swaps the source, call `_lpDestroyHls` there too.
+
+### Bundle subs and sidecar subs share the `<video>.textTracks` array
+
+When hls.js is active, it surfaces the bundle's subtitle renditions through its own `hls.subtitleTracks` API. We also append sidecar `.srt`/`.vtt` files (from `_list_sidecar_subs`) as `<track>` children on the `<video>`, which lands them in `video.textTracks` **after** the bundle's tracks. The frontend uses a sentinel `"sidecar:N"` string for sidecar picks in the dropdown so the index space doesn't collide with bundle indices. If you add a new subtitle source, follow the same naming convention or the audio/sub-pick persistence will save garbage indices.
+
+### Image subs (PGS / VOBSUB / DVB) are intentionally not in the bundle
+
+`_ffprobe_full` flags subs with `codec_name in {hdmv_pgs_subtitle, pgssub, dvd_subtitle, dvdsub, dvb_subtitle, vobsub, xsub}` as `image_based: True`. `_build_hls_ffmpeg_args` filters them out before mapping streams — HTML5 `<video>` can't render bitmap subs through `<track>`, and ffmpeg can't transmux them to WebVTT (would need OCR). They surface in `meta.json:skipped_image_subs` for the UI to flag. If a user complains "my subs are missing on the phone but show in VLC", check this list first. The VLC path reads the source MKV directly so image subs work there.
+
+### Cache key is sha256(VERSION | path | mtime | size), and VERSION includes layout
+
+`OFFLINE_CACHE_VERSION = "v3-hls"`. Bumping the version invalidates every existing bundle because it changes the key. Old `<sha>.mp4` cache files map to *different* keys under v3 (since v3 keys never resolve to a `.mp4`), so they auto-orphan and surface in the admin tab. If you change the ffmpeg invocation in a way that breaks compatibility (segment naming, codec, container), bump the version — don't try to be clever about partial invalidation.
+
+### Path traversal in `/offline-cache/{key}/{filename}`
+
+`offline_cache_bundle_file` enforces `_CACHE_KEY_RE = ^[a-f0-9]{24}$` and `_BUNDLE_FILE_RE = ^[A-Za-z0-9._-]+$`. The cache_key check kills obvious traversal (`..`, `/`, leading dots); the filename check kills the same plus URL-decoded variants. Don't relax these — even though FastAPI's path-param parser doesn't pass `/` through `{filename}` by default, Path arithmetic with a malicious filename could still resolve outside the cache root.
 
 ### `/prep-all` must serialize ffmpeg jobs
 
@@ -189,29 +221,25 @@ Most torrents are MKV with H.264/AAC. Safari iOS's `<video>` element only accept
 
 Keep the `_offline_job_sem()` semaphore in place (`OFFLINE_JOB_CONCURRENCY = 1`). Jobs sit in `status="pending"` until they acquire it; both `/prep-status` and `/api/offline-active` already treat `pending` as in-progress, so the UI behaves correctly. If you ever raise the cap, also re-baseline `started_at` inside the semaphore (already done) so per-job ETAs don't include queue time.
 
-### Local player streams the server URL — no client-side blob, no `URL.createObjectURL`
+### Resume seek lands on segment boundaries
 
-The local player sets `<video id="lpVideo">.src` directly to the `video_url`
-returned by `/offline-prepare` (either `/api/library/{id}/download…` for
-fast-path Safari MP4s or `/api/library/offline-cache/<sha>.mp4` after a remux/
-transcode). The browser issues HTTP Range requests; FastAPI's `FileResponse`
-honors them so seek-while-streaming works without extra plumbing. There is no
-client-side blob anymore — don't reintroduce one. Tiny ↔ fullscreen toggling
-is still pure CSS (`.lp-tiny` class on `#localPlayer`); the video element is
-never moved or re-`src`-ed mid-playback.
+HLS playback seeks land on the nearest fmp4 segment boundary, then plays from there. With 6-second segments, the resume position can drift up to ~6 s after the saved position. The browser handles the within-segment offset automatically after the segment loads, so this is mostly invisible — but if a user reports "my resume is always a few seconds late on the browser player but not VLC", this is why. Don't shrink the segment size to compensate (you'd just multiply the segment count without solving the underlying snap-to-boundary behavior).
 
-Subtitle `<track src=…>` URLs point at `/api/library/{id}/subtitle?file=…`,
-which is same-origin, so `crossorigin="anonymous"` on the `<video>` continues
-to be sufficient for them to load. Don't drop that attribute.
+### Local-player track picks ≠ VLC track picks
+
+Two parallel persistence systems live in `file_progress`:
+- `audio_track` / `subtitle_track` — VLC's elementary-stream IDs (from `"Stream N"` keys of `vs.information.category`). Set via `/api/vlc/track/audio/{id}`, applied by `_apply_track_prefs` after a short delay on VLC playback start.
+- `local_audio_idx` / `local_subtitle_idx` — 0-based indices into the HLS bundle's `meta.json.audios` / `subtitles` arrays. Set via `/api/library/{id}/local-tracks`, applied by the frontend on `MANIFEST_PARSED` / `loadedmetadata`.
+
+The two are intentionally independent — a user who switches audio to Japanese in VLC on TV might still want English on their phone (different speakers / different room). `update_progress` and `mark_watched` both preserve **all four** keys across writes. Don't merge them into a single field thinking "they mean the same thing" — they don't.
+
+### ASS/SSA styling is lost in HLS conversion
+
+ffmpeg's `-c:s webvtt` strips karaoke effects, positioning tags, custom fonts, and animations from ASS/SSA source subtitles down to plain WebVTT. Acceptable for the vast majority of content; jarring for anime fansubs. The deferred fix (Milestone 16.10) is to ship libass.js + a WebAssembly font renderer (~200 KB JS) and render styled subs onto a canvas overlay. Not implemented until someone actually complains. Don't go halfway by piping unstyled ASS into the bundle — players treat it as broken WebVTT.
 
 ### Service worker is an eviction stub — keep it that way
 
-`static/sw.js` exists only to unregister itself and `caches.delete` everything
-it ever cached, so devices with the old "Handoff" SW installed don't stay
-pinned to a stale app shell. Don't reintroduce caching strategies, navigation
-fallbacks, or API caches in `sw.js`. Once enough time has passed that no
-device has the old SW alive, the file and the `evictLegacyServiceWorker` call
-in `index.html` can be deleted entirely.
+`static/sw.js` exists only to unregister itself and `caches.delete` everything it ever cached, so devices with the old "Handoff" SW installed don't stay pinned to a stale app shell. Don't reintroduce caching strategies, navigation fallbacks, or API caches in `sw.js`. Once enough time has passed that no device has the old SW alive, the file and the `evictLegacyServiceWorker` call in `index.html` can be deleted entirely.
 
 ## Settings
 

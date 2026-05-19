@@ -187,3 +187,20 @@ device that quits playback abruptly resumes from the right spot on next play.
 
 ---
 
+## Milestone 16 — Multi-Track Stream-to-Device (HLS)
+
+Replaces the single-MP4 prep with an HLS bundle so every MKV audio track and every text-based subtitle survives into the in-browser local player, and users can switch between them at runtime.
+
+- [x] **16.1** Backend: rewrite `_run_offline_job` to emit per-source HLS bundles (`<sha>/master.m3u8` + per-rendition `.m3u8` + fmp4 segments + `meta.json`). One ffmpeg invocation with `-var_stream_map` maps the video, every audio (transcoded to AAC stereo), and every text subtitle (transcoded to WebVTT). Image-based subs (`pgs`/`vobsub`/`dvb`) are filtered out and surfaced via `meta.json:skipped_image_subs`. Video stream-copies when source is already H.264 yuv420p with a non-Hi10 profile; otherwise `libx264 -preset veryfast -crf 23` (or `h264_nvenc` when available). ffmpeg ≥ 4.3 is required and enforced via `_ffmpeg_version()` probe — older builds fail-fast with a clear error.
+- [x] **16.2** Backend: bump `OFFLINE_CACHE_VERSION` to `v3-hls`. Cache layout changes from `<sha>.mp4` to `<sha>/` directory. Old MP4 caches become orphans and are surfaced in the admin Offline Cache tab under a new `legacy` kind for one-click purge.
+- [x] **16.3** Backend: replace `/api/library/offline-cache/{name}` with `/api/library/offline-cache/{cache_key}/{filename}`. Strict regex validation on both segments (`[a-f0-9]{24}` + `[A-Za-z0-9._-]+`) prevents path traversal. Per-extension media types for `.m3u8` / `.m4s` / `.vtt`.
+- [x] **16.4** Backend: `_build_offline_cache_inventory` / `_delete_cache_artifacts` / `_offline_cache_path_active` are now directory-aware. `_dir_size_bytes` helper recurses into bundle dirs for accurate per-item size totals.
+- [x] **16.5** Backend: new `LocalTracksReq` model and `/api/library/{id}/local-tracks` endpoint persist the in-browser player's audio/subtitle picks per-profile per-file under `local_audio_idx` / `local_subtitle_idx`. Kept separate from VLC's `audio_track` / `subtitle_track` because the two systems use different addressing (ES IDs vs HLS rendition indices). `update_progress` and `mark_watched` preserve these fields across writes.
+- [x] **16.6** Frontend: ship `static/vendor/hls.min.js` (hls.js v1.5.17, ~100 KB gz). Lazy-loaded on first local-player open via `_ensureHlsLib()` so it doesn't slow the dashboard's initial paint.
+- [x] **16.7** Frontend: rewrite `_lpLoadIndex` to branch on `Hls.isSupported()` — hls.js for Chrome/Firefox/Edge (MSE-based), `<video>.src = master_url` for Safari (native HLS). Audio/sub dropdowns populated from the bundle's `meta.json` (returned by `/offline-prepare`). Per-row sidecar `.srt`/`.vtt` files coexist with bundle subs as additional dropdown options.
+- [x] **16.8** Frontend: `lpSetAudio(idx)` and `lpSetSubtitle(idx)` switch tracks at runtime — `hls.audioTrack` / `hls.subtitleTrack` on the MSE path, `AudioTrackList.enabled` / `TextTrackList.mode` on Safari. Each switch POSTs to `/local-tracks` so the pick comes back the next time the user plays this file.
+- [x] **16.9** Docs: rewrite `docs/STREAMING.md` for the HLS flow; add HLS-specific footguns to `docs/GOTCHAS.md` (ffmpeg version floor, segment-boundary seek granularity, hls.js-vs-native branching, sidecar sub index offset, cache-version migration).
+- [ ] **16.10 (deferred)** Render `ass`/`ssa` subtitle styling via [libass.js](https://github.com/libass/libass) so karaoke effects, positioning, and fonts survive into the browser. Adds ~200 KB JS + a WebAssembly font renderer. Currently SSA/ASS text is converted to plain WebVTT, losing styling. Worth doing only if a user actually complains about plain-text subs.
+
+---
+
