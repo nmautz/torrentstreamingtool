@@ -16,7 +16,7 @@ Metro UI throughout — flat tiles, no rounded corners, bold uppercase typograph
 | 75–116  | Profile PIN prompt modal (numpad, hidden keyboard input) |
 | 118–151 | Change PIN modal |
 | 153–218 | Profile settings modal (auto-skip toggles, resume mode, global max-volume, change-PIN button) |
-| 220–240 | Profile picker (full-screen on first load) |
+| 220–240 | Profile picker (full-screen on first load). Acts as a lock screen: a `body:has(#profilePicker:not(.hidden))` rule in `<style>` hides the player footer, skip/resume offers, and `#localPlayer` while the picker is open, so background playback chrome doesn't bleed through over the bottom-row login buttons on short mobile viewports. |
 | 242–274 | Profile add/delete modal |
 | 276–372 | Download modal (with metadata fields + file picker) |
 | 374–447 | Upload modal (drop zone, progress bar) |

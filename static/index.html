@@ -172,6 +172,16 @@
     }
     #localPlayer.lp-tiny #lpSkipOffer { display: none !important; }
     #localPlayer.lp-tiny #lpPreparing { display: none !important; }
+    /* While the profile picker is up (lock screen), hide every piece of
+       playback chrome that would otherwise float on top of its bottom row of
+       login buttons (Log in with PIN / Manage profiles / Admin). The picker
+       itself is z-40 and opaque, but the footer is also z-40 and later in the
+       DOM, and skip/resume offers + the local-device player are z-50+ — so
+       without this rule they bleed through over the buttons on mobile. */
+    body:has(#profilePicker:not(.hidden)) footer,
+    body:has(#profilePicker:not(.hidden)) #skipOffer,
+    body:has(#profilePicker:not(.hidden)) #resumeOffer,
+    body:has(#profilePicker:not(.hidden)) #localPlayer { display: none !important; }
   </style>
 </head>
 <body class="dark bg-gray-950 text-gray-100 min-h-screen flex flex-col">
@@ -5479,6 +5489,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">2.4.0</div>
+<div style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">2.4.1</div>
 </body>
 </html>

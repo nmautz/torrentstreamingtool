@@ -1,5 +1,8 @@
 # Changelog
 
+## [2.4.1] — 2026-05-18
+- **Bug fix:** Profile-picker bottom buttons (**Log in with PIN**, **Manage profiles**, **Admin**) are no longer covered by playback chrome on mobile when a video is playing. The picker is `fixed inset-0 z-40` with `bg-gray-950`, but the player footer is also `z-40` and later in the DOM, and the skip/resume offers and local-device player sit at `z-50`+, so all of them bled through over the picker's bottom row on short viewports. Added a `body:has(#profilePicker:not(.hidden))` rule that hides `footer`, `#skipOffer`, `#resumeOffer`, and `#localPlayer` while the picker is up — turns the picker into a proper lock-screen overlay regardless of what's playing in the background.
+
 ## [2.4.0] — 2026-05-18
 - **Minor feature: Shut Down Server from the admin panel.** New **System** tab in `/admin` with a single red "Shut Down" button. Posts to a new `POST /api/admin/shutdown` endpoint, which enumerates every `uvicorn main:app` process via psutil and sends SIGTERM — siblings first (so the admin process can finish issuing signals), self last, with a 3 s `os._exit(0)` fallback if uvicorn ignores the signal. Once the HTTP uvicorn exits, `run.py`'s existing `finally` block tears down the HTTPS sibling and the mDNS responder. qBittorrent / Jackett / VLC are not touched — they aren't children of the FastAPI process. Useful for stopping the server cleanly from a phone without SSH-ing into the host.
 
