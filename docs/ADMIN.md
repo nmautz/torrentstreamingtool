@@ -101,6 +101,12 @@ For each profile:
 - **Clear PIN** — same
 - **Elevated** toggle → `POST /api/profiles/{id}/set-elevated {elevated}` — grants view of `admin_only` items
 
+### 7. System
+
+Single destructive action: **Shut Down Server**. Posts to `POST /api/admin/shutdown`, which finds every `uvicorn main:app` process (both the HTTP listener and, when SSL certs exist, the HTTPS sibling) and sends `SIGTERM`. Sibling processes are signalled first so the admin process stays alive long enough to terminate the others; a 3 s `os._exit(0)` fallback handles the case where uvicorn ignores SIGTERM. Once the HTTP uvicorn exits, `run.py`'s `finally` block at [run.py:873](../run.py#L873) cleans up the HTTPS subprocess and the mDNS responder.
+
+Note: this only stops the StreamLink web server. qBittorrent, Jackett, and VLC keep running — they are launched separately and are not children of the FastAPI process. Use the host's process manager to stop those if needed.
+
 ## Server endpoints (admin)
 
 All require admin auth (`_require_admin`). See [API.md](API.md#admin) for the full table.

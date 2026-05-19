@@ -180,6 +180,7 @@ All require admin auth.
 | DELETE | `/api/admin/background-video` | Removes file + settings. Stops VLC if bg was on screen |
 | POST | `/api/admin/background-video/volume` | `{volume}` 0–200; capped by `settings.max_volume`. Pushed live to VLC if bg is on screen |
 | POST | `/api/admin/background-video/enabled` | `{enabled}` toggle without deleting the file. When off, stops VLC if bg is on screen |
+| POST | `/api/admin/shutdown` | Stop the StreamLink web server. Returns `{ok:true, message}` immediately, then asynchronously sends SIGTERM to every `uvicorn main:app` process (HTTP + HTTPS siblings). After 3 s without exit, falls back to `os._exit(0)`. qBittorrent / Jackett / VLC are not touched — they're not children of this process |
 
 ## Admin HTTPS redirect
 

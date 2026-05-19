@@ -98,6 +98,10 @@
       class="tab-inactive px-4 sm:px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors whitespace-nowrap flex-shrink-0">
       Background
     </button>
+    <button onclick="switchTab('system')" id="tab-system"
+      class="tab-inactive px-4 sm:px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors whitespace-nowrap flex-shrink-0">
+      System
+    </button>
   </div>
 
   <!-- Toast -->
@@ -331,6 +335,26 @@
     </div>
   </div>
 
+  <!-- ── System Tab ───────────────────────────────────────────────────────────── -->
+  <div id="panelSystem" class="hidden flex-1 overflow-y-auto p-3 sm:p-5 max-w-2xl mx-auto w-full space-y-4">
+    <div class="bg-gray-900 border border-red-900/60">
+      <div class="px-5 py-4 border-b border-red-900/60">
+        <h2 class="text-sm font-black uppercase tracking-wide text-red-300">Shut Down Server</h2>
+        <p class="text-xs text-amber-200/70 mt-0.5">Stops the StreamLink web server (both HTTP and HTTPS). The TV will not be reachable until you re-launch <code class="font-mono text-amber-200">run.py</code> on the host. Active downloads and qBittorrent continue running in the background.</p>
+      </div>
+      <div class="px-5 py-4 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <div class="text-sm font-bold text-gray-200">Stop StreamLink</div>
+          <div class="text-[11px] text-gray-600 mt-0.5">Disconnects every browser and this admin session.</div>
+        </div>
+        <button id="shutdownBtn" onclick="doShutdownServer()"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-4 py-2.5 border border-red-800 bg-red-950 text-red-300 hover:bg-red-900 transition-colors">
+          Shut Down
+        </button>
+      </div>
+    </div>
+  </div>
+
 </div>
 
 <!-- ── Add Indexer Modal ──────────────────────────────────────────────────────── -->
@@ -519,7 +543,7 @@ async function loadOfflineEncoder(){
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 function switchTab(tab){
   activeTab = tab;
-  ["indexers","content","profiles","skip","offline","background"].forEach(t=>{
+  ["indexers","content","profiles","skip","offline","background","system"].forEach(t=>{
     document.getElementById(`tab-${t}`).className =
       t===tab ? "tab-active px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors"
                : "tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors";
@@ -530,6 +554,27 @@ function switchTab(tab){
   if(tab==="skip")       loadSkipPanel();
   if(tab==="offline")    loadOfflineCache();
   if(tab==="background") loadBackgroundVideo();
+}
+
+// ── System ────────────────────────────────────────────────────────────────────
+async function doShutdownServer(){
+  if(!confirm("Shut down the StreamLink server?\n\nEvery connected browser will be disconnected and the TV dashboard will go offline. You'll need to re-launch run.py on the host to bring it back.")) return;
+  const btn = document.getElementById("shutdownBtn");
+  btn.disabled = true;
+  btn.textContent = "Shutting down…";
+  try{
+    const r = await fetch("/api/admin/shutdown",{method:"POST", headers: authHeader()});
+    if(!r.ok){
+      const t = await r.text();
+      showToast(`Shutdown failed: ${t || r.status}`, true);
+      btn.disabled = false;
+      btn.textContent = "Shut Down";
+      return;
+    }
+    showToast("Server shutting down…");
+  }catch(_){
+    showToast("Server stopped.");
+  }
 }
 
 // ── Smart Skip ────────────────────────────────────────────────────────────────

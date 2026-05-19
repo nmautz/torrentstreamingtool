@@ -11,6 +11,7 @@ import platform
 import re
 import secrets
 import shutil
+import signal
 import socket
 import struct
 import subprocess
@@ -4425,6 +4426,49 @@ async def admin_offline_encoder(request: Request) -> JSONResponse:
         "encoder":         "h264_nvenc" if nvenc else "libx264",
         "ffmpeg":          analyzer.ffmpeg_bin(),
     })
+
+
+@app.post("/api/admin/shutdown")
+async def admin_shutdown(request: Request) -> JSONResponse:
+    """Stop the StreamLink server.
+
+    Sends SIGTERM to every uvicorn process running our `main:app` (the HTTP
+    process on port 80 and, when SSL certs exist, the HTTPS process on port
+    443). The launcher (run.py) is blocked on the HTTP uvicorn via
+    subprocess.run, so once that exits its finally block also cleans up the
+    HTTPS sibling — see run.py:861.
+    """
+    _require_admin(request)
+
+    async def _kill_uvicorns() -> None:
+        # Brief delay so this HTTP response can flush back to the client
+        # before we tear our own process down.
+        await asyncio.sleep(0.5)
+        me = os.getpid()
+        targets: list[psutil.Process] = []
+        for proc in psutil.process_iter(["pid", "name", "cmdline"]):
+            try:
+                cmdline = proc.info.get("cmdline") or []
+                joined = " ".join(cmdline)
+                if "uvicorn" in joined and "main:app" in joined:
+                    targets.append(proc)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        # Signal siblings first, then self last, so the admin process stays
+        # alive long enough to send the others.
+        siblings = [p for p in targets if p.pid != me]
+        selves   = [p for p in targets if p.pid == me]
+        for p in siblings + selves:
+            try:
+                p.send_signal(signal.SIGTERM)
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                continue
+        # Hard-exit fallback in case uvicorn ignores SIGTERM for some reason.
+        await asyncio.sleep(3.0)
+        os._exit(0)
+
+    asyncio.create_task(_kill_uvicorns())
+    return JSONResponse({"ok": True, "message": "Server shutting down…"})
 
 
 # ── Routes: Idle Background Video ─────────────────────────────────────────────
