@@ -64,7 +64,7 @@
     .ep-prog-fill { height:100%; background:#22c55e; }
     .safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }
     .safe-top    { padding-top:    env(safe-area-inset-top,    0px); }
-    button, select { touch-action: manipulation; }
+    button, select { touch-action: manipulation; user-select: none; -webkit-user-select: none; }
     /* Fullscreen controls overlay: no text selection / tap highlight on any
        child element (tiles, header buttons, title, time, labels). */
     #fullscreenControls, #fullscreenControls * {
@@ -5489,6 +5489,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">2.4.1</div>
+<div style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">2.4.2</div>
 </body>
 </html>

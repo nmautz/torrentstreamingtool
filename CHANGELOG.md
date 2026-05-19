@@ -1,5 +1,8 @@
 # Changelog
 
+## [2.4.2] — 2026-05-18
+- **Bug fix:** Button text is no longer selectable. Added `user-select: none; -webkit-user-select: none` to the global `button, select` rule in `index.html` and a matching `button` rule in `admin.html`.
+
 ## [2.4.1] — 2026-05-18
 - **Bug fix:** Profile-picker bottom buttons (**Log in with PIN**, **Manage profiles**, **Admin**) are no longer covered by playback chrome on mobile when a video is playing. The picker is `fixed inset-0 z-40` with `bg-gray-950`, but the player footer is also `z-40` and later in the DOM, and the skip/resume offers and local-device player sit at `z-50`+, so all of them bled through over the picker's bottom row on short viewports. Added a `body:has(#profilePicker:not(.hidden))` rule that hides `footer`, `#skipOffer`, `#resumeOffer`, and `#localPlayer` while the picker is up — turns the picker into a proper lock-screen overlay regardless of what's playing in the background.
 
