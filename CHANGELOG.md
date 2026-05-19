@@ -1,5 +1,8 @@
 # Changelog
 
+## [2.4.3] — 2026-05-18
+- **Bug fix:** On server restart, the default VLC volume is now half of the configured max-volume cap instead of 100 (normal). `lifespan` reads the cap from `library.json` settings, sets `state.vlc_volume` and `state.user_volume_before_bg` to `cap // 2`, and immediately pushes that value to VLC. This prevents an audio blast when playback starts on a fresh server start — the pre-existing `vlc("in_play")` pre-roll already sends the volume before any media loads, so the correct starting level now flows through cleanly.
+
 ## [2.4.2] — 2026-05-18
 - **Bug fix:** Button text is no longer selectable. Added `user-select: none; -webkit-user-select: none` to the global `button, select` rule in `index.html` and a matching `button` rule in `admin.html`.
 

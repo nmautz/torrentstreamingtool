@@ -2270,6 +2270,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     await qbit_login()
     Path(settings.qbit_download_path).mkdir(parents=True, exist_ok=True)
 
+    # Default volume to half of the admin cap. Without this, state.vlc_volume
+    # starts at 100 (the dataclass default) which can blast if the cap is low.
+    _startup_vol = (await _global_max_volume()) // 2
+    state.vlc_volume = _startup_vol
+    state.user_volume_before_bg = _startup_vol
+    _startup_raw = max(0, min(512, round(_startup_vol / 100 * 256)))
+    await vlc("volume", val=str(_startup_raw))
+
     guard       = asyncio.create_task(vpn_guard())
     broadcaster = asyncio.create_task(stat_broadcaster())
     dl_monitor  = asyncio.create_task(library_download_monitor())
