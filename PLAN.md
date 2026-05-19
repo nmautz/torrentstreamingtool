@@ -43,6 +43,7 @@
 - [x] **4.2** Priority Downloads: expose qBit priority controls; "Play when ready" for queued items
 - [x] **4.3** Multi-Disk Support: configure multiple `LIBRARY_PATH_*` entries; show per-disk free space
 - [x] **4.4** Retry Playback: VLC can run into issues if the file is not fully ready, add a button next to stop in the fullscreen controls UI to relanch VLC and retry playback
+  - 2026-05-18 follow-up: the Retry button has been removed from the fullscreen controls per user request. The `/api/retry` endpoint + `_retry_task` helper remain in `main.py` but are no longer reachable from the UI; the slow-network playback work in 2.2.0 covered the original "VLC opens before the file is ready" footgun.
 - [x] **4.5** VLC Focus: On playback, VLC is focused and set to fullscreen
   - 2026-05-17 follow-up: at boot via the system service, the idle background video was coming up in a small windowed view because the post-`in_play` HTTP fullscreen toggle raced the desktop. VLC is now spawned with `--fullscreen` in all three launch paths, `vlc_focus_and_fullscreen` retries the toggle until VLC reports `state=playing` (up to 6 attempts), and the macOS path now also hides every other visible app via AppleScript so VLC owns the screen.
 

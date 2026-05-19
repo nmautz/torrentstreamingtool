@@ -72,6 +72,17 @@
       -webkit-tap-highlight-color: transparent;
     }
     .fc-tile { flex-direction:column; align-items:center; justify-content:center; }
+    /* Hold-to-activate buttons: a left-to-right fill grows over the hold duration,
+       giving the user a visible progress bar so a long-press doesn't feel ambiguous. */
+    .hold-btn { position: relative; overflow: hidden; }
+    .hold-btn::after {
+      content: ""; position: absolute; left: 0; top: 0; bottom: 0; width: 100%;
+      background: currentColor; opacity: 0; transform: scaleX(0); transform-origin: left;
+      pointer-events: none; z-index: 0;
+    }
+    .hold-btn > * { position: relative; z-index: 1; }
+    .hold-btn.holding::after { opacity: 0.22; transform: scaleX(1); transition: transform 500ms linear, opacity 80ms; }
+    .hold-btn.hold-fired::after { opacity: 0.45; transform: scaleX(1); transition: opacity 250ms; }
     /* Metro design system */
     .tab-active   { border-bottom: 3px solid #4f46e5; color: white; }
     .tab-inactive { border-bottom: 3px solid transparent; color: #6b7280; }
@@ -1073,21 +1084,29 @@
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M10 9v6m4-6v6"/>
       </svg>
     </button>
-    <button onclick="stopStream(this)" title="Stop"
-      class="flex items-center justify-center flex-1 py-2.5 border-r border-gray-800
+    <button onpointerdown="_holdStart(this, stopStream, event)"
+      onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
+      title="Hold to stop"
+      class="hold-btn flex items-center justify-center flex-1 py-2.5 border-r border-gray-800
              text-red-600 hover:text-red-400 hover:bg-red-950/30 active:bg-red-950/50 transition-colors">
       <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14"/></svg>
     </button>
-    <button id="prevEpBtn" onclick="vlcPrev(this)" title="Previous episode"
-      class="hidden flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
+    <button id="prevEpBtn"
+      onpointerdown="_holdStart(this, vlcPrev, event)"
+      onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
+      title="Hold for previous episode"
+      class="hold-btn hidden flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
              text-indigo-400 hover:text-indigo-200 hover:bg-indigo-950/30 active:bg-indigo-950/50 transition-colors">
       <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7M18 12H5"/>
       </svg>
       <span class="text-[9px] font-bold uppercase tracking-wide leading-none mt-0.5">Prev</span>
     </button>
-    <button id="nextEpBtn" onclick="vlcNext(this)" title="Next episode"
-      class="hidden flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
+    <button id="nextEpBtn"
+      onpointerdown="_holdStart(this, vlcNext, event)"
+      onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
+      title="Hold for next episode"
+      class="hold-btn hidden flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
              text-indigo-400 hover:text-indigo-200 hover:bg-indigo-950/30 active:bg-indigo-950/50 transition-colors">
       <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M6 12h13"/>
@@ -1235,8 +1254,11 @@
 
     <!-- Row B: Episode nav — hidden by default; JS shows as flex when library item has >1 file -->
     <div id="fcEpNav" class="hidden flex-1 border-b border-gray-800 min-h-0">
-      <button id="fcPrevBtn" onclick="vlcPrev(this)"
-        class="fc-tile flex flex-1 border-r border-gray-800
+      <button id="fcPrevBtn"
+        onpointerdown="_holdStart(this, vlcPrev, event)"
+        onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
+        title="Hold for previous episode"
+        class="hold-btn fc-tile flex flex-1 border-r border-gray-800
                hover:bg-indigo-950/40 active:bg-indigo-950/70 text-indigo-400 transition-colors">
         <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -1247,8 +1269,11 @@
       <div class="flex items-center justify-center px-3 flex-shrink-0 pointer-events-none">
         <span id="fcEpCounter" class="text-xs font-mono text-gray-600 tabular-nums text-center"></span>
       </div>
-      <button id="fcNextBtn" onclick="vlcNext(this)"
-        class="fc-tile flex flex-1 hover:bg-indigo-950/40 active:bg-indigo-950/70 text-indigo-400 transition-colors">
+      <button id="fcNextBtn"
+        onpointerdown="_holdStart(this, vlcNext, event)"
+        onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
+        title="Hold for next episode"
+        class="hold-btn fc-tile flex flex-1 hover:bg-indigo-950/40 active:bg-indigo-950/70 text-indigo-400 transition-colors">
         <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
             d="M13 5l7 7-7 7M6 12h13"/>
@@ -1308,23 +1333,17 @@
       </div>
     </div>
 
-    <!-- Row E: Stop (always) + Retry (while playing, toggled by JS) + Save (streaming torrent only, toggled by JS) -->
+    <!-- Row E: Stop (hold to confirm) + Save (streaming torrent only, toggled by JS) -->
     <div class="flex flex-1 min-h-0">
-      <button onclick="stopStream(this);closeFullscreenControls()"
-        class="fc-tile flex flex-1 bg-red-950/15 hover:bg-red-950/45
+      <button onpointerdown="_holdStart(this, (b)=>{stopStream(b);closeFullscreenControls();}, event)"
+        onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
+        title="Hold to stop"
+        class="hold-btn fc-tile flex flex-1 bg-red-950/15 hover:bg-red-950/45
                active:bg-red-950/70 text-red-500 transition-colors">
         <svg class="w-8 h-8 mb-1" fill="currentColor" viewBox="0 0 24 24">
           <rect x="5" y="5" width="14" height="14" rx="2"/>
         </svg>
         <span class="text-xs font-bold">Stop</span>
-      </button>
-      <button id="fcRetryBtn" onclick="retryPlayback(this)"
-        class="fc-tile flex flex-1 border-l border-gray-800 bg-amber-950/15
-               hover:bg-amber-950/45 active:bg-amber-950/70 text-amber-400 transition-colors">
-        <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/>
-        </svg>
-        <span class="text-xs font-bold">Retry</span>
       </button>
       <!-- border-l so no orphan line when Save is hidden -->
       <button id="fcSaveBtn" onclick="openSaveStreamModal();closeFullscreenControls()"
@@ -1934,6 +1953,28 @@ async function vlcVolumeStep(delta, btn){
       }
     }
   });
+}
+
+// Hold-to-activate utility for destructive / navigation actions (Stop, Prev/Next ep).
+// A short tap does nothing; the action fires only after the user holds for `ms` (default 500).
+// The .holding class drives a CSS progress fill so the user can see the timer counting.
+function _holdStart(btn, fn, ev, ms){
+  if(ev && ev.preventDefault) ev.preventDefault();
+  _holdCancel(btn);
+  btn._holdFired = false;
+  btn.classList.add("holding");
+  btn._holdTimer = setTimeout(() => {
+    btn._holdTimer = null;
+    btn._holdFired = true;
+    btn.classList.remove("holding");
+    btn.classList.add("hold-fired");
+    setTimeout(() => btn.classList.remove("hold-fired"), 250);
+    try { fn(btn); } catch(_){}
+  }, ms || 500);
+}
+function _holdCancel(btn){
+  if(btn._holdTimer){ clearTimeout(btn._holdTimer); btn._holdTimer = null; }
+  btn.classList.remove("holding");
 }
 
 // Hold-to-large-step for fullscreen vol buttons.
@@ -4413,13 +4454,6 @@ async function stopStream(btn){
     document.querySelectorAll(".play-btn").forEach(b=>{b.disabled=false;b.textContent="▶ Play";});
   });
 }
-async function retryPlayback(btn){
-  await withInflight("retry", btn, async () => {
-    const r=await fetch("/api/retry",{method:"POST"}).catch(()=>null);
-    if(r&&!r.ok){ const e=await r.json().catch(()=>({})); showAlert(e.detail||"Retry failed.","error"); }
-  });
-}
-
 // ── Skip & Track controls ───────────────────────────────────────────────────
 async function vlcSeek(delta, btn){
   await withInflight(`seek_${delta}`, btn, async () => {
@@ -5445,6 +5479,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">2.2.1</div>
+<div style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">2.3.0</div>
 </body>
 </html>
