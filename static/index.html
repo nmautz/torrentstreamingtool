@@ -72,6 +72,9 @@
       -webkit-tap-highlight-color: transparent;
     }
     .fc-tile { flex-direction:column; align-items:center; justify-content:center; }
+    /* Handoff-to-device greyed state: shown when the current file isn't prepped
+       for on-device streaming. Stays clickable so the tooltip / toast can explain. */
+    .handoff-disabled { opacity:.4 !important; filter:grayscale(1); cursor:not-allowed; }
     /* Hold-to-activate buttons: a left-to-right fill grows over the hold duration,
        giving the user a visible progress bar so a long-press doesn't feel ambiguous. */
     .hold-btn { position: relative; overflow: hidden; }
@@ -1365,13 +1368,14 @@
         <span class="text-xs font-bold">Stop</span>
       </button>
       <!-- Hand off to this device — resume here, stop the TV. Library playback only. -->
-      <button id="fcHandoffBtn" onclick="handoffToDevice(this);closeFullscreenControls()"
+      <button id="fcHandoffBtn" onclick="handoffToDevice(this)"
         class="hidden fc-tile flex-1 border-l border-gray-800 bg-emerald-950/15
                hover:bg-emerald-950/45 active:bg-emerald-950/70 text-emerald-400 transition-colors">
         <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
           <rect x="6" y="2" width="12" height="20" rx="2"/><path stroke-linecap="round" d="M11 18h2"/>
         </svg>
         <span class="text-xs font-bold">To Device</span>
+        <span id="fcHandoffNote" class="hidden text-[9px] font-bold uppercase tracking-tight text-gray-400 leading-tight text-center px-1 mt-0.5">Not prepped for<br>on-device streaming</span>
       </button>
       <!-- border-l so no orphan line when Save is hidden -->
       <button id="fcSaveBtn" onclick="openSaveStreamModal();closeFullscreenControls()"
@@ -1596,6 +1600,10 @@ let app = {
   // feel dead during the seconds between "user clicked Play" and "VLC opened
   // the file".
   _connected:true,
+  // Handoff-to-device prep readiness for the current VLC file (see
+  // _handoffReadyState / _maybeRefreshHandoffReady). _handoffReady is the
+  // resolved boolean for _handoffReadyFile; _handoffInflightFile guards the fetch.
+  _handoffReady:null, _handoffReadyFile:null, _handoffInflightFile:null,
 };
 const expandedDownloads=new Set();   // item IDs whose file lists are currently expanded
 const downloadFilesData=new Map();   // item_id → files array (cached from /files endpoint)
@@ -1913,12 +1921,29 @@ function renderPlayer(s){
   if(fcsb){ fcsb.classList.toggle("hidden",!canSave); fcsb.classList.toggle("flex",canSave); }
 
   // Handoff-to-device button (footer + fullscreen): visible while VLC is playing a
-  // library item — lets the viewer continue on this device at the exact same time.
+  // library item. Greyed with a note when the current file isn't prepped for
+  // on-device streaming (no `.offline_cache` MP4 and not Safari-native) — handoff
+  // would otherwise drop into a long transcode with the TV already stopped.
   const canHandoff=isPlaying&&s.is_library_playback&&!!s.library_item_id;
+  if(canHandoff) _maybeRefreshHandoffReady(s);
+  const handoffBlocked=canHandoff&&_handoffReadyState(s)===false; // only grey when known-not-ready
   const hob=document.getElementById("handoffBtn");
-  if(hob){ hob.classList.toggle("hidden",!canHandoff); hob.classList.toggle("flex",canHandoff); }
+  if(hob){
+    hob.classList.toggle("hidden",!canHandoff);
+    hob.classList.toggle("flex",canHandoff);
+    hob.classList.toggle("handoff-disabled",handoffBlocked);
+    hob.title=handoffBlocked
+      ? "Video not prepped for on-device streaming"
+      : "Hand off to this device — resume here, stop the TV";
+  }
   const fchob=document.getElementById("fcHandoffBtn");
-  if(fchob){ fchob.classList.toggle("hidden",!canHandoff); fchob.classList.toggle("flex",canHandoff); }
+  if(fchob){
+    fchob.classList.toggle("hidden",!canHandoff);
+    fchob.classList.toggle("flex",canHandoff);
+    fchob.classList.toggle("handoff-disabled",handoffBlocked);
+  }
+  const fchn=document.getElementById("fcHandoffNote");
+  if(fchn) fchn.classList.toggle("hidden",!handoffBlocked);
 
   // Prev / Next episode buttons (footer) — show whenever library item has multiple files
   const prevBtn=document.getElementById("prevEpBtn");
@@ -4851,6 +4876,13 @@ async function handoffToDevice(btn) {
     showAlert("Disconnected — handoff needs the host to be reachable.", "error");
     return;
   }
+  // Gate on prep: the device player needs a `.offline_cache` MP4 (or a
+  // Safari-native source). Without it the handoff would stop the TV and then sit
+  // in a long transcode, so we block + explain instead.
+  if (_handoffReadyState(app) === false) {
+    showAlert("This episode isn't prepped for on-device streaming yet — prep it first.", "warn");
+    return;
+  }
   await withInflight("handoff", btn, async () => {
     const itemId = app.library_item_id;
     const currentFile = app.library_current_file;
@@ -4877,10 +4909,51 @@ async function handoffToDevice(btn) {
       return;
     }
 
+    // Close the fullscreen VLC controls (if open) so the device player takes over.
+    const fc = document.getElementById("fullscreenControls");
+    if (fc && !fc.classList.contains("hidden")) closeFullscreenControls();
     // Stop the TV (202 — VLC teardown runs in the background) and pick up here.
     fetch("/api/stop", { method: "POST" }).catch(() => {});
     await lpPlay(itemId, files, seekTo, label);
   });
+}
+
+// Resolve whether the currently-playing VLC file is prepped for on-device
+// streaming: true (cached / Safari-native), false (needs prep / prepping / error
+// / missing), or null when we don't know yet (the async check is still pending).
+// Drives the greyed Handoff-to-Device state in renderPlayer.
+function _handoffReadyState(s) {
+  const itemId = s.library_item_id, file = s.library_current_file;
+  if (!itemId || !file) return null;
+  const ps = prepFileState.get(offKey(itemId, file));
+  if (ps === "ready")    return true;
+  if (ps === "prepping") return false;
+  if (app._handoffReadyFile === file) return app._handoffReady;  // resolved async result
+  return null;
+}
+
+// Fetch /prep-status once per current file to learn whether it's stream-ready,
+// unless prepFileState already knows. Re-renders the player when the answer lands
+// so the button flips from greyed to active without a manual reload.
+async function _maybeRefreshHandoffReady(s) {
+  const itemId = s.library_item_id, file = s.library_current_file;
+  if (!itemId || !file) return;
+  const ps = prepFileState.get(offKey(itemId, file));
+  if (ps === "ready" || ps === "prepping") return;                   // known via prepFileState
+  if (app._handoffReadyFile === file && app._handoffReady !== null) return;  // already checked
+  if (app._handoffInflightFile === file) return;                     // fetch already in flight
+  app._handoffInflightFile = file;
+  try {
+    const r = await fetch(`/api/library/${itemId}/prep-status`);
+    if (!r.ok) return;
+    const d = await r.json();
+    _ingestPrepStatusFiles(itemId, d.files);                         // keep the picker in sync too
+    const entry = (d.files || []).find(f => f.file_path === file);
+    app._handoffReady = !!(entry && ["ready_native", "cached", "done"].includes(entry.status));
+    app._handoffReadyFile = file;
+    if (app.library_current_file === file) renderPlayer(app);        // still current → repaint
+  } catch (_) {}
+  finally { if (app._handoffInflightFile === file) app._handoffInflightFile = null; }
 }
 
 // --- Reverse handoff: push device playback back onto the TV (VLC), time-synced.

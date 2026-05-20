@@ -201,6 +201,18 @@ snapshot). Two entry points, both shown only during library playback by
 `renderPlayer`: the footer **Device** button (`#handoffBtn`, next to Stop) and
 the fullscreen **To Device** tile (`#fcHandoffBtn`, next to the Stop tile).
 
+**Prep gating.** The button is greyed (`.handoff-disabled`) with a "Not prepped
+for on-device streaming" note when the current file isn't stream-ready (footer:
+via `title`; fullscreen tile: the `#fcHandoffNote` sub-label). Readiness is
+`_handoffReadyState(s)` → `true | false | null`: it reads `prepFileState` first
+(instant when the file was prepped via the picker / prep-all), else the resolved
+result of `_maybeRefreshHandoffReady(s)`, which fetches
+`GET /api/library/{id}/prep-status` once per current file and repaints. Only a
+*known-not-ready* (`=== false`) greys the button and blocks the click (with a
+toast); `null` (unknown) stays clickable to avoid false-blocking. The async
+result is cached in `app._handoffReady` / `app._handoffReadyFile` (guarded by
+`app._handoffInflightFile`).
+
 `lpHandoffToVlc(btn)` is the reverse — it pushes the on-device play back onto the
 TV. It captures the local `<video>` position + remaining playlist tail, calls
 `lpStop()` (flushes progress, tears down the device player), then

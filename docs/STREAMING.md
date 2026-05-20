@@ -154,6 +154,16 @@ Needs `app.is_library_playback && app.library_item_id` (both published in
 `state_snapshot()`); the footer **Device** button and fullscreen **To Device**
 tile are shown only then. Guarded by `withInflight("handoff")`.
 
+The button is **prep-gated**: it greys out (`.handoff-disabled`) with a "Not
+prepped for on-device streaming" note when the current VLC file has no
+`.offline_cache` MP4 and isn't Safari-native — otherwise the handoff would stop
+the TV and sit in a long transcode. `_handoffReadyState` resolves readiness from
+`prepFileState` (instant) or a per-file `GET /prep-status` check
+(`_maybeRefreshHandoffReady`); it flips to active automatically once the file is
+prepped (episode-picker Prep or a card's Prep for Streaming). Tapping while not
+prepped shows a toast instead of acting. See [FRONTEND.md](FRONTEND.md) for the
+readiness state machine.
+
 ### 7. Handoff to VLC (device → TV)
 
 `lpHandoffToVlc(btn)` is the mirror image — it pushes the on-device play back
