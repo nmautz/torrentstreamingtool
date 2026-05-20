@@ -446,9 +446,11 @@ def _build_specs() -> tuple[list[ServiceSpec], ServiceSpec]:
     # Smart Skip countdown popup: VLC reads this file via a marq sub-source and
     # renders it bottom-right on the TV. main.py writes "Skipping … in N" here.
     # Keep these args in sync with main.py's _vlc_marquee_args() and run.py.
+    # A lone space, not "" — marq's getline() treats an empty file as EOF and
+    # logs a read error every refresh tick. A space reads fine and shows nothing.
     marquee_file = HERE / ".vlc_marquee.txt"
     try:
-        marquee_file.write_text("", encoding="utf-8")
+        marquee_file.write_text(" ", encoding="utf-8")
     except OSError:
         pass
 

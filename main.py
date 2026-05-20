@@ -107,10 +107,17 @@ def _vlc_marquee_args() -> list:
 
 
 def _marquee_write(text: str) -> None:
-    """Atomically replace the marquee file's contents (sync; tiny write)."""
+    """Atomically replace the marquee file's contents (sync; tiny write).
+
+    Clearing writes a single space, never an empty string. VLC's marq filter
+    reads the file with getline(); on an *empty* file getline hits EOF, so the
+    filter keeps the previously-shown text (and logs a read error every refresh
+    tick). A lone space is a valid non-empty line that forces the update yet
+    renders nothing — we draw no background box, so a space has no glyph.
+    """
     try:
         tmp = MARQUEE_FILE.with_suffix(".tmp")
-        tmp.write_text(text, encoding="utf-8")
+        tmp.write_text(text or " ", encoding="utf-8")
         os.replace(tmp, MARQUEE_FILE)
     except Exception:
         pass
@@ -118,7 +125,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "2.6.1"
+UI_VERSION = "2.6.2"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 

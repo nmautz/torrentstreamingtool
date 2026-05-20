@@ -281,9 +281,11 @@ def start_vlc() -> bool:
     # renders it bottom-right on the TV. main.py writes "Skipping … in N" here.
     # Create it empty so marq has something to open at launch. Keep the args in
     # sync with main.py's _vlc_marquee_args() and watchdog.py's vlc_spec.
+    # A lone space, not "" — marq's getline() treats an empty file as EOF and
+    # logs a read error every refresh tick. A space reads fine and shows nothing.
     marquee_file = HERE / ".vlc_marquee.txt"
     try:
-        marquee_file.write_text("", encoding="utf-8")
+        marquee_file.write_text(" ", encoding="utf-8")
     except OSError:
         pass
 

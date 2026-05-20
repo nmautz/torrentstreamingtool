@@ -1,5 +1,8 @@
 # Changelog
 
+## [2.6.2] — 2026-05-19
+- **Bug fix:** The countdown popup ("Skipping intro in 1") stayed frozen on the TV after the skip fired — and after any seek that ended the countdown. Root cause: VLC's `marq` filter reads `--marq-file` with `getdelim()`, which returns EOF on an *empty* file, so the filter **keeps the previously-rendered text** instead of blanking it (and logs a read error every refresh tick). Every "clear" wrote an empty string, which was a no-op on screen. `_marquee_write` now clears by writing a single space — a valid non-empty line that forces marq to update but renders no glyph (we draw no background box). `run.py` / `watchdog.py` likewise seed the file with a space, not "". This is what actually made 2.6.1's two-sided-window abort visible on screen.
+
 ## [2.6.1] — 2026-05-19
 - **Bug fix:** The "Skipping intro in N" countdown popup no longer lingers when the viewer scrubs the progress bar past the intro. `_run_skip_countdown` previously only aborted when the position moved *below* the window floor (a backward seek); a forward seek out of the intro left the popup up and would have yanked playback back to the intro end when the count hit zero. The countdown now takes a `[floor, ceil)` window (intro `ceil = intro end`; credits unbounded) and aborts on leaving it in **either** direction, clearing the popup within ~1 s of the seek.
 
