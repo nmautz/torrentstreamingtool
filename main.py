@@ -6,6 +6,7 @@ import gzip
 import hashlib
 import io
 import json
+import math
 import os
 import platform
 import re
@@ -125,7 +126,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "2.6.2"
+UI_VERSION = "2.7.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -2018,52 +2019,68 @@ async def _cancel_skip_countdown() -> None:
 
 def _start_skip_countdown(
     kind: str, item: dict, file_path: str,
-    end_at: float, floor: float, ceil: float, secs: int,
+    end_at: float, target: float, lead: int,
 ) -> None:
-    """Kick off the auto-skip countdown task (no-op if one is already running)."""
+    """Kick off the auto-skip countdown task (no-op if one is already running).
+
+    `target` is the playback position to skip AT; `lead` is how many seconds of
+    countdown precede it. The skip fires when playback reaches `target`.
+    """
     if state.skip_countdown_task and not state.skip_countdown_task.done():
         return
-    state.skip_countdown = {"type": kind, "file_path": file_path, "n": secs}
+    state.skip_countdown = {"type": kind, "file_path": file_path, "n": lead}
     state.skip_countdown_task = asyncio.create_task(
-        _run_skip_countdown(kind, item, file_path, end_at, floor, ceil, secs)
+        _run_skip_countdown(kind, item, file_path, end_at, target, lead)
     )
 
 
 async def _run_skip_countdown(
     kind: str, item: dict, file_path: str,
-    end_at: float, floor: float, ceil: float, secs: int,
+    end_at: float, target: float, lead: int,
 ) -> None:
-    """Show "Skipping … in N" on the TV for `secs` seconds, then perform the skip.
+    """Count down to `target` on the TV, then perform the skip.
 
-    Polls VLC each tick so it pauses with playback and aborts if the viewer
-    seeks out of the `[floor, ceil)` window (in either direction) or switches
-    files. On normal completion it performs the same action the immediate
-    auto-skip used to: seek past the intro, or advance to the next episode
-    (else stop) for credits.
+    Position-driven: the displayed number is `ceil(target - pos)`, so it tracks
+    real playback — it freezes while paused and grows/shrinks as the viewer
+    seeks. The skip fires once `pos >= target` (intro start → seek past the
+    whole intro; credits start → advance to the next episode, else stop), so the
+    intro/credits is skipped in full after the warning. Aborts (clearing the
+    popup) if the file changes, the viewer seeks well before the countdown
+    window, or — for an intro — seeks past the intro end.
     """
     label = "intro" if kind == "intro" else "credits"
+    intro_end = end_at if kind == "intro" else None
+    last_n: Optional[int] = None
     try:
-        n = secs
-        while n > 0:
+        while True:
             vs = await vlc_status()
             vstate = (vs or {}).get("state")
             # Playback ended or file changed under us → drop the countdown.
             if vstate in (None, "stopped") or state.library_current_file != file_path:
                 return
             pos = float((vs or {}).get("time", 0) or 0)
-            if pos < floor or pos >= ceil:  # viewer seeked out of the window
+            # Seeked clean past the intro → nothing left to skip.
+            if intro_end is not None and pos >= intro_end:
                 return
-            await _vlc_marquee(f"Skipping {label} in {n}")
+            remaining = target - pos
+            # Seeked back well before the countdown window → drop it.
+            if remaining > lead + SKIP_PREROLL_SEC:
+                return
             if vstate == "paused":
-                # Hold the count while paused — don't skip out from under a pause.
-                await asyncio.sleep(1)
+                # Hold (and don't fire) while paused; pos is frozen anyway.
+                await asyncio.sleep(0.5)
                 continue
-            state.skip_countdown = {"type": kind, "file_path": file_path, "n": n}
-            await broadcast("state", state_snapshot())
-            await asyncio.sleep(1)
-            n -= 1
+            if remaining <= 0:
+                break  # reached the skip point
+            n = max(1, min(lead, math.ceil(remaining)))
+            if n != last_n:
+                last_n = n
+                state.skip_countdown = {"type": kind, "file_path": file_path, "n": n}
+                await _vlc_marquee(f"Skipping {label} in {n}")
+                await broadcast("state", state_snapshot())
+            await asyncio.sleep(0.5)
 
-        # Final guard against VLC having already advanced in the last tick.
+        # Final guard against VLC having already advanced past this file.
         cur_uri = await vlc_playlist_uri()
         if cur_uri and cur_uri.startswith("file://"):
             if Path(uri_to_path(cur_uri)).resolve() != Path(file_path).resolve():
@@ -2092,7 +2109,9 @@ async def _maybe_emit_skip_offer(
     """Set or clear state.skip_offer based on current playback position.
 
     Auto-skip behavior: if the profile has auto_skip_* enabled, this helper
-    issues the seek/advance directly and does NOT show the offer in the UI.
+    starts an on-TV countdown (`_start_skip_countdown`) that fires the skip when
+    playback reaches the intro/credits start — it does NOT show the dashboard
+    offer. Manual (auto-skip off) still shows the Skip button as before.
     """
     if not meta:
         await _clear_skip_offer(file_path)
@@ -2102,25 +2121,25 @@ async def _maybe_emit_skip_offer(
     if state.skip_countdown_task and not state.skip_countdown_task.done():
         return
 
-    # Intro window: position within [start - PREROLL, end]
+    # Intro window
     intro = meta.get("intro")
     if intro and intro.get("end", 0) > intro.get("start", 0):
         start = float(intro.get("start", 0))
         end   = float(intro.get("end",   0))
-        if (start - SKIP_PREROLL_SEC) <= pos_sec < end:
-            if prefs.get("auto_skip_intro"):
-                # Auto path: once the intro actually begins, warn on the TV with a
-                # countdown, then skip. Start once per file; stay silent (no manual
-                # offer) during the 2 s pre-roll and after the skip has fired.
-                if (pos_sec >= start and end - pos_sec > 1.0
-                        and state.skip_offer_file != f"{file_path}#intro-done"):
-                    state.skip_offer = None
-                    _start_skip_countdown(
-                        "intro", item, file_path, end,
-                        start - SKIP_PREROLL_SEC, end, SKIP_COUNTDOWN_INTRO_SEC,
-                    )
-                    await broadcast("state", state_snapshot())
+        if prefs.get("auto_skip_intro"):
+            # Auto path: run the countdown over the `lead` seconds *before* the
+            # intro and skip the whole intro the moment it starts. Trigger once
+            # per file; the countdown task owns the screen from there.
+            if ((start - SKIP_COUNTDOWN_INTRO_SEC) <= pos_sec < end
+                    and state.skip_offer_file != f"{file_path}#intro-done"):
+                state.skip_offer = None
+                _start_skip_countdown(
+                    "intro", item, file_path, end, start, SKIP_COUNTDOWN_INTRO_SEC,
+                )
+                await broadcast("state", state_snapshot())
                 return
+        elif (start - SKIP_PREROLL_SEC) <= pos_sec < end:
+            # Manual path: show the Skip button across [start - PREROLL, end].
             offer = {"type": "intro", "end_at": round(end, 1), "file_path": file_path}
             if state.skip_offer != offer:
                 state.skip_offer = offer
@@ -2130,36 +2149,38 @@ async def _maybe_emit_skip_offer(
         elif pos_sec >= end and state.skip_offer and state.skip_offer.get("type") == "intro":
             await _clear_skip_offer(file_path)
 
-    # Credits window: position past credits_start
+    # Credits window
     credits_start = meta.get("credits_start")
-    if credits_start and pos_sec >= float(credits_start) - SKIP_PREROLL_SEC and pos_sec < dur_sec - 1:
-        next_path = _next_file_in_item(item, file_path)
-        next_exists = bool(next_path) and Path(next_path).exists()
+    if credits_start and pos_sec < dur_sec - 1:
+        cs = float(credits_start)
         if prefs.get("auto_skip_credits"):
-            # Auto path: at credits_start, warn on the TV with a countdown, then
-            # advance. Start once per file; stay silent during the 2 s pre-roll.
-            if (pos_sec >= float(credits_start)
+            # Auto path: run the countdown over the `lead` seconds *before* the
+            # credits, then advance at credits_start (credits skipped in full).
+            # Trigger once per file; the countdown task owns the screen from there.
+            if (pos_sec >= cs - SKIP_COUNTDOWN_CREDITS_SEC
                     and state.skip_offer_file != f"{file_path}#credits-done"):
                 state.skip_offer = None
                 _start_skip_countdown(
-                    "credits", item, file_path, 0.0,
-                    float(credits_start) - SKIP_PREROLL_SEC, float("inf"),
-                    SKIP_COUNTDOWN_CREDITS_SEC,
+                    "credits", item, file_path, 0.0, cs, SKIP_COUNTDOWN_CREDITS_SEC,
                 )
                 await broadcast("state", state_snapshot())
+                return
+        elif pos_sec >= cs - SKIP_PREROLL_SEC:
+            # Manual path: show the Skip button from [credits_start - PREROLL, end).
+            next_path = _next_file_in_item(item, file_path)
+            next_exists = bool(next_path) and Path(next_path).exists()
+            offer = {
+                "type": "credits",
+                "credits_start": round(cs, 1),
+                "file_path": file_path,
+                "has_next": next_exists,
+                "next_file_path": next_path if next_exists else None,
+            }
+            if state.skip_offer != offer:
+                state.skip_offer = offer
+                state.skip_offer_file = file_path
+                await broadcast("state", state_snapshot())
             return
-        offer = {
-            "type": "credits",
-            "credits_start": round(float(credits_start), 1),
-            "file_path": file_path,
-            "has_next": next_exists,
-            "next_file_path": next_path if next_exists else None,
-        }
-        if state.skip_offer != offer:
-            state.skip_offer = offer
-            state.skip_offer_file = file_path
-            await broadcast("state", state_snapshot())
-        return
 
     # Outside any window — clear if one was set for this file
     await _clear_skip_offer(file_path)
