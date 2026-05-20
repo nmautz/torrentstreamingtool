@@ -118,7 +118,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "2.6.0"
+UI_VERSION = "2.6.1"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -2010,26 +2010,29 @@ async def _cancel_skip_countdown() -> None:
 
 
 def _start_skip_countdown(
-    kind: str, item: dict, file_path: str, end_at: float, floor: float, secs: int,
+    kind: str, item: dict, file_path: str,
+    end_at: float, floor: float, ceil: float, secs: int,
 ) -> None:
     """Kick off the auto-skip countdown task (no-op if one is already running)."""
     if state.skip_countdown_task and not state.skip_countdown_task.done():
         return
     state.skip_countdown = {"type": kind, "file_path": file_path, "n": secs}
     state.skip_countdown_task = asyncio.create_task(
-        _run_skip_countdown(kind, item, file_path, end_at, floor, secs)
+        _run_skip_countdown(kind, item, file_path, end_at, floor, ceil, secs)
     )
 
 
 async def _run_skip_countdown(
-    kind: str, item: dict, file_path: str, end_at: float, floor: float, secs: int,
+    kind: str, item: dict, file_path: str,
+    end_at: float, floor: float, ceil: float, secs: int,
 ) -> None:
     """Show "Skipping … in N" on the TV for `secs` seconds, then perform the skip.
 
     Polls VLC each tick so it pauses with playback and aborts if the viewer
-    seeks back out of the window or switches files. On normal completion it
-    performs the same action the immediate auto-skip used to: seek past the
-    intro, or advance to the next episode (else stop) for credits.
+    seeks out of the `[floor, ceil)` window (in either direction) or switches
+    files. On normal completion it performs the same action the immediate
+    auto-skip used to: seek past the intro, or advance to the next episode
+    (else stop) for credits.
     """
     label = "intro" if kind == "intro" else "credits"
     try:
@@ -2041,7 +2044,7 @@ async def _run_skip_countdown(
             if vstate in (None, "stopped") or state.library_current_file != file_path:
                 return
             pos = float((vs or {}).get("time", 0) or 0)
-            if pos < floor:  # viewer seeked back out of the window
+            if pos < floor or pos >= ceil:  # viewer seeked out of the window
                 return
             await _vlc_marquee(f"Skipping {label} in {n}")
             if vstate == "paused":
@@ -2107,7 +2110,7 @@ async def _maybe_emit_skip_offer(
                     state.skip_offer = None
                     _start_skip_countdown(
                         "intro", item, file_path, end,
-                        start - SKIP_PREROLL_SEC, SKIP_COUNTDOWN_INTRO_SEC,
+                        start - SKIP_PREROLL_SEC, end, SKIP_COUNTDOWN_INTRO_SEC,
                     )
                     await broadcast("state", state_snapshot())
                 return
@@ -2133,7 +2136,8 @@ async def _maybe_emit_skip_offer(
                 state.skip_offer = None
                 _start_skip_countdown(
                     "credits", item, file_path, 0.0,
-                    float(credits_start) - SKIP_PREROLL_SEC, SKIP_COUNTDOWN_CREDITS_SEC,
+                    float(credits_start) - SKIP_PREROLL_SEC, float("inf"),
+                    SKIP_COUNTDOWN_CREDITS_SEC,
                 )
                 await broadcast("state", state_snapshot())
             return

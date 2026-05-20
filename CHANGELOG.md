@@ -1,5 +1,8 @@
 # Changelog
 
+## [2.6.1] — 2026-05-19
+- **Bug fix:** The "Skipping intro in N" countdown popup no longer lingers when the viewer scrubs the progress bar past the intro. `_run_skip_countdown` previously only aborted when the position moved *below* the window floor (a backward seek); a forward seek out of the intro left the popup up and would have yanked playback back to the intro end when the count hit zero. The countdown now takes a `[floor, ceil)` window (intro `ceil = intro end`; credits unbounded) and aborts on leaving it in **either** direction, clearing the popup within ~1 s of the seek.
+
 ## [2.6.0] — 2026-05-19
 - **Minor feature: on-TV auto-skip countdown popup.** When a profile has auto-skip enabled, Smart Skip no longer cuts instantly — it first shows a countdown directly on the TV (VLC) before acting: **10 s** before auto-advancing past credits, **5 s** before seeking past an intro. The popup renders bottom-right with padding, as opaque white text. Implemented via a VLC `marq` sub-source: VLC is launched (in `run.py`, `watchdog.py`, and `main.py`'s `_restart_vlc_process`) with `--sub-source=marq --marq-file=<repo>/.vlc_marquee.txt --marq-position=10 …`, and `main.py` writes "Skipping intro/credits in N" into that file each second (emptying it clears the popup). Text-only — no global freetype background box — so regular subtitles render unchanged. A dedicated countdown coroutine (`_run_skip_countdown`) polls VLC each tick so it holds while paused and aborts if the viewer seeks out of the window or switches files; Stop / Next / Prev / a new Play all cancel it and wipe the popup. New `state.skip_countdown` field is included in the SSE state snapshot.
 
