@@ -126,7 +126,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "2.7.0"
+UI_VERSION = "2.8.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -313,8 +313,10 @@ def state_snapshot() -> dict:
         "library_playlist_count": len(playlist),
         "library_current_index": cur_idx,
         "library_current_file": current,
+        "library_playlist": list(playlist),
         "library_item_file_count": state.library_item_file_count,
         "is_library_playback": state.library_item_id is not None,
+        "library_item_id": state.library_item_id,
         "play_when_ready_item_id": state.play_when_ready_item_id,
         "play_when_ready_file_path": state.play_when_ready_file_path,
         "skip_offer": state.skip_offer,

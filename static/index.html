@@ -1101,6 +1101,15 @@
              text-red-600 hover:text-red-400 hover:bg-red-950/30 active:bg-red-950/50 transition-colors">
       <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14"/></svg>
     </button>
+    <button id="handoffBtn" onclick="handoffToDevice(this)"
+      title="Hand off to this device — resume here, stop the TV"
+      class="hidden flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
+             text-emerald-400 hover:text-emerald-200 hover:bg-emerald-950/30 active:bg-emerald-950/50 transition-colors">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+        <rect x="6" y="2" width="12" height="20" rx="2"/><path stroke-linecap="round" d="M11 18h2"/>
+      </svg>
+      <span class="text-[9px] font-bold uppercase tracking-wide leading-none mt-0.5">Device</span>
+    </button>
     <button id="prevEpBtn"
       onpointerdown="_holdStart(this, vlcPrev, event)"
       onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
@@ -1355,6 +1364,15 @@
         </svg>
         <span class="text-xs font-bold">Stop</span>
       </button>
+      <!-- Hand off to this device — resume here, stop the TV. Library playback only. -->
+      <button id="fcHandoffBtn" onclick="handoffToDevice(this);closeFullscreenControls()"
+        class="hidden fc-tile flex-1 border-l border-gray-800 bg-emerald-950/15
+               hover:bg-emerald-950/45 active:bg-emerald-950/70 text-emerald-400 transition-colors">
+        <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+          <rect x="6" y="2" width="12" height="20" rx="2"/><path stroke-linecap="round" d="M11 18h2"/>
+        </svg>
+        <span class="text-xs font-bold">To Device</span>
+      </button>
       <!-- border-l so no orphan line when Save is hidden -->
       <button id="fcSaveBtn" onclick="openSaveStreamModal();closeFullscreenControls()"
         class="hidden fc-tile flex-1 border-l border-gray-800 bg-emerald-950/15
@@ -1560,7 +1578,8 @@ let app = {
   dl_speed_bps:0, ul_speed_bps:0,
   vlc_time:0, vlc_duration:0, vlc_volume:100,
   library_playlist_count:0, library_current_index:-1, library_current_file:null,
-  library_item_file_count:0, is_library_playback:false,
+  library_playlist:[], library_item_file_count:0, is_library_playback:false,
+  library_item_id:null,
   play_when_ready_item_id:null,
   play_when_ready_file_path:null,
   skip_offer:null,
@@ -1885,6 +1904,14 @@ function renderPlayer(s){
   if(ssb){ ssb.classList.toggle("hidden",!canSave); ssb.classList.toggle("flex",canSave); }
   const fcsb=document.getElementById("fcSaveBtn");
   if(fcsb){ fcsb.classList.toggle("hidden",!canSave); fcsb.classList.toggle("flex",canSave); }
+
+  // Handoff-to-device button (footer + fullscreen): visible while VLC is playing a
+  // library item — lets the viewer continue on this device at the exact same time.
+  const canHandoff=isPlaying&&s.is_library_playback&&!!s.library_item_id;
+  const hob=document.getElementById("handoffBtn");
+  if(hob){ hob.classList.toggle("hidden",!canHandoff); hob.classList.toggle("flex",canHandoff); }
+  const fchob=document.getElementById("fcHandoffBtn");
+  if(fchob){ fchob.classList.toggle("hidden",!canHandoff); fchob.classList.toggle("flex",canHandoff); }
 
   // Prev / Next episode buttons (footer) — show whenever library item has multiple files
   const prevBtn=document.getElementById("prevEpBtn");
@@ -4801,6 +4828,54 @@ function closePlayChooser() {
   if (ctx && ctx._isResume) fetch("/api/resume-now", {method:"DELETE"}).catch(()=>{});
 }
 
+// --- Handoff: move VLC playback onto this device, perfectly time-synced -------
+//
+// Captures VLC's live position, hands the same item + remaining-playlist tail to
+// the local <video> player seeked to that exact time, then stops VLC. /api/stop
+// returns 202 (the VLC teardown runs server-side), so the device prep runs in
+// parallel with the TV stopping. The resume position is frozen at the captured
+// time, so the handoff lands on the same frame no matter how long prep takes.
+async function handoffToDevice(btn) {
+  if (!app.is_library_playback || !app.library_item_id) {
+    showAlert("Handoff only works while a library item is playing on the TV.", "warn");
+    return;
+  }
+  if (!navigator.onLine) {
+    showAlert("Disconnected — handoff needs the host to be reachable.", "error");
+    return;
+  }
+  await withInflight("handoff", btn, async () => {
+    const itemId = app.library_item_id;
+    const currentFile = app.library_current_file;
+    const label = app.active_title || "";
+
+    // Freshest possible VLC position — a live status read beats the ≤2 s-stale
+    // app.vlc_time from the SSE snapshot. Fall back to the snapshot on failure.
+    let seekTo = Math.max(0, Number(app.vlc_time) || 0);
+    try {
+      const tr = await fetch("/api/vlc/tracks").then(r => r.ok ? r.json() : null);
+      if (tr && Number(tr.time) > 0) seekTo = Number(tr.time);
+    } catch (_) {}
+
+    // Build the playlist tail (current file + remaining episodes) so auto-advance
+    // continues on the device exactly as it would have on the TV. library_playlist
+    // is the in-flight VLC playlist; slice from the current file forward.
+    const pl = Array.isArray(app.library_playlist) ? app.library_playlist : [];
+    const idx = currentFile ? pl.indexOf(currentFile) : -1;
+    let files = idx >= 0 ? pl.slice(idx)
+              : currentFile ? [currentFile]
+              : pl.slice();
+    if (!files.length) {
+      showAlert("Couldn't tell what's playing — handoff aborted.", "error");
+      return;
+    }
+
+    // Stop the TV (202 — VLC teardown runs in the background) and pick up here.
+    fetch("/api/stop", { method: "POST" }).catch(() => {});
+    await lpPlay(itemId, files, seekTo, label);
+  });
+}
+
 // --- Local player (browser-side <video>) -------------------------------------
 //
 // Streams a server-prepared MP4 over HTTP. Loop:
@@ -5521,6 +5596,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">2.7.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">2.8.0</div>
 </body>
 </html>

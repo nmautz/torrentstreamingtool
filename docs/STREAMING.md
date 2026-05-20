@@ -22,6 +22,7 @@ Read this when changing anything related to:
 - The per-row **Prep** button in the episode picker, `prepForStreaming`, `prepFileState`
 - The bulk **Prep for Streaming** button on library cards (`prepItemForStreaming`, `/prep-all`)
 - The play chooser (`#playChooserModal`, `playLibraryWithChooser`, `pcChoose`)
+- The TV→device **Handoff** (`handoffToDevice`, `#handoffBtn`, `#fcHandoffBtn`)
 - `saveProgress`, `_lpFlushProgress`, the `pagehide`/`visibilitychange` flush
 
 For player-style UI changes that don't touch streaming logic, see
@@ -130,6 +131,27 @@ write, increments `lp.pi`, and calls `_lpLoadIndex(0)`. That re-runs the prep
 flow for the next file. If the next episode has already been prepped (or was
 fast-path Safari-compatible), playback resumes within a network round-trip;
 otherwise the user sees the same "Preparing for streaming…" overlay.
+
+### 6. Handoff from VLC (TV → device)
+
+`handoffToDevice(btn)` is a second entry point into `lpPlay` (the play chooser
+is the first). It transfers a live VLC (TV) library play onto the requesting
+browser, time-synced:
+
+1. Captures VLC's **live** position from `GET /api/vlc/tracks` (`time`) — fresher
+   than the ≤2 s-stale `app.vlc_time` snapshot, which is the fallback.
+2. Slices the remaining-playlist tail from `app.library_playlist` starting at
+   `app.library_current_file`, so on-device auto-advance continues the series.
+3. Fires `POST /api/stop` (202; VLC teardown is backgrounded) **and** calls
+   `lpPlay(itemId, tail, capturedTime, label)`. Because stop returns immediately,
+   the device's prep/transcode overlaps the TV teardown. The resume seek is
+   pinned to `capturedTime` (applied on `loadedmetadata`), so the device lands on
+   the same frame no matter how long prep takes — VLC is stopped, so the position
+   doesn't drift while the device prepares.
+
+Needs `app.is_library_playback && app.library_item_id` (both published in
+`state_snapshot()`); the footer **Device** button and fullscreen **To Device**
+tile are shown only then. Guarded by `withInflight("handoff")`.
 
 ---
 

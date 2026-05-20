@@ -188,3 +188,15 @@ device that quits playback abruptly resumes from the right spot on next play.
 
 ---
 
+## Milestone 16 — Handoff to Device (TV → device, time-synced)
+
+Move an in-progress VLC (TV) library play onto the requesting browser, resuming
+at the exact same position. Distinct from Milestone 11's retired download-to-device
+"Handoff" — this is a live TV→device transfer over the Stream-to-Device path.
+
+- [x] **16.1** Server: publish `library_item_id` and the full ordered `library_playlist` in `state_snapshot()` so the client can reconstruct the remaining-playlist tail at handoff time.
+- [x] **16.2** Client: `handoffToDevice()` captures VLC's live position (`GET /api/vlc/tracks`), slices the playlist tail from `library_current_file` forward, stops VLC (`POST /api/stop`, 202), and starts the local `<video>` player (`lpPlay`) seeked to the captured time. Gated by `withInflight("handoff")`.
+- [x] **16.3** UI: emerald **Device** button in the player footer (next to Stop) + **To Device** tile in the fullscreen controls (next to Stop), both shown only during library playback (`is_library_playback && library_item_id`).
+
+---
+

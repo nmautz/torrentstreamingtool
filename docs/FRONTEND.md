@@ -39,6 +39,7 @@ let app = { vpn_secure, vpn_status, stream_status, active_title, progress,
             downloaded_mb, total_mb, dl_speed_bps, ul_speed_bps,
             vlc_time, vlc_duration, vlc_volume,
             library_playlist_count, library_current_index, library_current_file,
+            library_playlist, library_item_id,
             library_item_file_count, is_library_playback,
             play_when_ready_item_id, play_when_ready_file_path,
             skip_offer, resume_offer };
@@ -177,6 +178,28 @@ The service worker (`static/sw.js`) is now a one-shot eviction stub registered
 via `evictLegacyServiceWorker()` so devices that PWA-installed the old build
 drop their stale caches. See [STREAMING.md](STREAMING.md) and
 [GOTCHAS.md](GOTCHAS.md) for details.
+
+### Handoff to Device (TV → device, time-synced)
+
+`handoffToDevice(btn)` moves an in-progress VLC (TV) library play onto the
+browser that tapped the button, resuming at the same position. It:
+
+1. Reads VLC's **live** position from `GET /api/vlc/tracks` (`time`), falling
+   back to the ≤2 s-stale `app.vlc_time` from the SSE snapshot.
+2. Builds the remaining-playlist tail by slicing `app.library_playlist` from
+   `app.library_current_file` forward (so auto-advance keeps going on-device),
+   falling back to just the current file.
+3. Fires `POST /api/stop` (202 — VLC teardown runs server-side) and immediately
+   calls `lpPlay(itemId, files, seekTo, label)`. The device prep/transcode runs
+   in parallel with the TV stopping; `lpPlay`'s resume seek is frozen at the
+   captured time (applied on `loadedmetadata`), so the handoff lands on the same
+   frame regardless of prep latency.
+
+Wrapped in `withInflight("handoff")` against double-taps. Requires
+`app.is_library_playback && app.library_item_id` (both now in the state
+snapshot). Two entry points, both shown only during library playback by
+`renderPlayer`: the footer **Device** button (`#handoffBtn`, next to Stop) and
+the fullscreen **To Device** tile (`#fcHandoffBtn`, next to the Stop tile).
 
 ### Init ([static/index.html:3569](../static/index.html#L3569))
 
