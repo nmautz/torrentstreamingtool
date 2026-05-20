@@ -443,6 +443,15 @@ def _build_specs() -> tuple[list[ServiceSpec], ServiceSpec]:
     jackett_port     = _extract_port(jackett_url, 9117)
     jackett_is_local = jackett_host in ("localhost", "127.0.0.1", "::1")
 
+    # Smart Skip countdown popup: VLC reads this file via a marq sub-source and
+    # renders it bottom-right on the TV. main.py writes "Skipping … in N" here.
+    # Keep these args in sync with main.py's _vlc_marquee_args() and run.py.
+    marquee_file = HERE / ".vlc_marquee.txt"
+    try:
+        marquee_file.write_text("", encoding="utf-8")
+    except OSError:
+        pass
+
     vlc_spec = ServiceSpec(
         name="VLC",
         port=vlc_port,
@@ -461,6 +470,16 @@ def _build_specs() -> tuple[list[ServiceSpec], ServiceSpec]:
             # desktop and VLC window aren't ready, so we ask VLC to come up
             # fullscreen from the start instead of toggling later.
             "--fullscreen",
+            # Bottom-right opaque countdown marquee (text only — no subtitle box).
+            "--sub-source=marq",
+            f"--marq-file={marquee_file}",
+            "--marq-refresh=200",
+            "--marq-position=10",
+            "--marq-x=50", "--marq-y=50",
+            "--marq-size=48",
+            "--marq-color=16777215",
+            "--marq-opacity=255",
+            "--marq-timeout=0",
         ],
         startup_timeout=20.0,
         back_off=5.0,

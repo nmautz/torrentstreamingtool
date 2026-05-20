@@ -1,5 +1,8 @@
 # Changelog
 
+## [2.6.0] — 2026-05-19
+- **Minor feature: on-TV auto-skip countdown popup.** When a profile has auto-skip enabled, Smart Skip no longer cuts instantly — it first shows a countdown directly on the TV (VLC) before acting: **10 s** before auto-advancing past credits, **5 s** before seeking past an intro. The popup renders bottom-right with padding, as opaque white text. Implemented via a VLC `marq` sub-source: VLC is launched (in `run.py`, `watchdog.py`, and `main.py`'s `_restart_vlc_process`) with `--sub-source=marq --marq-file=<repo>/.vlc_marquee.txt --marq-position=10 …`, and `main.py` writes "Skipping intro/credits in N" into that file each second (emptying it clears the popup). Text-only — no global freetype background box — so regular subtitles render unchanged. A dedicated countdown coroutine (`_run_skip_countdown`) polls VLC each tick so it holds while paused and aborts if the viewer seeks out of the window or switches files; Stop / Next / Prev / a new Play all cancel it and wipe the popup. New `state.skip_countdown` field is included in the SSE state snapshot.
+
 ## [2.5.0] — 2026-05-18
 - **Minor feature: automatic UI cache-bust on version mismatch.** Added `GET /api/version` (returns `{"version": "…"}` with `no-cache` headers) and a `UI_VERSION` constant in `main.py` that must be kept in sync with the version badge in `index.html`. On every page load, a self-invoking script block reads the version baked into the loaded HTML (via the `[data-ui-version]` badge) and compares it against the server response. If the cached page is older than the server's version, the page reloads with a `?_v=<version>` cache-busting query parameter so the browser fetches the updated HTML. A `sessionStorage` guard prevents infinite reload loops.
 

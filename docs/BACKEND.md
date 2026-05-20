@@ -67,6 +67,7 @@
 | `vlc_time`, `vlc_duration`, `vlc_volume` | Sampled by `stat_broadcaster` every 2 s |
 | `prepare_hash` | Torrent added by `/api/stream/prepare` pending user file selection — also cleaned up by `/api/stop` |
 | `skip_offer`, `skip_offer_file` | Current intro/credits skip offer (or `#intro-done` / `#credits-done` marker) |
+| `skip_countdown`, `skip_countdown_task` | Active auto-skip countdown `{type, file_path, n}` + its coroutine handle. Drives the on-TV marquee popup; see [ANALYZER.md](ANALYZER.md#auto-skip-countdown-on-tv-marquee) |
 | `resume_offer` | When `resume_mode="prompt"`, a `{position_sec, file_path}` dict |
 | `analysis_jobs` | `{series_key → {status, stage, current, total, message, …}}` |
 | `sse_queues` | One `asyncio.Queue` per connected client |

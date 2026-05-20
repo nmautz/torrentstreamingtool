@@ -71,13 +71,25 @@ The greedy approach handles three failure modes the original single-anchor appro
 
 `vlc_progress_tracker` runs every 2 s. For the current file:
 1. Look up `_find_file_meta(item, file_path)` from `skip_data`
-2. **Intro window**: if `start - 2s ≤ pos < end`, either auto-skip (profile pref + still has >1 s left) or set `state.skip_offer = {type:"intro", end_at, file_path}` and broadcast
-3. **Credits window**: if `pos ≥ credits_start - 2s` and not at the very end, either auto-skip (profile pref + `pos ≥ credits_start`) or set `state.skip_offer = {type:"credits", credits_start, file_path, has_next, next_file_path}`
+2. **Intro window**: if `start - 2s ≤ pos < end` — with auto-skip on (profile pref + still has >1 s left) start the **intro countdown** (see below); otherwise set `state.skip_offer = {type:"intro", end_at, file_path}` and broadcast
+3. **Credits window**: if `pos ≥ credits_start - 2s` and not at the very end — with auto-skip on (profile pref + `pos ≥ credits_start`) start the **credits countdown**; otherwise set `state.skip_offer = {type:"credits", credits_start, file_path, has_next, next_file_path}`
 4. **Outside any window** → clear offer
 
 The `SKIP_PREROLL_SEC = 2.0` ([main.py:1352](../main.py#L1352)) gives the user 2 s of visual time to react before the range starts.
 
 `state.skip_offer_file` carries the file path while an offer is active. After acting/dismissing, it gets a `#intro-done` / `#credits-done` suffix so the same offer doesn't re-emit on the next tick.
+
+## Auto-skip countdown (on-TV marquee)
+
+When auto-skip is enabled, Smart Skip does **not** cut instantly — it warns on the TV with a countdown first, then acts. Lengths: `SKIP_COUNTDOWN_INTRO_SEC = 5`, `SKIP_COUNTDOWN_CREDITS_SEC = 10`.
+
+- `_maybe_emit_skip_offer` calls `_start_skip_countdown(kind, item, file_path, end_at, floor, secs)` instead of seeking/advancing directly. While `state.skip_countdown_task` is alive, the helper early-returns so the tracker doesn't fight it.
+- `_run_skip_countdown` is a dedicated coroutine (1 s cadence, polls `vlc_status` itself). Each tick it writes `Skipping intro/credits in N` to the marquee file and broadcasts `state` (carrying `state.skip_countdown = {type, file_path, n}`). It **holds** while VLC is paused (no decrement) and **aborts** if the viewer seeks back below `floor` or the playing file changes. At 0 it re-checks the live playlist URI, then performs the original action (intro → `seek end+1`; credits → `vlc_next_file` else `pl_stop`) and sets the `#…-done` marker. The `finally` always empties the marquee file.
+- `_cancel_skip_countdown()` cancels the task and clears the popup; it's called from Stop / Next / Prev / a new Play, and as a backstop in the tracker's playback-ended branch.
+
+### How the popup reaches the TV
+
+The popup is a VLC **`marq` sub-source**, not dashboard UI — it draws on the video output itself. VLC is launched with `--sub-source=marq --marq-file=<repo>/.vlc_marquee.txt --marq-refresh=200 --marq-position=10 …` (bottom-right, opaque white text, padded). VLC re-reads the file ~5×/s; `main.py` writes the countdown text into it (`_marquee_write` / `_vlc_marquee`, atomic `os.replace`) and empties it to clear. The launch args live in three places that must stay in sync — `main.py` `_vlc_marquee_args()`, `run.py` `start_vlc`, `watchdog.py` `vlc_spec`. See [GOTCHAS.md](GOTCHAS.md#smart-skip-countdown-marquee).
 
 ## Endpoints
 

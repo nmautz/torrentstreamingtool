@@ -89,6 +89,8 @@ Three steps each tick (default 3 s):
 
 `_interruptible_sleep` watches `_stop_event` so `stop_watchdog()` exits the back-off promptly.
 
+`vlc_spec.build_args` launches VLC with `--fullscreen` plus the Smart Skip **marquee args** (`--sub-source=marq --marq-file=<repo>/.vlc_marquee.txt --marq-position=10 …`) for the on-TV auto-skip countdown popup; `_build_specs` creates that file empty first. These args are mirrored in `run.py` `start_vlc` and `main.py` `_vlc_marquee_args()` — keep all three in sync. See [GOTCHAS.md](GOTCHAS.md#smart-skip-countdown-marquee).
+
 Transitions (DOWN/UP) are logged once; routine ticks are silent. This keeps the log readable.
 
 ### Jackett specifics ([watchdog.py:160](../watchdog.py#L160))

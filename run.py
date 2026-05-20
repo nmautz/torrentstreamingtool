@@ -277,6 +277,16 @@ def start_vlc() -> bool:
         kill_by_name("VLC")
         time.sleep(1.5)
 
+    # Smart Skip countdown popup: VLC reads this file via a marq sub-source and
+    # renders it bottom-right on the TV. main.py writes "Skipping … in N" here.
+    # Create it empty so marq has something to open at launch. Keep the args in
+    # sync with main.py's _vlc_marquee_args() and watchdog.py's vlc_spec.
+    marquee_file = HERE / ".vlc_marquee.txt"
+    try:
+        marquee_file.write_text("", encoding="utf-8")
+    except OSError:
+        pass
+
     info(f"Starting VLC (Lua HTTP on port {vlc_port}) …")
     launch_bg([
         vlc_bin,
@@ -289,6 +299,16 @@ def start_vlc() -> bool:
         # (and any subsequent playback) covers the screen reliably, even at
         # boot when the post-play HTTP fullscreen toggle can race the desktop.
         "--fullscreen",
+        # Bottom-right opaque countdown marquee (text only — no subtitle box).
+        "--sub-source=marq",
+        f"--marq-file={marquee_file}",
+        "--marq-refresh=200",
+        "--marq-position=10",
+        "--marq-x=50", "--marq-y=50",
+        "--marq-size=48",
+        "--marq-color=16777215",
+        "--marq-opacity=255",
+        "--marq-timeout=0",
     ])
     return wait_for_port(vlc_port, 20.0, "VLC")
 

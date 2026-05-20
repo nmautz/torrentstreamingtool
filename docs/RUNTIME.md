@@ -28,8 +28,9 @@ if _VENV_PY.exists() and Path(sys.prefix).resolve() != VENV.resolve():
 ### `start_vlc()`
 - Port-open check first; if port 8080 is already serving, skip
 - If a non-HTTP VLC is running, kill it, sleep 1.5 s
-- `launch_bg([vlc_bin, --extraintf=http, --http-host=localhost, --http-port=N, --http-password=PWD, --no-random])`
+- `launch_bg([vlc_bin, --extraintf=http, --http-host=localhost, --http-port=N, --http-password=PWD, --no-random, --fullscreen, <marquee args>])`
 - Always launches with HTTP flags rather than editing VLC prefs
+- The `<marquee args>` (`--sub-source=marq --marq-file=<repo>/.vlc_marquee.txt --marq-position=10 …`) enable the Smart Skip on-TV countdown popup. Creates the file empty first. Mirrored in `watchdog.py` `vlc_spec` and `main.py` `_vlc_marquee_args()` — keep all three in sync. See [ANALYZER.md](ANALYZER.md#how-the-popup-reaches-the-tv) and [GOTCHAS.md](GOTCHAS.md#smart-skip-countdown-marquee).
 
 ### `start_qbittorrent()`
 - Port-open check; if 8081 responds, skip

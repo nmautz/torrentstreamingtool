@@ -78,10 +78,47 @@ settings = Settings()
 LIBRARY_FILE = Path(__file__).parent / "library.json"
 BACKGROUND_DIR = Path(__file__).parent / ".background"
 
+# Countdown popup shown on the TV itself. VLC is launched with a `marq`
+# sub-source that re-reads this file ~5×/s and renders its contents bottom-right.
+# main.py writes the "Skipping … in N" text here; emptying the file clears it.
+# run.py and watchdog.py launch VLC with --marq-file pointed at this same path —
+# keep _vlc_marquee_args() (below) in sync with their arg lists.
+MARQUEE_FILE = Path(__file__).parent / ".vlc_marquee.txt"
+
+
+def _vlc_marquee_args() -> list:
+    """VLC CLI args enabling the bottom-right countdown marquee.
+
+    Mirrored verbatim in run.py (start_vlc) and watchdog.py (vlc_spec) — the
+    three launch paths must agree. Text-only (no background box) so regular
+    subtitles render unchanged; readability comes from VLC's default outline.
+    """
+    return [
+        "--sub-source=marq",
+        f"--marq-file={MARQUEE_FILE}",
+        "--marq-refresh=200",      # re-read the file ~5×/s → smooth countdown
+        "--marq-position=10",      # 10 = Bottom-Right
+        "--marq-x=50", "--marq-y=50",   # padding in from the corner
+        "--marq-size=48",
+        "--marq-color=16777215",   # white
+        "--marq-opacity=255",      # fully opaque text
+        "--marq-timeout=0",        # persist until the file is emptied
+    ]
+
+
+def _marquee_write(text: str) -> None:
+    """Atomically replace the marquee file's contents (sync; tiny write)."""
+    try:
+        tmp = MARQUEE_FILE.with_suffix(".tmp")
+        tmp.write_text(text, encoding="utf-8")
+        os.replace(tmp, MARQUEE_FILE)
+    except Exception:
+        pass
+
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "2.5.0"
+UI_VERSION = "2.6.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -181,6 +218,8 @@ class AppState:
     prepare_hash: Optional[str] = None                    # hash added by /stream/prepare, pending user selection
     skip_offer: Optional[dict] = None                     # {"type": "intro"|"credits", "end_at": s, "next_item_id": id?, "next_file_path": p?}
     skip_offer_file: Optional[str] = None                 # path the current skip offer corresponds to
+    skip_countdown: Optional[dict] = None                 # {"type", "file_path", "n"} active auto-skip countdown (TV marquee)
+    skip_countdown_task: Optional[asyncio.Task] = None    # in-flight countdown coroutine
     resume_offer: Optional[dict] = None                   # {"position_sec": N, "file_path": "..."} when resume_mode="prompt"
     analysis_jobs: dict = field(default_factory=dict)     # series_key → {status, stage, current, total, message, item_ids, started_at, finished_at}
     background_playing: bool = False                      # True when the idle background video is the active VLC playlist
@@ -271,6 +310,7 @@ def state_snapshot() -> dict:
         "play_when_ready_item_id": state.play_when_ready_item_id,
         "play_when_ready_file_path": state.play_when_ready_file_path,
         "skip_offer": state.skip_offer,
+        "skip_countdown": state.skip_countdown,
         "resume_offer": state.resume_offer,
         "analysis_jobs": state.analysis_jobs,
     }
@@ -1160,10 +1200,11 @@ async def _restart_vlc_process() -> bool:
         kw["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kw["start_new_session"] = True
+    _marquee_write("")  # start clean; marq needs the file to exist at launch
     subprocess.Popen(
         [vlc_bin, "--extraintf=http", "--http-host=localhost",
          f"--http-port={vlc_port}", f"--http-password={settings.vlc_password}", "--no-random",
-         "--fullscreen"],
+         "--fullscreen", *_vlc_marquee_args()],
         **kw,
     )
 
@@ -1947,6 +1988,92 @@ def _schedule_series_analysis_if_eligible(item: dict, lib: dict) -> None:
 # the user has visual time to react when entering the window.
 SKIP_PREROLL_SEC = 2.0
 
+# Auto-skip countdown lengths (seconds). When a profile has auto-skip enabled we
+# warn the viewer on the TV before acting instead of cutting immediately.
+SKIP_COUNTDOWN_INTRO_SEC = 5
+SKIP_COUNTDOWN_CREDITS_SEC = 10
+
+
+async def _vlc_marquee(text: str) -> None:
+    """Show `text` on the TV (or clear it when empty). Offloads the file I/O."""
+    await asyncio.to_thread(_marquee_write, text)
+
+
+async def _cancel_skip_countdown() -> None:
+    """Stop any in-flight auto-skip countdown and wipe the on-screen popup."""
+    t = state.skip_countdown_task
+    state.skip_countdown_task = None
+    state.skip_countdown = None
+    if t and not t.done():
+        t.cancel()
+    await _vlc_marquee("")
+
+
+def _start_skip_countdown(
+    kind: str, item: dict, file_path: str, end_at: float, floor: float, secs: int,
+) -> None:
+    """Kick off the auto-skip countdown task (no-op if one is already running)."""
+    if state.skip_countdown_task and not state.skip_countdown_task.done():
+        return
+    state.skip_countdown = {"type": kind, "file_path": file_path, "n": secs}
+    state.skip_countdown_task = asyncio.create_task(
+        _run_skip_countdown(kind, item, file_path, end_at, floor, secs)
+    )
+
+
+async def _run_skip_countdown(
+    kind: str, item: dict, file_path: str, end_at: float, floor: float, secs: int,
+) -> None:
+    """Show "Skipping … in N" on the TV for `secs` seconds, then perform the skip.
+
+    Polls VLC each tick so it pauses with playback and aborts if the viewer
+    seeks back out of the window or switches files. On normal completion it
+    performs the same action the immediate auto-skip used to: seek past the
+    intro, or advance to the next episode (else stop) for credits.
+    """
+    label = "intro" if kind == "intro" else "credits"
+    try:
+        n = secs
+        while n > 0:
+            vs = await vlc_status()
+            vstate = (vs or {}).get("state")
+            # Playback ended or file changed under us → drop the countdown.
+            if vstate in (None, "stopped") or state.library_current_file != file_path:
+                return
+            pos = float((vs or {}).get("time", 0) or 0)
+            if pos < floor:  # viewer seeked back out of the window
+                return
+            await _vlc_marquee(f"Skipping {label} in {n}")
+            if vstate == "paused":
+                # Hold the count while paused — don't skip out from under a pause.
+                await asyncio.sleep(1)
+                continue
+            state.skip_countdown = {"type": kind, "file_path": file_path, "n": n}
+            await broadcast("state", state_snapshot())
+            await asyncio.sleep(1)
+            n -= 1
+
+        # Final guard against VLC having already advanced in the last tick.
+        cur_uri = await vlc_playlist_uri()
+        if cur_uri and cur_uri.startswith("file://"):
+            if Path(uri_to_path(cur_uri)).resolve() != Path(file_path).resolve():
+                return
+
+        if kind == "intro":
+            state.skip_offer_file = f"{file_path}#intro-done"
+            await vlc("seek", val=str(int(end_at) + 1))
+        else:
+            state.skip_offer_file = f"{file_path}#credits-done"
+            next_path = _next_file_in_item(item, file_path)
+            if next_path and Path(next_path).exists():
+                await vlc_next_file(file_path, item)
+            else:
+                await vlc("pl_stop")
+        await broadcast("state", state_snapshot())
+    finally:
+        state.skip_countdown = None
+        await _vlc_marquee("")
+
 
 async def _maybe_emit_skip_offer(
     item: dict, file_path: str, meta: Optional[dict],
@@ -1961,18 +2088,27 @@ async def _maybe_emit_skip_offer(
         await _clear_skip_offer(file_path)
         return
 
+    # A countdown owns the screen while it runs — don't fight it with offers.
+    if state.skip_countdown_task and not state.skip_countdown_task.done():
+        return
+
     # Intro window: position within [start - PREROLL, end]
     intro = meta.get("intro")
     if intro and intro.get("end", 0) > intro.get("start", 0):
         start = float(intro.get("start", 0))
         end   = float(intro.get("end",   0))
         if (start - SKIP_PREROLL_SEC) <= pos_sec < end:
-            if prefs.get("auto_skip_intro") and end - pos_sec > 1.0:
-                # Only auto-skip if the offer hasn't already been auto-handled
-                if state.skip_offer_file != f"{file_path}#intro-done":
-                    state.skip_offer_file = f"{file_path}#intro-done"
+            if prefs.get("auto_skip_intro"):
+                # Auto path: once the intro actually begins, warn on the TV with a
+                # countdown, then skip. Start once per file; stay silent (no manual
+                # offer) during the 2 s pre-roll and after the skip has fired.
+                if (pos_sec >= start and end - pos_sec > 1.0
+                        and state.skip_offer_file != f"{file_path}#intro-done"):
                     state.skip_offer = None
-                    await vlc("seek", val=str(int(end) + 1))
+                    _start_skip_countdown(
+                        "intro", item, file_path, end,
+                        start - SKIP_PREROLL_SEC, SKIP_COUNTDOWN_INTRO_SEC,
+                    )
                     await broadcast("state", state_snapshot())
                 return
             offer = {"type": "intro", "end_at": round(end, 1), "file_path": file_path}
@@ -1989,17 +2125,17 @@ async def _maybe_emit_skip_offer(
     if credits_start and pos_sec >= float(credits_start) - SKIP_PREROLL_SEC and pos_sec < dur_sec - 1:
         next_path = _next_file_in_item(item, file_path)
         next_exists = bool(next_path) and Path(next_path).exists()
-        if prefs.get("auto_skip_credits") and (pos_sec >= float(credits_start)):
-            # Only auto-skip once per file
-            done_marker = f"{file_path}#credits-done"
-            if state.skip_offer_file != done_marker:
-                state.skip_offer_file = done_marker
+        if prefs.get("auto_skip_credits"):
+            # Auto path: at credits_start, warn on the TV with a countdown, then
+            # advance. Start once per file; stay silent during the 2 s pre-roll.
+            if (pos_sec >= float(credits_start)
+                    and state.skip_offer_file != f"{file_path}#credits-done"):
                 state.skip_offer = None
+                _start_skip_countdown(
+                    "credits", item, file_path, 0.0,
+                    float(credits_start) - SKIP_PREROLL_SEC, SKIP_COUNTDOWN_CREDITS_SEC,
+                )
                 await broadcast("state", state_snapshot())
-                if next_exists:
-                    await vlc_next_file(file_path, item)
-                else:
-                    await vlc("pl_stop")
             return
         offer = {
             "type": "credits",
@@ -2067,6 +2203,8 @@ async def vlc_progress_tracker() -> None:
         await asyncio.sleep(2)
         if not state.library_item_id or not state.library_profile_id:
             # Clear any stale skip/resume offers when playback ends
+            if state.skip_countdown_task and not state.skip_countdown_task.done():
+                await _cancel_skip_countdown()
             changed = False
             if state.skip_offer is not None:
                 state.skip_offer = None
@@ -2347,6 +2485,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     qbit = httpx.AsyncClient(timeout=10.0)
     await qbit_login()
     Path(settings.qbit_download_path).mkdir(parents=True, exist_ok=True)
+    _marquee_write("")  # wipe any stale countdown text from a prior run
 
     # Default volume to half of the admin cap. Without this, state.vlc_volume
     # starts at 100 (the dataclass default) which can blast if the cap is low.
@@ -2942,6 +3081,7 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     prior = state.library_play_task
     if prior and not prior.done():
         prior.cancel()
+    await _cancel_skip_countdown()
 
     # Flip state to buffering NOW so the SSE-driven UI paints loading state
     # before the slow VLC roundtrips even start.
@@ -3394,6 +3534,7 @@ async def stop() -> JSONResponse:
     state.skip_offer_file = None
     state.resume_offer = None
     state.prepare_hash = None
+    await _cancel_skip_countdown()
 
     await broadcast("stream_status", {"status": "idle", "message": "Stopped."})
     await broadcast("state", state_snapshot())
@@ -3575,6 +3716,7 @@ async def vlc_prev() -> JSONResponse:
     if prior and not prior.done():
         prior.cancel()
 
+    await _cancel_skip_countdown()
     state.library_playlist     = new_tail
     state.library_current_file = prev_file
     state.current_audio_track  = -1
@@ -3622,6 +3764,7 @@ async def vlc_next() -> JSONResponse:
     if prior and not prior.done():
         prior.cancel()
 
+    await _cancel_skip_countdown()
     state.library_playlist     = new_tail
     state.library_current_file = next_file
     state.current_audio_track  = -1
