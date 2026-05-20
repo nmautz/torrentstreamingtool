@@ -1478,6 +1478,13 @@
         <div id="lpTitle" class="text-xs font-bold text-gray-200 truncate">—</div>
         <div class="text-[10px] uppercase tracking-widest text-emerald-500 font-bold">On Device</div>
       </div>
+      <button onclick="lpHandoffToVlc(this)" title="Hand off to the TV (VLC) — resume there at the same time"
+        class="h-full px-4 flex items-center gap-1.5 text-indigo-400 hover:text-indigo-200 hover:bg-indigo-950/40 active:bg-indigo-950/70 transition-colors text-xs font-bold uppercase tracking-wide">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+          <rect x="2" y="4" width="20" height="14" rx="0"/><path stroke-linecap="round" d="M8 20h8M12 18v2"/>
+        </svg>
+        To TV
+      </button>
       <button onclick="lpStop()"
         class="h-full px-4 flex items-center gap-1.5 text-red-500 hover:text-red-300 hover:bg-red-950/40 active:bg-red-950/70 transition-colors text-xs font-bold uppercase tracking-wide">
         Stop
@@ -4873,6 +4880,41 @@ async function handoffToDevice(btn) {
     // Stop the TV (202 — VLC teardown runs in the background) and pick up here.
     fetch("/api/stop", { method: "POST" }).catch(() => {});
     await lpPlay(itemId, files, seekTo, label);
+  });
+}
+
+// --- Reverse handoff: push device playback back onto the TV (VLC), time-synced.
+//
+// Captures the local <video> position + remaining playlist tail, tears down the
+// device player (which flushes progress), and starts VLC playback at the exact
+// captured time via playLibraryFiles (POST /api/library/{id}/play with
+// seek_first_to). VLC plays the original source seeked to the same moment, so
+// the content picks up on the same frame. The mirror image of handoffToDevice.
+async function lpHandoffToVlc(btn) {
+  if (!lp.itemId || !lp.filePath) {
+    showAlert("Nothing is playing on this device.", "warn");
+    return;
+  }
+  if (!profile.id) { showAlert("Select a profile first.", "warn"); return; }
+  if (!navigator.onLine || !app._connected) {
+    showAlert("Reconnecting — try again in a moment.", "warn");
+    return;
+  }
+  await withInflight("handoff_vlc", btn, async () => {
+    const itemId = lp.itemId;
+    const label  = _libraryLabel(itemId);
+    const v = document.getElementById("lpVideo");
+    const seekTo = Math.max(0, v.currentTime || 0);
+    // Remaining playlist tail from the current file forward, so the TV keeps
+    // auto-advancing the series exactly as the device would have.
+    const files = lp.playlist.slice(lp.pi);
+    if (!files.length) {
+      showAlert("Couldn't tell what's playing — handoff aborted.", "error");
+      return;
+    }
+    // lpStop flushes the current position to the server, then start VLC there.
+    await lpStop();
+    await playLibraryFiles(itemId, files, seekTo, label);
   });
 }
 

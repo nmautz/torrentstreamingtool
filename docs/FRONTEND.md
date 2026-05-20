@@ -201,6 +201,15 @@ snapshot). Two entry points, both shown only during library playback by
 `renderPlayer`: the footer **Device** button (`#handoffBtn`, next to Stop) and
 the fullscreen **To Device** tile (`#fcHandoffBtn`, next to the Stop tile).
 
+`lpHandoffToVlc(btn)` is the reverse — it pushes the on-device play back onto the
+TV. It captures the local `<video>` position + remaining playlist tail, calls
+`lpStop()` (flushes progress, tears down the device player), then
+`playLibraryFiles(itemId, tail, capturedTime, label)` (`POST
+/api/library/{id}/play` with `seek_first_to`). VLC plays the original source
+seeked to the same moment. The **To TV** button sits in the local player's
+fullscreen header next to Stop (part of `.lp-chrome`, hidden in tiny mode).
+Guarded by `withInflight("handoff_vlc")`.
+
 ### Init ([static/index.html:3569](../static/index.html#L3569))
 
 On `DOMContentLoaded`:

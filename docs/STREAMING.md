@@ -22,7 +22,8 @@ Read this when changing anything related to:
 - The per-row **Prep** button in the episode picker, `prepForStreaming`, `prepFileState`
 - The bulk **Prep for Streaming** button on library cards (`prepItemForStreaming`, `/prep-all`)
 - The play chooser (`#playChooserModal`, `playLibraryWithChooser`, `pcChoose`)
-- The TV→device **Handoff** (`handoffToDevice`, `#handoffBtn`, `#fcHandoffBtn`)
+- The **Handoff** (both directions): TV→device (`handoffToDevice`, `#handoffBtn`,
+  `#fcHandoffBtn`) and device→TV (`lpHandoffToVlc`, the local player's **To TV** button)
 - `saveProgress`, `_lpFlushProgress`, the `pagehide`/`visibilitychange` flush
 
 For player-style UI changes that don't touch streaming logic, see
@@ -152,6 +153,25 @@ browser, time-synced:
 Needs `app.is_library_playback && app.library_item_id` (both published in
 `state_snapshot()`); the footer **Device** button and fullscreen **To Device**
 tile are shown only then. Guarded by `withInflight("handoff")`.
+
+### 7. Handoff to VLC (device → TV)
+
+`lpHandoffToVlc(btn)` is the mirror image — it pushes the on-device play back
+onto the TV:
+
+1. Captures the local `<video>` `currentTime` and the remaining playlist tail
+   (`lp.playlist.slice(lp.pi)`).
+2. Calls `lpStop()` (which flushes the current position to the server and tears
+   down the device player).
+3. Calls `playLibraryFiles(itemId, tail, capturedTime, label)` → `POST
+   /api/library/{id}/play` with `seek_first_to`. VLC plays the **original source**
+   seeked to the same moment (transcode preserves the timeline, so the device's
+   cached MP4 and the source share timestamps), so playback resumes on the same
+   frame.
+
+The **To TV** button lives in the local player's fullscreen header (next to
+Stop); it's part of `.lp-chrome`, so it's hidden in tiny mode (maximize first).
+Guarded by `withInflight("handoff_vlc")`.
 
 ---
 
