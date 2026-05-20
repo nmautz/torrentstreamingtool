@@ -152,7 +152,9 @@ browser, time-synced:
 
 Needs `app.is_library_playback && app.library_item_id` (both published in
 `state_snapshot()`); the footer **Device** button and fullscreen **To Device**
-tile are shown only then. Guarded by `withInflight("handoff")`.
+tile are shown only then. Both are **hold-to-activate** (0.5 s `.hold-btn` fill,
+same as Stop) so an accidental tap can't pull playback off the TV. Guarded by
+`withInflight("handoff")`.
 
 The button is **prep-gated**: it greys out (`.handoff-disabled`) with a "Not
 prepped for on-device streaming" note when the current VLC file has no

@@ -199,7 +199,10 @@ Wrapped in `withInflight("handoff")` against double-taps. Requires
 `app.is_library_playback && app.library_item_id` (both now in the state
 snapshot). Two entry points, both shown only during library playback by
 `renderPlayer`: the footer **Device** button (`#handoffBtn`, next to Stop) and
-the fullscreen **To Device** tile (`#fcHandoffBtn`, next to the Stop tile).
+the fullscreen **To Device** tile (`#fcHandoffBtn`, next to the Stop tile). Both
+are **hold-to-activate** (`_holdStart(this, handoffToDevice, event)` + the
+`.hold-btn` 0.5 s progress fill, same as Stop) so an accidental tap can't pull
+playback off the TV — a short tap does nothing.
 
 **Prep gating.** The button is greyed (`.handoff-disabled`) with a "Not prepped
 for on-device streaming" note when the current file isn't stream-ready (footer:

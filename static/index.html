@@ -1104,9 +1104,11 @@
              text-red-600 hover:text-red-400 hover:bg-red-950/30 active:bg-red-950/50 transition-colors">
       <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><rect x="5" y="5" width="14" height="14"/></svg>
     </button>
-    <button id="handoffBtn" onclick="handoffToDevice(this)"
-      title="Hand off to this device — resume here, stop the TV"
-      class="hidden flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
+    <button id="handoffBtn"
+      onpointerdown="_holdStart(this, handoffToDevice, event)"
+      onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
+      title="Hold to hand off to this device — resume here, stop the TV"
+      class="hold-btn hidden flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
              text-emerald-400 hover:text-emerald-200 hover:bg-emerald-950/30 active:bg-emerald-950/50 transition-colors">
       <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
         <rect x="6" y="2" width="12" height="20" rx="2"/><path stroke-linecap="round" d="M11 18h2"/>
@@ -1368,8 +1370,11 @@
         <span class="text-xs font-bold">Stop</span>
       </button>
       <!-- Hand off to this device — resume here, stop the TV. Library playback only. -->
-      <button id="fcHandoffBtn" onclick="handoffToDevice(this)"
-        class="hidden fc-tile flex-1 border-l border-gray-800 bg-emerald-950/15
+      <button id="fcHandoffBtn"
+        onpointerdown="_holdStart(this, handoffToDevice, event)"
+        onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
+        title="Hold to hand off to this device"
+        class="hold-btn hidden fc-tile flex-1 border-l border-gray-800 bg-emerald-950/15
                hover:bg-emerald-950/45 active:bg-emerald-950/70 text-emerald-400 transition-colors">
         <svg class="w-8 h-8 mb-1" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
           <rect x="6" y="2" width="12" height="20" rx="2"/><path stroke-linecap="round" d="M11 18h2"/>
@@ -1934,7 +1939,7 @@ function renderPlayer(s){
     hob.classList.toggle("handoff-disabled",handoffBlocked);
     hob.title=handoffBlocked
       ? "Video not prepped for on-device streaming"
-      : "Hand off to this device — resume here, stop the TV";
+      : "Hold to hand off to this device — resume here, stop the TV";
   }
   const fchob=document.getElementById("fcHandoffBtn");
   if(fchob){
