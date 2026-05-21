@@ -47,7 +47,7 @@ with the following layout:
 ```
 .offline_cache/
   <sha24>/
-    master.m3u8           ← top-level playlist (variants + alternate audio/subs)
+    master.m3u8           ← top-level playlist (video variant + alternate audio)
     video.m3u8            ← video rendition playlist
     seg_video_00001.m4s   ← 6 s fmp4 segments
     seg_video_00002.m4s
@@ -57,23 +57,43 @@ with the following layout:
     …
     audio_1.m3u8          (when source has multiple audio tracks)
     …
-    sub_0.m3u8            ← per-text-sub rendition (WebVTT segments)
-    seg_sub_0_00001.m4s
+    sub_0.vtt             ← standalone WebVTT sidecar per text sub (NOT in manifest)
+    sub_1.vtt
     …
     meta.json             ← track display info for the UI
 ```
 
-`meta.json` carries the human labels (`{idx, label, language, default}`) for
-each audio and subtitle rendition plus a `skipped_image_subs` list noting
-PGS/VOBSUB tracks that couldn't be included (they need image-OCR or burn-in,
-neither of which is implemented). The UI reads `meta.json` via
-`/offline-prepare` to populate dropdowns — it never re-probes the bundle.
+> **Subtitles are NOT in the HLS manifest.** ffmpeg's HLS muxer cannot package
+> multi-track WebVTT — a single inline subtitle works, but two or more (as their
+> own `s:N,sgroup:…` variants) fail with `No streams to mux were specified` /
+> `Could not write header`, for both `fmp4` and `mpegts`. Since every real MKV
+> has many subtitle tracks, in-manifest subs meant prep *always* failed (fixed
+> in v3.2.0). Instead each text sub is emitted as a standalone `sub_<i>.vtt` in
+> the same single ffmpeg pass; the player attaches them as `<track>` children.
+> See [GOTCHAS.md](GOTCHAS.md).
+
+`meta.json` carries the human labels for each audio rendition
+(`{idx, playlist, label, language, default}`) and each subtitle
+(`{idx, file, label, language, title}` where `file` is the bundle-relative
+`sub_<i>.vtt`), plus a `skipped_image_subs` list noting PGS/VOBSUB tracks that
+couldn't be included (they need image-OCR or burn-in, neither of which is
+implemented). The UI reads `meta.json` via `/offline-prepare` to populate
+dropdowns — it never re-probes the bundle.
 
 Cache key (`_offline_cache_key`) is
 `sha256(OFFLINE_CACHE_VERSION | path | mtime | size)[:24]`. Re-encoding the
-source invalidates the bundle. `OFFLINE_CACHE_VERSION = "v3-hls"`; bumping it
+source invalidates the bundle. `OFFLINE_CACHE_VERSION = "v4-hls"`; bumping it
 forces every bundle to be rebuilt on next prep (old `<sha>/` dirs become
 orphans, listed in Admin → Offline Cache for one-click purge).
+
+> **Not available on macOS hosts.** When the server runs on macOS, ffmpeg /
+> ffprobe (children of the non-GUI Python process) are blocked by TCC from
+> reading the user's `~/Downloads` / `~/Desktop` / `~/Documents`, so every prep
+> aborts at the probe step with `Operation not permitted`. The prep endpoints
+> short-circuit with a clear error, `state_snapshot` returns
+> `hls_available: false`, and the dashboard hides all Prep / On-Device controls
+> (`no-hls` body class) and routes the play chooser straight to VLC. VLC ("On
+> TV") is unaffected — it's a separate, individually TCC-granted app.
 
 ---
 
@@ -84,21 +104,25 @@ orphans, listed in Admin → Offline Cache for one-click purge).
 ```
 ffmpeg -y -progress pipe:1 -nostats \
   -thread_queue_size 1024 -rtbufsize 64M -i src.mkv \
-  -map 0:v:0 -map 0:a:0 -map 0:a:1 -map 0:s:0 \
+  -map 0:v:0 -map 0:a:0 -map 0:a:1 \
   [-c:v copy | -c:v libx264 -preset veryfast -crf 23 | -c:v h264_nvenc -preset medium -cq 23] \
   -pix_fmt yuv420p -profile:v high -level 4.1 \
   -c:a aac -b:a 160k -ac 2 \
-  -c:s webvtt \
   -f hls -hls_time 6 -hls_playlist_type vod \
   -hls_segment_type fmp4 -hls_flags independent_segments \
   -hls_segment_filename "<out>/seg_%v_%05d.m4s" \
   -master_pl_name master.m3u8 \
-  -var_stream_map "v:0,agroup:aud,sgroup:sub,name:video \
+  -var_stream_map "v:0,agroup:aud,name:video \
                    a:0,agroup:aud,name:audio_0,language:eng,default:yes \
-                   a:1,agroup:aud,name:audio_1,language:jpn \
-                   s:0,sgroup:sub,name:sub_0,language:eng" \
-  "<out>/%v.m3u8"
+                   a:1,agroup:aud,name:audio_1,language:jpn" \
+  "<out>/%v.m3u8" \
+  -map 0:s:0 -c:s webvtt -f webvtt "<out>/sub_0.vtt" \
+  -map 0:s:1 -c:s webvtt -f webvtt "<out>/sub_1.vtt"
 ```
+
+Note the two output groups: the HLS bundle (video + audio only) comes first,
+then one extra WebVTT output file per text subtitle. Both are produced in the
+**single** ffmpeg pass — no second invocation.
 
 Key decisions:
 
@@ -112,12 +136,13 @@ Key decisions:
   re-encoded at 160 kbps. Multi-channel preservation is not implemented;
   for 5.1 playback on TV, use VLC's path which reads the source MKV
   directly.
-- **Text subs become WebVTT.** subrip / ass / ssa are transparently
-  converted by ffmpeg. ASS styling (karaoke, positioning, custom fonts)
-  is **lost** — see [GOTCHAS.md](GOTCHAS.md) for the libass.js deferral.
-  Image-based subs (`hdmv_pgs_subtitle`, `dvd_subtitle`, `dvb_subtitle`,
-  `vobsub`) are filtered out by `_ffprobe_full` and noted in
-  `meta.json:skipped_image_subs`.
+- **Text subs become standalone WebVTT sidecars** (`sub_<i>.vtt`), *not*
+  in-manifest renditions — ffmpeg's HLS muxer can't package more than one
+  WebVTT track. subrip / ass / ssa are transparently converted; ASS styling
+  (karaoke, positioning, custom fonts) is **lost** — see
+  [GOTCHAS.md](GOTCHAS.md) for the libass.js deferral. Image-based subs
+  (`hdmv_pgs_subtitle`, `dvd_subtitle`, `dvb_subtitle`, `vobsub`) are filtered
+  out by `_ffprobe_full` and noted in `meta.json:skipped_image_subs`.
 - **6-second segments, fmp4, independent_segments.** Modern HLS defaults.
   Switching audio/sub mid-stream doesn't require an extra fetch.
 - **ffmpeg ≥ 4.3** is enforced via `_ffmpeg_version()` cache. Older builds
@@ -182,15 +207,21 @@ Two ways to populate the cache:
      Wait for `MANIFEST_PARSED` → populate dropdowns and apply saved
      track picks. Errors recoverable via `hls.recoverMediaError()`.
    - **Safari** (iOS + macOS): set `<video>.src = master_url` directly.
-     Safari plays HLS natively, exposing `AudioTrackList` and
-     `TextTrackList` for switching. Wait for `loadedmetadata` →
-     populate dropdowns.
+     Safari plays HLS natively, exposing `AudioTrackList` for audio
+     switching. Wait for `loadedmetadata` → populate dropdowns. (Subtitles
+     are `<track>` children, not in-band, on every engine — see step 5.)
 5. Track switching:
-   - **hls.js path**: `hls.audioTrack = idx`, `hls.subtitleTrack = idx`.
-   - **Safari native**: `for t of video.audioTracks: t.enabled = (i===idx)`;
-     `for t of video.textTracks: t.mode = (i===idx) ? "showing" : "disabled"`.
+   - **Audio** (in-manifest): hls.js path sets `hls.audioTrack = idx`; Safari
+     native sets `video.audioTracks[i].enabled = (i===idx)`.
+   - **Subtitles** (`<track>` children): `_lpLoadIndex` appends one `<track>`
+     per bundle `sub_<i>.vtt` then per on-disk sidecar, recording each in
+     `lp.subTracks` as `{el, key}` in dropdown order (key = `"i"` for bundle,
+     `"sidecar:i"` for on-disk). `_lpApplySubIdx(idx)` just sets
+     `tr.el.track.mode` to `"showing"` on the matching key and `"disabled"`
+     elsewhere — identical for hls.js and Safari, since these are native
+     `<track>`s the browser renders independent of the MSE pipeline.
    - Each switch POSTs to `/api/library/{id}/local-tracks` with the new
-     pick so it persists across sessions.
+     pick so it persists across sessions (on-disk sidecar picks save as -1).
 6. The container toggles between fullscreen overlay and a corner tile via
    the `.lp-tiny` class — pure CSS, no DOM moves. `lpMaximize` /
    `lpMinimize` flip the class; `lpStop` removes both `.lp-active` and

@@ -140,7 +140,7 @@ BACKGROUND_DIR = Path(__file__).parent / ".background"
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.1.0"
+UI_VERSION = "3.2.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -332,6 +332,8 @@ def state_snapshot() -> dict:
         "skip_offer": state.skip_offer,
         "resume_offer": state.resume_offer,
         "analysis_jobs": state.analysis_jobs,
+        # False on macOS hosts — the UI hides stream-to-device / Prep affordances.
+        "hls_available": HLS_AVAILABLE,
     }
 
 
@@ -4811,8 +4813,21 @@ async def admin_set_background_enabled(request: Request, req: BackgroundEnabledR
 OFFLINE_CACHE = Path(__file__).parent / ".offline_cache"
 # Bump this when offline-output requirements change (codec rules, ffmpeg args,
 # cache layout) so previously-cached bundles built by older logic get rebuilt
-# on next request. v3-hls switched single-MP4 output to per-source HLS bundles.
-OFFLINE_CACHE_VERSION = "v3-hls"
+# on next request. v3-hls switched single-MP4 output to per-source HLS bundles;
+# v4-hls moved subtitles out of the (broken) in-manifest renditions into
+# standalone sub_<i>.vtt sidecars.
+OFFLINE_CACHE_VERSION = "v4-hls"
+
+# Stream-to-device (HLS prep) is unavailable on macOS hosts. ffmpeg/ffprobe run
+# as children of the (non-GUI) server process, and macOS TCC blocks them from
+# reading media in the user's protected ~/Downloads / ~/Desktop / ~/Documents —
+# every prep would abort at the probe step with "Operation not permitted". VLC
+# ("On TV") is unaffected because it's a separate, individually-granted app.
+HLS_AVAILABLE = platform.system() != "Darwin"
+HLS_UNAVAILABLE_MSG = (
+    "Stream-to-device isn’t available on macOS hosts — the server can’t read "
+    "media in TCC-protected folders. Use “On TV (VLC)” instead."
+)
 # Cap ffmpeg worker threads for offline prep so bulk Save Offline on a 30+ episode
 # show can't saturate every core on the host. The browser and OS need headroom —
 # without this, ffmpeg pegs all cores and the dashboard becomes unresponsive.
@@ -5140,12 +5155,11 @@ def _build_hls_ffmpeg_args(
         "-i", str(src),
     ]
 
-    # Stream mapping: one video + every audio + every text sub.
+    # Stream mapping for the HLS output: one video + every audio. Text subs are
+    # mapped separately into their own sidecar .vtt outputs further below.
     args += ["-map", "0:v:0"]
     for a in audios:
         args += ["-map", f"0:a:{a['idx']}"]
-    for s in subs:
-        args += ["-map", f"0:s:{s['idx']}"]
 
     # Video codec — stream-copy when already H.264 yuv420p with a good profile.
     # NVENC always re-encodes (it ignores codec-compat).
@@ -5177,12 +5191,6 @@ def _build_hls_ffmpeg_args(
     if audios:
         args += ["-c:a", "aac", "-b:a", "160k", "-ac", "2"]
 
-    # Subs: HLS requires WebVTT for text renditions. ffmpeg converts subrip /
-    # ass / ssa transparently; ASS styling (karaoke, positioning, fonts) is
-    # lost in the conversion — that's a known tradeoff documented in GOTCHAS.
-    if subs:
-        args += ["-c:s", "webvtt"]
-
     args += [
         "-f", "hls",
         "-hls_time", str(HLS_SEGMENT_SECS),
@@ -5195,14 +5203,18 @@ def _build_hls_ffmpeg_args(
         "-master_pl_name", "master.m3u8",
     ]
 
-    # Build the var_stream_map. The video variant carries `agroup`/`sgroup`
-    # tags pointing at the audio/sub group ids. ffmpeg uses those to emit the
-    # right #EXT-X-MEDIA entries in master.m3u8.
+    # Build the var_stream_map for the HLS output — VIDEO + AUDIO ONLY.
+    #
+    # Subtitles are deliberately NOT part of the HLS manifest. ffmpeg's HLS
+    # muxer cannot package WebVTT renditions: a single inline subtitle works,
+    # but two or more (declared as their own `s:N,sgroup:…` variants) fail with
+    # "No streams to mux were specified" / "Could not write header". Every real
+    # release MKV has many subtitle tracks, so in-manifest subs meant HLS prep
+    # ALWAYS failed. Instead we emit one standalone `sub_<i>.vtt` per text track
+    # (see below) and the player wires them as <track> children. See GOTCHAS.md.
     v_parts = ["v:0"]
     if audios:
         v_parts.append("agroup:aud")
-    if subs:
-        v_parts.append("sgroup:sub")
     v_parts.append("name:video")
     parts: list[str] = [",".join(v_parts)]
 
@@ -5213,15 +5225,21 @@ def _build_hls_ffmpeg_args(
             p.append("default:yes")
         parts.append(",".join(p))
 
-    for i, s in enumerate(subs):
-        parts.append(",".join([
-            f"s:{i}", "sgroup:sub", f"name:sub_{i}",
-            f"language:{s.get('language') or 'und'}",
-        ]))
-
     args += ["-var_stream_map", " ".join(parts)]
     # Per-rendition playlist template — %v expands to the `name:` tag above.
     args += [str(out_dir / "%v.m3u8")]
+
+    # Sidecar subtitle outputs, one additional WebVTT output file per text sub,
+    # produced in the SAME ffmpeg pass. subrip / ass / ssa convert transparently;
+    # ASS styling (karaoke, positioning, fonts) is lost — see GOTCHAS.md. The
+    # `sub_<i>.vtt` index matches `meta.json["subtitles"][i]`.
+    for i, s in enumerate(subs):
+        args += [
+            "-map", f"0:s:{s['idx']}",
+            "-c:s", "webvtt",
+            "-f", "webvtt",
+            str(out_dir / f"sub_{i}.vtt"),
+        ]
 
     return args, audios, subs
 
@@ -5233,6 +5251,9 @@ async def _run_offline_job(job_id: str) -> None:
     """
     job = _offline_jobs.get(job_id)
     if not job:
+        return
+    if not HLS_AVAILABLE:
+        job["status"] = "error"; job["error"] = HLS_UNAVAILABLE_MSG
         return
     # Hold pending until the global concurrency slot frees up. This is what
     # keeps a 77-file /prep-all from spawning 77 ffmpegs at once.
@@ -5404,7 +5425,10 @@ async def _run_offline_job(job_id: str) -> None:
                 "subtitles": [
                     {
                         "idx":      i,
-                        "playlist": f"sub_{i}.m3u8",
+                        # Standalone WebVTT sidecar emitted alongside the HLS
+                        # bundle (not an in-manifest rendition). The player loads
+                        # it as a <track> child. Relative to the bundle dir.
+                        "file":     f"sub_{i}.vtt",
                         "language": s.get("language") or "und",
                         "title":    s.get("title") or "",
                         "label":    _track_label(s, f"Subtitles {i+1}"),
@@ -5493,6 +5517,8 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
     /api/library/offline-cache/<sha>/master.m3u8 — both hls.js (Chrome /
     Firefox / Edge) and Safari (native HLS) load it the same way.
     """
+    if not HLS_AVAILABLE:
+        raise HTTPException(503, HLS_UNAVAILABLE_MSG)
     lib = await get_library()
     item = next((it for it in lib["items"] if it["id"] == item_id), None)
     if not item:
@@ -5569,8 +5595,10 @@ async def _maybe_start_prep_job(src: Path, item_id: str = "") -> dict:
     Returns one of:
       {status:"cached"}                              — bundle already on disk
       {status:"processing", job_id, progress, operation}
-      {status:"error", error}                        — ffmpeg unavailable
+      {status:"error", error}                        — ffmpeg unavailable / macOS
     """
+    if not HLS_AVAILABLE:
+        return {"status": "error", "error": HLS_UNAVAILABLE_MSG}
     OFFLINE_CACHE.mkdir(exist_ok=True)
     out_dir = OFFLINE_CACHE / _offline_cache_key(src)
     if (out_dir / "master.m3u8").exists():

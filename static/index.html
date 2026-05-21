@@ -113,6 +113,13 @@
       flex-direction: column;
     }
     #localPlayer.lp-active { display: flex; }
+    /* macOS host: stream-to-device is unavailable (ffmpeg can't read TCC-
+       protected media). Hide every Prep / On-Device affordance, matched by the
+       onclick handler name so new render sites stay covered automatically. */
+    body.no-hls #pcLocalBtn,
+    body.no-hls [onclick^="prepForStreaming"],
+    body.no-hls [onclick^="prepItemForStreaming"],
+    body.no-hls [onclick^="playLibraryWithChooser"] { display: none !important; }
     #lpVideo {
       flex: 1;
       width: 100%;
@@ -1586,6 +1593,10 @@ const libDownloadStats = new Map(); // item_id → latest library_progress paylo
 let profile      = { id:"", name:"", color:"indigo" };
 let allProfiles  = [];
 let globalMaxVolume = 200;   // global VLC volume cap (0-200); fetched at startup
+// Stream-to-device availability — false when the host runs macOS (ffmpeg can't
+// read TCC-protected media). Fetched from /api/state at startup; toggles the
+// `no-hls` body class which hides every Prep / On-Device affordance via CSS.
+let hlsAvailable = true;
 let activeTab    = "search";
 let libShowHidden = false;   // true = library shows hidden items instead of main list
 let selectedColor = "indigo";
@@ -1627,10 +1638,11 @@ let lp = {
   // HLS bundle state — set by _lpLoadIndex from /offline-prepare's meta.json
   hls: null,              // active hls.js instance, null on Safari native
   audios: [],             // [{idx,label,language,default}] from meta.json
-  subtitles: [],          // [{idx,label,language}] from meta.json
-  sidecarSubs: [],        // [{name,lang,url}] non-bundle subs served via /subtitle
+  subtitles: [],          // [{idx,file,label,language}] from meta.json (bundle .vtt sidecars)
+  sidecarSubs: [],        // [{name,lang,url}] on-disk subs served via /subtitle
+  subTracks: [],          // [{el,key}] every <track> we created, in dropdown order
   pendingAudioIdx: 0,     // applied on MANIFEST_PARSED / loadedmetadata
-  pendingSubtitleIdx: -1, // -1 = off, integer = bundle idx, "sidecar:N" = sidecar idx
+  pendingSubtitleIdx: -1, // -1 = off, integer = bundle idx, "sidecar:N" = on-disk sidecar idx
 };
 // Play-chooser modal state
 let pcCtx = null;  // {itemId, files, seekTo, label}
@@ -4702,6 +4714,7 @@ function _ingestPrepStatusFiles(itemId, files) {
 }
 
 async function prepForStreaming(itemId, filePath, fileName) {
+  if (!hlsAvailable) { showAlert("Stream-to-device isn’t available on this host.", "warn"); return; }
   const k = offKey(itemId, filePath);
   if (prepFileState.get(k) === "prepping" || prepFileState.get(k) === "ready") return;
   prepFileState.set(k, "prepping");
@@ -4758,6 +4771,8 @@ function resumeLibraryItemWithChooser(itemId) {
   const seekTo     = hasProgress ? (resume.position_sec || 0) : 0;
   const label      = (item && item.title) || "";
   pcCtx = { itemId, files: resumeFile ? [resumeFile] : [], seekTo, label, _continueMode: true };
+  // macOS host: no device option — go straight to VLC instead of a 1-item modal.
+  if (!hlsAvailable) return pcChoose("vlc");
   document.getElementById("pcSubtitle").textContent = label;
   document.getElementById("pcLocalSub").textContent = "Stream to this device's browser";
   document.getElementById("pcLocalBtn").disabled = false;
@@ -4772,6 +4787,8 @@ async function playLibraryWithChooser(itemId, files, seekTo, label) {
     return;
   }
   pcCtx = { itemId, files, seekTo, label };
+  // macOS host: no device option — go straight to VLC instead of a 1-item modal.
+  if (!hlsAvailable) return pcChoose("vlc");
   document.getElementById("pcSubtitle").textContent = label || "";
   document.getElementById("pcLocalSub").textContent = "Stream to this device's browser";
   document.getElementById("pcLocalBtn").disabled = false;
@@ -4826,8 +4843,10 @@ function closePlayChooser() {
 //      a "Preparing…" overlay so the user knows what's happening.
 //   3. Hand the master_url to hls.js (Chrome / Firefox / Edge) or set
 //      <video>.src directly (Safari native HLS).
-// Audio/sub track switching uses hls.js's audioTrack/subtitleTrack setters on
-// MSE browsers, or AudioTrackList/TextTrackList.mode on Safari.
+// Audio switching uses hls.js's audioTrack setter on MSE browsers, or
+// AudioTrackList.enabled on Safari. Subtitles are <track> children of <video>
+// (bundle .vtt sidecars + on-disk sidecars) toggled via track.mode on every
+// engine — they're not in the HLS manifest. See STREAMING.md / GOTCHAS.md.
 
 // --- hls.js lazy loader. The library is ~100 KB gzipped — only fetched the
 // first time the local player is opened. The promise is cached so concurrent
@@ -4848,6 +4867,7 @@ function _ensureHlsLib() {
 }
 
 async function lpPlay(itemId, files, seekTo, label) {
+  if (!hlsAvailable) { showAlert("Stream-to-device isn’t available on this host.", "warn"); return; }
   if (!Array.isArray(files) || !files.length) {
     showAlert("Nothing to play.", "warn"); return;
   }
@@ -4893,7 +4913,7 @@ async function _lpLoadIndex(seekTo) {
   lp.skipData = null;
   lp.skipOfferType = null; lp.skipOfferEnd = 0;
   lp.resumeApplied = false; lp.resumeSec = seekTo || 0;
-  lp.audios = []; lp.subtitles = [];
+  lp.audios = []; lp.subtitles = []; lp.sidecarSubs = []; lp.subTracks = [];
   // Push the throttle window forward so the first `timeupdate` after this load
   // doesn't fire saveProgress before the resume seek has landed (otherwise we'd
   // overwrite the server's watched state with t≈0).
@@ -5032,14 +5052,31 @@ async function _lpLoadIndex(seekTo) {
     v.addEventListener("loadedmetadata", onMeta);
   }
 
-  // Sidecar `.srt`/`.vtt` files sit alongside the source on disk and aren't
-  // part of the HLS bundle — wire them as extra <track> children so they show
-  // up in the same subtitle dropdown via _lpRenderTrackRows below.
+  // Subtitles are NOT in the HLS manifest (ffmpeg can't mux multi-track WebVTT
+  // into HLS — see STREAMING.md / GOTCHAS.md). Every text track is a standalone
+  // .vtt that we attach as a <track> child of <video> and toggle via .mode.
+  // Two sources, appended in the same order the dropdown lists them:
+  //   1. bundle subs   (sub_<i>.vtt inside the cache dir)  → key "0".."N-1"
+  //   2. on-disk subs   (.srt/.vtt next to the source)      → key "sidecar:i"
+  // The browser renders <track> cues natively regardless of hls.js, so this
+  // works identically on the hls.js (Chrome/FF/Edge) and Safari-native paths.
+  lp.subTracks = [];
+  const subBase = masterUrl.substring(0, masterUrl.lastIndexOf("/") + 1);
+  (lp.subtitles || []).forEach((s, i) => {
+    const t = document.createElement("track");
+    t.kind = "subtitles";
+    t.src = subBase + (s.file || `sub_${i}.vtt`);
+    t.srclang = s.language || "und";
+    t.label = s.label || ("Subtitles " + (i + 1));
+    v.appendChild(t);
+    lp.subTracks.push({ el: t, key: String(i) });
+  });
   (lp.sidecarSubs || []).forEach((s, i) => {
     const t = document.createElement("track");
     t.kind = "subtitles"; t.src = s.url; t.srclang = s.lang || "und";
-    t.label = s.name || s.lang || `Sidecar ${i+1}`;
+    t.label = s.name || s.lang || `Sidecar ${i + 1}`;
     v.appendChild(t);
+    lp.subTracks.push({ el: t, key: `sidecar:${i}` });
   });
 
   try { await v.play(); } catch (_) { /* iOS may block autoplay until user gesture */ }
@@ -5099,44 +5136,15 @@ function _lpApplyAudioIdx(idx) {
 }
 
 function _lpApplySubIdx(idx) {
-  const v = document.getElementById("lpVideo");
-  const sidecar = String(idx).startsWith("sidecar:");
-  const n = Number(sidecar ? -1 : idx);
-
-  if (lp.hls) {
-    // hls.js owns bundle subtitle renditions. Sidecar <track> children live on
-    // the <video> element directly and are controlled by their .mode flag.
-    try {
-      lp.hls.subtitleTrack = (sidecar || n < 0) ? -1 : n;
-      lp.hls.subtitleDisplay = !sidecar && n >= 0;
-    } catch (_) {}
-    // Toggle sidecar tracks on the element. They live AFTER any in-band
-    // tracks hls.js exposes, so we mark sidecar-N -> textTracks[bundleN + N].
-    if (v.textTracks) {
-      const bundleN = (lp.subtitles || []).length;
-      const sidecarN = sidecar ? Number(String(idx).split(":")[1]) : -1;
-      for (let i = bundleN; i < v.textTracks.length; i++) {
-        v.textTracks[i].mode = (sidecar && (i - bundleN) === sidecarN) ? "showing" : "disabled";
-      }
-    }
-    return;
-  }
-  // Safari native HLS path — bundle subs come through as textTracks too. We
-  // just toggle modes the same way the legacy player did.
-  if (!v.textTracks) return;
-  if (sidecar) {
-    const bundleN = (lp.subtitles || []).length;
-    const sidecarN = Number(String(idx).split(":")[1]);
-    for (let i = 0; i < v.textTracks.length; i++) {
-      v.textTracks[i].mode = (i === bundleN + sidecarN) ? "showing" : "disabled";
-    }
-  } else if (n < 0) {
-    for (let i = 0; i < v.textTracks.length; i++) v.textTracks[i].mode = "disabled";
-  } else {
-    for (let i = 0; i < v.textTracks.length; i++) {
-      v.textTracks[i].mode = (i === n) ? "showing" : "disabled";
-    }
-  }
+  // All subtitles are <track> children now (bundle + on-disk sidecars), so a
+  // single mode toggle keyed by the dropdown value covers both the hls.js and
+  // Safari-native paths. `idx` is "-1" (off), a bundle index ("0".."N-1"), or
+  // "sidecar:N"; only the track whose key matches is set to "showing".
+  const key = String(idx);
+  (lp.subTracks || []).forEach((tr) => {
+    try { tr.el.track.mode = (tr.key === key) ? "showing" : "disabled"; }
+    catch (_) {}
+  });
 }
 
 function lpSetAudio(idx) {
@@ -5432,6 +5440,7 @@ function _renderPrepChip(itemId) {
 }
 
 async function prepItemForStreaming(itemId) {
+  if (!hlsAvailable) { showAlert("Stream-to-device isn’t available on this host.", "warn"); return; }
   try {
     const r = await fetch(`/api/library/${itemId}/prep-all`, { method: "POST" });
     if (!r.ok) {
@@ -5720,6 +5729,13 @@ document.addEventListener("DOMContentLoaded",async()=>{
     if(d.enabled) document.getElementById("adminPanelLink").classList.remove("hidden");
   }).catch(()=>{});
 
+  // Stream-to-device availability (false on macOS hosts). Toggles the `no-hls`
+  // body class which hides Prep / On-Device affordances via CSS.
+  fetch("/api/state").then(r=>r.ok?r.json():null).then(d=>{
+    hlsAvailable = !(d && d.hls_available === false);
+    document.body.classList.toggle("no-hls", !hlsAvailable);
+  }).catch(()=>{});
+
   // Fetch the global max-volume cap so sliders are clamped correctly
   fetch("/api/settings/max-volume").then(r=>r.ok?r.json():null).then(d=>{
     if(d && d.max_volume!=null){
@@ -5744,6 +5760,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">3.1.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">3.2.0</div>
 </body>
 </html>

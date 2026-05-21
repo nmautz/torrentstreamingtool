@@ -181,6 +181,16 @@ Failures inside the parallel `gather(..., return_exceptions=True)` are silently 
 
 The cache layout switched in Milestone 16. Each prepped source produces `.offline_cache/<sha>/` with `master.m3u8`, per-rendition playlists, fmp4 segments, and `meta.json`. The pre-v3 single-MP4 cache (`<sha>.mp4`) is dead code on disk — surfaced as `kind: "legacy"` orphans in Admin → Offline Cache for purge. Don't reintroduce code that assumes "a prepped file is one MP4" — every endpoint, admin tool, and cleanup path now walks the directory.
 
+### Subtitles can NOT live in the HLS manifest — they're standalone `.vtt` sidecars
+
+ffmpeg's HLS muxer cannot package multi-track WebVTT. Exactly *one* subtitle works if you declare it inline on the video variant (`v:0,a:0,s:0,sgroup:…`); declaring two or more as their own `s:N,sgroup:…` variants fails unconditionally with `[mpegts/mp4] No streams to mux were specified` → `Could not write header (incorrect codec parameters ?)` → `Conversion failed!`. This holds for **both** `fmp4` and `mpegts` segment types (verified on ffmpeg 8.1.1). Because virtually every release MKV ships many subtitle tracks, the old in-manifest design meant HLS prep failed on essentially every real file — it had never once succeeded (fixed in v3.2.0).
+
+The fix: `_build_hls_ffmpeg_args` builds a **video + audio only** HLS bundle, then emits one standalone `sub_<i>.vtt` per text sub via extra outputs in the *same* ffmpeg pass (`… <out>/%v.m3u8 -map 0:s:0 -c:s webvtt -f webvtt <out>/sub_0.vtt …`). The player attaches them as `<track>` children. Do **not** "re-add subtitles to `-var_stream_map`" — it will silently break prep again. If you ever need a single inline sub, the one-subtitle inline form is the only var_stream_map shape that works.
+
+### macOS hosts can't run HLS prep — TCC blocks ffmpeg from `~/Downloads`
+
+ffmpeg / ffprobe run as children of the (non-GUI) Python server process. macOS TCC denies that process access to the user's protected folders (`~/Downloads`, `~/Desktop`, `~/Documents`) — `ffprobe` returns empty JSON + `Operation not permitted`, so `_ffprobe_full` yields `video: None` and prep aborts with a misleading "no video stream" (the file is fine; the process just can't open it). VLC and qBittorrent work on the same files because they're separate `.app`s the user individually granted. Rather than chase per-process Full-Disk-Access grants, `HLS_AVAILABLE = platform.system() != "Darwin"` short-circuits the prep endpoints with a clear message, `state_snapshot` exposes `hls_available`, and the UI hides the controls. If you ever want HLS on a Mac host, the file would need to live outside the TCC-protected folders **and** the responsible app (Terminal / the service binary) would need Full Disk Access.
+
 ### ffmpeg ≥ 4.3 is required for multi-rendition HLS
 
 `-var_stream_map` with subtitle groups is unreliable on ffmpeg 4.0–4.2 — the master playlist sometimes drops audio renditions, sometimes mis-tags `agroup`. `_run_offline_job` calls `_ffmpeg_version()` (cached per process) and fail-fast errors the job before launching ffmpeg if the version is too old. Don't drop this check — the silent-bad-manifest failure mode is hard to diagnose from the UI side (the player just shows "no audio" or stalls on a missing rendition).
@@ -195,11 +205,11 @@ The prep UI only shows the last 500 chars of `job["error"]` (an ffmpeg stderr ta
 
 ### hls.js vs Safari native is a runtime branch, not a build-time pick
 
-`_lpLoadIndex` checks `window.Hls.isSupported()` (which returns true on every MSE-capable browser and false on iOS Safari, which has no MSE — Safari plays HLS via the platform stack instead). The two paths read/write **different APIs** for the same job:
-- **hls.js**: `hls.audioTrack = idx`, `hls.subtitleTrack = idx`, `hls.recoverMediaError()`. The actual `<video>.audioTracks` / `<video>.textTracks` on the element will be empty (or undefined) — hls.js owns the rendition selection.
-- **Safari native**: `<video>.audioTracks[i].enabled` and `<video>.textTracks[i].mode`. There is no hls.js instance — `lp.hls` is null.
+`_lpLoadIndex` checks `window.Hls.isSupported()` (which returns true on every MSE-capable browser and false on iOS Safari, which has no MSE — Safari plays HLS via the platform stack instead). The two paths read/write **different APIs** for **audio** selection:
+- **hls.js**: `hls.audioTrack = idx`, `hls.recoverMediaError()`. The element's `<video>.audioTracks` will be empty — hls.js owns audio-rendition selection.
+- **Safari native**: `<video>.audioTracks[i].enabled`. There is no hls.js instance — `lp.hls` is null.
 
-Don't try to unify by always populating both. The `lp.hls` field is the right runtime indicator — `if (lp.hls)` for the MSE path, `else` for Safari native.
+**Subtitles are the exception and are now engine-agnostic:** they're `<track>` children of `<video>` (bundle `sub_<i>.vtt` + on-disk sidecars), so `_lpApplySubIdx` toggles `tr.el.track.mode` the same way regardless of `lp.hls`. Don't route subtitles back through `hls.subtitleTrack` — there are no in-manifest subtitle renditions to select.
 
 ### Always destroy the previous hls.js instance before re-using `<video>`
 
