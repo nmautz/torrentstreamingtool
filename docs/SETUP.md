@@ -43,6 +43,17 @@ Goal: register `Jackett` as a Windows service so it runs as LocalSystem from boo
 3. If we're not admin, request elevation via `ShellExecuteW` `runas` and poll for the service to appear (up to ~15 s)
 4. Otherwise run `JackettConsole.exe --Install`, falling back to `JackettService.exe --install`, falling back to `sc.exe create Jackett binPath=… start=auto`
 5. `sc.exe start Jackett` (1056 = ALREADY_RUNNING is treated as success)
+6. `grant_jackett_service_control()` — runs in **both** the already-installed and freshly-installed branches
+
+### `grant_jackett_service_control()` ([setup.py:607](../setup.py#L607))
+
+Lets the non-elevated StreamLink watchdog recover a hung Jackett **without a reboot**. A LocalSystem `Jackett` service can normally only be `sc stop`/`sc start`'d by an administrator, so a non-elevated watchdog can detect a wedged Jackett but not restart it — only a reboot clears it.
+
+- Reads the service's SDDL via `sc.exe sdshow Jackett`, additively inserts `(A;;RPWP;;;AU)` (Authenticated Users → `SERVICE_START` + `SERVICE_STOP`) into the DACL (before the `S:` SACL), and applies it with `sc.exe sdset`.
+- Also sets `sc.exe failure Jackett reset= 86400 actions= restart/5000/…` so SCM auto-restarts Jackett on a hard crash (manual stops, like the watchdog's, don't trigger failure actions).
+- **Idempotent**: skips when the ACE is already present. **Best-effort**: never fatal to setup.
+- When not admin, applies both in a single elevated `cmd /c … & …` (one UAC prompt). If elevation is declined, it prints the exact `sc sdset` / `sc failure` commands to run manually in an elevated PowerShell.
+- No-op if Jackett runs as a tray/user process (the watchdog can kill+relaunch that directly). See [GOTCHAS.md](GOTCHAS.md#controlling-the-localsystem-jackett-service-needs-admin).
 
 ## qBittorrent ini ([setup.py:846](../setup.py#L846))
 

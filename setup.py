@@ -604,6 +604,96 @@ def _find_jackett_install_dir() -> Path | None:
     return None
 
 
+def _jackett_service_sddl() -> str | None:
+    """Return the Jackett service's security descriptor (SDDL), or None."""
+    try:
+        r = vrun(["sc.exe", "sdshow", "Jackett"], timeout=10)
+    except Exception as exc:
+        vlog(f"sc.exe sdshow raised: {exc}")
+        return None
+    out = (r.stdout or "").strip()
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith(("D:", "O:")) or "(A;" in line:
+            return line
+    return out or None
+
+
+def grant_jackett_service_control() -> None:
+    """Let the current (non-admin) user start/stop the Jackett service and set
+    SCM crash-recovery, so the watchdog can recover a hung Jackett WITHOUT a UAC
+    prompt or a reboot.
+
+    Without this, a LocalSystem Jackett service can only be controlled by an
+    administrator — so a non-elevated StreamLink watchdog can detect a hung
+    Jackett but not restart it, and the only cure is a reboot. We additively
+    grant Authenticated Users SERVICE_START + SERVICE_STOP via `sc sdset`, and
+    set restart-on-failure actions. Idempotent and best-effort — never fatal.
+    """
+    if SYSTEM != "Windows" or not _jackett_service_installed():
+        return
+
+    header("Jackett Auto-Recovery Permissions")
+
+    GRANT_ACE = "(A;;RPWP;;;AU)"   # Authenticated Users: SERVICE_START + SERVICE_STOP
+    sddl = _jackett_service_sddl()
+    vlog(f"Jackett SDDL: {sddl}")
+    already = bool(sddl and GRANT_ACE in sddl)
+
+    new_sddl: str | None = None
+    if sddl and not already:
+        if "S:" in sddl:
+            d, s = sddl.split("S:", 1)
+            new_sddl = f"{d}{GRANT_ACE}S:{s}"
+        else:
+            new_sddl = f"{sddl}{GRANT_ACE}"
+
+    failure_args = ["reset=", "86400", "actions=",
+                    "restart/5000/restart/5000/restart/5000"]
+
+    if already:
+        ok("This account can already start/stop the Jackett service.")
+        # Refresh crash-recovery actions when we have the rights to do so.
+        if _is_windows_admin():
+            vrun(["sc.exe", "failure", "Jackett", *failure_args])
+        return
+
+    if _is_windows_admin():
+        if new_sddl:
+            r = vrun(["sc.exe", "sdset", "Jackett", new_sddl])
+            if r.returncode == 0:
+                ok("Granted this account permission to start/stop the Jackett service.")
+            else:
+                warn(f"sc.exe sdset Jackett failed (exit {r.returncode}).")
+        r = vrun(["sc.exe", "failure", "Jackett", *failure_args])
+        if r.returncode == 0:
+            ok("Configured Jackett crash-recovery (auto-restart on failure).")
+        return
+
+    # Not admin → apply both in a single elevated shell (one UAC prompt).
+    failure_cmd = "sc failure Jackett reset= 86400 actions= restart/5000/restart/5000/restart/5000"
+    parts = []
+    if new_sddl:
+        parts.append(f'sc sdset Jackett "{new_sddl}"')
+    parts.append(failure_cmd)
+    chained = " & ".join(parts)
+    note("Granting the watchdog permission to restart Jackett without a reboot.")
+    info("Requesting elevation — accept the UAC prompt …")
+    try:
+        import ctypes
+        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", "cmd.exe", f"/c {chained}", None, 0)
+        if rc <= 32:
+            warn(f"Elevation declined (code {rc}).")
+            note("Run these once in an elevated PowerShell to enable auto-recovery:")
+            if new_sddl:
+                note(f'  sc sdset Jackett "{new_sddl}"')
+            note(f"  {failure_cmd}")
+            return
+        ok("Done — the watchdog can now restart a hung Jackett without admin or a reboot.")
+    except Exception as exc:
+        warn(f"Could not request elevation: {exc}")
+
+
 def install_jackett_service() -> None:
     """Install and start the 'Jackett' Windows service so it runs as a
     background service from boot — the same action as the tray's
@@ -624,6 +714,7 @@ def install_jackett_service() -> None:
             vrun(["sc.exe", "start", "Jackett"], timeout=10)
         except Exception as exc:
             vlog(f"sc.exe start raised: {exc}")
+        grant_jackett_service_control()
         return
 
     jackett_dir = _find_jackett_install_dir()
@@ -719,6 +810,7 @@ def install_jackett_service() -> None:
                 warn(f"sc.exe start Jackett returned {r.returncode}")
         except Exception as exc:
             vlog(f"sc.exe start raised: {exc}")
+        grant_jackett_service_control()
     else:
         warn("Jackett service didn't appear — install may have been declined.")
         note("Open the Jackett tray icon → 'Start background service' manually.")

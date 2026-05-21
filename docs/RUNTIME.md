@@ -38,8 +38,9 @@ if _VENV_PY.exists() and Path(sys.prefix).resolve() != VENV.resolve():
 
 ### `start_jackett()` ([run.py:331](../run.py#L331))
 - Parses `INDEXER_URL` for hostname; sets `is_local = host in (localhost, 127.0.0.1, ::1)`
-- **Remote**: never tries to launch — just `port_open` checks. If unreachable, warns
-- **Local**: tries to find the binary. On Windows: prefers starting the `Jackett` service via `sc.exe start Jackett` (handles 1056 = already running). If service isn't installed, prints how to fix. Otherwise launches `JackettTray.exe` (Windows) or `jackett --NoRestart` (others)
+- **Reachability is an HTTP check, not a port check.** `http_ok(f"{INDEXER_URL}/UI/Login")` decides "already reachable" — a hung Jackett keeps the port open while it stops serving, so a port check would wrongly skip the relaunch. See [GOTCHAS.md](GOTCHAS.md#port-open-is-not-a-jackett-health-check).
+- **Remote**: never tries to launch — HTTP reachability check only. If unreachable, warns
+- **Local**: if the port is open but it isn't serving (hung), `_force_stop_jackett_local()` clears it (Windows `sc stop` + wait, hard-kill fallback; else `kill_by_name`) so the relaunch can re-bind. Then finds the binary. On Windows: prefers starting the `Jackett` service via `sc.exe start Jackett` (handles 1056 = already running). If service isn't installed, prints how to fix. Otherwise launches `JackettTray.exe` (Windows) or `jackett --NoRestart` (others)
 - `_diagnose_jackett_service_state()` (verbose mode) polls service state for 8 s, dumps the Jackett log file from any of 5 LocalSystem-AppData candidates, and pulls SCM events via PowerShell. Used to debug the case where the service registers, starts, then crashes immediately
 
 ### `check_mullvad()`

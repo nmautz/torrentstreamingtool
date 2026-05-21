@@ -126,7 +126,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "2.8.0"
+UI_VERSION = "2.9.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -197,6 +197,7 @@ def _now_iso() -> str:
 class AppState:
     vpn_secure: bool = True
     vpn_status_text: str = "Checking…"
+    jackett_ok: bool = True               # last known Jackett HTTP reachability
     active_hash: Optional[str] = None
     active_title: Optional[str] = None
     active_file: Optional[Path] = None
@@ -299,6 +300,7 @@ def state_snapshot() -> dict:
     return {
         "vpn_secure": state.vpn_secure,
         "vpn_status": state.vpn_status_text,
+        "jackett_ok": state.jackett_ok,
         "stream_status": state.stream_status,
         "active_title": state.active_title,
         "progress": round(state.progress, 2),
@@ -1505,6 +1507,65 @@ async def vpn_guard() -> None:
         await asyncio.sleep(3)
 
 
+# ── Background Task: Jackett Health Monitor ──────────────────────────────────
+
+async def jackett_health_monitor() -> None:
+    """Poll Jackett over HTTP regularly so the dashboard knows when the indexer
+    is unreachable, and — as a backstop to the process watchdog — kick a local
+    restart if Jackett stays wedged for an extended period.
+
+    The watchdog (run.py / the installed service) is the primary supervisor and
+    recovers a hung Jackett within seconds. This in-app monitor only force-
+    restarts after a *long* sustained outage, so it never duels a healthy
+    watchdog: if the watchdog can recover Jackett it already has, and this path
+    stays dormant. It also covers running the dashboard without the watchdog.
+
+    Reachability here means "answers HTTP", not "port is open" — a hung Jackett
+    keeps the port bound while it stops serving, which is the failure mode that
+    used to require a reboot.
+    """
+    CHECK_EVERY         = 20    # seconds between probes
+    FAIL_BEFORE_RESTART = 6     # ~2 min of sustained failure before a backstop restart
+
+    base = settings.indexer_url.rstrip("/")
+    m = re.search(r"https?://([^:/]+)", settings.indexer_url)
+    host = m.group(1) if m else "127.0.0.1"
+    is_local = host in ("localhost", "127.0.0.1", "::1")
+
+    consecutive_fail = 0
+    while True:
+        await asyncio.sleep(CHECK_EVERY)
+
+        serving = False
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as c:
+                await c.get(f"{base}/UI/Login")
+            serving = True   # any HTTP status means the web stack is answering
+        except Exception:
+            serving = False
+
+        if serving != state.jackett_ok:
+            state.jackett_ok = serving
+            await broadcast("jackett_status", {"ok": serving, "url": settings.indexer_url})
+            print(f"[jackett] {'reachable again' if serving else 'UNREACHABLE'} at {settings.indexer_url}")
+
+        if serving:
+            consecutive_fail = 0
+            continue
+
+        consecutive_fail += 1
+        if is_local and consecutive_fail >= FAIL_BEFORE_RESTART:
+            print(f"[jackett] unreachable for ~{consecutive_fail * CHECK_EVERY}s — "
+                  "attempting in-app backstop restart")
+            try:
+                from watchdog import restart_jackett
+                ok = await asyncio.to_thread(restart_jackett)
+                print(f"[jackett] backstop restart {'succeeded' if ok else 'failed'}")
+            except Exception as exc:
+                print(f"[jackett] backstop restart errored: {exc}")
+            consecutive_fail = 0   # cooldown — re-evaluate fresh on the next probes
+
+
 # ── Background Task: State Broadcaster ───────────────────────────────────────
 
 async def stat_broadcaster() -> None:
@@ -2539,10 +2600,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     dl_monitor  = asyncio.create_task(library_download_monitor())
     vlc_tracker = asyncio.create_task(vlc_progress_tracker())
     bg_loop     = asyncio.create_task(background_video_loop())
+    jackett_mon = asyncio.create_task(jackett_health_monitor())
 
     yield
 
-    for t in (guard, broadcaster, dl_monitor, vlc_tracker, bg_loop):
+    for t in (guard, broadcaster, dl_monitor, vlc_tracker, bg_loop, jackett_mon):
         t.cancel()
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()

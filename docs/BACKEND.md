@@ -53,6 +53,7 @@
 | Field | What it means |
 |-------|---------------|
 | `vpn_secure`, `vpn_status_text` | Set by `vpn_guard`; gates `/api/stream` and `/api/library/download` |
+| `jackett_ok` | Last known Jackett HTTP reachability; set by `jackett_health_monitor`, published in `state_snapshot()` |
 | `active_hash`, `active_title`, `active_file` | The current torrent (stream-now OR library playback) |
 | `stream_status` | `idle` \| `buffering` \| `playing` \| `error` |
 | `progress`, `downloaded_mb`, `total_mb`, `dl_speed_bps`, `ul_speed_bps` | Live torrent stats from qBit |
@@ -77,6 +78,7 @@
 Started in `lifespan` ([main.py:1746](../main.py#L1746)); all run forever until app shutdown.
 
 - **`vpn_guard`** (every 3 s) — runs `mullvad status` via `asyncio.create_subprocess_exec`. On disconnect: kills `qbittorrent` via psutil, sets `vpn_secure=False`, broadcasts `vpn_status`. The kill switch is enforced redundantly by `watchdog.py` at the process level.
+- **`jackett_health_monitor`** (every 20 s) — `GET {INDEXER_URL}/UI/Login` (any HTTP status = serving, since a hung Jackett keeps the port open but stops answering). Updates `state.jackett_ok` and broadcasts `jackett_status` on transitions. As a backstop, if a *local* Jackett stays unreachable for ~2 min it calls `watchdog.restart_jackett()` via `asyncio.to_thread` — primary recovery is the process watchdog (which acts within seconds), so this only fires when no watchdog is running. See [DAEMON_WATCHDOG.md](DAEMON_WATCHDOG.md#jackett-specifics-watchdogpy160) and [GOTCHAS.md](GOTCHAS.md#port-open-is-not-a-jackett-health-check).
 - **`stat_broadcaster`** (every 2 s) — when `stream_status in ("buffering","playing")` polls `qbit_info(active_hash)`. When `playing`, also polls `vlc_status()` for `time`/`length`/`volume`. Always broadcasts `state` with `state_snapshot()`.
 - **`library_download_monitor`** (every 5 s) — for each item with `status="downloading"`, polls qBit; flips to `ready` on `uploading`/`stalledUP`/`pausedUP`/`queuedUP`/`forcedUP`, to `error` on `error`/`missingFiles`. Pushes a per-item `library_progress` event with speed/ETA. Also handles `play_when_ready_*`: auto-plays the item (or a specific file once its progress reaches 1.0) when the trigger fires.
 - **`vlc_progress_tracker`** (every 2 s skip check; 15 s save) — runs only while `library_item_id` is set. Reads current VLC position, finds the matching `skip_data` entry, calls `_maybe_emit_skip_offer` (auto-skip or set `state.skip_offer`). Every 15 s, also writes `position_sec`/`duration_sec`/`completed` into `library.json` for the active profile and broadcasts `progress_saved`.

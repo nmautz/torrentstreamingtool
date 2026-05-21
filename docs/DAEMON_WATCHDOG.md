@@ -95,9 +95,17 @@ Transitions (DOWN/UP) are logged once; routine ticks are silent. This keeps the 
 
 ### Jackett specifics ([watchdog.py:160](../watchdog.py#L160))
 
-On Windows, Jackett's `build_args` runs `sc.exe query Jackett` + `sc.exe start Jackett` inline and returns `None`. The loop logs the result but doesn't call `_launch_bg`. This means a missing Jackett service surfaces as a clear log message instead of silently launching the tray exe.
+On Windows, Jackett's `build_args` runs `sc.exe query Jackett` + `sc.exe start Jackett` inline and returns `None`. The loop logs the result but doesn't call `_launch_bg`. When the service isn't installed it now launches the tray/console exe as a **user process** (`return [bin_path]`) instead of giving up — that's the model the watchdog can fully manage without elevation.
 
 Jackett is only added to plain_specs when `INDEXER_URL` points at localhost. Remote Jackett is unwatched — `run.py` already warned at startup if it wasn't reachable.
+
+**HTTP health check, not a port check.** Jackett's `ServiceSpec` is built with a `health_check` (`_jackett_alive`) that requires both an open port *and* a successful `GET {INDEXER_URL}/UI/Login` (`_http_ok`). A hung Jackett holds the port open while it stops serving — a bare port check would call that alive forever. `ServiceSpec.is_alive()` uses `health_check` when present, else the port check (VLC/qBit are unchanged).
+
+**Force-down before restart.** The Jackett spec also sets `pre_restart=_jackett_force_down`. `ServiceSpec.start()` runs it first: on Windows `_force_stop_jackett_windows()` does `sc stop` + waits for STOPPED (hard-kill fallback); elsewhere `_kill_by_name("jackett")`. This clears a wedged Jackett so the relaunch can re-bind 9117 — `sc start` alone is a 1056 no-op on a hung service. `start()` then waits on `is_alive()` (HTTP), not just the port, so it doesn't tight-loop before Jackett's web stack is ready (`startup_timeout=40s`).
+
+**Admin requirement.** Stopping/starting a LocalSystem `Jackett` service needs admin; a non-elevated watchdog gets access-denied and logs a clear hint. `setup.py`'s `grant_jackett_service_control()` grants the rights once so the watchdog can recover Jackett without elevation. See [GOTCHAS.md](GOTCHAS.md#controlling-the-localsystem-jackett-service-needs-admin).
+
+**Reusable restart.** `restart_jackett()` / `jackett_healthy()` ([watchdog.py:670](../watchdog.py#L670)) expose the same force-down+launch and HTTP-liveness logic so the dashboard process (`main.py`'s `jackett_health_monitor`) can use them as a backstop when no watchdog is running.
 
 ### Building specs ([watchdog.py:431](../watchdog.py#L431))
 

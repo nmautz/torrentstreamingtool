@@ -87,7 +87,8 @@
 
 ## Milestone 10 — Reliability & Visibility
 
-- [ ] **10.1** UI warning if any dependency/service is unreachable (VLC, qBittorrent, Jackett): currently only shown at startup in the terminal; surface these as persistent in-app banners so users on mobile know why things aren't working
+- [/] **10.1** UI warning if any dependency/service is unreachable (VLC, qBittorrent, Jackett): currently only shown at startup in the terminal; surface these as persistent in-app banners so users on mobile know why things aren't working
+  - Jackett reachability is now published (`state.jackett_ok` in `state_snapshot()` + the `jackett_status` SSE event, from `jackett_health_monitor`). The frontend banner still needs wiring; VLC/qBit reachability not yet surfaced.
 - [/] **10.2** Per-control in-flight indicators for VLC controls: when a request is slow (busy CPU / weak network), show a per-button loading state and ignore further clicks of that same control until it resolves. Other controls remain clickable independently (e.g. clicking volume-up shows it loading while pause stays usable). Applies to pause, seek ±, volume ± / slider, prev / next, stop, retry, audio / subtitle selects, seek bar click, and the skip / resume offer buttons.
 
 ---
@@ -166,6 +167,7 @@ device that quits playback abruptly resumes from the right spot on next play.
 
 - [x] **7.1** Daemonization: `run.py --install` registers a launchd/systemd service for startup launch
 - [x] **7.2** Watchdog: background process monitors VLC, qBit, Jackett; auto-restarts crashed services
+  - **Jackett hardening (v2.9.0):** liveness is now an HTTP probe (`GET /UI/Login`), not a bare port check — a hung Jackett holds the port open while it stops serving. Restart force-stops the wedged service/process (`pre_restart`) before relaunching, since `sc start` is a 1056 no-op on a hung service. `setup.py grant_jackett_service_control()` grants the non-elevated account `sc` start/stop rights (+ `sc failure` recovery) so the watchdog can recover Jackett without a reboot. Mirrored in `run.py` startup and `main.py`'s `jackett_health_monitor` backstop.
 
 ---
 
