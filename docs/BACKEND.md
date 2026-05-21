@@ -123,6 +123,19 @@ anymore.
 
 The fast-path of `/offline-prepare` returns the existing `/api/library/{id}/download` URL — no new file is created. Only when remux/transcode is needed do we hit `OFFLINE_CACHE`.
 
+## Logging
+
+`main.py` configures Python `logging` at import time via `_init_logging()` (just below the imports). There is one logger tree under the name `streamlink`:
+
+- `log` = `logging.getLogger("streamlink")` — the app-wide logger. Two handlers: a `RotatingFileHandler` → `logs/streamlink_app.log` (2 MB × 3 backups) and a stderr `StreamHandler` capped at `WARNING`. `propagate=False` so records don't double-emit through uvicorn's root logger.
+- `hls_log` = `logging.getLogger("streamlink.hls")` — child logger for the offline-prep / HLS pipeline. Adds its **own** `RotatingFileHandler` → `logs/hls.log`, and (because it propagates to `streamlink`) every line also lands in `logs/streamlink_app.log` + stderr.
+
+Net effect: a `WARNING`/`ERROR` shows up on the console and in both files; routine `INFO` (job START/DONE, the ffmpeg command line) stays out of the console but is preserved on disk. `_init_logging()` is idempotent (returns early if handlers already exist) so uvicorn reloads don't stack handlers.
+
+`_run_offline_job` is the main user of `hls_log` — it logs the exact ffmpeg invocation, encoder choice, and on a non-zero exit the return code + elapsed time + the last 300 lines of ffmpeg stderr. **When an HLS conversion fails, `logs/hls.log` is the first place to look.** ffmpeg's stderr is drained concurrently (not read after `proc.wait()`) — see [GOTCHAS.md](GOTCHAS.md) for why that matters.
+
+The legacy `print("[offline] …")` calls in the NVENC probe (`_has_nvenc`) predate this and still go straight to stdout.
+
 ## qBittorrent client notes
 
 - **Auth**: `qbit_login` calls `/api/v2/auth/login`. Because `setup.py` writes `WebUI\LocalHostAuth=false` to qBit's ini, localhost requests don't actually need a cookie — but `qreq` still retries on 403.

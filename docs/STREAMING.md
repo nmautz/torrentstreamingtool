@@ -154,6 +154,12 @@ Two ways to populate the cache:
 > ffmpegs. The CPU path uses `-threads OFFLINE_FFMPEG_THREADS` (2);
 > NVENC ignores it. See [GOTCHAS.md](GOTCHAS.md) for why the cap is 1.
 
+> **Debugging a failed conversion.** The UI only shows a short stderr tail.
+> `_run_offline_job` logs the full ffmpeg command, return code, elapsed time,
+> and the last 300 lines of ffmpeg stderr to **`logs/hls.log`** via the
+> `streamlink.hls` logger. Start there for any "prep failed / conversion
+> died seconds in" report. See [BACKEND.md § Logging](BACKEND.md#logging).
+
 ### 2. Play on this device
 
 1. User taps Play (or the "📱 On Device" button on a library card). The

@@ -6,10 +6,12 @@ import gzip
 import hashlib
 import io
 import json
+import logging
 import os
 import platform
 import re
 import secrets
+import shlex
 import shutil
 import signal
 import socket
@@ -20,9 +22,11 @@ import threading
 import time
 import uuid
 import zipfile
+from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import AsyncGenerator, Optional
 from urllib.parse import quote, unquote, urlparse
@@ -36,6 +40,61 @@ from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 import analyzer
+
+
+# ── Logging ─────────────────────────────────────────────────────────────────
+# main.py historically had no logging: errors raised inside background tasks —
+# most painfully the HLS offline-prep ffmpeg pipeline — vanished into a
+# truncated job["error"] field with nothing written to disk, so a conversion
+# that died seconds after starting left no diagnosable trail. This wires up a
+# rotating file logger. HLS gets a child logger with its own dedicated file
+# (logs/hls.log) because that pipeline is the most failure-prone and the one
+# operators most often need to debug; everything also propagates to the shared
+# app log + stderr (captured by launchd/the console into logs/streamlink.err).
+LOG_DIR = Path(__file__).parent / "logs"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+
+
+def _init_logging() -> logging.Logger:
+    root = logging.getLogger("streamlink")
+    if root.handlers:                    # idempotent across uvicorn reloads
+        return root
+    root.setLevel(logging.INFO)
+    root.propagate = False               # don't double-log via the Python root
+
+    fmt = logging.Formatter(
+        "%(asctime)s  %(levelname)-7s [%(name)s] %(message)s",
+        datefmt="%Y-%m-%d %H:%M:%S",
+    )
+
+    app_fh = RotatingFileHandler(
+        LOG_DIR / "streamlink_app.log", maxBytes=2_000_000, backupCount=3,
+        encoding="utf-8",
+    )
+    app_fh.setFormatter(fmt)
+    root.addHandler(app_fh)
+
+    # Mirror to stderr (→ console / logs/streamlink.err) but only WARNING+ so a
+    # bulk /prep-all doesn't bury the interactive console in per-job INFO lines;
+    # the full INFO trail still lands in the rotating files.
+    stderr_h = logging.StreamHandler(sys.stderr)
+    stderr_h.setLevel(logging.WARNING)
+    stderr_h.setFormatter(fmt)
+    root.addHandler(stderr_h)
+
+    # Dedicated HLS file. The child propagates to `root`, so HLS lines also
+    # reach the app log + stderr — this handler just keeps a focused copy.
+    hls = logging.getLogger("streamlink.hls")
+    hls_fh = RotatingFileHandler(
+        LOG_DIR / "hls.log", maxBytes=2_000_000, backupCount=3, encoding="utf-8",
+    )
+    hls_fh.setFormatter(fmt)
+    hls.addHandler(hls_fh)
+    return root
+
+
+log     = _init_logging()
+hls_log = logging.getLogger("streamlink.hls")
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
@@ -81,7 +140,7 @@ BACKGROUND_DIR = Path(__file__).parent / ".background"
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.0.0"
+UI_VERSION = "3.1.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -5190,10 +5249,12 @@ async def _run_offline_job(job_id: str) -> None:
         # ETAs reflect real ffmpeg throughput, not queue wait time.
         job["started_at"] = time.time()
         src = Path(job["src"])
+        hls_log.info("job %s START src=%s out=%s", job_id, src, out_dir.name)
         tmp_dir = out_dir.with_name(out_dir.name + ".part")
         ffmpeg = analyzer.ffmpeg_bin()
         if not ffmpeg:
             job["status"] = "error"; job["error"] = "ffmpeg not available."
+            hls_log.error("job %s ABORT: ffmpeg binary not found on PATH", job_id)
             return
         ver = await _ffmpeg_version()
         if ver is None or ver < _FFMPEG_MIN_VERSION:
@@ -5201,11 +5262,16 @@ async def _run_offline_job(job_id: str) -> None:
             need = f"{_FFMPEG_MIN_VERSION[0]}.{_FFMPEG_MIN_VERSION[1]}"
             have = (f"{ver[0]}.{ver[1]}" if ver else "unknown")
             job["error"] = f"ffmpeg too old ({have}) — need ≥ {need} for HLS prep."
+            hls_log.error("job %s ABORT: %s", job_id, job["error"])
             return
         info = await asyncio.to_thread(_ffprobe_full, str(src))
         duration = float(info.get("duration_sec", 0) or 0)
         if not info.get("video"):
             job["status"] = "error"; job["error"] = "No video stream in source."
+            hls_log.error(
+                "job %s ABORT: no video stream in %s (ffprobe keys: %s)",
+                job_id, src, sorted(info.keys()),
+            )
             return
 
         # Clean any leftover .part dir from a previous crashed run.
@@ -5224,12 +5290,41 @@ async def _run_offline_job(job_id: str) -> None:
             else:
                 job["encoder"] = "h264_nvenc" if use_nvenc else "libx264"
 
+            hls_log.info(
+                "job %s encode: encoder=%s duration=%.1fs audios=%d subs=%d nvenc=%s",
+                job_id, job["encoder"], duration,
+                len(kept_audios), len(kept_subs), use_nvenc,
+            )
+            hls_log.info(
+                "job %s ffmpeg cmd: %s",
+                job_id, " ".join(shlex.quote(a) for a in args),
+            )
+
             proc = await asyncio.create_subprocess_exec(
                 *args,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 **_FFMPEG_SUBPROCESS_KW,
             )
+
+            # Drain stderr concurrently into a bounded buffer. Two reasons:
+            # (1) ffmpeg with -nostats still writes stream mapping, warnings and
+            #     the fatal error line to stderr; if nobody reads it the OS pipe
+            #     buffer can fill and ffmpeg blocks on write → proc.wait() hangs.
+            # (2) on failure we want the *whole* error, not the 500-char tail
+            #     job["error"] keeps for the UI — it goes to logs/hls.log.
+            stderr_tail: deque[str] = deque(maxlen=300)
+
+            async def _drain_stderr() -> None:
+                assert proc.stderr is not None
+                while True:
+                    try:
+                        line = await proc.stderr.readline()
+                    except Exception:
+                        return
+                    if not line:
+                        return
+                    stderr_tail.append(line.decode("utf-8", "replace").rstrip())
 
             async def _drain_progress() -> None:
                 assert proc.stdout is not None
@@ -5261,20 +5356,29 @@ async def _run_offline_job(job_id: str) -> None:
                         return
 
             progress_task = asyncio.create_task(_drain_progress())
-            try:
-                await proc.wait()
-            finally:
-                if not progress_task.done():
-                    progress_task.cancel()
+            stderr_task   = asyncio.create_task(_drain_stderr())
+            await proc.wait()
+            # Both drain loops end on pipe EOF once the process exits; bound the
+            # wait so a wedged pipe can't hang the job indefinitely.
+            for t in (progress_task, stderr_task):
+                try:
+                    await asyncio.wait_for(t, timeout=5)
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    t.cancel()
 
             if proc.returncode != 0:
-                err = ""
-                try:
-                    err = (await proc.stderr.read()).decode("utf-8", "replace")
-                except Exception:
-                    pass
+                err = "\n".join(stderr_tail).strip()
+                elapsed = time.time() - job["started_at"]
+                hls_log.error(
+                    "job %s FAILED rc=%s after %.1fs src=%s\n"
+                    "  ffmpeg cmd: %s\n"
+                    "  ffmpeg stderr (last %d lines):\n%s",
+                    job_id, proc.returncode, elapsed, src,
+                    " ".join(shlex.quote(a) for a in args),
+                    len(stderr_tail), err or "(no stderr captured)",
+                )
                 job["status"] = "error"
-                job["error"]  = f"ffmpeg failed: {err.strip()[-500:] or 'unknown error'}"
+                job["error"]  = f"ffmpeg failed: {err[-500:] or 'unknown error'}"
                 shutil.rmtree(tmp_dir, ignore_errors=True)
                 return
 
@@ -5324,7 +5428,13 @@ async def _run_offline_job(job_id: str) -> None:
 
             job["progress"] = 1.0
             job["status"]   = "done"
+            hls_log.info(
+                "job %s DONE in %.1fs encoder=%s size=%.1f MB src=%s",
+                job_id, time.time() - job["started_at"], job["encoder"],
+                _dir_size_bytes(out_dir) / 1_000_000, src,
+            )
         except Exception as e:
+            hls_log.exception("job %s CRASHED: %s", job_id, e)
             job["status"] = "error"; job["error"] = str(e)
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
