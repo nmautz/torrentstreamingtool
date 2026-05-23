@@ -126,7 +126,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "2.9.0"
+UI_VERSION = "2.10.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -233,6 +233,7 @@ class AppState:
     analysis_jobs: dict = field(default_factory=dict)     # series_key → {status, stage, current, total, message, item_ids, started_at, finished_at}
     background_playing: bool = False                      # True when the idle background video is the active VLC playlist
     user_volume_before_bg: int = 100                      # snapshot of state.vlc_volume taken when bg first took over
+    last_activity: float = 0.0                            # time.time() of last user-initiated interaction (drives scheduled-reboot idle check)
     sse_queues: list = field(default_factory=list)
 
 
@@ -1566,6 +1567,169 @@ async def jackett_health_monitor() -> None:
             consecutive_fail = 0   # cooldown — re-evaluate fresh on the next probes
 
 
+# ── Machine Reboot / Scheduled Restart ───────────────────────────────────────
+
+def _reboot_commands() -> list[list[str]]:
+    """Platform-appropriate reboot command(s), tried in order until one works.
+
+    On macOS the launchd *user agent* can restart via System Events without
+    sudo; we fall back to `sudo -n shutdown` (passwordless) then a bare
+    `shutdown` for setups that allow it. Linux prefers `systemctl reboot`.
+    """
+    sysname = platform.system()
+    if sysname == "Windows":
+        return [["shutdown", "/r", "/t", "0"]]
+    if sysname == "Darwin":
+        return [
+            ["osascript", "-e", 'tell application "System Events" to restart'],
+            ["sudo", "-n", "shutdown", "-r", "now"],
+            ["shutdown", "-r", "now"],
+        ]
+    # Linux / other Unix
+    return [
+        ["systemctl", "reboot"],
+        ["sudo", "-n", "shutdown", "-r", "now"],
+        ["shutdown", "-r", "now"],
+    ]
+
+
+def _do_reboot_blocking() -> bool:
+    """Fire the reboot. Returns True if a command was accepted. Blocking — run
+    via asyncio.to_thread. The machine usually goes down before this returns."""
+    for cmd in _reboot_commands():
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+            if proc.returncode == 0:
+                print(f"[reboot] issued: {' '.join(cmd)}")
+                return True
+            print(f"[reboot] '{' '.join(cmd)}' rc={proc.returncode} "
+                  f"stderr={proc.stderr.strip()[:200]}")
+        except FileNotFoundError:
+            continue   # command not on this platform — try the next
+        except Exception as exc:
+            print(f"[reboot] '{' '.join(cmd)}' errored: {exc}")
+    return False
+
+
+async def _reboot_machine(delay: float = 0.5) -> None:
+    """Reboot the host after a short delay (lets the HTTP response flush)."""
+    await asyncio.sleep(delay)
+    print("[reboot] rebooting host machine now")
+    ok = await asyncio.to_thread(_do_reboot_blocking)
+    if not ok:
+        print("[reboot] all reboot commands failed — host may lack permission. "
+              "On macOS/Linux configure passwordless sudo for `shutdown`, "
+              "or run the service with reboot rights.")
+
+
+def _now_in_tz(tzname: str) -> datetime:
+    """Current time in the named IANA tz (e.g. 'America/Los_Angeles').
+    Empty / unknown tz → system local time."""
+    if tzname:
+        try:
+            from zoneinfo import ZoneInfo
+            return datetime.now(ZoneInfo(tzname))
+        except Exception:
+            pass
+    return datetime.now()
+
+
+async def _machine_in_use(window_secs: int) -> bool:
+    """True if the box looks busy: VLC actively playing/paused real content, an
+    active stream/download, or a user interaction within `window_secs`."""
+    # 1. Live VLC playback of non-background content
+    if not state.background_playing:
+        vs = await vlc_status()
+        if vs and vs.get("state") in ("playing", "paused"):
+            return True
+    # 2. Active stream pipeline or library downloads in flight
+    if state.stream_status in ("buffering", "playing"):
+        return True
+    if state.downloading_count > 0:
+        return True
+    # 3. Recent user-initiated HTTP interaction (set by the activity middleware)
+    if state.last_activity and (time.time() - state.last_activity) < window_secs:
+        return True
+    return False
+
+
+def _scheduled_reboot_cfg(lib: dict) -> dict:
+    """Read settings.scheduled_reboot with defaults filled in."""
+    cfg = (lib.get("settings", {}) or {}).get("scheduled_reboot") or {}
+    return {
+        "enabled":      bool(cfg.get("enabled", False)),
+        "time":         str(cfg.get("time", "00:00")),
+        "timezone":     str(cfg.get("timezone", "America/Los_Angeles")),
+        "idle_minutes": int(cfg.get("idle_minutes", 15)),
+        "last_fired":   str(cfg.get("last_fired", "")),
+    }
+
+
+async def scheduled_reboot_loop() -> None:
+    """Daily scheduled host reboot with an idle guard.
+
+    At the configured local time, if the machine has been idle for
+    `idle_minutes`, reboot it. If it's in use, wait `idle_minutes` and re-check —
+    repeating until the box is idle. A persisted `last_fired` date stops the
+    just-rebooted machine from immediately re-arming and looping.
+    """
+    next_check = 0.0   # monotonic time of next idle re-check while armed for today
+    while True:
+        await asyncio.sleep(20)
+        try:
+            lib = await get_library()
+            cfg = _scheduled_reboot_cfg(lib)
+            if not cfg["enabled"]:
+                continue
+
+            parts = cfg["time"].split(":")
+            try:
+                target_h, target_m = int(parts[0]), int(parts[1])
+            except (ValueError, IndexError):
+                continue
+            if not (0 <= target_h <= 23 and 0 <= target_m <= 59):
+                continue
+
+            now = _now_in_tz(cfg["timezone"])
+            today = now.date().isoformat()
+            if cfg["last_fired"] == today:
+                continue   # already handled (or rebooted) for today
+
+            scheduled_today = now.replace(hour=target_h, minute=target_m,
+                                          second=0, microsecond=0)
+            if now < scheduled_today:
+                next_check = 0.0   # re-arm fresh for the upcoming window
+                continue
+
+            # We're at/past today's scheduled time and haven't fired yet.
+            idle_secs = max(60, cfg["idle_minutes"] * 60)
+            if asyncio.get_event_loop().time() < next_check:
+                continue
+
+            if await _machine_in_use(idle_secs):
+                next_check = asyncio.get_event_loop().time() + idle_secs
+                print(f"[reboot] scheduled restart deferred — machine in use; "
+                      f"re-checking in {cfg['idle_minutes']} min")
+                continue
+
+            # Idle → record that we've fired for today (loop guard), then reboot.
+            lib2 = await get_library()
+            sr = lib2.setdefault("settings", {}).setdefault("scheduled_reboot", {})
+            sr["last_fired"] = today
+            await put_library(lib2)
+            print(f"[reboot] scheduled restart firing — machine idle for "
+                  f"{cfg['idle_minutes']} min")
+            await _reboot_machine()
+            # On success the process is torn down by the reboot before we reach
+            # here. If it returns (no reboot permission), don't kill the loop —
+            # last_fired == today now stops it re-hammering reboot commands every
+            # tick, and it stands down until tomorrow's window.
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[reboot] scheduled_reboot_loop error: {exc}")
+
+
 # ── Background Task: State Broadcaster ───────────────────────────────────────
 
 async def stat_broadcaster() -> None:
@@ -2601,10 +2765,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     vlc_tracker = asyncio.create_task(vlc_progress_tracker())
     bg_loop     = asyncio.create_task(background_video_loop())
     jackett_mon = asyncio.create_task(jackett_health_monitor())
+    reboot_loop = asyncio.create_task(scheduled_reboot_loop())
 
     yield
 
-    for t in (guard, broadcaster, dl_monitor, vlc_tracker, bg_loop, jackett_mon):
+    for t in (guard, broadcaster, dl_monitor, vlc_tracker, bg_loop, jackett_mon, reboot_loop):
         t.cancel()
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
@@ -2623,6 +2788,29 @@ async def admin_https_redirect(request: Request, call_next):
             host = request.url.hostname
             qs   = ("?" + request.url.query) if request.url.query else ""
             return RedirectResponse(f"https://{host}{path}{qs}", status_code=301)
+    return await call_next(request)
+
+
+# Endpoints that fire on a timer regardless of whether a human is present — they
+# must NOT count as "usage" for the scheduled-reboot idle check.
+_ACTIVITY_IGNORE_PATHS = (
+    "/api/admin/scheduled-reboot",
+    "/api/admin/reboot",
+    "/api/admin/shutdown",
+)
+
+
+@app.middleware("http")
+async def track_activity(request: Request, call_next):
+    """Stamp state.last_activity on user-initiated interactions so the scheduled
+    reboot can tell whether the box is idle. Mutating verbs (POST/PUT/PATCH/
+    DELETE) and search GETs are treated as real usage; routine GET polling
+    (state/events/version/prep-status) is not, so it never blocks a reboot."""
+    method = request.method
+    path = request.url.path
+    if (method in ("POST", "PUT", "PATCH", "DELETE") or path == "/api/search") \
+            and path not in _ACTIVITY_IGNORE_PATHS:
+        state.last_activity = time.time()
     return await call_next(request)
 
 
@@ -2693,6 +2881,13 @@ class AdminItemLockReq(BaseModel):
 class AdminSettingsReq(BaseModel):
     indexer_categories: Optional[str] = None
     tmdb_api_key: Optional[str] = None
+
+
+class ScheduledRebootReq(BaseModel):
+    enabled: bool = False
+    time: str = "00:00"                       # local HH:MM in `timezone`
+    timezone: str = "America/Los_Angeles"     # IANA name; "" = system local
+    idle_minutes: int = 15                     # idle window before a reboot fires
 
 
 class MetadataRefreshReq(BaseModel):
@@ -4808,6 +5003,63 @@ async def admin_shutdown(request: Request) -> JSONResponse:
 
     asyncio.create_task(_kill_uvicorns())
     return JSONResponse({"ok": True, "message": "Server shutting down…"})
+
+
+@app.post("/api/admin/reboot")
+async def admin_reboot(request: Request) -> JSONResponse:
+    """Reboot the host machine immediately.
+
+    This restarts the whole computer, not just the web server. For the server to
+    come back automatically the host needs auto-login + the StreamLink system
+    service installed (`run.py --install`); see README. Used as a hard reset for
+    a wedged Jackett. The reboot fires ~0.5 s after this response flushes.
+    """
+    _require_admin(request)
+    asyncio.create_task(_reboot_machine())
+    return JSONResponse({"ok": True, "message": "Rebooting host machine…"})
+
+
+@app.get("/api/admin/scheduled-reboot")
+async def admin_get_scheduled_reboot(request: Request) -> JSONResponse:
+    """Return the scheduled-reboot config + the host's current time in the
+    configured timezone (so the UI can show what 'now' looks like there)."""
+    _require_admin(request)
+    cfg = _scheduled_reboot_cfg(await get_library())
+    now = _now_in_tz(cfg["timezone"])
+    cfg["now"] = now.strftime("%Y-%m-%d %H:%M %Z").strip()
+    return JSONResponse(cfg)
+
+
+@app.post("/api/admin/scheduled-reboot")
+async def admin_set_scheduled_reboot(
+    request: Request, body: ScheduledRebootReq,
+) -> JSONResponse:
+    """Save the scheduled-reboot config. Validates the HH:MM time and clamps the
+    idle window. Changing the config clears any prior `last_fired` guard so a
+    newly-set time can arm today."""
+    _require_admin(request)
+
+    parts = body.time.split(":")
+    try:
+        h, m = int(parts[0]), int(parts[1])
+        assert 0 <= h <= 23 and 0 <= m <= 59
+    except (ValueError, IndexError, AssertionError):
+        raise HTTPException(400, "time must be HH:MM (24-hour), e.g. 00:00")
+
+    idle = max(1, min(720, int(body.idle_minutes)))
+
+    lib = await get_library()
+    sr = lib.setdefault("settings", {}).setdefault("scheduled_reboot", {})
+    sr["enabled"]      = bool(body.enabled)
+    sr["time"]         = f"{h:02d}:{m:02d}"
+    sr["timezone"]     = body.timezone.strip()
+    sr["idle_minutes"] = idle
+    sr["last_fired"]   = ""   # reset guard so the new schedule can arm today
+    await put_library(lib)
+
+    cfg = _scheduled_reboot_cfg(lib)
+    cfg["now"] = _now_in_tz(cfg["timezone"]).strftime("%Y-%m-%d %H:%M %Z").strip()
+    return JSONResponse({"ok": True, **cfg})
 
 
 # ── Routes: Idle Background Video ─────────────────────────────────────────────

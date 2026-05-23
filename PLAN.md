@@ -206,3 +206,18 @@ over the Stream-to-Device path.
 
 ---
 
+## Milestone 17 — Machine Reboot & Scheduled Restart (Jackett hard-reset)
+
+A full host reboot is the only reliable cure for some wedged-Jackett states.
+Surfaces both a manual reboot and an automated nightly idle-gated one in the
+admin **System** tab. Requires host auto-login + the installed service for the
+box to come back on its own (documented in README).
+
+- [x] **17.1** Server: `POST /api/admin/reboot` reboots the whole host. `_reboot_machine()` tries a platform command chain (macOS System Events restart / `sudo -n shutdown` / `shutdown`; Linux `systemctl reboot` / sudo / shutdown; Windows `shutdown /r /t 0`), fires ~0.5 s after the response flushes, and logs a hint if it lacks permission.
+- [x] **17.2** Server: `scheduled_reboot_loop` background task + `GET`/`POST /api/admin/scheduled-reboot`. Config in `library.json → settings.scheduled_reboot` (`enabled`, `time` HH:MM, `timezone`, `idle_minutes`). At the configured local time it reboots when idle for `idle_minutes`, else waits and re-checks until idle. Persisted `last_fired` date guards against a post-reboot re-arm loop; saving config resets it.
+- [x] **17.3** Server: idle detection. `track_activity` middleware stamps `state.last_activity` on mutating verbs + `/api/search` (routine GET polling excluded). `_machine_in_use()` also treats live VLC playback/pause of non-background content and any active stream/download as in-use, so a reboot never interrupts watching or a download.
+- [x] **17.4** Admin UI: **Reboot Machine** (confirm-gated) + **Scheduled Restart** panel (enable toggle, time, timezone select, idle window, host-time display) in the System tab.
+- [x] **17.5** README: documents the auto-login + `run.py --install` requirement so the host returns to a running StreamLink after a reboot.
+
+---
+

@@ -243,6 +243,7 @@ Password-protected at `/admin`. Token stored in `sessionStorage.admin_token` and
 2. **Content Lock** ([line 142](../static/admin.html#L142)) — toggle `admin_only` per library item. Profiles can be marked `elevated` to also see admin-only items.
 3. **Smart Skip** ([line 155](../static/admin.html#L155)) — list items with their skip-data status; per-item `Analyze` button (force re-run); `Edit` opens inline editor with three numeric fields per file (intro start, intro end, credits start). Manual edits set `analysis.source="manual"` so they survive re-analysis.
 4. **Profile PINs** ([line 182](../static/admin.html#L182)) — set/clear PIN per profile (admin overrides current-PIN check); toggle the `elevated` flag.
+5. **System** (`#panelSystem`) — **Shut Down** (`doShutdownServer`), **Reboot Machine** (`doRebootMachine`, confirm-gated → `POST /api/admin/reboot`), and **Scheduled Restart** (`loadScheduledReboot` / `toggleScheduledReboot` / `saveScheduledReboot` → `GET`/`POST /api/admin/scheduled-reboot`). The scheduled-restart panel has an enable toggle, time input, timezone select, idle-window field, and a live host-time readout; loaded on tab switch. (Offline Cache and Background Video tabs also exist — see [ADMIN.md](ADMIN.md).)
 
 ### Admin SSE ([static/admin.html:483](../static/admin.html#L483))
 
