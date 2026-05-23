@@ -71,9 +71,11 @@ After all services are up, `start_watchdog()` is called. It returns a daemon thr
 
 `get_wifi_ssid()` is best-effort: `airport -I` (macOS, with `networksetup` fallback), `iwgetid -r` (Linux), `netsh wlan show interfaces` (Windows).
 
-## mDNS ([run.py:658](../run.py#L658))
+## mDNS ([run.py:734](../run.py#L734))
 
-Uses `zeroconf`. Registers `_http._tcp.local. → remote.local` on the detected LAN IP (port 80), and a separate `_https._tcp.local.` entry for port 443 if SSL certs exist. Cleaned up on Ctrl+C via `_zc.close()`.
+Uses `zeroconf`. `start_mdns(lan_ip, http_port, https_port)` registers `_http._tcp.local. → remote.local` on the given LAN IP (port 80), plus a separate `_https._tcp.local.` entry for port 443 if SSL certs exist.
+
+**Both `run.py` and the installed service call `start_mdns_resilient()`, not `start_mdns()` directly.** It spawns a daemon thread that polls `get_local_ip()` until a LAN IP appears, registers, then re-registers if the IP later changes (DHCP lease / network switch). It polls every 5 s until registered, then every 30 s to watch for changes. This exists because the service starts at boot **before Wi-Fi is up** — a one-shot registration would see no IP and silently skip, so `remote.local` would never resolve until a manual relaunch even though the dashboard is reachable by IP. See [GOTCHAS.md](GOTCHAS.md#remotelocal-doesnt-resolve-after-a-reboot). Returns a handle with `.close()`, called on Ctrl+C / service shutdown.
 
 ## Windows Firewall ([run.py:629](../run.py#L629))
 

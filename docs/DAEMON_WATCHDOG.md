@@ -17,7 +17,7 @@ Two related but distinct pieces:
 3. Calls `start_watchdog()` (monitors VLC/qBit/Jackett — and launches them when missing)
 4. Calls `run.get_local_ip()` to detect the LAN IP for mDNS
 5. On Windows: calls `run.setup_windows_firewall(80)` and `(443)` if certs exist (idempotent — Task Scheduler runs the wrapper elevated so `netsh add rule` succeeds)
-6. Calls `run.start_mdns(lan_ip, 80, 443 if certs)` so `remote.local` resolves for LAN clients
+6. Calls `run.start_mdns_resilient(80, 443 if certs)` so `remote.local` resolves for LAN clients. **Resilient, not one-shot:** the service starts at boot before Wi-Fi has a LAN IP, so a single `start_mdns()` would see no IP and silently skip — `remote.local` would never resolve until a manual relaunch even though the dashboard is reachable by IP. The resilient version registers from a daemon thread that waits for the IP and re-registers on change. See [GOTCHAS.md](GOTCHAS.md#remotelocal-doesnt-resolve-after-a-reboot)
 7. If `cert.pem` + `key.pem` exist: launches a separate `uvicorn … --port 443 --ssl-certfile … --ssl-keyfile …` subprocess for the admin panel (HTTPS), logging to `logs/uvicorn_https.log`. Not supervised — if it dies, only port 443 stops; the main HTTP service continues
 8. Supervises `uvicorn main:app --host 0.0.0.0 --port 80` in a restart loop
 9. Restart loop logic: clean exit (rc 0) → quit; non-zero → wait 5 s and retry. **Fast-death detection**: 5 consecutive crashes in under 15 s each → give up (prevents tight crash loops eating CPU)

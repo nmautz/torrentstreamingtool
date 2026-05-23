@@ -123,21 +123,20 @@ if _SYSTEM == "Windows":
     except Exception as exc:
         log.error("Firewall setup failed: %s", exc)
 
-# mDNS — registers remote.local so phones can find the dashboard.
-# Without this, the service binds port 80 fine but the LAN hostname doesn\'t resolve.
+# mDNS — registers remote.local so phones can find the dashboard. RESILIENT:
+# at boot the service starts before Wi-Fi has associated, so a one-shot
+# registration would see no LAN IP and silently skip it — remote.local would
+# then never resolve until a manual relaunch even though uvicorn (0.0.0.0) is
+# reachable by IP the moment the network comes up. start_mdns_resilient waits
+# for the LAN IP in a background thread and re-registers if it changes.
+# See docs/GOTCHAS.md.
 _zc = None
-if _lan_ip:
-    try:
-        from run import start_mdns
-        _zc = start_mdns(_lan_ip, 80, 443 if _has_cert else 0)
-        if _zc:
-            log.info("mDNS registered remote.local -> %s", _lan_ip)
-        else:
-            log.warning("mDNS registration returned None — remote.local will not resolve")
-    except Exception as exc:
-        log.error("mDNS registration failed: %s", exc)
-else:
-    log.warning("No LAN IP — skipping mDNS registration (remote.local will not resolve)")
+try:
+    from run import start_mdns_resilient
+    _zc = start_mdns_resilient(80, 443 if _has_cert else 0)
+    log.info("mDNS keepalive started (registers remote.local once a LAN IP is up)")
+except Exception as exc:
+    log.error("mDNS keepalive failed to start: %s", exc)
 
 # HTTPS admin uvicorn (port 443) — only if certs exist. Launched once; if it
 # crashes the main HTTP service keeps running. Mirrors run.py interactive launch.

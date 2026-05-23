@@ -771,6 +771,64 @@ def start_mdns(lan_ip: str, http_port: int, https_port: int = 0):
         return None
 
 
+def start_mdns_resilient(http_port: int, https_port: int = 0,
+                         poll_interval: float = 5.0, watch_interval: float = 30.0):
+    """Register remote.local via mDNS, resilient to a late or changing LAN IP.
+
+    A one-shot ``start_mdns()`` registers whatever ``get_local_ip()`` returns
+    *right now*. That's fine interactively (the network is already up), but the
+    installed launchd/systemd service starts at login *before* Wi-Fi has
+    associated — ``get_local_ip()`` returns "" and the registration is silently
+    skipped, so ``remote.local`` never resolves until the next manual relaunch
+    even though uvicorn (bound to ``0.0.0.0``) becomes reachable by IP the
+    moment the network comes up. That's why "remote.local works on first
+    install but not after a reboot." See docs/GOTCHAS.md.
+
+    This runs a daemon thread that waits for a LAN IP, registers, then
+    re-registers if the IP later changes (DHCP lease, network switch). It polls
+    every ``poll_interval`` until registered, then every ``watch_interval`` to
+    watch for changes. Returns a handle with ``.close()`` for shutdown cleanup;
+    safe to call even when zeroconf is missing.
+    """
+    import threading
+
+    class _MdnsKeepalive:
+        def __init__(self) -> None:
+            self._zc = None
+            self._ip = ""
+            self._stop = threading.Event()
+            self._thread = threading.Thread(
+                target=self._run, name="mdns-keepalive", daemon=True)
+            self._thread.start()
+
+        def _run(self) -> None:
+            while not self._stop.is_set():
+                ip = get_local_ip()
+                if ip and ip != self._ip:
+                    if self._zc is not None:
+                        try:
+                            self._zc.close()
+                        except Exception:
+                            pass
+                        self._zc = None
+                    zc = start_mdns(ip, http_port, https_port)
+                    if zc is not None:
+                        self._zc = zc
+                        self._ip = ip
+                # poll quickly until registered, then just watch for IP changes
+                self._stop.wait(watch_interval if self._zc is not None else poll_interval)
+
+        def close(self) -> None:
+            self._stop.set()
+            if self._zc is not None:
+                try:
+                    self._zc.close()
+                except Exception:
+                    pass
+
+    return _MdnsKeepalive()
+
+
 # ── Main ───────────────────────────────────────────────────────────────────
 def main():
     # ── Handle --install / --uninstall / --status flags (7.1) ────────────
@@ -910,9 +968,11 @@ def main():
             setup_windows_firewall(ADMIN_PORT)
         print()
 
-    # Register mDNS hostname (remote.local) for HTTP + HTTPS
+    # Register mDNS hostname (remote.local) for HTTP + HTTPS. Resilient: waits
+    # for the LAN IP and re-registers if it changes, so it works even when
+    # launched before Wi-Fi is up. See start_mdns_resilient.
     print(f"{BOLD}  mDNS{RESET}")
-    _zc = start_mdns(lan_ip, PORT, ADMIN_PORT if has_cert else 0) if lan_ip else None
+    _zc = start_mdns_resilient(PORT, ADMIN_PORT if has_cert else 0)
     print()
 
     # ── HTTPS admin process (port 443) ────────────────────────────────────

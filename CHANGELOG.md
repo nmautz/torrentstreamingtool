@@ -1,5 +1,11 @@
 # Changelog
 
+## [2.10.1] — 2026-05-23
+- **Bug fix: `remote.local` stops resolving after a reboot when run as a system service.** Root cause: the installed service registered mDNS exactly once at startup, but at boot it launches before Wi-Fi has associated and the interface has a LAN IP. `get_local_ip()` returned `""`, so the registration was silently skipped — `remote.local` then never resolved until the next manual relaunch, even though uvicorn (bound to `0.0.0.0`) became reachable by IP the moment the network came up. That's why it worked on first interactive install (network already up) but not after a reboot.
+  - **`start_mdns_resilient()` (in `run.py`).** Registers mDNS from a background daemon thread that polls `get_local_ip()` until a LAN IP appears, registers `remote.local`, then re-registers if the IP later changes (DHCP lease, network switch). Polls every 5 s until registered, then every 30 s to watch for changes. Returns a `.close()` handle for shutdown cleanup.
+  - **Used by both launch paths.** The generated service wrapper (`daemon.py`) and interactive `run.py` both now call `start_mdns_resilient()` instead of the one-shot `start_mdns()`, keeping them behaviourally identical and fixing the same latent issue when `run.py` is launched before Wi-Fi.
+  - **Re-run `python3 run.py --install` to regenerate the service wrapper** with the fix.
+
 ## [2.10.0] — 2026-05-23
 - **Minor feature: machine reboot + scheduled daily restart (Jackett hard-reset).** A reboot is the only reliable cure for some wedged-Jackett states, so the admin **System** tab now exposes both a manual reboot and an automated nightly one.
   - **Reboot Machine.** New `POST /api/admin/reboot` restarts the whole host (not just the web server). `_reboot_machine()` tries platform-appropriate commands in order — macOS: System Events restart (no sudo from a launchd user agent) → `sudo -n shutdown -r now` → `shutdown -r now`; Linux: `systemctl reboot` → `sudo -n shutdown` → `shutdown`; Windows: `shutdown /r /t 0`. Fires ~0.5 s after the response flushes so the UI gets confirmation first.

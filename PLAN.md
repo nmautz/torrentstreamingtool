@@ -53,6 +53,7 @@
 ## Milestone 5 — Advanced / Power Features
 
 - [x] **5.1** Local DNS: configure mDNS so the tool is accessible at `http://remote.local`, update project to use port 80 (or 443 if https is enabled)
+  - **Boot-timing fix (v2.10.1):** the installed service registered mDNS once at startup, but at boot it runs before Wi-Fi has a LAN IP, so `remote.local` was silently skipped and never resolved until a manual relaunch (the IP still worked). `start_mdns_resilient()` now registers from a background daemon thread that waits for the LAN IP and re-registers if it changes; used by both `run.py` and the service wrapper. See [docs/GOTCHAS.md](docs/GOTCHAS.md).
 - [x] **5.2** Smart Skip: audio fingerprinting to detect and skip intro/credit sequences on library files
   - Auto-skip now warns on the TV before acting: a VLC `marq` sub-source renders a bottom-right countdown popup (10 s before credits auto-advance, 5 s before intro seek). See [docs/ANALYZER.md](docs/ANALYZER.md#auto-skip-countdown-on-tv-marquee).
 - [-] **5.3** Control API: documented JSON POST endpoints for external play/pause/seek/volume control
