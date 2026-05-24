@@ -5026,14 +5026,26 @@ async function _lpLoadIndex(seekTo) {
       _lpRenderTrackRows();
     });
     hls.on(window.Hls.Events.ERROR, (_evt, data) => {
+      // Always log the full shape — a fatal `fragLoadError` is almost always a
+      // segment/init URL that 404s or a transport failure, and the only way to
+      // tell which is the response code + the exact URL hls.js tried.
+      const url  = (data.frag && data.frag.url) || (data.context && data.context.url) || "";
+      const code = data.response && data.response.code;
+      if (data.fatal || data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
+        console.error("[hls] error", {
+          type: data.type, details: data.details, fatal: data.fatal,
+          httpCode: code, url,
+        });
+      }
       if (!data.fatal) return;
-      // Fatal errors on hls.js are typically media-source decoding crashes.
-      // Try to recover before bailing — `recoverMediaError` re-attaches the
-      // MSE buffer; if that fails, surface the error.
+      // Media errors are MSE decoding crashes — `recoverMediaError` re-attaches
+      // the buffer; if that fails, fall through to surface the error.
       if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
         try { hls.recoverMediaError(); return; } catch (_) {}
       }
-      showAlert("Playback error: " + (data.details || data.type), "error");
+      // Surface a code + filename so a "won't play" report is self-diagnosing.
+      const where = url ? (" (" + url.split("/").pop() + (code ? " → HTTP " + code : "") + ")") : "";
+      showAlert("Playback error: " + (data.details || data.type) + where, "error");
     });
     hls.loadSource(masterUrl);
     hls.attachMedia(v);
@@ -5760,6 +5772,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">3.2.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">3.2.1</div>
 </body>
 </html>

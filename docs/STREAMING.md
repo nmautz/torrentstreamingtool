@@ -49,10 +49,12 @@ with the following layout:
   <sha24>/
     master.m3u8           ← top-level playlist (video variant + alternate audio)
     video.m3u8            ← video rendition playlist
+    init_video.mp4        ← fmp4 init segment (EXT-X-MAP) for the video rendition
     seg_video_00001.m4s   ← 6 s fmp4 segments
     seg_video_00002.m4s
     …
     audio_0.m3u8          ← per-audio-track rendition (default=YES on idx 0)
+    init_audio_0.mp4      ← fmp4 init segment for audio rendition 0
     seg_audio_0_00001.m4s
     …
     audio_1.m3u8          (when source has multiple audio tracks)
@@ -110,6 +112,7 @@ ffmpeg -y -progress pipe:1 -nostats \
   -c:a aac -b:a 160k -ac 2 \
   -f hls -hls_time 6 -hls_playlist_type vod \
   -hls_segment_type fmp4 -hls_flags independent_segments \
+  -hls_fmp4_init_filename "init_%v.mp4" \
   -hls_segment_filename "<out>/seg_%v_%05d.m4s" \
   -master_pl_name master.m3u8 \
   -var_stream_map "v:0,agroup:aud,name:video \
@@ -145,6 +148,13 @@ Key decisions:
   out by `_ffprobe_full` and noted in `meta.json:skipped_image_subs`.
 - **6-second segments, fmp4, independent_segments.** Modern HLS defaults.
   Switching audio/sub mid-stream doesn't require an extra fetch.
+- **The fmp4 init filename is templated explicitly** (`-hls_fmp4_init_filename
+  init_%v.mp4`). Left to ffmpeg's default, the init segment's `%v` expansion
+  doesn't reliably match the `#EXT-X-MAP:URI=` written into each variant
+  playlist → the player 404s the init segment → fatal `fragLoadError` with the
+  manifest already parsed (so the dropdowns populate first). Pinning it keeps
+  the EXT-X-MAP URI and the on-disk file in lock-step. See
+  [GOTCHAS.md](GOTCHAS.md).
 - **ffmpeg ≥ 4.3** is enforced via `_ffmpeg_version()` cache. Older builds
   fail-fast at prep start with a clear error message — multi-rendition
   `-var_stream_map` is unreliable on 4.0–4.2.

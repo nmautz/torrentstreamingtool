@@ -140,7 +140,7 @@ BACKGROUND_DIR = Path(__file__).parent / ".background"
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.2.0"
+UI_VERSION = "3.2.1"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -4815,8 +4815,10 @@ OFFLINE_CACHE = Path(__file__).parent / ".offline_cache"
 # cache layout) so previously-cached bundles built by older logic get rebuilt
 # on next request. v3-hls switched single-MP4 output to per-source HLS bundles;
 # v4-hls moved subtitles out of the (broken) in-manifest renditions into
-# standalone sub_<i>.vtt sidecars.
-OFFLINE_CACHE_VERSION = "v4-hls"
+# standalone sub_<i>.vtt sidecars; v5-hls pins the fmp4 init filename
+# (-hls_fmp4_init_filename init_%v.mp4) so the EXT-X-MAP URI matches the file on
+# disk — older bundles could 404 the init segment and stall with fragLoadError.
+OFFLINE_CACHE_VERSION = "v5-hls"
 
 # Stream-to-device (HLS prep) is unavailable on macOS hosts. ffmpeg/ffprobe run
 # as children of the (non-GUI) server process, and macOS TCC blocks them from
@@ -5199,6 +5201,18 @@ def _build_hls_ffmpeg_args(
         # independent_segments: every segment starts on a keyframe so the
         # player can switch renditions without an extra fetch round-trip.
         "-hls_flags", "independent_segments",
+        # Template the fmp4 init filename per-variant. Without an explicit
+        # -hls_fmp4_init_filename, ffmpeg picks its OWN %v expansion for the
+        # init segment, and across versions that name does NOT always match the
+        # `#EXT-X-MAP:URI=` it writes into the variant playlist. When they
+        # diverge the player 404s the init segment → hls.js surfaces a fatal
+        # `fragLoadError` and playback never starts (the manifest + variant
+        # playlists still parse, so audio/sub dropdowns populate first — making
+        # it look like "everything loaded but won't play"). Pinning the name to
+        # the same `name:`-tag scheme we use for segments (init_video.mp4,
+        # init_audio_0.mp4, …) keeps the EXT-X-MAP URI and the file on disk in
+        # lock-step on every ffmpeg ≥ 4.3. See GOTCHAS.md.
+        "-hls_fmp4_init_filename", "init_%v.mp4",
         "-hls_segment_filename", str(out_dir / "seg_%v_%05d.m4s"),
         "-master_pl_name", "master.m3u8",
     ]
