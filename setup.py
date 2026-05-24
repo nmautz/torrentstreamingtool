@@ -67,8 +67,12 @@ def vrun(cmd, **kwargs) -> subprocess.CompletedProcess:
 _STDIN_INTERACTIVE = bool(getattr(sys.stdin, "isatty", lambda: False)())
 
 
-def ask(prompt, default="", secret=False):
-    hint = f"{CYN}{default}{RESET}"
+def ask(prompt, default="", secret=False, show_default=None):
+    # show_default lets a caller display a different hint than the real default
+    # value — used to mask stored secrets in the brackets while still returning
+    # the stored value when the user just presses Enter.
+    shown = show_default if show_default is not None else default
+    hint = f"{CYN}{shown}{RESET}"
     if not _STDIN_INTERACTIVE:
         print(f"  {BOLD}{prompt}{RESET} [{hint}]: (no stdin — using default)")
         return default
@@ -927,37 +931,56 @@ def detect_tools() -> dict:
 
 
 # ── Step 4: Interactive configuration ─────────────────────────────────────
-def gather_config() -> dict:
+def gather_config(existing: dict | None = None) -> dict:
     header("Configuration")
-    note("Press Enter to accept the default shown in brackets.")
+    prev = existing or {}
+    if prev:
+        note("Current values are pre-filled — press Enter to keep each one.")
+        note("Reviewing every value here doubles as a quick .env health check.")
+    else:
+        note("Press Enter to accept the default shown in brackets.")
     print()
 
     default_dl = str(Path.home() / "Downloads" / "StreamLink")
 
     cfg: dict[str, str] = {}
 
+    # Plain field: default to the stored value, falling back to the factory default.
+    def ask_field(label, key, factory=""):
+        return ask(label, prev.get(key, factory))
+
+    # Secret field: same defaulting, but never echo the stored value to the
+    # terminal — show a masked placeholder so re-running setup can't leak it.
+    def ask_secret(label, key, factory=""):
+        cur = prev.get(key, factory)
+        if key in prev:
+            shown = "•••••• (Enter = keep)" if cur else "(currently blank)"
+        else:
+            shown = factory
+        return ask(label, cur, secret=True, show_default=shown)
+
     print(f"  {BOLD}Jackett (indexer){RESET}")
-    cfg["INDEXER_URL"]        = ask("URL",               "http://localhost:9117")
-    cfg["INDEXER_API_KEY"]    = ask("API key",           "")
-    cfg["JACKETT_PASSWORD"]   = ask("Admin password (for indexer management, leave blank if none)", "", secret=True)
-    cfg["INDEXER_CATEGORIES"] = ask("Categories (0=all, 2000=Movies, 5000=TV)", "0")
+    cfg["INDEXER_URL"]        = ask_field("URL",     "INDEXER_URL", "http://localhost:9117")
+    cfg["INDEXER_API_KEY"]    = ask_field("API key", "INDEXER_API_KEY", "")
+    cfg["JACKETT_PASSWORD"]   = ask_secret("Admin password (for indexer management, leave blank if none)", "JACKETT_PASSWORD", "")
+    cfg["INDEXER_CATEGORIES"] = ask_field("Categories (0=all, 2000=Movies, 5000=TV)", "INDEXER_CATEGORIES", "0")
     print()
     print(f"  {BOLD}qBittorrent{RESET}")
-    cfg["QBIT_URL"]           = ask("Web UI URL",        "http://localhost:8081")
-    cfg["QBIT_USERNAME"]      = ask("Username",          "admin")
-    cfg["QBIT_PASSWORD"]      = ask("Password",          "adminadmin", secret=True)
-    cfg["QBIT_DOWNLOAD_PATH"] = ask("Download folder",   default_dl)
+    cfg["QBIT_URL"]           = ask_field("Web UI URL", "QBIT_URL", "http://localhost:8081")
+    cfg["QBIT_USERNAME"]      = ask_field("Username",   "QBIT_USERNAME", "admin")
+    cfg["QBIT_PASSWORD"]      = ask_secret("Password",  "QBIT_PASSWORD", "adminadmin")
+    cfg["QBIT_DOWNLOAD_PATH"] = ask_field("Download folder", "QBIT_DOWNLOAD_PATH", default_dl)
     print()
     print(f"  {BOLD}VLC{RESET}")
-    cfg["VLC_URL"]            = ask("HTTP URL",          "http://localhost:8080")
-    cfg["VLC_PASSWORD"]       = ask("Lua HTTP password", "vlcpassword", secret=True)
+    cfg["VLC_URL"]            = ask_field("HTTP URL",          "VLC_URL", "http://localhost:8080")
+    cfg["VLC_PASSWORD"]       = ask_secret("Lua HTTP password", "VLC_PASSWORD", "vlcpassword")
     print()
     print(f"  {BOLD}Buffer thresholds (stream starts when either is met){RESET}")
-    cfg["BUFFER_MIN_MB"]      = ask("Min MB",  "15.0")
-    cfg["BUFFER_MIN_PCT"]     = ask("Min %",   "1.0")
+    cfg["BUFFER_MIN_MB"]      = ask_field("Min MB", "BUFFER_MIN_MB", "15.0")
+    cfg["BUFFER_MIN_PCT"]     = ask_field("Min %",  "BUFFER_MIN_PCT", "1.0")
     print()
     print(f"  {BOLD}Admin panel{RESET}")
-    cfg["ADMIN_PASSWORD"]     = ask("Admin password (leave blank to disable)", "", secret=True)
+    cfg["ADMIN_PASSWORD"]     = ask_secret("Admin password (leave blank to disable)", "ADMIN_PASSWORD", "")
 
     # Warn if qBittorrent and VLC are configured on the same port
     import re as _re
@@ -1230,18 +1253,20 @@ def main():
     install_jackett_service()
     tools = install_smart_skip_deps(tools)
 
+    existing = parse_existing_env() if ENV.exists() else {}
     reuse_env = False
-    if ENV.exists():
+    if existing:
         header("Existing .env detected")
         note(f"Found {ENV}")
+        note("Re-prompting pre-fills each current value (press Enter to keep it).")
         reuse_env = ask_bool("Reuse existing .env without re-prompting?", default=True)
 
     if reuse_env:
-        cfg = parse_existing_env()
+        cfg = existing
         merge_tool_paths(tools)
         ok("Skipped interactive configuration")
     else:
-        cfg = gather_config()
+        cfg = gather_config(existing)
         configure_qbittorrent(cfg)
         write_env(cfg, tools)
 

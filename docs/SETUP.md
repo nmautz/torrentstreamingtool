@@ -11,7 +11,7 @@
 4. `install_core_deps()` — install missing core apps (winget / brew cask / hint on Linux)
 5. `install_jackett_service()` — Windows only: register `Jackett` as a Windows service (auto-elevates via UAC)
 6. `install_smart_skip_deps()` — install ffmpeg + chromaprint (brew/apt/dnf/pacman/portable zip)
-7. Either reuse existing `.env` (merge tool paths only) or prompt for full config
+7. Either reuse existing `.env` (merge tool paths only) or re-prompt for full config — see [Interactive configuration](#interactive-configuration-setuppyl930)
 8. `configure_qbittorrent()` — write `qBittorrent.ini` directly
 9. `write_env()` — save `.env` with both user config and `_VLC_BIN` / `_QBIT_BIN` / etc.
 10. `ensure_download_dir()` — create the download folder
@@ -54,6 +54,14 @@ Lets the non-elevated StreamLink watchdog recover a hung Jackett **without a reb
 - **Idempotent**: skips when the ACE is already present. **Best-effort**: never fatal to setup.
 - When not admin, applies both in a single elevated `cmd /c … & …` (one UAC prompt). If elevation is declined, it prints the exact `sc sdset` / `sc failure` commands to run manually in an elevated PowerShell.
 - No-op if Jackett runs as a tray/user process (the watchdog can kill+relaunch that directly). See [GOTCHAS.md](GOTCHAS.md#controlling-the-localsystem-jackett-service-needs-admin).
+
+## Interactive configuration ([setup.py:930](../setup.py#L930))
+
+`gather_config(existing)` prompts for the user-facing `.env` keys (Jackett URL/API key/password/categories, qBit URL/user/password/download path, VLC URL/password, buffer thresholds, admin password).
+
+**Re-running pre-fills current values.** When `.env` already exists, `main()` parses it (`parse_existing_env()`) and either reuses it wholesale (fast path, `merge_tool_paths()` only) or — if you decline the reuse prompt — passes it into `gather_config(existing)`, which defaults each prompt to the stored value. Press Enter to keep any field; only type to change. On a fresh install (`existing` empty) each prompt falls back to its factory default, so first-run behaviour is unchanged. Walking the prompts this way doubles as a `.env` health check.
+
+**Secrets are masked, not echoed.** Secret fields (`JACKETT_PASSWORD`, `QBIT_PASSWORD`, `VLC_PASSWORD`, `ADMIN_PASSWORD`) use `ask_secret()`, which shows `•••••• (Enter = keep)` (or `(currently blank)`) in the brackets instead of the stored plaintext — so re-running setup can't leak a password to the terminal/scrollback. The real stored value is still the effective default on empty input. This relies on `ask()`'s `show_default` override (display a different hint than the value returned). Factory secret defaults on a fresh install (`adminadmin`, `vlcpassword`) are still shown in plaintext for discoverability.
 
 ## qBittorrent ini ([setup.py:846](../setup.py#L846))
 

@@ -62,6 +62,7 @@
   - `setup.py` now auto-installs core apps (VLC/qBittorrent/Jackett/Mullvad) via winget on Windows (brew casks on macOS), in addition to the existing ffmpeg/fpcalc install. winget "already installed / no upgrade" exit codes are treated as success.
   - Jackett detection (setup.py, run.py, watchdog.py) now scans every Program Files / LocalAppData / ProgramData location the Windows installer may use, for both `JackettConsole.exe` and `jackett.exe`.
   - `setup.py` offers to register the system service at the end (defaults to yes on Windows); on Windows, service install self-elevates via UAC when not run from an admin shell. The service's watchdog starts all deps on its own, gating qBittorrent on VPN connection.
+  - Re-running setup and declining the "reuse .env" prompt now pre-fills every prompt with the current `.env` value (Enter keeps it; secrets are masked, not echoed), so it doubles as a config health check (v2.11.0).
 
 
 ---
