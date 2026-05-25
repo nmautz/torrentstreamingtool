@@ -185,7 +185,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.4.4"
+UI_VERSION = "3.4.5"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -300,6 +300,7 @@ class AppState:
 
 state = AppState()
 qbit: Optional[httpx.AsyncClient] = None
+vlc_client: Optional[httpx.AsyncClient] = None   # persistent keep-alive client for VLC (see _vlc_http)
 _admin_sessions: dict[str, float] = {}   # token → expiry Unix timestamp
 
 # ── Jackett Session ───────────────────────────────────────────────────────────
@@ -509,36 +510,60 @@ async def qbit_delete(h: str, delete_files: bool = True) -> None:
 
 # ── VLC Client ────────────────────────────────────────────────────────────────
 
+def _vlc_http() -> httpx.AsyncClient:
+    """Return the shared, persistent VLC HTTP client (keep-alive connection pool).
+
+    VLC's built-in HTTP interface is a tiny, effectively single-threaded server.
+    Opening a *fresh* TCP connection on every call — which the old per-call
+    `httpx.AsyncClient()` did — swamps its accept path: three background loops
+    (`stat_broadcaster`, `vlc_progress_tracker`, `background_video_loop`) each
+    poll every 2–3 s, and a play fires several commands in a burst, so VLC is
+    constantly tearing down and re-establishing sockets and every call ends up
+    taking seconds. One keep-alive client amortizes the connect across all calls
+    (a warm connection from the polling loops is almost always already in the
+    pool when a play starts), so commands and status reads stay sub-second.
+
+    Created in `lifespan`; lazily built here too so any call that runs before
+    startup finishes (or in a stray task) still works. `base_url` + client-level
+    `auth` mean callers pass only the relative path.
+    """
+    global vlc_client
+    if vlc_client is None or vlc_client.is_closed:
+        vlc_client = httpx.AsyncClient(
+            base_url=settings.vlc_url,
+            auth=httpx.BasicAuth("", settings.vlc_password),
+            timeout=httpx.Timeout(5.0, connect=2.0),
+            limits=httpx.Limits(max_connections=4, max_keepalive_connections=4, keepalive_expiry=30.0),
+        )
+    return vlc_client
+
+
 async def vlc(command: str, **params) -> None:
     try:
-        async with httpx.AsyncClient() as c:
-            if command == "in_play":
-                # User content is taking over from the idle background video —
-                # restore the volume the user had before bg took the floor.
-                if state.background_playing:
-                    state.vlc_volume = state.user_volume_before_bg
-                    state.background_playing = False
-                # Clamp by the current max-volume cap. state.vlc_volume can drift
-                # above the cap: it's polled directly from VLC's reported volume
-                # (which is 100 at fresh start) and the user_volume_before_bg
-                # snapshot may have been taken before the cap was lowered. Without
-                # this clamp, in_play would blast at >cap until the user nudged
-                # the slider and tripped the server-side clamp.
-                cap = await _global_max_volume()
-                state.vlc_volume = max(0, min(cap, state.vlc_volume))
-                raw = max(0, min(512, round(state.vlc_volume / 100 * 256)))
-                await c.get(
-                    f"{settings.vlc_url}/requests/status.xml",
-                    auth=httpx.BasicAuth("", settings.vlc_password),
-                    params={"command": "volume", "val": str(raw)},
-                    timeout=5.0,
-                )
+        c = _vlc_http()
+        if command == "in_play":
+            # User content is taking over from the idle background video —
+            # restore the volume the user had before bg took the floor.
+            if state.background_playing:
+                state.vlc_volume = state.user_volume_before_bg
+                state.background_playing = False
+            # Clamp by the current max-volume cap. state.vlc_volume can drift
+            # above the cap: it's polled directly from VLC's reported volume
+            # (which is 100 at fresh start) and the user_volume_before_bg
+            # snapshot may have been taken before the cap was lowered. Without
+            # this clamp, in_play would blast at >cap until the user nudged
+            # the slider and tripped the server-side clamp.
+            cap = await _global_max_volume()
+            state.vlc_volume = max(0, min(cap, state.vlc_volume))
+            raw = max(0, min(512, round(state.vlc_volume / 100 * 256)))
             await c.get(
-                f"{settings.vlc_url}/requests/status.xml",
-                auth=httpx.BasicAuth("", settings.vlc_password),
-                params={"command": command, **params},
-                timeout=5.0,
+                "/requests/status.xml",
+                params={"command": "volume", "val": str(raw)},
             )
+        await c.get(
+            "/requests/status.xml",
+            params={"command": command, **params},
+        )
     except Exception:
         pass
 
@@ -546,14 +571,9 @@ async def vlc(command: str, **params) -> None:
 async def vlc_status() -> Optional[dict]:
     """Return VLC's current status JSON (includes 'time' and 'length' in seconds)."""
     try:
-        async with httpx.AsyncClient() as c:
-            r = await c.get(
-                f"{settings.vlc_url}/requests/status.json",
-                auth=httpx.BasicAuth("", settings.vlc_password),
-                timeout=3.0,
-            )
-            if r.status_code == 200:
-                return r.json()
+        r = await _vlc_http().get("/requests/status.json", timeout=3.0)
+        if r.status_code == 200:
+            return r.json()
     except Exception:
         pass
     return None
@@ -563,22 +583,17 @@ async def vlc_status() -> Optional[dict]:
 async def vlc_playlist_uri() -> Optional[str]:
     """Return the file:// URI of the currently active VLC playlist item."""
     try:
-        async with httpx.AsyncClient() as c:
-            r = await c.get(
-                f"{settings.vlc_url}/requests/playlist.json",
-                auth=httpx.BasicAuth("", settings.vlc_password),
-                timeout=3.0,
-            )
-            if r.status_code == 200:
-                def _find_current(node: dict) -> Optional[str]:
-                    if node.get("current") == "current":
-                        return node.get("uri")
-                    for child in node.get("children", []):
-                        found = _find_current(child)
-                        if found:
-                            return found
-                    return None
-                return _find_current(r.json())
+        r = await _vlc_http().get("/requests/playlist.json", timeout=3.0)
+        if r.status_code == 200:
+            def _find_current(node: dict) -> Optional[str]:
+                if node.get("current") == "current":
+                    return node.get("uri")
+                for child in node.get("children", []):
+                    found = _find_current(child)
+                    if found:
+                        return found
+                return None
+            return _find_current(r.json())
     except Exception:
         pass
     return None
@@ -2006,19 +2021,9 @@ async def _play_background_video() -> bool:
     state.resume_offer = None
 
     try:
-        async with httpx.AsyncClient() as c:
-            await c.get(
-                f"{settings.vlc_url}/requests/status.xml",
-                auth=httpx.BasicAuth("", settings.vlc_password),
-                params={"command": "volume", "val": str(raw)},
-                timeout=5.0,
-            )
-            await c.get(
-                f"{settings.vlc_url}/requests/status.xml",
-                auth=httpx.BasicAuth("", settings.vlc_password),
-                params={"command": "in_play", "input": p.resolve().as_uri()},
-                timeout=5.0,
-            )
+        c = _vlc_http()
+        await c.get("/requests/status.xml", params={"command": "volume", "val": str(raw)})
+        await c.get("/requests/status.xml", params={"command": "in_play", "input": p.resolve().as_uri()})
     except Exception:
         return False
     asyncio.create_task(vlc_focus_and_fullscreen())
@@ -2887,13 +2892,14 @@ async def library_download_pipeline(
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
-    global qbit, _lib_lock, _jackett_cookie_lock
+    global qbit, vlc_client, _lib_lock, _jackett_cookie_lock
     # Make StreamLink's request handling the box's top priority before anything
     # else — so controls / UI / VLC-control stay responsive under heavy prep load.
     _raise_own_priority()
     _lib_lock = asyncio.Lock()
     _jackett_cookie_lock = asyncio.Lock()
     qbit = httpx.AsyncClient(timeout=10.0)
+    _vlc_http()   # build the persistent keep-alive VLC client up front
     await qbit_login()
     Path(settings.qbit_download_path).mkdir(parents=True, exist_ok=True)
     _marquee_write("")  # wipe any stale countdown text from a prior run
@@ -2928,6 +2934,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
     await qbit.aclose()
+    if vlc_client is not None:
+        await vlc_client.aclose()
 
 
 app = FastAPI(title="P2P StreamLink", version="2.0", lifespan=lifespan)
