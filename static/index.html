@@ -1528,6 +1528,12 @@
   <!-- Audio + subtitle selectors. Each row hides itself when only one track
        exists for its type (or zero, in the case of subs). -->
   <div id="lpTrackRow" class="lp-chrome hidden border-t border-gray-800 bg-gray-950 px-3 py-2 flex flex-col gap-2 flex-shrink-0">
+    <div id="lpQualityRow" class="hidden flex items-center gap-3">
+      <span class="text-[9px] font-black uppercase tracking-widest text-gray-600 flex-shrink-0 w-8">Res</span>
+      <select id="lpQualitySelect" onchange="lpSetQuality(this.value)"
+        class="flex-1 min-w-0 bg-gray-900 border-b border-gray-700 text-xs text-gray-300 px-2 py-1.5 focus:outline-none focus:border-indigo-500 cursor-pointer">
+      </select>
+    </div>
     <div id="lpAudioRow" class="hidden flex items-center gap-3">
       <span class="text-[9px] font-black uppercase tracking-widest text-gray-600 flex-shrink-0 w-8">Aud</span>
       <select id="lpAudioSelect" onchange="lpSetAudio(this.value)"
@@ -5315,11 +5321,37 @@ function _lpRenderTrackRows() {
   });
   subSel.value = String(lp.pendingSubtitleIdx ?? -1);
 
+  // Quality (ABR) — hls.js path only. Levels come straight from hls.js's
+  // master-playlist parse, so we never depend on meta.json ordering. Safari
+  // native HLS auto-adapts among the variants but exposes no reliable manual
+  // level API, so its row stays hidden (auto-only) — see GOTCHAS.md.
+  const qSel = document.getElementById("lpQualitySelect");
+  const levels = (lp.hls && lp.hls.levels) ? lp.hls.levels : [];
+  const qN = levels.length;
+  if (qN > 1) {
+    const rungs = levels
+      .map((l, i) => ({ i, h: l.height || 0 }))
+      .sort((a, b) => b.h - a.h);  // highest resolution first
+    qSel.innerHTML = `<option value="-1">Auto</option>` +
+      rungs.map(r => `<option value="${r.i}">${r.h ? r.h + "p" : "Level " + (r.i + 1)}</option>`).join("");
+    // hls.js boots in ABR/auto mode (currentLevel -1); quality is session-only.
+    qSel.value = String(lp.hls.autoLevelEnabled ? -1 : lp.hls.currentLevel);
+  }
+
   const audN = (lp.audios || []).length;
   const subN = (lp.subtitles || []).length + (lp.sidecarSubs || []).length;
+  document.getElementById("lpQualityRow").classList.toggle("hidden", qN <= 1);
   document.getElementById("lpAudioRow").classList.toggle("hidden", audN <= 1);
   document.getElementById("lpSubRow").classList.toggle("hidden", subN === 0);
-  document.getElementById("lpTrackRow").classList.toggle("hidden", audN <= 1 && subN === 0);
+  document.getElementById("lpTrackRow").classList.toggle("hidden", audN <= 1 && subN === 0 && qN <= 1);
+}
+
+function lpSetQuality(idx) {
+  // hls.js only. -1 = Auto (ABR); a level index pins that rendition (a brief
+  // rebuffer on switch is expected for a manual pick). Safari native HLS has no
+  // reliable manual API, so its row is never shown.
+  if (!lp.hls) return;
+  try { lp.hls.currentLevel = Number(idx); } catch (_) {}
 }
 
 function _lpApplyAudioIdx(idx) {
@@ -5967,6 +5999,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">3.2.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">3.3.0</div>
 </body>
 </html>

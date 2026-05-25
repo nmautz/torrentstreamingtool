@@ -185,7 +185,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.2.2"
+UI_VERSION = "3.3.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -5310,8 +5310,10 @@ OFFLINE_CACHE = Path(__file__).parent / ".offline_cache"
 # (-hls_fmp4_init_filename init_%v.mp4); v6-hls makes every output a bare name
 # and runs ffmpeg with cwd=<bundle dir> so the init segment actually lands in
 # the bundle on Windows (backslash playlist paths otherwise misdirect it → the
-# player 404s init_video.mp4 and stalls with fragLoadError).
-OFFLINE_CACHE_VERSION = "v6-hls"
+# player 404s init_video.mp4 and stalls with fragLoadError); v7-hls-abr emits
+# multiple video variants (Original + 720p + 480p, capped at source height) so
+# the player can offer Auto/manual quality switching.
+OFFLINE_CACHE_VERSION = "v7-hls-abr"
 
 # Stream-to-device (HLS prep) is unavailable on macOS hosts. ffmpeg/ffprobe run
 # as children of the (non-GUI) server process, and macOS TCC blocks them from
@@ -5431,6 +5433,36 @@ _ffmpeg_version_probe: dict = {}
 # tune their buffering for this range, and segment-boundary seek granularity
 # stays under the user-perceptible threshold.
 HLS_SEGMENT_SECS = 6
+
+# Adaptive-bitrate ladder: lower video renditions emitted alongside the original.
+# Each rung is (name, target_height, maxrate_kbps, bufsize_kbps). The original
+# (source-resolution) variant is always emitted as index 0; a rung is added only
+# when the source is TALLER than it (no upscaling). The maxrate/bufsize VBV caps
+# keep the down-rungs genuinely smaller and give the master playlist realistic
+# BANDWIDTH numbers so hls.js / Safari pick sensibly under ABR.
+HLS_ABR_LADDER = [
+    ("video_720", 720, 3000, 6000),
+    ("video_480", 480, 1200, 2400),
+]
+
+
+def _hls_video_variants(info: dict) -> list[dict]:
+    """Video renditions to emit for this source, capped at its height.
+
+    Returns a list ordered original-first:
+      [{name, height, scale}]  where scale=None means "no -filter, keep source".
+    Down-rungs carry maxrate/bufsize too. A ≤480p source yields a single
+    variant (the original) — i.e. no ABR menu, today's behaviour.
+    """
+    src_h = int((info.get("video") or {}).get("height") or 0)
+    variants: list[dict] = [{"name": "video", "height": src_h, "scale": None}]
+    for name, h, maxrate, bufsize in HLS_ABR_LADDER:
+        if src_h > h:
+            variants.append({
+                "name": name, "height": h, "scale": h,
+                "maxrate": maxrate, "bufsize": bufsize,
+            })
+    return variants
 
 
 def _ffprobe_bin() -> Optional[str]:
@@ -5619,7 +5651,7 @@ def _build_hls_ffmpeg_args(
     src: Path,
     info: dict,
     use_nvenc: bool,
-) -> tuple[list[str], list[dict], list[dict]]:
+) -> tuple[list[str], list[dict], list[dict], list[dict]]:
     """Construct the full ffmpeg invocation that emits one HLS bundle.
 
     All OUTPUT paths are bare filenames (init/segments/playlists/subs) — the
@@ -5629,12 +5661,23 @@ def _build_hls_ffmpeg_args(
     the init file to the wrong place (→ 404 → fragLoadError). Bare names + cwd
     sidesteps that on every OS. The only absolute path is the `-i` source input.
 
-    Returns (args, kept_audios, kept_subs) — the latter two are the audio /
-    text-sub tracks (from `info`) that were included in the output, in the
-    order they appear in the manifest. Image-based subs are filtered out.
+    Emits an ABR ladder: the original video (stream-copied when compatible) plus
+    a 720p and/or 480p down-rung (capped at source height — see
+    `_hls_video_variants`). All video variants share one audio group, so the
+    player switches video quality without re-fetching audio.
+
+    Returns (args, kept_audios, kept_subs, video_variants) — audios/subs are the
+    tracks (from `info`) included in the output in manifest order (image-based
+    subs filtered out); video_variants is the ladder actually emitted, in master
+    playlist order (index 0 = original).
     """
     audios = list(info.get("audios") or [])
     subs   = [s for s in (info.get("subtitles") or []) if not s.get("image_based")]
+    videos = _hls_video_variants(info)
+    # Original can stream-copy when already browser-safe H.264; down-rungs must
+    # always re-encode (they're scaled). Decoupled from use_nvenc so the source
+    # rung stays a cheap remux even when the GPU encoder is present.
+    copy_original = _video_can_copy(info.get("video"))
 
     # Exactly one audio rendition should be marked DEFAULT in the master
     # playlist. Honor the source's disposition.default if any; otherwise the
@@ -5656,35 +5699,49 @@ def _build_hls_ffmpeg_args(
         "-i", str(src),
     ]
 
-    # Stream mapping for the HLS output: one video + every audio. Text subs are
-    # mapped separately into their own sidecar .vtt outputs further below.
-    args += ["-map", "0:v:0"]
+    # Stream mapping for the HLS output: the source video mapped once per ladder
+    # rung, then every audio. Text subs are mapped separately into their own
+    # sidecar .vtt outputs further below.
+    for _ in videos:
+        args += ["-map", "0:v:0"]
     for a in audios:
         args += ["-map", f"0:a:{a['idx']}"]
 
-    # Video codec — stream-copy when already H.264 yuv420p with a good profile.
-    # NVENC always re-encodes (it ignores codec-compat).
-    if _video_can_copy(info.get("video")) and not use_nvenc:
-        args += ["-c:v", "copy"]
-    elif use_nvenc:
-        args += [
-            "-c:v", "h264_nvenc",
-            "-preset", "medium",
-            "-rc", "vbr", "-cq", "23",
-            "-b:v", "0", "-maxrate", "0",
-            "-profile:v", "high", "-level", "4.1",
-            "-pix_fmt", "yuv420p",
-        ]
-    else:
-        args += [
-            "-c:v", "libx264",
-            "-preset", "veryfast", "-crf", "23",
-            # Caps x264 worker threads so the host stays responsive during bulk
-            # /prep-all runs. NVENC ignores this (runs on the GPU).
-            "-threads", str(OFFLINE_FFMPEG_THREADS),
-            "-pix_fmt", "yuv420p",
-            "-profile:v", "high", "-level", "4.1",
-        ]
+    # Per-output video codec. Output video stream index `i` matches `videos[i]`:
+    #   • original (i==0): stream-copy when browser-safe, else encode full-res
+    #   • down-rungs:      always encode + scale=-2:<h> (even width for yuv420p),
+    #                      with a maxrate/bufsize VBV cap so the rendition is
+    #                      genuinely smaller and the master BANDWIDTH is realistic
+    # NVENC encodes on the GPU when available; the CPU scale filter feeds it.
+    def _encode_video(i: int, v: dict) -> list[str]:
+        a: list[str] = []
+        if v["scale"]:
+            a += [f"-filter:v:{i}", f"scale=-2:{v['scale']}"]
+        if use_nvenc:
+            a += [
+                f"-c:v:{i}", "h264_nvenc",
+                "-preset", "medium", "-rc", "vbr", f"-cq:v:{i}", "23",
+            ]
+        else:
+            a += [
+                f"-c:v:{i}", "libx264",
+                "-preset", "veryfast", f"-crf:v:{i}", "23",
+                # Caps x264 worker threads so the host stays responsive during
+                # bulk /prep-all runs. NVENC ignores this (runs on the GPU).
+                "-threads", str(OFFLINE_FFMPEG_THREADS),
+            ]
+        if v.get("maxrate"):
+            a += [f"-maxrate:v:{i}", f"{v['maxrate']}k",
+                  f"-bufsize:v:{i}", f"{v['bufsize']}k"]
+        a += [f"-pix_fmt:v:{i}", "yuv420p",
+              f"-profile:v:{i}", "high", f"-level:v:{i}", "4.1"]
+        return a
+
+    for i, v in enumerate(videos):
+        if i == 0 and copy_original:
+            args += [f"-c:v:{i}", "copy"]
+        else:
+            args += _encode_video(i, v)
 
     # Audio: every track to AAC stereo, regardless of source. Safari iOS only
     # plays AAC/MP3/AC3/EAC3 reliably and won't decode FLAC/Opus/DTS in MP4 —
@@ -5730,11 +5787,17 @@ def _build_hls_ffmpeg_args(
     # release MKV has many subtitle tracks, so in-manifest subs meant HLS prep
     # ALWAYS failed. Instead we emit one standalone `sub_<i>.vtt` per text track
     # (see below) and the player wires them as <track> children. See GOTCHAS.md.
-    v_parts = ["v:0"]
-    if audios:
-        v_parts.append("agroup:aud")
-    v_parts.append("name:video")
-    parts: list[str] = [",".join(v_parts)]
+    # One entry per video variant (all sharing the single audio group) followed
+    # by one per audio rendition. %v in the playlist/segment/init templates
+    # expands to each `name:` tag, so the bundle gets video.m3u8 / video_720.m3u8
+    # / video_480.m3u8 (+ matching init_*/seg_*).
+    parts: list[str] = []
+    for i, v in enumerate(videos):
+        vp = [f"v:{i}"]
+        if audios:
+            vp.append("agroup:aud")
+        vp.append(f"name:{v['name']}")
+        parts.append(",".join(vp))
 
     for i, a in enumerate(audios):
         p = [f"a:{i}", "agroup:aud", f"name:audio_{i}",
@@ -5761,7 +5824,7 @@ def _build_hls_ffmpeg_args(
             f"sub_{i}.vtt",   # bare name — lands in ffmpeg's cwd (the bundle dir)
         ]
 
-    return args, audios, subs
+    return args, audios, subs, videos
 
 
 async def _run_offline_job(job_id: str) -> None:
@@ -5822,19 +5885,24 @@ async def _run_offline_job(job_id: str) -> None:
 
         try:
             use_nvenc = await _has_nvenc()
-            args, kept_audios, kept_subs = _build_hls_ffmpeg_args(
+            args, kept_audios, kept_subs, kept_videos = _build_hls_ffmpeg_args(
                 ffmpeg, src, info, use_nvenc,
             )
-            # Record encoder for admin/UI display.
-            if _video_can_copy(info.get("video")) and not use_nvenc:
+            # Record encoder for admin/UI display. The original rung may copy
+            # while the ABR down-rungs (if any) still transcode, so reflect both.
+            down_encoder = "h264_nvenc" if use_nvenc else "libx264"
+            copy_original = _video_can_copy(info.get("video"))
+            if copy_original and len(kept_videos) > 1:
+                job["encoder"] = f"copy+{down_encoder}"
+            elif copy_original:
                 job["encoder"] = "copy"
             else:
-                job["encoder"] = "h264_nvenc" if use_nvenc else "libx264"
+                job["encoder"] = down_encoder
 
             hls_log.info(
-                "job %s encode: encoder=%s duration=%.1fs audios=%d subs=%d nvenc=%s",
+                "job %s encode: encoder=%s duration=%.1fs videos=%d audios=%d subs=%d nvenc=%s",
                 job_id, job["encoder"], duration,
-                len(kept_audios), len(kept_subs), use_nvenc,
+                len(kept_videos), len(kept_audios), len(kept_subs), use_nvenc,
             )
             hls_log.info(
                 "job %s ffmpeg cmd: %s",
@@ -5936,6 +6004,19 @@ async def _run_offline_job(job_id: str) -> None:
                 "version":      OFFLINE_CACHE_VERSION,
                 "src":          str(src),
                 "duration_sec": duration,
+                # ABR video ladder, master-playlist order (idx 0 = original).
+                # Informational for admin/API — the player builds its quality
+                # menu from hls.js `levels`, not from this ordering.
+                "videos": [
+                    {
+                        "idx":      i,
+                        "name":     v["name"],
+                        "height":   v["height"],
+                        "label":    (f"{v['height']}p (Source)" if i == 0
+                                     else f"{v['height']}p"),
+                    }
+                    for i, v in enumerate(kept_videos)
+                ],
                 "audios": [
                     {
                         "idx":      i,
@@ -6070,6 +6151,7 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
             "needs_processing":  False,
             "master_url":        f"/api/library/offline-cache/{key}/master.m3u8",
             "duration_sec":      meta.get("duration_sec", 0),
+            "videos":            meta.get("videos", []),
             "audios":            meta.get("audios", []),
             "subtitles":         meta.get("subtitles", []),
             "skipped_image_subs": meta.get("skipped_image_subs", []),
@@ -6340,6 +6422,7 @@ async def offline_job_status(job_id: str) -> JSONResponse:
         meta = _read_meta(out_dir)
         out["master_url"]        = f"/api/library/offline-cache/{key}/master.m3u8"
         out["duration_sec"]      = meta.get("duration_sec", 0)
+        out["videos"]            = meta.get("videos", [])
         out["audios"]            = meta.get("audios", [])
         out["subtitles"]         = meta.get("subtitles", [])
         out["skipped_image_subs"] = meta.get("skipped_image_subs", [])

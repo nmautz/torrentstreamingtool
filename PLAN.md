@@ -243,3 +243,18 @@ box to come back on its own (documented in README).
 
 ---
 
+## Milestone 19 — HLS Quality Selection (ABR + in-player menu)
+
+Adds adaptive-bitrate streaming to the on-device HLS player: each bundle carries
+multiple video renditions and the player offers a YouTube-style quality menu
+(Auto + manual). Trades longer prep + ~1.7× storage for live quality switching
+and graceful degradation on weak links.
+
+- [x] **19.1** Backend: `_hls_video_variants(info)` builds the ladder **Original + 720p + 480p**, capped at source height (a rung is added only when the source is taller — ≤480p source ⇒ single variant). VBV caps per rung (`HLS_ABR_LADDER`: 720p≈3 Mbps, 480p≈1.2 Mbps).
+- [x] **19.2** Backend: `_build_hls_ffmpeg_args` maps `0:v:0` once per rung and sets index-qualified per-output codec/scale (`-c:v:i`, `-filter:v:i scale=-2:<h>`, `-maxrate:v:i`/`-bufsize:v:i`). The original rung stream-copies when browser-safe **even with NVENC present** (decoupled from `use_nvenc`); down-rungs always transcode (NVENC on GPU else libx264). `-var_stream_map` emits one `v:i,agroup:aud,name:…` entry per rung sharing one audio group. Returns the variant list; `meta.json` + `/offline-prepare` + `/offline-job` gain `videos[]`.
+- [x] **19.3** Backend: bump `OFFLINE_CACHE_VERSION` to `v7-hls-abr` so single-rendition `v6-hls` bundles rebuild; old dirs surface as orphans for purge.
+- [x] **19.4** Frontend: add a **Res** dropdown to `#lpTrackRow`. `_lpRenderTrackRows` builds it from `lp.hls.levels` (Auto + each resolution, hidden when ≤1 level); `lpSetQuality(idx)` sets `lp.hls.currentLevel` (`-1` = Auto). hls.js-only — Safari native HLS stays auto (no manual-level API). Quality is session-only (not persisted).
+- [x] **19.5** Docs: STREAMING.md (output layout, ffmpeg invocation, player flow, storage cost), GOTCHAS.md (ABR var_stream_map shape + quality-menu engine branch), API.md (offline endpoints `videos[]`), FRONTEND.md (`_lpRenderTrackRows` / `lpSetQuality`). Version → 3.3.0.
+
+---
+

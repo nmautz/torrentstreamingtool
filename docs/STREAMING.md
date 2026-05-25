@@ -49,11 +49,19 @@ with the following layout:
 ```
 .offline_cache/
   <sha24>/
-    master.m3u8           ← top-level playlist (video variant + alternate audio)
-    video.m3u8            ← video rendition playlist
-    init_video.mp4        ← fmp4 init segment (EXT-X-MAP) for the video rendition
+    master.m3u8           ← top-level playlist (video variants + alternate audio)
+    video.m3u8            ← original (source-resolution) video rendition
+    init_video.mp4        ← fmp4 init segment (EXT-X-MAP) for the original rendition
     seg_video_00001.m4s   ← 6 s fmp4 segments
     seg_video_00002.m4s
+    …
+    video_720.m3u8        ← ABR down-rung (only when source height > 720)
+    init_video_720.mp4
+    seg_video_720_00001.m4s
+    …
+    video_480.m3u8        ← ABR down-rung (only when source height > 480)
+    init_video_480.mp4
+    seg_video_480_00001.m4s
     …
     audio_0.m3u8          ← per-audio-track rendition (default=YES on idx 0)
     init_audio_0.mp4      ← fmp4 init segment for audio rendition 0
@@ -76,17 +84,20 @@ with the following layout:
 > the same single ffmpeg pass; the player attaches them as `<track>` children.
 > See [GOTCHAS.md](GOTCHAS.md).
 
-`meta.json` carries the human labels for each audio rendition
-(`{idx, playlist, label, language, default}`) and each subtitle
+`meta.json` carries the video ABR ladder (`videos: [{idx, name, height,
+label}]`, master-playlist order, idx 0 = original), the human labels for each
+audio rendition (`{idx, playlist, label, language, default}`) and each subtitle
 (`{idx, file, label, language, title}` where `file` is the bundle-relative
 `sub_<i>.vtt`), plus a `skipped_image_subs` list noting PGS/VOBSUB tracks that
 couldn't be included (they need image-OCR or burn-in, neither of which is
-implemented). The UI reads `meta.json` via `/offline-prepare` to populate
-dropdowns — it never re-probes the bundle.
+implemented). The UI reads `meta.json` via `/offline-prepare` to populate the
+audio/subtitle dropdowns — it never re-probes the bundle. The **quality** menu
+is instead built from hls.js `levels` (the master-playlist parse), so it never
+depends on `videos[]` ordering; `videos[]` is informational (admin/API).
 
 Cache key (`_offline_cache_key`) is
 `sha256(OFFLINE_CACHE_VERSION | path | mtime | size)[:24]`. Re-encoding the
-source invalidates the bundle. `OFFLINE_CACHE_VERSION = "v4-hls"`; bumping it
+source invalidates the bundle. `OFFLINE_CACHE_VERSION = "v7-hls-abr"`; bumping it
 forces every bundle to be rebuilt on next prep (old `<sha>/` dirs become
 orphans, listed in Admin → Offline Cache for one-click purge).
 
@@ -107,11 +118,18 @@ orphans, listed in Admin → Offline Cache for one-click purge).
 
 ```
 # cwd = the bundle's .part/ dir; EVERY output below is a BARE filename.
+# Source video is mapped ONCE PER LADDER RUNG (here: original + 720p + 480p).
 ffmpeg -y -progress pipe:1 -nostats \
   -thread_queue_size 1024 -rtbufsize 64M -i /abs/path/src.mkv \
-  -map 0:v:0 -map 0:a:0 -map 0:a:1 \
-  [-c:v copy | -c:v libx264 -preset veryfast -crf 23 | -c:v h264_nvenc -preset medium -cq 23] \
-  -pix_fmt yuv420p -profile:v high -level 4.1 \
+  -map 0:v:0 -map 0:v:0 -map 0:v:0 -map 0:a:0 -map 0:a:1 \
+  # v:0 = original (copy when browser-safe H.264, even with NVENC present):
+  -c:v:0 copy \
+  # v:1 = 720p down-rung (always transcodes; CPU scale feeds NVENC if present):
+  -filter:v:1 scale=-2:720 -c:v:1 libx264 -preset veryfast -crf:v:1 23 \
+  -maxrate:v:1 3000k -bufsize:v:1 6000k -pix_fmt:v:1 yuv420p -profile:v:1 high -level:v:1 4.1 \
+  # v:2 = 480p down-rung:
+  -filter:v:2 scale=-2:480 -c:v:2 libx264 -preset veryfast -crf:v:2 23 \
+  -maxrate:v:2 1200k -bufsize:v:2 2400k -pix_fmt:v:2 yuv420p -profile:v:2 high -level:v:2 4.1 \
   -c:a aac -b:a 160k -ac 2 \
   -f hls -hls_time 6 -hls_playlist_type vod \
   -hls_segment_type fmp4 -hls_flags independent_segments \
@@ -119,6 +137,8 @@ ffmpeg -y -progress pipe:1 -nostats \
   -hls_segment_filename "seg_%v_%05d.m4s" \
   -master_pl_name master.m3u8 \
   -var_stream_map "v:0,agroup:aud,name:video \
+                   v:1,agroup:aud,name:video_720 \
+                   v:2,agroup:aud,name:video_480 \
                    a:0,agroup:aud,name:audio_0,language:eng,default:yes \
                    a:1,agroup:aud,name:audio_1,language:jpn" \
   "%v.m3u8" \
@@ -126,9 +146,15 @@ ffmpeg -y -progress pipe:1 -nostats \
   -map 0:s:1 -c:s webvtt -f webvtt "sub_1.vtt"
 ```
 
-Note the two output groups: the HLS bundle (video + audio only) comes first,
-then one extra WebVTT output file per text subtitle. Both are produced in the
-**single** ffmpeg pass — no second invocation.
+Note the two output groups: the HLS bundle (video variants + audio) comes
+first, then one extra WebVTT output file per text subtitle. Both are produced in
+the **single** ffmpeg pass — no second invocation. The ladder rungs come from
+`_hls_video_variants(info)` — original always, `video_720`/`video_480` only when
+the source is taller than that rung (so a ≤480p source emits one variant and the
+player shows no quality menu). With NVENC, the `-c:v:i` for each transcoded rung
+becomes `h264_nvenc -preset medium -rc vbr -cq:v:i 23` (the CPU `scale` filter
+still feeds it); the original rung copies when `_video_can_copy` regardless of
+NVENC, so only the scaled down-rungs hit the encoder.
 
 > **All outputs are bare filenames and ffmpeg runs with `cwd=<bundle .part dir>`**
 > (`_run_offline_job` passes `cwd=str(tmp_dir)`). Only the `-i` source is an
@@ -142,10 +168,18 @@ then one extra WebVTT output file per text subtitle. Both are produced in the
 
 Key decisions:
 
-- **Video stream-copies when possible.** If source video is already H.264 /
-  yuv420p with a browser-safe profile (anything other than Hi10P / 4:2:2 /
-  4:4:4), `-c:v copy` is used. NVENC always transcodes — it doesn't honor
-  source-compat checks.
+- **ABR ladder: Original + 720p + 480p.** The source video is mapped once per
+  rung (`_hls_video_variants` caps the ladder at source height — no upscaling).
+  All variants share one audio group, so the player switches video quality
+  without re-fetching audio. Each down-rung gets a `scale=-2:<h>` filter (the
+  `-2` keeps an even width for yuv420p) and a `maxrate`/`bufsize` VBV cap so the
+  rendition is genuinely smaller and the master playlist's `BANDWIDTH` is
+  realistic for ABR selection.
+- **The original rung stream-copies when possible** — if source video is already
+  H.264 / yuv420p with a browser-safe profile (anything other than Hi10P / 4:2:2
+  / 4:4:4), `-c:v:0 copy` is used **even when NVENC is present** (decoupled from
+  the encoder choice, since only the scaled down-rungs need to encode). The
+  down-rungs always transcode (NVENC on GPU when available, else libx264).
 - **Every audio is transcoded to AAC stereo.** MP4/HLS only reliably plays
   AAC/MP3/AC3/EAC3 in Safari, and Chrome/hls.js handles AAC universally.
   Source FLAC / Opus / DTS / TrueHD are downmixed to 2 channels and
@@ -236,6 +270,14 @@ Two ways to populate the cache:
      switching. Wait for `loadedmetadata` → populate dropdowns. (Subtitles
      are `<track>` children, not in-band, on every engine — see step 5.)
 5. Track switching:
+   - **Quality** (ABR, hls.js only): `_lpRenderTrackRows` builds the **Res**
+     dropdown from `lp.hls.levels` (sorted high→low) as `Auto` + each
+     resolution; `lpSetQuality(idx)` sets `lp.hls.currentLevel` (`-1` = Auto/ABR,
+     a level index pins that rung — a brief rebuffer on switch is expected).
+     Quality is **session-only** — not persisted via `/local-tracks`, since the
+     right rung is connection-dependent and Auto is the sensible default. Safari
+     native HLS auto-adapts among the variants but exposes no reliable manual
+     level API, so its Res row stays hidden (auto-only).
    - **Audio** (in-manifest): hls.js path sets `hls.audioTrack = idx`; Safari
      native sets `video.audioTracks[i].enabled = (i===idx)`.
    - **Subtitles** (`<track>` children): `_lpLoadIndex` appends one `<track>`
@@ -357,11 +399,14 @@ Guarded by `withInflight("handoff_vlc")`.
 The server keeps `.offline_cache/<sha>/` directories indefinitely; the Admin
 → Offline Cache tab ([docs/ADMIN.md](ADMIN.md)) lists per-item totals,
 per-file deletes, a "delete all for this item" button, and a one-click
-orphan purge. Storage cost vs. the old single-MP4 cache: an HLS bundle
-shares the video segments across audio renditions, so total cost is roughly
-`video + sum(audio at 160 kbps stereo) + subs (tiny)`. For a typical TV
-episode (~1 GB MKV, one audio), the bundle is ~1 GB; for a 4 GB movie with
-3 audios, ~4.5 GB total.
+orphan purge. Storage cost: an HLS bundle shares the video segments across
+audio renditions, so total cost is roughly `sum(video variants) + sum(audio at
+160 kbps stereo) + subs (tiny)`. Since `v7-hls-abr` the video term is the ABR
+ladder (Original + 720p + 480p, capped at source height), which is ~1.6–1.9× the
+original-only video — e.g. a ~1 GB episode bundle becomes ~1.7 GB, and a 4 GB,
+3-audio movie ~7 GB. The down-rungs also mean the video always transcodes (the
+original rung still copies when compatible), so prep takes longer — much faster
+with NVENC than libx264.
 
 Cache keys are `sha256(VERSION | path | mtime | size)[:24]`. Re-encoding the
 source invalidates the entry; deleting a library item leaves orphans on

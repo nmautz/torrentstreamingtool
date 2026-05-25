@@ -134,17 +134,27 @@ function shows a toast and bails.
 
 "On This Device" calls `lpPlay`, which kicks off `_lpLoadIndex`. That POSTs
 `/api/library/{id}/offline-prepare` for the current file and either uses the
-returned `video_url` directly (Safari-native MP4 fast path or a cache hit) or
-polls `/api/library/offline-job/{id}` while the `#lpPreparing` overlay shows
-"Remuxing… 42%" / "Transcoding…". Once the URL is ready, `<video>.src` is set
-to it. The browser issues HTTP Range requests (`FileResponse` is range-aware),
-so seek-while-streaming works without client-side help.
+returned `master_url` directly (cache hit) or polls
+`/api/library/offline-job/{id}` while the `#lpPreparing` overlay shows
+"Building stream… 42%". Once the bundle is ready, the player loads `master_url`
+via **hls.js** (`Hls.isSupported()` → `loadSource`/`attachMedia`) or **Safari
+native HLS** (`<video>.src = master_url`). See [STREAMING.md](STREAMING.md) for
+the engine branch.
 
-Subtitle `<track>` elements are wired straight from the `subs[].url` entries
-in the prep response (each points at `/api/library/{id}/subtitle` — server
-converts SRT→VTT on the fly). Skip-data is fetched in parallel from
-`/api/library/{id}/skip-data?file_path=…` and assigned to `lp.skipData` for
-the skip-intro / skip-credits logic in `lpEvaluateSkipOffer`.
+`_lpRenderTrackRows` (run on `MANIFEST_PARSED` / `loadedmetadata`) populates the
+three `#lpTrackRow` selectors: **Res** (quality), **Aud**, **Sub** — each row
+hidden when it has ≤1 option. Quality is hls.js-only: the Res dropdown is built
+from `lp.hls.levels` (sorted high→low) as `Auto` + each resolution, and
+`lpSetQuality(idx)` sets `lp.hls.currentLevel` (`-1` = Auto/ABR; session-only,
+not persisted). Safari's Res row stays hidden (no manual-level API). `lpSetAudio`
+/ `lpSetSubtitle` persist their picks via `/api/library/{id}/local-tracks`.
+
+Subtitle `<track>` elements are wired from the bundle's `subtitles[]` (each a
+`sub_<i>.vtt` in the cache dir) plus on-disk `subs[].url` sidecars (each points
+at `/api/library/{id}/subtitle` — server converts SRT→VTT on the fly). Skip-data
+is fetched in parallel from `/api/library/{id}/skip-data?file_path=…` and
+assigned to `lp.skipData` for the skip-intro / skip-credits logic in
+`lpEvaluateSkipOffer`.
 
 There is **one** `<video id="lpVideo">` inside `#localPlayer`. The container
 has two visual modes toggled via class:
