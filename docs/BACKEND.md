@@ -78,7 +78,9 @@
 
 ## Background tasks
 
-Started in `lifespan` ([main.py:1746](../main.py#L1746)); all run forever until app shutdown.
+`lifespan` startup first calls **`_raise_own_priority()`** — sets the server process to `HIGH_PRIORITY_CLASS` (Windows) / a negative `nice` (POSIX, needs root/CAP_SYS_NICE) so control/UI/VLC-control request handling preempts background prep. It's best-effort (logs + continues). Heavy children are kept *below* the server (prep ffmpeg via `_ffmpeg_nice_prefix`/`_FFMPEG_SUBPROCESS_KW`; analyzer via `analyzer._lp`/`_LOWPRIO_KW`) so they don't inherit the raised priority. See [STREAMING.md](STREAMING.md) and [GOTCHAS.md](GOTCHAS.md#server-runs-at-raised-os-priority-keep-heavy-children-below-it).
+
+Background tasks are then started in `lifespan` ([main.py:1746](../main.py#L1746)); all run forever until app shutdown.
 
 - **`vpn_guard`** (every 3 s) — runs `mullvad status` via `asyncio.create_subprocess_exec`. On disconnect: kills `qbittorrent` via psutil, sets `vpn_secure=False`, broadcasts `vpn_status`. The kill switch is enforced redundantly by `watchdog.py` at the process level.
 - **`jackett_health_monitor`** (every 20 s) — `GET {INDEXER_URL}/UI/Login` (any HTTP status = serving, since a hung Jackett keeps the port open but stops answering). Updates `state.jackett_ok` and broadcasts `jackett_status` on transitions. As a backstop, if a *local* Jackett stays unreachable for ~2 min it calls `watchdog.restart_jackett()` via `asyncio.to_thread` — primary recovery is the process watchdog (which acts within seconds), so this only fires when no watchdog is running. See [DAEMON_WATCHDOG.md](DAEMON_WATCHDOG.md#jackett-specifics-watchdogpy160) and [GOTCHAS.md](GOTCHAS.md#port-open-is-not-a-jackett-health-check).

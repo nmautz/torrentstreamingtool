@@ -21,6 +21,23 @@ from typing import Optional
 
 ANALYZER_VERSION = 2
 
+# Run analyzer subprocesses (ffmpeg decode, fpcalc, ffprobe) at lowered OS
+# priority so a Smart-Skip pass never starves the StreamLink server. The server
+# raises itself to HIGH at startup and children inherit that, so without this an
+# analysis would run at HIGH and lag the controls/UI — exactly what we're trying
+# to avoid. Windows: BELOW_NORMAL_PRIORITY_CLASS via creationflags. POSIX:
+# prepend `nice -n 10` (no-op when `nice` isn't on PATH). Mirrors main.py's prep.
+_LOWPRIO_KW: dict = {}
+if os.name == "nt":
+    _LOWPRIO_KW["creationflags"] = 0x00004000  # BELOW_NORMAL_PRIORITY_CLASS
+
+
+def _lp(cmd: list[str]) -> list[str]:
+    """Prefix `nice -n 10` on POSIX (when available) so the child de-prioritizes."""
+    if os.name == "posix" and shutil.which("nice"):
+        return ["nice", "-n", "10", *cmd]
+    return cmd
+
 # Chromaprint emits ~7.8 fingerprint frames per second (8192 samples @ 11025 Hz).
 # Each frame is one 32-bit integer.
 FP_FRAMES_PER_SEC = 7.8
@@ -81,8 +98,8 @@ def _fpcalc_raw(file_path: str, length_sec: int, start_sec: int = 0) -> list[int
         return []
     if start_sec <= 0:
         proc = subprocess.run(
-            [binp, "-raw", "-length", str(length_sec), file_path],
-            capture_output=True, text=True, timeout=120,
+            _lp([binp, "-raw", "-length", str(length_sec), file_path]),
+            capture_output=True, text=True, timeout=120, **_LOWPRIO_KW,
         )
     else:
         ff = ffmpeg_bin()
@@ -90,14 +107,14 @@ def _fpcalc_raw(file_path: str, length_sec: int, start_sec: int = 0) -> list[int
             return []
         # Pipe a mono 11025 Hz WAV chunk through ffmpeg → fpcalc on stdin
         ff_proc = subprocess.Popen(
-            [ff, "-loglevel", "error", "-ss", str(start_sec), "-t", str(length_sec),
-             "-i", file_path, "-ac", "1", "-ar", "11025", "-f", "wav", "pipe:1"],
-            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            _lp([ff, "-loglevel", "error", "-ss", str(start_sec), "-t", str(length_sec),
+                 "-i", file_path, "-ac", "1", "-ar", "11025", "-f", "wav", "pipe:1"]),
+            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, **_LOWPRIO_KW,
         )
         proc = subprocess.run(
-            [binp, "-raw", "-length", str(length_sec), "-"],
+            _lp([binp, "-raw", "-length", str(length_sec), "-"]),
             input=ff_proc.stdout.read() if ff_proc.stdout else b"",
-            capture_output=True, timeout=120,
+            capture_output=True, timeout=120, **_LOWPRIO_KW,
         )
         ff_proc.wait(timeout=10)
         proc = subprocess.CompletedProcess(
@@ -132,7 +149,8 @@ def _media_duration(file_path: str) -> Optional[float]:
     if not ffprobe:
         # Fall back to parsing ffmpeg's stderr
         proc = subprocess.run(
-            [ff, "-i", file_path], capture_output=True, text=True, timeout=15,
+            _lp([ff, "-i", file_path]), capture_output=True, text=True, timeout=15,
+            **_LOWPRIO_KW,
         )
         m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", proc.stderr)
         if m:
@@ -140,9 +158,9 @@ def _media_duration(file_path: str) -> Optional[float]:
             return h * 3600 + mn * 60 + s
         return None
     proc = subprocess.run(
-        [ffprobe, "-v", "error", "-show_entries", "format=duration",
-         "-of", "default=noprint_wrappers=1:nokey=1", file_path],
-        capture_output=True, text=True, timeout=15,
+        _lp([ffprobe, "-v", "error", "-show_entries", "format=duration",
+             "-of", "default=noprint_wrappers=1:nokey=1", file_path]),
+        capture_output=True, text=True, timeout=15, **_LOWPRIO_KW,
     )
     try:
         return float(proc.stdout.strip())
@@ -277,21 +295,21 @@ def _detect_blackframe(file_path: str, start_at_sec: float,
     # keyframe boundary. If that misses, fall back to a full-decode pass at
     # 4 fps which is ~10x faster than realtime decode.
     proc = subprocess.run(
-        [ff, "-skip_frame", "nokey",
-         "-ss", str(int(start_at_sec)), "-t", str(int(scan_duration_sec)),
-         "-i", file_path,
-         "-vf", "scale=64:-2,blackdetect=d=0.2:pix_th=0.10",
-         "-an", "-sn", "-f", "null", "-"],
-        capture_output=True, text=True, timeout=120,
+        _lp([ff, "-skip_frame", "nokey",
+             "-ss", str(int(start_at_sec)), "-t", str(int(scan_duration_sec)),
+             "-i", file_path,
+             "-vf", "scale=64:-2,blackdetect=d=0.2:pix_th=0.10",
+             "-an", "-sn", "-f", "null", "-"]),
+        capture_output=True, text=True, timeout=120, **_LOWPRIO_KW,
     )
     matches = re.findall(r"black_start:(\d+(?:\.\d+)?)\s+black_end:(\d+(?:\.\d+)?)", proc.stderr)
     if not matches:
         proc = subprocess.run(
-            [ff, "-ss", str(int(start_at_sec)), "-t", str(int(scan_duration_sec)),
-             "-i", file_path,
-             "-vf", "scale=64:-2,fps=4,blackdetect=d=0.4:pix_th=0.10",
-             "-an", "-sn", "-f", "null", "-"],
-            capture_output=True, text=True, timeout=120,
+            _lp([ff, "-ss", str(int(start_at_sec)), "-t", str(int(scan_duration_sec)),
+                 "-i", file_path,
+                 "-vf", "scale=64:-2,fps=4,blackdetect=d=0.4:pix_th=0.10",
+                 "-an", "-sn", "-f", "null", "-"]),
+            capture_output=True, text=True, timeout=120, **_LOWPRIO_KW,
         )
     # ffmpeg prints lines like:  [blackdetect @ 0x..] black_start:120.5 black_end:122.0 black_duration:1.5
     matches = re.findall(r"black_start:(\d+(?:\.\d+)?)\s+black_end:(\d+(?:\.\d+)?)", proc.stderr)

@@ -2888,6 +2888,9 @@ async def library_download_pipeline(
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
     global qbit, _lib_lock, _jackett_cookie_lock
+    # Make StreamLink's request handling the box's top priority before anything
+    # else — so controls / UI / VLC-control stay responsive under heavy prep load.
+    _raise_own_priority()
     _lib_lock = asyncio.Lock()
     _jackett_cookie_lock = asyncio.Lock()
     qbit = httpx.AsyncClient(timeout=10.0)
@@ -5505,6 +5508,47 @@ def _ffmpeg_nice_prefix() -> list[str]:
     if os.name == "posix" and shutil.which("nice"):
         return ["nice", "-n", "10"]
     return []
+
+
+def _raise_own_priority() -> None:
+    """Raise the StreamLink server process ABOVE normal priority so its
+    control / UI / VLC-control request handling stays snappy even when a
+    background prep (or anything else) is saturating the CPU.
+
+    The server is overwhelmingly I/O-bound, so a high priority just lets its
+    short request bursts preempt the encoder — it doesn't hog the box when idle.
+    Combined with prep ffmpeg running BELOW normal (and the analyzer likewise),
+    StreamLink's core path decisively wins the CPU. Both the HTTP and HTTPS
+    uvicorn processes run this (each imports `main` → `lifespan`).
+
+    Best-effort — never crashes startup:
+    - Windows: HIGH_PRIORITY_CLASS (allowed for one's own process without admin;
+      REALTIME is deliberately avoided — it can starve OS/driver threads).
+    - POSIX: a negative nice, which needs privilege (root / CAP_SYS_NICE, e.g.
+      the installed system service). Tries a strong boost, backs off, then gives
+      up — even at nice 0 the de-prioritized encoder still yields to the server.
+    """
+    try:
+        p = psutil.Process()
+    except Exception:
+        return
+    try:
+        if sys.platform == "win32":
+            p.nice(psutil.HIGH_PRIORITY_CLASS)
+            print("[priority] StreamLink server set to HIGH_PRIORITY_CLASS")
+        else:
+            for target in (-10, -5, -1):
+                try:
+                    p.nice(target)
+                    print(f"[priority] StreamLink server niceness set to {target}")
+                    break
+                except (psutil.AccessDenied, PermissionError, OSError):
+                    continue
+            else:
+                print("[priority] could not raise server niceness (needs root / "
+                      "CAP_SYS_NICE) — prep/analyzer are still de-prioritized below it")
+    except Exception as exc:
+        print(f"[priority] could not raise server priority: {exc}")
 # Lazy-probed once per process: True if this ffmpeg can open an h264_nvenc session
 # on the host's GPU. Pascal (GTX 10xx) and newer all qualify; the only failure
 # modes are (a) ffmpeg built without --enable-nvenc, (b) no NVIDIA driver loaded,

@@ -243,16 +243,26 @@ Two ways to populate the cache:
 > ffmpegs. The CPU path uses `-threads OFFLINE_FFMPEG_THREADS` (2);
 > NVENC ignores it. See [GOTCHAS.md](GOTCHAS.md) for why the cap is 1.
 
-> **Staying responsive while prepping.** Prep must never block the web server
-> (single asyncio event loop). All heavy work is off-loop: ffmpeg/ffprobe run as
-> subprocesses, and the recursive bundle FS ops (`shutil.rmtree`,
-> `_dir_size_bytes`) use `asyncio.to_thread`. The fan-out endpoints (`/prep-all`,
-> the overnight `_enqueue_library_prep`) `await asyncio.sleep(0)` between files
-> because the per-file `_maybe_start_prep_job` is synchronous. ffmpeg also runs at
-> **lowered OS priority** — `nice -n 10` on POSIX (`_ffmpeg_nice_prefix`),
-> `BELOW_NORMAL_PRIORITY_CLASS` on Windows (`_FFMPEG_SUBPROCESS_KW`) — so it yields
-> CPU to the server, VLC, and qBit. The remaining slowness under prep is pure CPU
-> contention, which the lag warning + Pause/Resume + overnight scheduling address.
+> **Staying responsive while prepping.** Three layers keep controls/UI/VLC-control
+> snappy under heavy prep:
+> 1. **The server runs at raised OS priority.** `_raise_own_priority()` (called
+>    first in `lifespan`, so both the HTTP and HTTPS uvicorn processes do it) sets
+>    `HIGH_PRIORITY_CLASS` on Windows / a negative `nice` on POSIX. The server is
+>    I/O-bound, so this just lets its short request bursts preempt the encoder.
+> 2. **All background CPU work runs BELOW normal**, so it can never starve the
+>    server: prep ffmpeg via `_ffmpeg_nice_prefix` (`nice -n 10`) / `_FFMPEG_SUBPROCESS_KW`
+>    (`BELOW_NORMAL_PRIORITY_CLASS`), and the Smart-Skip analyzer subprocesses via
+>    `analyzer._lp` / `analyzer._LOWPRIO_KW` (needed because children would
+>    otherwise *inherit* the server's HIGH priority). Net order: server ≫ VLC/qBit
+>    (normal) ≫ prep/analyzer.
+> 3. **Nothing blocks the event loop.** ffmpeg/ffprobe are subprocesses; the
+>    recursive bundle FS ops (`shutil.rmtree`, `_dir_size_bytes`) use
+>    `asyncio.to_thread`; and the fan-out endpoints (`/prep-all`, the overnight
+>    `_enqueue_library_prep`) `await asyncio.sleep(0)` between files (the per-file
+>    `_maybe_start_prep_job` is synchronous).
+>
+> The remaining slowness under prep is pure CPU contention, which the lag warning
+> + Pause/Resume + overnight scheduling address.
 
 > **Debugging a failed conversion.** The UI only shows a short stderr tail.
 > `_run_offline_job` logs the full ffmpeg command, return code, elapsed time,

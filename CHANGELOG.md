@@ -1,5 +1,10 @@
 # Changelog
 
+## [3.4.2] — 2026-05-25
+- **StreamLink's core path is now the box's top priority — controls/UI/VLC-control stay responsive under heavy prep.** Lowering ffmpeg (3.4.1) wasn't enough: the server process itself sat at normal priority, so on a saturated box it got starved while separate apps (e.g. a VLC remote talking straight to VLC) stayed snappy — the on-screen volume button lagged.
+  - **The server raises its own priority at startup** (`_raise_own_priority`, called first thing in `lifespan`, so both the HTTP and HTTPS uvicorn processes do it): `HIGH_PRIORITY_CLASS` on Windows (no admin needed; REALTIME deliberately avoided), a negative `nice` on POSIX (needs root/CAP_SYS_NICE — the installed service; degrades gracefully otherwise). The server is I/O-bound, so high priority just lets its short request bursts preempt the encoder without hogging the box.
+  - **All background CPU work stays below it.** Prep ffmpeg already ran BELOW_NORMAL/`nice` (3.4.1); the Smart-Skip **analyzer** subprocesses (ffmpeg decode, fpcalc, ffprobe) now do too (`analyzer._lp` + `_LOWPRIO_KW`) — without this they'd inherit the server's HIGH priority and re-introduce lag during an analysis. Net effect: server ≫ VLC/qBit (normal) ≫ prep/analyzer (below normal).
+
 ## [3.4.1] — 2026-05-25
 - **Keep the dashboard responsive while stream-prep runs.** Prep is CPU-heavy, so beyond the warning/pause/overnight controls (3.4.0) the work now actively yields to the rest of the app rather than just relying on the user to pause it.
   - **ffmpeg runs at lowered OS priority on every platform.** Windows already used `BELOW_NORMAL_PRIORITY_CLASS`; POSIX hosts now prepend `nice -n 10` (`_ffmpeg_nice_prefix`, fork-safe vs `preexec_fn`, no-ops if `nice` is missing). The bulk encode yields CPU to the web server's event loop, VLC, and qBit, so the site stays usable.
