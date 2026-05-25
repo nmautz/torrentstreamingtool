@@ -20,6 +20,13 @@ The only persistent server-side state. Lives at the project root. Accessed via `
     "admin_overrides": {
       "indexer_categories": "0",        // overrides .env INDEXER_CATEGORIES at search time
       "tmdb_api_key": "abc123"          // overrides .env TMDB_API_KEY; set/cleared in admin UI
+    },
+    "scheduled_reboot": {               // daily idle-gated host reboot (admin System tab)
+      "enabled":      false,
+      "time":         "00:00",          // local HH:MM in `timezone`
+      "timezone":     "America/Los_Angeles",  // IANA name; "" = system local
+      "idle_minutes": 15,               // no usage for this long ⇒ reboot; clamped 1–720
+      "last_fired":   ""                // internal: tz date last fired; loop guard, reset on save
     }
   }
 }
@@ -45,6 +52,8 @@ PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "so
 `settings.max_volume`: VLC is uncapped (0–200, where 200 % is overdrive). Capping it system-wide stops anyone from accidentally blowing the speakers. Lives under `settings` because it applies to the physical playback host, not to individual viewers. Enforced server-side in `_global_max_volume`.
 
 `settings.background_video`: managed by the **Background** admin tab (see [ADMIN.md](ADMIN.md)). The file lives under `.background/<name>` at the repo root; the directory is wiped on each upload so only one file ever exists. The `background_video_loop` task in `main.py` plays it on VLC any time VLC reports `stopped` and a stream pipeline isn't actively buffering. Any user `vlc("in_play", …)` replaces it and restores the user's pre-bg volume.
+
+`settings.scheduled_reboot`: managed by the **System** admin tab (see [ADMIN.md §7](ADMIN.md)). The `scheduled_reboot_loop` task reboots the host daily at `time` (in `timezone`) once it's been idle for `idle_minutes`. `last_fired` is an internal guard (the tz date of the last fire) that stops the just-rebooted machine from re-arming and looping; it's reset to `""` whenever the config is saved so a newly-set time can arm the same day. Lives under `settings` because it applies to the physical host, not an individual viewer.
 
 `resume_mode`:
 - `"auto"` (default) — immediately seek to saved position

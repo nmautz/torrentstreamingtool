@@ -39,6 +39,7 @@ let app = { vpn_secure, vpn_status, stream_status, active_title, progress,
             downloaded_mb, total_mb, dl_speed_bps, ul_speed_bps,
             vlc_time, vlc_duration, vlc_volume,
             library_playlist_count, library_current_index, library_current_file,
+            library_playlist, library_item_id,
             library_item_file_count, is_library_playback,
             play_when_ready_item_id, play_when_ready_file_path,
             skip_offer, resume_offer };
@@ -178,6 +179,52 @@ via `evictLegacyServiceWorker()` so devices that PWA-installed the old build
 drop their stale caches. See [STREAMING.md](STREAMING.md) and
 [GOTCHAS.md](GOTCHAS.md) for details.
 
+### Handoff to Device (TV → device, time-synced)
+
+`handoffToDevice(btn)` moves an in-progress VLC (TV) library play onto the
+browser that tapped the button, resuming at the same position. It:
+
+1. Reads VLC's **live** position from `GET /api/vlc/tracks` (`time`), falling
+   back to the ≤2 s-stale `app.vlc_time` from the SSE snapshot.
+2. Builds the remaining-playlist tail by slicing `app.library_playlist` from
+   `app.library_current_file` forward (so auto-advance keeps going on-device),
+   falling back to just the current file.
+3. Fires `POST /api/stop` (202 — VLC teardown runs server-side) and immediately
+   calls `lpPlay(itemId, files, seekTo, label)`. The device prep/transcode runs
+   in parallel with the TV stopping; `lpPlay`'s resume seek is frozen at the
+   captured time (applied on `loadedmetadata`), so the handoff lands on the same
+   frame regardless of prep latency.
+
+Wrapped in `withInflight("handoff")` against double-taps. Requires
+`app.is_library_playback && app.library_item_id` (both now in the state
+snapshot). Two entry points, both shown only during library playback by
+`renderPlayer`: the footer **Device** button (`#handoffBtn`, next to Stop) and
+the fullscreen **To Device** tile (`#fcHandoffBtn`, next to the Stop tile). Both
+are **hold-to-activate** (`_holdStart(this, handoffToDevice, event)` + the
+`.hold-btn` 0.5 s progress fill, same as Stop) so an accidental tap can't pull
+playback off the TV — a short tap does nothing.
+
+**Prep gating.** The button is greyed (`.handoff-disabled`) with a "Not prepped
+for on-device streaming" note when the current file isn't stream-ready (footer:
+via `title`; fullscreen tile: the `#fcHandoffNote` sub-label). Readiness is
+`_handoffReadyState(s)` → `true | false | null`: it reads `prepFileState` first
+(instant when the file was prepped via the picker / prep-all), else the resolved
+result of `_maybeRefreshHandoffReady(s)`, which fetches
+`GET /api/library/{id}/prep-status` once per current file and repaints. Only a
+*known-not-ready* (`=== false`) greys the button and blocks the click (with a
+toast); `null` (unknown) stays clickable to avoid false-blocking. The async
+result is cached in `app._handoffReady` / `app._handoffReadyFile` (guarded by
+`app._handoffInflightFile`).
+
+`lpHandoffToVlc(btn)` is the reverse — it pushes the on-device play back onto the
+TV. It captures the local `<video>` position + remaining playlist tail, calls
+`lpStop()` (flushes progress, tears down the device player), then
+`playLibraryFiles(itemId, tail, capturedTime, label)` (`POST
+/api/library/{id}/play` with `seek_first_to`). VLC plays the original source
+seeked to the same moment. The **To TV** button sits in the local player's
+fullscreen header next to Stop (part of `.lp-chrome`, hidden in tiny mode).
+Guarded by `withInflight("handoff_vlc")`.
+
 ### Init ([static/index.html:3569](../static/index.html#L3569))
 
 On `DOMContentLoaded`:
@@ -196,6 +243,7 @@ Password-protected at `/admin`. Token stored in `sessionStorage.admin_token` and
 2. **Content Lock** ([line 142](../static/admin.html#L142)) — toggle `admin_only` per library item. Profiles can be marked `elevated` to also see admin-only items.
 3. **Smart Skip** ([line 155](../static/admin.html#L155)) — list items with their skip-data status; per-item `Analyze` button (force re-run); `Edit` opens inline editor with three numeric fields per file (intro start, intro end, credits start). Manual edits set `analysis.source="manual"` so they survive re-analysis.
 4. **Profile PINs** ([line 182](../static/admin.html#L182)) — set/clear PIN per profile (admin overrides current-PIN check); toggle the `elevated` flag.
+5. **System** (`#panelSystem`) — **Shut Down** (`doShutdownServer`), **Reboot Machine** (`doRebootMachine`, confirm-gated → `POST /api/admin/reboot`), and **Scheduled Restart** (`loadScheduledReboot` / `toggleScheduledReboot` / `saveScheduledReboot` → `GET`/`POST /api/admin/scheduled-reboot`). The scheduled-restart panel has an enable toggle, time input, timezone select, idle-window field, and a live host-time readout; loaded on tab switch. (Offline Cache and Background Video tabs also exist — see [ADMIN.md](ADMIN.md).)
 
 ### Admin SSE ([static/admin.html:483](../static/admin.html#L483))
 

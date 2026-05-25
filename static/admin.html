@@ -354,6 +354,79 @@
         </button>
       </div>
     </div>
+
+    <!-- Reboot host machine -->
+    <div class="bg-gray-900 border border-red-900/60">
+      <div class="px-5 py-4 border-b border-red-900/60">
+        <h2 class="text-sm font-black uppercase tracking-wide text-red-300">Reboot Machine</h2>
+        <p class="text-xs text-amber-200/70 mt-0.5">Restarts the entire host computer — not just StreamLink. Use this as a hard reset when Jackett wedges. For the server to come back on its own, configure <strong>auto-login</strong> and install the system service (<code class="font-mono text-amber-200">run.py --install</code>). See the README.</p>
+      </div>
+      <div class="px-5 py-4 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <div class="text-sm font-bold text-gray-200">Reboot Now</div>
+          <div class="text-[11px] text-gray-600 mt-0.5">The machine goes down immediately and reboots.</div>
+        </div>
+        <button id="rebootBtn" onclick="doRebootMachine()"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-4 py-2.5 border border-red-800 bg-red-950 text-red-300 hover:bg-red-900 transition-colors">
+          Reboot
+        </button>
+      </div>
+    </div>
+
+    <!-- Scheduled restart -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Scheduled Restart</h2>
+          <p class="text-xs text-gray-500 mt-0.5">Reboots the host daily at a set time — but only when idle. If the box was used in the last <span id="srIdleEcho">15</span> min at the scheduled time, it waits and re-checks every <span id="srIdleEcho2">15</span> min until idle, then reboots.</p>
+        </div>
+        <button id="srEnabledBtn" onclick="toggleScheduledReboot()"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+                 bg-gray-800 border-gray-700 text-gray-400 hover:text-white">
+          …
+        </button>
+      </div>
+
+      <div class="px-5 py-4 border-b border-gray-800 grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div class="space-y-1.5">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Restart Time</label>
+          <input id="srTime" type="time" value="00:00"
+            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none"/>
+        </div>
+        <div class="space-y-1.5">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Timezone</label>
+          <select id="srTimezone"
+            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-indigo-500 outline-none">
+            <option value="America/Los_Angeles">Pacific (Los Angeles)</option>
+            <option value="America/Denver">Mountain (Denver)</option>
+            <option value="America/Chicago">Central (Chicago)</option>
+            <option value="America/New_York">Eastern (New York)</option>
+            <option value="America/Anchorage">Alaska (Anchorage)</option>
+            <option value="Pacific/Honolulu">Hawaii (Honolulu)</option>
+            <option value="UTC">UTC</option>
+            <option value="">System local time</option>
+          </select>
+        </div>
+        <div class="space-y-1.5">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Idle Window (min)</label>
+          <input id="srIdle" type="number" min="1" max="720" value="15"
+            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none"/>
+          <p class="text-[10px] text-gray-600">No usage for this long ⇒ safe to reboot.</p>
+        </div>
+        <div class="space-y-1.5">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Host Time Now</label>
+          <div id="srNow" class="w-full px-3 py-2 text-sm font-mono text-gray-400 border border-gray-800 bg-black/40">…</div>
+        </div>
+      </div>
+
+      <div class="px-5 py-4 flex items-center justify-between gap-3">
+        <div id="srStatus" class="text-[11px] text-gray-600 min-w-0"></div>
+        <button id="srSaveBtn" onclick="saveScheduledReboot()"
+          class="flex-shrink-0 bg-indigo-600 hover:bg-indigo-500 px-5 py-2.5 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">
+          Save
+        </button>
+      </div>
+    </div>
   </div>
 
 </div>
@@ -555,6 +628,7 @@ function switchTab(tab){
   if(tab==="skip")       loadSkipPanel();
   if(tab==="offline")    loadOfflineCache();
   if(tab==="background") loadBackgroundVideo();
+  if(tab==="system")     loadScheduledReboot();
 }
 
 // ── System ────────────────────────────────────────────────────────────────────
@@ -575,6 +649,100 @@ async function doShutdownServer(){
     showToast("Server shutting down…");
   }catch(_){
     showToast("Server stopped.");
+  }
+}
+
+async function doRebootMachine(){
+  if(!confirm("Reboot the host machine?\n\nThis restarts the WHOLE computer, not just StreamLink. It will only come back on its own if auto-login is configured and the StreamLink system service is installed (run.py --install).\n\nProceed?")) return;
+  const btn = document.getElementById("rebootBtn");
+  btn.disabled = true;
+  btn.textContent = "Rebooting…";
+  try{
+    const r = await fetch("/api/admin/reboot",{method:"POST", headers: authHeader()});
+    if(!r.ok){
+      const t = await r.text();
+      showToast(`Reboot failed: ${t || r.status}`, true);
+      btn.disabled = false;
+      btn.textContent = "Reboot";
+      return;
+    }
+    showToast("Rebooting host machine…");
+  }catch(_){
+    showToast("Reboot issued — machine going down.");
+  }
+}
+
+// ── Scheduled Restart ───────────────────────────────────────────────────────────
+let _srEnabled = false;
+
+function _renderSrEnabled(){
+  const btn = document.getElementById("srEnabledBtn");
+  if(!btn) return;
+  if(_srEnabled){
+    btn.textContent = "Enabled";
+    btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-emerald-950 border-emerald-700 text-emerald-300 hover:bg-emerald-900";
+  } else {
+    btn.textContent = "Disabled";
+    btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white";
+  }
+}
+
+async function loadScheduledReboot(){
+  try{
+    const r = await fetch("/api/admin/scheduled-reboot", {headers: authHeader()});
+    if(!r.ok) return;
+    const d = await r.json();
+    _srEnabled = !!d.enabled;
+    _renderSrEnabled();
+    document.getElementById("srTime").value     = d.time || "00:00";
+    document.getElementById("srIdle").value     = d.idle_minutes ?? 15;
+    const tzSel = document.getElementById("srTimezone");
+    tzSel.value = (d.timezone ?? "America/Los_Angeles");
+    // If the saved tz isn't one of the presets, fall back to System local
+    if(tzSel.value !== (d.timezone ?? "")) tzSel.value = "";
+    document.getElementById("srNow").textContent = d.now || "—";
+    document.getElementById("srIdleEcho").textContent  = d.idle_minutes ?? 15;
+    document.getElementById("srIdleEcho2").textContent = d.idle_minutes ?? 15;
+    const status = document.getElementById("srStatus");
+    if(d.enabled){
+      status.textContent = d.last_fired ? `Last fired: ${d.last_fired}` : "Armed — will reboot at the next scheduled time when idle.";
+    } else {
+      status.textContent = "Scheduled restart is off.";
+    }
+  }catch(_){}
+}
+
+function toggleScheduledReboot(){
+  _srEnabled = !_srEnabled;
+  _renderSrEnabled();
+}
+
+async function saveScheduledReboot(){
+  const btn = document.getElementById("srSaveBtn");
+  const body = {
+    enabled:      _srEnabled,
+    time:         document.getElementById("srTime").value || "00:00",
+    timezone:     document.getElementById("srTimezone").value,
+    idle_minutes: parseInt(document.getElementById("srIdle").value, 10) || 15,
+  };
+  btn.disabled = true;
+  try{
+    const r = await fetch("/api/admin/scheduled-reboot",{
+      method:"POST",
+      headers:{...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify(body),
+    });
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      showToast(`Save failed: ${d.detail || r.status}`, true);
+      return;
+    }
+    showToast(_srEnabled ? "Scheduled restart saved." : "Scheduled restart disabled.");
+    await loadScheduledReboot();
+  }catch(_){
+    showToast("Save failed.", true);
+  }finally{
+    btn.disabled = false;
   }
 }
 

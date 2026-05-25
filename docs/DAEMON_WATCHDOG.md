@@ -17,7 +17,7 @@ Two related but distinct pieces:
 3. Calls `start_watchdog()` (monitors VLC/qBit/Jackett — and launches them when missing)
 4. Calls `run.get_local_ip()` to detect the LAN IP for mDNS
 5. On Windows: calls `run.setup_windows_firewall(80)` and `(443)` if certs exist (idempotent — Task Scheduler runs the wrapper elevated so `netsh add rule` succeeds)
-6. Calls `run.start_mdns(lan_ip, 80, 443 if certs)` so `remote.local` resolves for LAN clients
+6. Calls `run.start_mdns_resilient(80, 443 if certs)` so `remote.local` resolves for LAN clients. **Resilient, not one-shot:** the service starts at boot before Wi-Fi has a LAN IP, so a single `start_mdns()` would see no IP and silently skip — `remote.local` would never resolve until a manual relaunch even though the dashboard is reachable by IP. The resilient version registers from a daemon thread that waits for the IP and re-registers on change. See [GOTCHAS.md](GOTCHAS.md#remotelocal-doesnt-resolve-after-a-reboot)
 7. If `cert.pem` + `key.pem` exist: launches a separate `uvicorn … --port 443 --ssl-certfile … --ssl-keyfile …` subprocess for the admin panel (HTTPS), logging to `logs/uvicorn_https.log`. Not supervised — if it dies, only port 443 stops; the main HTTP service continues
 8. Supervises `uvicorn main:app --host 0.0.0.0 --port 80` in a restart loop
 9. Restart loop logic: clean exit (rc 0) → quit; non-zero → wait 5 s and retry. **Fast-death detection**: 5 consecutive crashes in under 15 s each → give up (prevents tight crash loops eating CPU)
@@ -89,13 +89,23 @@ Three steps each tick (default 3 s):
 
 `_interruptible_sleep` watches `_stop_event` so `stop_watchdog()` exits the back-off promptly.
 
+`vlc_spec.build_args` launches VLC with `--fullscreen` plus the Smart Skip **marquee args** (`--sub-source=marq --marq-file=<repo>/.vlc_marquee.txt --marq-position=10 …`) for the on-TV auto-skip countdown popup; `_build_specs` creates that file empty first. These args are mirrored in `run.py` `start_vlc` and `main.py` `_vlc_marquee_args()` — keep all three in sync. See [GOTCHAS.md](GOTCHAS.md#smart-skip-countdown-marquee).
+
 Transitions (DOWN/UP) are logged once; routine ticks are silent. This keeps the log readable.
 
 ### Jackett specifics ([watchdog.py:160](../watchdog.py#L160))
 
-On Windows, Jackett's `build_args` runs `sc.exe query Jackett` + `sc.exe start Jackett` inline and returns `None`. The loop logs the result but doesn't call `_launch_bg`. This means a missing Jackett service surfaces as a clear log message instead of silently launching the tray exe.
+On Windows, Jackett's `build_args` runs `sc.exe query Jackett` + `sc.exe start Jackett` inline and returns `None`. The loop logs the result but doesn't call `_launch_bg`. When the service isn't installed it now launches the tray/console exe as a **user process** (`return [bin_path]`) instead of giving up — that's the model the watchdog can fully manage without elevation.
 
 Jackett is only added to plain_specs when `INDEXER_URL` points at localhost. Remote Jackett is unwatched — `run.py` already warned at startup if it wasn't reachable.
+
+**HTTP health check, not a port check.** Jackett's `ServiceSpec` is built with a `health_check` (`_jackett_alive`) that requires both an open port *and* a successful `GET {INDEXER_URL}/UI/Login` (`_http_ok`). A hung Jackett holds the port open while it stops serving — a bare port check would call that alive forever. `ServiceSpec.is_alive()` uses `health_check` when present, else the port check (VLC/qBit are unchanged).
+
+**Force-down before restart.** The Jackett spec also sets `pre_restart=_jackett_force_down`. `ServiceSpec.start()` runs it first: on Windows `_force_stop_jackett_windows()` does `sc stop` + waits for STOPPED (hard-kill fallback); elsewhere `_kill_by_name("jackett")`. This clears a wedged Jackett so the relaunch can re-bind 9117 — `sc start` alone is a 1056 no-op on a hung service. `start()` then waits on `is_alive()` (HTTP), not just the port, so it doesn't tight-loop before Jackett's web stack is ready (`startup_timeout=40s`).
+
+**Admin requirement.** Stopping/starting a LocalSystem `Jackett` service needs admin; a non-elevated watchdog gets access-denied and logs a clear hint. `setup.py`'s `grant_jackett_service_control()` grants the rights once so the watchdog can recover Jackett without elevation. See [GOTCHAS.md](GOTCHAS.md#controlling-the-localsystem-jackett-service-needs-admin).
+
+**Reusable restart.** `restart_jackett()` / `jackett_healthy()` ([watchdog.py:670](../watchdog.py#L670)) expose the same force-down+launch and HTTP-liveness logic so the dashboard process (`main.py`'s `jackett_health_monitor`) can use them as a backstop when no watchdog is running.
 
 ### Building specs ([watchdog.py:431](../watchdog.py#L431))
 

@@ -29,6 +29,8 @@ Read this when changing anything related to:
 - The bulk **Prep for Streaming** button on library cards
   (`prepItemForStreaming`, `/prep-all`)
 - The play chooser (`#playChooserModal`, `playLibraryWithChooser`, `pcChoose`)
+- The **Handoff** (both directions): TV→device (`handoffToDevice`, `#handoffBtn`,
+  `#fcHandoffBtn`) and device→TV (`lpHandoffToVlc`, the local player's **To TV** button)
 - `saveProgress`, `_lpFlushProgress`, the `pagehide`/`visibilitychange` flush
 - hls.js integration (`/vendor/hls.min.js`, `_ensureHlsLib`, `_lpDestroyHls`)
 
@@ -295,6 +297,58 @@ write, increments `lp.pi`, and calls `_lpLoadIndex(0)`. That re-runs the
 prep flow for the next file. If the next episode has already been prepped,
 playback resumes within a network round-trip; otherwise the user sees the
 same "Building stream…" overlay.
+
+### 6. Handoff from VLC (TV → device)
+
+`handoffToDevice(btn)` is a second entry point into `lpPlay` (the play chooser
+is the first). It transfers a live VLC (TV) library play onto the requesting
+browser, time-synced:
+
+1. Captures VLC's **live** position from `GET /api/vlc/tracks` (`time`) — fresher
+   than the ≤2 s-stale `app.vlc_time` snapshot, which is the fallback.
+2. Slices the remaining-playlist tail from `app.library_playlist` starting at
+   `app.library_current_file`, so on-device auto-advance continues the series.
+3. Fires `POST /api/stop` (202; VLC teardown is backgrounded) **and** calls
+   `lpPlay(itemId, tail, capturedTime, label)`. Because stop returns immediately,
+   the device's prep/transcode overlaps the TV teardown. The resume seek is
+   pinned to `capturedTime` (applied on `loadedmetadata`), so the device lands on
+   the same frame no matter how long prep takes — VLC is stopped, so the position
+   doesn't drift while the device prepares.
+
+Needs `app.is_library_playback && app.library_item_id` (both published in
+`state_snapshot()`); the footer **Device** button and fullscreen **To Device**
+tile are shown only then. Both are **hold-to-activate** (0.5 s `.hold-btn` fill,
+same as Stop) so an accidental tap can't pull playback off the TV. Guarded by
+`withInflight("handoff")`.
+
+The button is **prep-gated**: it greys out (`.handoff-disabled`) with a "Not
+prepped for on-device streaming" note when the current VLC file has no
+`.offline_cache` MP4 and isn't Safari-native — otherwise the handoff would stop
+the TV and sit in a long transcode. `_handoffReadyState` resolves readiness from
+`prepFileState` (instant) or a per-file `GET /prep-status` check
+(`_maybeRefreshHandoffReady`); it flips to active automatically once the file is
+prepped (episode-picker Prep or a card's Prep for Streaming). Tapping while not
+prepped shows a toast instead of acting. See [FRONTEND.md](FRONTEND.md) for the
+readiness state machine.
+
+### 7. Handoff to VLC (device → TV)
+
+`lpHandoffToVlc(btn)` is the mirror image — it pushes the on-device play back
+onto the TV:
+
+1. Captures the local `<video>` `currentTime` and the remaining playlist tail
+   (`lp.playlist.slice(lp.pi)`).
+2. Calls `lpStop()` (which flushes the current position to the server and tears
+   down the device player).
+3. Calls `playLibraryFiles(itemId, tail, capturedTime, label)` → `POST
+   /api/library/{id}/play` with `seek_first_to`. VLC plays the **original source**
+   seeked to the same moment (transcode preserves the timeline, so the device's
+   cached MP4 and the source share timestamps), so playback resumes on the same
+   frame.
+
+The **To TV** button lives in the local player's fullscreen header (next to
+Stop); it's part of `.lp-chrome`, so it's hidden in tiny mode (maximize first).
+Guarded by `withInflight("handoff_vlc")`.
 
 ---
 

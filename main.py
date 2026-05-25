@@ -7,6 +7,7 @@ import hashlib
 import io
 import json
 import logging
+import math
 import os
 import platform
 import re
@@ -137,6 +138,50 @@ settings = Settings()
 LIBRARY_FILE = Path(__file__).parent / "library.json"
 BACKGROUND_DIR = Path(__file__).parent / ".background"
 
+# Countdown popup shown on the TV itself. VLC is launched with a `marq`
+# sub-source that re-reads this file ~5×/s and renders its contents bottom-right.
+# main.py writes the "Skipping … in N" text here; emptying the file clears it.
+# run.py and watchdog.py launch VLC with --marq-file pointed at this same path —
+# keep _vlc_marquee_args() (below) in sync with their arg lists.
+MARQUEE_FILE = Path(__file__).parent / ".vlc_marquee.txt"
+
+
+def _vlc_marquee_args() -> list:
+    """VLC CLI args enabling the bottom-right countdown marquee.
+
+    Mirrored verbatim in run.py (start_vlc) and watchdog.py (vlc_spec) — the
+    three launch paths must agree. Text-only (no background box) so regular
+    subtitles render unchanged; readability comes from VLC's default outline.
+    """
+    return [
+        "--sub-source=marq",
+        f"--marq-file={MARQUEE_FILE}",
+        "--marq-refresh=200",      # re-read the file ~5×/s → smooth countdown
+        "--marq-position=10",      # 10 = Bottom-Right
+        "--marq-x=50", "--marq-y=50",   # padding in from the corner
+        "--marq-size=48",
+        "--marq-color=16777215",   # white
+        "--marq-opacity=255",      # fully opaque text
+        "--marq-timeout=0",        # persist until the file is emptied
+    ]
+
+
+def _marquee_write(text: str) -> None:
+    """Atomically replace the marquee file's contents (sync; tiny write).
+
+    Clearing writes a single space, never an empty string. VLC's marq filter
+    reads the file with getline(); on an *empty* file getline hits EOF, so the
+    filter keeps the previously-shown text (and logs a read error every refresh
+    tick). A lone space is a valid non-empty line that forces the update yet
+    renders nothing — we draw no background box, so a space has no glyph.
+    """
+    try:
+        tmp = MARQUEE_FILE.with_suffix(".tmp")
+        tmp.write_text(text or " ", encoding="utf-8")
+        os.replace(tmp, MARQUEE_FILE)
+    except Exception:
+        pass
+
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
@@ -211,6 +256,7 @@ def _now_iso() -> str:
 class AppState:
     vpn_secure: bool = True
     vpn_status_text: str = "Checking…"
+    jackett_ok: bool = True               # last known Jackett HTTP reachability
     active_hash: Optional[str] = None
     active_title: Optional[str] = None
     active_file: Optional[Path] = None
@@ -240,10 +286,13 @@ class AppState:
     prepare_hash: Optional[str] = None                    # hash added by /stream/prepare, pending user selection
     skip_offer: Optional[dict] = None                     # {"type": "intro"|"credits", "end_at": s, "next_item_id": id?, "next_file_path": p?}
     skip_offer_file: Optional[str] = None                 # path the current skip offer corresponds to
+    skip_countdown: Optional[dict] = None                 # {"type", "file_path", "n"} active auto-skip countdown (TV marquee)
+    skip_countdown_task: Optional[asyncio.Task] = None    # in-flight countdown coroutine
     resume_offer: Optional[dict] = None                   # {"position_sec": N, "file_path": "..."} when resume_mode="prompt"
     analysis_jobs: dict = field(default_factory=dict)     # series_key → {status, stage, current, total, message, item_ids, started_at, finished_at}
     background_playing: bool = False                      # True when the idle background video is the active VLC playlist
     user_volume_before_bg: int = 100                      # snapshot of state.vlc_volume taken when bg first took over
+    last_activity: float = 0.0                            # time.time() of last user-initiated interaction (drives scheduled-reboot idle check)
     sse_queues: list = field(default_factory=list)
 
 
@@ -311,6 +360,7 @@ def state_snapshot() -> dict:
     return {
         "vpn_secure": state.vpn_secure,
         "vpn_status": state.vpn_status_text,
+        "jackett_ok": state.jackett_ok,
         "stream_status": state.stream_status,
         "active_title": state.active_title,
         "progress": round(state.progress, 2),
@@ -325,11 +375,14 @@ def state_snapshot() -> dict:
         "library_playlist_count": len(playlist),
         "library_current_index": cur_idx,
         "library_current_file": current,
+        "library_playlist": list(playlist),
         "library_item_file_count": state.library_item_file_count,
         "is_library_playback": state.library_item_id is not None,
+        "library_item_id": state.library_item_id,
         "play_when_ready_item_id": state.play_when_ready_item_id,
         "play_when_ready_file_path": state.play_when_ready_file_path,
         "skip_offer": state.skip_offer,
+        "skip_countdown": state.skip_countdown,
         "resume_offer": state.resume_offer,
         "analysis_jobs": state.analysis_jobs,
         # False on macOS hosts — the UI hides stream-to-device / Prep affordances.
@@ -1221,10 +1274,11 @@ async def _restart_vlc_process() -> bool:
         kw["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
     else:
         kw["start_new_session"] = True
+    _marquee_write("")  # start clean; marq needs the file to exist at launch
     subprocess.Popen(
         [vlc_bin, "--extraintf=http", "--http-host=localhost",
          f"--http-port={vlc_port}", f"--http-password={settings.vlc_password}", "--no-random",
-         "--fullscreen"],
+         "--fullscreen", *_vlc_marquee_args()],
         **kw,
     )
 
@@ -1513,6 +1567,228 @@ async def vpn_guard() -> None:
             pass
 
         await asyncio.sleep(3)
+
+
+# ── Background Task: Jackett Health Monitor ──────────────────────────────────
+
+async def jackett_health_monitor() -> None:
+    """Poll Jackett over HTTP regularly so the dashboard knows when the indexer
+    is unreachable, and — as a backstop to the process watchdog — kick a local
+    restart if Jackett stays wedged for an extended period.
+
+    The watchdog (run.py / the installed service) is the primary supervisor and
+    recovers a hung Jackett within seconds. This in-app monitor only force-
+    restarts after a *long* sustained outage, so it never duels a healthy
+    watchdog: if the watchdog can recover Jackett it already has, and this path
+    stays dormant. It also covers running the dashboard without the watchdog.
+
+    Reachability here means "answers HTTP", not "port is open" — a hung Jackett
+    keeps the port bound while it stops serving, which is the failure mode that
+    used to require a reboot.
+    """
+    CHECK_EVERY         = 20    # seconds between probes
+    FAIL_BEFORE_RESTART = 6     # ~2 min of sustained failure before a backstop restart
+
+    base = settings.indexer_url.rstrip("/")
+    m = re.search(r"https?://([^:/]+)", settings.indexer_url)
+    host = m.group(1) if m else "127.0.0.1"
+    is_local = host in ("localhost", "127.0.0.1", "::1")
+
+    consecutive_fail = 0
+    while True:
+        await asyncio.sleep(CHECK_EVERY)
+
+        serving = False
+        try:
+            async with httpx.AsyncClient(timeout=5.0) as c:
+                await c.get(f"{base}/UI/Login")
+            serving = True   # any HTTP status means the web stack is answering
+        except Exception:
+            serving = False
+
+        if serving != state.jackett_ok:
+            state.jackett_ok = serving
+            await broadcast("jackett_status", {"ok": serving, "url": settings.indexer_url})
+            print(f"[jackett] {'reachable again' if serving else 'UNREACHABLE'} at {settings.indexer_url}")
+
+        if serving:
+            consecutive_fail = 0
+            continue
+
+        consecutive_fail += 1
+        if is_local and consecutive_fail >= FAIL_BEFORE_RESTART:
+            print(f"[jackett] unreachable for ~{consecutive_fail * CHECK_EVERY}s — "
+                  "attempting in-app backstop restart")
+            try:
+                from watchdog import restart_jackett
+                ok = await asyncio.to_thread(restart_jackett)
+                print(f"[jackett] backstop restart {'succeeded' if ok else 'failed'}")
+            except Exception as exc:
+                print(f"[jackett] backstop restart errored: {exc}")
+            consecutive_fail = 0   # cooldown — re-evaluate fresh on the next probes
+
+
+# ── Machine Reboot / Scheduled Restart ───────────────────────────────────────
+
+def _reboot_commands() -> list[list[str]]:
+    """Platform-appropriate reboot command(s), tried in order until one works.
+
+    On macOS the launchd *user agent* can restart via System Events without
+    sudo; we fall back to `sudo -n shutdown` (passwordless) then a bare
+    `shutdown` for setups that allow it. Linux prefers `systemctl reboot`.
+    """
+    sysname = platform.system()
+    if sysname == "Windows":
+        return [["shutdown", "/r", "/t", "0"]]
+    if sysname == "Darwin":
+        return [
+            ["osascript", "-e", 'tell application "System Events" to restart'],
+            ["sudo", "-n", "shutdown", "-r", "now"],
+            ["shutdown", "-r", "now"],
+        ]
+    # Linux / other Unix
+    return [
+        ["systemctl", "reboot"],
+        ["sudo", "-n", "shutdown", "-r", "now"],
+        ["shutdown", "-r", "now"],
+    ]
+
+
+def _do_reboot_blocking() -> bool:
+    """Fire the reboot. Returns True if a command was accepted. Blocking — run
+    via asyncio.to_thread. The machine usually goes down before this returns."""
+    for cmd in _reboot_commands():
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+            if proc.returncode == 0:
+                print(f"[reboot] issued: {' '.join(cmd)}")
+                return True
+            print(f"[reboot] '{' '.join(cmd)}' rc={proc.returncode} "
+                  f"stderr={proc.stderr.strip()[:200]}")
+        except FileNotFoundError:
+            continue   # command not on this platform — try the next
+        except Exception as exc:
+            print(f"[reboot] '{' '.join(cmd)}' errored: {exc}")
+    return False
+
+
+async def _reboot_machine(delay: float = 0.5) -> None:
+    """Reboot the host after a short delay (lets the HTTP response flush)."""
+    await asyncio.sleep(delay)
+    print("[reboot] rebooting host machine now")
+    ok = await asyncio.to_thread(_do_reboot_blocking)
+    if not ok:
+        print("[reboot] all reboot commands failed — host may lack permission. "
+              "On macOS/Linux configure passwordless sudo for `shutdown`, "
+              "or run the service with reboot rights.")
+
+
+def _now_in_tz(tzname: str) -> datetime:
+    """Current time in the named IANA tz (e.g. 'America/Los_Angeles').
+    Empty / unknown tz → system local time."""
+    if tzname:
+        try:
+            from zoneinfo import ZoneInfo
+            return datetime.now(ZoneInfo(tzname))
+        except Exception:
+            pass
+    return datetime.now()
+
+
+async def _machine_in_use(window_secs: int) -> bool:
+    """True if the box looks busy: VLC actively playing/paused real content, an
+    active stream/download, or a user interaction within `window_secs`."""
+    # 1. Live VLC playback of non-background content
+    if not state.background_playing:
+        vs = await vlc_status()
+        if vs and vs.get("state") in ("playing", "paused"):
+            return True
+    # 2. Active stream pipeline or library downloads in flight
+    if state.stream_status in ("buffering", "playing"):
+        return True
+    if state.downloading_count > 0:
+        return True
+    # 3. Recent user-initiated HTTP interaction (set by the activity middleware)
+    if state.last_activity and (time.time() - state.last_activity) < window_secs:
+        return True
+    return False
+
+
+def _scheduled_reboot_cfg(lib: dict) -> dict:
+    """Read settings.scheduled_reboot with defaults filled in."""
+    cfg = (lib.get("settings", {}) or {}).get("scheduled_reboot") or {}
+    return {
+        "enabled":      bool(cfg.get("enabled", False)),
+        "time":         str(cfg.get("time", "00:00")),
+        "timezone":     str(cfg.get("timezone", "America/Los_Angeles")),
+        "idle_minutes": int(cfg.get("idle_minutes", 15)),
+        "last_fired":   str(cfg.get("last_fired", "")),
+    }
+
+
+async def scheduled_reboot_loop() -> None:
+    """Daily scheduled host reboot with an idle guard.
+
+    At the configured local time, if the machine has been idle for
+    `idle_minutes`, reboot it. If it's in use, wait `idle_minutes` and re-check —
+    repeating until the box is idle. A persisted `last_fired` date stops the
+    just-rebooted machine from immediately re-arming and looping.
+    """
+    next_check = 0.0   # monotonic time of next idle re-check while armed for today
+    while True:
+        await asyncio.sleep(20)
+        try:
+            lib = await get_library()
+            cfg = _scheduled_reboot_cfg(lib)
+            if not cfg["enabled"]:
+                continue
+
+            parts = cfg["time"].split(":")
+            try:
+                target_h, target_m = int(parts[0]), int(parts[1])
+            except (ValueError, IndexError):
+                continue
+            if not (0 <= target_h <= 23 and 0 <= target_m <= 59):
+                continue
+
+            now = _now_in_tz(cfg["timezone"])
+            today = now.date().isoformat()
+            if cfg["last_fired"] == today:
+                continue   # already handled (or rebooted) for today
+
+            scheduled_today = now.replace(hour=target_h, minute=target_m,
+                                          second=0, microsecond=0)
+            if now < scheduled_today:
+                next_check = 0.0   # re-arm fresh for the upcoming window
+                continue
+
+            # We're at/past today's scheduled time and haven't fired yet.
+            idle_secs = max(60, cfg["idle_minutes"] * 60)
+            if asyncio.get_event_loop().time() < next_check:
+                continue
+
+            if await _machine_in_use(idle_secs):
+                next_check = asyncio.get_event_loop().time() + idle_secs
+                print(f"[reboot] scheduled restart deferred — machine in use; "
+                      f"re-checking in {cfg['idle_minutes']} min")
+                continue
+
+            # Idle → record that we've fired for today (loop guard), then reboot.
+            lib2 = await get_library()
+            sr = lib2.setdefault("settings", {}).setdefault("scheduled_reboot", {})
+            sr["last_fired"] = today
+            await put_library(lib2)
+            print(f"[reboot] scheduled restart firing — machine idle for "
+                  f"{cfg['idle_minutes']} min")
+            await _reboot_machine()
+            # On success the process is torn down by the reboot before we reach
+            # here. If it returns (no reboot permission), don't kill the loop —
+            # last_fired == today now stops it re-hammering reboot commands every
+            # tick, and it stands down until tomorrow's window.
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[reboot] scheduled_reboot_loop error: {exc}")
 
 
 # ── Background Task: State Broadcaster ───────────────────────────────────────
@@ -2008,6 +2284,111 @@ def _schedule_series_analysis_if_eligible(item: dict, lib: dict) -> None:
 # the user has visual time to react when entering the window.
 SKIP_PREROLL_SEC = 2.0
 
+# Auto-skip countdown lengths (seconds). When a profile has auto-skip enabled we
+# warn the viewer on the TV before acting instead of cutting immediately.
+SKIP_COUNTDOWN_INTRO_SEC = 5
+SKIP_COUNTDOWN_CREDITS_SEC = 10
+
+
+async def _vlc_marquee(text: str) -> None:
+    """Show `text` on the TV (or clear it when empty). Offloads the file I/O."""
+    await asyncio.to_thread(_marquee_write, text)
+
+
+async def _cancel_skip_countdown() -> None:
+    """Stop any in-flight auto-skip countdown and wipe the on-screen popup."""
+    t = state.skip_countdown_task
+    state.skip_countdown_task = None
+    state.skip_countdown = None
+    if t and not t.done():
+        t.cancel()
+    await _vlc_marquee("")
+
+
+def _start_skip_countdown(
+    kind: str, item: dict, file_path: str,
+    end_at: float, target: float, lead: int,
+) -> None:
+    """Kick off the auto-skip countdown task (no-op if one is already running).
+
+    `target` is the playback position to skip AT; `lead` is how many seconds of
+    countdown precede it. The skip fires when playback reaches `target`.
+    """
+    if state.skip_countdown_task and not state.skip_countdown_task.done():
+        return
+    state.skip_countdown = {"type": kind, "file_path": file_path, "n": lead}
+    state.skip_countdown_task = asyncio.create_task(
+        _run_skip_countdown(kind, item, file_path, end_at, target, lead)
+    )
+
+
+async def _run_skip_countdown(
+    kind: str, item: dict, file_path: str,
+    end_at: float, target: float, lead: int,
+) -> None:
+    """Count down to `target` on the TV, then perform the skip.
+
+    Position-driven: the displayed number is `ceil(target - pos)`, so it tracks
+    real playback — it freezes while paused and grows/shrinks as the viewer
+    seeks. The skip fires once `pos >= target` (intro start → seek past the
+    whole intro; credits start → advance to the next episode, else stop), so the
+    intro/credits is skipped in full after the warning. Aborts (clearing the
+    popup) if the file changes, the viewer seeks well before the countdown
+    window, or — for an intro — seeks past the intro end.
+    """
+    label = "intro" if kind == "intro" else "credits"
+    intro_end = end_at if kind == "intro" else None
+    last_n: Optional[int] = None
+    try:
+        while True:
+            vs = await vlc_status()
+            vstate = (vs or {}).get("state")
+            # Playback ended or file changed under us → drop the countdown.
+            if vstate in (None, "stopped") or state.library_current_file != file_path:
+                return
+            pos = float((vs or {}).get("time", 0) or 0)
+            # Seeked clean past the intro → nothing left to skip.
+            if intro_end is not None and pos >= intro_end:
+                return
+            remaining = target - pos
+            # Seeked back well before the countdown window → drop it.
+            if remaining > lead + SKIP_PREROLL_SEC:
+                return
+            if vstate == "paused":
+                # Hold (and don't fire) while paused; pos is frozen anyway.
+                await asyncio.sleep(0.5)
+                continue
+            if remaining <= 0:
+                break  # reached the skip point
+            n = max(1, min(lead, math.ceil(remaining)))
+            if n != last_n:
+                last_n = n
+                state.skip_countdown = {"type": kind, "file_path": file_path, "n": n}
+                await _vlc_marquee(f"Skipping {label} in {n}")
+                await broadcast("state", state_snapshot())
+            await asyncio.sleep(0.5)
+
+        # Final guard against VLC having already advanced past this file.
+        cur_uri = await vlc_playlist_uri()
+        if cur_uri and cur_uri.startswith("file://"):
+            if Path(uri_to_path(cur_uri)).resolve() != Path(file_path).resolve():
+                return
+
+        if kind == "intro":
+            state.skip_offer_file = f"{file_path}#intro-done"
+            await vlc("seek", val=str(int(end_at) + 1))
+        else:
+            state.skip_offer_file = f"{file_path}#credits-done"
+            next_path = _next_file_in_item(item, file_path)
+            if next_path and Path(next_path).exists():
+                await vlc_next_file(file_path, item)
+            else:
+                await vlc("pl_stop")
+        await broadcast("state", state_snapshot())
+    finally:
+        state.skip_countdown = None
+        await _vlc_marquee("")
+
 
 async def _maybe_emit_skip_offer(
     item: dict, file_path: str, meta: Optional[dict],
@@ -2016,26 +2397,37 @@ async def _maybe_emit_skip_offer(
     """Set or clear state.skip_offer based on current playback position.
 
     Auto-skip behavior: if the profile has auto_skip_* enabled, this helper
-    issues the seek/advance directly and does NOT show the offer in the UI.
+    starts an on-TV countdown (`_start_skip_countdown`) that fires the skip when
+    playback reaches the intro/credits start — it does NOT show the dashboard
+    offer. Manual (auto-skip off) still shows the Skip button as before.
     """
     if not meta:
         await _clear_skip_offer(file_path)
         return
 
-    # Intro window: position within [start - PREROLL, end]
+    # A countdown owns the screen while it runs — don't fight it with offers.
+    if state.skip_countdown_task and not state.skip_countdown_task.done():
+        return
+
+    # Intro window
     intro = meta.get("intro")
     if intro and intro.get("end", 0) > intro.get("start", 0):
         start = float(intro.get("start", 0))
         end   = float(intro.get("end",   0))
-        if (start - SKIP_PREROLL_SEC) <= pos_sec < end:
-            if prefs.get("auto_skip_intro") and end - pos_sec > 1.0:
-                # Only auto-skip if the offer hasn't already been auto-handled
-                if state.skip_offer_file != f"{file_path}#intro-done":
-                    state.skip_offer_file = f"{file_path}#intro-done"
-                    state.skip_offer = None
-                    await vlc("seek", val=str(int(end) + 1))
-                    await broadcast("state", state_snapshot())
+        if prefs.get("auto_skip_intro"):
+            # Auto path: run the countdown over the `lead` seconds *before* the
+            # intro and skip the whole intro the moment it starts. Trigger once
+            # per file; the countdown task owns the screen from there.
+            if ((start - SKIP_COUNTDOWN_INTRO_SEC) <= pos_sec < end
+                    and state.skip_offer_file != f"{file_path}#intro-done"):
+                state.skip_offer = None
+                _start_skip_countdown(
+                    "intro", item, file_path, end, start, SKIP_COUNTDOWN_INTRO_SEC,
+                )
+                await broadcast("state", state_snapshot())
                 return
+        elif (start - SKIP_PREROLL_SEC) <= pos_sec < end:
+            # Manual path: show the Skip button across [start - PREROLL, end].
             offer = {"type": "intro", "end_at": round(end, 1), "file_path": file_path}
             if state.skip_offer != offer:
                 state.skip_offer = offer
@@ -2045,35 +2437,38 @@ async def _maybe_emit_skip_offer(
         elif pos_sec >= end and state.skip_offer and state.skip_offer.get("type") == "intro":
             await _clear_skip_offer(file_path)
 
-    # Credits window: position past credits_start
+    # Credits window
     credits_start = meta.get("credits_start")
-    if credits_start and pos_sec >= float(credits_start) - SKIP_PREROLL_SEC and pos_sec < dur_sec - 1:
-        next_path = _next_file_in_item(item, file_path)
-        next_exists = bool(next_path) and Path(next_path).exists()
-        if prefs.get("auto_skip_credits") and (pos_sec >= float(credits_start)):
-            # Only auto-skip once per file
-            done_marker = f"{file_path}#credits-done"
-            if state.skip_offer_file != done_marker:
-                state.skip_offer_file = done_marker
+    if credits_start and pos_sec < dur_sec - 1:
+        cs = float(credits_start)
+        if prefs.get("auto_skip_credits"):
+            # Auto path: run the countdown over the `lead` seconds *before* the
+            # credits, then advance at credits_start (credits skipped in full).
+            # Trigger once per file; the countdown task owns the screen from there.
+            if (pos_sec >= cs - SKIP_COUNTDOWN_CREDITS_SEC
+                    and state.skip_offer_file != f"{file_path}#credits-done"):
                 state.skip_offer = None
+                _start_skip_countdown(
+                    "credits", item, file_path, 0.0, cs, SKIP_COUNTDOWN_CREDITS_SEC,
+                )
                 await broadcast("state", state_snapshot())
-                if next_exists:
-                    await vlc_next_file(file_path, item)
-                else:
-                    await vlc("pl_stop")
+                return
+        elif pos_sec >= cs - SKIP_PREROLL_SEC:
+            # Manual path: show the Skip button from [credits_start - PREROLL, end).
+            next_path = _next_file_in_item(item, file_path)
+            next_exists = bool(next_path) and Path(next_path).exists()
+            offer = {
+                "type": "credits",
+                "credits_start": round(cs, 1),
+                "file_path": file_path,
+                "has_next": next_exists,
+                "next_file_path": next_path if next_exists else None,
+            }
+            if state.skip_offer != offer:
+                state.skip_offer = offer
+                state.skip_offer_file = file_path
+                await broadcast("state", state_snapshot())
             return
-        offer = {
-            "type": "credits",
-            "credits_start": round(float(credits_start), 1),
-            "file_path": file_path,
-            "has_next": next_exists,
-            "next_file_path": next_path if next_exists else None,
-        }
-        if state.skip_offer != offer:
-            state.skip_offer = offer
-            state.skip_offer_file = file_path
-            await broadcast("state", state_snapshot())
-        return
 
     # Outside any window — clear if one was set for this file
     await _clear_skip_offer(file_path)
@@ -2128,6 +2523,8 @@ async def vlc_progress_tracker() -> None:
         await asyncio.sleep(2)
         if not state.library_item_id or not state.library_profile_id:
             # Clear any stale skip/resume offers when playback ends
+            if state.skip_countdown_task and not state.skip_countdown_task.done():
+                await _cancel_skip_countdown()
             changed = False
             if state.skip_offer is not None:
                 state.skip_offer = None
@@ -2408,6 +2805,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     qbit = httpx.AsyncClient(timeout=10.0)
     await qbit_login()
     Path(settings.qbit_download_path).mkdir(parents=True, exist_ok=True)
+    _marquee_write("")  # wipe any stale countdown text from a prior run
 
     # Default volume to half of the admin cap. Without this, state.vlc_volume
     # starts at 100 (the dataclass default) which can blast if the cap is low.
@@ -2427,10 +2825,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     dl_monitor  = asyncio.create_task(library_download_monitor())
     vlc_tracker = asyncio.create_task(vlc_progress_tracker())
     bg_loop     = asyncio.create_task(background_video_loop())
+    jackett_mon = asyncio.create_task(jackett_health_monitor())
+    reboot_loop = asyncio.create_task(scheduled_reboot_loop())
 
     yield
 
-    for t in (guard, broadcaster, dl_monitor, vlc_tracker, bg_loop):
+    for t in (guard, broadcaster, dl_monitor, vlc_tracker, bg_loop, jackett_mon, reboot_loop):
         t.cancel()
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
@@ -2449,6 +2849,29 @@ async def admin_https_redirect(request: Request, call_next):
             host = request.url.hostname
             qs   = ("?" + request.url.query) if request.url.query else ""
             return RedirectResponse(f"https://{host}{path}{qs}", status_code=301)
+    return await call_next(request)
+
+
+# Endpoints that fire on a timer regardless of whether a human is present — they
+# must NOT count as "usage" for the scheduled-reboot idle check.
+_ACTIVITY_IGNORE_PATHS = (
+    "/api/admin/scheduled-reboot",
+    "/api/admin/reboot",
+    "/api/admin/shutdown",
+)
+
+
+@app.middleware("http")
+async def track_activity(request: Request, call_next):
+    """Stamp state.last_activity on user-initiated interactions so the scheduled
+    reboot can tell whether the box is idle. Mutating verbs (POST/PUT/PATCH/
+    DELETE) and search GETs are treated as real usage; routine GET polling
+    (state/events/version/prep-status) is not, so it never blocks a reboot."""
+    method = request.method
+    path = request.url.path
+    if (method in ("POST", "PUT", "PATCH", "DELETE") or path == "/api/search") \
+            and path not in _ACTIVITY_IGNORE_PATHS:
+        state.last_activity = time.time()
     return await call_next(request)
 
 
@@ -2519,6 +2942,13 @@ class AdminItemLockReq(BaseModel):
 class AdminSettingsReq(BaseModel):
     indexer_categories: Optional[str] = None
     tmdb_api_key: Optional[str] = None
+
+
+class ScheduledRebootReq(BaseModel):
+    enabled: bool = False
+    time: str = "00:00"                       # local HH:MM in `timezone`
+    timezone: str = "America/Los_Angeles"     # IANA name; "" = system local
+    idle_minutes: int = 15                     # idle window before a reboot fires
 
 
 class MetadataRefreshReq(BaseModel):
@@ -3003,6 +3433,7 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     prior = state.library_play_task
     if prior and not prior.done():
         prior.cancel()
+    await _cancel_skip_countdown()
 
     # Flip state to buffering NOW so the SSE-driven UI paints loading state
     # before the slow VLC roundtrips even start.
@@ -3498,6 +3929,7 @@ async def stop() -> JSONResponse:
     state.skip_offer_file = None
     state.resume_offer = None
     state.prepare_hash = None
+    await _cancel_skip_countdown()
 
     await broadcast("stream_status", {"status": "idle", "message": "Stopped."})
     await broadcast("state", state_snapshot())
@@ -3679,6 +4111,7 @@ async def vlc_prev() -> JSONResponse:
     if prior and not prior.done():
         prior.cancel()
 
+    await _cancel_skip_countdown()
     state.library_playlist     = new_tail
     state.library_current_file = prev_file
     state.current_audio_track  = -1
@@ -3726,6 +4159,7 @@ async def vlc_next() -> JSONResponse:
     if prior and not prior.done():
         prior.cancel()
 
+    await _cancel_skip_countdown()
     state.library_playlist     = new_tail
     state.library_current_file = next_file
     state.current_audio_track  = -1
@@ -4673,6 +5107,63 @@ async def admin_shutdown(request: Request) -> JSONResponse:
 
     asyncio.create_task(_kill_uvicorns())
     return JSONResponse({"ok": True, "message": "Server shutting down…"})
+
+
+@app.post("/api/admin/reboot")
+async def admin_reboot(request: Request) -> JSONResponse:
+    """Reboot the host machine immediately.
+
+    This restarts the whole computer, not just the web server. For the server to
+    come back automatically the host needs auto-login + the StreamLink system
+    service installed (`run.py --install`); see README. Used as a hard reset for
+    a wedged Jackett. The reboot fires ~0.5 s after this response flushes.
+    """
+    _require_admin(request)
+    asyncio.create_task(_reboot_machine())
+    return JSONResponse({"ok": True, "message": "Rebooting host machine…"})
+
+
+@app.get("/api/admin/scheduled-reboot")
+async def admin_get_scheduled_reboot(request: Request) -> JSONResponse:
+    """Return the scheduled-reboot config + the host's current time in the
+    configured timezone (so the UI can show what 'now' looks like there)."""
+    _require_admin(request)
+    cfg = _scheduled_reboot_cfg(await get_library())
+    now = _now_in_tz(cfg["timezone"])
+    cfg["now"] = now.strftime("%Y-%m-%d %H:%M %Z").strip()
+    return JSONResponse(cfg)
+
+
+@app.post("/api/admin/scheduled-reboot")
+async def admin_set_scheduled_reboot(
+    request: Request, body: ScheduledRebootReq,
+) -> JSONResponse:
+    """Save the scheduled-reboot config. Validates the HH:MM time and clamps the
+    idle window. Changing the config clears any prior `last_fired` guard so a
+    newly-set time can arm today."""
+    _require_admin(request)
+
+    parts = body.time.split(":")
+    try:
+        h, m = int(parts[0]), int(parts[1])
+        assert 0 <= h <= 23 and 0 <= m <= 59
+    except (ValueError, IndexError, AssertionError):
+        raise HTTPException(400, "time must be HH:MM (24-hour), e.g. 00:00")
+
+    idle = max(1, min(720, int(body.idle_minutes)))
+
+    lib = await get_library()
+    sr = lib.setdefault("settings", {}).setdefault("scheduled_reboot", {})
+    sr["enabled"]      = bool(body.enabled)
+    sr["time"]         = f"{h:02d}:{m:02d}"
+    sr["timezone"]     = body.timezone.strip()
+    sr["idle_minutes"] = idle
+    sr["last_fired"]   = ""   # reset guard so the new schedule can arm today
+    await put_library(lib)
+
+    cfg = _scheduled_reboot_cfg(lib)
+    cfg["now"] = _now_in_tz(cfg["timezone"]).strftime("%Y-%m-%d %H:%M %Z").strip()
+    return JSONResponse({"ok": True, **cfg})
 
 
 # ── Routes: Idle Background Video ─────────────────────────────────────────────

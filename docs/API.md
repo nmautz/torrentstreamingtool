@@ -16,8 +16,9 @@ All endpoints are defined in `main.py`. SSE event stream is `/api/events`.
 Event types:
 | Event | When | Payload shape |
 |-------|------|---------------|
-| `state` | every 2 s; on any state change | full `state_snapshot()` ([main.py:229](../main.py#L229)) |
+| `state` | every 2 s; on any state change | full `state_snapshot()` ([main.py:292](../main.py#L292)). Includes `library_item_id` and the full ordered `library_playlist` (used by the TV→device Handoff to reconstruct the remaining tail), alongside `library_current_file` / `library_current_index` / `is_library_playback`, and `jackett_ok` (last known indexer HTTP reachability) |
 | `vpn_status` | VPN connect/disconnect transition | `{secure, status}` |
+| `jackett_status` | Jackett HTTP reachability transition (from `jackett_health_monitor`, ~20 s poll) | `{ok, url}` |
 | `stream_status` | stream pipeline phase transition | `{status, message, progress?, downloaded_mb?, total_mb?, dl_speed_bps?, ul_speed_bps?}` |
 | `library_progress` | per-download stats, ~every 5 s while downloading | `{item_id, speed_bps, downloaded_bytes, total_bytes, progress_pct, eta_secs}` |
 | `library_update` | library item status changed | `{item_id, status, message?}` |
@@ -182,6 +183,9 @@ All require admin auth.
 | POST | `/api/admin/background-video/volume` | `{volume}` 0–200; capped by `settings.max_volume`. Pushed live to VLC if bg is on screen |
 | POST | `/api/admin/background-video/enabled` | `{enabled}` toggle without deleting the file. When off, stops VLC if bg is on screen |
 | POST | `/api/admin/shutdown` | Stop the StreamLink web server. Returns `{ok:true, message}` immediately, then asynchronously sends SIGTERM to every `uvicorn main:app` process (HTTP + HTTPS siblings). After 3 s without exit, falls back to `os._exit(0)`. qBittorrent / Jackett / VLC are not touched — they're not children of this process |
+| POST | `/api/admin/reboot` | Reboot the **whole host machine** (not just the web server). Returns `{ok:true, message}` immediately, then fires `_reboot_machine()` ~0.5 s later (platform-appropriate command chain). For the box to come back the host needs auto-login + the system service (`run.py --install`). Hard reset for a wedged Jackett |
+| GET | `/api/admin/scheduled-reboot` | `{enabled, time:"HH:MM", timezone, idle_minutes, last_fired, now}` — `now` is the host's current time in the configured tz |
+| POST | `/api/admin/scheduled-reboot` | `{enabled, time:"HH:MM", timezone, idle_minutes}` → saves to `library.json → settings.scheduled_reboot`. Validates HH:MM (24h), clamps `idle_minutes` to 1–720, resets the internal `last_fired` guard. Drives the `scheduled_reboot_loop`: at the configured local time, reboots when idle for `idle_minutes`, else waits and re-checks until idle |
 
 ## Admin HTTPS redirect
 

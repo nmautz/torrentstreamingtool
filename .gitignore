@@ -18,6 +18,9 @@ Downloads/
 # User library database (profiles + watch history)
 library.json
 
+# Runtime scratch: countdown text VLC reads for the on-TV skip popup
+.vlc_marquee.txt
+
 # macOS
 .DS_Store
 ._*

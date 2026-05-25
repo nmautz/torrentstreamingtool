@@ -53,13 +53,16 @@
 ## Milestone 5 — Advanced / Power Features
 
 - [x] **5.1** Local DNS: configure mDNS so the tool is accessible at `http://remote.local`, update project to use port 80 (or 443 if https is enabled)
+  - **Boot-timing fix (v2.10.1):** the installed service registered mDNS once at startup, but at boot it runs before Wi-Fi has a LAN IP, so `remote.local` was silently skipped and never resolved until a manual relaunch (the IP still worked). `start_mdns_resilient()` now registers from a background daemon thread that waits for the LAN IP and re-registers if it changes; used by both `run.py` and the service wrapper. See [docs/GOTCHAS.md](docs/GOTCHAS.md).
 - [x] **5.2** Smart Skip: audio fingerprinting to detect and skip intro/credit sequences on library files
+  - Auto-skip now warns on the TV before acting: a VLC `marq` sub-source renders a bottom-right countdown popup (10 s before credits auto-advance, 5 s before intro seek). See [docs/ANALYZER.md](docs/ANALYZER.md#auto-skip-countdown-on-tv-marquee).
 - [-] **5.3** Control API: documented JSON POST endpoints for external play/pause/seek/volume control
 - [x] **5.4** Subtitle Download: Find subtitles for the track by hash or name
 - [x] **5.5** Windows targetted Full Setup and Startup Automation: Setup should install ALL dependencies including optional ones. setup should also install the service and the service should be able to startup all depencies on its own. (assuming vpn handles itself starting, just dont start qbittorrent until vpn is on and connected)
   - `setup.py` now auto-installs core apps (VLC/qBittorrent/Jackett/Mullvad) via winget on Windows (brew casks on macOS), in addition to the existing ffmpeg/fpcalc install. winget "already installed / no upgrade" exit codes are treated as success.
   - Jackett detection (setup.py, run.py, watchdog.py) now scans every Program Files / LocalAppData / ProgramData location the Windows installer may use, for both `JackettConsole.exe` and `jackett.exe`.
   - `setup.py` offers to register the system service at the end (defaults to yes on Windows); on Windows, service install self-elevates via UAC when not run from an admin shell. The service's watchdog starts all deps on its own, gating qBittorrent on VPN connection.
+  - Re-running setup and declining the "reuse .env" prompt now pre-fills every prompt with the current `.env` value (Enter keeps it; secrets are masked, not echoed), so it doubles as a config health check (v2.11.0).
 
 
 ---
@@ -86,7 +89,8 @@
 
 ## Milestone 10 — Reliability & Visibility
 
-- [ ] **10.1** UI warning if any dependency/service is unreachable (VLC, qBittorrent, Jackett): currently only shown at startup in the terminal; surface these as persistent in-app banners so users on mobile know why things aren't working
+- [/] **10.1** UI warning if any dependency/service is unreachable (VLC, qBittorrent, Jackett): currently only shown at startup in the terminal; surface these as persistent in-app banners so users on mobile know why things aren't working
+  - Jackett reachability is now published (`state.jackett_ok` in `state_snapshot()` + the `jackett_status` SSE event, from `jackett_health_monitor`). The frontend banner still needs wiring; VLC/qBit reachability not yet surfaced.
 - [/] **10.2** Per-control in-flight indicators for VLC controls: when a request is slow (busy CPU / weak network), show a per-button loading state and ignore further clicks of that same control until it resolves. Other controls remain clickable independently (e.g. clicking volume-up shows it loading while pause stays usable). Applies to pause, seek ±, volume ± / slider, prev / next, stop, retry, audio / subtitle selects, seek bar click, and the skip / resume offer buttons.
 
 ---
@@ -165,6 +169,7 @@ device that quits playback abruptly resumes from the right spot on next play.
 
 - [x] **7.1** Daemonization: `run.py --install` registers a launchd/systemd service for startup launch
 - [x] **7.2** Watchdog: background process monitors VLC, qBit, Jackett; auto-restarts crashed services
+  - **Jackett hardening (v2.9.0):** liveness is now an HTTP probe (`GET /UI/Login`), not a bare port check — a hung Jackett holds the port open while it stops serving. Restart force-stops the wedged service/process (`pre_restart`) before relaunching, since `sc start` is a 1056 no-op on a hung service. `setup.py grant_jackett_service_control()` grants the non-elevated account `sc` start/stop rights (+ `sc failure` recovery) so the watchdog can recover Jackett without a reboot. Mirrored in `run.py` startup and `main.py`'s `jackett_health_monitor` backstop.
 
 ---
 
@@ -205,6 +210,36 @@ Replaces the single-MP4 prep with an HLS bundle so every MKV audio track and eve
 - [x] **16.13** Stream-to-device gated off on macOS hosts: ffmpeg/ffprobe (children of the non-GUI server process) are blocked by macOS TCC from reading `~/Downloads`/`~/Desktop`/`~/Documents` (`Operation not permitted`), so prep always failed at the probe step. `HLS_AVAILABLE = platform.system() != "Darwin"` short-circuits the prep endpoints + job with a clear message, `state_snapshot` exposes `hls_available`, and the UI hides all Prep / On-Device controls (`no-hls` body class) and routes the play chooser straight to VLC.
 - [x] **16.14** Fix: HLS playback stalled with a fatal `fragLoadError` even though the manifest + audio/sub dropdowns loaded — the fmp4 init segment 404'd. Two parts: (a) v3.2.1 pinned `-hls_fmp4_init_filename "init_%v.mp4"` so the init *name* matches the `#EXT-X-MAP:URI=` (ffmpeg's default `%v` expansion didn't); the on-screen alert + console now log the failing URL + HTTP code, which pinpointed it. (b) v3.2.2 fixed the init *location* on Windows: ffmpeg parses the playlist path to decide where to write the init file, and a backslash playlist path misdirected it out of the bundle. Now **every output is a bare filename** and ffmpeg runs with `cwd=<bundle .part dir>` (only `-i` is absolute); `_build_hls_ffmpeg_args` dropped its `out_dir` param. `OFFLINE_CACHE_VERSION` → `v6-hls`. Docs: STREAMING.md + GOTCHAS.md.
 - [ ] **16.10 (deferred)** Render `ass`/`ssa` subtitle styling via [libass.js](https://github.com/libass/libass) so karaoke effects, positioning, and fonts survive into the browser. Adds ~200 KB JS + a WebAssembly font renderer. Currently SSA/ASS text is converted to plain WebVTT, losing styling. Worth doing only if a user actually complains about plain-text subs.
+---
+
+## Milestone 17 — Bidirectional Handoff (TV ⇄ device, time-synced)
+
+Move an in-progress library play between the TV (VLC) and the requesting browser
+in either direction, resuming at the exact same position. Distinct from
+Milestone 11's retired download-to-device "Handoff" — this is a live transfer
+over the Stream-to-Device path.
+
+- [x] **17.1** Server: publish `library_item_id` and the full ordered `library_playlist` in `state_snapshot()` so the client can reconstruct the remaining-playlist tail at handoff time.
+- [x] **17.2** Client (TV → device): `handoffToDevice()` captures VLC's live position (`GET /api/vlc/tracks`), slices the playlist tail from `library_current_file` forward, stops VLC (`POST /api/stop`, 202), and starts the local `<video>` player (`lpPlay`) seeked to the captured time. Gated by `withInflight("handoff")`.
+- [x] **17.3** UI (TV → device): emerald **Device** button in the player footer (next to Stop) + **To Device** tile in the fullscreen controls (next to Stop), both shown only during library playback (`is_library_playback && library_item_id`). Both are hold-to-activate (0.5 s `.hold-btn` fill) so an accidental tap can't pull playback off the TV.
+- [x] **17.3a** Prep gating: the handoff-to-device button greys out (with a "Not prepped for on-device streaming" note) when the current file has no `.offline_cache` MP4 / isn't Safari-native. Readiness from `prepFileState` + a per-file `/prep-status` check (`_handoffReadyState` / `_maybeRefreshHandoffReady`); flips to active once prepped. Tapping while not prepped shows a toast.
+- [x] **17.4** Client (device → TV): `lpHandoffToVlc()` captures the local `<video>` position + remaining playlist tail, stops the device player (flushing progress), and starts VLC at the captured time via `playLibraryFiles` (`POST /api/library/{id}/play` with `seek_first_to`). Gated by `withInflight("handoff_vlc")`.
+- [x] **17.5** UI (device → TV): indigo **To TV** button in the local player's fullscreen header (next to Stop).
+
+---
+
+## Milestone 18 — Machine Reboot & Scheduled Restart (Jackett hard-reset)
+
+A full host reboot is the only reliable cure for some wedged-Jackett states.
+Surfaces both a manual reboot and an automated nightly idle-gated one in the
+admin **System** tab. Requires host auto-login + the installed service for the
+box to come back on its own (documented in README).
+
+- [x] **18.1** Server: `POST /api/admin/reboot` reboots the whole host. `_reboot_machine()` tries a platform command chain (macOS System Events restart / `sudo -n shutdown` / `shutdown`; Linux `systemctl reboot` / sudo / shutdown; Windows `shutdown /r /t 0`), fires ~0.5 s after the response flushes, and logs a hint if it lacks permission.
+- [x] **18.2** Server: `scheduled_reboot_loop` background task + `GET`/`POST /api/admin/scheduled-reboot`. Config in `library.json → settings.scheduled_reboot` (`enabled`, `time` HH:MM, `timezone`, `idle_minutes`). At the configured local time it reboots when idle for `idle_minutes`, else waits and re-checks until idle. Persisted `last_fired` date guards against a post-reboot re-arm loop; saving config resets it.
+- [x] **18.3** Server: idle detection. `track_activity` middleware stamps `state.last_activity` on mutating verbs + `/api/search` (routine GET polling excluded). `_machine_in_use()` also treats live VLC playback/pause of non-background content and any active stream/download as in-use, so a reboot never interrupts watching or a download.
+- [x] **18.4** Admin UI: **Reboot Machine** (confirm-gated) + **Scheduled Restart** panel (enable toggle, time, timezone select, idle window, host-time display) in the System tab.
+- [x] **18.5** README: documents the auto-login + `run.py --install` requirement so the host returns to a running StreamLink after a reboot.
 
 ---
 

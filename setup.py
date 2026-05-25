@@ -67,8 +67,12 @@ def vrun(cmd, **kwargs) -> subprocess.CompletedProcess:
 _STDIN_INTERACTIVE = bool(getattr(sys.stdin, "isatty", lambda: False)())
 
 
-def ask(prompt, default="", secret=False):
-    hint = f"{CYN}{default}{RESET}"
+def ask(prompt, default="", secret=False, show_default=None):
+    # show_default lets a caller display a different hint than the real default
+    # value — used to mask stored secrets in the brackets while still returning
+    # the stored value when the user just presses Enter.
+    shown = show_default if show_default is not None else default
+    hint = f"{CYN}{shown}{RESET}"
     if not _STDIN_INTERACTIVE:
         print(f"  {BOLD}{prompt}{RESET} [{hint}]: (no stdin — using default)")
         return default
@@ -604,6 +608,96 @@ def _find_jackett_install_dir() -> Path | None:
     return None
 
 
+def _jackett_service_sddl() -> str | None:
+    """Return the Jackett service's security descriptor (SDDL), or None."""
+    try:
+        r = vrun(["sc.exe", "sdshow", "Jackett"], timeout=10)
+    except Exception as exc:
+        vlog(f"sc.exe sdshow raised: {exc}")
+        return None
+    out = (r.stdout or "").strip()
+    for line in out.splitlines():
+        line = line.strip()
+        if line.startswith(("D:", "O:")) or "(A;" in line:
+            return line
+    return out or None
+
+
+def grant_jackett_service_control() -> None:
+    """Let the current (non-admin) user start/stop the Jackett service and set
+    SCM crash-recovery, so the watchdog can recover a hung Jackett WITHOUT a UAC
+    prompt or a reboot.
+
+    Without this, a LocalSystem Jackett service can only be controlled by an
+    administrator — so a non-elevated StreamLink watchdog can detect a hung
+    Jackett but not restart it, and the only cure is a reboot. We additively
+    grant Authenticated Users SERVICE_START + SERVICE_STOP via `sc sdset`, and
+    set restart-on-failure actions. Idempotent and best-effort — never fatal.
+    """
+    if SYSTEM != "Windows" or not _jackett_service_installed():
+        return
+
+    header("Jackett Auto-Recovery Permissions")
+
+    GRANT_ACE = "(A;;RPWP;;;AU)"   # Authenticated Users: SERVICE_START + SERVICE_STOP
+    sddl = _jackett_service_sddl()
+    vlog(f"Jackett SDDL: {sddl}")
+    already = bool(sddl and GRANT_ACE in sddl)
+
+    new_sddl: str | None = None
+    if sddl and not already:
+        if "S:" in sddl:
+            d, s = sddl.split("S:", 1)
+            new_sddl = f"{d}{GRANT_ACE}S:{s}"
+        else:
+            new_sddl = f"{sddl}{GRANT_ACE}"
+
+    failure_args = ["reset=", "86400", "actions=",
+                    "restart/5000/restart/5000/restart/5000"]
+
+    if already:
+        ok("This account can already start/stop the Jackett service.")
+        # Refresh crash-recovery actions when we have the rights to do so.
+        if _is_windows_admin():
+            vrun(["sc.exe", "failure", "Jackett", *failure_args])
+        return
+
+    if _is_windows_admin():
+        if new_sddl:
+            r = vrun(["sc.exe", "sdset", "Jackett", new_sddl])
+            if r.returncode == 0:
+                ok("Granted this account permission to start/stop the Jackett service.")
+            else:
+                warn(f"sc.exe sdset Jackett failed (exit {r.returncode}).")
+        r = vrun(["sc.exe", "failure", "Jackett", *failure_args])
+        if r.returncode == 0:
+            ok("Configured Jackett crash-recovery (auto-restart on failure).")
+        return
+
+    # Not admin → apply both in a single elevated shell (one UAC prompt).
+    failure_cmd = "sc failure Jackett reset= 86400 actions= restart/5000/restart/5000/restart/5000"
+    parts = []
+    if new_sddl:
+        parts.append(f'sc sdset Jackett "{new_sddl}"')
+    parts.append(failure_cmd)
+    chained = " & ".join(parts)
+    note("Granting the watchdog permission to restart Jackett without a reboot.")
+    info("Requesting elevation — accept the UAC prompt …")
+    try:
+        import ctypes
+        rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", "cmd.exe", f"/c {chained}", None, 0)
+        if rc <= 32:
+            warn(f"Elevation declined (code {rc}).")
+            note("Run these once in an elevated PowerShell to enable auto-recovery:")
+            if new_sddl:
+                note(f'  sc sdset Jackett "{new_sddl}"')
+            note(f"  {failure_cmd}")
+            return
+        ok("Done — the watchdog can now restart a hung Jackett without admin or a reboot.")
+    except Exception as exc:
+        warn(f"Could not request elevation: {exc}")
+
+
 def install_jackett_service() -> None:
     """Install and start the 'Jackett' Windows service so it runs as a
     background service from boot — the same action as the tray's
@@ -624,6 +718,7 @@ def install_jackett_service() -> None:
             vrun(["sc.exe", "start", "Jackett"], timeout=10)
         except Exception as exc:
             vlog(f"sc.exe start raised: {exc}")
+        grant_jackett_service_control()
         return
 
     jackett_dir = _find_jackett_install_dir()
@@ -719,6 +814,7 @@ def install_jackett_service() -> None:
                 warn(f"sc.exe start Jackett returned {r.returncode}")
         except Exception as exc:
             vlog(f"sc.exe start raised: {exc}")
+        grant_jackett_service_control()
     else:
         warn("Jackett service didn't appear — install may have been declined.")
         note("Open the Jackett tray icon → 'Start background service' manually.")
@@ -835,37 +931,56 @@ def detect_tools() -> dict:
 
 
 # ── Step 4: Interactive configuration ─────────────────────────────────────
-def gather_config() -> dict:
+def gather_config(existing: dict | None = None) -> dict:
     header("Configuration")
-    note("Press Enter to accept the default shown in brackets.")
+    prev = existing or {}
+    if prev:
+        note("Current values are pre-filled — press Enter to keep each one.")
+        note("Reviewing every value here doubles as a quick .env health check.")
+    else:
+        note("Press Enter to accept the default shown in brackets.")
     print()
 
     default_dl = str(Path.home() / "Downloads" / "StreamLink")
 
     cfg: dict[str, str] = {}
 
+    # Plain field: default to the stored value, falling back to the factory default.
+    def ask_field(label, key, factory=""):
+        return ask(label, prev.get(key, factory))
+
+    # Secret field: same defaulting, but never echo the stored value to the
+    # terminal — show a masked placeholder so re-running setup can't leak it.
+    def ask_secret(label, key, factory=""):
+        cur = prev.get(key, factory)
+        if key in prev:
+            shown = "•••••• (Enter = keep)" if cur else "(currently blank)"
+        else:
+            shown = factory
+        return ask(label, cur, secret=True, show_default=shown)
+
     print(f"  {BOLD}Jackett (indexer){RESET}")
-    cfg["INDEXER_URL"]        = ask("URL",               "http://localhost:9117")
-    cfg["INDEXER_API_KEY"]    = ask("API key",           "")
-    cfg["JACKETT_PASSWORD"]   = ask("Admin password (for indexer management, leave blank if none)", "", secret=True)
-    cfg["INDEXER_CATEGORIES"] = ask("Categories (0=all, 2000=Movies, 5000=TV)", "0")
+    cfg["INDEXER_URL"]        = ask_field("URL",     "INDEXER_URL", "http://localhost:9117")
+    cfg["INDEXER_API_KEY"]    = ask_field("API key", "INDEXER_API_KEY", "")
+    cfg["JACKETT_PASSWORD"]   = ask_secret("Admin password (for indexer management, leave blank if none)", "JACKETT_PASSWORD", "")
+    cfg["INDEXER_CATEGORIES"] = ask_field("Categories (0=all, 2000=Movies, 5000=TV)", "INDEXER_CATEGORIES", "0")
     print()
     print(f"  {BOLD}qBittorrent{RESET}")
-    cfg["QBIT_URL"]           = ask("Web UI URL",        "http://localhost:8081")
-    cfg["QBIT_USERNAME"]      = ask("Username",          "admin")
-    cfg["QBIT_PASSWORD"]      = ask("Password",          "adminadmin", secret=True)
-    cfg["QBIT_DOWNLOAD_PATH"] = ask("Download folder",   default_dl)
+    cfg["QBIT_URL"]           = ask_field("Web UI URL", "QBIT_URL", "http://localhost:8081")
+    cfg["QBIT_USERNAME"]      = ask_field("Username",   "QBIT_USERNAME", "admin")
+    cfg["QBIT_PASSWORD"]      = ask_secret("Password",  "QBIT_PASSWORD", "adminadmin")
+    cfg["QBIT_DOWNLOAD_PATH"] = ask_field("Download folder", "QBIT_DOWNLOAD_PATH", default_dl)
     print()
     print(f"  {BOLD}VLC{RESET}")
-    cfg["VLC_URL"]            = ask("HTTP URL",          "http://localhost:8080")
-    cfg["VLC_PASSWORD"]       = ask("Lua HTTP password", "vlcpassword", secret=True)
+    cfg["VLC_URL"]            = ask_field("HTTP URL",          "VLC_URL", "http://localhost:8080")
+    cfg["VLC_PASSWORD"]       = ask_secret("Lua HTTP password", "VLC_PASSWORD", "vlcpassword")
     print()
     print(f"  {BOLD}Buffer thresholds (stream starts when either is met){RESET}")
-    cfg["BUFFER_MIN_MB"]      = ask("Min MB",  "15.0")
-    cfg["BUFFER_MIN_PCT"]     = ask("Min %",   "1.0")
+    cfg["BUFFER_MIN_MB"]      = ask_field("Min MB", "BUFFER_MIN_MB", "15.0")
+    cfg["BUFFER_MIN_PCT"]     = ask_field("Min %",  "BUFFER_MIN_PCT", "1.0")
     print()
     print(f"  {BOLD}Admin panel{RESET}")
-    cfg["ADMIN_PASSWORD"]     = ask("Admin password (leave blank to disable)", "", secret=True)
+    cfg["ADMIN_PASSWORD"]     = ask_secret("Admin password (leave blank to disable)", "ADMIN_PASSWORD", "")
 
     # Warn if qBittorrent and VLC are configured on the same port
     import re as _re
@@ -1138,18 +1253,20 @@ def main():
     install_jackett_service()
     tools = install_smart_skip_deps(tools)
 
+    existing = parse_existing_env() if ENV.exists() else {}
     reuse_env = False
-    if ENV.exists():
+    if existing:
         header("Existing .env detected")
         note(f"Found {ENV}")
+        note("Re-prompting pre-fills each current value (press Enter to keep it).")
         reuse_env = ask_bool("Reuse existing .env without re-prompting?", default=True)
 
     if reuse_env:
-        cfg = parse_existing_env()
+        cfg = existing
         merge_tool_paths(tools)
         ok("Skipped interactive configuration")
     else:
-        cfg = gather_config()
+        cfg = gather_config(existing)
         configure_qbittorrent(cfg)
         write_env(cfg, tools)
 

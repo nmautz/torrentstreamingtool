@@ -90,6 +90,29 @@ def _wait_port(port: int, host: str, timeout: float) -> bool:
     return False
 
 
+def _http_ok(url: str, timeout: float = 4.0) -> bool:
+    """True if `url` returns *any* HTTP response within `timeout`.
+
+    Used instead of a bare TCP check for Jackett. A hung Jackett can keep its
+    listener socket bound (so the port still "connects") while it has stopped
+    serving requests — a port-open check would call that "alive" forever and
+    never restart it. Any HTTP status, even 401/404, proves the web stack is
+    answering; a refused connection, reset, or read timeout means it's wedged.
+    Uses stdlib urllib so this works in the standalone `python3 watchdog.py`
+    path where the venv (and httpx) may not be importable.
+    """
+    import urllib.request
+    import urllib.error
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            resp.read(1)
+            return True
+    except urllib.error.HTTPError:
+        return True
+    except Exception:
+        return False
+
+
 # ── Executable finders (mirrors run.py) ────────────────────────────────────
 def _find(saved_key: str, candidates_by_os: dict, fallback: list[str]) -> str | None:
     saved = _e(saved_key)
@@ -157,6 +180,56 @@ def _start_jackett_service_windows() -> bool:
     return False
 
 
+def _force_stop_jackett_windows() -> None:
+    """Force a hung/zombie Jackett down so it can be cleanly restarted.
+
+    Handles both Windows install models:
+      • LocalSystem **service** — `sc.exe start` is a no-op (1056 ALREADY_RUNNING)
+        on a wedged service, which is why a hung Jackett previously needed a full
+        reboot. We stop it and wait for STOPPED.
+      • **Tray / user process** (no service) — there's nothing to `sc stop`, so we
+        kill the process directly.
+
+    Stopping a LocalSystem service (or killing its process) needs admin rights;
+    if StreamLink isn't elevated this logs a clear hint instead of silently
+    failing — that's the difference between "auto-recovered" and "needs reboot".
+    """
+    q = subprocess.run(["sc.exe", "query", "Jackett"], capture_output=True, text=True)
+    service_exists = q.returncode == 0
+
+    if service_exists:
+        try:
+            r = subprocess.run(["sc.exe", "stop", "Jackett"],
+                               capture_output=True, text=True, timeout=10)
+            out = (r.stdout or "") + (r.stderr or "")
+            log.info("sc.exe stop Jackett → exit=%d", r.returncode)
+            if r.returncode == 5 or "Access is denied" in out:
+                log.warning(
+                    "Access denied stopping the Jackett service — StreamLink is not "
+                    "elevated. Run it as Administrator (or grant this account service "
+                    "start/stop rights), otherwise a hung Jackett can only be cleared "
+                    "by a reboot."
+                )
+        except Exception as exc:
+            log.warning("sc.exe stop Jackett failed: %s", exc)
+        for _ in range(12):
+            qq = subprocess.run(["sc.exe", "query", "Jackett"], capture_output=True, text=True)
+            if "STOPPED" in (qq.stdout or ""):
+                return
+            if _stop_event.wait(1.0):
+                return
+        log.warning("Jackett service did not stop in time — hard-killing the process.")
+
+    # No service, or the service refused to stop: kill the process directly.
+    killed = _kill_by_name("jackett")
+    if killed == 0:
+        log.warning(
+            "No Jackett process could be killed — it may be a LocalSystem service "
+            "this account can't terminate. Re-launch StreamLink as Administrator."
+        )
+    _stop_event.wait(1.0)
+
+
 def _build_jackett_args(bin_path: str):
     """Return the launch command for Jackett — or None when the start was
     handled synchronously here (Windows path)."""
@@ -171,12 +244,16 @@ def _build_jackett_args(bin_path: str):
             for line in q.stderr.strip().splitlines():
                 log.debug("  stderr: %s", line)
         if q.returncode != 0:
+            # No LocalSystem service — launch Jackett as a user process (the
+            # tray/console exe). This is the model the watchdog can fully manage
+            # without elevation, so we start it rather than giving up.
             log.warning(
-                "Jackett Windows service is not installed — sc.exe query returned %d. "
-                "Re-run setup.py from an Administrator PowerShell.", q.returncode
+                "Jackett Windows service not installed — launching %s as a user "
+                "process instead.", bin_path
             )
-            return None
+            return [bin_path]
         r = subprocess.run(["sc.exe", "start", "Jackett"], capture_output=True, text=True, timeout=10)
+        out = (r.stdout or "") + (r.stderr or "")
         log.info("sc.exe start Jackett → exit=%d", r.returncode)
         if r.stdout:
             for line in r.stdout.strip().splitlines():
@@ -184,6 +261,12 @@ def _build_jackett_args(bin_path: str):
         if r.stderr:
             for line in r.stderr.strip().splitlines():
                 log.info("  stderr: %s", line)
+        if r.returncode == 5 or "Access is denied" in out:
+            log.warning(
+                "Access denied starting the Jackett service — StreamLink is not "
+                "elevated. Run it as Administrator (or grant this account service "
+                "start/stop rights) so the watchdog can recover Jackett without a reboot."
+            )
         return None
     return [bin_path, "--NoRestart"]
 
@@ -275,6 +358,8 @@ class ServiceSpec:
         build_args: callable,        # (bin_path: str) -> list[str]
         startup_timeout: float = 30.0,
         back_off: float = 5.0,
+        health_check: callable = None,   # () -> bool; overrides the port check
+        pre_restart: callable = None,    # () -> None; run before (re)launching
     ):
         self.name            = name
         self.port            = port
@@ -283,13 +368,38 @@ class ServiceSpec:
         self.build_args      = build_args
         self.startup_timeout = startup_timeout
         self.back_off        = back_off
+        self.health_check    = health_check
+        self.pre_restart     = pre_restart
         self._failures       = 0
         self._MAX_BACK_OFF   = 120.0
 
     def is_alive(self) -> bool:
+        # When a service supplies a real health check (e.g. an HTTP probe), use
+        # it — a bare TCP port-open can't tell a serving process from a hung one
+        # that still holds the socket. Falls back to the port check otherwise.
+        if self.health_check is not None:
+            return self.health_check()
         return _port_open(self.port, self.host, timeout=0.5)
 
+    def _wait_until_alive(self, timeout: float) -> bool:
+        """Poll is_alive() until True or timeout — honours the stop event so a
+        long Jackett startup wait doesn't block a clean shutdown."""
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            if self.is_alive():
+                return True
+            if _stop_event.wait(0.5):
+                return False
+        return False
+
     def start(self) -> bool:
+        # A hung service can keep its port bound, so simply launching a second
+        # copy would fail to bind. pre_restart forces the old one down first.
+        if self.pre_restart is not None:
+            try:
+                self.pre_restart()
+            except Exception as exc:
+                log.warning("%s pre-restart hook failed: %s", self.name, exc)
         bin_path = self.find_bin()
         if not bin_path:
             log.warning("%s binary not found — cannot start", self.name)
@@ -302,7 +412,10 @@ class ServiceSpec:
         else:
             log.info("Starting %s: %s", self.name, " ".join(str(a) for a in args))
             _launch_bg(args)
-        alive = _wait_port(self.port, self.host, self.startup_timeout)
+        # Wait on the real liveness check, not just the port — for Jackett this
+        # means we wait until it actually serves HTTP, which prevents a tight
+        # restart loop where the port opens before the web stack is ready.
+        alive = self._wait_until_alive(self.startup_timeout)
         if alive:
             log.info("%s is up on port %d", self.name, self.port)
             self._failures = 0
@@ -443,6 +556,17 @@ def _build_specs() -> tuple[list[ServiceSpec], ServiceSpec]:
     jackett_port     = _extract_port(jackett_url, 9117)
     jackett_is_local = jackett_host in ("localhost", "127.0.0.1", "::1")
 
+    # Smart Skip countdown popup: VLC reads this file via a marq sub-source and
+    # renders it bottom-right on the TV. main.py writes "Skipping … in N" here.
+    # Keep these args in sync with main.py's _vlc_marquee_args() and run.py.
+    # A lone space, not "" — marq's getline() treats an empty file as EOF and
+    # logs a read error every refresh tick. A space reads fine and shows nothing.
+    marquee_file = HERE / ".vlc_marquee.txt"
+    try:
+        marquee_file.write_text(" ", encoding="utf-8")
+    except OSError:
+        pass
+
     vlc_spec = ServiceSpec(
         name="VLC",
         port=vlc_port,
@@ -461,6 +585,16 @@ def _build_specs() -> tuple[list[ServiceSpec], ServiceSpec]:
             # desktop and VLC window aren't ready, so we ask VLC to come up
             # fullscreen from the start instead of toggling later.
             "--fullscreen",
+            # Bottom-right opaque countdown marquee (text only — no subtitle box).
+            "--sub-source=marq",
+            f"--marq-file={marquee_file}",
+            "--marq-refresh=200",
+            "--marq-position=10",
+            "--marq-x=50", "--marq-y=50",
+            "--marq-size=48",
+            "--marq-color=16777215",
+            "--marq-opacity=255",
+            "--marq-timeout=0",
         ],
         startup_timeout=20.0,
         back_off=5.0,
@@ -479,14 +613,33 @@ def _build_specs() -> tuple[list[ServiceSpec], ServiceSpec]:
     plain_specs: list[ServiceSpec] = [vlc_spec]
 
     if jackett_is_local:
+        jackett_base = jackett_url.rstrip("/")
+
+        def _jackett_alive() -> bool:
+            # Port must be open AND Jackett must actually answer HTTP. /UI/Login
+            # is served without auth, so any HTTP response means it's healthy.
+            if not _port_open(jackett_port, jackett_host, timeout=0.5):
+                return False
+            return _http_ok(f"{jackett_base}/UI/Login", timeout=4.0)
+
+        def _jackett_force_down() -> None:
+            # Clear a hung/zombie Jackett before relaunching so the port frees.
+            if SYSTEM == "Windows":
+                _force_stop_jackett_windows()
+            else:
+                _kill_by_name("jackett")
+                _stop_event.wait(1.0)
+
         plain_specs.append(ServiceSpec(
             name="Jackett",
             port=jackett_port,
-            host="127.0.0.1",
+            host=jackett_host,
             find_bin=find_jackett,
             build_args=_build_jackett_args,
-            startup_timeout=25.0,
+            startup_timeout=40.0,   # mono/.NET cold start can be slow to serve
             back_off=5.0,
+            health_check=_jackett_alive,
+            pre_restart=_jackett_force_down,
         ))
 
     return plain_specs, qbit_spec
@@ -513,6 +666,36 @@ def start_watchdog() -> threading.Thread:
 def stop_watchdog() -> None:
     """Signal the watchdog loop to exit (used in tests / clean shutdown)."""
     _stop_event.set()
+
+
+def jackett_healthy() -> bool:
+    """True if a local Jackett is actually serving HTTP (not just port-open).
+
+    Returns True for a remote Jackett (we can't manage it, so don't report it as
+    locally unhealthy). Safe to call from the dashboard process.
+    """
+    plain_specs, _ = _build_specs()
+    for spec in plain_specs:
+        if spec.name == "Jackett":
+            return spec.is_alive()
+    return True   # Jackett isn't locally managed (remote URL) — nothing to report
+
+
+def restart_jackett() -> bool:
+    """Force a hung/stopped local Jackett down and start it again.
+
+    Reuses the same force-down + launch + HTTP-readiness wait the watchdog uses.
+    Intended as a backstop the dashboard can call when its own health monitor
+    sees Jackett wedged and no watchdog has recovered it. No-op (returns False)
+    for a remote Jackett.
+    """
+    plain_specs, _ = _build_specs()
+    for spec in plain_specs:
+        if spec.name == "Jackett":
+            log.warning("Manual Jackett restart requested.")
+            return spec.start()
+    log.info("restart_jackett: Jackett is remote / not locally managed — skipping.")
+    return False
 
 
 # ── Standalone entry-point (used by the daemon service) ───────────────────

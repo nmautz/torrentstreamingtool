@@ -53,6 +53,7 @@
 | Field | What it means |
 |-------|---------------|
 | `vpn_secure`, `vpn_status_text` | Set by `vpn_guard`; gates `/api/stream` and `/api/library/download` |
+| `jackett_ok` | Last known Jackett HTTP reachability; set by `jackett_health_monitor`, published in `state_snapshot()` |
 | `active_hash`, `active_title`, `active_file` | The current torrent (stream-now OR library playback) |
 | `stream_status` | `idle` \| `buffering` \| `playing` \| `error` |
 | `progress`, `downloaded_mb`, `total_mb`, `dl_speed_bps`, `ul_speed_bps` | Live torrent stats from qBit |
@@ -67,8 +68,10 @@
 | `vlc_time`, `vlc_duration`, `vlc_volume` | Sampled by `stat_broadcaster` every 2 s |
 | `prepare_hash` | Torrent added by `/api/stream/prepare` pending user file selection — also cleaned up by `/api/stop` |
 | `skip_offer`, `skip_offer_file` | Current intro/credits skip offer (or `#intro-done` / `#credits-done` marker) |
+| `skip_countdown`, `skip_countdown_task` | Active auto-skip countdown `{type, file_path, n}` + its coroutine handle. Drives the on-TV marquee popup; see [ANALYZER.md](ANALYZER.md#auto-skip-countdown-on-tv-marquee) |
 | `resume_offer` | When `resume_mode="prompt"`, a `{position_sec, file_path}` dict |
 | `analysis_jobs` | `{series_key → {status, stage, current, total, message, …}}` |
+| `last_activity` | `time.time()` of the last user-initiated interaction. Stamped by the `track_activity` middleware (mutating verbs + `/api/search`); read by `_machine_in_use()` for the scheduled-reboot idle gate |
 | `sse_queues` | One `asyncio.Queue` per connected client |
 
 ## Background tasks
@@ -76,10 +79,23 @@
 Started in `lifespan` ([main.py:1746](../main.py#L1746)); all run forever until app shutdown.
 
 - **`vpn_guard`** (every 3 s) — runs `mullvad status` via `asyncio.create_subprocess_exec`. On disconnect: kills `qbittorrent` via psutil, sets `vpn_secure=False`, broadcasts `vpn_status`. The kill switch is enforced redundantly by `watchdog.py` at the process level.
+- **`jackett_health_monitor`** (every 20 s) — `GET {INDEXER_URL}/UI/Login` (any HTTP status = serving, since a hung Jackett keeps the port open but stops answering). Updates `state.jackett_ok` and broadcasts `jackett_status` on transitions. As a backstop, if a *local* Jackett stays unreachable for ~2 min it calls `watchdog.restart_jackett()` via `asyncio.to_thread` — primary recovery is the process watchdog (which acts within seconds), so this only fires when no watchdog is running. See [DAEMON_WATCHDOG.md](DAEMON_WATCHDOG.md#jackett-specifics-watchdogpy160) and [GOTCHAS.md](GOTCHAS.md#port-open-is-not-a-jackett-health-check).
 - **`stat_broadcaster`** (every 2 s) — when `stream_status in ("buffering","playing")` polls `qbit_info(active_hash)`. When `playing`, also polls `vlc_status()` for `time`/`length`/`volume`. Always broadcasts `state` with `state_snapshot()`.
 - **`library_download_monitor`** (every 5 s) — for each item with `status="downloading"`, polls qBit; flips to `ready` on `uploading`/`stalledUP`/`pausedUP`/`queuedUP`/`forcedUP`, to `error` on `error`/`missingFiles`. Pushes a per-item `library_progress` event with speed/ETA. Also handles `play_when_ready_*`: auto-plays the item (or a specific file once its progress reaches 1.0) when the trigger fires.
 - **`vlc_progress_tracker`** (every 2 s skip check; 15 s save) — runs only while `library_item_id` is set. Reads current VLC position, finds the matching `skip_data` entry, calls `_maybe_emit_skip_offer` (auto-skip or set `state.skip_offer`). Every 15 s, also writes `position_sec`/`duration_sec`/`completed` into `library.json` for the active profile and broadcasts `progress_saved`.
 - **`background_video_loop`** (every 3 s) — if `settings.background_video` is configured + enabled, `stream_status` is not `buffering`, and VLC reports anything other than `playing`/`paused`, plays the bg file via `_play_background_video()`. Sets `state.background_playing=True`. Naturally replaced by any user `vlc("in_play", …)` — that branch in the `vlc()` helper restores `state.vlc_volume` from `state.user_volume_before_bg` and clears `background_playing`. See [ADMIN.md §5](ADMIN.md) and [LIBRARY_DATA.md](LIBRARY_DATA.md).
+- **`scheduled_reboot_loop`** (every 20 s) — daily idle-gated host reboot. Reads `settings.scheduled_reboot`; once past the configured local time (`_now_in_tz`) and not yet fired today, reboots via `_reboot_machine()` if `_machine_in_use(idle_minutes*60)` is False, else waits `idle_minutes` and re-checks. Persists `last_fired` (the tz date) before rebooting so the machine doesn't re-arm on the way back up and loop. See [ADMIN.md §7](ADMIN.md) and [GOTCHAS.md](GOTCHAS.md#scheduled-reboot-loop-guard).
+
+## Reboot helpers
+
+- **`_reboot_machine(delay)`** — sleeps `delay` (lets the HTTP response flush), then runs `_do_reboot_blocking()` via `asyncio.to_thread`. The latter tries `_reboot_commands()` (platform-specific chain — macOS System Events / `sudo -n shutdown` / `shutdown`; Linux `systemctl reboot` / sudo / shutdown; Windows `shutdown /r /t 0`) until one returns rc 0.
+- **`_machine_in_use(window_secs)`** — True if live VLC plays/pauses non-background content, a stream is `buffering`/`playing`, `downloading_count > 0`, or `state.last_activity` is within `window_secs`.
+- **`_now_in_tz(tzname)`** — current `datetime` in an IANA tz via `zoneinfo` (lazy import); empty/unknown tz → system local.
+
+## Middleware
+
+- **`admin_https_redirect`** — 301s plain-HTTP `/admin*` and `/api/admin/*` to HTTPS (port 443).
+- **`track_activity`** — stamps `state.last_activity = time.time()` on mutating verbs (POST/PUT/PATCH/DELETE) and `/api/search`, excluding the reboot/shutdown control endpoints (`_ACTIVITY_IGNORE_PATHS`). Routine GET polling (state/events/version/prep-status) deliberately does **not** count, so background polling never blocks a scheduled reboot.
 
 ## Pipelines
 

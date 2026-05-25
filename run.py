@@ -112,6 +112,25 @@ def wait_for_port(port: int, timeout: float, label: str, host: str = "127.0.0.1"
     return False
 
 
+def http_ok(url: str, timeout: float = 4.0) -> bool:
+    """True if `url` returns any HTTP response within `timeout`.
+
+    Stronger than a port check for Jackett: a hung Jackett keeps its listener
+    socket open while no longer serving, so a bare port-open would wrongly
+    report it reachable. Any HTTP status proves the web stack is answering.
+    """
+    import urllib.request
+    import urllib.error
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp:
+            resp.read(1)
+            return True
+    except urllib.error.HTTPError:
+        return True
+    except Exception:
+        return False
+
+
 def extract_port(url: str, default: int) -> int:
     m = re.search(r":(\d+)", url)
     return int(m.group(1)) if m else default
@@ -277,6 +296,18 @@ def start_vlc() -> bool:
         kill_by_name("VLC")
         time.sleep(1.5)
 
+    # Smart Skip countdown popup: VLC reads this file via a marq sub-source and
+    # renders it bottom-right on the TV. main.py writes "Skipping … in N" here.
+    # Create it empty so marq has something to open at launch. Keep the args in
+    # sync with main.py's _vlc_marquee_args() and watchdog.py's vlc_spec.
+    # A lone space, not "" — marq's getline() treats an empty file as EOF and
+    # logs a read error every refresh tick. A space reads fine and shows nothing.
+    marquee_file = HERE / ".vlc_marquee.txt"
+    try:
+        marquee_file.write_text(" ", encoding="utf-8")
+    except OSError:
+        pass
+
     info(f"Starting VLC (Lua HTTP on port {vlc_port}) …")
     launch_bg([
         vlc_bin,
@@ -289,6 +320,16 @@ def start_vlc() -> bool:
         # (and any subsequent playback) covers the screen reliably, even at
         # boot when the post-play HTTP fullscreen toggle can race the desktop.
         "--fullscreen",
+        # Bottom-right opaque countdown marquee (text only — no subtitle box).
+        "--sub-source=marq",
+        f"--marq-file={marquee_file}",
+        "--marq-refresh=200",
+        "--marq-position=10",
+        "--marq-x=50", "--marq-y=50",
+        "--marq-size=48",
+        "--marq-color=16777215",
+        "--marq-opacity=255",
+        "--marq-timeout=0",
     ])
     return wait_for_port(vlc_port, 20.0, "VLC")
 
@@ -331,6 +372,27 @@ def _start_jackett_service_windows() -> bool:
     return False
 
 
+def _force_stop_jackett_local() -> None:
+    """Force a hung local Jackett down so the relaunch below can re-bind 9117.
+
+    On Windows `sc.exe start` is a no-op (1056) on a wedged service, so we stop
+    it (waiting for STOPPED, hard-killing if it won't die). Elsewhere we kill
+    the process directly.
+    """
+    if SYSTEM == "Windows":
+        vrun(["sc.exe", "stop", "Jackett"], timeout=10)
+        for _ in range(12):
+            q = vrun(["sc.exe", "query", "Jackett"])
+            if q.returncode != 0 or "STOPPED" in (q.stdout or ""):
+                return
+            time.sleep(1)
+        warn("Jackett service did not stop — hard-killing the process")
+        kill_by_name("jackett")
+    else:
+        kill_by_name("jackett")
+    time.sleep(1)
+
+
 def start_jackett() -> bool:
     indexer_url  = e("INDEXER_URL", "http://localhost:9117")
     jackett_port = extract_port(indexer_url, 9117)
@@ -340,7 +402,11 @@ def start_jackett() -> bool:
     jackett_host = m.group(1) if m else "127.0.0.1"
     is_local     = jackett_host in ("localhost", "127.0.0.1", "::1")
 
-    if port_open(jackett_port, jackett_host):
+    # "Reachable" means actually serving HTTP, not just an open port — a hung
+    # Jackett keeps the port bound but stops answering, and that's the failure
+    # mode the watchdog must be able to recover from.
+    base = indexer_url.rstrip("/")
+    if http_ok(f"{base}/UI/Login"):
         prefix = "Remote Jackett" if not is_local else "Jackett"
         ok(f"{prefix} reachable at {indexer_url}")
         return True
@@ -350,6 +416,12 @@ def start_jackett() -> bool:
         warn(f"Jackett not reachable at {indexer_url}")
         warn("Start Jackett on the remote machine, then retry")
         return False
+
+    # Local instance that isn't serving. If the port is still held open it's a
+    # hung process — clear it first so the launch below can take the port.
+    if port_open(jackett_port, jackett_host):
+        warn("Jackett port is open but not serving — forcing a restart")
+        _force_stop_jackett_local()
 
     # Local instance — try to launch it
     jackett_bin = find_jackett()
@@ -699,6 +771,64 @@ def start_mdns(lan_ip: str, http_port: int, https_port: int = 0):
         return None
 
 
+def start_mdns_resilient(http_port: int, https_port: int = 0,
+                         poll_interval: float = 5.0, watch_interval: float = 30.0):
+    """Register remote.local via mDNS, resilient to a late or changing LAN IP.
+
+    A one-shot ``start_mdns()`` registers whatever ``get_local_ip()`` returns
+    *right now*. That's fine interactively (the network is already up), but the
+    installed launchd/systemd service starts at login *before* Wi-Fi has
+    associated — ``get_local_ip()`` returns "" and the registration is silently
+    skipped, so ``remote.local`` never resolves until the next manual relaunch
+    even though uvicorn (bound to ``0.0.0.0``) becomes reachable by IP the
+    moment the network comes up. That's why "remote.local works on first
+    install but not after a reboot." See docs/GOTCHAS.md.
+
+    This runs a daemon thread that waits for a LAN IP, registers, then
+    re-registers if the IP later changes (DHCP lease, network switch). It polls
+    every ``poll_interval`` until registered, then every ``watch_interval`` to
+    watch for changes. Returns a handle with ``.close()`` for shutdown cleanup;
+    safe to call even when zeroconf is missing.
+    """
+    import threading
+
+    class _MdnsKeepalive:
+        def __init__(self) -> None:
+            self._zc = None
+            self._ip = ""
+            self._stop = threading.Event()
+            self._thread = threading.Thread(
+                target=self._run, name="mdns-keepalive", daemon=True)
+            self._thread.start()
+
+        def _run(self) -> None:
+            while not self._stop.is_set():
+                ip = get_local_ip()
+                if ip and ip != self._ip:
+                    if self._zc is not None:
+                        try:
+                            self._zc.close()
+                        except Exception:
+                            pass
+                        self._zc = None
+                    zc = start_mdns(ip, http_port, https_port)
+                    if zc is not None:
+                        self._zc = zc
+                        self._ip = ip
+                # poll quickly until registered, then just watch for IP changes
+                self._stop.wait(watch_interval if self._zc is not None else poll_interval)
+
+        def close(self) -> None:
+            self._stop.set()
+            if self._zc is not None:
+                try:
+                    self._zc.close()
+                except Exception:
+                    pass
+
+    return _MdnsKeepalive()
+
+
 # ── Main ───────────────────────────────────────────────────────────────────
 def main():
     # ── Handle --install / --uninstall / --status flags (7.1) ────────────
@@ -838,9 +968,11 @@ def main():
             setup_windows_firewall(ADMIN_PORT)
         print()
 
-    # Register mDNS hostname (remote.local) for HTTP + HTTPS
+    # Register mDNS hostname (remote.local) for HTTP + HTTPS. Resilient: waits
+    # for the LAN IP and re-registers if it changes, so it works even when
+    # launched before Wi-Fi is up. See start_mdns_resilient.
     print(f"{BOLD}  mDNS{RESET}")
-    _zc = start_mdns(lan_ip, PORT, ADMIN_PORT if has_cert else 0) if lan_ip else None
+    _zc = start_mdns_resilient(PORT, ADMIN_PORT if has_cert else 0)
     print()
 
     # ── HTTPS admin process (port 443) ────────────────────────────────────

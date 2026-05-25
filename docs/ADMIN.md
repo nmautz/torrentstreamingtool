@@ -103,9 +103,40 @@ For each profile:
 
 ### 7. System
 
-Single destructive action: **Shut Down Server**. Posts to `POST /api/admin/shutdown`, which finds every `uvicorn main:app` process (both the HTTP listener and, when SSL certs exist, the HTTPS sibling) and sends `SIGTERM`. Sibling processes are signalled first so the admin process stays alive long enough to terminate the others; a 3 s `os._exit(0)` fallback handles the case where uvicorn ignores SIGTERM. Once the HTTP uvicorn exits, `run.py`'s `finally` block at [run.py:873](../run.py#L873) cleans up the HTTPS subprocess and the mDNS responder.
+Three controls: **Shut Down Server**, **Reboot Machine**, and **Scheduled Restart**.
+
+#### Shut Down Server
+
+Posts to `POST /api/admin/shutdown`, which finds every `uvicorn main:app` process (both the HTTP listener and, when SSL certs exist, the HTTPS sibling) and sends `SIGTERM`. Sibling processes are signalled first so the admin process stays alive long enough to terminate the others; a 3 s `os._exit(0)` fallback handles the case where uvicorn ignores SIGTERM. Once the HTTP uvicorn exits, `run.py`'s `finally` block at [run.py:873](../run.py#L873) cleans up the HTTPS subprocess and the mDNS responder.
 
 Note: this only stops the StreamLink web server. qBittorrent, Jackett, and VLC keep running — they are launched separately and are not children of the FastAPI process. Use the host's process manager to stop those if needed.
+
+#### Reboot Machine
+
+Posts to `POST /api/admin/reboot`, which restarts the **whole host computer**, not just the web server. This exists as a hard reset for a wedged Jackett (some hung states only clear on reboot). `_reboot_machine()` ([main.py](../main.py)) tries platform-appropriate commands in order and fires ~0.5 s after the response flushes:
+
+| Platform | Commands tried (first that succeeds wins) |
+|----------|--------------------------------------------|
+| macOS    | `osascript … System Events … restart` (no sudo from a launchd user agent) → `sudo -n shutdown -r now` → `shutdown -r now` |
+| Linux    | `systemctl reboot` → `sudo -n shutdown -r now` → `shutdown -r now` |
+| Windows  | `shutdown /r /t 0` |
+
+For the server to come back automatically the host needs **OS auto-login** plus the **system service** installed (`run.py --install`) — see the README. If every command fails (no reboot permission), it logs an actionable hint.
+
+#### Scheduled Restart
+
+A daily, idle-gated reboot. Config persists under `library.json → settings.scheduled_reboot` (`enabled`, `time` HH:MM, `timezone` IANA name, `idle_minutes`, plus an internal `last_fired` date). Driven by the `scheduled_reboot_loop` background task ([main.py](../main.py), registered in `lifespan`):
+
+1. At/after the configured local time (computed via `_now_in_tz`), if it hasn't already fired today, check `_machine_in_use(idle_minutes * 60)`.
+2. **Idle** → write `last_fired = today` (loop guard), then `_reboot_machine()`.
+3. **In use** → wait `idle_minutes` and re-check, repeating until idle.
+
+"In use" = live VLC playback/pause of non-background content, an active stream (`stream_status ∈ buffering|playing`), a running download (`downloading_count > 0`), or a user interaction within the window. User interactions are stamped onto `state.last_activity` by the `track_activity` middleware (mutating verbs + `/api/search`; routine GET polling is ignored).
+
+The persisted `last_fired` date is what stops a just-rebooted machine from re-arming and looping (it comes back up past the scheduled time, sees `last_fired == today`, and stands down until tomorrow). Saving new config clears `last_fired` so a freshly-set time can arm the same day.
+
+- `GET /api/admin/scheduled-reboot` → config + `now` (host time in the configured tz, for display).
+- `POST /api/admin/scheduled-reboot` → `{enabled, time, timezone, idle_minutes}`. Validates HH:MM, clamps `idle_minutes` to 1–720, resets `last_fired`.
 
 ## Server endpoints (admin)
 
