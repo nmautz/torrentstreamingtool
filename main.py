@@ -185,7 +185,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.3.0"
+UI_VERSION = "3.4.3"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -3436,6 +3436,25 @@ async def set_file_priority_for_item(item_id: str, req: FilePriorityReq) -> JSON
     return JSONResponse({"ok": True, "updated": len(indices)})
 
 
+async def _vlc_wait_until_ready(timeout: float = 20.0) -> bool:
+    """Poll VLC until it has actually opened the current file, then return True.
+
+    "Ready" = VLC reports a playing/paused state AND a non-zero `length`. The
+    duration only becomes known once VLC's demuxer is up, which is precisely the
+    moment a `seek` will take effect. We poll fast (every 0.2 s) so the resume
+    seek lands as soon as VLC is ready instead of after a blind fixed wait — on
+    a local file that's typically well under a second, but the loop still waits
+    the full time a slow open needs so the seek doesn't get dropped on the floor.
+    """
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        vs = await vlc_status()
+        if vs and vs.get("state") in ("playing", "paused") and float(vs.get("length", 0) or 0) > 0:
+            return True
+        await asyncio.sleep(0.2)
+    return False
+
+
 async def _library_play_launch(
     playlist: list[str],
     item_id: str,
@@ -3466,18 +3485,40 @@ async def _library_play_launch(
 
         asyncio.create_task(vlc_focus_and_fullscreen())
 
+        # These run detached so the seek can fire in parallel with the enqueue
+        # below. They outlive a cancelled _library_play_launch, so each re-checks
+        # state.library_current_file before touching VLC — a newer play (or
+        # prev/next) moves that pointer and the stale resume bails instead of
+        # seeking the wrong file.
+        expected_file = playlist[0]
         if seek_sec and seek_sec > 5:
             if resume_mode == "auto":
-                async def _delayed_seek(s: float) -> None:
-                    await asyncio.sleep(3)
-                    await vlc("seek", val=str(int(s)))
-                asyncio.create_task(_delayed_seek(seek_sec))
+                async def _resume_seek(s: float) -> None:
+                    target = int(s)
+                    # Wait until VLC has the file open, then seek straight away.
+                    await _vlc_wait_until_ready()
+                    if state.library_current_file != expected_file:
+                        return
+                    await vlc("seek", val=str(target))
+                    # VLC occasionally ignores a seek issued the instant the
+                    # demuxer comes up. Re-issue once if we're still parked near
+                    # the start a moment later (guarded so a user who manually
+                    # seeks forward in this window isn't yanked back).
+                    await asyncio.sleep(0.6)
+                    if state.library_current_file != expected_file:
+                        return
+                    vs = await vlc_status()
+                    if vs and float(vs.get("time", 0) or 0) < target - 15:
+                        await vlc("seek", val=str(target))
+                asyncio.create_task(_resume_seek(seek_sec))
             elif resume_mode == "prompt":
-                async def _delayed_resume_offer(s: float, fp: str, iid: str, pl: list) -> None:
-                    await asyncio.sleep(3)
+                async def _resume_offer(s: float, fp: str, iid: str, pl: list) -> None:
+                    await _vlc_wait_until_ready()
+                    if state.library_current_file != expected_file:
+                        return
                     state.resume_offer = {"position_sec": s, "file_path": fp, "item_id": iid, "playlist": pl}
                     await broadcast("state", state_snapshot())
-                asyncio.create_task(_delayed_resume_offer(seek_sec, playlist[0], item_id, playlist))
+                asyncio.create_task(_resume_offer(seek_sec, playlist[0], item_id, playlist))
 
         asyncio.create_task(_apply_track_prefs(item_id, profile_id, playlist[0], delay=3.5))
 

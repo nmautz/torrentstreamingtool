@@ -21,6 +21,10 @@ See `get_tracks()` ([main.py:2799](../main.py#L2799)) — `es_id = int(key.split
 
 `val=N` with no suffix is interpreted as a **0–1 fraction**, not seconds. Don't confuse them.
 
+### Resume seek must wait for VLC to open the file — poll, don't sleep
+
+A `seek` issued right after `in_play` is silently dropped: VLC can't honour it until its demuxer is up, which is when `status.json`'s `length` becomes non-zero. The resume path therefore **polls** via `_vlc_wait_until_ready()` (state `playing`/`paused` **and** `length > 0`, every 0.2 s) and seeks the instant VLC is ready, instead of the old blind `asyncio.sleep(3)`. On a local file VLC opens in well under a second, so the old fixed wait left the user staring at 0:00 for ~3 s before the jump; a slow open could miss the 3 s window entirely and never resume. `_library_play_launch` re-issues the seek **once** (guarded: only if `time` is still >15 s behind target) because VLC occasionally ignores a seek fired the very moment the demuxer comes up. Don't revert this to a fixed sleep — and if you add another "do X a few seconds after `in_play`" path (track prefs, marquee, etc.), prefer the same ready-poll over a magic delay. The `resume_mode="prompt"` offer uses the same gate so it appears as soon as playback is live.
+
 ### File path → URI
 
 Always use `Path(p).resolve().as_uri()` when sending to VLC. This:
