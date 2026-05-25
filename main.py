@@ -293,6 +293,8 @@ class AppState:
     background_playing: bool = False                      # True when the idle background video is the active VLC playlist
     user_volume_before_bg: int = 100                      # snapshot of state.vlc_volume taken when bg first took over
     last_activity: float = 0.0                            # time.time() of last user-initiated interaction (drives scheduled-reboot idle check)
+    prep_paused: bool = False                             # True ⇒ bulk stream-prep jobs hold (set by the non-admin Pause control / overnight window end)
+    overnight_active: bool = False                        # True while inside the admin's overnight auto-prep window (in-memory window membership)
     sse_queues: list = field(default_factory=list)
 
 
@@ -387,6 +389,8 @@ def state_snapshot() -> dict:
         "analysis_jobs": state.analysis_jobs,
         # False on macOS hosts — the UI hides stream-to-device / Prep affordances.
         "hls_available": HLS_AVAILABLE,
+        # True ⇒ bulk stream-prep is paused (drives the global prep bar's Resume control).
+        "prep_paused": state.prep_paused,
     }
 
 
@@ -1726,6 +1730,44 @@ def _scheduled_reboot_cfg(lib: dict) -> dict:
     }
 
 
+def _overnight_prep_cfg(lib: dict) -> dict:
+    """Read settings.overnight_prep (auto stream-prep window) with defaults."""
+    cfg = (lib.get("settings", {}) or {}).get("overnight_prep") or {}
+    on_end = str(cfg.get("on_end", "pause"))
+    if on_end not in ("pause", "continue"):
+        on_end = "pause"
+    return {
+        "enabled":  bool(cfg.get("enabled", False)),
+        "start":    str(cfg.get("start", "02:00")),
+        "end":      str(cfg.get("end", "06:00")),
+        "timezone": str(cfg.get("timezone", "America/Los_Angeles")),
+        "on_end":   on_end,
+    }
+
+
+def _hhmm_to_min(s: str) -> Optional[int]:
+    """'HH:MM' → minutes-since-midnight, or None if malformed."""
+    try:
+        h, m = s.split(":")
+        h, m = int(h), int(m)
+    except (ValueError, AttributeError):
+        return None
+    if 0 <= h <= 23 and 0 <= m <= 59:
+        return h * 60 + m
+    return None
+
+
+def _in_overnight_window(now: datetime, start_min: int, end_min: int) -> bool:
+    """True if `now` falls inside [start, end). Handles windows that wrap past
+    midnight (e.g. 23:00–06:00). A zero-length window (start == end) is never in."""
+    cur = now.hour * 60 + now.minute
+    if start_min == end_min:
+        return False
+    if start_min < end_min:
+        return start_min <= cur < end_min
+    return cur >= start_min or cur < end_min
+
+
 async def scheduled_reboot_loop() -> None:
     """Daily scheduled host reboot with an idle guard.
 
@@ -1789,6 +1831,52 @@ async def scheduled_reboot_loop() -> None:
             raise
         except Exception as exc:
             print(f"[reboot] scheduled_reboot_loop error: {exc}")
+
+
+async def overnight_prep_loop() -> None:
+    """Auto-prep the whole library for streaming during an admin-defined nightly
+    window, when the heavy ffmpeg load won't bother anyone.
+
+    On entering the window: clear any pause and queue a bulk HLS-prep job for
+    every un-prepped library file. On leaving the window: if `on_end == "pause"`
+    the queue holds (the in-flight file finishes gracefully, the rest wait until
+    the next window); if `on_end == "continue"` it runs to completion past the
+    window. Window membership is tracked in-memory (`state.overnight_active`), so
+    entry/exit each fire once; a mid-window restart re-detects "in window" and
+    re-enqueues, which is idempotent. See _enqueue_library_prep / _pause_prep."""
+    while True:
+        await asyncio.sleep(30)
+        try:
+            cfg = _overnight_prep_cfg(await get_library())
+            if not cfg["enabled"]:
+                if state.overnight_active:
+                    state.overnight_active = False
+                continue
+
+            start_min = _hhmm_to_min(cfg["start"])
+            end_min   = _hhmm_to_min(cfg["end"])
+            if start_min is None or end_min is None:
+                continue
+
+            now = _now_in_tz(cfg["timezone"])
+            in_window = _in_overnight_window(now, start_min, end_min)
+
+            if in_window and not state.overnight_active:
+                state.overnight_active = True
+                _resume_prep()   # clear any prior pause + re-spawn paused jobs
+                n = await _enqueue_library_prep()
+                print(f"[overnight] window open — queued {n} file(s) for stream-prep")
+            elif not in_window and state.overnight_active:
+                state.overnight_active = False
+                if cfg["on_end"] == "pause":
+                    _pause_prep(kill=False)   # graceful: let the current file finish
+                    print("[overnight] window closed — pausing remaining prep")
+                else:
+                    print("[overnight] window closed — continuing until prep finishes")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[overnight] overnight_prep_loop error: {exc}")
 
 
 # ── Background Task: State Broadcaster ───────────────────────────────────────
@@ -2827,10 +2915,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     bg_loop     = asyncio.create_task(background_video_loop())
     jackett_mon = asyncio.create_task(jackett_health_monitor())
     reboot_loop = asyncio.create_task(scheduled_reboot_loop())
+    overnight_loop = asyncio.create_task(overnight_prep_loop())
 
     yield
 
-    for t in (guard, broadcaster, dl_monitor, vlc_tracker, bg_loop, jackett_mon, reboot_loop):
+    for t in (guard, broadcaster, dl_monitor, vlc_tracker, bg_loop, jackett_mon,
+              reboot_loop, overnight_loop):
         t.cancel()
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
@@ -2949,6 +3039,20 @@ class ScheduledRebootReq(BaseModel):
     time: str = "00:00"                       # local HH:MM in `timezone`
     timezone: str = "America/Los_Angeles"     # IANA name; "" = system local
     idle_minutes: int = 15                     # idle window before a reboot fires
+
+
+class OvernightPrepReq(BaseModel):
+    enabled: bool = False
+    start: str = "02:00"                       # local HH:MM in `timezone` — window opens
+    end: str = "06:00"                         # local HH:MM in `timezone` — window closes
+    timezone: str = "America/Los_Angeles"     # IANA name; "" = system local
+    on_end: str = "pause"                      # "pause" ⇒ stop at window end · "continue" ⇒ run to completion
+
+
+class PrepPauseReq(BaseModel):
+    # True ⇒ terminate the file ffmpeg is encoding right now (instant relief, partial
+    # work is discarded); False ⇒ let the in-flight file finish, then hold the rest.
+    kill: bool = False
 
 
 class MetadataRefreshReq(BaseModel):
@@ -5166,6 +5270,58 @@ async def admin_set_scheduled_reboot(
     return JSONResponse({"ok": True, **cfg})
 
 
+@app.get("/api/admin/overnight-prep")
+async def admin_get_overnight_prep(request: Request) -> JSONResponse:
+    """Return the overnight auto-prep config + the host's current time in the
+    configured timezone, and whether the window is open right now."""
+    _require_admin(request)
+    cfg = _overnight_prep_cfg(await get_library())
+    now = _now_in_tz(cfg["timezone"])
+    cfg["now"] = now.strftime("%Y-%m-%d %H:%M %Z").strip()
+    s_min, e_min = _hhmm_to_min(cfg["start"]), _hhmm_to_min(cfg["end"])
+    cfg["in_window"] = bool(
+        cfg["enabled"] and s_min is not None and e_min is not None
+        and _in_overnight_window(now, s_min, e_min)
+    )
+    cfg["paused"] = state.prep_paused
+    return JSONResponse(cfg)
+
+
+@app.post("/api/admin/overnight-prep")
+async def admin_set_overnight_prep(
+    request: Request, body: OvernightPrepReq,
+) -> JSONResponse:
+    """Save the overnight auto-prep config. Validates both HH:MM times and the
+    on_end mode. Re-evaluates the window immediately so a change takes effect on
+    the next scheduler tick without waiting for a fresh entry/exit transition."""
+    _require_admin(request)
+
+    s_min = _hhmm_to_min(body.start)
+    e_min = _hhmm_to_min(body.end)
+    if s_min is None or e_min is None:
+        raise HTTPException(400, "start and end must be HH:MM (24-hour), e.g. 02:00")
+    if s_min == e_min:
+        raise HTTPException(400, "start and end can't be the same time (empty window).")
+    on_end = body.on_end if body.on_end in ("pause", "continue") else "pause"
+
+    lib = await get_library()
+    op = lib.setdefault("settings", {}).setdefault("overnight_prep", {})
+    op["enabled"]  = bool(body.enabled)
+    op["start"]    = f"{s_min // 60:02d}:{s_min % 60:02d}"
+    op["end"]      = f"{e_min // 60:02d}:{e_min % 60:02d}"
+    op["timezone"] = body.timezone.strip()
+    op["on_end"]   = on_end
+    await put_library(lib)
+
+    # Reset in-memory window membership so the loop re-detects entry/exit against
+    # the new config on its next tick (and applies the new on_end on exit).
+    state.overnight_active = False
+
+    cfg = _overnight_prep_cfg(lib)
+    cfg["now"] = _now_in_tz(cfg["timezone"]).strftime("%Y-%m-%d %H:%M %Z").strip()
+    return JSONResponse({"ok": True, **cfg})
+
+
 # ── Routes: Idle Background Video ─────────────────────────────────────────────
 
 @app.get("/api/admin/background-video")
@@ -5848,6 +6004,15 @@ async def _run_offline_job(job_id: str) -> None:
             job["progress"] = 1.0
             job["status"]   = "done"
             return
+        # Global pause gate. A bulk ("Prep for later" / overnight) job that reaches
+        # the head of the queue while prep is paused marks itself "paused" and
+        # EXITS — releasing the single concurrency slot so an interactive
+        # play-on-device prep can still run. _resume_prep() re-spawns this worker
+        # when the user (or the overnight window) resumes. Interactive jobs ignore
+        # the gate entirely. See PrepPauseReq / _pause_prep / _resume_prep.
+        if job.get("queue") == "bulk" and state.prep_paused:
+            job["status"] = "paused"
+            return
         job["status"] = "processing"
         # Re-baseline started_at to when the work actually begins so per-job
         # ETAs reflect real ffmpeg throughput, not queue wait time.
@@ -5921,6 +6086,8 @@ async def _run_offline_job(job_id: str) -> None:
                 stderr=asyncio.subprocess.PIPE,
                 **_FFMPEG_SUBPROCESS_KW,
             )
+            # Expose the handle so _pause_prep(kill=True) can terminate this encode.
+            job["_proc"] = proc
 
             # Drain stderr concurrently into a bounded buffer. Two reasons:
             # (1) ffmpeg with -nostats still writes stream mapping, warnings and
@@ -5981,7 +6148,18 @@ async def _run_offline_job(job_id: str) -> None:
                 except (asyncio.TimeoutError, asyncio.CancelledError):
                     t.cancel()
 
+            job["_proc"] = None
             if proc.returncode != 0:
+                # Did _pause_prep(kill=True) terminate us on purpose? If so, this
+                # isn't a real failure — re-queue the job as "paused" (it restarts
+                # from scratch on resume; HLS prep can't checkpoint mid-file) and
+                # don't surface a spurious error.
+                if job.pop("_paused_kill", False):
+                    job["status"] = "paused"
+                    job["progress"] = 0.0
+                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                    hls_log.info("job %s PAUSED (encode terminated by user)", job_id)
+                    return
                 err = "\n".join(stderr_tail).strip()
                 elapsed = time.time() - job["started_at"]
                 hls_log.error(
@@ -6070,6 +6248,84 @@ async def _run_offline_job(job_id: str) -> None:
             shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
+def _pause_prep(kill: bool) -> int:
+    """Pause bulk stream-prep. Sets the global gate so no further bulk job starts.
+
+    kill=False ("Finish current file, then halt") — the file ffmpeg is encoding
+    right now runs to completion; every queued file then holds at the gate.
+    kill=True ("Stop now") — the in-flight bulk encode is terminated immediately
+    for instant relief; it restarts from scratch on resume (HLS prep can't
+    checkpoint mid-file). Interactive play-on-device encodes are never killed.
+
+    Returns the number of encodes terminated.
+    """
+    state.prep_paused = True
+    killed = 0
+    if kill:
+        for j in _offline_jobs.values():
+            if j.get("queue") != "bulk" or j.get("status") != "processing":
+                continue
+            proc = j.get("_proc")
+            if proc is not None and proc.returncode is None:
+                j["_paused_kill"] = True   # tells _run_offline_job this was intentional
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+                killed += 1
+    return killed
+
+
+def _resume_prep() -> int:
+    """Clear the global pause gate and re-spawn a worker for every paused job.
+
+    Paused jobs exited their task at the gate (so they didn't hold the
+    concurrency slot), so resuming means creating fresh `_run_offline_job`
+    tasks for them. Returns how many were re-queued.
+    """
+    state.prep_paused = False
+    n = 0
+    for jid, j in list(_offline_jobs.items()):
+        if j.get("status") == "paused":
+            j["status"] = "pending"
+            j["_proc"] = None
+            j.pop("_paused_kill", None)
+            asyncio.create_task(_run_offline_job(jid))
+            n += 1
+    return n
+
+
+async def _enqueue_library_prep() -> int:
+    """Queue a bulk HLS-prep job for every un-prepped video file in the library.
+
+    Used by the overnight auto-prep window. Idempotent: `_maybe_start_prep_job`
+    skips files already cached or already queued, so re-running (e.g. on a
+    mid-window restart) only adds genuinely-new work. Returns the count of files
+    that still need prep (newly-queued + already in flight).
+    """
+    if not HLS_AVAILABLE:
+        return 0
+    lib = await get_library()
+    queued = 0
+    for item in lib.get("items", []):
+        for f in item.get("files", []):
+            p = Path(f.get("path", ""))
+            if p.suffix.lower() not in VIDEO_EXTS:
+                continue
+            try:
+                if not p.exists():
+                    continue
+            except OSError:
+                continue
+            st = await _maybe_start_prep_job(p, item.get("id", ""))
+            if st.get("status") in ("processing", "pending", "paused"):
+                queued += 1
+        # Yield to the event loop between items so a large library doesn't stall
+        # the scheduler tick while it stats every file.
+        await asyncio.sleep(0)
+    return queued
+
+
 def _read_meta(out_dir: Path) -> dict:
     try:
         return json.loads((out_dir / "meta.json").read_text())
@@ -6112,6 +6368,10 @@ def _saved_local_tracks(item: dict, profile_id: str, file_path: str) -> dict:
 class OfflinePrepareReq(BaseModel):
     file_path: str
     profile_id: str = ""   # Optional: when set, response includes saved track picks.
+    # True ⇒ this is a "Prep for later" request (per-row Prep button / bulk prep) and
+    # the job honors the global pause. False (default) ⇒ interactive play-on-device, which
+    # must run even while bulk prep is paused so a user can still watch on demand.
+    bulk: bool = False
 
 
 @app.post("/api/library/{item_id}/offline-prepare")
@@ -6162,10 +6422,18 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
     # Coalesce: if a job for this exact source is already running, return its id.
     existing = next(
         (j for j in _offline_jobs.values()
-         if j["src"] == str(src) and j["status"] in ("pending", "processing")),
+         if j["src"] == str(src) and j["status"] in ("pending", "processing", "paused")),
         None,
     )
     if existing:
+        # An interactive (play-now) request must not be left stuck behind a paused
+        # bulk job — promote it to interactive so the pause gate lets it run.
+        if not req.bulk and existing.get("queue") == "bulk":
+            existing["queue"] = "interactive"
+            if existing.get("status") == "paused":
+                existing["status"] = "pending"
+                existing["_proc"] = None
+                asyncio.create_task(_run_offline_job(existing["id"]))
         return JSONResponse({
             "ready":             False,
             "needs_processing":  True,
@@ -6185,6 +6453,8 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
         "progress": 0.0, "error": None,
         "started_at": time.time(),
         "item_id": item_id,
+        # Interactive play-on-device bypasses the pause gate; "Prep for later" honors it.
+        "queue": "bulk" if req.bulk else "interactive",
     }
     asyncio.create_task(_run_offline_job(job_id))
     return JSONResponse({
@@ -6213,11 +6483,11 @@ async def _maybe_start_prep_job(src: Path, item_id: str = "") -> dict:
         return {"status": "cached"}
     existing = next(
         (j for j in _offline_jobs.values()
-         if j["src"] == str(src) and j["status"] in ("pending", "processing")),
+         if j["src"] == str(src) and j["status"] in ("pending", "processing", "paused")),
         None,
     )
     if existing:
-        return {"status": "processing", "job_id": existing["id"],
+        return {"status": existing["status"], "job_id": existing["id"],
                 "progress": existing["progress"], "operation": existing["operation"]}
     if not analyzer.ffmpeg_bin():
         return {"status": "error", "error": "ffmpeg not available."}
@@ -6228,6 +6498,8 @@ async def _maybe_start_prep_job(src: Path, item_id: str = "") -> dict:
         "progress": 0.0, "error": None,
         "started_at": time.time(),
         "item_id": item_id,
+        # Bulk / per-item / overnight prep — honors the global pause gate.
+        "queue": "bulk",
     }
     asyncio.create_task(_run_offline_job(job_id))
     return {"status": "processing", "job_id": job_id, "progress": 0.0, "operation": "hls"}
@@ -6317,6 +6589,7 @@ def _prep_summary(files: list[dict]) -> dict:
     busy_states  = ("pending", "processing")
     ready      = sum(1 for x in files if x["status"] in ready_states)
     processing = sum(1 for x in files if x["status"] in busy_states)
+    paused     = sum(1 for x in files if x["status"] == "paused")
     errored    = sum(1 for x in files if x["status"] == "error")
     needs_prep = sum(1 for x in files if x["status"] == "needs_prep")
     missing    = sum(1 for x in files if x["status"] == "missing")
@@ -6347,6 +6620,7 @@ def _prep_summary(files: list[dict]) -> dict:
         "total":       len(files),
         "ready":       ready,
         "processing":  processing,
+        "paused":      paused,
         "errored":     errored,
         "needs_prep":  needs_prep,
         "missing":     missing,
@@ -6363,13 +6637,16 @@ async def offline_active() -> JSONResponse:
     This endpoint surfaces ALL active jobs (across all items) so a persistent
     indicator can stay visible regardless of which tab the user is on.
 
-    Active = status in (pending, processing). Done/error jobs are NOT returned;
-    those are still visible via the per-item /prep-status when the card mounts.
+    Active = status in (pending, processing, paused) — paused jobs are included
+    so the global bar keeps showing (with a Resume affordance) while the queue is
+    held. Done/error jobs are NOT returned; those are still visible via the
+    per-item /prep-status when the card mounts.
     """
     active = [j for j in _offline_jobs.values()
-              if j.get("status") in ("pending", "processing")]
+              if j.get("status") in ("pending", "processing", "paused")]
     if not active:
-        return JSONResponse({"active": False, "total_jobs": 0, "items": []})
+        return JSONResponse({"active": False, "paused": state.prep_paused,
+                             "total_jobs": 0, "items": []})
     # Group by item_id, falling back to "" for jobs created before item_id
     # tagging existed (shouldn't happen after the upgrade, but be defensive).
     by_item: dict[str, list[dict]] = {}
@@ -6400,9 +6677,30 @@ async def offline_active() -> JSONResponse:
         })
     return JSONResponse({
         "active": True,
+        "paused": state.prep_paused,
         "total_jobs": len(active),
+        "processing_jobs": sum(1 for j in active if j.get("status") == "processing"),
+        "pending_jobs":    sum(1 for j in active if j.get("status") == "pending"),
+        "paused_jobs":     sum(1 for j in active if j.get("status") == "paused"),
         "items": items_out,
     })
+
+
+@app.post("/api/offline-prep/pause")
+async def offline_prep_pause(req: PrepPauseReq) -> JSONResponse:
+    """Pause bulk stream-prep from the (non-admin) UI. `kill` decides whether the
+    in-flight encode is terminated now or allowed to finish. See _pause_prep."""
+    killed = _pause_prep(req.kill)
+    await broadcast("state", state_snapshot())
+    return JSONResponse({"ok": True, "paused": True, "killed": killed})
+
+
+@app.post("/api/offline-prep/resume")
+async def offline_prep_resume() -> JSONResponse:
+    """Resume bulk stream-prep from the (non-admin) UI — re-spawns paused jobs."""
+    n = _resume_prep()
+    await broadcast("state", state_snapshot())
+    return JSONResponse({"ok": True, "paused": False, "resumed": n})
 
 
 @app.get("/api/library/offline-job/{job_id}")

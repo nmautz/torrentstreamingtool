@@ -28,6 +28,11 @@ Read this when changing anything related to:
   `prepFileState`
 - The bulk **Prep for Streaming** button on library cards
   (`prepItemForStreaming`, `/prep-all`)
+- The prep **lag warning** (`#prepWarnModal`, `confirmStreamPrepWarning`), the
+  **Pause/Resume** controls on `#globalPrepBar` (`/api/offline-prep/pause` +
+  `/resume`, `_pause_prep` / `_resume_prep`), or **overnight auto-prep**
+  (`overnight_prep_loop`, `/api/admin/overnight-prep`) — see the
+  [Pause / resume + overnight](#pause--resume--overnight-auto-prep) section
 - The play chooser (`#playChooserModal`, `playLibraryWithChooser`, `pcChoose`)
 - The **Handoff** (both directions): TV→device (`handoffToDevice`, `#handoffBtn`,
   `#fcHandoffBtn`) and device→TV (`lpHandoffToVlc`, the local player's **To TV** button)
@@ -391,6 +396,64 @@ onto the TV:
 The **To TV** button lives in the local player's fullscreen header (next to
 Stop); it's part of `.lp-chrome`, so it's hidden in tiny mode (maximize first).
 Guarded by `withInflight("handoff_vlc")`.
+
+---
+
+## Pause / resume + overnight auto-prep
+
+Prep is CPU-heavy enough to make the host laggy, so the work is interruptible
+and can be scheduled for the small hours. Three pieces:
+
+### Lag warning (client)
+
+`confirmStreamPrepWarning()` shows `#prepWarnModal` the first time a user
+triggers an explicit prep in a session — the per-item **Prep for Streaming**
+(`prepItemForStreaming`) or a per-row **Prep** (`prepForStreaming`). It resolves
+a `Promise<bool>` and remembers the acknowledgement for the session
+(`_prepWarnAcked`). The interactive **play-on-device** path (`_lpLoadIndex`)
+does **not** warn — the user wants playback now.
+
+### Global pause gate (server)
+
+Every prep job carries a `queue` field: `"bulk"` (per-item / per-row "prep for
+later" + overnight) or `"interactive"` (play-on-device). `state.prep_paused`
+gates **bulk** jobs only. The gate lives at the top of `_run_offline_job`, just
+after the semaphore is acquired:
+
+- A bulk job that reaches the head of the queue while paused marks itself
+  `"paused"` and **exits its task** — crucially *releasing* the single
+  `OFFLINE_JOB_CONCURRENCY` slot so an interactive play-on-device prep can still
+  run while bulk prep is held. Paused jobs are re-spawned (fresh
+  `_run_offline_job` tasks) by `_resume_prep()`.
+- `_pause_prep(kill)` sets the flag. `kill=False` ("Finish current file, then
+  stop") lets the in-flight encode complete; the next bulk job then hits the gate
+  and parks. `kill=True` ("Stop now") `terminate()`s the running ffmpeg via the
+  handle stashed on `job["_proc"]` and marks `job["_paused_kill"]` so the
+  non-zero return code is treated as an intentional pause (re-queued, not an
+  error). A killed file restarts from scratch on resume — HLS prep has no
+  mid-file checkpoint. Interactive encodes are never killed.
+
+Endpoints (both **non-admin**, exposed in the global prep bar): `POST
+/api/offline-prep/pause {kill}` and `POST /api/offline-prep/resume`.
+`/api/offline-active`, `/prep-status`, and `state_snapshot` all surface the
+paused state so the UI can show "Prep paused" + a Resume button.
+
+### Overnight auto-prep (server, admin-configured)
+
+`overnight_prep_loop` (registered in `lifespan`) auto-preps the **whole
+un-prepped library** during an admin-defined nightly window. Config:
+`library.json → settings.overnight_prep` (`enabled`, `start`/`end` HH:MM,
+`timezone`, `on_end ∈ {pause, continue}`). Window membership is tracked
+in-memory (`state.overnight_active`):
+
+- **Entering** → `_resume_prep()` (clears any pause) then `_enqueue_library_prep()`
+  queues a bulk job for every un-prepped video file (idempotent).
+- **Leaving** → `on_end == "pause"` ⇒ `_pause_prep(kill=False)` (graceful: the
+  in-flight file finishes, the rest wait for the next window); `on_end ==
+  "continue"` ⇒ leave the queue running to completion.
+
+The window may cross midnight (`_in_overnight_window` handles the wrap). See
+[ADMIN.md § Overnight Stream Prep](ADMIN.md) for the panel + endpoints.
 
 ---
 

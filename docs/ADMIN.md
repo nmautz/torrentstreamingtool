@@ -138,6 +138,21 @@ The persisted `last_fired` date is what stops a just-rebooted machine from re-ar
 - `GET /api/admin/scheduled-reboot` → config + `now` (host time in the configured tz, for display).
 - `POST /api/admin/scheduled-reboot` → `{enabled, time, timezone, idle_minutes}`. Validates HH:MM, clamps `idle_minutes` to 1–720, resets `last_fired`.
 
+#### Overnight Stream Prep
+
+Auto-prepares the whole library for on-device streaming during a nightly window, when the heavy ffmpeg load won't bother anyone. Config persists under `library.json → settings.overnight_prep` (`enabled`, `start` HH:MM, `end` HH:MM, `timezone` IANA name, `on_end`). Driven by the `overnight_prep_loop` background task ([main.py](../main.py), registered in `lifespan`).
+
+Panel controls: enable toggle, **Start/End Time** (the window may cross midnight, e.g. `23:00 → 06:00`), **Timezone** (same preset list as Scheduled Restart), **When End Time Is Reached** (`pause` ⇒ hold until the next window · `continue` ⇒ run to completion), and a host-time display.
+
+Loop mechanics: window membership is tracked in-memory (`state.overnight_active`) so entry/exit each fire once.
+1. **Entering the window** → clear any pause (`_resume_prep`, which also re-spawns previously-paused jobs) and queue a bulk HLS-prep job for every un-prepped library video file (`_enqueue_library_prep`, idempotent — `_maybe_start_prep_job` skips cached/already-queued files, so a mid-window restart re-enqueues safely).
+2. **Leaving the window** → if `on_end == "pause"`, call `_pause_prep(kill=False)` (the in-flight file finishes gracefully; the rest hold until the next window); if `on_end == "continue"`, leave the queue running to completion past the window.
+
+Saving config resets `state.overnight_active` so the new schedule is re-evaluated on the next tick. Prep load relief is a separate, user-facing concern — see [STREAMING.md § Pause / resume + overnight](STREAMING.md) for the global pause gate and the non-admin Pause/Resume control.
+
+- `GET /api/admin/overnight-prep` → config + `now` + `in_window` + `paused`.
+- `POST /api/admin/overnight-prep` → `{enabled, start, end, timezone, on_end}`. Validates both HH:MM, rejects `start == end`, resets the in-memory window guard.
+
 ## Server endpoints (admin)
 
 All require admin auth (`_require_admin`). See [API.md](API.md#admin) for the full table.

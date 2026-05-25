@@ -179,10 +179,19 @@ entire write path.
 
 Per-file Prep state for the picker rows lives in `prepFileState:
 Map<offKey, "prepping"|"ready">`. `prepForStreaming(itemId, filePath, fileName)`
-POSTs `/offline-prepare`, polls `/offline-job/{id}` to completion, and
-flips the row to "Stream Ready". The map is also hydrated from
-`/api/library/{id}/prep-status` whenever the picker opens or `/prep-all` runs
-on the library card.
+first awaits `confirmStreamPrepWarning()` (the once-per-session lag warning),
+then POSTs `/offline-prepare` **with `bulk:true`** (so the job honors the global
+pause gate), polls `/offline-job/{id}` to completion, and flips the row to
+"Stream Ready". The map is also hydrated from `/api/library/{id}/prep-status`
+whenever the picker opens or `/prep-all` runs on the library card.
+
+`#globalPrepBar` (the persistent top-right indicator) is now interactive:
+`_renderGlobalPrep(d)` toggles a **Pause** button (`openPrepPauseChooser` →
+`confirmPausePrep(kill)` → `/api/offline-prep/pause`) and a **Resume** button
+(`resumePrep` → `/api/offline-prep/resume`) from `d.paused`. Pausing a job that's
+mid-encode shows "Pausing — finishing current file" until it completes (or, if
+the user chose "Stop now", it's cancelled at once). The per-card chip
+(`prepChipHtml`) shows "Prep paused" when `processing === 0 && paused > 0`.
 
 The service worker (`static/sw.js`) is now a one-shot eviction stub registered
 via `evictLegacyServiceWorker()` so devices that PWA-installed the old build

@@ -427,6 +427,70 @@
         </button>
       </div>
     </div>
+
+    <!-- Overnight stream prep -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Overnight Stream Prep</h2>
+          <p class="text-xs text-gray-500 mt-0.5">Automatically prepares every un-prepped library file for on-device streaming during a nightly window, when the heavy ffmpeg load won't bother anyone. Each bundle is roughly 1.7× the source size.</p>
+        </div>
+        <button id="opEnabledBtn" onclick="toggleOvernightPrep()"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+                 bg-gray-800 border-gray-700 text-gray-400 hover:text-white">
+          …
+        </button>
+      </div>
+
+      <div class="px-5 py-4 border-b border-gray-800 grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div class="space-y-1.5">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Start Time</label>
+          <input id="opStart" type="time" value="02:00"
+            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none"/>
+        </div>
+        <div class="space-y-1.5">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">End Time</label>
+          <input id="opEnd" type="time" value="06:00"
+            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none"/>
+          <p class="text-[10px] text-gray-600">Windows may cross midnight (e.g. 23:00 → 06:00).</p>
+        </div>
+        <div class="space-y-1.5">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Timezone</label>
+          <select id="opTimezone"
+            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-indigo-500 outline-none">
+            <option value="America/Los_Angeles">Pacific (Los Angeles)</option>
+            <option value="America/Denver">Mountain (Denver)</option>
+            <option value="America/Chicago">Central (Chicago)</option>
+            <option value="America/New_York">Eastern (New York)</option>
+            <option value="America/Anchorage">Alaska (Anchorage)</option>
+            <option value="Pacific/Honolulu">Hawaii (Honolulu)</option>
+            <option value="UTC">UTC</option>
+            <option value="">System local time</option>
+          </select>
+        </div>
+        <div class="space-y-1.5">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">When End Time Is Reached</label>
+          <select id="opOnEnd"
+            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-indigo-500 outline-none">
+            <option value="pause">Pause until the next window</option>
+            <option value="continue">Continue until finished</option>
+          </select>
+          <p class="text-[10px] text-gray-600">Pause lets the in-flight file finish, then holds the rest.</p>
+        </div>
+        <div class="space-y-1.5 sm:col-span-2">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Host Time Now</label>
+          <div id="opNow" class="w-full px-3 py-2 text-sm font-mono text-gray-400 border border-gray-800 bg-black/40">…</div>
+        </div>
+      </div>
+
+      <div class="px-5 py-4 flex items-center justify-between gap-3">
+        <div id="opStatus" class="text-[11px] text-gray-600 min-w-0"></div>
+        <button id="opSaveBtn" onclick="saveOvernightPrep()"
+          class="flex-shrink-0 bg-indigo-600 hover:bg-indigo-500 px-5 py-2.5 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">
+          Save
+        </button>
+      </div>
+    </div>
   </div>
 
 </div>
@@ -628,7 +692,7 @@ function switchTab(tab){
   if(tab==="skip")       loadSkipPanel();
   if(tab==="offline")    loadOfflineCache();
   if(tab==="background") loadBackgroundVideo();
-  if(tab==="system")     loadScheduledReboot();
+  if(tab==="system")   { loadScheduledReboot(); loadOvernightPrep(); }
 }
 
 // ── System ────────────────────────────────────────────────────────────────────
@@ -739,6 +803,81 @@ async function saveScheduledReboot(){
     }
     showToast(_srEnabled ? "Scheduled restart saved." : "Scheduled restart disabled.");
     await loadScheduledReboot();
+  }catch(_){
+    showToast("Save failed.", true);
+  }finally{
+    btn.disabled = false;
+  }
+}
+
+// ── Overnight Stream Prep ─────────────────────────────────────────────────────
+let _opEnabled = false;
+
+function _renderOpEnabled(){
+  const btn = document.getElementById("opEnabledBtn");
+  if(!btn) return;
+  if(_opEnabled){
+    btn.textContent = "Enabled";
+    btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-emerald-950 border-emerald-700 text-emerald-300 hover:bg-emerald-900";
+  } else {
+    btn.textContent = "Disabled";
+    btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white";
+  }
+}
+
+async function loadOvernightPrep(){
+  try{
+    const r = await fetch("/api/admin/overnight-prep", {headers: authHeader()});
+    if(!r.ok) return;
+    const d = await r.json();
+    _opEnabled = !!d.enabled;
+    _renderOpEnabled();
+    document.getElementById("opStart").value = d.start || "02:00";
+    document.getElementById("opEnd").value   = d.end || "06:00";
+    document.getElementById("opOnEnd").value = (d.on_end === "continue") ? "continue" : "pause";
+    const tzSel = document.getElementById("opTimezone");
+    tzSel.value = (d.timezone ?? "America/Los_Angeles");
+    if(tzSel.value !== (d.timezone ?? "")) tzSel.value = "";   // unknown tz ⇒ System local
+    document.getElementById("opNow").textContent = d.now || "—";
+    const status = document.getElementById("opStatus");
+    if(d.enabled){
+      status.textContent = d.in_window
+        ? (d.paused ? "Window open · paused." : "Window open · prepping now.")
+        : "Armed — will start at the next window.";
+    } else {
+      status.textContent = "Overnight prep is off.";
+    }
+  }catch(_){}
+}
+
+function toggleOvernightPrep(){
+  _opEnabled = !_opEnabled;
+  _renderOpEnabled();
+}
+
+async function saveOvernightPrep(){
+  const btn = document.getElementById("opSaveBtn");
+  const body = {
+    enabled:  _opEnabled,
+    start:    document.getElementById("opStart").value || "02:00",
+    end:      document.getElementById("opEnd").value || "06:00",
+    timezone: document.getElementById("opTimezone").value,
+    on_end:   document.getElementById("opOnEnd").value || "pause",
+  };
+  btn.disabled = true;
+  try{
+    const r = await fetch("/api/admin/overnight-prep",{
+      method:"POST",
+      headers:{...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify(body),
+    });
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      showToast(`Save failed: ${d.detail || r.status}`, true);
+      return;
+    }
+    showToast(_opEnabled ? "Overnight prep saved." : "Overnight prep disabled.");
+    await loadOvernightPrep();
   }catch(_){
     showToast("Save failed.", true);
   }finally{

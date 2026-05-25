@@ -258,3 +258,16 @@ and graceful degradation on weak links.
 
 ---
 
+## Milestone 20 — Interruptible & Scheduled Stream-Prep
+
+Stream-prep pegs the host CPU, so warn before it starts, let anyone pause/resume
+it from the non-admin UI, and let the admin schedule it to run overnight.
+
+- [x] **20.1** Client warning: `confirmStreamPrepWarning()` shows `#prepWarnModal` before a user-triggered prep (`prepItemForStreaming` / `prepForStreaming`) explaining the host will get laggy. Acknowledged once per session (`_prepWarnAcked`). The interactive play-on-device path does not warn.
+- [x] **20.2** Server pause gate: prep jobs are tagged `queue:"bulk"` (per-item / per-row / overnight) vs `"interactive"` (play-on-device). `state.prep_paused` gates bulk jobs in `_run_offline_job` — a paused bulk job marks itself `"paused"` and exits its task, *releasing* the concurrency slot so interactive prep still runs; `_resume_prep()` re-spawns it. `_pause_prep(kill)` supports "finish current file then stop" (`kill=False`) and "stop now" (`kill=True`, terminates ffmpeg via `job["_proc"]` + `_paused_kill`, restarts from scratch on resume).
+- [x] **20.3** Non-admin pause/resume UI: `#globalPrepBar` gains Pause (→ choice modal: finish-current vs stop-now) and Resume buttons. `POST /api/offline-prep/pause {kill}` + `POST /api/offline-prep/resume`. Paused state surfaced in `/api/offline-active`, `/prep-status`, `state_snapshot`; per-card chip shows "Prep paused".
+- [x] **20.4** Overnight auto-prep: `overnight_prep_loop` queues a bulk job for every un-prepped library file during an admin window, then on window end either pauses (in-flight file finishes) or continues to completion. Config in `library.json → settings.overnight_prep` (`enabled`, `start`/`end`, `timezone`, `on_end`); window-crossing-midnight supported. `GET/POST /api/admin/overnight-prep`; admin **System → Overnight Stream Prep** panel.
+- [x] **20.5** Docs + version → 3.4.0: STREAMING.md (pause/resume + overnight section), ADMIN.md (System tab subsection), API.md (new endpoints + paused fields), LIBRARY_DATA.md (`settings.overnight_prep`), CHANGELOG.
+
+---
+
