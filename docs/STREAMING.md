@@ -104,8 +104,9 @@ orphans, listed in Admin → Offline Cache for one-click purge).
 `_build_hls_ffmpeg_args` in `main.py` constructs the command. The shape:
 
 ```
+# cwd = the bundle's .part/ dir; EVERY output below is a BARE filename.
 ffmpeg -y -progress pipe:1 -nostats \
-  -thread_queue_size 1024 -rtbufsize 64M -i src.mkv \
+  -thread_queue_size 1024 -rtbufsize 64M -i /abs/path/src.mkv \
   -map 0:v:0 -map 0:a:0 -map 0:a:1 \
   [-c:v copy | -c:v libx264 -preset veryfast -crf 23 | -c:v h264_nvenc -preset medium -cq 23] \
   -pix_fmt yuv420p -profile:v high -level 4.1 \
@@ -113,19 +114,29 @@ ffmpeg -y -progress pipe:1 -nostats \
   -f hls -hls_time 6 -hls_playlist_type vod \
   -hls_segment_type fmp4 -hls_flags independent_segments \
   -hls_fmp4_init_filename "init_%v.mp4" \
-  -hls_segment_filename "<out>/seg_%v_%05d.m4s" \
+  -hls_segment_filename "seg_%v_%05d.m4s" \
   -master_pl_name master.m3u8 \
   -var_stream_map "v:0,agroup:aud,name:video \
                    a:0,agroup:aud,name:audio_0,language:eng,default:yes \
                    a:1,agroup:aud,name:audio_1,language:jpn" \
-  "<out>/%v.m3u8" \
-  -map 0:s:0 -c:s webvtt -f webvtt "<out>/sub_0.vtt" \
-  -map 0:s:1 -c:s webvtt -f webvtt "<out>/sub_1.vtt"
+  "%v.m3u8" \
+  -map 0:s:0 -c:s webvtt -f webvtt "sub_0.vtt" \
+  -map 0:s:1 -c:s webvtt -f webvtt "sub_1.vtt"
 ```
 
 Note the two output groups: the HLS bundle (video + audio only) comes first,
 then one extra WebVTT output file per text subtitle. Both are produced in the
 **single** ffmpeg pass — no second invocation.
+
+> **All outputs are bare filenames and ffmpeg runs with `cwd=<bundle .part dir>`**
+> (`_run_offline_job` passes `cwd=str(tmp_dir)`). Only the `-i` source is an
+> absolute path. This is load-bearing on Windows: ffmpeg derives the fmp4 init
+> segment's directory by *parsing the playlist path*, and a backslash playlist
+> path defeats that parse, dumping `init_video.mp4` into the server's working
+> directory instead of the bundle → the player 404s it → fatal `fragLoadError`.
+> A full path on `-hls_fmp4_init_filename` is **not** a fix (ffmpeg prepends the
+> playlist dir and the encode dies). Bare names + cwd is the only portable shape.
+> See [GOTCHAS.md](GOTCHAS.md).
 
 Key decisions:
 
@@ -149,12 +160,14 @@ Key decisions:
 - **6-second segments, fmp4, independent_segments.** Modern HLS defaults.
   Switching audio/sub mid-stream doesn't require an extra fetch.
 - **The fmp4 init filename is templated explicitly** (`-hls_fmp4_init_filename
-  init_%v.mp4`). Left to ffmpeg's default, the init segment's `%v` expansion
-  doesn't reliably match the `#EXT-X-MAP:URI=` written into each variant
-  playlist → the player 404s the init segment → fatal `fragLoadError` with the
-  manifest already parsed (so the dropdowns populate first). Pinning it keeps
-  the EXT-X-MAP URI and the on-disk file in lock-step. See
-  [GOTCHAS.md](GOTCHAS.md).
+  init_%v.mp4`) **and every output is a bare name with ffmpeg run from
+  `cwd=<bundle dir>`.** Left to ffmpeg's default the init's `%v` expansion
+  doesn't reliably match the `#EXT-X-MAP:URI=` in each variant playlist, and on
+  Windows a backslash playlist path misdirects the init file out of the bundle
+  entirely — either way the player 404s the init segment → fatal `fragLoadError`
+  with the manifest already parsed (so the dropdowns populate first, masking it
+  as "loaded but won't play"). Bare names + cwd keep the EXT-X-MAP URI and the
+  on-disk file in lock-step on every OS. See [GOTCHAS.md](GOTCHAS.md).
 - **ffmpeg ≥ 4.3** is enforced via `_ffmpeg_version()` cache. Older builds
   fail-fast at prep start with a clear error message — multi-rendition
   `-var_stream_map` is unreliable on 4.0–4.2.

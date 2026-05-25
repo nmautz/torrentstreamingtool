@@ -140,7 +140,7 @@ BACKGROUND_DIR = Path(__file__).parent / ".background"
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.2.1"
+UI_VERSION = "3.2.2"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -4815,10 +4815,12 @@ OFFLINE_CACHE = Path(__file__).parent / ".offline_cache"
 # cache layout) so previously-cached bundles built by older logic get rebuilt
 # on next request. v3-hls switched single-MP4 output to per-source HLS bundles;
 # v4-hls moved subtitles out of the (broken) in-manifest renditions into
-# standalone sub_<i>.vtt sidecars; v5-hls pins the fmp4 init filename
-# (-hls_fmp4_init_filename init_%v.mp4) so the EXT-X-MAP URI matches the file on
-# disk — older bundles could 404 the init segment and stall with fragLoadError.
-OFFLINE_CACHE_VERSION = "v5-hls"
+# standalone sub_<i>.vtt sidecars; v5-hls pinned the fmp4 init filename
+# (-hls_fmp4_init_filename init_%v.mp4); v6-hls makes every output a bare name
+# and runs ffmpeg with cwd=<bundle dir> so the init segment actually lands in
+# the bundle on Windows (backslash playlist paths otherwise misdirect it → the
+# player 404s init_video.mp4 and stalls with fragLoadError).
+OFFLINE_CACHE_VERSION = "v6-hls"
 
 # Stream-to-device (HLS prep) is unavailable on macOS hosts. ffmpeg/ffprobe run
 # as children of the (non-GUI) server process, and macOS TCC blocks them from
@@ -5124,11 +5126,17 @@ def _offline_cache_key(src: Path) -> str:
 def _build_hls_ffmpeg_args(
     ffmpeg: str,
     src: Path,
-    out_dir: Path,
     info: dict,
     use_nvenc: bool,
 ) -> tuple[list[str], list[dict], list[dict]]:
     """Construct the full ffmpeg invocation that emits one HLS bundle.
+
+    All OUTPUT paths are bare filenames (init/segments/playlists/subs) — the
+    caller MUST run ffmpeg with cwd set to the bundle directory so they land
+    there. This is deliberate: ffmpeg derives the init segment's directory by
+    parsing the playlist path, which fails on Windows backslash paths and sends
+    the init file to the wrong place (→ 404 → fragLoadError). Bare names + cwd
+    sidesteps that on every OS. The only absolute path is the `-i` source input.
 
     Returns (args, kept_audios, kept_subs) — the latter two are the audio /
     text-sub tracks (from `info`) that were included in the output, in the
@@ -5201,19 +5209,24 @@ def _build_hls_ffmpeg_args(
         # independent_segments: every segment starts on a keyframe so the
         # player can switch renditions without an extra fetch round-trip.
         "-hls_flags", "independent_segments",
-        # Template the fmp4 init filename per-variant. Without an explicit
-        # -hls_fmp4_init_filename, ffmpeg picks its OWN %v expansion for the
-        # init segment, and across versions that name does NOT always match the
-        # `#EXT-X-MAP:URI=` it writes into the variant playlist. When they
-        # diverge the player 404s the init segment → hls.js surfaces a fatal
-        # `fragLoadError` and playback never starts (the manifest + variant
-        # playlists still parse, so audio/sub dropdowns populate first — making
-        # it look like "everything loaded but won't play"). Pinning the name to
-        # the same `name:`-tag scheme we use for segments (init_video.mp4,
-        # init_audio_0.mp4, …) keeps the EXT-X-MAP URI and the file on disk in
-        # lock-step on every ffmpeg ≥ 4.3. See GOTCHAS.md.
+        # Template the fmp4 init filename per-variant. Two reasons this is
+        # critical, both of which produce the *same* symptom — a fatal hls.js
+        # `fragLoadError` on the init segment after the manifest + variant
+        # playlists already parsed (so audio/sub dropdowns populate first,
+        # making it look like "everything loaded but won't play"):
+        #   1. Without an explicit -hls_fmp4_init_filename, ffmpeg picks its OWN
+        #      %v expansion for the init segment, which across versions doesn't
+        #      always match the `#EXT-X-MAP:URI=` it writes into the playlist.
+        #   2. The init filename MUST be a BARE name (no directory). ffmpeg
+        #      joins it to the directory it parses out of the playlist path; a
+        #      full path breaks the encode ("Failed to open segment"), and on
+        #      Windows the backslash playlist path defeats that dir-parse so the
+        #      init lands in the process CWD instead of the bundle → 404.
+        # The portable fix: bare names for EVERY output (init/segments/playlists
+        # /subs below) and run ffmpeg with cwd=<bundle dir> (see _run_offline_job)
+        # so all of them land in the bundle on every OS. See GOTCHAS.md.
         "-hls_fmp4_init_filename", "init_%v.mp4",
-        "-hls_segment_filename", str(out_dir / "seg_%v_%05d.m4s"),
+        "-hls_segment_filename", "seg_%v_%05d.m4s",
         "-master_pl_name", "master.m3u8",
     ]
 
@@ -5241,7 +5254,9 @@ def _build_hls_ffmpeg_args(
 
     args += ["-var_stream_map", " ".join(parts)]
     # Per-rendition playlist template — %v expands to the `name:` tag above.
-    args += [str(out_dir / "%v.m3u8")]
+    # Bare name (relative to ffmpeg's cwd, which the caller sets to the bundle
+    # dir) — see the init-filename note above for why every output is bare.
+    args += ["%v.m3u8"]
 
     # Sidecar subtitle outputs, one additional WebVTT output file per text sub,
     # produced in the SAME ffmpeg pass. subrip / ass / ssa convert transparently;
@@ -5252,7 +5267,7 @@ def _build_hls_ffmpeg_args(
             "-map", f"0:s:{s['idx']}",
             "-c:s", "webvtt",
             "-f", "webvtt",
-            str(out_dir / f"sub_{i}.vtt"),
+            f"sub_{i}.vtt",   # bare name — lands in ffmpeg's cwd (the bundle dir)
         ]
 
     return args, audios, subs
@@ -5317,7 +5332,7 @@ async def _run_offline_job(job_id: str) -> None:
         try:
             use_nvenc = await _has_nvenc()
             args, kept_audios, kept_subs = _build_hls_ffmpeg_args(
-                ffmpeg, src, tmp_dir, info, use_nvenc,
+                ffmpeg, src, info, use_nvenc,
             )
             # Record encoder for admin/UI display.
             if _video_can_copy(info.get("video")) and not use_nvenc:
@@ -5337,6 +5352,12 @@ async def _run_offline_job(job_id: str) -> None:
 
             proc = await asyncio.create_subprocess_exec(
                 *args,
+                # Run inside the staging dir: every OUTPUT arg is a bare filename
+                # (init/segments/playlists/subs), so they all land here. This is
+                # what keeps the fmp4 init segment in the bundle on Windows,
+                # where a backslash playlist path otherwise misdirects it (→ 404
+                # → fragLoadError). The `-i` source is absolute, so cwd is safe.
+                cwd=str(tmp_dir),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 **_FFMPEG_SUBPROCESS_KW,
