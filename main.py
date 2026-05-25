@@ -185,7 +185,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.4.3"
+UI_VERSION = "3.4.4"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -3436,21 +3436,46 @@ async def set_file_priority_for_item(item_id: str, req: FilePriorityReq) -> JSON
     return JSONResponse({"ok": True, "updated": len(indices)})
 
 
-async def _vlc_wait_until_ready(timeout: float = 20.0) -> bool:
-    """Poll VLC until it has actually opened the current file, then return True.
+async def _vlc_wait_until_ready(
+    expected_file: Optional[Path] = None, timeout: float = 20.0,
+) -> bool:
+    """Poll VLC until it has actually opened the file, then return True.
 
-    "Ready" = VLC reports a playing/paused state AND a non-zero `length`. The
-    duration only becomes known once VLC's demuxer is up, which is precisely the
-    moment a `seek` will take effect. We poll fast (every 0.2 s) so the resume
-    seek lands as soon as VLC is ready instead of after a blind fixed wait — on
-    a local file that's typically well under a second, but the loop still waits
-    the full time a slow open needs so the seek doesn't get dropped on the floor.
+    "Ready" = VLC reports a playing/paused state AND a non-zero `length` (the
+    duration only becomes known once the demuxer is up, which is precisely the
+    moment a `seek` takes effect). When `expected_file` is given we also require
+    VLC's current playlist URI to match it, so we don't mistake the *previously*
+    playing file (background video, prior episode) for the new one.
+
+    This is the responsiveness lever for play/resume. VLC's HTTP reply to the
+    `in_play` command itself can lag several seconds behind actual playback
+    (which starts in <1 s); the lighter `status.json` poll reflects the real
+    state far sooner. Polling here — instead of awaiting `in_play`'s reply — is
+    what lets the UI flip to "playing" and the resume seek land almost
+    immediately. We poll every 0.2 s and still wait out a genuinely slow open so
+    nothing fires before VLC can honour it.
     """
+    target: Optional[Path] = None
+    if expected_file is not None:
+        try:
+            target = expected_file.resolve()
+        except Exception:
+            target = expected_file
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         vs = await vlc_status()
         if vs and vs.get("state") in ("playing", "paused") and float(vs.get("length", 0) or 0) > 0:
-            return True
+            if target is None:
+                return True
+            uri = await vlc_playlist_uri()
+            if uri:
+                cur = uri_to_path(uri)
+                try:
+                    if Path(cur).resolve() == target:
+                        return True
+                except Exception:
+                    if cur == str(target):
+                        return True
         await asyncio.sleep(0.2)
     return False
 
@@ -3465,19 +3490,26 @@ async def _library_play_launch(
     """VLC handoff for a library play, run in the background.
 
     Flow:
-    1. `in_play` the first file — this is what the user is about to watch.
-    2. Flip `stream_status` to "playing" and broadcast IMMEDIATELY — VLC is
-       already playing, so the UI must reflect that without waiting for the
-       rest of the playlist to be enqueued. (Previously the state flip ran
-       after a sequential `in_enqueue` loop for every remaining file, so a
-       50-episode resume left the UI showing "buffering" for many seconds
-       while VLC was already playing the first episode.)
-    3. Enqueue the rest in parallel via `asyncio.gather` so wall time is one
-       roundtrip max, regardless of playlist length.
+    1. Fire `in_play` for the first file *detached* — VLC's HTTP reply to this
+       command can hang for several seconds while the demuxer spins up, even
+       though playback actually starts in <1 s. Awaiting it (the old behaviour)
+       pinned the UI on "buffering" for that whole window.
+    2. Poll `status.json` for the new file to actually be live, then flip
+       `stream_status` to "playing" and seek to the resume point — both happen
+       as soon as VLC is genuinely ready, not when `in_play` finally replies.
+    3. Enqueue the rest in parallel via `asyncio.gather`. We let the `in_play`
+       call finish first (correct playlist order); that wait is invisible since
+       the user is already watching the first file.
     """
+    first = Path(playlist[0])
+    first_resolved = first.resolve()
+    # Detached: don't let in_play's slow reply gate the UI flip or the seek.
+    play_task = asyncio.create_task(vlc("in_play", input=first_resolved.as_uri()))
     try:
-        first = Path(playlist[0])
-        await vlc("in_play", input=first.resolve().as_uri())
+        # Wait for VLC to actually be playing the new file (poll, not the slow
+        # in_play reply). Falls through after the timeout and flips optimistically
+        # — the command is already on its way — so the UI never sticks.
+        ready = await _vlc_wait_until_ready(first_resolved, timeout=10.0)
 
         state.stream_status = "playing"
         await broadcast("stream_status", {"status": "playing", "message": f"Playing: {first.name}"})
@@ -3485,18 +3517,18 @@ async def _library_play_launch(
 
         asyncio.create_task(vlc_focus_and_fullscreen())
 
-        # These run detached so the seek can fire in parallel with the enqueue
-        # below. They outlive a cancelled _library_play_launch, so each re-checks
-        # state.library_current_file before touching VLC — a newer play (or
-        # prev/next) moves that pointer and the stale resume bails instead of
-        # seeking the wrong file.
+        # Resume seek / offer run detached so they can fire in parallel with the
+        # enqueue below. They outlive a cancelled _library_play_launch, so each
+        # re-checks state.library_current_file before touching VLC — a newer play
+        # (or prev/next) moves that pointer and the stale resume bails instead of
+        # seeking the wrong file. `ready` lets the common case skip a second poll.
         expected_file = playlist[0]
         if seek_sec and seek_sec > 5:
             if resume_mode == "auto":
-                async def _resume_seek(s: float) -> None:
+                async def _resume_seek(s: float, already_ready: bool) -> None:
                     target = int(s)
-                    # Wait until VLC has the file open, then seek straight away.
-                    await _vlc_wait_until_ready()
+                    if not already_ready and not await _vlc_wait_until_ready(first_resolved):
+                        return
                     if state.library_current_file != expected_file:
                         return
                     await vlc("seek", val=str(target))
@@ -3510,27 +3542,36 @@ async def _library_play_launch(
                     vs = await vlc_status()
                     if vs and float(vs.get("time", 0) or 0) < target - 15:
                         await vlc("seek", val=str(target))
-                asyncio.create_task(_resume_seek(seek_sec))
+                asyncio.create_task(_resume_seek(seek_sec, ready))
             elif resume_mode == "prompt":
-                async def _resume_offer(s: float, fp: str, iid: str, pl: list) -> None:
-                    await _vlc_wait_until_ready()
+                async def _resume_offer(s: float, fp: str, iid: str, pl: list, already_ready: bool) -> None:
+                    if not already_ready and not await _vlc_wait_until_ready(first_resolved):
+                        return
                     if state.library_current_file != expected_file:
                         return
                     state.resume_offer = {"position_sec": s, "file_path": fp, "item_id": iid, "playlist": pl}
                     await broadcast("state", state_snapshot())
-                asyncio.create_task(_resume_offer(seek_sec, playlist[0], item_id, playlist))
+                asyncio.create_task(_resume_offer(seek_sec, playlist[0], item_id, playlist, ready))
 
         asyncio.create_task(_apply_track_prefs(item_id, profile_id, playlist[0], delay=3.5))
 
         rest = playlist[1:]
         if rest:
+            # Ensure in_play has been accepted (so the tail appends in the right
+            # place); bounded by vlc()'s own per-call timeouts.
+            try:
+                await play_task
+            except Exception:
+                pass
             await asyncio.gather(
                 *(vlc("in_enqueue", input=Path(p).resolve().as_uri()) for p in rest),
                 return_exceptions=True,
             )
     except asyncio.CancelledError:
+        play_task.cancel()
         raise
     except Exception as e:
+        play_task.cancel()
         state.stream_status = "error"
         await broadcast("stream_status", {"status": "error", "message": f"Playback failed: {e}"})
         await broadcast("state", state_snapshot())
@@ -4199,14 +4240,17 @@ def _find_in_paths(current: str, paths: list[str]) -> int:
 async def _vlc_relaunch_playlist(playlist: list[str], target_name: str) -> None:
     """Background VLC handoff used by prev/next so slow VLC roundtrips don't block the response.
 
-    Flips `stream_status` to "playing" the moment VLC accepts the first track —
-    not after the whole playlist has been enqueued. The enqueue loop on a long
-    "remaining episodes" tail would otherwise pin the UI to "buffering" for
-    seconds while the user is already watching the new episode.
+    Fires `in_play` detached and flips `stream_status` to "playing" the moment a
+    `status.json` poll shows VLC is actually on the new file — not when in_play's
+    (often multi-second) HTTP reply finally comes back, and not after the whole
+    playlist has been enqueued. Either of those would pin the UI to "buffering"
+    for seconds while the user is already watching the new episode.
     """
+    first = Path(playlist[0])
+    first_resolved = first.resolve()
+    play_task = asyncio.create_task(vlc("in_play", input=first_resolved.as_uri()))
     try:
-        first = Path(playlist[0])
-        await vlc("in_play", input=first.resolve().as_uri())
+        await _vlc_wait_until_ready(first_resolved, timeout=10.0)
         state.stream_status = "playing"
         await broadcast("stream_status", {"status": "playing", "message": f"Playing: {target_name}"})
         await broadcast("state", state_snapshot())
@@ -4216,13 +4260,19 @@ async def _vlc_relaunch_playlist(playlist: list[str], target_name: str) -> None:
             ))
         rest = playlist[1:]
         if rest:
+            try:
+                await play_task
+            except Exception:
+                pass
             await asyncio.gather(
                 *(vlc("in_enqueue", input=Path(p).resolve().as_uri()) for p in rest),
                 return_exceptions=True,
             )
     except asyncio.CancelledError:
+        play_task.cancel()
         raise
     except Exception as e:
+        play_task.cancel()
         state.stream_status = "error"
         await broadcast("stream_status", {"status": "error", "message": f"Playback failed: {e}"})
         await broadcast("state", state_snapshot())
