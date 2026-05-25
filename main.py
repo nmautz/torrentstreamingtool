@@ -5487,13 +5487,24 @@ HLS_UNAVAILABLE_MSG = (
 # Only used on the CPU (libx264) path; NVENC offloads to the GPU and ignores it.
 OFFLINE_FFMPEG_THREADS = 2
 
-# Windows-only: lower ffmpeg's process priority so it can't crowd the foreground
-# UI or amplify the NVIDIA driver's DPC/ISR storm that pegs "System Interrupts"
-# during a fast NVENC encode. BELOW_NORMAL_PRIORITY_CLASS == 0x00004000. The flag
-# only exists on the win32 subprocess module; on Linux/macOS we pass nothing.
+# Lower ffmpeg's OS scheduling priority so a bulk prep can't starve the web
+# server (the asyncio event loop), VLC playback, or qBit — the whole point of
+# "the website still works while prepping". On Windows we pass
+# BELOW_NORMAL_PRIORITY_CLASS (== 0x00004000) via creationflags (also tames the
+# NVIDIA driver's DPC/ISR "System Interrupts" storm during a fast NVENC encode).
+# On POSIX we prepend `nice -n 10` to the command (preferred over preexec_fn,
+# which is fork-unsafe in a threaded process); ffmpeg then yields CPU to every
+# normal-priority process. Falls back to no-nice if the `nice` binary is absent.
 _FFMPEG_SUBPROCESS_KW: dict = {}
 if sys.platform == "win32":
     _FFMPEG_SUBPROCESS_KW["creationflags"] = 0x00004000  # BELOW_NORMAL_PRIORITY_CLASS
+
+def _ffmpeg_nice_prefix() -> list[str]:
+    """`['nice','-n','10']` on POSIX when available, else `[]` (Windows uses
+    creationflags instead)."""
+    if os.name == "posix" and shutil.which("nice"):
+        return ["nice", "-n", "10"]
+    return []
 # Lazy-probed once per process: True if this ffmpeg can open an h264_nvenc session
 # on the host's GPU. Pascal (GTX 10xx) and newer all qualify; the only failure
 # modes are (a) ffmpeg built without --enable-nvenc, (b) no NVIDIA driver loaded,
@@ -6043,9 +6054,11 @@ async def _run_offline_job(job_id: str) -> None:
             )
             return
 
-        # Clean any leftover .part dir from a previous crashed run.
+        # Clean any leftover .part dir from a previous crashed run. Offloaded to a
+        # thread so a large stale bundle's recursive unlink can't stall the event
+        # loop (and with it every other HTTP request) while prep is starting.
         if tmp_dir.exists():
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+            await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
         tmp_dir.mkdir(parents=True, exist_ok=True)
 
         try:
@@ -6069,13 +6082,17 @@ async def _run_offline_job(job_id: str) -> None:
                 job_id, job["encoder"], duration,
                 len(kept_videos), len(kept_audios), len(kept_subs), use_nvenc,
             )
+            # Run ffmpeg at lowered OS priority (POSIX: `nice -n 10`; Windows:
+            # BELOW_NORMAL via _FFMPEG_SUBPROCESS_KW) so the bulk encode yields CPU
+            # to the web server, VLC, and qBit — keeping the dashboard responsive.
+            cmd = _ffmpeg_nice_prefix() + args
             hls_log.info(
                 "job %s ffmpeg cmd: %s",
-                job_id, " ".join(shlex.quote(a) for a in args),
+                job_id, " ".join(shlex.quote(a) for a in cmd),
             )
 
             proc = await asyncio.create_subprocess_exec(
-                *args,
+                *cmd,
                 # Run inside the staging dir: every OUTPUT arg is a bare filename
                 # (init/segments/playlists/subs), so they all land here. This is
                 # what keeps the fmp4 init segment in the bundle on Windows,
@@ -6157,7 +6174,7 @@ async def _run_offline_job(job_id: str) -> None:
                 if job.pop("_paused_kill", False):
                     job["status"] = "paused"
                     job["progress"] = 0.0
-                    shutil.rmtree(tmp_dir, ignore_errors=True)
+                    await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
                     hls_log.info("job %s PAUSED (encode terminated by user)", job_id)
                     return
                 err = "\n".join(stderr_tail).strip()
@@ -6172,7 +6189,7 @@ async def _run_offline_job(job_id: str) -> None:
                 )
                 job["status"] = "error"
                 job["error"]  = f"ffmpeg failed: {err[-500:] or 'unknown error'}"
-                shutil.rmtree(tmp_dir, ignore_errors=True)
+                await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
                 return
 
             # Write meta.json with everything the UI needs to build dropdowns
@@ -6230,22 +6247,23 @@ async def _run_offline_job(job_id: str) -> None:
             # Atomic-ish swap: rename .part dir into place. Path.rename onto an
             # existing directory fails on every platform, so we drop any prior
             # output first; the master.m3u8 guard at the top of this function
-            # handles the "another worker beat us" race separately.
+            # handles the "another worker beat us" race separately. The recursive
+            # drop of a prior bundle runs in a thread so it doesn't stall the loop.
             if out_dir.exists():
-                shutil.rmtree(out_dir, ignore_errors=True)
+                await asyncio.to_thread(shutil.rmtree, out_dir, ignore_errors=True)
             tmp_dir.rename(out_dir)
 
             job["progress"] = 1.0
             job["status"]   = "done"
+            size_mb = (await asyncio.to_thread(_dir_size_bytes, out_dir)) / 1_000_000
             hls_log.info(
                 "job %s DONE in %.1fs encoder=%s size=%.1f MB src=%s",
-                job_id, time.time() - job["started_at"], job["encoder"],
-                _dir_size_bytes(out_dir) / 1_000_000, src,
+                job_id, time.time() - job["started_at"], job["encoder"], size_mb, src,
             )
         except Exception as e:
             hls_log.exception("job %s CRASHED: %s", job_id, e)
             job["status"] = "error"; job["error"] = str(e)
-            shutil.rmtree(tmp_dir, ignore_errors=True)
+            await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
 
 
 def _pause_prep(kill: bool) -> int:
@@ -6320,9 +6338,10 @@ async def _enqueue_library_prep() -> int:
             st = await _maybe_start_prep_job(p, item.get("id", ""))
             if st.get("status") in ("processing", "pending", "paused"):
                 queued += 1
-        # Yield to the event loop between items so a large library doesn't stall
-        # the scheduler tick while it stats every file.
-        await asyncio.sleep(0)
+            # Yield between every file (sync FS stat + task spawn, no internal
+            # await) so scanning a large library never stalls the event loop and
+            # the dashboard stays responsive during the overnight enqueue.
+            await asyncio.sleep(0)
     return queued
 
 
@@ -6556,6 +6575,10 @@ async def prep_all(item_id: str) -> JSONResponse:
             continue
         st = await _maybe_start_prep_job(p, item_id)
         out.append({"file_path": f["path"], "name": f.get("name", ""), **st})
+        # _maybe_start_prep_job is sync (FS stat + task spawn, no internal await),
+        # so yield between files — a 77-file pack otherwise hogs the event loop in
+        # one burst and briefly stalls every other request.
+        await asyncio.sleep(0)
     return JSONResponse({"files": out, **_prep_summary(out)})
 
 

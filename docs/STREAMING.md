@@ -243,6 +243,17 @@ Two ways to populate the cache:
 > ffmpegs. The CPU path uses `-threads OFFLINE_FFMPEG_THREADS` (2);
 > NVENC ignores it. See [GOTCHAS.md](GOTCHAS.md) for why the cap is 1.
 
+> **Staying responsive while prepping.** Prep must never block the web server
+> (single asyncio event loop). All heavy work is off-loop: ffmpeg/ffprobe run as
+> subprocesses, and the recursive bundle FS ops (`shutil.rmtree`,
+> `_dir_size_bytes`) use `asyncio.to_thread`. The fan-out endpoints (`/prep-all`,
+> the overnight `_enqueue_library_prep`) `await asyncio.sleep(0)` between files
+> because the per-file `_maybe_start_prep_job` is synchronous. ffmpeg also runs at
+> **lowered OS priority** — `nice -n 10` on POSIX (`_ffmpeg_nice_prefix`),
+> `BELOW_NORMAL_PRIORITY_CLASS` on Windows (`_FFMPEG_SUBPROCESS_KW`) — so it yields
+> CPU to the server, VLC, and qBit. The remaining slowness under prep is pure CPU
+> contention, which the lag warning + Pause/Resume + overnight scheduling address.
+
 > **Debugging a failed conversion.** The UI only shows a short stderr tail.
 > `_run_offline_job` logs the full ffmpeg command, return code, elapsed time,
 > and the last 300 lines of ffmpeg stderr to **`logs/hls.log`** via the

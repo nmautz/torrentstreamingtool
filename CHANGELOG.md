@@ -1,5 +1,10 @@
 # Changelog
 
+## [3.4.1] — 2026-05-25
+- **Keep the dashboard responsive while stream-prep runs.** Prep is CPU-heavy, so beyond the warning/pause/overnight controls (3.4.0) the work now actively yields to the rest of the app rather than just relying on the user to pause it.
+  - **ffmpeg runs at lowered OS priority on every platform.** Windows already used `BELOW_NORMAL_PRIORITY_CLASS`; POSIX hosts now prepend `nice -n 10` (`_ffmpeg_nice_prefix`, fork-safe vs `preexec_fn`, no-ops if `nice` is missing). The bulk encode yields CPU to the web server's event loop, VLC, and qBit, so the site stays usable.
+  - **No synchronous bursts on the event loop.** The recursive `.part`/old-bundle removals and the bundle size calc in `_run_offline_job` are offloaded with `asyncio.to_thread`, and `/prep-all` + the overnight `_enqueue_library_prep` now `await asyncio.sleep(0)` between files (the per-file `_maybe_start_prep_job` is synchronous), so kicking off prep on a large pack/library no longer briefly stalls other requests. All heavy prep work was already off-loop (ffmpeg/ffprobe as subprocesses); this closes the remaining small windows.
+
 ## [3.4.0] — 2026-05-25
 - **Stream-prep is now interruptible and can run itself overnight.** Preparing files for on-device streaming pegs the host CPU, so the dashboard now warns about it, lets anyone pause/resume the work, and can do the whole library automatically while nobody's watching.
   - **Lag warning (`static/index.html`):** the first time you tap **Prep for Streaming** (per-item) or a per-row **Prep** in a session, a modal explains that the server will get laggy and can become unusable at times, and points at the pause control. Acknowledged once per session. The interactive "play on this device" path is unaffected (no warning — you want it now).

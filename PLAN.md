@@ -268,6 +268,7 @@ it from the non-admin UI, and let the admin schedule it to run overnight.
 - [x] **20.3** Non-admin pause/resume UI: `#globalPrepBar` gains Pause (→ choice modal: finish-current vs stop-now) and Resume buttons. `POST /api/offline-prep/pause {kill}` + `POST /api/offline-prep/resume`. Paused state surfaced in `/api/offline-active`, `/prep-status`, `state_snapshot`; per-card chip shows "Prep paused".
 - [x] **20.4** Overnight auto-prep: `overnight_prep_loop` queues a bulk job for every un-prepped library file during an admin window, then on window end either pauses (in-flight file finishes) or continues to completion. Config in `library.json → settings.overnight_prep` (`enabled`, `start`/`end`, `timezone`, `on_end`); window-crossing-midnight supported. `GET/POST /api/admin/overnight-prep`; admin **System → Overnight Stream Prep** panel.
 - [x] **20.5** Docs + version → 3.4.0: STREAMING.md (pause/resume + overnight section), ADMIN.md (System tab subsection), API.md (new endpoints + paused fields), LIBRARY_DATA.md (`settings.overnight_prep`), CHANGELOG.
+- [x] **20.6** Keep the dashboard responsive during prep (v3.4.1): ffmpeg runs at lowered OS priority on all platforms (`nice -n 10` on POSIX via `_ffmpeg_nice_prefix`, `BELOW_NORMAL_PRIORITY_CLASS` on Windows); recursive bundle FS ops in `_run_offline_job` offloaded with `asyncio.to_thread`; `/prep-all` + `_enqueue_library_prep` yield (`await asyncio.sleep(0)`) between files so kicking off prep on a large pack/library never stalls the event loop.
 
 ---
 
