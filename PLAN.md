@@ -291,3 +291,15 @@ remotely over SSE. See [docs/YOUTUBE.md](docs/YOUTUBE.md).
 
 ---
 
+## Milestone 22 — Remote log download
+
+Pull the server's rotating log files off the host from the admin panel, so an
+operator on a remote (especially Windows) box can diagnose problems without
+SSH / RDP.
+
+- [x] **22.1** Backend: `GET /api/admin/logs` (listing with size + mtime, newest first), `GET /api/admin/logs/{name}` (single file as attachment — `_safe_log_path` rejects slashes / `..` / absolute paths / anything that resolves outside `LOG_DIR`), `GET /api/admin/logs/_bundle` (streamed ZIP via the `os.pipe()` pattern shared with `/api/library/{id}/zip`, filename `streamlink-logs-<timestamp>.zip`). All three require admin auth; the per-file route accepts the token via `?admin_token=` query param so plain `<a download>` anchors work.
+- [x] **22.2** Admin UI: **Server Logs** card in the System tab. Lists every file in `logs/` with size + mtime, per-row Download, plus **Download All (.zip)** at the top. `loadLogs()` runs alongside `loadScheduledReboot()` / `loadOvernightPrep()` when the tab opens; Refresh button re-reads.
+- [x] **22.3** Docs + version → 3.6.0: API.md (the 3 new endpoints), ADMIN.md (new "Server Logs" subsection under System), CHANGELOG.
+
+---
+

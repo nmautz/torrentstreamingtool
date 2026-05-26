@@ -203,6 +203,9 @@ All require admin auth.
 | POST | `/api/admin/scheduled-reboot` | `{enabled, time:"HH:MM", timezone, idle_minutes}` → saves to `library.json → settings.scheduled_reboot`. Validates HH:MM (24h), clamps `idle_minutes` to 1–720, resets the internal `last_fired` guard. Drives the `scheduled_reboot_loop`: at the configured local time, reboots when idle for `idle_minutes`, else waits and re-checks until idle |
 | GET | `/api/admin/overnight-prep` | `{enabled, start:"HH:MM", end:"HH:MM", timezone, on_end, now, in_window, paused}` — overnight auto stream-prep config + the host's current time in the configured tz and whether the window is open now |
 | POST | `/api/admin/overnight-prep` | `{enabled, start:"HH:MM", end:"HH:MM", timezone, on_end:"pause"\|"continue"}` → saves to `library.json → settings.overnight_prep`. Validates both HH:MM (24h), rejects an empty (start==end) window, resets in-memory window membership. Drives the `overnight_prep_loop`: on entering the window it queues a bulk HLS-prep job for every un-prepped library file; on leaving it either pauses (in-flight file finishes) or continues to completion |
+| GET | `/api/admin/logs` | `{log_dir, files:[{name, bytes, mtime}]}` — lists every file in `LOG_DIR` (newest first by mtime). Used by the admin System tab "Server Logs" card |
+| GET | `/api/admin/logs/_bundle` | Streams a ZIP of every file in `LOG_DIR` (deflated). Filename `streamlink-logs-YYYYMMDD-HHMMSS.zip`. 404 if no log files exist |
+| GET | `/api/admin/logs/{name}` | Streams a single log file as an attachment (`text/plain; charset=utf-8`). `{name}` is the basename only — slashes/`..`/absolute paths are rejected and the resolved path must stay within `LOG_DIR` |
 
 ## Admin HTTPS redirect
 

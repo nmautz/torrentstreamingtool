@@ -189,7 +189,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.5.2"
+UI_VERSION = "3.6.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -5825,6 +5825,121 @@ async def admin_reboot(request: Request) -> JSONResponse:
     _require_admin(request)
     asyncio.create_task(_reboot_machine())
     return JSONResponse({"ok": True, "message": "Rebooting host machine…"})
+
+
+# ── Log download ──────────────────────────────────────────────────────────────
+# Operators frequently need the server's rotating log files (hls.log,
+# streamlink_app.log, streamlink.err, …) to diagnose a remote box where SSH
+# isn't set up. These admin endpoints expose the contents of LOG_DIR read-only:
+# a directory listing + per-file download + a bundled zip of everything. Path
+# traversal is blocked by resolving the requested name against LOG_DIR and
+# refusing anything that escapes it.
+
+def _safe_log_path(name: str) -> Path:
+    """Resolve `name` against LOG_DIR, refusing traversal/absolute paths.
+
+    Raises HTTPException on any attempt to escape LOG_DIR or read a non-file.
+    """
+    if not name or "/" in name or "\\" in name or name in (".", ".."):
+        raise HTTPException(400, "Invalid log filename.")
+    candidate = (LOG_DIR / name).resolve()
+    try:
+        candidate.relative_to(LOG_DIR.resolve())
+    except ValueError:
+        raise HTTPException(400, "Log file is outside the logs directory.")
+    if not candidate.exists() or not candidate.is_file():
+        raise HTTPException(404, "Log file not found.")
+    return candidate
+
+
+@app.get("/api/admin/logs")
+async def admin_list_logs(request: Request) -> JSONResponse:
+    """List every file in LOG_DIR with size + mtime (newest first)."""
+    _require_admin(request)
+    entries = []
+    if LOG_DIR.exists():
+        for p in LOG_DIR.iterdir():
+            if not p.is_file():
+                continue
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            entries.append({
+                "name":   p.name,
+                "bytes":  st.st_size,
+                "mtime":  int(st.st_mtime),
+            })
+    entries.sort(key=lambda e: e["mtime"], reverse=True)
+    return JSONResponse({"log_dir": str(LOG_DIR), "files": entries})
+
+
+@app.get("/api/admin/logs/_bundle")
+async def admin_download_logs_bundle(request: Request) -> StreamingResponse:
+    """Stream a ZIP of every file in LOG_DIR.
+
+    Path is `_bundle` (underscore prefix) so it can't collide with a real log
+    filename — `_safe_log_path` rejects names containing slashes anyway, but
+    matching against the literal `_bundle` route ensures the per-file handler
+    never sees this name.
+    """
+    _require_admin(request)
+    files: list[Path] = []
+    if LOG_DIR.exists():
+        for p in LOG_DIR.iterdir():
+            if p.is_file():
+                files.append(p)
+    if not files:
+        raise HTTPException(404, "No log files to download.")
+
+    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
+    zip_name = f"streamlink-logs-{stamp}.zip"
+
+    r_fd, w_fd = os.pipe()
+
+    def _write_zip() -> None:
+        try:
+            with os.fdopen(w_fd, "wb") as wf, \
+                    zipfile.ZipFile(wf, "w", zipfile.ZIP_DEFLATED) as zf:
+                for p in files:
+                    try:
+                        zf.write(str(p), p.name)
+                    except OSError:
+                        continue
+        except Exception:
+            pass
+
+    threading.Thread(target=_write_zip, daemon=True).start()
+
+    async def _read_pipe() -> AsyncGenerator[bytes, None]:
+        rf = os.fdopen(r_fd, "rb")
+        try:
+            while True:
+                chunk = await asyncio.to_thread(rf.read, 65536)
+                if not chunk:
+                    break
+                yield chunk
+        finally:
+            rf.close()
+
+    return StreamingResponse(
+        _read_pipe(),
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{zip_name}"'},
+    )
+
+
+@app.get("/api/admin/logs/{name}")
+async def admin_download_log(request: Request, name: str) -> FileResponse:
+    """Download one file from LOG_DIR by name. Forces attachment disposition."""
+    _require_admin(request)
+    path = _safe_log_path(name)
+    return FileResponse(
+        str(path),
+        media_type="text/plain; charset=utf-8",
+        filename=path.name,
+        headers={"Content-Disposition": f'attachment; filename="{path.name}"'},
+    )
 
 
 @app.get("/api/admin/scheduled-reboot")

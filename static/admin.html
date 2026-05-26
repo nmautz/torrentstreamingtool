@@ -373,6 +373,30 @@
       </div>
     </div>
 
+    <!-- Server logs -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Server Logs</h2>
+          <p class="text-xs text-gray-500 mt-0.5">Download the server's rotating log files (under <code class="font-mono text-gray-400">logs/</code>) for diagnostics. Useful when SSH isn't set up on the host.</p>
+        </div>
+        <div class="flex-shrink-0 flex gap-2">
+          <button id="logsRefreshBtn" onclick="loadLogs()"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 text-gray-300 hover:bg-gray-700 transition-colors">
+            Refresh
+          </button>
+          <button id="logsBundleBtn" onclick="downloadLogsBundle()"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-indigo-700 bg-indigo-900 text-indigo-200 hover:bg-indigo-800 transition-colors">
+            Download All (.zip)
+          </button>
+        </div>
+      </div>
+
+      <div id="logsList" class="divide-y divide-gray-800">
+        <div class="px-5 py-6 text-center text-gray-600 text-sm">Loading…</div>
+      </div>
+    </div>
+
     <!-- Scheduled restart -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
@@ -692,7 +716,7 @@ function switchTab(tab){
   if(tab==="skip")       loadSkipPanel();
   if(tab==="offline")    loadOfflineCache();
   if(tab==="background") loadBackgroundVideo();
-  if(tab==="system")   { loadScheduledReboot(); loadOvernightPrep(); }
+  if(tab==="system")   { loadScheduledReboot(); loadOvernightPrep(); loadLogs(); }
 }
 
 // ── System ────────────────────────────────────────────────────────────────────
@@ -734,6 +758,72 @@ async function doRebootMachine(){
   }catch(_){
     showToast("Reboot issued — machine going down.");
   }
+}
+
+// ── Server Logs ───────────────────────────────────────────────────────────────
+function _fmtBytes(n){
+  if(!Number.isFinite(n)) return "—";
+  if(n < 1024) return `${n} B`;
+  if(n < 1024*1024) return `${(n/1024).toFixed(1)} KB`;
+  if(n < 1024*1024*1024) return `${(n/1024/1024).toFixed(1)} MB`;
+  return `${(n/1024/1024/1024).toFixed(2)} GB`;
+}
+
+function _fmtMtime(ts){
+  if(!ts) return "—";
+  try { return new Date(ts*1000).toLocaleString(); } catch(_) { return "—"; }
+}
+
+async function loadLogs(){
+  const list = document.getElementById("logsList");
+  if(!list) return;
+  list.innerHTML = `<div class="px-5 py-6 text-center text-gray-600 text-sm">Loading…</div>`;
+  try{
+    const r = await fetch("/api/admin/logs", {headers: authHeader()});
+    if(!r.ok){
+      list.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Failed to load logs (${r.status})</div>`;
+      return;
+    }
+    const d = await r.json();
+    const files = d.files || [];
+    if(!files.length){
+      list.innerHTML = `<div class="px-5 py-6 text-center text-gray-600 text-sm">No log files yet.</div>`;
+      document.getElementById("logsBundleBtn").disabled = true;
+      return;
+    }
+    document.getElementById("logsBundleBtn").disabled = false;
+    list.innerHTML = files.map(f => {
+      const name = f.name;
+      const url  = `/api/admin/logs/${encodeURIComponent(name)}?admin_token=${encodeURIComponent(adminToken)}`;
+      return `
+        <div class="px-5 py-3 flex items-center justify-between gap-3">
+          <div class="min-w-0 flex-1">
+            <div class="text-sm font-mono text-gray-200 truncate">${name}</div>
+            <div class="text-[11px] text-gray-600 mt-0.5">${_fmtBytes(f.bytes)} · ${_fmtMtime(f.mtime)}</div>
+          </div>
+          <a href="${url}" download="${name}"
+             class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 text-gray-300 hover:bg-gray-700 transition-colors">
+            Download
+          </a>
+        </div>`;
+    }).join("");
+  }catch(_){
+    list.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Failed to load logs.</div>`;
+  }
+}
+
+function downloadLogsBundle(){
+  if(!adminToken){ showToast("Not authenticated.", true); return; }
+  const url = `/api/admin/logs/_bundle?admin_token=${encodeURIComponent(adminToken)}`;
+  // Trigger a real browser download via a hidden <a>; using location.href would
+  // navigate away from /admin if the response somehow rendered inline.
+  const a = document.createElement("a");
+  a.href = url;
+  a.rel = "noopener";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  showToast("Preparing logs bundle…");
 }
 
 // ── Scheduled Restart ───────────────────────────────────────────────────────────

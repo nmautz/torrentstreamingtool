@@ -103,7 +103,7 @@ For each profile:
 
 ### 7. System
 
-Three controls: **Shut Down Server**, **Reboot Machine**, and **Scheduled Restart**.
+Controls: **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, and **Overnight Stream Prep**.
 
 #### Shut Down Server
 
@@ -122,6 +122,16 @@ Posts to `POST /api/admin/reboot`, which restarts the **whole host computer**, n
 | Windows  | `shutdown /r /t 0` |
 
 For the server to come back automatically the host needs **OS auto-login** plus the **system service** installed (`run.py --install`) — see the README. If every command fails (no reboot permission), it logs an actionable hint.
+
+#### Server Logs
+
+Inventory + download for the host's rotating log files in `logs/` (`streamlink_app.log`, `hls.log`, `streamlink.err`, plus any rotated `.1`/`.2`/`.3` siblings). Surfaced so operators can pull diagnostics off a remote box without needing SSH.
+
+- **Refresh** re-reads the directory.
+- **Per-file Download** is a plain `<a download>` link to `/api/admin/logs/{name}?admin_token=…`. The token rides as a query param because anchor downloads can't set headers.
+- **Download All (.zip)** hits `/api/admin/logs/_bundle?admin_token=…` and streams a ZIP of every file in `LOG_DIR`. Filename includes a host-local timestamp so multiple snapshots don't collide.
+
+Path traversal is blocked server-side: `_safe_log_path` resolves the requested name against `LOG_DIR` and refuses any name containing a slash, `..`, an absolute path, or a resolved location that escapes the directory.
 
 #### Scheduled Restart
 
