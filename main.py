@@ -189,7 +189,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.7.2"
+UI_VERSION = "3.7.3"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -4364,7 +4364,13 @@ def _windows_volume_op(op):
         from ctypes import cast, POINTER                                # type: ignore[import-not-found]
         import comtypes                                                 # type: ignore[import-not-found]
         from comtypes import CLSCTX_ALL                                 # type: ignore[import-not-found]
-        from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume    # type: ignore[import-not-found]
+        # Use pycaw's COM interface DEFINITIONS but NOT its convenience wrappers.
+        # `AudioUtilities.GetSpeakers()` is API-unstable across pycaw versions —
+        # some return the raw IMMDevice (has `.Activate`), some return a Python
+        # `AudioDevice` wrapper that doesn't. Going through `CoCreateInstance` +
+        # `GetDefaultAudioEndpoint` works against every pycaw release we ship.
+        from pycaw.api.endpointvolume import IAudioEndpointVolume       # type: ignore[import-not-found]
+        from pycaw.api.mmdeviceapi import IMMDeviceEnumerator           # type: ignore[import-not-found]
     except ImportError as e:
         _PYCAW_IMPORT_FAILED = True
         # Name the actual missing module — pycaw / comtypes / something else —
@@ -4381,6 +4387,19 @@ def _windows_volume_op(op):
         )
         log.warning("System volume: %s (%s)", _PYCAW_LAST_ERROR, e)
         return None
+    # CLSID for MMDeviceEnumerator. Prefer the pycaw constant when present;
+    # fall back to the documented Microsoft GUID so we don't break on a future
+    # pycaw release that moves it. Same story for the EDataFlow / ERole enums.
+    try:
+        from pycaw.constants import CLSID_MMDeviceEnumerator, EDataFlow, ERole   # type: ignore[import-not-found]
+        e_render = int(EDataFlow.eRender.value)
+        e_multimedia = int(ERole.eMultimedia.value)
+    except Exception:
+        from comtypes import GUID                                                # type: ignore[import-not-found]
+        CLSID_MMDeviceEnumerator = GUID("{BCDE0395-E52F-467C-8E3D-C4579291692E}")
+        e_render = 0       # eRender (audio output)
+        e_multimedia = 1   # eMultimedia (default for music/video)
+
     com_initialized_here = False
     try:
         # On the worker thread, CoInitialize must be called before any COM use.
@@ -4393,8 +4412,12 @@ def _windows_volume_op(op):
             com_initialized_here = True
         except Exception:
             pass
-        devices = AudioUtilities.GetSpeakers()
-        interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+        device_enum = comtypes.CoCreateInstance(
+            CLSID_MMDeviceEnumerator, IMMDeviceEnumerator,
+            comtypes.CLSCTX_INPROC_SERVER,
+        )
+        speakers = device_enum.GetDefaultAudioEndpoint(e_render, e_multimedia)
+        interface = speakers.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
         vol = cast(interface, POINTER(IAudioEndpointVolume))
         return op(vol)
     except Exception as e:

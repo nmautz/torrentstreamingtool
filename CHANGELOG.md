@@ -1,5 +1,9 @@
 # Changelog
 
+## [3.7.3] — 2026-05-25
+- **Fix: `'AudioDevice' object has no attribute 'Activate'`** — even with `comtypes` installed, Windows volume control still failed because **`pycaw.AudioUtilities.GetSpeakers()` is API-unstable across pycaw versions**. Some releases return the raw `IMMDevice` COM pointer (has `.Activate()`), others return a Python `AudioDevice` wrapper that doesn't. `_windows_volume_op` now **bypasses `AudioUtilities.GetSpeakers()` entirely**, going through `CoCreateInstance(CLSID_MMDeviceEnumerator) → GetDefaultAudioEndpoint(eRender, eMultimedia) → Activate(IAudioEndpointVolume)` directly. This reuses pycaw's COM **interface definitions** (`pycaw.api.endpointvolume.IAudioEndpointVolume`, `pycaw.api.mmdeviceapi.IMMDeviceEnumerator`) — which have been stable — but not its convenience wrapper. Works against any pycaw release we ship.
+- Also falls back to a hard-coded `CLSID_MMDeviceEnumerator` GUID (`BCDE0395-E52F-467C-8E3D-C4579291692E`) + numeric `EDataFlow`/`ERole` constants if pycaw ever moves them, so the path keeps working through future renames.
+
 ## [3.7.2] — 2026-05-25
 - **Fix: Windows volume control still failed — `No module named 'comtypes'`.** `pycaw` declares `comtypes` as a transitive dep, but on real hosts (the user's box, in particular) pycaw can end up installed without comtypes — older standalone installs, `pip install --no-deps`, partial venvs, etc. Now `comtypes>=1.2.0` is pinned **explicitly** in `requirements.txt` under the same `sys_platform == "win32"` marker (belt-and-braces), so a clean `pip install -r requirements.txt` always lands both.
 - **Better diagnostic when an import is missing.** The error message now names the *actual* missing module (via `ImportError.name`) — so the dashboard toast says *"Windows volume control dep `comtypes` is not installed"* instead of the generic *"pycaw is not installed"*, telling the operator exactly which `pip install` to run.
