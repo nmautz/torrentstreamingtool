@@ -189,7 +189,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.7.0"
+UI_VERSION = "3.7.1"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -4340,20 +4340,77 @@ def _kill_tv_browser() -> None:
 # the OS volume to a configured "expected max" (`settings.system_volume_default`)
 # so headphones at 100 % don't blow eardrums after a movie session.
 
+# pycaw uses COM, which must be initialized **on every thread that calls it**.
+# `asyncio.to_thread` runs on Python's default ThreadPoolExecutor — those worker
+# threads don't have COM initialized, so `AudioUtilities.GetSpeakers()` raises
+# `CoInitialize has not been called` and the dashboard silently does nothing.
+# `_windows_volume_op` wraps each call in CoInitialize/CoUninitialize so it
+# works whichever pool worker happens to run it.
+
+# Cached once: True after the first successful import, False after the first
+# ImportError (so we don't spam the log every second on a host without pycaw).
+_PYCAW_IMPORT_FAILED = False
+_PYCAW_LAST_ERROR: Optional[str] = None
+
+
+def _windows_volume_op(op):
+    """Run `op(vol)` against the Windows default audio endpoint with COM init.
+    Returns op's return value, or None on failure. Last error is cached in
+    `_PYCAW_LAST_ERROR` so callers can surface it (e.g. in the API response)."""
+    global _PYCAW_IMPORT_FAILED, _PYCAW_LAST_ERROR
+    if _PYCAW_IMPORT_FAILED:
+        return None
+    try:
+        from ctypes import cast, POINTER                                # type: ignore[import-not-found]
+        import comtypes                                                 # type: ignore[import-not-found]
+        from comtypes import CLSCTX_ALL                                 # type: ignore[import-not-found]
+        from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume    # type: ignore[import-not-found]
+    except ImportError as e:
+        _PYCAW_IMPORT_FAILED = True
+        _PYCAW_LAST_ERROR = (
+            "pycaw is not installed on the server. Run "
+            "`pip install -r requirements.txt` (or re-run setup.py) and restart."
+        )
+        log.warning("System volume: %s (%s)", _PYCAW_LAST_ERROR, e)
+        return None
+    com_initialized_here = False
+    try:
+        # On the worker thread, CoInitialize must be called before any COM use.
+        # Returns S_OK first time (we own Uninit), S_FALSE if already inited
+        # by a prior call on this thread (still safe to Uninit — it's reference
+        # counted). RPC_E_CHANGED_MODE means another mode is in effect — fine,
+        # just don't call Uninit.
+        try:
+            comtypes.CoInitialize()
+            com_initialized_here = True
+        except Exception:
+            pass
+        devices = AudioUtilities.GetSpeakers()
+        interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+        vol = cast(interface, POINTER(IAudioEndpointVolume))
+        return op(vol)
+    except Exception as e:
+        _PYCAW_LAST_ERROR = f"{type(e).__name__}: {e}"
+        log.warning("System volume: Windows audio call failed: %s", _PYCAW_LAST_ERROR)
+        return None
+    finally:
+        if com_initialized_here:
+            try:
+                comtypes.CoUninitialize()                               # type: ignore[name-defined]
+            except Exception:
+                pass
+
+
 def _set_system_volume_sync(pct: int) -> bool:
     pct = max(0, min(100, int(pct)))
     sys_name = platform.system()
-    try:
-        if sys_name == "Windows":
-            from ctypes import cast, POINTER          # type: ignore[import-not-found]
-            from comtypes import CLSCTX_ALL           # type: ignore[import-not-found]
-            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume  # type: ignore[import-not-found]
-            devices = AudioUtilities.GetSpeakers()
-            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            vol = cast(interface, POINTER(IAudioEndpointVolume))
+    if sys_name == "Windows":
+        def _set(vol):
             vol.SetMute(0, None)
             vol.SetMasterVolumeLevelScalar(pct / 100.0, None)
             return True
+        return _windows_volume_op(_set) is True
+    try:
         if sys_name == "Darwin":
             subprocess.run(
                 ["osascript", "-e", f"set volume output volume {pct}"],
@@ -4388,15 +4445,11 @@ def _set_system_volume_sync(pct: int) -> bool:
 
 def _get_system_volume_sync() -> Optional[int]:
     sys_name = platform.system()
-    try:
-        if sys_name == "Windows":
-            from ctypes import cast, POINTER          # type: ignore[import-not-found]
-            from comtypes import CLSCTX_ALL           # type: ignore[import-not-found]
-            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume  # type: ignore[import-not-found]
-            devices = AudioUtilities.GetSpeakers()
-            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-            vol = cast(interface, POINTER(IAudioEndpointVolume))
+    if sys_name == "Windows":
+        def _get(vol):
             return max(0, min(100, round(vol.GetMasterVolumeLevelScalar() * 100)))
+        return _windows_volume_op(_get)
+    try:
         if sys_name == "Darwin":
             r = subprocess.run(
                 ["osascript", "-e", "output volume of (get volume settings)"],
@@ -4698,7 +4751,15 @@ async def youtube_control(req: YouTubeControlReq) -> JSONResponse:
         if ok:
             state.vlc_volume = target
             await broadcast("state", state_snapshot())
-        return JSONResponse({"ok": ok, "volume": target})
+            return JSONResponse({"ok": True, "volume": target})
+        # Failure: surface *why* so the user can act (most often: pycaw not
+        # installed on Windows, or COM init refused). _PYCAW_LAST_ERROR is
+        # populated by _windows_volume_op on Windows; on POSIX we fall back to a
+        # generic message since pactl/osascript failures are rare.
+        err = _PYCAW_LAST_ERROR if platform.system() == "Windows" else \
+            "Couldn't set the host system volume."
+        return JSONResponse({"ok": False, "volume": target, "error": err},
+                            status_code=503)
 
     await broadcast("yt_command", {"action": req.action, "value": req.value})
     return JSONResponse({"ok": True})

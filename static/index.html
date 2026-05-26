@@ -4762,12 +4762,22 @@ async function playYoutube(btn){
   });
 }
 // Relay a control to the YouTube TV player. action ∈ playpause|seek|seek_to|volume_set|volume_step.
+// Surfaces a one-shot alert when volume control fails (e.g. pycaw missing on
+// Windows) — without this the slider just silently no-ops and the user is left
+// guessing. Throttled per session so a stuck slider doesn't spam the toast.
+let _ytVolErrorShown = false;
 async function ytControl(action, value){
-  await fetch("/api/youtube/control",{
+  const r = await fetch("/api/youtube/control",{
     method:"POST",
     headers:{"Content-Type":"application/json"},
     body:JSON.stringify({action, value}),
-  }).catch(()=>{});
+  }).catch(()=>null);
+  if (r && !r.ok && (action === "volume_set" || action === "volume_step") && !_ytVolErrorShown) {
+    _ytVolErrorShown = true;
+    let detail = "Volume control isn't working on the server.";
+    try { const d = await r.json(); if (d && d.error) detail = d.error; } catch(_){}
+    showAlert(detail, "error");
+  }
 }
 
 // ── Skip & Track controls ───────────────────────────────────────────────────
@@ -6269,6 +6279,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">3.7.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">3.7.1</div>
 </body>
 </html>
