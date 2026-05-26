@@ -273,3 +273,19 @@ it from the non-admin UI, and let the admin schedule it to run overnight.
 
 ---
 
+## Milestone 21 — YouTube on TV
+
+Play any YouTube link on the TV (the host display) and drive it from the
+dashboard. Not VLC (its `youtube.lua` is broken) and not a download — the video
+plays in a fullscreen Chrome kiosk via the YouTube IFrame Player API, controlled
+remotely over SSE. See [docs/YOUTUBE.md](docs/YOUTUBE.md).
+
+- [x] **21.1** Backend endpoints: `POST /api/youtube {url}` (extract id, take over now-playing state, stop VLC, broadcast `yt_command:load`, launch kiosk if `/tv` not seen <6 s), `POST /api/youtube/control {action,value}` (relay as `yt_command`), `POST /api/youtube/tv-state` (heartbeat + mirror time/duration/title/volume onto reused display fields, rebroadcast `state`), `GET /tv` (serve the kiosk page). New `AppState` fields `youtube_active` / `youtube_video_id` / `youtube_playback` / `youtube_tv_seen_at`; both surfaced in `state_snapshot`.
+- [x] **21.2** Kiosk lifecycle: `_extract_youtube_id` (watch / `youtu.be` / shorts / live / embed / bare id), `_find_chrome` (Chrome → Chromium → Edge, or `_CHROME_BIN`), `_launch_tv_browser` (`--kiosk --app=http://localhost/tv?v=<id>` + `--autoplay-policy=no-user-gesture-required` + isolated `--user-data-dir=.tv_chrome_profile`), `_kill_tv_browser` (kills only the kiosk, matched by profile dir in cmdline). `/api/stop` clears YouTube state, broadcasts `yt_command:close`, hard-kills the kiosk.
+- [x] **21.3** Poller gating: `stat_broadcaster` skips its VLC status read while `youtube_active` (so the YouTube-reported time/volume isn't clobbered); `background_video_loop` skips entirely (no idle background video over the kiosk). `vlc_progress_tracker` already no-ops without a library item.
+- [x] **21.4** TV player page `static/tv.html`: YouTube IFrame API player, reads `?v=<id>` + listens for `yt_command` over `/api/events`, autoplay, POSTs `tv-state` every 1 s + after each command, queues a pre-ready `load`, ignores a `load` for the current id, `close` → pause + `window.close()`.
+- [x] **21.5** Frontend: red **Play on TV** input at the top of the Search tab + `playYoutube()`; `ytControl()` relay; `vlcPause` / `vlcSeek` / `handleSeekBarClick` / `vlcSetVolume` / `vlcVolumeStep` / `vlcVolume` branch on `app.youtube_active`; save-to-library / handoff / episode-nav / track menus hidden in YouTube mode.
+- [x] **21.6** Docs + version → 3.5.0: new docs/YOUTUBE.md, CLAUDE.md index, API.md (3 endpoints + `/tv` + `yt_command` SSE event), GOTCHAS.md (broken VLC youtube.lua, autoplay flag, reused display fields + poller gating, kiosk kill-by-profile), ARCHITECTURE.md (code map + data-flow), CHANGELOG. `.gitignore` for `.tv_chrome_profile/`.
+
+---
+

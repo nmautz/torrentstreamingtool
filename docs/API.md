@@ -24,6 +24,7 @@ Event types:
 | `library_update` | library item status changed | `{item_id, status, message?}` |
 | `progress_saved` | every 15 s while a library item is playing | `{item_id, profile_id, file_path, episode_name, position_sec, duration_sec, pct}` |
 | `analysis_status` | Smart Skip job progress | `{series_key, job: {status, stage, current, total, message, episode_name?, …}}` |
+| `yt_command` | YouTube-on-TV: a playback command for the `/tv` kiosk page | `{action, value?, video_id?}` — `action ∈ load\|play\|pause\|playpause\|seek\|seek_to\|volume_set\|volume_step\|close`. Broadcast to all SSE clients; only `static/tv.html` acts on it. See [YOUTUBE.md](YOUTUBE.md) |
 
 ## State / Version
 
@@ -45,9 +46,21 @@ Event types:
 | POST | `/api/stream/prepare` | `{magnet, title}` → adds magnet, waits for metadata + file list, returns `{hash, files[]}`. Stores hash in `state.prepare_hash` |
 | DELETE | `/api/stream/cancel?hash=…` | Deletes a torrent added by `/stream/prepare` (e.g. user dismissed the picker) |
 | POST | `/api/stream` | `{magnet, title, file_index?, torrent_hash?}` → 202; clears `state` synchronously, kicks off `stream_pipeline`, and runs the prior-torrent qBit cleanup in a background task so the response never waits on qBit. `torrent_hash` reuses the `/prepare` torrent |
-| POST | `/api/stop` | Returns **202** — clears `state` and broadcasts `idle` synchronously, then runs the qBit delete + VLC `pl_stop` + minimize in a background task so the UI flips to idle immediately even when qBit/VLC roundtrips are slow. Cancels both `state.stream_task` and `state.library_play_task` first |
+| POST | `/api/stop` | Returns **202** — clears `state` and broadcasts `idle` synchronously, then runs the qBit delete + VLC `pl_stop` + minimize in a background task so the UI flips to idle immediately even when qBit/VLC roundtrips are slow. Cancels both `state.stream_task` and `state.library_play_task` first. If a YouTube play was active, also broadcasts `yt_command:close` and hard-kills the kiosk Chrome |
 | POST | `/api/retry` | Kill VLC, relaunch with HTTP interface, replay current file + remainder of playlist |
 | POST | `/api/stream/save-to-library` | `{title, series, season, episode, save_path}` → adopt the active stream into the library. Restores all file priorities to 1 so the full torrent continues. Sets `library_item_id` so `/api/stop` won't delete files |
+
+## YouTube on TV
+
+Plays a YouTube link in a fullscreen Chrome kiosk on the host display, driven
+from the dashboard. Not VPN-gated (ordinary HTTPS, not P2P). See [YOUTUBE.md](YOUTUBE.md).
+
+| Method | Path | Notes |
+|--------|------|-------|
+| POST | `/api/youtube` | `{url}` → **202**. Extracts the video id (watch / `youtu.be` / shorts / live / embed / bare id; 400 if none), takes over now-playing state (`youtube_active=True`, `stream_status="playing"`), stops VLC, broadcasts `yt_command:load`, and launches the kiosk if the `/tv` page hasn't beaten in the last 6 s (else hot-swaps via the broadcast). 500 if no Chrome/Chromium found (`_find_chrome`; override with `_CHROME_BIN` in `.env`) |
+| POST | `/api/youtube/control` | `{action, value?}` → relays the command to the `/tv` page as an SSE `yt_command`. `action ∈ playpause\|play\|pause\|seek\|seek_to\|volume_set\|volume_step`; `value` = ±seconds (`seek`), 0–100 % (`seek_to`), or dashboard volume 0–200 / ±delta. 409 if no YouTube video is active, 400 on unknown action |
+| POST | `/api/youtube/tv-state` | Heartbeat + playback report **from** the `/tv` page: `{video_id, title, time, duration, volume, playback}`. Stamps `state.youtube_tv_seen_at`, mirrors fields onto the reused `active_title`/`vlc_time`/`vlc_duration`/`vlc_volume`, rebroadcasts `state`. Returns `{active}` so a stale page can self-pause after Stop |
+| GET | `/tv` | Serves `static/tv.html`, the host-side kiosk player (YouTube IFrame API + `yt_command` listener). Opened by the kiosk launcher with `?v=<id>` |
 
 ## Profiles
 

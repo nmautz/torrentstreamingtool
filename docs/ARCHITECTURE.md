@@ -39,6 +39,7 @@ All four services (VLC, qBittorrent, Jackett, dashboard) run on the same host ex
 | `analyzer.py` | 540 | Smart Skip — chromaprint fingerprinting + ffmpeg blackdetect |
 | `static/index.html` | 3608 | Main UI — vanilla JS, Tailwind CDN, SSE-driven |
 | `static/admin.html` | 990 | Admin panel — indexer management, content lock, Smart Skip editor |
+| `static/tv.html` | — | YouTube-on-TV kiosk page (host display): IFrame Player API + `yt_command` SSE listener + state heartbeat. See [YOUTUBE.md](YOUTUBE.md) |
 | `library.json` | — | Persisted state: profiles, library items, watch progress, skip data |
 | `.env` | — | Settings + auto-detected binary paths (`_VLC_BIN`, `_QBIT_BIN`, etc.) |
 
@@ -56,6 +57,12 @@ All four services (VLC, qBittorrent, Jackett, dashboard) run on the same host ex
 2. `stream_pipeline` task: adds magnet to qBit with `sequentialDownload=true`, waits for torrent metadata (up to 30 s), polls every 1 s until `BUFFER_MIN_MB` or `BUFFER_MIN_PCT`, resolves the largest video file path, sends `in_play` to VLC's Lua HTTP, optionally fullscreens VLC.
 3. `stat_broadcaster` keeps pushing `state` snapshots every 2 s with download progress and VLC playback position.
 4. On `/api/stop` (or new Play): cancel the task, delete torrent + files via qBit, `pl_stop` VLC.
+
+### YouTube on TV (Search tab → Play on TV)
+1. Browser POST `/api/youtube` `{url}` → 202. Backend extracts the video id, sets `youtube_active`, stops VLC, broadcasts `yt_command:load`, and launches a fullscreen Chrome kiosk at `/tv?v=<id>` (or hot-swaps if the page is already open).
+2. `static/tv.html` plays the video via the YouTube IFrame API and reports position/title/volume back via `POST /api/youtube/tv-state` every 1 s; the backend mirrors those onto the reused `vlc_*` display fields and rebroadcasts `state`.
+3. The dashboard's existing footer/fullscreen controls route to `POST /api/youtube/control` (→ SSE `yt_command` → IFrame API) whenever `app.youtube_active`.
+4. `/api/stop` broadcasts `yt_command:close` and hard-kills the kiosk. Full detail in [YOUTUBE.md](YOUTUBE.md).
 
 ### Library download → Play
 1. Browser POST `/api/library/download` → creates an item in `library.json` with `status="downloading"`, kicks off `library_download_pipeline`.

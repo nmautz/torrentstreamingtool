@@ -1,0 +1,181 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <title>StreamLink — TV</title>
+  <style>
+    /* Full-bleed black canvas; the iframe fills the kiosk window edge-to-edge. */
+    html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }
+    #player, #player iframe { width: 100vw; height: 100vh; border: 0; display: block; }
+    /* Idle splash shown before the first video loads. */
+    #idle {
+      position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+      flex-direction: column; gap: 14px; color: #4b5563; background: #000;
+      font: 700 22px/1.2 system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+      text-transform: uppercase; letter-spacing: .15em;
+    }
+    #idle .logo { font-size: 34px; letter-spacing: .25em; }
+    #idle .logo b { color: #818cf8; }
+    .hidden { display: none !important; }
+  </style>
+</head>
+<body>
+  <div id="idle">
+    <div class="logo"><b>Stream</b>Link</div>
+    <div>Ready for YouTube</div>
+  </div>
+  <div id="player" class="hidden"></div>
+
+  <script>
+  // ── StreamLink TV player ──────────────────────────────────────────────────
+  // Runs in a fullscreen Chrome kiosk on the host (the TV). Plays YouTube via the
+  // IFrame Player API and is driven from the dashboard: dashboard → backend →
+  // SSE `yt_command` → here. It reports playback back to /api/youtube/tv-state so
+  // every dashboard mirrors the TV. See docs/YOUTUBE.md.
+
+  let player = null;          // YT.Player instance (null until API + first load)
+  let apiReady = false;       // YT IFrame API script finished loading
+  let currentVideoId = null;  // id currently loaded (dedupes redundant `load`s)
+  let pendingLoadId = null;   // a load that arrived before the API was ready
+
+  // Read the initial video id from ?v= (the kiosk is launched with it so it
+  // autoplays even if it misses the first SSE broadcast).
+  const initialId = new URLSearchParams(location.search).get("v");
+
+  // The IFrame API calls this once its script has loaded.
+  window.onYouTubeIframeAPIReady = function () {
+    apiReady = true;
+    const startId = pendingLoadId || initialId;
+    if (startId) createPlayer(startId);
+  };
+
+  function createPlayer(videoId) {
+    currentVideoId = videoId;
+    pendingLoadId = null;
+    document.getElementById("idle").classList.add("hidden");
+    document.getElementById("player").classList.remove("hidden");
+    player = new YT.Player("player", {
+      videoId: videoId,
+      playerVars: {
+        autoplay: 1, controls: 1, rel: 0, modestbranding: 1,
+        playsinline: 1, fs: 1, iv_load_policy: 3,
+      },
+      events: {
+        onReady: (e) => { try { e.target.playVideo(); } catch (_) {} reportState(); },
+        onStateChange: reportState,
+        onError: reportState,
+      },
+    });
+  }
+
+  function loadVideo(videoId) {
+    if (!videoId) return;
+    if (!apiReady) { pendingLoadId = videoId; return; }
+    if (!player) { createPlayer(videoId); return; }
+    if (videoId === currentVideoId) { try { player.playVideo(); } catch (_) {} return; }
+    currentVideoId = videoId;
+    document.getElementById("idle").classList.add("hidden");
+    document.getElementById("player").classList.remove("hidden");
+    try { player.loadVideoById(videoId); } catch (_) {}
+  }
+
+  // ── Command handling (from the dashboard via SSE) ──────────────────────────
+  function handleCommand(cmd) {
+    if (!cmd || !cmd.action) return;
+    const a = cmd.action, v = cmd.value;
+    if (a === "load") { loadVideo(cmd.video_id); return; }
+    if (!player) return;
+    try {
+      switch (a) {
+        case "play":  player.playVideo(); break;
+        case "pause": player.pauseVideo(); break;
+        case "playpause": {
+          const s = player.getPlayerState();
+          // 1 = playing → pause; anything else → play.
+          if (s === 1) player.pauseVideo(); else player.playVideo();
+          break;
+        }
+        case "seek": {           // value = delta seconds (may be negative)
+          const t = player.getCurrentTime() + (Number(v) || 0);
+          player.seekTo(Math.max(0, t), true);
+          break;
+        }
+        case "seek_to": {        // value = absolute percent 0..100
+          const dur = player.getDuration() || 0;
+          player.seekTo(Math.max(0, Math.min(100, Number(v) || 0)) / 100 * dur, true);
+          break;
+        }
+        case "volume_set": {     // value = dashboard 0..200 → YouTube 0..100
+          player.unMute();
+          player.setVolume(Math.max(0, Math.min(100, Number(v) || 0)));
+          break;
+        }
+        case "volume_step": {    // value = delta (dashboard units ≈ percent)
+          player.unMute();
+          const nv = Math.max(0, Math.min(100, player.getVolume() + (Number(v) || 0)));
+          player.setVolume(nv);
+          break;
+        }
+        case "close":
+          try { player.pauseVideo(); } catch (_) {}
+          // App/kiosk windows opened by Chrome honor window.close(); the server
+          // also hard-kills the kiosk instance as a backstop.
+          setTimeout(() => { try { window.close(); } catch (_) {} }, 150);
+          break;
+      }
+    } catch (_) {}
+    // Push a fresh report right after acting so the dashboard updates snappily.
+    setTimeout(reportState, 120);
+  }
+
+  // ── State reporting (to the dashboard via the backend) ─────────────────────
+  const PB = { "-1": "unstarted", "0": "ended", "1": "playing", "2": "paused", "3": "buffering", "5": "cued" };
+
+  function reportState() {
+    let body = { video_id: currentVideoId };
+    try {
+      if (player && player.getCurrentTime) {
+        body.time = player.getCurrentTime() || 0;
+        body.duration = player.getDuration() || 0;
+        body.volume = player.isMuted && player.isMuted() ? 0 : (player.getVolume ? player.getVolume() : undefined);
+        body.playback = PB[String(player.getPlayerState ? player.getPlayerState() : -1)] || "";
+        const data = player.getVideoData ? player.getVideoData() : null;
+        if (data && data.title) body.title = data.title;
+      }
+    } catch (_) {}
+    fetch("/api/youtube/tv-state", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      keepalive: true,
+    }).then(r => r.json()).then(d => {
+      // Server says it's no longer the active playback (Stop was pressed elsewhere
+      // and our kill missed us) — pause and bow out.
+      if (d && d.active === false) { try { player && player.pauseVideo(); } catch (_) {} }
+    }).catch(() => {});
+  }
+
+  // Heartbeat + position report every second. Doubles as the "page is open"
+  // signal the backend uses to hot-swap videos instead of relaunching Chrome.
+  setInterval(reportState, 1000);
+
+  // ── SSE: receive commands from the dashboard ───────────────────────────────
+  function connectSSE() {
+    const es = new EventSource("/api/events");
+    es.addEventListener("yt_command", (e) => {
+      try { handleCommand(JSON.parse(e.data)); } catch (_) {}
+    });
+    es.addEventListener("error", () => { /* EventSource auto-reconnects */ });
+  }
+  connectSSE();
+
+  // Load the YouTube IFrame API.
+  (function () {
+    const tag = document.createElement("script");
+    tag.src = "https://www.youtube.com/iframe_api";
+    document.head.appendChild(tag);
+  })();
+  </script>
+</body>
+</html>

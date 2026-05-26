@@ -21,6 +21,9 @@ library.json
 # Runtime scratch: countdown text VLC reads for the on-TV skip popup
 .vlc_marquee.txt
 
+# Dedicated Chrome profile for the YouTube-on-TV kiosk window
+.tv_chrome_profile/
+
 # macOS
 .DS_Store
 ._*

@@ -137,6 +137,10 @@ class Settings(BaseSettings):
 settings = Settings()
 LIBRARY_FILE = Path(__file__).parent / "library.json"
 BACKGROUND_DIR = Path(__file__).parent / ".background"
+# Dedicated Chrome user-data-dir for the YouTube-on-TV kiosk window. Isolated so
+# launching/killing it never touches the user's normal Chrome, and so we can
+# identify *just* the kiosk instance to kill on Stop (match this path in cmdline).
+TV_CHROME_PROFILE = Path(__file__).parent / ".tv_chrome_profile"
 
 # Countdown popup shown on the TV itself. VLC is launched with a `marq`
 # sub-source that re-reads this file ~5×/s and renders its contents bottom-right.
@@ -185,7 +189,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.4.5"
+UI_VERSION = "3.5.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -295,6 +299,11 @@ class AppState:
     last_activity: float = 0.0                            # time.time() of last user-initiated interaction (drives scheduled-reboot idle check)
     prep_paused: bool = False                             # True ⇒ bulk stream-prep jobs hold (set by the non-admin Pause control / overnight window end)
     overnight_active: bool = False                        # True while inside the admin's overnight auto-prep window (in-memory window membership)
+    # ── YouTube-on-TV (browser playback on the host display, remote-controlled) ──
+    youtube_active: bool = False                          # True while a YouTube video is the active TV playback (browser, not VLC)
+    youtube_video_id: Optional[str] = None               # 11-char YouTube id currently loaded on the TV page
+    youtube_playback: str = ""                            # last player state from /tv: unstarted|buffering|playing|paused|ended
+    youtube_tv_seen_at: float = 0.0                       # time.time() of last /tv heartbeat (drives relaunch-vs-load decision)
     sse_queues: list = field(default_factory=list)
 
 
@@ -392,6 +401,12 @@ def state_snapshot() -> dict:
         "hls_available": HLS_AVAILABLE,
         # True ⇒ bulk stream-prep is paused (drives the global prep bar's Resume control).
         "prep_paused": state.prep_paused,
+        # YouTube-on-TV: when active, the dashboard routes its player controls to
+        # /api/youtube/control instead of VLC, and hides save/handoff/episode-nav.
+        # active_title / vlc_time / vlc_duration / vlc_volume are reused for display,
+        # populated from the /tv page's heartbeat (see /api/youtube/tv-state).
+        "youtube_active": state.youtube_active,
+        "youtube_video_id": state.youtube_video_id,
     }
 
 
@@ -1909,7 +1924,7 @@ async def stat_broadcaster() -> None:
                 state.total_mb = total / 1_048_576
                 state.dl_speed_bps = info.get("dlspeed", 0)
                 state.ul_speed_bps = info.get("upspeed", 0)
-        if state.stream_status == "playing":
+        if state.stream_status == "playing" and not state.youtube_active:
             vs = await vlc_status()
             if vs:
                 state.vlc_time = int(vs.get("time", 0))
@@ -2041,6 +2056,10 @@ async def background_video_loop() -> None:
     while True:
         await asyncio.sleep(3)
         try:
+            # YouTube is playing in the browser on the TV — VLC is intentionally
+            # stopped. Don't let the idle-background loop start a video over it.
+            if state.youtube_active:
+                continue
             lib = await get_library()
             bg = lib.get("settings", {}).get("background_video") or {}
             if not bg.get("path") or not bg.get("enabled", True):
@@ -3017,6 +3036,26 @@ class ProgressReq(BaseModel):
     file_path: str
     position_sec: float
     duration_sec: float
+
+
+class YouTubeReq(BaseModel):
+    url: str
+
+
+class YouTubeControlReq(BaseModel):
+    action: str
+    value: Optional[float] = None        # ±seconds (seek) / 0-100% (seek_to) / volume
+
+
+class YouTubeTvStateReq(BaseModel):
+    # Heartbeat + playback report posted by the /tv kiosk page. All optional —
+    # an early beat (before the IFrame player is ready) carries only video_id.
+    video_id: Optional[str] = None
+    title: Optional[str] = None
+    time: Optional[float] = None
+    duration: Optional[float] = None
+    volume: Optional[float] = None
+    playback: Optional[str] = None
 
 
 class LibraryPlayReq(BaseModel):
@@ -4094,6 +4133,228 @@ async def save_stream_to_library(req: SaveToLibraryReq) -> JSONResponse:
                          "default_save_path": settings.qbit_download_path})
 
 
+# ── YouTube on TV ───────────────────────────────────────────────────────────
+# VLC 3.0's bundled youtube.lua is perpetually broken (it "plays" the watch page
+# for a few seconds, never resolves a title/length, then stops — see GOTCHAS).
+# Instead we play YouTube in a Chrome kiosk window on the host display (the TV)
+# via the YouTube IFrame Player API on our own /tv page, and drive it remotely
+# from the dashboard: dashboard → POST /api/youtube/control → SSE `yt_command`
+# → /tv page → IFrame API. The /tv page reports playback back via
+# /api/youtube/tv-state, which we mirror onto the reused vlc_time/duration/volume
+# fields so the existing footer + fullscreen controls render it unchanged.
+
+_YT_ID_RE = re.compile(
+    r"(?:youtu\.be/|youtube\.com/(?:watch\?(?:.*&)?v=|embed/|shorts/|live/|v/))"
+    r"([0-9A-Za-z_-]{11})"
+)
+
+
+def _extract_youtube_id(url: str) -> Optional[str]:
+    """Pull the 11-char video id from any common YouTube URL form.
+
+    Accepts watch?v=, youtu.be/, /shorts/, /embed/, /live/, or a bare 11-char id.
+    Returns None if nothing that looks like a video id is present.
+    """
+    if not url:
+        return None
+    url = url.strip()
+    m = _YT_ID_RE.search(url)
+    if m:
+        return m.group(1)
+    # Bare id pasted directly (e.g. "dQw4w9WgXcQ")
+    if re.fullmatch(r"[0-9A-Za-z_-]{11}", url):
+        return url
+    return None
+
+
+def _find_chrome() -> Optional[str]:
+    """Locate a Chromium-family browser binary for the kiosk window."""
+    saved = os.environ.get("_CHROME_BIN")
+    if saved and Path(saved).exists():
+        return saved
+    candidates = {
+        "Darwin": [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+            "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        ],
+        "Windows": [
+            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
+            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+        ],
+    }.get(platform.system(), [
+        "google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
+        "microsoft-edge",
+    ])
+    for c in candidates:
+        if os.path.sep in c or (os.path.altsep and os.path.altsep in c):
+            if Path(c).exists():
+                return c
+        else:
+            found = shutil.which(c)
+            if found:
+                return found
+    return None
+
+
+def _launch_tv_browser(video_id: str) -> bool:
+    """Open the /tv player page in a fullscreen Chrome kiosk on the host display.
+
+    Uses an isolated --user-data-dir so we never disturb the user's Chrome and
+    can kill exactly this instance later. --autoplay-policy lets the IFrame
+    player start with sound without a user gesture. Returns False if no Chrome.
+    """
+    chrome = _find_chrome()
+    if not chrome:
+        return False
+    url = f"http://localhost/tv?v={video_id}"
+    args = [
+        chrome,
+        f"--user-data-dir={TV_CHROME_PROFILE}",
+        "--no-first-run",
+        "--no-default-browser-check",
+        "--autoplay-policy=no-user-gesture-required",
+        "--kiosk",
+        f"--app={url}",
+    ]
+    kw: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if platform.system() == "Windows":
+        kw["creationflags"] = subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP  # type: ignore[attr-defined]
+    else:
+        kw["start_new_session"] = True
+    try:
+        subprocess.Popen(args, **kw)
+        return True
+    except Exception:
+        return False
+
+
+def _kill_tv_browser() -> None:
+    """Kill the dedicated kiosk Chrome (matched by our --user-data-dir) — and
+    only that instance, leaving the user's normal Chrome windows alone."""
+    needle = str(TV_CHROME_PROFILE)
+    for p in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            cmdline = p.info.get("cmdline") or []
+            if any(needle in str(a) for a in cmdline):
+                p.kill()
+        except Exception:
+            pass
+
+
+@app.get("/tv", include_in_schema=False)
+async def tv_player_page() -> FileResponse:
+    """The host-side kiosk page: YouTube IFrame player + SSE command listener."""
+    return FileResponse(str(Path(__file__).parent / "static" / "tv.html"))
+
+
+@app.post("/api/youtube")
+async def youtube_play(req: YouTubeReq) -> JSONResponse:
+    """Play a YouTube URL on the TV (host browser), remote-controlled from here.
+
+    Not VPN-gated — this is ordinary HTTPS playback in a browser, not P2P.
+    """
+    video_id = _extract_youtube_id(req.url)
+    if not video_id:
+        raise HTTPException(400, "Not a recognisable YouTube link.")
+
+    # Cancel any in-flight VLC pipeline so it can't grab the screen mid-launch.
+    if state.stream_task and not state.stream_task.done():
+        state.stream_task.cancel()
+    if state.library_play_task and not state.library_play_task.done():
+        state.library_play_task.cancel()
+
+    # Take over the "now playing" state. Title fills in once the /tv page reports
+    # it back via /api/youtube/tv-state; show a placeholder until then.
+    state.active_hash = None
+    state.active_file = None
+    state.library_item_id = None
+    state.library_profile_id = None
+    state.library_item_file_count = 0
+    state.library_playlist = []
+    state.library_current_file = None
+    state.youtube_active = True
+    state.youtube_video_id = video_id
+    state.youtube_playback = "buffering"
+    state.active_title = "YouTube"
+    state.vlc_time = 0
+    state.vlc_duration = 0
+    state.stream_status = "playing"
+
+    # Stop VLC + clear any idle background so only the browser shows on the TV.
+    await vlc("pl_stop")
+
+    # If the /tv page is already open (recent heartbeat), just hot-swap the video
+    # via SSE — smoother than relaunching the whole kiosk. Otherwise launch it;
+    # the fresh page reads ?v=<id> and autoplays even if it missed the broadcast.
+    page_open = (time.time() - state.youtube_tv_seen_at) < 6.0
+    await broadcast("yt_command", {"action": "load", "video_id": video_id})
+    launched = True
+    if not page_open:
+        launched = await asyncio.to_thread(_launch_tv_browser, video_id)
+        if not launched:
+            state.youtube_active = False
+            state.youtube_video_id = None
+            state.youtube_playback = ""
+            state.active_title = None
+            state.stream_status = "idle"
+            await broadcast("state", state_snapshot())
+            raise HTTPException(
+                500,
+                "No Chrome/Chromium found on the host to play YouTube on the TV. "
+                "Install Google Chrome (or set _CHROME_BIN in .env).",
+            )
+
+    # Note: we deliberately do NOT broadcast a `stream_status` event here — the
+    # client's stream_status handler phrases playing as "Now playing in VLC".
+    # The `state` snapshot below already carries stream_status="playing".
+    await broadcast("state", state_snapshot())
+    return JSONResponse({"ok": True, "video_id": video_id}, status_code=202)
+
+
+@app.post("/api/youtube/control")
+async def youtube_control(req: YouTubeControlReq) -> JSONResponse:
+    """Relay a playback command to the TV page over SSE.
+
+    action ∈ {playpause, play, pause, seek, seek_to, volume_set, volume_step}.
+    `value` carries the numeric argument where relevant (seconds, percent, etc.).
+    """
+    if not state.youtube_active:
+        raise HTTPException(409, "No YouTube video is playing on the TV.")
+    if req.action not in ("playpause", "play", "pause", "seek", "seek_to",
+                          "volume_set", "volume_step"):
+        raise HTTPException(400, f"Unknown action: {req.action}")
+    await broadcast("yt_command", {"action": req.action, "value": req.value})
+    return JSONResponse({"ok": True})
+
+
+@app.post("/api/youtube/tv-state")
+async def youtube_tv_state(req: YouTubeTvStateReq) -> JSONResponse:
+    """Heartbeat + playback report from the /tv page. Mirrors the player's
+    position/duration/volume/title onto the reused display fields and rebroadcasts
+    so every dashboard reflects the TV instantly."""
+    state.youtube_tv_seen_at = time.time()
+    if not state.youtube_active:
+        # A stale page still beating after Stop — tell it to close itself.
+        return JSONResponse({"ok": True, "active": False})
+
+    if req.video_id:
+        state.youtube_video_id = req.video_id
+    if req.title and req.title.strip():
+        state.active_title = req.title.strip()
+    if req.time is not None:
+        state.vlc_time = int(req.time)
+    if req.duration is not None:
+        state.vlc_duration = int(req.duration)
+    if req.volume is not None:
+        state.vlc_volume = max(0, min(200, int(req.volume)))
+    if req.playback:
+        state.youtube_playback = req.playback
+    await broadcast("state", state_snapshot())
+    return JSONResponse({"ok": True, "active": True})
+
+
 @app.post("/api/stop")
 async def stop() -> JSONResponse:
     # Cancel any in-flight pipelines first so a buffering stream doesn't race the teardown
@@ -4106,12 +4367,18 @@ async def stop() -> JSONResponse:
     active_hash = state.active_hash
     library_item_id = state.library_item_id
     prepare_hash = state.prepare_hash
+    was_youtube = state.youtube_active
 
     # Clear state + broadcast idle immediately — the UI updates before slow qBit/VLC roundtrips run
     state.active_hash = None
     state.active_file = None
     state.active_title = None
     state.stream_status = "idle"
+    state.youtube_active = False
+    state.youtube_video_id = None
+    state.youtube_playback = ""
+    state.vlc_time = 0
+    state.vlc_duration = 0
     state.library_item_id = None
     state.library_profile_id = None
     state.library_item_file_count = 0
@@ -4128,21 +4395,31 @@ async def stop() -> JSONResponse:
     state.prepare_hash = None
     await _cancel_skip_countdown()
 
+    # Tell the TV page to pause + close itself, then hard-kill the kiosk browser
+    # so a YouTube play doesn't linger on the TV after Stop.
+    if was_youtube:
+        await broadcast("yt_command", {"action": "close"})
+
     await broadcast("stream_status", {"status": "idle", "message": "Stopped."})
     await broadcast("state", state_snapshot())
 
-    async def _stop_cleanup(ah: Optional[str], lid: Optional[str], ph: Optional[str]) -> None:
+    async def _stop_cleanup(ah: Optional[str], lid: Optional[str], ph: Optional[str], yt: bool) -> None:
         try:
             if ah and not lid:
                 await qbit_delete(ah)
             if ph:
                 await qbit_delete(ph, delete_files=True)
+            if yt:
+                # Give the page a beat to pause via the SSE 'close' command, then
+                # kill the dedicated kiosk Chrome instance (matched by profile dir).
+                await asyncio.sleep(0.4)
+                await asyncio.to_thread(_kill_tv_browser)
             await vlc("pl_stop")
             await vlc_minimize()
         except Exception:
             pass
 
-    asyncio.create_task(_stop_cleanup(active_hash, library_item_id, prepare_hash))
+    asyncio.create_task(_stop_cleanup(active_hash, library_item_id, prepare_hash, was_youtube))
     return JSONResponse({"ok": True}, status_code=202)
 
 
