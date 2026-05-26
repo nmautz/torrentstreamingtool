@@ -189,7 +189,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.6.0"
+UI_VERSION = "3.6.1"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -304,6 +304,7 @@ class AppState:
     youtube_video_id: Optional[str] = None               # 11-char YouTube id currently loaded on the TV page
     youtube_playback: str = ""                            # last player state from /tv: unstarted|buffering|playing|paused|ended
     youtube_tv_seen_at: float = 0.0                       # time.time() of last /tv heartbeat (drives relaunch-vs-load decision)
+    system_volume_before_yt: Optional[int] = None        # OS volume (0-100) snapshot at YouTube start; falls back when no default configured
     sse_queues: list = field(default_factory=list)
 
 
@@ -3137,6 +3138,10 @@ class MaxVolumeReq(BaseModel):
     max_volume: int   # 0-200; 200 = no cap
 
 
+class SystemVolumeDefaultReq(BaseModel):
+    system_volume_default: int   # 0-100; OS volume restored when YouTube stops
+
+
 class SkipNowReq(BaseModel):
     type: str         # "intro" or "credits"
 
@@ -4277,12 +4282,25 @@ def _launch_tv_browser(video_id: str) -> bool:
     chrome = _find_chrome()
     if not chrome:
         return False
-    url = f"http://localhost/tv?v={video_id}"
+    # 127.0.0.1, NOT localhost. On Windows the hosts file resolves localhost to
+    # both `::1` and `127.0.0.1`, and Chromium prefers IPv6 first; uvicorn binds
+    # `0.0.0.0` (IPv4 only), so the kiosk hits ECONNREFUSED on `::1` and may
+    # show an error page or hang long enough that the heartbeat watchdog fires
+    # before the page ever loads. Pinning v4 sidesteps all of that. See
+    # docs/GOTCHAS.md.
+    url = f"http://127.0.0.1/tv?v={video_id}"
     args = [
         chrome,
         f"--user-data-dir={TV_CHROME_PROFILE}",
         "--no-first-run",
         "--no-default-browser-check",
+        # Suppress the Edge / Chrome welcome / signin / promo modals that can
+        # block a fresh --user-data-dir profile from rendering the requested URL.
+        "--disable-features=msImplicitSignin,SigninInterceptBubbleV2,DesktopPWAsRunOnOsLogin",
+        "--disable-fre",                # Edge first-run experience
+        "--disable-default-apps",
+        "--disable-component-update",
+        "--noerrdialogs",               # no crash dialog if a prior kiosk crashed
         "--autoplay-policy=no-user-gesture-required",
         "--kiosk",
         f"--app={url}",
@@ -4312,6 +4330,108 @@ def _kill_tv_browser() -> None:
                 p.kill()
         except Exception:
             pass
+
+
+# ── OS system volume ─────────────────────────────────────────────────────────
+# YouTube plays through the host's normal audio mixer (the IFrame player has
+# no direct VLC-style amp), so the dashboard volume slider must drive the OS
+# system volume during YouTube playback — otherwise every video plays at
+# whatever volume the host happened to be at (often max). On Stop we restore
+# the OS volume to a configured "expected max" (`settings.system_volume_default`)
+# so headphones at 100 % don't blow eardrums after a movie session.
+
+def _set_system_volume_sync(pct: int) -> bool:
+    pct = max(0, min(100, int(pct)))
+    sys_name = platform.system()
+    try:
+        if sys_name == "Windows":
+            from ctypes import cast, POINTER          # type: ignore[import-not-found]
+            from comtypes import CLSCTX_ALL           # type: ignore[import-not-found]
+            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume  # type: ignore[import-not-found]
+            devices = AudioUtilities.GetSpeakers()
+            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+            vol = cast(interface, POINTER(IAudioEndpointVolume))
+            vol.SetMute(0, None)
+            vol.SetMasterVolumeLevelScalar(pct / 100.0, None)
+            return True
+        if sys_name == "Darwin":
+            subprocess.run(
+                ["osascript", "-e", f"set volume output volume {pct}"],
+                check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                timeout=3,
+            )
+            return True
+        if sys_name == "Linux":
+            if shutil.which("pactl"):
+                subprocess.run(
+                    ["pactl", "set-sink-mute", "@DEFAULT_SINK@", "0"],
+                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=3,
+                )
+                subprocess.run(
+                    ["pactl", "set-sink-volume", "@DEFAULT_SINK@", f"{pct}%"],
+                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=3,
+                )
+                return True
+            if shutil.which("amixer"):
+                subprocess.run(
+                    ["amixer", "-q", "set", "Master", f"{pct}%", "unmute"],
+                    check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                    timeout=3,
+                )
+                return True
+    except Exception as e:
+        log.warning("System volume set failed (%s, %d%%): %s", sys_name, pct, e)
+    return False
+
+
+def _get_system_volume_sync() -> Optional[int]:
+    sys_name = platform.system()
+    try:
+        if sys_name == "Windows":
+            from ctypes import cast, POINTER          # type: ignore[import-not-found]
+            from comtypes import CLSCTX_ALL           # type: ignore[import-not-found]
+            from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume  # type: ignore[import-not-found]
+            devices = AudioUtilities.GetSpeakers()
+            interface = devices.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+            vol = cast(interface, POINTER(IAudioEndpointVolume))
+            return max(0, min(100, round(vol.GetMasterVolumeLevelScalar() * 100)))
+        if sys_name == "Darwin":
+            r = subprocess.run(
+                ["osascript", "-e", "output volume of (get volume settings)"],
+                capture_output=True, text=True, timeout=3,
+            )
+            if r.returncode == 0:
+                return max(0, min(100, int(r.stdout.strip() or 0)))
+        if sys_name == "Linux":
+            if shutil.which("pactl"):
+                r = subprocess.run(
+                    ["pactl", "get-sink-volume", "@DEFAULT_SINK@"],
+                    capture_output=True, text=True, timeout=3,
+                )
+                if r.returncode == 0:
+                    m = re.search(r"(\d+)%", r.stdout)
+                    if m:
+                        return max(0, min(100, int(m.group(1))))
+    except Exception:
+        pass
+    return None
+
+
+async def set_system_volume(pct: int) -> bool:
+    return await asyncio.to_thread(_set_system_volume_sync, pct)
+
+
+async def get_system_volume() -> Optional[int]:
+    return await asyncio.to_thread(_get_system_volume_sync)
+
+
+async def _system_volume_default() -> int:
+    """Configured system volume to restore when YouTube stops (0-100)."""
+    lib = await get_library()
+    raw = lib.get("settings", {}).get("system_volume_default", 70)
+    return max(0, min(100, int(raw)))
 
 
 # Window title set by static/tv.html — used to find the kiosk window on Windows
@@ -4446,6 +4566,13 @@ async def youtube_play(req: YouTubeReq) -> JSONResponse:
     if state.library_play_task and not state.library_play_task.done():
         state.library_play_task.cancel()
 
+    # Snapshot the current OS volume so we can restore it on Stop if no default
+    # is configured. Do this BEFORE we change anything below (so the snapshot is
+    # the user's "before" state, not whatever we set later).
+    cur_sys_vol = await get_system_volume()
+    if cur_sys_vol is not None:
+        state.system_volume_before_yt = cur_sys_vol
+
     # Take over the "now playing" state. Title fills in once the /tv page reports
     # it back via /api/youtube/tv-state; show a placeholder until then.
     state.active_hash = None
@@ -4462,6 +4589,11 @@ async def youtube_play(req: YouTubeReq) -> JSONResponse:
     state.vlc_time = 0
     state.vlc_duration = 0
     state.stream_status = "playing"
+    # During YouTube the dashboard volume slider drives the *system* volume
+    # (0-100), not VLC's 0-200 amp. Initialise to whatever the OS is currently
+    # at so the slider doesn't jump when the user first touches it.
+    if cur_sys_vol is not None:
+        state.vlc_volume = cur_sys_vol
 
     # Stop VLC + clear any idle background so only the browser shows on the TV.
     await vlc("pl_stop")
@@ -4536,16 +4668,38 @@ async def _youtube_kiosk_healthcheck(video_id: str, launch_at: float) -> None:
 
 @app.post("/api/youtube/control")
 async def youtube_control(req: YouTubeControlReq) -> JSONResponse:
-    """Relay a playback command to the TV page over SSE.
+    """Drive the kiosk player from the dashboard.
+
+    Playback actions (play/pause/seek) are relayed to the `/tv` page over SSE.
+    Volume actions are handled **server-side** by setting the host's OS volume
+    (the IFrame player has no real amp; its setVolume only scales the audio it
+    emits *before* the system mixer), so the dashboard slider behaves like the
+    user expects on the TV — and a configured default is restored on Stop.
 
     action ∈ {playpause, play, pause, seek, seek_to, volume_set, volume_step}.
-    `value` carries the numeric argument where relevant (seconds, percent, etc.).
     """
     if not state.youtube_active:
         raise HTTPException(409, "No YouTube video is playing on the TV.")
     if req.action not in ("playpause", "play", "pause", "seek", "seek_to",
                           "volume_set", "volume_step"):
         raise HTTPException(400, f"Unknown action: {req.action}")
+
+    if req.action in ("volume_set", "volume_step"):
+        # Volume slider sends a dashboard value (historically 0-200 for VLC); for
+        # YouTube clamp to the OS scale 0-100. For volume_step, read the OS
+        # volume so an out-of-sync client doesn't snap us back to a stale value.
+        if req.action == "volume_set":
+            target = max(0, min(100, int(req.value or 0)))
+        else:
+            cur = await get_system_volume()
+            base = cur if cur is not None else (state.vlc_volume or 50)
+            target = max(0, min(100, int(base) + int(req.value or 0)))
+        ok = await set_system_volume(target)
+        if ok:
+            state.vlc_volume = target
+            await broadcast("state", state_snapshot())
+        return JSONResponse({"ok": ok, "volume": target})
+
     await broadcast("yt_command", {"action": req.action, "value": req.value})
     return JSONResponse({"ok": True})
 
@@ -4568,8 +4722,11 @@ async def youtube_tv_state(req: YouTubeTvStateReq) -> JSONResponse:
         state.vlc_time = int(req.time)
     if req.duration is not None:
         state.vlc_duration = int(req.duration)
-    if req.volume is not None:
-        state.vlc_volume = max(0, min(200, int(req.volume)))
+    # Intentionally ignore req.volume here. During YouTube the *system mixer* is
+    # the real amp — the IFrame `player.getVolume()` only describes the player's
+    # pre-mixer gain (which we lock at 100 in tv.html), so reading it back over
+    # the heartbeat would just stomp the dashboard's authoritative OS-volume
+    # value with 100 every second. /api/youtube/control owns state.vlc_volume.
     if req.playback:
         state.youtube_playback = req.playback
     await broadcast("state", state_snapshot())
@@ -4624,7 +4781,13 @@ async def stop() -> JSONResponse:
     await broadcast("stream_status", {"status": "idle", "message": "Stopped."})
     await broadcast("state", state_snapshot())
 
-    async def _stop_cleanup(ah: Optional[str], lid: Optional[str], ph: Optional[str], yt: bool) -> None:
+    # Snapshot the system-volume restore target *before* clearing state — we
+    # need the pre-stop snapshot to fall back on if no default is configured.
+    yt_sys_vol_snapshot = state.system_volume_before_yt
+    state.system_volume_before_yt = None
+
+    async def _stop_cleanup(ah: Optional[str], lid: Optional[str], ph: Optional[str],
+                            yt: bool, sys_vol_snapshot: Optional[int]) -> None:
         try:
             if ah and not lid:
                 await qbit_delete(ah)
@@ -4635,12 +4798,41 @@ async def stop() -> JSONResponse:
                 # kill the dedicated kiosk Chrome instance (matched by profile dir).
                 await asyncio.sleep(0.4)
                 await asyncio.to_thread(_kill_tv_browser)
+                # Verify the kiosk is actually gone before we touch the OS
+                # volume — otherwise we'd be turning the still-playing YouTube
+                # video's volume up/down underneath the user. Poll a few times.
+                deadline = time.monotonic() + 4.0
+                needle = str(TV_CHROME_PROFILE)
+                while time.monotonic() < deadline:
+                    still = False
+                    for p in psutil.process_iter(["cmdline"]):
+                        try:
+                            cl = p.info.get("cmdline") or []
+                            if any(needle in str(a) for a in cl):
+                                still = True
+                                break
+                        except Exception:
+                            pass
+                    if not still:
+                        break
+                    await asyncio.to_thread(_kill_tv_browser)
+                    await asyncio.sleep(0.3)
+                # Now safe to restore the OS volume. Prefer the admin-configured
+                # default (the user's "expected max"); fall back to the pre-YT
+                # snapshot if no default is set.
+                target = await _system_volume_default()
+                if target is None and sys_vol_snapshot is not None:
+                    target = sys_vol_snapshot
+                if target is not None:
+                    await set_system_volume(target)
+                    log.info("YouTube TV: restored system volume to %d%%", target)
             await vlc("pl_stop")
             await vlc_minimize()
         except Exception:
             pass
 
-    asyncio.create_task(_stop_cleanup(active_hash, library_item_id, prepare_hash, was_youtube))
+    asyncio.create_task(_stop_cleanup(active_hash, library_item_id, prepare_hash,
+                                       was_youtube, yt_sys_vol_snapshot))
     return JSONResponse({"ok": True}, status_code=202)
 
 
@@ -5600,6 +5792,26 @@ async def set_max_volume(req: MaxVolumeReq) -> JSONResponse:
         state.vlc_volume = capped
         await broadcast("state", state_snapshot())
     return JSONResponse({"ok": True, "max_volume": capped})
+
+
+@app.get("/api/settings/system-volume-default")
+async def get_system_volume_default() -> JSONResponse:
+    return JSONResponse({"system_volume_default": await _system_volume_default()})
+
+
+@app.post("/api/settings/system-volume-default")
+async def set_system_volume_default(req: SystemVolumeDefaultReq) -> JSONResponse:
+    """Configure the OS volume restored when YouTube stops (the "expected max").
+
+    Stored in `library.json → settings.system_volume_default` (0-100, default 70).
+    Doesn't change the OS volume right now — only takes effect at the next
+    YouTube Stop. See docs/YOUTUBE.md.
+    """
+    capped = max(0, min(100, int(req.system_volume_default)))
+    lib = await get_library()
+    lib.setdefault("settings", {})["system_volume_default"] = capped
+    await put_library(lib)
+    return JSONResponse({"ok": True, "system_volume_default": capped})
 
 
 @app.post("/api/skip-now")

@@ -58,7 +58,7 @@ from the dashboard. Not VPN-gated (ordinary HTTPS, not P2P). See [YOUTUBE.md](YO
 | Method | Path | Notes |
 |--------|------|-------|
 | POST | `/api/youtube` | `{url}` → **202**. Extracts the video id (watch / `youtu.be` / shorts / live / embed / bare id; 400 if none), takes over now-playing state (`youtube_active=True`, `stream_status="playing"`), stops VLC, broadcasts `yt_command:load`, and launches the kiosk if the `/tv` page hasn't beaten in the last 6 s (else hot-swaps via the broadcast). 500 if no Chrome/Chromium found (`_find_chrome`; override with `_CHROME_BIN` in `.env`) |
-| POST | `/api/youtube/control` | `{action, value?}` → relays the command to the `/tv` page as an SSE `yt_command`. `action ∈ playpause\|play\|pause\|seek\|seek_to\|volume_set\|volume_step`; `value` = ±seconds (`seek`), 0–100 % (`seek_to`), or dashboard volume 0–200 / ±delta. 409 if no YouTube video is active, 400 on unknown action |
+| POST | `/api/youtube/control` | `{action, value?}`. Playback actions (`playpause`/`play`/`pause`/`seek`/`seek_to`) are relayed to the `/tv` page as an SSE `yt_command`. **Volume actions (`volume_set`/`volume_step`) are handled server-side** — they call `set_system_volume` and do not broadcast (the IFrame `setVolume` doesn't change the OS mixer output). `value` = ±seconds (`seek`), 0–100 % (`seek_to`), or OS volume 0–100 / ±delta (`volume_*`). 409 if no YouTube video is active, 400 on unknown action |
 | POST | `/api/youtube/tv-state` | Heartbeat + playback report **from** the `/tv` page: `{video_id, title, time, duration, volume, playback}`. Stamps `state.youtube_tv_seen_at`, mirrors fields onto the reused `active_title`/`vlc_time`/`vlc_duration`/`vlc_volume`, rebroadcasts `state`. Returns `{active}` so a stale page can self-pause after Stop |
 | GET | `/tv` | Serves `static/tv.html`, the host-side kiosk player (YouTube IFrame API + `yt_command` listener). Opened by the kiosk launcher with `?v=<id>` |
 
@@ -163,6 +163,8 @@ See [STREAMING.md](STREAMING.md) for the full client/server flow.
 | GET | `/api/settings/disk-space` | Per-path `{total_bytes, free_bytes, free_pct}` |
 | GET | `/api/settings/max-volume` | `{max_volume}` — global VLC volume cap (0-200) |
 | POST | `/api/settings/max-volume` | `{max_volume: 0-200}` — immediately enforces if current VLC volume exceeds the new cap |
+| GET | `/api/settings/system-volume-default` | `{system_volume_default}` — host OS volume (0-100, default 70) restored when a YouTube play stops. See [YOUTUBE.md](YOUTUBE.md) |
+| POST | `/api/settings/system-volume-default` | `{system_volume_default: 0-100}` — stores in `library.json → settings.system_volume_default`. Does NOT change the OS volume immediately, only at the next YouTube Stop |
 
 ## Admin
 

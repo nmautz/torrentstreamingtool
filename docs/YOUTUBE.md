@@ -123,9 +123,13 @@ rest of the stop teardown (qBit delete) is naturally skipped.
 ```
 chrome --user-data-dir=<repo>/.tv_chrome_profile \
        --no-first-run --no-default-browser-check \
+       --disable-fre --disable-features=msImplicitSignin,SigninInterceptBubbleV2,DesktopPWAsRunOnOsLogin \
+       --disable-default-apps --disable-component-update --noerrdialogs \
        --autoplay-policy=no-user-gesture-required \
-       --kiosk --app=http://localhost/tv?v=<id>
+       --kiosk --app=http://127.0.0.1/tv?v=<id>
 ```
+
+> **The URL is `127.0.0.1`, not `localhost`** — see [GOTCHAS.md](GOTCHAS.md). Windows resolves localhost to both `::1` *and* `127.0.0.1` and Chromium tries IPv6 first; uvicorn binds `0.0.0.0` (IPv4 only), so the kiosk would hit ECONNREFUSED on `::1` and either show an error page or stall long enough for the heartbeat watchdog to fire before the page ever loads.
 
 - **`--kiosk --app=`** → borderless fullscreen, no browser chrome.
 - **`--autoplay-policy=no-user-gesture-required`** → the IFrame player can
@@ -210,6 +214,48 @@ so `volume_set`/`volume_step` clamp to 0–100 and the reported `volume` (0–10
 is shown as a percentage in the dashboard.
 
 ---
+
+## Volume is the OS system volume, not the IFrame player
+
+The IFrame Player API's `setVolume` only scales the audio the player emits *before
+it hits the OS mixer* — the actual loudness on the TV is whatever the host's
+system volume is set to. Driving setVolume alone left every video at "system
+max", which is what users hear. So while YouTube is the active playback the
+dashboard's volume slider drives the **host's OS volume** instead of the IFrame
+player. The IFrame is locked at 100 % + unmuted (`onReady` in `tv.html`) so the
+OS mixer is the sole amp.
+
+- **Server side**: `POST /api/youtube/control` handles `volume_set` and
+  `volume_step` directly (no `yt_command` broadcast) — it calls
+  `set_system_volume` and updates `state.vlc_volume` to match. Per-OS:
+  - **Windows**: `pycaw` (`AudioUtilities.GetSpeakers` →
+    `IAudioEndpointVolume.SetMasterVolumeLevelScalar`). `pycaw` is a
+    Windows-only dep declared in `requirements.txt` under a
+    `sys_platform == "win32"` marker.
+  - **macOS**: `osascript -e 'set volume output volume N'`.
+  - **Linux**: `pactl set-sink-volume @DEFAULT_SINK@ N%`, else `amixer set Master`.
+- **Dashboard side**: while `app.youtube_active`, `_maxVol()` returns 100 and
+  `renderPlayer` flips the slider's `max` to 100, so the visible range matches
+  the OS scale (0-100) instead of VLC's 0-200 amp.
+- **tv-state heartbeat ignores the player's `volume` field** while
+  `youtube_active` — reading `player.getVolume()` would just stomp the
+  authoritative OS-volume value with `100` every second.
+
+### Restore on Stop ("expected max")
+
+A movie session that ended at OS volume 100 % shouldn't leave the room loud the
+next time anyone touches VLC, and headphones at 100 % can blow eardrums. On
+Stop the OS volume is **restored to a configured target** — the admin setting
+`settings.system_volume_default` (0-100, default **70**) in `library.json`,
+exposed via `GET`/`POST /api/settings/system-volume-default` and the
+**System Volume After YouTube** slider in the profile-settings panel. If no
+default is set, falls back to `state.system_volume_before_yt`, the snapshot
+`youtube_play` took before changing anything.
+
+The restore runs inside `_stop_cleanup`, **after polling for the kiosk process
+to actually exit** (`TV_CHROME_PROFILE` match, 4 s deadline). If we restored
+sooner we'd be turning the still-playing video's volume up or down underneath
+the user.
 
 ## Limitations / notes
 

@@ -65,7 +65,15 @@
         playsinline: 1, fs: 1, iv_load_policy: 3,
       },
       events: {
-        onReady: (e) => { try { e.target.playVideo(); } catch (_) {} reportState(); },
+        onReady: (e) => {
+          // Lock the IFrame player at full gain + unmuted. The host's OS mixer
+          // is the real volume control during YouTube (driven by the dashboard
+          // via /api/youtube/control), so the IFrame must not attenuate.
+          try { e.target.unMute(); } catch (_) {}
+          try { e.target.setVolume(100); } catch (_) {}
+          try { e.target.playVideo(); } catch (_) {}
+          reportState();
+        },
         onStateChange: reportState,
         onError: reportState,
       },
@@ -109,17 +117,12 @@
           player.seekTo(Math.max(0, Math.min(100, Number(v) || 0)) / 100 * dur, true);
           break;
         }
-        case "volume_set": {     // value = dashboard 0..200 → YouTube 0..100
-          player.unMute();
-          player.setVolume(Math.max(0, Math.min(100, Number(v) || 0)));
+        // Volume is driven by the host OS mixer (server-side). The dashboard's
+        // /api/youtube/control sets the system volume directly and does NOT
+        // broadcast a volume yt_command — keep the IFrame locked at 100.
+        case "volume_set":
+        case "volume_step":
           break;
-        }
-        case "volume_step": {    // value = delta (dashboard units ≈ percent)
-          player.unMute();
-          const nv = Math.max(0, Math.min(100, player.getVolume() + (Number(v) || 0)));
-          player.setVolume(nv);
-          break;
-        }
         case "close":
           try { player.pauseVideo(); } catch (_) {}
           // App/kiosk windows opened by Chrome honor window.close(); the server
