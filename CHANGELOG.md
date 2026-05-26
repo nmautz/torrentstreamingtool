@@ -1,5 +1,9 @@
 # Changelog
 
+## [3.7.2] — 2026-05-25
+- **Fix: Windows volume control still failed — `No module named 'comtypes'`.** `pycaw` declares `comtypes` as a transitive dep, but on real hosts (the user's box, in particular) pycaw can end up installed without comtypes — older standalone installs, `pip install --no-deps`, partial venvs, etc. Now `comtypes>=1.2.0` is pinned **explicitly** in `requirements.txt` under the same `sys_platform == "win32"` marker (belt-and-braces), so a clean `pip install -r requirements.txt` always lands both.
+- **Better diagnostic when an import is missing.** The error message now names the *actual* missing module (via `ImportError.name`) — so the dashboard toast says *"Windows volume control dep `comtypes` is not installed"* instead of the generic *"pycaw is not installed"*, telling the operator exactly which `pip install` to run.
+
 ## [3.7.1] — 2026-05-25
 - **Fix: YouTube volume controls did nothing on Windows.** Two failure modes, both silent:
   - **COM was not initialized on the thread that called pycaw.** Volume operations run via `asyncio.to_thread`, which dispatches to Python's default `ThreadPoolExecutor` — those worker threads don't have COM initialized, so `AudioUtilities.GetSpeakers()` raises *"CoInitialize has not been called"*, the helper's `except` swallowed it as a warning, and the dashboard slider just no-oped. Volume helpers now call `comtypes.CoInitialize()` / `CoUninitialize()` around each operation (`_windows_volume_op` wrapper), so they work regardless of which pool worker happens to run them.

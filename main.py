@@ -189,7 +189,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.7.1"
+UI_VERSION = "3.7.2"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -4367,9 +4367,17 @@ def _windows_volume_op(op):
         from pycaw.pycaw import AudioUtilities, IAudioEndpointVolume    # type: ignore[import-not-found]
     except ImportError as e:
         _PYCAW_IMPORT_FAILED = True
+        # Name the actual missing module — pycaw / comtypes / something else —
+        # so the operator knows exactly what `pip install` to run. ImportError
+        # exposes the missing module on .name (3.6+); fall back to parsing the
+        # message for the unusual builds that don't set it.
+        missing = getattr(e, "name", None) or (
+            str(e).split("'")[1] if "'" in str(e) else "a Windows audio module"
+        )
         _PYCAW_LAST_ERROR = (
-            "pycaw is not installed on the server. Run "
-            "`pip install -r requirements.txt` (or re-run setup.py) and restart."
+            f"Windows volume control dep `{missing}` is not installed on the "
+            "server. Run `pip install -r requirements.txt` (or re-run setup.py) "
+            "and restart the StreamLink service."
         )
         log.warning("System volume: %s (%s)", _PYCAW_LAST_ERROR, e)
         return None
