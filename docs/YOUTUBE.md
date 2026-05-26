@@ -156,6 +156,30 @@ always resolve there. Discovery and launch both **log** (to
 silently. If nothing is found, `POST /api/youtube` returns 500 with a clear
 message (install Chrome/Edge or set `_CHROME_BIN`).
 
+### Bringing the kiosk to the foreground (Windows)
+
+On Windows the server isn't the foreground process, so the browser window it
+spawns is denied focus by **focus-stealing prevention** — it only flashes in the
+taskbar while the still-visible VLC window keeps the screen. After every play
+(fresh launch *and* hot-swap), `_bring_tv_to_front`:
+
+1. **Minimizes VLC** (`vlc_minimize`) so it yields the screen. Safe because the
+   return-to-background path (`_play_background_video` → `vlc_focus_and_fullscreen`)
+   `SW_RESTORE`s VLC when YouTube stops.
+2. **Polls for the kiosk window by title** (`_find_tv_browser_hwnds_windows`
+   matches `_TV_WINDOW_MARKER`, which must equal `static/tv.html`'s `<title>` —
+   Chrome is multi-process so PID matching is unreliable) and forces it forward
+   (`_focus_tv_browser_windows`) with the same cocktail as `_vlc_focus_windows`
+   (zero foreground-lock timeout + synthetic ALT + `AttachThreadInput` +
+   `SetForegroundWindow` + clear taskbar flash). It retries for ~10 s because the
+   window takes ~1–2 s to appear, then settles after a couple of reinforcing
+   passes.
+
+`vlc_focus_and_fullscreen` also **bails the instant `youtube_active` is set**, so
+a background-video focus loop from a prior idle session can't keep minimizing the
+kiosk / re-focusing VLC. macOS and Linux foreground the `--app` kiosk on their
+own, so step 2 is Windows-only (step 1 still runs everywhere).
+
 ### Launch health-check
 
 `subprocess.Popen` returning doesn't prove the browser actually rendered the

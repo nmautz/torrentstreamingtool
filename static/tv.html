@@ -3,7 +3,10 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
-  <title>StreamLink — TV</title>
+  <!-- Title is also a window-match marker: the server finds this kiosk window by
+       its title to pull it to the foreground on Windows. Keep it in sync with
+       _TV_WINDOW_MARKER in main.py. -->
+  <title>StreamLink TV Player</title>
   <style>
     /* Full-bleed black canvas; the iframe fills the kiosk window edge-to-edge. */
     html, body { margin: 0; padding: 0; height: 100%; background: #000; overflow: hidden; }

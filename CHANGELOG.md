@@ -1,5 +1,11 @@
 # Changelog
 
+## [3.5.2] — 2026-05-25
+- **Fix: on Windows the YouTube kiosk launched but stayed behind VLC** — the idle background video kept the screen and the kiosk window only flashed in the taskbar until you clicked it. Two causes, both Windows-specific:
+  - **Focus-stealing prevention.** The server isn't the foreground process, so the browser window it spawns is denied focus (Windows flashes its taskbar button instead). Now `_bring_tv_to_front` finds the kiosk window **by its title** (`_TV_WINDOW_MARKER` = the `static/tv.html` `<title>`, since Chrome is multi-process so PID matching is unreliable) and forces it forward with the same cocktail used for VLC (zero foreground-lock timeout + synthetic ALT + `AttachThreadInput` + `SetForegroundWindow` + clear taskbar flash), retrying for ~10 s while the window is still being created.
+  - **VLC stayed on top.** `/api/youtube` only `pl_stop`ped VLC; its window remained. Now it also **minimizes VLC** (`vlc_minimize`, via `_bring_tv_to_front`). Safe because the return-to-background path (`_play_background_video → vlc_focus_and_fullscreen`) `SW_RESTORE`s it.
+  - **The background focus loop no longer fights the kiosk.** `vlc_focus_and_fullscreen` now bails the moment `youtube_active` is set — previously a still-running loop would keep minimizing the kiosk and re-focusing VLC for up to ~24 s after a background session.
+
 ## [3.5.1] — 2026-05-25
 - **Fix: YouTube-on-TV never started on Windows** (it worked on macOS). The video failed to launch and you'd see the idle background video stop, VLC flash its loading animation, then the background video restart — the tell-tale sign that the kiosk launch failed: `_launch_tv_browser` returned False, so `/api/youtube` hit its 500 path, reset `youtube_active`, and ~3 s later `background_video_loop` reclaimed VLC.
   - **Root cause: browser discovery was too narrow on Windows.** It only checked three hard-coded Program Files paths and silently returned None when Chrome/Edge lived elsewhere — most commonly a **per-user Chrome install under `%LOCALAPPDATA%`**, or Edge at a path the list didn't cover.

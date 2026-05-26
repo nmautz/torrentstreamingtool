@@ -189,7 +189,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.5.1"
+UI_VERSION = "3.5.2"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -1251,6 +1251,11 @@ async def vlc_focus_and_fullscreen() -> None:
     delays = [0.5] * 6 + [1.0] * 8 + [2.0] * 6
 
     for delay in delays:
+        # YouTube took over the TV (browser kiosk) — stop fighting it. Without
+        # this, a still-running background focus loop would keep minimizing the
+        # kiosk window (via _minimize_other_windows) and re-focusing VLC.
+        if state.youtube_active:
+            return
         # Always re-assert focus + minimize-others, even if VLC reports
         # fullscreen=True. The reported flag tracks VLC's internal state and
         # can be True while a later-launching app is rendering on top.
@@ -4309,6 +4314,116 @@ def _kill_tv_browser() -> None:
             pass
 
 
+# Window title set by static/tv.html — used to find the kiosk window on Windows
+# and pull it to the foreground (Chrome is multi-process, so PID matching is
+# unreliable; the --app window's title is the page <title>). Keep both in sync.
+_TV_WINDOW_MARKER = "StreamLink TV Player"
+
+
+def _find_tv_browser_hwnds_windows() -> list:
+    """Visible top-level windows whose title marks them as our kiosk page."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        found: list = []
+        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+        def _cb(hwnd, _):
+            if user32.IsWindowVisible(hwnd):
+                n = user32.GetWindowTextLengthW(hwnd)
+                if n:
+                    buf = ctypes.create_unicode_buffer(n + 1)
+                    user32.GetWindowTextW(hwnd, buf, n + 1)
+                    if _TV_WINDOW_MARKER in buf.value:
+                        found.append(hwnd)
+            return True
+
+        cb = EnumWindowsProc(_cb)   # keep ref alive — ctypes GC pitfall
+        user32.EnumWindows(cb, 0)
+        return found
+    except Exception:
+        return []
+
+
+def _focus_tv_browser_windows() -> bool:
+    """Pull the kiosk window to the foreground past focus-stealing prevention.
+
+    Same cocktail as `_vlc_focus_windows` (zero foreground-lock timeout +
+    synthetic ALT + AttachThreadInput + SetForegroundWindow + clear taskbar
+    flash). Returns True once a kiosk window exists (so the caller can stop
+    retrying)."""
+    hwnds = _find_tv_browser_hwnds_windows()
+    if not hwnds:
+        return False
+    hwnd = hwnds[0]
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        SPI_SETFOREGROUNDLOCKTIMEOUT = 0x2001
+        SPIF_SENDCHANGE = 0x02
+        user32.SystemParametersInfoW(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, 0, SPIF_SENDCHANGE)
+
+        VK_MENU = 0x12
+        KEYEVENTF_KEYUP = 0x0002
+        user32.keybd_event(VK_MENU, 0, 0, 0)
+        user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+
+        fg_thread = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
+        my_thread = kernel32.GetCurrentThreadId()
+        if fg_thread != my_thread:
+            user32.AttachThreadInput(my_thread, fg_thread, True)
+        user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+        if fg_thread != my_thread:
+            user32.AttachThreadInput(my_thread, fg_thread, False)
+
+        class FLASHWINFO(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", ctypes.c_uint), ("hwnd", wintypes.HWND),
+                ("dwFlags", wintypes.DWORD), ("uCount", wintypes.UINT),
+                ("dwTimeout", wintypes.DWORD),
+            ]
+        FLASHW_STOP = 0x00000000
+        for h in hwnds:
+            info = FLASHWINFO(ctypes.sizeof(FLASHWINFO), h, FLASHW_STOP, 0, 0)
+            user32.FlashWindowEx(ctypes.byref(info))
+    except Exception:
+        pass
+    return True
+
+
+async def _bring_tv_to_front(video_id: str) -> None:
+    """Get VLC out of the way and pull the kiosk window to the foreground.
+
+    On Windows the server isn't the foreground process, so the browser's window
+    is blocked from taking focus (it just flashes in the taskbar) and the
+    still-visible VLC window keeps the screen — the user has to click the taskbar
+    icon. We minimize VLC, then poll for the kiosk window and force it forward
+    for a few seconds (it takes ~1–2 s to appear). Best-effort; never raises."""
+    await vlc_minimize()
+    if platform.system() != "Windows":
+        return  # macOS/Linux foreground the --app kiosk on their own
+    loop = asyncio.get_running_loop()
+    reinforced = 0
+    for delay in [0.4] * 6 + [0.8] * 5 + [1.5] * 3:   # ~10 s, slowing cadence
+        if not state.youtube_active or state.youtube_video_id != video_id:
+            return  # superseded (stopped / different video)
+        try:
+            got = await loop.run_in_executor(None, _focus_tv_browser_windows)
+        except Exception:
+            got = False
+        if got:
+            reinforced += 1
+            if reinforced >= 3:   # found + two reinforcing passes → settle
+                return
+        await asyncio.sleep(delay)
+
+
 @app.get("/tv", include_in_schema=False)
 async def tv_player_page() -> FileResponse:
     """The host-side kiosk page: YouTube IFrame player + SSE command listener."""
@@ -4377,6 +4492,13 @@ async def youtube_play(req: YouTubeReq) -> JSONResponse:
         # of loading, so if nothing checks in we know the kiosk never rendered —
         # surface that instead of silently dropping back to the idle background.
         asyncio.create_task(_youtube_kiosk_healthcheck(video_id, launch_at))
+
+    # Minimize VLC and pull the kiosk window to the foreground. On Windows the
+    # server can't give the new browser window focus (focus-stealing prevention),
+    # so without this the kiosk just flashes in the taskbar behind VLC and the
+    # user has to click it. Covers both fresh-launch and hot-swap (user may have
+    # alt-tabbed away from an already-open kiosk).
+    asyncio.create_task(_bring_tv_to_front(video_id))
 
     # Note: we deliberately do NOT broadcast a `stream_status` event here — the
     # client's stream_status handler phrases playing as "Now playing in VLC".
