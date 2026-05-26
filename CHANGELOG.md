@@ -1,5 +1,10 @@
 # Changelog
 
+## [3.8.0] — 2026-05-25
+- **New setting: "YouTube Starting Volume".** Configures the host OS volume that's pre-set **before** the YouTube kiosk loads, so the first audio frame plays at a known level instead of whatever the OS happened to be at (often max). Lives in the profile-settings panel next to "System Volume After YouTube" (default **30 %**). Stored at `library.json → settings.youtube_start_volume`.
+- **Order matters and is enforced.** `/api/youtube` now: (1) snapshots the current OS volume for the Stop restore, (2) **sets the OS mixer to the configured start volume**, (3) takes over now-playing state, (4) `pl_stop`s VLC, (5) broadcasts `yt_command:load`, (6) launches the kiosk. The pre-set happens before the load broadcast and before Chrome paints, so the IFrame player can never out-run it. `state.vlc_volume` is seeded from the pre-set so the dashboard slider lines up with reality the moment YouTube takes over.
+- **Backend:** new `_youtube_start_volume`, `YouTubeStartVolumeReq`, `GET`/`POST /api/settings/youtube-start-volume`. **Frontend:** new red slider in the profile-settings panel with matching load/save plumbing (`saveYoutubeStartVolume`).
+
 ## [3.7.4] — 2026-05-25
 - **Fix: "COM method call without VTable" spam in the logs after each volume change** (`Exception ignored in <function _compointer_base.__del__>`). Order-of-teardown bug: the `finally` block in `_windows_volume_op` calls `CoUninitialize` *before* Python destroys the function's frame, so the local COM pointers' `__del__` calls `Release()` against a torn-down apartment. Volume changes were still landing — just every successful call left three ignored exceptions in the logs. Fix: do all COM work inside an inner closure (`_do_com_work`); when it returns, its frame is destroyed first, the COM pointers `Release()` while the apartment is still alive, *then* the outer `finally` runs `CoUninitialize`. `op(vol)` returns a plain `bool`/`int` so no COM refs leak out across the boundary.
 

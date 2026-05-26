@@ -189,7 +189,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.7.4"
+UI_VERSION = "3.8.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -3142,6 +3142,10 @@ class SystemVolumeDefaultReq(BaseModel):
     system_volume_default: int   # 0-100; OS volume restored when YouTube stops
 
 
+class YouTubeStartVolumeReq(BaseModel):
+    youtube_start_volume: int   # 0-100; OS volume pre-set before a YouTube play starts
+
+
 class SkipNowReq(BaseModel):
     type: str         # "intro" or "credits"
 
@@ -4530,6 +4534,18 @@ async def _system_volume_default() -> int:
     return max(0, min(100, int(raw)))
 
 
+async def _youtube_start_volume() -> int:
+    """Configured OS volume to pre-set BEFORE a YouTube video starts (0-100).
+
+    Sensible default 30 — quieter than restore-on-stop because the user is about
+    to actively start a video and can turn up from there if they want, but a
+    "max-by-default" first frame on a movie at 100 % blows out the room. Stored
+    in `library.json → settings.youtube_start_volume`."""
+    lib = await get_library()
+    raw = lib.get("settings", {}).get("youtube_start_volume", 30)
+    return max(0, min(100, int(raw)))
+
+
 # Window title set by static/tv.html — used to find the kiosk window on Windows
 # and pull it to the foreground (Chrome is multi-process, so PID matching is
 # unreliable; the --app window's title is the page <title>). Keep both in sync.
@@ -4669,6 +4685,15 @@ async def youtube_play(req: YouTubeReq) -> JSONResponse:
     if cur_sys_vol is not None:
         state.system_volume_before_yt = cur_sys_vol
 
+    # Pre-set the OS mixer to the configured "start" volume BEFORE the kiosk
+    # loads the page — once the IFrame player begins producing audio (which can
+    # be near-instantaneous after Chrome paints) the system mixer is already at
+    # the right level, instead of whatever the OS was at (often max). If the
+    # set call fails, we fall back to the user's current OS volume so the
+    # dashboard slider isn't out of sync.
+    start_vol = await _youtube_start_volume()
+    initial_vol = start_vol if await set_system_volume(start_vol) else cur_sys_vol
+
     # Take over the "now playing" state. Title fills in once the /tv page reports
     # it back via /api/youtube/tv-state; show a placeholder until then.
     state.active_hash = None
@@ -4686,10 +4711,11 @@ async def youtube_play(req: YouTubeReq) -> JSONResponse:
     state.vlc_duration = 0
     state.stream_status = "playing"
     # During YouTube the dashboard volume slider drives the *system* volume
-    # (0-100), not VLC's 0-200 amp. Initialise to whatever the OS is currently
-    # at so the slider doesn't jump when the user first touches it.
-    if cur_sys_vol is not None:
-        state.vlc_volume = cur_sys_vol
+    # (0-100), not VLC's 0-200 amp. Initialise to the pre-set "start" volume
+    # we just wrote (or the OS's current value if pycaw isn't usable on this
+    # host) so the slider doesn't jump when the user first touches it.
+    if initial_vol is not None:
+        state.vlc_volume = initial_vol
 
     # Stop VLC + clear any idle background so only the browser shows on the TV.
     await vlc("pl_stop")
@@ -5916,6 +5942,26 @@ async def set_system_volume_default(req: SystemVolumeDefaultReq) -> JSONResponse
     lib.setdefault("settings", {})["system_volume_default"] = capped
     await put_library(lib)
     return JSONResponse({"ok": True, "system_volume_default": capped})
+
+
+@app.get("/api/settings/youtube-start-volume")
+async def get_youtube_start_volume() -> JSONResponse:
+    return JSONResponse({"youtube_start_volume": await _youtube_start_volume()})
+
+
+@app.post("/api/settings/youtube-start-volume")
+async def set_youtube_start_volume(req: YouTubeStartVolumeReq) -> JSONResponse:
+    """Configure the OS volume pre-set before a YouTube play starts.
+
+    Stored in `library.json → settings.youtube_start_volume` (0-100, default 30).
+    Doesn't change the OS volume right now — only takes effect at the next
+    YouTube play. See docs/YOUTUBE.md.
+    """
+    capped = max(0, min(100, int(req.youtube_start_volume)))
+    lib = await get_library()
+    lib.setdefault("settings", {})["youtube_start_volume"] = capped
+    await put_library(lib)
+    return JSONResponse({"ok": True, "youtube_start_volume": capped})
 
 
 @app.post("/api/skip-now")

@@ -241,6 +241,29 @@ OS mixer is the sole amp.
   `youtube_active` — reading `player.getVolume()` would just stomp the
   authoritative OS-volume value with `100` every second.
 
+### Pre-set on Start (the "starting volume")
+
+A video at OS volume 100 % blowing the room out the moment Chrome paints is a
+bad first impression, so `/api/youtube` **pre-sets the OS mixer to a configured
+"start" volume before the kiosk loads** (and before the `yt_command:load`
+broadcast). The setting lives at `library.json → settings.youtube_start_volume`
+(0-100, default **30**), exposed via `GET`/`POST /api/settings/youtube-start-volume`
+and the **YouTube Starting Volume** slider in the profile-settings panel.
+
+Order in `youtube_play`:
+
+1. Snapshot the user's current OS volume → `state.system_volume_before_yt`
+   (restore fallback if no Stop default).
+2. **Set OS mixer to `_youtube_start_volume()`** (pre-set happens here).
+3. Take over now-playing state; seed `state.vlc_volume` from the pre-set value
+   so the dashboard slider lines up immediately.
+4. `vlc("pl_stop")`.
+5. Broadcast `yt_command:load`.
+6. Launch the kiosk (or hot-swap).
+
+The pre-set happens before the broadcast and before Chrome paints — the IFrame
+player can never out-run it.
+
 ### Restore on Stop ("expected max")
 
 A movie session that ended at OS volume 100 % shouldn't leave the room loud the
