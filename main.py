@@ -189,7 +189,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.7.3"
+UI_VERSION = "3.7.4"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -4400,6 +4400,25 @@ def _windows_volume_op(op):
         e_render = 0       # eRender (audio output)
         e_multimedia = 1   # eMultimedia (default for music/video)
 
+    # COM-pointer-lifetime trap: if we hold the COM pointers in this function's
+    # locals and then `CoUninitialize` in `finally`, Python's frame teardown
+    # happens *after* the finally — so the pointers' `__del__` calls
+    # `Release()` against a torn-down apartment, raising "COM method call
+    # without VTable" (logged as "Exception ignored in __del__"). The fix is to
+    # do all COM work inside an inner closure: when it returns, its frame is
+    # destroyed first, the pointers' `__del__` runs while COM is still alive,
+    # *then* we CoUninitialize. The result `op(vol)` returns is a plain
+    # bool/int — no COM refs leak out.
+    def _do_com_work():
+        device_enum = comtypes.CoCreateInstance(
+            CLSID_MMDeviceEnumerator, IMMDeviceEnumerator,
+            comtypes.CLSCTX_INPROC_SERVER,
+        )
+        speakers = device_enum.GetDefaultAudioEndpoint(e_render, e_multimedia)
+        interface = speakers.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
+        vol = cast(interface, POINTER(IAudioEndpointVolume))
+        return op(vol)
+
     com_initialized_here = False
     try:
         # On the worker thread, CoInitialize must be called before any COM use.
@@ -4412,14 +4431,7 @@ def _windows_volume_op(op):
             com_initialized_here = True
         except Exception:
             pass
-        device_enum = comtypes.CoCreateInstance(
-            CLSID_MMDeviceEnumerator, IMMDeviceEnumerator,
-            comtypes.CLSCTX_INPROC_SERVER,
-        )
-        speakers = device_enum.GetDefaultAudioEndpoint(e_render, e_multimedia)
-        interface = speakers.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-        vol = cast(interface, POINTER(IAudioEndpointVolume))
-        return op(vol)
+        return _do_com_work()
     except Exception as e:
         _PYCAW_LAST_ERROR = f"{type(e).__name__}: {e}"
         log.warning("System volume: Windows audio call failed: %s", _PYCAW_LAST_ERROR)
