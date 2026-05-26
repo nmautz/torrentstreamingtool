@@ -1,5 +1,12 @@
 # Changelog
 
+## [3.5.1] — 2026-05-25
+- **Fix: YouTube-on-TV never started on Windows** (it worked on macOS). The video failed to launch and you'd see the idle background video stop, VLC flash its loading animation, then the background video restart — the tell-tale sign that the kiosk launch failed: `_launch_tv_browser` returned False, so `/api/youtube` hit its 500 path, reset `youtube_active`, and ~3 s later `background_video_loop` reclaimed VLC.
+  - **Root cause: browser discovery was too narrow on Windows.** It only checked three hard-coded Program Files paths and silently returned None when Chrome/Edge lived elsewhere — most commonly a **per-user Chrome install under `%LOCALAPPDATA%`**, or Edge at a path the list didn't cover.
+  - **Fix:** `_find_chrome` now casts a wide net on Windows — the **`App Paths` registry** (HKCU + HKLM, for `chrome.exe` / `msedge.exe` / `brave.exe` / `chromium.exe`), per-user `%LOCALAPPDATA%`, both `Program Files` trees, and PATH — covering Chrome, **Edge** (preinstalled on Win10/11, so this essentially always resolves), Brave and Chromium. Discovery and launch now **log** what they found / why they failed (`logs/streamlink_app.log`) instead of failing silently.
+  - **Plus a health-check:** after launching the kiosk, if the `/tv` page doesn't heartbeat within 12 s (it normally checks in within ~1 s), the server now reports a clear on-screen error — "YouTube didn't start on the TV — the browser failed to open" — instead of silently dropping back to the background video. Catches locked-profile / instant-exit / session-0-service cases too.
+  - **CLAUDE.md:** added a top-of-file directive that **Windows is the primary target platform** (then Linux, then macOS) — a feature that works on macOS but not Windows is a bug, not partial success.
+
 ## [3.5.0] — 2026-05-25
 - **New: play any YouTube link on the TV, controlled from the dashboard.** A red **Play on TV** input now sits at the top of the Search tab — paste a YouTube link (watch, `youtu.be`, Shorts, live, embed, or a bare id) and it opens fullscreen on the TV (the host display) and starts playing.
   - **Plays in a browser, not VLC.** VLC 3.0's bundled `youtube.lua` is broken (it "plays" the watch page for a few seconds, never resolves a title/length, then stops), and yt-dlp-into-VLC adds a fragile dependency and caps at 720p without an audio-slave hack. Instead the video plays in a fullscreen **Chrome kiosk** on the host via the **YouTube IFrame Player API** (`static/tv.html`), so quality/ads/captions all "just work".

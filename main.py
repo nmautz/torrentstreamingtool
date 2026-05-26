@@ -189,7 +189,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.5.0"
+UI_VERSION = "3.5.1"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -4167,34 +4167,98 @@ def _extract_youtube_id(url: str) -> Optional[str]:
     return None
 
 
+def _windows_chrome_from_registry() -> list[str]:
+    """Resolve browser exes from the Windows `App Paths` registry keys.
+
+    This is the most reliable discovery on Windows — it finds Chrome/Edge/Brave
+    wherever they were installed, including per-user installs under
+    %LOCALAPPDATA% that the hard-coded Program Files paths miss. Checked for both
+    HKLM (machine-wide) and HKCU (per-user)."""
+    found: list[str] = []
+    try:
+        import winreg  # type: ignore[import-not-found]
+    except Exception:
+        return found
+    subkey_root = r"SOFTWARE\Microsoft\Windows\CurrentVersion\App Paths"
+    for exe in ("chrome.exe", "msedge.exe", "brave.exe", "chromium.exe"):
+        for hive in (winreg.HKEY_CURRENT_USER, winreg.HKEY_LOCAL_MACHINE):
+            try:
+                with winreg.OpenKey(hive, subkey_root + "\\" + exe) as k:
+                    val, _ = winreg.QueryValueEx(k, None)  # default value = full path
+                    if val and Path(val).exists():
+                        found.append(val)
+            except (FileNotFoundError, OSError):
+                continue
+    return found
+
+
 def _find_chrome() -> Optional[str]:
-    """Locate a Chromium-family browser binary for the kiosk window."""
+    """Locate a Chromium-family browser binary for the kiosk window.
+
+    Windows is the primary target, so it gets the widest net: an explicit
+    `_CHROME_BIN` override, the `App Paths` registry, per-user %LOCALAPPDATA%
+    installs, both Program Files trees, and PATH — for Chrome, Edge, Brave and
+    Chromium. Edge is preinstalled on Windows 10/11, so this should essentially
+    always resolve there."""
     saved = os.environ.get("_CHROME_BIN")
     if saved and Path(saved).exists():
         return saved
-    candidates = {
-        "Darwin": [
+
+    system = platform.system()
+    candidates: list[str] = []
+
+    if system == "Windows":
+        # Registry first — handles per-user installs and non-default locations.
+        candidates.extend(_windows_chrome_from_registry())
+        local = os.environ.get("LOCALAPPDATA", "")
+        pf = os.environ.get("ProgramFiles", r"C:\Program Files")
+        pfx86 = os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)")
+        rel = [
+            (r"Google\Chrome\Application\chrome.exe"),
+            (r"Microsoft\Edge\Application\msedge.exe"),
+            (r"BraveSoftware\Brave-Browser\Application\brave.exe"),
+            (r"Chromium\Application\chrome.exe"),
+        ]
+        roots = [r for r in (pf, pfx86, local) if r]
+        for root in roots:
+            for r in rel:
+                candidates.append(str(Path(root) / r))
+        # PATH fallbacks (e.g. choco/scoop shims).
+        candidates += ["chrome.exe", "msedge.exe", "brave.exe", "chrome", "msedge"]
+    elif system == "Darwin":
+        candidates = [
             "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-            "/Applications/Chromium.app/Contents/MacOS/Chromium",
             "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-        ],
-        "Windows": [
-            r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-            r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
-        ],
-    }.get(platform.system(), [
-        "google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
-        "microsoft-edge",
-    ])
+            "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ]
+    else:  # Linux / other
+        candidates = [
+            "google-chrome", "google-chrome-stable", "chromium", "chromium-browser",
+            "microsoft-edge", "microsoft-edge-stable", "brave-browser",
+            "/usr/bin/google-chrome", "/usr/bin/chromium", "/usr/bin/microsoft-edge",
+            "/snap/bin/chromium",
+        ]
+
     for c in candidates:
-        if os.path.sep in c or (os.path.altsep and os.path.altsep in c):
+        # A bare command name (no separator) → resolve via PATH; otherwise treat
+        # as a literal path and test existence.
+        has_sep = (os.path.sep in c) or bool(os.path.altsep and os.path.altsep in c)
+        if has_sep:
             if Path(c).exists():
+                log.info("YouTube TV: using browser %s", c)
                 return c
         else:
-            found = shutil.which(c)
-            if found:
-                return found
+            resolved = shutil.which(c)
+            if resolved:
+                log.info("YouTube TV: using browser %s (from PATH: %s)", resolved, c)
+                return resolved
+
+    log.warning(
+        "YouTube TV: no Chromium-family browser found on %s. Tried registry + %d "
+        "candidate path(s). Install Chrome/Edge or set _CHROME_BIN in .env.",
+        system, len(candidates),
+    )
     return None
 
 
@@ -4225,8 +4289,10 @@ def _launch_tv_browser(video_id: str) -> bool:
         kw["start_new_session"] = True
     try:
         subprocess.Popen(args, **kw)
+        log.info("YouTube TV: launched kiosk (%s) for video %s", Path(chrome).name, video_id)
         return True
-    except Exception:
+    except Exception as e:
+        log.warning("YouTube TV: kiosk launch failed (%s): %s", chrome, e)
         return False
 
 
@@ -4290,8 +4356,8 @@ async def youtube_play(req: YouTubeReq) -> JSONResponse:
     # the fresh page reads ?v=<id> and autoplays even if it missed the broadcast.
     page_open = (time.time() - state.youtube_tv_seen_at) < 6.0
     await broadcast("yt_command", {"action": "load", "video_id": video_id})
-    launched = True
     if not page_open:
+        launch_at = time.time()
         launched = await asyncio.to_thread(_launch_tv_browser, video_id)
         if not launched:
             state.youtube_active = False
@@ -4302,15 +4368,48 @@ async def youtube_play(req: YouTubeReq) -> JSONResponse:
             await broadcast("state", state_snapshot())
             raise HTTPException(
                 500,
-                "No Chrome/Chromium found on the host to play YouTube on the TV. "
-                "Install Google Chrome (or set _CHROME_BIN in .env).",
+                "No Chrome/Edge/Chromium browser found on the host to play YouTube "
+                "on the TV. Install Google Chrome or Microsoft Edge (or set "
+                "_CHROME_BIN in .env). See logs/streamlink_app.log for details.",
             )
+        # The browser was spawned, but Popen can't tell us it actually came up
+        # (locked profile, instant exit, …). The /tv page heartbeats within ~1 s
+        # of loading, so if nothing checks in we know the kiosk never rendered —
+        # surface that instead of silently dropping back to the idle background.
+        asyncio.create_task(_youtube_kiosk_healthcheck(video_id, launch_at))
 
     # Note: we deliberately do NOT broadcast a `stream_status` event here — the
     # client's stream_status handler phrases playing as "Now playing in VLC".
     # The `state` snapshot below already carries stream_status="playing".
     await broadcast("state", state_snapshot())
     return JSONResponse({"ok": True, "video_id": video_id}, status_code=202)
+
+
+async def _youtube_kiosk_healthcheck(video_id: str, launch_at: float) -> None:
+    """If the freshly-launched kiosk never heartbeats, the browser didn't render
+    the /tv page — report a clear error rather than leaving the TV blank."""
+    await asyncio.sleep(12)
+    # Superseded (stopped, or a different video started) → nothing to check.
+    if not state.youtube_active or state.youtube_video_id != video_id:
+        return
+    if state.youtube_tv_seen_at >= launch_at:
+        return  # the page checked in — all good
+    log.warning(
+        "YouTube TV: kiosk for %s launched but never reported in within 12 s — "
+        "the browser likely failed to open the /tv page (locked profile, blocked "
+        "network, or session-0 service with no desktop).", video_id,
+    )
+    state.youtube_active = False
+    state.youtube_video_id = None
+    state.youtube_playback = ""
+    state.active_title = None
+    state.stream_status = "idle"
+    await broadcast("stream_status", {
+        "status": "error",
+        "message": "YouTube didn't start on the TV — the browser failed to open. "
+                   "See logs/streamlink_app.log.",
+    })
+    await broadcast("state", state_snapshot())
 
 
 @app.post("/api/youtube/control")

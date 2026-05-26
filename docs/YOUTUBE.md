@@ -118,8 +118,7 @@ rest of the stop teardown (qBit delete) is naturally skipped.
 
 ## The kiosk
 
-`_launch_tv_browser` runs Chrome (`_find_chrome`: Chrome → Chromium → Edge, or
-`_CHROME_BIN` from `.env`) as:
+`_launch_tv_browser` runs Chrome (`_find_chrome`) as:
 
 ```
 chrome --user-data-dir=<repo>/.tv_chrome_profile \
@@ -135,8 +134,38 @@ chrome --user-data-dir=<repo>/.tv_chrome_profile \
   Chrome and lets `_kill_tv_browser` kill *only* this instance (matched by the
   profile path in the process cmdline). The dir is git-ignored.
 
-If no Chromium-family browser is found, `POST /api/youtube` returns 500 with a
-clear message (install Chrome or set `_CHROME_BIN`).
+### Browser discovery (`_find_chrome`) — Windows-first
+
+Windows is the primary target, so it gets the widest net. In order:
+
+1. `_CHROME_BIN` from the environment (explicit override).
+2. **Windows: the `App Paths` registry** — HKCU + HKLM, for `chrome.exe`,
+   `msedge.exe`, `brave.exe`, `chromium.exe`. This is the most reliable source
+   and handles **per-user installs** and non-default locations.
+3. **Windows: filesystem candidates** under `%ProgramFiles%`,
+   `%ProgramFiles(x86)%` **and `%LOCALAPPDATA%`** (the per-user Chrome location
+   the original code missed — the cause of the v3.5.0 "never starts on Windows"
+   bug), for Chrome / Edge / Brave / Chromium, plus PATH shims.
+4. macOS: the `/Applications/*.app/Contents/MacOS/*` binaries.
+5. Linux: `google-chrome` / `chromium` / `microsoft-edge` / `brave-browser`
+   (PATH + common absolute paths + the snap path).
+
+**Edge is preinstalled on Windows 10/11**, so discovery should essentially
+always resolve there. Discovery and launch both **log** (to
+`logs/streamlink_app.log`) what they picked or why they failed — never fail
+silently. If nothing is found, `POST /api/youtube` returns 500 with a clear
+message (install Chrome/Edge or set `_CHROME_BIN`).
+
+### Launch health-check
+
+`subprocess.Popen` returning doesn't prove the browser actually rendered the
+page (a locked profile, an instant exit, or a **session-0 Windows service with
+no interactive desktop** all "launch" but show nothing). After a launch,
+`_youtube_kiosk_healthcheck` waits 12 s; the `/tv` page heartbeats within ~1 s of
+loading, so if `youtube_tv_seen_at` never advances past the launch time the
+server clears the YouTube state and broadcasts a `stream_status:error`
+("YouTube didn't start on the TV…") — instead of silently dropping back to the
+idle background video.
 
 ---
 

@@ -4,6 +4,20 @@ Guidance for Claude Code working in this repo. This file is intentionally **ters
 
 ---
 
+## ⚠️ Target platform priority — Windows first
+
+**Windows is the primary deployment target. Linux is second. macOS is last (dev convenience only).** This ordering is non-negotiable and overrides any instinct to optimise for the Mac you may be developing on.
+
+Concretely, for every change that touches the OS — launching processes, file paths, service/daemon install, firewall, browser/VLC launch, priorities, signals:
+
+1. **Make it correct on Windows first.** A feature that works on macOS but not Windows is a **bug**, not a partial success. Verify the Windows code path (exe discovery incl. per-user `%LOCALAPPDATA%` installs and the registry, `creationflags`, backslash paths, no reliance on POSIX-only APIs) before considering the task done.
+2. **Then Linux** (systemd, `nice`, `/usr/bin` paths, `start_new_session`).
+3. **macOS last.** Don't let a macOS-only convenience (or a macOS limitation like the TCC HLS block) shape the design in a way that weakens Windows.
+
+When a capability can't be identical across all three, Windows wins. Note any platform gaps explicitly in the relevant `docs/` file and `docs/GOTCHAS.md`.
+
+---
+
 ## ⚠️ Keeping documentation current — read this first
 
 This repo has **two** sources of truth you must keep current as the code changes:
