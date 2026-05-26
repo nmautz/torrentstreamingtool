@@ -208,6 +208,7 @@ All require admin auth.
 | GET | `/api/admin/logs` | `{log_dir, files:[{name, bytes, mtime}]}` — lists every file in `LOG_DIR` (newest first by mtime). Used by the admin System tab "Server Logs" card |
 | GET | `/api/admin/logs/_bundle` | Streams a ZIP of every file in `LOG_DIR` (deflated). Filename `streamlink-logs-YYYYMMDD-HHMMSS.zip`. 404 if no log files exist |
 | GET | `/api/admin/logs/{name}` | Streams a single log file as an attachment (`text/plain; charset=utf-8`). `{name}` is the basename only — slashes/`..`/absolute paths are rejected and the resolved path must stay within `LOG_DIR` |
+| DELETE | `/api/admin/logs` | Clear every file in `LOG_DIR`. Active rotating handlers (`streamlink_app.log`, `hls.log`) are **truncated in-place via `handler.stream.truncate(0)`** so the live FD keeps working — deleting them would orphan the handle on Windows and silently swallow writes on POSIX. Non-active siblings (rotated `.1`/`.2`/`.3`, `streamlink.err`) are unlinked, with a write-mode truncate fallback if unlink fails (e.g. service holds an exclusive Windows handle). Returns `{ok:true, cleared:[name], errors:[{file, error}]}` |
 
 ## Admin HTTPS redirect
 

@@ -189,7 +189,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.6.1"
+UI_VERSION = "3.7.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -6152,6 +6152,76 @@ async def admin_download_log(request: Request, name: str) -> FileResponse:
         filename=path.name,
         headers={"Content-Disposition": f'attachment; filename="{path.name}"'},
     )
+
+
+@app.delete("/api/admin/logs")
+async def admin_clear_logs(request: Request) -> JSONResponse:
+    """Clear every file in LOG_DIR.
+
+    Active rotating handlers (`streamlink_app.log`, `hls.log`) are **truncated
+    in-place via the handler's stream** rather than deleted — on Windows you
+    can't unlink a file that the running process has open for writing, and even
+    on POSIX a delete would leave the FD valid but disconnected from any
+    on-disk file so subsequent writes would vanish until the next restart.
+    Truncating via `handler.stream.truncate(0)` keeps logging fully functional;
+    new lines append from offset 0.
+
+    Non-active files (rotated `.1`/`.2`/`.3` siblings, plus the
+    launchd/systemd-written `streamlink.err`) are unlinked. If unlink fails
+    (e.g. service still has an exclusive write handle on Windows), we fall back
+    to a write-mode truncate and continue.
+    """
+    _require_admin(request)
+
+    cleared: list[str] = []
+    errors:  list[dict] = []
+    active_basenames: set[str] = set()
+
+    # 1) Truncate the live rotating-file handlers via their own streams so we
+    #    don't race the logging thread.
+    for logger_name in ("streamlink", "streamlink.hls"):
+        lg = logging.getLogger(logger_name)
+        for h in lg.handlers:
+            if not isinstance(h, RotatingFileHandler):
+                continue
+            try:
+                base = Path(h.baseFilename).name
+                active_basenames.add(base)
+                h.acquire()
+                try:
+                    if h.stream:
+                        h.stream.flush()
+                        h.stream.seek(0)
+                        h.stream.truncate(0)
+                finally:
+                    h.release()
+                cleared.append(base)
+            except Exception as e:
+                errors.append({"file": Path(h.baseFilename).name, "error": str(e)})
+
+    # 2) Everything else in LOG_DIR — delete; on failure, truncate-and-keep.
+    if LOG_DIR.exists():
+        for p in LOG_DIR.iterdir():
+            if not p.is_file() or p.name in active_basenames:
+                continue
+            try:
+                p.unlink()
+                cleared.append(p.name)
+                continue
+            except OSError:
+                pass
+            try:
+                with open(p, "wb"):
+                    pass
+                cleared.append(p.name)
+            except OSError as e:
+                errors.append({"file": p.name, "error": str(e)})
+
+    log.info(
+        "Admin cleared logs: %d file(s) cleared, %d error(s).",
+        len(cleared), len(errors),
+    )
+    return JSONResponse({"ok": True, "cleared": cleared, "errors": errors})
 
 
 @app.get("/api/admin/scheduled-reboot")

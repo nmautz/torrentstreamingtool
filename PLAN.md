@@ -301,6 +301,7 @@ SSH / RDP.
 - [x] **22.1** Backend: `GET /api/admin/logs` (listing with size + mtime, newest first), `GET /api/admin/logs/{name}` (single file as attachment — `_safe_log_path` rejects slashes / `..` / absolute paths / anything that resolves outside `LOG_DIR`), `GET /api/admin/logs/_bundle` (streamed ZIP via the `os.pipe()` pattern shared with `/api/library/{id}/zip`, filename `streamlink-logs-<timestamp>.zip`). All three require admin auth; the per-file route accepts the token via `?admin_token=` query param so plain `<a download>` anchors work.
 - [x] **22.2** Admin UI: **Server Logs** card in the System tab. Lists every file in `logs/` with size + mtime, per-row Download, plus **Download All (.zip)** at the top. `loadLogs()` runs alongside `loadScheduledReboot()` / `loadOvernightPrep()` when the tab opens; Refresh button re-reads.
 - [x] **22.3** Docs + version → 3.6.0: API.md (the 3 new endpoints), ADMIN.md (new "Server Logs" subsection under System), CHANGELOG.
+- [x] **22.4** Clear logs (v3.7.0): `DELETE /api/admin/logs` + **Clear All** button in the Server Logs card (confirm-gated). Active rotating handlers are **truncated in-place** via `handler.stream.truncate(0)` (deleting would orphan the open FD on Windows / leave POSIX writes vanishing into a disconnected inode); non-active siblings (rotated `.1`/`.2`/`.3`, `streamlink.err`) are unlinked with a write-mode-truncate fallback for the Windows-service-holds-the-handle case. Returns `{ok, cleared, errors}`.
 
 ---
 

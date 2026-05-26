@@ -380,7 +380,7 @@
           <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Server Logs</h2>
           <p class="text-xs text-gray-500 mt-0.5">Download the server's rotating log files (under <code class="font-mono text-gray-400">logs/</code>) for diagnostics. Useful when SSH isn't set up on the host.</p>
         </div>
-        <div class="flex-shrink-0 flex gap-2">
+        <div class="flex-shrink-0 flex gap-2 flex-wrap justify-end">
           <button id="logsRefreshBtn" onclick="loadLogs()"
             class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 text-gray-300 hover:bg-gray-700 transition-colors">
             Refresh
@@ -388,6 +388,10 @@
           <button id="logsBundleBtn" onclick="downloadLogsBundle()"
             class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-indigo-700 bg-indigo-900 text-indigo-200 hover:bg-indigo-800 transition-colors">
             Download All (.zip)
+          </button>
+          <button id="logsClearBtn" onclick="clearLogs()"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-red-800 bg-red-950 text-red-300 hover:bg-red-900 transition-colors">
+            Clear All
           </button>
         </div>
       </div>
@@ -824,6 +828,33 @@ function downloadLogsBundle(){
   a.click();
   a.remove();
   showToast("Preparing logs bundle…");
+}
+
+async function clearLogs(){
+  if(!confirm("Clear all server logs?\n\nActive log files (streamlink_app.log, hls.log) will be truncated to zero bytes — logging keeps working. Rotated siblings and streamlink.err are deleted.\n\nThis cannot be undone.")) return;
+  const btn = document.getElementById("logsClearBtn");
+  btn.disabled = true;
+  btn.textContent = "Clearing…";
+  try{
+    const r = await fetch("/api/admin/logs",{method:"DELETE", headers: authHeader()});
+    if(!r.ok){
+      const t = await r.text();
+      showToast(`Clear failed: ${t || r.status}`, true);
+      return;
+    }
+    const d = await r.json().catch(()=>({}));
+    const n = Array.isArray(d.cleared) ? d.cleared.length : 0;
+    const errs = Array.isArray(d.errors) ? d.errors.length : 0;
+    showToast(errs
+      ? `Cleared ${n} file${n===1?"":"s"} · ${errs} error${errs===1?"":"s"}`
+      : `Cleared ${n} log file${n===1?"":"s"}.`, errs > 0);
+    await loadLogs();
+  }catch(_){
+    showToast("Clear failed.", true);
+  }finally{
+    btn.disabled = false;
+    btn.textContent = "Clear All";
+  }
 }
 
 // ── Scheduled Restart ───────────────────────────────────────────────────────────

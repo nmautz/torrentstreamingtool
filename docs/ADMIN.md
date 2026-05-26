@@ -130,6 +130,7 @@ Inventory + download for the host's rotating log files in `logs/` (`streamlink_a
 - **Refresh** re-reads the directory.
 - **Per-file Download** is a plain `<a download>` link to `/api/admin/logs/{name}?admin_token=…`. The token rides as a query param because anchor downloads can't set headers.
 - **Download All (.zip)** hits `/api/admin/logs/_bundle?admin_token=…` and streams a ZIP of every file in `LOG_DIR`. Filename includes a host-local timestamp so multiple snapshots don't collide.
+- **Clear All** (`DELETE /api/admin/logs`, confirm-gated) truncates the active rotating handlers in-place (`streamlink_app.log`, `hls.log`) and deletes the non-active siblings (rotated `.1`/`.2`/`.3`, plus `streamlink.err` written by the system service). Truncation rather than delete on the live files is deliberate: on Windows you can't `unlink` a file the running process has open for writing, and on POSIX a delete would leave logging's FD valid but disconnected — subsequent writes would vanish until restart. Falls back to a write-mode truncate if `unlink` fails (e.g. the service still holds an exclusive Windows handle on `streamlink.err`).
 
 Path traversal is blocked server-side: `_safe_log_path` resolves the requested name against `LOG_DIR` and refuses any name containing a slash, `..`, an absolute path, or a resolved location that escapes the directory.
 
