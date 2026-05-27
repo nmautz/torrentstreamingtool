@@ -1,5 +1,8 @@
 # Changelog
 
+## [3.10.4] — 2026-05-26
+- **Fix: Windows service crashed on startup with `RuntimeError: Directory 'static' does not exist`.** Task Scheduler launches the wrapper with CWD = `C:\Windows\System32`, but `main.py` mounts `StaticFiles(directory="static")` with a *relative* path. Result: every `uvicorn.Server` raised on import, the supervisor restarted 5× in 1.0s, hit the fast-death circuit breaker, and the service gave up. Fixed by `os.chdir(HERE)` at the top of `streamlink_service.py` (and the matching `_WRAPPER_CONTENT` template in `daemon.py`) so all relative paths in `main.py` resolve next to the wrapper. macOS launchd and Linux systemd were unaffected because their unit files already set `WorkingDirectory={HERE}` — the bug only surfaced on Windows where `schtasks` has no equivalent.
+
 ## [3.10.3] — 2026-05-26
 - **Fix: playing media state not shared between HTTP and HTTPS connections; service shuts down immediately on Windows.** Both `run.py` and `streamlink_service.py` were spawning two separate `uvicorn` subprocesses (port 80 HTTP, port 443 HTTPS) with independent `AppState`. Fixed by running both servers concurrently in the same `asyncio` event loop so they share state. Also fixed two service-specific failures: (1) uvicorn's default `dictConfig` adds `StreamHandler`s pointing at `sys.stderr`/`stdout`, which are `None` in a Task Scheduler service (no console) — suppressed via `log_config={"version":1,...}`; (2) the supervisor loop broke on `rc=0` treating a fast startup crash as a clean exit — fixed so any `asyncio.run()` return (non-interrupt) triggers a restart.
 

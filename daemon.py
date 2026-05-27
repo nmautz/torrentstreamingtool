@@ -63,6 +63,14 @@ VENV = HERE / ".venv"
 import platform, os
 _SYSTEM = platform.system()
 
+# Task Scheduler launches with CWD = C:\\Windows\\System32, but main.py mounts
+# StaticFiles("static") with a *relative* path — chdir before import so
+# `static/`, `cert.pem`, `library.json` and friends resolve next to this file.
+try:
+    os.chdir(HERE)
+except OSError:
+    pass
+
 # File logging — Task Scheduler / launchd have no console
 _log_dir = HERE / "logs"
 _log_dir.mkdir(exist_ok=True)
