@@ -984,12 +984,15 @@ def main():
     if str(HERE) not in sys.path:
         sys.path.insert(0, str(HERE))
 
+    _uv_log_cfg = {"version": 1, "disable_existing_loggers": False}
+
     async def _launch():
         http_cfg = _uvicorn.Config(
             "main:app",
             host="0.0.0.0",
             port=PORT,
             log_level="warning",
+            log_config=_uv_log_cfg,
         )
         http_srv = _uvicorn.Server(http_cfg)
         http_srv.install_signal_handlers = lambda: None
@@ -1004,6 +1007,7 @@ def main():
                 ssl_certfile=str(CERT),
                 ssl_keyfile=str(KEY),
                 log_level="warning",
+                log_config=_uv_log_cfg,
                 lifespan="off",
             )
             https_srv = _uvicorn.Server(https_cfg)

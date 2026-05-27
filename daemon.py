@@ -141,10 +141,18 @@ except Exception as exc:
 # both servers share the AppState module global in main.py. Two separate
 # processes (the previous approach) had separate memory and showed stale state
 # to clients on the other port.
+#
+# log_config suppresses uvicorn\'s default dictConfig which adds StreamHandlers
+# pointing at sys.stderr/stdout — those are None in a Task Scheduler service
+# (no console), causing uvicorn to fail silently on startup.
+_UV_LOG_CFG = {"version": 1, "disable_existing_loggers": False}
+
 async def _launch_servers():
     import uvicorn as _uvicorn
+    log.info("Configuring uvicorn servers (HTTP port 80%s)", ", HTTPS port 443" if _has_cert else "")
     http_cfg = _uvicorn.Config(
-        "main:app", host="0.0.0.0", port=80, log_level="warning",
+        "main:app", host="0.0.0.0", port=80,
+        log_level="warning", log_config=_UV_LOG_CFG,
     )
     http_srv = _uvicorn.Server(http_cfg)
     http_srv.install_signal_handlers = lambda: None
@@ -153,15 +161,23 @@ async def _launch_servers():
         https_cfg = _uvicorn.Config(
             "main:app", host="0.0.0.0", port=443,
             ssl_certfile=str(_CERT), ssl_keyfile=str(_KEY),
-            log_level="warning", lifespan="off",
+            log_level="warning", log_config=_UV_LOG_CFG,
+            lifespan="off",
         )
         https_srv = _uvicorn.Server(https_cfg)
         https_srv.install_signal_handlers = lambda: None
         coros.append(https_srv.serve())
-    await asyncio.gather(*coros, return_exceptions=True)
+    results = await asyncio.gather(*coros, return_exceptions=True)
+    for i, r in enumerate(results):
+        if isinstance(r, BaseException):
+            log.error("Server %d exited with exception: %s: %s", i, type(r).__name__, r)
+    if hasattr(http_srv, "started") and not http_srv.started:
+        raise RuntimeError("HTTP server (port 80) failed to start — port may be in use or permission denied")
 
-# Supervise — restart on abnormal exit so a transient failure
+# Supervise — restart whenever the servers stop so a transient failure
 # (e.g. port briefly busy at boot) doesn\'t kill the dashboard permanently.
+# The service is only stopped via explicit OS signal (KeyboardInterrupt /
+# SystemExit) or after _MAX_FAST_DEATHS consecutive quick crashes.
 _RESTART_DELAY    = 5.0
 _FAST_DEATH_SECS  = 15.0   # death within this window counts as "fast"
 _MAX_FAST_DEATHS  = 5      # give up after this many consecutive fast deaths
@@ -173,20 +189,14 @@ try:
         t0 = time.monotonic()
         try:
             asyncio.run(_launch_servers())
-            rc = 0
         except (KeyboardInterrupt, SystemExit):
-            log.info("Interrupted — clean exit")
+            log.info("Interrupted — stopping service")
             break
         except Exception as exc:
-            log.error("Server launch error: %s", exc)
-            rc = -1
+            log.error("Server error: %s: %s", type(exc).__name__, exc)
 
         elapsed = time.monotonic() - t0
-        log.info("Servers exited rc=%d after %.1fs", rc, elapsed)
-
-        if rc == 0:
-            log.info("Clean exit — service wrapper shutting down")
-            break
+        log.info("Servers exited after %.1fs — restarting", elapsed)
 
         if elapsed < _FAST_DEATH_SECS:
             consecutive_fast += 1
