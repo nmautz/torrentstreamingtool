@@ -24,6 +24,32 @@ VERBOSE = any(a in ("-v", "--verbose") for a in sys.argv[1:])
 if VERBOSE:
     sys.argv = [sys.argv[0]] + [a for a in sys.argv[1:] if a not in ("-v", "--verbose")]
 
+# ── stdout/stderr encoding (Python 3.13 + Windows + piped output crash) ──
+# When setup.py runs as a subprocess on Windows (auto-updater calling it, or any
+# `subprocess.run([...setup.py])` invocation), Python defaults stdout/stderr to
+# the host's legacy ANSI code page — usually cp1252 in en-US. cp1252 can't
+# encode the Unicode box-drawing characters / ✓ ✗ → ⚠ symbols this script prints,
+# so the very first banner raises UnicodeEncodeError and the whole process
+# exits with rc=1 before doing anything useful. Force UTF-8 with errors="replace"
+# so misencoded glyphs degrade to ? instead of killing the process. Idempotent.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        if hasattr(_stream, "reconfigure"):
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+    except Exception:
+        pass
+
+# Whether this is an auto-updater-driven re-run. The updater (see updater.py)
+# sets this env var; when it's True, setup.py:
+#   - forces reuse_env=True when an existing .env is found (no prompt)
+#   - skips offer_service_install() — the updater does its own daemon.uninstall()
+#     + install() afterwards
+#   - treats `pip install` failures as warnings (transient network glitches
+#     shouldn't kill an update — the next setup re-run will catch up)
+#   - never tries to install OS-level apps (winget/brew casks) — those run only
+#     during the initial interactive setup
+AUTOUPDATE = os.environ.get("STREAMLINK_AUTOUPDATE", "").strip() == "1"
+
 # ── Color output (disabled on non-TTY) ────────────────────────────────────
 _TTY = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
 def _c(n): return f"\033[{n}m" if _TTY else ""
@@ -895,10 +921,35 @@ def setup_venv():
     python = VENV / ("Scripts/python.exe" if SYSTEM == "Windows" else "bin/python")
     pip    = VENV / ("Scripts/pip.exe"    if SYSTEM == "Windows" else "bin/pip")
     note("Installing dependencies (may take a moment) …")
+
+    # In auto-update mode, treat pip failures as warnings — a transient network
+    # glitch (or a PyPI hiccup) shouldn't kill the whole update. If deps are
+    # actually missing the new code will fail at import time on next boot,
+    # which the operator can debug separately. Interactive setup keeps the
+    # original fail-loud behaviour.
+    def _pip_step(cmd: list, label: str) -> bool:
+        try:
+            subprocess.run(cmd, check=True)
+            return True
+        except subprocess.CalledProcessError as exc:
+            if AUTOUPDATE:
+                warn(f"{label} failed (rc={exc.returncode}) — continuing in auto-update mode.")
+                return False
+            raise
+
     # Use 'python -m pip' to upgrade pip — calling pip.exe directly fails on Windows
-    subprocess.run([str(python), "-m", "pip", "install", "-q", "--upgrade", "pip"], check=True)
-    subprocess.run([str(pip), "install", "-q", "-r", str(HERE / "requirements.txt")], check=True)
-    ok("All Python packages installed")
+    pip_ok = _pip_step(
+        [str(python), "-m", "pip", "install", "-q", "--upgrade", "pip"],
+        "pip self-upgrade",
+    )
+    reqs_ok = _pip_step(
+        [str(pip), "install", "-q", "-r", str(HERE / "requirements.txt")],
+        "requirements.txt install",
+    )
+    if pip_ok and reqs_ok:
+        ok("All Python packages installed")
+    else:
+        warn("Some dependency steps were skipped; existing venv contents will be used.")
 
 
 # ── Step 3: Detect external tools ─────────────────────────────────────────
@@ -1249,17 +1300,33 @@ def main():
     check_python()
     setup_venv()
     tools = detect_tools()
-    tools = install_core_deps(tools)
-    install_jackett_service()
-    tools = install_smart_skip_deps(tools)
+    if AUTOUPDATE:
+        # Skip OS-level app installs in the auto-updater context — winget/brew
+        # need an interactive desktop and can hang or fail from a service
+        # account. The admin chose these on first setup; we don't add or
+        # remove them just because new code was pulled.
+        note("Auto-update mode — skipping winget/brew app installs.")
+    else:
+        tools = install_core_deps(tools)
+        install_jackett_service()
+        tools = install_smart_skip_deps(tools)
 
     existing = parse_existing_env() if ENV.exists() else {}
     reuse_env = False
     if existing:
-        header("Existing .env detected")
-        note(f"Found {ENV}")
-        note("Re-prompting pre-fills each current value (press Enter to keep it).")
-        reuse_env = ask_bool("Reuse existing .env without re-prompting?", default=True)
+        if AUTOUPDATE:
+            # Auto-updater path: never prompt, never re-prompt for values. The
+            # admin's existing .env is authoritative; any new env keys
+            # introduced by the new code are surfaced via the dashboard's
+            # missing-env-keys banner so the admin fills them in post-update.
+            reuse_env = True
+            header("Existing .env detected")
+            note(f"Found {ENV} — reusing in auto-update mode (no prompts).")
+        else:
+            header("Existing .env detected")
+            note(f"Found {ENV}")
+            note("Re-prompting pre-fills each current value (press Enter to keep it).")
+            reuse_env = ask_bool("Reuse existing .env without re-prompting?", default=True)
 
     if reuse_env:
         cfg = existing
@@ -1274,7 +1341,15 @@ def main():
         ensure_download_dir(cfg)
     generate_ssl_cert()
 
-    service_installed = offer_service_install()
+    if AUTOUPDATE:
+        # The auto-updater calls daemon.uninstall() + daemon.install() itself
+        # right after this script exits — don't duplicate the work here (and
+        # don't risk a Windows UAC elevation prompt blowing up from a service
+        # context, which has no interactive desktop).
+        service_installed = False
+        note("Auto-update mode — skipping service install (updater handles it).")
+    else:
+        service_installed = offer_service_install()
 
     header("Done")
     ok("Setup complete!")

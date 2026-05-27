@@ -206,7 +206,23 @@ async def run_setup(timeout: float = 900.0) -> dict:
         return {"ok": False, "error": "setup.py not found"}
 
     log.info("Re-running setup.py with %s (non-interactive)", py)
-    env = {**os.environ, "PYTHONUNBUFFERED": "1"}
+    # PYTHONIOENCODING=utf-8 keeps the Unicode banner / ✓ / ✗ glyphs from
+    # crashing setup.py on Python 3.13 + Windows, where a piped stdout
+    # defaults to the host's legacy ANSI code page (cp1252 in en-US) and
+    # UnicodeEncodeError fires on the very first print(). setup.py also
+    # reconfigures its own stdout/stderr defensively, but setting this here
+    # belt-and-braces any version of setup.py that doesn't.
+    #
+    # STREAMLINK_AUTOUPDATE=1 puts setup.py into its non-interactive update
+    # mode: reuse the existing .env, skip OS-app installs, tolerate transient
+    # pip failures (don't kill the update), and skip offer_service_install
+    # (the updater does its own daemon.uninstall() + install() afterwards).
+    env = {
+        **os.environ,
+        "PYTHONUNBUFFERED": "1",
+        "PYTHONIOENCODING":  "utf-8",
+        "STREAMLINK_AUTOUPDATE": "1",
+    }
     try:
         proc = await asyncio.create_subprocess_exec(
             str(py), str(setup),

@@ -331,7 +331,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.10.0"
+UI_VERSION = "3.10.1"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -2194,7 +2194,18 @@ async def _run_apply(branch: str, reboot: bool = True) -> dict:
         setup_res = await updater.run_setup()
         state.updater_last_output = setup_res.get("output_tail", "")
         if not setup_res.get("ok"):
-            err = setup_res.get("error") or f"setup.py exited rc={setup_res.get('returncode')}"
+            base_err = setup_res.get("error") or f"setup.py exited rc={setup_res.get('returncode')}"
+            # Hoist the last non-empty line of setup.py's output into the
+            # phase message so the admin sees the actual cause (e.g. a
+            # `UnicodeEncodeError` traceback's exception line) without having
+            # to expand the collapsed diagnostic panel.
+            last_line = ""
+            for line in reversed(state.updater_last_output.splitlines()):
+                stripped = line.strip()
+                if stripped and not stripped.startswith("─"):
+                    last_line = stripped
+                    break
+            err = f"{base_err} — {last_line}" if last_line else base_err
             await _set_updater_phase("error", err, busy=False)
             await _persist_updater_state(
                 last_error=err,
