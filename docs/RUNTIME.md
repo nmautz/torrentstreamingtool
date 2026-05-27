@@ -56,8 +56,9 @@ After all services are up, `start_watchdog()` is called. It returns a daemon thr
 - **Port 80** for HTTP (the main dashboard)
 - **Port 443** for HTTPS (admin panel) — only if `cert.pem` + `key.pem` exist
 - Uvicorn binds to `0.0.0.0` so mobile devices on the same LAN can connect
-- The HTTPS process is launched separately (also via uvicorn) as a subprocess; the main `run.py` foreground process is the HTTP uvicorn
-- Both pointed at `main:app`. Same FastAPI app served over both — `admin_https_redirect` middleware ensures admin routes go through 443
+- HTTP and HTTPS uvicorn servers run in the **same Python process**, both inside one `asyncio.run()` event loop ([run.py:989](../run.py#L989))
+- Port 80 serves the canonical `main:app`. Port 443 serves [`https_proxy:app`](../https_proxy.py) — a thin reverse proxy that streams every request to `127.0.0.1:80` and the response back. This guarantees a single `AppState` regardless of which port/hostname a client uses (see [GOTCHAS.md](GOTCHAS.md#https-port-443-is-a-reverse-proxy-not-a-second-fastapi-instance))
+- `admin_https_redirect` middleware ensures admin routes go through 443; it honors `X-Forwarded-Proto` so requests arriving via the proxy aren't bounced into a redirect loop
 - No browser auto-open. `run.py` is a server launcher — the URL is printed for the operator, but `webbrowser.open` is intentionally not called so headless / service installs don't try to pop a UI on a box that may have no display.
 
 ## LAN detection ([run.py:516](../run.py#L516))

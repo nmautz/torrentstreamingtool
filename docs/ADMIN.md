@@ -107,7 +107,7 @@ Controls: **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled
 
 #### Shut Down Server
 
-Posts to `POST /api/admin/shutdown`, which finds every `uvicorn main:app` process (both the HTTP listener and, when SSL certs exist, the HTTPS sibling) and sends `SIGTERM`. Sibling processes are signalled first so the admin process stays alive long enough to terminate the others; a 3 s `os._exit(0)` fallback handles the case where uvicorn ignores SIGTERM. Once the HTTP uvicorn exits, `run.py`'s `finally` block at [run.py:873](../run.py#L873) cleans up the HTTPS subprocess and the mDNS responder.
+Posts to `POST /api/admin/shutdown`, which schedules a 3.5 s `os._exit(0)` after flushing the response. Both uvicorn servers (port 80 `main:app` + port 443 `https_proxy:app`, when certs exist) live inside the same Python process, so exiting once terminates both. The psutil walk for "uvicorn main:app" processes is a legacy path — it finds nothing in the current architecture and the `os._exit(0)` fallback is what actually performs the shutdown. The launcher's `finally` block at [run.py:1023](../run.py#L1023) cleans up the mDNS responder on the way out.
 
 Note: this only stops the StreamLink web server. qBittorrent, Jackett, and VLC keep running — they are launched separately and are not children of the FastAPI process. Use the host's process manager to stop those if needed.
 
