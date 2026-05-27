@@ -40,3 +40,6 @@ uvicorn*.log
 
 # Portable Smart Skip binaries downloaded by setup.py
 tools/
+
+
+streamlink_service.py
