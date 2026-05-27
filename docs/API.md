@@ -81,7 +81,7 @@ Up to 6 profiles. No passwords. Optional 4-digit PIN per profile.
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/api/library?profile_id=…` | List items. Filters out `admin_only` items unless admin OR `profile.elevated`. Adds `resume` hint and `hidden: bool` (per-profile visibility) per item |
+| GET | `/api/library?profile_id=…` | List items. Filters out `admin_only` items unless admin OR `profile.elevated`. Adds `resume` hint, `hidden: bool` (per-profile visibility), and `skip_status ∈ {ok, partial, failed, pending, none}` (Smart Skip availability summary — drives the user-visible "⚠ Intro/credits skip not available" chip) per item |
 | GET | `/api/library/{id}/files?profile_id=…` | Per-file list with progress |
 | POST | `/api/library/prepare` | `{magnet, title}` → file list for the precision-selection picker (no `state.prepare_hash` side effect) |
 | POST | `/api/library/download` | `{magnet, title, series, season, episode, save_path, torrent_hash, selected_file_indices[], default_visible_profiles[]}` — `default_visible_profiles` is optional; if non-empty, only those profile IDs see the item in the main list by default (others see it in the hidden tab) |
@@ -179,7 +179,7 @@ All require admin auth.
 | POST | `/api/admin/logout` | Invalidates the bearer token |
 | GET | `/api/admin/settings` | Returns `INDEXER_URL`, `INDEXER_API_KEY`, current `indexer_categories` override, `tmdb_api_key`, and `tmdb_api_key_source ∈ {admin\|env\|unset}` |
 | POST | `/api/admin/settings` | `{indexer_categories?, tmdb_api_key?}` — both saved as `library.json` → `settings.admin_overrides.*` (admin override beats `.env`). Empty `tmdb_api_key` clears the override |
-| GET | `/api/admin/library` | All items including admin-only; includes `series_key`, `files_with_skip`, `analysis_job` for each |
+| GET | `/api/admin/library` | All items including admin-only; includes `series_key`, `files_with_skip`, `files_failed` (count of files marked `analysis.source == "failed"`), `skip_status` (item-level summary), and `analysis_job` for each |
 | GET | `/api/admin/indexers` | List configured Jackett indexers |
 | GET | `/api/admin/indexers/available` | List all Jackett-known indexers (configured + available) |
 | GET | `/api/admin/indexers/{id}/config` | Indexer config schema for setup form |
@@ -187,10 +187,11 @@ All require admin auth.
 | DELETE | `/api/admin/indexers/{id}` | Remove indexer from Jackett |
 | POST | `/api/library/{id}/visibility` | `{profile_id, hidden: bool}` — toggle per-profile visibility. `hidden=true` moves the item to the user's hidden tab; `hidden=false` restores it to the main list. Distinct from `admin_only` (admin content lock) |
 | POST | `/api/library/{id}/admin-lock` | `{admin_only}` |
-| GET | `/api/admin/library/{id}/skip-data` | Per-file intro/credits times for the editor |
+| GET | `/api/admin/library/{id}/skip-data` | Per-file intro/credits times for the editor. Failed files also carry `error_code` and `error` so the editor can render the failure reason |
 | PATCH | `/api/admin/library/{id}/skip-data` | `{file_path, intro_start?, intro_end?, credits_start?}` — manual override; sets `analysis.source="manual"` |
 | POST | `/api/admin/library/{id}/analyze` | Force re-run of series analysis |
 | GET | `/api/admin/analyzer-status` | `{available, ffmpeg, fpcalc}` |
+| GET | `/api/admin/analyzer-log?limit=N` | In-memory Smart Skip event ring buffer (200-deep, resets on restart). Returns `{entries:[{ts, level, series_key, item_id, file_path, error_code, message}], available, ffmpeg, fpcalc}` — drives the Fingerprint Log panel under the Smart Skip admin tab |
 | GET | `/api/admin/offline-encoder` | `{nvenc_available, encoder, ffmpeg}` — which encoder offline Save Offline jobs use (h264_nvenc when an NVIDIA GPU + NVENC-built ffmpeg are present, else libx264). Result is cached for the process lifetime. |
 | GET | `/api/admin/offline-cache` | `{total_bytes, cache_dir, items:[{item_id, title, file_count, total_bytes, cached_count, processing_count, pending_count, error_count, partial_count, files:[…]}], orphans:[{cache_key, kind:"cached"\|"partial", bytes, mtime}]}`. Each `files[]` entry has `{file_path, name, cache_key, bytes, status}` where `status ∈ cached \| processing \| pending \| error \| partial_stale`; processing entries add `progress, operation, encoder, job_id, started_at, eta_secs?`; error entries add `error, operation, encoder, job_id, started_at`. |
 | DELETE | `/api/admin/offline-cache/{cache_key}` | Delete one cached MP4 by its 24-hex basename. 409 if a pending/processing prep job is currently writing that file |

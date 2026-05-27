@@ -21,6 +21,18 @@ from typing import Optional
 
 ANALYZER_VERSION = 2
 
+# Per-file failure codes recorded in skip_data[path].analysis when fingerprinting
+# could not produce usable skip points. The user-facing UI shows a "Skip
+# unavailable" chip for any of these; the admin editor + analyzer log surface
+# the message verbatim. Keep codes stable — clients may filter on them.
+ERR_NO_BINARY    = "no_binary"      # ffmpeg or fpcalc not installed on host
+ERR_FILE_MISSING = "file_missing"   # video file is not on disk
+ERR_NO_DURATION  = "no_duration"    # ffprobe could not read duration
+ERR_FP_EMPTY     = "fp_empty"       # fpcalc returned no fingerprint (codec/corruption)
+ERR_TOO_SHORT    = "too_short"      # file shorter than the credits-fallback threshold
+ERR_NO_SKIP      = "no_skip_points" # fingerprinting ran but produced nothing usable
+ERR_EXCEPTION    = "exception"      # raised inside analyze_series — message carries detail
+
 # Run analyzer subprocesses (ffmpeg decode, fpcalc, ffprobe) at lowered OS
 # priority so a Smart-Skip pass never starves the StreamLink server. The server
 # raises itself to HIGH at startup and children inherit that, so without this an
@@ -276,6 +288,26 @@ def frames_to_seconds(frames: int) -> float:
     return frames / FP_FRAMES_PER_SEC
 
 
+def _failed_entry(error_code: str, error: str) -> dict:
+    """Build a per-file skip_data entry that records a fingerprinting failure.
+
+    The shape matches a successful entry so the rest of the system (admin
+    editor, runtime skip-offer lookup, fingerprint-version migration) can read
+    `analysis.source` uniformly. Callers that show user-facing chips should
+    check for `analysis.source == "failed"`.
+    """
+    return {
+        "intro": None,
+        "credits_start": None,
+        "analysis": {
+            "version":    ANALYZER_VERSION,
+            "source":     "failed",
+            "error_code": error_code,
+            "error":      error,
+        },
+    }
+
+
 def _detect_blackframe(file_path: str, start_at_sec: float,
                        scan_duration_sec: float = 300.0) -> Optional[float]:
     """Use ffmpeg blackdetect to find the first long black segment after start_at_sec.
@@ -411,9 +443,6 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
         message:  short human-readable string
         episode_name: optional basename of file being processed
     """
-    if not is_available():
-        return {}
-
     async def _emit(**kw):
         if progress_cb is None:
             return
@@ -422,17 +451,54 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
         except Exception:
             pass
 
-    # Flatten to a list of (item_idx, file_idx, path, item) tuples
-    episodes: list[dict] = []
+    # Collect every file path the caller asked us to analyze. The result map
+    # always carries an entry per path — successes get intro/credits, failures
+    # carry an `analysis.source == "failed"` marker so the UI can flag the file
+    # as un-skippable and the admin can see why.
+    all_paths: list[str] = []
+    seen: set[str] = set()
     for item in items:
         for f in item.get("files", []):
-            path = f.get("path", "")
-            if path and Path(path).exists():
-                episodes.append({"path": path, "item_id": item.get("id", ""), "file": f})
+            p = f.get("path", "")
+            if p and p not in seen:
+                seen.add(p)
+                all_paths.append(p)
+
+    if not all_paths:
+        return {}
+
+    # Missing binaries: every file fails the same way. We still return an entry
+    # per file so the user-facing "Skip unavailable" chip shows up consistently
+    # and the admin log records the host-level diagnostic.
+    if not is_available():
+        ff_ok = bool(ffmpeg_bin())
+        fp_ok = bool(fpcalc_bin())
+        missing = [n for n, ok in (("ffmpeg", ff_ok), ("fpcalc", fp_ok)) if not ok]
+        err = (
+            f"Required binary not installed on the host: {', '.join(missing)}. "
+            "Smart Skip cannot fingerprint audio without it — re-run setup.py "
+            "after installing the dependency."
+        )
+        return {p: _failed_entry(ERR_NO_BINARY, err) for p in all_paths}
+
+    # Files we'll actually fingerprint (exist on disk). Missing files get a
+    # failure entry up-front and are excluded from the clustering input.
+    result: dict = {}
+    episodes: list[dict] = []
+    for p in all_paths:
+        if not Path(p).exists():
+            result[p] = _failed_entry(
+                ERR_FILE_MISSING,
+                "Video file is not present on disk — Smart Skip could not fingerprint it.",
+            )
+        else:
+            episodes.append({"path": p})
 
     if len(episodes) < 2:
-        # No peers — return fallback credits only
-        result: dict = {}
+        # No peers — return fallback credits only. A duration-less or too-short
+        # file is recorded as a per-file failure (no shared intro can be found,
+        # and the 92 % credits heuristic only makes sense for full-length
+        # content).
         for idx, ep in enumerate(episodes, start=1):
             await _emit(stage="finalizing", current=idx, total=len(episodes),
                         message="No peers — applying credits fallback",
@@ -444,12 +510,26 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
                     "credits_start": round(dur * CREDITS_FALLBACK_PCT, 1),
                     "analysis": {"version": ANALYZER_VERSION, "source": "auto-fallback"},
                 }
+            elif dur:
+                result[ep["path"]] = _failed_entry(
+                    ERR_TOO_SHORT,
+                    f"File duration ({dur:.0f}s) is below the 60 s minimum for credits fallback.",
+                )
+            else:
+                result[ep["path"]] = _failed_entry(
+                    ERR_NO_DURATION,
+                    "ffprobe could not determine the media duration — the container may be "
+                    "unsupported or the file may be partially written.",
+                )
         return result
 
-    # Compute fingerprints for the head and tail of each episode in parallel chunks
+    # Compute fingerprints for the head and tail of each episode in parallel chunks.
+    # Track per-episode failures so files where fpcalc returned nothing are
+    # recorded as failures instead of silently disappearing from the result.
     head_fps: list[list[int]] = []
     tail_fps: list[list[int]] = []
     durations: list[Optional[float]] = []
+    fp_errors: dict[int, tuple[str, str]] = {}   # ep idx → (code, message)
     total_eps = len(episodes)
 
     for idx, ep in enumerate(episodes, start=1):
@@ -461,6 +541,12 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
         durations.append(dur)
         head = await asyncio.to_thread(_fpcalc_raw, ep["path"], INTRO_SEARCH_SECS, 0)
         head_fps.append(head)
+        if not head:
+            fp_errors[idx - 1] = (
+                ERR_FP_EMPTY,
+                "fpcalc produced no fingerprint for the head of this file "
+                "(unsupported audio codec, silent track, or corrupted container).",
+            )
 
         if dur and dur > OUTRO_SEARCH_SECS + 60:
             tail_start = int(dur - OUTRO_SEARCH_SECS)
@@ -496,7 +582,9 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
     outro_by_ep = _build_ep_offset_map(outro_clusters)
 
     # ── Build per-episode result ─────────────────────────────────────────────
-    result: dict = {}
+    # `result` already carries per-path failure entries for missing files. Now
+    # add per-episode entries — success for files that produced intro/credits,
+    # failure for files that produced nothing usable.
     for idx, ep in enumerate(episodes):
         path = ep["path"]
         dur = durations[idx]
@@ -541,6 +629,25 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
                     "source": "auto" if intro else source,
                 },
             }
+        else:
+            # Nothing usable — record why so the admin can see it and the user
+            # gets the "Skip unavailable" chip. fpcalc emptiness is the most
+            # specific cause; missing duration is the next; otherwise we hit
+            # the matcher with usable input but nothing aligned and no black
+            # frame was found.
+            if idx in fp_errors:
+                code, msg = fp_errors[idx]
+            elif not dur:
+                code, msg = ERR_NO_DURATION, (
+                    "ffprobe could not determine the media duration — no credits "
+                    "fallback could be applied."
+                )
+            else:
+                code, msg = ERR_NO_SKIP, (
+                    "Fingerprinting completed but no shared intro and no credits "
+                    "transition could be located in this file."
+                )
+            result[path] = _failed_entry(code, msg)
 
     return result
 

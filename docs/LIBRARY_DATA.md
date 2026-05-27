@@ -143,13 +143,17 @@ Written by `vlc_progress_tracker` every 15 s. `mark_watched` ([main.py:2221](../
     "credits_start": 2940.0,                     // or null
     "analysis": {
       "version": 2,                              // analyzer.ANALYZER_VERSION
-      "source": "auto" | "auto-blackframe" | "auto-fallback" | "manual"
+      "source": "auto" | "auto-blackframe" | "auto-fallback" | "manual" | "failed",
+      // Only present when source == "failed":
+      "error_code": "no_binary" | "file_missing" | "no_duration" |
+                    "fp_empty"  | "too_short"    | "no_skip_points" | "exception",
+      "error":      "Human-readable detail surfaced in the admin editor + log."
     }
   }
 }
 ```
 
-`source="manual"` entries are never overwritten by re-runs. Entries with `analysis.version < ANALYZER_VERSION` are eligible for re-analysis.
+`source="manual"` entries are never overwritten by re-runs. Entries with `analysis.version < ANALYZER_VERSION` are eligible for re-analysis. `source="failed"` entries are also retried on the next ready-flip in the series — when a new sibling episode arrives, the larger fingerprint pool can unlock a previously-failed file. See [ANALYZER.md](ANALYZER.md#failure-tracking) for the full table of error codes and how the failure is surfaced to users + admins.
 
 ### `metadata` (TMDb cache, optional)
 

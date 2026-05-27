@@ -98,10 +98,11 @@ User-facing:
 - `DELETE /api/skip-now` — dismiss without acting
 
 Admin:
-- `GET /api/admin/library/{id}/skip-data` — per-file editor data
+- `GET /api/admin/library/{id}/skip-data` — per-file editor data (now also returns `error_code` / `error` for failed files)
 - `PATCH /api/admin/library/{id}/skip-data` — manual override (sets `analysis.source="manual"`)
 - `POST /api/admin/library/{id}/analyze` — force re-run for the item's series
 - `GET /api/admin/analyzer-status` — `{available, ffmpeg, fpcalc}`
+- `GET /api/admin/analyzer-log?limit=N` — ring buffer of fingerprint events; each entry is `{ts, level, series_key, item_id, file_path, error_code, message}`
 
 ## Skip data shape (stored per item)
 
@@ -112,11 +113,55 @@ Admin:
     "credits_start": 2940.0,                       // or null
     "analysis": {
       "version": 2,
-      "source": "auto" | "auto-blackframe" | "auto-fallback" | "manual"
+      "source": "auto" | "auto-blackframe" | "auto-fallback" | "manual" | "failed",
+      // Only present when source == "failed":
+      "error_code": "no_binary" | "file_missing" | "no_duration" |
+                    "fp_empty"  | "too_short"    | "no_skip_points" | "exception",
+      "error":      "Human-readable message describing why fingerprinting failed."
     }
   }
 }
 ```
+
+## Failure tracking
+
+`analyze_series` always returns an entry per input file — successes carry the
+`intro` / `credits_start` shape above, failures carry `analysis.source ==
+"failed"` with an `error_code` and `error` message. The orchestrator in
+`main.py` persists every entry (success or failure) into `library.json`, then
+emits one `_log_analyzer_event` per failure into `state.analyzer_log` (200-deep
+in-memory ring buffer). Three downstream consumers read this:
+
+1. **User-facing chip** — `/api/library` now returns a per-item `skip_status`
+   summary (`"ok"` / `"partial"` / `"failed"` / `"pending"` / `"none"`).
+   `static/index.html` renders an amber "⚠ Intro/credits skip not available"
+   chip next to the title when `skip_status == "failed"`, and a softer
+   "Skip partial" chip when only some files in a multi-file item failed.
+2. **Admin editor** — `/api/admin/library/{id}/skip-data` now carries
+   `error_code` and `error` per file. The Smart Skip tab's editor shows a
+   red error block above the time inputs so the admin can see exactly why
+   the file failed.
+3. **Admin log panel** — `/api/admin/analyzer-log` returns the ring buffer
+   (newest first). The Smart Skip tab renders a scrolling log under the item
+   list with timestamp · error_code · file basename · message per row,
+   refreshing whenever an `analysis_status` SSE event lands a terminal status.
+
+Error codes (defined as constants at the top of `analyzer.py`):
+
+| `error_code`       | Cause | Typical fix |
+|--------------------|-------|-------------|
+| `no_binary`        | ffmpeg or fpcalc missing on host | Re-run `setup.py` after installing the dep |
+| `file_missing`     | Path exists in library.json but not on disk | Library scan / clean orphans |
+| `no_duration`      | ffprobe couldn't read the container | Re-encode or remux; check codec support |
+| `fp_empty`         | fpcalc produced no fingerprint for the head | Unsupported audio codec, silent track, corruption |
+| `too_short`        | < 60 s — fallback heuristic is meaningless | None (expected for trailers, recap clips) |
+| `no_skip_points`   | Fingerprinted but no cluster and no black frame | Often resolves when more peers in the series arrive |
+| `exception`        | Unhandled error inside `analyze_series` | See `streamlink_app.log` for the traceback |
+
+`_schedule_series_analysis_if_eligible` treats `source == "failed"` as
+eligible for re-analysis on the next ready-flip in the series, so a new
+sibling arriving can unlock a previously-failed file without an admin click.
+Manually-edited entries (`source == "manual"`) are still never overwritten.
 
 ## Frontend
 

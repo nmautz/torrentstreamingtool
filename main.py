@@ -331,7 +331,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.9.1"
+UI_VERSION = "3.10.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -436,6 +436,12 @@ class AppState:
     skip_countdown_task: Optional[asyncio.Task] = None    # in-flight countdown coroutine
     resume_offer: Optional[dict] = None                   # {"position_sec": N, "file_path": "..."} when resume_mode="prompt"
     analysis_jobs: dict = field(default_factory=dict)     # series_key → {status, stage, current, total, message, item_ids, started_at, finished_at}
+    # Ring buffer of Smart Skip events (most recent first). Each entry:
+    # {ts, level: "info"|"warn"|"error", series_key, item_id, file_path,
+    #  error_code, message}. Surfaces in the admin "Smart Skip" tab so the
+    # operator can see *why* fingerprinting failed for individual files without
+    # tailing logs/streamlink_app.log.
+    analyzer_log: deque = field(default_factory=lambda: deque(maxlen=200))
     background_playing: bool = False                      # True when the idle background video is the active VLC playlist
     user_volume_before_bg: int = 100                      # snapshot of state.vlc_volume taken when bg first took over
     last_activity: float = 0.0                            # time.time() of last user-initiated interaction (drives scheduled-reboot idle check)
@@ -2691,6 +2697,51 @@ def _find_file_meta(item: dict, file_path: str) -> Optional[dict]:
     return skip_data.get(file_path)
 
 
+def _item_skip_status(item: dict) -> str:
+    """Summarize the Smart Skip availability of every file in this item.
+
+    Drives the user-facing "Skip unavailable" chip in the library list and the
+    admin Smart Skip tab's quick filter. Values:
+      `none`        — no files (status surface not applicable)
+      `pending`     — at least one file has no skip_data entry yet (analysis
+                      hasn't run, or item still downloading)
+      `failed`      — every analyzed file is marked failed (no intro AND no
+                      credits AND analysis.source == "failed")
+      `partial`     — some files succeeded, others failed
+      `ok`          — every file produced usable intro/credits (or has been
+                      manually edited)
+    """
+    files = item.get("files", [])
+    if not files:
+        return "none"
+    skip_data = item.get("skip_data", {}) or {}
+    ok = 0
+    fail = 0
+    pending = 0
+    for f in files:
+        path = f.get("path", "")
+        entry = skip_data.get(path)
+        if not entry:
+            pending += 1
+            continue
+        src = (entry.get("analysis") or {}).get("source", "")
+        if src == "failed":
+            fail += 1
+        else:
+            ok += 1
+    if pending and not fail and not ok:
+        return "pending"
+    if fail and not ok:
+        return "failed"
+    if fail and ok:
+        return "partial"
+    if pending:
+        # Some succeeded, some not yet analyzed — surface as partial so the UI
+        # still hints that not everything is covered.
+        return "partial"
+    return "ok"
+
+
 async def _set_analysis_status(series_key: str, **patch) -> None:
     """Update state.analysis_jobs[series_key] and broadcast the change."""
     job = state.analysis_jobs.setdefault(series_key, {})
@@ -2698,16 +2749,42 @@ async def _set_analysis_status(series_key: str, **patch) -> None:
     await broadcast("analysis_status", {"series_key": series_key, "job": job})
 
 
-async def _run_series_analysis(series_key: str) -> None:
-    """Background task: analyze a series, save results, broadcast progress."""
-    if not analyzer.is_available():
-        await _set_analysis_status(
-            series_key, status="failed",
-            stage="error", message="ffmpeg/fpcalc not available",
-            current=0, total=0, finished_at=_now_iso(),
-        )
-        return
+def _log_analyzer_event(*, level: str, message: str, series_key: str = "",
+                        item_id: str = "", file_path: str = "",
+                        error_code: str = "") -> None:
+    """Append a Smart Skip event to the analyzer ring buffer + app log.
 
+    The ring buffer is the source of truth for the admin "Smart Skip" tab's
+    log panel (state lives in-memory and resets on restart — failures are
+    re-discovered on the next analysis run, so persistence isn't worth the
+    library.json bloat). `streamlink_app.log` mirrors the message for
+    longer-term forensics.
+    """
+    entry = {
+        "ts":         _now_iso(),
+        "level":      level,
+        "series_key": series_key,
+        "item_id":    item_id,
+        "file_path":  file_path,
+        "error_code": error_code,
+        "message":    message,
+    }
+    state.analyzer_log.appendleft(entry)
+    fname = Path(file_path).name if file_path else ""
+    code = f" [{error_code}]" if error_code else ""
+    log_fn = log.error if level == "error" else (log.warning if level == "warn" else log.info)
+    log_fn(f"[analyzer]{code} {fname}: {message}")
+
+
+async def _run_series_analysis(series_key: str) -> None:
+    """Background task: analyze a series, save results, broadcast progress.
+
+    `analyzer.analyze_series` now always returns an entry per file (success or
+    failure), so the orchestrator persists everything it gets and uses
+    `analysis.source == "failed"` to drive the admin log + user-facing chip.
+    Missing-binary and exception cases are still surfaced as a series-level
+    `analysis_jobs.status = "failed"` for the admin UI.
+    """
     lock = analyzer.lock_for_series(series_key)
     async with lock:
         lib = await get_library()
@@ -2733,23 +2810,38 @@ async def _run_series_analysis(series_key: str) -> None:
         try:
             results = await analyzer.analyze_series(ready_items, progress_cb=_on_progress)
         except Exception as exc:
+            err_msg = f"Analysis crashed: {exc}"
+            # Record an exception entry for every file in the series so the
+            # user-facing chip + admin editor still surface the failure even
+            # when nothing else gets persisted.
+            results = {}
+            for it in ready_items:
+                for f in it.get("files", []):
+                    p = f.get("path", "")
+                    if p:
+                        results[p] = {
+                            "intro": None, "credits_start": None,
+                            "analysis": {
+                                "version":    analyzer.ANALYZER_VERSION,
+                                "source":     "failed",
+                                "error_code": analyzer.ERR_EXCEPTION,
+                                "error":      err_msg,
+                            },
+                        }
+            _log_analyzer_event(
+                level="error", series_key=series_key,
+                error_code=analyzer.ERR_EXCEPTION, message=err_msg,
+            )
             await _set_analysis_status(
                 series_key, status="failed",
-                stage="error", message=f"Analysis failed: {exc}",
+                stage="error", message=err_msg,
                 finished_at=_now_iso(),
             )
-            return
+            # fall through to persistence so per-file failures still get recorded
 
-        if not results:
-            await _set_analysis_status(
-                series_key, status="failed",
-                stage="error", message="No analyzable episodes found",
-                finished_at=_now_iso(),
-            )
-            return
-
-        # Persist results back into library.json under each item
+        # Persist results back into library.json under each item.
         files_updated = 0
+        files_failed = 0
         lib = await get_library()
         for it in lib["items"]:
             if _series_key(it) != series_key:
@@ -2762,16 +2854,48 @@ async def _run_series_analysis(series_key: str) -> None:
                     skip_data[p] = results[p]
                     files_updated += 1
                     changed = True
+                    ana = results[p].get("analysis") or {}
+                    if ana.get("source") == "failed":
+                        files_failed += 1
+                        _log_analyzer_event(
+                            level="error", series_key=series_key,
+                            item_id=it["id"], file_path=p,
+                            error_code=ana.get("error_code", ""),
+                            message=ana.get("error", "Fingerprinting failed."),
+                        )
             if changed:
                 await broadcast("library_update", {"item_id": it["id"], "status": it.get("status", "ready")})
         await put_library(lib)
 
-        await _set_analysis_status(
-            series_key, status="complete",
-            stage="done", message=f"Updated {files_updated} file(s)",
-            current=files_updated, total=files_updated,
-            finished_at=_now_iso(),
-        )
+        # If the analyze_series call already set the job to "failed" (exception
+        # path), don't overwrite it back to complete.
+        job_now = state.analysis_jobs.get(series_key) or {}
+        if job_now.get("status") != "failed":
+            successes = files_updated - files_failed
+            if files_updated == 0:
+                await _set_analysis_status(
+                    series_key, status="failed",
+                    stage="error", message="No analyzable episodes found",
+                    finished_at=_now_iso(),
+                )
+            elif files_failed and not successes:
+                await _set_analysis_status(
+                    series_key, status="failed",
+                    stage="error",
+                    message=f"All {files_failed} file(s) failed fingerprinting",
+                    current=files_updated, total=files_updated,
+                    finished_at=_now_iso(),
+                )
+            else:
+                msg = f"Updated {successes} file(s)"
+                if files_failed:
+                    msg += f", {files_failed} failed"
+                await _set_analysis_status(
+                    series_key, status="complete",
+                    stage="done", message=msg,
+                    current=files_updated, total=files_updated,
+                    finished_at=_now_iso(),
+                )
 
 
 def _schedule_series_analysis_if_eligible(item: dict, lib: dict) -> None:
@@ -2789,6 +2913,10 @@ def _schedule_series_analysis_if_eligible(item: dict, lib: dict) -> None:
         analysis = file_data.get("analysis") or {}
         if analysis.get("source") == "manual":
             return False
+        # Previously-failed files retry whenever a peer in the series flips to
+        # ready — a new sibling can unlock a cluster that wasn't possible before.
+        if analysis.get("source") == "failed":
+            return True
         return analysis.get("version", 0) < analyzer.ANALYZER_VERSION
 
     needs_run = False
@@ -3669,6 +3797,7 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
             "resume": resume,
             "first_file": first_file,
             "hidden": _item_hidden_for_profile(it, profile_id),
+            "skip_status": _item_skip_status(it),
         })
     items.sort(key=lambda x: (
         x["series"] or "\xff" + x["title"],
@@ -6164,7 +6293,17 @@ async def admin_list_library(request: Request) -> JSONResponse:
         files = it.get("files", [])
         series_key = _series_key(it)
         skip_data = it.get("skip_data", {})
-        files_with_skip = sum(1 for f in files if f.get("path", "") in skip_data)
+        files_with_skip = 0
+        files_failed = 0
+        for f in files:
+            entry = skip_data.get(f.get("path", ""))
+            if not entry:
+                continue
+            src = (entry.get("analysis") or {}).get("source", "")
+            if src == "failed":
+                files_failed += 1
+            else:
+                files_with_skip += 1
         items.append({
             "id": it["id"],
             "title": it["title"],
@@ -6177,6 +6316,8 @@ async def admin_list_library(request: Request) -> JSONResponse:
             "admin_only": it.get("admin_only", False),
             "series_key": series_key,
             "files_with_skip": files_with_skip,
+            "files_failed": files_failed,
+            "skip_status": _item_skip_status(it),
             "analysis_job": state.analysis_jobs.get(series_key),
         })
     items.sort(key=lambda x: (x["series"] or "\xff" + x["title"], x["season"], x["episode"]))
@@ -6469,13 +6610,18 @@ async def admin_get_skip_data(item_id: str, request: Request) -> JSONResponse:
         path = f.get("path", "")
         entry = skip_data.get(path) or {}
         intro = entry.get("intro") or {}
+        analysis = entry.get("analysis") or {}
         files_out.append({
             "name": f.get("name", Path(path).name),
             "path": path,
             "intro_start":   intro.get("start"),
             "intro_end":     intro.get("end"),
             "credits_start": entry.get("credits_start"),
-            "source":        (entry.get("analysis") or {}).get("source", ""),
+            "source":        analysis.get("source", ""),
+            # When fingerprinting failed for this file these surface in the
+            # editor + Smart Skip log panel so the operator can see why.
+            "error_code":    analysis.get("error_code", ""),
+            "error":         analysis.get("error", ""),
         })
     return JSONResponse({"files": files_out, "series_key": _series_key(item)})
 
@@ -6525,6 +6671,24 @@ async def admin_analyze_series(item_id: str, request: Request) -> JSONResponse:
 async def admin_analyzer_status(request: Request) -> JSONResponse:
     _require_admin(request)
     return JSONResponse({
+        "available": analyzer.is_available(),
+        "ffmpeg":    analyzer.ffmpeg_bin(),
+        "fpcalc":    analyzer.fpcalc_bin(),
+    })
+
+
+@app.get("/api/admin/analyzer-log")
+async def admin_analyzer_log(request: Request, limit: int = 100) -> JSONResponse:
+    """Return the in-memory Smart Skip event log (most recent first).
+
+    Used by the admin Smart Skip tab to show why fingerprinting failed for
+    individual files. The buffer is bounded at 200 and resets on restart —
+    persistent failures will repopulate the log on the next analysis run.
+    """
+    _require_admin(request)
+    limit = max(1, min(int(limit), state.analyzer_log.maxlen or 200))
+    return JSONResponse({
+        "entries": list(state.analyzer_log)[:limit],
         "available": analyzer.is_available(),
         "ffmpeg":    analyzer.ffmpeg_bin(),
         "fpcalc":    analyzer.fpcalc_bin(),
