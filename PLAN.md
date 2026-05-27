@@ -295,6 +295,24 @@ remotely over SSE. See [docs/YOUTUBE.md](docs/YOUTUBE.md).
 
 ---
 
+## Milestone 23 — Auto-Updater + Post-Update Env-Key Gating
+
+Pull-and-restart so a remote box can keep itself current without an admin
+needing shell access. Branch picker is locked to main / beta / alpha to make
+sure casual one-button updates can't drag the box onto a development branch.
+
+- [x] **23.1** Backend `updater.py` — async `git fetch / switch / reset --hard` plumbing + a non-interactive `setup.py` subprocess invoker + `service_is_installed()` so the apply path knows whether SIGTERM-ing uvicorn will actually relaunch.
+- [x] **23.2** Background `updater_loop` (1-min tick, fires every `interval_hours`) reads `library.json → settings.autoupdate` and, when `auto_apply` is on, calls `_run_apply` only after `_machine_in_use(window_secs=300)` returns False. Active streams + downloads + recent admin clicks all defer the apply to the next cycle.
+- [x] **23.3** Admin endpoints — `GET /api/admin/updater` (config + git state + live phase), `POST /api/admin/updater/config` (partial update), `POST /api/admin/updater/check` (force fetch + compare), `POST /api/admin/updater/apply` (full sequence with optional `restart:false`), `POST /api/admin/updater/switch-branch` (hard checkout, no setup, no restart).
+- [x] **23.4** Admin UI — new **Updates** tab (`static/admin.html`) with branch picker (main / beta / alpha), check interval (1-168 h), auto-apply toggle, status panel (current branch / commit / last check / last applied / live phase message), and **Check Now** / **Apply Now** / **Switch Branch** / **Save** controls. Last `setup.py` output is collapsible for diagnostics.
+- [x] **23.5** Env-key feature registry — `ENV_KEY_FEATURES` declares which `.env` keys gate which features (`ADMIN_PASSWORD` + `INDEXER_API_KEY` required, `JACKETT_PASSWORD` + `TMDB_API_KEY` optional). `_missing_env_keys()` exposes the gaps to the client via `state_snapshot()`. `_write_env_keys` atomically merges into `.env` (preserves comments + key order); `_reload_settings` re-instantiates the pydantic Settings so live writes take effect in-process.
+- [x] **23.6** Endpoints `GET`/`POST /api/admin/env-keys` plus the **Required API Keys** card on the Updates tab. Sensitive keys render as `type="password"`; "(Already set — type to replace)" prefilling stops the form from accidentally clearing a non-empty key on save.
+- [x] **23.7** Non-admin UX — sticky banner below the navbar (`#serverAttentionBanner`) driven by `renderServerAttention(d)` on the SSE `state` event. Amber for missing required env keys ("Server needs admin attention: …"), indigo while an update is being applied, **red while the host is rebooting** so non-admin viewers see the disruption coming.
+- [x] **23.8** (v3.9.1) Full-cleanup apply: after the git pull + setup.py, the apply path now also **uninstalls + reinstalls the OS service** (`updater.reinstall_service()` → `daemon.uninstall()` + `daemon.install()` on a worker thread, regenerating `streamlink_service.py` from the new code) and then **reboots the host** instead of SIGTERM-ing uvicorn. Service reinstall is best-effort — a failure is logged but the reboot still fires; the previously-installed service definition keeps the dashboard alive after reboot. Phases reported via SSE: `applying → setup → reinstalling-service → rebooting`. `_kill_self_for_restart` removed.
+- [x] **23.9** (v3.9.1) Switch-back-to-older-branch is first-class through Apply Now — the button uses the picker's current value (not the saved config), so `alpha → main` is one confirm-gated click. `git switch -C origin/<branch>` + `git reset --hard` is symmetric in both directions; gitignored state survives. Confirmation dialog explicitly names the direction.
+
+---
+
 ## Milestone 22 — Remote log download
 
 Pull the server's rotating log files off the host from the admin panel, so an

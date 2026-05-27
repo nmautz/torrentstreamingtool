@@ -41,6 +41,7 @@ from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 import analyzer
+import updater
 
 
 # ── Logging ─────────────────────────────────────────────────────────────────
@@ -135,6 +136,147 @@ class Settings(BaseSettings):
 
 
 settings = Settings()
+
+
+# ── Env-key feature registry ──────────────────────────────────────────────────
+# Each entry declares an env key that controls a user-visible feature. The
+# autoupdater surfaces any key in this list that the running .env doesn't set,
+# so the admin can fill it in from the dashboard after an update introduces a
+# new requirement — without the dashboard becoming unusable in the meantime.
+#
+# Fields:
+#   key         — the .env key name
+#   attr        — the Settings model attribute (lowercase)
+#   label       — short feature name shown in the admin UI
+#   description — one-line "what does this gate" (shown in the admin form)
+#   required    — True = the dashboard banner shows for everyone (blocks UX);
+#                 False = optional, only surfaces in the admin Updates tab.
+#                 The non-admin UI never *hides* features wholesale — admins
+#                 just see a banner so they know to wire the key up.
+#   secret      — passed to the admin form so the input is rendered as
+#                 type="password" instead of "text".
+
+ENV_KEY_FEATURES: list[dict] = [
+    {
+        "key": "ADMIN_PASSWORD",
+        "attr": "admin_password",
+        "label": "Admin panel",
+        "description": "Password gating /admin. Without it the admin dashboard is disabled.",
+        "required": True,
+        "secret": True,
+    },
+    {
+        "key": "INDEXER_API_KEY",
+        "attr": "indexer_api_key",
+        "label": "Torrent search",
+        "description": "Jackett API key. Without it /api/search returns no results.",
+        "required": True,
+        "secret": True,
+    },
+    {
+        "key": "JACKETT_PASSWORD",
+        "attr": "jackett_password",
+        "label": "Indexer management",
+        "description": "Jackett UI admin password. Only needed for the admin Indexers tab.",
+        "required": False,
+        "secret": True,
+    },
+    {
+        "key": "TMDB_API_KEY",
+        "attr": "tmdb_api_key",
+        "label": "Episode metadata",
+        "description": "Optional TMDb v3 API key for backdrops/posters/episode titles.",
+        "required": False,
+        "secret": True,
+    },
+]
+
+
+def _missing_env_keys() -> list[dict]:
+    """Return the registry entries whose Settings attribute is empty.
+
+    `tmdb_api_key` may be set live via the admin overrides — when that's the
+    case, treat the key as present so the UI doesn't nag for one that's
+    already configured a different way.
+    """
+    out: list[dict] = []
+    for feat in ENV_KEY_FEATURES:
+        val = getattr(settings, feat["attr"], "") or ""
+        if not val and feat["attr"] == "tmdb_api_key":
+            # Honour the admin override (set via /api/admin/settings) — the
+            # library file is the runtime source of truth for that key.
+            try:
+                lib_raw = _load_lib_raw()
+                ov = (lib_raw.get("settings", {}) or {}).get("admin_overrides", {}) or {}
+                if ov.get("tmdb_api_key"):
+                    continue
+            except Exception:
+                pass
+        if val:
+            continue
+        out.append({
+            "key":         feat["key"],
+            "label":       feat["label"],
+            "description": feat["description"],
+            "required":    feat["required"],
+            "secret":      feat["secret"],
+        })
+    return out
+
+
+def _write_env_keys(updates: dict[str, str]) -> int:
+    """Merge `updates` into the .env file, preserving comments and ordering.
+
+    Existing keys are rewritten in place; unknown keys are appended at the end.
+    Empty-string values clear the entry rather than leaving `KEY=` behind.
+    Returns the count of keys actually written/changed.
+    """
+    env_path = Path(__file__).parent / ".env"
+    lines: list[str] = []
+    if env_path.exists():
+        lines = env_path.read_text(encoding="utf-8", errors="replace").splitlines()
+
+    remaining = dict(updates)
+    out: list[str] = []
+    changed = 0
+    for raw in lines:
+        stripped = raw.strip()
+        if "=" in stripped and not stripped.startswith("#"):
+            k = stripped.split("=", 1)[0].strip()
+            if k in remaining:
+                new_val = remaining.pop(k)
+                if new_val == "":
+                    # Drop the line entirely so Settings reverts to its default.
+                    changed += 1
+                    continue
+                if raw != f"{k}={new_val}":
+                    changed += 1
+                out.append(f"{k}={new_val}")
+                continue
+        out.append(raw)
+
+    for k, v in remaining.items():
+        if not v:
+            continue
+        out.append(f"{k}={v}")
+        changed += 1
+
+    if changed == 0:
+        return 0
+
+    env_path.write_text("\n".join(out) + ("\n" if out and not out[-1].endswith("\n") else ""),
+                        encoding="utf-8")
+    return changed
+
+
+def _reload_settings() -> None:
+    """Re-instantiate Settings so newly-written .env values take effect without
+    a full server restart. Most code references `settings.foo` via the module
+    global, so rebinding here propagates to all callers."""
+    global settings
+    settings = Settings()
+
+
 LIBRARY_FILE = Path(__file__).parent / "library.json"
 BACKGROUND_DIR = Path(__file__).parent / ".background"
 # Dedicated Chrome user-data-dir for the YouTube-on-TV kiosk window. Isolated so
@@ -189,7 +331,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.8.0"
+UI_VERSION = "3.9.1"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -305,6 +447,14 @@ class AppState:
     youtube_playback: str = ""                            # last player state from /tv: unstarted|buffering|playing|paused|ended
     youtube_tv_seen_at: float = 0.0                       # time.time() of last /tv heartbeat (drives relaunch-vs-load decision)
     system_volume_before_yt: Optional[int] = None        # OS volume (0-100) snapshot at YouTube start; falls back when no default configured
+    # ── Auto-updater (transient view of the current update operation) ──
+    # All persisted updater state lives in library.json → settings.autoupdate.
+    # These fields just expose the live state of an in-flight check/apply so
+    # the admin UI can render progress without polling git directly.
+    updater_phase: str = "idle"            # idle | checking | applying | setup | restarting | error
+    updater_message: str = ""              # human-readable detail for the current phase
+    updater_busy: bool = False             # True while a check/apply is running (admin UI disables buttons)
+    updater_last_output: str = ""          # last 8 KiB of setup.py stdout/stderr — for diagnostics
     sse_queues: list = field(default_factory=list)
 
 
@@ -408,6 +558,18 @@ def state_snapshot() -> dict:
         # populated from the /tv page's heartbeat (see /api/youtube/tv-state).
         "youtube_active": state.youtube_active,
         "youtube_video_id": state.youtube_video_id,
+        # Env keys whose absence disables features. The non-admin UI shows a
+        # passive banner ("server needs admin attention") when this is non-empty
+        # AND any entry has `required=True`; the admin Updates tab renders the
+        # full list as a fill-in form. Keep this cheap to compute — it runs on
+        # every state broadcast.
+        "missing_env_keys": _missing_env_keys(),
+        # Auto-updater phase for the in-flight operation (idle when nothing
+        # is happening). Persisted history lives in library.json — fetch
+        # `/api/admin/updater` for the full record.
+        "updater_phase":   state.updater_phase,
+        "updater_busy":    state.updater_busy,
+        "updater_message": state.updater_message,
     }
 
 
@@ -1766,6 +1928,35 @@ def _scheduled_reboot_cfg(lib: dict) -> dict:
     }
 
 
+def _autoupdate_cfg(lib: dict) -> dict:
+    """Read settings.autoupdate with defaults filled in.
+
+    The auto-updater is opt-in (default off) and pinned to the `main` branch
+    unless the admin changes it. Allowed branches are enforced by updater.py;
+    a stale config that names something else is sanitised to `main` on read.
+    """
+    cfg = (lib.get("settings", {}) or {}).get("autoupdate") or {}
+    branch = str(cfg.get("branch", "main"))
+    if branch not in updater.ALLOWED_BRANCHES:
+        branch = "main"
+    try:
+        interval = int(cfg.get("interval_hours", 6))
+    except (TypeError, ValueError):
+        interval = 6
+    interval = max(1, min(168, interval))   # 1 h .. 1 week
+    return {
+        "enabled":           bool(cfg.get("enabled", False)),
+        "branch":            branch,
+        "interval_hours":    interval,
+        "auto_apply":        bool(cfg.get("auto_apply", True)),
+        "last_check_at":     int(cfg.get("last_check_at", 0)),
+        "last_check_status": str(cfg.get("last_check_status", "")),
+        "last_applied_at":   int(cfg.get("last_applied_at", 0)),
+        "last_applied_commit": str(cfg.get("last_applied_commit", "")),
+        "last_error":        str(cfg.get("last_error", "")),
+    }
+
+
 def _overnight_prep_cfg(lib: dict) -> dict:
     """Read settings.overnight_prep (auto stream-prep window) with defaults."""
     cfg = (lib.get("settings", {}) or {}).get("overnight_prep") or {}
@@ -1913,6 +2104,221 @@ async def overnight_prep_loop() -> None:
             raise
         except Exception as exc:
             print(f"[overnight] overnight_prep_loop error: {exc}")
+
+
+# ── Background Task: Auto-Updater ────────────────────────────────────────────
+
+_updater_lock = asyncio.Lock()   # serialise check + apply against each other
+
+
+async def _set_updater_phase(phase: str, message: str = "", busy: bool = False) -> None:
+    """Update the in-memory updater status + broadcast a state event so the
+    admin UI animates progress live."""
+    state.updater_phase = phase
+    state.updater_message = message
+    state.updater_busy = busy
+    try:
+        await broadcast("state", state_snapshot())
+    except Exception:
+        pass
+
+
+async def _persist_updater_state(**fields) -> None:
+    """Merge `fields` into library.json → settings.autoupdate, preserving everything else."""
+    lib = await get_library()
+    au = lib.setdefault("settings", {}).setdefault("autoupdate", {})
+    au.update(fields)
+    await put_library(lib)
+
+
+async def _run_check(branch: str) -> dict:
+    """Wrapper around updater.check_update that records the result in library.json."""
+    res = await updater.check_update(branch)
+    status = "ok" if res.get("ok") else (res.get("error") or "error")
+    await _persist_updater_state(
+        last_check_at=int(time.time()),
+        last_check_status=status,
+    )
+    return res
+
+
+async def _run_apply(branch: str, reboot: bool = True) -> dict:
+    """The full update sequence: git apply → setup.py → service reinstall →
+    machine reboot.
+
+    Steps (each gated so a failure surfaces with a stage label):
+      1. **git apply** — `git switch -C <branch>` (if current branch differs)
+         then `git reset --hard origin/<branch>`. Goes forwards AND backwards
+         (alpha → main is the same operation as main → alpha as far as git is
+         concerned; library.json / .env / .offline_cache survive because they
+         are gitignored).
+      2. **setup.py** — re-run non-interactively so any new deps land and the
+         qBit ini / certs / .env are refreshed against the new code's
+         expectations.
+      3. **Service reinstall** — `daemon.uninstall()` then `daemon.install()`
+         so `streamlink_service.py` (the supervisor wrapper) is regenerated
+         from the new `daemon.py`'s `_WRAPPER_CONTENT`. Without this the OS
+         supervisor would keep running the old wrapper code even after the
+         pull. Best-effort: a failure here is logged but doesn't abort the
+         reboot, since the existing service may still work on the new code.
+      4. **Reboot** — the whole host. Cleanest possible state on the way back
+         up; the OS service supervisor brings StreamLink back on its own.
+
+    With `reboot=False`, steps 3 and 4 are skipped (used by the dev-mode
+    "files only" toggle, and by the auto-apply loop's polling path when it
+    just wants to validate that the pull + setup would succeed).
+    """
+    async with _updater_lock:
+        if state.updater_busy:
+            return {"ok": False, "stage": "busy", "message": "An update is already running."}
+
+        await _set_updater_phase("applying", f"Applying {branch} branch…", busy=True)
+        prev_commit = await updater.current_commit()
+        apply_res = await updater.apply_update(branch)
+        if not apply_res.get("ok"):
+            err = apply_res.get("error") or "git update failed"
+            await _set_updater_phase("error", f"git apply: {err}", busy=False)
+            await _persist_updater_state(last_error=err)
+            return {"ok": False, "stage": "git", "message": err}
+
+        new_commit = apply_res.get("commit", "")
+        same_commit = new_commit and new_commit == prev_commit
+
+        await _set_updater_phase("setup", "Running setup.py (non-interactive)…", busy=True)
+        setup_res = await updater.run_setup()
+        state.updater_last_output = setup_res.get("output_tail", "")
+        if not setup_res.get("ok"):
+            err = setup_res.get("error") or f"setup.py exited rc={setup_res.get('returncode')}"
+            await _set_updater_phase("error", err, busy=False)
+            await _persist_updater_state(
+                last_error=err,
+                last_applied_at=int(time.time()),
+                last_applied_commit=new_commit,
+            )
+            return {"ok": False, "stage": "setup", "message": err,
+                    "output_tail": state.updater_last_output}
+
+        await _persist_updater_state(
+            last_error="",
+            last_applied_at=int(time.time()),
+            last_applied_commit=new_commit,
+        )
+
+        if not reboot:
+            await _set_updater_phase("idle",
+                                    f"Updated to {new_commit}. Reboot pending.",
+                                    busy=False)
+            return {"ok": True, "stage": "complete",
+                    "message": f"Updated to {new_commit}.",
+                    "commit": new_commit, "reboot_pending": True}
+
+        # Step 3: reinstall the OS service so the wrapper script + registration
+        # come from the freshly-pulled daemon.py.
+        await _set_updater_phase("reinstalling-service",
+                                f"Reinstalling system service from {new_commit}…",
+                                busy=True)
+        svc = await updater.reinstall_service()
+        # Append the daemon output to the diagnostic buffer alongside setup's.
+        if svc.get("output"):
+            tail = (state.updater_last_output + "\n── service ──\n" + svc["output"])[-8192:]
+            state.updater_last_output = tail
+        if not svc.get("ok"):
+            # Log + persist but don't bail — proceed to reboot anyway. The user
+            # can SSH in afterwards and `run.py --install` manually if needed,
+            # which is still better than getting stuck pre-reboot.
+            log.warning("Service reinstall failed; rebooting anyway. Error: %s",
+                       svc.get("error", ""))
+            await _persist_updater_state(
+                last_error=f"service reinstall: {svc.get('error', 'unknown')}",
+            )
+
+        # Step 4: machine reboot. Fire after a short grace so this RPC's HTTP
+        # response gets flushed to the admin UI first.
+        await _set_updater_phase("rebooting",
+                                f"Updated to {new_commit}. Rebooting host machine…",
+                                busy=True)
+        asyncio.create_task(_reboot_machine(delay=1.5))
+
+        msg_prefix = "Updated" if not same_commit else "Branch reset"
+        return {"ok": True, "stage": "reboot",
+                "message": f"{msg_prefix} to {new_commit}. Host is rebooting…",
+                "commit": new_commit,
+                "service_reinstalled": svc.get("ok", False),
+                "service_install_output": svc.get("output", "")}
+
+
+async def updater_loop() -> None:
+    """Periodic auto-update poll.
+
+    Reads settings.autoupdate every minute; when enabled, runs a check at
+    `interval_hours` cadence and (when `auto_apply` is on) auto-applies new
+    commits if the machine is currently idle. Active streams, downloads, and
+    recent admin actions all defer the apply — we never tear the server down
+    while the user is watching something.
+    """
+    last_check_mono = 0.0
+    while True:
+        await asyncio.sleep(60)
+        try:
+            lib = await get_library()
+            cfg = _autoupdate_cfg(lib)
+            if not cfg["enabled"]:
+                continue
+
+            interval_secs = cfg["interval_hours"] * 3600
+            now_mono = asyncio.get_event_loop().time()
+            last_check_wall = cfg["last_check_at"]
+            wall_due = (time.time() - last_check_wall) >= interval_secs if last_check_wall else True
+            mono_due = (now_mono - last_check_mono) >= interval_secs
+            if not (wall_due and mono_due):
+                continue
+
+            if state.updater_busy:
+                continue
+
+            branch = cfg["branch"]
+            async with _updater_lock:
+                if state.updater_busy:
+                    continue
+                await _set_updater_phase("checking", f"Checking origin/{branch}…", busy=True)
+                res = await _run_check(branch)
+                last_check_mono = now_mono
+
+            if not res.get("ok"):
+                await _set_updater_phase("error", res.get("error", "check failed"), busy=False)
+                continue
+
+            if not res.get("has_update"):
+                await _set_updater_phase("idle",
+                                        f"Up to date with origin/{branch}.",
+                                        busy=False)
+                continue
+
+            if not cfg["auto_apply"]:
+                # New commits available but admin opted out of auto-apply —
+                # leave the banner for them and idle.
+                await _set_updater_phase("idle",
+                                        f"Update available: origin/{branch} ({res['behind_by']} ahead). Apply from the admin panel.",
+                                        busy=False)
+                continue
+
+            # Idle gate: never tear down a running playback for a routine update.
+            if await _machine_in_use(window_secs=300):
+                await _set_updater_phase("idle",
+                                        f"Update queued: machine in use, will retry next cycle.",
+                                        busy=False)
+                continue
+
+            print(f"[updater] auto-applying origin/{branch} "
+                  f"(local={res['local']} → remote={res['remote']})")
+            apply_res = await _run_apply(branch, reboot=True)
+            if not apply_res.get("ok"):
+                print(f"[updater] auto-apply failed at stage={apply_res.get('stage')}: "
+                      f"{apply_res.get('message')}")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[updater] updater_loop error: {exc}")
 
 
 # ── Background Task: State Broadcaster ───────────────────────────────────────
@@ -2950,11 +3356,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     jackett_mon = asyncio.create_task(jackett_health_monitor())
     reboot_loop = asyncio.create_task(scheduled_reboot_loop())
     overnight_loop = asyncio.create_task(overnight_prep_loop())
+    update_loop = asyncio.create_task(updater_loop())
 
     yield
 
     for t in (guard, broadcaster, dl_monitor, vlc_tracker, bg_loop, jackett_mon,
-              reboot_loop, overnight_loop):
+              reboot_loop, overnight_loop, update_loop):
         t.cancel()
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
@@ -2984,6 +3391,10 @@ _ACTIVITY_IGNORE_PATHS = (
     "/api/admin/scheduled-reboot",
     "/api/admin/reboot",
     "/api/admin/shutdown",
+    # Updater config + status pollers — the admin Updates tab refreshes its
+    # banner every few seconds; that's not "the user is watching", so it
+    # mustn't keep the scheduled-reboot loop on the bench.
+    "/api/admin/updater",
 )
 
 
@@ -6467,6 +6878,258 @@ async def admin_set_overnight_prep(
     cfg = _overnight_prep_cfg(lib)
     cfg["now"] = _now_in_tz(cfg["timezone"]).strftime("%Y-%m-%d %H:%M %Z").strip()
     return JSONResponse({"ok": True, **cfg})
+
+
+# ── Routes: Auto-Updater ──────────────────────────────────────────────────────
+# Periodic git-pull + setup-rerun + service-restart, gated to the main / beta /
+# alpha branches. State lives in library.json → settings.autoupdate; in-flight
+# operation status is mirrored on AppState for live UI. See `updater_loop` and
+# the updater.py module for the actual git plumbing.
+
+class UpdaterConfigReq(BaseModel):
+    enabled:        Optional[bool] = None
+    branch:         Optional[str]  = None     # main | beta | alpha
+    interval_hours: Optional[int]  = None     # 1-168
+    auto_apply:     Optional[bool] = None
+
+
+class UpdaterApplyReq(BaseModel):
+    branch: Optional[str] = None     # default: settings.autoupdate.branch
+    # When True (default), the apply ends with daemon.uninstall() +
+    # daemon.install() + a full host reboot for a clean-state restart on the
+    # new code. False = code-only refresh: git apply + setup.py, no service
+    # reinstall, no reboot. Used by the dev "Apply files only" toggle.
+    reboot: bool = True
+
+
+@app.get("/api/admin/updater")
+async def admin_get_updater(request: Request) -> JSONResponse:
+    """Return the persisted updater config + the live git state + the current
+    phase of any in-flight check/apply.
+
+    Fields:
+        cfg            — settings.autoupdate (enabled, branch, interval_hours, auto_apply, …)
+        allowed_branches — the three branches the picker is allowed to select
+        is_git_repo    — False ⇒ the dashboard is running from a non-git copy
+                         (admin UI hides the Apply controls in that case)
+        current_branch — git's view of the active branch
+        current_commit — short HEAD sha
+        phase          — idle | checking | applying | setup | restarting | error
+        message        — human-readable detail for the current phase
+        busy           — True while an admin endpoint is mid-operation
+        last_output    — last 8 KiB of setup.py stdout/stderr (diagnostics)
+    """
+    _require_admin(request)
+    lib = await get_library()
+    cfg = _autoupdate_cfg(lib)
+    is_repo = await updater.is_git_repo()
+    return JSONResponse({
+        "cfg":             cfg,
+        "allowed_branches": list(updater.ALLOWED_BRANCHES),
+        "is_git_repo":     is_repo,
+        "current_branch":  (await updater.current_branch()) if is_repo else "",
+        "current_commit":  (await updater.current_commit()) if is_repo else "",
+        "phase":           state.updater_phase,
+        "message":         state.updater_message,
+        "busy":            state.updater_busy,
+        "last_output":     state.updater_last_output,
+        "service_installed": await updater.service_is_installed(),
+        "ui_version":      UI_VERSION,
+    })
+
+
+@app.post("/api/admin/updater/config")
+async def admin_set_updater_config(request: Request, body: UpdaterConfigReq) -> JSONResponse:
+    """Persist a partial update to settings.autoupdate. Fields that aren't
+    provided are left untouched. Branch is validated against ALLOWED_BRANCHES;
+    interval_hours is clamped to [1, 168]."""
+    _require_admin(request)
+    lib = await get_library()
+    au = lib.setdefault("settings", {}).setdefault("autoupdate", {})
+    if body.branch is not None:
+        if body.branch not in updater.ALLOWED_BRANCHES:
+            raise HTTPException(400,
+                f"Branch '{body.branch}' is not allowed. Pick one of: "
+                f"{', '.join(updater.ALLOWED_BRANCHES)}.")
+        au["branch"] = body.branch
+    if body.interval_hours is not None:
+        try:
+            ih = int(body.interval_hours)
+        except (TypeError, ValueError):
+            raise HTTPException(400, "interval_hours must be an integer.")
+        au["interval_hours"] = max(1, min(168, ih))
+    if body.enabled is not None:
+        au["enabled"] = bool(body.enabled)
+    if body.auto_apply is not None:
+        au["auto_apply"] = bool(body.auto_apply)
+    await put_library(lib)
+    return JSONResponse({"ok": True, "cfg": _autoupdate_cfg(lib)})
+
+
+@app.post("/api/admin/updater/check")
+async def admin_check_update(request: Request) -> JSONResponse:
+    """Force an immediate git fetch + compare. Branch defaults to settings.autoupdate.branch."""
+    _require_admin(request)
+    if state.updater_busy:
+        raise HTTPException(409, "An update operation is already running.")
+    lib = await get_library()
+    branch = _autoupdate_cfg(lib)["branch"]
+    async with _updater_lock:
+        await _set_updater_phase("checking", f"Checking origin/{branch}…", busy=True)
+        try:
+            res = await _run_check(branch)
+        finally:
+            if state.updater_busy:
+                if res.get("ok"):
+                    msg = (f"Update available ({res.get('behind_by', 0)} commits)"
+                           if res.get("has_update")
+                           else f"Up to date with origin/{branch}.")
+                    await _set_updater_phase("idle", msg, busy=False)
+                else:
+                    await _set_updater_phase("error", res.get("error") or "check failed",
+                                            busy=False)
+    return JSONResponse(res)
+
+
+@app.post("/api/admin/updater/apply")
+async def admin_apply_update(request: Request, body: UpdaterApplyReq) -> JSONResponse:
+    """Run the full update sequence right now (git apply → setup.py → service
+    reinstall → host reboot).
+
+    `body.branch` accepts main / beta / alpha — passing a branch that differs
+    from the current working tree triggers a downgrade or sidegrade (git apply
+    handles the switch). With `body.reboot=False` the service reinstall and
+    machine reboot are skipped (dev convenience — refresh the code without
+    tearing the box down).
+
+    Does NOT check `_machine_in_use` — an admin clicking Apply Now is taken at
+    their word. The auto-apply loop (in `updater_loop`) is the path that defers
+    to the idle gate.
+    """
+    _require_admin(request)
+    if state.updater_busy:
+        raise HTTPException(409, "An update operation is already running.")
+
+    lib = await get_library()
+    branch = (body.branch or _autoupdate_cfg(lib)["branch"]).strip()
+    if branch not in updater.ALLOWED_BRANCHES:
+        raise HTTPException(400, f"Branch '{branch}' is not allowed.")
+
+    res = await _run_apply(branch, reboot=bool(body.reboot))
+    if not res.get("ok"):
+        raise HTTPException(500, res.get("message") or "Update failed.")
+    return JSONResponse(res)
+
+
+@app.post("/api/admin/updater/switch-branch")
+async def admin_switch_branch(request: Request, body: UpdaterConfigReq) -> JSONResponse:
+    """Switch the working tree to a new branch (without auto-applying yet).
+
+    Useful when an admin wants to try the alpha branch immediately — sets
+    the saved branch AND does a hard checkout of origin/<branch>. Does NOT
+    run setup.py or restart; the admin can follow up with /apply if they
+    want the full sequence.
+    """
+    _require_admin(request)
+    if state.updater_busy:
+        raise HTTPException(409, "An update operation is already running.")
+    if body.branch is None:
+        raise HTTPException(400, "branch is required.")
+    if body.branch not in updater.ALLOWED_BRANCHES:
+        raise HTTPException(400,
+            f"Branch '{body.branch}' is not allowed. Pick one of: "
+            f"{', '.join(updater.ALLOWED_BRANCHES)}.")
+
+    async with _updater_lock:
+        await _set_updater_phase("applying", f"Switching to {body.branch}…", busy=True)
+        res = await updater.switch_branch(body.branch)
+        if not res.get("ok"):
+            await _set_updater_phase("error", res.get("error", "switch failed"), busy=False)
+            raise HTTPException(500, res.get("error", "switch failed"))
+
+        # Persist the new branch as the default for future auto-checks.
+        lib = await get_library()
+        au = lib.setdefault("settings", {}).setdefault("autoupdate", {})
+        au["branch"] = body.branch
+        await put_library(lib)
+
+        await _set_updater_phase("idle",
+                                f"Switched to {body.branch} ({res['commit']}).",
+                                busy=False)
+    return JSONResponse({"ok": True, "branch": body.branch, "commit": res["commit"]})
+
+
+# ── Routes: Env Keys ──────────────────────────────────────────────────────────
+# Companion to the auto-updater: when an update introduces a new required env
+# key (e.g. an API key for a new feature), the dashboard surfaces a banner and
+# the admin sets the missing keys from the Updates tab — no shell access needed.
+
+class EnvKeysReq(BaseModel):
+    # key → value. Empty string removes the entry from .env (Settings falls
+    # back to its declared default). Non-listed keys are left untouched.
+    keys: dict[str, str]
+
+
+@app.get("/api/admin/env-keys")
+async def admin_get_env_keys(request: Request) -> JSONResponse:
+    """Return the env-key feature registry + which keys are currently missing.
+
+    The non-admin UI uses /api/state.missing_env_keys (a redacted subset) to
+    drive its banner; this admin-only endpoint includes the full registry
+    metadata (label / description / required / secret) plus a `present` flag
+    on each entry so the form can show "(set)" instead of asking again.
+    """
+    _require_admin(request)
+    out = []
+    for feat in ENV_KEY_FEATURES:
+        val = getattr(settings, feat["attr"], "") or ""
+        present = bool(val)
+        # tmdb_api_key has the live admin-overrides path too — reflect that.
+        if feat["attr"] == "tmdb_api_key" and not present:
+            try:
+                lib_raw = _load_lib_raw()
+                ov = (lib_raw.get("settings", {}) or {}).get("admin_overrides", {}) or {}
+                if ov.get("tmdb_api_key"):
+                    present = True
+            except Exception:
+                pass
+        out.append({
+            "key":         feat["key"],
+            "label":       feat["label"],
+            "description": feat["description"],
+            "required":    feat["required"],
+            "secret":      feat["secret"],
+            "present":     present,
+        })
+    return JSONResponse({"features": out})
+
+
+@app.post("/api/admin/env-keys")
+async def admin_set_env_keys(request: Request, body: EnvKeysReq) -> JSONResponse:
+    """Write the provided keys into .env (creating it if needed), then reload
+    Settings so the new values take effect for the running process without
+    requiring a service restart.
+
+    Only keys listed in ENV_KEY_FEATURES are accepted — the endpoint can't be
+    used as a generic .env editor.
+    """
+    _require_admin(request)
+    allowed = {feat["key"] for feat in ENV_KEY_FEATURES}
+    sanitised: dict[str, str] = {}
+    for k, v in (body.keys or {}).items():
+        if k not in allowed:
+            raise HTTPException(400, f"Env key '{k}' is not in the writable feature registry.")
+        # Strip newlines and surrounding whitespace; never write multi-line values.
+        sanitised[k] = (v or "").replace("\r", "").replace("\n", "").strip()
+    written = _write_env_keys(sanitised)
+    _reload_settings()
+    # Broadcast immediately so the banner clears on every connected client.
+    try:
+        await broadcast("state", state_snapshot())
+    except Exception:
+        pass
+    return JSONResponse({"ok": True, "written": written,
+                         "missing_env_keys": _missing_env_keys()})
 
 
 # ── Routes: Idle Background Video ─────────────────────────────────────────────

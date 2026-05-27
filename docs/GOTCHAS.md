@@ -474,6 +474,32 @@ The background-video focus loop runs for ~24 s on a slowing cadence, re-assertin
 
 `POST /api/youtube` broadcasts `yt_command:load` **and** only launches Chrome when no `/tv` heartbeat (`state.youtube_tv_seen_at`) arrived in the last 6 s. If the page is already up, the broadcast swaps the video in place (smooth); relaunching every time would stack kiosk windows. The freshly-launched page also reads `?v=<id>` so it autoplays even if it missed the broadcast — the two mechanisms are intentionally redundant, keep both.
 
+### Auto-updater ends with a full host reboot — needs auto-login + the service installed
+
+`/api/admin/updater/apply` (and the `updater_loop` auto-apply path) finishes its sequence with `_reboot_machine()` — a full host restart. The new code runs on the way back up via the OS service supervisor (launchd / systemd / Task Scheduler). **Two prerequisites** the dashboard can't enforce on its own:
+- **The system service must already be installed** (`python run.py --install`). The apply path *also* re-runs that registration itself (step 3, via `daemon.uninstall()` + `daemon.install()`) so the wrapper script matches the new code, but if no service ever existed the reboot ends with nothing to relaunch the dashboard. The admin UI surfaces an amber warning when `service_installed=false`.
+- **The OS must be configured for auto-login.** User-level launchd / systemd-user / Task Scheduler entries don't run until the user is logged in; an unattended reboot ends at the login screen and StreamLink stays down. The README has per-OS steps; if your box isn't set up for auto-login, leave **Auto-apply** off and use **Apply Now** manually so you can be physically at the box to log in.
+
+### Service reinstall on Windows is best-effort — can fail silently if not elevated
+
+The auto-update apply path calls `daemon.uninstall()` + `daemon.install()` from inside the running uvicorn process. On macOS/Linux this works because the daemon helpers use `launchctl` / `systemctl --user` against the current user. On Windows, `schtasks /Create` needs admin and `_windows_install` tries to UAC-elevate by spawning a new console — that doesn't work from a service-launched uvicorn (no interactive desktop). The reinstall step is therefore **best-effort**: on failure, the diagnostic is captured in `state.updater_last_output`, `last_error` is persisted, but the reboot still fires. The previously-installed service definition keeps running after reboot — usually fine because the wrapper-script path is stable across versions. If you change `daemon.py`'s `_WRAPPER_CONTENT` and need it to take effect on Windows, the operator has to RDP/SSH in afterwards and run `python run.py --install` from an Administrator shell.
+
+### Switching to any allowed branch (forwards or backwards) goes through the same Apply Now path
+
+`updater.switch_branch()` / `apply_update()` use `git switch -C <target> origin/<target>` + `git reset --hard origin/<target>` — same operation regardless of direction. `alpha → main` and `main → alpha` are symmetric. State files (`library.json`, `.env`, `.offline_cache/`, `.background/`) are gitignored and survive the switch. The Apply Now button uses the picker's current value (not the saved config), so a downgrade is one confirm-gated click; the confirm dialog calls out the direction explicitly. Don't try to "be clever" by detecting the downgrade and rewriting library.json — forward-only migrations are the contract.
+
+### Branch picker is locked to main / beta / alpha — for a reason
+
+`updater.ALLOWED_BRANCHES = ("main", "beta", "alpha")` is enforced at every entry point: config save, switch-branch, check, apply. Don't widen it without thinking — accepting an arbitrary branch from the admin UI would let one mis-click drag a production box onto a dev branch (or a feature branch that's been force-pushed to point at unreviewed code). If you genuinely need to ship from a fourth branch, *add it to the tuple in updater.py* rather than punching a hole in the validation.
+
+### `_run_apply` mutates the running uvicorn — long-running state goes with it
+
+When `restart=true` (the default), the apply path SIGTERMs uvicorn while the HTTP response is still in flight. The admin UI knows this and treats a closed SSE connection as "restart in progress", but **anything in-process that you expected to outlive the response is gone too** — in-flight ffmpeg prep jobs (their parent dies, ffmpeg becomes a zombie until reaped by `subprocess.Popen` finalisation), `_lib_lock`-held writes (writes are atomic JSON; in-flight ones get torn but `library.json` itself stays consistent because the file write is atomic per-call), the analyzer task. The intended use case is "admin clicks Apply when the box is otherwise idle", which is also what the loop's `_machine_in_use` gate enforces. If you grow the updater to do something during an active stream, you'll need a per-task save-and-resume protocol that doesn't exist today.
+
+### `_reload_settings()` rebinds the module global — it works because every caller uses `settings.foo`
+
+Pydantic Settings reads `.env` only on `__init__`, so changing `.env` at runtime needs a re-instantiation. `_reload_settings()` does `global settings; settings = Settings()`. This works because the entire codebase references the setting via the module-level binding (`settings.indexer_api_key`, etc.) rather than capturing the object into a local. **Don't bind it as a default argument or stash it in a closure** — those captures would freeze to the pre-reload instance. If you ever need to add `from main import settings as _s` into a hot path, switch it to `import main; main.settings.foo` so re-loading propagates.
+
 ## See also
 
 - [BACKEND.md](BACKEND.md) — invariants enforced by `main.py`

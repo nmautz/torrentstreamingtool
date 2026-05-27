@@ -43,6 +43,7 @@ Each entry is a short hook so future Claude instances can jump straight to the r
 | [docs/SETUP.md](docs/SETUP.md) | Changing `setup.py` — venv, deps install, qBit ini, SSL cert, service registration. |
 | [docs/RUNTIME.md](docs/RUNTIME.md) | Changing `run.py` — venv relaunch, service launchers, LAN/SSID detection, mDNS, firewall, dashboard launch (HTTP + HTTPS). |
 | [docs/DAEMON_WATCHDOG.md](docs/DAEMON_WATCHDOG.md) | Working on `daemon.py` (system service install) or `watchdog.py` (crash supervisor + VPN-gated qBit). |
+| `updater.py` (top-level) | Auto-updater. Async `git fetch / switch / reset` + non-interactive `setup.py` invoker + `service_is_installed()`. Triggers live in `main.py` (`updater_loop`, `/api/admin/updater/*`, `ENV_KEY_FEATURES`). See [docs/ADMIN.md § Updates](docs/ADMIN.md). |
 | [docs/ANALYZER.md](docs/ANALYZER.md) | Touching Smart Skip — `analyzer.py`, the orchestrator in `main.py`, skip-offer UI logic, or the admin editor. Algorithm + thresholds + fallback chain. |
 | [docs/ADMIN.md](docs/ADMIN.md) | Working on `/admin` panel — auth flow, HTTPS redirect, Jackett admin auth, the four tabs, content-lock semantics. |
 | [docs/STREAMING.md](docs/STREAMING.md) | Working on Stream-to-Device — `/offline-prepare`, `.offline_cache/`, per-row Prep buttons, the local `<video>` player, progress sync. (Successor to the old `OFFLINE.md`.) |

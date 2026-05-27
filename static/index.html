@@ -869,6 +869,19 @@
     class="max-w-2xl mx-auto px-4 py-2.5 text-sm text-center fade-in"></div>
 </div>
 
+<!-- ── Server-attention banner (missing env keys / pending update) ──────── -->
+<!-- Shown below the navbar when the server is reachable but a feature is
+     disabled because the admin hasn't supplied a required API key, or when
+     an update is being applied. Stays out of the way otherwise. -->
+<div id="serverAttentionBanner"
+  class="hidden sticky top-0 z-30 bg-amber-950/95 border-b border-amber-800 text-amber-200 text-xs sm:text-sm px-3 py-2 flex items-center justify-between gap-3">
+  <div id="serverAttentionMsg" class="min-w-0 flex-1 leading-tight"></div>
+  <a id="serverAttentionLink" href="/admin"
+    class="flex-shrink-0 text-[11px] font-bold uppercase tracking-wide px-3 py-1.5 border border-amber-700 hover:bg-amber-900 transition-colors">
+    Admin Panel
+  </a>
+</div>
+
 <!-- ── Navbar ─────────────────────────────────────────────────────────────── -->
 <!-- Mobile portrait: wraps to two rows. Row 1 = logo + status + profile + settings; Row 2 = three full-width tabs.
      sm+ : single row, same as before. ml-auto on the right block doubles as the desktop spacer. -->
@@ -1932,6 +1945,52 @@ function showAlert(msg,type="error") {
 function hideAlert(){
   document.getElementById("alert").classList.add("hidden");
   document.getElementById("globalToast").classList.add("hidden");
+}
+
+// ── Server-attention banner (missing env keys / pending update) ──────────
+// Driven by the SSE `state` event's new `missing_env_keys` + `updater_phase`
+// fields. The banner is non-blocking — it just tells the user (and any admin
+// who happens to be looking) that something needs admin attention. The
+// features themselves stay enabled to the extent possible; the admin fills
+// the missing key from the Updates tab.
+function renderServerAttention(d){
+  const el = document.getElementById("serverAttentionBanner");
+  const msg = document.getElementById("serverAttentionMsg");
+  if(!el || !msg) return;
+
+  const missing = Array.isArray(d.missing_env_keys) ? d.missing_env_keys : [];
+  const requiredMissing = missing.filter(k => k && k.required);
+  const phase = d.updater_phase || "idle";
+  const updaterMsg = d.updater_message || "";
+
+  // Updater priority — surface while an update is in flight so the user knows
+  // why the page is about to lurch. Idle "up to date" never shows.
+  const UPDATE_PHASES = new Set(["applying","setup","reinstalling-service","rebooting","restarting"]);
+  if(UPDATE_PHASES.has(phase)){
+    const tone = (phase === "rebooting")
+      ? "bg-red-950/95 border-red-700 text-red-200"
+      : "bg-indigo-950/95 border-indigo-700 text-indigo-200";
+    el.className = `sticky top-0 z-30 ${tone} border-b text-xs sm:text-sm px-3 py-2 flex items-center justify-between gap-3`;
+    const friendly = updaterMsg || phase;
+    const verb = (phase === "rebooting") ? "Rebooting server" : "Updating server";
+    msg.textContent = `${verb}… ${friendly}`;
+    el.classList.remove("hidden");
+    return;
+  }
+
+  // Required env keys missing — banner everyone sees.
+  if(requiredMissing.length){
+    const labels = requiredMissing.map(k => k.label).join(", ");
+    el.className = "sticky top-0 z-30 bg-amber-950/95 border-b border-amber-800 text-amber-200 text-xs sm:text-sm px-3 py-2 flex items-center justify-between gap-3";
+    msg.textContent = `Server needs admin attention: ${labels} not configured.`;
+    el.classList.remove("hidden");
+    return;
+  }
+
+  // Optional env keys still missing — show a quieter hint, but only to admins
+  // who can act on it. The non-admin UI hides this case entirely.
+  // We don't know if the viewer is an admin here, so we just hide the banner.
+  el.classList.add("hidden");
 }
 
 // ── VPN UI ─────────────────────────────────────────────────────────────────
@@ -6190,6 +6249,7 @@ function connectSSE(){
     const d=JSON.parse(e.data); Object.assign(app,d);
     renderVpn(d.vpn_secure,d.vpn_status); renderPlayer(app);
     updateDlBadge(d.downloading_count||0);
+    renderServerAttention(d);
   });
   es.addEventListener("vpn_status",e=>{
     const d=JSON.parse(e.data); app.vpn_secure=d.secure; app.vpn_status=d.status;
@@ -6336,6 +6396,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">3.8.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">3.9.1</div>
 </body>
 </html>

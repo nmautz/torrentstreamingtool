@@ -103,6 +103,10 @@
       class="tab-inactive px-4 sm:px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors whitespace-nowrap flex-shrink-0">
       System
     </button>
+    <button onclick="switchTab('updates')" id="tab-updates"
+      class="tab-inactive px-4 sm:px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors whitespace-nowrap flex-shrink-0">
+      Updates
+    </button>
   </div>
 
   <!-- Toast -->
@@ -521,6 +525,126 @@
     </div>
   </div>
 
+  <!-- ── Updates Tab ──────────────────────────────────────────────────────────── -->
+  <div id="panelUpdates" class="hidden flex-1 overflow-y-auto p-3 sm:p-5 max-w-2xl mx-auto w-full space-y-4">
+
+    <!-- Auto-updater config -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Auto Update</h2>
+          <p class="text-xs text-gray-500 mt-0.5">Periodically pulls the chosen branch from GitHub. When a new commit lands, it runs setup.py (non-interactive), reinstalls the OS service so the supervisor wrapper matches the new code, then reboots the host for a clean restart. Auto-apply waits until the host is idle so a routine update can't interrupt a stream.</p>
+        </div>
+        <button id="auEnabledBtn" onclick="toggleAutoupdate()"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+                 bg-gray-800 border-gray-700 text-gray-400 hover:text-white">…</button>
+      </div>
+
+      <div class="px-5 py-4 border-b border-gray-800 grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div class="space-y-1.5">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Branch</label>
+          <select id="auBranch"
+            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-indigo-500 outline-none">
+            <option value="main">main (stable)</option>
+            <option value="beta">beta (release candidate)</option>
+            <option value="alpha">alpha (bleeding edge)</option>
+          </select>
+          <p class="text-[10px] text-gray-600">Only main / beta / alpha may be selected.</p>
+        </div>
+        <div class="space-y-1.5">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Check Every (hours)</label>
+          <input id="auInterval" type="number" min="1" max="168" value="6"
+            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none"/>
+          <p class="text-[10px] text-gray-600">Between 1 and 168 (1 week).</p>
+        </div>
+        <div class="space-y-1.5 sm:col-span-2">
+          <label class="flex items-center gap-2 text-sm text-gray-200 cursor-pointer">
+            <input id="auAutoApply" type="checkbox" class="accent-indigo-500"/>
+            <span class="select-none">Auto-apply when a new commit is detected</span>
+          </label>
+          <p class="text-[10px] text-gray-600 ml-6">When off, the dashboard shows a banner and the admin clicks Apply Now to update. Auto-apply waits until the host is idle so it never interrupts a stream.</p>
+        </div>
+      </div>
+
+      <div class="px-5 py-4 border-b border-gray-800 grid grid-cols-1 sm:grid-cols-2 gap-3">
+        <div class="space-y-1">
+          <div class="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Current Branch</div>
+          <div id="auCurBranch" class="text-sm font-mono text-gray-200">—</div>
+        </div>
+        <div class="space-y-1">
+          <div class="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Current Commit</div>
+          <div id="auCurCommit" class="text-sm font-mono text-gray-200">—</div>
+        </div>
+        <div class="space-y-1">
+          <div class="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Last Check</div>
+          <div id="auLastCheck" class="text-sm text-gray-400">—</div>
+        </div>
+        <div class="space-y-1">
+          <div class="text-[10px] font-bold text-gray-500 uppercase tracking-widest">Last Applied</div>
+          <div id="auLastApplied" class="text-sm text-gray-400">—</div>
+        </div>
+        <div id="auStatusRow" class="sm:col-span-2">
+          <div class="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1">Status</div>
+          <div id="auStatusMsg" class="text-sm text-gray-300">Idle.</div>
+        </div>
+        <div id="auServiceWarn" class="hidden sm:col-span-2 text-[11px] text-amber-300 border-l-4 border-amber-700 bg-amber-950/40 px-3 py-2">
+          The system service is not installed on this host — applying an update will stop the server and you'll need to manually re-run <code class="font-mono">run.py</code>.
+          Install the service with <code class="font-mono">python run.py --install</code>.
+        </div>
+        <div id="auRepoWarn" class="hidden sm:col-span-2 text-[11px] text-red-300 border-l-4 border-red-700 bg-red-950/40 px-3 py-2">
+          This installation isn't a git checkout — automatic updates are disabled. Re-deploy by cloning the repository to enable the updater.
+        </div>
+      </div>
+
+      <div class="px-5 py-4 flex items-center justify-between gap-3 flex-wrap">
+        <div id="auSummary" class="text-[11px] text-gray-600 min-w-0">Loading…</div>
+        <div class="flex gap-2 flex-wrap justify-end">
+          <button id="auCheckBtn" onclick="checkUpdateNow()"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 text-gray-300 hover:bg-gray-700 transition-colors disabled:opacity-50">
+            Check Now
+          </button>
+          <button id="auApplyBtn" onclick="applyUpdateNow()"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-emerald-700 bg-emerald-900 text-emerald-200 hover:bg-emerald-800 transition-colors disabled:opacity-50">
+            Apply Now
+          </button>
+          <button id="auSwitchBtn" onclick="switchBranchNow()"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-indigo-700 bg-indigo-900 text-indigo-200 hover:bg-indigo-800 transition-colors disabled:opacity-50">
+            Switch Branch
+          </button>
+          <button id="auSaveBtn" onclick="saveAutoupdate()"
+            class="bg-indigo-600 hover:bg-indigo-500 px-5 py-2 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">
+            Save
+          </button>
+        </div>
+      </div>
+
+      <details id="auOutputBox" class="hidden border-t border-gray-800">
+        <summary class="px-5 py-3 cursor-pointer text-[11px] font-bold uppercase tracking-widest text-gray-500 hover:text-gray-300">
+          Last setup.py output
+        </summary>
+        <pre id="auOutputPre" class="px-5 py-3 text-[11px] font-mono text-gray-400 whitespace-pre-wrap break-all max-h-64 overflow-y-auto"></pre>
+      </details>
+    </div>
+
+    <!-- Env-key configuration (post-update feature gating) -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Required API Keys</h2>
+        <p class="text-xs text-gray-500 mt-0.5">If a new release adds a feature that needs an API key, the feature is disabled until you fill in the key here. Other features keep working as normal.</p>
+      </div>
+      <div id="auEnvList" class="divide-y divide-gray-800">
+        <div class="px-5 py-6 text-center text-gray-600 text-sm">Loading…</div>
+      </div>
+      <div class="px-5 py-4 flex items-center justify-end gap-3 border-t border-gray-800">
+        <button id="auEnvSaveBtn" onclick="saveEnvKeys()"
+          class="bg-indigo-600 hover:bg-indigo-500 px-5 py-2 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">
+          Save Keys
+        </button>
+      </div>
+    </div>
+
+  </div>
+
 </div>
 
 <!-- ── Add Indexer Modal ──────────────────────────────────────────────────────── -->
@@ -709,7 +833,7 @@ async function loadOfflineEncoder(){
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 function switchTab(tab){
   activeTab = tab;
-  ["indexers","content","profiles","skip","offline","background","system"].forEach(t=>{
+  ["indexers","content","profiles","skip","offline","background","system","updates"].forEach(t=>{
     document.getElementById(`tab-${t}`).className =
       t===tab ? "tab-active px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors"
                : "tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors";
@@ -721,6 +845,8 @@ function switchTab(tab){
   if(tab==="offline")    loadOfflineCache();
   if(tab==="background") loadBackgroundVideo();
   if(tab==="system")   { loadScheduledReboot(); loadOvernightPrep(); loadLogs(); }
+  if(tab==="updates")  { loadAutoupdate(); loadEnvKeys(); startAutoupdatePolling(); }
+  else                 { stopAutoupdatePolling(); }
 }
 
 // ── System ────────────────────────────────────────────────────────────────────
@@ -1005,6 +1131,312 @@ async function saveOvernightPrep(){
     btn.disabled = false;
   }
 }
+
+// ── Auto-Updater ──────────────────────────────────────────────────────────────
+let _auEnabled = false;
+let _auState = null;
+let _auPollTimer = null;
+
+function _renderAuEnabled(){
+  const btn = document.getElementById("auEnabledBtn");
+  if(!btn) return;
+  if(_auEnabled){
+    btn.textContent = "Enabled";
+    btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-emerald-950 border-emerald-700 text-emerald-300 hover:bg-emerald-900";
+  } else {
+    btn.textContent = "Disabled";
+    btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white";
+  }
+}
+
+function toggleAutoupdate(){
+  _auEnabled = !_auEnabled;
+  _renderAuEnabled();
+}
+
+function _fmtAgo(ts){
+  if(!ts) return "Never";
+  try{
+    const d = new Date(ts*1000);
+    return d.toLocaleString();
+  }catch(_){ return "—"; }
+}
+
+async function loadAutoupdate(){
+  try{
+    const r = await fetch("/api/admin/updater", {headers: authHeader()});
+    if(!r.ok){
+      document.getElementById("auSummary").textContent = "Failed to load updater state.";
+      return;
+    }
+    const d = await r.json();
+    _auState = d;
+    const cfg = d.cfg || {};
+    _auEnabled = !!cfg.enabled;
+    _renderAuEnabled();
+    document.getElementById("auBranch").value     = cfg.branch || "main";
+    document.getElementById("auInterval").value   = cfg.interval_hours || 6;
+    document.getElementById("auAutoApply").checked = cfg.auto_apply !== false;
+    document.getElementById("auCurBranch").textContent  = d.current_branch || "—";
+    document.getElementById("auCurCommit").textContent  = d.current_commit || "—";
+    document.getElementById("auLastCheck").textContent  =
+      cfg.last_check_at ? `${_fmtAgo(cfg.last_check_at)} · ${cfg.last_check_status || "ok"}` : "Never";
+    document.getElementById("auLastApplied").textContent =
+      cfg.last_applied_at ? `${_fmtAgo(cfg.last_applied_at)} · ${cfg.last_applied_commit || ""}` : "Never";
+    document.getElementById("auServiceWarn").classList.toggle("hidden", !!d.service_installed);
+    document.getElementById("auRepoWarn").classList.toggle("hidden", !!d.is_git_repo);
+
+    const msg = d.message
+      || (cfg.last_error ? `Last error: ${cfg.last_error}` : "Idle.");
+    document.getElementById("auStatusMsg").textContent = msg;
+    document.getElementById("auSummary").textContent =
+      `v${d.ui_version || ""} · ${d.allowed_branches?.join(" / ") || "main / beta / alpha"}`;
+
+    const busy = !!d.busy;
+    document.getElementById("auCheckBtn").disabled  = busy || !d.is_git_repo;
+    document.getElementById("auApplyBtn").disabled  = busy || !d.is_git_repo;
+    document.getElementById("auSwitchBtn").disabled = busy || !d.is_git_repo;
+    document.getElementById("auSaveBtn").disabled   = busy;
+
+    const out = d.last_output || "";
+    document.getElementById("auOutputBox").classList.toggle("hidden", !out);
+    document.getElementById("auOutputPre").textContent = out;
+  }catch(_){
+    document.getElementById("auSummary").textContent = "Failed to load updater state.";
+  }
+}
+
+function startAutoupdatePolling(){
+  if(_auPollTimer) return;
+  _auPollTimer = setInterval(loadAutoupdate, 4000);
+}
+function stopAutoupdatePolling(){
+  if(_auPollTimer){ clearInterval(_auPollTimer); _auPollTimer = null; }
+}
+
+async function saveAutoupdate(){
+  const btn = document.getElementById("auSaveBtn");
+  btn.disabled = true;
+  try{
+    const body = {
+      enabled:        _auEnabled,
+      branch:         document.getElementById("auBranch").value,
+      interval_hours: parseInt(document.getElementById("auInterval").value,10) || 6,
+      auto_apply:     document.getElementById("auAutoApply").checked,
+    };
+    const r = await fetch("/api/admin/updater/config", {
+      method: "POST",
+      headers: {...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify(body),
+    });
+    if(!r.ok){
+      const t = await r.text();
+      showToast(`Save failed: ${t || r.status}`, true);
+      return;
+    }
+    showToast(_auEnabled ? "Auto-update settings saved." : "Auto-update disabled.");
+    await loadAutoupdate();
+  }catch(_){
+    showToast("Save failed.", true);
+  }finally{
+    btn.disabled = false;
+  }
+}
+
+async function checkUpdateNow(){
+  const btn = document.getElementById("auCheckBtn");
+  btn.disabled = true;
+  btn.textContent = "Checking…";
+  try{
+    const r = await fetch("/api/admin/updater/check", {method:"POST", headers: authHeader()});
+    if(!r.ok){
+      const t = await r.text();
+      showToast(`Check failed: ${t || r.status}`, true);
+      return;
+    }
+    const d = await r.json();
+    if(d.has_update){
+      showToast(`Update available: ${d.behind_by} commit(s) behind origin/${d.branch}.`);
+    } else if(d.ok){
+      showToast(`Up to date with origin/${d.branch}.`);
+    } else {
+      showToast(`Check error: ${d.error || ""}`, true);
+    }
+    await loadAutoupdate();
+  }catch(_){
+    showToast("Check failed.", true);
+  }finally{
+    btn.disabled = false;
+    btn.textContent = "Check Now";
+  }
+}
+
+async function applyUpdateNow(){
+  // Use the picker's current value so switching back to an older branch
+  // (e.g., alpha → main) flows through Apply Now without a separate Save +
+  // Switch dance. The server runs `git switch -C <target> origin/<target>`
+  // followed by a hard reset, so it's symmetric in both directions.
+  const target = document.getElementById("auBranch").value;
+  const cur    = (_auState && _auState.current_branch) || "";
+  const direction = (cur && target && cur !== target)
+    ? `\nSwitching working tree '${cur}' → '${target}'.\n`
+    : "";
+
+  if(!confirm(
+      "Apply update right now?\n" + direction +
+      "\nThis will:\n" +
+      "  1. git fetch + hard-checkout origin/" + target + " (local edits to tracked files are discarded).\n" +
+      "  2. Re-run setup.py (non-interactive).\n" +
+      "  3. Uninstall the old system service and reinstall it from the new code.\n" +
+      "  4. Reboot the host machine for a clean state.\n\n" +
+      "Active playback and downloads will be interrupted. Continue?"
+  )) return;
+  const btn = document.getElementById("auApplyBtn");
+  btn.disabled = true;
+  btn.textContent = "Updating…";
+  try{
+    const r = await fetch("/api/admin/updater/apply", {
+      method: "POST",
+      headers: {...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify({branch: target, reboot: true}),
+    });
+    if(!r.ok){
+      const txt = await r.text();
+      showToast(`Update failed: ${txt || r.status}`, true);
+      await loadAutoupdate();
+      return;
+    }
+    const d = await r.json();
+    if(d.service_reinstalled){
+      showToast(`Updated to ${d.commit}. Host is rebooting…`);
+    } else {
+      showToast(`Updated to ${d.commit}. Service reinstall failed — re-run run.py --install after reboot.`, true);
+    }
+  }catch(_){
+    // The host going down tears this response down — expected on success.
+    showToast("Update issued. Host rebooting…");
+  }finally{
+    btn.textContent = "Apply Now";
+    // Don't re-enable: a successful apply ends with a host reboot, and a
+    // failed one gets re-enabled by the next loadAutoupdate() poll.
+  }
+}
+
+async function switchBranchNow(){
+  const target = document.getElementById("auBranch").value;
+  if(!target) return;
+  if(!confirm(`Switch the working tree to '${target}'?\n\nThis hard-checks out origin/${target} (any local edits to tracked files are discarded). Run Apply Now afterwards to actually update the server on this branch's code.`)) return;
+  const btn = document.getElementById("auSwitchBtn");
+  btn.disabled = true;
+  btn.textContent = "Switching…";
+  try{
+    const r = await fetch("/api/admin/updater/switch-branch", {
+      method: "POST",
+      headers: {...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify({branch: target}),
+    });
+    if(!r.ok){
+      const t = await r.text();
+      showToast(`Switch failed: ${t || r.status}`, true);
+      return;
+    }
+    const d = await r.json();
+    showToast(`Switched to ${d.branch} (${d.commit}). Click Apply Now to refresh deps.`);
+    await loadAutoupdate();
+  }catch(_){
+    showToast("Switch failed.", true);
+  }finally{
+    btn.disabled = false;
+    btn.textContent = "Switch Branch";
+  }
+}
+
+// ── Env Keys ──────────────────────────────────────────────────────────────────
+async function loadEnvKeys(){
+  const list = document.getElementById("auEnvList");
+  if(!list) return;
+  list.innerHTML = `<div class="px-5 py-6 text-center text-gray-600 text-sm">Loading…</div>`;
+  try{
+    const r = await fetch("/api/admin/env-keys", {headers: authHeader()});
+    if(!r.ok){
+      list.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Failed to load env keys (${r.status})</div>`;
+      return;
+    }
+    const d = await r.json();
+    const feats = d.features || [];
+    if(!feats.length){
+      list.innerHTML = `<div class="px-5 py-6 text-center text-gray-600 text-sm">No configurable keys.</div>`;
+      return;
+    }
+    list.innerHTML = feats.map(f => {
+      const badge = f.present
+        ? `<span class="text-[10px] font-bold uppercase tracking-widest px-2 py-1 border bg-emerald-950 border-emerald-700 text-emerald-300">Set</span>`
+        : (f.required
+            ? `<span class="text-[10px] font-bold uppercase tracking-widest px-2 py-1 border bg-red-950 border-red-700 text-red-300">Missing · Required</span>`
+            : `<span class="text-[10px] font-bold uppercase tracking-widest px-2 py-1 border bg-gray-900 border-gray-700 text-gray-500">Optional</span>`);
+      const type = f.secret ? "password" : "text";
+      const ph = f.present ? "Already set — type to replace, leave blank to keep" : `Enter ${f.label}`;
+      return `
+        <div class="px-5 py-4 space-y-2">
+          <div class="flex items-center justify-between gap-3">
+            <div class="min-w-0">
+              <div class="text-sm font-bold text-gray-200">${escHtml(f.label)}</div>
+              <div class="text-[11px] text-gray-500 mt-0.5">${escHtml(f.description)} <span class="text-gray-700 ml-1 font-mono">${escHtml(f.key)}</span></div>
+            </div>
+            ${badge}
+          </div>
+          <input data-env-key="${escAttr(f.key)}" type="${type}" autocomplete="off" placeholder="${escAttr(ph)}"
+            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none"/>
+        </div>`;
+    }).join("");
+  }catch(_){
+    list.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Failed to load env keys.</div>`;
+  }
+}
+
+async function saveEnvKeys(){
+  const inputs = document.querySelectorAll("#auEnvList input[data-env-key]");
+  if(!inputs.length){ showToast("No keys to save.", true); return; }
+  const keys = {};
+  inputs.forEach(el => {
+    const k = el.getAttribute("data-env-key");
+    const v = (el.value || "").trim();
+    if(v) keys[k] = v;     // skip blanks so we don't accidentally clear existing keys
+  });
+  if(!Object.keys(keys).length){
+    showToast("Nothing to save — every field is empty.", true);
+    return;
+  }
+  const btn = document.getElementById("auEnvSaveBtn");
+  btn.disabled = true;
+  btn.textContent = "Saving…";
+  try{
+    const r = await fetch("/api/admin/env-keys", {
+      method: "POST",
+      headers: {...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify({keys}),
+    });
+    if(!r.ok){
+      const t = await r.text();
+      showToast(`Save failed: ${t || r.status}`, true);
+      return;
+    }
+    const d = await r.json();
+    showToast(`Saved ${d.written} key${d.written===1?"":"s"}. ${(d.missing_env_keys||[]).length} still missing.`);
+    await loadEnvKeys();
+  }catch(_){
+    showToast("Save failed.", true);
+  }finally{
+    btn.disabled = false;
+    btn.textContent = "Save Keys";
+  }
+}
+
+// Small HTML/attr-escape helpers used by the env-keys / updates rendering. The
+// existing escHtml in this file is defined later, so define standalone copies
+// to avoid forward-reference issues at module load (these stay private to the
+// updates panel).
+function escAttr(s){ return String(s||"").replace(/["&]/g, c => ({'"':"&quot;","&":"&amp;"})[c]); }
 
 // ── Smart Skip ────────────────────────────────────────────────────────────────
 // Cache: series_key → item rows currently rendered, so SSE updates can target them

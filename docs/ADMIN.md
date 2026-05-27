@@ -164,6 +164,50 @@ Saving config resets `state.overnight_active` so the new schedule is re-evaluate
 - `GET /api/admin/overnight-prep` → config + `now` + `in_window` + `paused`.
 - `POST /api/admin/overnight-prep` → `{enabled, start, end, timezone, on_end}`. Validates both HH:MM, rejects `start == end`, resets the in-memory window guard.
 
+### 8. Updates
+
+Auto-updater for the dashboard itself + post-update env-key fill-in. The
+underlying git/setup plumbing lives in [updater.py](../updater.py); the loop
++ endpoints are in [main.py](../main.py).
+
+#### Auto Update card
+
+- **Enable toggle** — flips `library.json → settings.autoupdate.enabled`. When off, the background loop is dormant.
+- **Branch picker** — locked to **main / beta / alpha** by `updater.ALLOWED_BRANCHES`. Saved as `settings.autoupdate.branch`.
+- **Check Every (hours)** — between 1 and 168 (clamped server-side). The loop polls every minute and runs a check when this interval has elapsed.
+- **Auto-apply** — when on, a detected update triggers the full sequence (git apply → `setup.py` → service uninstall+reinstall → host reboot) but only if `_machine_in_use(300)` returns False. When off, the loop just notes the update is available; the admin uses **Apply Now** when ready.
+- **Status panel** — current branch, current commit, last check + result, last applied + commit, plus a live message for the in-flight phase (`checking`, `applying`, `setup`, `reinstalling-service`, `rebooting`, `error`).
+- **Buttons** — **Check Now** (`POST /api/admin/updater/check`), **Apply Now** (full sequence on the branch *currently selected in the picker*, confirm-gated — so switching back to an older branch is just "set picker → Apply Now"), **Switch Branch** (hard checkout origin/`<branch>`, no setup, no reboot), **Save** (persist config changes without applying).
+- **Diagnostics** — a collapsed details panel exposes the last 8 KiB of `setup.py` stdout/stderr (and any output from the service uninstall/reinstall) so a non-zero exit can be diagnosed without SSH.
+
+#### What Apply Now does
+
+`POST /api/admin/updater/apply {branch, reboot:true}` runs four steps in order:
+
+1. **git apply** — `git switch -C <target> origin/<target>` (if current ≠ target) then `git reset --hard origin/<target>`. Symmetric: works for forward, backward, and side-grade switches. `library.json`, `.env`, `.offline_cache/`, `.background/` are all gitignored and survive.
+2. **setup.py** — re-run non-interactively (`stdin=DEVNULL`, all prompts fall through to stored defaults via setup.py's `_STDIN_INTERACTIVE` guard) so new deps + qBit ini + certs match the new code's expectations.
+3. **Service reinstall** — `daemon.uninstall()` + `daemon.install()` on a worker thread (the daemon helpers are sync). This regenerates `streamlink_service.py` from the freshly-pulled `daemon._WRAPPER_CONTENT`, so the supervisor wrapper matches the new code. Best-effort: a failed reinstall is logged + persisted but the reboot still fires (better to come back up with a stale service than be stuck pre-reboot).
+4. **Reboot** — `_reboot_machine(delay=1.5)`. The host comes back; the OS service starts the dashboard on the new code.
+
+`reboot=false` (dev convenience) skips steps 3 and 4 — files refreshed in place, no service touch, no downtime. Used for one-off testing; not the auto-apply path.
+
+Warnings the UI surfaces inline:
+- **System service not installed** — without a supervisor (launchd / systemd / Task Scheduler), the dashboard won't come back after the reboot. Admin is told to run `python run.py --install`.
+- **Not a git repository** — running from a tarball / unzipped archive instead of a clone. The updater is disabled; the buttons are greyed out.
+
+> **Auto-login is required for the auto-apply path.** A host reboot ends at the login screen unless the OS is configured to log in automatically; user-level launchd / systemd / Task Scheduler entries don't run before login, so the dashboard would stay down. See `README` for the per-OS auto-login steps and [GOTCHAS.md](GOTCHAS.md).
+
+#### Required API Keys card
+
+Renders the `ENV_KEY_FEATURES` registry from `main.py`. Each row shows:
+- The feature name + a one-line description + the literal env key (e.g. `TMDB_API_KEY`).
+- A status badge — **Set** (green), **Missing · Required** (red, also drives the user-side banner), or **Optional** (grey).
+- An input field, type=password for secrets. Empty fields are skipped on save so a partial form-fill never clears existing keys.
+
+Saving writes through `POST /api/admin/env-keys`, which merges the changes into `.env` (preserves existing comments + key order) and re-instantiates the `Settings` object in-process. Changes take effect immediately; no restart needed for most keys.
+
+The same registry feeds `state_snapshot()` → `missing_env_keys`, which drives the sticky banner in [static/index.html](../static/index.html) (`renderServerAttention`). Required-key gaps banner everyone; optional gaps only show up on this admin card.
+
 ## Server endpoints (admin)
 
 All require admin auth (`_require_admin`). See [API.md](API.md#admin) for the full table.
