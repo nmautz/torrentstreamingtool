@@ -1,8 +1,11 @@
 # Changelog
 
 ## [3.12.0] — 2026-05-27
-- **New: Host Volume slider in the global section of profile settings.** Drags drive the host's OS mixer in real time (pycaw on Windows, `osascript` on macOS, `pactl`/`amixer` on Linux) — no need to walk over to the box to turn it down. Throttled to ~20 push/s with a final `change` flush so the release always lands exactly where the thumb stopped. Reads the current OS volume on open; greys out (showing "N/A") if the platform helper isn't available.
-- **Backend:** `GET /api/settings/host-volume` → `{host_volume: 0-100 | null}`; `POST /api/settings/host-volume {host_volume: 0-100}` calls `set_system_volume` immediately. Not persisted in `library.json` — the OS already owns its mixer state and an external change (TV remote, keyboard volume key) shouldn't be clobbered by a stale dashboard value on next launch.
+- **New: Host Volume slider in the global section of profile settings.** Drags drive the host's OS mixer in real time (pycaw on Windows, `osascript` on macOS, `pactl`/`amixer` on Linux) — no need to walk over to the box to turn it down. Reads the current OS volume on open; greys out (showing "N/A") if the platform helper isn't available.
+- **Hardening (server):** `POST /api/settings/host-volume` serializes concurrent writes behind an `asyncio.Lock` and short-circuits if the latest target already matches the last value written. Stops a dragging slider from piling up parallel pycaw COM round-trips (CoInitialize → endpoint enum → Activate → set → CoUninitialize is heavy on Windows; 20+/s of those can wedge the audio subsystem).
+- **Hardening (client):** single-flight pump — at most one POST is in flight at a time; further drags only update the pending target and the next POST goes out when the current resolves AND only if the target moved. Combined with the server-side dedupe, a fast drag now produces one OS write per distinct value rather than one per slider tick.
+- **UI:** profile-settings modal is now `max-h-[90vh]` with the content area scrollable and the Done button pinned to the bottom — needed because the added Host Volume row pushed the modal off-screen on shorter viewports.
+- **Backend:** `GET /api/settings/host-volume` → `{host_volume: 0-100 | null}`; `POST /api/settings/host-volume {host_volume: 0-100}` calls `set_system_volume`. Not persisted in `library.json` — the OS already owns its mixer state and an external change (TV remote, keyboard volume key) shouldn't be clobbered by a stale dashboard value on next launch.
 - **Docs:** [docs/API.md](docs/API.md) Settings table updated with both endpoints.
 
 ## [3.11.0] — 2026-05-26

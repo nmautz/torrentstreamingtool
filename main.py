@@ -6554,6 +6554,11 @@ async def get_host_volume() -> JSONResponse:
     return JSONResponse({"host_volume": await get_system_volume()})
 
 
+_host_volume_lock: Optional[asyncio.Lock] = None
+_host_volume_target: Optional[int] = None
+_host_volume_last_written: Optional[int] = None
+
+
 @app.post("/api/settings/host-volume")
 async def set_host_volume(req: HostVolumeReq) -> JSONResponse:
     """Immediately set the host OS mixer volume (0-100).
@@ -6561,9 +6566,26 @@ async def set_host_volume(req: HostVolumeReq) -> JSONResponse:
     Not persisted in `library.json` — the OS already remembers its own mixer
     state, and an external change (TV remote, keyboard volume key) shouldn't
     be clobbered by a stale dashboard value on next launch.
+
+    Coalesced + serialized: concurrent requests share one "latest target" slot.
+    Each call takes the lock (queueing if busy), then writes the OS mixer only
+    if the latest target differs from the value already written. A drag that
+    fires N requests/s on the client therefore produces at most one OS write
+    per distinct target value, not N — protects pycaw from being thrashed by
+    its own heavy CoInitialize/CoUninitialize cycle on each call.
     """
+    global _host_volume_lock, _host_volume_target, _host_volume_last_written
     capped = max(0, min(100, int(req.host_volume)))
-    ok = await set_system_volume(capped)
+    if _host_volume_lock is None:
+        _host_volume_lock = asyncio.Lock()
+    _host_volume_target = capped
+    async with _host_volume_lock:
+        target = _host_volume_target
+        if target == _host_volume_last_written:
+            return JSONResponse({"ok": True, "host_volume": capped, "skipped": True})
+        ok = await set_system_volume(target)
+        if ok:
+            _host_volume_last_written = target
     return JSONResponse({"ok": ok, "host_volume": capped})
 
 

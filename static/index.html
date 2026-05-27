@@ -328,12 +328,12 @@
 <!-- ── Profile Settings Modal (auto-skip toggles) ─────────────────────────── -->
 <div id="profileSettingsModal"
   class="hidden fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center sm:px-4">
-  <div class="bg-gray-900 w-full sm:max-w-sm fade-in border-t-[3px] border-indigo-600">
-    <div class="px-5 pt-5 pb-4 border-b border-gray-800 flex items-center justify-between">
+  <div class="bg-gray-900 w-full sm:max-w-sm fade-in border-t-[3px] border-indigo-600 flex flex-col max-h-[90vh] sm:max-h-[85vh]">
+    <div class="px-5 pt-5 pb-4 border-b border-gray-800 flex items-center justify-between flex-shrink-0">
       <h2 class="text-lg font-black uppercase tracking-wide">Profile Settings</h2>
       <button onclick="closeProfileSettings()" class="text-gray-600 hover:text-gray-300 text-xl leading-none">✕</button>
     </div>
-    <div class="px-5 py-4 space-y-3">
+    <div class="px-5 py-4 space-y-3 overflow-y-auto flex-1">
       <p class="text-[11px] text-gray-500 uppercase tracking-widest" id="psProfileLabel"></p>
 
       <label class="flex items-center justify-between gap-3 bg-gray-800/60 px-4 py-3 cursor-pointer hover:bg-gray-800 transition-colors">
@@ -433,9 +433,9 @@
 
       <p id="psStatus" class="text-[10px] text-gray-600 uppercase tracking-widest pt-1">Manual skip button is always available.</p>
     </div>
-    <div class="px-4 pb-4 safe-bottom">
+    <div class="px-4 pb-4 safe-bottom flex-shrink-0 border-t border-gray-800">
       <button onclick="closeProfileSettings()"
-        class="w-full bg-gray-800 hover:bg-gray-700 py-4 text-sm font-bold uppercase tracking-wide transition-colors">
+        class="w-full bg-gray-800 hover:bg-gray-700 py-4 text-sm font-bold uppercase tracking-wide transition-colors mt-3">
         Done
       </button>
     </div>
@@ -2521,42 +2521,44 @@ async function saveSystemVolumeDefault(){
   }
 }
 
-// Live host OS mixer volume (0-100). Drag = instant push to the host's mixer.
-// Throttled to ~20/s while dragging; the final value also goes on `change` so
-// the release always lands exactly where the user left the thumb.
-let _hostVolThrottleTimer = null;
-let _hostVolPendingValue  = null;
-let _hostVolInflight      = false;
-async function _flushHostVolume(){
-  if(_hostVolPendingValue==null || _hostVolInflight) return;
-  const v = _hostVolPendingValue;
-  _hostVolPendingValue = null;
-  _hostVolInflight = true;
-  try{
-    await fetch("/api/settings/host-volume", {
-      method:"POST", headers:{"Content-Type":"application/json"},
-      body: JSON.stringify({host_volume: v}),
-    });
-  }catch(_){}
-  _hostVolInflight = false;
-  if(_hostVolPendingValue!=null) _flushHostVolume();
+// Live host OS mixer volume (0-100). Drag = push to the host's mixer.
+// Single-flight pump: at most one POST is in flight at a time. While a POST is
+// flying, further drags only update the pending target; the next POST goes out
+// as soon as the current one resolves AND only if the target moved. On Windows
+// each pycaw call is a full COM round-trip (CoInitialize → device enum →
+// Activate → SetMasterVolumeLevelScalar → CoUninitialize), so hammering 20+/s
+// can wedge the audio subsystem — single-flight bounds it to the round-trip
+// rate of the OS itself (~10–20 / s in practice, never piling up).
+let _hostVolPending  = null;   // latest desired value (null = nothing pending)
+let _hostVolInflight = false;  // POST currently flying?
+let _hostVolLastSent = null;   // last value we actually POSTed
+async function _hostVolPump(){
+  if(_hostVolInflight) return;
+  while(_hostVolPending != null && _hostVolPending !== _hostVolLastSent){
+    const v = _hostVolPending;
+    _hostVolLastSent = v;
+    _hostVolInflight = true;
+    try{
+      await fetch("/api/settings/host-volume", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({host_volume: v}),
+      });
+    }catch(_){}
+    _hostVolInflight = false;
+  }
+  _hostVolPending = null;
 }
 function onHostVolumeInput(raw){
   const v = Math.max(0,Math.min(100,parseInt(raw,10)||0));
   document.getElementById("psHostVolumeLabel").textContent = v + "%";
-  _hostVolPendingValue = v;
-  if(_hostVolThrottleTimer) return;
-  _hostVolThrottleTimer = setTimeout(()=>{
-    _hostVolThrottleTimer = null;
-    _flushHostVolume();
-  }, 50);
+  _hostVolPending = v;
+  _hostVolPump();
 }
-async function saveHostVolume(raw){
+function saveHostVolume(raw){
   const v = Math.max(0,Math.min(100,parseInt(raw,10)||0));
   document.getElementById("psHostVolumeLabel").textContent = v + "%";
-  _hostVolPendingValue = v;
-  if(_hostVolThrottleTimer){ clearTimeout(_hostVolThrottleTimer); _hostVolThrottleTimer = null; }
-  await _flushHostVolume();
+  _hostVolPending = v;
+  _hostVolPump();
 }
 
 // OS volume pre-set the moment a YouTube play starts. 0-100 OS scale.
@@ -2812,6 +2814,10 @@ async function openProfileSettings(){
       slider.disabled = false;
       slider.value = hv;
       label.textContent = hv + "%";
+      // Tell the pump "OS is already here" so dragging back to this value
+      // after an external OS change still no-ops correctly.
+      _hostVolLastSent = hv;
+      _hostVolPending  = null;
     }
   }catch(_){
     document.getElementById("psHostVolume").disabled = true;
