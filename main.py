@@ -7840,7 +7840,7 @@ def _prep_summary(files: list[dict]) -> dict:
 
 
 @app.get("/api/offline-active")
-async def offline_active() -> JSONResponse:
+async def offline_active(request: Request, profile_id: str = "") -> JSONResponse:
     """Global view of every offline-prep job currently running.
 
     The library card chip is only rendered when the card is on-screen, so prep
@@ -7852,6 +7852,12 @@ async def offline_active() -> JSONResponse:
     so the global bar keeps showing (with a Resume affordance) while the queue is
     held. Done/error jobs are NOT returned; those are still visible via the
     per-item /prep-status when the card mounts.
+
+    All callers see the SAME counts/progress so prep activity looks identical to
+    everyone. Item titles are redacted to "Library content" and item_id is blanked
+    when the requesting profile can't see any one of the active items (admin_only
+    without admin/elevated). Redaction is all-or-nothing per response, so the
+    absence of a title doesn't leak which specific item the user is blocked from.
     """
     active = [j for j in _offline_jobs.values()
               if j.get("status") in ("pending", "processing", "paused")]
@@ -7864,7 +7870,19 @@ async def offline_active() -> JSONResponse:
     for j in active:
         by_item.setdefault(j.get("item_id", ""), []).append(j)
     lib = await get_library()
-    titles = {it["id"]: it.get("title", "") for it in lib.get("items", [])}
+    is_admin = _check_admin(request)
+    elevated_ids = {p["id"] for p in lib.get("profiles", []) if p.get("elevated")}
+    is_elevated = bool(profile_id) and profile_id in elevated_ids
+    items_by_id = {it["id"]: it for it in lib.get("items", [])}
+    # Redact when ANY active job is restricted from this requester — keeps the
+    # response shape identical so a curious user can't infer which one is hidden.
+    redact = False
+    if not is_admin and not is_elevated:
+        for iid in by_item.keys():
+            it = items_by_id.get(iid)
+            if it and it.get("admin_only"):
+                redact = True
+                break
     items_out: list[dict] = []
     now = time.time()
     for item_id, jobs in by_item.items():
@@ -7878,9 +7896,10 @@ async def offline_active() -> JSONResponse:
             if elapsed > 2.0 and p > 0.02:
                 eta_total += elapsed * (1 - p) / p
                 eta_count += 1
+        it = items_by_id.get(item_id)
         items_out.append({
-            "item_id":    item_id,
-            "title":      titles.get(item_id, ""),
+            "item_id":    "" if redact else item_id,
+            "title":      "Library content" if redact else (it.get("title", "") if it else ""),
             "processing": len(jobs),
             "progress":   round(total_progress / len(jobs), 3) if jobs else 0,
             "eta_secs":   round(eta_total, 1) if eta_count > 0 else None,

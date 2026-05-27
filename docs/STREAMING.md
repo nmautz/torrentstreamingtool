@@ -231,6 +231,15 @@ Two ways to populate the cache:
   `/api/offline-active` every 3 s while jobs exist (8 s idle) so the
   indicator survives page reloads.
 
+> **Per-profile title redaction.** `/api/offline-active` accepts `?profile_id=` and
+> returns identical counts/progress/ETA to every caller, but if **any** active item
+> is `admin_only` and the requester isn't admin or elevated, every entry's `title`
+> is replaced with the literal string `"Library content"` and `item_id` is blanked.
+> Redaction is all-or-nothing per response — selectively hiding only the restricted
+> entries would itself reveal which one is hidden. The per-card chip is unaffected
+> because `/api/library` already filters admin-only items out of restricted
+> profiles' library views.
+
 - **Per-file Prep** — Each row in the episode picker has a Prep button. It
   POSTs `/api/library/{id}/offline-prepare {file_path}`, then polls
   `/offline-job/{id}` until `done`. State for the button is mirrored in

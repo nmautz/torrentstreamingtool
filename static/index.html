@@ -6082,7 +6082,11 @@ async function pollGlobalPrep(){
   }
   let interval = _PREP_POLL_MS_IDLE;
   try{
-    const r = await fetch("/api/offline-active");
+    // Pass profile_id so the server can redact titles for items this profile
+    // can't access. Item_id comes back blank in that case, which is why the
+    // per-card reawaken loop below is guarded.
+    const pid = profile.id ? `?profile_id=${encodeURIComponent(profile.id)}` : "";
+    const r = await fetch(`/api/offline-active${pid}`);
     if(r.ok){
       const d = await r.json();
       _renderGlobalPrep(d);
@@ -6090,7 +6094,9 @@ async function pollGlobalPrep(){
         interval = _PREP_POLL_MS_BUSY;
         // Reawaken per-card pollers for any item whose card is visible — the
         // chip won't be drawn until the user opens the library tab, but if
-        // they're already there we want detail right away.
+        // they're already there we want detail right away. item_id is blanked
+        // by the server for restricted responses, so the guard naturally skips
+        // those.
         for(const it of (d.items||[])){
           if(it.item_id && !prepPolling.has(it.item_id)){
             prepStats.set(it.item_id, {
@@ -6330,6 +6336,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">3.8.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">3.8.1</div>
 </body>
 </html>
