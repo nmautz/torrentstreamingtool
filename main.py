@@ -3713,6 +3713,10 @@ class YouTubeStartVolumeReq(BaseModel):
     youtube_start_volume: int   # 0-100; OS volume pre-set before a YouTube play starts
 
 
+class HostVolumeReq(BaseModel):
+    host_volume: int  # 0-100; live host OS mixer volume
+
+
 class SkipNowReq(BaseModel):
     type: str         # "intro" or "credits"
 
@@ -6542,6 +6546,25 @@ async def set_youtube_start_volume(req: YouTubeStartVolumeReq) -> JSONResponse:
     lib.setdefault("settings", {})["youtube_start_volume"] = capped
     await put_library(lib)
     return JSONResponse({"ok": True, "youtube_start_volume": capped})
+
+
+@app.get("/api/settings/host-volume")
+async def get_host_volume() -> JSONResponse:
+    """Live host OS mixer volume (0-100). `null` if the platform helper failed."""
+    return JSONResponse({"host_volume": await get_system_volume()})
+
+
+@app.post("/api/settings/host-volume")
+async def set_host_volume(req: HostVolumeReq) -> JSONResponse:
+    """Immediately set the host OS mixer volume (0-100).
+
+    Not persisted in `library.json` — the OS already remembers its own mixer
+    state, and an external change (TV remote, keyboard volume key) shouldn't
+    be clobbered by a stale dashboard value on next launch.
+    """
+    capped = max(0, min(100, int(req.host_volume)))
+    ok = await set_system_volume(capped)
+    return JSONResponse({"ok": ok, "host_volume": capped})
 
 
 @app.post("/api/skip-now")

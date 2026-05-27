@@ -392,6 +392,20 @@
       <div class="bg-gray-800/60 px-4 py-3">
         <div class="flex items-center justify-between gap-3 mb-2">
           <div class="min-w-0">
+            <div class="text-sm font-bold text-gray-200 uppercase tracking-wide">Host Volume</div>
+            <div class="text-[11px] text-gray-500 mt-0.5">Drives the host OS mixer in real time. Reflects (and overrides) the speaker volume on the machine running StreamLink.</div>
+          </div>
+          <span id="psHostVolumeLabel" class="text-sm font-mono font-bold text-indigo-400 tabular-nums">—</span>
+        </div>
+        <input id="psHostVolume" type="range" min="0" max="100" step="1" value="0"
+          class="w-full accent-indigo-500 cursor-pointer"
+          oninput="onHostVolumeInput(this.value)"
+          onchange="saveHostVolume(this.value)"/>
+      </div>
+
+      <div class="bg-gray-800/60 px-4 py-3">
+        <div class="flex items-center justify-between gap-3 mb-2">
+          <div class="min-w-0">
             <div class="text-sm font-bold text-gray-200 uppercase tracking-wide">YouTube Starting Volume</div>
             <div class="text-[11px] text-gray-500 mt-0.5">Host OS volume pre-set the moment a YouTube link starts playing, before the first frame produces audio. Keeps videos from blasting at system max.</div>
           </div>
@@ -2507,6 +2521,44 @@ async function saveSystemVolumeDefault(){
   }
 }
 
+// Live host OS mixer volume (0-100). Drag = instant push to the host's mixer.
+// Throttled to ~20/s while dragging; the final value also goes on `change` so
+// the release always lands exactly where the user left the thumb.
+let _hostVolThrottleTimer = null;
+let _hostVolPendingValue  = null;
+let _hostVolInflight      = false;
+async function _flushHostVolume(){
+  if(_hostVolPendingValue==null || _hostVolInflight) return;
+  const v = _hostVolPendingValue;
+  _hostVolPendingValue = null;
+  _hostVolInflight = true;
+  try{
+    await fetch("/api/settings/host-volume", {
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({host_volume: v}),
+    });
+  }catch(_){}
+  _hostVolInflight = false;
+  if(_hostVolPendingValue!=null) _flushHostVolume();
+}
+function onHostVolumeInput(raw){
+  const v = Math.max(0,Math.min(100,parseInt(raw,10)||0));
+  document.getElementById("psHostVolumeLabel").textContent = v + "%";
+  _hostVolPendingValue = v;
+  if(_hostVolThrottleTimer) return;
+  _hostVolThrottleTimer = setTimeout(()=>{
+    _hostVolThrottleTimer = null;
+    _flushHostVolume();
+  }, 50);
+}
+async function saveHostVolume(raw){
+  const v = Math.max(0,Math.min(100,parseInt(raw,10)||0));
+  document.getElementById("psHostVolumeLabel").textContent = v + "%";
+  _hostVolPendingValue = v;
+  if(_hostVolThrottleTimer){ clearTimeout(_hostVolThrottleTimer); _hostVolThrottleTimer = null; }
+  await _flushHostVolume();
+}
+
 // OS volume pre-set the moment a YouTube play starts. 0-100 OS scale.
 async function saveYoutubeStartVolume(){
   const v = Math.max(0, Math.min(100, parseInt(document.getElementById("psYtStartVolume").value,10)));
@@ -2746,6 +2798,24 @@ async function openProfileSettings(){
   }catch(_){
     document.getElementById("psYtStartVolume").value = 30;
     document.getElementById("psYtStartVolumeLabel").textContent = "30%";
+  }
+  try{
+    const r = await fetch("/api/settings/host-volume");
+    const d = r.ok ? await r.json() : {};
+    const hv = (d.host_volume==null) ? null : Math.max(0,Math.min(100,parseInt(d.host_volume,10)));
+    const slider = document.getElementById("psHostVolume");
+    const label  = document.getElementById("psHostVolumeLabel");
+    if(hv==null){
+      slider.disabled = true;
+      label.textContent = "N/A";
+    }else{
+      slider.disabled = false;
+      slider.value = hv;
+      label.textContent = hv + "%";
+    }
+  }catch(_){
+    document.getElementById("psHostVolume").disabled = true;
+    document.getElementById("psHostVolumeLabel").textContent = "N/A";
   }
   document.getElementById("profileSettingsModal").classList.remove("hidden");
 }
@@ -6410,6 +6480,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">3.11.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">3.12.0</div>
 </body>
 </html>

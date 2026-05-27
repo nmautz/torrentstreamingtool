@@ -167,6 +167,8 @@ See [STREAMING.md](STREAMING.md) for the full client/server flow.
 | POST | `/api/settings/system-volume-default` | `{system_volume_default: 0-100}` — stores in `library.json → settings.system_volume_default`. Does NOT change the OS volume immediately, only at the next YouTube Stop |
 | GET | `/api/settings/youtube-start-volume` | `{youtube_start_volume}` — host OS volume (0-100, default 30) pre-set the moment a YouTube play starts (before the kiosk loads, before audio). **Global.** See [YOUTUBE.md](YOUTUBE.md) |
 | POST | `/api/settings/youtube-start-volume` | `{youtube_start_volume: 0-100}` — stores in `library.json → settings.youtube_start_volume`. Does NOT change the OS volume immediately, only at the next YouTube play |
+| GET | `/api/settings/host-volume` | `{host_volume}` — current host OS mixer volume (0-100), or `null` if the platform helper failed (pycaw missing on Windows, no `pactl`/`amixer` on Linux) |
+| POST | `/api/settings/host-volume` | `{host_volume: 0-100}` — **immediately** pushes to the host OS mixer via pycaw / `osascript` / `pactl`/`amixer`. Not persisted in `library.json` — the OS owns its own mixer state |
 
 ## Admin
 
