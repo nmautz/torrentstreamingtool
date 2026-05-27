@@ -552,7 +552,7 @@
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
         <div class="min-w-0">
           <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Auto Update</h2>
-          <p class="text-xs text-gray-500 mt-0.5">Periodically pulls the chosen branch from GitHub. When a new commit lands, it runs setup.py (non-interactive), reinstalls the OS service so the supervisor wrapper matches the new code, then reboots the host for a clean restart. Auto-apply waits until the host is idle so a routine update can't interrupt a stream.</p>
+          <p class="text-xs text-gray-500 mt-0.5">Periodically pulls the chosen branch from GitHub. When a new commit lands, it runs setup.py (non-interactive), regenerates the supervisor wrapper script (no UAC — just a file write), then reboots the host for a clean restart on the new code. Auto-apply waits until the host is idle so a routine update can't interrupt a stream.</p>
         </div>
         <button id="auEnabledBtn" onclick="toggleAutoupdate()"
           class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
@@ -1306,7 +1306,7 @@ async function applyUpdateNow(){
       "\nThis will:\n" +
       "  1. git fetch + hard-checkout origin/" + target + " (local edits to tracked files are discarded).\n" +
       "  2. Re-run setup.py (non-interactive).\n" +
-      "  3. Uninstall the old system service and reinstall it from the new code.\n" +
+      "  3. Refresh the supervisor wrapper script in place (no UAC prompt; the OS service entry still points to the same path).\n" +
       "  4. Reboot the host machine for a clean state.\n\n" +
       "Active playback and downloads will be interrupted. Continue?"
   )) return;
@@ -1329,7 +1329,7 @@ async function applyUpdateNow(){
     if(d.service_reinstalled){
       showToast(`Updated to ${d.commit}. Host is rebooting…`);
     } else {
-      showToast(`Updated to ${d.commit}. Service reinstall failed — re-run run.py --install after reboot.`, true);
+      showToast(`Updated to ${d.commit}. Wrapper refresh failed — see the diagnostic panel for details.`, true);
     }
   }catch(_){
     // The host going down tears this response down — expected on success.

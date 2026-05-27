@@ -331,7 +331,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.10.1"
+UI_VERSION = "3.10.2"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -2229,24 +2229,31 @@ async def _run_apply(branch: str, reboot: bool = True) -> dict:
                     "message": f"Updated to {new_commit}.",
                     "commit": new_commit, "reboot_pending": True}
 
-        # Step 3: reinstall the OS service so the wrapper script + registration
-        # come from the freshly-pulled daemon.py.
-        await _set_updater_phase("reinstalling-service",
-                                f"Reinstalling system service from {new_commit}…",
+        # Step 3: refresh the supervisor wrapper script (streamlink_service.py)
+        # from the freshly-pulled daemon._WRAPPER_CONTENT. This is a plain file
+        # write — NO elevation required, no UAC prompt on Windows. The OS-level
+        # service registration (task / plist / unit) keeps pointing to the same
+        # wrapper path, so the reboot brings up the new wrapper code on its own.
+        # Re-registration would require admin on Windows (UAC) and is therefore
+        # incompatible with a fully-automatic update; the wrapper refresh is
+        # enough for the common case.
+        await _set_updater_phase("refreshing-service",
+                                f"Refreshing supervisor wrapper for {new_commit}…",
                                 busy=True)
-        svc = await updater.reinstall_service()
-        # Append the daemon output to the diagnostic buffer alongside setup's.
+        svc = await updater.refresh_service_wrapper()
+        # Append the wrapper output to the diagnostic buffer alongside setup's.
         if svc.get("output"):
             tail = (state.updater_last_output + "\n── service ──\n" + svc["output"])[-8192:]
             state.updater_last_output = tail
         if not svc.get("ok"):
-            # Log + persist but don't bail — proceed to reboot anyway. The user
-            # can SSH in afterwards and `run.py --install` manually if needed,
-            # which is still better than getting stuck pre-reboot.
-            log.warning("Service reinstall failed; rebooting anyway. Error: %s",
+            # Log + persist but don't bail — proceed to reboot anyway. If the
+            # wrapper write genuinely fails (read-only filesystem, missing
+            # daemon.py), the existing wrapper file still runs the new code
+            # because main.py / watchdog.py path references are dynamic.
+            log.warning("Wrapper refresh failed; rebooting anyway. Error: %s",
                        svc.get("error", ""))
             await _persist_updater_state(
-                last_error=f"service reinstall: {svc.get('error', 'unknown')}",
+                last_error=f"wrapper refresh: {svc.get('error', 'unknown')}",
             )
 
         # Step 4: machine reboot. Fire after a short grace so this RPC's HTTP
@@ -2260,6 +2267,8 @@ async def _run_apply(branch: str, reboot: bool = True) -> dict:
         return {"ok": True, "stage": "reboot",
                 "message": f"{msg_prefix} to {new_commit}. Host is rebooting…",
                 "commit": new_commit,
+                # Kept the legacy `service_reinstalled` key name so the admin
+                # UI's success-toast branch doesn't have to change shape.
                 "service_reinstalled": svc.get("ok", False),
                 "service_install_output": svc.get("output", "")}
 

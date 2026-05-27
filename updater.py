@@ -255,31 +255,45 @@ async def run_setup(timeout: float = 900.0) -> dict:
     }
 
 
-async def reinstall_service() -> dict:
-    """Uninstall the OS service then reinstall it.
+async def refresh_service_wrapper() -> dict:
+    """Regenerate the `streamlink_service.py` supervisor wrapper from the
+    freshly-pulled `daemon._WRAPPER_CONTENT`. Does NOT touch the OS-level
+    service registration (Task Scheduler task / launchd plist / systemd unit).
 
-    Why both: an in-place reinstall is technically enough on macOS (launchd
-    `load -w` reloads the plist) and Windows (`schtasks /Create /F` overwrites),
-    but doing an explicit `uninstall` + `install` round-trip:
-      - Regenerates the `streamlink_service.py` wrapper from the (freshly
-        pulled) `daemon._WRAPPER_CONTENT`. Without that the supervisor would
-        keep running the old wrapper code even after a code update.
-      - Clears any stale plist/unit/task entry so the new install is a clean
-        slate — useful when a previous install left the service in a degraded
-        state (failed loads, orphan PIDs, etc.).
-      - Picks up any change to daemon.py itself (service registration logic,
-        env vars passed to the supervisor, file paths) in the new version.
+    Why not full uninstall + reinstall:
+      - On Windows, `daemon.install()` requires admin and tries to UAC-elevate
+        via `ShellExecute(..."runas"...)`. From a service-launched uvicorn
+        there's no interactive desktop to display the UAC prompt, so the call
+        either fails silently or blocks the auto-update on a manual click —
+        which makes the whole flow non-automatic.
+      - The OS service entry references the wrapper script by *path*
+        (`<repo>/streamlink_service.py`). That path is stable across versions,
+        so the supervisor keeps finding the same file. What matters for
+        getting the *new code* running is that the wrapper file's CONTENTS
+        reflect the new `daemon._WRAPPER_CONTENT` — which is a plain file
+        write, no elevation needed (the repo is owned by the user the service
+        runs as).
+      - The reboot at the end of `_run_apply` gives the supervisor a clean
+        process tree on the new wrapper anyway. No `launchctl reload` /
+        `systemctl daemon-reload` is necessary.
 
-    Best-effort: a failed uninstall is logged but doesn't abort the reinstall.
-    Output from daemon.* is captured via a stdout redirect so the admin UI can
-    surface it without a console. All work runs on a worker thread because the
-    daemon helpers are sync (subprocess.run + blocking input on Windows).
+    If `daemon.py` introduces a change that needs a re-registration (e.g.,
+    new plist key, different schtasks arguments), the admin has to run
+    `python run.py --install` manually from an elevated shell after the
+    update. The admin UI's diagnostic panel calls that out.
     """
     try:
         import daemon as _daemon  # type: ignore
     except Exception as exc:
-        log.error("Could not import daemon.py for service reinstall: %s", exc)
+        log.error("Could not import daemon.py for wrapper refresh: %s", exc)
         return {"ok": False, "error": f"Could not import daemon.py: {exc}",
+                "output": ""}
+
+    wrapper_path = getattr(_daemon, "_WRAPPER_PATH", None)
+    wrapper_content = getattr(_daemon, "_WRAPPER_CONTENT", None)
+    if wrapper_path is None or wrapper_content is None:
+        return {"ok": False,
+                "error": "daemon.py is missing _WRAPPER_PATH / _WRAPPER_CONTENT",
                 "output": ""}
 
     def _do_it() -> tuple[bool, str]:
@@ -289,31 +303,45 @@ async def reinstall_service() -> dict:
         ok = False
         with redirect_stdout(buf):
             try:
-                print("── uninstall ──")
-                _daemon.uninstall()
+                # Skip the rewrite if the file is already byte-identical — keeps
+                # mtime stable and gives the admin UI a clearer "no-op" log entry.
+                existing = ""
+                try:
+                    existing = wrapper_path.read_text(encoding="utf-8")
+                except OSError:
+                    pass
+                if existing == wrapper_content:
+                    print(f"Wrapper already up to date: {wrapper_path.name}")
+                    ok = True
+                else:
+                    wrapper_path.write_text(wrapper_content, encoding="utf-8")
+                    try:
+                        wrapper_path.chmod(0o755)
+                    except OSError:
+                        pass   # Windows ignores chmod, that's fine
+                    print(f"Wrote service wrapper → {wrapper_path.name} "
+                          f"({len(wrapper_content)} bytes)")
+                    ok = True
+            except OSError as exc:
+                print(f"[wrapper] write failed: {exc}")
+                ok = False
             except Exception as exc:
-                print(f"[uninstall] error: {exc}")
-            try:
-                print("── install ──")
-                ok = bool(_daemon.install())
-            except Exception as exc:
-                print(f"[install] error: {exc}")
+                print(f"[wrapper] unexpected error: {exc}")
                 ok = False
         return ok, buf.getvalue()
 
     try:
         ok, output = await asyncio.wait_for(
             asyncio.to_thread(_do_it),
-            timeout=300.0,
+            timeout=30.0,
         )
     except asyncio.TimeoutError:
-        return {"ok": False, "error": "service reinstall timed out (5 min)",
+        return {"ok": False, "error": "wrapper refresh timed out",
                 "output": ""}
 
-    log.info("Service reinstall %s (%d bytes of output)",
-             "ok" if ok else "failed", len(output))
+    log.info("Service wrapper refresh %s", "ok" if ok else "failed")
     return {"ok": ok, "output": output,
-            "error": "" if ok else "daemon.install() returned False"}
+            "error": "" if ok else "wrapper refresh failed (see output)"}
 
 
 async def service_is_installed() -> bool:
