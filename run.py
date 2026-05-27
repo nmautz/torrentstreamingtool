@@ -11,6 +11,7 @@ and other venv packages are available without manual activation.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import platform
 import re
@@ -975,40 +976,47 @@ def main():
     _zc = start_mdns_resilient(PORT, ADMIN_PORT if has_cert else 0)
     print()
 
-    # ── HTTPS admin process (port 443) ────────────────────────────────────
-    _https_proc = None
-    if has_cert:
-        _https_proc = subprocess.Popen(
-            [
-                str(uvicorn_bin), "main:app",
-                "--host", "0.0.0.0",
-                "--port", str(ADMIN_PORT),
-                "--ssl-certfile", str(CERT),
-                "--ssl-keyfile", str(KEY),
-                "--log-level", "warning",
-            ],
-            cwd=str(HERE),
+    # ── Launch dashboard (single process so HTTP + HTTPS share AppState) ──
+    # Both servers run in the same asyncio event loop, so module-level state
+    # in main.py is shared. The HTTPS server uses lifespan="off" to avoid
+    # re-running startup hooks (qBit login, background tasks) a second time.
+    import uvicorn as _uvicorn
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+
+    async def _launch():
+        http_cfg = _uvicorn.Config(
+            "main:app",
+            host="0.0.0.0",
+            port=PORT,
+            log_level="warning",
         )
+        http_srv = _uvicorn.Server(http_cfg)
+        http_srv.install_signal_handlers = lambda: None
+
+        coros = [http_srv.serve()]
+
+        if has_cert:
+            https_cfg = _uvicorn.Config(
+                "main:app",
+                host="0.0.0.0",
+                port=ADMIN_PORT,
+                ssl_certfile=str(CERT),
+                ssl_keyfile=str(KEY),
+                log_level="warning",
+                lifespan="off",
+            )
+            https_srv = _uvicorn.Server(https_cfg)
+            https_srv.install_signal_handlers = lambda: None
+            coros.append(https_srv.serve())
+
+        await asyncio.gather(*coros, return_exceptions=True)
 
     try:
-        subprocess.run(
-            [
-                str(uvicorn_bin), "main:app",
-                "--host", "0.0.0.0",
-                "--port", str(PORT),
-                "--log-level", "warning",
-            ],
-            cwd=str(HERE),
-        )
+        asyncio.run(_launch())
     except KeyboardInterrupt:
         print(f"\n  {GRN}✓{RESET}  StreamLink stopped.")
     finally:
-        if _https_proc:
-            try:
-                _https_proc.terminate()
-                _https_proc.wait(timeout=5)
-            except Exception:
-                pass
         if _zc:
             try:
                 _zc.close()
