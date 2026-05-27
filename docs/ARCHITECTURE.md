@@ -46,7 +46,7 @@ All four services (VLC, qBittorrent, Jackett, dashboard) run on the same host ex
 ## Lifecycle
 
 1. **`setup.py`** runs once with system Python. Creates `.venv`, installs deps, detects/installs VLC/qBittorrent/Jackett/Mullvad and ffmpeg/fpcalc, writes `qBittorrent.ini` directly, generates self-signed cert for HTTPS admin, writes `.env`. Optionally registers a system service via `daemon.py`.
-2. **`run.py`** runs with system Python, immediately `os.execv`s into `.venv/bin/python`. Starts VLC (with `--extraintf=http`), qBittorrent, Jackett (local only), checks Mullvad. Starts `watchdog` thread. Launches `uvicorn main:app` on port 80 (and 443 for admin if certs exist). Registers `remote.local` via zeroconf.
+2. **`run.py`** runs with system Python, immediately `os.execv`s into `.venv/bin/python`. Starts VLC (with `--extraintf=http`), qBittorrent, Jackett (local only), checks Mullvad. Starts `watchdog` thread. Launches two uvicorn servers in the same `asyncio.run()` event loop: port 80 serves the canonical `main:app`, port 443 (if certs exist) serves `https_proxy:app` — a thin reverse proxy that forwards every request to `127.0.0.1:80`. Single AppState regardless of port/host. Registers `remote.local` via zeroconf.
 3. **`main.py` lifespan** opens an httpx client to qBittorrent, logs in, then launches four background tasks: `vpn_guard`, `stat_broadcaster`, `library_download_monitor`, `vlc_progress_tracker`.
 4. **Browser connects** → `EventSource('/api/events')` opens. Backend immediately yields a `state` snapshot, then pushes events as state changes.
 

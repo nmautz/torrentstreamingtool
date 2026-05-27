@@ -3523,11 +3523,19 @@ app = FastAPI(title="P2P StreamLink", version="2.0", lifespan=lifespan)
 
 @app.middleware("http")
 async def admin_https_redirect(request: Request, call_next):
-    """Redirect /admin and /api/admin/* to HTTPS when accessed over plain HTTP."""
+    """Redirect /admin and /api/admin/* to HTTPS when accessed over plain HTTP.
+
+    Honours `X-Forwarded-Proto` / `X-Forwarded-Host` so requests arriving via
+    the port-443 reverse proxy (see https_proxy.py) are recognised as already
+    HTTPS — without this, every admin hit through the proxy would redirect to
+    the upstream's `127.0.0.1` host on https, breaking access for the real
+    client and looping.
+    """
     path = request.url.path
     if (path == "/admin" or path.startswith("/admin/") or path.startswith("/api/admin")):
-        if request.url.scheme == "http":
-            host = request.url.hostname
+        proto = (request.headers.get("x-forwarded-proto") or request.url.scheme).lower()
+        if proto == "http":
+            host = request.headers.get("x-forwarded-host") or request.url.hostname
             qs   = ("?" + request.url.query) if request.url.query else ""
             return RedirectResponse(f"https://{host}{path}{qs}", status_code=301)
     return await call_next(request)

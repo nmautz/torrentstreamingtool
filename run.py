@@ -976,10 +976,13 @@ def main():
     _zc = start_mdns_resilient(PORT, ADMIN_PORT if has_cert else 0)
     print()
 
-    # ── Launch dashboard (single process so HTTP + HTTPS share AppState) ──
-    # Both servers run in the same asyncio event loop, so module-level state
-    # in main.py is shared. The HTTPS server uses lifespan="off" to avoid
-    # re-running startup hooks (qBit login, background tasks) a second time.
+    # ── Launch dashboard (single canonical app + HTTPS reverse proxy) ─────
+    # Port 80 serves the real FastAPI app (main:app). Port 443, when certs
+    # exist, serves a thin reverse-proxy app (https_proxy:app) that streams
+    # every request to 127.0.0.1:80. The result: there is exactly ONE
+    # AppState in the process, regardless of whether a client connects via
+    # http://remote.local, http://<lan-ip>, https://remote.local or
+    # https://<lan-ip>. See docs/GOTCHAS.md for the divergence story.
     import uvicorn as _uvicorn
     if str(HERE) not in sys.path:
         sys.path.insert(0, str(HERE))
@@ -1001,14 +1004,13 @@ def main():
 
         if has_cert:
             https_cfg = _uvicorn.Config(
-                "main:app",
+                "https_proxy:app",
                 host="0.0.0.0",
                 port=ADMIN_PORT,
                 ssl_certfile=str(CERT),
                 ssl_keyfile=str(KEY),
                 log_level="warning",
                 log_config=_uv_log_cfg,
-                lifespan="off",
             )
             https_srv = _uvicorn.Server(https_cfg)
             https_srv.install_signal_handlers = lambda: None

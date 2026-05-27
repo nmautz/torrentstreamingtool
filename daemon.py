@@ -145,10 +145,13 @@ try:
 except Exception as exc:
     log.error("mDNS keepalive failed to start: %s", exc)
 
-# Run HTTP (port 80) and HTTPS (port 443) in the SAME asyncio event loop so
-# both servers share the AppState module global in main.py. Two separate
-# processes (the previous approach) had separate memory and showed stale state
-# to clients on the other port.
+# Two uvicorn servers run in the SAME asyncio event loop, but only the HTTP
+# one (port 80) serves the real FastAPI app. The HTTPS one (port 443) serves
+# a tiny reverse-proxy app (https_proxy:app) that streams every request to
+# 127.0.0.1:80 — so there is exactly ONE AppState in the process, no matter
+# which port / hostname a client connects to. This eliminates the state-
+# divergence bugs that plagued the earlier "share module globals between two
+# main:app instances" approach.
 #
 # log_config suppresses uvicorn\'s default dictConfig which adds StreamHandlers
 # pointing at sys.stderr/stdout — those are None in a Task Scheduler service
@@ -157,7 +160,7 @@ _UV_LOG_CFG = {"version": 1, "disable_existing_loggers": False}
 
 async def _launch_servers():
     import uvicorn as _uvicorn
-    log.info("Configuring uvicorn servers (HTTP port 80%s)", ", HTTPS port 443" if _has_cert else "")
+    log.info("Configuring uvicorn servers (HTTP port 80%s)", ", HTTPS proxy port 443" if _has_cert else "")
     http_cfg = _uvicorn.Config(
         "main:app", host="0.0.0.0", port=80,
         log_level="warning", log_config=_UV_LOG_CFG,
@@ -167,10 +170,9 @@ async def _launch_servers():
     coros = [http_srv.serve()]
     if _has_cert:
         https_cfg = _uvicorn.Config(
-            "main:app", host="0.0.0.0", port=443,
+            "https_proxy:app", host="0.0.0.0", port=443,
             ssl_certfile=str(_CERT), ssl_keyfile=str(_KEY),
             log_level="warning", log_config=_UV_LOG_CFG,
-            lifespan="off",
         )
         https_srv = _uvicorn.Server(https_cfg)
         https_srv.install_signal_handlers = lambda: None
