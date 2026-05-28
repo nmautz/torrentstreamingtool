@@ -328,3 +328,21 @@ SSH / RDP.
 
 ---
 
+## Milestone 24 — AI Auto-Generated Subtitles (speech-to-text)
+
+Transcribe audio into a subtitle track for sources that ship none usable, so
+both VLC and the on-device player always have subtitles available. whisper.cpp
+on the host; output is a sidecar `.srt` that reuses the existing sidecar
+plumbing (no manifest/bundle change). Preprocess (prep + overnight) **and**
+on-demand. See [docs/STT.md](docs/STT.md).
+
+- [x] **24.1** New `stt.py` module — `_extract_wav` (ffmpeg → 16 kHz mono PCM), `_run_whisper` (whisper-cli `-osrt`, `-tr` for translate, auto-detect language, stderr progress parse), `generate()` (transcribe in source language always; add an English-translated track when the detected language isn't English). Output `<stem>.<lang>.ai.srt` next to the source. Self-contained low-priority subprocess discipline (`_LOWPRIO_KW` / `_lp`) like analyzer.py.
+- [x] **24.2** Trigger + jobs in `main.py` — `_needs_stt_subs(info, default_lang)` (no text sub / image-only / no language match → generate), `_stt_cfg` + `_canon_lang`, `_stt_jobs` + `_run_stt_job` + `_maybe_start_stt_job` (share the offline-prep semaphore + bulk pause gate), `_ensure_stt_for`. `_list_sidecar_subs` gains an `ai` flag. Post-HLS hook in `_run_offline_job`; overnight backfill for already-cached files in `_enqueue_library_prep`; `state.stt_available` (cached probe).
+- [x] **24.3** Endpoints — `POST /api/library/{id}/generate-subtitles` (on-device, interactive), `POST /api/subtitles/generate` (VLC current file, loads + selects on done), `GET /api/stt-job/{id}` (status + `tracks` + `subs`). `offline-job` done response now also returns `subs[]`.
+- [x] **24.4** Admin — `GET`/`POST /api/admin/stt` + **Auto-Generated Subtitles** card in the System tab: enable toggle, preferred default language, English-translation toggle, unavailable banner. `settings.stt` in library.json.
+- [x] **24.5** Setup — `install_stt_deps` downloads portable whisper.cpp + the multilingual `ggml-base` model into `tools/whisper/` (Windows), brew on macOS, model-only on Linux. `detect_tools` finds binary + model; `.env` gains `_WHISPER_BIN` / `_WHISPER_MODEL`.
+- [x] **24.6** Frontend — VLC subtitle modal **Generate with AI** action + translate checkbox (`generateSubsVlc`), on-device player **AI** button in the sub row (`lpGenerateSubs` → `_lpAttachSidecarSubs`, non-blocking), shared `_pollSttJob`, `sttAvailable` from `/api/state`, "(AI)" labels on generated tracks.
+- [x] **24.7** Docs + version → 4.0.0: new docs/STT.md, CLAUDE.md index, STREAMING.md (post-prep STT hook), SETUP.md (whisper deps + env), API.md (endpoints), GOTCHAS.md (multilingual model + English-only translate), ARCHITECTURE.md (code map), CHANGELOG.
+
+---
+

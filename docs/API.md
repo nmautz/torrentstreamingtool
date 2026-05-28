@@ -120,6 +120,20 @@ Up to 6 profiles. No passwords. Optional 4-digit PIN per profile.
 | GET | `/api/subtitles/search?query=…&lang=…` | Search by movie hash + name. Hash matches sorted first. `lang` is OpenSubtitles 3-letter id (blank = all) |
 | POST | `/api/subtitles/download` | `{download_link, lang}` — host must be `*.opensubtitles.org`. Downloads, gunzips, saves as `<stem>.<lang>.srt` next to the video, calls VLC `addsubtitle` + selects the new track (picks max ES ID after add) |
 
+## AI Subtitles (speech-to-text, whisper.cpp)
+
+Generated subs are sidecar `<stem>.<lang>.ai.srt` files next to the source —
+picked up by VLC and the on-device HLS player through the existing sidecar
+plumbing. Trigger = no usable text subtitle (none, image-only, or none matching
+the admin default language). See [STT.md](STT.md). All return **503** when
+whisper.cpp / its model isn't installed (`state.stt_available` false).
+
+| Method | Path | Notes |
+|--------|------|-------|
+| POST | `/api/library/{id}/generate-subtitles` | `{file_path, translate?}` → interactive STT for a library file (on-device context). `{status:"processing"\|"cached"\|"error", job_id?, progress?}`. Writes sidecars; poll `/api/stt-job/{id}` |
+| POST | `/api/subtitles/generate` | `{translate?}` → interactive STT for the file VLC is currently playing. On completion the sidecar is loaded into VLC + selected. Same response shape |
+| GET | `/api/stt-job/{job_id}` | Poll an STT job — `{status:"pending"\|"processing"\|"paused"\|"done"\|"error", progress (0-1), error, tracks[]}`. On `done` also `subs[]` (the file's full sidecar list incl. generated tracks, each `{name,lang,ai,url}`) |
+
 ## Smart Skip
 
 | Method | Path | Notes |
@@ -138,7 +152,7 @@ compatibility; the user-facing flow is now stream-to-device (the device's
 | Method | Path | Notes |
 |--------|------|-------|
 | POST | `/api/library/{id}/offline-prepare` | `{file_path, profile_id?, bulk?}` → ffprobes the source. If the HLS bundle is already on disk: `{ready:true, master_url, duration_sec, videos[], audios[], subtitles[], skipped_image_subs[], subs[] (on-disk sidecars), saved_tracks{audio_idx,subtitle_idx}}`. Otherwise spawns an HLS prep job: `{ready:false, needs_processing:true, job_id, operation:"hls", subs[], saved_tracks}`. `master_url` → `/api/library/offline-cache/<key>/master.m3u8`, loaded by hls.js (Chrome/FF/Edge) or Safari native. `videos[]` is the ABR ladder `[{idx,name,height,label}]` (master order, idx 0 = original). `bulk:true` ⇒ "prep for later" job that honors the global pause gate; default `false` ⇒ interactive play-on-device, which always runs (an existing paused job for the same file is promoted to interactive). **503 on macOS hosts** (`HLS_AVAILABLE` false) |
-| GET | `/api/library/offline-job/{job_id}` | Poll a prep job — `{status:"pending"\|"processing"\|"done"\|"error", operation:"hls", progress (0-1), error}`. On `done` it also carries the bundle fields: `master_url, duration_sec, videos[], audios[], subtitles[], skipped_image_subs[], bundle_size_bytes`. Progress is parsed from ffmpeg `-progress pipe:1` |
+| GET | `/api/library/offline-job/{job_id}` | Poll a prep job — `{status:"pending"\|"processing"\|"done"\|"error", operation:"hls", progress (0-1), error}`. On `done` it also carries the bundle fields: `master_url, duration_sec, videos[], audios[], subtitles[], skipped_image_subs[], bundle_size_bytes, subs[]` (on-disk sidecars incl. any generated `.ai.srt`). Progress is parsed from ffmpeg `-progress pipe:1` |
 | GET | `/api/library/offline-cache/{cache_key}/{filename}` | Serves one file from an HLS bundle dir — `master.m3u8`, per-rendition `*.m3u8`, `init_*.mp4`, `seg_*.m4s`, `sub_*.vtt`, `meta.json`. `cache_key` is sha256(VERSION \| path \| mtime \| size)[:24] (24 hex); both segments regex-validated (`_CACHE_KEY_RE` / `_BUNDLE_FILE_RE`). Range-aware, correct HLS MIME types |
 | GET | `/api/library/{id}/subtitle?file=…` | Returns a sidecar `.srt`/`.vtt` next to a video file as `text/vtt` (SRT auto-converted by `_srt_to_vtt`). Filename only — no path traversal. Wired straight into `<track src=…>` by the local player |
 | GET | `/api/library/{id}/skip-data?file_path=…` | Read-only intro/credits times for one file (or full map when `file_path` is omitted). Same shape as the admin editor but no auth — any profile that can play the item can read its skip data |
@@ -210,6 +224,8 @@ All require admin auth.
 | POST | `/api/admin/scheduled-reboot` | `{enabled, time:"HH:MM", timezone, idle_minutes}` → saves to `library.json → settings.scheduled_reboot`. Validates HH:MM (24h), clamps `idle_minutes` to 1–720, resets the internal `last_fired` guard. Drives the `scheduled_reboot_loop`: at the configured local time, reboots when idle for `idle_minutes`, else waits and re-checks until idle |
 | GET | `/api/admin/overnight-prep` | `{enabled, start:"HH:MM", end:"HH:MM", timezone, on_end, now, in_window, paused}` — overnight auto stream-prep config + the host's current time in the configured tz and whether the window is open now |
 | POST | `/api/admin/overnight-prep` | `{enabled, start:"HH:MM", end:"HH:MM", timezone, on_end:"pause"\|"continue"}` → saves to `library.json → settings.overnight_prep`. Validates both HH:MM (24h), rejects an empty (start==end) window, resets in-memory window membership. Drives the `overnight_prep_loop`: on entering the window it queues a bulk HLS-prep job for every un-prepped library file; on leaving it either pauses (in-flight file finishes) or continues to completion |
+| GET | `/api/admin/stt` | `{enabled, default_language, translate, available, languages:[{code,name}]}` — AI auto-subtitle config + whether whisper.cpp is installed + the language-picker options |
+| POST | `/api/admin/stt` | `{enabled, default_language, translate}` → saves to `library.json → settings.stt`. `default_language` canonicalized to a 3-letter code ("" = any). When set, files lacking a sub in that language also get one generated. See [STT.md](STT.md) |
 | GET | `/api/admin/logs` | `{log_dir, files:[{name, bytes, mtime}]}` — lists every file in `LOG_DIR` (newest first by mtime). Used by the admin System tab "Server Logs" card |
 | GET | `/api/admin/logs/_bundle` | Streams a ZIP of every file in `LOG_DIR` (deflated). Filename `streamlink-logs-YYYYMMDD-HHMMSS.zip`. 404 if no log files exist |
 | GET | `/api/admin/logs/{name}` | Streams a single log file as an attachment (`text/plain; charset=utf-8`). `{name}` is the basename only — slashes/`..`/absolute paths are rejected and the resolved path must stay within `LOG_DIR` |

@@ -198,6 +198,15 @@ Key decisions:
   [GOTCHAS.md](GOTCHAS.md) for the libass.js deferral. Image-based subs
   (`hdmv_pgs_subtitle`, `dvd_subtitle`, `dvb_subtitle`, `vobsub`) are filtered
   out by `_ffprobe_full` and noted in `meta.json:skipped_image_subs`.
+- **No usable text sub ⇒ AI generation.** After a successful HLS encode,
+  `_run_offline_job` calls `_ensure_stt_for`: if the source has no usable text
+  subtitle (none, image-only, or — per the admin default-language setting — none
+  matching), a whisper.cpp transcription job is queued (bulk, after the encode
+  releases the shared slot). It writes a sidecar `<stem>.<lang>.ai.srt` next to
+  the source, which then surfaces via `_list_sidecar_subs` (the `subs[]` field,
+  also returned by the job-done response) and the on-device player attaches it as
+  a `<track>`. The episode picker's per-row Prep and the **AI** button in the
+  player both feed the same machinery. Full detail in [STT.md](STT.md).
 - **6-second segments, fmp4, independent_segments.** Modern HLS defaults.
   Switching audio/sub mid-stream doesn't require an extra fetch.
 - **The fmp4 init filename is templated explicitly** (`-hls_fmp4_init_filename

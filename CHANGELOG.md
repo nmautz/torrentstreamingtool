@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.0.0] — 2026-05-27
+- **New: AI auto-generated subtitles (speech-to-text).** When a source ships no usable text subtitle — none at all, only image-based (PGS/VOBSUB) tracks, or none matching the admin's preferred language — StreamLink transcribes the audio into a sidecar `.srt` using bundled **whisper.cpp**. The sidecar is picked up by both players through existing plumbing: VLC via `addsubtitle`, the on-device HLS player via `_list_sidecar_subs` → `/api/library/{id}/subtitle`. Non-English audio additionally gets an English-translated track (whisper's translate task is English-only).
+- **Both preprocess and on-demand:** generation runs automatically after HLS stream-prep and during the overnight window (off the playback path), and on demand via a **Generate with AI** action in the VLC subtitle menu and an **AI** button in the on-device player's subtitle row. Generated tracks are labelled “(AI)”.
+- **Admin:** new System-tab card — enable/disable, a **preferred subtitle language** (a missing match triggers generation; "" = only sub-less files), and an English-translation toggle. `GET`/`POST /api/admin/stt`.
+- **Setup:** `setup.py` downloads a portable whisper.cpp build + the multilingual `ggml-base` model into `tools/whisper/` (Windows), or via brew on macOS; paths recorded in `.env` as `_WHISPER_BIN` / `_WHISPER_MODEL`. Optional — declining only disables this feature.
+- **Backend:** new `stt.py` module (audio extract → transcribe/translate at lowered OS priority, sharing the offline-prep concurrency semaphore + pause gate); `POST /api/library/{id}/generate-subtitles`, `POST /api/subtitles/generate`, `GET /api/stt-job/{id}`; `state.stt_available`.
+- **Docs:** new [docs/STT.md](docs/STT.md); [docs/STREAMING.md](docs/STREAMING.md), [docs/SETUP.md](docs/SETUP.md), [docs/API.md](docs/API.md), [docs/GOTCHAS.md](docs/GOTCHAS.md), [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) updated.
+
 ## [3.13.0] — 2026-05-27
 - **New: "Reset Hard" button in the admin Updates tab.** Recovery for a wedged or diverged checkout — runs `git fetch` + `git reset --hard origin/<current-branch>`, forcing the working tree back onto the remote and discarding any local commits and uncommitted edits to tracked files. Distinct from Switch Branch: it stays on the current branch and never runs setup.py or reboots. Confirm-gated.
 - **Preserves local data:** no `git clean`, so untracked / gitignored files (`library.json`, `.env`, `.offline_cache/`, `.background/`) survive the reset.

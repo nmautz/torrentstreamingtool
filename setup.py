@@ -251,6 +251,34 @@ def fpcalc_candidates() -> list[str]:
     return portable + ["/usr/bin/fpcalc", "/usr/local/bin/fpcalc", "fpcalc"]
 
 
+def whisper_candidates() -> list[str]:
+    portable = _portable_matches("whisper", "whisper-cli.exe", "whisper-cli",
+                                 "main.exe", "whisper.exe")
+    if SYSTEM == "Darwin":
+        return portable + ["/opt/homebrew/bin/whisper-cli", "/usr/local/bin/whisper-cli",
+                           "whisper-cli", "whisper-cpp"]
+    if SYSTEM == "Windows":
+        return portable + ["whisper-cli.exe", "whisper-cli"]
+    return portable + ["/usr/bin/whisper-cli", "/usr/local/bin/whisper-cli",
+                       "whisper-cli", "whisper-cpp"]
+
+
+def whisper_model_candidates() -> list[str]:
+    """Locate a downloaded GGML model under ./tools/whisper/ (any ggml-*.bin)."""
+    base = TOOLS_DIR / "whisper"
+    if not base.exists():
+        return []
+    return [str(p) for p in base.rglob("ggml-*.bin") if p.is_file()]
+
+
+def whisper_install_hint() -> str:
+    if SYSTEM == "Darwin":
+        return "brew install whisper-cpp  (then re-run setup.py to download the model)"
+    if SYSTEM == "Windows":
+        return "let setup.py download the portable whisper.cpp build, or grab it from https://github.com/ggml-org/whisper.cpp/releases"
+    return "build whisper.cpp (https://github.com/ggml-org/whisper.cpp) so `whisper-cli` is on PATH"
+
+
 def chromaprint_install_hint() -> str:
     if SYSTEM == "Darwin":
         return "brew install ffmpeg chromaprint"
@@ -267,6 +295,16 @@ FFMPEG_WIN_URL  = "https://www.gyan.dev/ffmpeg/builds/ffmpeg-release-essentials.
 FPCALC_WIN_URL  = "https://github.com/acoustid/chromaprint/releases/download/v1.5.1/chromaprint-fpcalc-1.5.1-windows-x86_64.zip"
 FPCALC_LINUX_URL = "https://github.com/acoustid/chromaprint/releases/download/v1.5.1/chromaprint-fpcalc-1.5.1-linux-x86_64.tar.gz"
 FPCALC_MAC_URL   = "https://github.com/acoustid/chromaprint/releases/download/v1.5.1/chromaprint-fpcalc-1.5.1-macos-x86_64.tar.gz"
+
+# whisper.cpp — portable Windows build (CPU) + a multilingual GGML model used by
+# the auto-subtitle (STT) feature. The model MUST be multilingual (not *.en) so
+# whisper's translate task can emit English from foreign audio. ggml-base is the
+# size/quality sweet spot for overnight bulk prep; admins can swap in a larger
+# model by dropping it in tools/whisper/ and pointing _WHISPER_MODEL at it.
+WHISPER_VERSION    = "1.7.4"
+WHISPER_WIN_URL    = f"https://github.com/ggml-org/whisper.cpp/releases/download/v{WHISPER_VERSION}/whisper-bin-x64.zip"
+WHISPER_MODEL_NAME = "ggml-base.bin"
+WHISPER_MODEL_URL  = f"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{WHISPER_MODEL_NAME}"
 
 
 def _download_with_progress(url: str, dest: Path) -> bool:
@@ -383,6 +421,104 @@ def _portable_install_unix(system: str) -> dict:
         tmp_tar.unlink(missing_ok=True)
 
     return result
+
+
+def _download_whisper_model() -> Optional[str]:
+    """Download the multilingual GGML model into tools/whisper/models/. Returns
+    the saved path or None. Shared across platforms — the model is portable."""
+    model_dir = TOOLS_DIR / "whisper" / "models"
+    model_dir.mkdir(parents=True, exist_ok=True)
+    dest = model_dir / WHISPER_MODEL_NAME
+    if dest.exists() and dest.stat().st_size > 1_000_000:
+        ok(f"whisper model already present → {dest}")
+        return str(dest)
+    note(f"Downloading whisper model {WHISPER_MODEL_NAME} (~148 MB) …")
+    if _download_with_progress(WHISPER_MODEL_URL, dest):
+        ok(f"whisper model → {dest}")
+        return str(dest)
+    warn("whisper model download failed.")
+    return None
+
+
+def _portable_install_whisper_windows() -> dict:
+    """Download the portable whisper.cpp Windows build + model under ./tools/whisper/.
+
+    Returns {"whisper": path or None, "whisper_model": path or None}.
+    """
+    result: dict = {"whisper": None, "whisper_model": None}
+    TOOLS_DIR.mkdir(exist_ok=True)
+    tmp_zip = TOOLS_DIR / "_dl_whisper.zip"
+    wh_dir = TOOLS_DIR / "whisper"
+    if _download_with_progress(WHISPER_WIN_URL, tmp_zip):
+        if _extract_archive(tmp_zip, wh_dir):
+            wh_path = (_find_in_tree(wh_dir, ["whisper-cli.exe"])
+                       or _find_in_tree(wh_dir, ["main.exe"])
+                       or _find_in_tree(wh_dir, ["whisper.exe"]))
+            if wh_path:
+                result["whisper"] = wh_path
+                ok(f"whisper.cpp → {wh_path}")
+            else:
+                warn("whisper-cli.exe not found inside the extracted archive.")
+        tmp_zip.unlink(missing_ok=True)
+    result["whisper_model"] = _download_whisper_model()
+    return result
+
+
+# ── Auto-install whisper.cpp + model (auto-subtitle / STT dep) ─────────────
+def install_stt_deps(tools: dict) -> dict:
+    """Offer to install whisper.cpp + a multilingual GGML model for the
+    auto-subtitle (speech-to-text) feature. No-op if both are already detected.
+
+    whisper.cpp generates a sidecar .srt for sources that ship no usable text
+    subtitle. It's optional — declining only disables auto/AI subtitles; every
+    other feature works without it.
+    """
+    if tools.get("whisper") and tools.get("whisper_model"):
+        return tools
+
+    header("Auto-Subtitle Dependencies (whisper.cpp + model)")
+    note("Used to transcribe audio into subtitles when a file has none. Optional.")
+    missing = []
+    if not tools.get("whisper"):       missing.append("whisper.cpp")
+    if not tools.get("whisper_model"): missing.append("GGML model")
+    warn(f"Missing: {', '.join(missing)}")
+
+    refreshed = dict(tools)
+    if SYSTEM == "Windows":
+        if not ask_bool("Download portable whisper.cpp + base model into ./tools/ (~180 MB)?",
+                        default=True):
+            note(f"Skipped. Enable later with: {whisper_install_hint()}")
+            return tools
+        portable = _portable_install_whisper_windows()
+        if portable.get("whisper"):       refreshed["whisper"] = portable["whisper"]
+        if portable.get("whisper_model"): refreshed["whisper_model"] = portable["whisper_model"]
+    elif SYSTEM == "Darwin":
+        brew = find_exe("brew", "/opt/homebrew/bin/brew", "/usr/local/bin/brew")
+        if brew and not refreshed.get("whisper"):
+            if ask_bool(f"Run `{brew} install whisper-cpp` now?", default=True):
+                try:
+                    subprocess.run([brew, "install", "whisper-cpp"], check=True)
+                except subprocess.CalledProcessError as e:
+                    warn(f"brew install failed (exit {e.returncode})")
+            refreshed["whisper"] = find_exe(*whisper_candidates())
+        elif not brew:
+            warn("Homebrew not found — install whisper.cpp manually, then re-run setup.py.")
+            note(f"Hint: {whisper_install_hint()}")
+        if ask_bool("Download the multilingual whisper model (~148 MB) now?", default=True):
+            refreshed["whisper_model"] = _download_whisper_model()
+    else:
+        # Linux: no reliable prebuilt; the model is still portable.
+        if not refreshed.get("whisper"):
+            warn("No prebuilt whisper.cpp for Linux — build it so `whisper-cli` is on PATH.")
+            note(f"Hint: {whisper_install_hint()}")
+        if ask_bool("Download the multilingual whisper model (~148 MB) now?", default=True):
+            refreshed["whisper_model"] = _download_whisper_model()
+
+    if refreshed.get("whisper") and refreshed.get("whisper_model"):
+        ok("Auto-subtitles ready.")
+    else:
+        note("Auto-subtitles will stay disabled until both the binary and model are present.")
+    return refreshed
 
 
 # ── Auto-install ffmpeg + chromaprint (Smart Skip deps) ────────────────────
@@ -964,6 +1100,7 @@ def detect_tools() -> dict:
         ("jackett", "Jackett",       jackett_candidates(), "https://github.com/Jackett/Jackett/releases"),
         ("ffmpeg",  "ffmpeg",        ffmpeg_candidates(),  "https://ffmpeg.org/download.html"),
         ("fpcalc",  "fpcalc (chromaprint)", fpcalc_candidates(), "https://acoustid.org/chromaprint"),
+        ("whisper", "whisper.cpp",   whisper_candidates(), "https://github.com/ggml-org/whisper.cpp/releases"),
     ]
 
     for key, label, candidates, url in checks:
@@ -973,6 +1110,12 @@ def detect_tools() -> dict:
             ok(f"{label}: {path}")
         else:
             warn(f"{label} not found — download: {url}")
+
+    # whisper.cpp model is a data file, not an exe — detect it separately.
+    model_path = next(iter(whisper_model_candidates()), None)
+    tools["whisper_model"] = model_path
+    if model_path:
+        ok(f"whisper model: {model_path}")
 
     if not tools.get("ffmpeg") or not tools.get("fpcalc"):
         note(f"Smart Skip (intro/credits auto-detection) needs both ffmpeg and fpcalc.")
@@ -1214,7 +1357,8 @@ def write_env(cfg: dict, tools: dict) -> None:
     lines += ["", "# Auto-detected binary paths (used by run.py)"]
     mapping = {"vlc": "_VLC_BIN", "qbit": "_QBIT_BIN",
                "jackett": "_JACKETT_BIN", "mullvad": "_MULLVAD_BIN",
-               "ffmpeg": "_FFMPEG_BIN", "fpcalc": "_FPCALC_BIN"}
+               "ffmpeg": "_FFMPEG_BIN", "fpcalc": "_FPCALC_BIN",
+               "whisper": "_WHISPER_BIN", "whisper_model": "_WHISPER_MODEL"}
     for key, env_key in mapping.items():
         if tools.get(key):
             lines.append(f"{env_key}={tools[key]}")
@@ -1257,7 +1401,8 @@ def merge_tool_paths(tools: dict) -> None:
     lines = ENV.read_text(encoding="utf-8", errors="replace").splitlines()
     mapping = {"vlc": "_VLC_BIN", "qbit": "_QBIT_BIN",
                "jackett": "_JACKETT_BIN", "mullvad": "_MULLVAD_BIN",
-               "ffmpeg": "_FFMPEG_BIN", "fpcalc": "_FPCALC_BIN"}
+               "ffmpeg": "_FFMPEG_BIN", "fpcalc": "_FPCALC_BIN",
+               "whisper": "_WHISPER_BIN", "whisper_model": "_WHISPER_MODEL"}
     desired = {env_key: tools[key] for key, env_key in mapping.items() if tools.get(key)}
 
     out: list[str] = []
@@ -1310,6 +1455,7 @@ def main():
         tools = install_core_deps(tools)
         install_jackett_service()
         tools = install_smart_skip_deps(tools)
+        tools = install_stt_deps(tools)
 
     existing = parse_existing_env() if ENV.exists() else {}
     reuse_env = False

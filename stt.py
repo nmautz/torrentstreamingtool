@@ -1,0 +1,267 @@
+"""Speech-to-text subtitle generation via whisper.cpp.
+
+When a source file has no usable text subtitle track (none at all, only
+image-based PGS/VOBSUB, or none matching the admin's preferred language), this
+module transcribes the audio into a sidecar `.srt` placed next to the source —
+which both VLC (`addsubtitle`) and the HLS on-device player (`_list_sidecar_subs`
+→ `/api/library/{id}/subtitle`) pick up through existing plumbing. No bundle or
+manifest changes are needed.
+
+The whisper.cpp CLI + a multilingual GGML model are bundled by setup.py under
+`tools/whisper/` (paths recorded in `.env` as `_WHISPER_BIN` / `_WHISPER_MODEL`).
+A multilingual model is required: whisper's translate task only emits English,
+so for non-English audio we additionally produce an English-translated track.
+
+All subprocess work runs blocking (call via asyncio.to_thread) at lowered OS
+priority — same discipline as analyzer.py / HLS prep — so a transcription never
+starves the StreamLink server, which runs at raised priority and would otherwise
+pass that priority on to children.
+"""
+from __future__ import annotations
+
+import os
+import re
+import shutil
+import subprocess
+import tempfile
+from pathlib import Path
+from typing import Callable, Optional
+
+STT_VERSION = 1
+
+# Marker embedded in generated sidecar names: "<stem>.<lang>.ai.srt". The `.ai`
+# segment distinguishes machine-generated subs from real/downloaded ones so we
+# can detect "already generated" and the UI can flag them.
+AI_SUFFIX = "ai"
+
+# Run whisper at lowered OS priority so a transcription yields CPU to the web
+# server / VLC / qBit. Windows: BELOW_NORMAL_PRIORITY_CLASS via creationflags.
+# POSIX: prepend `nice -n 10`. Mirrors analyzer._LOWPRIO_KW / main._FFMPEG_*.
+_LOWPRIO_KW: dict = {}
+if os.name == "nt":
+    _LOWPRIO_KW["creationflags"] = 0x00004000  # BELOW_NORMAL_PRIORITY_CLASS
+
+# Cap whisper worker threads. It runs below-normal, but an unbounded thread
+# count still spikes scheduler pressure; 4 keeps headroom on typical hosts.
+STT_THREADS = 4
+
+
+def _lp(cmd: list[str]) -> list[str]:
+    """Prefix `nice -n 10` on POSIX (when available) so the child de-prioritizes."""
+    if os.name == "posix" and shutil.which("nice"):
+        return ["nice", "-n", "10", *cmd]
+    return cmd
+
+
+def _env_bin(env_key: str) -> Optional[str]:
+    """Read a path from .env. Falls back to PATH lookup of the bare name."""
+    env_file = Path(__file__).parent / ".env"
+    if env_file.exists():
+        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line.startswith(f"{env_key}="):
+                val = line.split("=", 1)[1].strip()
+                if val and Path(val).exists():
+                    return val
+    return None
+
+
+def whisper_bin() -> Optional[str]:
+    return (_env_bin("_WHISPER_BIN")
+            or shutil.which("whisper-cli")
+            or shutil.which("whisper-cpp"))
+
+
+def whisper_model() -> Optional[str]:
+    p = _env_bin("_WHISPER_MODEL")
+    return p if p and Path(p).exists() else None
+
+
+def ffmpeg_bin() -> Optional[str]:
+    return _env_bin("_FFMPEG_BIN") or shutil.which("ffmpeg")
+
+
+def is_available() -> bool:
+    """True iff every piece STT needs is present: whisper binary, a model, ffmpeg."""
+    return bool(whisper_bin() and whisper_model() and ffmpeg_bin())
+
+
+# whisper.cpp reports detected language as ISO 639-1 (2-letter). Map the common
+# ones to the 3-letter codes the rest of the app (_LANG_NAMES, sidecar lang
+# tags) speaks. Unknown codes pass through unchanged.
+_ISO1_TO_ISO3 = {
+    "en": "eng", "ja": "jpn", "es": "spa", "fr": "fre", "de": "ger",
+    "it": "ita", "pt": "por", "ru": "rus", "zh": "chi", "ko": "kor",
+    "ar": "ara", "hi": "hin", "nl": "nld", "sv": "swe", "fi": "fin",
+    "no": "nor", "da": "dan", "pl": "pol", "tr": "tur", "uk": "ukr",
+    "th": "tha", "vi": "vie",
+}
+
+
+def _to_iso3(code: str) -> str:
+    code = (code or "").strip().lower()
+    if len(code) == 3:
+        return code
+    return _ISO1_TO_ISO3.get(code, code or "und")
+
+
+def has_ai_subs(src: Path) -> bool:
+    """True if a previously-generated `<stem>.*.ai.srt` already exists next to src."""
+    try:
+        for p in src.parent.iterdir():
+            if (p.is_file() and p.suffix.lower() == ".srt"
+                    and p.stem.startswith(src.stem + ".")
+                    and p.stem.endswith("." + AI_SUFFIX)):
+                return True
+    except OSError:
+        pass
+    return False
+
+
+def _extract_wav(src: Path, out_wav: Path) -> bool:
+    """Decode the source's first audio track to 16 kHz mono PCM — whisper's
+    required input format. Returns True on success."""
+    ff = ffmpeg_bin()
+    if not ff:
+        return False
+    cmd = _lp([
+        ff, "-y", "-loglevel", "error",
+        "-i", str(src),
+        "-map", "0:a:0", "-vn", "-sn",
+        "-ac", "1", "-ar", "16000", "-c:a", "pcm_s16le",
+        str(out_wav),
+    ])
+    try:
+        proc = subprocess.run(cmd, capture_output=True, timeout=3600, **_LOWPRIO_KW)
+    except (subprocess.TimeoutExpired, OSError):
+        return False
+    return proc.returncode == 0 and out_wav.exists() and out_wav.stat().st_size > 0
+
+
+# whisper.cpp prints progress like "...progress = 42%" and the detected language
+# like "auto-detected language: en (p = 0.97)".
+_PROGRESS_RE = re.compile(r"progress\s*=\s*(\d+)%")
+_DETECT_RE   = re.compile(r"auto-detected language:\s*([a-z]{2,3})")
+
+
+def _run_whisper(
+    wav: Path, out_base: Path, *,
+    translate: bool,
+    language: str = "auto",
+    progress_cb: Optional[Callable[[float], None]] = None,
+) -> tuple[bool, str]:
+    """Run whisper-cli, writing `<out_base>.srt`. Returns (ok, detected_iso1).
+
+    `language="auto"` lets whisper detect; `translate=True` emits English
+    regardless of source language. Streams stderr to surface progress + the
+    detected language without buffering the whole run.
+    """
+    binp = whisper_bin()
+    model = whisper_model()
+    if not binp or not model:
+        return False, ""
+    cmd = _lp([
+        binp,
+        "-m", model,
+        "-f", str(wav),
+        "-l", language or "auto",
+        "-t", str(STT_THREADS),
+        "-osrt",
+        "-of", str(out_base),
+        "-pp",            # print progress to stderr
+    ])
+    if translate:
+        cmd.append("-tr")
+
+    detected = ""
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+            text=True, **_LOWPRIO_KW,
+        )
+    except OSError:
+        return False, ""
+    assert proc.stderr is not None
+    for line in proc.stderr:
+        m = _DETECT_RE.search(line)
+        if m:
+            detected = m.group(1)
+        if progress_cb:
+            pm = _PROGRESS_RE.search(line)
+            if pm:
+                try:
+                    progress_cb(min(1.0, int(pm.group(1)) / 100.0))
+                except Exception:
+                    pass
+    proc.wait()
+    srt = out_base.with_suffix(".srt")
+    return (proc.returncode == 0 and srt.exists()), detected
+
+
+def generate(
+    src: Path, *,
+    want_translation: bool = True,
+    progress_cb: Optional[Callable[[float], None]] = None,
+) -> dict:
+    """Transcribe `src` to sidecar `.srt`(s) next to it.
+
+    Always produces a source-language track (`<stem>.<lang>.ai.srt`). If the
+    detected language isn't English and `want_translation` is set, also produces
+    an English-translated track (`<stem>.eng.ai.srt`).
+
+    Returns {"tracks": [{"path","lang","translated"}], "error": str|None}.
+    `tracks` is empty when nothing was produced.
+    """
+    if not is_available():
+        return {"tracks": [], "error": "whisper.cpp or its model is not installed on the host."}
+    if not src.exists():
+        return {"tracks": [], "error": "Source file not on disk."}
+
+    tracks: list[dict] = []
+    tmpdir = Path(tempfile.mkdtemp(prefix="stt_"))
+    try:
+        wav = tmpdir / "audio.wav"
+        # Audio extraction is a small, bounded fraction of total time; reserve
+        # the bulk of the progress bar for transcription.
+        if progress_cb:
+            progress_cb(0.02)
+        if not _extract_wav(src, wav):
+            return {"tracks": [], "error": "ffmpeg could not extract audio for transcription."}
+
+        # Pass 1 — transcribe in the spoken language (auto-detect).
+        base1 = tmpdir / "transcribe"
+        ok1, detected = _run_whisper(
+            wav, base1, translate=False, language="auto",
+            progress_cb=(lambda p: progress_cb(0.05 + 0.65 * p)) if progress_cb else None,
+        )
+        if not ok1:
+            return {"tracks": [], "error": "Transcription failed."}
+        lang3 = _to_iso3(detected) if detected else "und"
+        dest1 = src.with_name(f"{src.stem}.{lang3}.{AI_SUFFIX}.srt")
+        try:
+            shutil.move(str(base1.with_suffix(".srt")), str(dest1))
+        except OSError as e:
+            return {"tracks": [], "error": f"Could not save subtitle file: {e}"}
+        tracks.append({"path": str(dest1), "lang": lang3, "translated": False})
+
+        # Pass 2 — English translation, only when the audio isn't already English.
+        is_english = detected in ("en", "eng") or lang3 == "eng"
+        if want_translation and not is_english:
+            base2 = tmpdir / "translate"
+            ok2, _ = _run_whisper(
+                wav, base2, translate=True, language="auto",
+                progress_cb=(lambda p: progress_cb(0.70 + 0.28 * p)) if progress_cb else None,
+            )
+            if ok2:
+                dest2 = src.with_name(f"{src.stem}.eng.{AI_SUFFIX}.srt")
+                try:
+                    shutil.move(str(base2.with_suffix(".srt")), str(dest2))
+                    tracks.append({"path": str(dest2), "lang": "eng", "translated": True})
+                except OSError:
+                    pass  # the transcription track still succeeded
+
+        if progress_cb:
+            progress_cb(1.0)
+        return {"tracks": tracks, "error": None}
+    finally:
+        shutil.rmtree(tmpdir, ignore_errors=True)

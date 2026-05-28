@@ -542,6 +542,53 @@
         </button>
       </div>
     </div>
+
+    <!-- Auto-generated subtitles (speech-to-text) -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Auto-Generated Subtitles (AI)</h2>
+          <p class="text-xs text-gray-500 mt-0.5">Transcribes audio into a subtitle track for files that ship none usable — during stream-prep / overnight, or on demand from the player. Uses whisper.cpp on the host (slower than real-time; best left to the overnight window).</p>
+        </div>
+        <button id="sttEnabledBtn" onclick="toggleStt()"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+                 bg-gray-800 border-gray-700 text-gray-400 hover:text-white">
+          …
+        </button>
+      </div>
+
+      <div id="sttUnavailable" class="hidden px-5 py-3 border-b border-gray-800 text-[11px] text-amber-400 bg-amber-950/30">
+        whisper.cpp or its model isn't installed on this host — generation is disabled. Re-run <span class="font-mono">setup.py</span> to add it.
+      </div>
+
+      <div class="px-5 py-4 border-b border-gray-800 grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div class="space-y-1.5">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Preferred Subtitle Language</label>
+          <select id="sttLang"
+            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-indigo-500 outline-none">
+            <option value="">Any (only generate when none at all)</option>
+          </select>
+          <p class="text-[10px] text-gray-600">When set, files lacking a subtitle in this language also get one generated. Note: whisper can only translate <em>to</em> English, so for other targets it transcribes the spoken language.</p>
+        </div>
+        <div class="space-y-1.5">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">English Translation</label>
+          <select id="sttTranslate"
+            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-indigo-500 outline-none">
+            <option value="1">Add an English track for non-English audio</option>
+            <option value="0">Transcribe only (no translation)</option>
+          </select>
+          <p class="text-[10px] text-gray-600">Doubles transcription time for foreign-language audio.</p>
+        </div>
+      </div>
+
+      <div class="px-5 py-4 flex items-center justify-between gap-3">
+        <div id="sttStatus" class="text-[11px] text-gray-600 min-w-0"></div>
+        <button id="sttSaveBtn" onclick="saveStt()"
+          class="flex-shrink-0 bg-indigo-600 hover:bg-indigo-500 px-5 py-2.5 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">
+          Save
+        </button>
+      </div>
+    </div>
   </div>
 
   <!-- ── Updates Tab ──────────────────────────────────────────────────────────── -->
@@ -867,7 +914,7 @@ function switchTab(tab){
   if(tab==="skip")       loadSkipPanel();
   if(tab==="offline")    loadOfflineCache();
   if(tab==="background") loadBackgroundVideo();
-  if(tab==="system")   { loadScheduledReboot(); loadOvernightPrep(); loadLogs(); }
+  if(tab==="system")   { loadScheduledReboot(); loadOvernightPrep(); loadStt(); loadLogs(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
 }
@@ -1148,6 +1195,86 @@ async function saveOvernightPrep(){
     }
     showToast(_opEnabled ? "Overnight prep saved." : "Overnight prep disabled.");
     await loadOvernightPrep();
+  }catch(_){
+    showToast("Save failed.", true);
+  }finally{
+    btn.disabled = false;
+  }
+}
+
+// ── Auto-Generated Subtitles (STT) ─────────────────────────────────────────────
+let _sttEnabled = true;
+
+function _renderSttEnabled(){
+  const btn = document.getElementById("sttEnabledBtn");
+  if(!btn) return;
+  if(_sttEnabled){
+    btn.textContent = "Enabled";
+    btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-emerald-950 border-emerald-700 text-emerald-300 hover:bg-emerald-900";
+  } else {
+    btn.textContent = "Disabled";
+    btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white";
+  }
+}
+
+async function loadStt(){
+  try{
+    const r = await fetch("/api/admin/stt", {headers: authHeader()});
+    if(!r.ok) return;
+    const d = await r.json();
+    _sttEnabled = !!d.enabled;
+    _renderSttEnabled();
+    // Populate the language picker (server sends 3-letter code + display name).
+    const langSel = document.getElementById("sttLang");
+    if(langSel && langSel.options.length <= 1 && Array.isArray(d.languages)){
+      for(const l of d.languages){
+        const o = document.createElement("option");
+        o.value = l.code; o.textContent = l.name;
+        langSel.appendChild(o);
+      }
+    }
+    if(langSel) langSel.value = d.default_language || "";
+    document.getElementById("sttTranslate").value = d.translate === false ? "0" : "1";
+    document.getElementById("sttUnavailable").classList.toggle("hidden", !!d.available);
+    const status = document.getElementById("sttStatus");
+    if(!d.available){
+      status.textContent = "Unavailable — whisper.cpp not installed.";
+    } else if(d.enabled){
+      status.textContent = d.default_language
+        ? `On — generates when no “${d.default_language.toUpperCase()}” subtitle exists.`
+        : "On — generates only for files with no usable subtitle.";
+    } else {
+      status.textContent = "Auto-generation is off.";
+    }
+  }catch(_){}
+}
+
+function toggleStt(){
+  _sttEnabled = !_sttEnabled;
+  _renderSttEnabled();
+}
+
+async function saveStt(){
+  const btn = document.getElementById("sttSaveBtn");
+  const body = {
+    enabled:          _sttEnabled,
+    default_language: document.getElementById("sttLang").value || "",
+    translate:        document.getElementById("sttTranslate").value !== "0",
+  };
+  btn.disabled = true;
+  try{
+    const r = await fetch("/api/admin/stt",{
+      method:"POST",
+      headers:{...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify(body),
+    });
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      showToast(`Save failed: ${d.detail || r.status}`, true);
+      return;
+    }
+    showToast(_sttEnabled ? "Subtitle generation saved." : "Subtitle generation disabled.");
+    await loadStt();
   }catch(_){
     showToast("Save failed.", true);
   }finally{

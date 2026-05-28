@@ -41,6 +41,7 @@ from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 import analyzer
+import stt
 import updater
 
 
@@ -556,6 +557,9 @@ def state_snapshot() -> dict:
         "analysis_jobs": state.analysis_jobs,
         # False on macOS hosts — the UI hides stream-to-device / Prep affordances.
         "hls_available": HLS_AVAILABLE,
+        # True ⇒ whisper.cpp + a model are installed; drives the "Generate subtitles
+        # (AI)" affordance in the subtitle menus. See docs/STT.md.
+        "stt_available": _stt_available(),
         # True ⇒ bulk stream-prep is paused (drives the global prep bar's Resume control).
         "prep_paused": state.prep_paused,
         # YouTube-on-TV: when active, the dashboard routes its player controls to
@@ -1976,6 +1980,38 @@ def _overnight_prep_cfg(lib: dict) -> dict:
         "timezone": str(cfg.get("timezone", "America/Los_Angeles")),
         "on_end":   on_end,
     }
+
+
+def _stt_cfg(lib: dict) -> dict:
+    """Read settings.stt (auto subtitle generation) with defaults.
+
+    `default_language` is a 3-letter code (or "" = any). When set, a source with
+    text subtitles but none in that language still triggers generation; when
+    blank, only a source with NO usable text subtitle does. `translate` adds an
+    English track for non-English audio (whisper can only translate TO English).
+    """
+    cfg = (lib.get("settings", {}) or {}).get("stt") or {}
+    return {
+        "enabled":          bool(cfg.get("enabled", True)),
+        "default_language": str(cfg.get("default_language", "")).strip().lower(),
+        "translate":        bool(cfg.get("translate", True)),
+    }
+
+
+# Canonicalize a language tag so 2- and 3-letter spellings of the same language
+# compare equal (en/eng, ja/jpn, …). Anything unknown maps to itself.
+_LANG_CANON = {
+    "en": "eng", "ja": "jpn", "es": "spa", "esp": "spa", "fr": "fre", "fra": "fre",
+    "de": "ger", "deu": "ger", "it": "ita", "pt": "por", "ru": "rus",
+    "zh": "chi", "zho": "chi", "ko": "kor", "ar": "ara", "hi": "hin",
+    "nl": "nld", "sv": "swe", "fi": "fin", "no": "nor", "da": "dan",
+    "pl": "pol", "tr": "tur", "uk": "ukr", "th": "tha", "vi": "vie",
+}
+
+
+def _canon_lang(code: str) -> str:
+    code = (code or "").strip().lower()
+    return _LANG_CANON.get(code, code)
 
 
 def _hhmm_to_min(s: str) -> Optional[int]:
@@ -3670,6 +3706,12 @@ class OvernightPrepReq(BaseModel):
     end: str = "06:00"                         # local HH:MM in `timezone` — window closes
     timezone: str = "America/Los_Angeles"     # IANA name; "" = system local
     on_end: str = "pause"                      # "pause" ⇒ stop at window end · "continue" ⇒ run to completion
+
+
+class SttConfigReq(BaseModel):
+    enabled: bool = True
+    default_language: str = ""                 # 3-letter code, or "" = any text sub is acceptable
+    translate: bool = True                     # also emit an English track for non-English audio
 
 
 class PrepPauseReq(BaseModel):
@@ -7097,6 +7139,35 @@ async def admin_set_overnight_prep(
     return JSONResponse({"ok": True, **cfg})
 
 
+@app.get("/api/admin/stt")
+async def admin_get_stt(request: Request) -> JSONResponse:
+    """Return the auto-subtitle (STT) config + whether the host can actually run
+    it, plus the language options for the default-language picker."""
+    _require_admin(request)
+    cfg = _stt_cfg(await get_library())
+    cfg["available"] = _stt_available()
+    cfg["languages"] = [{"code": c, "name": n}
+                        for c, n in sorted(_LANG_NAMES.items(), key=lambda kv: kv[1])
+                        if n and len(c) == 3]
+    return JSONResponse(cfg)
+
+
+@app.post("/api/admin/stt")
+async def admin_set_stt(request: Request, body: SttConfigReq) -> JSONResponse:
+    """Save the STT config. `default_language` is canonicalized to a 3-letter
+    code; "" means any text subtitle satisfies (only sub-less files trigger)."""
+    _require_admin(request)
+    lib = await get_library()
+    s = lib.setdefault("settings", {}).setdefault("stt", {})
+    s["enabled"]          = bool(body.enabled)
+    s["default_language"] = _canon_lang(body.default_language) if body.default_language.strip() else ""
+    s["translate"]        = bool(body.translate)
+    await put_library(lib)
+    cfg = _stt_cfg(lib)
+    cfg["available"] = _stt_available()
+    return JSONResponse({"ok": True, **cfg})
+
+
 # ── Routes: Auto-Updater ──────────────────────────────────────────────────────
 # Periodic git-pull + setup-rerun + service-restart, gated to the main / beta /
 # alpha branches. State lives in library.json → settings.autoupdate; in-flight
@@ -7605,6 +7676,8 @@ def _raise_own_priority() -> None:
 # (c) headless containers without /dev/nvidia*. We fall back to libx264 silently.
 _nvenc_probe: dict[str, bool] = {}
 _offline_jobs: dict[str, dict] = {}   # job_id → {id, src, out, status, operation, progress, error, started_at}
+_stt_jobs: dict[str, dict] = {}       # job_id → {id, src, item_id, status, progress, error, tracks, ...}
+_stt_available_probe: dict[str, bool] = {}   # cached stt.is_available() (see _stt_available)
 
 # Cap how many ffmpeg prep jobs can run AT THE SAME TIME. Without this,
 # /prep-all on a 77-episode pack fires asyncio.create_task for every file,
@@ -7870,7 +7943,12 @@ def _video_can_copy(v: Optional[dict]) -> bool:
 
 
 def _list_sidecar_subs(src: Path, item_id: str) -> list[dict]:
-    """Find .srt/.vtt files next to a video file. Match either exact stem or stem.<lang>."""
+    """Find .srt/.vtt files next to a video file. Match either exact stem or stem.<lang>.
+
+    Files named `<stem>.<lang>.ai.srt` (see stt.py) are machine-generated; they
+    carry `ai: true` so the UI can label them, and the `.ai` segment is stripped
+    from the parsed language tag.
+    """
     out: list[dict] = []
     if not src.parent.exists():
         return out
@@ -7879,20 +7957,41 @@ def _list_sidecar_subs(src: Path, item_id: str) -> list[dict]:
         for p in src.parent.iterdir():
             if not p.is_file() or p.suffix.lower() not in (".srt", ".vtt"):
                 continue
+            ai = False
             if p.stem == stem:
                 lang = ""
             elif p.stem.startswith(stem + "."):
-                lang = p.stem[len(stem) + 1:].split(".")[0]
+                segs = p.stem[len(stem) + 1:].split(".")
+                ai = stt.AI_SUFFIX in segs
+                lang = segs[0]
             else:
                 continue
             out.append({
                 "name": p.name,
                 "lang": lang or "und",
+                "ai":   ai,
                 "url": f"/api/library/{item_id}/subtitle?file={quote(p.name)}",
             })
     except OSError:
         pass
     return out
+
+
+def _needs_stt_subs(info: dict, default_lang: str = "") -> bool:
+    """Decide whether a source warrants generated (STT) subtitles.
+
+    True when there is no usable *text* subtitle: none at all, only image-based
+    (PGS/VOBSUB/DVB) tracks, or — when `default_lang` is set — none matching that
+    language. `default_lang` is canonicalized so en/eng etc. compare equal.
+    """
+    text_subs = [s for s in (info.get("subtitles") or []) if not s.get("image_based")]
+    if not text_subs:
+        return True
+    if default_lang:
+        want = _canon_lang(default_lang)
+        if not any(_canon_lang(s.get("language")) == want for s in text_subs):
+            return True
+    return False
 
 
 def _srt_to_vtt(srt: str) -> str:
@@ -8354,6 +8453,14 @@ async def _run_offline_job(job_id: str) -> None:
                 "job %s DONE in %.1fs encoder=%s size=%.1f MB src=%s",
                 job_id, time.time() - job["started_at"], job["encoder"], size_mb, src,
             )
+            # Auto-generate subtitles for sources that have none usable. Reuses
+            # the ffprobe we already ran; enqueues a bulk STT job that runs after
+            # this HLS encode releases the shared concurrency slot. Best-effort —
+            # a failure here must never fail the HLS bundle.
+            try:
+                await _ensure_stt_for(src, job.get("item_id", ""), info=info, queue="bulk")
+            except Exception as exc:
+                hls_log.warning("job %s: STT enqueue skipped: %s", job_id, exc)
         except Exception as e:
             hls_log.exception("job %s CRASHED: %s", job_id, e)
             job["status"] = "error"; job["error"] = str(e)
@@ -8404,6 +8511,11 @@ def _resume_prep() -> int:
             j.pop("_paused_kill", None)
             asyncio.create_task(_run_offline_job(jid))
             n += 1
+    for jid, j in list(_stt_jobs.items()):
+        if j.get("status") == "paused":
+            j["status"] = "pending"
+            asyncio.create_task(_run_stt_job(jid))
+            n += 1
     return n
 
 
@@ -8432,11 +8544,156 @@ async def _enqueue_library_prep() -> int:
             st = await _maybe_start_prep_job(p, item.get("id", ""))
             if st.get("status") in ("processing", "pending", "paused"):
                 queued += 1
+            elif st.get("status") == "cached":
+                # Already HLS-prepped, so the post-encode STT hook never fires for
+                # it — check here so overnight still backfills generated subs for
+                # files prepped before STT existed (or before the lang setting).
+                await _ensure_stt_for(p, item.get("id", ""), queue="bulk")
             # Yield between every file (sync FS stat + task spawn, no internal
             # await) so scanning a large library never stalls the event loop and
             # the dashboard stays responsive during the overnight enqueue.
             await asyncio.sleep(0)
     return queued
+
+
+# ── STT subtitle generation (whisper.cpp) ────────────────────────────────────
+# Generated subs are sidecar `<stem>.<lang>.ai.srt` files written next to the
+# source. They flow into both players through existing plumbing: VLC via
+# `addsubtitle`, the HLS on-device player via `_list_sidecar_subs`. STT jobs
+# share the offline-prep concurrency semaphore + pause gate so a transcription
+# never competes with (or starves alongside) an HLS encode. See docs/STT.md.
+
+def _stt_available() -> bool:
+    """Cached stt.is_available() — reading .env on every state broadcast is wasteful.
+    Re-probed only on process restart (the binaries don't appear mid-run)."""
+    if "result" not in _stt_available_probe:
+        _stt_available_probe["result"] = stt.is_available()
+    return _stt_available_probe["result"]
+
+
+async def _attach_stt_to_vlc(src: Path, tracks: list[dict]) -> None:
+    """Load a freshly-generated sidecar into VLC and select it — but only if VLC
+    is still playing the same file. Mirrors download_subtitle's load+select."""
+    try:
+        cur = await _current_playback_path()
+        if not cur or cur.resolve() != src.resolve():
+            return
+    except Exception:
+        return
+    dest = Path(tracks[0]["path"])
+    await vlc("addsubtitle", val=str(dest.resolve()))
+    await asyncio.sleep(0.6)
+    vs = await vlc_status()
+    if not vs:
+        return
+    cat = vs.get("information", {}).get("category", {})
+    sub_ids = [
+        int(k.split()[-1]) for k, v in cat.items()
+        if k.startswith("Stream") and k.split()[-1].isdigit()
+        and v.get("Type") == "Subtitle"
+    ]
+    if sub_ids:
+        new_id = max(sub_ids)
+        state.current_subtitle_track = new_id
+        await vlc("subtitle_track", val=str(new_id))
+
+
+async def _run_stt_job(job_id: str) -> None:
+    """Transcribe one source to sidecar .srt(s). Shares the offline-prep
+    semaphore + bulk pause gate; runs whisper at lowered OS priority (stt.py)."""
+    job = _stt_jobs.get(job_id)
+    if not job:
+        return
+    async with _offline_job_sem():
+        # Bulk STT honors the same global pause as bulk HLS prep; interactive
+        # (play-now / "Generate now") jobs ignore it.
+        if job.get("queue") == "bulk" and state.prep_paused:
+            job["status"] = "paused"
+            return
+        job["status"] = "processing"
+        job["started_at"] = time.time()
+        src = Path(job["src"])
+        hls_log.info("stt job %s START src=%s translate=%s", job_id, src, job.get("translate"))
+
+        def _set_progress(p: float) -> None:
+            job["progress"] = max(0.0, min(1.0, p))
+
+        result = await asyncio.to_thread(
+            stt.generate, src,
+            want_translation=bool(job.get("translate", True)),
+            progress_cb=_set_progress,
+        )
+        if result.get("error"):
+            job["status"] = "error"
+            job["error"]  = result["error"]
+            hls_log.error("stt job %s FAILED: %s", job_id, result["error"])
+            return
+        job["tracks"]   = result.get("tracks", [])
+        job["progress"] = 1.0
+        job["status"]   = "done"
+        hls_log.info("stt job %s DONE tracks=%d src=%s", job_id, len(job["tracks"]), src)
+
+        if job.get("vlc_attach") and job["tracks"]:
+            await _attach_stt_to_vlc(src, job["tracks"])
+
+
+def _maybe_start_stt_job(src: Path, item_id: str = "", *,
+                         translate: bool = True, queue: str = "bulk",
+                         vlc_attach: bool = False) -> dict:
+    """Per-file: return current STT state, starting a job if none exists.
+
+    Returns {status:"cached"} when sidecars already exist, {status:"error"} when
+    STT is unavailable, else {status, job_id, progress}.
+    """
+    if not _stt_available():
+        return {"status": "error", "error": "Subtitle generation is not available on this host."}
+    if stt.has_ai_subs(src):
+        return {"status": "cached"}
+    existing = next(
+        (j for j in _stt_jobs.values()
+         if j["src"] == str(src) and j["status"] in ("pending", "processing", "paused")),
+        None,
+    )
+    if existing:
+        # Promote a queued bulk job to interactive when a user asks for it now.
+        if vlc_attach or queue == "interactive":
+            existing["queue"] = "interactive"
+            existing["vlc_attach"] = existing.get("vlc_attach") or vlc_attach
+            if existing.get("status") == "paused":
+                existing["status"] = "pending"
+                asyncio.create_task(_run_stt_job(existing["id"]))
+        return {"status": existing["status"], "job_id": existing["id"],
+                "progress": existing["progress"]}
+    job_id = secrets.token_hex(8)
+    _stt_jobs[job_id] = {
+        "id": job_id, "src": str(src), "item_id": item_id,
+        "status": "pending", "progress": 0.0, "error": None,
+        "tracks": [], "translate": bool(translate),
+        "queue": queue, "vlc_attach": vlc_attach,
+        "started_at": time.time(),
+    }
+    asyncio.create_task(_run_stt_job(job_id))
+    return {"status": "processing", "job_id": job_id, "progress": 0.0}
+
+
+async def _ensure_stt_for(src: Path, item_id: str = "", *,
+                          info: Optional[dict] = None, queue: str = "bulk") -> Optional[dict]:
+    """Start a bulk STT job for `src` iff STT is enabled and the source lacks a
+    usable text subtitle (honoring the admin default language). Idempotent: skips
+    when sidecars already exist or a job is already in flight. `info` (ffprobe
+    output) is reused when the caller already has it to avoid a re-probe."""
+    if not _stt_available():
+        return None
+    cfg = _stt_cfg(await get_library())
+    if not cfg["enabled"]:
+        return None
+    if stt.has_ai_subs(src):
+        return None
+    if info is None:
+        info = await asyncio.to_thread(_ffprobe_full, str(src))
+    if not _needs_stt_subs(info, cfg["default_language"]):
+        return None
+    return _maybe_start_stt_job(src, item_id, translate=cfg["translate"], queue=queue)
 
 
 def _read_meta(out_dir: Path) -> dict:
@@ -8861,6 +9118,77 @@ async def offline_job_status(job_id: str) -> JSONResponse:
         out["subtitles"]         = meta.get("subtitles", [])
         out["skipped_image_subs"] = meta.get("skipped_image_subs", [])
         out["bundle_size_bytes"] = _dir_size_bytes(out_dir)
+        # Include on-disk sidecars (incl. any generated `.ai.srt`) so the local
+        # player can attach them as <track>s without a separate prep round-trip.
+        src = Path(job.get("src", ""))
+        out["subs"] = _list_sidecar_subs(src, job.get("item_id", ""))
+    return JSONResponse(out)
+
+
+class GenerateSubsReq(BaseModel):
+    file_path: str
+    translate: bool = True
+
+
+@app.post("/api/library/{item_id}/generate-subtitles")
+async def generate_subtitles(item_id: str, req: GenerateSubsReq) -> JSONResponse:
+    """On-demand STT for a library file (on-device context). Writes sidecar
+    `.srt`(s) next to the source; poll /api/stt-job/{job_id} until done, then the
+    sidecars appear in the file's `subs` list. Runs even while bulk prep is
+    paused (interactive)."""
+    if not _stt_available():
+        raise HTTPException(503, "Subtitle generation isn’t available — whisper.cpp "
+                                 "or its model isn’t installed. Re-run setup.py.")
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    target = next((f for f in item.get("files", []) if f["path"] == req.file_path), None)
+    if not target:
+        raise HTTPException(404, "File not found in this item.")
+    src = Path(target["path"])
+    if not src.exists():
+        raise HTTPException(404, "File not on disk.")
+    st = _maybe_start_stt_job(src, item_id, translate=req.translate, queue="interactive")
+    return JSONResponse(st)
+
+
+class VlcGenerateSubsReq(BaseModel):
+    translate: bool = True
+
+
+@app.post("/api/subtitles/generate")
+async def generate_subtitles_vlc(req: VlcGenerateSubsReq) -> JSONResponse:
+    """On-demand STT for the file VLC is currently playing. On completion the
+    sidecar is loaded into VLC and selected (like the OpenSubtitles download
+    flow). Poll /api/stt-job/{job_id} for progress."""
+    if not _stt_available():
+        raise HTTPException(503, "Subtitle generation isn’t available — whisper.cpp "
+                                 "or its model isn’t installed. Re-run setup.py.")
+    video = await _current_playback_path()
+    if not video:
+        raise HTTPException(409, "No file is currently playing.")
+    st = _maybe_start_stt_job(video, state.library_item_id or "",
+                              translate=req.translate, queue="interactive",
+                              vlc_attach=True)
+    return JSONResponse(st)
+
+
+@app.get("/api/stt-job/{job_id}")
+async def stt_job_status(job_id: str) -> JSONResponse:
+    """Status of an STT subtitle-generation job. On `done`, `subs` carries the
+    file's sidecar list (incl. the generated tracks) for the on-device player."""
+    job = _stt_jobs.get(job_id)
+    if not job:
+        raise HTTPException(404, "Job not found.")
+    out: dict = {
+        "status":   job["status"],
+        "progress": round(job["progress"], 3),
+        "error":    job["error"],
+        "tracks":   job.get("tracks", []),
+    }
+    if job["status"] == "done":
+        out["subs"] = _list_sidecar_subs(Path(job["src"]), job.get("item_id", ""))
     return JSONResponse(out)
 
 

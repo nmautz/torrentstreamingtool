@@ -11,6 +11,7 @@
 4. `install_core_deps()` — install missing core apps (winget / brew cask / hint on Linux)
 5. `install_jackett_service()` — Windows only: register `Jackett` as a Windows service (auto-elevates via UAC)
 6. `install_smart_skip_deps()` — install ffmpeg + chromaprint (brew/apt/dnf/pacman/portable zip)
+6b. `install_stt_deps()` — install whisper.cpp + a multilingual GGML model for AI auto-subtitles (optional)
 7. Either reuse existing `.env` (merge tool paths only) or re-prompt for full config — see [Interactive configuration](#interactive-configuration-setuppyl930)
 8. `configure_qbittorrent()` — write `qBittorrent.ini` directly
 9. `write_env()` — save `.env` with both user config and `_VLC_BIN` / `_QBIT_BIN` / etc.
@@ -34,6 +35,15 @@
 - **Linux**: detects apt/dnf/pacman, runs the matching install command with sudo
 - **Windows**: skips winget entirely (flaky); downloads official portable zips for ffmpeg (gyan.dev essentials build) and fpcalc (chromaprint 1.5.1 release) into `./tools/`, extracts with zipfile/tarfile, walks the resulting tree to find the actual exe paths
 - After install, calls `find_exe(*ffmpeg_candidates())` to refresh tool paths
+
+## AI subtitle deps — whisper.cpp ([setup.py](../setup.py))
+
+`install_stt_deps()` bundles the auto-subtitle (speech-to-text) feature. **Optional** — declining only disables AI subtitles. See [STT.md](STT.md).
+
+- **Windows**: downloads the portable whisper.cpp build (`whisper-bin-x64.zip` from `ggml-org/whisper.cpp` releases) + the multilingual `ggml-base.bin` model into `./tools/whisper/`. The binary is `whisper-cli.exe` (older builds: `main.exe`).
+- **macOS**: `brew install whisper-cpp`, plus the model download.
+- **Linux**: no reliable prebuilt — build whisper.cpp so `whisper-cli` is on PATH; the model still downloads (it's platform-independent).
+- The model **must be multilingual** (not `*.en`) so whisper's translate task can emit English from foreign audio. `detect_tools()` finds the binary via `whisper_candidates()` and the model via `whisper_model_candidates()` (any `tools/whisper/**/ggml-*.bin`).
 
 ## Jackett Windows service ([setup.py:593](../setup.py#L593))
 
@@ -82,7 +92,7 @@ Uses the `cryptography` package (in requirements.txt). Generates a self-signed C
 
 ## .env shape
 
-`write_env()` writes user-facing keys then a "Auto-detected binary paths" section with `_VLC_BIN`, `_QBIT_BIN`, `_JACKETT_BIN`, `_MULLVAD_BIN`, `_FFMPEG_BIN`, `_FPCALC_BIN`. These are read by `run.py`, `watchdog.py`, and `analyzer.py` to skip path discovery on subsequent runs.
+`write_env()` writes user-facing keys then a "Auto-detected binary paths" section with `_VLC_BIN`, `_QBIT_BIN`, `_JACKETT_BIN`, `_MULLVAD_BIN`, `_FFMPEG_BIN`, `_FPCALC_BIN`, and (when present) `_WHISPER_BIN` / `_WHISPER_MODEL`. These are read by `run.py`, `watchdog.py`, `analyzer.py`, and `stt.py` to skip path discovery on subsequent runs.
 
 `merge_tool_paths()` ([setup.py:1045](../setup.py#L1045)) re-runs without re-prompting: keeps user settings, drops stale `_*_BIN` entries that no longer exist, appends new ones.
 

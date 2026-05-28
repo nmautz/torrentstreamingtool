@@ -37,6 +37,7 @@ All four services (VLC, qBittorrent, Jackett, dashboard) run on the same host ex
 | `daemon.py` | 545 | launchd / systemd / Task Scheduler service installer |
 | `watchdog.py` | 519 | Background thread (or standalone process) that restarts crashed deps |
 | `analyzer.py` | 540 | Smart Skip — chromaprint fingerprinting + ffmpeg blackdetect |
+| `stt.py` | — | AI subtitles — whisper.cpp wrapper (audio extract → transcribe/translate). See [STT.md](STT.md) |
 | `static/index.html` | 3608 | Main UI — vanilla JS, Tailwind CDN, SSE-driven |
 | `static/admin.html` | 990 | Admin panel — indexer management, content lock, Smart Skip editor |
 | `static/tv.html` | — | YouTube-on-TV kiosk page (host display): IFrame Player API + `yt_command` SSE listener + state heartbeat. See [YOUTUBE.md](YOUTUBE.md) |

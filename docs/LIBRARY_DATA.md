@@ -36,6 +36,11 @@ The only persistent server-side state. Lives at the project root. Accessed via `
       "end":      "06:00",
       "timezone": "America/Los_Angeles",
       "on_end":   "pause"               // "pause" ⇒ hold at window end · "continue" ⇒ run to completion
+    },
+    "stt": {                            // AI auto-subtitle generation (admin System tab)
+      "enabled":          true,
+      "default_language": "",           // 3-letter code; "" = only sub-less files trigger
+      "translate":        true          // add an English track for non-English audio
     }
   }
 }
@@ -69,6 +74,8 @@ PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "so
 `settings.scheduled_reboot`: managed by the **System** admin tab (see [ADMIN.md §7](ADMIN.md)). The `scheduled_reboot_loop` task reboots the host daily at `time` (in `timezone`) once it's been idle for `idle_minutes`. `last_fired` is an internal guard (the tz date of the last fire) that stops the just-rebooted machine from re-arming and looping; it's reset to `""` whenever the config is saved so a newly-set time can arm the same day. Lives under `settings` because it applies to the physical host, not an individual viewer.
 
 `settings.overnight_prep`: managed by the **System** admin tab (see [ADMIN.md §7](ADMIN.md)). The `overnight_prep_loop` task auto-preps every un-prepped library file for on-device streaming during the `[start, end)` window (in `timezone`; the window may cross midnight). At the window end, `on_end == "pause"` lets the in-flight file finish then holds the rest until the next window, while `"continue"` runs to completion. Window membership is tracked in-memory (`state.overnight_active`), so there's no persisted fire-guard. Lives under `settings` because it applies to the physical host.
+
+`settings.stt`: managed by the **System** admin tab. Gates AI auto-subtitle generation (whisper.cpp). `default_language` is a 3-letter code (`_canon_lang`-normalized) — when set, a source lacking a text subtitle *in that language* triggers generation; `""` means only sources with no usable text sub at all do. `translate` adds an English-translated track for non-English audio. Read via `_stt_cfg`; consumed by `_needs_stt_subs` / `_ensure_stt_for`. Lives under `settings` because it applies to the host's media library, not an individual viewer. See [STT.md](STT.md).
 
 `resume_mode`:
 - `"auto"` (default) — immediately seek to saved position
