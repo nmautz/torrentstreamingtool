@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import concurrent.futures
 import gzip
 import hashlib
 import io
@@ -4917,16 +4918,42 @@ def _kill_tv_browser() -> None:
 # so headphones at 100 % don't blow eardrums after a movie session.
 
 # pycaw uses COM, which must be initialized **on every thread that calls it**.
-# `asyncio.to_thread` runs on Python's default ThreadPoolExecutor — those worker
-# threads don't have COM initialized, so `AudioUtilities.GetSpeakers()` raises
-# `CoInitialize has not been called` and the dashboard silently does nothing.
-# `_windows_volume_op` wraps each call in CoInitialize/CoUninitialize so it
-# works whichever pool worker happens to run it.
+# We deliberately run *all* Windows volume ops on one dedicated single-worker
+# thread (`_win_volume_executor`) and CoInitialize that thread exactly once,
+# **never** calling CoUninitialize for the life of the process. See below for
+# why — the previous per-call CoInitialize/CoUninitialize was crashing the host.
+#
+# THE CRASH WE FIXED: doing `CoInitialize → work → CoUninitialize` on every call
+# (across arbitrary `asyncio.to_thread` pool workers) tears the COM apartment
+# down between calls. comtypes caches interface metadata/proxies that become
+# dangling once the apartment is gone; a later access (often during GC of a COM
+# pointer on a *different* pool thread) is a native access violation that kills
+# the whole Python process with NOTHING in the log — Python never gets to raise.
+# Symptom: "the first few volume changes work, then the server vanishes."
+# Keeping one long-lived COM-initialized thread removes the teardown entirely.
 
 # Cached once: True after the first successful import, False after the first
 # ImportError (so we don't spam the log every second on a host without pycaw).
 _PYCAW_IMPORT_FAILED = False
 _PYCAW_LAST_ERROR: Optional[str] = None
+
+# Per-thread "has COM been initialized on this thread?" guard. Set once, never
+# cleared — we never CoUninitialize (see the comment block above).
+_com_tls = threading.local()
+
+# Single dedicated worker for every Windows volume op. max_workers=1 means all
+# ops run on the same thread, so COM is initialized exactly once process-wide
+# and no COM pointer is ever created on one thread and released on another.
+_win_vol_executor: Optional["concurrent.futures.ThreadPoolExecutor"] = None
+
+
+def _win_volume_executor() -> "concurrent.futures.ThreadPoolExecutor":
+    global _win_vol_executor
+    if _win_vol_executor is None:
+        _win_vol_executor = concurrent.futures.ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix="winvol",
+        )
+    return _win_vol_executor
 
 
 def _windows_volume_op(op):
@@ -4976,15 +5003,11 @@ def _windows_volume_op(op):
         e_render = 0       # eRender (audio output)
         e_multimedia = 1   # eMultimedia (default for music/video)
 
-    # COM-pointer-lifetime trap: if we hold the COM pointers in this function's
-    # locals and then `CoUninitialize` in `finally`, Python's frame teardown
-    # happens *after* the finally — so the pointers' `__del__` calls
-    # `Release()` against a torn-down apartment, raising "COM method call
-    # without VTable" (logged as "Exception ignored in __del__"). The fix is to
-    # do all COM work inside an inner closure: when it returns, its frame is
-    # destroyed first, the pointers' `__del__` runs while COM is still alive,
-    # *then* we CoUninitialize. The result `op(vol)` returns is a plain
-    # bool/int — no COM refs leak out.
+    # All COM work in an inner closure so the COM pointers' frame is destroyed
+    # (and their `Release()` runs) before this function returns — the apartment
+    # stays alive for the whole process so that's always safe now, but keeping
+    # the locals scoped tight is still good hygiene. The result `op(vol)` returns
+    # is a plain bool/int — no COM refs leak out.
     def _do_com_work():
         device_enum = comtypes.CoCreateInstance(
             CLSID_MMDeviceEnumerator, IMMDeviceEnumerator,
@@ -4995,29 +5018,23 @@ def _windows_volume_op(op):
         vol = cast(interface, POINTER(IAudioEndpointVolume))
         return op(vol)
 
-    com_initialized_here = False
     try:
-        # On the worker thread, CoInitialize must be called before any COM use.
-        # Returns S_OK first time (we own Uninit), S_FALSE if already inited
-        # by a prior call on this thread (still safe to Uninit — it's reference
-        # counted). RPC_E_CHANGED_MODE means another mode is in effect — fine,
-        # just don't call Uninit.
-        try:
-            comtypes.CoInitialize()
-            com_initialized_here = True
-        except Exception:
-            pass
+        # Initialize COM on this thread exactly once, then leave it up for the
+        # life of the process. We NEVER CoUninitialize — tearing the apartment
+        # down between calls is what crashed the host (see the comment block at
+        # the top of this section). S_FALSE (already inited) / RPC_E_CHANGED_MODE
+        # both just mean "COM is usable on this thread", so swallow either.
+        if not getattr(_com_tls, "initialized", False):
+            try:
+                comtypes.CoInitialize()
+            except Exception:
+                pass
+            _com_tls.initialized = True
         return _do_com_work()
     except Exception as e:
         _PYCAW_LAST_ERROR = f"{type(e).__name__}: {e}"
         log.warning("System volume: Windows audio call failed: %s", _PYCAW_LAST_ERROR)
         return None
-    finally:
-        if com_initialized_here:
-            try:
-                comtypes.CoUninitialize()                               # type: ignore[name-defined]
-            except Exception:
-                pass
 
 
 def _set_system_volume_sync(pct: int) -> bool:
@@ -5092,10 +5109,18 @@ def _get_system_volume_sync() -> Optional[int]:
 
 
 async def set_system_volume(pct: int) -> bool:
+    # Windows: pin to the one COM-initialized thread (see _win_volume_executor).
+    # POSIX: osascript / pactl / amixer are plain subprocesses — any pool thread.
+    if platform.system() == "Windows":
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_win_volume_executor(), _set_system_volume_sync, pct)
     return await asyncio.to_thread(_set_system_volume_sync, pct)
 
 
 async def get_system_volume() -> Optional[int]:
+    if platform.system() == "Windows":
+        loop = asyncio.get_running_loop()
+        return await loop.run_in_executor(_win_volume_executor(), _get_system_volume_sync)
     return await asyncio.to_thread(_get_system_volume_sync)
 
 
