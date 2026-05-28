@@ -1,5 +1,11 @@
 # Changelog
 
+## [3.13.0] — 2026-05-27
+- **New: "Reset Hard" button in the admin Updates tab.** Recovery for a wedged or diverged checkout — runs `git fetch` + `git reset --hard origin/<current-branch>`, forcing the working tree back onto the remote and discarding any local commits and uncommitted edits to tracked files. Distinct from Switch Branch: it stays on the current branch and never runs setup.py or reboots. Confirm-gated.
+- **Preserves local data:** no `git clean`, so untracked / gitignored files (`library.json`, `.env`, `.offline_cache/`, `.background/`) survive the reset.
+- **Backend:** `updater.reset_hard()` (gated to `ALLOWED_BRANCHES` — refuses a detached HEAD or any branch outside main/beta/alpha) + `POST /api/admin/updater/reset-hard` (no body; 409 if another update operation is running). Returns `{ok, branch, commit}`.
+- **Docs:** [docs/ADMIN.md § Updates](docs/ADMIN.md) and [docs/API.md](docs/API.md) document the new button and endpoint.
+
 ## [3.12.4] — 2026-05-27
 - **Fix: in the fullscreen controls, hovering a mouse over the volume −/+ buttons could fire a volume step.** The buttons bind `_fcVolUp` to `onpointerleave` (so dragging off a held button still releases it), but `_fcVolUp` fired `vlcVolumeStep` whenever called with no hold active — and on desktop `pointerleave` fires on a plain hover-out with no preceding `pointerdown`. So moving the mouse across and off a vol button changed the volume. Touch was unaffected (no hover).
 - **Fix:** added a `_volPressed` guard set in `_fcVolDown` (pointerdown) and required in `_fcVolUp`; a `pointerleave`/`pointerup` with no matching press is now ignored.

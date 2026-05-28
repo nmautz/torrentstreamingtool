@@ -7276,6 +7276,32 @@ async def admin_switch_branch(request: Request, body: UpdaterConfigReq) -> JSONR
     return JSONResponse({"ok": True, "branch": body.branch, "commit": res["commit"]})
 
 
+@app.post("/api/admin/updater/reset-hard")
+async def admin_reset_hard(request: Request) -> JSONResponse:
+    """Force the working tree back onto origin/<current-branch>.
+
+    Recovery for a wedged / diverged checkout: `git fetch` + `git reset
+    --hard origin/<current-branch>`, discarding local commits and edits to
+    tracked files. Stays on the same branch and does no `git clean`, so
+    untracked / gitignored files (library.json, .env, .offline_cache/,
+    .background/) survive. Does NOT run setup.py or reboot.
+    """
+    _require_admin(request)
+    if state.updater_busy:
+        raise HTTPException(409, "An update operation is already running.")
+
+    async with _updater_lock:
+        await _set_updater_phase("applying", "Resetting hard to origin…", busy=True)
+        res = await updater.reset_hard()
+        if not res.get("ok"):
+            await _set_updater_phase("error", res.get("error", "reset failed"), busy=False)
+            raise HTTPException(500, res.get("error", "reset failed"))
+        await _set_updater_phase("idle",
+                                f"Reset {res['branch']} to origin ({res['commit']}).",
+                                busy=False)
+    return JSONResponse({"ok": True, "branch": res["branch"], "commit": res["commit"]})
+
+
 # ── Routes: Env Keys ──────────────────────────────────────────────────────────
 # Companion to the auto-updater: when an update introduces a new required env
 # key (e.g. an API key for a new feature), the dashboard surfaces a banner and

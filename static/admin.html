@@ -630,6 +630,10 @@
             class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-indigo-700 bg-indigo-900 text-indigo-200 hover:bg-indigo-800 transition-colors disabled:opacity-50">
             Switch Branch
           </button>
+          <button id="auResetBtn" onclick="resetHardNow()"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-red-800 bg-red-950 text-red-300 hover:bg-red-900 transition-colors disabled:opacity-50">
+            Reset Hard
+          </button>
           <button id="auSaveBtn" onclick="saveAutoupdate()"
             class="bg-indigo-600 hover:bg-indigo-500 px-5 py-2 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">
             Save
@@ -1221,6 +1225,7 @@ async function loadAutoupdate(){
     document.getElementById("auCheckBtn").disabled  = busy || !d.is_git_repo;
     document.getElementById("auApplyBtn").disabled  = busy || !d.is_git_repo;
     document.getElementById("auSwitchBtn").disabled = busy || !d.is_git_repo;
+    document.getElementById("auResetBtn").disabled  = busy || !d.is_git_repo;
     document.getElementById("auSaveBtn").disabled   = busy;
 
     const out = d.last_output || "";
@@ -1375,6 +1380,39 @@ async function switchBranchNow(){
   }finally{
     btn.disabled = false;
     btn.textContent = "Switch Branch";
+  }
+}
+
+async function resetHardNow(){
+  const cur = (_auState && _auState.current_branch) || "the current branch";
+  if(!confirm(
+      `Hard-reset '${cur}' to origin?\n\n` +
+      `Runs git fetch + git reset --hard origin/${cur}, discarding any local commits ` +
+      `AND uncommitted edits to tracked files — the checkout is forced to match the remote exactly.\n\n` +
+      `Untracked / gitignored files (library.json, .env, .offline_cache/, .background/) are kept. ` +
+      `setup.py is NOT re-run and the host is NOT rebooted. Continue?`
+  )) return;
+  const btn = document.getElementById("auResetBtn");
+  btn.disabled = true;
+  btn.textContent = "Resetting…";
+  try{
+    const r = await fetch("/api/admin/updater/reset-hard", {
+      method: "POST",
+      headers: authHeader(),
+    });
+    if(!r.ok){
+      const t = await r.text();
+      showToast(`Reset failed: ${t || r.status}`, true);
+      return;
+    }
+    const d = await r.json();
+    showToast(`Reset ${d.branch} to origin (${d.commit}).`);
+    await loadAutoupdate();
+  }catch(_){
+    showToast("Reset failed.", true);
+  }finally{
+    btn.disabled = false;
+    btn.textContent = "Reset Hard";
   }
 }
 
