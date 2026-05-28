@@ -2326,9 +2326,10 @@ function _holdCancel(btn){
 
 // Hold-to-large-step for fullscreen vol buttons.
 // Short tap → step 5; hold (>400 ms) → step 15, repeating every 350 ms.
-let _volHoldTimer = null, _volHoldInterval = null, _volHoldActive = false;
+let _volHoldTimer = null, _volHoldInterval = null, _volHoldActive = false, _volPressed = false;
 function _fcVolDown(delta, btn, e){
   e.preventDefault();
+  _volPressed = true;
   _volHoldActive = false;
   const bigDelta = delta > 0 ? 15 : -15;
   _volHoldTimer = setTimeout(() => {
@@ -2338,6 +2339,10 @@ function _fcVolDown(delta, btn, e){
   }, 400);
 }
 function _fcVolUp(delta, btn){
+  // pointerleave fires on plain mouse hover (no preceding pointerdown); without
+  // this guard, hovering off the button would fire a volume step.
+  if(!_volPressed) return;
+  _volPressed = false;
   clearTimeout(_volHoldTimer); _volHoldTimer = null;
   if(_volHoldInterval){ clearInterval(_volHoldInterval); _volHoldInterval = null; }
   if(!_volHoldActive) vlcVolumeStep(delta, btn);
@@ -6486,6 +6491,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">3.12.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">3.12.4</div>
 </body>
 </html>

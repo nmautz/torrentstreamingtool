@@ -1,5 +1,9 @@
 # Changelog
 
+## [3.12.4] — 2026-05-27
+- **Fix: in the fullscreen controls, hovering a mouse over the volume −/+ buttons could fire a volume step.** The buttons bind `_fcVolUp` to `onpointerleave` (so dragging off a held button still releases it), but `_fcVolUp` fired `vlcVolumeStep` whenever called with no hold active — and on desktop `pointerleave` fires on a plain hover-out with no preceding `pointerdown`. So moving the mouse across and off a vol button changed the volume. Touch was unaffected (no hover).
+- **Fix:** added a `_volPressed` guard set in `_fcVolDown` (pointerdown) and required in `_fcVolUp`; a `pointerleave`/`pointerup` with no matching press is now ignored.
+
 ## [3.12.3] — 2026-05-27
 - **Fix: the Auto Update admin card reset the branch picker mid-selection, making it nearly impossible to switch branches.** The card polls `/api/admin/updater` every 4 s and `loadAutoupdate()` was unconditionally writing the server's saved config back into the editable controls (branch `<select>`, interval, auto-apply checkbox, enabled toggle). So a branch you picked got snapped back to the saved value within 4 s — you had to race the poll to click Switch/Apply.
 - **Fix:** added an `_auFormDirty` guard. User edits to any of those controls (and the enable toggle) set the flag; while it's set, the background poll updates only the read-only status fields (current branch/commit, last check, status message, button enable/disable) and leaves the editable controls alone. The flag is cleared after Save and Switch Branch (which reload to a known server state) and on every fresh open of the Updates tab, so the form re-syncs once your edit is committed.
