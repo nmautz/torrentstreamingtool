@@ -2,7 +2,6 @@
 
 import asyncio
 import base64
-import concurrent.futures
 import gzip
 import hashlib
 import io
@@ -4917,135 +4916,92 @@ def _kill_tv_browser() -> None:
 # the OS volume to a configured "expected max" (`settings.system_volume_default`)
 # so headphones at 100 % don't blow eardrums after a movie session.
 
-# pycaw uses COM, which must be initialized **on every thread that calls it**.
-# We deliberately run *all* Windows volume ops on one dedicated single-worker
-# thread (`_win_volume_executor`) and CoInitialize that thread exactly once,
-# **never** calling CoUninitialize for the life of the process. See below for
-# why — the previous per-call CoInitialize/CoUninitialize was crashing the host.
-#
-# THE CRASH WE FIXED: doing `CoInitialize → work → CoUninitialize` on every call
-# (across arbitrary `asyncio.to_thread` pool workers) tears the COM apartment
-# down between calls. comtypes caches interface metadata/proxies that become
-# dangling once the apartment is gone; a later access (often during GC of a COM
-# pointer on a *different* pool thread) is a native access violation that kills
-# the whole Python process with NOTHING in the log — Python never gets to raise.
-# Symptom: "the first few volume changes work, then the server vanishes."
-# Keeping one long-lived COM-initialized thread removes the teardown entirely.
-
-# Cached once: True after the first successful import, False after the first
-# ImportError (so we don't spam the log every second on a host without pycaw).
-_PYCAW_IMPORT_FAILED = False
+# Last human-readable failure reason from the OS-volume path, surfaced in API
+# responses (e.g. the YouTube volume endpoint) so the operator can act. On
+# Windows it's set from the helper child's error reply; on POSIX it stays a
+# generic message (pactl/osascript failures are rare).
 _PYCAW_LAST_ERROR: Optional[str] = None
 
-# Per-thread "has COM been initialized on this thread?" guard. Set once, never
-# cleared — we never CoUninitialize (see the comment block above).
-_com_tls = threading.local()
+# ── Windows OS-mixer volume: isolated in a CHILD PROCESS ─────────────────────
+# Driving the Windows endpoint volume via pycaw/COM *in-process* crashed the
+# whole server: after a handful of rapid calls the process vanished with a
+# native access violation and NO Python traceback. It crashed even when pinned
+# to a single COM-initialized thread that never CoUninitialized. A native crash
+# can only be contained by an OS process boundary, so all Windows volume ops now
+# run in `winvol_helper.py` as a long-lived child: if it ever crashes, only the
+# child dies and we respawn it — the server stays up. See docs/GOTCHAS.md.
+WINVOL_HELPER = Path(__file__).parent / "winvol_helper.py"
+_winvol_proc: Optional[subprocess.Popen] = None   # the live helper child
+_winvol_lock: Optional[asyncio.Lock] = None       # serializes round-trips
 
-# Single dedicated worker for every Windows volume op. max_workers=1 means all
-# ops run on the same thread, so COM is initialized exactly once process-wide
-# and no COM pointer is ever created on one thread and released on another.
-_win_vol_executor: Optional["concurrent.futures.ThreadPoolExecutor"] = None
 
-
-def _win_volume_executor() -> "concurrent.futures.ThreadPoolExecutor":
-    global _win_vol_executor
-    if _win_vol_executor is None:
-        _win_vol_executor = concurrent.futures.ThreadPoolExecutor(
-            max_workers=1, thread_name_prefix="winvol",
+def _winvol_roundtrip_sync(req: dict) -> dict:
+    """Send one request to the helper child (spawning/respawning as needed) and
+    return its parsed reply. Runs in a worker thread (blocking pipe IO). Raises
+    on IO failure / dead child so the async caller can recover."""
+    global _winvol_proc
+    if _winvol_proc is None or _winvol_proc.poll() is not None:
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if platform.system() == "Windows" else 0
+        _winvol_proc = subprocess.Popen(
+            [sys.executable, str(WINVOL_HELPER)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, bufsize=1, creationflags=flags,
         )
-    return _win_vol_executor
-
-
-def _windows_volume_op(op):
-    """Run `op(vol)` against the Windows default audio endpoint with COM init.
-    Returns op's return value, or None on failure. Last error is cached in
-    `_PYCAW_LAST_ERROR` so callers can surface it (e.g. in the API response)."""
-    global _PYCAW_IMPORT_FAILED, _PYCAW_LAST_ERROR
-    if _PYCAW_IMPORT_FAILED:
-        return None
+    proc = _winvol_proc
     try:
-        from ctypes import cast, POINTER                                # type: ignore[import-not-found]
-        import comtypes                                                 # type: ignore[import-not-found]
-        from comtypes import CLSCTX_ALL                                 # type: ignore[import-not-found]
-        # Use pycaw's COM interface DEFINITIONS but NOT its convenience wrappers.
-        # `AudioUtilities.GetSpeakers()` is API-unstable across pycaw versions —
-        # some return the raw IMMDevice (has `.Activate`), some return a Python
-        # `AudioDevice` wrapper that doesn't. Going through `CoCreateInstance` +
-        # `GetDefaultAudioEndpoint` works against every pycaw release we ship.
-        from pycaw.api.endpointvolume import IAudioEndpointVolume       # type: ignore[import-not-found]
-        from pycaw.api.mmdeviceapi import IMMDeviceEnumerator           # type: ignore[import-not-found]
-    except ImportError as e:
-        _PYCAW_IMPORT_FAILED = True
-        # Name the actual missing module — pycaw / comtypes / something else —
-        # so the operator knows exactly what `pip install` to run. ImportError
-        # exposes the missing module on .name (3.6+); fall back to parsing the
-        # message for the unusual builds that don't set it.
-        missing = getattr(e, "name", None) or (
-            str(e).split("'")[1] if "'" in str(e) else "a Windows audio module"
-        )
-        _PYCAW_LAST_ERROR = (
-            f"Windows volume control dep `{missing}` is not installed on the "
-            "server. Run `pip install -r requirements.txt` (or re-run setup.py) "
-            "and restart the StreamLink service."
-        )
-        log.warning("System volume: %s (%s)", _PYCAW_LAST_ERROR, e)
-        return None
-    # CLSID for MMDeviceEnumerator. Prefer the pycaw constant when present;
-    # fall back to the documented Microsoft GUID so we don't break on a future
-    # pycaw release that moves it. Same story for the EDataFlow / ERole enums.
-    try:
-        from pycaw.constants import CLSID_MMDeviceEnumerator, EDataFlow, ERole   # type: ignore[import-not-found]
-        e_render = int(EDataFlow.eRender.value)
-        e_multimedia = int(ERole.eMultimedia.value)
+        proc.stdin.write(json.dumps(req) + "\n")
+        proc.stdin.flush()
+        line = proc.stdout.readline()
+        if not line:
+            raise RuntimeError("helper closed its pipe (child exited)")
+        return json.loads(line.strip())
     except Exception:
-        from comtypes import GUID                                                # type: ignore[import-not-found]
-        CLSID_MMDeviceEnumerator = GUID("{BCDE0395-E52F-467C-8E3D-C4579291692E}")
-        e_render = 0       # eRender (audio output)
-        e_multimedia = 1   # eMultimedia (default for music/video)
+        # Force a clean child on the next call.
+        try:
+            proc.kill()
+        except Exception:
+            pass
+        _winvol_proc = None
+        raise
 
-    # All COM work in an inner closure so the COM pointers' frame is destroyed
-    # (and their `Release()` runs) before this function returns — the apartment
-    # stays alive for the whole process so that's always safe now, but keeping
-    # the locals scoped tight is still good hygiene. The result `op(vol)` returns
-    # is a plain bool/int — no COM refs leak out.
-    def _do_com_work():
-        device_enum = comtypes.CoCreateInstance(
-            CLSID_MMDeviceEnumerator, IMMDeviceEnumerator,
-            comtypes.CLSCTX_INPROC_SERVER,
-        )
-        speakers = device_enum.GetDefaultAudioEndpoint(e_render, e_multimedia)
-        interface = speakers.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-        vol = cast(interface, POINTER(IAudioEndpointVolume))
-        return op(vol)
 
-    try:
-        # Initialize COM on this thread exactly once, then leave it up for the
-        # life of the process. We NEVER CoUninitialize — tearing the apartment
-        # down between calls is what crashed the host (see the comment block at
-        # the top of this section). S_FALSE (already inited) / RPC_E_CHANGED_MODE
-        # both just mean "COM is usable on this thread", so swallow either.
-        if not getattr(_com_tls, "initialized", False):
-            try:
-                comtypes.CoInitialize()
-            except Exception:
-                pass
-            _com_tls.initialized = True
-        return _do_com_work()
-    except Exception as e:
-        _PYCAW_LAST_ERROR = f"{type(e).__name__}: {e}"
-        log.warning("System volume: Windows audio call failed: %s", _PYCAW_LAST_ERROR)
-        return None
+async def _winvol_request(req: dict) -> Optional[dict]:
+    """Async wrapper around the helper round-trip: serialized, time-bounded, and
+    self-healing. Returns the reply dict, or None on failure (sets _PYCAW_LAST_ERROR)."""
+    global _winvol_lock, _winvol_proc, _PYCAW_LAST_ERROR
+    if _winvol_lock is None:
+        _winvol_lock = asyncio.Lock()
+    async with _winvol_lock:
+        try:
+            # First call pays the child's comtypes/pycaw import + CoInitialize
+            # (a few hundred ms); later calls are fast. 5 s covers a cold start.
+            resp = await asyncio.wait_for(
+                asyncio.to_thread(_winvol_roundtrip_sync, req), timeout=5,
+            )
+        except Exception as e:
+            # Timeout or IO error — kill the (possibly wedged) child so the next
+            # call respawns a clean one, and remember why for the API surface.
+            p = _winvol_proc
+            if p is not None:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+                _winvol_proc = None
+            _PYCAW_LAST_ERROR = f"Windows volume helper failed: {type(e).__name__}: {e}"
+            log.warning("%s", _PYCAW_LAST_ERROR)
+            return None
+        if resp and not resp.get("ok"):
+            _PYCAW_LAST_ERROR = resp.get("error") or "Windows volume helper returned an error."
+            log.warning("System volume: %s", _PYCAW_LAST_ERROR)
+        return resp
 
 
 def _set_system_volume_sync(pct: int) -> bool:
+    """POSIX system-volume set (osascript / pactl / amixer). Windows is handled
+    out-of-process via the helper child — see set_system_volume."""
     pct = max(0, min(100, int(pct)))
     sys_name = platform.system()
-    if sys_name == "Windows":
-        def _set(vol):
-            vol.SetMute(0, None)
-            vol.SetMasterVolumeLevelScalar(pct / 100.0, None)
-            return True
-        return _windows_volume_op(_set) is True
     try:
         if sys_name == "Darwin":
             subprocess.run(
@@ -5080,11 +5036,9 @@ def _set_system_volume_sync(pct: int) -> bool:
 
 
 def _get_system_volume_sync() -> Optional[int]:
+    """POSIX system-volume read. Windows is handled out-of-process — see
+    get_system_volume."""
     sys_name = platform.system()
-    if sys_name == "Windows":
-        def _get(vol):
-            return max(0, min(100, round(vol.GetMasterVolumeLevelScalar() * 100)))
-        return _windows_volume_op(_get)
     try:
         if sys_name == "Darwin":
             r = subprocess.run(
@@ -5109,18 +5063,19 @@ def _get_system_volume_sync() -> Optional[int]:
 
 
 async def set_system_volume(pct: int) -> bool:
-    # Windows: pin to the one COM-initialized thread (see _win_volume_executor).
-    # POSIX: osascript / pactl / amixer are plain subprocesses — any pool thread.
+    pct = max(0, min(100, int(pct)))
     if platform.system() == "Windows":
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(_win_volume_executor(), _set_system_volume_sync, pct)
+        resp = await _winvol_request({"op": "set", "pct": pct})
+        return bool(resp and resp.get("ok"))
     return await asyncio.to_thread(_set_system_volume_sync, pct)
 
 
 async def get_system_volume() -> Optional[int]:
     if platform.system() == "Windows":
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(_win_volume_executor(), _get_system_volume_sync)
+        resp = await _winvol_request({"op": "get"})
+        if resp and resp.get("ok"):
+            return resp.get("value")
+        return None
     return await asyncio.to_thread(_get_system_volume_sync)
 
 
@@ -5419,9 +5374,9 @@ async def youtube_control(req: YouTubeControlReq) -> JSONResponse:
             await broadcast("state", state_snapshot())
             return JSONResponse({"ok": True, "volume": target})
         # Failure: surface *why* so the user can act (most often: pycaw not
-        # installed on Windows, or COM init refused). _PYCAW_LAST_ERROR is
-        # populated by _windows_volume_op on Windows; on POSIX we fall back to a
-        # generic message since pactl/osascript failures are rare.
+        # installed on Windows, or the helper child errored). _PYCAW_LAST_ERROR
+        # is set from the helper's error reply on Windows; on POSIX we fall back
+        # to a generic message since pactl/osascript failures are rare.
         err = _PYCAW_LAST_ERROR if platform.system() == "Windows" else \
             "Couldn't set the host system volume."
         return JSONResponse({"ok": False, "volume": target, "error": err},
