@@ -3523,11 +3523,19 @@ app = FastAPI(title="P2P StreamLink", version="2.0", lifespan=lifespan)
 
 @app.middleware("http")
 async def admin_https_redirect(request: Request, call_next):
-    """Redirect /admin and /api/admin/* to HTTPS when accessed over plain HTTP."""
+    """Redirect /admin and /api/admin/* to HTTPS when accessed over plain HTTP.
+
+    Honours `X-Forwarded-Proto` / `X-Forwarded-Host` so requests arriving via
+    the port-443 reverse proxy (see https_proxy.py) are recognised as already
+    HTTPS — without this, every admin hit through the proxy would redirect to
+    the upstream's `127.0.0.1` host on https, breaking access for the real
+    client and looping.
+    """
     path = request.url.path
     if (path == "/admin" or path.startswith("/admin/") or path.startswith("/api/admin")):
-        if request.url.scheme == "http":
-            host = request.url.hostname
+        proto = (request.headers.get("x-forwarded-proto") or request.url.scheme).lower()
+        if proto == "http":
+            host = request.headers.get("x-forwarded-host") or request.url.hostname
             qs   = ("?" + request.url.query) if request.url.query else ""
             return RedirectResponse(f"https://{host}{path}{qs}", status_code=301)
     return await call_next(request)
@@ -3703,6 +3711,10 @@ class SystemVolumeDefaultReq(BaseModel):
 
 class YouTubeStartVolumeReq(BaseModel):
     youtube_start_volume: int   # 0-100; OS volume pre-set before a YouTube play starts
+
+
+class HostVolumeReq(BaseModel):
+    host_volume: int  # 0-100; live host OS mixer volume
 
 
 class SkipNowReq(BaseModel):
@@ -4904,119 +4916,92 @@ def _kill_tv_browser() -> None:
 # the OS volume to a configured "expected max" (`settings.system_volume_default`)
 # so headphones at 100 % don't blow eardrums after a movie session.
 
-# pycaw uses COM, which must be initialized **on every thread that calls it**.
-# `asyncio.to_thread` runs on Python's default ThreadPoolExecutor — those worker
-# threads don't have COM initialized, so `AudioUtilities.GetSpeakers()` raises
-# `CoInitialize has not been called` and the dashboard silently does nothing.
-# `_windows_volume_op` wraps each call in CoInitialize/CoUninitialize so it
-# works whichever pool worker happens to run it.
-
-# Cached once: True after the first successful import, False after the first
-# ImportError (so we don't spam the log every second on a host without pycaw).
-_PYCAW_IMPORT_FAILED = False
+# Last human-readable failure reason from the OS-volume path, surfaced in API
+# responses (e.g. the YouTube volume endpoint) so the operator can act. On
+# Windows it's set from the helper child's error reply; on POSIX it stays a
+# generic message (pactl/osascript failures are rare).
 _PYCAW_LAST_ERROR: Optional[str] = None
 
+# ── Windows OS-mixer volume: isolated in a CHILD PROCESS ─────────────────────
+# Driving the Windows endpoint volume via pycaw/COM *in-process* crashed the
+# whole server: after a handful of rapid calls the process vanished with a
+# native access violation and NO Python traceback. It crashed even when pinned
+# to a single COM-initialized thread that never CoUninitialized. A native crash
+# can only be contained by an OS process boundary, so all Windows volume ops now
+# run in `winvol_helper.py` as a long-lived child: if it ever crashes, only the
+# child dies and we respawn it — the server stays up. See docs/GOTCHAS.md.
+WINVOL_HELPER = Path(__file__).parent / "winvol_helper.py"
+_winvol_proc: Optional[subprocess.Popen] = None   # the live helper child
+_winvol_lock: Optional[asyncio.Lock] = None       # serializes round-trips
 
-def _windows_volume_op(op):
-    """Run `op(vol)` against the Windows default audio endpoint with COM init.
-    Returns op's return value, or None on failure. Last error is cached in
-    `_PYCAW_LAST_ERROR` so callers can surface it (e.g. in the API response)."""
-    global _PYCAW_IMPORT_FAILED, _PYCAW_LAST_ERROR
-    if _PYCAW_IMPORT_FAILED:
-        return None
-    try:
-        from ctypes import cast, POINTER                                # type: ignore[import-not-found]
-        import comtypes                                                 # type: ignore[import-not-found]
-        from comtypes import CLSCTX_ALL                                 # type: ignore[import-not-found]
-        # Use pycaw's COM interface DEFINITIONS but NOT its convenience wrappers.
-        # `AudioUtilities.GetSpeakers()` is API-unstable across pycaw versions —
-        # some return the raw IMMDevice (has `.Activate`), some return a Python
-        # `AudioDevice` wrapper that doesn't. Going through `CoCreateInstance` +
-        # `GetDefaultAudioEndpoint` works against every pycaw release we ship.
-        from pycaw.api.endpointvolume import IAudioEndpointVolume       # type: ignore[import-not-found]
-        from pycaw.api.mmdeviceapi import IMMDeviceEnumerator           # type: ignore[import-not-found]
-    except ImportError as e:
-        _PYCAW_IMPORT_FAILED = True
-        # Name the actual missing module — pycaw / comtypes / something else —
-        # so the operator knows exactly what `pip install` to run. ImportError
-        # exposes the missing module on .name (3.6+); fall back to parsing the
-        # message for the unusual builds that don't set it.
-        missing = getattr(e, "name", None) or (
-            str(e).split("'")[1] if "'" in str(e) else "a Windows audio module"
+
+def _winvol_roundtrip_sync(req: dict) -> dict:
+    """Send one request to the helper child (spawning/respawning as needed) and
+    return its parsed reply. Runs in a worker thread (blocking pipe IO). Raises
+    on IO failure / dead child so the async caller can recover."""
+    global _winvol_proc
+    if _winvol_proc is None or _winvol_proc.poll() is not None:
+        flags = getattr(subprocess, "CREATE_NO_WINDOW", 0) if platform.system() == "Windows" else 0
+        _winvol_proc = subprocess.Popen(
+            [sys.executable, str(WINVOL_HELPER)],
+            stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+            text=True, bufsize=1, creationflags=flags,
         )
-        _PYCAW_LAST_ERROR = (
-            f"Windows volume control dep `{missing}` is not installed on the "
-            "server. Run `pip install -r requirements.txt` (or re-run setup.py) "
-            "and restart the StreamLink service."
-        )
-        log.warning("System volume: %s (%s)", _PYCAW_LAST_ERROR, e)
-        return None
-    # CLSID for MMDeviceEnumerator. Prefer the pycaw constant when present;
-    # fall back to the documented Microsoft GUID so we don't break on a future
-    # pycaw release that moves it. Same story for the EDataFlow / ERole enums.
+    proc = _winvol_proc
     try:
-        from pycaw.constants import CLSID_MMDeviceEnumerator, EDataFlow, ERole   # type: ignore[import-not-found]
-        e_render = int(EDataFlow.eRender.value)
-        e_multimedia = int(ERole.eMultimedia.value)
+        proc.stdin.write(json.dumps(req) + "\n")
+        proc.stdin.flush()
+        line = proc.stdout.readline()
+        if not line:
+            raise RuntimeError("helper closed its pipe (child exited)")
+        return json.loads(line.strip())
     except Exception:
-        from comtypes import GUID                                                # type: ignore[import-not-found]
-        CLSID_MMDeviceEnumerator = GUID("{BCDE0395-E52F-467C-8E3D-C4579291692E}")
-        e_render = 0       # eRender (audio output)
-        e_multimedia = 1   # eMultimedia (default for music/video)
-
-    # COM-pointer-lifetime trap: if we hold the COM pointers in this function's
-    # locals and then `CoUninitialize` in `finally`, Python's frame teardown
-    # happens *after* the finally — so the pointers' `__del__` calls
-    # `Release()` against a torn-down apartment, raising "COM method call
-    # without VTable" (logged as "Exception ignored in __del__"). The fix is to
-    # do all COM work inside an inner closure: when it returns, its frame is
-    # destroyed first, the pointers' `__del__` runs while COM is still alive,
-    # *then* we CoUninitialize. The result `op(vol)` returns is a plain
-    # bool/int — no COM refs leak out.
-    def _do_com_work():
-        device_enum = comtypes.CoCreateInstance(
-            CLSID_MMDeviceEnumerator, IMMDeviceEnumerator,
-            comtypes.CLSCTX_INPROC_SERVER,
-        )
-        speakers = device_enum.GetDefaultAudioEndpoint(e_render, e_multimedia)
-        interface = speakers.Activate(IAudioEndpointVolume._iid_, CLSCTX_ALL, None)
-        vol = cast(interface, POINTER(IAudioEndpointVolume))
-        return op(vol)
-
-    com_initialized_here = False
-    try:
-        # On the worker thread, CoInitialize must be called before any COM use.
-        # Returns S_OK first time (we own Uninit), S_FALSE if already inited
-        # by a prior call on this thread (still safe to Uninit — it's reference
-        # counted). RPC_E_CHANGED_MODE means another mode is in effect — fine,
-        # just don't call Uninit.
+        # Force a clean child on the next call.
         try:
-            comtypes.CoInitialize()
-            com_initialized_here = True
+            proc.kill()
         except Exception:
             pass
-        return _do_com_work()
-    except Exception as e:
-        _PYCAW_LAST_ERROR = f"{type(e).__name__}: {e}"
-        log.warning("System volume: Windows audio call failed: %s", _PYCAW_LAST_ERROR)
-        return None
-    finally:
-        if com_initialized_here:
-            try:
-                comtypes.CoUninitialize()                               # type: ignore[name-defined]
-            except Exception:
-                pass
+        _winvol_proc = None
+        raise
+
+
+async def _winvol_request(req: dict) -> Optional[dict]:
+    """Async wrapper around the helper round-trip: serialized, time-bounded, and
+    self-healing. Returns the reply dict, or None on failure (sets _PYCAW_LAST_ERROR)."""
+    global _winvol_lock, _winvol_proc, _PYCAW_LAST_ERROR
+    if _winvol_lock is None:
+        _winvol_lock = asyncio.Lock()
+    async with _winvol_lock:
+        try:
+            # First call pays the child's comtypes/pycaw import + CoInitialize
+            # (a few hundred ms); later calls are fast. 5 s covers a cold start.
+            resp = await asyncio.wait_for(
+                asyncio.to_thread(_winvol_roundtrip_sync, req), timeout=5,
+            )
+        except Exception as e:
+            # Timeout or IO error — kill the (possibly wedged) child so the next
+            # call respawns a clean one, and remember why for the API surface.
+            p = _winvol_proc
+            if p is not None:
+                try:
+                    p.kill()
+                except Exception:
+                    pass
+                _winvol_proc = None
+            _PYCAW_LAST_ERROR = f"Windows volume helper failed: {type(e).__name__}: {e}"
+            log.warning("%s", _PYCAW_LAST_ERROR)
+            return None
+        if resp and not resp.get("ok"):
+            _PYCAW_LAST_ERROR = resp.get("error") or "Windows volume helper returned an error."
+            log.warning("System volume: %s", _PYCAW_LAST_ERROR)
+        return resp
 
 
 def _set_system_volume_sync(pct: int) -> bool:
+    """POSIX system-volume set (osascript / pactl / amixer). Windows is handled
+    out-of-process via the helper child — see set_system_volume."""
     pct = max(0, min(100, int(pct)))
     sys_name = platform.system()
-    if sys_name == "Windows":
-        def _set(vol):
-            vol.SetMute(0, None)
-            vol.SetMasterVolumeLevelScalar(pct / 100.0, None)
-            return True
-        return _windows_volume_op(_set) is True
     try:
         if sys_name == "Darwin":
             subprocess.run(
@@ -5051,11 +5036,9 @@ def _set_system_volume_sync(pct: int) -> bool:
 
 
 def _get_system_volume_sync() -> Optional[int]:
+    """POSIX system-volume read. Windows is handled out-of-process — see
+    get_system_volume."""
     sys_name = platform.system()
-    if sys_name == "Windows":
-        def _get(vol):
-            return max(0, min(100, round(vol.GetMasterVolumeLevelScalar() * 100)))
-        return _windows_volume_op(_get)
     try:
         if sys_name == "Darwin":
             r = subprocess.run(
@@ -5080,10 +5063,19 @@ def _get_system_volume_sync() -> Optional[int]:
 
 
 async def set_system_volume(pct: int) -> bool:
+    pct = max(0, min(100, int(pct)))
+    if platform.system() == "Windows":
+        resp = await _winvol_request({"op": "set", "pct": pct})
+        return bool(resp and resp.get("ok"))
     return await asyncio.to_thread(_set_system_volume_sync, pct)
 
 
 async def get_system_volume() -> Optional[int]:
+    if platform.system() == "Windows":
+        resp = await _winvol_request({"op": "get"})
+        if resp and resp.get("ok"):
+            return resp.get("value")
+        return None
     return await asyncio.to_thread(_get_system_volume_sync)
 
 
@@ -5382,9 +5374,9 @@ async def youtube_control(req: YouTubeControlReq) -> JSONResponse:
             await broadcast("state", state_snapshot())
             return JSONResponse({"ok": True, "volume": target})
         # Failure: surface *why* so the user can act (most often: pycaw not
-        # installed on Windows, or COM init refused). _PYCAW_LAST_ERROR is
-        # populated by _windows_volume_op on Windows; on POSIX we fall back to a
-        # generic message since pactl/osascript failures are rare.
+        # installed on Windows, or the helper child errored). _PYCAW_LAST_ERROR
+        # is set from the helper's error reply on Windows; on POSIX we fall back
+        # to a generic message since pactl/osascript failures are rare.
         err = _PYCAW_LAST_ERROR if platform.system() == "Windows" else \
             "Couldn't set the host system volume."
         return JSONResponse({"ok": False, "volume": target, "error": err},
@@ -6536,6 +6528,47 @@ async def set_youtube_start_volume(req: YouTubeStartVolumeReq) -> JSONResponse:
     return JSONResponse({"ok": True, "youtube_start_volume": capped})
 
 
+@app.get("/api/settings/host-volume")
+async def get_host_volume() -> JSONResponse:
+    """Live host OS mixer volume (0-100). `null` if the platform helper failed."""
+    return JSONResponse({"host_volume": await get_system_volume()})
+
+
+_host_volume_lock: Optional[asyncio.Lock] = None
+_host_volume_target: Optional[int] = None
+_host_volume_last_written: Optional[int] = None
+
+
+@app.post("/api/settings/host-volume")
+async def set_host_volume(req: HostVolumeReq) -> JSONResponse:
+    """Immediately set the host OS mixer volume (0-100).
+
+    Not persisted in `library.json` — the OS already remembers its own mixer
+    state, and an external change (TV remote, keyboard volume key) shouldn't
+    be clobbered by a stale dashboard value on next launch.
+
+    Coalesced + serialized: concurrent requests share one "latest target" slot.
+    Each call takes the lock (queueing if busy), then writes the OS mixer only
+    if the latest target differs from the value already written. A drag that
+    fires N requests/s on the client therefore produces at most one OS write
+    per distinct target value, not N — protects pycaw from being thrashed by
+    its own heavy CoInitialize/CoUninitialize cycle on each call.
+    """
+    global _host_volume_lock, _host_volume_target, _host_volume_last_written
+    capped = max(0, min(100, int(req.host_volume)))
+    if _host_volume_lock is None:
+        _host_volume_lock = asyncio.Lock()
+    _host_volume_target = capped
+    async with _host_volume_lock:
+        target = _host_volume_target
+        if target == _host_volume_last_written:
+            return JSONResponse({"ok": True, "host_volume": capped, "skipped": True})
+        ok = await set_system_volume(target)
+        if ok:
+            _host_volume_last_written = target
+    return JSONResponse({"ok": ok, "host_volume": capped})
+
+
 @app.post("/api/skip-now")
 async def skip_now(req: SkipNowReq) -> JSONResponse:
     """Execute the current Smart Skip offer (called by the client's Skip button)."""
@@ -7241,6 +7274,32 @@ async def admin_switch_branch(request: Request, body: UpdaterConfigReq) -> JSONR
                                 f"Switched to {body.branch} ({res['commit']}).",
                                 busy=False)
     return JSONResponse({"ok": True, "branch": body.branch, "commit": res["commit"]})
+
+
+@app.post("/api/admin/updater/reset-hard")
+async def admin_reset_hard(request: Request) -> JSONResponse:
+    """Force the working tree back onto origin/<current-branch>.
+
+    Recovery for a wedged / diverged checkout: `git fetch` + `git reset
+    --hard origin/<current-branch>`, discarding local commits and edits to
+    tracked files. Stays on the same branch and does no `git clean`, so
+    untracked / gitignored files (library.json, .env, .offline_cache/,
+    .background/) survive. Does NOT run setup.py or reboot.
+    """
+    _require_admin(request)
+    if state.updater_busy:
+        raise HTTPException(409, "An update operation is already running.")
+
+    async with _updater_lock:
+        await _set_updater_phase("applying", "Resetting hard to origin…", busy=True)
+        res = await updater.reset_hard()
+        if not res.get("ok"):
+            await _set_updater_phase("error", res.get("error", "reset failed"), busy=False)
+            raise HTTPException(500, res.get("error", "reset failed"))
+        await _set_updater_phase("idle",
+                                f"Reset {res['branch']} to origin ({res['commit']}).",
+                                busy=False)
+    return JSONResponse({"ok": True, "branch": res["branch"], "commit": res["commit"]})
 
 
 # ── Routes: Env Keys ──────────────────────────────────────────────────────────

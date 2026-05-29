@@ -328,12 +328,12 @@
 <!-- ── Profile Settings Modal (auto-skip toggles) ─────────────────────────── -->
 <div id="profileSettingsModal"
   class="hidden fixed inset-0 z-50 bg-black/70 flex items-end sm:items-center justify-center sm:px-4">
-  <div class="bg-gray-900 w-full sm:max-w-sm fade-in border-t-[3px] border-indigo-600">
-    <div class="px-5 pt-5 pb-4 border-b border-gray-800 flex items-center justify-between">
+  <div class="bg-gray-900 w-full sm:max-w-sm fade-in border-t-[3px] border-indigo-600 flex flex-col max-h-[90vh] sm:max-h-[85vh]">
+    <div class="px-5 pt-5 pb-4 border-b border-gray-800 flex items-center justify-between flex-shrink-0">
       <h2 class="text-lg font-black uppercase tracking-wide">Profile Settings</h2>
       <button onclick="closeProfileSettings()" class="text-gray-600 hover:text-gray-300 text-xl leading-none">✕</button>
     </div>
-    <div class="px-5 py-4 space-y-3">
+    <div class="px-5 py-4 space-y-3 overflow-y-auto flex-1">
       <p class="text-[11px] text-gray-500 uppercase tracking-widest" id="psProfileLabel"></p>
 
       <label class="flex items-center justify-between gap-3 bg-gray-800/60 px-4 py-3 cursor-pointer hover:bg-gray-800 transition-colors">
@@ -392,6 +392,20 @@
       <div class="bg-gray-800/60 px-4 py-3">
         <div class="flex items-center justify-between gap-3 mb-2">
           <div class="min-w-0">
+            <div class="text-sm font-bold text-gray-200 uppercase tracking-wide">Host Volume</div>
+            <div class="text-[11px] text-gray-500 mt-0.5">Drives the host OS mixer in real time. Reflects (and overrides) the speaker volume on the machine running StreamLink.</div>
+          </div>
+          <span id="psHostVolumeLabel" class="text-sm font-mono font-bold text-indigo-400 tabular-nums">—</span>
+        </div>
+        <input id="psHostVolume" type="range" min="0" max="100" step="1" value="0"
+          class="w-full accent-indigo-500 cursor-pointer"
+          oninput="onHostVolumeInput(this.value)"
+          onchange="saveHostVolume(this.value)"/>
+      </div>
+
+      <div class="bg-gray-800/60 px-4 py-3">
+        <div class="flex items-center justify-between gap-3 mb-2">
+          <div class="min-w-0">
             <div class="text-sm font-bold text-gray-200 uppercase tracking-wide">YouTube Starting Volume</div>
             <div class="text-[11px] text-gray-500 mt-0.5">Host OS volume pre-set the moment a YouTube link starts playing, before the first frame produces audio. Keeps videos from blasting at system max.</div>
           </div>
@@ -419,9 +433,9 @@
 
       <p id="psStatus" class="text-[10px] text-gray-600 uppercase tracking-widest pt-1">Manual skip button is always available.</p>
     </div>
-    <div class="px-4 pb-4 safe-bottom">
+    <div class="px-4 pb-4 safe-bottom flex-shrink-0 border-t border-gray-800">
       <button onclick="closeProfileSettings()"
-        class="w-full bg-gray-800 hover:bg-gray-700 py-4 text-sm font-bold uppercase tracking-wide transition-colors">
+        class="w-full bg-gray-800 hover:bg-gray-700 py-4 text-sm font-bold uppercase tracking-wide transition-colors mt-3">
         Done
       </button>
     </div>
@@ -2312,9 +2326,10 @@ function _holdCancel(btn){
 
 // Hold-to-large-step for fullscreen vol buttons.
 // Short tap → step 5; hold (>400 ms) → step 15, repeating every 350 ms.
-let _volHoldTimer = null, _volHoldInterval = null, _volHoldActive = false;
+let _volHoldTimer = null, _volHoldInterval = null, _volHoldActive = false, _volPressed = false;
 function _fcVolDown(delta, btn, e){
   e.preventDefault();
+  _volPressed = true;
   _volHoldActive = false;
   const bigDelta = delta > 0 ? 15 : -15;
   _volHoldTimer = setTimeout(() => {
@@ -2324,6 +2339,10 @@ function _fcVolDown(delta, btn, e){
   }, 400);
 }
 function _fcVolUp(delta, btn){
+  // pointerleave fires on plain mouse hover (no preceding pointerdown); without
+  // this guard, hovering off the button would fire a volume step.
+  if(!_volPressed) return;
+  _volPressed = false;
   clearTimeout(_volHoldTimer); _volHoldTimer = null;
   if(_volHoldInterval){ clearInterval(_volHoldInterval); _volHoldInterval = null; }
   if(!_volHoldActive) vlcVolumeStep(delta, btn);
@@ -2505,6 +2524,46 @@ async function saveSystemVolumeDefault(){
       s.className = "text-[10px] text-gray-600 uppercase tracking-widest pt-1";
     }, 2500);
   }
+}
+
+// Live host OS mixer volume (0-100). Drag = push to the host's mixer.
+// Single-flight pump: at most one POST is in flight at a time. While a POST is
+// flying, further drags only update the pending target; the next POST goes out
+// as soon as the current one resolves AND only if the target moved. On Windows
+// each pycaw call is a full COM round-trip (CoInitialize → device enum →
+// Activate → SetMasterVolumeLevelScalar → CoUninitialize), so hammering 20+/s
+// can wedge the audio subsystem — single-flight bounds it to the round-trip
+// rate of the OS itself (~10–20 / s in practice, never piling up).
+let _hostVolPending  = null;   // latest desired value (null = nothing pending)
+let _hostVolInflight = false;  // POST currently flying?
+let _hostVolLastSent = null;   // last value we actually POSTed
+async function _hostVolPump(){
+  if(_hostVolInflight) return;
+  while(_hostVolPending != null && _hostVolPending !== _hostVolLastSent){
+    const v = _hostVolPending;
+    _hostVolLastSent = v;
+    _hostVolInflight = true;
+    try{
+      await fetch("/api/settings/host-volume", {
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body: JSON.stringify({host_volume: v}),
+      });
+    }catch(_){}
+    _hostVolInflight = false;
+  }
+  _hostVolPending = null;
+}
+function onHostVolumeInput(raw){
+  const v = Math.max(0,Math.min(100,parseInt(raw,10)||0));
+  document.getElementById("psHostVolumeLabel").textContent = v + "%";
+  _hostVolPending = v;
+  _hostVolPump();
+}
+function saveHostVolume(raw){
+  const v = Math.max(0,Math.min(100,parseInt(raw,10)||0));
+  document.getElementById("psHostVolumeLabel").textContent = v + "%";
+  _hostVolPending = v;
+  _hostVolPump();
 }
 
 // OS volume pre-set the moment a YouTube play starts. 0-100 OS scale.
@@ -2746,6 +2805,28 @@ async function openProfileSettings(){
   }catch(_){
     document.getElementById("psYtStartVolume").value = 30;
     document.getElementById("psYtStartVolumeLabel").textContent = "30%";
+  }
+  try{
+    const r = await fetch("/api/settings/host-volume");
+    const d = r.ok ? await r.json() : {};
+    const hv = (d.host_volume==null) ? null : Math.max(0,Math.min(100,parseInt(d.host_volume,10)));
+    const slider = document.getElementById("psHostVolume");
+    const label  = document.getElementById("psHostVolumeLabel");
+    if(hv==null){
+      slider.disabled = true;
+      label.textContent = "N/A";
+    }else{
+      slider.disabled = false;
+      slider.value = hv;
+      label.textContent = hv + "%";
+      // Tell the pump "OS is already here" so dragging back to this value
+      // after an external OS change still no-ops correctly.
+      _hostVolLastSent = hv;
+      _hostVolPending  = null;
+    }
+  }catch(_){
+    document.getElementById("psHostVolume").disabled = true;
+    document.getElementById("psHostVolumeLabel").textContent = "N/A";
   }
   document.getElementById("profileSettingsModal").classList.remove("hidden");
 }
@@ -6410,6 +6491,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">3.10.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">3.13.0</div>
 </body>
 </html>

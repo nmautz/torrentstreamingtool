@@ -562,7 +562,7 @@
       <div class="px-5 py-4 border-b border-gray-800 grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div class="space-y-1.5">
           <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Branch</label>
-          <select id="auBranch"
+          <select id="auBranch" onchange="_auFormDirty=true"
             class="w-full bg-black border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-indigo-500 outline-none">
             <option value="main">main (stable)</option>
             <option value="beta">beta (release candidate)</option>
@@ -572,13 +572,13 @@
         </div>
         <div class="space-y-1.5">
           <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Check Every (hours)</label>
-          <input id="auInterval" type="number" min="1" max="168" value="6"
+          <input id="auInterval" type="number" min="1" max="168" value="6" oninput="_auFormDirty=true"
             class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none"/>
           <p class="text-[10px] text-gray-600">Between 1 and 168 (1 week).</p>
         </div>
         <div class="space-y-1.5 sm:col-span-2">
           <label class="flex items-center gap-2 text-sm text-gray-200 cursor-pointer">
-            <input id="auAutoApply" type="checkbox" class="accent-indigo-500"/>
+            <input id="auAutoApply" type="checkbox" onchange="_auFormDirty=true" class="accent-indigo-500"/>
             <span class="select-none">Auto-apply when a new commit is detected</span>
           </label>
           <p class="text-[10px] text-gray-600 ml-6">When off, the dashboard shows a banner and the admin clicks Apply Now to update. Auto-apply waits until the host is idle so it never interrupts a stream.</p>
@@ -629,6 +629,10 @@
           <button id="auSwitchBtn" onclick="switchBranchNow()"
             class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-indigo-700 bg-indigo-900 text-indigo-200 hover:bg-indigo-800 transition-colors disabled:opacity-50">
             Switch Branch
+          </button>
+          <button id="auResetBtn" onclick="resetHardNow()"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-red-800 bg-red-950 text-red-300 hover:bg-red-900 transition-colors disabled:opacity-50">
+            Reset Hard
           </button>
           <button id="auSaveBtn" onclick="saveAutoupdate()"
             class="bg-indigo-600 hover:bg-indigo-500 px-5 py-2 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">
@@ -864,7 +868,7 @@ function switchTab(tab){
   if(tab==="offline")    loadOfflineCache();
   if(tab==="background") loadBackgroundVideo();
   if(tab==="system")   { loadScheduledReboot(); loadOvernightPrep(); loadLogs(); }
-  if(tab==="updates")  { loadAutoupdate(); loadEnvKeys(); startAutoupdatePolling(); }
+  if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
 }
 
@@ -1155,6 +1159,7 @@ async function saveOvernightPrep(){
 let _auEnabled = false;
 let _auState = null;
 let _auPollTimer = null;
+let _auFormDirty = false;   // true while the user has unsaved edits to the editable controls
 
 function _renderAuEnabled(){
   const btn = document.getElementById("auEnabledBtn");
@@ -1170,6 +1175,7 @@ function _renderAuEnabled(){
 
 function toggleAutoupdate(){
   _auEnabled = !_auEnabled;
+  _auFormDirty = true;
   _renderAuEnabled();
 }
 
@@ -1191,11 +1197,15 @@ async function loadAutoupdate(){
     const d = await r.json();
     _auState = d;
     const cfg = d.cfg || {};
-    _auEnabled = !!cfg.enabled;
-    _renderAuEnabled();
-    document.getElementById("auBranch").value     = cfg.branch || "main";
-    document.getElementById("auInterval").value   = cfg.interval_hours || 6;
-    document.getElementById("auAutoApply").checked = cfg.auto_apply !== false;
+    // Don't clobber editable controls while the user is mid-edit — the 4 s poll
+    // would otherwise reset the branch picker before they can hit Switch/Apply.
+    if(!_auFormDirty){
+      _auEnabled = !!cfg.enabled;
+      _renderAuEnabled();
+      document.getElementById("auBranch").value     = cfg.branch || "main";
+      document.getElementById("auInterval").value   = cfg.interval_hours || 6;
+      document.getElementById("auAutoApply").checked = cfg.auto_apply !== false;
+    }
     document.getElementById("auCurBranch").textContent  = d.current_branch || "—";
     document.getElementById("auCurCommit").textContent  = d.current_commit || "—";
     document.getElementById("auLastCheck").textContent  =
@@ -1215,6 +1225,7 @@ async function loadAutoupdate(){
     document.getElementById("auCheckBtn").disabled  = busy || !d.is_git_repo;
     document.getElementById("auApplyBtn").disabled  = busy || !d.is_git_repo;
     document.getElementById("auSwitchBtn").disabled = busy || !d.is_git_repo;
+    document.getElementById("auResetBtn").disabled  = busy || !d.is_git_repo;
     document.getElementById("auSaveBtn").disabled   = busy;
 
     const out = d.last_output || "";
@@ -1254,6 +1265,7 @@ async function saveAutoupdate(){
       return;
     }
     showToast(_auEnabled ? "Auto-update settings saved." : "Auto-update disabled.");
+    _auFormDirty = false;
     await loadAutoupdate();
   }catch(_){
     showToast("Save failed.", true);
@@ -1361,12 +1373,46 @@ async function switchBranchNow(){
     }
     const d = await r.json();
     showToast(`Switched to ${d.branch} (${d.commit}). Click Apply Now to refresh deps.`);
+    _auFormDirty = false;
     await loadAutoupdate();
   }catch(_){
     showToast("Switch failed.", true);
   }finally{
     btn.disabled = false;
     btn.textContent = "Switch Branch";
+  }
+}
+
+async function resetHardNow(){
+  const cur = (_auState && _auState.current_branch) || "the current branch";
+  if(!confirm(
+      `Hard-reset '${cur}' to origin?\n\n` +
+      `Runs git fetch + git reset --hard origin/${cur}, discarding any local commits ` +
+      `AND uncommitted edits to tracked files — the checkout is forced to match the remote exactly.\n\n` +
+      `Untracked / gitignored files (library.json, .env, .offline_cache/, .background/) are kept. ` +
+      `setup.py is NOT re-run and the host is NOT rebooted. Continue?`
+  )) return;
+  const btn = document.getElementById("auResetBtn");
+  btn.disabled = true;
+  btn.textContent = "Resetting…";
+  try{
+    const r = await fetch("/api/admin/updater/reset-hard", {
+      method: "POST",
+      headers: authHeader(),
+    });
+    if(!r.ok){
+      const t = await r.text();
+      showToast(`Reset failed: ${t || r.status}`, true);
+      return;
+    }
+    const d = await r.json();
+    showToast(`Reset ${d.branch} to origin (${d.commit}).`);
+    await loadAutoupdate();
+  }catch(_){
+    showToast("Reset failed.", true);
+  }finally{
+    btn.disabled = false;
+    btn.textContent = "Reset Hard";
   }
 }
 

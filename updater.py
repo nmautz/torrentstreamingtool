@@ -181,6 +181,42 @@ async def apply_update(branch: str) -> dict:
     return await switch_branch(branch)
 
 
+async def reset_hard() -> dict:
+    """Force the working tree back onto origin/<current-branch>.
+
+    Recovery tool for a wedged / diverged checkout: fetches the current
+    branch and `git reset --hard origin/<branch>`, discarding any local
+    commits and uncommitted edits to tracked files. Stays on the same
+    branch (unlike switch_branch) and does NOT `git clean`, so untracked /
+    gitignored files (library.json, .env, .offline_cache/, .background/)
+    survive.
+
+    Gated to ALLOWED_BRANCHES: refuses to act on a detached HEAD or any
+    branch outside main/beta/alpha so the button can't quietly nuke an
+    unexpected checkout.
+    """
+    if not await is_git_repo():
+        return {"ok": False, "error": "Not a git checkout."}
+
+    branch = await current_branch()
+    if not branch or branch == "HEAD":
+        return {"ok": False, "error": "Detached HEAD — checkout a branch first."}
+    if branch not in ALLOWED_BRANCHES:
+        return {"ok": False,
+                "error": f"Current branch '{branch}' is not one of "
+                         f"{', '.join(ALLOWED_BRANCHES)}."}
+
+    ok, msg = await _fetch(branch)
+    if not ok:
+        return {"ok": False, "error": msg}
+
+    rc, _, err = await _git("reset", "--hard", f"origin/{branch}", timeout=60.0)
+    if rc != 0:
+        return {"ok": False, "error": err or "git reset failed"}
+
+    return {"ok": True, "branch": branch, "commit": await current_commit()}
+
+
 # ── setup re-run + service restart ───────────────────────────────────────────
 
 def _venv_python() -> Optional[Path]:

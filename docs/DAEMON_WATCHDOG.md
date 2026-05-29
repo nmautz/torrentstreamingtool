@@ -18,10 +18,14 @@ Two related but distinct pieces:
 4. Calls `run.get_local_ip()` to detect the LAN IP for mDNS
 5. On Windows: calls `run.setup_windows_firewall(80)` and `(443)` if certs exist (idempotent — Task Scheduler runs the wrapper elevated so `netsh add rule` succeeds)
 6. Calls `run.start_mdns_resilient(80, 443 if certs)` so `remote.local` resolves for LAN clients. **Resilient, not one-shot:** the service starts at boot before Wi-Fi has a LAN IP, so a single `start_mdns()` would see no IP and silently skip — `remote.local` would never resolve until a manual relaunch even though the dashboard is reachable by IP. The resilient version registers from a daemon thread that waits for the IP and re-registers on change. See [GOTCHAS.md](GOTCHAS.md#remotelocal-doesnt-resolve-after-a-reboot)
-7. If `cert.pem` + `key.pem` exist: launches a separate `uvicorn … --port 443 --ssl-certfile … --ssl-keyfile …` subprocess for the admin panel (HTTPS), logging to `logs/uvicorn_https.log`. Not supervised — if it dies, only port 443 stops; the main HTTP service continues
-8. Supervises `uvicorn main:app --host 0.0.0.0 --port 80` in a restart loop
-9. Restart loop logic: clean exit (rc 0) → quit; non-zero → wait 5 s and retry. **Fast-death detection**: 5 consecutive crashes in under 15 s each → give up (prevents tight crash loops eating CPU)
-10. On any exit path the wrapper cleans up: terminates the HTTPS subprocess, closes the zeroconf instance
+7. `os.chdir(HERE)` — Task Scheduler launches the wrapper with CWD = `C:\Windows\System32`; `main.py` mounts `StaticFiles("static")` with a relative path so this must run **before** `main:app` is imported. See [GOTCHAS.md](GOTCHAS.md#windows-service-wrapper-must-oschdirhere-before-importing-mainapp)
+8. Launches **both uvicorn servers in the same `asyncio.run()` event loop** via the programmatic `uvicorn.Server` API:
+    - Port 80 → `main:app` (the canonical FastAPI app — runs the lifespan, owns the only `AppState`)
+    - Port 443 → `https_proxy:app` (a thin reverse proxy that forwards every request to `127.0.0.1:80`); only registered when `cert.pem` + `key.pem` exist
+    - Single process means one `AppState` regardless of port/hostname — see [GOTCHAS.md](GOTCHAS.md#https-port-443-is-a-reverse-proxy-not-a-second-fastapi-instance)
+    - `log_config={"version":1,"disable_existing_loggers":False}` suppresses uvicorn's default `dictConfig` (which adds `StreamHandler`s pointing at `sys.stderr`/`stdout` — both `None` in a Task Scheduler service)
+9. Restart loop logic: **any** return from `asyncio.run()` triggers a 5 s back-off and retry; only `KeyboardInterrupt`/`SystemExit` breaks the loop. **Fast-death detection**: 5 consecutive returns in under 15 s each → give up (prevents tight crash loops eating CPU)
+10. On any exit path the wrapper closes the zeroconf instance
 
 The wrapper does **not** explicitly launch VLC / qBit / Jackett at boot — the watchdog detects them as down on its first tick and starts them itself. This matches the interactive `run.py` flow once you account for the watchdog also running there.
 

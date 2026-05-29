@@ -11,6 +11,7 @@ and other venv packages are available without manual activation.
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import platform
 import re
@@ -975,40 +976,53 @@ def main():
     _zc = start_mdns_resilient(PORT, ADMIN_PORT if has_cert else 0)
     print()
 
-    # ── HTTPS admin process (port 443) ────────────────────────────────────
-    _https_proc = None
-    if has_cert:
-        _https_proc = subprocess.Popen(
-            [
-                str(uvicorn_bin), "main:app",
-                "--host", "0.0.0.0",
-                "--port", str(ADMIN_PORT),
-                "--ssl-certfile", str(CERT),
-                "--ssl-keyfile", str(KEY),
-                "--log-level", "warning",
-            ],
-            cwd=str(HERE),
+    # ── Launch dashboard (single canonical app + HTTPS reverse proxy) ─────
+    # Port 80 serves the real FastAPI app (main:app). Port 443, when certs
+    # exist, serves a thin reverse-proxy app (https_proxy:app) that streams
+    # every request to 127.0.0.1:80. The result: there is exactly ONE
+    # AppState in the process, regardless of whether a client connects via
+    # http://remote.local, http://<lan-ip>, https://remote.local or
+    # https://<lan-ip>. See docs/GOTCHAS.md for the divergence story.
+    import uvicorn as _uvicorn
+    if str(HERE) not in sys.path:
+        sys.path.insert(0, str(HERE))
+
+    _uv_log_cfg = {"version": 1, "disable_existing_loggers": False}
+
+    async def _launch():
+        http_cfg = _uvicorn.Config(
+            "main:app",
+            host="0.0.0.0",
+            port=PORT,
+            log_level="warning",
+            log_config=_uv_log_cfg,
         )
+        http_srv = _uvicorn.Server(http_cfg)
+        http_srv.install_signal_handlers = lambda: None
+
+        coros = [http_srv.serve()]
+
+        if has_cert:
+            https_cfg = _uvicorn.Config(
+                "https_proxy:app",
+                host="0.0.0.0",
+                port=ADMIN_PORT,
+                ssl_certfile=str(CERT),
+                ssl_keyfile=str(KEY),
+                log_level="warning",
+                log_config=_uv_log_cfg,
+            )
+            https_srv = _uvicorn.Server(https_cfg)
+            https_srv.install_signal_handlers = lambda: None
+            coros.append(https_srv.serve())
+
+        await asyncio.gather(*coros, return_exceptions=True)
 
     try:
-        subprocess.run(
-            [
-                str(uvicorn_bin), "main:app",
-                "--host", "0.0.0.0",
-                "--port", str(PORT),
-                "--log-level", "warning",
-            ],
-            cwd=str(HERE),
-        )
+        asyncio.run(_launch())
     except KeyboardInterrupt:
         print(f"\n  {GRN}✓{RESET}  StreamLink stopped.")
     finally:
-        if _https_proc:
-            try:
-                _https_proc.terminate()
-                _https_proc.wait(timeout=5)
-            except Exception:
-                pass
         if _zc:
             try:
                 _zc.close()
