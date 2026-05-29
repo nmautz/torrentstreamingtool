@@ -9233,7 +9233,25 @@ async def offline_cache_bundle_file(cache_key: str, filename: str) -> FileRespon
 # per-file, per-item, or every orphan in one shot.
 
 async def _build_offline_cache_inventory() -> dict:
-    """Walk OFFLINE_CACHE + the library + `_offline_jobs` and return the admin payload.
+    """Fetch the library + snapshot the jobs, then run the (heavy, blocking)
+    filesystem walk in a worker thread.
+
+    The walk sums every file in every HLS bundle via `_dir_size_bytes` (recursive
+    `rglob` + `stat`). Since the ABR ladder tripled the segment count per bundle,
+    a sizeable `.offline_cache/` makes that walk take long enough that doing it
+    inline on the event loop freezes the WHOLE server — SSE, VLC polling, and
+    every other request stall until it looks crashed and the service restarts.
+    Offloading keeps the loop free (same discipline as `_run_offline_job`). The
+    job list is snapshotted here so the worker thread never iterates the live
+    `_offline_jobs` dict while the loop mutates it.
+    """
+    lib = await get_library()
+    jobs = list(_offline_jobs.values())
+    return await asyncio.to_thread(_offline_cache_inventory_sync, lib, jobs)
+
+
+def _offline_cache_inventory_sync(lib: dict, jobs: list[dict]) -> dict:
+    """Walk OFFLINE_CACHE + the library + the job snapshot and return the admin payload.
 
     Each per-file entry has a `status` of:
       cached         — `<sha>/master.m3u8` exists, ready for HLS playback
@@ -9286,7 +9304,7 @@ async def _build_offline_cache_inventory() -> dict:
     # 2) Index jobs by their output cache key. Keep only the most recent job per
     #    key so a series of failed retries collapses to one row.
     jobs_by_key: dict[str, dict] = {}
-    for j in _offline_jobs.values():
+    for j in jobs:
         try:
             key = Path(j.get("out", "")).name
         except Exception:
@@ -9299,7 +9317,6 @@ async def _build_offline_cache_inventory() -> dict:
     # 3) For every library file still on disk, compute the cache key and combine
     #    cache + partial + job state into one entry. Anything not referenced by
     #    a current library file lands in `orphans` below.
-    lib = await get_library()
     items_out: list[dict] = []
     matched_keys: set[str] = set()
     now = time.time()

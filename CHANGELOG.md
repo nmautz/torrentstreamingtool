@@ -1,5 +1,10 @@
 # Changelog
 
+## [4.0.1] — 2026-05-28
+- **Fix: admin → Offline Cache tab froze/crashed the server (stuck on "Loading cache inventory…").** `_build_offline_cache_inventory` did its heavy filesystem walk — `_dir_size_bytes` (recursive `rglob` + `stat` over every segment in every HLS bundle) plus a `stat()` per library file — **synchronously on the asyncio event loop**. With the ABR ladder tripling the segment count per bundle (and a library spread across drives), that walk blocked the loop long enough to wedge the entire server (SSE, VLC polling, every request stalled), which presented as a crash. The request never returned, so the tab sat on "Loading…" forever.
+- **Fix:** the inventory now fetches the library + snapshots the job list on the loop, then runs the blocking walk in a worker thread via `asyncio.to_thread` (`_offline_cache_inventory_sync`) — the same discipline `_run_offline_job` already uses for `_dir_size_bytes`/`rmtree`. The job snapshot avoids iterating the live `_offline_jobs` dict off-thread.
+- **Docs:** [docs/GOTCHAS.md](docs/GOTCHAS.md) notes never to run a full-cache FS walk inline on the event loop.
+
 ## [4.0.0] — 2026-05-27
 - **New: AI auto-generated subtitles (speech-to-text).** When a source ships no usable text subtitle — none at all, only image-based (PGS/VOBSUB) tracks, or none matching the admin's preferred language — StreamLink transcribes the audio into a sidecar `.srt` using bundled **whisper.cpp**. The sidecar is picked up by both players through existing plumbing: VLC via `addsubtitle`, the on-device HLS player via `_list_sidecar_subs` → `/api/library/{id}/subtitle`. Non-English audio additionally gets an English-translated track (whisper's translate task is English-only).
 - **Both preprocess and on-demand:** generation runs automatically after HLS stream-prep and during the overnight window (off the playback path), and on demand via a **Generate with AI** action in the VLC subtitle menu and an **AI** button in the on-device player's subtitle row. Generated tracks are labelled “(AI)”.
