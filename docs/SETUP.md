@@ -44,6 +44,11 @@
 - **macOS**: `brew install whisper-cpp`, plus the model download.
 - **Linux**: no reliable prebuilt — build whisper.cpp so `whisper-cli` is on PATH; the model still downloads (it's platform-independent).
 - The model **must be multilingual** (not `*.en`) so whisper's translate task can emit English from foreign audio. `detect_tools()` finds the binary via `whisper_candidates()` and the model via `whisper_model_candidates()` (any `tools/whisper/**/ggml-*.bin`).
+- The Windows binary zip's asset name is stable (`whisper-bin-x64.zip`) but the release tag isn't, so `_resolve_whisper_win_url()` queries the GitHub releases API at install time and only falls back to a pinned known-good tag if the API is unreachable.
+
+## Installing optional components after setup (admin panel)
+
+`setup.py` under `STREAMLINK_AUTOUPDATE=1` **skips every `install_*` step** (winget/brew need an interactive desktop), so a box that auto-updates never downloads portable deps it didn't already have — most notably whisper.cpp. Rather than require a manual terminal `setup.py` run, the admin **System → Optional Components** card installs them from the web: it reuses these same helpers (`_resolve_whisper_win_url`, `_extract_archive`, `_find_in_tree`, the `*_candidates()` finders, the URL constants) from inside the running server (`import setup` is safe — prompts are gated under `__main__`), streams the download for live progress, and writes the path into `.env` via `_write_env_keys`. Because the files land in `tools/`, the next auto-update's `detect_tools()` + `merge_tool_paths()` re-detect them and keep `.env` current — so a one-time install persists. See [ADMIN.md](ADMIN.md) and `main.py` `_run_component_install` / `/api/admin/components`.
 
 ## Jackett Windows service ([setup.py:593](../setup.py#L593))
 

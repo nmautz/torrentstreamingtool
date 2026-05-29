@@ -7168,6 +7168,42 @@ async def admin_set_stt(request: Request, body: SttConfigReq) -> JSONResponse:
     return JSONResponse({"ok": True, **cfg})
 
 
+@app.get("/api/admin/components")
+async def admin_components(request: Request) -> JSONResponse:
+    """Status of the installable portable dependencies (ffmpeg, fpcalc, whisper
+    binary, whisper model) + any in-flight install job. Polled by the admin
+    Components card while an install runs."""
+    _require_admin(request)
+    return JSONResponse(_component_status_payload())
+
+
+class ComponentInstallReq(BaseModel):
+    component: str
+    model: str = "base"      # whisper_model only: base | small | medium
+
+
+@app.post("/api/admin/components/install")
+async def admin_components_install(request: Request, req: ComponentInstallReq) -> JSONResponse:
+    """Download + install one portable component in the background. Poll
+    /api/admin/components for progress. ffmpeg/whisper binaries are Windows-only
+    here (elsewhere use the OS package manager); fpcalc + the model work anywhere."""
+    _require_admin(request)
+    if req.component not in _COMPONENT_KEYS:
+        raise HTTPException(400, "Unknown component.")
+    if req.component in ("ffmpeg", "whisper") and platform.system() != "Windows":
+        raise HTTPException(400, "This component can only be auto-installed on Windows. "
+                                 "Install it via your OS package manager instead.")
+    existing = _component_jobs.get(req.component)
+    if existing and existing.get("status") in ("pending", "downloading"):
+        return JSONResponse({"ok": True, "status": existing["status"], "already_running": True})
+    _component_jobs[req.component] = {
+        "status": "pending", "progress": 0.0, "error": None,
+        "component": req.component, "started_at": time.time(),
+    }
+    asyncio.create_task(_run_component_install(req.component, req.model))
+    return JSONResponse({"ok": True, "status": "started"})
+
+
 # ── Routes: Auto-Updater ──────────────────────────────────────────────────────
 # Periodic git-pull + setup-rerun + service-restart, gated to the main / beta /
 # alpha branches. State lives in library.json → settings.autoupdate; in-flight
@@ -8699,6 +8735,167 @@ async def _ensure_stt_for(src: Path, item_id: str = "", *,
     if not _needs_stt_subs(info, cfg["default_language"]):
         return None
     return _maybe_start_stt_job(src, item_id, translate=cfg["translate"], queue=queue)
+
+
+# ── Optional component installer (admin-driven setup) ────────────────────────
+# Lets the admin install the portable dependencies — ffmpeg, fpcalc, the
+# whisper.cpp binary, and a whisper model — from the web panel instead of a
+# terminal. The auto-updater runs setup.py NON-interactively and skips every
+# install_* step, so these never landed on the production box otherwise. We reuse
+# setup.py's URL/extract/detect helpers (it imports cleanly — its prompts live
+# under __main__) and stream the download here for live progress. Once a file is
+# in tools/, setup.py's detect_tools()+merge_tool_paths() keep .env pointing at it
+# across future auto-updates, so a one-time install here persists. See docs/SETUP.md.
+
+_component_jobs: dict[str, dict] = {}   # component → {status, progress, error, ...}
+_COMPONENT_KEYS = ("ffmpeg", "fpcalc", "whisper", "whisper_model")
+_WHISPER_MODEL_SIZES = ("base", "small", "medium")
+
+
+async def _download_to(url: str, dest: Path, job: dict) -> None:
+    """Stream `url` to `dest` (atomic via a `.part` temp), updating job['progress'].
+    Follows redirects (GitHub/HuggingFace assets resolve to signed CDN URLs)."""
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    tmp = dest.with_name(dest.name + ".part")
+    async with httpx.AsyncClient(follow_redirects=True,
+                                 timeout=httpx.Timeout(60.0, read=600.0)) as c:
+        async with c.stream("GET", url, headers={"User-Agent": "StreamLink"}) as r:
+            r.raise_for_status()
+            total = int(r.headers.get("content-length") or 0)
+            got = 0
+            with open(tmp, "wb") as f:
+                async for chunk in r.aiter_bytes(131072):
+                    f.write(chunk)
+                    got += len(chunk)
+                    job["progress"] = (min(0.99, got / total) if total > 0 else 0.5)
+    tmp.replace(dest)
+
+
+async def _run_component_install(component: str, model: str = "base") -> None:
+    """Download + install one portable component, then point .env at it and clear
+    the relevant detection caches so the new binary takes effect without a restart."""
+    job = _component_jobs[component]
+    job["status"] = "downloading"
+    try:
+        import setup  # stdlib-only, prompts gated under __main__ — safe to import
+    except Exception as e:
+        job["status"] = "error"; job["error"] = f"setup module import failed: {e}"
+        return
+    try:
+        if component == "whisper_model":
+            size = model if model in _WHISPER_MODEL_SIZES else "base"
+            fname = f"ggml-{size}.bin"
+            url = f"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{fname}"
+            dest = setup.TOOLS_DIR / "whisper" / "models" / fname
+            await _download_to(url, dest, job)
+            _write_env_keys({"_WHISPER_MODEL": str(dest)})
+
+        elif component == "whisper":
+            if os.name != "nt":
+                raise RuntimeError("Portable whisper.cpp is Windows-only here — build it on "
+                                   "Linux, or `brew install whisper-cpp` on macOS.")
+            url = await asyncio.to_thread(setup._resolve_whisper_win_url)
+            wh_dir = setup.TOOLS_DIR / "whisper"
+            tmp_zip = setup.TOOLS_DIR / "_dl_whisper.zip"
+            await _download_to(url, tmp_zip, job)
+            ok = await asyncio.to_thread(setup._extract_archive, tmp_zip, wh_dir)
+            tmp_zip.unlink(missing_ok=True)
+            if not ok:
+                raise RuntimeError("Could not extract the whisper.cpp archive.")
+            binp = (setup._find_in_tree(wh_dir, ["whisper-cli.exe"])
+                    or setup._find_in_tree(wh_dir, ["main.exe"])
+                    or setup._find_in_tree(wh_dir, ["whisper.exe"]))
+            if not binp:
+                raise RuntimeError("whisper-cli.exe not found inside the downloaded archive.")
+            _write_env_keys({"_WHISPER_BIN": binp})
+
+        elif component == "ffmpeg":
+            if os.name != "nt":
+                raise RuntimeError("Portable ffmpeg is Windows-only here — install it via your "
+                                   "package manager (brew / apt / dnf).")
+            ff_dir = setup.TOOLS_DIR / "ffmpeg"
+            tmp_zip = setup.TOOLS_DIR / "_dl_ffmpeg.zip"
+            await _download_to(setup.FFMPEG_WIN_URL, tmp_zip, job)
+            ok = await asyncio.to_thread(setup._extract_archive, tmp_zip, ff_dir)
+            tmp_zip.unlink(missing_ok=True)
+            if not ok:
+                raise RuntimeError("Could not extract the ffmpeg archive.")
+            binp = setup._find_in_tree(ff_dir, ["ffmpeg.exe"])
+            if not binp:
+                raise RuntimeError("ffmpeg.exe not found inside the downloaded archive.")
+            _write_env_keys({"_FFMPEG_BIN": binp})
+            _ffmpeg_version_probe.clear(); _nvenc_probe.clear()
+
+        elif component == "fpcalc":
+            sysname = platform.system()
+            if sysname == "Windows":
+                url, arcname, exe = setup.FPCALC_WIN_URL, "_dl_fpcalc.zip", "fpcalc.exe"
+            elif sysname == "Linux":
+                url, arcname, exe = setup.FPCALC_LINUX_URL, "_dl_fpcalc.tar.gz", "fpcalc"
+            else:
+                url, arcname, exe = setup.FPCALC_MAC_URL, "_dl_fpcalc.tar.gz", "fpcalc"
+            fp_dir = setup.TOOLS_DIR / "chromaprint"
+            tmp_arc = setup.TOOLS_DIR / arcname
+            await _download_to(url, tmp_arc, job)
+            ok = await asyncio.to_thread(setup._extract_archive, tmp_arc, fp_dir)
+            tmp_arc.unlink(missing_ok=True)
+            if not ok:
+                raise RuntimeError("Could not extract the fpcalc archive.")
+            binp = setup._find_in_tree(fp_dir, [exe])
+            if not binp:
+                raise RuntimeError(f"{exe} not found inside the downloaded archive.")
+            if os.name == "posix":
+                try:
+                    os.chmod(binp, 0o755)
+                except OSError:
+                    pass
+            _write_env_keys({"_FPCALC_BIN": binp})
+        else:
+            raise RuntimeError(f"Unknown component: {component}")
+
+        _stt_available_probe.clear()   # re-probe STT availability on next state read
+        job["progress"] = 1.0
+        job["status"] = "done"
+        hls_log.info("component install DONE: %s", component)
+    except Exception as e:
+        job["status"] = "error"
+        job["error"] = str(e)
+        hls_log.error("component install FAILED: %s — %s", component, e)
+
+
+def _component_status_payload() -> dict:
+    """Status of every installable portable dependency + any in-flight install job."""
+    import setup
+    win = (platform.system() == "Windows")
+    ffmpeg  = analyzer.ffmpeg_bin()
+    fpcalc  = analyzer.fpcalc_bin()
+    whisper = stt.whisper_bin()
+    model   = stt.whisper_model()
+    comps = {
+        "ffmpeg":        {"label": "ffmpeg",               "installed": bool(ffmpeg),
+                          "path": ffmpeg or "",  "installable": win,
+                          "purpose": "Stream-prep (HLS), Smart Skip, AI-subtitle audio extraction"},
+        "fpcalc":        {"label": "fpcalc (chromaprint)", "installed": bool(fpcalc),
+                          "path": fpcalc or "",  "installable": True,
+                          "purpose": "Smart Skip intro/credits fingerprinting"},
+        "whisper":       {"label": "whisper.cpp",          "installed": bool(whisper),
+                          "path": whisper or "", "installable": win,
+                          "purpose": "AI subtitle generation engine"},
+        "whisper_model": {"label": "whisper model",        "installed": bool(model),
+                          "path": model or "",   "installable": True,
+                          "purpose": "AI subtitle language model (multilingual)"},
+    }
+    for k, c in comps.items():
+        j = _component_jobs.get(k)
+        if j:
+            c["job"] = {"status": j["status"], "progress": round(j.get("progress", 0.0), 3),
+                        "error": j.get("error")}
+    return {
+        "components":   comps,
+        "platform":     platform.system(),
+        "model_sizes":  list(_WHISPER_MODEL_SIZES),
+        "stt_available": _stt_available(),
+    }
 
 
 def _read_meta(out_dir: Path) -> dict:

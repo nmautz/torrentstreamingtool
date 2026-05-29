@@ -103,7 +103,7 @@ For each profile:
 
 ### 7. System
 
-Controls: **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, and **Overnight Stream Prep**.
+Controls: **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Overnight Stream Prep**, **Auto-Generated Subtitles**, and **Optional Components**.
 
 #### Shut Down Server
 
@@ -163,6 +163,21 @@ Saving config resets `state.overnight_active` so the new schedule is re-evaluate
 
 - `GET /api/admin/overnight-prep` → config + `now` + `in_window` + `paused`.
 - `POST /api/admin/overnight-prep` → `{enabled, start, end, timezone, on_end}`. Validates both HH:MM, rejects `start == end`, resets the in-memory window guard.
+
+#### Optional Components
+
+Installs the portable dependencies the auto-updater can't fetch on its own. `setup.py` under `STREAMLINK_AUTOUPDATE=1` skips all `install_*` steps, so on an auto-updating box anything not already present (most often whisper.cpp + its model, sometimes ffmpeg/fpcalc) never downloads. This card installs them from the web instead of a terminal `setup.py` run.
+
+Lists four components — **ffmpeg**, **fpcalc**, **whisper.cpp** (binary), **whisper model** — each with an Installed/Missing badge, its resolved path, and an Install/Reinstall button. The whisper model has a size picker (base/small/medium, all multilingual). Installs stream on the host with a live progress bar.
+
+Mechanics ([main.py](../main.py) `_run_component_install`): reuses `setup.py`'s URL/extract/detect helpers (safe to `import setup` — its prompts are gated under `__main__`), streams the download via httpx for progress, extracts into `tools/`, writes the path into `.env` (`_write_env_keys`), and clears the ffmpeg-version / NVENC / STT-availability caches so the new binary takes effect without a restart. Because the files live in `tools/`, the next auto-update's `detect_tools()` + `merge_tool_paths()` re-detect them — a one-time install persists. **ffmpeg and whisper.cpp binaries are Windows-only here** (off-Windows the button is disabled with an "OS package manager" note); fpcalc and the model install on any OS.
+
+- `GET /api/admin/components` → per-component status + any in-flight install job.
+- `POST /api/admin/components/install` → `{component, model?}`; 400 for ffmpeg/whisper off-Windows.
+
+#### Auto-Generated Subtitles
+
+STT (whisper.cpp) config — enable toggle, preferred default language, English-translation toggle, and an unavailable banner when whisper isn't installed. See [STT.md](STT.md). `GET`/`POST /api/admin/stt`.
 
 ### 8. Updates
 

@@ -1,5 +1,11 @@
 # Changelog
 
+## [4.1.0] — 2026-05-28
+- **New: admin Optional Components installer (System tab).** The auto-updater runs `setup.py` non-interactively and skips every `install_*` step, so portable dependencies the box didn't already have — notably whisper.cpp + its model for AI subtitles — never landed without a manual terminal `setup.py` run. New **Optional Components** card lets the admin install/update them from the web: ffmpeg, fpcalc, the whisper.cpp binary, and the whisper model (base/small/medium picker). Downloads stream on the host with live progress and write the paths into `.env`; `detect_tools()` + `merge_tool_paths()` then keep them across future auto-updates, so a one-time install persists.
+- **Windows-native, no terminal.** Reuses `setup.py`'s URL-resolution / extract / detect helpers (imported into the running server — its prompts are gated under `__main__`) and streams the download via httpx for progress. ffmpeg / whisper.cpp binaries are offered only on Windows (elsewhere: OS package manager); fpcalc + the model install on any OS.
+- **Backend:** `GET /api/admin/components` (status + in-flight job) and `POST /api/admin/components/install {component, model?}`; installs run in the background and clear the ffmpeg-version / NVENC / STT-availability caches so a freshly-installed binary takes effect without a restart.
+- **Docs:** [docs/ADMIN.md](docs/ADMIN.md), [docs/SETUP.md](docs/SETUP.md), [docs/API.md](docs/API.md), [docs/STT.md](docs/STT.md).
+
 ## [4.0.3] — 2026-05-28
 - **Fix: whisper.cpp binary download 404'd in setup.py, so AI subtitles could never become available on Windows.** The download URL pinned a release tag (`v1.7.4`) that doesn't publish the Windows binary zip. The asset *name* (`whisper-bin-x64.zip`) is stable but the tag isn't, so a hardcoded version rots. setup.py now resolves the current URL from the GitHub releases API (`_resolve_whisper_win_url`) and only falls back to a pinned known-good release (v1.8.4) if the API is unreachable. Verified the asset contains `whisper-cli.exe`. The model download (HuggingFace) was always fine.
 

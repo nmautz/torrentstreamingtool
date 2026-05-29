@@ -343,6 +343,18 @@ on-demand. See [docs/STT.md](docs/STT.md).
 - [x] **24.5** Setup — `install_stt_deps` downloads portable whisper.cpp + the multilingual `ggml-base` model into `tools/whisper/` (Windows), brew on macOS, model-only on Linux. `detect_tools` finds binary + model; `.env` gains `_WHISPER_BIN` / `_WHISPER_MODEL`.
 - [x] **24.6** Frontend — VLC subtitle modal **Generate with AI** action + translate checkbox (`generateSubsVlc`), on-device player **AI** button in the sub row (`lpGenerateSubs` → `_lpAttachSidecarSubs`, non-blocking), shared `_pollSttJob`, `sttAvailable` from `/api/state`, "(AI)" labels on generated tracks.
 - [x] **24.7** Docs + version → 4.0.0: new docs/STT.md, CLAUDE.md index, STREAMING.md (post-prep STT hook), SETUP.md (whisper deps + env), API.md (endpoints), GOTCHAS.md (multilingual model + English-only translate), ARCHITECTURE.md (code map), CHANGELOG.
+- [x] **24.8** (v4.0.1) Fix: admin Offline Cache tab froze the server — `_build_offline_cache_inventory` ran the full-cache `_dir_size_bytes` walk inline on the event loop; now offloaded via `asyncio.to_thread` (`_offline_cache_inventory_sync`, job list snapshotted). GOTCHAS note added.
+- [x] **24.9** (v4.0.2) Fix: Generate-subtitle affordances only appeared after a full restart+reload once whisper was installed — `_stt_available()` now re-probes on a 60 s TTL (was cached forever), and the dashboard updates `sttAvailable` live from the SSE `state` stream.
+- [x] **24.10** (v4.0.3) Fix: whisper.cpp binary download 404'd (pinned a release tag that doesn't publish the Windows zip). `setup._resolve_whisper_win_url()` now resolves the asset URL from the GitHub releases API, pinned fallback v1.8.4.
+
+## Milestone 25 — Admin Optional-Components installer
+
+The auto-updater runs `setup.py` non-interactively (skips all `install_*`), so portable deps the box lacked — chiefly whisper.cpp + model — never landed without a manual terminal run. Let the admin install/update them from the web instead.
+
+- [x] **25.1** Backend — `_run_component_install` (httpx-streamed download with progress → `setup._extract_archive` → `setup._find_in_tree` → `_write_env_keys` → clear ffmpeg-version/NVENC/STT caches) for `ffmpeg` / `fpcalc` / `whisper` / `whisper_model`; `_component_status_payload` reuses `setup`'s candidate finders + `_resolve_whisper_win_url`. ffmpeg/whisper binaries Windows-only; fpcalc+model any OS. Persists across auto-update via `detect_tools()`+`merge_tool_paths()`.
+- [x] **25.2** Endpoints — `GET /api/admin/components` (status + in-flight job), `POST /api/admin/components/install {component, model?}`.
+- [x] **25.3** Frontend — **Optional Components** card in the System tab (`loadComponents`/`_renderComponents`/`installComponent`): per-component Installed/Missing badge + path + Install/Reinstall, whisper model size picker (base/small/medium), live progress bar, polls while installing.
+- [x] **25.4** Docs + version → 4.1.0: ADMIN.md (Optional Components subsection), SETUP.md (admin-install path + autoupdate skip rationale), API.md (2 endpoints), STT.md (no-terminal install note), CHANGELOG.
 
 ---
 

@@ -124,6 +124,12 @@ affordances on it; the admin card shows an "unavailable" banner otherwise.
 - **Windows (primary):** portable whisper.cpp build + model downloaded by
   `setup.py` into `tools/whisper/`. CPU build by default; a CUDA build is a
   manual upgrade (drop it in and re-point `_WHISPER_BIN`).
+- **Installing without a terminal:** the auto-updater runs `setup.py`
+  non-interactively and skips the whisper download, so on an auto-updating box
+  install it from **Admin → System → Optional Components** instead (binary +
+  model, with a size picker). It streams the download, writes `.env`, and clears
+  the availability cache so STT lights up without a restart. See
+  [ADMIN.md](ADMIN.md) / [SETUP.md](SETUP.md).
 - **Linux:** no reliable prebuilt — build whisper.cpp so `whisper-cli` is on
   PATH; the model still downloads.
 - **macOS (dev only):** `brew install whisper-cpp` + model download. Note HLS

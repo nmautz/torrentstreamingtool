@@ -589,6 +589,23 @@
         </button>
       </div>
     </div>
+
+    <!-- Optional components / portable dependencies -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Optional Components</h2>
+          <p class="text-xs text-gray-500 mt-0.5">Install the portable dependencies the auto-updater can't fetch on its own — ffmpeg, fpcalc, and the whisper.cpp engine + model for AI subtitles. Downloads run on the host and persist across updates. ffmpeg / whisper.cpp binaries are Windows-only here; on Linux/macOS use your package manager.</p>
+        </div>
+        <button onclick="loadComponents()"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 text-gray-300 hover:text-white transition-colors">
+          Refresh
+        </button>
+      </div>
+      <div id="compList" class="divide-y divide-gray-800">
+        <div class="px-5 py-8 text-center text-gray-600 text-sm">Loading components…</div>
+      </div>
+    </div>
   </div>
 
   <!-- ── Updates Tab ──────────────────────────────────────────────────────────── -->
@@ -914,7 +931,7 @@ function switchTab(tab){
   if(tab==="skip")       loadSkipPanel();
   if(tab==="offline")    loadOfflineCache();
   if(tab==="background") loadBackgroundVideo();
-  if(tab==="system")   { loadScheduledReboot(); loadOvernightPrep(); loadStt(); loadLogs(); }
+  if(tab==="system")   { loadScheduledReboot(); loadOvernightPrep(); loadStt(); loadComponents(); loadLogs(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
 }
@@ -1279,6 +1296,104 @@ async function saveStt(){
     showToast("Save failed.", true);
   }finally{
     btn.disabled = false;
+  }
+}
+
+// ── Optional Components (portable dependency installer) ─────────────────────────
+let _compPollTimer = null;
+
+async function loadComponents(){
+  const list = document.getElementById("compList");
+  if(!list) return;
+  let r;
+  try{
+    r = await fetch("/api/admin/components", {headers: authHeader()});
+  }catch(_){
+    list.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Network error — could not load components.</div>`;
+    return;
+  }
+  if(!r.ok){
+    list.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Failed to load components (HTTP ${r.status}).</div>`;
+    return;
+  }
+  const d = await r.json();
+  _renderComponents(d);
+  // Poll while any install is running; self-stop when all jobs settle.
+  const active = Object.values(d.components || {}).some(c => c.job && (c.job.status === "pending" || c.job.status === "downloading"));
+  if(active){
+    if(!_compPollTimer) _compPollTimer = setInterval(loadComponents, 1500);
+  } else if(_compPollTimer){
+    clearInterval(_compPollTimer); _compPollTimer = null;
+  }
+}
+
+function _renderComponents(d){
+  const order = ["ffmpeg","fpcalc","whisper","whisper_model"];
+  const sizes = d.model_sizes || ["base","small","medium"];
+  const html = order.map(key=>{
+    const c = (d.components || {})[key];
+    if(!c) return "";
+    const job = c.job;
+    const installing = job && (job.status === "pending" || job.status === "downloading");
+    const pct = job ? Math.round((job.progress || 0) * 100) : 0;
+    const badge = c.installed
+      ? `<span class="text-[10px] font-black uppercase tracking-widest px-1.5 py-0.5 bg-emerald-950 text-emerald-300">Installed</span>`
+      : `<span class="text-[10px] font-black uppercase tracking-widest px-1.5 py-0.5 bg-gray-800 text-gray-400">Missing</span>`;
+    const sizeSel = (key === "whisper_model")
+      ? `<select id="compModelSize" class="bg-black border border-gray-700 px-2 py-1.5 text-xs text-gray-200 focus:border-indigo-500 outline-none">
+           ${sizes.map(s=>`<option value="${s}"${s==="base"?" selected":""}>${escHtml(s)}</option>`).join("")}
+         </select>`
+      : "";
+    let action;
+    if(installing){
+      action = `<span class="text-[11px] font-bold uppercase tracking-wide text-indigo-300">Installing… ${pct}%</span>`;
+    } else if(!c.installable){
+      action = `<span class="text-[10px] text-gray-600 uppercase tracking-wide">OS package manager</span>`;
+    } else {
+      action = `<button onclick="installComponent('${key}')"
+        class="text-[11px] font-bold uppercase tracking-wide px-3 py-1.5 border border-indigo-700 bg-indigo-950/60 text-indigo-200 hover:bg-indigo-900 transition-colors">
+        ${c.installed ? "Reinstall" : "Install"}</button>`;
+    }
+    const err = (job && job.status === "error")
+      ? `<div class="text-[10px] text-red-400 mt-1">${escHtml(job.error || "Install failed.")}</div>` : "";
+    return `
+    <div class="px-5 py-3">
+      <div class="flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <div class="flex items-center gap-2">${badge}<span class="text-sm font-bold text-gray-200">${escHtml(c.label || key)}</span></div>
+          <div class="text-[10px] text-gray-600 mt-0.5">${escHtml(c.purpose || "")}</div>
+          ${c.path ? `<div class="text-[10px] font-mono text-gray-700 mt-0.5 truncate">${escHtml(c.path)}</div>` : ""}
+          ${err}
+        </div>
+        <div class="flex items-center gap-2 flex-shrink-0">${sizeSel}${action}</div>
+      </div>
+      ${installing ? `<div class="mt-2 h-1 bg-gray-800"><div class="h-1 bg-indigo-500 transition-all" style="width:${pct}%"></div></div>` : ""}
+    </div>`;
+  }).join("");
+  document.getElementById("compList").innerHTML = html;
+}
+
+async function installComponent(key){
+  const body = { component: key };
+  if(key === "whisper_model"){
+    const sel = document.getElementById("compModelSize");
+    if(sel) body.model = sel.value;
+  }
+  try{
+    const r = await fetch("/api/admin/components/install", {
+      method: "POST",
+      headers: {...authHeader(), "Content-Type": "application/json"},
+      body: JSON.stringify(body),
+    });
+    if(!r.ok){
+      const e = await r.json().catch(()=>({}));
+      showToast(`Install failed: ${e.detail || r.status}`, true);
+      return;
+    }
+    showToast("Install started…");
+    loadComponents();
+  }catch(_){
+    showToast("Could not start install.", true);
   }
 }
 
