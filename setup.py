@@ -301,10 +301,40 @@ FPCALC_MAC_URL   = "https://github.com/acoustid/chromaprint/releases/download/v1
 # whisper's translate task can emit English from foreign audio. ggml-base is the
 # size/quality sweet spot for overnight bulk prep; admins can swap in a larger
 # model by dropping it in tools/whisper/ and pointing _WHISPER_MODEL at it.
-WHISPER_VERSION    = "1.7.4"
-WHISPER_WIN_URL    = f"https://github.com/ggml-org/whisper.cpp/releases/download/v{WHISPER_VERSION}/whisper-bin-x64.zip"
+#
+# The Windows binary zip's ASSET NAME is stable (`whisper-bin-x64.zip`) but the
+# release TAG is not — a hardcoded tag 404s the moment a new release lands. So we
+# resolve the URL from the GitHub releases API at install time and only fall back
+# to a pinned known-good release if the API is unreachable. (`whisper-cublas-*`
+# CUDA builds also exist for NVIDIA hosts, but need matching CUDA runtime DLLs —
+# the CPU build is the portable default.)
+WHISPER_ASSET            = "whisper-bin-x64.zip"
+WHISPER_RELEASES_API     = "https://api.github.com/repos/ggml-org/whisper.cpp/releases/latest"
+WHISPER_FALLBACK_VERSION = "1.8.4"   # known-good tag that publishes WHISPER_ASSET
+WHISPER_WIN_URL_FALLBACK = f"https://github.com/ggml-org/whisper.cpp/releases/download/v{WHISPER_FALLBACK_VERSION}/{WHISPER_ASSET}"
 WHISPER_MODEL_NAME = "ggml-base.bin"
 WHISPER_MODEL_URL  = f"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{WHISPER_MODEL_NAME}"
+
+
+def _resolve_whisper_win_url() -> str:
+    """Return the current `whisper-bin-x64.zip` download URL from the GitHub
+    releases API, or the pinned fallback if the API can't be reached."""
+    import urllib.request, json as _json
+    try:
+        req = urllib.request.Request(
+            WHISPER_RELEASES_API,
+            headers={"User-Agent": "StreamLink-setup",
+                     "Accept": "application/vnd.github+json"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = _json.loads(resp.read().decode("utf-8", "replace"))
+        for asset in data.get("assets", []):
+            if asset.get("name") == WHISPER_ASSET and asset.get("browser_download_url"):
+                return asset["browser_download_url"]
+        warn("whisper-bin-x64.zip not found in the latest release; using pinned fallback.")
+    except Exception as e:
+        warn(f"Could not query whisper.cpp releases ({e}); using pinned fallback.")
+    return WHISPER_WIN_URL_FALLBACK
 
 
 def _download_with_progress(url: str, dest: Path) -> bool:
@@ -449,7 +479,7 @@ def _portable_install_whisper_windows() -> dict:
     TOOLS_DIR.mkdir(exist_ok=True)
     tmp_zip = TOOLS_DIR / "_dl_whisper.zip"
     wh_dir = TOOLS_DIR / "whisper"
-    if _download_with_progress(WHISPER_WIN_URL, tmp_zip):
+    if _download_with_progress(_resolve_whisper_win_url(), tmp_zip):
         if _extract_archive(tmp_zip, wh_dir):
             wh_path = (_find_in_tree(wh_dir, ["whisper-cli.exe"])
                        or _find_in_tree(wh_dir, ["main.exe"])

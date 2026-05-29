@@ -1,5 +1,8 @@
 # Changelog
 
+## [4.0.3] — 2026-05-28
+- **Fix: whisper.cpp binary download 404'd in setup.py, so AI subtitles could never become available on Windows.** The download URL pinned a release tag (`v1.7.4`) that doesn't publish the Windows binary zip. The asset *name* (`whisper-bin-x64.zip`) is stable but the tag isn't, so a hardcoded version rots. setup.py now resolves the current URL from the GitHub releases API (`_resolve_whisper_win_url`) and only falls back to a pinned known-good release (v1.8.4) if the API is unreachable. Verified the asset contains `whisper-cli.exe`. The model download (HuggingFace) was always fine.
+
 ## [4.0.2] — 2026-05-28
 - **Fix: the "Generate subtitles (AI)" affordances only appeared after a full server restart + page reload once whisper.cpp was installed.** Two stale caches: (1) the server's `_stt_available()` cached the whisper probe **forever** at first call, so installing whisper after startup never registered; it now re-probes on a 60 s TTL. (2) the dashboard read `stt_available` once at page load into `sttAvailable`; it now also updates live from the SSE `state` stream (and re-renders the on-device player's track row if a play is active). Net: install whisper, and within ~a minute the Generate option shows up on its own — no restart, no reload. The option is gated solely on STT availability (never on whether the file already has subtitles), as intended.
 
