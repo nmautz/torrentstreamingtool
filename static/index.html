@@ -6502,6 +6502,14 @@ function connectSSE(){
   });
   es.addEventListener("state",e=>{
     const d=JSON.parse(e.data); Object.assign(app,d);
+    // Pick up whisper availability live (the server re-probes on a 60s TTL) so
+    // the Generate-subtitles affordances appear the moment STT becomes available,
+    // without a page reload. Was previously read once at page load only.
+    if(typeof d.stt_available === "boolean"){
+      const was = sttAvailable;
+      sttAvailable = d.stt_available;
+      if(was !== sttAvailable && lp && lp.itemId){ try{ _lpRenderTrackRows(); }catch(_){} }
+    }
     renderVpn(d.vpn_secure,d.vpn_status); renderPlayer(app);
     updateDlBadge(d.downloading_count||0);
     renderServerAttention(d);
@@ -6652,6 +6660,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.0.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.0.2</div>
 </body>
 </html>

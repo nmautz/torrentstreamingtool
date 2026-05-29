@@ -8564,11 +8564,16 @@ async def _enqueue_library_prep() -> int:
 # never competes with (or starves alongside) an HLS encode. See docs/STT.md.
 
 def _stt_available() -> bool:
-    """Cached stt.is_available() — reading .env on every state broadcast is wasteful.
-    Re-probed only on process restart (the binaries don't appear mid-run)."""
-    if "result" not in _stt_available_probe:
+    """stt.is_available() with a 60 s TTL cache. Probing every state broadcast
+    (reads .env + shutil.which) is wasteful, but caching forever meant installing
+    whisper.cpp after startup never took effect until a full server restart — so
+    the Generate-subtitles affordances stayed hidden. The TTL lets a fresh setup
+    light them up within a minute, no restart needed."""
+    now = time.time()
+    if now - _stt_available_probe.get("at", 0.0) > 60:
         _stt_available_probe["result"] = stt.is_available()
-    return _stt_available_probe["result"]
+        _stt_available_probe["at"] = now
+    return bool(_stt_available_probe.get("result", False))
 
 
 async def _attach_stt_to_vlc(src: Path, tracks: list[dict]) -> None:
