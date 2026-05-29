@@ -30,9 +30,9 @@ Read this when changing anything related to:
   (`prepItemForStreaming`, `/prep-all`)
 - The prep **lag warning** (`#prepWarnModal`, `confirmStreamPrepWarning`), the
   **Pause/Resume** controls on `#globalPrepBar` (`/api/offline-prep/pause` +
-  `/resume`, `_pause_prep` / `_resume_prep`), or **overnight auto-prep**
-  (`overnight_prep_loop`, `/api/admin/overnight-prep`) — see the
-  [Pause / resume + overnight](#pause--resume--overnight-auto-prep) section
+  `/resume`, `_pause_prep` / `_resume_prep`), or **automatic auto-prep**
+  (`auto_prep_loop`, `/api/admin/overnight-prep`, `/api/admin/idle-prep`) — see the
+  [Pause / resume + auto-prep](#pause--resume--auto-prep) section
 - The play chooser (`#playChooserModal`, `playLibraryWithChooser`, `pcChoose`)
 - The **Handoff** (both directions): TV→device (`handoffToDevice`, `#handoffBtn`,
   `#fcHandoffBtn`) and device→TV (`lpHandoffToVlc`, the local player's **To TV** button)
@@ -438,10 +438,11 @@ Guarded by `withInflight("handoff_vlc")`.
 
 ---
 
-## Pause / resume + overnight auto-prep
+## Pause / resume + auto-prep
 
 Prep is CPU-heavy enough to make the host laggy, so the work is interruptible
-and can be scheduled for the small hours. Three pieces:
+and can be scheduled for the small hours **or** gated on host idleness. Four
+pieces:
 
 ### Lag warning (client)
 
@@ -477,22 +478,55 @@ Endpoints (both **non-admin**, exposed in the global prep bar): `POST
 `/api/offline-active`, `/prep-status`, and `state_snapshot` all surface the
 paused state so the UI can show "Prep paused" + a Resume button.
 
-### Overnight auto-prep (server, admin-configured)
+### Auto-prep (server, admin-configured)
 
-`overnight_prep_loop` (registered in `lifespan`) auto-preps the **whole
-un-prepped library** during an admin-defined nightly window. Config:
-`library.json → settings.overnight_prep` (`enabled`, `start`/`end` HH:MM,
-`timezone`, `on_end ∈ {pause, continue}`). Window membership is tracked
-in-memory (`state.overnight_active`):
+A single background loop, `auto_prep_loop` (registered in `lifespan`), drives
+**two independent triggers** that both auto-prep the **whole un-prepped
+library**. One loop owns the decision because both write the shared
+`state.prep_paused` gate and would otherwise fight. The combined question each
+tick (every 15 s) is:
 
-- **Entering** → `_resume_prep()` (clears any pause) then `_enqueue_library_prep()`
-  queues a bulk job for every un-prepped video file (idempotent).
-- **Leaving** → `on_end == "pause"` ⇒ `_pause_prep(kill=False)` (graceful: the
-  in-flight file finishes, the rest wait for the next window); `on_end ==
-  "continue"` ⇒ leave the queue running to completion.
+```
+want = overnight_window_open  OR  (idle_prep_enabled AND host idle ≥ idle_minutes)
+```
 
-The window may cross midnight (`_in_overnight_window` handles the wrap). See
-[ADMIN.md § Overnight Stream Prep](ADMIN.md) for the panel + endpoints.
+`state.auto_prep_engaged` is the in-memory edge flag:
+
+- **Rising edge** (`want` and not engaged) → `_resume_prep()` (clears any pause +
+  re-spawns paused jobs) then `_enqueue_library_prep()` queues a bulk job for
+  every un-prepped video file (idempotent).
+- **Falling edge** (engaged and not `want`) → pause, with the **kind** decided by
+  *why* it stopped:
+  - **idle-prep enabled and the box is now in use** ⇒ `_pause_prep(kill=True)` —
+    the in-flight encode is terminated immediately for instant responsiveness;
+    it restarts from scratch on the next idle stretch (HLS prep can't
+    checkpoint). Activity always wins, even over the overnight `on_end` mode.
+  - else, overnight `on_end == "continue"` ⇒ no pause, the queue runs to
+    completion past the window.
+  - else (overnight window closed, `on_end == "pause"`) ⇒ `_pause_prep(kill=False)`
+    (graceful: the in-flight file finishes, the rest wait for the next window).
+
+**Trigger 1 — Overnight window.** Config: `library.json → settings.overnight_prep`
+(`enabled`, `start`/`end` HH:MM, `timezone`, `on_end ∈ {pause, continue}`). The
+window may cross midnight (`_in_overnight_window` handles the wrap) and runs
+regardless of activity — heavy load when nobody's watching.
+
+**Trigger 2 — Idle.** Config: `library.json → settings.idle_prep` (`enabled`,
+`idle_minutes` clamped 1–720). It reuses `_machine_in_use(idle_minutes*60)` — the
+same helper the scheduled reboot uses — so "idle" means no VLC playback of real
+content, no active stream, no running download, and no mutating HTTP interaction
+within the window. That single window doubles as the activity detector: a fresh
+interaction stamps `state.last_activity`, flipping `_machine_in_use` True within a
+tick, which collapses `want` and triggers the kill=True pause.
+
+> **Coexistence.** Both triggers can be enabled at once. During the overnight
+> window prep runs regardless of activity; outside it, idle-prep governs (prep
+> when idle, pause on activity). If idle-prep is on, it naturally extends prep
+> past the overnight window whenever the box stays idle, and an activity pause
+> overrides overnight Continue.
+
+See [ADMIN.md § Overnight Stream Prep / § Idle Auto-Prep](ADMIN.md) for the
+panels + endpoints.
 
 ---
 

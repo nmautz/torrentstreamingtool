@@ -332,7 +332,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "3.10.2"
+UI_VERSION = "4.4.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -447,7 +447,7 @@ class AppState:
     user_volume_before_bg: int = 100                      # snapshot of state.vlc_volume taken when bg first took over
     last_activity: float = 0.0                            # time.time() of last user-initiated interaction (drives scheduled-reboot idle check)
     prep_paused: bool = False                             # True ⇒ bulk stream-prep jobs hold (set by the non-admin Pause control / overnight window end)
-    overnight_active: bool = False                        # True while inside the admin's overnight auto-prep window (in-memory window membership)
+    auto_prep_engaged: bool = False                       # True while the unified auto_prep_loop has prep running (overnight window OR idle trigger) — edge flag for resume/pause
     # ── YouTube-on-TV (browser playback on the host display, remote-controlled) ──
     youtube_active: bool = False                          # True while a YouTube video is the active TV playback (browser, not VLC)
     youtube_video_id: Optional[str] = None               # 11-char YouTube id currently loaded on the TV page
@@ -1982,6 +1982,25 @@ def _overnight_prep_cfg(lib: dict) -> dict:
     }
 
 
+def _idle_prep_cfg(lib: dict) -> dict:
+    """Read settings.idle_prep (activity-gated auto stream-prep) with defaults.
+
+    Unlike the fixed nightly window, this fires whenever the box has been idle —
+    no user interaction / VLC playback / active stream / running download — for
+    `idle_minutes`, and pauses (discarding the in-flight encode) the instant
+    activity returns. The same idle window doubles as the activity detector."""
+    cfg = (lib.get("settings", {}) or {}).get("idle_prep") or {}
+    try:
+        idle_minutes = int(cfg.get("idle_minutes", 30))
+    except (TypeError, ValueError):
+        idle_minutes = 30
+    idle_minutes = max(1, min(720, idle_minutes))
+    return {
+        "enabled":      bool(cfg.get("enabled", False)),
+        "idle_minutes": idle_minutes,
+    }
+
+
 def _stt_cfg(lib: dict) -> dict:
     """Read settings.stt (auto subtitle generation) with defaults.
 
@@ -2102,50 +2121,74 @@ async def scheduled_reboot_loop() -> None:
             print(f"[reboot] scheduled_reboot_loop error: {exc}")
 
 
-async def overnight_prep_loop() -> None:
-    """Auto-prep the whole library for streaming during an admin-defined nightly
-    window, when the heavy ffmpeg load won't bother anyone.
+async def auto_prep_loop() -> None:
+    """Drive automatic stream-prep from two independent triggers that share the
+    one bulk-prep concurrency slot + pause gate:
 
-    On entering the window: clear any pause and queue a bulk HLS-prep job for
-    every un-prepped library file. On leaving the window: if `on_end == "pause"`
-    the queue holds (the in-flight file finishes gracefully, the rest wait until
-    the next window); if `on_end == "continue"` it runs to completion past the
-    window. Window membership is tracked in-memory (`state.overnight_active`), so
-    entry/exit each fire once; a mid-window restart re-detects "in window" and
-    re-enqueues, which is idempotent. See _enqueue_library_prep / _pause_prep."""
+      • **Overnight window** — runs during an admin-defined nightly window
+        regardless of activity (heavy ffmpeg load when nobody's watching).
+      • **Idle trigger** — runs any time the box has been idle for `idle_minutes`
+        (no interaction / VLC playback / active stream / running download), and
+        pauses *and discards the in-flight encode* the instant activity returns.
+
+    Because both write `state.prep_paused`, a single loop owns the decision so the
+    two triggers can't fight. The combined "should prep run now?" is:
+
+        want = overnight_window_open OR (idle_enabled AND idle_for_threshold)
+
+    A rising edge (`want` and not engaged) resumes + enqueues the whole un-prepped
+    library; a falling edge pauses. The pause is a hard **kill** when idle-prep is
+    the reason (activity returned — HLS prep can't checkpoint, so the file
+    restarts from scratch later); otherwise it honours the overnight `on_end` mode
+    (graceful pause vs. run-to-completion). When idle-prep is enabled its
+    activity-pause overrides `on_end` — activity always wins. `auto_prep_engaged`
+    is the in-memory edge flag (re-derived after any config save)."""
     while True:
-        await asyncio.sleep(30)
+        await asyncio.sleep(15)
         try:
-            cfg = _overnight_prep_cfg(await get_library())
-            if not cfg["enabled"]:
-                if state.overnight_active:
-                    state.overnight_active = False
-                continue
+            lib = await get_library()
+            on_cfg = _overnight_prep_cfg(lib)
+            id_cfg = _idle_prep_cfg(lib)
 
-            start_min = _hhmm_to_min(cfg["start"])
-            end_min   = _hhmm_to_min(cfg["end"])
-            if start_min is None or end_min is None:
-                continue
+            # Overnight window membership (activity-independent).
+            overnight_open = False
+            if on_cfg["enabled"]:
+                s_min = _hhmm_to_min(on_cfg["start"])
+                e_min = _hhmm_to_min(on_cfg["end"])
+                if s_min is not None and e_min is not None:
+                    now = _now_in_tz(on_cfg["timezone"])
+                    overnight_open = _in_overnight_window(now, s_min, e_min)
 
-            now = _now_in_tz(cfg["timezone"])
-            in_window = _in_overnight_window(now, start_min, end_min)
+            # Idle trigger: busy within the idle window ⇒ not eligible. The same
+            # `_machine_in_use` window doubles as the activity detector — a fresh
+            # interaction stamps last_activity, flipping this True within a tick.
+            in_use = False
+            if id_cfg["enabled"]:
+                in_use = await _machine_in_use(id_cfg["idle_minutes"] * 60)
 
-            if in_window and not state.overnight_active:
-                state.overnight_active = True
+            want = overnight_open or (id_cfg["enabled"] and not in_use)
+
+            if want and not state.auto_prep_engaged:
+                state.auto_prep_engaged = True
                 _resume_prep()   # clear any prior pause + re-spawn paused jobs
                 n = await _enqueue_library_prep()
-                print(f"[overnight] window open — queued {n} file(s) for stream-prep")
-            elif not in_window and state.overnight_active:
-                state.overnight_active = False
-                if cfg["on_end"] == "pause":
-                    _pause_prep(kill=False)   # graceful: let the current file finish
-                    print("[overnight] window closed — pausing remaining prep")
+                reason = "overnight window open" if overnight_open \
+                    else f"idle {id_cfg['idle_minutes']} min"
+                print(f"[autoprep] {reason} — queued {n} file(s) for stream-prep")
+            elif state.auto_prep_engaged and not want:
+                state.auto_prep_engaged = False
+                if id_cfg["enabled"] and in_use:
+                    killed = _pause_prep(kill=True)   # activity returned — discard in-flight
+                    print(f"[autoprep] activity detected — pausing prep (killed {killed} in-flight)")
+                elif on_cfg["on_end"] == "continue":
+                    print("[autoprep] overnight window closed — continuing until prep finishes")
                 else:
-                    print("[overnight] window closed — continuing until prep finishes")
+                    _pause_prep(kill=False)           # graceful: let the current file finish
+                    print("[autoprep] overnight window closed — pausing remaining prep")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
-            print(f"[overnight] overnight_prep_loop error: {exc}")
+            print(f"[autoprep] auto_prep_loop error: {exc}")
 
 
 # ── Background Task: Auto-Updater ────────────────────────────────────────────
@@ -3539,13 +3582,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     bg_loop     = asyncio.create_task(background_video_loop())
     jackett_mon = asyncio.create_task(jackett_health_monitor())
     reboot_loop = asyncio.create_task(scheduled_reboot_loop())
-    overnight_loop = asyncio.create_task(overnight_prep_loop())
+    autoprep_loop = asyncio.create_task(auto_prep_loop())
     update_loop = asyncio.create_task(updater_loop())
 
     yield
 
     for t in (guard, broadcaster, dl_monitor, vlc_tracker, bg_loop, jackett_mon,
-              reboot_loop, overnight_loop, update_loop):
+              reboot_loop, autoprep_loop, update_loop):
         t.cancel()
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
@@ -3706,6 +3749,11 @@ class OvernightPrepReq(BaseModel):
     end: str = "06:00"                         # local HH:MM in `timezone` — window closes
     timezone: str = "America/Los_Angeles"     # IANA name; "" = system local
     on_end: str = "pause"                      # "pause" ⇒ stop at window end · "continue" ⇒ run to completion
+
+
+class IdlePrepReq(BaseModel):
+    enabled: bool = False
+    idle_minutes: int = 30                     # auto-prep after this many minutes with no activity; clamped 1–720
 
 
 class SttConfigReq(BaseModel):
@@ -7130,12 +7178,47 @@ async def admin_set_overnight_prep(
     op["on_end"]   = on_end
     await put_library(lib)
 
-    # Reset in-memory window membership so the loop re-detects entry/exit against
-    # the new config on its next tick (and applies the new on_end on exit).
-    state.overnight_active = False
+    # Reset the auto-prep edge flag so the loop re-derives "want" against the new
+    # config on its next tick (and applies the new on_end on exit).
+    state.auto_prep_engaged = False
 
     cfg = _overnight_prep_cfg(lib)
     cfg["now"] = _now_in_tz(cfg["timezone"]).strftime("%Y-%m-%d %H:%M %Z").strip()
+    return JSONResponse({"ok": True, **cfg})
+
+
+@app.get("/api/admin/idle-prep")
+async def admin_get_idle_prep(request: Request) -> JSONResponse:
+    """Return the idle-triggered auto-prep config + whether the box is idle enough
+    to be prepping right now."""
+    _require_admin(request)
+    cfg = _idle_prep_cfg(await get_library())
+    in_use = await _machine_in_use(cfg["idle_minutes"] * 60)
+    cfg["idle_now"] = not in_use
+    cfg["paused"]   = state.prep_paused
+    cfg["active"]   = bool(cfg["enabled"] and state.auto_prep_engaged and not in_use)
+    return JSONResponse(cfg)
+
+
+@app.post("/api/admin/idle-prep")
+async def admin_set_idle_prep(request: Request, body: IdlePrepReq) -> JSONResponse:
+    """Save the idle-triggered auto-prep config. Clamps idle_minutes to 1–720 and
+    re-derives the trigger on the next scheduler tick."""
+    _require_admin(request)
+    idle_minutes = max(1, min(720, int(body.idle_minutes)))
+
+    lib = await get_library()
+    ip = lib.setdefault("settings", {}).setdefault("idle_prep", {})
+    ip["enabled"]      = bool(body.enabled)
+    ip["idle_minutes"] = idle_minutes
+    await put_library(lib)
+
+    # Re-derive "want" fresh against the new config on the next loop tick.
+    state.auto_prep_engaged = False
+
+    cfg = _idle_prep_cfg(lib)
+    in_use = await _machine_in_use(cfg["idle_minutes"] * 60)
+    cfg["idle_now"] = not in_use
     return JSONResponse({"ok": True, **cfg})
 
 

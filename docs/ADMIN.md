@@ -103,7 +103,7 @@ For each profile:
 
 ### 7. System
 
-Controls: **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Overnight Stream Prep**, **Auto-Generated Subtitles**, and **Optional Components**.
+Controls: **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Overnight Stream Prep**, **Idle Auto-Prep**, **Auto-Generated Subtitles**, and **Optional Components**.
 
 #### Shut Down Server
 
@@ -151,18 +151,31 @@ The persisted `last_fired` date is what stops a just-rebooted machine from re-ar
 
 #### Overnight Stream Prep
 
-Auto-prepares the whole library for on-device streaming during a nightly window, when the heavy ffmpeg load won't bother anyone. Config persists under `library.json → settings.overnight_prep` (`enabled`, `start` HH:MM, `end` HH:MM, `timezone` IANA name, `on_end`). Driven by the `overnight_prep_loop` background task ([main.py](../main.py), registered in `lifespan`).
+Auto-prepares the whole library for on-device streaming during a nightly window, when the heavy ffmpeg load won't bother anyone. Config persists under `library.json → settings.overnight_prep` (`enabled`, `start` HH:MM, `end` HH:MM, `timezone` IANA name, `on_end`). Driven by the unified `auto_prep_loop` background task ([main.py](../main.py), registered in `lifespan`), which also serves Idle Auto-Prep below.
 
 Panel controls: enable toggle, **Start/End Time** (the window may cross midnight, e.g. `23:00 → 06:00`), **Timezone** (same preset list as Scheduled Restart), **When End Time Is Reached** (`pause` ⇒ hold until the next window · `continue` ⇒ run to completion), and a host-time display.
 
-Loop mechanics: window membership is tracked in-memory (`state.overnight_active`) so entry/exit each fire once.
+Loop mechanics: an in-memory edge flag (`state.auto_prep_engaged`) tracks whether prep is currently running, so entry/exit each fire once.
 1. **Entering the window** → clear any pause (`_resume_prep`, which also re-spawns previously-paused jobs) and queue a bulk HLS-prep job for every un-prepped library video file (`_enqueue_library_prep`, idempotent — `_maybe_start_prep_job` skips cached/already-queued files, so a mid-window restart re-enqueues safely).
 2. **Leaving the window** → if `on_end == "pause"`, call `_pause_prep(kill=False)` (the in-flight file finishes gracefully; the rest hold until the next window); if `on_end == "continue"`, leave the queue running to completion past the window.
 
-Saving config resets `state.overnight_active` so the new schedule is re-evaluated on the next tick. Prep load relief is a separate, user-facing concern — see [STREAMING.md § Pause / resume + overnight](STREAMING.md) for the global pause gate and the non-admin Pause/Resume control.
+Saving config resets `state.auto_prep_engaged` so the new schedule is re-evaluated on the next tick. Prep load relief is a separate, user-facing concern — see [STREAMING.md § Pause / resume + auto-prep](STREAMING.md) for the global pause gate and the non-admin Pause/Resume control.
 
 - `GET /api/admin/overnight-prep` → config + `now` + `in_window` + `paused`.
-- `POST /api/admin/overnight-prep` → `{enabled, start, end, timezone, on_end}`. Validates both HH:MM, rejects `start == end`, resets the in-memory window guard.
+- `POST /api/admin/overnight-prep` → `{enabled, start, end, timezone, on_end}`. Validates both HH:MM, rejects `start == end`, resets the auto-prep edge flag.
+
+#### Idle Auto-Prep
+
+The activity-gated companion to the nightly window: instead of (or alongside) a fixed time, auto-prep runs **any time the host has been idle for `idle_minutes`** and pauses — *discarding* the in-flight encode — the instant activity returns. Config persists under `library.json → settings.idle_prep` (`enabled`, `idle_minutes`). Same `auto_prep_loop` task; same shared pause gate.
+
+Panel controls: enable toggle, **Idle Time (min)** (1–720), and a live **Status Now** readout (idle vs. in use).
+
+Loop mechanics: "idle" reuses `_machine_in_use(idle_minutes*60)` — the same helper the Scheduled Restart uses — so the box counts as idle only when there's no live VLC playback of real content, no active stream, no running download, and no mutating HTTP interaction within the window. That window doubles as the activity detector: a fresh interaction stamps `state.last_activity`, which flips `_machine_in_use` True within a tick and triggers `_pause_prep(kill=True)` (terminate the running ffmpeg; the file restarts from scratch on the next idle stretch — HLS prep can't checkpoint). When both triggers are enabled, the overnight window runs regardless of activity, and idle-prep's activity-pause overrides overnight `on_end == "continue"`. See [STREAMING.md § Pause / resume + auto-prep](STREAMING.md) for the combined `want` decision.
+
+Saving config resets `state.auto_prep_engaged` so the trigger is re-derived on the next tick.
+
+- `GET /api/admin/idle-prep` → config + `idle_now` (is the box idle right now) + `paused` + `active` (prepping while idle right now).
+- `POST /api/admin/idle-prep` → `{enabled, idle_minutes}`. Clamps `idle_minutes` to 1–720, resets the auto-prep edge flag.
 
 #### Optional Components
 

@@ -543,6 +543,42 @@
       </div>
     </div>
 
+    <!-- Idle auto-prep -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Idle Auto-Prep</h2>
+          <p class="text-xs text-gray-500 mt-0.5">Prepares un-prepped library files for on-device streaming any time the box has been idle (no usage, playback, stream, or download) for the set time — then pauses the instant someone uses it again, discarding the file it was mid-encode on (HLS prep can't checkpoint). Runs independently of the nightly window above.</p>
+        </div>
+        <button id="ipEnabledBtn" onclick="toggleIdlePrep()"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+                 bg-gray-800 border-gray-700 text-gray-400 hover:text-white">
+          …
+        </button>
+      </div>
+
+      <div class="px-5 py-4 border-b border-gray-800 grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div class="space-y-1.5">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Idle Time (min)</label>
+          <input id="ipIdle" type="number" min="1" max="720" value="30"
+            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none"/>
+          <p class="text-[10px] text-gray-600">No usage for this long ⇒ start prepping. Any activity pauses it immediately.</p>
+        </div>
+        <div class="space-y-1.5">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Status Now</label>
+          <div id="ipNow" class="w-full px-3 py-2 text-sm font-mono text-gray-400 border border-gray-800 bg-black/40">…</div>
+        </div>
+      </div>
+
+      <div class="px-5 py-4 flex items-center justify-between gap-3">
+        <div id="ipStatus" class="text-[11px] text-gray-600 min-w-0"></div>
+        <button id="ipSaveBtn" onclick="saveIdlePrep()"
+          class="flex-shrink-0 bg-indigo-600 hover:bg-indigo-500 px-5 py-2.5 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">
+          Save
+        </button>
+      </div>
+    </div>
+
     <!-- Auto-generated subtitles (speech-to-text) -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
@@ -931,7 +967,7 @@ function switchTab(tab){
   if(tab==="skip")       loadSkipPanel();
   if(tab==="offline")    loadOfflineCache();
   if(tab==="background") loadBackgroundVideo();
-  if(tab==="system")   { loadScheduledReboot(); loadOvernightPrep(); loadStt(); loadComponents(); loadLogs(); }
+  if(tab==="system")   { loadScheduledReboot(); loadOvernightPrep(); loadIdlePrep(); loadStt(); loadComponents(); loadLogs(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
 }
@@ -1212,6 +1248,73 @@ async function saveOvernightPrep(){
     }
     showToast(_opEnabled ? "Overnight prep saved." : "Overnight prep disabled.");
     await loadOvernightPrep();
+  }catch(_){
+    showToast("Save failed.", true);
+  }finally{
+    btn.disabled = false;
+  }
+}
+
+// ── Idle Auto-Prep ────────────────────────────────────────────────────────────
+let _ipEnabled = false;
+
+function _renderIpEnabled(){
+  const btn = document.getElementById("ipEnabledBtn");
+  if(!btn) return;
+  if(_ipEnabled){
+    btn.textContent = "Enabled";
+    btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-emerald-950 border-emerald-700 text-emerald-300 hover:bg-emerald-900";
+  } else {
+    btn.textContent = "Disabled";
+    btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white";
+  }
+}
+
+async function loadIdlePrep(){
+  try{
+    const r = await fetch("/api/admin/idle-prep", {headers: authHeader()});
+    if(!r.ok) return;
+    const d = await r.json();
+    _ipEnabled = !!d.enabled;
+    _renderIpEnabled();
+    document.getElementById("ipIdle").value = d.idle_minutes ?? 30;
+    document.getElementById("ipNow").textContent = d.idle_now ? "Idle — eligible to prep" : "In use — holding";
+    const status = document.getElementById("ipStatus");
+    if(d.enabled){
+      status.textContent = d.active
+        ? "Prepping now while idle."
+        : (d.idle_now ? "Idle — prep starting." : "Armed — waiting for the box to go idle.");
+    } else {
+      status.textContent = "Idle auto-prep is off.";
+    }
+  }catch(_){}
+}
+
+function toggleIdlePrep(){
+  _ipEnabled = !_ipEnabled;
+  _renderIpEnabled();
+}
+
+async function saveIdlePrep(){
+  const btn = document.getElementById("ipSaveBtn");
+  const body = {
+    enabled:      _ipEnabled,
+    idle_minutes: parseInt(document.getElementById("ipIdle").value, 10) || 30,
+  };
+  btn.disabled = true;
+  try{
+    const r = await fetch("/api/admin/idle-prep",{
+      method:"POST",
+      headers:{...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify(body),
+    });
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      showToast(`Save failed: ${d.detail || r.status}`, true);
+      return;
+    }
+    showToast(_ipEnabled ? "Idle auto-prep saved." : "Idle auto-prep disabled.");
+    await loadIdlePrep();
   }catch(_){
     showToast("Save failed.", true);
   }finally{
