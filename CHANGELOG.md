@@ -1,5 +1,10 @@
 # Changelog
 
+## [4.5.0] — 2026-05-28
+- **Improved: AI subtitle timing, especially around long pauses.** Generated subs no longer linger across silence or start early. whisper now runs with **DTW token-level timestamp alignment** (`-dtw`) — it warps the decoder's cross-attention against the audio for accurate word boundaries that respect pauses — plus **word-boundary cue splitting** (`-ml 80` + `-sow`), so each cue carries its own accurate timing and a pause becomes a real gap between cues instead of one stretched block. Needs no extra download (alignment heads are built into whisper.cpp) and applies to every model size and both CPU/GPU builds. Regenerate an existing AI track to pick up the better timing.
+- **Backend:** `stt._dtw_preset()` maps the configured model (`model_name()`) to its `-dtw` architecture preset via `_DTW_PRESETS`, disabling DTW for any model it can't map confidently (a mismatched preset would error the run); `STT_MAX_LEN` controls cue length. The CPU-fallback retry keeps the new flags.
+- **Docs:** [docs/STT.md](docs/STT.md), [docs/GOTCHAS.md](docs/GOTCHAS.md).
+
 ## [4.4.0] — 2026-05-28
 - **New: idle-triggered auto stream-prep.** In addition to the fixed nightly window, the library can now auto-prep for on-device streaming any time the host has been idle for a configurable number of minutes — no user interaction, VLC playback, active stream, or running download. The moment activity returns it pauses and **discards the in-flight encode** (HLS prep can't checkpoint mid-file, so that file simply restarts from scratch on the next idle stretch). Configured in **Admin → System → Idle Auto-Prep** (enable + idle-time minutes).
 - **Unified scheduler.** The old `overnight_prep_loop` is now `auto_prep_loop`, which owns both triggers so they can't fight over the shared bulk-prep pause gate. "Should prep run now?" = overnight window open **OR** (idle-prep enabled AND idle long enough). A rising edge resumes + enqueues the whole un-prepped library; a falling edge hard-kills when activity is the cause, else honours the overnight `on_end` mode. With idle-prep on, an activity pause always wins over overnight Continue.

@@ -97,6 +97,33 @@ admin Components card (or dropping the file in `tools/whisper/` and pointing
 `_WHISPER_MODEL` at it) — existing subs then read as stale and can be regenerated
 (see "Regenerating on a model change" above).
 
+### Timing precision — DTW token alignment + word-boundary cues
+
+whisper's native segment timestamps are coarse and **drift around long pauses**:
+a segment carries a single start/end, so a line lingers across silence or the
+next one starts early. `_run_whisper` passes two flags to fix this:
+
+- **`-dtw <preset>`** — token-level timestamps via Dynamic Time Warping of the
+  decoder's cross-attention against the audio. Far more accurate boundaries than
+  the decoder's timestamp tokens, and it *respects pauses*. Needs **no extra
+  download** (alignment heads are built into whisper.cpp). The preset must name
+  the loaded model's architecture, so `stt._dtw_preset()` maps `model_name()` →
+  preset via `_DTW_PRESETS` (`base`→`base`, `large-v3`→`large.v3`, `.en`→`.en`,
+  …) and **disables DTW** for any model it can't map — a wrong preset would error
+  the run. The offered sizes (base/small/medium) all map.
+- **`-ml STT_MAX_LEN` + `-sow`** — re-split each segment into shorter
+  word-boundary cues (≤ 80 chars). Each cue then carries its **own** DTW-accurate
+  timing, so a pause becomes a real gap between two cues instead of one stretched
+  block. `-sow` keeps splits off mid-word.
+
+> A literal **one-word-per-cue** track (`-ml 1`) would be unreadable as a
+> subtitle; DTW alignment is the higher-precision *and* readable answer. If pause
+> handling ever needs to go further, whisper.cpp's `--vad` (Silero) is the next
+> lever — but it needs a separate VAD model bundled, which DTW avoids.
+
+The CPU-fallback retry (`-ng`) keeps these flags; they're orthogonal to GPU
+offload.
+
 ---
 
 ## Preprocess vs on-demand (both are wired)
@@ -192,7 +219,7 @@ whisper.cpp ships three Windows builds per release: the CPU build
 
 | File | Role |
 |------|------|
-| `stt.py` | whisper.cpp wrapper: wav extract, transcribe/translate, lang map, `generate()`, `model_name`, `_list_ai_subs`, `has_ai_subs`, `ai_subs_stale` |
+| `stt.py` | whisper.cpp wrapper: wav extract, transcribe/translate, lang map, `generate()`, `model_name`, `_dtw_preset` (DTW timing presets), `_list_ai_subs`, `has_ai_subs`, `ai_subs_stale` |
 | `main.py` | `_stt_cfg`, `_needs_stt_subs`, `_canon_lang`, `_stt_jobs`, `_run_stt_job`, `_maybe_start_stt_job`, `_ensure_stt_for`, `_attach_stt_to_vlc`, the 3 STT endpoints + admin endpoints, `_list_sidecar_subs` `ai` flag |
 | `setup.py` | `whisper_candidates`, `whisper_model_candidates`, `install_stt_deps`, `_portable_install_whisper_windows`, `_download_whisper_model`, `.env` mapping |
 | `static/index.html` | `generateSubsVlc`, `_pollSttJob`, `lpGenerateSubs`, `_lpAttachSidecarSubs`, `sttAvailable`, subtitle-modal AI row, `#lpGenSubBtn` |

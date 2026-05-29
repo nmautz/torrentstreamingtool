@@ -370,3 +370,11 @@ Generated subs are tagged with the model that produced them so a model upgrade (
 
 ---
 
+## Milestone 27 — AI subtitle timing precision
+
+Generated subs were timed wrong around long pauses (lines lingering across silence / starting early). whisper's native segment timestamps are coarse and don't respect pauses.
+
+- [x] **27.1** (v4.5.0) `_run_whisper` adds **DTW token-level timestamp alignment** (`-dtw <preset>`, cross-attention warped against audio — accurate boundaries that respect pauses; no extra download) + **word-boundary cue splitting** (`-ml STT_MAX_LEN` + `-sow`) so each cue carries its own accurate timing. `stt._dtw_preset()` maps `model_name()` → preset via `_DTW_PRESETS`, disabling DTW for unmappable models (a mismatched preset errors the run). CPU-fallback retry keeps the flags. Docs: STT.md (Timing precision), GOTCHAS.md, CHANGELOG.
+
+---
+

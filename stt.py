@@ -45,6 +45,39 @@ if os.name == "nt":
 # count still spikes scheduler pressure; 4 keeps headroom on typical hosts.
 STT_THREADS = 4
 
+# Subtitle timing precision. whisper's native segment timestamps are coarse and
+# drift around long pauses — a single segment carries one start/end, so a line
+# lingers across silence or the next line starts early. Two flags fix this:
+#
+#  * `-dtw <preset>` computes token-level timestamps by Dynamic-Time-Warping the
+#    decoder's cross-attention against the audio — far more accurate boundaries
+#    than the decoder's timestamp tokens, and it respects pauses. Needs no extra
+#    download (alignment heads are built into whisper.cpp), but the preset must
+#    name the loaded model's architecture, so we only enable it when we can map
+#    the configured model confidently (see `_dtw_preset`).
+#  * `-ml`/`-sow` re-split each segment into shorter word-boundary cues, so every
+#    cue carries its own (now DTW-accurate) timing and a pause becomes a real
+#    gap between two cues instead of one stretched block.
+STT_MAX_LEN = 80  # max characters per cue for -ml; 0 would disable splitting
+
+# whisper.cpp `-dtw` alignment-head presets, keyed by the model's short name as
+# `model_name()` reports it (dots sanitized to hyphens, so `.en` → `-en`,
+# `large-v3`). Passing a preset whose heads don't match the loaded model errors,
+# so anything not here disables DTW rather than risking a failed run.
+_DTW_PRESETS = {
+    "tiny": "tiny", "tiny-en": "tiny.en",
+    "base": "base", "base-en": "base.en",
+    "small": "small", "small-en": "small.en",
+    "medium": "medium", "medium-en": "medium.en",
+    "large-v1": "large.v1", "large-v2": "large.v2", "large-v3": "large.v3",
+    "large": "large.v3",
+}
+
+
+def _dtw_preset() -> str:
+    """DTW alignment preset matching the configured model, or '' if unmappable."""
+    return _DTW_PRESETS.get(model_name().lower(), "")
+
 
 def _lp(cmd: list[str]) -> list[str]:
     """Prefix `nice -n 10` on POSIX (when available) so the child de-prioritizes."""
@@ -203,6 +236,12 @@ def _run_whisper(
     regardless of source language. Streams stderr to surface progress + the
     detected language without buffering the whole run.
 
+    Timing precision: `-dtw` aligns token timestamps to the audio (accurate
+    boundaries that respect pauses) when the model maps to a known preset, and
+    `-ml`/`-sow` re-split into word-boundary cues so each carries its own timing
+    — together these stop a line from lingering across a long silence. See the
+    `STT_MAX_LEN` / `_DTW_PRESETS` notes above.
+
     A CUDA/cuBLAS build offloads to the GPU automatically. If CUDA can't
     initialize at runtime (driver too old, no device), the first attempt fails;
     we retry once with `-ng` (force CPU), which is also a no-op for the CPU
@@ -213,12 +252,17 @@ def _run_whisper(
     if not binp or not model:
         return False, ""
 
+    preset = _dtw_preset()
+
     def _attempt(no_gpu: bool) -> tuple[bool, str]:
         cmd = [
             binp, "-m", model, "-f", str(wav),
             "-l", language or "auto", "-t", str(STT_THREADS),
             "-osrt", "-of", str(out_base), "-pp",
+            "-ml", str(STT_MAX_LEN), "-sow",   # word-boundary cues, per-cue timing
         ]
+        if preset:
+            cmd += ["-dtw", preset]            # DTW token-level timestamp alignment
         if translate:
             cmd.append("-tr")
         if no_gpu:
