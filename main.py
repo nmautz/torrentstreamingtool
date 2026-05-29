@@ -7989,31 +7989,40 @@ def _video_can_copy(v: Optional[dict]) -> bool:
 def _list_sidecar_subs(src: Path, item_id: str) -> list[dict]:
     """Find .srt/.vtt files next to a video file. Match either exact stem or stem.<lang>.
 
-    Files named `<stem>.<lang>.ai.srt` (see stt.py) are machine-generated; they
-    carry `ai: true` so the UI can label them, and the `.ai` segment is stripped
+    Files named `<stem>.<lang>.ai[.<model>].srt` (see stt.py) are machine-generated;
+    they carry `ai: true`, the generating `model` name, and `stale: true` when that
+    model differs from the currently-configured one (so the UI can offer Regenerate
+    and label the track with its model). The `.ai`/`.<model>` segments are stripped
     from the parsed language tag.
     """
     out: list[dict] = []
     if not src.parent.exists():
         return out
     stem = src.stem
+    cur_model = stt.model_name()
     try:
         for p in src.parent.iterdir():
             if not p.is_file() or p.suffix.lower() not in (".srt", ".vtt"):
                 continue
             ai = False
+            model = ""
             if p.stem == stem:
                 lang = ""
             elif p.stem.startswith(stem + "."):
                 segs = p.stem[len(stem) + 1:].split(".")
                 ai = stt.AI_SUFFIX in segs
                 lang = segs[0]
+                if ai:
+                    i = segs.index(stt.AI_SUFFIX)
+                    model = segs[i + 1] if i + 1 < len(segs) else ""
             else:
                 continue
             out.append({
                 "name": p.name,
                 "lang": lang or "und",
                 "ai":   ai,
+                "model": model,
+                "stale": bool(ai and model != cur_model),
                 "url": f"/api/library/{item_id}/subtitle?file={quote(p.name)}",
             })
     except OSError:
@@ -8691,12 +8700,14 @@ def _maybe_start_stt_job(src: Path, item_id: str = "", *,
                          vlc_attach: bool = False) -> dict:
     """Per-file: return current STT state, starting a job if none exists.
 
-    Returns {status:"cached"} when sidecars already exist, {status:"error"} when
-    STT is unavailable, else {status, job_id, progress}.
+    Returns {status:"cached"} when current-model sidecars already exist,
+    {status:"error"} when STT is unavailable, else {status, job_id, progress}.
+    Generated subs made with a DIFFERENT model are treated as stale, so an
+    explicit request regenerates them (generate() replaces the old ones).
     """
     if not _stt_available():
         return {"status": "error", "error": "Subtitle generation is not available on this host."}
-    if stt.has_ai_subs(src):
+    if stt.has_ai_subs(src) and not stt.ai_subs_stale(src):
         return {"status": "cached"}
     existing = next(
         (j for j in _stt_jobs.values()

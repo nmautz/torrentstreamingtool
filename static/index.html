@@ -5770,7 +5770,7 @@ async function _lpLoadIndex(seekTo) {
   (lp.sidecarSubs || []).forEach((s, i) => {
     const t = document.createElement("track");
     t.kind = "subtitles"; t.src = s.url; t.srclang = s.lang || "und";
-    t.label = (s.name || s.lang || `Sidecar ${i + 1}`) + (s.ai ? " (AI)" : "");
+    t.label = (s.name || s.lang || `Sidecar ${i + 1}`) + (s.ai ? " (AI" + (s.model ? " · " + s.model : "") + ")" : "");
     v.appendChild(t);
     lp.subTracks.push({ el: t, key: `sidecar:${i}` });
   });
@@ -5798,7 +5798,7 @@ function _lpRenderTrackRows() {
       `<option value="${i}">${escHtml(s.label || ("Subtitles " + (i+1)))}</option>`);
   });
   (lp.sidecarSubs || []).forEach((s, i) => {
-    const label = (s.lang ? s.lang.toUpperCase() + " — " : "") + (s.name || "sub") + (s.ai ? " (AI)" : "");
+    const label = (s.lang ? s.lang.toUpperCase() + " — " : "") + (s.name || "sub") + (s.ai ? " (AI" + (s.model ? " · " + s.model : "") + ")" : "");
     subSel.insertAdjacentHTML("beforeend",
       `<option value="sidecar:${i}">${escHtml(label)}</option>`);
   });
@@ -5827,9 +5827,18 @@ function _lpRenderTrackRows() {
   // available and the file currently has no AI-generated sidecar yet. So the
   // sub row is shown when there are subs OR we can generate them.
   const hasAiSub = (lp.sidecarSubs || []).some(s => s.ai);
-  const canGen = sttAvailable && !hasAiSub && !lp._sttBusy;
+  const staleAi  = (lp.sidecarSubs || []).some(s => s.ai && s.stale);
+  // Offer generation when there's no AI sub yet, OR when an existing one was made
+  // with a different whisper model than the one configured now (→ Regenerate).
+  const canGen = sttAvailable && !lp._sttBusy && (!hasAiSub || staleAi);
   const genBtn = document.getElementById("lpGenSubBtn");
-  if (genBtn) genBtn.classList.toggle("hidden", !canGen);
+  if (genBtn) {
+    genBtn.classList.toggle("hidden", !canGen);
+    genBtn.textContent = staleAi ? "Regen" : "AI";
+    genBtn.title = staleAi
+      ? "Regenerate subtitles with the current model"
+      : "Generate subtitles with AI";
+  }
   // Hide the (empty) Off-only select when there are no real tracks but keep the
   // row so the AI button shows.
   document.getElementById("lpSubSelect").classList.toggle("hidden", subN === 0);
@@ -5845,9 +5854,10 @@ function _lpRenderTrackRows() {
 // sidecar .vtt(s) are attached as <track>s without reloading the stream.
 async function lpGenerateSubs() {
   if (!lp.itemId || !lp.filePath || lp._sttBusy) return;
+  const regen = (lp.sidecarSubs || []).some(s => s.ai && s.stale);
   lp._sttBusy = true;
   _lpRenderTrackRows();
-  showAlert("Generating subtitles — this can take a few minutes. You can keep watching.", "info");
+  showAlert((regen ? "Regenerating" : "Generating") + " subtitles — this can take a few minutes. You can keep watching.", "info");
   const fileAtStart = lp.filePath;
   try {
     const r = await fetch(`/api/library/${lp.itemId}/generate-subtitles`, {
@@ -5890,7 +5900,7 @@ function _lpAttachSidecarSubs(subs) {
   lp.sidecarSubs.forEach((s, i) => {
     const t = document.createElement("track");
     t.kind = "subtitles"; t.src = s.url; t.srclang = s.lang || "und";
-    t.label = (s.name || s.lang || `Sidecar ${i + 1}`) + (s.ai ? " (AI)" : "");
+    t.label = (s.name || s.lang || `Sidecar ${i + 1}`) + (s.ai ? " (AI" + (s.model ? " · " + s.model : "") + ")" : "");
     v.appendChild(t);
     lp.subTracks.push({ el: t, key: `sidecar:${i}` });
   });
@@ -6660,6 +6670,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.2.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.3.0</div>
 </body>
 </html>

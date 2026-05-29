@@ -359,3 +359,13 @@ The auto-updater runs `setup.py` non-interactively (skips all `install_*`), so p
 
 ---
 
+## Milestone 26 — Regenerate subtitles on model change
+
+Generated subs are tagged with the model that produced them so a model upgrade (base→medium, CPU→GPU build, etc.) can be detected and re-run on demand, and the model is visible in the track name.
+
+- [x] **26.1** (v4.3.0) Sidecars renamed `<stem>.<lang>.ai.<model>.srt`; `stt.model_name()`, `_list_ai_subs()`, `ai_subs_stale()`; `generate()` tags new files with the current model and removes superseded ones (different model / legacy untagged) after success. `_run_whisper` unchanged.
+- [x] **26.2** (v4.3.0) `_maybe_start_stt_job` treats same-model subs as `cached`, different-model as regenerable (explicit requests only — `_ensure_stt_for` preprocess stays idempotent on existence so a model change never mass-re-transcodes). `_list_sidecar_subs` exposes per-sub `model` + `stale`.
+- [x] **26.3** (v4.3.0) Frontend: on-device subtitle button flips **AI** → **Regen** when stale; track dropdown + `<track>` labels show the model (“English (AI · base)”); VLC "Generate with AI" regenerates on model change (cached when matched). Docs: STT.md, CHANGELOG.
+
+---
+

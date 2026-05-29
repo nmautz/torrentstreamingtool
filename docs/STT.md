@@ -21,9 +21,10 @@ Read this when changing anything related to:
 ## The core idea: it's just a sidecar
 
 STT output is a **sidecar `.srt` written next to the source video**, named
-`<stem>.<lang>.ai.srt` (e.g. `Movie.eng.ai.srt`, `Show.jpn.ai.srt`). This is
-the same shape the OpenSubtitles download flow already produces, so it flows
-into both players through existing plumbing with **no manifest/bundle changes**:
+`<stem>.<lang>.ai.<model>.srt` (e.g. `Movie.eng.ai.base.srt`,
+`Show.jpn.ai.medium.srt`). This is the same shape the OpenSubtitles download
+flow already produces, so it flows into both players through existing plumbing
+with **no manifest/bundle changes**:
 
 - **VLC (TV):** `await vlc("addsubtitle", val=<abs path>)` loads + selects it
   (see `_attach_stt_to_vlc`, mirroring `download_subtitle`).
@@ -31,10 +32,28 @@ into both players through existing plumbing with **no manifest/bundle changes**:
   next to the source and serves them via `/api/library/{id}/subtitle` (SRT→VTT
   on the fly). The player attaches each as a `<track>` child.
 
-The `.ai` segment in the filename marks the track as machine-generated:
-`_list_sidecar_subs` strips it from the parsed language tag and sets `ai: true`
-so the UI can label it “(AI)”. It's also how idempotency works — `stt.has_ai_subs(src)`
-checks for an existing `<stem>.*.ai.srt` so we never regenerate.
+The `.ai` segment marks the track as machine-generated; the segment after it is
+the **model name** that produced it (`base`/`small`/`medium`/… — derived from
+the configured `ggml-*.bin`). `_list_sidecar_subs` strips both from the parsed
+language tag and returns `ai: true`, the `model`, and `stale: true` when that
+model differs from the one configured now. The UI labels the track with its
+model (“English (AI · base)”). `stt.has_ai_subs(src)` (any generated sub exists)
+gates idempotent *preprocess*; `stt.ai_subs_stale(src)` (a sub exists but from a
+different model) drives the **Regenerate** affordance.
+
+### Regenerating on a model change
+
+Only an **explicit** request regenerates — preprocess/overnight prep stays
+idempotent (`_ensure_stt_for` skips when any generated sub exists), so changing
+the model never silently re-transcodes the whole library. The manual paths
+(`_maybe_start_stt_job`) treat a **same-model** sub as `cached` and a
+**different-model** sub as regenerable; on the on-device player the subtitle
+button flips from **AI** → **Regen** when `stale`. `generate()` tags each new
+file with the current model and, after the new ones are written, removes any
+superseded generated subs (different model, or legacy untagged) so the switch is
+clean. Legacy `<stem>.<lang>.ai.srt` files (no model tag, pre-v4.3) read as
+model `""` → always stale → offered for regen, which migrates them to the tagged
+form.
 
 ---
 
@@ -64,17 +83,19 @@ A source warrants generated subs when it has **no usable text subtitle**:
 
 1. Extract the **first audio track** to 16 kHz mono PCM WAV via the bundled
    ffmpeg (whisper's required input).
-2. **Pass 1 — transcribe** (auto language detect) → `<stem>.<detected>.ai.srt`.
+2. **Pass 1 — transcribe** (auto language detect) → `<stem>.<detected>.ai.<model>.srt`.
 3. **Pass 2 — translate to English**, only when the detected language isn't
-   English and `want_translation` is on → `<stem>.eng.ai.srt`. (English audio
-   skips this — transcription already *is* English.)
+   English and `want_translation` is on → `<stem>.eng.ai.<model>.srt`. (English
+   audio skips this — transcription already *is* English.)
 
-Returns `{"tracks": [{path, lang, translated}], "error": None}`.
+Returns `{"tracks": [{path, lang, translated, model}], "error": None}`.
 
 Model: a **multilingual** GGML model (default `ggml-base`). `.en` models can't
 translate, so a multilingual model is mandatory — see SETUP. Larger models
-(`small`/`medium`) are more accurate but slower; swap by dropping the file in
-`tools/whisper/` and pointing `_WHISPER_MODEL` at it.
+(`small`/`medium`) are more accurate but slower; swap by installing one via the
+admin Components card (or dropping the file in `tools/whisper/` and pointing
+`_WHISPER_MODEL` at it) — existing subs then read as stale and can be regenerated
+(see "Regenerating on a model change" above).
 
 ---
 
@@ -171,7 +192,7 @@ whisper.cpp ships three Windows builds per release: the CPU build
 
 | File | Role |
 |------|------|
-| `stt.py` | whisper.cpp wrapper: wav extract, transcribe/translate, lang map, `generate()` |
+| `stt.py` | whisper.cpp wrapper: wav extract, transcribe/translate, lang map, `generate()`, `model_name`, `_list_ai_subs`, `has_ai_subs`, `ai_subs_stale` |
 | `main.py` | `_stt_cfg`, `_needs_stt_subs`, `_canon_lang`, `_stt_jobs`, `_run_stt_job`, `_maybe_start_stt_job`, `_ensure_stt_for`, `_attach_stt_to_vlc`, the 3 STT endpoints + admin endpoints, `_list_sidecar_subs` `ai` flag |
 | `setup.py` | `whisper_candidates`, `whisper_model_candidates`, `install_stt_deps`, `_portable_install_whisper_windows`, `_download_whisper_model`, `.env` mapping |
 | `static/index.html` | `generateSubsVlc`, `_pollSttJob`, `lpGenerateSubs`, `_lpAttachSidecarSubs`, `sttAvailable`, subtitle-modal AI row, `#lpGenSubBtn` |

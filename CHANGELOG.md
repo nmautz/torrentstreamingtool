@@ -1,5 +1,11 @@
 # Changelog
 
+## [4.3.0] — 2026-05-28
+- **New: regenerate AI subtitles when the whisper model changed, and show the model in the track name.** Generated sidecars are now tagged with the model that produced them — `<stem>.<lang>.ai.<model>.srt` (e.g. `Movie.eng.ai.base.srt`). Subtitle track labels in the on-device player show it too: “English (AI · base)”.
+- **Regenerate option:** when an existing generated sub was made with a different model than the one configured now (e.g. you upgraded base → medium, or switched to a GPU/larger model), the on-device player's subtitle button switches from **AI** to **Regen** and re-runs with the current model; legacy untagged subs count as stale. `generate()` removes the superseded files after the new ones are written, so it replaces cleanly. The VLC "Generate with AI" action regenerates automatically on a model change (and reports "already generated" when the model matches).
+- **Behaviour:** only an *explicit* request regenerates — preprocess/overnight prep stays idempotent (it won't silently re-transcribe the whole library when you change models). `_maybe_start_stt_job` treats same-model subs as cached and different-model subs as regenerable; `_list_sidecar_subs` exposes `model` + `stale` per generated track.
+- **Docs:** [docs/STT.md](docs/STT.md).
+
 ## [4.2.0] — 2026-05-28
 - **New: GPU (CUDA) acceleration for AI subtitles.** whisper.cpp transcription can now run on an NVIDIA GPU via the cuBLAS build — dramatically faster than CPU (a 45-min episode drops from minutes to tens of seconds). The admin Optional Components card gains a build picker for whisper.cpp — **CPU**, **GPU · CUDA 12** (~440 MB), or **GPU · CUDA 11** (~60 MB) — and recommends a CUDA build when an NVIDIA GPU is detected (`nvenc` probe). Note: NVENC (video encode) and CUDA (whisper compute) are different GPU subsystems — this adds the latter.
 - **Graceful CPU fallback at runtime.** A CUDA build offloads to the GPU automatically; if CUDA can't initialize (driver too old, no device), `_run_whisper` retries once with `-ng` (force CPU), so a too-new build choice degrades to CPU instead of failing. `-ng` is a no-op for the CPU build.
