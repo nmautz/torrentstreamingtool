@@ -1344,6 +1344,17 @@ function _renderComponents(d){
            ${sizes.map(s=>`<option value="${s}"${s==="base"?" selected":""}>${escHtml(s)}</option>`).join("")}
          </select>`
       : "";
+    // whisper binary build picker: CPU vs CUDA (GPU). Default to a CUDA build
+    // when an NVIDIA GPU is detected; whisper falls back to CPU at runtime if
+    // CUDA can't init, so a too-new pick degrades gracefully instead of failing.
+    const gpu = !!d.nvenc;
+    const buildSel = (key === "whisper")
+      ? `<select id="compWhisperBuild" class="bg-black border border-gray-700 px-2 py-1.5 text-xs text-gray-200 focus:border-indigo-500 outline-none">
+           <option value="cpu"${!gpu?" selected":""}>CPU</option>
+           <option value="cuda12"${gpu?" selected":""}>GPU · CUDA 12 (~440MB)</option>
+           <option value="cuda11">GPU · CUDA 11 (~60MB)</option>
+         </select>`
+      : "";
     let action;
     if(installing){
       action = `<span class="text-[11px] font-bold uppercase tracking-wide text-indigo-300">Installing… ${pct}%</span>`;
@@ -1363,9 +1374,10 @@ function _renderComponents(d){
           <div class="flex items-center gap-2">${badge}<span class="text-sm font-bold text-gray-200">${escHtml(c.label || key)}</span></div>
           <div class="text-[10px] text-gray-600 mt-0.5">${escHtml(c.purpose || "")}</div>
           ${c.path ? `<div class="text-[10px] font-mono text-gray-700 mt-0.5 truncate">${escHtml(c.path)}</div>` : ""}
+          ${(key === "whisper" && gpu) ? `<div class="text-[10px] text-emerald-500 mt-0.5">NVIDIA GPU detected — a CUDA build runs STT far faster (falls back to CPU if the driver can't init).</div>` : ""}
           ${err}
         </div>
-        <div class="flex items-center gap-2 flex-shrink-0">${sizeSel}${action}</div>
+        <div class="flex items-center gap-2 flex-shrink-0">${sizeSel}${buildSel}${action}</div>
       </div>
       ${installing ? `<div class="mt-2 h-1 bg-gray-800"><div class="h-1 bg-indigo-500 transition-all" style="width:${pct}%"></div></div>` : ""}
     </div>`;
@@ -1378,6 +1390,10 @@ async function installComponent(key){
   if(key === "whisper_model"){
     const sel = document.getElementById("compModelSize");
     if(sel) body.model = sel.value;
+  }
+  if(key === "whisper"){
+    const sel = document.getElementById("compWhisperBuild");
+    if(sel) body.build = sel.value;
   }
   try{
     const r = await fetch("/api/admin/components/install", {

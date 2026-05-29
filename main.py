@@ -7172,21 +7172,29 @@ async def admin_set_stt(request: Request, body: SttConfigReq) -> JSONResponse:
 async def admin_components(request: Request) -> JSONResponse:
     """Status of the installable portable dependencies (ffmpeg, fpcalc, whisper
     binary, whisper model) + any in-flight install job. Polled by the admin
-    Components card while an install runs."""
+    Components card while an install runs. `nvenc` flags an NVIDIA GPU so the UI
+    can recommend a CUDA whisper build."""
     _require_admin(request)
-    return JSONResponse(_component_status_payload())
+    payload = _component_status_payload()
+    try:
+        payload["nvenc"] = await _has_nvenc()
+    except Exception:
+        payload["nvenc"] = False
+    return JSONResponse(payload)
 
 
 class ComponentInstallReq(BaseModel):
     component: str
     model: str = "base"      # whisper_model only: base | small | medium
+    build: str = "cpu"       # whisper only: cpu | cuda12 | cuda11
 
 
 @app.post("/api/admin/components/install")
 async def admin_components_install(request: Request, req: ComponentInstallReq) -> JSONResponse:
     """Download + install one portable component in the background. Poll
     /api/admin/components for progress. ffmpeg/whisper binaries are Windows-only
-    here (elsewhere use the OS package manager); fpcalc + the model work anywhere."""
+    here (elsewhere use the OS package manager); fpcalc + the model work anywhere.
+    For whisper, `build` picks the CPU or a CUDA/cuBLAS variant."""
     _require_admin(request)
     if req.component not in _COMPONENT_KEYS:
         raise HTTPException(400, "Unknown component.")
@@ -7200,7 +7208,7 @@ async def admin_components_install(request: Request, req: ComponentInstallReq) -
         "status": "pending", "progress": 0.0, "error": None,
         "component": req.component, "started_at": time.time(),
     }
-    asyncio.create_task(_run_component_install(req.component, req.model))
+    asyncio.create_task(_run_component_install(req.component, req.model, req.build))
     return JSONResponse({"ok": True, "status": "started"})
 
 
@@ -8771,9 +8779,12 @@ async def _download_to(url: str, dest: Path, job: dict) -> None:
     tmp.replace(dest)
 
 
-async def _run_component_install(component: str, model: str = "base") -> None:
+async def _run_component_install(component: str, model: str = "base", build: str = "cpu") -> None:
     """Download + install one portable component, then point .env at it and clear
-    the relevant detection caches so the new binary takes effect without a restart."""
+    the relevant detection caches so the new binary takes effect without a restart.
+
+    `build` (whisper only) selects the whisper.cpp variant: cpu / cuda12 / cuda11.
+    """
     job = _component_jobs[component]
     job["status"] = "downloading"
     try:
@@ -8794,7 +8805,7 @@ async def _run_component_install(component: str, model: str = "base") -> None:
             if os.name != "nt":
                 raise RuntimeError("Portable whisper.cpp is Windows-only here — build it on "
                                    "Linux, or `brew install whisper-cpp` on macOS.")
-            url = await asyncio.to_thread(setup._resolve_whisper_win_url)
+            url = await asyncio.to_thread(setup._resolve_whisper_win_url, build)
             wh_dir = setup.TOOLS_DIR / "whisper"
             tmp_zip = setup.TOOLS_DIR / "_dl_whisper.zip"
             await _download_to(url, tmp_zip, job)

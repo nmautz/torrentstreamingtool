@@ -155,47 +155,55 @@ def _run_whisper(
     `language="auto"` lets whisper detect; `translate=True` emits English
     regardless of source language. Streams stderr to surface progress + the
     detected language without buffering the whole run.
+
+    A CUDA/cuBLAS build offloads to the GPU automatically. If CUDA can't
+    initialize at runtime (driver too old, no device), the first attempt fails;
+    we retry once with `-ng` (force CPU), which is also a no-op for the CPU
+    build. This lets a GPU build degrade gracefully to CPU instead of failing.
     """
     binp = whisper_bin()
     model = whisper_model()
     if not binp or not model:
         return False, ""
-    cmd = _lp([
-        binp,
-        "-m", model,
-        "-f", str(wav),
-        "-l", language or "auto",
-        "-t", str(STT_THREADS),
-        "-osrt",
-        "-of", str(out_base),
-        "-pp",            # print progress to stderr
-    ])
-    if translate:
-        cmd.append("-tr")
 
-    detected = ""
-    try:
-        proc = subprocess.Popen(
-            cmd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
-            text=True, **_LOWPRIO_KW,
-        )
-    except OSError:
-        return False, ""
-    assert proc.stderr is not None
-    for line in proc.stderr:
-        m = _DETECT_RE.search(line)
-        if m:
-            detected = m.group(1)
-        if progress_cb:
-            pm = _PROGRESS_RE.search(line)
-            if pm:
-                try:
-                    progress_cb(min(1.0, int(pm.group(1)) / 100.0))
-                except Exception:
-                    pass
-    proc.wait()
-    srt = out_base.with_suffix(".srt")
-    return (proc.returncode == 0 and srt.exists()), detected
+    def _attempt(no_gpu: bool) -> tuple[bool, str]:
+        cmd = [
+            binp, "-m", model, "-f", str(wav),
+            "-l", language or "auto", "-t", str(STT_THREADS),
+            "-osrt", "-of", str(out_base), "-pp",
+        ]
+        if translate:
+            cmd.append("-tr")
+        if no_gpu:
+            cmd.append("-ng")          # --no-gpu: force CPU (ignored by the CPU build)
+        detected = ""
+        try:
+            proc = subprocess.Popen(
+                _lp(cmd), stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                text=True, **_LOWPRIO_KW,
+            )
+        except OSError:
+            return False, ""
+        assert proc.stderr is not None
+        for line in proc.stderr:
+            m = _DETECT_RE.search(line)
+            if m:
+                detected = m.group(1)
+            if progress_cb:
+                pm = _PROGRESS_RE.search(line)
+                if pm:
+                    try:
+                        progress_cb(min(1.0, int(pm.group(1)) / 100.0))
+                    except Exception:
+                        pass
+        proc.wait()
+        srt = out_base.with_suffix(".srt")
+        return (proc.returncode == 0 and srt.exists()), detected
+
+    ok, detected = _attempt(no_gpu=False)
+    if not ok:
+        ok, detected = _attempt(no_gpu=True)
+    return ok, detected
 
 
 def generate(

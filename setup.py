@@ -302,23 +302,40 @@ FPCALC_MAC_URL   = "https://github.com/acoustid/chromaprint/releases/download/v1
 # size/quality sweet spot for overnight bulk prep; admins can swap in a larger
 # model by dropping it in tools/whisper/ and pointing _WHISPER_MODEL at it.
 #
-# The Windows binary zip's ASSET NAME is stable (`whisper-bin-x64.zip`) but the
-# release TAG is not — a hardcoded tag 404s the moment a new release lands. So we
-# resolve the URL from the GitHub releases API at install time and only fall back
-# to a pinned known-good release if the API is unreachable. (`whisper-cublas-*`
-# CUDA builds also exist for NVIDIA hosts, but need matching CUDA runtime DLLs —
-# the CPU build is the portable default.)
-WHISPER_ASSET            = "whisper-bin-x64.zip"
+# The Windows binary zip's ASSET NAME is stable but the release TAG is not — a
+# hardcoded tag 404s the moment a new release lands. So we resolve the URL from
+# the GitHub releases API at install time and only fall back to a pinned
+# known-good release if the API is unreachable.
+#
+# Three builds ship per release: the CPU build (`whisper-bin-x64.zip`) and two
+# CUDA/cuBLAS builds (`whisper-cublas-12.x.x-bin-x64.zip`, `…-11.8.0-…`) for
+# NVIDIA hosts. The CUDA builds bundle the CUDA runtime DLLs but still need a
+# compatible NVIDIA driver; whisper.cpp auto-offloads to the GPU when run, and
+# we force-fall-back to CPU at runtime (`-ng`) if CUDA init fails. CPU is the
+# portable default; the GPU build is opt-in via the admin Components panel.
 WHISPER_RELEASES_API     = "https://api.github.com/repos/ggml-org/whisper.cpp/releases/latest"
-WHISPER_FALLBACK_VERSION = "1.8.4"   # known-good tag that publishes WHISPER_ASSET
-WHISPER_WIN_URL_FALLBACK = f"https://github.com/ggml-org/whisper.cpp/releases/download/v{WHISPER_FALLBACK_VERSION}/{WHISPER_ASSET}"
+WHISPER_FALLBACK_VERSION = "1.8.4"   # known-good tag that publishes all three builds
 WHISPER_MODEL_NAME = "ggml-base.bin"
 WHISPER_MODEL_URL  = f"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{WHISPER_MODEL_NAME}"
 
+# build key → (pinned fallback asset name, matcher against live release asset names)
+_WHISPER_BUILDS = {
+    "cpu":    ("whisper-bin-x64.zip",
+               lambda n: n == "whisper-bin-x64.zip"),
+    "cuda12": ("whisper-cublas-12.4.0-bin-x64.zip",
+               lambda n: n.startswith("whisper-cublas-12") and n.endswith("-bin-x64.zip")),
+    "cuda11": ("whisper-cublas-11.8.0-bin-x64.zip",
+               lambda n: n.startswith("whisper-cublas-11") and n.endswith("-bin-x64.zip")),
+}
 
-def _resolve_whisper_win_url() -> str:
-    """Return the current `whisper-bin-x64.zip` download URL from the GitHub
-    releases API, or the pinned fallback if the API can't be reached."""
+
+def _resolve_whisper_win_url(build: str = "cpu") -> str:
+    """Return the download URL for the requested whisper.cpp Windows build
+    (`cpu` | `cuda12` | `cuda11`) from the GitHub releases API, or the pinned
+    fallback if the API can't be reached / the asset isn't found."""
+    fallback_asset, matcher = _WHISPER_BUILDS.get(build, _WHISPER_BUILDS["cpu"])
+    fallback = (f"https://github.com/ggml-org/whisper.cpp/releases/download/"
+                f"v{WHISPER_FALLBACK_VERSION}/{fallback_asset}")
     import urllib.request, json as _json
     try:
         req = urllib.request.Request(
@@ -329,12 +346,13 @@ def _resolve_whisper_win_url() -> str:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = _json.loads(resp.read().decode("utf-8", "replace"))
         for asset in data.get("assets", []):
-            if asset.get("name") == WHISPER_ASSET and asset.get("browser_download_url"):
+            name = asset.get("name", "")
+            if matcher(name) and asset.get("browser_download_url"):
                 return asset["browser_download_url"]
-        warn("whisper-bin-x64.zip not found in the latest release; using pinned fallback.")
+        warn(f"whisper {build} build not found in the latest release; using pinned fallback.")
     except Exception as e:
         warn(f"Could not query whisper.cpp releases ({e}); using pinned fallback.")
-    return WHISPER_WIN_URL_FALLBACK
+    return fallback
 
 
 def _download_with_progress(url: str, dest: Path) -> bool:

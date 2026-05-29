@@ -122,8 +122,8 @@ binary, a model, and ffmpeg are all present. The UI gates the Generate
 affordances on it; the admin card shows an "unavailable" banner otherwise.
 
 - **Windows (primary):** portable whisper.cpp build + model downloaded by
-  `setup.py` into `tools/whisper/`. CPU build by default; a CUDA build is a
-  manual upgrade (drop it in and re-point `_WHISPER_BIN`).
+  `setup.py` into `tools/whisper/`. CPU build by default; a **CUDA/cuBLAS build**
+  (GPU) is selectable in the admin Components card — see GPU acceleration below.
 - **Installing without a terminal:** the auto-updater runs `setup.py`
   non-interactively and skips the whisper download, so on an auto-updating box
   install it from **Admin → System → Optional Components** instead (binary +
@@ -135,6 +135,35 @@ affordances on it; the admin card shows an "unavailable" banner otherwise.
 - **macOS (dev only):** `brew install whisper-cpp` + model download. Note HLS
   prep is TCC-blocked on macOS, so **preprocess** STT won't run there, but the
   **VLC on-demand** path still works.
+
+---
+
+## GPU (CUDA) acceleration
+
+> **NVENC ≠ CUDA.** The `_has_nvenc()` probe / "GPU: NVENC" badge is about the
+> NVIDIA *video encoder* (used by the HLS ffmpeg transcode). Whisper uses
+> **CUDA/cuBLAS** general compute — a different subsystem. NVENC being available
+> is a good *signal* that a CUDA-capable GPU exists, which is why the Components
+> card recommends a CUDA build when `nvenc` is true, but the CPU whisper build
+> never uses the GPU regardless.
+
+whisper.cpp ships three Windows builds per release: the CPU build
+(`whisper-bin-x64.zip`) and two cuBLAS builds
+(`whisper-cublas-12.x-bin-x64.zip` ≈ 440 MB, `whisper-cublas-11.8.0-…` ≈ 60 MB).
+`setup._resolve_whisper_win_url(build)` resolves the right asset by build key
+(`cpu`/`cuda12`/`cuda11`) from the releases API. The admin picks the build in the
+**Optional Components** card; CUDA 12 is the default when a GPU is detected.
+
+- **No flag needed to use the GPU** — a cuBLAS build auto-offloads. `stt._run_whisper`
+  passes the same args for every build.
+- **Runtime CPU fallback** — `_run_whisper` runs once, and on failure retries
+  once with `-ng` (`--no-gpu`). So a cuBLAS build on a too-old driver (CUDA init
+  fails) degrades to CPU instead of erroring; `-ng` is a harmless no-op for the
+  CPU build. The cost is a wasted first attempt only on actual failure.
+- **Driver compatibility** — CUDA 12.x needs a newer NVIDIA driver than 11.8.
+  The cuBLAS zips bundle the CUDA *runtime* DLLs (no toolkit install needed) but
+  still require a compatible driver. If unsure, CUDA 11 is the wider-compatible,
+  much smaller download; the CPU fallback covers a wrong pick either way.
 
 ---
 

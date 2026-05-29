@@ -355,6 +355,7 @@ The auto-updater runs `setup.py` non-interactively (skips all `install_*`), so p
 - [x] **25.2** Endpoints — `GET /api/admin/components` (status + in-flight job), `POST /api/admin/components/install {component, model?}`.
 - [x] **25.3** Frontend — **Optional Components** card in the System tab (`loadComponents`/`_renderComponents`/`installComponent`): per-component Installed/Missing badge + path + Install/Reinstall, whisper model size picker (base/small/medium), live progress bar, polls while installing.
 - [x] **25.4** Docs + version → 4.1.0: ADMIN.md (Optional Components subsection), SETUP.md (admin-install path + autoupdate skip rationale), API.md (2 endpoints), STT.md (no-terminal install note), CHANGELOG.
+- [x] **25.5** (v4.2.0) GPU (CUDA) whisper builds: `setup._resolve_whisper_win_url(build)` resolves cpu/cuda12/cuda11 cuBLAS assets; Components card gains a whisper build picker (recommends CUDA when `nvenc`); `_run_whisper` retries with `-ng` on failure for a graceful CPU fallback; `/api/admin/components` reports `nvenc`, install accepts `build`. Docs: STT.md (GPU section), ADMIN.md, API.md.
 
 ---
 

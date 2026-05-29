@@ -1,5 +1,11 @@
 # Changelog
 
+## [4.2.0] — 2026-05-28
+- **New: GPU (CUDA) acceleration for AI subtitles.** whisper.cpp transcription can now run on an NVIDIA GPU via the cuBLAS build — dramatically faster than CPU (a 45-min episode drops from minutes to tens of seconds). The admin Optional Components card gains a build picker for whisper.cpp — **CPU**, **GPU · CUDA 12** (~440 MB), or **GPU · CUDA 11** (~60 MB) — and recommends a CUDA build when an NVIDIA GPU is detected (`nvenc` probe). Note: NVENC (video encode) and CUDA (whisper compute) are different GPU subsystems — this adds the latter.
+- **Graceful CPU fallback at runtime.** A CUDA build offloads to the GPU automatically; if CUDA can't initialize (driver too old, no device), `_run_whisper` retries once with `-ng` (force CPU), so a too-new build choice degrades to CPU instead of failing. `-ng` is a no-op for the CPU build.
+- **Backend:** `setup._resolve_whisper_win_url(build)` resolves the cpu/cuda12/cuda11 asset from the GitHub releases API (pinned v1.8.4 fallback); `/api/admin/components/install` accepts `build`; `/api/admin/components` reports `nvenc`.
+- **Docs:** [docs/STT.md](docs/STT.md), [docs/ADMIN.md](docs/ADMIN.md), [docs/API.md](docs/API.md).
+
 ## [4.1.0] — 2026-05-28
 - **New: admin Optional Components installer (System tab).** The auto-updater runs `setup.py` non-interactively and skips every `install_*` step, so portable dependencies the box didn't already have — notably whisper.cpp + its model for AI subtitles — never landed without a manual terminal `setup.py` run. New **Optional Components** card lets the admin install/update them from the web: ffmpeg, fpcalc, the whisper.cpp binary, and the whisper model (base/small/medium picker). Downloads stream on the host with live progress and write the paths into `.env`; `detect_tools()` + `merge_tool_paths()` then keep them across future auto-updates, so a one-time install persists.
 - **Windows-native, no terminal.** Reuses `setup.py`'s URL-resolution / extract / detect helpers (imported into the running server — its prompts are gated under `__main__`) and streams the download via httpx for progress. ffmpeg / whisper.cpp binaries are offered only on Windows (elsewhere: OS package manager); fpcalc + the model install on any OS.
