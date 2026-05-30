@@ -331,13 +331,14 @@ WHISPER_FALLBACK_VERSION = "1.8.4"   # known-good tag that publishes all three b
 WHISPER_MODEL_NAME = "ggml-base.bin"
 WHISPER_MODEL_URL  = f"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{WHISPER_MODEL_NAME}"
 
-# Silero VAD model — optional, ~2 MB. Lets whisper detect speech regions before
+# Silero VAD model — optional, ~1 MB. Lets whisper detect speech regions before
 # transcribing so per-region timing can't drift across a long file (the big
-# accumulating-drift fix). Pulled from the ggml-org repo (the source the official
-# download-vad-model.sh uses). Stored under tools/whisper/vad/ — NOT models/ — so
-# whisper_model_candidates() never mistakes it for a transcription model.
+# accumulating-drift fix). Hosted in the dedicated `ggml-org/whisper-vad` HF repo
+# (NOT `ggml-org/whisper.cpp`, whose resolve path 401s for this file). Stored under
+# tools/whisper/vad/ — NOT models/ — so whisper_model_candidates() never mistakes
+# it for a transcription model.
 WHISPER_VAD_MODEL_NAME = "ggml-silero-v5.1.2.bin"
-WHISPER_VAD_MODEL_URL  = f"https://huggingface.co/ggml-org/whisper.cpp/resolve/main/{WHISPER_VAD_MODEL_NAME}"
+WHISPER_VAD_MODEL_URL  = f"https://huggingface.co/ggml-org/whisper-vad/resolve/main/{WHISPER_VAD_MODEL_NAME}"
 
 # build key → (pinned fallback asset name, matcher against live release asset names)
 _WHISPER_BUILDS = {
@@ -519,7 +520,7 @@ def _download_whisper_vad_model() -> Optional[str]:
     if dest.exists() and dest.stat().st_size > 500_000:
         ok(f"whisper VAD model already present → {dest}")
         return str(dest)
-    note(f"Downloading whisper VAD model {WHISPER_VAD_MODEL_NAME} (~2 MB) …")
+    note(f"Downloading whisper VAD model {WHISPER_VAD_MODEL_NAME} (~1 MB) …")
     if _download_with_progress(WHISPER_VAD_MODEL_URL, dest):
         ok(f"whisper VAD model → {dest}")
         return str(dest)

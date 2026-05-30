@@ -44,7 +44,7 @@
 - **macOS**: `brew install whisper-cpp`, plus the model + VAD download.
 - **Linux**: no reliable prebuilt — build whisper.cpp so `whisper-cli` is on PATH; the model + VAD model still download (they're platform-independent).
 - The model **must be multilingual** (not `*.en`) so whisper's translate task can emit English from foreign audio. `detect_tools()` finds the binary via `whisper_candidates()` and the model via `whisper_model_candidates()` (any `tools/whisper/**/ggml-*.bin`, **excluding `ggml-silero-*`**). It **prefers the model already in `.env`** when it still exists, so a non-interactive auto-update can't reset an admin's `small`/`medium` pick back to `base`.
-- **Silero VAD model** (`ggml-silero-v5.1.2.bin`, ~2 MB, optional): downloaded into `tools/whisper/vad/` (a separate dir so it isn't mistaken for a transcription model), found via `whisper_vad_candidates()`. It lets whisper segment speech to stop subtitle timing drift on long media; STT works without it. See [STT.md](STT.md) § Timing precision.
+- **Silero VAD model** (`ggml-silero-v5.1.2.bin`, ~1 MB, optional): downloaded into `tools/whisper/vad/` (a separate dir so it isn't mistaken for a transcription model), found via `whisper_vad_candidates()`. It lets whisper segment speech to stop subtitle timing drift on long media; STT works without it. See [STT.md](STT.md) § Timing precision.
 - The Windows binary zip's asset name is stable (`whisper-bin-x64.zip`) but the release tag isn't, so `_resolve_whisper_win_url()` queries the GitHub releases API at install time and only falls back to a pinned known-good tag if the API is unreachable.
 
 ## Installing optional components after setup (admin panel)

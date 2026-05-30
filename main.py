@@ -8913,7 +8913,7 @@ async def _run_component_install(component: str, model: str = "base", build: str
             _write_env_keys({"_WHISPER_MODEL": str(dest)})
 
         elif component == "whisper_vad":
-            # Optional Silero VAD model (~2 MB) — reduces AI-subtitle timing drift
+            # Optional Silero VAD model (~1 MB) — reduces AI-subtitle timing drift
             # on long media. Portable (installable on every OS). Stored under
             # tools/whisper/vad/ so it isn't mistaken for a transcription model.
             fname = setup.WHISPER_VAD_MODEL_NAME
@@ -9018,7 +9018,7 @@ def _component_status_payload() -> dict:
                           "purpose": "AI subtitle language model (multilingual)"},
         "whisper_vad":   {"label": "whisper VAD model (Silero)", "installed": bool(stt.whisper_vad_model()),
                           "path": stt.whisper_vad_model() or "", "installable": True,
-                          "purpose": "Reduces AI-subtitle timing drift on long media (optional, ~2 MB)"},
+                          "purpose": "Reduces AI-subtitle timing drift on long media (optional, ~1 MB)"},
     }
     for k, c in comps.items():
         j = _component_jobs.get(k)

@@ -141,7 +141,7 @@ it — sometimes self-correcting, often compounding. Two more levers fight this:
   Windows build (v1.8.4+) has it. The VAD model is **never** part of
   `is_available()`; absence just means the pre-VAD behaviour.
 
-The model — `ggml-silero-v5.1.2.bin` (~2 MB) — is bundled by `setup.py` into
+The model — `ggml-silero-v5.1.2.bin` (~1 MB) — is bundled by `setup.py` into
 `tools/whisper/vad/` (a separate dir so `whisper_model_candidates()`'s
 `ggml-*.bin` glob never mistakes it for a transcription model), recorded in
 `.env` as `_WHISPER_VAD_MODEL`, and installable post-hoc from **Admin → System →
