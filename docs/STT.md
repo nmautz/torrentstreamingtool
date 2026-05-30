@@ -126,15 +126,13 @@ DTW and `-ml`/`-sow` fix *within-cue* boundaries, but not the **cross-window
 drift** that accumulates over long (~1 hr) media: whisper decodes in 30-second
 windows and advances its audio cursor by its own timestamp tokens, so one
 misjudgment (silence, music, a hallucinated repetition) shifts everything after
-it — sometimes self-correcting, often compounding. Two more levers fight this:
+it — sometimes self-correcting, often compounding. The lever that fights this:
 
-- **`-mc 0`** (`--max-context 0`, **always on**) — don't carry decoded text
-  across windows. The carried prompt is what breeds the repetition/hallucination
-  loops that corrupt timestamps. Free, no model. Costs a little cross-window
-  textual coherence; the drift reduction on long media is the better trade.
 - **`--vad --vad-model <silero>`** (**optional**) — whisper detects speech
   regions up front (Silero VAD) and transcribes each at its own correct absolute
-  offset, so a per-window error can't propagate down the file. Enabled only when
+  offset, so a per-window error can't propagate down the file. It re-anchors
+  *timing* without touching the model's decoding context, so it doesn't degrade
+  word accuracy. Enabled only when
   `stt.whisper_vad_model()` finds the model **and** `stt._whisper_supports_vad()`
   (a cached `whisper-cli --help` probe) confirms the build accepts `--vad` —
   older user-built Linux/macOS binaries (pre ~v1.7.5) lack it; the bundled
@@ -153,6 +151,13 @@ surfaces in `/api/admin/stt` (`vad`) and `/api/admin/components` (`vad_active`).
 culprit), then forces **CPU** (`-ng`) — each lever dropped independently so one
 failure mode never costs the whole transcription. All flags are orthogonal to
 GPU offload.
+
+> **Why not `-mc 0`?** v4.6.0 also forced `--max-context 0` to curb the
+> repetition/hallucination loops that corrupt timestamps. It worked for that, but
+> it strips the cross-window context whisper uses to decode ambiguous audio and
+> **drastically degraded transcription quality** (worst combined with VAD's short
+> segments — tiny chunks with no shared context). Reverted in v4.6.1; rely on VAD
+> for drift, never `-mc`. See [GOTCHAS.md](GOTCHAS.md).
 
 #### Picking up the improvement on existing subs — the generation tag
 

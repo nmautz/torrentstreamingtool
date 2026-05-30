@@ -28,10 +28,11 @@ from pathlib import Path
 from typing import Callable, Optional
 
 # Bumped whenever the transcription *pipeline* changes in a way that affects
-# output timing (not just the model). Embedded in sidecar names as `g<N>` (plus a
-# `v` when a VAD model is installed) so subs from an older pipeline read as stale
-# and the UI offers Regenerate. v2 = `-mc 0` + optional Silero VAD (drift fix).
-STT_VERSION = 2
+# output (timing or content). Embedded in sidecar names as `g<N>` (plus a `v`
+# when a VAD model is installed) so subs from an older pipeline read as stale and
+# the UI offers Regenerate. v2 added `-mc 0` + optional Silero VAD; v3 dropped
+# `-mc 0` (it tanked transcription *quality* — see GOTCHAS), keeping VAD for drift.
+STT_VERSION = 3
 
 # Marker embedded in generated sidecar names: "<stem>.<lang>.ai.srt". The `.ai`
 # segment distinguishes machine-generated subs from real/downloaded ones so we
@@ -66,12 +67,14 @@ STT_THREADS = 4
 # DTW + ml/sow fix *within-cue* boundaries but not the *cross-window* drift that
 # accumulates over long media: whisper decodes in 30s windows and advances its
 # audio cursor by its own timestamp tokens, so one misjudgment (silence, music, a
-# hallucinated repetition) shifts everything after it. Two more levers fight that:
-#  * `-mc 0` stops carrying decoded text across windows — the loop that breeds the
-#    repetition/hallucination that corrupts timestamps. Always on (free, no model).
+# hallucinated repetition) shifts everything after it. The fix is:
 #  * `--vad` (optional, needs a bundled Silero model — see `whisper_vad_model`)
 #    detects speech regions up front so each is transcribed at its own correct
 #    absolute offset; a per-window error can no longer propagate down the file.
+# (We briefly also forced `-mc 0` to curb the repetition loops, but it tanked
+# transcription *quality* — the model needs cross-window context to decode well,
+# and it was worst combined with VAD's short segments — so it was reverted in
+# v4.6.1. See GOTCHAS. Use VAD, not -mc, for drift.)
 STT_MAX_LEN = 80  # max characters per cue for -ml; 0 would disable splitting
 
 # whisper.cpp `-dtw` alignment-head presets, keyed by the model's short name as
@@ -299,9 +302,9 @@ def _run_whisper(
     Timing precision: `-dtw` aligns token timestamps to the audio (accurate
     boundaries that respect pauses) when the model maps to a known preset, and
     `-ml`/`-sow` re-split into word-boundary cues so each carries its own timing.
-    `-mc 0` (always) plus `--vad` (when a Silero model is installed and the build
-    supports it) fight the cross-window drift that accumulates over long media —
-    see the `STT_MAX_LEN` / `_DTW_PRESETS` / `whisper_vad_model` notes above.
+    `--vad` (when a Silero model is installed and the build supports it) fights
+    the cross-window drift that accumulates over long media — see the
+    `STT_MAX_LEN` / `_DTW_PRESETS` / `whisper_vad_model` notes above.
 
     A CUDA/cuBLAS build offloads to the GPU automatically. If CUDA can't
     initialize at runtime (driver too old, no device), the first attempt fails;
@@ -323,9 +326,6 @@ def _run_whisper(
             "-l", language or "auto", "-t", str(STT_THREADS),
             "-osrt", "-of", str(out_base), "-pp",
             "-ml", str(STT_MAX_LEN), "-sow",   # word-boundary cues, per-cue timing
-            "-mc", "0",                        # don't carry decoded text across the
-                                               # 30s windows — stops repetition loops
-                                               # that corrupt cross-window timestamps
         ]
         if preset:
             cmd += ["-dtw", preset]            # DTW token-level timestamp alignment
