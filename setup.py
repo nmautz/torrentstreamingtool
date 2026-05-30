@@ -264,11 +264,24 @@ def whisper_candidates() -> list[str]:
 
 
 def whisper_model_candidates() -> list[str]:
-    """Locate a downloaded GGML model under ./tools/whisper/ (any ggml-*.bin)."""
+    """Locate a downloaded GGML transcription model under ./tools/whisper/.
+
+    Excludes `ggml-silero-*.bin` — that's the VAD model (see
+    `whisper_vad_candidates`), not a transcription model; if it leaked into this
+    list it'd be offered as a 2 MB "model" and break `stt.model_name()`."""
     base = TOOLS_DIR / "whisper"
     if not base.exists():
         return []
-    return [str(p) for p in base.rglob("ggml-*.bin") if p.is_file()]
+    return [str(p) for p in base.rglob("ggml-*.bin")
+            if p.is_file() and not p.name.startswith("ggml-silero")]
+
+
+def whisper_vad_candidates() -> list[str]:
+    """Locate a downloaded Silero VAD model under ./tools/whisper/ (optional)."""
+    base = TOOLS_DIR / "whisper"
+    if not base.exists():
+        return []
+    return [str(p) for p in base.rglob("ggml-silero-*.bin") if p.is_file()]
 
 
 def whisper_install_hint() -> str:
@@ -317,6 +330,14 @@ WHISPER_RELEASES_API     = "https://api.github.com/repos/ggml-org/whisper.cpp/re
 WHISPER_FALLBACK_VERSION = "1.8.4"   # known-good tag that publishes all three builds
 WHISPER_MODEL_NAME = "ggml-base.bin"
 WHISPER_MODEL_URL  = f"https://huggingface.co/ggerganov/whisper.cpp/resolve/main/{WHISPER_MODEL_NAME}"
+
+# Silero VAD model — optional, ~2 MB. Lets whisper detect speech regions before
+# transcribing so per-region timing can't drift across a long file (the big
+# accumulating-drift fix). Pulled from the ggml-org repo (the source the official
+# download-vad-model.sh uses). Stored under tools/whisper/vad/ — NOT models/ — so
+# whisper_model_candidates() never mistakes it for a transcription model.
+WHISPER_VAD_MODEL_NAME = "ggml-silero-v5.1.2.bin"
+WHISPER_VAD_MODEL_URL  = f"https://huggingface.co/ggml-org/whisper.cpp/resolve/main/{WHISPER_VAD_MODEL_NAME}"
 
 # build key → (pinned fallback asset name, matcher against live release asset names)
 _WHISPER_BUILDS = {
@@ -488,12 +509,31 @@ def _download_whisper_model() -> Optional[str]:
     return None
 
 
+def _download_whisper_vad_model() -> Optional[str]:
+    """Download the Silero VAD model into tools/whisper/vad/. Returns the saved
+    path or None. Portable across platforms. Optional — it reduces AI-subtitle
+    timing drift on long media; STT works fine without it."""
+    vad_dir = TOOLS_DIR / "whisper" / "vad"
+    vad_dir.mkdir(parents=True, exist_ok=True)
+    dest = vad_dir / WHISPER_VAD_MODEL_NAME
+    if dest.exists() and dest.stat().st_size > 500_000:
+        ok(f"whisper VAD model already present → {dest}")
+        return str(dest)
+    note(f"Downloading whisper VAD model {WHISPER_VAD_MODEL_NAME} (~2 MB) …")
+    if _download_with_progress(WHISPER_VAD_MODEL_URL, dest):
+        ok(f"whisper VAD model → {dest}")
+        return str(dest)
+    warn("whisper VAD model download failed (optional — STT still works).")
+    return None
+
+
 def _portable_install_whisper_windows() -> dict:
     """Download the portable whisper.cpp Windows build + model under ./tools/whisper/.
 
-    Returns {"whisper": path or None, "whisper_model": path or None}.
+    Returns {"whisper": path or None, "whisper_model": path or None,
+    "whisper_vad": path or None}.
     """
-    result: dict = {"whisper": None, "whisper_model": None}
+    result: dict = {"whisper": None, "whisper_model": None, "whisper_vad": None}
     TOOLS_DIR.mkdir(exist_ok=True)
     tmp_zip = TOOLS_DIR / "_dl_whisper.zip"
     wh_dir = TOOLS_DIR / "whisper"
@@ -509,6 +549,7 @@ def _portable_install_whisper_windows() -> dict:
                 warn("whisper-cli.exe not found inside the extracted archive.")
         tmp_zip.unlink(missing_ok=True)
     result["whisper_model"] = _download_whisper_model()
+    result["whisper_vad"]   = _download_whisper_vad_model()
     return result
 
 
@@ -533,13 +574,14 @@ def install_stt_deps(tools: dict) -> dict:
 
     refreshed = dict(tools)
     if SYSTEM == "Windows":
-        if not ask_bool("Download portable whisper.cpp + base model into ./tools/ (~180 MB)?",
+        if not ask_bool("Download portable whisper.cpp + base model + VAD model into ./tools/ (~182 MB)?",
                         default=True):
             note(f"Skipped. Enable later with: {whisper_install_hint()}")
             return tools
         portable = _portable_install_whisper_windows()
         if portable.get("whisper"):       refreshed["whisper"] = portable["whisper"]
         if portable.get("whisper_model"): refreshed["whisper_model"] = portable["whisper_model"]
+        if portable.get("whisper_vad"):   refreshed["whisper_vad"] = portable["whisper_vad"]
     elif SYSTEM == "Darwin":
         brew = find_exe("brew", "/opt/homebrew/bin/brew", "/usr/local/bin/brew")
         if brew and not refreshed.get("whisper"):
@@ -552,15 +594,17 @@ def install_stt_deps(tools: dict) -> dict:
         elif not brew:
             warn("Homebrew not found — install whisper.cpp manually, then re-run setup.py.")
             note(f"Hint: {whisper_install_hint()}")
-        if ask_bool("Download the multilingual whisper model (~148 MB) now?", default=True):
+        if ask_bool("Download the multilingual whisper model + VAD model (~150 MB) now?", default=True):
             refreshed["whisper_model"] = _download_whisper_model()
+            refreshed["whisper_vad"]   = _download_whisper_vad_model()
     else:
         # Linux: no reliable prebuilt; the model is still portable.
         if not refreshed.get("whisper"):
             warn("No prebuilt whisper.cpp for Linux — build it so `whisper-cli` is on PATH.")
             note(f"Hint: {whisper_install_hint()}")
-        if ask_bool("Download the multilingual whisper model (~148 MB) now?", default=True):
+        if ask_bool("Download the multilingual whisper model + VAD model (~150 MB) now?", default=True):
             refreshed["whisper_model"] = _download_whisper_model()
+            refreshed["whisper_vad"]   = _download_whisper_vad_model()
 
     if refreshed.get("whisper") and refreshed.get("whisper_model"):
         ok("Auto-subtitles ready.")
@@ -1160,10 +1204,23 @@ def detect_tools() -> dict:
             warn(f"{label} not found — download: {url}")
 
     # whisper.cpp model is a data file, not an exe — detect it separately.
-    model_path = next(iter(whisper_model_candidates()), None)
+    # Prefer the model already recorded in .env: an admin may have swapped to a
+    # larger one (small/medium) via the Components card, and an auto-update re-run
+    # must NOT reset that to whatever ggml-*.bin rglob happens to yield first
+    # (usually base). Only auto-pick a candidate when the configured one is gone.
+    cands = whisper_model_candidates()
+    existing_model = parse_existing_env().get("_WHISPER_MODEL", "").strip()
+    model_path = (existing_model if existing_model and Path(existing_model).exists()
+                  else next(iter(cands), None))
     tools["whisper_model"] = model_path
     if model_path:
         ok(f"whisper model: {model_path}")
+
+    # Silero VAD model (optional — reduces AI-subtitle timing drift on long media).
+    vad_path = next(iter(whisper_vad_candidates()), None)
+    tools["whisper_vad"] = vad_path
+    if vad_path:
+        ok(f"whisper VAD model: {vad_path}")
 
     if not tools.get("ffmpeg") or not tools.get("fpcalc"):
         note(f"Smart Skip (intro/credits auto-detection) needs both ffmpeg and fpcalc.")
@@ -1406,7 +1463,8 @@ def write_env(cfg: dict, tools: dict) -> None:
     mapping = {"vlc": "_VLC_BIN", "qbit": "_QBIT_BIN",
                "jackett": "_JACKETT_BIN", "mullvad": "_MULLVAD_BIN",
                "ffmpeg": "_FFMPEG_BIN", "fpcalc": "_FPCALC_BIN",
-               "whisper": "_WHISPER_BIN", "whisper_model": "_WHISPER_MODEL"}
+               "whisper": "_WHISPER_BIN", "whisper_model": "_WHISPER_MODEL",
+               "whisper_vad": "_WHISPER_VAD_MODEL"}
     for key, env_key in mapping.items():
         if tools.get(key):
             lines.append(f"{env_key}={tools[key]}")
@@ -1450,7 +1508,8 @@ def merge_tool_paths(tools: dict) -> None:
     mapping = {"vlc": "_VLC_BIN", "qbit": "_QBIT_BIN",
                "jackett": "_JACKETT_BIN", "mullvad": "_MULLVAD_BIN",
                "ffmpeg": "_FFMPEG_BIN", "fpcalc": "_FPCALC_BIN",
-               "whisper": "_WHISPER_BIN", "whisper_model": "_WHISPER_MODEL"}
+               "whisper": "_WHISPER_BIN", "whisper_model": "_WHISPER_MODEL",
+               "whisper_vad": "_WHISPER_VAD_MODEL"}
     desired = {env_key: tools[key] for key, env_key in mapping.items() if tools.get(key)}
 
     out: list[str] = []

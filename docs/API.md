@@ -122,11 +122,13 @@ Up to 6 profiles. No passwords. Optional 4-digit PIN per profile.
 
 ## AI Subtitles (speech-to-text, whisper.cpp)
 
-Generated subs are sidecar `<stem>.<lang>.ai.srt` files next to the source —
-picked up by VLC and the on-device HLS player through the existing sidecar
-plumbing. Trigger = no usable text subtitle (none, image-only, or none matching
-the admin default language). See [STT.md](STT.md). All return **503** when
-whisper.cpp / its model isn't installed (`state.stt_available` false).
+Generated subs are sidecar `<stem>.<lang>.ai.<model>.<gen>.srt` files next to the
+source (the `<gen>` = `g<N>[v]` records the transcription pipeline — see
+[STT.md](STT.md) § Timing precision) — picked up by VLC and the on-device HLS
+player through the existing sidecar plumbing. Trigger = no usable text subtitle
+(none, image-only, or none matching the admin default language). See
+[STT.md](STT.md). All return **503** when whisper.cpp / its model isn't installed
+(`state.stt_available` false).
 
 | Method | Path | Notes |
 |--------|------|-------|
@@ -226,10 +228,10 @@ All require admin auth.
 | POST | `/api/admin/overnight-prep` | `{enabled, start:"HH:MM", end:"HH:MM", timezone, on_end:"pause"\|"continue"}` → saves to `library.json → settings.overnight_prep`. Validates both HH:MM (24h), rejects an empty (start==end) window, resets the auto-prep edge flag. Drives the unified `auto_prep_loop`: on entering the window it queues a bulk HLS-prep job for every un-prepped library file; on leaving it either pauses (in-flight file finishes) or continues to completion |
 | GET | `/api/admin/idle-prep` | `{enabled, idle_minutes, idle_now, paused, active}` — idle-triggered auto stream-prep config. `idle_now` = box is idle right now; `active` = prepping while idle right now |
 | POST | `/api/admin/idle-prep` | `{enabled, idle_minutes}` → saves to `library.json → settings.idle_prep`. Clamps `idle_minutes` to 1–720, resets the auto-prep edge flag. Drives the same `auto_prep_loop`: when the host has been idle (`_machine_in_use`) for `idle_minutes` it queues bulk HLS-prep for the whole un-prepped library, and on the first sign of activity calls `_pause_prep(kill=True)` — discarding the in-flight encode (restarts later, no mid-file checkpoint) |
-| GET | `/api/admin/stt` | `{enabled, default_language, translate, available, languages:[{code,name}]}` — AI auto-subtitle config + whether whisper.cpp is installed + the language-picker options |
-| POST | `/api/admin/stt` | `{enabled, default_language, translate}` → saves to `library.json → settings.stt`. `default_language` canonicalized to a 3-letter code ("" = any). When set, files lacking a sub in that language also get one generated. See [STT.md](STT.md) |
-| GET | `/api/admin/components` | Status of installable portable deps: `{components:{ffmpeg,fpcalc,whisper,whisper_model:{label,installed,path,installable,purpose,job?}}, platform, model_sizes, stt_available, nvenc}`. `nvenc` = an NVIDIA GPU is present (UI recommends a CUDA whisper build). `job` (when present) = `{status:"pending"\|"downloading"\|"done"\|"error", progress, error}`. Polled while an install runs |
-| POST | `/api/admin/components/install` | `{component:"ffmpeg"\|"fpcalc"\|"whisper"\|"whisper_model", model?, build?}` → starts a background download+install (streamed for progress), writes the path into `.env`, clears the ffmpeg-version/NVENC/STT caches. `model` (whisper_model only) ∈ base/small/medium. `build` (whisper only) ∈ `cpu`/`cuda12`/`cuda11` (CUDA = GPU; runtime auto-falls-back to CPU via `-ng` if CUDA can't init). ffmpeg/whisper binaries are **400** off-Windows (use the OS package manager). See [SETUP.md](SETUP.md) |
+| GET | `/api/admin/stt` | `{enabled, default_language, translate, available, vad, languages:[{code,name}]}` — AI auto-subtitle config + whether whisper.cpp is installed (`available`) + whether VAD timing-drift reduction is active (`vad` = model installed AND build supports `--vad`) + the language-picker options |
+| POST | `/api/admin/stt` | `{enabled, default_language, translate}` → saves to `library.json → settings.stt`; echoes `available` + `vad`. `default_language` canonicalized to a 3-letter code ("" = any). When set, files lacking a sub in that language also get one generated. See [STT.md](STT.md) |
+| GET | `/api/admin/components` | Status of installable portable deps: `{components:{ffmpeg,fpcalc,whisper,whisper_model,whisper_vad:{label,installed,path,installable,purpose,job?}}, platform, model_sizes, stt_available, vad_active, nvenc}`. `whisper_vad` = the optional Silero VAD model (reduces AI-subtitle timing drift; installable on any OS); `vad_active` = it's present AND the build supports `--vad`. `nvenc` = an NVIDIA GPU is present (UI recommends a CUDA whisper build). `job` (when present) = `{status:"pending"\|"downloading"\|"done"\|"error", progress, error}`. Polled while an install runs |
+| POST | `/api/admin/components/install` | `{component:"ffmpeg"\|"fpcalc"\|"whisper"\|"whisper_model"\|"whisper_vad", model?, build?}` → starts a background download+install (streamed for progress), writes the path into `.env`, clears the ffmpeg-version/NVENC/STT caches. `model` (whisper_model only) ∈ base/small/medium. `build` (whisper only) ∈ `cpu`/`cuda12`/`cuda11` (CUDA = GPU; runtime auto-falls-back to CPU via `-ng` if CUDA can't init). `whisper_vad` is the optional Silero VAD model (any OS). ffmpeg/whisper **binaries** are **400** off-Windows (use the OS package manager). See [SETUP.md](SETUP.md) |
 | GET | `/api/admin/logs` | `{log_dir, files:[{name, bytes, mtime}]}` — lists every file in `LOG_DIR` (newest first by mtime). Used by the admin System tab "Server Logs" card |
 | GET | `/api/admin/logs/_bundle` | Streams a ZIP of every file in `LOG_DIR` (deflated). Filename `streamlink-logs-YYYYMMDD-HHMMSS.zip`. 404 if no log files exist |
 | GET | `/api/admin/logs/{name}` | Streams a single log file as an attachment (`text/plain; charset=utf-8`). `{name}` is the basename only — slashes/`..`/absolute paths are rejected and the resolved path must stay within `LOG_DIR` |

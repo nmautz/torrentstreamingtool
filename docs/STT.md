@@ -36,10 +36,11 @@ The `.ai` segment marks the track as machine-generated; the segment after it is
 the **model name** that produced it (`base`/`small`/`medium`/… — derived from
 the configured `ggml-*.bin`). `_list_sidecar_subs` strips both from the parsed
 language tag and returns `ai: true`, the `model`, and `stale: true` when that
-model differs from the one configured now. The UI labels the track with its
-model (“English (AI · base)”). `stt.has_ai_subs(src)` (any generated sub exists)
-gates idempotent *preprocess*; `stt.ai_subs_stale(src)` (a sub exists but from a
-different model) drives the **Regenerate** affordance.
+model **or the transcription-pipeline generation** (the `g<N>[v]` tag — see
+“Timing precision” below) differs from what's configured now. The UI labels the
+track with its model (“English (AI · base)”). `stt.has_ai_subs(src)` (any
+generated sub exists) gates idempotent *preprocess*; `stt.ai_subs_stale(src)`
+drives the **Regenerate** affordance.
 
 ### Regenerating on a model change
 
@@ -97,7 +98,7 @@ admin Components card (or dropping the file in `tools/whisper/` and pointing
 `_WHISPER_MODEL` at it) — existing subs then read as stale and can be regenerated
 (see "Regenerating on a model change" above).
 
-### Timing precision — DTW token alignment + word-boundary cues
+### Timing precision — DTW, word-boundary cues, and cross-window drift control
 
 whisper's native segment timestamps are coarse and **drift around long pauses**:
 a segment carries a single start/end, so a line lingers across silence or the
@@ -117,12 +118,58 @@ next one starts early. `_run_whisper` passes two flags to fix this:
   block. `-sow` keeps splits off mid-word.
 
 > A literal **one-word-per-cue** track (`-ml 1`) would be unreadable as a
-> subtitle; DTW alignment is the higher-precision *and* readable answer. If pause
-> handling ever needs to go further, whisper.cpp's `--vad` (Silero) is the next
-> lever — but it needs a separate VAD model bundled, which DTW avoids.
+> subtitle; DTW alignment is the higher-precision *and* readable answer.
 
-The CPU-fallback retry (`-ng`) keeps these flags; they're orthogonal to GPU
-offload.
+#### Cross-window drift (the long-media failure) — `-mc 0` + `--vad`
+
+DTW and `-ml`/`-sow` fix *within-cue* boundaries, but not the **cross-window
+drift** that accumulates over long (~1 hr) media: whisper decodes in 30-second
+windows and advances its audio cursor by its own timestamp tokens, so one
+misjudgment (silence, music, a hallucinated repetition) shifts everything after
+it — sometimes self-correcting, often compounding. Two more levers fight this:
+
+- **`-mc 0`** (`--max-context 0`, **always on**) — don't carry decoded text
+  across windows. The carried prompt is what breeds the repetition/hallucination
+  loops that corrupt timestamps. Free, no model. Costs a little cross-window
+  textual coherence; the drift reduction on long media is the better trade.
+- **`--vad --vad-model <silero>`** (**optional**) — whisper detects speech
+  regions up front (Silero VAD) and transcribes each at its own correct absolute
+  offset, so a per-window error can't propagate down the file. Enabled only when
+  `stt.whisper_vad_model()` finds the model **and** `stt._whisper_supports_vad()`
+  (a cached `whisper-cli --help` probe) confirms the build accepts `--vad` —
+  older user-built Linux/macOS binaries (pre ~v1.7.5) lack it; the bundled
+  Windows build (v1.8.4+) has it. The VAD model is **never** part of
+  `is_available()`; absence just means the pre-VAD behaviour.
+
+The model — `ggml-silero-v5.1.2.bin` (~2 MB) — is bundled by `setup.py` into
+`tools/whisper/vad/` (a separate dir so `whisper_model_candidates()`'s
+`ggml-*.bin` glob never mistakes it for a transcription model), recorded in
+`.env` as `_WHISPER_VAD_MODEL`, and installable post-hoc from **Admin → System →
+Optional Components** (portable — installable on every OS, unlike the Windows-only
+whisper *binary*). `main._vad_active()` (model present AND build supports it)
+surfaces in `/api/admin/stt` (`vad`) and `/api/admin/components` (`vad_active`).
+
+`_run_whisper` runs VAD+GPU first, then sheds **VAD** on failure (the likeliest
+culprit), then forces **CPU** (`-ng`) — each lever dropped independently so one
+failure mode never costs the whole transcription. All flags are orthogonal to
+GPU offload.
+
+#### Picking up the improvement on existing subs — the generation tag
+
+Sidecars are named `<stem>.<lang>.ai.<model>.g<N>[v].srt`. The `g<N>` segment
+(`g{STT_VERSION}`, plus `v` when a VAD model is installed — see `sub_gen_tag()`)
+records the **transcription-pipeline generation**. `ai_subs_stale` /
+`_list_sidecar_subs` flag a sub stale when **either** the model **or** the gen
+tag differs from the current config, so subs made on an older pipeline (or before
+VAD was installed) read as stale → the on-device player shows **Regen** and VLC
+offers **Generate with AI**. Legacy untagged files parse as model `""` / gen `""`
+→ always stale → migrated to the tagged form on regen.
+
+> Edge case (non-primary platforms): the gen tag's `v` reflects VAD *model
+> presence*, not the live capability probe (kept out of the hot listing path). On
+> a host with the model but a `--vad`-incapable binary, subs are tagged `…v` yet
+> transcribed without VAD; if that binary is later upgraded, those subs won't
+> re-flag. Windows (the bundled build always supports `--vad`) is unaffected.
 
 ---
 
@@ -219,9 +266,9 @@ whisper.cpp ships three Windows builds per release: the CPU build
 
 | File | Role |
 |------|------|
-| `stt.py` | whisper.cpp wrapper: wav extract, transcribe/translate, lang map, `generate()`, `model_name`, `_dtw_preset` (DTW timing presets), `_list_ai_subs`, `has_ai_subs`, `ai_subs_stale` |
-| `main.py` | `_stt_cfg`, `_needs_stt_subs`, `_canon_lang`, `_stt_jobs`, `_run_stt_job`, `_maybe_start_stt_job`, `_ensure_stt_for`, `_attach_stt_to_vlc`, the 3 STT endpoints + admin endpoints, `_list_sidecar_subs` `ai` flag |
-| `setup.py` | `whisper_candidates`, `whisper_model_candidates`, `install_stt_deps`, `_portable_install_whisper_windows`, `_download_whisper_model`, `.env` mapping |
+| `stt.py` | whisper.cpp wrapper: wav extract, transcribe/translate, lang map, `generate()`, `model_name`, `_dtw_preset` (DTW timing presets), `whisper_vad_model`/`_whisper_supports_vad` (optional VAD), `sub_gen_tag` (pipeline-generation tag), `_list_ai_subs`, `has_ai_subs`, `ai_subs_stale` |
+| `main.py` | `_stt_cfg`, `_needs_stt_subs`, `_canon_lang`, `_stt_jobs`, `_run_stt_job`, `_maybe_start_stt_job`, `_ensure_stt_for`, `_attach_stt_to_vlc`, `_vad_active`, the 3 STT endpoints + admin endpoints, the `whisper_vad` component, `_list_sidecar_subs` `ai`/`stale` flags |
+| `setup.py` | `whisper_candidates`, `whisper_model_candidates` (excludes silero), `whisper_vad_candidates`, `install_stt_deps`, `_portable_install_whisper_windows`, `_download_whisper_model`, `_download_whisper_vad_model`, `detect_tools` (prefers the `.env` model so auto-update can't reset it), `.env` mapping |
 | `static/index.html` | `generateSubsVlc`, `_pollSttJob`, `lpGenerateSubs`, `_lpAttachSidecarSubs`, `sttAvailable`, subtitle-modal AI row, `#lpGenSubBtn` |
 | `static/admin.html` | System-tab "Auto-Generated Subtitles" card + `loadStt`/`saveStt`/`toggleStt` |
 

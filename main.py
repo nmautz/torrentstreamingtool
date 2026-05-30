@@ -332,7 +332,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "4.4.0"
+UI_VERSION = "4.6.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -7229,6 +7229,7 @@ async def admin_get_stt(request: Request) -> JSONResponse:
     _require_admin(request)
     cfg = _stt_cfg(await get_library())
     cfg["available"] = _stt_available()
+    cfg["vad"] = _vad_active()
     cfg["languages"] = [{"code": c, "name": n}
                         for c, n in sorted(_LANG_NAMES.items(), key=lambda kv: kv[1])
                         if n and len(c) == 3]
@@ -7248,6 +7249,7 @@ async def admin_set_stt(request: Request, body: SttConfigReq) -> JSONResponse:
     await put_library(lib)
     cfg = _stt_cfg(lib)
     cfg["available"] = _stt_available()
+    cfg["vad"] = _vad_active()
     return JSONResponse({"ok": True, **cfg})
 
 
@@ -8083,12 +8085,14 @@ def _list_sidecar_subs(src: Path, item_id: str) -> list[dict]:
         return out
     stem = src.stem
     cur_model = stt.model_name()
+    cur_gen = stt.sub_gen_tag()
     try:
         for p in src.parent.iterdir():
             if not p.is_file() or p.suffix.lower() not in (".srt", ".vtt"):
                 continue
             ai = False
             model = ""
+            gen = ""
             if p.stem == stem:
                 lang = ""
             elif p.stem.startswith(stem + "."):
@@ -8098,6 +8102,8 @@ def _list_sidecar_subs(src: Path, item_id: str) -> list[dict]:
                 if ai:
                     i = segs.index(stt.AI_SUFFIX)
                     model = segs[i + 1] if i + 1 < len(segs) else ""
+                    gen = (segs[i + 2] if i + 2 < len(segs)
+                           and re.fullmatch(r"g\d+v?", segs[i + 2]) else "")
             else:
                 continue
             out.append({
@@ -8105,7 +8111,9 @@ def _list_sidecar_subs(src: Path, item_id: str) -> list[dict]:
                 "lang": lang or "und",
                 "ai":   ai,
                 "model": model,
-                "stale": bool(ai and model != cur_model),
+                # Stale when made with a different model OR an older transcription
+                # pipeline (gen tag) than the current config — drives Regenerate.
+                "stale": bool(ai and (model != cur_model or gen != cur_gen)),
                 "url": f"/api/library/{item_id}/subtitle?file={quote(p.name)}",
             })
     except OSError:
@@ -8712,6 +8720,15 @@ def _stt_available() -> bool:
     return bool(_stt_available_probe.get("result", False))
 
 
+def _vad_active() -> bool:
+    """True iff the Silero VAD model is installed AND the whisper build supports
+    `--vad` — i.e. the AI-subtitle drift mitigation will actually engage. The
+    capability probe is cached per binary in stt, so this is cheap to repeat."""
+    vad = stt.whisper_vad_model()
+    binp = stt.whisper_bin()
+    return bool(vad and binp and stt._whisper_supports_vad(binp))
+
+
 async def _attach_stt_to_vlc(src: Path, tracks: list[dict]) -> None:
     """Load a freshly-generated sidecar into VLC and select it — but only if VLC
     is still playing the same file. Mirrors download_subtitle's load+select."""
@@ -8850,7 +8867,7 @@ async def _ensure_stt_for(src: Path, item_id: str = "", *,
 # across future auto-updates, so a one-time install here persists. See docs/SETUP.md.
 
 _component_jobs: dict[str, dict] = {}   # component → {status, progress, error, ...}
-_COMPONENT_KEYS = ("ffmpeg", "fpcalc", "whisper", "whisper_model")
+_COMPONENT_KEYS = ("ffmpeg", "fpcalc", "whisper", "whisper_model", "whisper_vad")
 _WHISPER_MODEL_SIZES = ("base", "small", "medium")
 
 
@@ -8895,6 +8912,15 @@ async def _run_component_install(component: str, model: str = "base", build: str
             await _download_to(url, dest, job)
             _write_env_keys({"_WHISPER_MODEL": str(dest)})
 
+        elif component == "whisper_vad":
+            # Optional Silero VAD model (~2 MB) — reduces AI-subtitle timing drift
+            # on long media. Portable (installable on every OS). Stored under
+            # tools/whisper/vad/ so it isn't mistaken for a transcription model.
+            fname = setup.WHISPER_VAD_MODEL_NAME
+            dest = setup.TOOLS_DIR / "whisper" / "vad" / fname
+            await _download_to(setup.WHISPER_VAD_MODEL_URL, dest, job)
+            _write_env_keys({"_WHISPER_VAD_MODEL": str(dest)})
+
         elif component == "whisper":
             if os.name != "nt":
                 raise RuntimeError("Portable whisper.cpp is Windows-only here — build it on "
@@ -8913,6 +8939,7 @@ async def _run_component_install(component: str, model: str = "base", build: str
             if not binp:
                 raise RuntimeError("whisper-cli.exe not found inside the downloaded archive.")
             _write_env_keys({"_WHISPER_BIN": binp})
+            stt._VAD_SUPPORT.clear()   # re-probe --vad support against the new build
 
         elif component == "ffmpeg":
             if os.name != "nt":
@@ -8989,6 +9016,9 @@ def _component_status_payload() -> dict:
         "whisper_model": {"label": "whisper model",        "installed": bool(model),
                           "path": model or "",   "installable": True,
                           "purpose": "AI subtitle language model (multilingual)"},
+        "whisper_vad":   {"label": "whisper VAD model (Silero)", "installed": bool(stt.whisper_vad_model()),
+                          "path": stt.whisper_vad_model() or "", "installable": True,
+                          "purpose": "Reduces AI-subtitle timing drift on long media (optional, ~2 MB)"},
     }
     for k, c in comps.items():
         j = _component_jobs.get(k)
@@ -9000,6 +9030,7 @@ def _component_status_payload() -> dict:
         "platform":     platform.system(),
         "model_sizes":  list(_WHISPER_MODEL_SIZES),
         "stt_available": _stt_available(),
+        "vad_active":   _vad_active(),
     }
 
 

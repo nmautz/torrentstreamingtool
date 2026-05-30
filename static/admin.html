@@ -631,7 +631,7 @@
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
         <div class="min-w-0">
           <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Optional Components</h2>
-          <p class="text-xs text-gray-500 mt-0.5">Install the portable dependencies the auto-updater can't fetch on its own — ffmpeg, fpcalc, and the whisper.cpp engine + model for AI subtitles. Downloads run on the host and persist across updates. ffmpeg / whisper.cpp binaries are Windows-only here; on Linux/macOS use your package manager.</p>
+          <p class="text-xs text-gray-500 mt-0.5">Install the portable dependencies the auto-updater can't fetch on its own — ffmpeg, fpcalc, the whisper.cpp engine + model for AI subtitles, and the optional Silero VAD model that reduces subtitle timing drift on long media. Downloads run on the host and persist across updates. ffmpeg / whisper.cpp binaries are Windows-only here; on Linux/macOS use your package manager.</p>
         </div>
         <button onclick="loadComponents()"
           class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 text-gray-300 hover:text-white transition-colors">
@@ -1357,15 +1357,23 @@ async function loadStt(){
     document.getElementById("sttTranslate").value = d.translate === false ? "0" : "1";
     document.getElementById("sttUnavailable").classList.toggle("hidden", !!d.available);
     const status = document.getElementById("sttStatus");
+    let msg;
     if(!d.available){
-      status.textContent = "Unavailable — whisper.cpp not installed.";
+      msg = "Unavailable — whisper.cpp not installed.";
     } else if(d.enabled){
-      status.textContent = d.default_language
+      msg = d.default_language
         ? `On — generates when no “${d.default_language.toUpperCase()}” subtitle exists.`
         : "On — generates only for files with no usable subtitle.";
     } else {
-      status.textContent = "Auto-generation is off.";
+      msg = "Auto-generation is off.";
     }
+    if(d.available){
+      const regen = "Existing AI subtitles show a Regenerate option to pick up the improved timing.";
+      msg += d.vad
+        ? `<br><span class="text-emerald-500">Timing-drift reduction (VAD) active.</span> <span class="text-gray-500">${regen}</span>`
+        : `<br><span class="text-gray-500">Install the VAD model (Optional Components, below) for the biggest reduction in subtitle timing drift on long media. ${regen}</span>`;
+    }
+    status.innerHTML = msg;
   }catch(_){}
 }
 
@@ -1431,7 +1439,7 @@ async function loadComponents(){
 }
 
 function _renderComponents(d){
-  const order = ["ffmpeg","fpcalc","whisper","whisper_model"];
+  const order = ["ffmpeg","fpcalc","whisper","whisper_model","whisper_vad"];
   const sizes = d.model_sizes || ["base","small","medium"];
   const html = order.map(key=>{
     const c = (d.components || {})[key];

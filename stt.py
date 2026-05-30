@@ -27,7 +27,11 @@ import tempfile
 from pathlib import Path
 from typing import Callable, Optional
 
-STT_VERSION = 1
+# Bumped whenever the transcription *pipeline* changes in a way that affects
+# output timing (not just the model). Embedded in sidecar names as `g<N>` (plus a
+# `v` when a VAD model is installed) so subs from an older pipeline read as stale
+# and the UI offers Regenerate. v2 = `-mc 0` + optional Silero VAD (drift fix).
+STT_VERSION = 2
 
 # Marker embedded in generated sidecar names: "<stem>.<lang>.ai.srt". The `.ai`
 # segment distinguishes machine-generated subs from real/downloaded ones so we
@@ -58,6 +62,16 @@ STT_THREADS = 4
 #  * `-ml`/`-sow` re-split each segment into shorter word-boundary cues, so every
 #    cue carries its own (now DTW-accurate) timing and a pause becomes a real
 #    gap between two cues instead of one stretched block.
+#
+# DTW + ml/sow fix *within-cue* boundaries but not the *cross-window* drift that
+# accumulates over long media: whisper decodes in 30s windows and advances its
+# audio cursor by its own timestamp tokens, so one misjudgment (silence, music, a
+# hallucinated repetition) shifts everything after it. Two more levers fight that:
+#  * `-mc 0` stops carrying decoded text across windows — the loop that breeds the
+#    repetition/hallucination that corrupts timestamps. Always on (free, no model).
+#  * `--vad` (optional, needs a bundled Silero model — see `whisper_vad_model`)
+#    detects speech regions up front so each is transcribed at its own correct
+#    absolute offset; a per-window error can no longer propagate down the file.
 STT_MAX_LEN = 80  # max characters per cue for -ml; 0 would disable splitting
 
 # whisper.cpp `-dtw` alignment-head presets, keyed by the model's short name as
@@ -110,6 +124,46 @@ def whisper_model() -> Optional[str]:
     return p if p and Path(p).exists() else None
 
 
+def whisper_vad_model() -> Optional[str]:
+    """Path to the bundled Silero VAD model (`_WHISPER_VAD_MODEL`), or None.
+
+    Optional — when present (and the whisper build supports `--vad`), whisper
+    segments speech first and re-anchors each region's timing, which stops the
+    cross-window timestamp drift that accumulates over long media. NEVER part of
+    is_available(): absence just means the pre-VAD behaviour."""
+    p = _env_bin("_WHISPER_VAD_MODEL")
+    return p if p and Path(p).exists() else None
+
+
+# whisper.cpp gained `--vad` (Silero speech detection) in ~v1.7.5. A user-built
+# Linux/macOS binary may predate it, and passing --vad to such a build errors the
+# whole run — so probe `--help` once per binary path (cached) and only pass --vad
+# when support is confirmed. The bundled Windows build (v1.8.4+) always has it.
+_VAD_SUPPORT: dict[str, bool] = {}
+
+
+def _whisper_supports_vad(binp: str) -> bool:
+    if binp in _VAD_SUPPORT:
+        return _VAD_SUPPORT[binp]
+    supported = False
+    try:
+        proc = subprocess.run([binp, "--help"], capture_output=True, text=True,
+                              timeout=15, **_LOWPRIO_KW)
+        supported = "--vad" in ((proc.stdout or "") + (proc.stderr or ""))
+    except (OSError, subprocess.TimeoutExpired):
+        supported = False
+    _VAD_SUPPORT[binp] = supported
+    return supported
+
+
+def sub_gen_tag() -> str:
+    """Pipeline-generation marker embedded in generated sidecar names (after the
+    model segment): `g<STT_VERSION>`, plus `v` when a VAD model is installed. A
+    change here — a pipeline bump or VAD newly installed — makes existing subs
+    read as stale so the UI offers Regenerate to pick up the better timing."""
+    return f"g{STT_VERSION}" + ("v" if whisper_vad_model() else "")
+
+
 def ffmpeg_bin() -> Optional[str]:
     return _env_bin("_FFMPEG_BIN") or shutil.which("ffmpeg")
 
@@ -150,13 +204,15 @@ def model_name() -> str:
     return re.sub(r"[^A-Za-z0-9_-]", "-", name) or "model"
 
 
-def _list_ai_subs(src: Path) -> list[tuple[Path, str]]:
-    """Every machine-generated sidecar next to `src`, as (path, model_name).
+def _list_ai_subs(src: Path) -> list[tuple[Path, str, str]]:
+    """Every machine-generated sidecar next to `src`, as (path, model, gen).
 
-    Generated files are `<stem>.<lang>.ai[.<model>].srt`. The `model` segment
-    (after `ai`) records which whisper model produced it; `""` for the legacy
-    pre-model-tag format (treated as a model mismatch → offered for regen)."""
-    out: list[tuple[Path, str]] = []
+    Generated files are `<stem>.<lang>.ai.<model>[.<gen>].srt`. `model` (after
+    `ai`) records which whisper model produced it; `gen` (a `g<N>[v]` tag after
+    it — see `sub_gen_tag`) records the transcription-pipeline generation. Either
+    differing from the current config flags the sub stale. Both are `""` for the
+    legacy pre-tag formats (treated as a mismatch → offered for regen)."""
+    out: list[tuple[Path, str, str]] = []
     try:
         for p in src.parent.iterdir():
             if not p.is_file() or p.suffix.lower() not in (".srt", ".vtt"):
@@ -168,7 +224,9 @@ def _list_ai_subs(src: Path) -> list[tuple[Path, str]]:
                 continue
             i = segs.index(AI_SUFFIX)
             model = segs[i + 1] if i + 1 < len(segs) else ""
-            out.append((p, model))
+            gen = (segs[i + 2] if i + 2 < len(segs)
+                   and re.fullmatch(r"g\d+v?", segs[i + 2]) else "")
+            out.append((p, model, gen))
     except OSError:
         pass
     return out
@@ -180,11 +238,13 @@ def has_ai_subs(src: Path) -> bool:
 
 
 def ai_subs_stale(src: Path) -> bool:
-    """True if generated subs exist but at least one was made with a model other
-    than the currently-configured one (so a Regenerate is worth offering)."""
-    cur = model_name()
+    """True if generated subs exist but at least one was made with a different
+    model OR an older transcription pipeline than the current config (so a
+    Regenerate is worth offering)."""
+    cur_model = model_name()
+    cur_gen = sub_gen_tag()
     subs = _list_ai_subs(src)
-    return bool(subs) and any(m != cur for _, m in subs)
+    return bool(subs) and any(m != cur_model or g != cur_gen for _, m, g in subs)
 
 
 def ai_sub_model(name: str, stem: str) -> str:
@@ -238,9 +298,10 @@ def _run_whisper(
 
     Timing precision: `-dtw` aligns token timestamps to the audio (accurate
     boundaries that respect pauses) when the model maps to a known preset, and
-    `-ml`/`-sow` re-split into word-boundary cues so each carries its own timing
-    — together these stop a line from lingering across a long silence. See the
-    `STT_MAX_LEN` / `_DTW_PRESETS` notes above.
+    `-ml`/`-sow` re-split into word-boundary cues so each carries its own timing.
+    `-mc 0` (always) plus `--vad` (when a Silero model is installed and the build
+    supports it) fight the cross-window drift that accumulates over long media —
+    see the `STT_MAX_LEN` / `_DTW_PRESETS` / `whisper_vad_model` notes above.
 
     A CUDA/cuBLAS build offloads to the GPU automatically. If CUDA can't
     initialize at runtime (driver too old, no device), the first attempt fails;
@@ -253,16 +314,25 @@ def _run_whisper(
         return False, ""
 
     preset = _dtw_preset()
+    vad_model = whisper_vad_model()
+    vad_ok = bool(vad_model) and _whisper_supports_vad(binp)
 
-    def _attempt(no_gpu: bool) -> tuple[bool, str]:
+    def _attempt(no_gpu: bool, use_vad: bool) -> tuple[bool, str]:
         cmd = [
             binp, "-m", model, "-f", str(wav),
             "-l", language or "auto", "-t", str(STT_THREADS),
             "-osrt", "-of", str(out_base), "-pp",
             "-ml", str(STT_MAX_LEN), "-sow",   # word-boundary cues, per-cue timing
+            "-mc", "0",                        # don't carry decoded text across the
+                                               # 30s windows — stops repetition loops
+                                               # that corrupt cross-window timestamps
         ]
         if preset:
             cmd += ["-dtw", preset]            # DTW token-level timestamp alignment
+        if use_vad and vad_model:
+            cmd += ["--vad", "--vad-model", vad_model]   # segment speech first so a
+                                               # per-window cursor misjudgment can't
+                                               # propagate (long-media drift fix)
         if translate:
             cmd.append("-tr")
         if no_gpu:
@@ -291,9 +361,14 @@ def _run_whisper(
         srt = out_base.with_suffix(".srt")
         return (proc.returncode == 0 and srt.exists()), detected
 
-    ok, detected = _attempt(no_gpu=False)
+    # Try VAD + GPU first; on failure drop VAD (the likeliest culprit on an old
+    # binary or bad model), then force CPU. Each lever is shed independently so a
+    # single failure mode doesn't cost us the transcription entirely.
+    ok, detected = _attempt(no_gpu=False, use_vad=vad_ok)
+    if not ok and vad_ok:
+        ok, detected = _attempt(no_gpu=False, use_vad=False)
     if not ok:
-        ok, detected = _attempt(no_gpu=True)
+        ok, detected = _attempt(no_gpu=True, use_vad=False)
     return ok, detected
 
 
@@ -320,6 +395,7 @@ def generate(
         return {"tracks": [], "error": "Source file not on disk."}
 
     mname = model_name() or "model"
+    gen = sub_gen_tag()
     tracks: list[dict] = []
     tmpdir = Path(tempfile.mkdtemp(prefix="stt_"))
     try:
@@ -340,7 +416,7 @@ def generate(
         if not ok1:
             return {"tracks": [], "error": "Transcription failed."}
         lang3 = _to_iso3(detected) if detected else "und"
-        dest1 = src.with_name(f"{src.stem}.{lang3}.{AI_SUFFIX}.{mname}.srt")
+        dest1 = src.with_name(f"{src.stem}.{lang3}.{AI_SUFFIX}.{mname}.{gen}.srt")
         try:
             shutil.move(str(base1.with_suffix(".srt")), str(dest1))
         except OSError as e:
@@ -356,7 +432,7 @@ def generate(
                 progress_cb=(lambda p: progress_cb(0.70 + 0.28 * p)) if progress_cb else None,
             )
             if ok2:
-                dest2 = src.with_name(f"{src.stem}.eng.{AI_SUFFIX}.{mname}.srt")
+                dest2 = src.with_name(f"{src.stem}.eng.{AI_SUFFIX}.{mname}.{gen}.srt")
                 try:
                     shutil.move(str(base2.with_suffix(".srt")), str(dest2))
                     tracks.append({"path": str(dest2), "lang": "eng", "translated": True, "model": mname})
@@ -366,7 +442,7 @@ def generate(
         # Remove any older generated subs (different model, or legacy untagged)
         # now that the new model's output is in place — keep only what we wrote.
         written = {Path(t["path"]) for t in tracks}
-        for p, _m in _list_ai_subs(src):
+        for p, _m, _g in _list_ai_subs(src):
             if p not in written:
                 try:
                     p.unlink()
