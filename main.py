@@ -2237,6 +2237,33 @@ async def _reconcile_item_downloads(item: dict, idle_open: bool) -> bool:
     return any_active
 
 
+async def _apply_item_schedule(item: dict, lib: dict) -> bool:
+    """Reconcile qBit after a user schedule change, and reactivate a *finished* item
+    when the change re-introduced a non-skip file that isn't on disk yet — e.g.
+    un-skipping a file (or moving an idle file to now) on a download that had already
+    flipped to 'ready'. Flipping the item back to 'downloading' is what lets the
+    monitor + scheduler resume managing it (downloading→ready stays the monitor's job).
+    Returns the current idle-window state. Mutates `item` in place; caller persists."""
+    idle_open = await _download_idle_open(lib)
+    await _reconcile_item_downloads(item, idle_open)
+    h = item.get("torrent_hash")
+    if h and item.get("status") == "ready":
+        info = await qbit_info(h)
+        qfiles = await qbit_files(h) if info else []
+        if info and qfiles:
+            sp = info.get("save_path", settings.qbit_download_path)
+            cfg = _download_cfg(item)
+            pending = any(
+                _effective_file_mode(cfg, str(Path(sp) / qf.get("name", ""))) != "skip"
+                and qf.get("progress", 0.0) < 0.999
+                for qf in qfiles
+            )
+            if pending:
+                item["status"] = "downloading"
+                state.downloading_count += 1
+    return idle_open
+
+
 async def download_scheduler_loop() -> None:
     """Honour per-item download schedules: only fetch 'idle'-scheduled files/torrents
     during the idle/night window (reusing the admin prep windows), and keep 'now'
@@ -4227,13 +4254,14 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
         else:
             progress = None
         mode = _effective_file_mode(cfg, path)
-        if mode == "skip":
-            # Deselected from the download — never on disk, never "complete".
-            dl_pct = round(qmap[path] * 100, 1) if path in qmap else 0.0
-            complete = False
-        elif path in qmap:
+        if path in qmap:
+            # Live qBit progress is the truth, regardless of mode — a file that was
+            # downloaded then later marked "skip" is still on disk and playable.
             dl_pct = round(qmap[path] * 100, 1)
             complete = qmap[path] >= 0.999
+        elif mode == "skip":
+            # No live data + skipped ⇒ assume it was never fetched.
+            dl_pct, complete = 0.0, False
         else:
             # No live qBit data: trust status (uploaded item, or torrent gone).
             complete = is_ready or not has_torrent
@@ -4456,9 +4484,8 @@ async def set_download_schedule(item_id: str, req: DownloadScheduleReq) -> JSONR
         for p, m in list(files.items()):
             if m == "idle":
                 files[p] = "now"
+    idle_open = await _apply_item_schedule(item, lib)   # may flip ready→downloading
     await put_library(lib)
-    idle_open = await _download_idle_open(lib)
-    await _reconcile_item_downloads(item, idle_open)
     await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "downloading")})
     return JSONResponse({"ok": True, "mode": mode, "idle_open": idle_open})
 
@@ -4479,9 +4506,8 @@ async def set_file_schedule(item_id: str, req: FileScheduleReq) -> JSONResponse:
     files = dl.setdefault("files", {})
     for p in req.file_paths:
         files[p] = mode
+    idle_open = await _apply_item_schedule(item, lib)   # may flip ready→downloading (e.g. un-skip)
     await put_library(lib)
-    idle_open = await _download_idle_open(lib)
-    await _reconcile_item_downloads(item, idle_open)
     await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "downloading")})
     return JSONResponse({"ok": True, "updated": len(req.file_paths), "mode": mode})
 

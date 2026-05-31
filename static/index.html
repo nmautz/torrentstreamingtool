@@ -3227,6 +3227,18 @@ function renderLibrary(items){
         }
       }
       if(isReady){
+        // Partial download finished its kept files: still expose the per-file
+        // Top/Now/Idle/Skip controls (and "download this skipped file now") via the
+        // same Files expander used while downloading.
+        if(item.download_partial && item.torrent_hash){
+          buttons+=`<button id="dl-files-btn-${item.id}" onclick="toggleDownloadFiles('${item.id}')"
+            class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 hover:text-white px-3 py-2.5 transition-colors min-h-[44px] flex items-center gap-1.5 flex-shrink-0"
+            title="Manage which files download (priority / idle / skip)">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"/>
+            </svg><span class="dl-files-label text-xs">Files</span>
+          </button>`;
+        }
         if(isMulti){
           const contLabel=hasProgress?`↩ Resume ${Math.round(pct)}%`:`▶ Play All`;
           buttons+=`<button onclick="openEpisodePicker('${item.id}',${escHtml(JSON.stringify(item.title))})"
@@ -3376,7 +3388,7 @@ function renderLibrary(items){
           ${progBar}
         </div>
         ${buttons?"<div class='flex items-center gap-2 flex-wrap'>"+buttons+"</div>":""}
-        ${isDownloading?`<div id="dl-files-${item.id}" class="hidden"></div>`:""}
+        ${(isDownloading||(isReady&&item.download_partial&&item.torrent_hash))?`<div id="dl-files-${item.id}" class="hidden"></div>`:""}
       </div>`;
     });
     html+=`</div></div>`;
@@ -3385,6 +3397,12 @@ function renderLibrary(items){
   // Wire restart buttons via data attributes so paths never need JS-string escaping
   el.querySelectorAll(".lib-restart-btn").forEach(btn=>{
     btn.addEventListener("click",()=>playLibraryWithChooser(btn.dataset.itemId,[btn.dataset.path],0,""));
+  });
+  // Re-populate any Files expander that was open before this re-render (a status
+  // flip — e.g. un-skipping a file — rebuilds the card with an empty container).
+  expandedDownloads.forEach(id=>{
+    if(document.getElementById(`dl-files-${id}`)) showDownloadFiles(id);
+    else expandedDownloads.delete(id);
   });
 }
 
@@ -3796,6 +3814,15 @@ async function setDownloadSchedule(itemId, mode){
   }
 }
 
+// Episode-picker action on a "Not downloaded" (skipped) episode: fetch it now. The
+// server re-enables the file and flips the item back to downloading; refresh the
+// open picker so the row turns into a live "Downloading…" state.
+async function epDownloadSkipped(itemId, filePath){
+  await setFileSchedule(itemId,[filePath],"now");
+  if(epItemId===itemId) refreshEpFiles();
+  showAlert("Downloading this file now.","success");
+}
+
 async function queuePlayFile(itemId,filePath){
   if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
   const params=new URLSearchParams({profile_id:profile.id,file_path:filePath});
@@ -4036,9 +4063,11 @@ function _epCardHtml(f){
   const isComplete=prog?.completed;
   const inProgress=prog&&!isComplete&&pct>2;
   const isNowPlaying=app.library_current_file&&f.path===app.library_current_file;
-  // Download completeness (from qBit, via /files). false ⇒ this file was skipped /
-  // isn't on disk — show it as part of the partial download but not playable.
+  // Download completeness (from qBit, via /files). false ⇒ not on disk yet: either
+  // skipped (offer "download now") or actively downloading (show progress).
   const notDownloaded=f.complete===false;
+  const isSkipped=notDownloaded&&f.mode==="skip";
+  const epDlPct=(typeof f.dl_pct==="number")?f.dl_pct:null;
 
   const label=epLabel(f);
   const epName=_epDisplayTitle(f);
@@ -4056,9 +4085,10 @@ function _epCardHtml(f){
   const watchedBadge = isComplete
     ? `<span class="text-[10px] text-green-500 font-bold uppercase tracking-widest">✓ Watched</span>`
     : inProgress ? `<span class="text-[10px] text-yellow-500 font-bold">${pct}%</span>` : "";
-  const notDlBadge = notDownloaded
-    ? `<span class="text-[10px] text-orange-400 font-bold uppercase tracking-widest" title="This file was skipped from the download — not on disk.">⊘ Not downloaded</span>`
-    : "";
+  const notDlBadge = !notDownloaded ? ""
+    : isSkipped
+      ? `<span class="text-[10px] text-orange-400 font-bold uppercase tracking-widest" title="Skipped from the download — not on disk.">⊘ Not downloaded</span>`
+      : `<span class="text-[10px] text-sky-400 font-bold uppercase tracking-widest" title="Downloading now…">⬇ ${epDlPct!=null?epDlPct.toFixed(0)+'%':'Downloading…'}</span>`;
 
   const prepState = prepFileState.get(offKey(epItemId,f.path));
   const isReady    = prepState === "ready";
@@ -4156,6 +4186,15 @@ function _epCardHtml(f){
               <path stroke-linecap="round" stroke-width="2" d="M21 12a9 9 0 0 1-9 9"></path>
             </svg>
           </button>
+          ${isSkipped
+            ? `<button onclick="epDownloadSkipped(${_id},${_p})"
+                class="h-9 px-2.5 flex items-center gap-1 text-[11px] font-bold uppercase tracking-wide text-emerald-300 hover:text-emerald-200 hover:bg-emerald-950/40 transition-colors"
+                title="Download this file to the host now">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                  <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+                </svg>Download
+              </button>`
+            : ""}
           ${notDownloaded?"":offlineBtn}
           ${notDownloaded?"":`<a href="/api/library/${escHtml(epItemId)}/download?file_path=${encodeURIComponent(f.path)}" download="${escHtml(f.name)}"
             class="w-9 h-9 flex items-center justify-center text-gray-600 hover:text-indigo-300 hover:bg-indigo-950/40 transition-colors"
@@ -6839,6 +6878,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.7.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.8.0</div>
 </body>
 </html>

@@ -1,5 +1,14 @@
 # Changelog
 
+## [4.8.0] — 2026-05-31
+- **New: full per-file download control on a finished partial download, including "download this skipped file now."** Once a partial selection's kept files finish, you keep the same Top / Now / Idle / Skip controls you had while downloading:
+  - The library card shows the **Files** expander on a partial item (⊘ Partial) even after it's ready, with the full per-row schedule controls + progress.
+  - The **episode picker** now has a **⬇ Download** button on every ⊘ Not-downloaded (skipped) episode; re-enabled files immediately switch to a live "⬇ Downloading…%" state.
+  - Re-enabling a skipped file (or moving an idle file to now) on a finished item flips it back to **downloading** so the file actually fetches and the monitor/scheduler resume managing it — `downloading→ready` still happens automatically when the kept set is complete again.
+- **Backend:** `_apply_item_schedule` reconciles qBit after a schedule change and reactivates a `ready` item when a non-skip file is no longer on disk; the `download-schedule` / `file-schedule` endpoints route through it. `get_item_files` now derives `complete`/`dl_pct` from live qBit per-file progress regardless of mode, so a file that was downloaded then later marked skip still reads as complete/playable.
+- **Frontend:** the Files expander is exposed on ready partial cards (and re-expands across re-renders); episode-picker rows distinguish skipped (offer download) from actively-downloading (show %).
+- **Docs:** [docs/API.md](docs/API.md), [docs/BACKEND.md](docs/BACKEND.md), [docs/FRONTEND.md](docs/FRONTEND.md), [PLAN.md](PLAN.md).
+
 ## [4.7.1] — 2026-05-31
 - **Fixed: a partial download (some files skipped) looked fully complete once it finished.** The library monitor flipped an item to "ready" purely on qBittorrent's torrent state — but with skipped (and idle-deferred) files at priority 0, qBit reports the torrent "complete" while those files are still absent. So a partial selection showed every episode as downloaded, audio fingerprinting ran against a missing set, and an idle-deferred file could be abandoned (the item went ready before it fetched).
   - **Ready is now gated on per-file completion**: an item flips ready (and only then audio-fingerprints) once **every non-skip file** is fully downloaded — including idle-deferred ones. Skipped files are excluded from fingerprinting and from the Smart Skip status.
