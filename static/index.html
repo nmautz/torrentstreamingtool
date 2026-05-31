@@ -1941,7 +1941,12 @@ let lp = {
   // True after we've loaded the metadata once (so seek-to-resume only fires once)
   resumeApplied: false,
   resumeSec: 0,
-  // HLS bundle state — set by _lpLoadIndex from /offline-prepare's meta.json
+  // Live / instant-start (JIT) state — set by _lpLoadIndex from /live-prepare.
+  // When live, playback streams a server-side on-demand transcode (single quality,
+  // muxed audio) instead of a fully-prepped bundle. See STREAMING.md § Live.
+  live: false,            // true ⇒ this load is a live (un-prepped) stream
+  liveSession: null,      // live session id (for the /live/{id}/stop teardown)
+  // HLS bundle state — set by _lpLoadIndex from /live-prepare's meta.json
   hls: null,              // active hls.js instance, null on Safari native
   audios: [],             // [{idx,label,language,default}] from meta.json
   subtitles: [],          // [{idx,file,label,language}] from meta.json (bundle .vtt sidecars)
@@ -6080,11 +6085,15 @@ function _lpDestroyHls() {
   }
 }
 
-async function _lpLoadIndex(seekTo) {
+async function _lpLoadIndex(seekTo, forceAudioIdx) {
   const filePath = lp.playlist[lp.pi];
   if (!filePath) { lpStop(); return; }
+  // Tear down any prior live session (audio switch / file advance) so its
+  // encoder + temp dir are freed immediately rather than waiting for GC.
+  const prevSession = lp.liveSession;
   lp.filePath = filePath;
   lp.name = filePath.split(/[/\\]/).pop();
+  lp.live = false; lp.liveSession = null;
   lp.skipData = null;
   lp.skipOfferType = null; lp.skipOfferEnd = 0;
   lp.resumeApplied = false; lp.resumeSec = seekTo || 0;
@@ -6099,9 +6108,16 @@ async function _lpLoadIndex(seekTo) {
   let prep;
   _lpShowPreparing("Preparing for streaming…");
   try {
-    const r = await fetch(`/api/library/${lp.itemId}/offline-prepare`, {
+    // /live-prepare instantly returns either a cached full bundle (mode:"bundle")
+    // or a live just-in-time stream (mode:"live") — see STREAMING.md § Live. Either
+    // way `ready:true`, so there's no whole-file encode to wait on: live playback
+    // starts at `start_sec` and seeking generates segments on demand (the browser's
+    // native buffering spinner shows during generation).
+    const body = { file_path: filePath, profile_id: profile.id || "", start_sec: seekTo || 0 };
+    if (forceAudioIdx != null) body.audio_idx = Number(forceAudioIdx);
+    const r = await fetch(`/api/library/${lp.itemId}/live-prepare`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file_path: filePath, profile_id: profile.id || "" }),
+      body: JSON.stringify(body),
     });
     if (!r.ok) {
       const e = await r.json().catch(() => ({ detail: "Prepare failed." }));
@@ -6113,40 +6129,23 @@ async function _lpLoadIndex(seekTo) {
     showAlert(err.message || "Could not prepare this file for streaming.", "error");
     lpStop(); return;
   }
-
-  let masterUrl = prep.master_url;
-  if (!prep.ready && prep.job_id) {
-    try {
-      while (true) {
-        // Abort if the user moved on (lpStop or another _lpLoadIndex).
-        if (lp.filePath !== filePath) return;
-        await new Promise(res => setTimeout(res, 1500));
-        const sr = await fetch(`/api/library/offline-job/${prep.job_id}`);
-        if (!sr.ok) throw new Error("Lost track of prep job.");
-        const s = await sr.json();
-        const pct = Math.round((s.progress || 0) * 100);
-        _lpShowPreparing(`Building stream… ${pct}%`);
-        if (s.status === "done") {
-          masterUrl    = s.master_url;
-          prep.audios  = s.audios || [];
-          prep.subtitles = s.subtitles || [];
-          prep.skipped_image_subs = s.skipped_image_subs || [];
-          break;
-        }
-        if (s.status === "error") throw new Error(s.error || "Prep failed.");
-      }
-    } catch (err) {
-      _lpHidePreparing();
-      showAlert(err.message || "Streaming prep failed.", "error");
-      lpStop(); return;
-    }
-  }
   if (lp.filePath !== filePath) return;  // raced with a stop/advance
+
+  lp.live = (prep.mode === "live");
+  lp.liveSession = prep.session_id || null;
+  const masterUrl = prep.master_url || prep.playlist_url;
+  // Free the previous live session (if any) now that the new source is resolved —
+  // covers audio-switch reloads and file advances.
+  if (prevSession && prevSession !== lp.liveSession) _lpStopLiveSession(prevSession);
+
   _lpHidePreparing();
 
-  // Mark the cache hit in prepFileState so per-row buttons reflect "Stream Ready".
-  prepFileState.set(offKey(lp.itemId, filePath), "ready");
-  if (epItemId === lp.itemId) { try { renderEpList(); } catch (_) {} }
+  // A fully-prepped bundle is genuinely "ready"; a live stream is NOT prepped, so
+  // don't flip the per-row Stream-Ready chips / handoff gating for it.
+  if (!lp.live) {
+    prepFileState.set(offKey(lp.itemId, filePath), "ready");
+    if (epItemId === lp.itemId) { try { renderEpList(); } catch (_) {} }
+  }
 
   // Fetch skip-data in parallel — fire-and-forget; skip-offer logic just runs
   // off `lp.skipData` once it lands.
@@ -6163,11 +6162,12 @@ async function _lpLoadIndex(seekTo) {
   lp.subtitles  = prep.subtitles || [];
   lp.sidecarSubs = prep.subs || [];
 
-  // Default selections: saved per-file picks (sent back by /offline-prepare
-  // when profile_id is provided), otherwise the rendition flagged `default`
-  // in the master playlist (which mirrors the source's disposition.default).
+  // Default selections: an explicit forceAudioIdx (live audio-switch reload) wins;
+  // else saved per-file picks (sent back by /live-prepare when profile_id is set),
+  // else the rendition flagged `default` (mirrors the source's disposition.default).
   const saved = prep.saved_tracks || {};
-  const defAudioIdx = (saved.audio_idx != null) ? saved.audio_idx
+  const defAudioIdx = (forceAudioIdx != null) ? Number(forceAudioIdx)
+                    : (saved.audio_idx != null) ? saved.audio_idx
                     : (lp.audios.findIndex(a => a.default) >= 0
                        ? lp.audios.findIndex(a => a.default) : 0);
   const defSubIdx   = (saved.subtitle_idx != null) ? saved.subtitle_idx : -1;
@@ -6188,8 +6188,15 @@ async function _lpLoadIndex(seekTo) {
       // VOD playback gets no benefit from LL-HLS and it doubles fetch volume.
       lowLatencyMode: false,
       // Cap forward buffer; without this hls.js can preload 60+ MB of segments
-      // on long files which hurts mobile data and stalls switching.
-      maxBufferLength: 60,
+      // on long files which hurts mobile data and stalls switching. In live (JIT)
+      // mode keep it tighter so the encoder doesn't race far ahead of the playhead
+      // (work a seek would discard) and seeks stay responsive.
+      maxBufferLength: lp.live ? 30 : 60,
+      // In live mode a cold-start segment (encoder spin-up at a fresh seek) can
+      // take longer than hls.js's default 20 s fragment-load timeout, which would
+      // trigger needless aborts/retries. The server blocks up to ~40 s, so give
+      // the client headroom past that. Bundles are instant, so leave them default.
+      fragLoadingTimeOut: lp.live ? 60000 : 20000,
     });
     lp.hls = hls;
     hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
@@ -6446,8 +6453,33 @@ function _lpApplySubIdx(idx) {
 
 function lpSetAudio(idx) {
   lp.pendingAudioIdx = Number(idx);
+  // Live (JIT) audio is muxed into the video segments, not a separate manifest
+  // rendition — so switching means re-preparing a fresh session at the current
+  // position with the new audio track (a brief rebuffer). The bundle path swaps
+  // the in-manifest audio rendition instantly.
+  if (lp.live) { _lpLiveReload(Number(idx)); _lpSaveLocalTracks(); return; }
   _lpApplyAudioIdx(idx);
   _lpSaveLocalTracks();
+}
+
+// Re-load the current live file at the current playhead with a different audio
+// track. Reuses _lpLoadIndex (which tears down the old session + encoder and
+// spins up a new one), so audio switching costs one short rebuffer.
+async function _lpLiveReload(audioIdx) {
+  const v = document.getElementById("lpVideo");
+  const at = Math.max(0, v.currentTime || lp.resumeSec || 0);
+  await _lpLoadIndex(at, audioIdx);
+}
+
+// Best-effort teardown of a server live session (frees its ffmpeg + temp dir
+// immediately instead of waiting for idle GC). `useBeacon` for unload paths.
+function _lpStopLiveSession(sessionId, useBeacon) {
+  if (!sessionId) return;
+  const url = `/api/library/live/${sessionId}/stop`;
+  try {
+    if (useBeacon && navigator.sendBeacon) { navigator.sendBeacon(url); return; }
+    fetch(url, { method: "POST", keepalive: true }).catch(() => {});
+  } catch (_) {}
 }
 
 function lpSetSubtitle(idx) {
@@ -6500,6 +6532,8 @@ async function lpStop() {
     saveProgress(lp.itemId, lp.filePath, t, d);
   }
   await lpUnloadCurrent();
+  if (lp.liveSession) { _lpStopLiveSession(lp.liveSession); lp.liveSession = null; }
+  lp.live = false;
   const c = document.getElementById("localPlayer");
   c.classList.remove("lp-active", "lp-tiny");
   document.getElementById("lpSkipOffer").classList.add("hidden");
@@ -6629,8 +6663,12 @@ function _lpAttachVideoEvents() {
     if (document.visibilityState === "hidden") _lpFlushProgress(false);
   });
   // Tab/window close, browser back, BFCache eviction → use sendBeacon since
-  // any in-flight fetch is liable to be cancelled mid-request.
-  window.addEventListener("pagehide", () => _lpFlushProgress(true));
+  // any in-flight fetch is liable to be cancelled mid-request. Also free any
+  // live session so its ffmpeg + temp dir don't linger until GC.
+  window.addEventListener("pagehide", () => {
+    _lpFlushProgress(true);
+    if (lp.live && lp.liveSession) _lpStopLiveSession(lp.liveSession, true);
+  });
 }
 
 // --- Service-worker eviction stub -------------------------------------------
@@ -7173,6 +7211,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.14.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.0.0</div>
 </body>
 </html>

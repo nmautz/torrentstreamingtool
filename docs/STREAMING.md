@@ -20,6 +20,11 @@ Read this when changing anything related to:
 
 - `/api/library/{id}/offline-prepare`, `/offline-job/{id}`,
   `/offline-cache/<sha>/<file>`
+- **Live / instant-start (JIT)** — `/api/library/{id}/live-prepare`,
+  `/api/library/live/{sid}/playlist.m3u8` | `/{filename}` (init/seg/sub) |
+  `/stop`, the `_live_*` helpers + `_live_sessions` registry, `live_session_gc`,
+  and the `lp.live` / `_lpLiveReload` / `_lpStopLiveSession` frontend path. See
+  the [Live / instant-start](#live--instant-start-jit) section.
 - `/api/library/{id}/subtitle` (sidecar `.srt`/`.vtt`) or
   `/api/library/{id}/local-tracks` (persisted browser track picks)
 - The local player UI (`#localPlayer`, `#lpVideo`, `#lpPreparing`,
@@ -296,14 +301,18 @@ Two ways to populate the cache:
 2. "On This Device" calls `lpPlay(itemId, files, seekTo, label)`. The
    player sets `lp.itemId/playlist/pi`, applies the `.lp-active` class to
    `#localPlayer`, and calls `_lpLoadIndex(seekTo)`.
-3. `_lpLoadIndex` POSTs `/api/library/{id}/offline-prepare {file_path,
-   profile_id}`.
-   - If `ready: true` → grab `master_url`, `audios[]`, `subtitles[]`,
-     `saved_tracks{audio_idx, subtitle_idx}` directly.
-   - If `ready: false` → show the `#lpPreparing` overlay
-     ("Building stream… 42%") and poll
-     `/api/library/offline-job/{job_id}` every 1.5 s until
-     `status: done`. The done response carries the same fields.
+3. `_lpLoadIndex` POSTs `/api/library/{id}/live-prepare {file_path,
+   profile_id, start_sec}`. The response is **always** `ready: true` and
+   carries a `mode`:
+   - `mode: "bundle"` → a full bundle is already cached. Grab `master_url`,
+     `videos[]`, `audios[]`, `subtitles[]`, `saved_tracks` directly (the
+     player keeps ABR quality + in-manifest track switching).
+   - `mode: "live"` → no bundle yet, so the file streams **just-in-time**:
+     grab `playlist_url`, set `lp.live = true` + `lp.liveSession`, and attach
+     directly — playback starts at `start_sec` and seeking generates segments
+     on demand. **There is no "Building stream… %" overlay** in live mode; the
+     browser's native buffering spinner covers any wait. See the
+     [Live / instant-start](#live--instant-start-jit) section.
 4. Player engine selection:
    - **`Hls.isSupported()` true** (Chrome, Firefox, Edge, Android Chrome):
      instantiate hls.js, `attachMedia(<video>)`, `loadSource(master_url)`.
@@ -380,9 +389,11 @@ write doesn't wipe either track-pref system.
 
 When `<video>` fires `ended`, `_lpAdvanceOrEnd` saves a final 100% progress
 write, increments `lp.pi`, and calls `_lpLoadIndex(0)`. That re-runs the
-prep flow for the next file. If the next episode has already been prepped,
-playback resumes within a network round-trip; otherwise the user sees the
-same "Building stream…" overlay.
+prepare flow for the next file (tearing down the previous live session via the
+`prevSession` capture in `_lpLoadIndex`). If the next episode has a cached
+bundle, playback resumes within a network round-trip; otherwise it streams
+**live** (instant start, no "Building stream…" overlay — see
+[Live / instant-start](#live--instant-start-jit)).
 
 ### 6. Handoff from VLC (TV → device)
 
@@ -435,6 +446,80 @@ onto the TV:
 The **To TV** button lives in the local player's fullscreen header (next to
 Stop); it's part of `.lp-chrome`, so it's hidden in tiny mode (maximize first).
 Guarded by `withInflight("handoff_vlc")`.
+
+---
+
+## Live / instant-start (JIT)
+
+When a file has **no fully-prepped bundle**, the on-device player streams it
+**live** instead of waiting for a whole-file VOD encode. Playback starts at the
+playhead within seconds and seeking anywhere generates that part on demand — the
+model a real streaming service uses (Jellyfin/Plex JIT transcoding). The fully
+prepped bundle path above is unchanged; live mode only runs for un-prepped files.
+
+`live-prepare` returns `mode: "live"` (vs. `mode: "bundle"` when a cached bundle
+exists), and everything else is served from `/api/library/live/{session_id}/…`.
+
+### How it works
+
+- **Predicted playlist.** `GET /…/playlist.m3u8` is computed from the ffprobe
+  duration alone — every `seg_NNNNN.m4s` listed with `#EXTINF:6.000000,`,
+  `#EXT-X-PLAYLIST-TYPE:VOD`, `#EXT-X-MAP:URI="init.mp4"`, `#EXT-X-ENDLIST`. No
+  encoding is needed to produce it, so the player gets a full scrubber and can
+  seek anywhere immediately. `n = ceil(duration/6)`; the last `#EXTINF` is the
+  remainder.
+- **One marching encoder.** A single ffmpeg session (`_live_start_encoder`)
+  writes globally-numbered fmp4 segments starting at the requested segment.
+  `-ss {N*6}` (input seek, no `-copyts`) makes the encoder timeline start at 0 so
+  `-force_key_frames expr:gte(t,n_forced*6)` lands keyframes exactly on the 6 s
+  grid; `-output_ts_offset {N*6}` then shifts the muxed timestamps so **every**
+  segment's fmp4 `baseMediaDecodeTime` equals its global position (seg N ⇒ N·6 s).
+  That global timeline is what makes segments from sessions started at different
+  offsets **interchangeable** — they share one init and accumulate in one dir.
+- **Blocking segment endpoint.** `GET /…/seg_NNNNN.m4s` (and `init.mp4`/
+  `sub_i.vtt`, all via the `live_file` catch-all) **blocks until the file exists**
+  (`_live_wait_for`, ≤ `LIVE_SEG_WAIT_TIMEOUT` = 40 s), then serves it. It never
+  404s a not-yet-built segment — a 404 is a fatal hls.js `fragLoadError`; a slow
+  200 just shows the browser's buffering spinner. `temp_file` in `-hls_flags`
+  means segments are atomically renamed into place, so existence ⇒ complete.
+- **Seek = restart-on-demand.** `_live_ensure_encoder(sess, seg)` serves the file
+  if present; if the running encoder will reach `seg` soon (within
+  `LIVE_LOOKAHEAD` = 3 of the highest contiguous ready segment) it just waits;
+  otherwise (backward seek, far-forward seek, dead encoder) it terminates the old
+  ffmpeg and restarts at `seg`. Already-built segments are kept.
+- **Single quality, no ABR.** Live always transcodes one rendition (libx264 /
+  h264_nvenc, yuv420p high@4.1) — stream-copy's source-dependent SPS/PPS +
+  keyframe-bound `-ss` would desync boundaries across restarts. hls.js sees a
+  single-level media playlist, so the **Res** menu is hidden automatically.
+- **One audio muxed in; switching = new session.** The chosen audio (request →
+  saved pick → source default → first) is muxed into the segments. Changing audio
+  can't swap an in-manifest rendition (there isn't one), so `lpSetAudio` calls
+  `_lpLiveReload`, which re-runs `_lpLoadIndex` at the current `currentTime` with
+  the new `audio_idx` → a fresh session (brief rebuffer).
+- **Subtitles stay instant.** `_live_extract_subs` dumps every text sub to
+  `sub_<i>.vtt` in one cheap background pass at session start; the `sub_<i>.vtt`
+  endpoint waits on them. Attached as `<track>` children exactly like the bundle.
+- **Priority.** The live encoder runs at **normal** OS priority (Windows:
+  explicit `NORMAL_PRIORITY_CLASS` so it doesn't inherit the server's HIGH; POSIX:
+  no `nice` prefix) — unlike bulk prep (BELOW_NORMAL), because it must keep pace
+  with realtime playback.
+- **Lifecycle.** Sessions live in `_live_sessions` keyed by a 16-hex id. The
+  frontend frees a session via `POST /…/stop` on stop / file-advance / audio
+  switch (and a `sendBeacon` on `pagehide`); `live_session_gc` reaps any session
+  untouched for `LIVE_SESSION_TTL` = 90 s (terminate ffmpeg + `rmtree` the dir,
+  which lives under `.offline_cache/live/<sid>/`).
+
+### What live mode does NOT do
+
+- **No ABR / quality menu** — single rendition (see above).
+- **No persistent cache** — segments are ephemeral and GC'd. To get a cached,
+  multi-quality, multi-audio copy, prep the file (episode-row **Prep** / card
+  **Prep for Streaming**); the next play then returns `mode: "bundle"`.
+- **No background full-bundle build** while live-streaming (avoids a double
+  encode). Prepping is always an explicit user/auto-prep action.
+- **Skip / resume / progress are unaffected** — they key off absolute source
+  seconds, and the live timeline is global, so they work identically to the
+  bundle path.
 
 ---
 

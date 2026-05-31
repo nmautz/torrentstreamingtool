@@ -372,6 +372,63 @@ Keep the `_offline_job_sem()` semaphore in place (`OFFLINE_JOB_CONCURRENCY = 1`)
 
 HLS playback seeks land on the nearest fmp4 segment boundary, then plays from there. With 6-second segments, the resume position can drift up to ~6 s after the saved position. The browser handles the within-segment offset automatically after the segment loads, so this is mostly invisible — but if a user reports "my resume is always a few seconds late on the browser player but not VLC", this is why. Don't shrink the segment size to compensate (you'd just multiply the segment count without solving the underlying snap-to-boundary behavior).
 
+### Live (JIT) streaming — the segment endpoint must BLOCK, never 404
+
+The live/instant-start path (`/api/library/live/{sid}/…`, for files with no
+prepped bundle) serves a **predicted** VOD playlist that lists every
+`seg_NNNNN.m4s` before any are encoded. The segment endpoint (`live_file`) must
+**block until the requested segment exists** (`_live_wait_for`, ≤40 s) and only
+then return 200 — it must **never** 404 a not-yet-built segment. A 404 (or a 5xx)
+on a fragment is a *fatal* hls.js `fragLoadError`; a slow 200 is just buffering,
+which is exactly the UX we want. The same rule covers `init.mp4` and the
+`sub_<i>.vtt` sidecars. If you ever "optimize" by returning early when a segment
+isn't ready, you'll reintroduce hard playback failures on every cold seek.
+
+### Live timeline: `-ss` + `-output_ts_offset`, NOT `-copyts`, keeps segments interchangeable
+
+Live segments come from a single ffmpeg session that can be **restarted at any
+segment** on a seek, yet all sessions must share one init and one global timeline
+so already-built segments stay valid. The exact recipe in `_build_live_ffmpeg_args`
+is load-bearing:
+- `-ss {N*6}` is an **input** seek (before `-i`) with **no `-copyts`**, so the
+  encoder timeline starts at 0. That makes `-force_key_frames expr:gte(t,n_forced*6)`
+  place keyframes on the clean 6 s grid (the first frame at the seek point is a
+  keyframe). With `-copyts`, `t` would start at `N*6` and the expr would force a
+  keyframe on *every* frame — the classic mistake.
+- `-output_ts_offset {N*6}` then shifts the **muxed** timestamps so each segment's
+  fmp4 `baseMediaDecodeTime` equals its global position (seg N ⇒ N·6 s). This is
+  what makes segments from sessions started at different offsets line up on one
+  timeline and be interchangeable.
+- Always **transcode** (libx264/h264_nvenc) — never stream-copy in live mode. A
+  copy's source SPS/PPS + keyframe-bound `-ss` desync segment boundaries across
+  restarts and can produce mismatched init segments.
+- `-start_number {N}` numbers files globally; `temp_file` in `-hls_flags` makes
+  each segment appear atomically, so `path.exists()` ⇒ fully written (the blocking
+  endpoint can serve the instant it appears). Bare output filenames + `cwd=<session
+  dir>` for the same Windows reason as the bundle encoder (a backslash playlist
+  path misdirects `init.mp4`).
+
+### Live encoder runs at NORMAL priority — bulk prep runs BELOW_NORMAL
+
+`_live_start_encoder` passes `_LIVE_SUBPROCESS_KW` (Windows: explicit
+`NORMAL_PRIORITY_CLASS`, POSIX: no `nice` prefix), **not** the BELOW_NORMAL
+`_FFMPEG_SUBPROCESS_KW` / `nice -n 10` that bulk prep uses. Live transcode has to
+keep pace with realtime playback, so it can't be starved like a background prep.
+The Windows `NORMAL_PRIORITY_CLASS` is deliberate: without it the child would
+**inherit the server's HIGH_PRIORITY_CLASS** (the server raises itself in
+`lifespan`) and make the box laggy. Don't "unify" the two subprocess kwargs.
+
+### Live mode is single-quality on purpose — don't bolt ABR onto it
+
+`live-prepare` returns `mode:"live"` with a single-rendition media playlist (no
+master), so hls.js reports one level and `_lpRenderTrackRows` hides the Res menu
+automatically. Audio is **muxed into the segments**, so there's no in-manifest
+audio rendition to switch — `lpSetAudio` detects `lp.live` and calls
+`_lpLiveReload` (re-prepare at the current time with a new `audio_idx` → fresh
+session, brief rebuffer). If you want ABR + instant track switching, that's the
+**bundle** path (`mode:"bundle"`); prep the file. Adding an ABR ladder to the JIT
+encoder is a large, separate effort — not a tweak.
+
 ### Local-player track picks ≠ VLC track picks
 
 Two parallel persistence systems live in `file_progress`:

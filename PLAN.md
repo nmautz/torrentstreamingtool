@@ -426,3 +426,13 @@ Three subtitle problems: online search buried English (defaulted to all language
 - [x] **31.4** (v4.14.0) UI. Admin **Subtitles** card (language + on-by-default + auto-search toggles; `loadSubs`/`saveSubs`), AI card loses its language picker. Profile Settings **Subtitles** selector (Default/On/Off; `saveSubtitlesPref`). Find-Subtitles modal language filter (`#subSearchLang`, defaults to preferred, "All languages" option). Version badge → 4.14.0.
 - [x] **31.5** (v4.14.0) Docs — GOTCHAS (VLC auto-enables subs / selection priority), STT (unified language), API (endpoints + search + state field), ADMIN (Subtitles card), LIBRARY_DATA (settings.subtitles + profile.subtitles_on + migration), FRONTEND (controls), BACKEND (helpers + AppState), CHANGELOG.
 
+
+## Milestone 32 — Instant on-device playback (just-in-time HLS)
+
+Playing a **non-prepped** file on a device used to block on a whole-file HLS encode ("Building stream… 42%"). New **live mode** streams un-prepped files just-in-time: playback starts at the playhead in seconds and seeking anywhere generates that part on demand (browser shows its native buffering spinner). Fully-prepped bundles are unchanged (ABR + instant track switching). Single quality, one audio muxed in; subtitles pre-extracted. Windows-first ffmpeg recipe; user-verified on the Windows box.
+
+- [x] **32.1** (v5.0.0) Backend live subsystem in `main.py`: `_live_sessions` registry, `_build_live_ffmpeg_args` (`-ss` + `-output_ts_offset` + `force_key_frames` on the 6 s grid, always-transcode single rendition, `temp_file` segments, bare names + `cwd`), `_live_start_encoder`/`_live_ensure_encoder` (restart-on-seek), `_live_wait_for` (blocking), `_live_extract_subs`, `_live_stop_session`, `live_session_gc` (registered in `lifespan`). Live encoder runs at NORMAL priority (`_LIVE_SUBPROCESS_KW`).
+- [x] **32.2** (v5.0.0) Endpoints: `POST /api/library/{id}/live-prepare` (`mode:"bundle"|"live"`), `GET /api/library/live/{sid}/playlist.m3u8` (predicted VOD playlist), `GET /api/library/live/{sid}/{filename}` (blocking init/seg/sub generation), `POST /api/library/live/{sid}/stop`.
+- [x] **32.3** (v5.0.0) Frontend: `_lpLoadIndex` POSTs `live-prepare` and branches on `mode`; `lp.live`/`lp.liveSession`; `_lpLiveReload` for audio switch (fresh session); `_lpStopLiveSession` teardown on stop/advance/pagehide; tighter `maxBufferLength` + raised `fragLoadingTimeOut` in live mode; Res menu auto-hidden (single level).
+- [x] **32.4** (v5.0.0) Docs — STREAMING (Live / instant-start section + flow updates), GOTCHAS (blocking-segment / `-ss`+`output_ts_offset` timeline / normal-priority / single-quality footguns), API (live-* routes), version badge → 5.0.0, CHANGELOG.
+

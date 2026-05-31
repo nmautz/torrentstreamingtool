@@ -4381,11 +4381,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     update_loop = asyncio.create_task(updater_loop())
     dlsched_loop = asyncio.create_task(download_scheduler_loop())
     sysmon_loop = asyncio.create_task(system_monitor_loop())
+    live_gc     = asyncio.create_task(live_session_gc())
 
     yield
 
     for t in (guard, broadcaster, dl_monitor, vlc_tracker, bg_loop, jackett_mon,
-              reboot_loop, autoprep_loop, update_loop, dlsched_loop, sysmon_loop):
+              reboot_loop, autoprep_loop, update_loop, dlsched_loop, sysmon_loop,
+              live_gc):
         t.cancel()
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
@@ -10756,6 +10758,509 @@ async def offline_cache_bundle_file(cache_key: str, filename: str) -> FileRespon
         raise HTTPException(404, "Cached file not found.")
     media = _HLS_MIME.get(p.suffix.lower(), "application/octet-stream")
     return FileResponse(str(p), media_type=media, filename=p.name)
+
+
+# ── Live / instant-start HLS (just-in-time transcode) ───────────────────────
+#
+# When a library file has NO fully-prepped bundle, the on-device player streams
+# it "live": playback starts at the playhead within seconds and seeking anywhere
+# generates that part on demand — instead of waiting for a whole-file VOD encode.
+#
+# How it works (full detail in docs/STREAMING.md § Live / instant-start):
+#   • The full VOD playlist is PREDICTED from ffprobe duration (every segment
+#     listed, #EXT-X-ENDLIST) and served immediately, so the player gets a full
+#     scrubber and can seek anywhere at once — no encoding needed for the manifest.
+#   • A single ffmpeg session writes globally-numbered fmp4 segments starting at
+#     the requested segment. Input -ss + per-session -output_ts_offset put every
+#     segment's fmp4 baseMediaDecodeTime at its GLOBAL position (seg N ⇒ N*6 s),
+#     so segments from sessions started at different offsets are interchangeable
+#     (same init, same timeline) and accumulate in one dir.
+#   • The segment endpoint BLOCKS until the requested file exists — it never 404s
+#     a not-yet-built segment (a 404 is a fatal hls.js fragLoadError; a slow 200
+#     just shows the browser's native buffering spinner). A far/backward seek
+#     restarts the encoder at that segment.
+#   • Single video quality (always transcoded — no ABR), one selected audio muxed
+#     in; switching audio re-prepares a fresh session (the frontend reloads). Text
+#     subs are pre-extracted to sidecar .vtt. Idle sessions are GC'd (LIVE_SESSION_TTL).
+#
+# See GOTCHAS.md for the -ss / -output_ts_offset / force_key_frames footguns.
+
+LIVE_CACHE = OFFLINE_CACHE / "live"
+LIVE_SESSION_TTL = 90          # secs since last playlist/segment fetch before GC
+LIVE_SEG_WAIT_TIMEOUT = 40     # max secs to block a segment request awaiting ffmpeg
+LIVE_LOOKAHEAD = 3             # if the live encoder is within N segs of the ask, wait
+                              # for it to march there rather than restarting it
+
+# Live ffmpeg runs at NORMAL OS priority — unlike bulk prep (BELOW_NORMAL via
+# _FFMPEG_SUBPROCESS_KW) it must keep pace with realtime playback. On Windows we
+# pass NORMAL_PRIORITY_CLASS explicitly so the encoder does NOT inherit the
+# server's HIGH_PRIORITY_CLASS (which would make the box laggy). On POSIX no nice
+# prefix is added (inherits the server's niceness).
+_LIVE_SUBPROCESS_KW: dict = {}
+if sys.platform == "win32":
+    _LIVE_SUBPROCESS_KW["creationflags"] = 0x00000020  # NORMAL_PRIORITY_CLASS
+
+_LIVE_SESSION_RE = re.compile(r"^[a-f0-9]{16}$")
+_LIVE_SEG_RE     = re.compile(r"^seg_(\d{5})\.m4s$")
+_LIVE_SUB_RE     = re.compile(r"^sub_(\d+)\.vtt$")
+
+# session_id → live session dict. See live_prepare() for the field reference.
+_live_sessions: dict[str, dict] = {}
+
+
+def _live_seg_path(sess: dict, n: int) -> Path:
+    return Path(sess["tmp_dir"]) / f"seg_{n:05d}.m4s"
+
+
+def _live_highest_ready(sess: dict) -> int:
+    """Largest segment index contiguously present from enc_start_seg, or -1 if the
+    encoder's starting segment isn't on disk yet. Used to decide whether a forward
+    request is within the in-flight encoder's reach or needs a restart."""
+    n = sess["enc_start_seg"]
+    if not _live_seg_path(sess, n).exists():
+        return -1
+    while _live_seg_path(sess, n + 1).exists():
+        n += 1
+    return n
+
+
+def _build_live_ffmpeg_args(
+    ffmpeg: str, src: Path, audio_stream_idx: Optional[int],
+    start_seg: int, use_nvenc: bool,
+) -> list[str]:
+    """ffmpeg command for ONE live encoder session starting at `start_seg`.
+
+    All OUTPUT paths are bare filenames — the caller MUST run with cwd=<session
+    dir> (a backslash playlist path misdirects the fmp4 init on Windows; same
+    discipline as _build_hls_ffmpeg_args). The only absolute path is the source.
+
+    Timeline correctness (see GOTCHAS.md):
+      • input `-ss {t0}` (no -copyts) ⇒ the encoder timeline starts at 0, so
+        `force_key_frames expr:gte(t,n_forced*6)` forces keyframes exactly on the
+        6 s grid (t0=N*6 makes the first frame a keyframe too).
+      • `-output_ts_offset {t0}` shifts the MUXED timestamps so each fmp4 segment's
+        baseMediaDecodeTime lands at its GLOBAL position — seg N ⇒ N*6 s — for
+        EVERY session regardless of where it started, which is what makes segments
+        interchangeable across encoder restarts.
+      • `-start_number {start_seg}` numbers the first segment seg_{start_seg}.
+    """
+    seg = HLS_SEGMENT_SECS
+    t0 = start_seg * seg
+    args = [
+        ffmpeg, "-y", "-nostdin",
+        "-ss", str(t0),
+        "-thread_queue_size", "1024", "-rtbufsize", "64M",
+        "-i", str(src),
+        "-map", "0:v:0",
+    ]
+    if audio_stream_idx is not None:
+        args += ["-map", f"0:a:{audio_stream_idx}"]
+    # Always transcode video so every session emits an IDENTICAL init segment;
+    # stream-copy's source-dependent SPS/PPS + keyframe-bound -ss would desync the
+    # segment boundaries across sessions.
+    if use_nvenc:
+        args += ["-c:v", "h264_nvenc", "-preset", "medium", "-rc", "vbr", "-cq:v", "23"]
+    else:
+        args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23"]
+    args += [
+        "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
+        "-force_key_frames", f"expr:gte(t,n_forced*{seg})",
+    ]
+    if audio_stream_idx is not None:
+        args += ["-c:a", "aac", "-b:a", "160k", "-ac", "2"]
+    args += [
+        "-output_ts_offset", str(t0),
+        "-f", "hls",
+        "-hls_time", str(seg),
+        "-hls_playlist_type", "vod",
+        "-hls_segment_type", "fmp4",
+        # temp_file: each segment is written to seg_N.m4s.tmp and atomically
+        # renamed on completion, so .exists() ⇒ fully written (the blocking
+        # segment endpoint can serve it the instant it appears).
+        "-hls_flags", "independent_segments+temp_file",
+        "-hls_fmp4_init_filename", "init.mp4",
+        "-hls_segment_filename", "seg_%05d.m4s",
+        "-start_number", str(start_seg),
+        # ffmpeg writes its own playlist here; we ignore it and serve a predicted one.
+        "out.m3u8",
+    ]
+    return args
+
+
+async def _live_terminate_proc(proc) -> None:
+    if proc is None or proc.returncode is not None:
+        return
+    try:
+        proc.terminate()
+    except Exception:
+        pass
+    try:
+        await asyncio.wait_for(proc.wait(), timeout=5)
+    except (asyncio.TimeoutError, asyncio.CancelledError):
+        try:
+            proc.kill()
+        except Exception:
+            pass
+
+
+async def _live_start_encoder(sess: dict, start_seg: int) -> None:
+    """(Re)start the ffmpeg session at `start_seg`. Caller holds sess['enc_lock'].
+    Existing segments are kept — they're interchangeable across sessions."""
+    sess["_restarting"] = True
+    await _live_terminate_proc(sess.get("proc"))
+    ffmpeg = analyzer.ffmpeg_bin()
+    use_nvenc = await _has_nvenc()
+    args = _build_live_ffmpeg_args(
+        ffmpeg, Path(sess["src"]), sess.get("audio_stream_idx"), start_seg, use_nvenc,
+    )
+    hls_log.info(
+        "live %s encoder start seg=%d audio=%s cmd: %s",
+        sess["id"], start_seg, sess.get("audio_stream_idx"),
+        " ".join(shlex.quote(a) for a in args),
+    )
+    proc = await asyncio.create_subprocess_exec(
+        *args, cwd=sess["tmp_dir"],
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+        **_LIVE_SUBPROCESS_KW,
+    )
+    sess["proc"] = proc
+    sess["enc_start_seg"] = start_seg
+    sess["_restarting"] = False
+
+    # Drain stderr so the OS pipe can't fill and wedge ffmpeg; keep a tail for logs.
+    async def _drain() -> None:
+        assert proc.stderr is not None
+        tail: deque[str] = deque(maxlen=40)
+        while True:
+            try:
+                line = await proc.stderr.readline()
+            except Exception:
+                return
+            if not line:
+                break
+            tail.append(line.decode("utf-8", "replace").rstrip())
+        rc = proc.returncode
+        # rc 0 = ran to EOF (whole tail of file encoded); a non-zero rc that wasn't
+        # an intentional restart is a real failure worth logging.
+        if rc not in (0, None) and sess.get("proc") is proc and not sess.get("_restarting"):
+            hls_log.warning("live %s encoder exited rc=%s: %s",
+                            sess["id"], rc, " | ".join(list(tail)[-4:]) or "(no stderr)")
+    asyncio.create_task(_drain())
+
+
+async def _live_ensure_encoder(sess: dict, seg: int) -> None:
+    """Ensure the encoder is producing toward `seg`. Restart it there on a backward
+    seek, a far-forward seek, or a dead encoder; otherwise let the running encoder
+    march to it. Serialized per-session via enc_lock."""
+    if _live_seg_path(sess, seg).exists():
+        return
+    async with sess["enc_lock"]:
+        if _live_seg_path(sess, seg).exists():
+            return
+        proc = sess.get("proc")
+        alive = proc is not None and proc.returncode is None
+        ready = _live_highest_ready(sess)
+        reach = max(ready, sess["enc_start_seg"]) + LIVE_LOOKAHEAD
+        if alive and sess["enc_start_seg"] <= seg <= reach:
+            return  # the running encoder will get there shortly — just wait
+        await _live_start_encoder(sess, seg)
+
+
+async def _live_wait_for(path: Path, timeout: float) -> bool:
+    """Block until `path` exists (segments are atomically renamed into place, so
+    existence ⇒ complete) or `timeout` elapses. Polling is cheap vs. the ffmpeg
+    work it's waiting on."""
+    deadline = time.monotonic() + timeout
+    while True:
+        if path.exists():
+            return True
+        if time.monotonic() >= deadline:
+            return path.exists()
+        await asyncio.sleep(0.15)
+
+
+async def _live_extract_subs(sess: dict) -> None:
+    """Background: dump every text subtitle to the session dir as sub_<i>.vtt in a
+    single pass (cheap relative to the video encode). The sub endpoint waits on these."""
+    subs = sess.get("subtitles") or []
+    ffmpeg = analyzer.ffmpeg_bin()
+    if not subs or not ffmpeg:
+        return
+    args = [ffmpeg, "-y", "-nostdin", "-i", str(sess["src"])]
+    for i, s in enumerate(subs):
+        args += ["-map", f"0:s:{s['idx']}", "-c:s", "webvtt", "-f", "webvtt", f"sub_{i}.vtt"]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args, cwd=sess["tmp_dir"],
+            stdout=asyncio.subprocess.DEVNULL, stderr=asyncio.subprocess.DEVNULL,
+            **_LIVE_SUBPROCESS_KW,
+        )
+        await proc.wait()
+    except Exception as exc:
+        hls_log.warning("live %s subtitle extract failed: %s", sess["id"], exc)
+
+
+async def _live_stop_session(session_id: str) -> None:
+    """Terminate the encoder and delete the session dir. Idempotent."""
+    sess = _live_sessions.pop(session_id, None)
+    if not sess:
+        return
+    proc = sess.get("proc")
+    # Clear the handle first so the encoder's stderr-drain doesn't log the
+    # intentional termination as a failure (its `sess["proc"] is proc` guard).
+    sess["proc"] = None
+    await _live_terminate_proc(proc)
+    await asyncio.to_thread(shutil.rmtree, sess["tmp_dir"], ignore_errors=True)
+    hls_log.info("live %s stopped + cleaned", session_id)
+
+
+async def live_session_gc() -> None:
+    """Reap idle live sessions: terminate ffmpeg + delete the dir once a session
+    hasn't been touched (playlist/segment fetch) for LIVE_SESSION_TTL. Registered
+    in lifespan; cancellation cleans up every remaining session."""
+    while True:
+        try:
+            await asyncio.sleep(15)
+            now = time.time()
+            stale = [sid for sid, s in list(_live_sessions.items())
+                     if now - s.get("last_access", 0) > LIVE_SESSION_TTL]
+            for sid in stale:
+                await _live_stop_session(sid)
+        except asyncio.CancelledError:
+            for sid in list(_live_sessions.keys()):
+                await _live_stop_session(sid)
+            raise
+        except Exception as exc:
+            hls_log.warning("live gc error: %s", exc)
+
+
+class LivePrepareReq(BaseModel):
+    file_path: str
+    profile_id: str = ""          # when set, response includes saved track picks
+    start_sec: float = 0.0        # resume / seek position — the encoder starts here
+    audio_idx: Optional[int] = None  # audio POSITION (dropdown index) to mux; None ⇒ saved/default
+
+
+@app.post("/api/library/{item_id}/live-prepare")
+async def live_prepare(item_id: str, req: LivePrepareReq) -> JSONResponse:
+    """Begin instant on-device playback of a library file.
+
+    If a full bundle is already cached, returns the same payload as
+    /offline-prepare's ready path plus `mode:"bundle"` (the player keeps ABR +
+    in-manifest track switching). Otherwise builds a live session (single quality,
+    one audio muxed in), kicks off the encoder at `start_sec` + background subtitle
+    extraction, and returns `mode:"live"` immediately with a predicted playlist URL.
+    """
+    if not HLS_AVAILABLE:
+        raise HTTPException(503, HLS_UNAVAILABLE_MSG)
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    target = next((f for f in item.get("files", []) if f["path"] == req.file_path), None)
+    if not target:
+        raise HTTPException(404, "File not found in this item.")
+    src = Path(target["path"])
+    if not src.exists():
+        raise HTTPException(404, "File not on disk.")
+
+    sidecar_subs = _list_sidecar_subs(src, item_id)
+    saved_tracks = (_saved_local_tracks(item, req.profile_id, req.file_path)
+                    if req.profile_id else {})
+
+    # Already fully prepped? Use the cached ABR bundle (identical to
+    # offline_prepare's ready path) so the player keeps quality + track switching.
+    OFFLINE_CACHE.mkdir(exist_ok=True)
+    key = _offline_cache_key(src)
+    out_dir = OFFLINE_CACHE / key
+    if (out_dir / "master.m3u8").exists():
+        meta = _read_meta(out_dir)
+        return JSONResponse({
+            "ready":             True,
+            "mode":              "bundle",
+            "master_url":        f"/api/library/offline-cache/{key}/master.m3u8",
+            "duration_sec":      meta.get("duration_sec", 0),
+            "videos":            meta.get("videos", []),
+            "audios":            meta.get("audios", []),
+            "subtitles":         meta.get("subtitles", []),
+            "skipped_image_subs": meta.get("skipped_image_subs", []),
+            "subs":              sidecar_subs,
+            "saved_tracks":      saved_tracks,
+        })
+
+    if not analyzer.ffmpeg_bin():
+        raise HTTPException(503, "ffmpeg is not available — cannot stream this file.")
+    ver = await _ffmpeg_version()
+    if ver is None or ver < _FFMPEG_MIN_VERSION:
+        need = f"{_FFMPEG_MIN_VERSION[0]}.{_FFMPEG_MIN_VERSION[1]}"
+        have = (f"{ver[0]}.{ver[1]}" if ver else "unknown")
+        raise HTTPException(503, f"ffmpeg too old ({have}) — need ≥ {need} for streaming.")
+
+    info = await asyncio.to_thread(_ffprobe_full, str(src))
+    if not info.get("video"):
+        raise HTTPException(422, "No video stream in this file.")
+    duration = float(info.get("duration_sec", 0) or 0)
+    if duration <= 0:
+        raise HTTPException(422, "Could not determine this file's duration.")
+
+    audios = list(info.get("audios") or [])
+    subs   = [s for s in (info.get("subtitles") or []) if not s.get("image_based")]
+
+    # Choose the audio POSITION to mux: explicit request → saved pick → source
+    # default → first. (For audio, ffprobe `idx` == position, so the stream index
+    # used in -map equals the position.)
+    default_audio_pos = next((i for i, a in enumerate(audios) if a.get("default")),
+                             0 if audios else -1)
+    audio_pos = req.audio_idx
+    if audio_pos is None and "audio_idx" in saved_tracks:
+        audio_pos = saved_tracks["audio_idx"]
+    if audio_pos is None:
+        audio_pos = default_audio_pos
+    if audios:
+        audio_pos = max(0, min(int(audio_pos), len(audios) - 1))
+        audio_stream_idx: Optional[int] = audios[audio_pos]["idx"]
+    else:
+        audio_pos = -1
+        audio_stream_idx = None
+
+    n_segments = max(1, math.ceil(duration / HLS_SEGMENT_SECS))
+    start_seg = max(0, min(int(req.start_sec // HLS_SEGMENT_SECS), n_segments - 1))
+
+    session_id = secrets.token_hex(8)
+    LIVE_CACHE.mkdir(parents=True, exist_ok=True)
+    tmp_dir = LIVE_CACHE / session_id
+    await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    # Dropdown payloads — same shape as the bundle's meta.json so the frontend
+    # renders identically. `idx` is the audio/sub POSITION the player echoes back.
+    audios_meta = [{
+        "idx":      i,
+        "language": a.get("language") or "und",
+        "title":    a.get("title") or "",
+        "label":    _track_label(a, f"Audio {i+1}"),
+        "default":  (i == audio_pos),
+    } for i, a in enumerate(audios)]
+    subtitles_meta = [{
+        "idx":      i,
+        "file":     f"sub_{i}.vtt",
+        "language": s.get("language") or "und",
+        "title":    s.get("title") or "",
+        "label":    _track_label(s, f"Subtitles {i+1}"),
+    } for i, s in enumerate(subs)]
+
+    sess = {
+        "id": session_id, "src": str(src), "item_id": item_id,
+        "info": info, "duration": duration, "n_segments": n_segments,
+        "audios": audios, "subtitles": subs,
+        "audio_stream_idx": audio_stream_idx,
+        "tmp_dir": str(tmp_dir),
+        "proc": None, "enc_start_seg": start_seg,
+        "enc_lock": asyncio.Lock(),
+        "last_access": time.time(),
+    }
+    _live_sessions[session_id] = sess
+
+    # Start the first encoder at the playhead + background sub extraction so the
+    # leading segments and the .vtt sidecars are already being produced on return.
+    async with sess["enc_lock"]:
+        await _live_start_encoder(sess, start_seg)
+    asyncio.create_task(_live_extract_subs(sess))
+
+    base = f"/api/library/live/{session_id}"
+    return JSONResponse({
+        "ready":        True,
+        "mode":         "live",
+        "session_id":   session_id,
+        "playlist_url": f"{base}/playlist.m3u8",
+        "duration_sec": duration,
+        "audios":       audios_meta,
+        "subtitles":    subtitles_meta,
+        "subs":         sidecar_subs,
+        "saved_tracks": saved_tracks,
+    })
+
+
+@app.get("/api/library/live/{session_id}/playlist.m3u8")
+async def live_playlist(session_id: str) -> Response:
+    """Predicted full-length VOD playlist (every segment listed, #EXT-X-ENDLIST)
+    computed from duration — no encoding needed, so the player gets a full scrubber
+    and can seek anywhere immediately."""
+    if not _LIVE_SESSION_RE.match(session_id):
+        raise HTTPException(400, "Invalid session.")
+    sess = _live_sessions.get(session_id)
+    if not sess:
+        raise HTTPException(404, "Live session not found.")
+    sess["last_access"] = time.time()
+    n = sess["n_segments"]; dur = sess["duration"]; seg = HLS_SEGMENT_SECS
+    lines = [
+        "#EXTM3U", "#EXT-X-VERSION:7",
+        f"#EXT-X-TARGETDURATION:{seg}",
+        "#EXT-X-MEDIA-SEQUENCE:0",
+        "#EXT-X-PLAYLIST-TYPE:VOD",
+        '#EXT-X-MAP:URI="init.mp4"',
+    ]
+    for i in range(n):
+        d = float(seg) if i < n - 1 else max(0.001, dur - seg * (n - 1))
+        lines.append(f"#EXTINF:{d:.6f},")
+        lines.append(f"seg_{i:05d}.m4s")
+    lines.append("#EXT-X-ENDLIST")
+    return Response(content="\n".join(lines) + "\n",
+                    media_type="application/vnd.apple.mpegurl")
+
+
+@app.post("/api/library/live/{session_id}/stop")
+async def live_stop(session_id: str) -> JSONResponse:
+    """Tear down a live session (frontend fires this on stop/advance/unload)."""
+    if not _LIVE_SESSION_RE.match(session_id):
+        raise HTTPException(400, "Invalid session.")
+    await _live_stop_session(session_id)
+    return JSONResponse({"stopped": True})
+
+
+@app.get("/api/library/live/{session_id}/{filename}")
+async def live_file(session_id: str, filename: str) -> FileResponse:
+    """Serve a live init segment / media segment / subtitle, generating on demand.
+
+    BLOCKS until the requested file exists — a not-yet-built segment must NOT 404
+    (that's a fatal hls.js fragLoadError); a slow 200 just shows the browser's
+    buffering spinner. A request for an un-reached segment (re)starts the encoder
+    at that segment first.
+    """
+    if not _LIVE_SESSION_RE.match(session_id):
+        raise HTTPException(400, "Invalid session.")
+    sess = _live_sessions.get(session_id)
+    if not sess:
+        raise HTTPException(404, "Live session not found.")
+    sess["last_access"] = time.time()
+
+    m = _LIVE_SEG_RE.match(filename)
+    if m:
+        n = int(m.group(1))
+        if n >= sess["n_segments"]:
+            raise HTTPException(404, "Segment past end of media.")
+        await _live_ensure_encoder(sess, n)
+        p = _live_seg_path(sess, n)
+        if not await _live_wait_for(p, LIVE_SEG_WAIT_TIMEOUT):
+            raise HTTPException(504, "Timed out generating segment.")
+        return FileResponse(str(p), media_type="video/iso.segment")
+
+    if filename == "init.mp4":
+        p = Path(sess["tmp_dir"]) / "init.mp4"
+        # The init lands as soon as the encoder starts; ensure one is running.
+        await _live_ensure_encoder(sess, sess["enc_start_seg"])
+        if not await _live_wait_for(p, LIVE_SEG_WAIT_TIMEOUT):
+            raise HTTPException(504, "Timed out generating init segment.")
+        return FileResponse(str(p), media_type="video/mp4")
+
+    if _LIVE_SUB_RE.match(filename):
+        p = Path(sess["tmp_dir"]) / filename
+        if not await _live_wait_for(p, LIVE_SEG_WAIT_TIMEOUT):
+            raise HTTPException(404, "Subtitle not ready.")
+        return FileResponse(str(p), media_type="text/vtt")
+
+    raise HTTPException(404, "Unknown live file.")
 
 
 # ── Admin: offline-cache inventory + cleanup ────────────────────────────────
