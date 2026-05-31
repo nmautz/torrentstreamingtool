@@ -389,3 +389,19 @@ DTW fixed *within-cue* timing but not the **cross-window drift** that accumulate
 
 ---
 
+
+
+---
+
+### 2026-05-30 — v4.6.2: AI subtitle timing fix (VAD removed)
+
+Reverted the Silero `--vad` pass from the STT pipeline — it caused overlapping /
+out-of-order cue timestamps and music-region hallucinations (subs too early or
+seconds-to-30s late), the regression reported against 4.5.0. Pipeline is back to
+the proven `-dtw` + `-ml`/`-sow` path; `STT_VERSION`→4 so old subs regenerate.
+See CHANGELOG 4.6.2, docs/STT.md, docs/GOTCHAS.md.
+
+Follow-ups (not yet done): relabel/retire the now-dormant "whisper VAD model"
+admin Optional-Component (it advertises "reduces timing drift" but the pipeline
+ignores it); optionally add `--suppress-nst` (guarded by a `--help` probe) to
+drop "[music]"/"(applause)" annotation hallucinations.

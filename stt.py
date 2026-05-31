@@ -28,11 +28,15 @@ from pathlib import Path
 from typing import Callable, Optional
 
 # Bumped whenever the transcription *pipeline* changes in a way that affects
-# output (timing or content). Embedded in sidecar names as `g<N>` (plus a `v`
-# when a VAD model is installed) so subs from an older pipeline read as stale and
-# the UI offers Regenerate. v2 added `-mc 0` + optional Silero VAD; v3 dropped
-# `-mc 0` (it tanked transcription *quality* — see GOTCHAS), keeping VAD for drift.
-STT_VERSION = 3
+# output (timing or content). Embedded in sidecar names as `g<N>` so subs from an
+# older pipeline read as stale and the UI offers Regenerate. v2 added `-mc 0` +
+# optional Silero VAD; v3 dropped `-mc 0` (it tanked transcription *quality* — see
+# GOTCHAS), keeping VAD for drift; v4 dropped `--vad` too — whisper.cpp's
+# per-speech-region timestamp remapping produced overlapping / out-of-order cue
+# times and let music through as hallucinated "speech" (subs showing too early, or
+# seconds-to-30s off — the exact regression VAD was meant to cure). Back to the
+# proven 4.5.0 timing path (`-dtw` + `-ml`/`-sow`). See GOTCHAS.
+STT_VERSION = 4
 
 # Marker embedded in generated sidecar names: "<stem>.<lang>.ai.srt". The `.ai`
 # segment distinguishes machine-generated subs from real/downloaded ones so we
@@ -64,17 +68,20 @@ STT_THREADS = 4
 #    cue carries its own (now DTW-accurate) timing and a pause becomes a real
 #    gap between two cues instead of one stretched block.
 #
-# DTW + ml/sow fix *within-cue* boundaries but not the *cross-window* drift that
-# accumulates over long media: whisper decodes in 30s windows and advances its
-# audio cursor by its own timestamp tokens, so one misjudgment (silence, music, a
-# hallucinated repetition) shifts everything after it. The fix is:
-#  * `--vad` (optional, needs a bundled Silero model — see `whisper_vad_model`)
-#    detects speech regions up front so each is transcribed at its own correct
-#    absolute offset; a per-window error can no longer propagate down the file.
-# (We briefly also forced `-mc 0` to curb the repetition loops, but it tanked
-# transcription *quality* — the model needs cross-window context to decode well,
-# and it was worst combined with VAD's short segments — so it was reverted in
-# v4.6.1. See GOTCHAS. Use VAD, not -mc, for drift.)
+# DTW + ml/sow fix *within-cue* boundaries. They don't fight the *cross-window*
+# drift that can accumulate over long media (whisper decodes in 30s windows and
+# advances its cursor by its own timestamp tokens, so one misjudgment shifts what
+# follows) — but in practice `-dtw`'s audio-anchored timings keep that small, and
+# the two levers we tried against it were each worse than the disease:
+#  * `--vad` (Silero, v4.6.0) re-anchored timing per detected speech region, but
+#    whisper.cpp's region→original-time remapping produced overlapping /
+#    out-of-order cues AND treated music/ambience as speech (hallucinated lines at
+#    wrong offsets) — i.e. subs too early, or seconds-to-30s off. Dropped from the
+#    pipeline in v4 (the model stays installable for the admin badge, but we never
+#    pass `--vad`).
+#  * `-mc 0` (v4.6.0) curbed repetition loops but stripped the decode context the
+#    model needs and tanked quality; reverted in v4.6.1.
+# See GOTCHAS.
 STT_MAX_LEN = 80  # max characters per cue for -ml; 0 would disable splitting
 
 # whisper.cpp `-dtw` alignment-head presets, keyed by the model's short name as
@@ -161,10 +168,11 @@ def _whisper_supports_vad(binp: str) -> bool:
 
 def sub_gen_tag() -> str:
     """Pipeline-generation marker embedded in generated sidecar names (after the
-    model segment): `g<STT_VERSION>`, plus `v` when a VAD model is installed. A
-    change here — a pipeline bump or VAD newly installed — makes existing subs
-    read as stale so the UI offers Regenerate to pick up the better timing."""
-    return f"g{STT_VERSION}" + ("v" if whisper_vad_model() else "")
+    model segment): `g<STT_VERSION>`. A bump makes existing subs read as stale so
+    the UI offers Regenerate to pick up the better timing. (Pre-v4 names could
+    carry a trailing `v` for VAD; `_list_ai_subs` still parses those, and the v4
+    bump retires them as stale.)"""
+    return f"g{STT_VERSION}"
 
 
 def ffmpeg_bin() -> Optional[str]:
@@ -302,9 +310,8 @@ def _run_whisper(
     Timing precision: `-dtw` aligns token timestamps to the audio (accurate
     boundaries that respect pauses) when the model maps to a known preset, and
     `-ml`/`-sow` re-split into word-boundary cues so each carries its own timing.
-    `--vad` (when a Silero model is installed and the build supports it) fights
-    the cross-window drift that accumulates over long media — see the
-    `STT_MAX_LEN` / `_DTW_PRESETS` / `whisper_vad_model` notes above.
+    `--vad` is deliberately NOT used — it mistimed cues and hallucinated over
+    music; see the `STT_MAX_LEN` / `_DTW_PRESETS` notes above and GOTCHAS.
 
     A CUDA/cuBLAS build offloads to the GPU automatically. If CUDA can't
     initialize at runtime (driver too old, no device), the first attempt fails;
@@ -317,10 +324,8 @@ def _run_whisper(
         return False, ""
 
     preset = _dtw_preset()
-    vad_model = whisper_vad_model()
-    vad_ok = bool(vad_model) and _whisper_supports_vad(binp)
 
-    def _attempt(no_gpu: bool, use_vad: bool) -> tuple[bool, str]:
+    def _attempt(no_gpu: bool) -> tuple[bool, str]:
         cmd = [
             binp, "-m", model, "-f", str(wav),
             "-l", language or "auto", "-t", str(STT_THREADS),
@@ -329,10 +334,6 @@ def _run_whisper(
         ]
         if preset:
             cmd += ["-dtw", preset]            # DTW token-level timestamp alignment
-        if use_vad and vad_model:
-            cmd += ["--vad", "--vad-model", vad_model]   # segment speech first so a
-                                               # per-window cursor misjudgment can't
-                                               # propagate (long-media drift fix)
         if translate:
             cmd.append("-tr")
         if no_gpu:
@@ -361,14 +362,12 @@ def _run_whisper(
         srt = out_base.with_suffix(".srt")
         return (proc.returncode == 0 and srt.exists()), detected
 
-    # Try VAD + GPU first; on failure drop VAD (the likeliest culprit on an old
-    # binary or bad model), then force CPU. Each lever is shed independently so a
-    # single failure mode doesn't cost us the transcription entirely.
-    ok, detected = _attempt(no_gpu=False, use_vad=vad_ok)
-    if not ok and vad_ok:
-        ok, detected = _attempt(no_gpu=False, use_vad=False)
+    # GPU first; on failure force CPU. (A cuBLAS build on a too-old driver fails
+    # CUDA init on the first attempt; `-ng` is a harmless no-op for the CPU build.)
+    # No VAD attempt — it mistimed cues and hallucinated over music; see GOTCHAS.
+    ok, detected = _attempt(no_gpu=False)
     if not ok:
-        ok, detected = _attempt(no_gpu=True, use_vad=False)
+        ok, detected = _attempt(no_gpu=True)
     return ok, detected
 
 

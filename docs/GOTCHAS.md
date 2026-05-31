@@ -558,3 +558,25 @@ The optional VAD model (`ggml-silero-v5.1.2.bin`, ~1 MB) is also a `ggml-*.bin`,
 - [DAEMON_WATCHDOG.md](DAEMON_WATCHDOG.md) — VPN guard at the process level
 - [ANALYZER.md](ANALYZER.md) — Smart Skip algorithm details and fallback chain
 - [STT.md](STT.md) — AI auto-subtitle pipeline
+
+
+## whisper `--vad` mistimes subtitles — do not re-enable it (v4.6.2)
+
+The Silero `--vad` pass (added 4.6.0, kept 4.6.1) was **removed from the STT
+pipeline in 4.6.2** because it *caused* the timing regression it was meant to
+fix. With `--vad`, whisper.cpp transcribes a silence-removed timeline and remaps
+cue times back to real time; that remap produces **overlapping / out-of-order cue
+timestamps**, and the detector treats **music/ambience as speech**, so whisper
+hallucinates lines at arbitrary offsets. Symptom: subtitles show **too early, or
+seconds-to-30s late** (known whisper.cpp issues #3207, #3250, #3711).
+
+- `stt._run_whisper` no longer passes `--vad`; the attempt chain is just
+  GPU → CPU (`-ng`). The proven path is `-dtw` + `-ml`/`-sow` (4.5.0), whose
+  timings are anchored directly to the audio.
+- `STT_VERSION` was bumped to `4` and `sub_gen_tag()` no longer appends `v`, so
+  subs made under the VAD pipeline read as stale and offer a clean regenerate.
+- The Silero model is still installable (Admin → System) and `_vad_active()` /
+  `_whisper_supports_vad()` still report capability, but they are **dormant** —
+  nothing in transcription consumes them. Don't wire `--vad` back in without
+  first confirming whisper.cpp has fixed its VAD timestamp remap (and re-measure
+  on real audio with music, not just clean speech).

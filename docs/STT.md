@@ -36,7 +36,7 @@ The `.ai` segment marks the track as machine-generated; the segment after it is
 the **model name** that produced it (`base`/`small`/`medium`/… — derived from
 the configured `ggml-*.bin`). `_list_sidecar_subs` strips both from the parsed
 language tag and returns `ai: true`, the `model`, and `stale: true` when that
-model **or the transcription-pipeline generation** (the `g<N>[v]` tag — see
+model **or the transcription-pipeline generation** (the `g<N>` tag — see
 “Timing precision” below) differs from what's configured now. The UI labels the
 track with its model (“English (AI · base)”). `stt.has_ai_subs(src)` (any
 generated sub exists) gates idempotent *preprocess*; `stt.ai_subs_stale(src)`
@@ -120,61 +120,57 @@ next one starts early. `_run_whisper` passes two flags to fix this:
 > A literal **one-word-per-cue** track (`-ml 1`) would be unreadable as a
 > subtitle; DTW alignment is the higher-precision *and* readable answer.
 
-#### Cross-window drift (the long-media failure) — `-mc 0` + `--vad`
+#### Cross-window drift — why we no longer use `--vad` or `-mc 0`
 
-DTW and `-ml`/`-sow` fix *within-cue* boundaries, but not the **cross-window
-drift** that accumulates over long (~1 hr) media: whisper decodes in 30-second
-windows and advances its audio cursor by its own timestamp tokens, so one
-misjudgment (silence, music, a hallucinated repetition) shifts everything after
-it — sometimes self-correcting, often compounding. The lever that fights this:
+DTW and `-ml`/`-sow` fix *within-cue* boundaries. They don't directly fight the
+**cross-window drift** that can accumulate over long (~1 hr) media: whisper
+decodes in 30-second windows and advances its audio cursor by its own timestamp
+tokens, so one misjudgment (silence, music, a hallucinated repetition) can shift
+what follows. In practice DTW's audio-anchored timings keep that small. Two
+levers were tried against it in 4.6.0 and **both were reverted** — each hurt more
+than it helped:
 
-- **`--vad --vad-model <silero>`** (**optional**) — whisper detects speech
-  regions up front (Silero VAD) and transcribes each at its own correct absolute
-  offset, so a per-window error can't propagate down the file. It re-anchors
-  *timing* without touching the model's decoding context, so it doesn't degrade
-  word accuracy. Enabled only when
-  `stt.whisper_vad_model()` finds the model **and** `stt._whisper_supports_vad()`
-  (a cached `whisper-cli --help` probe) confirms the build accepts `--vad` —
-  older user-built Linux/macOS binaries (pre ~v1.7.5) lack it; the bundled
-  Windows build (v1.8.4+) has it. The VAD model is **never** part of
-  `is_available()`; absence just means the pre-VAD behaviour.
+- **`--vad --vad-model <silero>`** (added 4.6.0, removed from the pipeline in
+  **4.6.2**) — Silero VAD detects speech regions up front and whisper transcribes
+  each on a *filtered* (silence-removed) timeline, then remaps the result back to
+  real time. The remap is the problem: whisper.cpp's region→original mapping
+  yields **overlapping / out-of-order cue timestamps**, and the detector lets
+  **music/ambience through as "speech"**, so whisper hallucinates lines and stamps
+  them at arbitrary offsets. Net effect: subs showing **too early, or
+  seconds-to-30s late** — the exact regression VAD was meant to cure. (Known
+  whisper.cpp issue class: ggml-org/whisper.cpp #3207, #3250, #3711.) The pipeline
+  now **never passes `--vad`**.
+- **`-mc 0` (`--max-context 0`)** (added 4.6.0, reverted **4.6.1**) — curbed
+  repetition loops but stripped the cross-window context whisper needs to decode
+  ambiguous audio, **drastically degrading quality** (worst combined with VAD's
+  short segments). See [GOTCHAS.md](GOTCHAS.md).
 
-The model — `ggml-silero-v5.1.2.bin` (~1 MB) — is bundled by `setup.py` into
-`tools/whisper/vad/` (a separate dir so `whisper_model_candidates()`'s
-`ggml-*.bin` glob never mistakes it for a transcription model), recorded in
-`.env` as `_WHISPER_VAD_MODEL`, and installable post-hoc from **Admin → System →
-Optional Components** (portable — installable on every OS, unlike the Windows-only
-whisper *binary*). `main._vad_active()` (model present AND build supports it)
-surfaces in `/api/admin/stt` (`vad`) and `/api/admin/components` (`vad_active`).
+The Silero model (`ggml-silero-v5.1.2.bin`, ~1 MB) is still bundled by `setup.py`
+into `tools/whisper/vad/` and installable from **Admin → System → Optional
+Components**; `main._vad_active()` / `stt._whisper_supports_vad()` still report
+whether the build *could* accept `--vad` (surfaced in `/api/admin/stt` and
+`/api/admin/components`). But the transcription pipeline is **dormant** with
+respect to VAD — installing the model changes nothing unless/until whisper.cpp's
+VAD remap is fixed and we re-enable it. (Relabeling the now-misleading "reduces
+timing drift" component copy is a tracked follow-up.)
 
-`_run_whisper` runs VAD+GPU first, then sheds **VAD** on failure (the likeliest
-culprit), then forces **CPU** (`-ng`) — each lever dropped independently so one
-failure mode never costs the whole transcription. All flags are orthogonal to
-GPU offload.
-
-> **Why not `-mc 0`?** v4.6.0 also forced `--max-context 0` to curb the
-> repetition/hallucination loops that corrupt timestamps. It worked for that, but
-> it strips the cross-window context whisper uses to decode ambiguous audio and
-> **drastically degraded transcription quality** (worst combined with VAD's short
-> segments — tiny chunks with no shared context). Reverted in v4.6.1; rely on VAD
-> for drift, never `-mc`. See [GOTCHAS.md](GOTCHAS.md).
+`_run_whisper` runs **GPU first, then forces CPU (`-ng`) on failure** — no VAD
+attempt in the chain. All flags are orthogonal to GPU offload.
 
 #### Picking up the improvement on existing subs — the generation tag
 
-Sidecars are named `<stem>.<lang>.ai.<model>.g<N>[v].srt`. The `g<N>` segment
-(`g{STT_VERSION}`, plus `v` when a VAD model is installed — see `sub_gen_tag()`)
-records the **transcription-pipeline generation**. `ai_subs_stale` /
-`_list_sidecar_subs` flag a sub stale when **either** the model **or** the gen
-tag differs from the current config, so subs made on an older pipeline (or before
-VAD was installed) read as stale → the on-device player shows **Regen** and VLC
-offers **Generate with AI**. Legacy untagged files parse as model `""` / gen `""`
-→ always stale → migrated to the tagged form on regen.
+Sidecars are named `<stem>.<lang>.ai.<model>.g<N>.srt`. The `g<N>` segment
+(`g{STT_VERSION}` — see `sub_gen_tag()`) records the **transcription-pipeline
+generation**. `ai_subs_stale` / `_list_sidecar_subs` flag a sub stale when
+**either** the model **or** the gen tag differs from the current config, so subs
+made on an older pipeline read as stale → the on-device player shows **Regen** and
+VLC offers **Generate with AI**. Legacy untagged files parse as model `""` / gen
+`""` → always stale → migrated to the tagged form on regen.
 
-> Edge case (non-primary platforms): the gen tag's `v` reflects VAD *model
-> presence*, not the live capability probe (kept out of the hot listing path). On
-> a host with the model but a `--vad`-incapable binary, subs are tagged `…v` yet
-> transcribed without VAD; if that binary is later upgraded, those subs won't
-> re-flag. Windows (the bundled build always supports `--vad`) is unaffected.
+> Pre-4.6.2 names could carry a trailing `v` (a VAD model was installed at
+> generation time); `_list_ai_subs` still parses those — its `g\d+v?` regex
+> matches both forms — and the `g4` bump retires them all as stale, so any
+> `…v`-tagged sub is offered for a clean, VAD-free regenerate.
 
 ---
 

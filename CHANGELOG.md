@@ -1,5 +1,12 @@
 # Changelog
 
+## [4.6.2] — 2026-05-30
+- **Fixed: AI subtitle timing degraded since 4.5.0 — cues showing too early, or seconds-to-30s late.** Root cause: the optional Silero **`--vad`** pass added in 4.6.0 (and kept in 4.6.1). VAD detects speech regions and transcribes each on a filtered timeline, then remaps the result back to real time — but whisper.cpp's per-region remap produces **overlapping / out-of-order cue timestamps**, and the detector also treats **music/ambience as speech**, so whisper hallucinates lines and stamps them at arbitrary offsets. Both present exactly as the reported symptom (subs too early or badly late). This is a known class of whisper.cpp VAD issues (see e.g. ggml-org/whisper.cpp #3207, #3250, #3711).
+- **Fix:** the transcription pipeline no longer passes `--vad`. It returns to the **proven 4.5.0 timing path** — `-dtw` (DTW token-level alignment) + `-ml`/`-sow` (word-boundary cues) — whose timings are anchored directly to the audio. DTW already keeps long-media drift small without VAD's remap hazards.
+- **Pipeline generation bumped (`g4`)** so subtitles produced under the 4.6.x VAD pipeline read as **stale** and offer **Regenerate** for a clean, correctly-timed track. The `g<N>` tag no longer carries the `v` (VAD) suffix.
+- The Silero VAD model stays installable from Admin → System (the availability badge still works), but it is **dormant** — the pipeline never uses it. Removing the now-misleading "reduces timing drift" component copy is a follow-up.
+- **Docs:** [docs/STT.md](docs/STT.md), [docs/GOTCHAS.md](docs/GOTCHAS.md).
+
 ## [4.6.1] — 2026-05-30
 - **Fixed: AI transcription quality dropped after 4.6.0.** The `-mc 0` (`--max-context 0`) flag added in 4.6.0 — meant to curb repetition loops — also strips the cross-window context whisper uses to decode ambiguous audio, which **drastically degraded transcription quality** (worst when combined with VAD's short speech segments: tiny chunks with zero shared context). Reverted: whisper now uses its default context again. **VAD remains the drift fix** — it re-anchors timing per speech region without removing decoding context, so timing-drift mitigation is preserved without the quality hit.
 - **Pipeline generation bumped (`g3`)** so subtitles generated under 4.6.0's bad `-mc 0` pipeline read as **stale** and offer **Regenerate** to produce a clean track.
