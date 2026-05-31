@@ -70,6 +70,16 @@ A source warrants generated subs when it has **no usable text subtitle**:
    equal. `default_language == ""` means "any text sub is acceptable" (only case
    1 / 2 trigger).
 
+> **The default language is unified, not STT-specific.** As of v4.14.0 the
+> preferred language lives in `settings.subtitles.default_language` (`_subs_cfg`),
+> and `_stt_cfg` re-sources its `default_language` from there — so the *one*
+> admin "Default Subtitle Language" (defaults to `eng`) drives generation, online
+> search, and automatic track selection alike. The old STT-only language picker
+> was removed from the AI card; `POST /api/admin/stt` no longer accepts
+> `default_language` (set it via `POST /api/admin/subtitles`). When that language
+> is `eng` (the unconfigured default), files lacking an English text track become
+> generation candidates during prep/overnight.
+
 > **Whisper translate is English-only.** Whisper can transcribe the spoken
 > language, and *translate to English* — nothing else. So if the admin sets a
 > non-English default (say Spanish) and the audio is English, the trigger fires

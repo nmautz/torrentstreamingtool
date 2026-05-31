@@ -522,6 +522,7 @@ class AppState:
     user_volume_before_bg: int = 100                      # snapshot of state.vlc_volume taken when bg first took over
     vlc_night_mode: bool = False                          # VLC compressor (dynamic-range) filter; persisted in library.json → settings.vlc_night_mode, seeded at lifespan startup. VLC must relaunch to apply (no runtime HTTP command for audio filters)
     vlc_night_mode_preset: str = "medium"                 # intensity preset (light|medium|max); persisted in library.json → settings.vlc_night_mode_preset, remembered independently of the on/off toggle
+    subtitle_default_language: str = "eng"                # preferred subtitle language (settings.subtitles.default_language; "" = Any), mirrored here for state_snapshot/UI defaults; seeded at lifespan, updated by the admin subtitles POST
     last_activity: float = 0.0                            # time.time() of last user-initiated interaction (drives scheduled-reboot idle check)
     prep_paused: bool = False                             # True ⇒ bulk stream-prep jobs hold (set by the non-admin Pause control / overnight window end)
     auto_prep_engaged: bool = False                       # True while the unified auto_prep_loop has prep running (overnight window OR idle trigger) — edge flag for resume/pause
@@ -630,6 +631,9 @@ def state_snapshot() -> dict:
         # picker stays in sync across clients.
         "vlc_night_mode": state.vlc_night_mode,
         "vlc_night_mode_preset": state.vlc_night_mode_preset,
+        # Admin's preferred subtitle language ("" = Any); the dashboard uses it to
+        # default the subtitle-search modal's language filter. See docs/API.md.
+        "subtitle_default_language": state.subtitle_default_language,
         "library_playlist_count": len(playlist),
         "library_current_index": cur_idx,
         "library_current_file": current,
@@ -2068,10 +2072,93 @@ async def _save_track_pref(
         pass
 
 
+async def _apply_subtitle_policy(lib: dict, profile_id: str, file_path: str) -> None:
+    """Decide and *explicitly* set the subtitle track for a freshly-started file
+    when the viewer has no saved per-file pick.
+
+    Resolves subs on/off (profile `subtitles_on` override → admin `on_by_default`).
+    Off ⇒ send `subtitle_track -1` so VLC can't sneak its auto/forced sub on (it
+    otherwise does, even when the UI says off — see docs/GOTCHAS.md). On ⇒ select,
+    in priority order:
+      (a) an embedded/loaded track in the preferred language (any track if the
+          admin chose "Any");
+      (b) an online auto-search download in the preferred language (if enabled);
+      (c) an AI sidecar (preferred language first), loaded + selected;
+      (d) otherwise leave subtitles off.
+    """
+    subs = _subs_cfg(lib)
+    prof = next((p for p in lib.get("profiles", []) if p["id"] == profile_id), {})
+    override = prof.get("subtitles_on")
+    subs_on = subs["on_by_default"] if override is None else bool(override)
+
+    if not subs_on:
+        state.current_subtitle_track = -1
+        await vlc("subtitle_track", val="-1")
+        return
+
+    pref = _canon_lang(subs["default_language"]) if subs["default_language"] else ""
+
+    # (a) a track VLC already knows about (embedded + auto-loaded sidecars).
+    tracks = await _vlc_subtitle_tracks()
+    if pref:
+        match = next((t for t in tracks if _canon_lang(t.get("language", "")) == pref), None)
+        if match:
+            state.current_subtitle_track = match["id"]
+            await vlc("subtitle_track", val=str(match["id"]))
+            return
+    elif tracks:
+        # "Any" preferred language — any embedded text sub is acceptable.
+        state.current_subtitle_track = tracks[0]["id"]
+        await vlc("subtitle_track", val=str(tracks[0]["id"]))
+        return
+
+    video = Path(file_path)
+
+    # (b) auto-search OpenSubtitles for the preferred language.
+    if subs["auto_search"] and pref and video.exists():
+        new_id = await _auto_fetch_subtitle(video, pref)
+        if new_id is not None:
+            return
+
+    # (c) AI sidecar fallback (subs the box transcribed/translated itself). The
+    #     language is encoded in the filename `<stem>.<lang>.ai[.<model>].srt`.
+    try:
+        ai = stt._list_ai_subs(video)
+    except Exception:
+        ai = []
+    if ai:
+        def _ai_lang(p: Path) -> str:
+            seg = p.stem[len(video.stem) + 1:].split(".")
+            return seg[0] if seg else ""
+        chosen = None
+        if pref:
+            chosen = next((p for p, _m in ai if _canon_lang(_ai_lang(p)) == pref), None)
+        chosen = chosen or ai[0][0]
+        await vlc("addsubtitle", val=str(Path(chosen).resolve()))
+        await asyncio.sleep(0.6)
+        after = await _vlc_subtitle_tracks()
+        if after:
+            new_id = max(t["id"] for t in after)
+            state.current_subtitle_track = new_id
+            await vlc("subtitle_track", val=str(new_id))
+            return
+
+    # (d) nothing usable — leave subtitles off.
+    state.current_subtitle_track = -1
+    await vlc("subtitle_track", val="-1")
+
+
 async def _apply_track_prefs(
     item_id: str, profile_id: str, file_path: str, delay: float = 2.0,
 ) -> None:
-    """Apply saved audio/subtitle track prefs for a file after a short delay."""
+    """Apply audio/subtitle tracks for a file after a short delay.
+
+    Audio + subtitle honour any saved per-file preference. With no saved subtitle
+    pick, the subtitle track falls through to the admin/profile default policy
+    (`_apply_subtitle_policy`), which tells VLC *explicitly* whether subs are on
+    or off — VLC otherwise auto-enables its first/forced sub even when subs should
+    be off. See docs/GOTCHAS.md.
+    """
     try:
         await asyncio.sleep(delay)
         lib = await get_library()
@@ -2088,8 +2175,11 @@ async def _apply_track_prefs(
             state.current_audio_track = audio
             await vlc("audio_track", val=str(audio))
         if subtitle is not None:
+            # Explicit per-file user pick wins over the default policy.
             state.current_subtitle_track = subtitle
             await vlc("subtitle_track", val=str(subtitle))
+        else:
+            await _apply_subtitle_policy(lib, profile_id, file_path)
         state.track_pref_applied_file = file_path
     except Exception:
         pass
@@ -2374,18 +2464,55 @@ def _idle_prep_cfg(lib: dict) -> dict:
     }
 
 
+def _subs_cfg(lib: dict) -> dict:
+    """Read settings.subtitles (the unified subtitle policy) with defaults.
+
+    `default_language` is the preferred subtitle language (3-letter canon code,
+    or "" = Any). One language drives all three subtitle features: the online-
+    search default, automatic track selection on playback, AND the AI-generation
+    trigger (`_stt_cfg` re-sources its language from here).
+
+    Unconfigured ⇒ "eng": when the `subtitles` block has never been written we
+    seed from the legacy `settings.stt.default_language` if it's set, else fall
+    back to English. Once the block exists its stored value is used verbatim, so
+    an admin who explicitly picks "Any" (saved as "") keeps it.
+
+    `on_by_default` is the admin default for subtitles on/off (a profile may
+    override via `profile["subtitles_on"]`). `auto_search` lets playback fetch a
+    preferred-language subtitle from OpenSubtitles when none is embedded.
+    """
+    settings = lib.get("settings", {}) or {}
+    cfg = settings.get("subtitles")
+    if not isinstance(cfg, dict) or "default_language" not in cfg:
+        # Never configured — migrate from the old STT language, else English.
+        legacy = str((settings.get("stt") or {}).get("default_language", "")).strip().lower()
+        default_language = _canon_lang(legacy) if legacy else "eng"
+        cfg = cfg if isinstance(cfg, dict) else {}
+    else:
+        raw = str(cfg.get("default_language", "")).strip().lower()
+        default_language = _canon_lang(raw) if raw else ""
+    return {
+        "default_language": default_language,
+        "on_by_default":    bool(cfg.get("on_by_default", False)),
+        "auto_search":      bool(cfg.get("auto_search", True)),
+    }
+
+
 def _stt_cfg(lib: dict) -> dict:
     """Read settings.stt (auto subtitle generation) with defaults.
 
-    `default_language` is a 3-letter code (or "" = any). When set, a source with
-    text subtitles but none in that language still triggers generation; when
-    blank, only a source with NO usable text subtitle does. `translate` adds an
-    English track for non-English audio (whisper can only translate TO English).
+    `default_language` is unified with the subtitle policy — it's sourced from
+    `_subs_cfg` (settings.subtitles), not a separate STT key — so the same
+    preferred language drives search, track selection, and generation. When set,
+    a source with text subtitles but none in that language still triggers
+    generation; when blank ("Any"), only a source with NO usable text subtitle
+    does. `translate` adds an English track for non-English audio (whisper can
+    only translate TO English).
     """
     cfg = (lib.get("settings", {}) or {}).get("stt") or {}
     return {
         "enabled":          bool(cfg.get("enabled", True)),
-        "default_language": str(cfg.get("default_language", "")).strip().lower(),
+        "default_language": _subs_cfg(lib)["default_language"],
         "translate":        bool(cfg.get("translate", True)),
     }
 
@@ -4221,9 +4348,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # the snapshot + any mid-session VLC relaunch (retry / restart) reflect them.
     # run.py / watchdog.py read the same settings independently at launch.
     try:
-        _nm = (await get_library()).get("settings", {})
+        _lib0 = await get_library()
+        _nm = _lib0.get("settings", {})
         state.vlc_night_mode = bool(_nm.get("vlc_night_mode", False))
         state.vlc_night_mode_preset = _night_mode_preset(_nm.get("vlc_night_mode_preset"))
+        state.subtitle_default_language = _subs_cfg(_lib0)["default_language"]
     except Exception:
         state.vlc_night_mode = False
         state.vlc_night_mode_preset = NIGHT_MODE_DEFAULT_PRESET
@@ -4433,8 +4562,23 @@ class IdlePrepReq(BaseModel):
 
 class SttConfigReq(BaseModel):
     enabled: bool = True
-    default_language: str = ""                 # 3-letter code, or "" = any text sub is acceptable
     translate: bool = True                     # also emit an English track for non-English audio
+
+
+class SubsConfigReq(BaseModel):
+    # Unified subtitle policy (settings.subtitles). `default_language` is the
+    # preferred subtitle language (3-letter code; "" = Any). `on_by_default` is
+    # the admin default for subs on/off (a profile may override). `auto_search`
+    # fetches a preferred-language sub online on playback when none is embedded.
+    default_language: str = "eng"
+    on_by_default: bool = False
+    auto_search: bool = True
+
+
+class ProfileSubsReq(BaseModel):
+    # Per-profile override of the admin subs-on/off default.
+    # None ⇒ inherit the admin default; True/False ⇒ force on/off for this profile.
+    subtitles_on: Optional[bool] = None
 
 
 class QbitLimitsReq(BaseModel):
@@ -4528,6 +4672,7 @@ async def list_profiles() -> JSONResponse:
             "auto_skip_intro":   bool(p.get("auto_skip_intro", False)),
             "auto_skip_credits": bool(p.get("auto_skip_credits", False)),
             "resume_mode":       p.get("resume_mode", "auto"),
+            "subtitles_on":      p.get("subtitles_on"),
         }
         for p in lib["profiles"]
     ]
@@ -6623,47 +6768,64 @@ async def vlc_next() -> JSONResponse:
     return JSONResponse({"ok": True}, status_code=202)
 
 
+def _parse_track_streams(vs: Optional[dict]) -> tuple[list[dict], list[dict]]:
+    """Parse a VLC status payload into (audio, subtitle) track lists.
+
+    Each entry is {id, label, language, codec}. `id` is the ES (elementary
+    stream) ID — the N in each 'Stream N' key, the same value VLC's
+    audio_track / subtitle_track commands take (a sequential counter would
+    silently fail). Shared by the /api/vlc/tracks endpoint and the playback
+    subtitle-default policy (`_apply_track_prefs`), so they agree on ES IDs.
+    """
+    audio: list[dict] = []
+    subtitle: list[dict] = []
+    if not vs:
+        return audio, subtitle
+    cat = vs.get("information", {}).get("category", {})
+    # Sort numerically by stream index so we process in file order.
+    stream_keys = sorted(
+        (k for k in cat if k.startswith("Stream")),
+        key=lambda k: int(k.split()[-1]) if k.split()[-1].isdigit() else 999,
+    )
+    audio_n = sub_n = 1   # display-only counters for fallback labels
+    for key in stream_keys:
+        try:
+            es_id = int(key.split()[-1])
+        except (ValueError, IndexError):
+            continue
+        s     = cat[key]
+        typ   = s.get("Type", "")
+        lang  = s.get("Language", s.get("language", ""))
+        codec = s.get("Codec", s.get("codec", ""))
+        if typ == "Audio":
+            audio.append({"id": es_id, "label": lang or codec or f"Track {audio_n}",
+                          "language": lang, "codec": codec})
+            audio_n += 1
+        elif typ == "Subtitle":
+            subtitle.append({"id": es_id, "label": lang or codec or f"Track {sub_n}",
+                             "language": lang, "codec": codec})
+            sub_n += 1
+    return audio, subtitle
+
+
+async def _vlc_subtitle_tracks() -> list[dict]:
+    """Live subtitle tracks VLC currently knows about (embedded + any loaded
+    sidecars), each {id, label, language, codec}. Excludes the synthetic 'Off'."""
+    _, subtitle = _parse_track_streams(await vlc_status())
+    return subtitle
+
+
 @app.get("/api/vlc/tracks")
 async def get_tracks() -> JSONResponse:
     """Return available audio/subtitle tracks and which are currently selected.
 
-    Track IDs are the actual ES (elementary stream) IDs from VLC — the number N
-    in each 'Stream N' key.  VLC's audio_track / subtitle_track commands accept
-    these same ES IDs, so sending the wrong sequential counter silently fails.
-    The <audiotrack> / <subtitletrack> XML values are also ES IDs, so they must
-    be compared against the same ES IDs for the 'current' highlight to work.
+    Track IDs are the actual ES (elementary stream) IDs from VLC. The
+    <audiotrack> / <subtitletrack> XML values are also ES IDs, so they must be
+    compared against the same ES IDs for the 'current' highlight to work.
     """
     vs = await vlc_status()
-
-    audio: list[dict] = []
-    subtitle: list[dict] = [{"id": -1, "label": "Off", "language": ""}]
-    audio_n = 1   # display-only counter for fallback labels
-    sub_n   = 1
-
-    if vs:
-        cat = vs.get("information", {}).get("category", {})
-        # Sort numerically by stream index so we process in file order
-        stream_keys = sorted(
-            (k for k in cat if k.startswith("Stream")),
-            key=lambda k: int(k.split()[-1]) if k.split()[-1].isdigit() else 999,
-        )
-        for key in stream_keys:
-            try:
-                es_id = int(key.split()[-1])   # the actual ES ID VLC uses
-            except (ValueError, IndexError):
-                continue
-            s     = cat[key]
-            typ   = s.get("Type", "")
-            lang  = s.get("Language", s.get("language", ""))
-            codec = s.get("Codec", s.get("codec", ""))
-            if typ == "Audio":
-                label = lang or codec or f"Track {audio_n}"
-                audio.append({"id": es_id, "label": label, "language": lang, "codec": codec})
-                audio_n += 1
-            elif typ == "Subtitle":
-                label = lang or codec or f"Track {sub_n}"
-                subtitle.append({"id": es_id, "label": label, "language": lang, "codec": codec})
-                sub_n += 1
+    audio, subs = _parse_track_streams(vs)
+    subtitle = [{"id": -1, "label": "Off", "language": ""}] + subs
 
     # VLC 3.x does not expose current track selection in its HTTP API
     # (no <audiotrack>/<subtitletrack> in status.xml). We track it ourselves.
@@ -6704,8 +6866,13 @@ async def set_subtitle_track(track_id: int) -> JSONResponse:
 @app.get("/api/subtitles/search")
 async def search_subtitles(query: str = "", lang: str = "") -> JSONResponse:
     """Find subtitles for the file VLC is playing — by movie hash (exact) and by
-    name (fallback). `query` overrides the auto-derived name; `lang` is an
-    optional 3-letter OpenSubtitles language id (blank = all languages)."""
+    name (fallback). `query` overrides the auto-derived name.
+
+    `lang` is the OpenSubtitles language filter: a 3-letter code, the literal
+    `"all"` for every language, or blank to fall back to the admin's preferred
+    subtitle language (`settings.subtitles.default_language`). Defaulting to the
+    preferred language is what surfaces English instead of burying it under a
+    handful of foreign hits. The effective filter is echoed back as `lang`."""
     video = await _current_playback_path()
     file_hash: Optional[str] = None
     file_size: Optional[int] = None
@@ -6717,13 +6884,81 @@ async def search_subtitles(query: str = "", lang: str = "") -> JSONResponse:
     q = query.strip() or (video.stem if video else "")
     if not file_hash and not q:
         raise HTTPException(409, "Nothing is playing and no search query was given.")
-    results = await _opensubtitles_search(file_hash, file_size, q, lang.strip())
-    return JSONResponse({"file": file_name, "hash": file_hash, "results": results})
+    sel = lang.strip().lower()
+    if sel == "all":
+        sel = ""                                       # explicit all-languages
+    elif not sel:
+        sel = _subs_cfg(await get_library())["default_language"]   # default → preferred
+    results = await _opensubtitles_search(file_hash, file_size, q, sel)
+    return JSONResponse({"file": file_name, "hash": file_hash, "lang": sel, "results": results})
 
 
 class SubtitleDownloadReq(BaseModel):
     download_link: str
     lang: str = ""
+
+
+async def _download_and_attach_subtitle(
+    video: Path, link: str, lang: str, save_pref: bool = True,
+) -> tuple[Optional[int], Optional[Path]]:
+    """Download an OpenSubtitles .gz/.srt, save it as a sidecar next to `video`,
+    load it into VLC via `addsubtitle`, and select the newly-added track.
+
+    Returns (selected ES ID, saved sidecar path). Shared by the manual download
+    endpoint (`save_pref=True` → persists the pick as a per-file preference) and
+    the playback auto-search (`save_pref=False` → the choice stays a live policy
+    decision, so a later profile/admin subs-off toggle still wins). Raises
+    httpx/OS errors for the caller to map; the auto-search wrapper swallows them.
+    """
+    headers = {"User-Agent": settings.opensubtitles_user_agent}
+    async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as c:
+        r = await c.get(link, headers=headers)
+    r.raise_for_status()
+    data = r.content
+    if data[:2] == b"\x1f\x8b":       # gzip magic — OpenSubtitles serves .gz
+        data = gzip.decompress(data)
+
+    safe = re.sub(r"[^a-zA-Z]", "", lang)[:5].lower() or "sub"
+    dest = video.with_name(f"{video.stem}.{safe}.srt")
+    n = 2
+    while dest.exists():
+        dest = video.with_name(f"{video.stem}.{safe}.{n}.srt")
+        n += 1
+    dest.write_bytes(data)
+
+    # Load into VLC, then select the newly added subtitle track (highest ES ID).
+    await vlc("addsubtitle", val=str(dest.resolve()))
+    await asyncio.sleep(0.6)
+    new_id: Optional[int] = None
+    subs = await _vlc_subtitle_tracks()
+    if subs:
+        new_id = max(s["id"] for s in subs)
+        state.current_subtitle_track = new_id
+        await vlc("subtitle_track", val=str(new_id))
+        if save_pref and state.library_item_id and state.library_profile_id and state.library_current_file:
+            asyncio.create_task(_save_track_pref(
+                state.library_item_id, state.library_profile_id,
+                state.library_current_file, subtitle=new_id,
+            ))
+    return new_id, dest
+
+
+async def _auto_fetch_subtitle(video: Path, lang: str) -> Optional[int]:
+    """Search OpenSubtitles for a `lang` subtitle for `video` and load the best
+    match into VLC. Best-effort: returns the selected ES ID or None. Used by the
+    playback subtitle-default policy when no preferred-language track is present."""
+    try:
+        file_size = video.stat().st_size
+        file_hash = await asyncio.to_thread(_opensubtitles_hash, video)
+        results = await _opensubtitles_search(file_hash, file_size, video.stem, lang)
+        results = [r for r in results if r.get("download_link")]
+        if not results:
+            return None
+        new_id, _ = await _download_and_attach_subtitle(
+            video, results[0]["download_link"], lang, save_pref=False)
+        return new_id
+    except Exception:
+        return None
 
 
 @app.post("/api/subtitles/download")
@@ -6737,52 +6972,13 @@ async def download_subtitle(req: SubtitleDownloadReq) -> JSONResponse:
     video = await _current_playback_path()
     if not video:
         raise HTTPException(409, "No file is currently playing.")
-
-    headers = {"User-Agent": settings.opensubtitles_user_agent}
     try:
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as c:
-            r = await c.get(link, headers=headers)
-        r.raise_for_status()
-        data = r.content
-        if data[:2] == b"\x1f\x8b":   # gzip magic — OpenSubtitles serves .gz
-            data = gzip.decompress(data)
+        new_id, dest = await _download_and_attach_subtitle(video, link, req.lang, save_pref=True)
+    except OSError as e:
+        raise HTTPException(500, f"Could not save subtitle file: {e}")
     except Exception as e:
         raise HTTPException(502, f"Subtitle download failed: {e}")
-
-    lang = re.sub(r"[^a-zA-Z]", "", req.lang)[:5].lower() or "sub"
-    dest = video.with_name(f"{video.stem}.{lang}.srt")
-    n = 2
-    while dest.exists():
-        dest = video.with_name(f"{video.stem}.{lang}.{n}.srt")
-        n += 1
-    try:
-        dest.write_bytes(data)
-    except Exception as e:
-        raise HTTPException(500, f"Could not save subtitle file: {e}")
-
-    # Load into VLC, then select the newly added subtitle track.
-    await vlc("addsubtitle", val=str(dest.resolve()))
-    await asyncio.sleep(0.6)
-    new_id: Optional[int] = None
-    vs = await vlc_status()
-    if vs:
-        cat = vs.get("information", {}).get("category", {})
-        sub_ids = [
-            int(k.split()[-1])
-            for k, v in cat.items()
-            if k.startswith("Stream") and k.split()[-1].isdigit()
-            and v.get("Type") == "Subtitle"
-        ]
-        if sub_ids:
-            new_id = max(sub_ids)
-            state.current_subtitle_track = new_id
-            await vlc("subtitle_track", val=str(new_id))
-            if state.library_item_id and state.library_profile_id and state.library_current_file:
-                asyncio.create_task(_save_track_pref(
-                    state.library_item_id, state.library_profile_id,
-                    state.library_current_file, subtitle=new_id,
-                ))
-    return JSONResponse({"ok": True, "saved": dest.name, "subtitle_track": new_id})
+    return JSONResponse({"ok": True, "saved": dest.name if dest else None, "subtitle_track": new_id})
 
 
 @app.get("/api/state")
@@ -7296,6 +7492,7 @@ async def login_with_pin(req: PinLoginReq) -> JSONResponse:
             "auto_skip_intro":   bool(p.get("auto_skip_intro", False)),
             "auto_skip_credits": bool(p.get("auto_skip_credits", False)),
             "resume_mode":       p.get("resume_mode", "auto"),
+            "subtitles_on":      p.get("subtitles_on"),
         }
         for p in lib["profiles"]
         if p.get("pin_hash") == h
@@ -7343,6 +7540,23 @@ async def set_profile_resume_mode(profile_id: str, req: ProfileResumeModeReq) ->
     profile["resume_mode"] = req.resume_mode
     await put_library(lib)
     return JSONResponse({"ok": True, "resume_mode": req.resume_mode})
+
+
+@app.post("/api/profiles/{profile_id}/subtitles")
+async def set_profile_subtitles(profile_id: str, req: ProfileSubsReq) -> JSONResponse:
+    """Per-profile override of the admin subs-on/off default. `subtitles_on` =
+    None ⇒ inherit the admin default; True/False ⇒ force on/off for this profile.
+    Applied on the next play by `_apply_subtitle_policy`."""
+    lib = await get_library()
+    profile = next((p for p in lib.get("profiles", []) if p["id"] == profile_id), None)
+    if not profile:
+        raise HTTPException(404, "Profile not found.")
+    if req.subtitles_on is None:
+        profile.pop("subtitles_on", None)
+    else:
+        profile["subtitles_on"] = bool(req.subtitles_on)
+    await put_library(lib)
+    return JSONResponse({"ok": True, "subtitles_on": profile.get("subtitles_on")})
 
 
 @app.get("/api/settings/max-volume")
@@ -8068,32 +8282,64 @@ async def admin_set_idle_prep(request: Request, body: IdlePrepReq) -> JSONRespon
     return JSONResponse({"ok": True, **cfg})
 
 
+def _subtitle_language_options() -> list[dict]:
+    """The 3-letter language options for the admin subtitle-language picker."""
+    return [{"code": c, "name": n}
+            for c, n in sorted(_LANG_NAMES.items(), key=lambda kv: kv[1])
+            if n and len(c) == 3]
+
+
 @app.get("/api/admin/stt")
 async def admin_get_stt(request: Request) -> JSONResponse:
     """Return the auto-subtitle (STT) config + whether the host can actually run
-    it, plus the language options for the default-language picker."""
+    it. The preferred language lives in the unified subtitle policy
+    (`/api/admin/subtitles`), so it's reported but not editable here."""
     _require_admin(request)
     cfg = _stt_cfg(await get_library())
     cfg["available"] = _stt_available()
-    cfg["languages"] = [{"code": c, "name": n}
-                        for c, n in sorted(_LANG_NAMES.items(), key=lambda kv: kv[1])
-                        if n and len(c) == 3]
     return JSONResponse(cfg)
 
 
 @app.post("/api/admin/stt")
 async def admin_set_stt(request: Request, body: SttConfigReq) -> JSONResponse:
-    """Save the STT config. `default_language` is canonicalized to a 3-letter
-    code; "" means any text subtitle satisfies (only sub-less files trigger)."""
+    """Save the STT config (enabled + translate). The preferred language is owned
+    by the unified subtitle policy (`POST /api/admin/subtitles`), not here."""
     _require_admin(request)
     lib = await get_library()
     s = lib.setdefault("settings", {}).setdefault("stt", {})
-    s["enabled"]          = bool(body.enabled)
-    s["default_language"] = _canon_lang(body.default_language) if body.default_language.strip() else ""
-    s["translate"]        = bool(body.translate)
+    s["enabled"]   = bool(body.enabled)
+    s["translate"] = bool(body.translate)
     await put_library(lib)
     cfg = _stt_cfg(lib)
     cfg["available"] = _stt_available()
+    return JSONResponse({"ok": True, **cfg})
+
+
+@app.get("/api/admin/subtitles")
+async def admin_get_subtitles(request: Request) -> JSONResponse:
+    """Return the unified subtitle policy (preferred language, subs on/off by
+    default, auto-search-online) + the language option list for the picker."""
+    _require_admin(request)
+    cfg = _subs_cfg(await get_library())
+    cfg["languages"] = _subtitle_language_options()
+    return JSONResponse(cfg)
+
+
+@app.post("/api/admin/subtitles")
+async def admin_set_subtitles(request: Request, body: SubsConfigReq) -> JSONResponse:
+    """Save the unified subtitle policy. `default_language` is canonicalized to a
+    3-letter code; "" means "Any" (no preferred language). This same language
+    also drives AI generation (`_stt_cfg` reads it) and the search default."""
+    _require_admin(request)
+    lib = await get_library()
+    s = lib.setdefault("settings", {}).setdefault("subtitles", {})
+    s["default_language"] = _canon_lang(body.default_language) if body.default_language.strip() else ""
+    s["on_by_default"]    = bool(body.on_by_default)
+    s["auto_search"]      = bool(body.auto_search)
+    await put_library(lib)
+    cfg = _subs_cfg(lib)
+    state.subtitle_default_language = cfg["default_language"]
+    await broadcast("state", state_snapshot())
     return JSONResponse({"ok": True, **cfg})
 
 

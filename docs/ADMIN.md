@@ -103,7 +103,7 @@ For each profile:
 
 ### 7. System
 
-Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Overnight Stream Prep**, **Idle Auto-Prep**, **Seeding & Bandwidth**, **Auto-Generated Subtitles**, and **Optional Components**.
+Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Overnight Stream Prep**, **Idle Auto-Prep**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
 
 #### System Health
 
@@ -206,9 +206,13 @@ Mechanics ([main.py](../main.py) `_run_component_install`): reuses `setup.py`'s 
 - `GET /api/admin/components` → per-component status + any in-flight install job.
 - `POST /api/admin/components/install` → `{component, model?}`; 400 for ffmpeg/whisper off-Windows.
 
+#### Subtitles
+
+The unified subtitle policy. Three controls: **Default Subtitle Language** (the *one* preferred language — drives online search, automatic track selection on playback, *and* AI generation; defaults to English when never configured, "Any" available), **Subtitles On By Default** (whether playback starts with subs on — off out-of-the-box; each viewer can override in their own Profile Settings), and **Auto-Search Online** (when subs are on and no preferred-language track is embedded, fetch one from OpenSubtitles on play, falling back to AI subs — on out-of-the-box). Persists to `library.json → settings.subtitles`. `GET`/`POST /api/admin/subtitles`. The per-viewer override is `POST /api/profiles/{id}/subtitles`. StreamLink sends VLC an **explicit** on/off every play so subtitles can't sneak on — see [GOTCHAS.md](GOTCHAS.md).
+
 #### Auto-Generated Subtitles
 
-STT (whisper.cpp) config — enable toggle, preferred default language, English-translation toggle, and an unavailable banner when whisper isn't installed. See [STT.md](STT.md). `GET`/`POST /api/admin/stt`.
+STT (whisper.cpp) config — enable toggle, English-translation toggle, and an unavailable banner when whisper isn't installed. The **target language is the unified one set in the Subtitles card** (no separate picker here anymore). See [STT.md](STT.md). `GET`/`POST /api/admin/stt`.
 
 ### 8. Updates
 

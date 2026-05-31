@@ -43,10 +43,15 @@ The only persistent server-side state. Lives at the project root. Accessed via `
       "enabled":      false,
       "idle_minutes": 30                // idle for this long ⇒ start; any activity pauses + discards in-flight; clamped 1–720
     },
+    "subtitles": {                      // unified subtitle policy (admin System tab)
+      "default_language": "eng",        // 3-letter code; "" = Any. Absent ⇒ "eng"
+      "on_by_default":    false,        // start playback with subs on? (profile may override)
+      "auto_search":      true          // fetch a preferred-lang sub online on play when none embedded
+    },
     "stt": {                            // AI auto-subtitle generation (admin System tab)
       "enabled":          true,
-      "default_language": "",           // 3-letter code; "" = only sub-less files trigger
       "translate":        true          // add an English track for non-English audio
+      // default_language is UNIFIED — sourced from settings.subtitles, not stored here
     },
     "autoupdate": {                     // dashboard auto-updater (admin Updates tab)
       "enabled":        false,
@@ -72,7 +77,8 @@ The only persistent server-side state. Lives at the project root. Accessed via `
   "elevated": true,                     // optional; can view admin_only items
   "auto_skip_intro":   true,            // optional; default false
   "auto_skip_credits": true,            // optional; default false
-  "resume_mode": "auto|prompt|off"      // default "auto"
+  "resume_mode": "auto|prompt|off",     // default "auto"
+  "subtitles_on": true                  // optional; per-profile override of settings.subtitles.on_by_default. absent/null = inherit; true/false = force
 }
 ```
 
@@ -96,12 +102,16 @@ PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "so
 
 `settings.autoupdate`: managed by the **Updates** admin tab (see [ADMIN.md §8](ADMIN.md)). Drives the `updater_loop` background task + the `/api/admin/updater/*` endpoints. `branch` is sanitised on read (`_autoupdate_cfg`): when `dev_mode` is false a non-canonical value snaps back to `main`; when `dev_mode` is true any structurally-valid branch name survives (so a developer can pin a feature branch). All branch operations route through `updater.branch_allowed(branch, allow_any=dev_mode)`. Lives under `settings` because the updater acts on the whole host install, not an individual viewer.
 
-`settings.stt`: managed by the **System** admin tab. Gates AI auto-subtitle generation (whisper.cpp). `default_language` is a 3-letter code (`_canon_lang`-normalized) — when set, a source lacking a text subtitle *in that language* triggers generation; `""` means only sources with no usable text sub at all do. `translate` adds an English-translated track for non-English audio. Read via `_stt_cfg`; consumed by `_needs_stt_subs` / `_ensure_stt_for`. Lives under `settings` because it applies to the host's media library, not an individual viewer. See [STT.md](STT.md).
+`settings.subtitles`: managed by the **System** admin tab's *Subtitles* card; read via `_subs_cfg`. The single source of truth for the preferred subtitle language. `default_language` is a 3-letter code (`_canon_lang`-normalized) or `""` (Any). **Migration / defaults:** if the `subtitles` block is absent it's seeded from the legacy `settings.stt.default_language` when that's set, else `"eng"` — so an unconfigured box defaults to English; once the block exists its value is used verbatim (so an admin who picks "Any" → `""` keeps it). `on_by_default` is whether playback starts with subs on (default false; a profile's `subtitles_on` overrides). `auto_search` lets playback fetch a preferred-language sub from OpenSubtitles when none is embedded (default true). This is the central subtitle setting: `_stt_cfg` re-sources its `default_language` from here, the search endpoint defaults to it, and `_apply_subtitle_policy` selects tracks by it.
+
+`settings.stt`: managed by the **System** admin tab's *Auto-Generated Subtitles (AI)* card. Gates AI auto-subtitle generation (whisper.cpp): `enabled` + `translate` (adds an English-translated track for non-English audio). The **preferred language is unified** — `_stt_cfg.default_language` is read from `settings.subtitles` (above), not stored here. Consumed by `_needs_stt_subs` / `_ensure_stt_for`. See [STT.md](STT.md).
 
 `resume_mode`:
 - `"auto"` (default) — immediately seek to saved position
 - `"prompt"` — start at beginning, show resume offer tile, user accepts via `/api/resume-now`
 - `"off"` — always start from beginning, no prompt
+
+`subtitles_on`: per-profile override of `settings.subtitles.on_by_default`. Absent/`null` ⇒ inherit the admin default; `true`/`false` ⇒ force subs on/off for this viewer. Set via `POST /api/profiles/{id}/subtitles`; read by `_apply_subtitle_policy` on each play.
 
 ## Library item
 

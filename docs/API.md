@@ -16,7 +16,7 @@ All endpoints are defined in `main.py`. SSE event stream is `/api/events`.
 Event types:
 | Event | When | Payload shape |
 |-------|------|---------------|
-| `state` | every 2 s; on any state change | full `state_snapshot()` ([main.py:292](../main.py#L292)). Includes `library_item_id` and the full ordered `library_playlist` (used by the TV→device Handoff to reconstruct the remaining tail), alongside `library_current_file` / `library_current_index` / `is_library_playback`, `jackett_ok` (last known indexer HTTP reachability), `download_idle_open` / `download_idle_configured` (idle/night download window state — see Download scheduling), and `sys_status` (host CPU/RAM/GPU/network health + `overall` ok\|degraded\|overloaded — drives the "host busy" perf banner) |
+| `state` | every 2 s; on any state change | full `state_snapshot()` ([main.py:292](../main.py#L292)). Includes `library_item_id` and the full ordered `library_playlist` (used by the TV→device Handoff to reconstruct the remaining tail), alongside `library_current_file` / `library_current_index` / `is_library_playback`, `jackett_ok` (last known indexer HTTP reachability), `download_idle_open` / `download_idle_configured` (idle/night download window state — see Download scheduling), and `sys_status` (host CPU/RAM/GPU/network health + `overall` ok\|degraded\|overloaded — drives the "host busy" perf banner), and `subtitle_default_language` (admin preferred subtitle language, "" = Any — defaults the search modal's language filter) |
 | `vpn_status` | VPN connect/disconnect transition | `{secure, status}` |
 | `jackett_status` | Jackett HTTP reachability transition (from `jackett_health_monitor`, ~20 s poll) | `{ok, url}` |
 | `stream_status` | stream pipeline phase transition | `{status, message, progress?, downloaded_mb?, total_mb?, dl_speed_bps?, ul_speed_bps?}` |
@@ -76,6 +76,7 @@ Up to 6 profiles. No passwords. Optional 4-digit PIN per profile.
 | POST | `/api/profiles/{id}/set-elevated` | `{elevated}` — admin only; grants view of `admin_only` items |
 | POST | `/api/profiles/{id}/auto-skip` | `{auto_skip_intro?, auto_skip_credits?}` |
 | POST | `/api/profiles/{id}/resume-mode` | `{resume_mode: "auto"|"prompt"|"off"}` |
+| POST | `/api/profiles/{id}/subtitles` | `{subtitles_on: bool|null}` — per-profile override of the admin subs-on/off default. `null` ⇒ inherit; stored as `profile.subtitles_on`. Applied on the next play by `_apply_subtitle_policy` |
 
 ## Library
 
@@ -122,8 +123,8 @@ Per-item download scheduling persists in `library.json → item.download` (`{mod
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/api/subtitles/search?query=…&lang=…` | Search by movie hash + name. Hash matches sorted first. `lang` is OpenSubtitles 3-letter id (blank = all) |
-| POST | `/api/subtitles/download` | `{download_link, lang}` — host must be `*.opensubtitles.org`. Downloads, gunzips, saves as `<stem>.<lang>.srt` next to the video, calls VLC `addsubtitle` + selects the new track (picks max ES ID after add) |
+| GET | `/api/subtitles/search?query=…&lang=…` | Search by movie hash + name. Hash matches sorted first. `lang` = OpenSubtitles 3-letter id, `all` for every language, or **blank → the admin preferred language** (`settings.subtitles.default_language`). The effective filter is echoed back as `lang`. Defaulting to the preferred language is what surfaces English instead of burying it |
+| POST | `/api/subtitles/download` | `{download_link, lang}` — host must be `*.opensubtitles.org`. Downloads, gunzips, saves as `<stem>.<lang>.srt` next to the video, calls VLC `addsubtitle` + selects the new track (picks max ES ID after add). Shares `_download_and_attach_subtitle` with the playback auto-search (which uses `save_pref=False`) |
 
 ## AI Subtitles (speech-to-text, whisper.cpp)
 
@@ -234,8 +235,10 @@ All require admin auth.
 | GET | `/api/admin/system-resources` | Live host health: `{cpu:{pct,status}, ram:{pct,used_gb,total_gb,status}, gpu:{util_pct,mem_pct,status}\|null, net:{up_mbps,down_mbps,status}, overall, updated_at, prep_active, prep_paused}` — each `status ∈ ok\|degraded\|overloaded`. `{}` until the first sample (~5 s after start). Sampled by `system_monitor_loop`; also rides in every `state` event as `sys_status`. Polled by the admin System Health card |
 | GET | `/api/admin/idle-prep` | `{enabled, idle_minutes, idle_now, paused, active}` — idle-triggered auto stream-prep config. `idle_now` = box is idle right now; `active` = prepping while idle right now |
 | POST | `/api/admin/idle-prep` | `{enabled, idle_minutes}` → saves to `library.json → settings.idle_prep`. Clamps `idle_minutes` to 1–720, resets the auto-prep edge flag. Drives the same `auto_prep_loop`: when the host has been idle (`_machine_in_use`) for `idle_minutes` it queues bulk HLS-prep for the whole un-prepped library, and on the first sign of activity calls `_pause_prep(kill=True)` — discarding the in-flight encode (restarts later, no mid-file checkpoint) |
-| GET | `/api/admin/stt` | `{enabled, default_language, translate, available, languages:[{code,name}]}` — AI auto-subtitle config + whether whisper.cpp is installed + the language-picker options |
-| POST | `/api/admin/stt` | `{enabled, default_language, translate}` → saves to `library.json → settings.stt`. `default_language` canonicalized to a 3-letter code ("" = any). When set, files lacking a sub in that language also get one generated. See [STT.md](STT.md) |
+| GET | `/api/admin/stt` | `{enabled, default_language, translate, available}` — AI auto-subtitle config + whether whisper.cpp is installed. `default_language` is read-only here (owned by `/api/admin/subtitles`) |
+| POST | `/api/admin/stt` | `{enabled, translate}` → saves to `library.json → settings.stt`. The preferred language is set via `/api/admin/subtitles`, not here. See [STT.md](STT.md) |
+| GET | `/api/admin/subtitles` | `{default_language, on_by_default, auto_search, languages:[{code,name}]}` — the unified subtitle policy + language-picker options. Unconfigured `default_language` ⇒ `eng` |
+| POST | `/api/admin/subtitles` | `{default_language, on_by_default, auto_search}` → saves to `library.json → settings.subtitles`. `default_language` canonicalized to a 3-letter code ("" = Any). This one language drives online search, automatic track selection, **and** AI generation (`_stt_cfg` re-sources it). Updates `state.subtitle_default_language` + broadcasts `state`. See [ADMIN.md](ADMIN.md) / [STT.md](STT.md) |
 | GET | `/api/admin/qbit-limits` | `{ok, ratio_enabled, ratio, dl_limit_bytes, up_limit_bytes}` — qBittorrent's **global** seeding-ratio limit + max up/down speeds (bytes/sec, 0 = unlimited), read live from qBit. `{ok:false}` when qBit is unreachable. See [ADMIN.md § Seeding & Bandwidth](ADMIN.md) |
 | POST | `/api/admin/qbit-limits` | `{ratio_enabled, ratio, dl_limit_bytes, up_limit_bytes}` → writes global limits to qBittorrent (`app/preferences` `max_ratio*` with `max_ratio_act=0` = pause/keep-files; `transfer/set{Download,Upload}Limit`). Ratio clamped 0–9998, speeds bytes/sec (0 = unlimited). Global (every torrent), persisted by qBit. 502 if qBit unreachable |
 | GET | `/api/admin/components` | Status of installable portable deps: `{components:{ffmpeg,fpcalc,whisper,whisper_model:{label,installed,path,installable,purpose,job?}}, platform, model_sizes, stt_available, nvenc}`. `nvenc` = an NVIDIA GPU is present (UI recommends a CUDA whisper build). `job` (when present) = `{status:"pending"\|"downloading"\|"done"\|"error", progress, error}`. Polled while an install runs |

@@ -367,6 +367,19 @@
         </select>
       </div>
 
+      <div class="flex items-center justify-between gap-3 bg-gray-800/60 px-4 py-3">
+        <div class="min-w-0">
+          <div class="text-sm font-bold text-gray-200 uppercase tracking-wide">Subtitles</div>
+          <div class="text-[11px] text-gray-500 mt-0.5">Start playback with subtitles on or off. Default follows the admin setting.</div>
+        </div>
+        <select id="psSubtitles" onchange="saveSubtitlesPref()"
+          class="bg-gray-700 text-gray-100 text-xs font-bold uppercase tracking-wide border-0 px-2 py-1.5 cursor-pointer focus:outline-none">
+          <option value="default">Default</option>
+          <option value="on">On</option>
+          <option value="off">Off</option>
+        </select>
+      </div>
+
       <!-- Divider: settings below this point are GLOBAL (apply to every profile,
            stored under library.json → settings, not under the profile). -->
       <div class="flex items-center gap-2 pt-2 pb-1 px-1 select-none">
@@ -908,6 +921,15 @@
           class="bg-indigo-700 hover:bg-indigo-600 text-white text-sm font-black uppercase tracking-wide px-5 py-2.5 transition-colors flex-shrink-0">
           Search
         </button>
+      </div>
+      <!-- Language filter — defaults to the admin's preferred language so English
+           (or the chosen language) surfaces instead of being buried. -->
+      <div class="mt-2 flex items-center gap-2">
+        <span class="text-[10px] font-bold uppercase tracking-widest text-gray-500">Language</span>
+        <select id="subSearchLang" onchange="runSubtitleSearch()"
+          class="bg-gray-800 text-gray-100 text-xs font-bold uppercase tracking-wide border-0 px-2 py-1.5 cursor-pointer focus:outline-none">
+          <option value="all">All languages</option>
+        </select>
       </div>
       <!-- AI / speech-to-text generation — only meaningful when the host has
            whisper.cpp installed (state.stt_available); hidden otherwise. -->
@@ -1875,6 +1897,10 @@ let hlsAvailable = true;
 // Auto-subtitle (whisper.cpp STT) availability — fetched from /api/state at
 // startup; gates the "Generate with AI" affordances in the subtitle menus.
 let sttAvailable = false;
+// Admin's preferred subtitle language ("" = Any), from /api/state. Defaults the
+// subtitle-search modal's language filter so English (or the chosen language)
+// surfaces instead of being buried under foreign hits.
+let subtitleDefaultLang = "eng";
 let activeTab    = "search";
 let libShowHidden = false;   // true = library shows hidden items instead of main list
 let selectedColor = "indigo";
@@ -2812,6 +2838,18 @@ async function saveResumeMode(){
   }
 }
 
+// Per-profile subtitle override: "default" (inherit admin), "on", or "off".
+// Sends null/true/false so the server stores or clears profile.subtitles_on.
+async function saveSubtitlesPref(){
+  if(!profile.id) return;
+  const v = document.getElementById("psSubtitles").value;
+  const subtitles_on = v === "on" ? true : (v === "off" ? false : null);
+  await fetch(`/api/profiles/${profile.id}/subtitles`,{
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({subtitles_on}),
+  }).catch(()=>{});
+}
+
 // ── Tabs ───────────────────────────────────────────────────────────────────
 function switchTab(tab){
   activeTab=tab;
@@ -2978,10 +3016,13 @@ async function openProfileSettings(){
     document.getElementById("psAutoSkipIntro").checked   = !!me.auto_skip_intro;
     document.getElementById("psAutoSkipCredits").checked = !!me.auto_skip_credits;
     document.getElementById("psResumeMode").value = me.resume_mode || "auto";
+    document.getElementById("psSubtitles").value =
+      me.subtitles_on === true ? "on" : (me.subtitles_on === false ? "off" : "default");
   }catch(_){
     document.getElementById("psAutoSkipIntro").checked = false;
     document.getElementById("psAutoSkipCredits").checked = false;
     document.getElementById("psResumeMode").value = "auto";
+    document.getElementById("psSubtitles").value = "default";
   }
   try{
     const r = await fetch("/api/settings/max-volume");
@@ -5488,12 +5529,39 @@ function stopTrackPoll(){
 
 // ── Subtitle search & download ──────────────────────────────────────────────
 let _subResults=[];
+// Common OpenSubtitles language codes for the search filter (3-letter ids).
+const SUB_SEARCH_LANGS=[
+  ["eng","English"],["spa","Spanish"],["fre","French"],["ger","German"],
+  ["ita","Italian"],["por","Portuguese"],["dut","Dutch"],["rus","Russian"],
+  ["jpn","Japanese"],["kor","Korean"],["chi","Chinese"],["ara","Arabic"],
+  ["hin","Hindi"],["tur","Turkish"],["pol","Polish"],["swe","Swedish"],
+];
+
+function _populateSubSearchLangs(){
+  const sel=document.getElementById("subSearchLang");
+  if(!sel || sel.dataset.populated) return;
+  for(const [code,name] of SUB_SEARCH_LANGS){
+    const o=document.createElement("option");
+    o.value=code; o.textContent=name;
+    sel.appendChild(o);
+  }
+  // Include the admin's preferred language even if it's outside the common list.
+  if(subtitleDefaultLang && !SUB_SEARCH_LANGS.some(l=>l[0]===subtitleDefaultLang)){
+    const o=document.createElement("option");
+    o.value=subtitleDefaultLang; o.textContent=subtitleDefaultLang.toUpperCase();
+    sel.appendChild(o);
+  }
+  sel.dataset.populated="1";
+}
 
 function openSubtitleModal(){
   document.getElementById("subtitleModal").classList.remove("hidden");
   document.getElementById("subSearchQuery").value="";
   document.getElementById("subModalFile").textContent="";
   document.getElementById("subGenRow").classList.toggle("hidden", !sttAvailable);
+  _populateSubSearchLangs();
+  // Default the filter to the admin's preferred language ("all" if Any).
+  document.getElementById("subSearchLang").value = subtitleDefaultLang || "all";
   runSubtitleSearch();
 }
 
@@ -5565,10 +5633,11 @@ function closeSubtitleModal(){
 
 async function runSubtitleSearch(){
   const q=document.getElementById("subSearchQuery").value.trim();
+  const lang=document.getElementById("subSearchLang")?.value || "";
   const box=document.getElementById("subResults");
   box.innerHTML='<p class="text-xs text-gray-600 uppercase tracking-widest text-center py-6">Searching…</p>';
   try{
-    const r=await fetch(`/api/subtitles/search?query=${encodeURIComponent(q)}`);
+    const r=await fetch(`/api/subtitles/search?query=${encodeURIComponent(q)}&lang=${encodeURIComponent(lang)}`);
     if(!r.ok){
       const e=await r.json().catch(()=>({}));
       box.innerHTML=`<p class="text-xs text-red-400 text-center py-6">${escHtml(e.detail||"Search failed.")}</p>`;
@@ -6948,6 +7017,7 @@ function connectSSE(){
       sttAvailable = d.stt_available;
       if(was !== sttAvailable && lp && lp.itemId){ try{ _lpRenderTrackRows(); }catch(_){} }
     }
+    if(typeof d.subtitle_default_language === "string") subtitleDefaultLang = d.subtitle_default_language;
     renderVpn(d.vpn_secure,d.vpn_status); renderPlayer(app);
     updateDlBadge(d.downloading_count||0);
     renderServerAttention(d);
@@ -7076,6 +7146,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
     hlsAvailable = !(d && d.hls_available === false);
     document.body.classList.toggle("no-hls", !hlsAvailable);
     sttAvailable = !!(d && d.stt_available === true);
+    if(d && typeof d.subtitle_default_language === "string") subtitleDefaultLang = d.subtitle_default_language;
   }).catch(()=>{});
 
   // Fetch the global max-volume cap so sliders are clamped correctly
@@ -7102,6 +7173,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.13.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.14.0</div>
 </body>
 </html>

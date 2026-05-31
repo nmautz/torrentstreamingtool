@@ -15,7 +15,7 @@ Metro UI throughout — flat tiles, no rounded corners, bold uppercase typograph
 | 56–73   | VPN-disconnected full-screen overlay (toggled by `renderVpn`) |
 | 75–116  | Profile PIN prompt modal (numpad, hidden keyboard input) |
 | 118–151 | Change PIN modal |
-| 153–218 | Profile settings modal (auto-skip toggles, resume mode, global max-volume, change-PIN button) |
+| 153–218 | Profile settings modal (auto-skip toggles, resume mode, per-profile subtitle on/off override, global max-volume, change-PIN button) |
 | 220–240 | Profile picker (full-screen on first load). Acts as a lock screen: a `body:has(#profilePicker:not(.hidden))` rule in `<style>` hides the player footer, skip/resume offers, and `#localPlayer` while the picker is open, so background playback chrome doesn't bleed through over the bottom-row login buttons on short mobile viewports. |
 | 242–274 | Profile add/delete modal |
 | 276–372 | Download modal (with metadata fields + file picker) |
@@ -23,7 +23,7 @@ Metro UI throughout — flat tiles, no rounded corners, bold uppercase typograph
 | 449–480 | Storage paths modal |
 | 482–550 | Episode page (full-screen, Netflix-style — hero / season tabs / episode cards / sticky action bar). Replaced the legacy bottom-sheet modal in Milestone 12 |
 | 552–575 | Stream file picker modal (`/api/stream/prepare` picker) |
-| 577–609 | Subtitle search modal |
+| 577–609 | Subtitle search modal (query box + **language filter** `#subSearchLang`, defaulting to `subtitleDefaultLang`, "All languages" option) |
 | 611–615 | Global toast (visible from any tab — sits under navbar). `top-24 sm:top-16` because the mobile navbar is two rows. |
 | 618–671 | Navbar (tabs, VPN pill, SSE dot, profile avatar, settings gear). On mobile portrait the row is `flex-wrap`: row 1 = logo + status/profile/settings, row 2 = the three tabs (each `flex-1`, full-width). `sm:` and up collapses back to a single row. `ml-auto` on the right cluster doubles as the desktop spacer. Tab order swaps via `order-3 sm:order-2` on tabs and `order-2 sm:order-3` on the right cluster. |
 | 677–750 | Search tab + Library tab containers |
@@ -99,6 +99,12 @@ A global on/off toggle reachable from **two** controls: the subtle moon button i
 The **intensity picker** (`#psNightModePreset`, Light/Medium/Max) is **settings-menu only** — deliberately not in the fullscreen UI. `setNightModePreset(preset)` POSTs `{preset}` only (so it never clobbers the on/off state) and persists independently of the toggle, so the chosen intensity is remembered the next time night mode is switched on. `NIGHT_PRESET_DESC` drives the one-line blurb under the picker.
 
 `renderNightMode()` (also called from the `state` SSE handler, since every snapshot carries `vlc_night_mode`) recolors the moon + fills its icon when active, checks the checkbox, and syncs the preset `<select>` + blurb. The server relaunches VLC to apply the filter (see [GOTCHAS.md](GOTCHAS.md)), so playback briefly re-buffers — these are intentionally low-prominence controls, not hot-path tiles (a preset change *while off* doesn't relaunch). `openProfileSettings` fetches the fresh `night_mode` + `preset` so both controls are correct even before the first SSE state event.
+
+### Subtitle defaults (per-profile override + search filter)
+
+Profile Settings has a **Subtitles** `<select>` (`#psSubtitles`: Default / On / Off). `openProfileSettings` seeds it from the profile's `subtitles_on` (`true`→On, `false`→Off, null→Default); `saveSubtitlesPref()` POSTs `/api/profiles/{id}/subtitles` with `subtitles_on` = `true`/`false`/`null`. This is just the *preference* — VLC track selection happens server-side in `_apply_subtitle_policy` on the next play (see [GOTCHAS.md](GOTCHAS.md)), so there's no live VLC call here.
+
+The **Find Subtitles** modal's language filter (`#subSearchLang`) is populated from a small common-language list plus `subtitleDefaultLang` (the admin preferred language, carried in every `state` snapshot as `subtitle_default_language`), and defaults to it (or "All languages" when Any). `runSubtitleSearch` passes the selected `lang` to `/api/subtitles/search`; the per-result download still uses each result's own language.
 
 ### Optimistic Play UI + in-flight guards
 

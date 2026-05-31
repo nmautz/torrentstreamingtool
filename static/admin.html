@@ -648,6 +648,52 @@
       </div>
     </div>
 
+    <!-- Subtitles policy (preferred language, on/off default, auto-search) -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Subtitles</h2>
+        <p class="text-xs text-gray-500 mt-0.5">One preferred language drives online search, automatic track selection on playback, and AI generation. StreamLink tells VLC explicitly whether subs are on or off, so they never sneak on when they should be off. Each user can override the on/off default in their own Profile Settings.</p>
+      </div>
+
+      <div class="px-5 py-4 border-b border-gray-800 space-y-1.5 max-w-md">
+        <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Default Subtitle Language</label>
+        <select id="subLang"
+          class="w-full bg-black border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-indigo-500 outline-none">
+          <option value="">Any (no preferred language)</option>
+        </select>
+        <p class="text-[10px] text-gray-600">Preferred when selecting a track and when searching online. Also the target for AI generation (whisper can only translate <em>to</em> English; other targets transcribe the spoken language).</p>
+      </div>
+
+      <div class="px-5 py-4 border-b border-gray-800 space-y-4">
+        <div class="flex items-center justify-between gap-3">
+          <div class="min-w-0">
+            <div class="text-sm font-bold text-gray-200">Subtitles On By Default</div>
+            <div class="text-[11px] text-gray-600 mt-0.5">Whether playback starts with subtitles on. Users can override per-profile.</div>
+          </div>
+          <button id="subOnDefaultBtn" onclick="toggleSubOnDefault()"
+            class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+                   bg-gray-800 border-gray-700 text-gray-400 hover:text-white">…</button>
+        </div>
+        <div class="flex items-center justify-between gap-3">
+          <div class="min-w-0">
+            <div class="text-sm font-bold text-gray-200">Auto-Search Online</div>
+            <div class="text-[11px] text-gray-600 mt-0.5">When subs are on and no preferred-language track is embedded, fetch one from OpenSubtitles on playback. Falls back to AI subs if the search comes up empty.</div>
+          </div>
+          <button id="subAutoSearchBtn" onclick="toggleSubAutoSearch()"
+            class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+                   bg-gray-800 border-gray-700 text-gray-400 hover:text-white">…</button>
+        </div>
+      </div>
+
+      <div class="px-5 py-4 flex items-center justify-between gap-3">
+        <div id="subStatus" class="text-[11px] text-gray-600 min-w-0"></div>
+        <button id="subSaveBtn" onclick="saveSubs()"
+          class="flex-shrink-0 bg-indigo-600 hover:bg-indigo-500 px-5 py-2.5 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">
+          Save
+        </button>
+      </div>
+    </div>
+
     <!-- Auto-generated subtitles (speech-to-text) -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
@@ -666,24 +712,14 @@
         whisper.cpp or its model isn't installed on this host — generation is disabled. Re-run <span class="font-mono">setup.py</span> to add it.
       </div>
 
-      <div class="px-5 py-4 border-b border-gray-800 grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <div class="space-y-1.5">
-          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Preferred Subtitle Language</label>
-          <select id="sttLang"
-            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-indigo-500 outline-none">
-            <option value="">Any (only generate when none at all)</option>
-          </select>
-          <p class="text-[10px] text-gray-600">When set, files lacking a subtitle in this language also get one generated. Note: whisper can only translate <em>to</em> English, so for other targets it transcribes the spoken language.</p>
-        </div>
-        <div class="space-y-1.5">
-          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">English Translation</label>
-          <select id="sttTranslate"
-            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-indigo-500 outline-none">
-            <option value="1">Add an English track for non-English audio</option>
-            <option value="0">Transcribe only (no translation)</option>
-          </select>
-          <p class="text-[10px] text-gray-600">Doubles transcription time for foreign-language audio.</p>
-        </div>
+      <div class="px-5 py-4 border-b border-gray-800 space-y-1.5 max-w-md">
+        <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">English Translation</label>
+        <select id="sttTranslate"
+          class="w-full bg-black border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-indigo-500 outline-none">
+          <option value="1">Add an English track for non-English audio</option>
+          <option value="0">Transcribe only (no translation)</option>
+        </select>
+        <p class="text-[10px] text-gray-600">Doubles transcription time for foreign-language audio. The target language is set above in the <span class="font-bold text-gray-400">Subtitles</span> card.</p>
       </div>
 
       <div class="px-5 py-4 flex items-center justify-between gap-3">
@@ -1040,7 +1076,7 @@ function switchTab(tab){
   if(tab==="skip")       loadSkipPanel();
   if(tab==="offline")    loadOfflineCache();
   if(tab==="background") loadBackgroundVideo();
-  if(tab==="system")   { loadScheduledReboot(); loadOvernightPrep(); loadIdlePrep(); loadQbitLimits(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
+  if(tab==="system")   { loadScheduledReboot(); loadOvernightPrep(); loadIdlePrep(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
   else                 { stopSysHealthPolling(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
@@ -1545,16 +1581,6 @@ async function loadStt(){
     const d = await r.json();
     _sttEnabled = !!d.enabled;
     _renderSttEnabled();
-    // Populate the language picker (server sends 3-letter code + display name).
-    const langSel = document.getElementById("sttLang");
-    if(langSel && langSel.options.length <= 1 && Array.isArray(d.languages)){
-      for(const l of d.languages){
-        const o = document.createElement("option");
-        o.value = l.code; o.textContent = l.name;
-        langSel.appendChild(o);
-      }
-    }
-    if(langSel) langSel.value = d.default_language || "";
     document.getElementById("sttTranslate").value = d.translate === false ? "0" : "1";
     document.getElementById("sttUnavailable").classList.toggle("hidden", !!d.available);
     const status = document.getElementById("sttStatus");
@@ -1578,9 +1604,8 @@ function toggleStt(){
 async function saveStt(){
   const btn = document.getElementById("sttSaveBtn");
   const body = {
-    enabled:          _sttEnabled,
-    default_language: document.getElementById("sttLang").value || "",
-    translate:        document.getElementById("sttTranslate").value !== "0",
+    enabled:   _sttEnabled,
+    translate: document.getElementById("sttTranslate").value !== "0",
   };
   btn.disabled = true;
   try{
@@ -1596,6 +1621,85 @@ async function saveStt(){
     }
     showToast(_sttEnabled ? "Subtitle generation saved." : "Subtitle generation disabled.");
     await loadStt();
+  }catch(_){
+    showToast("Save failed.", true);
+  }finally{
+    btn.disabled = false;
+  }
+}
+
+// ── Subtitles policy (preferred language + on/off default + auto-search) ────────
+let _subOnDefault = false;
+let _subAutoSearch = true;
+
+function _renderSubToggle(btn, on, onLabel, offLabel){
+  if(!btn) return;
+  if(on){
+    btn.textContent = onLabel;
+    btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-emerald-950 border-emerald-700 text-emerald-300 hover:bg-emerald-900";
+  } else {
+    btn.textContent = offLabel;
+    btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white";
+  }
+}
+
+function _renderSubToggles(){
+  _renderSubToggle(document.getElementById("subOnDefaultBtn"),  _subOnDefault,  "On", "Off");
+  _renderSubToggle(document.getElementById("subAutoSearchBtn"), _subAutoSearch, "Enabled", "Disabled");
+}
+
+async function loadSubs(){
+  try{
+    const r = await fetch("/api/admin/subtitles", {headers: authHeader()});
+    if(!r.ok) return;
+    const d = await r.json();
+    _subOnDefault  = !!d.on_by_default;
+    _subAutoSearch = d.auto_search !== false;
+    _renderSubToggles();
+    // Populate the language picker (server sends 3-letter code + display name).
+    const langSel = document.getElementById("subLang");
+    if(langSel && langSel.options.length <= 1 && Array.isArray(d.languages)){
+      for(const l of d.languages){
+        const o = document.createElement("option");
+        o.value = l.code; o.textContent = l.name;
+        langSel.appendChild(o);
+      }
+    }
+    if(langSel) langSel.value = d.default_language || "";
+    const status = document.getElementById("subStatus");
+    if(status){
+      const langTxt = d.default_language ? d.default_language.toUpperCase() : "Any language";
+      status.textContent = `${langTxt} · subs ${_subOnDefault ? "on" : "off"} by default · auto-search ${_subAutoSearch ? "on" : "off"}.`;
+    }
+  }catch(_){}
+}
+
+function toggleSubOnDefault(){ _subOnDefault = !_subOnDefault; _renderSubToggles(); }
+function toggleSubAutoSearch(){ _subAutoSearch = !_subAutoSearch; _renderSubToggles(); }
+
+async function saveSubs(){
+  const btn = document.getElementById("subSaveBtn");
+  const body = {
+    default_language: document.getElementById("subLang").value || "",
+    on_by_default:    _subOnDefault,
+    auto_search:      _subAutoSearch,
+  };
+  btn.disabled = true;
+  try{
+    const r = await fetch("/api/admin/subtitles",{
+      method:"POST",
+      headers:{...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify(body),
+    });
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      showToast(`Save failed: ${d.detail || r.status}`, true);
+      return;
+    }
+    showToast("Subtitle settings saved.");
+    await loadSubs();
+    // The AI card's status line echoes the preferred language — refresh it too.
+    loadStt();
   }catch(_){
     showToast("Save failed.", true);
   }finally{

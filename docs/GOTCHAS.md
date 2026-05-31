@@ -14,6 +14,12 @@ See `get_tracks()` ([main.py:2799](../main.py#L2799)) — `es_id = int(key.split
 
 `status.xml` / `status.json` don't include `<audiotrack>` or `<subtitletrack>` in VLC 3.x. We track it ourselves in `state.current_audio_track` / `state.current_subtitle_track`, reset to `-1` on every new `in_play`. The `POST /api/vlc/track/*` endpoints update this state.
 
+### VLC auto-enables subtitles — "off" must be sent explicitly, every play
+
+VLC turns on its first/forced subtitle track on its own when a file opens, so "subs off" in the UI was a lie unless we *told* VLC to turn them off. The subtitle-default policy (`_apply_subtitle_policy`, called from `_apply_track_prefs` on every play / prev / next / re-apply) therefore **always sends an explicit `subtitle_track`** — `-1` to disable, or a real ES ID to enable — it never leaves the choice to VLC. A saved per-file user pick (`file_progress[...].subtitle_track`) still wins; only when there's no saved pick does the policy run.
+
+The on/off decision is `profile["subtitles_on"]` (per-profile override) falling back to `settings.subtitles.on_by_default` (admin default, off out-of-the-box). When **on**, selection priority is: (a) an embedded/loaded track in the preferred language (`settings.subtitles.default_language`; any track if "Any") → (b) an OpenSubtitles auto-search download in that language (`auto_search`, on out-of-the-box) → (c) an AI sidecar (`stt._list_ai_subs`, preferred language first) loaded via `addsubtitle` → (d) otherwise off. Auto-search uses `save_pref=False` so it stays a *live* policy decision (a later profile/admin off-toggle still wins); the manual download endpoint persists the pick. The policy runs at the same ~3.5 s post-`in_play` delay as audio track prefs, so a brief sub flash before a forced-off file settles is possible and accepted.
+
 ### Absolute vs relative seek
 
 - Absolute: `val=N%` (percentage) or `val=Ns` (seconds). Our `/api/vlc/seek/to` uses `val=N%`

@@ -15,7 +15,7 @@
 | 263–291 | Admin auth (`_check_admin`, `_require_admin`, `_pin_hash`) |
 | 294–373 | qBittorrent client: `qreq`, `qbit_add_magnet`, `qbit_streaming_mode`, `qbit_info`, `qbit_files`, `qbit_delete`, `qbit_set_file_priority` |
 | 376–448 | VLC client: `vlc()`, `vlc_status`, `vlc_playlist_uri`, `uri_to_path` |
-| 450–552 | OpenSubtitles: `_opensubtitles_hash`, `_current_playback_path`, `_opensubtitles_search` |
+| 450–552 | OpenSubtitles: `_opensubtitles_hash`, `_current_playback_path`, `_opensubtitles_search`. Download/attach + playback auto-search helpers live with the routes: `_download_and_attach_subtitle`, `_auto_fetch_subtitle` |
 | 555–773 | VLC window control (Windows ctypes / macOS osascript / Linux xdotool): focus, fullscreen, minimize. Windows focus path first minimizes all non-VLC top-level windows so the player owns the screen on TV playback. |
 | 776–847 | VLC restart + `_retry_task` |
 | 793–940 | Utilities: `extract_hash`, `parse_season_episode`, `build_file_list`, `find_resume_hint` |
@@ -64,8 +64,9 @@
 | `downloading_count` | Driving the navbar download badge |
 | `play_when_ready_*` | "Auto-play when this item (or file) finishes downloading" |
 | `current_audio_track`, `current_subtitle_track` | VLC ES IDs — VLC 3.x doesn't expose these in status, so we track them server-side. Reset to -1 on new playback |
-| `track_pref_applied_file` | Last file for which saved audio/sub track prefs were applied (avoid double-applying) |
+| `track_pref_applied_file` | Last file for which audio/sub tracks were applied (avoid double-applying). The subtitle side runs the default policy (`_apply_subtitle_policy`) when no per-file pick is saved |
 | `vlc_time`, `vlc_duration`, `vlc_volume` | Sampled by `stat_broadcaster` every 2 s |
+| `subtitle_default_language` | Admin preferred subtitle language ("" = Any), mirrored from `settings.subtitles.default_language` (`_subs_cfg`) for `state_snapshot` / UI defaults. Seeded at lifespan, updated by `POST /api/admin/subtitles` |
 | `vlc_night_mode`, `vlc_night_mode_preset` | Night mode (VLC `compressor` audio filter) on/off + intensity preset (`light`\|`medium`\|`max`). Persisted in `library.json → settings.vlc_night_mode` / `vlc_night_mode_preset` (preset remembered independently of on/off), seeded at lifespan startup, read by `_restart_vlc_process` to append `NIGHT_MODE_PRESETS[preset]`. Changing either relaunches VLC (`_apply_night_mode`) — no runtime audio-filter command exists. See [GOTCHAS.md](GOTCHAS.md) |
 | `prepare_hash` | Torrent added by `/api/stream/prepare` pending user file selection — also cleaned up by `/api/stop` |
 | `skip_offer`, `skip_offer_file` | Current intro/credits skip offer (or `#intro-done` / `#credits-done` marker) |
@@ -181,6 +182,7 @@ The legacy `print("[offline] …")` calls in the NVENC probe (`_has_nvenc`) pred
 - Volume scale: VLC uses 0–512 (256 = 100 %). Our API uses 0–200 (100 = normal). Conversion: `raw = volume / 100 * 256`.
 - Pre-roll volume: when sending `in_play`, we send `volume` first so VLC's default doesn't blast for half a second.
 - VLC 3.x quirk: `audiotrack` / `subtitletrack` are not in the XML response. We track them ourselves in `state.current_audio_track` / `current_subtitle_track`, reset on each new playback.
+- **Subtitle default policy**: VLC auto-enables a sub when a file opens, so `_apply_track_prefs` → `_apply_subtitle_policy` always sends an **explicit** `subtitle_track` on every play/prev/next (`-1` off, or a chosen ES ID on). On = preferred-language track → online auto-search (`_auto_fetch_subtitle`) → AI sidecar → off. Decision = `profile.subtitles_on` (override) ?? `settings.subtitles.on_by_default`. Track lists come from `_vlc_subtitle_tracks` (factored out of `/api/vlc/tracks`). See [GOTCHAS.md](GOTCHAS.md).
 - **Night mode** (`compressor` audio filter, 3 intensity presets): launch-only — no runtime HTTP command adds an audio filter. `_apply_night_mode` snapshots the playing file + position, relaunches VLC via `_restart_vlc_process` (which appends `NIGHT_MODE_PRESETS[state.vlc_night_mode_preset]` when `state.vlc_night_mode`), then replays + seeks back + re-applies track prefs. The same presets dict is duplicated in `run.py`/`watchdog.py` (boot / crash recovery), gated on `library.json → settings.vlc_night_mode` + `vlc_night_mode_preset`. The preset is remembered independently of on/off; a preset change while off just persists. See [GOTCHAS.md](GOTCHAS.md).
 
 ## See also
