@@ -253,9 +253,9 @@ are **hold-to-activate** (`_holdStart(this, handoffToDevice, event)` + the
 `.hold-btn` 0.5 s progress fill, same as Stop) so an accidental tap can't pull
 playback off the TV — a short tap does nothing.
 
-**Prep gating.** The button is greyed (`.handoff-disabled`) with a "Not prepped
-for on-device streaming" note when the current file isn't stream-ready (footer:
-via `title`; fullscreen tile: the `#fcHandoffNote` sub-label). Readiness is
+**Prep gating (footer button).** The footer **Device** button is greyed
+(`.handoff-disabled`) with a "Not prepped for on-device streaming" note (via
+`title`) when the current file isn't stream-ready. Readiness is
 `_handoffReadyState(s)` → `true | false | null`: it reads `prepFileState` first
 (instant when the file was prepped via the picker / prep-all), else the resolved
 result of `_maybeRefreshHandoffReady(s)`, which fetches
@@ -264,6 +264,22 @@ result of `_maybeRefreshHandoffReady(s)`, which fetches
 toast); `null` (unknown) stays clickable to avoid false-blocking. The async
 result is cached in `app._handoffReady` / `app._handoffReadyFile` (guarded by
 `app._handoffInflightFile`).
+
+**Fullscreen To-Device tile (`#fcHandoffBtn`) — hold-to-prep.** Rather than just
+greying when not prepped, the fullscreen tile invites prepping in place.
+`_renderFcHandoff(s)` (called from `renderPlayer` and the prep poll loop) paints
+its `#fcHandoffLabel` / `#fcHandoffNote` / `#fcHandoffBar` for four states:
+**ready** ("Play To Device"), **not-ready** ("Prep for Device?", `.handoff-prep`),
+**prepping** ("Prepping 42%", `.handoff-busy` + the `#fcHandoffBar` fill from
+`app._fcPrepPct`; an indeterminate "Prepping…" when a prep started elsewhere owns
+the job), and **unknown / macOS-no-HLS** (neutral, or the legacy greyed "Not
+prepped" note). `fcDeviceTileHold(btn)` dispatches the hold: ready/unknown →
+`handoffToDevice`; known-not-ready → `prepCurrentForDevice()`, which POSTs
+`/offline-prepare {bulk:false}` (interactive, so it starts **while VLC keeps
+playing** — the TV is *not* stopped), polls `/offline-job/{id}` for progress, and
+`_finishFcPrep` flips it to "Play To Device". The first prep in a session still
+shows `confirmStreamPrepWarning()`. State lives in `app._fcPrepFile` /
+`app._fcPrepPct`.
 
 `lpHandoffToVlc(btn)` is the reverse — it pushes the on-device play back onto the
 TV. It captures the local `<video>` position + remaining playlist tail, calls

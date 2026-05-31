@@ -407,15 +407,26 @@ tile are shown only then. Both are **hold-to-activate** (0.5 s `.hold-btn` fill,
 same as Stop) so an accidental tap can't pull playback off the TV. Guarded by
 `withInflight("handoff")`.
 
-The button is **prep-gated**: it greys out (`.handoff-disabled`) with a "Not
-prepped for on-device streaming" note when the current VLC file has no
+The **footer Device button** is **prep-gated**: it greys out (`.handoff-disabled`)
+with a "Not prepped for on-device streaming" note when the current VLC file has no
 `.offline_cache` MP4 and isn't Safari-native — otherwise the handoff would stop
 the TV and sit in a long transcode. `_handoffReadyState` resolves readiness from
 `prepFileState` (instant) or a per-file `GET /prep-status` check
 (`_maybeRefreshHandoffReady`); it flips to active automatically once the file is
 prepped (episode-picker Prep or a card's Prep for Streaming). Tapping while not
-prepped shows a toast instead of acting. See [FRONTEND.md](FRONTEND.md) for the
-readiness state machine.
+prepped shows a toast instead of acting.
+
+The **fullscreen To-Device tile** (`#fcHandoffBtn`) is richer — instead of greying
+when not prepped, it offers **hold-to-prep in place**. `_renderFcHandoff(s)` paints
+four states: **ready** ("Play To Device", hold → `handoffToDevice`); **not-ready**
+("Prep for Device?", hold → `prepCurrentForDevice`); **prepping** ("Prepping 42%"
+with a `#fcHandoffBar` fill, driven by `app._fcPrepPct`); and **unknown/macOS**
+(neutral, or the old greyed "Not prepped" note when HLS is unavailable).
+`fcDeviceTileHold` is the hold dispatcher. `prepCurrentForDevice` POSTs
+`/offline-prepare {bulk:false}` (interactive — bypasses the global pause gate and
+the idle-prep kill so the encode starts **while VLC keeps playing the TV**), polls
+`/offline-job/{id}` for progress, then `_finishFcPrep` flips the tile to
+"Play To Device". See [FRONTEND.md](FRONTEND.md) for the readiness state machine.
 
 ### 7. Handoff to VLC (device → TV)
 

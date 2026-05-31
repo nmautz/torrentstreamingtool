@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.15.0] — 2026-05-31
+- **New: prep-to-device straight from the fullscreen player.** When a library file playing on the TV isn't yet prepped for on-device streaming, the fullscreen **To Device** tile no longer just greys out — it asks **"Prep for Device?"**. **Hold** it and the HLS encode starts immediately **while VLC keeps playing** (the TV is *not* stopped). The tile then shows live progress (**"Prepping 42%"** with a fill bar), and once the bundle is ready it flips to **"Play To Device"** — hold again to resume on this device, time-synced, stopping the TV. Previously you had to leave the player, open the episode picker, and Prep the row by hand before any handoff was possible.
+  - The hold gesture is the trigger; the once-per-session CPU-lag warning still appears the first time. Prep runs as an **interactive** job (bypasses the global prep-pause gate and the idle-prep activity kill) so it genuinely starts while you watch.
+  - A prep kicked off elsewhere (episode picker / Prep-for-Streaming) is reflected on the tile as an indeterminate **"Prepping…"**, flipping to **"Play To Device"** when it finishes.
+  - macOS hosts (no HLS) keep the old greyed **"Not prepped"** tile; the footer **Device** button is unchanged.
+- **Frontend:** new `_renderFcHandoff` (tile state machine, called from `renderPlayer` + the prep poll), `fcDeviceTileHold` (hold dispatcher), `prepCurrentForDevice` (interactive prep + progress polling), `_finishFcPrep`. New `app._fcPrepFile` / `app._fcPrepPct` state and `#fcHandoffLabel` / `#fcHandoffBar` elements.
+- **Docs:** [docs/STREAMING.md](docs/STREAMING.md), [docs/FRONTEND.md](docs/FRONTEND.md).
+
 ## [4.14.0] — 2026-05-31
 - **New: unified subtitle policy + explicit VLC enforcement.** Fixes three long-standing subtitle problems: online search burying English, no control over which language/track is auto-selected, and VLC turning subtitles **on** even when the UI said off.
   - **Admin → System → Subtitles** (new card): **Default Subtitle Language** (one language drives online search, automatic track selection, *and* AI generation — defaults to English when unconfigured), **Subtitles On By Default** (off out-of-the-box), and **Auto-Search Online** (on out-of-the-box). The AI card's old "Preferred Subtitle Language" picker moved here (now unified).
