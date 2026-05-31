@@ -6197,6 +6197,13 @@ async function _lpLoadIndex(seekTo, forceAudioIdx) {
       // trigger needless aborts/retries. The server blocks up to ~40 s, so give
       // the client headroom past that. Bundles are instant, so leave them default.
       fragLoadingTimeOut: lp.live ? 60000 : 20000,
+      // Start LOADING at the resume/seek position. Without this hls.js fetches
+      // segment 0 first (its VOD default) before the resume seek lands — which the
+      // server reads as a far-backward seek and restarts the encoder at 0, then
+      // back to the resume segment: a thrash that never produces playable buffer.
+      // Pinning startPosition makes hls.js request the resume segment directly so
+      // the encoder (already started there) just feeds it. (Bundle path: default.)
+      startPosition: lp.live ? Math.max(0, lp.resumeSec || 0) : -1,
     });
     lp.hls = hls;
     hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
@@ -7211,6 +7218,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.0.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.0.1</div>
 </body>
 </html>

@@ -1,5 +1,8 @@
 # Changelog
 
+## [5.0.1] — 2026-05-31
+- **Fix: live (instant-start) playback never started when resuming.** hls.js fetches segment 0 first on a VOD playlist (before the resume seek lands), which the live server read as a far-backward seek and used to restart the just-in-time encoder at 0, then back to the resume point — a thrash that produced no playable buffer. The player now pins hls.js `startPosition` to the resume position in live mode, so it requests the resume segment directly and the encoder (already started there) just feeds it. See [docs/GOTCHAS.md](docs/GOTCHAS.md).
+
 ## [5.0.0] — 2026-05-31
 - **New: instant on-device playback (just-in-time streaming).** Playing a file that hasn't been prepped for streaming no longer blocks on a whole-file encode ("Building stream… 42%"). Un-prepped files now stream **live**: playback starts at the playhead within seconds, and scrubbing to a part that isn't generated yet shows the browser's normal buffering spinner while the server generates that part and resumes there — exactly like a real streaming service. Fully-prepped files are unchanged (they keep the Auto/720p/480p quality menu and instant audio/subtitle switching).
   - **What live mode does:** a full-length playlist is predicted from the file's duration (so the scrubber and seek-anywhere work immediately), and a single transcode follows the playhead, regenerating on a seek. Single video quality (no quality menu), one audio track muxed in; **switching audio** re-starts the stream at the current spot (a brief rebuffer). Subtitles are pre-extracted and stay instant. Skip-intro/credits and resume position work exactly as before.

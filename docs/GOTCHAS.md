@@ -384,6 +384,19 @@ which is exactly the UX we want. The same rule covers `init.mp4` and the
 `sub_<i>.vtt` sidecars. If you ever "optimize" by returning early when a segment
 isn't ready, you'll reintroduce hard playback failures on every cold seek.
 
+### Live resume MUST pin hls.js `startPosition` — else the encoder thrashes
+
+hls.js on a VOD playlist fetches **segment 0 first** (its default start), *before*
+a resume seek lands. In live mode that first `seg_00000` request hits a server
+encoder started at the resume segment (say 22) and reads as a far-backward seek →
+`_live_ensure_encoder` restarts the encoder at 0; the resume seek then asks for
+seg 22 → restart back to 22 → thrash, and no stable buffer is ever produced (the
+exact "it never plays anything" failure). Fix: the hls.js config sets
+`startPosition: lp.resumeSec` for live so hls.js requests the resume segment
+directly and the already-started encoder just feeds it. Don't drop it, and if you
+ever add another player engine, give it the same start-at-position treatment
+(Safari native uses the `loadedmetadata` `currentTime` seek instead).
+
 ### Live timeline: `-ss` + `-output_ts_offset`, NOT `-copyts`, keeps segments interchangeable
 
 Live segments come from a single ffmpeg session that can be **restarted at any
