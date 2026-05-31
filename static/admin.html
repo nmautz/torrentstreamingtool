@@ -594,6 +594,60 @@
       </div>
     </div>
 
+    <!-- qBittorrent seeding & bandwidth limits -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Seeding &amp; Bandwidth</h2>
+          <p class="text-xs text-gray-500 mt-0.5">Global qBittorrent limits — apply to every torrent. Stop seeding once a share ratio is reached (files stay on disk), and cap up/down speeds so torrents don't saturate the connection.</p>
+        </div>
+        <span id="qbOffline" class="hidden flex-shrink-0 text-[10px] font-bold uppercase tracking-wide px-2 py-1 border border-amber-700 bg-amber-950/40 text-amber-300">qBit offline</span>
+      </div>
+
+      <div class="px-5 py-4 border-b border-gray-800 space-y-4">
+        <div class="flex items-center justify-between gap-3">
+          <div class="min-w-0">
+            <div class="text-sm font-bold text-gray-200">Stop Seeding at Ratio</div>
+            <div class="text-[11px] text-gray-600 mt-0.5">e.g. a 1.0 ratio stops a 10 GB show after it has uploaded 10 GB.</div>
+          </div>
+          <button id="qbRatioBtn" onclick="toggleQbRatio()"
+            class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+                   bg-gray-800 border-gray-700 text-gray-400 hover:text-white">
+            …
+          </button>
+        </div>
+        <div class="space-y-1.5 max-w-[12rem]">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Share Ratio</label>
+          <input id="qbRatio" type="number" min="0" max="9998" step="0.1" value="1.0"
+            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none"/>
+          <p class="text-[10px] text-gray-600">Uploaded ÷ downloaded. Ignored while the toggle is off.</p>
+        </div>
+      </div>
+
+      <div class="px-5 py-4 border-b border-gray-800 grid grid-cols-1 sm:grid-cols-2 gap-4">
+        <div class="space-y-1.5">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Max Upload Speed (MiB/s)</label>
+          <input id="qbUp" type="number" min="0" step="0.1" value="0"
+            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none"/>
+          <p class="text-[10px] text-gray-600">0 = unlimited.</p>
+        </div>
+        <div class="space-y-1.5">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Max Download Speed (MiB/s)</label>
+          <input id="qbDown" type="number" min="0" step="0.1" value="0"
+            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none"/>
+          <p class="text-[10px] text-gray-600">0 = unlimited.</p>
+        </div>
+      </div>
+
+      <div class="px-5 py-4 flex items-center justify-between gap-3">
+        <div id="qbStatus" class="text-[11px] text-gray-600 min-w-0"></div>
+        <button id="qbSaveBtn" onclick="saveQbitLimits()"
+          class="flex-shrink-0 bg-indigo-600 hover:bg-indigo-500 px-5 py-2.5 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">
+          Save
+        </button>
+      </div>
+    </div>
+
     <!-- Auto-generated subtitles (speech-to-text) -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
@@ -986,7 +1040,7 @@ function switchTab(tab){
   if(tab==="skip")       loadSkipPanel();
   if(tab==="offline")    loadOfflineCache();
   if(tab==="background") loadBackgroundVideo();
-  if(tab==="system")   { loadScheduledReboot(); loadOvernightPrep(); loadIdlePrep(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
+  if(tab==="system")   { loadScheduledReboot(); loadOvernightPrep(); loadIdlePrep(); loadQbitLimits(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
   else                 { stopSysHealthPolling(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
@@ -1381,6 +1435,87 @@ async function saveIdlePrep(){
     }
     showToast(_ipEnabled ? "Idle auto-prep saved." : "Idle auto-prep disabled.");
     await loadIdlePrep();
+  }catch(_){
+    showToast("Save failed.", true);
+  }finally{
+    btn.disabled = false;
+  }
+}
+
+// ── qBittorrent Seeding & Bandwidth ────────────────────────────────────────────
+const _QB_MIB = 1024 * 1024;   // MiB/s ⇄ bytes/s (matches qBit's own MiB display)
+let _qbRatioOn = false;
+
+function _renderQbRatio(){
+  const btn = document.getElementById("qbRatioBtn");
+  if(!btn) return;
+  if(_qbRatioOn){
+    btn.textContent = "Enabled";
+    btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-emerald-950 border-emerald-700 text-emerald-300 hover:bg-emerald-900";
+  } else {
+    btn.textContent = "Disabled";
+    btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white";
+  }
+}
+
+// bytes/s → MiB/s for the input box: trim to at most 3 decimals, drop trailing zeros.
+function _bytesToMib(b){
+  if(!b || b <= 0) return "0";
+  return String(Math.round((b / _QB_MIB) * 1000) / 1000);
+}
+
+async function loadQbitLimits(){
+  try{
+    const r = await fetch("/api/admin/qbit-limits", {headers: authHeader()});
+    if(!r.ok) return;
+    const d = await r.json();
+    const offline = document.getElementById("qbOffline");
+    const status  = document.getElementById("qbStatus");
+    if(!d.ok){
+      offline.classList.remove("hidden");
+      status.textContent = "qBittorrent isn't reachable — start it, then Refresh the page.";
+      return;
+    }
+    offline.classList.add("hidden");
+    _qbRatioOn = !!d.ratio_enabled;
+    _renderQbRatio();
+    document.getElementById("qbRatio").value = (d.ratio ?? 1.0);
+    document.getElementById("qbUp").value     = _bytesToMib(d.up_limit_bytes);
+    document.getElementById("qbDown").value   = _bytesToMib(d.dl_limit_bytes);
+    const up = d.up_limit_bytes ? `${_bytesToMib(d.up_limit_bytes)} MiB/s up` : "unlimited up";
+    const dn = d.dl_limit_bytes ? `${_bytesToMib(d.dl_limit_bytes)} MiB/s down` : "unlimited down";
+    const ratio = d.ratio_enabled ? `stop seeding at ${d.ratio}` : "seed forever";
+    status.textContent = `${ratio} · ${up} · ${dn}`;
+  }catch(_){}
+}
+
+function toggleQbRatio(){
+  _qbRatioOn = !_qbRatioOn;
+  _renderQbRatio();
+}
+
+async function saveQbitLimits(){
+  const btn = document.getElementById("qbSaveBtn");
+  const body = {
+    ratio_enabled:  _qbRatioOn,
+    ratio:          Math.max(0, parseFloat(document.getElementById("qbRatio").value) || 0),
+    up_limit_bytes:   Math.max(0, Math.round((parseFloat(document.getElementById("qbUp").value)   || 0) * _QB_MIB)),
+    dl_limit_bytes:   Math.max(0, Math.round((parseFloat(document.getElementById("qbDown").value) || 0) * _QB_MIB)),
+  };
+  btn.disabled = true;
+  try{
+    const r = await fetch("/api/admin/qbit-limits",{
+      method:"POST",
+      headers:{...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify(body),
+    });
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      showToast(`Save failed: ${d.detail || r.status}`, true);
+      return;
+    }
+    showToast("Seeding & bandwidth limits saved.");
+    await loadQbitLimits();
   }catch(_){
     showToast("Save failed.", true);
   }finally{

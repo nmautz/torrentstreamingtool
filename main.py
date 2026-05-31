@@ -332,7 +332,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "4.4.0"
+UI_VERSION = "4.11.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -723,6 +723,68 @@ async def qbit_resume(h: str) -> None:
     r = await qreq("POST", "/api/v2/torrents/resume", data={"hashes": h})
     if r is None or r.status_code == 404:
         await qreq("POST", "/api/v2/torrents/start", data={"hashes": h})
+
+
+async def qbit_get_preferences() -> Optional[dict]:
+    """Read qBittorrent's global application preferences (JSON dict), or None."""
+    r = await qreq("GET", "/api/v2/app/preferences")
+    if r and r.status_code == 200:
+        try:
+            return r.json()
+        except Exception:
+            return None
+    return None
+
+
+async def qbit_set_preferences(prefs: dict) -> bool:
+    """Merge a partial set of global preferences into qBittorrent. qBit persists
+    these in its own config, so they survive a qBit (or host) restart."""
+    r = await qreq("POST", "/api/v2/app/setPreferences",
+                   data={"json": json.dumps(prefs)})
+    return bool(r and 200 <= r.status_code < 300)
+
+
+async def qbit_get_speed_limit(kind: str) -> int:
+    """Current global speed limit in bytes/sec (0 = unlimited). kind ∈ download|upload.
+    Uses the transfer/*Limit endpoints, which are unambiguously bytes/sec — the
+    app/preferences dl_limit/up_limit fields have a KiB-vs-bytes ambiguity across
+    qBit versions, so we avoid them for speeds."""
+    r = await qreq("GET", f"/api/v2/transfer/{kind}Limit")
+    if r and r.status_code == 200:
+        try:
+            return max(0, int(r.text.strip()))
+        except Exception:
+            return 0
+    return 0
+
+
+async def qbit_set_speed_limit(kind: str, limit_bytes: int) -> bool:
+    """Set the global speed limit in bytes/sec (0 = unlimited). kind ∈ download|upload."""
+    verb = "setDownloadLimit" if kind == "download" else "setUploadLimit"
+    r = await qreq("POST", f"/api/v2/transfer/{verb}",
+                   data={"limit": str(max(0, int(limit_bytes)))})
+    return bool(r and 200 <= r.status_code < 300)
+
+
+async def qbit_global_limits() -> dict:
+    """Snapshot qBittorrent's global seeding-ratio + speed limits for the admin UI.
+    Returns {ok: False} when qBit is unreachable (the card shows an offline note)."""
+    prefs = await qbit_get_preferences()
+    if prefs is None:
+        return {"ok": False}
+    try:
+        ratio = float(prefs.get("max_ratio", 1.0))
+    except (TypeError, ValueError):
+        ratio = 1.0
+    if ratio < 0:
+        ratio = 1.0   # qBit stores -1 when never set; show a sane default in the box
+    return {
+        "ok": True,
+        "ratio_enabled":  bool(prefs.get("max_ratio_enabled", False)),
+        "ratio":          round(ratio, 2),
+        "dl_limit_bytes": await qbit_get_speed_limit("download"),
+        "up_limit_bytes": await qbit_get_speed_limit("upload"),
+    }
 
 
 # ── VLC Client ────────────────────────────────────────────────────────────────
@@ -4172,6 +4234,13 @@ class SttConfigReq(BaseModel):
     enabled: bool = True
     default_language: str = ""                 # 3-letter code, or "" = any text sub is acceptable
     translate: bool = True                     # also emit an English track for non-English audio
+
+
+class QbitLimitsReq(BaseModel):
+    ratio_enabled: bool = False                # stop seeding once max_ratio is reached
+    ratio: float = 1.0                         # share ratio (uploaded / downloaded); clamped 0–9998
+    dl_limit_bytes: int = 0                    # global download cap, bytes/sec (0 = unlimited)
+    up_limit_bytes: int = 0                    # global upload cap, bytes/sec (0 = unlimited)
 
 
 class PrepPauseReq(BaseModel):
@@ -7773,6 +7842,39 @@ async def admin_set_stt(request: Request, body: SttConfigReq) -> JSONResponse:
     cfg = _stt_cfg(lib)
     cfg["available"] = _stt_available()
     return JSONResponse({"ok": True, **cfg})
+
+
+@app.get("/api/admin/qbit-limits")
+async def admin_get_qbit_limits(request: Request) -> JSONResponse:
+    """Return qBittorrent's global seeding-ratio limit + max up/down speeds. Read
+    live from qBit (the source of truth — it persists them in its own config), so
+    the payload is `{ok: false}` when qBit isn't reachable."""
+    _require_admin(request)
+    return JSONResponse(await qbit_global_limits())
+
+
+@app.post("/api/admin/qbit-limits")
+async def admin_set_qbit_limits(request: Request, body: QbitLimitsReq) -> JSONResponse:
+    """Write the global ratio limit + speed caps to qBittorrent. These are global
+    qBit settings (apply to every torrent — stream-now and library) and persist in
+    qBit's own config. The ratio action is fixed to 'pause' (max_ratio_act=0) so a
+    torrent stops seeding — keeping its files on disk — the moment the ratio is hit
+    (e.g. a 1.0 ratio stops a 10 GB show after it has uploaded 10 GB). Speeds are
+    bytes/sec, 0 = unlimited."""
+    _require_admin(request)
+    ratio = max(0.0, min(9998.0, float(body.ratio)))
+    dl = max(0, int(body.dl_limit_bytes))
+    up = max(0, int(body.up_limit_bytes))
+    ok = await qbit_set_preferences({
+        "max_ratio_enabled": bool(body.ratio_enabled),
+        "max_ratio":         ratio,
+        "max_ratio_act":     0,   # 0 = pause/stop the torrent (keep files); 1 = remove
+    })
+    ok = (await qbit_set_speed_limit("download", dl)) and ok
+    ok = (await qbit_set_speed_limit("upload", up)) and ok
+    if not ok:
+        raise HTTPException(502, "Could not reach qBittorrent to apply the limits.")
+    return JSONResponse({"ok": True, **(await qbit_global_limits())})
 
 
 @app.get("/api/admin/components")

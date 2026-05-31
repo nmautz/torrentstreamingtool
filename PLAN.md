@@ -163,6 +163,7 @@ device that quits playback abruptly resumes from the right spot on next play.
 - [x] **6.4** Indexer Management: admin UI to view/add/remove Jackett indexers without editing `.env`
 - [x] **6.5** Idle Background Video: admin uploads a single video file (saved under `.background/`) that plays on the TV in VLC whenever nothing else is. Admin-tunable volume. Replaced automatically the moment any stream or library item starts; resumed by `background_video_loop` whenever VLC reports stopped/idle. Settings live under `library.json → settings.background_video`.
 - [x] **6.6** Server shutdown from admin: new **System** tab in `/admin` with a "Shut Down" button → `POST /api/admin/shutdown`. SIGTERMs every `uvicorn main:app` process (siblings first, self last), with a 3 s `os._exit(0)` fallback. Lets users stop StreamLink from a phone without SSH.
+- [x] **6.7** Seeding & Bandwidth limits from admin: **System** tab "Seeding & Bandwidth" card sets qBittorrent's **global** share-ratio limit (stop seeding when reached, files kept — `max_ratio_act=0`) and max up/down speeds (MiB/s, 0 = unlimited). Read/written live via the qBit Web API (`app/preferences`, `transfer/*Limit`) and persisted by qBit; `GET`/`POST /api/admin/qbit-limits`. See [docs/ADMIN.md § Seeding & Bandwidth](docs/ADMIN.md).
 
 ---
 

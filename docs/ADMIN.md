@@ -103,11 +103,23 @@ For each profile:
 
 ### 7. System
 
-Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Overnight Stream Prep**, **Idle Auto-Prep**, **Auto-Generated Subtitles**, and **Optional Components**.
+Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Overnight Stream Prep**, **Idle Auto-Prep**, **Seeding & Bandwidth**, **Auto-Generated Subtitles**, and **Optional Components**.
 
 #### System Health
 
 Live host load, so an operator can see at a glance whether the box is coping. A `system_monitor_loop` ([main.py](../main.py)) samples every 5 s and classifies **CPU**, **Memory**, **GPU** (via `nvidia-smi`; "Not detected" when absent), and **Network** (throughput + error/drop rate) as `ok` / `degraded` / `overloaded`, plus an **overall** badge (the worst component). The card polls `GET /api/admin/system-resources` every 4 s while the System tab is open and notes whether background prep/transcoding is running now (it runs below normal priority and is killed the instant a viewer is active — see [STT.md](STT.md) + [GOTCHAS.md](GOTCHAS.md)). The same `sys_status` rides in every `state` SSE event and drives the user-facing "host busy — performance may be reduced" banner on the dashboard.
+
+#### Seeding & Bandwidth
+
+Three **global** qBittorrent limits, applied live via the qBit Web API and persisted by qBit in its own config (so they survive a qBit / host restart). They apply to **every** torrent — stream-now and library alike. Read live; the card shows a "qBit offline" chip when qBittorrent isn't reachable.
+
+- **Stop Seeding at Ratio** — an enable toggle + a **Share Ratio** number (uploaded ÷ downloaded). When on, qBit stops a torrent once its ratio is hit. The action is fixed to **pause** (`max_ratio_act = 0`) — the files stay on disk, only seeding stops. E.g. ratio `1.0` stops a 10 GB show after it has uploaded 10 GB. Backed by `max_ratio_enabled` / `max_ratio` in `app/preferences`.
+- **Max Upload Speed** / **Max Download Speed** — global caps entered in **MiB/s** (`0` = unlimited). Stored as bytes/sec via `transfer/setUploadLimit` / `transfer/setDownloadLimit` (the unambiguous bytes/sec endpoints — the `app/preferences` `dl_limit`/`up_limit` fields differ in KiB-vs-bytes meaning across qBit versions, so they're avoided).
+
+The download scheduler's `_reconcile_item_downloads` only pauses/resumes torrents in **download-phase** states, so a torrent qBit paused at its ratio (a seeding/finished state) is never auto-resumed — seeding stays stopped. See [API.md](API.md) (`GET`/`POST /api/admin/qbit-limits`) and [BACKEND.md § qBittorrent client notes](BACKEND.md).
+
+- `GET /api/admin/qbit-limits` → `{ok, ratio_enabled, ratio, dl_limit_bytes, up_limit_bytes}` (`{ok:false}` when qBit is unreachable).
+- `POST /api/admin/qbit-limits` → `{ratio_enabled, ratio, dl_limit_bytes, up_limit_bytes}`; ratio clamped 0–9998, speeds bytes/sec (0 = unlimited).
 
 #### Shut Down Server
 
