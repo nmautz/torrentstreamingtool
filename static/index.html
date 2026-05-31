@@ -922,6 +922,15 @@
   </a>
 </div>
 
+<!-- ── Host performance banner ──────────────────────────────────────────────── -->
+<!-- Shown while the host is degraded/overloaded (e.g. catching up on background
+     prep after you arrive). Auto-clears the moment resources return to normal. -->
+<div id="perfBanner"
+  class="hidden sticky top-0 z-30 border-b text-xs sm:text-sm px-3 py-2 flex items-center gap-2 leading-tight">
+  <span id="perfBannerDot" class="w-2 h-2 flex-shrink-0"></span>
+  <div id="perfBannerMsg" class="min-w-0 flex-1"></div>
+</div>
+
 <!-- ── Navbar ─────────────────────────────────────────────────────────────── -->
 <!-- Mobile portrait: wraps to two rows. Row 1 = logo + status + profile + settings; Row 2 = three full-width tabs.
      sm+ : single row, same as before. ml-auto on the right block doubles as the desktop spacer. -->
@@ -2051,6 +2060,34 @@ function renderServerAttention(d){
   // who can act on it. The non-admin UI hides this case entirely.
   // We don't know if the viewer is an admin here, so we just hide the banner.
   el.classList.add("hidden");
+}
+
+// Host-performance banner. Shows while the box is degraded/overloaded — typically
+// when a user arrives mid-prep and the host is shedding/finishing background work.
+// Auto-clears the instant resources return to "ok". Driven by the SSE state's
+// `sys_status.overall` (set by system_monitor_loop).
+function renderPerfBanner(d){
+  const el=document.getElementById("perfBanner");
+  if(!el) return;
+  const s=d.sys_status||{};
+  const overall=s.overall;
+  if(overall!=="degraded" && overall!=="overloaded"){ el.classList.add("hidden"); return; }
+  const msg=document.getElementById("perfBannerMsg");
+  const dot=document.getElementById("perfBannerDot");
+  // Name what's hot so it's not a mystery ("CPU, GPU…").
+  const hot=[];
+  if(s.cpu&&s.cpu.status!=="ok") hot.push("CPU");
+  if(s.gpu&&s.gpu.status!=="ok") hot.push("GPU");
+  if(s.ram&&s.ram.status!=="ok") hot.push("RAM");
+  if(s.net&&s.net.status!=="ok") hot.push("network");
+  const over=overall==="overloaded";
+  el.className=`sticky top-0 z-30 border-b text-xs sm:text-sm px-3 py-2 flex items-center gap-2 leading-tight ${over?'bg-red-950/95 border-red-800 text-red-200':'bg-amber-950/95 border-amber-800 text-amber-200'}`;
+  dot.className=`w-2 h-2 flex-shrink-0 ${over?'bg-red-500 blink':'bg-amber-500'}`;
+  const what=hot.length?` (${hot.join(", ")})`:"";
+  msg.textContent=over
+    ? `Host is overloaded${what} — finishing background work. Performance may be reduced for a moment.`
+    : `Host is busy${what} — catching up on background work. Performance may be briefly reduced.`;
+  el.classList.remove("hidden");
 }
 
 // ── VPN UI ─────────────────────────────────────────────────────────────────
@@ -6782,6 +6819,7 @@ function connectSSE(){
     renderVpn(d.vpn_secure,d.vpn_status); renderPlayer(app);
     updateDlBadge(d.downloading_count||0);
     renderServerAttention(d);
+    renderPerfBanner(d);
   });
   es.addEventListener("vpn_status",e=>{
     const d=JSON.parse(e.data); app.vpn_secure=d.secure; app.vpn_status=d.status;
@@ -6931,6 +6969,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.9.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.10.0</div>
 </body>
 </html>

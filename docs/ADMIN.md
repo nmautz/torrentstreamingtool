@@ -103,7 +103,11 @@ For each profile:
 
 ### 7. System
 
-Controls: **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Overnight Stream Prep**, **Idle Auto-Prep**, **Auto-Generated Subtitles**, and **Optional Components**.
+Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Overnight Stream Prep**, **Idle Auto-Prep**, **Auto-Generated Subtitles**, and **Optional Components**.
+
+#### System Health
+
+Live host load, so an operator can see at a glance whether the box is coping. A `system_monitor_loop` ([main.py](../main.py)) samples every 5 s and classifies **CPU**, **Memory**, **GPU** (via `nvidia-smi`; "Not detected" when absent), and **Network** (throughput + error/drop rate) as `ok` / `degraded` / `overloaded`, plus an **overall** badge (the worst component). The card polls `GET /api/admin/system-resources` every 4 s while the System tab is open and notes whether background prep/transcoding is running now (it runs below normal priority and is killed the instant a viewer is active — see [STT.md](STT.md) + [GOTCHAS.md](GOTCHAS.md)). The same `sys_status` rides in every `state` SSE event and drives the user-facing "host busy — performance may be reduced" banner on the dashboard.
 
 #### Shut Down Server
 

@@ -71,6 +71,7 @@ Single `EventSource('/api/events')`. Handlers:
 - `refreshEpFiles()` — re-fetches `/api/library/{id}/files` for the open picker and re-renders. Called after `epToggleWatched` and from the `progress_saved` SSE handler. Preserves `epChecked` selections that still exist; does not touch the modal title (so it's safe to call mid-session).
 - `setFcTitle(title, filePath)` — sets the fullscreen overlay's title. Uses `parseEpisodeInfo` to extract "S01E04 · Episode Name" when possible.
 - `renderVpn(secure, statusText)` — updates the navbar pill + toggles the full-screen red overlay.
+- `renderPerfBanner(d)` — shows `#perfBanner` (sticky, amber=degraded / red=overloaded) from the `state` event's `sys_status.overall`, naming the hot resource(s) (CPU/GPU/RAM/network). Non-blocking; auto-hides the moment `overall` returns to `ok`. This is the user-facing "host is busy — performance may be reduced" warning while the box sheds/finishes background work after a viewer arrives. Admin sees the full per-resource breakdown in **Admin → System → System Health**.
 
 ### Download scheduling (per-item)
 

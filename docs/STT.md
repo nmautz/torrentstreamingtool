@@ -156,6 +156,17 @@ same reason ffmpeg/the analyzer do — the server raises itself to HIGH and
 children would otherwise inherit it and lag the UI. See [STREAMING.md](STREAMING.md)
 § "Staying responsive while prepping".
 
+> **Bulk STT is cancellable — a running transcription is killed on a pause/activity,
+> not just gated.** Honoring `prep_paused` only blocks jobs *before* they start;
+> once whisper is running, the gate does nothing to it. So `generate()` /
+> `_run_whisper()` / `_extract_wav()` take an `on_proc` (registers the live
+> subprocess) and a `cancel_check`; `_run_stt_job` passes a `threading.Event` and
+> `_pause_prep(kill=True)` sets it + `.kill()`s the registered process. The job
+> re-queues as `"paused"` (re-spawned by `_resume_prep`), and the GPU→CPU fallback
+> retry is **suppressed when cancelled** so a kill doesn't relaunch whisper. Without
+> this, whisper kept saturating the CPU/GPU long after HLS prep "paused" — the box
+> stayed laggy until it finished (or a reboot). See [GOTCHAS.md](GOTCHAS.md).
+
 > **STT is slower than the HLS transcode.** A 45-minute episode is minutes of
 > CPU even on `base`. That's why the default path is preprocess (overnight),
 > with on-demand as an explicit, clearly-progress-indicated fallback — never a

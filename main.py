@@ -450,6 +450,9 @@ class AppState:
     auto_prep_engaged: bool = False                       # True while the unified auto_prep_loop has prep running (overnight window OR idle trigger) — edge flag for resume/pause
     download_idle_open: bool = False                      # last computed idle/night DOWNLOAD window state (set by download_scheduler_loop) — drives the "waiting for idle" UI
     download_idle_configured: bool = False                # True if any admin prep window (overnight/idle) is enabled — so idle-only downloads have a window to run in
+    idle_prep_on: bool = False                            # cached settings.idle_prep.enabled (set each auto_prep_loop tick) — lets the activity hook decide cheaply
+    overnight_open: bool = False                          # cached: currently inside the overnight prep window (set each tick) — overnight load is intentional, so the activity hook stands down then
+    sys_status: dict = field(default_factory=dict)        # latest CPU/GPU/RAM/network sample + ok/degraded/overloaded classification (set by system_monitor_loop)
     # ── YouTube-on-TV (browser playback on the host display, remote-controlled) ──
     youtube_active: bool = False                          # True while a YouTube video is the active TV playback (browser, not VLC)
     youtube_video_id: Optional[str] = None               # 11-char YouTube id currently loaded on the TV page
@@ -569,6 +572,9 @@ def state_snapshot() -> dict:
         # download has no window to run in). See docs/STREAMING.md + the scheduler.
         "download_idle_open": state.download_idle_open,
         "download_idle_configured": state.download_idle_configured,
+        # Host resource health (cpu/ram/gpu/net + overall ok|degraded|overloaded).
+        # Drives the user "host busy" banner + the admin System health card.
+        "sys_status": state.sys_status,
         # YouTube-on-TV: when active, the dashboard routes its player controls to
         # /api/youtube/control instead of VLC, and hides save/handoff/episode-nav.
         # active_title / vlc_time / vlc_duration / vlc_volume are reused for display,
@@ -2003,14 +2009,23 @@ def _now_in_tz(tzname: str) -> datetime:
     return datetime.now()
 
 
-async def _machine_in_use(window_secs: int, ignore_downloads: bool = False) -> bool:
+async def _machine_in_use(window_secs: int, ignore_downloads: bool = False,
+                          for_prep: bool = False) -> bool:
     """True if the box looks busy: VLC actively playing/paused real content, an
     active stream/download, or a user interaction within `window_secs`.
 
     `ignore_downloads=True` drops library downloads from the "busy" signal — used by
     the download scheduler's idle check so an idle-only download that's running can't
     flip the box "in use" and self-close its own idle window (see _download_idle_open).
+
+    `for_prep=True` ALSO treats an open dashboard (a live SSE client) as "in use", so
+    idle stream-prep won't hammer the box while someone has the site open — even if
+    they're just looking and haven't clicked anything (a page load is a GET, which
+    deliberately doesn't stamp last_activity). The scheduled reboot does NOT pass this
+    (a forgotten-open tab shouldn't block the nightly reboot).
     """
+    if for_prep and state.sse_queues:
+        return True
     # 1. Live VLC playback of non-background content
     if not state.background_playing:
         vs = await vlc_status()
@@ -2293,6 +2308,112 @@ async def download_scheduler_loop() -> None:
             print(f"[dlsched] download_scheduler_loop error: {exc}")
 
 
+# ── System resource monitor ───────────────────────────────────────────────────
+# Samples CPU / RAM / GPU / network every few seconds and classifies each as
+# ok | degraded | overloaded, into state.sys_status. Drives the user-facing
+# "host busy — performance may be reduced" banner (so a user arriving mid-prep
+# knows it's catching up) and the admin System-tab health card. Best-effort:
+# psutil for CPU/RAM/net, nvidia-smi (if present) for GPU.
+
+_net_prev: dict = {}                 # last net counters + timestamp, for rate deltas
+_gpu_smi_ok: Optional[bool] = None   # None=untested, True=usable, False=give up probing
+
+
+def _classify(value: float, deg: float, over: float) -> str:
+    """Map a 0–100 utilisation to ok / degraded / overloaded."""
+    if value >= over:
+        return "overloaded"
+    if value >= deg:
+        return "degraded"
+    return "ok"
+
+
+async def _sample_gpu() -> Optional[dict]:
+    """Best-effort NVIDIA GPU sample via nvidia-smi → {util_pct, mem_pct}, or None
+    when there's no usable GPU/tool (cached so a GPU-less box stops probing)."""
+    global _gpu_smi_ok
+    if _gpu_smi_ok is False:
+        return None
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            "nvidia-smi",
+            "--query-gpu=utilization.gpu,memory.used,memory.total",
+            "--format=csv,noheader,nounits",
+            stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await asyncio.wait_for(proc.communicate(), timeout=4.0)
+    except Exception:
+        _gpu_smi_ok = False
+        return None
+    parts = [p.strip() for p in (out.decode(errors="ignore").strip().splitlines() or [""])[0].split(",")]
+    if len(parts) < 3:
+        _gpu_smi_ok = False
+        return None
+    try:
+        util, used, total = float(parts[0]), float(parts[1]), float(parts[2])
+    except ValueError:
+        _gpu_smi_ok = False
+        return None
+    _gpu_smi_ok = True
+    return {"util_pct": round(util, 1), "mem_pct": round((used / total * 100.0) if total else 0.0, 1)}
+
+
+async def system_monitor_loop() -> None:
+    """Sample host resources every 5 s and classify into state.sys_status."""
+    _ORDER = {"ok": 0, "degraded": 1, "overloaded": 2}
+    try:
+        psutil.cpu_percent(interval=None)   # prime the delta (first call is meaningless)
+    except Exception:
+        pass
+    while True:
+        await asyncio.sleep(5)
+        try:
+            cpu = float(psutil.cpu_percent(interval=None))   # % since last call (~5 s window)
+            vm = psutil.virtual_memory()
+            ram = float(vm.percent)
+
+            # Network: throughput + error/drop deltas from the counters.
+            net = await asyncio.to_thread(psutil.net_io_counters)
+            now = time.time()
+            up_mbps = down_mbps = 0.0
+            net_status = "ok"
+            errs = net.errin + net.errout + net.dropin + net.dropout
+            if _net_prev:
+                dt = max(0.001, now - _net_prev["ts"])
+                down_mbps = max(0.0, (net.bytes_recv - _net_prev["recv"]) * 8 / 1e6 / dt)
+                up_mbps   = max(0.0, (net.bytes_sent - _net_prev["sent"]) * 8 / 1e6 / dt)
+                d_err = errs - _net_prev["errs"]
+                net_status = "overloaded" if d_err > 50 else "degraded" if d_err > 0 else "ok"
+            _net_prev.update(ts=now, recv=net.bytes_recv, sent=net.bytes_sent, errs=errs)
+
+            gpu = await _sample_gpu()
+
+            cpu_status = _classify(cpu, 75, 92)
+            ram_status = _classify(ram, 82, 93)
+            comps = [cpu_status, ram_status, net_status]
+            gpu_block = None
+            if gpu is not None:
+                gpu_status = _classify(max(gpu["util_pct"], gpu["mem_pct"]), 80, 94)
+                gpu_block = {**gpu, "status": gpu_status}
+                comps.append(gpu_status)
+            overall = max(comps, key=lambda s: _ORDER.get(s, 0))
+
+            state.sys_status = {
+                "cpu": {"pct": round(cpu, 1), "status": cpu_status},
+                "ram": {"pct": round(ram, 1), "used_gb": round(vm.used / 1e9, 1),
+                        "total_gb": round(vm.total / 1e9, 1), "status": ram_status},
+                "gpu": gpu_block,   # None ⇒ no usable NVIDIA GPU on this host
+                "net": {"up_mbps": round(up_mbps, 1), "down_mbps": round(down_mbps, 1),
+                        "status": net_status},
+                "overall": overall,
+                "updated_at": now,
+            }
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[sysmon] system_monitor_loop error: {exc}")
+
+
 async def scheduled_reboot_loop() -> None:
     """Daily scheduled host reboot with an idle guard.
 
@@ -2401,7 +2522,15 @@ async def auto_prep_loop() -> None:
             # interaction stamps last_activity, flipping this True within a tick.
             in_use = False
             if id_cfg["enabled"]:
-                in_use = await _machine_in_use(id_cfg["idle_minutes"] * 60)
+                # for_prep: an open dashboard counts as "in use" so idle prep won't
+                # hammer the box while a viewer is on the site (even if just looking).
+                in_use = await _machine_in_use(id_cfg["idle_minutes"] * 60, for_prep=True)
+
+            # Cache for the cheap activity hook (`_activity_kick`): it pauses on
+            # interaction only when idle-prep governs and we're NOT inside the
+            # (intentional) overnight window.
+            state.idle_prep_on = id_cfg["enabled"]
+            state.overnight_open = overnight_open
 
             want = overnight_open or (id_cfg["enabled"] and not in_use)
 
@@ -3859,11 +3988,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     autoprep_loop = asyncio.create_task(auto_prep_loop())
     update_loop = asyncio.create_task(updater_loop())
     dlsched_loop = asyncio.create_task(download_scheduler_loop())
+    sysmon_loop = asyncio.create_task(system_monitor_loop())
 
     yield
 
     for t in (guard, broadcaster, dl_monitor, vlc_tracker, bg_loop, jackett_mon,
-              reboot_loop, autoprep_loop, update_loop, dlsched_loop):
+              reboot_loop, autoprep_loop, update_loop, dlsched_loop, sysmon_loop):
         t.cancel()
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
@@ -3919,6 +4049,12 @@ async def track_activity(request: Request, call_next):
     if (method in ("POST", "PUT", "PATCH", "DELETE") or path == "/api/search") \
             and path not in _ACTIVITY_IGNORE_PATHS:
         state.last_activity = time.time()
+        # Shed heavy background work the instant a user shows up (don't wait for the
+        # 15 s auto-prep tick) — see _activity_kick. Cheap + idempotent once paused.
+        try:
+            _activity_kick()
+        except Exception:
+            pass
     return await call_next(request)
 
 
@@ -6577,6 +6713,13 @@ async def download_library_zip(item_id: str, req: ZipDownloadReq) -> StreamingRe
 async def events(request: Request) -> StreamingResponse:
     q: asyncio.Queue = asyncio.Queue(maxsize=100)
     state.sse_queues.append(q)
+    # Opening the dashboard = a viewer is present → shed idle prep immediately, even
+    # though a page load is a GET (which doesn't stamp last_activity). The for_prep
+    # idle check then keeps prep paused while the tab stays open.
+    try:
+        _activity_kick()
+    except Exception:
+        pass
 
     async def stream() -> AsyncGenerator[str, None]:
         yield f"event: state\ndata: {json.dumps(state_snapshot())}\n\n"
@@ -7553,6 +7696,19 @@ async def admin_set_overnight_prep(
     cfg = _overnight_prep_cfg(lib)
     cfg["now"] = _now_in_tz(cfg["timezone"]).strftime("%Y-%m-%d %H:%M %Z").strip()
     return JSONResponse({"ok": True, **cfg})
+
+
+@app.get("/api/admin/system-resources")
+async def admin_system_resources(request: Request) -> JSONResponse:
+    """Live host health for the admin System tab: CPU / RAM / GPU / network with an
+    ok|degraded|overloaded status each + an overall. Sampled by system_monitor_loop;
+    also rides in every `state` SSE event as `sys_status`. Empty `{}` until the first
+    sample (~5 s after start). Includes whether bulk background work is running now."""
+    _require_admin(request)
+    s = dict(state.sys_status or {})
+    s["prep_active"] = _bulk_processing_now()
+    s["prep_paused"] = state.prep_paused
+    return JSONResponse(s)
 
 
 @app.get("/api/admin/idle-prep")
@@ -9038,6 +9194,23 @@ def _pause_prep(kill: bool) -> int:
                 except Exception:
                     pass
                 killed += 1
+        # Kill running bulk STT (whisper) too — it's the heaviest background load and
+        # was previously left churning the CPU/GPU long after HLS prep "paused", which
+        # made the box barely usable in the morning. The signalled job re-queues as
+        # "paused" (see _run_stt_job) and _resume_prep re-spawns it later.
+        for j in _stt_jobs.values():
+            if j.get("queue") != "bulk" or j.get("status") != "processing":
+                continue
+            ev = j.get("_cancel")
+            if ev is not None:
+                ev.set()
+            proc = j.get("_proc")
+            if proc is not None:
+                try:
+                    proc.kill()   # whisper ignores graceful term; SIGKILL/TerminateProcess
+                except Exception:
+                    pass
+            killed += 1
     return killed
 
 
@@ -9063,6 +9236,31 @@ def _resume_prep() -> int:
             asyncio.create_task(_run_stt_job(jid))
             n += 1
     return n
+
+
+def _bulk_processing_now() -> bool:
+    """True if any bulk HLS-prep or STT job is actively encoding/transcribing."""
+    return any(j.get("queue") == "bulk" and j.get("status") == "processing"
+               for j in (*_offline_jobs.values(), *_stt_jobs.values()))
+
+
+def _activity_kick() -> None:
+    """Called on genuine user interaction. When idle-prep governs (and we're outside
+    the intentional overnight window), stop bulk background work *immediately* — kill
+    the in-flight HLS encode AND whisper — instead of waiting up to a full
+    `auto_prep_loop` tick. This is the responsiveness lever: a user who shows up
+    mid-idle-prep shouldn't sit through ~15 s (or, when whisper wasn't being killed,
+    much longer) of a laggy box. The loop then leaves prep paused until the box is
+    idle again. No-op once already paused, so it's cheap to call on every request."""
+    if state.prep_paused:
+        return
+    if not state.idle_prep_on or state.overnight_open:
+        return
+    if not (state.auto_prep_engaged or _bulk_processing_now()):
+        return
+    killed = _pause_prep(kill=True)
+    state.auto_prep_engaged = False
+    print(f"[autoprep] user activity — pausing prep immediately (killed {killed} in-flight)")
 
 
 async def _enqueue_library_prep() -> int:
@@ -9166,14 +9364,32 @@ async def _run_stt_job(job_id: str) -> None:
         src = Path(job["src"])
         hls_log.info("stt job %s START src=%s translate=%s", job_id, src, job.get("translate"))
 
+        # Cancellation: an activity-pause sets this event and kills the registered
+        # whisper/ffmpeg subprocess so STT stops *immediately* (whisper is the heaviest
+        # background load; without this it churned the CPU/GPU long after prep "paused").
+        cancel = threading.Event()
+        job["_cancel"] = cancel
+        job["_proc"] = None
+
         def _set_progress(p: float) -> None:
             job["progress"] = max(0.0, min(1.0, p))
+
+        def _on_proc(p) -> None:
+            job["_proc"] = p
 
         result = await asyncio.to_thread(
             stt.generate, src,
             want_translation=bool(job.get("translate", True)),
             progress_cb=_set_progress,
+            on_proc=_on_proc, cancel_check=cancel.is_set,
         )
+        job["_proc"] = None
+        if result.get("cancelled") or cancel.is_set():
+            # Intentionally killed by a pause — re-queue (don't mark error/done).
+            # _resume_prep re-spawns "paused" STT jobs on the next idle stretch.
+            job["status"] = "paused"
+            hls_log.info("stt job %s PAUSED (cancelled) src=%s", job_id, src)
+            return
         if result.get("error"):
             job["status"] = "error"
             job["error"]  = result["error"]

@@ -361,6 +361,21 @@
 
   <!-- ── System Tab ───────────────────────────────────────────────────────────── -->
   <div id="panelSystem" class="hidden flex-1 overflow-y-auto p-3 sm:p-5 max-w-2xl mx-auto w-full space-y-4">
+    <!-- System health: live CPU / GPU / RAM / network status -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">System Health</h2>
+          <p class="text-xs text-gray-500 mt-0.5">Live host load. Background prep/transcoding runs below normal priority and is stopped the moment a viewer is active.</p>
+        </div>
+        <span id="sysOverallBadge" class="flex-shrink-0 text-[10px] font-bold uppercase tracking-wide px-2 py-1 border border-gray-700 text-gray-500">—</span>
+      </div>
+      <div id="sysHealthGrid" class="px-5 py-4 grid grid-cols-2 gap-2.5">
+        <p class="col-span-2 text-xs text-gray-600 text-center py-3">Loading…</p>
+      </div>
+      <div id="sysPrepNote" class="hidden px-5 pb-4 -mt-1 text-[11px] text-amber-300/80"></div>
+    </div>
+
     <div class="bg-gray-900 border border-red-900/60">
       <div class="px-5 py-4 border-b border-red-900/60">
         <h2 class="text-sm font-black uppercase tracking-wide text-red-300">Shut Down Server</h2>
@@ -971,10 +986,57 @@ function switchTab(tab){
   if(tab==="skip")       loadSkipPanel();
   if(tab==="offline")    loadOfflineCache();
   if(tab==="background") loadBackgroundVideo();
-  if(tab==="system")   { loadScheduledReboot(); loadOvernightPrep(); loadIdlePrep(); loadStt(); loadComponents(); loadLogs(); }
+  if(tab==="system")   { loadScheduledReboot(); loadOvernightPrep(); loadIdlePrep(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
+  else                 { stopSysHealthPolling(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
 }
+
+// ── System Health (CPU / GPU / RAM / network) ──────────────────────────────────
+let _sysHealthTimer = null;
+const _SYS_TONE = {
+  ok:         {badge:"border-emerald-700 text-emerald-400 bg-emerald-950/40", dot:"bg-emerald-500", label:"OK"},
+  degraded:   {badge:"border-amber-700 text-amber-400 bg-amber-950/40",       dot:"bg-amber-500",   label:"Degraded"},
+  overloaded: {badge:"border-red-700 text-red-400 bg-red-950/40",             dot:"bg-red-500",     label:"Overloaded"},
+};
+function _sysTone(s){ return _SYS_TONE[s] || {badge:"border-gray-700 text-gray-500", dot:"bg-gray-600", label:"—"}; }
+function _sysCell(label, value, status){
+  const t=_sysTone(status);
+  return `<div class="bg-gray-800/50 border border-gray-800 px-3 py-2.5">
+    <div class="flex items-center justify-between gap-2">
+      <span class="text-[10px] font-black text-gray-500 uppercase tracking-widest">${label}</span>
+      <span class="flex items-center gap-1.5"><span class="w-2 h-2 ${t.dot}"></span>
+        <span class="text-[10px] font-bold uppercase tracking-wide ${_sysTone(status).badge.split(' ').filter(c=>c.startsWith('text-')).join(' ')}">${t.label}</span></span>
+    </div>
+    <div class="text-sm font-mono text-gray-200 mt-1">${value}</div>
+  </div>`;
+}
+async function loadSystemHealth(){
+  const grid=document.getElementById("sysHealthGrid");
+  const badge=document.getElementById("sysOverallBadge");
+  const note=document.getElementById("sysPrepNote");
+  if(!grid) return;
+  try{
+    const r=await fetch("/api/admin/system-resources",{headers:authHeader()});
+    if(!r.ok) return;
+    const d=await r.json();
+    if(!d.overall){ grid.innerHTML=`<p class="col-span-2 text-xs text-gray-600 text-center py-3">Sampling…</p>`; return; }
+    const ot=_sysTone(d.overall);
+    badge.textContent=ot.label;
+    badge.className=`flex-shrink-0 text-[10px] font-bold uppercase tracking-wide px-2 py-1 border ${ot.badge}`;
+    const cells=[];
+    cells.push(_sysCell("CPU", `${d.cpu?.pct ?? "?"}%`, d.cpu?.status));
+    cells.push(_sysCell("Memory", `${d.ram?.pct ?? "?"}% · ${d.ram?.used_gb ?? "?"}/${d.ram?.total_gb ?? "?"} GB`, d.ram?.status));
+    cells.push(_sysCell("GPU", d.gpu ? `${d.gpu.util_pct}% · ${d.gpu.mem_pct}% mem` : "Not detected", d.gpu ? d.gpu.status : null));
+    cells.push(_sysCell("Network", `↓ ${d.net?.down_mbps ?? 0} · ↑ ${d.net?.up_mbps ?? 0} Mbps`, d.net?.status));
+    grid.innerHTML=cells.join("");
+    if(d.prep_active){ note.textContent="Background prep/transcoding is running now (below normal priority)."; note.classList.remove("hidden"); }
+    else if(d.prep_paused){ note.textContent="Background prep is paused."; note.classList.remove("hidden"); }
+    else note.classList.add("hidden");
+  }catch(_){}
+}
+function startSysHealthPolling(){ loadSystemHealth(); if(!_sysHealthTimer) _sysHealthTimer=setInterval(loadSystemHealth, 4000); }
+function stopSysHealthPolling(){ if(_sysHealthTimer){ clearInterval(_sysHealthTimer); _sysHealthTimer=null; } }
 
 // ── System ────────────────────────────────────────────────────────────────────
 async function doShutdownServer(){

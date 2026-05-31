@@ -198,9 +198,15 @@ def ai_sub_model(name: str, stem: str) -> str:
     return segs[i + 1] if i + 1 < len(segs) else ""
 
 
-def _extract_wav(src: Path, out_wav: Path) -> bool:
+def _extract_wav(src: Path, out_wav: Path, *,
+                 on_proc: Optional[Callable] = None,
+                 cancel_check: Optional[Callable[[], bool]] = None) -> bool:
     """Decode the source's first audio track to 16 kHz mono PCM — whisper's
-    required input format. Returns True on success."""
+    required input format. Returns True on success.
+
+    Runs as a killable Popen (registered via `on_proc`) so an activity-pause can
+    terminate it mid-extract instead of waiting it out — a long source's audio
+    decode is not instant."""
     ff = ffmpeg_bin()
     if not ff:
         return False
@@ -212,8 +218,21 @@ def _extract_wav(src: Path, out_wav: Path) -> bool:
         str(out_wav),
     ])
     try:
-        proc = subprocess.run(cmd, capture_output=True, timeout=3600, **_LOWPRIO_KW)
-    except (subprocess.TimeoutExpired, OSError):
+        proc = subprocess.Popen(cmd, stdout=subprocess.DEVNULL,
+                                stderr=subprocess.DEVNULL, **_LOWPRIO_KW)
+    except OSError:
+        return False
+    if on_proc:
+        on_proc(proc)
+    try:
+        proc.wait(timeout=3600)
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        return False
+    finally:
+        if on_proc:
+            on_proc(None)
+    if cancel_check and cancel_check():
         return False
     return proc.returncode == 0 and out_wav.exists() and out_wav.stat().st_size > 0
 
@@ -229,6 +248,8 @@ def _run_whisper(
     translate: bool,
     language: str = "auto",
     progress_cb: Optional[Callable[[float], None]] = None,
+    on_proc: Optional[Callable] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> tuple[bool, str]:
     """Run whisper-cli, writing `<out_base>.srt`. Returns (ok, detected_iso1).
 
@@ -275,6 +296,8 @@ def _run_whisper(
             )
         except OSError:
             return False, ""
+        if on_proc:
+            on_proc(proc)   # register so an activity-pause can kill it instantly
         assert proc.stderr is not None
         for line in proc.stderr:
             m = _DETECT_RE.search(line)
@@ -288,11 +311,18 @@ def _run_whisper(
                     except Exception:
                         pass
         proc.wait()
+        if on_proc:
+            on_proc(None)
         srt = out_base.with_suffix(".srt")
         return (proc.returncode == 0 and srt.exists()), detected
 
+    _cancelled = lambda: bool(cancel_check and cancel_check())
+    if _cancelled():
+        return False, ""
     ok, detected = _attempt(no_gpu=False)
-    if not ok:
+    # Don't fire the CPU-fallback retry if we were intentionally killed — that would
+    # just relaunch whisper and re-saturate the box the user is trying to use.
+    if not ok and not _cancelled():
         ok, detected = _attempt(no_gpu=True)
     return ok, detected
 
@@ -301,6 +331,8 @@ def generate(
     src: Path, *,
     want_translation: bool = True,
     progress_cb: Optional[Callable[[float], None]] = None,
+    on_proc: Optional[Callable] = None,
+    cancel_check: Optional[Callable[[], bool]] = None,
 ) -> dict:
     """Transcribe `src` to sidecar `.srt`(s) next to it.
 
@@ -319,6 +351,7 @@ def generate(
     if not src.exists():
         return {"tracks": [], "error": "Source file not on disk."}
 
+    _cancelled = lambda: bool(cancel_check and cancel_check())
     mname = model_name() or "model"
     tracks: list[dict] = []
     tmpdir = Path(tempfile.mkdtemp(prefix="stt_"))
@@ -328,7 +361,9 @@ def generate(
         # the bulk of the progress bar for transcription.
         if progress_cb:
             progress_cb(0.02)
-        if not _extract_wav(src, wav):
+        if not _extract_wav(src, wav, on_proc=on_proc, cancel_check=cancel_check):
+            if _cancelled():
+                return {"tracks": [], "error": None, "cancelled": True}
             return {"tracks": [], "error": "ffmpeg could not extract audio for transcription."}
 
         # Pass 1 — transcribe in the spoken language (auto-detect).
@@ -336,8 +371,11 @@ def generate(
         ok1, detected = _run_whisper(
             wav, base1, translate=False, language="auto",
             progress_cb=(lambda p: progress_cb(0.05 + 0.65 * p)) if progress_cb else None,
+            on_proc=on_proc, cancel_check=cancel_check,
         )
         if not ok1:
+            if _cancelled():
+                return {"tracks": [], "error": None, "cancelled": True}
             return {"tracks": [], "error": "Transcription failed."}
         lang3 = _to_iso3(detected) if detected else "und"
         dest1 = src.with_name(f"{src.stem}.{lang3}.{AI_SUFFIX}.{mname}.srt")
@@ -349,11 +387,12 @@ def generate(
 
         # Pass 2 — English translation, only when the audio isn't already English.
         is_english = detected in ("en", "eng") or lang3 == "eng"
-        if want_translation and not is_english:
+        if want_translation and not is_english and not _cancelled():
             base2 = tmpdir / "translate"
             ok2, _ = _run_whisper(
                 wav, base2, translate=True, language="auto",
                 progress_cb=(lambda p: progress_cb(0.70 + 0.28 * p)) if progress_cb else None,
+                on_proc=on_proc, cancel_check=cancel_check,
             )
             if ok2:
                 dest2 = src.with_name(f"{src.stem}.eng.{AI_SUFFIX}.{mname}.srt")

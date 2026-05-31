@@ -395,3 +395,14 @@ Downloads were all-or-nothing: they ran at full tilt the moment they were added,
 
 ---
 
+## Milestone 29 — Idle-prep performance recovery + host health monitor
+
+After idle-prep ran overnight, the box was barely usable in the morning and needed a reboot — the activity-pause killed the HLS ffmpeg but left **whisper** transcribing (CPU/GPU-bound) until it finished. Make background work stop fast on arrival, and surface host load.
+
+- [x] **29.1** (v4.10.0) Cancellable STT. `stt.generate`/`_run_whisper`/`_extract_wav` take `on_proc` (register live subprocess) + `cancel_check`; the GPU→CPU fallback retry is skipped when cancelled. `_run_stt_job` passes a `threading.Event` + `on_proc`, treats a cancelled result as `"paused"` (re-spawned by `_resume_prep`). `_pause_prep(kill=True)` now also sets the event + `.kill()`s running bulk STT.
+- [x] **29.2** (v4.10.0) Instant activity-pause. `auto_prep_loop` caches `state.idle_prep_on`/`overnight_open`; `_activity_kick` (from the `track_activity` middleware **and on SSE connect**, so merely opening the site recovers) pauses+kills bulk prep/STT immediately when idle-prep governs and we're outside the overnight window — no waiting for the 15 s tick. `_machine_in_use(for_prep=True)` counts an open dashboard as in-use so idle prep stays paused while a viewer is on the site (reboot ignores open tabs).
+- [x] **29.3** (v4.10.0) Host health monitor. `system_monitor_loop` (5 s) samples CPU/RAM (psutil), GPU (`nvidia-smi`, cached off when absent), network (throughput + error/drop), classifies `ok`/`degraded`/`overloaded` into `state.sys_status` (+ `overall`). `GET /api/admin/system-resources`; `sys_status` in `state_snapshot`.
+- [x] **29.4** (v4.10.0) UI. Dashboard `#perfBanner` ("host busy — performance may be reduced", names the hot resource, auto-clears) via `renderPerfBanner`. Admin **System → System Health** card (CPU/GPU/RAM/Network ok/degraded/overloaded + prep-active note), polls every 4 s. Docs: BACKEND, STT, ADMIN, API, FRONTEND, GOTCHAS, CHANGELOG.
+
+---
+
