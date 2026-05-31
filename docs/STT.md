@@ -176,8 +176,12 @@ affordances on it; the admin card shows an "unavailable" banner otherwise.
   non-interactively and skips the whisper download, so on an auto-updating box
   install it from **Admin → System → Optional Components** instead (binary +
   model, with a size picker). It streams the download, writes `.env`, and clears
-  the availability cache so STT lights up without a restart. See
-  [ADMIN.md](ADMIN.md) / [SETUP.md](SETUP.md).
+  the availability cache so STT lights up without a restart. The chosen model
+  **survives subsequent auto-updates / branch switches**: even though
+  `detect_tools()` would otherwise re-detect the first `ggml-*.bin` it finds
+  (usually `base`), `merge_tool_paths()` preserves the `_WHISPER_MODEL` already
+  in `.env` as long as that file still exists — see [GOTCHAS.md](GOTCHAS.md) and
+  [SETUP.md](SETUP.md). See also [ADMIN.md](ADMIN.md).
 - **Linux:** no reliable prebuilt — build whisper.cpp so `whisper-cli` is on
   PATH; the model still downloads.
 - **macOS (dev only):** `brew install whisper-cpp` + model download. Note HLS

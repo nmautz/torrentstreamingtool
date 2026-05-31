@@ -1453,6 +1453,19 @@ def merge_tool_paths(tools: dict) -> None:
                "whisper": "_WHISPER_BIN", "whisper_model": "_WHISPER_MODEL"}
     desired = {env_key: tools[key] for key, env_key in mapping.items() if tools.get(key)}
 
+    # _WHISPER_MODEL is a user CHOICE among possibly several installed GGML
+    # models (the admin can swap base→medium in the Components card, which leaves
+    # both ggml-base.bin and ggml-medium.bin under tools/whisper/), not merely an
+    # auto-detected path. detect_tools() picks the FIRST ggml-*.bin it globs —
+    # usually base — which would silently clobber the admin's choice on every
+    # auto-update. So if the existing .env already points _WHISPER_MODEL at a
+    # model file that still exists on disk, keep it; only fall back to a detected
+    # candidate when the configured model is gone.
+    cur_model = next((ln.split("=", 1)[1].strip() for ln in lines
+                      if ln.strip().startswith("_WHISPER_MODEL=")), "")
+    if cur_model and Path(cur_model).is_file():
+        desired["_WHISPER_MODEL"] = cur_model
+
     out: list[str] = []
     seen: set[str] = set()
     for raw in lines:

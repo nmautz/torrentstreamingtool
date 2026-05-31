@@ -99,7 +99,9 @@ Uses the `cryptography` package (in requirements.txt). Generates a self-signed C
 
 `write_env()` writes user-facing keys then a "Auto-detected binary paths" section with `_VLC_BIN`, `_QBIT_BIN`, `_JACKETT_BIN`, `_MULLVAD_BIN`, `_FFMPEG_BIN`, `_FPCALC_BIN`, and (when present) `_WHISPER_BIN` / `_WHISPER_MODEL`. These are read by `run.py`, `watchdog.py`, `analyzer.py`, and `stt.py` to skip path discovery on subsequent runs.
 
-`merge_tool_paths()` ([setup.py:1045](../setup.py#L1045)) re-runs without re-prompting: keeps user settings, drops stale `_*_BIN` entries that no longer exist, appends new ones.
+`merge_tool_paths()` ([setup.py:1440](../setup.py#L1440)) re-runs without re-prompting (the reuse-`.env` path, incl. every auto-update): keeps user settings, drops stale `_*_BIN` entries that no longer exist, appends new ones.
+
+**`_WHISPER_MODEL` is preserved, not blindly re-detected.** Unlike the `_*_BIN` paths (one binary each, pure auto-detect), the whisper model is a *user choice* among possibly several installed GGML files — the admin can swap `base`→`medium` in the Components card, which leaves **both** `ggml-base.bin` and `ggml-medium.bin` under `tools/whisper/`. `detect_tools()` picks the first one it globs (usually `base`), so a naïve refresh would silently revert the admin's choice on every auto-update. `merge_tool_paths()` therefore keeps the existing `_WHISPER_MODEL` whenever that file still exists on disk, only falling back to a detected candidate when the configured model is gone. See [GOTCHAS.md](GOTCHAS.md).
 
 ## See also
 
