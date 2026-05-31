@@ -668,7 +668,11 @@
             <option value="beta">beta (release candidate)</option>
             <option value="alpha">alpha (bleeding edge)</option>
           </select>
-          <p class="text-[10px] text-gray-600">Only main / beta / alpha may be selected.</p>
+          <label class="flex items-center gap-2 text-[11px] text-gray-400 cursor-pointer pt-0.5">
+            <input id="auDevMode" type="checkbox" onchange="toggleDevBranches()" class="accent-indigo-500"/>
+            <span class="select-none">Show all branches (developer mode)</span>
+          </label>
+          <p id="auBranchHint" class="text-[10px] text-gray-600">Only main / beta / alpha may be selected.</p>
         </div>
         <div class="space-y-1.5">
           <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Check Every (hours)</label>
@@ -1521,6 +1525,83 @@ let _auEnabled = false;
 let _auState = null;
 let _auPollTimer = null;
 let _auFormDirty = false;   // true while the user has unsaved edits to the editable controls
+let _auDevMode = false;     // mirrors the "show all branches" checkbox
+let _auBranches = null;     // cached origin branch list (null = never fetched, [] = fetched/empty)
+
+// The curated picker (dev mode off). [value, label] pairs.
+const _AU_STATIC_BRANCHES = [
+  ["main",  "main (stable)"],
+  ["beta",  "beta (release candidate)"],
+  ["alpha", "alpha (bleeding edge)"],
+];
+
+async function _loadBranchList(){
+  // Fetch every branch on origin for the dev-mode picker. On failure, mark the
+  // cache as loaded-but-empty so the 4 s poll doesn't keep re-fetching.
+  try{
+    const r = await fetch("/api/admin/updater/branches", {headers: authHeader()});
+    if(r.ok){
+      const d = await r.json();
+      _auBranches = Array.isArray(d.branches) ? d.branches : [];
+      return true;
+    }
+  }catch(_){}
+  if(_auBranches === null) _auBranches = [];
+  return false;
+}
+
+function _setBranchValue(selected){
+  const sel = document.getElementById("auBranch");
+  if(!selected) return;
+  // Guarantee the saved branch is selectable even when it's not in the option
+  // set (a dev branch deleted from origin, or the list not yet fetched) so
+  // .value doesn't silently blank out.
+  if(!Array.from(sel.options).some(o => o.value === selected)){
+    sel.insertAdjacentHTML("beforeend",
+      `<option value="${escHtml(selected)}">${escHtml(selected)}</option>`);
+  }
+  sel.value = selected;
+}
+
+function _renderBranchPicker(devMode, selected){
+  const sel = document.getElementById("auBranch");
+  // Only rebuild the <option> list when the option-set actually changes (mode
+  // toggle or a freshly-fetched branch list). The 4 s poll otherwise just syncs
+  // the value, so an open dropdown isn't yanked shut underneath the admin.
+  const sig = devMode ? "all:" + ((_auBranches || []).join(",")) : "static";
+  if(sel.dataset.sig !== sig){
+    const opts = (devMode && Array.isArray(_auBranches) && _auBranches.length)
+      ? _auBranches.map(b => [b, b])
+      : _AU_STATIC_BRANCHES.slice();
+    sel.innerHTML = opts.map(([v,l]) =>
+      `<option value="${escHtml(v)}">${escHtml(l)}</option>`).join("");
+    sel.dataset.sig = sig;
+    const hint = document.getElementById("auBranchHint");
+    if(hint){
+      hint.textContent = devMode
+        ? "Developer mode: any branch on origin may be selected."
+        : "Only main / beta / alpha may be selected.";
+    }
+  }
+  _setBranchValue(selected);
+}
+
+async function toggleDevBranches(){
+  _auDevMode = document.getElementById("auDevMode").checked;
+  _auFormDirty = true;   // dev_mode + branch are persisted together on Save
+  const cur = document.getElementById("auBranch").value;
+  if(_auDevMode){
+    // Deliberate action — always refresh the list so a just-pushed branch shows.
+    if(!await _loadBranchList()){
+      showToast("Couldn't list remote branches — using defaults.", true);
+    }
+    _renderBranchPicker(true, cur);
+  } else {
+    // Back to the curated three; snap to main if the current pick isn't one.
+    const keep = _AU_STATIC_BRANCHES.some(b => b[0] === cur) ? cur : "main";
+    _renderBranchPicker(false, keep);
+  }
+}
 
 function _renderAuEnabled(){
   const btn = document.getElementById("auEnabledBtn");
@@ -1563,7 +1644,13 @@ async function loadAutoupdate(){
     if(!_auFormDirty){
       _auEnabled = !!cfg.enabled;
       _renderAuEnabled();
-      document.getElementById("auBranch").value     = cfg.branch || "main";
+      _auDevMode = !!cfg.dev_mode;
+      document.getElementById("auDevMode").checked = _auDevMode;
+      // Dev mode on ⇒ make sure the full branch list is loaded so the saved
+      // (possibly non-canonical) branch is selectable. Fetched once, then the
+      // poll reuses the cache — _renderBranchPicker only rebuilds on a change.
+      if(_auDevMode && _auBranches === null) await _loadBranchList();
+      _renderBranchPicker(_auDevMode, cfg.branch || "main");
       document.getElementById("auInterval").value   = cfg.interval_hours || 6;
       document.getElementById("auAutoApply").checked = cfg.auto_apply !== false;
     }
@@ -1580,7 +1667,7 @@ async function loadAutoupdate(){
       || (cfg.last_error ? `Last error: ${cfg.last_error}` : "Idle.");
     document.getElementById("auStatusMsg").textContent = msg;
     document.getElementById("auSummary").textContent =
-      `v${d.ui_version || ""} · ${d.allowed_branches?.join(" / ") || "main / beta / alpha"}`;
+      `v${d.ui_version || ""} · ${_auDevMode ? "all branches (dev)" : (d.allowed_branches?.join(" / ") || "main / beta / alpha")}`;
 
     const busy = !!d.busy;
     document.getElementById("auCheckBtn").disabled  = busy || !d.is_git_repo;
@@ -1614,6 +1701,7 @@ async function saveAutoupdate(){
       branch:         document.getElementById("auBranch").value,
       interval_hours: parseInt(document.getElementById("auInterval").value,10) || 6,
       auto_apply:     document.getElementById("auAutoApply").checked,
+      dev_mode:       _auDevMode,
     };
     const r = await fetch("/api/admin/updater/config", {
       method: "POST",
@@ -1690,7 +1778,7 @@ async function applyUpdateNow(){
     const r = await fetch("/api/admin/updater/apply", {
       method: "POST",
       headers: {...authHeader(), "Content-Type":"application/json"},
-      body: JSON.stringify({branch: target, reboot: true}),
+      body: JSON.stringify({branch: target, reboot: true, dev_mode: _auDevMode}),
     });
     if(!r.ok){
       const txt = await r.text();
@@ -1725,7 +1813,7 @@ async function switchBranchNow(){
     const r = await fetch("/api/admin/updater/switch-branch", {
       method: "POST",
       headers: {...authHeader(), "Content-Type":"application/json"},
-      body: JSON.stringify({branch: target}),
+      body: JSON.stringify({branch: target, dev_mode: _auDevMode}),
     });
     if(!r.ok){
       const t = await r.text();

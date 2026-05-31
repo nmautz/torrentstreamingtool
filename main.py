@@ -1943,11 +1943,15 @@ def _autoupdate_cfg(lib: dict) -> dict:
 
     The auto-updater is opt-in (default off) and pinned to the `main` branch
     unless the admin changes it. Allowed branches are enforced by updater.py;
-    a stale config that names something else is sanitised to `main` on read.
+    a stale config that names something else is sanitised to `main` on read —
+    UNLESS dev mode is on, in which case any structurally-valid branch name
+    (e.g. a feature branch) is honoured so a developer can ride it.
     """
     cfg = (lib.get("settings", {}) or {}).get("autoupdate") or {}
+    dev_mode = bool(cfg.get("dev_mode", False))
     branch = str(cfg.get("branch", "main"))
-    if branch not in updater.ALLOWED_BRANCHES:
+    if branch not in updater.ALLOWED_BRANCHES \
+            and not (dev_mode and updater.branch_allowed(branch, allow_any=True)[0]):
         branch = "main"
     try:
         interval = int(cfg.get("interval_hours", 6))
@@ -1957,6 +1961,7 @@ def _autoupdate_cfg(lib: dict) -> dict:
     return {
         "enabled":           bool(cfg.get("enabled", False)),
         "branch":            branch,
+        "dev_mode":          dev_mode,
         "interval_hours":    interval,
         "auto_apply":        bool(cfg.get("auto_apply", True)),
         "last_check_at":     int(cfg.get("last_check_at", 0)),
@@ -2216,9 +2221,9 @@ async def _persist_updater_state(**fields) -> None:
     await put_library(lib)
 
 
-async def _run_check(branch: str) -> dict:
+async def _run_check(branch: str, allow_any: bool = False) -> dict:
     """Wrapper around updater.check_update that records the result in library.json."""
-    res = await updater.check_update(branch)
+    res = await updater.check_update(branch, allow_any=allow_any)
     status = "ok" if res.get("ok") else (res.get("error") or "error")
     await _persist_updater_state(
         last_check_at=int(time.time()),
@@ -2227,7 +2232,7 @@ async def _run_check(branch: str) -> dict:
     return res
 
 
-async def _run_apply(branch: str, reboot: bool = True) -> dict:
+async def _run_apply(branch: str, reboot: bool = True, allow_any: bool = False) -> dict:
     """The full update sequence: git apply → setup.py → service reinstall →
     machine reboot.
 
@@ -2259,7 +2264,7 @@ async def _run_apply(branch: str, reboot: bool = True) -> dict:
 
         await _set_updater_phase("applying", f"Applying {branch} branch…", busy=True)
         prev_commit = await updater.current_commit()
-        apply_res = await updater.apply_update(branch)
+        apply_res = await updater.apply_update(branch, allow_any=allow_any)
         if not apply_res.get("ok"):
             err = apply_res.get("error") or "git update failed"
             await _set_updater_phase("error", f"git apply: {err}", busy=False)
@@ -2382,11 +2387,12 @@ async def updater_loop() -> None:
                 continue
 
             branch = cfg["branch"]
+            allow_any = cfg["dev_mode"]
             async with _updater_lock:
                 if state.updater_busy:
                     continue
                 await _set_updater_phase("checking", f"Checking origin/{branch}…", busy=True)
-                res = await _run_check(branch)
+                res = await _run_check(branch, allow_any=allow_any)
                 last_check_mono = now_mono
 
             if not res.get("ok"):
@@ -2416,7 +2422,7 @@ async def updater_loop() -> None:
 
             print(f"[updater] auto-applying origin/{branch} "
                   f"(local={res['local']} → remote={res['remote']})")
-            apply_res = await _run_apply(branch, reboot=True)
+            apply_res = await _run_apply(branch, reboot=True, allow_any=allow_any)
             if not apply_res.get("ok"):
                 print(f"[updater] auto-apply failed at stage={apply_res.get('stage')}: "
                       f"{apply_res.get('message')}")
@@ -7303,13 +7309,15 @@ async def admin_components_install(request: Request, req: ComponentInstallReq) -
 
 class UpdaterConfigReq(BaseModel):
     enabled:        Optional[bool] = None
-    branch:         Optional[str]  = None     # main | beta | alpha
+    branch:         Optional[str]  = None     # main | beta | alpha (any branch when dev_mode)
     interval_hours: Optional[int]  = None     # 1-168
     auto_apply:     Optional[bool] = None
+    dev_mode:       Optional[bool] = None     # "show all branches" — relax the branch gate
 
 
 class UpdaterApplyReq(BaseModel):
     branch: Optional[str] = None     # default: settings.autoupdate.branch
+    dev_mode: Optional[bool] = None  # picker's "show all branches" state; gates a non-canonical branch
     # When True (default), the apply ends with daemon.uninstall() +
     # daemon.install() + a full host reboot for a clean-state restart on the
     # new code. False = code-only refresh: git apply + setup.py, no service
@@ -7353,19 +7361,43 @@ async def admin_get_updater(request: Request) -> JSONResponse:
     })
 
 
+@app.get("/api/admin/updater/branches")
+async def admin_updater_branches(request: Request) -> JSONResponse:
+    """List every branch on origin (a fresh `git ls-remote`), for the dev-mode
+    "show all branches" picker.
+
+    Kept off the polled `/api/admin/updater` payload on purpose — it costs a
+    network round-trip, so the UI fetches it only when the admin opens the
+    expanded picker rather than every 4 s. `ALLOWED_BRANCHES` (main/beta/alpha)
+    sort to the top; the rest follow alphabetically. Returns `[]` (not an error)
+    when this isn't a git checkout so the UI can fall back to the defaults.
+    """
+    _require_admin(request)
+    branches = await updater.list_remote_branches()
+    return JSONResponse({
+        "ok": True,
+        "branches": branches,
+        "allowed_branches": list(updater.ALLOWED_BRANCHES),
+    })
+
+
 @app.post("/api/admin/updater/config")
 async def admin_set_updater_config(request: Request, body: UpdaterConfigReq) -> JSONResponse:
     """Persist a partial update to settings.autoupdate. Fields that aren't
-    provided are left untouched. Branch is validated against ALLOWED_BRANCHES;
+    provided are left untouched. Branch is validated against ALLOWED_BRANCHES
+    (or, when dev_mode is on, any structurally-valid branch name);
     interval_hours is clamped to [1, 168]."""
     _require_admin(request)
     lib = await get_library()
     au = lib.setdefault("settings", {}).setdefault("autoupdate", {})
+    # Apply dev_mode first so the branch validation below uses the new value.
+    if body.dev_mode is not None:
+        au["dev_mode"] = bool(body.dev_mode)
+    allow_any = bool(au.get("dev_mode", False))
     if body.branch is not None:
-        if body.branch not in updater.ALLOWED_BRANCHES:
-            raise HTTPException(400,
-                f"Branch '{body.branch}' is not allowed. Pick one of: "
-                f"{', '.join(updater.ALLOWED_BRANCHES)}.")
+        ok, err = updater.branch_allowed(body.branch, allow_any=allow_any)
+        if not ok:
+            raise HTTPException(400, err)
         au["branch"] = body.branch
     if body.interval_hours is not None:
         try:
@@ -7388,11 +7420,12 @@ async def admin_check_update(request: Request) -> JSONResponse:
     if state.updater_busy:
         raise HTTPException(409, "An update operation is already running.")
     lib = await get_library()
-    branch = _autoupdate_cfg(lib)["branch"]
+    cfg = _autoupdate_cfg(lib)
+    branch = cfg["branch"]
     async with _updater_lock:
         await _set_updater_phase("checking", f"Checking origin/{branch}…", busy=True)
         try:
-            res = await _run_check(branch)
+            res = await _run_check(branch, allow_any=cfg["dev_mode"])
         finally:
             if state.updater_busy:
                 if res.get("ok"):
@@ -7411,11 +7444,11 @@ async def admin_apply_update(request: Request, body: UpdaterApplyReq) -> JSONRes
     """Run the full update sequence right now (git apply → setup.py → service
     reinstall → host reboot).
 
-    `body.branch` accepts main / beta / alpha — passing a branch that differs
-    from the current working tree triggers a downgrade or sidegrade (git apply
-    handles the switch). With `body.reboot=False` the service reinstall and
-    machine reboot are skipped (dev convenience — refresh the code without
-    tearing the box down).
+    `body.branch` accepts main / beta / alpha (or any branch when dev_mode is
+    on) — passing a branch that differs from the current working tree triggers
+    a downgrade or sidegrade (git apply handles the switch). With
+    `body.reboot=False` the service reinstall and machine reboot are skipped
+    (dev convenience — refresh the code without tearing the box down).
 
     Does NOT check `_machine_in_use` — an admin clicking Apply Now is taken at
     their word. The auto-apply loop (in `updater_loop`) is the path that defers
@@ -7426,11 +7459,14 @@ async def admin_apply_update(request: Request, body: UpdaterApplyReq) -> JSONRes
         raise HTTPException(409, "An update operation is already running.")
 
     lib = await get_library()
-    branch = (body.branch or _autoupdate_cfg(lib)["branch"]).strip()
-    if branch not in updater.ALLOWED_BRANCHES:
-        raise HTTPException(400, f"Branch '{branch}' is not allowed.")
+    cfg = _autoupdate_cfg(lib)
+    allow_any = bool(body.dev_mode) if body.dev_mode is not None else cfg["dev_mode"]
+    branch = (body.branch or cfg["branch"]).strip()
+    ok, err = updater.branch_allowed(branch, allow_any=allow_any)
+    if not ok:
+        raise HTTPException(400, err)
 
-    res = await _run_apply(branch, reboot=bool(body.reboot))
+    res = await _run_apply(branch, reboot=bool(body.reboot), allow_any=allow_any)
     if not res.get("ok"):
         raise HTTPException(500, res.get("message") or "Update failed.")
     return JSONResponse(res)
@@ -7444,28 +7480,38 @@ async def admin_switch_branch(request: Request, body: UpdaterConfigReq) -> JSONR
     the saved branch AND does a hard checkout of origin/<branch>. Does NOT
     run setup.py or restart; the admin can follow up with /apply if they
     want the full sequence.
+
+    `body.dev_mode` rides along so the picker's "show all branches" state takes
+    effect even before a separate Save: when provided it is persisted and used
+    to gate the (possibly non-canonical) target branch.
     """
     _require_admin(request)
     if state.updater_busy:
         raise HTTPException(409, "An update operation is already running.")
     if body.branch is None:
         raise HTTPException(400, "branch is required.")
-    if body.branch not in updater.ALLOWED_BRANCHES:
-        raise HTTPException(400,
-            f"Branch '{body.branch}' is not allowed. Pick one of: "
-            f"{', '.join(updater.ALLOWED_BRANCHES)}.")
+
+    lib = await get_library()
+    allow_any = bool(body.dev_mode) if body.dev_mode is not None \
+        else _autoupdate_cfg(lib)["dev_mode"]
+    ok, err = updater.branch_allowed(body.branch, allow_any=allow_any)
+    if not ok:
+        raise HTTPException(400, err)
 
     async with _updater_lock:
         await _set_updater_phase("applying", f"Switching to {body.branch}…", busy=True)
-        res = await updater.switch_branch(body.branch)
+        res = await updater.switch_branch(body.branch, allow_any=allow_any)
         if not res.get("ok"):
             await _set_updater_phase("error", res.get("error", "switch failed"), busy=False)
             raise HTTPException(500, res.get("error", "switch failed"))
 
-        # Persist the new branch as the default for future auto-checks.
+        # Persist the new branch (+ the dev-mode preference) as the default for
+        # future auto-checks.
         lib = await get_library()
         au = lib.setdefault("settings", {}).setdefault("autoupdate", {})
         au["branch"] = body.branch
+        if body.dev_mode is not None:
+            au["dev_mode"] = bool(body.dev_mode)
         await put_library(lib)
 
         await _set_updater_phase("idle",
@@ -7488,9 +7534,11 @@ async def admin_reset_hard(request: Request) -> JSONResponse:
     if state.updater_busy:
         raise HTTPException(409, "An update operation is already running.")
 
+    lib = await get_library()
+    allow_any = _autoupdate_cfg(lib)["dev_mode"]
     async with _updater_lock:
         await _set_updater_phase("applying", "Resetting hard to origin…", busy=True)
-        res = await updater.reset_hard()
+        res = await updater.reset_hard(allow_any=allow_any)
         if not res.get("ok"):
             await _set_updater_phase("error", res.get("error", "reset failed"), busy=False)
             raise HTTPException(500, res.get("error", "reset failed"))

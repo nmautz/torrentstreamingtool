@@ -7,8 +7,10 @@ setup.py non-interactively to refresh deps + the system-service registration,
 then asks the running uvicorn process to exit so the OS service supervisor
 relaunches it on the new code.
 
-All branch operations are gated to ALLOWED_BRANCHES so the picker can't be
-coaxed into fetching anything else.
+All branch operations are gated by `branch_allowed()`. By default only
+ALLOWED_BRANCHES (main/beta/alpha) pass; the admin's "show all branches" dev
+toggle relaxes the gate to any structurally-valid branch that exists on origin,
+so a developer can ride a feature branch without weakening the default picker.
 
 The actual *trigger* of `apply()` lives in main.py (`updater_loop` background
 task + `/api/admin/updater/*` endpoints) — this module is the platform-agnostic
@@ -20,6 +22,7 @@ import asyncio
 import logging
 import os
 import platform
+import re
 import sys
 from pathlib import Path
 from typing import Optional
@@ -27,9 +30,45 @@ from typing import Optional
 HERE = Path(__file__).parent
 SYSTEM = platform.system()
 
+# The branches the picker offers by default. "Dev mode" (the admin's
+# "show all branches" checkbox) relaxes this to *any* branch that actually
+# exists on origin and passes the structural guard below — see branch_allowed()
+# and list_remote_branches(). Without dev mode, only these three are reachable.
 ALLOWED_BRANCHES: tuple[str, ...] = ("main", "beta", "alpha")
 
+# Structural guard for a dev-mode branch name. A real git branch is made of
+# these chars; rejecting everything else stops a relaxed name from smuggling in
+# git option injection (leading "-"), a traversal-y refspec ("..", leading/
+# trailing "/"), or anything that isn't HTML-safe when echoed into the picker.
+_BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/\-]*$")
+
 log = logging.getLogger("streamlink.updater")
+
+
+def _looks_like_branch(name: str) -> bool:
+    """True if `name` is a plausible, safe branch name for the relaxed picker."""
+    if not name or ".." in name or name.endswith("/") or "//" in name:
+        return False
+    return bool(_BRANCH_RE.match(name))
+
+
+def branch_allowed(branch: str, allow_any: bool = False) -> tuple[bool, str]:
+    """Gate a branch name. Without dev mode, only ALLOWED_BRANCHES pass. With
+    dev mode (`allow_any`), any structurally-valid branch name passes — git
+    itself rejects one that doesn't exist on origin when the fetch runs, so the
+    structural guard is the only thing we need to enforce here.
+
+    Returns (ok, error_message). Shared by the async git helpers below and the
+    API layer in main.py so both agree on what's reachable.
+    """
+    if branch in ALLOWED_BRANCHES:
+        return True, ""
+    if not allow_any:
+        return False, (f"Branch '{branch}' is not allowed. Pick one of: "
+                       f"{', '.join(ALLOWED_BRANCHES)}.")
+    if not _looks_like_branch(branch):
+        return False, f"Branch '{branch}' is not a valid branch name."
+    return True, ""
 
 
 # ── git helpers ──────────────────────────────────────────────────────────────
@@ -85,16 +124,40 @@ async def current_commit(short: bool = True) -> str:
     return out[:12] if rc == 0 else ""
 
 
-async def _fetch(branch: str, timeout: float = 180.0) -> tuple[bool, str]:
-    if branch not in ALLOWED_BRANCHES:
-        return False, f"Branch '{branch}' is not allowed."
+async def _fetch(branch: str, timeout: float = 180.0, allow_any: bool = False) -> tuple[bool, str]:
+    ok, err = branch_allowed(branch, allow_any)
+    if not ok:
+        return False, err
     rc, _, err = await _git("fetch", "--prune", "origin", branch, timeout=timeout)
     if rc != 0:
         return False, err or f"git fetch failed (rc={rc})"
     return True, "ok"
 
 
-async def check_update(branch: str) -> dict:
+async def list_remote_branches(timeout: float = 30.0) -> list[str]:
+    """All branch names on origin, structurally valid + sorted, for the dev-mode
+    ("show all branches") picker. Canonical branches (main/beta/alpha) float to
+    the top; the rest follow alphabetically. Returns [] if not a git repo or the
+    remote query fails — the UI falls back to the three defaults in that case.
+    """
+    if not await is_git_repo():
+        return []
+    rc, out, _ = await _git("ls-remote", "--heads", "origin", timeout=timeout)
+    if rc != 0 or not out:
+        return []
+    names: set[str] = set()
+    for line in out.splitlines():
+        # Each line is "<sha>\trefs/heads/<branch>".
+        _, _, ref = line.partition("\trefs/heads/")
+        ref = ref.strip()
+        if ref and _looks_like_branch(ref):
+            names.add(ref)
+    canon = [b for b in ALLOWED_BRANCHES if b in names]
+    rest = sorted(b for b in names if b not in ALLOWED_BRANCHES)
+    return canon + rest
+
+
+async def check_update(branch: str, allow_any: bool = False) -> dict:
     """Look up how far behind origin/<branch> we are. Does a fetch first.
 
     Returned shape:
@@ -109,13 +172,14 @@ async def check_update(branch: str) -> dict:
           "error": str         # only present on failure
         }
     """
-    if branch not in ALLOWED_BRANCHES:
-        return {"ok": False, "branch": branch, "error": f"Branch '{branch}' not allowed."}
+    ok, msg = branch_allowed(branch, allow_any)
+    if not ok:
+        return {"ok": False, "branch": branch, "error": msg}
 
     if not await is_git_repo():
         return {"ok": False, "branch": branch, "error": "Not a git checkout."}
 
-    ok, msg = await _fetch(branch)
+    ok, msg = await _fetch(branch, allow_any=allow_any)
     if not ok:
         return {"ok": False, "branch": branch, "error": msg}
 
@@ -147,16 +211,17 @@ async def check_update(branch: str) -> dict:
     }
 
 
-async def switch_branch(branch: str) -> dict:
+async def switch_branch(branch: str, allow_any: bool = False) -> dict:
     """Hard-checkout origin/<branch>. Any local edits to tracked files are
     wiped — we own the host repo so this is the intended behaviour.
     """
-    if branch not in ALLOWED_BRANCHES:
-        return {"ok": False, "error": f"Branch '{branch}' not allowed."}
+    ok, msg = branch_allowed(branch, allow_any)
+    if not ok:
+        return {"ok": False, "error": msg}
     if not await is_git_repo():
         return {"ok": False, "error": "Not a git checkout."}
 
-    ok, msg = await _fetch(branch)
+    ok, msg = await _fetch(branch, allow_any=allow_any)
     if not ok:
         return {"ok": False, "error": msg}
 
@@ -176,12 +241,12 @@ async def switch_branch(branch: str) -> dict:
     return {"ok": True, "branch": branch, "commit": await current_commit()}
 
 
-async def apply_update(branch: str) -> dict:
+async def apply_update(branch: str, allow_any: bool = False) -> dict:
     """Switch to + hard-reset onto origin/<branch>. Idempotent."""
-    return await switch_branch(branch)
+    return await switch_branch(branch, allow_any=allow_any)
 
 
-async def reset_hard() -> dict:
+async def reset_hard(allow_any: bool = False) -> dict:
     """Force the working tree back onto origin/<current-branch>.
 
     Recovery tool for a wedged / diverged checkout: fetches the current
@@ -191,9 +256,10 @@ async def reset_hard() -> dict:
     gitignored files (library.json, .env, .offline_cache/, .background/)
     survive.
 
-    Gated to ALLOWED_BRANCHES: refuses to act on a detached HEAD or any
-    branch outside main/beta/alpha so the button can't quietly nuke an
-    unexpected checkout.
+    Gated by branch_allowed: refuses to act on a detached HEAD or — without
+    dev mode — any branch outside main/beta/alpha, so the button can't quietly
+    nuke an unexpected checkout. With dev mode (`allow_any`) it will reset onto
+    whatever dev branch is checked out.
     """
     if not await is_git_repo():
         return {"ok": False, "error": "Not a git checkout."}
@@ -201,12 +267,11 @@ async def reset_hard() -> dict:
     branch = await current_branch()
     if not branch or branch == "HEAD":
         return {"ok": False, "error": "Detached HEAD — checkout a branch first."}
-    if branch not in ALLOWED_BRANCHES:
-        return {"ok": False,
-                "error": f"Current branch '{branch}' is not one of "
-                         f"{', '.join(ALLOWED_BRANCHES)}."}
+    ok, msg = branch_allowed(branch, allow_any)
+    if not ok:
+        return {"ok": False, "error": f"Current branch '{branch}': {msg}"}
 
-    ok, msg = await _fetch(branch)
+    ok, msg = await _fetch(branch, allow_any=allow_any)
     if not ok:
         return {"ok": False, "error": msg}
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## [4.6.0] — 2026-05-30
+- **New: "Show all branches (developer mode)" in the auto-updater.** A checkbox under the Updates-tab branch picker repopulates it from a live `git ls-remote` of origin (canonical **main / beta / alpha** first, then every other branch alphabetically) so a developer can point the box at any feature branch — not just the curated three. With the box off, behaviour is unchanged and a stale non-canonical branch is sanitised back to `main` on read.
+- **Backend:** branch gating is now centralised in `updater.branch_allowed(branch, allow_any)` and threaded through `check_update` / `switch_branch` / `apply_update` / `reset_hard` (+ the `/config`, `/apply`, `/switch-branch`, `/reset-hard` endpoints) as `allow_any`. Without dev mode only `ALLOWED_BRANCHES` pass; with it, any **structurally-valid** branch passes (a guard rejects leading `-`, `..`, `//`, whitespace, and HTML-unsafe names, so the relaxed picker can't smuggle in git option injection). New `GET /api/admin/updater/branches` lists origin's branches; the UI fetches it lazily (on toggle / first open) rather than on the 4 s status poll. Persisted as `settings.autoupdate.dev_mode`; sent inline on Switch/Apply so it works before an explicit Save.
+- **Docs:** [docs/ADMIN.md](docs/ADMIN.md), [docs/API.md](docs/API.md), [docs/LIBRARY_DATA.md](docs/LIBRARY_DATA.md), [PLAN.md](PLAN.md).
+
 ## [4.5.1] — 2026-05-30
 - **Fixed: the AI-subtitle whisper model reverting to `base` after an auto-update / branch switch.** When the admin had installed a larger model (e.g. `medium`) via the Components card, the auto-updater's non-interactive `setup.py` re-ran `merge_tool_paths()`, which refreshed `_WHISPER_MODEL` to the *first* `ggml-*.bin` it globbed (usually `base`) — silently clobbering the admin's choice. `merge_tool_paths` now treats `_WHISPER_MODEL` as a user choice: if the existing `.env` already points at a model file that still exists on disk, it keeps it, only falling back to a detected candidate when the configured model is gone.
 - **Docs:** [docs/SETUP.md](docs/SETUP.md), [docs/STT.md](docs/STT.md), [docs/GOTCHAS.md](docs/GOTCHAS.md).

@@ -45,6 +45,15 @@ The only persistent server-side state. Lives at the project root. Accessed via `
       "enabled":          true,
       "default_language": "",           // 3-letter code; "" = only sub-less files trigger
       "translate":        true          // add an English track for non-English audio
+    },
+    "autoupdate": {                     // dashboard auto-updater (admin Updates tab)
+      "enabled":        false,
+      "branch":         "main",         // main/beta/alpha — or any branch when dev_mode
+      "dev_mode":       false,          // "show all branches": relax the branch gate for development
+      "interval_hours": 6,              // auto-check cadence; clamped 1–168
+      "auto_apply":     true            // apply (when idle) on detect, vs. just banner
+      // …plus internal fields: last_check_at, last_check_status,
+      //    last_applied_at, last_applied_commit, last_error
     }
   }
 }
@@ -80,6 +89,8 @@ PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "so
 `settings.overnight_prep`: managed by the **System** admin tab (see [ADMIN.md §7](ADMIN.md)). The unified `auto_prep_loop` task auto-preps every un-prepped library file for on-device streaming during the `[start, end)` window (in `timezone`; the window may cross midnight). At the window end, `on_end == "pause"` lets the in-flight file finish then holds the rest until the next window, while `"continue"` runs to completion. Engagement is tracked in-memory (`state.auto_prep_engaged`), so there's no persisted fire-guard. Lives under `settings` because it applies to the physical host.
 
 `settings.idle_prep`: managed by the **System** admin tab (see [ADMIN.md §7](ADMIN.md)). The activity-gated companion to `overnight_prep`, served by the same `auto_prep_loop` task: any time the host has been idle (`_machine_in_use`) for `idle_minutes`, it queues bulk HLS-prep for the whole un-prepped library; the first sign of activity pauses it and **discards the in-flight encode** (`_pause_prep(kill=True)` — that file restarts from scratch on the next idle stretch, since HLS prep has no mid-file checkpoint). `idle_minutes` is clamped 1–720. Lives under `settings` because it applies to the physical host.
+
+`settings.autoupdate`: managed by the **Updates** admin tab (see [ADMIN.md §8](ADMIN.md)). Drives the `updater_loop` background task + the `/api/admin/updater/*` endpoints. `branch` is sanitised on read (`_autoupdate_cfg`): when `dev_mode` is false a non-canonical value snaps back to `main`; when `dev_mode` is true any structurally-valid branch name survives (so a developer can pin a feature branch). All branch operations route through `updater.branch_allowed(branch, allow_any=dev_mode)`. Lives under `settings` because the updater acts on the whole host install, not an individual viewer.
 
 `settings.stt`: managed by the **System** admin tab. Gates AI auto-subtitle generation (whisper.cpp). `default_language` is a 3-letter code (`_canon_lang`-normalized) — when set, a source lacking a text subtitle *in that language* triggers generation; `""` means only sources with no usable text sub at all do. `translate` adds an English-translated track for non-English audio. Read via `_stt_cfg`; consumed by `_needs_stt_subs` / `_ensure_stt_for`. Lives under `settings` because it applies to the host's media library, not an individual viewer. See [STT.md](STT.md).
 

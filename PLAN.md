@@ -300,8 +300,9 @@ remotely over SSE. See [docs/YOUTUBE.md](docs/YOUTUBE.md).
 ## Milestone 23 — Auto-Updater + Post-Update Env-Key Gating
 
 Pull-and-restart so a remote box can keep itself current without an admin
-needing shell access. Branch picker is locked to main / beta / alpha to make
-sure casual one-button updates can't drag the box onto a development branch.
+needing shell access. The branch picker defaults to main / beta / alpha so
+casual one-button updates can't drag the box onto a development branch; an
+opt-in "show all branches" developer toggle (23.11) relaxes that for devs.
 
 - [x] **23.1** Backend `updater.py` — async `git fetch / switch / reset --hard` plumbing + a non-interactive `setup.py` subprocess invoker + `service_is_installed()` so the apply path knows whether SIGTERM-ing uvicorn will actually relaunch.
 - [x] **23.2** Background `updater_loop` (1-min tick, fires every `interval_hours`) reads `library.json → settings.autoupdate` and, when `auto_apply` is on, calls `_run_apply` only after `_machine_in_use(window_secs=300)` returns False. Active streams + downloads + recent admin clicks all defer the apply to the next cycle.
@@ -313,6 +314,7 @@ sure casual one-button updates can't drag the box onto a development branch.
 - [x] **23.8** (v3.9.1) Full-cleanup apply: after the git pull + setup.py, the apply path now also **uninstalls + reinstalls the OS service** (`updater.reinstall_service()` → `daemon.uninstall()` + `daemon.install()` on a worker thread, regenerating `streamlink_service.py` from the new code) and then **reboots the host** instead of SIGTERM-ing uvicorn. Service reinstall is best-effort — a failure is logged but the reboot still fires; the previously-installed service definition keeps the dashboard alive after reboot. Phases reported via SSE: `applying → setup → reinstalling-service → rebooting`. `_kill_self_for_restart` removed.
 - [x] **23.9** (v3.9.1) Switch-back-to-older-branch is first-class through Apply Now — the button uses the picker's current value (not the saved config), so `alpha → main` is one confirm-gated click. `git switch -C origin/<branch>` + `git reset --hard` is symmetric in both directions; gitignored state survives. Confirmation dialog explicitly names the direction.
 - [x] **23.10** (v3.13.0) **Reset Hard** button + `POST /api/admin/updater/reset-hard` (`updater.reset_hard()`) — recovery for a wedged/diverged checkout: `git fetch` + `git reset --hard origin/<current-branch>`, discarding local commits + tracked-file edits while staying on the same branch (no switch, no `git clean`, no setup, no reboot). Gated to `ALLOWED_BRANCHES`; untracked/gitignored state survives. Confirm-gated.
+- [x] **23.11** (v4.6.0) **Show all branches (developer mode)** — a checkbox under the branch picker that repopulates it from a live `git ls-remote` (`GET /api/admin/updater/branches`, canonical branches first) so a developer can ride any branch, not just main/beta/alpha. Persisted as `settings.autoupdate.dev_mode`; threaded through every git op as `allow_any`. The relaxed gate is centralised in `updater.branch_allowed()` (structural guard: no leading `-`, no `..`/`//`, no whitespace, HTML-safe) and replaces the scattered `branch not in ALLOWED_BRANCHES` checks across `check_update` / `switch_branch` / `apply_update` / `reset_hard` + the `/config` `/apply` `/switch-branch` endpoints. `_autoupdate_cfg` keeps a non-canonical saved branch only while dev mode is on. Branch list is fetched lazily (on toggle / first open), not per-poll.
 
 ---
 
