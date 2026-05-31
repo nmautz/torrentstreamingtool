@@ -4229,14 +4229,18 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
     # ready with skipped files still absent; without live progress they'd masquerade
     # as complete). Falls back to status when qBit has no data (uploaded item, or the
     # torrent was removed).
-    qmap: dict[str, float] = {}
+    qmap: dict[str, float] = {}     # full path → progress
+    qbase: dict[str, float] = {}    # basename → progress (fallback if path keys drift)
     if has_torrent:
         info = await qbit_info(item["torrent_hash"])
         qfiles = await qbit_files(item["torrent_hash"])
         if info and qfiles:
             sp = info.get("save_path", settings.qbit_download_path)
             for i, qf in enumerate(qfiles):
-                qmap[str(Path(sp) / qf.get("name", ""))] = qf.get("progress", 0.0)
+                name = qf.get("name", "")
+                prog = qf.get("progress", 0.0)
+                qmap[str(Path(sp) / name)] = prog
+                qbase[Path(name).name] = prog   # best-effort; collisions rare (SxxExx names)
 
     out = []
     for f in item.get("files", []):
@@ -4254,16 +4258,20 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
         else:
             progress = None
         mode = _effective_file_mode(cfg, path)
-        if path in qmap:
-            # Live qBit progress is the truth, regardless of mode — a file that was
-            # downloaded then later marked "skip" is still on disk and playable.
-            dl_pct = round(qmap[path] * 100, 1)
-            complete = qmap[path] >= 0.999
+        # Live qBit progress is the truth, regardless of mode — a file that was
+        # downloaded then later marked "skip" is still on disk and playable. Fall
+        # back to basename match if the full-path key didn't line up (save-path drift).
+        qp = qmap.get(path)
+        if qp is None:
+            qp = qbase.get(Path(path).name)
+        if qp is not None:
+            dl_pct = round(qp * 100, 1)
+            complete = qp >= 0.999
         elif mode == "skip":
             # No live data + skipped ⇒ assume it was never fetched.
             dl_pct, complete = 0.0, False
         else:
-            # No live qBit data: trust status (uploaded item, or torrent gone).
+            # No live qBit data at all (uploaded item, or torrent gone): trust status.
             complete = is_ready or not has_torrent
             dl_pct = 100.0 if complete else None
         out.append({
@@ -4281,6 +4289,7 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
     return JSONResponse({
         "files": out,
         "item_status": item.get("status", "ready"),
+        "has_torrent": has_torrent,                     # gates the download-scheduling controls
         "download_mode": cfg["mode"],
         "idle_open": state.download_idle_open,
         "idle_configured": state.download_idle_configured,
@@ -4455,7 +4464,8 @@ async def cancel_queue_play(item_id: str) -> JSONResponse:
 
 
 class DownloadScheduleReq(BaseModel):
-    mode: str   # "now" = download immediately; "idle" = only during idle/night window
+    mode: str            # "now" = download immediately; "idle" = only during idle/night window
+    reset_files: bool = False   # True ⇒ clear per-file overrides so EVERY file (incl. skipped) inherits `mode`
 
 
 class FileScheduleReq(BaseModel):
@@ -4476,7 +4486,12 @@ async def set_download_schedule(item_id: str, req: DownloadScheduleReq) -> JSONR
     dl = item.setdefault("download", {"mode": "now", "files": {}})
     dl["mode"] = mode
     files = dl.setdefault("files", {})
-    if mode == "idle":
+    if req.reset_files:
+        # "Whole torrent now/idle": drop every override so all files (including ones
+        # previously skipped) inherit `mode` — now ⇒ fetch everything, idle ⇒ defer all.
+        files.clear()
+    elif mode == "idle":
+        # Pause: defer the active files, but keep explicit skips skipped.
         for p, m in list(files.items()):
             if m in ("now", "high"):
                 files[p] = "idle"

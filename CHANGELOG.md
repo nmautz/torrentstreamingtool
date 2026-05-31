@@ -1,5 +1,15 @@
 # Changelog
 
+## [4.9.0] — 2026-05-31
+- **New: download scheduling right inside the episode picker — whole torrent, per season, and per episode.** The episode page now has a download-control bar (shown for any torrent-backed item):
+  - **This season / All files**: ⬇ Now · 🌙 Idle · ⊘ Skip — schedules the visible season's files (or all files on a single-season item).
+  - **All** (multi-season): ⬇ Now · 🌙 Idle — schedules the **entire torrent** (resets per-file overrides so even previously-skipped files are included).
+  - **Per episode**: a not-on-disk episode shows ⊘ Not downloaded (skipped) or 🌙 Idle — deferred with a **⬇ Download** button to fetch it to the host now; an actively-downloading one shows its live %.
+- **Fixed: the per-episode "download" button only offered download-to-**device**, and showed even for files that aren't on disk** (so it downloaded an empty/partial file). The device-download link now appears **only for files that are actually complete**; not-yet-downloaded files get the host **⬇ Download** action instead.
+- **Robustness:** `GET /files` per-file `complete`/`dl_pct` now falls back to a basename match if the qBit full-path key drifts (save-path differences), so a finished partial download no longer mislabels absent files as complete. `/files` also returns `has_torrent` (gates the controls).
+- **Backend:** `download-schedule` accepts `reset_files` (whole-torrent now/idle, clearing per-file overrides). **Frontend:** `epSchedSeason` / `epSchedItem` / `epDownloadSkipped` (host fetch) + `epHasTorrent`/`epDownloadMode` from `/files`.
+- **Docs:** [docs/API.md](docs/API.md), [docs/FRONTEND.md](docs/FRONTEND.md), [PLAN.md](PLAN.md).
+
 ## [4.8.0] — 2026-05-31
 - **New: full per-file download control on a finished partial download, including "download this skipped file now."** Once a partial selection's kept files finish, you keep the same Top / Now / Idle / Skip controls you had while downloading:
   - The library card shows the **Files** expander on a partial item (⊘ Partial) even after it's ready, with the full per-row schedule controls + progress.

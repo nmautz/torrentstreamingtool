@@ -1844,6 +1844,8 @@ let epMetaImgBase = "";    // TMDb image base URL (image.tmdb.org/t/p)
 let epCurrentSeason = 0;   // active season tab; 0 = "all" / no season info
 let epSeasonList = [];     // sorted seasons present in epFiles (positive ints only)
 let epWatchedExpanded = new Set(); // season keys whose watched-episode section is expanded
+let epHasTorrent = false;  // item has a qBit torrent → download-scheduling controls apply
+let epDownloadMode = "now"; // item-level download mode (now | idle) from /files
 // Stream file picker state
 let streamPrepData = null;   // {hash, files, magnet, title} from /stream/prepare
 let streamPrepAbort = null;  // AbortController for the in-flight prepare request
@@ -3799,10 +3801,10 @@ async function setFileSchedule(itemId, paths, mode){
   }
 }
 
-async function setDownloadSchedule(itemId, mode){
+async function setDownloadSchedule(itemId, mode, resetFiles){
   const r=await fetch(`/api/library/${itemId}/download-schedule`,{
     method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({mode}),
+    body:JSON.stringify({mode, reset_files:!!resetFiles}),
   });
   if(r.ok){
     showAlert(mode==="idle"?"Paused — will download during the idle/night window.":"Resuming download now.","success");
@@ -3868,6 +3870,8 @@ async function openEpisodePicker(itemId, title){
   }
   const d=await filesR.value.json();
   epFiles=d.files||[];
+  epHasTorrent=!!d.has_torrent;
+  epDownloadMode=d.download_mode||"now";
   epFiles.forEach(f=>{ if(!f.progress?.completed) epChecked.add(f.path); });
 
   if(metaR.status==="fulfilled" && metaR.value.ok){
@@ -4063,11 +4067,13 @@ function _epCardHtml(f){
   const isComplete=prog?.completed;
   const inProgress=prog&&!isComplete&&pct>2;
   const isNowPlaying=app.library_current_file&&f.path===app.library_current_file;
-  // Download completeness (from qBit, via /files). false ⇒ not on disk yet: either
-  // skipped (offer "download now") or actively downloading (show progress).
+  // Download completeness (from qBit, via /files). false ⇒ not on disk yet.
   const notDownloaded=f.complete===false;
-  const isSkipped=notDownloaded&&f.mode==="skip";
   const epDlPct=(typeof f.dl_pct==="number")?f.dl_pct:null;
+  // Offer a host "Download now" when the file isn't fetching on its own — i.e. it was
+  // skipped or deferred to the idle window. now/high incomplete files are already
+  // downloading, so they just show progress.
+  const canFetchNow=notDownloaded&&(f.mode==="skip"||f.mode==="idle");
 
   const label=epLabel(f);
   const epName=_epDisplayTitle(f);
@@ -4086,8 +4092,10 @@ function _epCardHtml(f){
     ? `<span class="text-[10px] text-green-500 font-bold uppercase tracking-widest">✓ Watched</span>`
     : inProgress ? `<span class="text-[10px] text-yellow-500 font-bold">${pct}%</span>` : "";
   const notDlBadge = !notDownloaded ? ""
-    : isSkipped
+    : f.mode==="skip"
       ? `<span class="text-[10px] text-orange-400 font-bold uppercase tracking-widest" title="Skipped from the download — not on disk.">⊘ Not downloaded</span>`
+      : f.mode==="idle"
+      ? `<span class="text-[10px] text-sky-400 font-bold uppercase tracking-widest" title="Deferred to the idle/night window.">🌙 Idle — deferred</span>`
       : `<span class="text-[10px] text-sky-400 font-bold uppercase tracking-widest" title="Downloading now…">⬇ ${epDlPct!=null?epDlPct.toFixed(0)+'%':'Downloading…'}</span>`;
 
   const prepState = prepFileState.get(offKey(epItemId,f.path));
@@ -4186,7 +4194,7 @@ function _epCardHtml(f){
               <path stroke-linecap="round" stroke-width="2" d="M21 12a9 9 0 0 1-9 9"></path>
             </svg>
           </button>
-          ${isSkipped
+          ${canFetchNow
             ? `<button onclick="epDownloadSkipped(${_id},${_p})"
                 class="h-9 px-2.5 flex items-center gap-1 text-[11px] font-bold uppercase tracking-wide text-emerald-300 hover:text-emerald-200 hover:bg-emerald-950/40 transition-colors"
                 title="Download this file to the host now">
@@ -4207,6 +4215,31 @@ function _epCardHtml(f){
         </div>
       </div>
     </div>`;
+}
+
+// Compact scheduling button for the episode-picker download bar.
+function _epSchedBtn(onclick, label, color){
+  return `<button onclick="${onclick}" class="text-[11px] font-bold uppercase tracking-wide px-2 py-1 bg-gray-800 hover:bg-gray-700 ${color} transition-colors">${label}</button>`;
+}
+// Paths in the currently-visible scope (the active season, or every file when the
+// item has no season grouping).
+function _visibleSeasonPaths(){
+  if(epSeasonList.length) return epFiles.filter(f=>(+f.season||0)===epCurrentSeason).map(f=>f.path);
+  return epFiles.map(f=>f.path);
+}
+// Set the download schedule (now/idle/skip) for the visible season's files.
+async function epSchedSeason(mode){
+  const paths=_visibleSeasonPaths();
+  if(!paths.length) return;
+  await setFileSchedule(epItemId, paths, mode);
+  refreshEpFiles();
+}
+// Whole-torrent download schedule. reset_files=true so EVERY file (including any
+// previously skipped) inherits the mode — "now" grabs the entire torrent, "idle"
+// defers all of it.
+async function epSchedItem(mode){
+  await setDownloadSchedule(epItemId, mode, true);
+  refreshEpFiles();
 }
 
 function renderEpList(){
@@ -4251,11 +4284,29 @@ function renderEpList(){
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                 d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
             </svg>
-            Season ${epCurrentSeason}
+            Save ZIP
           </button>
         </div>
       </div>`;
     }
+  }
+
+  // Download-scheduling bar — host-side control over what downloads and when, at the
+  // current scope (this season, or all files) plus the whole torrent. Shown for any
+  // torrent-backed item, with or without TMDb metadata.
+  if(epHasTorrent){
+    const scope=epSeasonList.length?`Season ${epCurrentSeason}`:"All files";
+    const multi=epSeasonList.length>1;
+    html += `<div class="px-3 sm:px-5 py-2 border-b border-gray-800 flex items-center gap-1.5 flex-wrap bg-gray-900/40">
+      <span class="text-[10px] font-black text-gray-500 uppercase tracking-widest mr-0.5">${escHtml(scope)}:</span>
+      ${_epSchedBtn("epSchedSeason('now')","⬇ Now","text-emerald-300 hover:bg-emerald-950/40")}
+      ${_epSchedBtn("epSchedSeason('idle')","🌙 Idle","text-sky-300 hover:bg-sky-950/40")}
+      ${_epSchedBtn("epSchedSeason('skip')","⊘ Skip","text-red-300 hover:bg-red-950/40")}
+      ${multi?`<span class="w-px h-4 bg-gray-700 mx-1"></span>
+        <span class="text-[10px] font-black text-gray-500 uppercase tracking-widest mr-0.5">All:</span>
+        ${_epSchedBtn("epSchedItem('now')","⬇ Now","text-emerald-300 hover:bg-emerald-950/40")}
+        ${_epSchedBtn("epSchedItem('idle')","🌙 Idle","text-sky-300 hover:bg-sky-950/40")}`:""}
+    </div>`;
   }
 
   html += `<div class="divide-y divide-gray-900">`;
@@ -4496,6 +4547,8 @@ async function refreshEpFiles(){
     if(!r.ok) return;
     const d=await r.json();
     epFiles=d.files||[];
+    epHasTorrent=!!d.has_torrent;
+    epDownloadMode=d.download_mode||"now";
     // Drop any checked paths that are no longer in the file list.
     epChecked=new Set([...epChecked].filter(p=>epFiles.some(f=>f.path===p)));
     renderEpList();
@@ -6878,6 +6931,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.8.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.9.0</div>
 </body>
 </html>
