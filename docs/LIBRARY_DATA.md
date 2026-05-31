@@ -113,6 +113,7 @@ PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "so
   "added_at": "2026-05-13T01:58:59+00:00",
   "status": "downloading|ready|error",
   "torrent_hash": "abc123...",          // empty for uploaded items
+  "download": { /* download schedule; see below */ },
   "progress": { /* per-profile; see below */ },
   "admin_only": false,                  // optional; hides from non-elevated profiles
   "default_visible_profiles": [],       // optional; if non-empty, only these profile IDs see item by default
@@ -121,6 +122,45 @@ PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "so
   "metadata": { /* optional; TMDb cache — see below */ }
 }
 ```
+
+### `download` (download schedule)
+
+```jsonc
+"download": {
+  "mode": "now",                 // "now" = download anytime · "idle" = only during idle/night
+  "files": {                     // per-file overrides (by absolute path); inherit `mode` if absent
+    "/abs/path/S01E01.mkv": "high",   // download now, first
+    "/abs/path/S01E09.mkv": "idle",   // only during the idle/night window
+    "/abs/path/extras.mkv": "skip"    // never download
+  }
+}
+```
+
+Controls **when** an item's torrent (and individual files) download. The
+`download_scheduler_loop` task ([main.py](../main.py)) is the **single source of
+truth** that translates this model into live qBittorrent file priorities + torrent
+pause/resume every 15 s — never write qBit `filePrio`/`pause` for a scheduled item
+outside the reconcile path or the next tick reverts it (see
+[GOTCHAS.md](GOTCHAS.md)). Effective per-file schedule = `files[path]` if present,
+else `mode`. Mapping to a qBit priority depends on whether the idle/night DOWNLOAD
+window is open right now (`_download_idle_open`, which **reuses** the admin
+`overnight_prep` window + `idle_prep` idleness — see [ADMIN.md](ADMIN.md)):
+
+| effective mode | qBit priority |
+|----------------|---------------|
+| `skip` | 0 (never) |
+| `now`  | 1 (download now) |
+| `high` | 7 (download now, first) |
+| `idle` | 1 when the idle window is open, else 0 |
+
+If no managed file should download right now, the torrent is paused (`qbit_pause`,
+with a 5.x `/stop` fallback); resumed when something becomes eligible. The
+item-level **Pause** (`mode=idle`) / **Resume** (`mode=now`) sweep `now`/`high`↔`idle`
+on the per-file overrides too, leaving explicit `skip` choices alone. Written by
+`POST /api/library/{id}/download-schedule` + `/file-schedule`, the download modal's
+"Download at idle/night only" toggle (`DownloadReq.download_mode`), and
+`library_download_pipeline` (which seeds `skip` for files the picker deselected).
+Missing/legacy items read as `{mode: "now", files: {}}` (plain anytime download).
 
 ### File
 

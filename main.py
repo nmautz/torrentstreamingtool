@@ -448,6 +448,8 @@ class AppState:
     last_activity: float = 0.0                            # time.time() of last user-initiated interaction (drives scheduled-reboot idle check)
     prep_paused: bool = False                             # True ⇒ bulk stream-prep jobs hold (set by the non-admin Pause control / overnight window end)
     auto_prep_engaged: bool = False                       # True while the unified auto_prep_loop has prep running (overnight window OR idle trigger) — edge flag for resume/pause
+    download_idle_open: bool = False                      # last computed idle/night DOWNLOAD window state (set by download_scheduler_loop) — drives the "waiting for idle" UI
+    download_idle_configured: bool = False                # True if any admin prep window (overnight/idle) is enabled — so idle-only downloads have a window to run in
     # ── YouTube-on-TV (browser playback on the host display, remote-controlled) ──
     youtube_active: bool = False                          # True while a YouTube video is the active TV playback (browser, not VLC)
     youtube_video_id: Optional[str] = None               # 11-char YouTube id currently loaded on the TV page
@@ -562,6 +564,11 @@ def state_snapshot() -> dict:
         "stt_available": _stt_available(),
         # True ⇒ bulk stream-prep is paused (drives the global prep bar's Resume control).
         "prep_paused": state.prep_paused,
+        # Idle/night DOWNLOAD window: whether it's open right now, and whether any
+        # admin prep window is even configured (so the UI can warn that an idle-only
+        # download has no window to run in). See docs/STREAMING.md + the scheduler.
+        "download_idle_open": state.download_idle_open,
+        "download_idle_configured": state.download_idle_configured,
         # YouTube-on-TV: when active, the dashboard routes its player controls to
         # /api/youtube/control instead of VLC, and hides save/handoff/episode-nav.
         # active_title / vlc_time / vlc_duration / vlc_volume are reused for display,
@@ -694,6 +701,22 @@ async def qbit_files(h: str) -> list:
 async def qbit_delete(h: str, delete_files: bool = True) -> None:
     await qreq("POST", "/api/v2/torrents/delete",
                 data={"hashes": h, "deleteFiles": "true" if delete_files else "false"})
+
+
+async def qbit_pause(h: str) -> None:
+    """Pause a torrent. qBittorrent 5.x renamed pause→stop; /pause still works there
+    as a deprecated alias, but fall back to /stop on a 404 to stay correct on the
+    Windows builds the box ships with (Windows is the primary target)."""
+    r = await qreq("POST", "/api/v2/torrents/pause", data={"hashes": h})
+    if r is None or r.status_code == 404:
+        await qreq("POST", "/api/v2/torrents/stop", data={"hashes": h})
+
+
+async def qbit_resume(h: str) -> None:
+    """Resume a torrent. See qbit_pause for the 5.x /start fallback."""
+    r = await qreq("POST", "/api/v2/torrents/resume", data={"hashes": h})
+    if r is None or r.status_code == 404:
+        await qreq("POST", "/api/v2/torrents/start", data={"hashes": h})
 
 
 # ── VLC Client ────────────────────────────────────────────────────────────────
@@ -1608,6 +1631,52 @@ def human_size(n: int) -> str:
     return f"{n:.1f} PB"
 
 
+# ── Per-item download scheduling ────────────────────────────────────────────────
+# A library item may carry a `download` config controlling WHEN its torrent's files
+# are fetched. The download_scheduler_loop is the *single source of truth* for qBit
+# file priorities + torrent pause/resume on scheduled items — never write filePrio /
+# pause/resume for these items elsewhere without going through this model, or the
+# next reconcile reverts it (see docs/GOTCHAS.md).
+#
+#   item["download"] = {
+#       "mode":  "now" | "idle",          # item-wide default for files w/o an override
+#       "files": { "<abs path>": "now" | "high" | "idle" | "skip" },
+#   }
+#
+# Effective per-file schedule = files[path] if present else mode. Mapping to a live
+# qBit priority depends on whether the idle/night download window is open right now:
+#   skip → 0 (never)          high → 7 (download now, first)
+#   now  → 1 (download now)    idle → 1 when window open, else 0
+_FILE_MODES = ("now", "high", "idle", "skip")
+
+
+def _download_cfg(item: dict) -> dict:
+    """Return item['download'] with defaults filled in (never mutates the item)."""
+    dl = item.get("download") or {}
+    mode = dl.get("mode", "now")
+    if mode not in ("now", "idle"):
+        mode = "now"
+    files = dl.get("files") or {}
+    return {"mode": mode, "files": {k: v for k, v in files.items() if v in _FILE_MODES}}
+
+
+def _effective_file_mode(cfg: dict, path: str) -> str:
+    """Resolve a single file's effective schedule from the item download cfg."""
+    fm = cfg["files"].get(path)
+    return fm if fm in _FILE_MODES else cfg["mode"]
+
+
+def _file_mode_to_priority(mode: str, idle_open: bool) -> int:
+    """Map an effective file mode + current idle-window state to a qBit priority."""
+    if mode == "skip":
+        return 0
+    if mode == "high":
+        return 7
+    if mode == "idle":
+        return 1 if idle_open else 0
+    return 1   # "now"
+
+
 def _file_progress(item: dict, profile_id: str, file_path: str) -> Optional[dict]:
     """Return per-file progress dict for a given profile and path, or None."""
     prof = item.get("progress", {}).get(profile_id, {})
@@ -1907,9 +1976,14 @@ def _now_in_tz(tzname: str) -> datetime:
     return datetime.now()
 
 
-async def _machine_in_use(window_secs: int) -> bool:
+async def _machine_in_use(window_secs: int, ignore_downloads: bool = False) -> bool:
     """True if the box looks busy: VLC actively playing/paused real content, an
-    active stream/download, or a user interaction within `window_secs`."""
+    active stream/download, or a user interaction within `window_secs`.
+
+    `ignore_downloads=True` drops library downloads from the "busy" signal — used by
+    the download scheduler's idle check so an idle-only download that's running can't
+    flip the box "in use" and self-close its own idle window (see _download_idle_open).
+    """
     # 1. Live VLC playback of non-background content
     if not state.background_playing:
         vs = await vlc_status()
@@ -1918,7 +1992,7 @@ async def _machine_in_use(window_secs: int) -> bool:
     # 2. Active stream pipeline or library downloads in flight
     if state.stream_status in ("buffering", "playing"):
         return True
-    if state.downloading_count > 0:
+    if not ignore_downloads and state.downloading_count > 0:
         return True
     # 3. Recent user-initiated HTTP interaction (set by the activity middleware)
     if state.last_activity and (time.time() - state.last_activity) < window_secs:
@@ -2059,6 +2133,110 @@ def _in_overnight_window(now: datetime, start_min: int, end_min: int) -> bool:
     if start_min < end_min:
         return start_min <= cur < end_min
     return cur >= start_min or cur < end_min
+
+
+# ── Download scheduling: idle/night window + reconcile + loop ───────────────────
+
+async def _download_idle_open(lib: dict) -> bool:
+    """True if the moment is inside the idle/night DOWNLOAD window — reusing the
+    admin prep schedules: the Overnight Stream Prep window OR Idle Auto-Prep idleness.
+
+    Unlike auto_prep's idle check, a running download does NOT count as activity here
+    (`ignore_downloads=True`), so an idle-only download that's actively fetching can't
+    flip the box "in use" and immediately close its own window."""
+    on_cfg = _overnight_prep_cfg(lib)
+    if on_cfg["enabled"]:
+        s_min = _hhmm_to_min(on_cfg["start"])
+        e_min = _hhmm_to_min(on_cfg["end"])
+        if s_min is not None and e_min is not None:
+            if _in_overnight_window(_now_in_tz(on_cfg["timezone"]), s_min, e_min):
+                return True
+    id_cfg = _idle_prep_cfg(lib)
+    if id_cfg["enabled"]:
+        if not await _machine_in_use(id_cfg["idle_minutes"] * 60, ignore_downloads=True):
+            return True
+    return False
+
+
+def _download_idle_configured(lib: dict) -> bool:
+    """True if at least one admin prep window (overnight or idle) is enabled, i.e. an
+    idle-only download actually has a window to run in."""
+    return bool(_overnight_prep_cfg(lib)["enabled"] or _idle_prep_cfg(lib)["enabled"])
+
+
+async def _reconcile_item_downloads(item: dict, idle_open: bool) -> bool:
+    """Apply an item's download schedule to qBittorrent: set each managed file's
+    priority from its effective mode + the idle window, then pause/resume the torrent
+    so it only fetches when something is allowed to download right now.
+
+    The single writer of scheduled items' qBit file priorities + pause state. Returns
+    True if anything is actively downloading for this item now."""
+    h = item.get("torrent_hash")
+    if not h:
+        return False
+    cfg = _download_cfg(item)
+    # Plain "download now, no per-file overrides" items are left entirely alone.
+    if cfg["mode"] == "now" and not cfg["files"]:
+        return True
+    info = await qbit_info(h)
+    qfiles = await qbit_files(h)
+    if not info or not qfiles:
+        return False
+    sp = info.get("save_path", settings.qbit_download_path)
+    by_priority: dict[int, list[int]] = {}
+    any_active = False
+    for i, qf in enumerate(qfiles):
+        idx = qf.get("index", i)
+        full = str(Path(sp) / qf.get("name", ""))
+        want = _file_mode_to_priority(_effective_file_mode(cfg, full), idle_open)
+        if want > 0:
+            any_active = True
+        if qf.get("priority", 1) != want:
+            by_priority.setdefault(want, []).append(idx)
+    for prio, ids in by_priority.items():
+        await qbit_set_file_priority(h, ids, prio)
+    # Torrent-level pause is the coarse gate (only touch download-phase states so we
+    # never pause a torrent that's already finished + seeding): don't leave a torrent
+    # "downloading" with every file at priority 0 (some qBit builds error/auto-pause
+    # that), and an explicit pause is what actually halts tracker churn while idle.
+    qstate = info.get("state", "")
+    DL_PAUSED = ("pausedDL", "stoppedDL")
+    DL_ACTIVE = ("downloading", "metaDL", "forcedMetaDL", "stalledDL", "forcedDL",
+                 "queuedDL", "checkingDL", "allocating", "checkingResumeData")
+    if any_active and qstate in DL_PAUSED:
+        await qbit_resume(h)
+    elif not any_active and qstate in DL_ACTIVE:
+        await qbit_pause(h)
+    return any_active
+
+
+async def download_scheduler_loop() -> None:
+    """Honour per-item download schedules: only fetch 'idle'-scheduled files/torrents
+    during the idle/night window (reusing the admin prep windows), and keep 'now'
+    files downloading. Runs every 15 s and is the single writer of scheduled items'
+    qBit file priorities + pause state. See _reconcile_item_downloads."""
+    while True:
+        await asyncio.sleep(15)
+        try:
+            lib = await get_library()
+            idle_open = await _download_idle_open(lib)
+            prev_open = state.download_idle_open
+            state.download_idle_open = idle_open
+            state.download_idle_configured = _download_idle_configured(lib)
+            scheduled = [
+                it for it in lib["items"]
+                if it.get("status") == "downloading" and it.get("torrent_hash")
+                and (_download_cfg(it)["mode"] == "idle" or _download_cfg(it)["files"])
+            ]
+            for item in scheduled:
+                await _reconcile_item_downloads(item, idle_open)
+                await asyncio.sleep(0)
+            if prev_open != idle_open:
+                await broadcast("state", state_snapshot())
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[dlsched] download_scheduler_loop error: {exc}")
 
 
 async def scheduled_reboot_loop() -> None:
@@ -2726,6 +2904,7 @@ async def library_download_monitor() -> None:
                 else:
                     # Still downloading — push live stats to the UI
                     eta = info.get("eta", 8640000)
+                    cfg = _download_cfg(item)
                     await broadcast("library_progress", {
                         "item_id": item["id"],
                         "speed_bps": info.get("dlspeed", 0),
@@ -2733,6 +2912,10 @@ async def library_download_monitor() -> None:
                         "total_bytes": info.get("size", 0),
                         "progress_pct": round(info.get("completed", 0) / max(info.get("size", 1), 1) * 100, 1),
                         "eta_secs": eta if eta < 8640000 else -1,
+                        "download_mode": cfg["mode"],   # now | idle
+                        # Intentionally halted by the scheduler (idle window closed) —
+                        # the UI shows "Waiting for idle window" instead of "Downloading".
+                        "paused": qstate in ("pausedDL", "stoppedDL"),
                     })
                     changed = True  # file list updated
                     # Check if a specific queued file finished (even while torrent is still going)
@@ -3489,6 +3672,7 @@ async def library_download_pipeline(
     save_path: str = "",
     torrent_hash: str = "",
     selected_file_indices: Optional[list[int]] = None,
+    download_mode: str = "now",
 ) -> None:
     """Add magnet to qBit for a full download; no streaming mode, never auto-deleted."""
     try:
@@ -3523,28 +3707,37 @@ async def library_download_pipeline(
         if info := await qbit_info(h):
             save_path = info.get("save_path", settings.qbit_download_path)
             qfiles = await qbit_files(h)
+            files = build_file_list(qfiles, save_path)
 
+            # Record the download schedule in the item model (the single source of
+            # truth) and let _reconcile_item_downloads apply qBit priorities + pause.
+            # Non-selected files become "skip" so they never download; the rest
+            # inherit the item mode (now/idle). The scheduler reconciles every 15 s
+            # too, but we apply once here so gating takes effect immediately.
+            file_modes: dict[str, str] = {}
             if selected_file_indices:
-                # Skip non-selected files to avoid downloading them
                 selected_set = set(selected_file_indices)
-                skip_ids = [
-                    f.get("index", i) for i, f in enumerate(qfiles)
-                    if f.get("index", i) not in selected_set
-                ]
-                if skip_ids:
-                    await qbit_set_file_priority(h, skip_ids, 0)
-                sel_qfiles = [f for i, f in enumerate(qfiles) if f.get("index", i) in selected_set]
-                files = build_file_list(sel_qfiles, save_path)
-            else:
-                files = build_file_list(qfiles, save_path)
+                for i, qf in enumerate(qfiles):
+                    full = str(Path(save_path) / qf.get("name", ""))
+                    if qf.get("index", i) not in selected_set:
+                        file_modes[full] = "skip"
 
             lib = await get_library()
+            target = None
             for it in lib["items"]:
                 if it["id"] == item_id:
                     it["files"] = files
                     it["size_bytes"] = info.get("size", 0)
+                    it["download"] = {
+                        "mode": download_mode if download_mode in ("now", "idle") else "now",
+                        "files": file_modes,
+                    }
+                    target = it
                     break
             await put_library(lib)
+            if target is not None:
+                idle_open = await _download_idle_open(lib)
+                await _reconcile_item_downloads(target, idle_open)
 
         await broadcast("library_update", {"item_id": item_id, "status": "downloading"})
 
@@ -3590,11 +3783,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     reboot_loop = asyncio.create_task(scheduled_reboot_loop())
     autoprep_loop = asyncio.create_task(auto_prep_loop())
     update_loop = asyncio.create_task(updater_loop())
+    dlsched_loop = asyncio.create_task(download_scheduler_loop())
 
     yield
 
     for t in (guard, broadcaster, dl_monitor, vlc_tracker, bg_loop, jackett_mon,
-              reboot_loop, autoprep_loop, update_loop):
+              reboot_loop, autoprep_loop, update_loop, dlsched_loop):
         t.cancel()
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
@@ -3677,6 +3871,7 @@ class DownloadReq(BaseModel):
     torrent_hash: str = ""          # pre-added hash from /api/library/prepare
     selected_file_indices: list[int] = []  # if non-empty, skip all other files
     default_visible_profiles: list[str] = []  # if non-empty, only these profiles see it by default
+    download_mode: str = "now"      # "now" = download immediately; "idle" = only during idle/night window
 
 
 class VisibilityReq(BaseModel):
@@ -3926,6 +4121,7 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
             "first_file": first_file,
             "hidden": _item_hidden_for_profile(it, profile_id),
             "skip_status": _item_skip_status(it),
+            "download_mode": _download_cfg(it)["mode"],   # now | idle — drives the card's Pause/Resume control
         })
     items.sort(key=lambda x: (
         x["series"] or "\xff" + x["title"],
@@ -3949,6 +4145,19 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
         if profile_id else {}
     )
 
+    cfg = _download_cfg(item)
+    is_ready = item.get("status") == "ready"
+    # For a still-downloading torrent, map per-file qBit download progress so the UI
+    # can show which files are complete (and playable) even while others lag behind.
+    qmap: dict[str, float] = {}
+    if not is_ready and item.get("torrent_hash"):
+        info = await qbit_info(item["torrent_hash"])
+        qfiles = await qbit_files(item["torrent_hash"])
+        if info and qfiles:
+            sp = info.get("save_path", settings.qbit_download_path)
+            for i, qf in enumerate(qfiles):
+                qmap[str(Path(sp) / qf.get("name", ""))] = qf.get("progress", 0.0)
+
     out = []
     for f in item.get("files", []):
         path = f.get("path", "")
@@ -3964,6 +4173,13 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
             }
         else:
             progress = None
+        if is_ready:
+            dl_pct, complete = 100.0, True
+        elif path in qmap:
+            dl_pct = round(qmap[path] * 100, 1)
+            complete = qmap[path] >= 0.999
+        else:
+            dl_pct, complete = None, False
         out.append({
             "name": f.get("name", Path(path).name),
             "path": path,
@@ -3972,8 +4188,17 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
             "season": f.get("season", 0),
             "episode": f.get("episode", 0),
             "progress": progress,
+            "mode": _effective_file_mode(cfg, path),   # now | high | idle | skip
+            "dl_pct": dl_pct,                           # download % (None if unknown)
+            "complete": complete,                       # file fully downloaded → playable
         })
-    return JSONResponse({"files": out, "item_status": item.get("status", "ready")})
+    return JSONResponse({
+        "files": out,
+        "item_status": item.get("status", "ready"),
+        "download_mode": cfg["mode"],
+        "idle_open": state.download_idle_open,
+        "idle_configured": state.download_idle_configured,
+    })
 
 
 @app.get("/api/library/{item_id}/metadata")
@@ -4039,6 +4264,8 @@ async def library_download(req: DownloadReq) -> JSONResponse:
         "progress": {},
         "default_visible_profiles": req.default_visible_profiles,
         "hidden_by_profiles": [],
+        "download": {"mode": req.download_mode if req.download_mode in ("now", "idle") else "now",
+                     "files": {}},
     }
     lib["items"].append(item)
     await put_library(lib)
@@ -4048,6 +4275,7 @@ async def library_download(req: DownloadReq) -> JSONResponse:
         item["id"], req.magnet, save_path,
         torrent_hash=req.torrent_hash,
         selected_file_indices=req.selected_file_indices or None,
+        download_mode=item["download"]["mode"],
     ))
     return JSONResponse({"ok": True, "item_id": item["id"],
                          "default_save_path": settings.qbit_download_path})
@@ -4108,19 +4336,25 @@ async def queue_play(item_id: str, profile_id: str = "", file_path: str = "") ->
     state.play_when_ready_item_id = item_id
     state.play_when_ready_profile_id = profile_id
     state.play_when_ready_file_path = file_path or None
+    # Route the boost through the download model so the scheduler keeps it — a raw
+    # filePrio write would be reverted on the next reconcile. A specific file is
+    # forced "high" (download now, first); a whole-item queue ensures the item isn't
+    # stuck idle (mode→now, sweep idle files→now) + bumps it in qBit's global queue.
+    dl = item.setdefault("download", {"mode": "now", "files": {}})
+    files = dl.setdefault("files", {})
+    if file_path:
+        files[file_path] = "high"
+    else:
+        dl["mode"] = "now"
+        for p, m in list(files.items()):
+            if m == "idle":
+                files[p] = "now"
+    await put_library(lib)
     h = item.get("torrent_hash")
     if h:
-        if file_path:
-            # Boost the specific file to max priority
-            qfiles = await qbit_files(h)
-            info = await qbit_info(h)
-            if qfiles and info:
-                sp = info.get("save_path", settings.qbit_download_path)
-                idx = [qf.get("index", i) for i, qf in enumerate(qfiles)
-                       if str(Path(sp) / qf.get("name", "")) == file_path]
-                if idx:
-                    await qbit_set_file_priority(h, idx, 7)
-        else:
+        idle_open = await _download_idle_open(lib)
+        await _reconcile_item_downloads(item, idle_open)
+        if not file_path:
             await qreq("POST", "/api/v2/torrents/topPrio", data={"hashes": h})
     return JSONResponse({"ok": True})
 
@@ -4134,35 +4368,64 @@ async def cancel_queue_play(item_id: str) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
-class FilePriorityReq(BaseModel):
+class DownloadScheduleReq(BaseModel):
+    mode: str   # "now" = download immediately; "idle" = only during idle/night window
+
+
+class FileScheduleReq(BaseModel):
     file_paths: list[str]
-    priority: int = 7   # 7=max, 1=normal, 0=skip
+    mode: str   # "now" | "high" | "idle" | "skip"
 
 
-@app.post("/api/library/{item_id}/file-priority")
-async def set_file_priority_for_item(item_id: str, req: FilePriorityReq) -> JSONResponse:
-    """Set qBit download priority for specific files within a library item's torrent."""
+@app.post("/api/library/{item_id}/download-schedule")
+async def set_download_schedule(item_id: str, req: DownloadScheduleReq) -> JSONResponse:
+    """Item-level download schedule. "idle" = Pause (download only during the idle/
+    night window, auto-resuming there); "now" = Resume (download immediately). Sweeps
+    the per-file overrides too, but leaves explicit "skip" choices alone."""
+    mode = req.mode if req.mode in ("now", "idle") else "now"
     lib = await get_library()
     item = next((it for it in lib["items"] if it["id"] == item_id), None)
     if not item:
         raise HTTPException(404, "Item not found.")
-    h = item.get("torrent_hash")
-    if not h:
-        raise HTTPException(400, "Item has no associated torrent.")
-    qfiles = await qbit_files(h)
-    info = await qbit_info(h)
-    if not qfiles or not info:
-        raise HTTPException(400, "Torrent not found in qBittorrent.")
-    sp = info.get("save_path", settings.qbit_download_path)
-    target_set = set(req.file_paths)
-    indices = [
-        qf.get("index", i) for i, qf in enumerate(qfiles)
-        if str(Path(sp) / qf.get("name", "")) in target_set
-    ]
-    if not indices:
-        raise HTTPException(400, "No matching files found in this torrent.")
-    await qbit_set_file_priority(h, indices, req.priority)
-    return JSONResponse({"ok": True, "updated": len(indices)})
+    dl = item.setdefault("download", {"mode": "now", "files": {}})
+    dl["mode"] = mode
+    files = dl.setdefault("files", {})
+    if mode == "idle":
+        for p, m in list(files.items()):
+            if m in ("now", "high"):
+                files[p] = "idle"
+    else:
+        for p, m in list(files.items()):
+            if m == "idle":
+                files[p] = "now"
+    await put_library(lib)
+    idle_open = await _download_idle_open(lib)
+    await _reconcile_item_downloads(item, idle_open)
+    await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "downloading")})
+    return JSONResponse({"ok": True, "mode": mode, "idle_open": idle_open})
+
+
+@app.post("/api/library/{item_id}/file-schedule")
+async def set_file_schedule(item_id: str, req: FileScheduleReq) -> JSONResponse:
+    """Set the download schedule for specific files (or a whole folder, by passing
+    its files) within a library item: "now" (normal), "high" (download now, first),
+    "idle" (only during the idle/night window), or "skip" (never)."""
+    mode = req.mode if req.mode in _FILE_MODES else "now"
+    if not req.file_paths:
+        raise HTTPException(400, "file_paths required.")
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    dl = item.setdefault("download", {"mode": "now", "files": {}})
+    files = dl.setdefault("files", {})
+    for p in req.file_paths:
+        files[p] = mode
+    await put_library(lib)
+    idle_open = await _download_idle_open(lib)
+    await _reconcile_item_downloads(item, idle_open)
+    await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "downloading")})
+    return JSONResponse({"ok": True, "updated": len(req.file_paths), "mode": mode})
 
 
 async def _vlc_wait_until_ready(

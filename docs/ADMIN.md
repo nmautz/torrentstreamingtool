@@ -161,6 +161,8 @@ Loop mechanics: an in-memory edge flag (`state.auto_prep_engaged`) tracks whethe
 
 Saving config resets `state.auto_prep_engaged` so the new schedule is re-evaluated on the next tick. Prep load relief is a separate, user-facing concern — see [STREAMING.md § Pause / resume + auto-prep](STREAMING.md) for the global pause gate and the non-admin Pause/Resume control.
 
+> **Doubles as the idle/night DOWNLOAD window.** The Overnight Stream Prep window **and** Idle Auto-Prep idleness also gate user-facing **idle-only library downloads** — the per-download Pause (defer to idle) control and the "Download at idle/night only" toggle in the download modal. `_download_idle_open` reuses both (so an idle-only download runs during the overnight window or whenever the box is idle), independently of whether prep itself is running. If **neither** is enabled, idle-only downloads have no window to run in and the download modal warns. See [docs/API.md § Download scheduling](API.md) and [docs/LIBRARY_DATA.md](LIBRARY_DATA.md).
+
 - `GET /api/admin/overnight-prep` → config + `now` + `in_window` + `paused`.
 - `POST /api/admin/overnight-prep` → `{enabled, start, end, timezone, on_end}`. Validates both HH:MM, rejects `start == end`, resets the auto-prep edge flag.
 

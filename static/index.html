@@ -583,6 +583,20 @@
         </div>
       </div>
 
+      <!-- Idle/night download scheduling -->
+      <div>
+        <label class="flex items-center justify-between gap-3 bg-gray-800/60 px-4 py-3 cursor-pointer hover:bg-gray-800 transition-colors">
+          <div class="min-w-0">
+            <div class="text-sm font-bold text-gray-200 uppercase tracking-wide">Download at idle/night only</div>
+            <div class="text-[11px] text-gray-500 mt-0.5">Hold off until the host is idle (or the admin's overnight window). You can flip this anytime from the Library card.</div>
+          </div>
+          <input id="dlIdleOnly" type="checkbox" class="w-5 h-5 accent-indigo-500 cursor-pointer flex-shrink-0"/>
+        </label>
+        <p id="dlIdleWarn" class="hidden text-[11px] text-amber-400 mt-1.5 px-1">
+          ⚠ No idle/night window is configured — idle-only downloads won't start until an admin enables Overnight Stream Prep or Idle Auto-Prep.
+        </p>
+      </div>
+
       <!-- Visible to (hidden when only 1 profile) -->
       <div id="dlVisibilityRow" class="hidden">
         <div class="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-2">Visible to</div>
@@ -1791,6 +1805,9 @@ let app = {
   play_when_ready_file_path:null,
   skip_offer:null,
   resume_offer:null,
+  // Optimistic default: don't flash the modal's "no idle window configured" warning
+  // before the first /state event lands (it sets the real value within ~tens of ms).
+  download_idle_open:false, download_idle_configured:true,
   // Client-only fields (not from /state) — drives immediate UI feedback before
   // the server's confirming SSE event arrives. Slow networks made the app
   // feel dead during the seconds between "user clicked Play" and "VLC opened
@@ -1894,8 +1911,13 @@ function avatarBg(c) { return (PROFILE_COLORS[c]||PROFILE_COLORS.indigo).bg; }
 function formatDlStat(d){
   const parts=[];
   if(d.total_bytes>0) parts.push(`${fmtSize(d.downloaded_bytes)} / ${fmtSize(d.total_bytes)} (${d.progress_pct}%)`);
-  if(d.speed_bps>0) parts.push(`↓ ${fmtSpeed(d.speed_bps)}`);
-  if(d.eta_secs>0) parts.push(`ETA ${fmtTime(d.eta_secs)}`);
+  // Intentionally halted by the scheduler (idle window closed) — say so instead of
+  // showing a misleading "↓ 0/s".
+  if(d.paused){ if(d.total_bytes>0) parts.push("⏸ waiting for idle window"); else return "⏸ Waiting for idle window"; }
+  else {
+    if(d.speed_bps>0) parts.push(`↓ ${fmtSpeed(d.speed_bps)}`);
+    if(d.eta_secs>0) parts.push(`ETA ${fmtTime(d.eta_secs)}`);
+  }
   return parts.join(" · ");
 }
 function pad2(n)      { return String(n).padStart(2,"0"); }
@@ -3135,8 +3157,18 @@ function renderLibrary(items){
       // Episode label for single-episode items
       const epPrefix=(item.season&&item.episode)?`S${pad2(item.season)}E${pad2(item.episode)} · `:"";
 
+      // Downloading badge: an idle-only item that the scheduler is currently holding
+      // (idle window closed) reads "Idle — waiting"; otherwise the live "Downloading".
+      let dlBadge;
+      if(item.download_mode==="idle"){
+        dlBadge=app.download_idle_open
+          ?`<span class="text-[10px] px-1.5 py-0.5 bg-yellow-900/50 text-yellow-400 border border-yellow-800 blink">↓ Idle download</span>`
+          :`<span class="text-[10px] px-1.5 py-0.5 bg-sky-950 text-sky-300 border border-sky-800" title="Will download during the idle/night window">⏸ Idle — waiting</span>`;
+      } else {
+        dlBadge=`<span class="text-[10px] px-1.5 py-0.5 bg-yellow-900/50 text-yellow-400 border border-yellow-800 blink">↓ Downloading</span>`;
+      }
       const statusBadge=isDownloading
-        ?`<span class="text-[10px] px-1.5 py-0.5 bg-yellow-900/50 text-yellow-400 border border-yellow-800 blink">↓ Downloading</span>`
+        ?dlBadge
         :isError?`<span class="text-[10px] px-1.5 py-0.5 bg-red-900/50 text-red-400 border border-red-800">Error</span>`
         :allDone?`<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-500 border border-gray-700">✓ All watched</span>`:"";
 
@@ -3164,6 +3196,16 @@ function renderLibrary(items){
               d="M4 6h16M4 10h16M4 14h16M4 18h16"/>
           </svg><span class="dl-files-label text-xs">Files</span>
         </button>`;
+        // Pause (defer to idle/night) ↔ Resume (download now). The download keeps
+        // its files; "idle" just gates them to the admin's idle/overnight window.
+        const isIdle=item.download_mode==="idle";
+        buttons+=isIdle
+          ?`<button onclick="setDownloadSchedule('${item.id}','now')"
+              class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white px-3 py-2.5 transition-colors min-h-[44px] flex items-center gap-1.5 flex-shrink-0"
+              title="Download now (stop waiting for the idle window)">▶ Resume</button>`
+          :`<button onclick="setDownloadSchedule('${item.id}','idle')"
+              class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 hover:text-white px-3 py-2.5 transition-colors min-h-[44px] flex items-center gap-1.5 flex-shrink-0"
+              title="Pause — only download during the idle/night window">⏸ Idle</button>`;
         // Whole-item Play When Ready (only shown as queued when no specific file is targeted)
         const isItemQueued=app.play_when_ready_item_id===item.id&&!app.play_when_ready_file_path;
         if(isItemQueued){
@@ -3580,6 +3622,81 @@ async function showDownloadFiles(itemId){
   }
 }
 
+// Split a stored path into segments — handles Windows backslashes too, since on a
+// Windows host the server stores backslash paths.
+function _dlSplit(p){ return (p||"").split(/[\/\\]+/).filter(Boolean); }
+
+// Group files by their sub-folder beneath the torrent's common root directory, so a
+// season pack with Season 1/ Season 2/ subfolders gets per-folder bulk actions.
+// Returns [] of {label, items:[{f, idx}]} in file order; one unlabeled group for a
+// flat torrent (no folder headers then).
+function _dlFolderGroups(files){
+  const dirs=files.map(f=>_dlSplit(f.path).slice(0,-1));
+  let common=dirs.length?dirs[0].length:0;
+  for(const d of dirs){ let i=0; while(i<common&&i<d.length&&d[i]===dirs[0][i]) i++; common=Math.min(common,i); }
+  const groups=[]; const byKey=new Map();
+  files.forEach((f,idx)=>{
+    const label=dirs[idx].slice(common).join(" / ");
+    const key=label||"\x00";
+    if(!byKey.has(key)){ const g={label,items:[]}; byKey.set(key,g); groups.push(g); }
+    byKey.get(key).items.push({f,idx});
+  });
+  return groups;
+}
+
+// Segmented schedule control. `idxAttr` = comma-separated file indices (into the
+// cached files array) the action targets; `cur` highlights the active mode ("" = a
+// mixed folder selection, so nothing is highlighted).
+function _schedControl(cls, idxAttr, cur){
+  const opts=[["high","Top"],["now","Now"],["idle","Idle"],["skip","Skip"]];
+  const on={high:"bg-amber-700 text-amber-50",now:"bg-indigo-700 text-white",idle:"bg-sky-800 text-sky-100",skip:"bg-red-900/70 text-red-200"};
+  return `<div class="flex border border-gray-700 divide-x divide-gray-700 flex-shrink-0">
+    ${opts.map(([m,l])=>`<button class="${cls} px-2 py-1 text-[10px] font-bold uppercase tracking-wide transition-colors ${cur===m?on[m]:'text-gray-500 hover:text-white hover:bg-gray-800'}"
+        data-idxs="${idxAttr}" data-mode="${m}" title="${m==='high'?'Download now, first':m==='now'?'Download now':m==='idle'?'Download only during idle/night':'Skip — never download'}">${l}</button>`).join("")}
+  </div>`;
+}
+
+function _folderMode(items){
+  // Highlight a folder control's segment only when every file in it shares one mode.
+  const modes=new Set(items.map(x=>x.f.mode||"now"));
+  return modes.size===1?[...modes][0]:"";
+}
+
+function _dlFileRow(itemId, f, i){
+  const isQueued=app.play_when_ready_item_id===itemId&&app.play_when_ready_file_path===f.path;
+  const mode=f.mode||"now";
+  const pct=(f.dl_pct==null)?null:Math.max(0,Math.min(100,f.dl_pct));
+  const complete=!!f.complete;
+  const barColor=complete?"bg-green-600":mode==="skip"?"bg-gray-700":"bg-indigo-600";
+  const statusRight=complete
+    ? `<span class="text-[10px] px-1.5 py-0.5 bg-green-900/50 text-green-300 border border-green-800 flex-shrink-0">✓ Complete</span>`
+    : pct!=null
+      ? `<span class="text-[11px] text-gray-500 font-mono flex-shrink-0">${pct.toFixed(0)}%</span>`
+      : (mode==="skip"?`<span class="text-[10px] text-gray-600 flex-shrink-0">Skipped</span>`:"");
+  // Right action: a complete file can play to the TV (VLC) right now even while the
+  // rest of the torrent downloads; an incomplete one offers the queue-when-ready toggle.
+  const action=complete
+    ? `<button class="dl-play-btn flex-shrink-0 text-[10px] font-bold uppercase tracking-wide bg-emerald-900/50 hover:bg-emerald-800/60 text-emerald-200 border border-emerald-800 px-2.5 py-1 transition-colors" data-idx="${i}" title="Play this file on the TV (VLC) now">▶ Play</button>`
+    : `<button class="dl-pwr-btn flex-shrink-0 p-1.5 transition-colors ${isQueued?'text-indigo-400 hover:text-red-400':'text-gray-600 hover:text-indigo-300'}" data-idx="${i}" title="${isQueued?'Cancel — play when ready':'Play this file when it finishes'}">${isQueued?'⏳':'▶'}</button>`;
+  const bar=(pct!=null&&!complete)
+    ? `<div class="h-1 bg-gray-800 overflow-hidden mt-1"><div class="${barColor} h-full" style="width:${pct}%"></div></div>`
+    : "";
+  return `<div class="px-3 py-2">
+    <div class="flex items-center gap-2">
+      <div class="flex-1 min-w-0">
+        <div class="text-xs ${mode==='skip'?'line-through text-gray-600':'text-gray-300'} truncate">${escHtml(f.name)}</div>
+        <div class="text-[11px] text-gray-600">${escHtml(f.size_human)}</div>
+      </div>
+      ${statusRight}
+      ${action}
+    </div>
+    ${bar}
+    <div class="flex items-center gap-2 mt-1.5">
+      ${_schedControl("dl-sched-btn", String(i), mode)}
+    </div>
+  </div>`;
+}
+
 function renderDownloadFiles(itemId,files){
   const el=document.getElementById(`dl-files-${itemId}`);
   if(!el) return;
@@ -3587,48 +3704,89 @@ function renderDownloadFiles(itemId,files){
     el.innerHTML=`<p class="text-xs text-gray-600 text-center py-3">No video files found yet.</p>`;
     return;
   }
-  el.innerHTML=`<div class="border border-gray-800 divide-y divide-gray-800/50 overflow-hidden">
-    ${files.map((f,i)=>{
-      const isFileQueued=app.play_when_ready_item_id===itemId&&app.play_when_ready_file_path===f.path;
-      return `<label class="flex items-center gap-2 px-3 py-2 hover:bg-gray-800/50 cursor-pointer select-none">
-        <input type="checkbox" class="dl-prio-cb flex-shrink-0 accent-indigo-500"
-               data-item="${escHtml(itemId)}" data-idx="${i}">
-        <div class="flex-1 min-w-0">
-          <div class="text-xs text-gray-300 truncate">${escHtml(f.name)}</div>
-          <div class="text-[11px] text-gray-600">${escHtml(f.size_human)}</div>
-        </div>
-        <button class="dl-file-pwr-btn flex-shrink-0 p-1.5 rounded transition-colors ${isFileQueued?'text-indigo-400 hover:text-red-400':'text-gray-600 hover:text-indigo-300'}"
-                data-item="${escHtml(itemId)}" data-idx="${i}"
-                title="${isFileQueued?'Cancel queue':'Play this file when ready'}">
-          ${isFileQueued?'⏳':'▶'}
-        </button>
-      </label>`;
-    }).join("")}
-  </div>
-  <div class="flex items-center gap-2 mt-1.5 pb-0.5">
-    <button class="dl-boost-btn text-xs bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 hover:text-white px-3 py-1.5 transition-colors flex items-center gap-1.5"
-            data-item="${escHtml(itemId)}">
-      <svg class="w-3 h-3 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 10l7-7 7 7M12 3v18"/>
-      </svg>Prioritize Selected
-    </button>
-  </div>`;
+  const groups=_dlFolderGroups(files);
+  const multiFolder=groups.length>1;
+  let html=`<div class="border border-gray-800 overflow-hidden">`;
+  groups.forEach(g=>{
+    if(multiFolder){
+      const idxs=g.items.map(x=>x.idx).join(",");
+      html+=`<div class="flex items-center gap-2 px-3 py-2 bg-gray-800/60 border-b border-gray-800">
+        <svg class="w-3.5 h-3.5 text-gray-500 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+        <span class="text-[11px] font-bold text-gray-400 uppercase tracking-wide truncate flex-1 min-w-0">${escHtml(g.label||"Files")}</span>
+        ${_schedControl("dl-fsched-btn", idxs, _folderMode(g.items))}
+      </div>`;
+    }
+    html+=`<div class="divide-y divide-gray-800/50">${g.items.map(x=>_dlFileRow(itemId,x.f,x.idx)).join("")}</div>`;
+  });
+  html+=`</div>`;
+  el.innerHTML=html;
+
   const cached=downloadFilesData.get(itemId)||files;
-  el.querySelectorAll(".dl-file-pwr-btn").forEach(btn=>{
-    btn.addEventListener("click",e=>{
-      e.preventDefault();
-      const f=cached[parseInt(btn.dataset.idx)];
-      if(!f) return;
-      if(app.play_when_ready_item_id===itemId&&app.play_when_ready_file_path===f.path){
-        cancelQueuePlay(itemId);
-      } else {
-        queuePlayFile(itemId,f.path);
-      }
+  const pathsFor=(attr)=>String(attr).split(",").map(s=>cached[parseInt(s)]?.path).filter(Boolean);
+  el.querySelectorAll(".dl-sched-btn,.dl-fsched-btn").forEach(btn=>{
+    btn.addEventListener("click",()=>setFileSchedule(itemId, pathsFor(btn.dataset.idxs), btn.dataset.mode));
+  });
+  el.querySelectorAll(".dl-play-btn").forEach(btn=>{
+    btn.addEventListener("click",()=>{
+      const f=cached[parseInt(btn.dataset.idx)]; if(!f) return;
+      playLibraryFiles(itemId,[f.path],0,f.name);
     });
   });
-  el.querySelectorAll(".dl-boost-btn").forEach(btn=>{
-    btn.addEventListener("click",()=>boostSelected(itemId));
+  el.querySelectorAll(".dl-pwr-btn").forEach(btn=>{
+    btn.addEventListener("click",e=>{
+      e.preventDefault();
+      const f=cached[parseInt(btn.dataset.idx)]; if(!f) return;
+      if(app.play_when_ready_item_id===itemId&&app.play_when_ready_file_path===f.path) cancelQueuePlay(itemId);
+      else queuePlayFile(itemId,f.path);
+    });
   });
+}
+
+async function refreshDownloadFiles(itemId){
+  // Lightweight re-fetch (no spinner) so live progress bars + complete badges keep
+  // updating while a download runs. No-op when the list isn't expanded.
+  if(!expandedDownloads.has(itemId)) return;
+  if(!document.getElementById(`dl-files-${itemId}`)) return;
+  try{
+    const pid=profile.id?`?profile_id=${encodeURIComponent(profile.id)}`:"";
+    const r=await fetch(`/api/library/${itemId}/files${pid}`);
+    if(!r.ok) return;
+    const {files}=await r.json();
+    downloadFilesData.set(itemId,files);
+    renderDownloadFiles(itemId,files);
+  }catch(_){}
+}
+
+async function setFileSchedule(itemId, paths, mode){
+  if(!paths||!paths.length) return;
+  const r=await fetch(`/api/library/${itemId}/file-schedule`,{
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({file_paths:paths,mode}),
+  });
+  if(r.ok){
+    // Optimistically reflect the new mode in the cache, then re-render + refresh.
+    const files=downloadFilesData.get(itemId);
+    if(files){ const set=new Set(paths); files.forEach(f=>{ if(set.has(f.path)) f.mode=mode; }); renderDownloadFiles(itemId,files); }
+    refreshDownloadFiles(itemId);
+  } else {
+    const e=await r.json().catch(()=>({detail:"Failed."}));
+    showAlert(e.detail||"Failed.","error");
+  }
+}
+
+async function setDownloadSchedule(itemId, mode){
+  const r=await fetch(`/api/library/${itemId}/download-schedule`,{
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({mode}),
+  });
+  if(r.ok){
+    showAlert(mode==="idle"?"Paused — will download during the idle/night window.":"Resuming download now.","success");
+    loadLibrary();
+    refreshDownloadFiles(itemId);
+  } else {
+    const e=await r.json().catch(()=>({detail:"Failed."}));
+    showAlert(e.detail||"Failed.","error");
+  }
 }
 
 async function queuePlayFile(itemId,filePath){
@@ -3644,22 +3802,6 @@ async function queuePlayFile(itemId,filePath){
   } else {
     const e=await r.json().catch(()=>({detail:"Could not queue."}));
     showAlert(e.detail||"Could not queue.","error");
-  }
-}
-
-async function boostSelected(itemId){
-  const cbs=document.querySelectorAll(`.dl-prio-cb[data-item="${itemId}"]`);
-  const files=downloadFilesData.get(itemId)||[];
-  const paths=Array.from(cbs).filter(c=>c.checked).map(c=>files[parseInt(c.dataset.idx)]?.path).filter(Boolean);
-  if(!paths.length){ showAlert("Select at least one file first.","warn"); return; }
-  const r=await fetch(`/api/library/${itemId}/file-priority`,{
-    method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({file_paths:paths,priority:7}),
-  });
-  if(r.ok) showAlert(`Prioritized ${paths.length} file${paths.length>1?"s":""}.`,"success");
-  else {
-    const e=await r.json().catch(()=>({detail:"Failed."}));
-    showAlert(e.detail||"Failed.","error");
   }
 }
 
@@ -4405,6 +4547,10 @@ async function openDownloadModal(magnet,title){
     .replace(/[._-]+/g," ").trim();
   document.getElementById("dlSeries").value=epMatch?seriesGuess:"";
 
+  // Reset the idle-only toggle + warn if no idle/night window is configured.
+  document.getElementById("dlIdleOnly").checked=false;
+  document.getElementById("dlIdleWarn").classList.toggle("hidden", app.download_idle_configured!==false);
+
   renderDlVisibilityProfiles();
   document.getElementById("downloadModal").classList.remove("hidden");
   document.getElementById("dlSeries").focus();
@@ -4645,6 +4791,7 @@ async function submitDownload(){
       });
     } else {
       const body={magnet:downloadTarget.magnet,title,series,season,episode,save_path:savePath};
+      if(document.getElementById("dlIdleOnly").checked) body.download_mode="idle";
       // Visibility: empty list = all profiles; non-empty = restricted to those IDs
       const visCbs=document.querySelectorAll(".dl-vis-cb");
       if(visCbs.length>0){
@@ -6511,7 +6658,13 @@ function connectSSE(){
     if(wasOffline) hideAlert();
   });
   es.addEventListener("state",e=>{
-    const d=JSON.parse(e.data); Object.assign(app,d);
+    const d=JSON.parse(e.data);
+    const idleWas=app.download_idle_open;
+    Object.assign(app,d);
+    // When the idle/night download window opens or closes, the library cards'
+    // "Idle — waiting" ↔ "Idle download" chips need to flip. Re-render if visible.
+    if(typeof d.download_idle_open==="boolean" && d.download_idle_open!==idleWas
+       && activeTab==="library") loadLibrary();
     // Pick up whisper availability live (the server re-probes on a 60s TTL) so
     // the Generate-subtitles affordances appear the moment STT becomes available,
     // without a page reload. Was previously read once at page load only.
@@ -6548,6 +6701,8 @@ function connectSSE(){
     libDownloadStats.set(d.item_id, d);
     const el=document.getElementById(`dl-stat-${d.item_id}`);
     if(el) el.textContent=formatDlStat(d);
+    // Keep an expanded per-file list's progress bars + complete badges live.
+    refreshDownloadFiles(d.item_id);
   });
   es.addEventListener("library_update",e=>{
     const d=JSON.parse(e.data||"{}");
@@ -6670,6 +6825,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.6.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.7.0</div>
 </body>
 </html>

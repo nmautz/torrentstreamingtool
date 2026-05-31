@@ -16,11 +16,11 @@ All endpoints are defined in `main.py`. SSE event stream is `/api/events`.
 Event types:
 | Event | When | Payload shape |
 |-------|------|---------------|
-| `state` | every 2 s; on any state change | full `state_snapshot()` ([main.py:292](../main.py#L292)). Includes `library_item_id` and the full ordered `library_playlist` (used by the TV→device Handoff to reconstruct the remaining tail), alongside `library_current_file` / `library_current_index` / `is_library_playback`, and `jackett_ok` (last known indexer HTTP reachability) |
+| `state` | every 2 s; on any state change | full `state_snapshot()` ([main.py:292](../main.py#L292)). Includes `library_item_id` and the full ordered `library_playlist` (used by the TV→device Handoff to reconstruct the remaining tail), alongside `library_current_file` / `library_current_index` / `is_library_playback`, `jackett_ok` (last known indexer HTTP reachability), and `download_idle_open` / `download_idle_configured` (idle/night download window state — see Download scheduling) |
 | `vpn_status` | VPN connect/disconnect transition | `{secure, status}` |
 | `jackett_status` | Jackett HTTP reachability transition (from `jackett_health_monitor`, ~20 s poll) | `{ok, url}` |
 | `stream_status` | stream pipeline phase transition | `{status, message, progress?, downloaded_mb?, total_mb?, dl_speed_bps?, ul_speed_bps?}` |
-| `library_progress` | per-download stats, ~every 5 s while downloading | `{item_id, speed_bps, downloaded_bytes, total_bytes, progress_pct, eta_secs}` |
+| `library_progress` | per-download stats, ~every 5 s while downloading | `{item_id, speed_bps, downloaded_bytes, total_bytes, progress_pct, eta_secs, download_mode, paused}` — `paused: true` ⇒ the scheduler is holding this item (idle window closed); the UI shows "Waiting for idle window" |
 | `library_update` | library item status changed | `{item_id, status, message?}` |
 | `progress_saved` | every 15 s while a library item is playing | `{item_id, profile_id, file_path, episode_name, position_sec, duration_sec, pct}` |
 | `analysis_status` | Smart Skip job progress | `{series_key, job: {status, stage, current, total, message, episode_name?, …}}` |
@@ -81,22 +81,27 @@ Up to 6 profiles. No passwords. Optional 4-digit PIN per profile.
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/api/library?profile_id=…` | List items. Filters out `admin_only` items unless admin OR `profile.elevated`. Adds `resume` hint, `hidden: bool` (per-profile visibility), and `skip_status ∈ {ok, partial, failed, pending, none}` (Smart Skip availability summary — drives the user-visible "⚠ Intro/credits skip not available" chip) per item |
-| GET | `/api/library/{id}/files?profile_id=…` | Per-file list with progress |
+| GET | `/api/library?profile_id=…` | List items. Filters out `admin_only` items unless admin OR `profile.elevated`. Adds `resume` hint, `hidden: bool` (per-profile visibility), `skip_status ∈ {ok, partial, failed, pending, none}` (Smart Skip availability summary — drives the user-visible "⚠ Intro/credits skip not available" chip), and `download_mode ∈ {now, idle}` (drives the card's Pause/Resume control) per item |
+| GET | `/api/library/{id}/files?profile_id=…` | Per-file list with progress. For a still-downloading item also carries per-file `mode ∈ {now, high, idle, skip}` (effective download schedule), `dl_pct` (download %, `null` if unknown), and `complete` (file fully downloaded → playable now). Response top-level adds `download_mode`, `idle_open`, `idle_configured` (see Download scheduling below) |
 | POST | `/api/library/prepare` | `{magnet, title}` → file list for the precision-selection picker (no `state.prepare_hash` side effect) |
-| POST | `/api/library/download` | `{magnet, title, series, season, episode, save_path, torrent_hash, selected_file_indices[], default_visible_profiles[]}` — `default_visible_profiles` is optional; if non-empty, only those profile IDs see the item in the main list by default (others see it in the hidden tab) |
+| POST | `/api/library/download` | `{magnet, title, series, season, episode, save_path, torrent_hash, selected_file_indices[], default_visible_profiles[], download_mode}` — `default_visible_profiles` optional (if non-empty, only those profile IDs see the item by default). `download_mode ∈ {now, idle}` (default `now`); `idle` only downloads during the idle/night window |
 | POST | `/api/library/upload` | multipart: `files[]`, `title`, `series`, `season`, `episode`, `save_path` — direct upload of local video files |
 | DELETE | `/api/library/{id}?delete_file=true` | Remove item; optionally also delete files from disk via qBit |
 | POST | `/api/library/{id}/play` | `{profile_id, files[], seek_first_to?}` → returns **202** immediately. State flips to `buffering`, a `state` SSE event fires, and the VLC `in_play`/`in_enqueue` work runs in a background task (`state.library_play_task`) which broadcasts `playing` when VLC has accepted the first track. Re-issuing Play / prev / next / stop while a prior handoff is in flight cancels it |
-| POST | `/api/library/{id}/queue-play` | `?profile_id=…&file_path=…` — auto-play when download (or specific file) completes; boosts qBit priority |
+| POST | `/api/library/{id}/queue-play` | `?profile_id=…&file_path=…` — auto-play when download (or specific file) completes. Routes the boost through the download model (specific file → `high`; whole-item → `mode=now` + qBit `topPrio`) so the scheduler keeps it |
 | DELETE | `/api/library/{id}/queue-play` | Cancel pending auto-play |
-| POST | `/api/library/{id}/file-priority` | `{file_paths[], priority: 0|1|7}` — qBit priority for specific files |
+| POST | `/api/library/{id}/download-schedule` | `{mode: "now"\|"idle"}` — item-level download schedule. `idle` = Pause (download only during the idle/night window, auto-resuming there); `now` = Resume (download immediately). Sweeps per-file `now`/`high`↔`idle` overrides too, leaving explicit `skip` alone. Reconciles qBit immediately |
+| POST | `/api/library/{id}/file-schedule` | `{file_paths[], mode: "now"\|"high"\|"idle"\|"skip"}` — set the download schedule for specific files (or a whole folder, by passing its files): `now` (normal), `high` (download now, first), `idle` (only during the idle/night window), `skip` (never). Reconciles qBit immediately |
 | POST | `/api/library/{id}/progress` | `{profile_id, file_path, position_sec, duration_sec}` — manual progress save (most progress comes from the tracker task) |
 | POST | `/api/library/{id}/mark-watched` | `{profile_id, watched, file_paths[], season?}` — mass mark watched/unwatched |
 | GET | `/api/library/{id}/download?file_path=…` | Browser-side file download (single file) |
 | POST | `/api/library/{id}/download-zip` | `{file_paths[]}` → streamed ZIP (uses `os.pipe` + thread; ZIP_STORED — no compression) |
 | GET | `/api/library/{id}/metadata?refresh=0\|1` | Cached TMDb show metadata (auto-fetches on first call when an API key is configured). Always returns `{enabled, img_base, metadata}`. `enabled=false` when no TMDb key is set — UI falls back to filename parsing |
 | POST | `/api/library/{id}/metadata/refresh` | Admin-only. `{tmdb_id?, kind?}` — force a re-fetch; optional `{tmdb_id, kind:"tv"\|"movie"}` overrides the auto-match for items that grabbed the wrong show |
+
+### Download scheduling
+
+Per-item download scheduling persists in `library.json → item.download` (`{mode, files}`) and is applied to qBittorrent by the `download_scheduler_loop` background task — the **single writer** of scheduled items' qBit file priorities + torrent pause/resume (see [BACKEND.md](BACKEND.md) and [GOTCHAS.md](GOTCHAS.md)). The "idle/night window" reuses the admin prep schedules (Overnight Stream Prep window OR Idle Auto-Prep idleness, via `_download_idle_open`). `download-schedule` / `file-schedule` (above) write the model and reconcile immediately. `state_snapshot` exposes `download_idle_open` (window open right now) and `download_idle_configured` (any admin prep window enabled — the UI warns when picking idle-only with none configured). A complete file in a still-downloading torrent (`files[].complete`) is playable to VLC now via `/api/library/{id}/play` with that single file.
 
 ## VLC controls
 

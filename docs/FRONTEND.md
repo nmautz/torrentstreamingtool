@@ -55,10 +55,10 @@ let app = { vpn_secure, vpn_status, stream_status, active_title, progress,
 ### SSE event handlers ([static/index.html:3494](../static/index.html#L3494))
 
 Single `EventSource('/api/events')`. Handlers:
-- `state` — full snapshot; `Object.assign(app, d)`, then `renderVpn` + `renderPlayer` + `updateDlBadge`
+- `state` — full snapshot; `Object.assign(app, d)`, then `renderVpn` + `renderPlayer` + `updateDlBadge`. Also re-renders the library (`loadLibrary()`) when `download_idle_open` flips while on the Library tab, so the cards' "Idle — waiting" ↔ "Idle download" chips update as the idle/night window opens/closes
 - `vpn_status` — show alert; update VPN pill + overlay
 - `stream_status` — phase transitions (`buffering`/`playing`/`error`/`idle`); push progress fields
-- `library_progress` — per-item dl speed/ETA (~every 5 s while item is downloading). Stored in `libDownloadStats` and rendered into `#dl-stat-<itemId>`
+- `library_progress` — per-item dl speed/ETA (~every 5 s while item is downloading). Stored in `libDownloadStats` and rendered into `#dl-stat-<itemId>` (`formatDlStat` shows "Waiting for idle window" when `paused`). Also calls `refreshDownloadFiles(item_id)` so an expanded per-file list's progress bars + ✓complete badges stay live
 - `library_update` — item status changed (`downloading`→`ready`/`error`); triggers `loadLibrary()` if on the Library tab
 - `progress_saved` — quiet refresh of the library tab so watch-progress bars update. If the episode picker is open for the same item, also calls `refreshEpFiles()` so the picker never displays stale watch data once the server has new state
 
@@ -71,6 +71,17 @@ Single `EventSource('/api/events')`. Handlers:
 - `refreshEpFiles()` — re-fetches `/api/library/{id}/files` for the open picker and re-renders. Called after `epToggleWatched` and from the `progress_saved` SSE handler. Preserves `epChecked` selections that still exist; does not touch the modal title (so it's safe to call mid-session).
 - `setFcTitle(title, filePath)` — sets the fullscreen overlay's title. Uses `parseEpisodeInfo` to extract "S01E04 · Episode Name" when possible.
 - `renderVpn(secure, statusText)` — updates the navbar pill + toggles the full-screen red overlay.
+
+### Download scheduling (per-item)
+
+A downloading library card shows a download-mode badge ("↓ Downloading", or "↓ Idle download" / "⏸ Idle — waiting" when `item.download_mode==="idle"`, gated on `app.download_idle_open`) plus a Pause↔Resume button: **⏸ Idle** (`setDownloadSchedule(id,"idle")` — download only during the idle/night window) ↔ **▶ Resume** (`setDownloadSchedule(id,"now")`). The download modal's **Download at idle/night only** toggle (`#dlIdleOnly`) sends `download_mode:"idle"` on submit and warns (`#dlIdleWarn`) when `app.download_idle_configured===false` (no admin prep window enabled).
+
+`renderDownloadFiles(itemId, files)` (the "Files" expander, `#dl-files-<id>`) is folder-grouped: `_dlFolderGroups(files)` splits each path (handling Windows `\` too) and groups files by their sub-folder beneath the torrent's common root — a flat torrent renders one unlabeled group (no header), a season pack gets per-folder headers with bulk controls. Each file row (`_dlFileRow`) shows name + size, a download progress bar + `dl_pct`%, a **✓ Complete** badge, and a per-row segmented schedule control (`_schedControl`: **Top**/`high` · **Now**/`now` · **Idle**/`idle` · **Skip**/`skip`, highlighting the active mode — replaces the old scroll-to-bottom "Prioritize Selected"). A **▶ Play** button appears on `complete` files and plays that single file to VLC via `playLibraryFiles` even while the rest of the torrent downloads; incomplete files keep the queue-when-ready ▶ toggle.
+
+- `setFileSchedule(itemId, paths, mode)` → `POST /file-schedule`; optimistically updates the cached `f.mode` then re-renders. Folder header buttons pass every file's path in the group.
+- `setDownloadSchedule(itemId, mode)` → `POST /download-schedule`; then `loadLibrary()`.
+- `refreshDownloadFiles(itemId)` — no-spinner re-fetch of `/files`, called from the `library_progress` SSE handler so progress bars/complete badges stay live. No-op unless the list is expanded.
+- Schedule + play buttons carry `data-idxs` / `data-idx` (indices into the cached `downloadFilesData` array) and are wired via `addEventListener` after render — never inline `onclick` with a JSON path (the established pattern; see `renderEpList`).
 
 ### Volume
 

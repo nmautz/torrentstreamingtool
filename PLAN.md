@@ -380,3 +380,15 @@ Generated subs were timed wrong around long pauses (lines lingering across silen
 
 ---
 
+## Milestone 28 — Download scheduling (idle-only, pause, per-file/folder priority)
+
+Downloads were all-or-nothing: they ran at full tilt the moment they were added, you could only prioritise files via a single button at the bottom of a long list, and there was no way to see/play an individual completed file while the rest of a pack downloaded. Add per-item + per-file download scheduling that reuses the admin idle/overnight prep windows.
+
+- [x] **28.1** (v4.7.0) Data model — per-item `library.json → download` (`{mode: now|idle, files: {<path>: now|high|idle|skip}}`); `_download_cfg` / `_effective_file_mode` / `_file_mode_to_priority` helpers. Missing/legacy → `{mode:"now", files:{}}` (no migration needed).
+- [x] **28.2** (v4.7.0) Scheduler — `download_scheduler_loop` (15 s) + `_reconcile_item_downloads` (single writer of scheduled items' qBit file priorities + torrent pause/resume); `qbit_pause`/`qbit_resume` (5.x `/stop`·`/start` fallback); `_download_idle_open` / `_download_idle_configured` reuse `overnight_prep`/`idle_prep`; `_machine_in_use(..., ignore_downloads=True)` so an idle-download can't self-close its window. Registered in `lifespan`.
+- [x] **28.3** (v4.7.0) Endpoints + plumbing — `POST /api/library/{id}/download-schedule` + `/file-schedule`; `DownloadReq.download_mode`; enriched `/files` (`mode`/`dl_pct`/`complete` + window state); `library` list `download_mode`; `library_progress` `download_mode`/`paused`; `state_snapshot` `download_idle_open`/`download_idle_configured`. `queue-play` + `library_download_pipeline` route through the model; old `/file-priority` removed.
+- [x] **28.4** (v4.7.0) Frontend — download-modal "idle/night only" toggle; per-card ⏸ Idle / ▶ Resume button + idle/waiting chip; `renderDownloadFiles` rewrite (folder groups, per-row Top/Now/Idle/Skip, per-file progress + ✓complete, ▶Play-to-VLC for complete files); `setDownloadSchedule` / `setFileSchedule` / `refreshDownloadFiles`; SSE wiring; version badge → 4.7.0.
+- [x] **28.5** (v4.7.0) Docs — LIBRARY_DATA (download field), BACKEND (loop + helpers + AppState + qBit notes), API (endpoints + SSE + /files), ADMIN (prep windows also gate idle downloads), FRONTEND (download-scheduling section), GOTCHAS (single-writer / ignore_downloads / pause-resume / play-complete), CHANGELOG.
+
+---
+

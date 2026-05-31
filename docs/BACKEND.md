@@ -73,6 +73,8 @@
 | `analysis_jobs` | `{series_key → {status, stage, current, total, message, …}}` |
 | `last_activity` | `time.time()` of the last user-initiated interaction. Stamped by the `track_activity` middleware (mutating verbs + `/api/search`); read by `_machine_in_use()` for the scheduled-reboot idle gate |
 | `prep_paused` | True ⇒ bulk stream-prep jobs hold at the gate in `_run_offline_job`. Set by `_pause_prep` (non-admin `/api/offline-prep/pause`, overnight window end, idle-prep activity); cleared by `_resume_prep`. Published in `state_snapshot()` |
+| `download_idle_open` | Last computed idle/night DOWNLOAD window state (set each tick by `download_scheduler_loop`). Drives the "Idle — waiting" vs "Idle download" card chip. Published in `state_snapshot()` |
+| `download_idle_configured` | True if any admin prep window (`overnight_prep`/`idle_prep`) is enabled — i.e. an idle-only download has a window to run in. The download modal warns when it's False. Published in `state_snapshot()` |
 | `auto_prep_engaged` | In-memory edge flag: True while `auto_prep_loop` has prep running (overnight window open OR idle trigger). Drives the rising/falling-edge resume/pause transitions (no persisted fire-guard); reset on any overnight/idle config save |
 | `sse_queues` | One `asyncio.Queue` per connected client |
 
@@ -90,11 +92,12 @@ Background tasks are then started in `lifespan` ([main.py:1746](../main.py#L1746
 - **`background_video_loop`** (every 3 s) — if `settings.background_video` is configured + enabled, `stream_status` is not `buffering`, and VLC reports anything other than `playing`/`paused`, plays the bg file via `_play_background_video()`. Sets `state.background_playing=True`. Naturally replaced by any user `vlc("in_play", …)` — that branch in the `vlc()` helper restores `state.vlc_volume` from `state.user_volume_before_bg` and clears `background_playing`. See [ADMIN.md §5](ADMIN.md) and [LIBRARY_DATA.md](LIBRARY_DATA.md).
 - **`scheduled_reboot_loop`** (every 20 s) — daily idle-gated host reboot. Reads `settings.scheduled_reboot`; once past the configured local time (`_now_in_tz`) and not yet fired today, reboots via `_reboot_machine()` if `_machine_in_use(idle_minutes*60)` is False, else waits `idle_minutes` and re-checks. Persists `last_fired` (the tz date) before rebooting so the machine doesn't re-arm on the way back up and loop. See [ADMIN.md §7](ADMIN.md) and [GOTCHAS.md](GOTCHAS.md#scheduled-reboot-loop-guard).
 - **`auto_prep_loop`** (every 15 s) — unified auto stream-prep driving **two** triggers that share the bulk-prep pause gate (so one loop owns the decision). `want = overnight_window_open OR (idle_prep_enabled AND _machine_in_use(idle_minutes*60) is False)`. A rising edge (`want` and not `state.auto_prep_engaged`) `_resume_prep()`s + `_enqueue_library_prep()`s a bulk HLS job for every un-prepped library video file; a falling edge pauses — `_pause_prep(kill=True)` (discard in-flight) when idle-prep activity is the cause, else the overnight `on_end` (`kill=False` graceful pause, or run to completion). Reads `settings.overnight_prep` + `settings.idle_prep`. See [ADMIN.md §7](ADMIN.md), [STREAMING.md](STREAMING.md), and [GOTCHAS.md](GOTCHAS.md#pausing-prep-a-paused-bulk-job-exits-its-task-and-releases-the-slot).
+- **`download_scheduler_loop`** (every 15 s) — honours per-item download schedules (`library.json → item.download`). Computes `idle_open = _download_idle_open(lib)` (the idle/night DOWNLOAD window — reuses the `overnight_prep` window OR `idle_prep` idleness, but with `_machine_in_use(..., ignore_downloads=True)` so a running idle-download can't self-close its own window), stamps `state.download_idle_open`/`download_idle_configured`, then `_reconcile_item_downloads(item, idle_open)` for every still-downloading item with `mode=="idle"` or any per-file override. `_reconcile_item_downloads` is the **single writer** of scheduled items' qBit file priorities (`_file_mode_to_priority`) + torrent pause/resume (`qbit_pause`/`qbit_resume`) — endpoints + the pipeline call it for immediate effect too. Broadcasts `state` on a window-open transition. See [LIBRARY_DATA.md](LIBRARY_DATA.md) and [GOTCHAS.md](GOTCHAS.md).
 
 ## Reboot helpers
 
 - **`_reboot_machine(delay)`** — sleeps `delay` (lets the HTTP response flush), then runs `_do_reboot_blocking()` via `asyncio.to_thread`. The latter tries `_reboot_commands()` (platform-specific chain — macOS System Events / `sudo -n shutdown` / `shutdown`; Linux `systemctl reboot` / sudo / shutdown; Windows `shutdown /r /t 0`) until one returns rc 0.
-- **`_machine_in_use(window_secs)`** — True if live VLC plays/pauses non-background content, a stream is `buffering`/`playing`, `downloading_count > 0`, or `state.last_activity` is within `window_secs`.
+- **`_machine_in_use(window_secs, ignore_downloads=False)`** — True if live VLC plays/pauses non-background content, a stream is `buffering`/`playing`, `downloading_count > 0`, or `state.last_activity` is within `window_secs`. `ignore_downloads=True` drops the download check — used by `_download_idle_open` so an idle-only download that's actively fetching doesn't count itself as activity and close its own window.
 - **`_now_in_tz(tzname)`** — current `datetime` in an IANA tz via `zoneinfo` (lazy import); empty/unknown tz → system local.
 
 ## Middleware
@@ -118,8 +121,8 @@ Cancellation: on new `/api/stream` or `/api/stop`, `state.stream_task.cancel()` 
 
 ### `library_download_pipeline` ([main.py:1675](../main.py#L1675))
 - Adds magnet WITHOUT sequential mode and WITHOUT auto-delete.
-- Waits for metadata, populates `item["files"]` via `build_file_list(qfiles, save_path)`.
-- Honours `selected_file_indices` (skip non-selected files via `qbit_set_file_priority`).
+- Waits for metadata, populates `item["files"]` via `build_file_list(qfiles, save_path)` (ALL video files — the monitor does the same, so deselected files now appear marked "Skip" rather than vanishing).
+- Seeds `item["download"]` from `download_mode` + records deselected `selected_file_indices` as `"skip"`, then calls `_reconcile_item_downloads` once so gating applies immediately (no longer a raw `qbit_set_file_priority` — the schedule model is authoritative).
 - The item stays `status="downloading"` until `library_download_monitor` flips it.
 
 ### `_library_play_launch` / `_vlc_relaunch_playlist`
@@ -162,6 +165,7 @@ The legacy `print("[offline] …")` calls in the NVENC probe (`_has_nvenc`) pred
 - **Auth**: `qbit_login` calls `/api/v2/auth/login`. Because `setup.py` writes `WebUI\LocalHostAuth=false` to qBit's ini, localhost requests don't actually need a cookie — but `qreq` still retries on 403.
 - **`qbit_streaming_mode`** uses `toggleSequentialDownload` (the only endpoint that exists; there is no `setSequentialDownload`). It's a toggle, so we read `seq_dl` first and only call it when sequential is currently off. Sequential is already set at add-time via the `/torrents/add` form.
 - **DO NOT call `toggleFirstLastPiecePrio`** — that fetches the last piece early, which defeats piece-order streaming. We deliberately do not enable it.
+- **`qbit_pause`/`qbit_resume`** drive the download scheduler's torrent-level gate. qBittorrent 5.x renamed `pause`→`stop` / `resume`→`start`; the old verbs still work there as deprecated aliases, but both helpers fall back to `/stop`·`/start` on a 404 so they're correct on whatever Windows build the box ships (Windows-first). Per-file priorities still go through `qbit_set_file_priority` (`filePrio`). The scheduler's `_reconcile_item_downloads` only pauses/resumes torrents in download-phase states — it never touches a finished/seeding torrent.
 
 ## VLC client notes
 
