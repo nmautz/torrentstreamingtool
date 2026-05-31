@@ -375,14 +375,30 @@
         <span class="flex-1 h-px bg-gray-800"></span>
       </div>
 
-      <label class="flex items-center justify-between gap-3 bg-gray-800/60 px-4 py-3 cursor-pointer hover:bg-gray-800 transition-colors">
-        <div class="min-w-0">
-          <div class="text-sm font-bold text-gray-200 uppercase tracking-wide">Night Mode (VLC)</div>
-          <div class="text-[11px] text-gray-500 mt-0.5">Even out loud and quiet sounds so dialogue stays clear at low volume. Toggling restarts VLC briefly to apply.</div>
+      <div class="bg-gray-800/60">
+        <label class="flex items-center justify-between gap-3 px-4 py-3 cursor-pointer hover:bg-gray-800 transition-colors">
+          <div class="min-w-0">
+            <div class="text-sm font-bold text-gray-200 uppercase tracking-wide">Night Mode (VLC)</div>
+            <div class="text-[11px] text-gray-500 mt-0.5">Even out loud and quiet sounds so dialogue stays clear at low volume. Toggling restarts VLC briefly to apply.</div>
+          </div>
+          <input id="psNightMode" type="checkbox" onchange="toggleNightMode(this)"
+            class="w-5 h-5 accent-indigo-500 cursor-pointer flex-shrink-0"/>
+        </label>
+        <!-- Intensity preset — settings-menu only. Remembered independently of the
+             on/off toggle, so it's selectable even while night mode is off. -->
+        <div class="flex items-center justify-between gap-3 px-4 py-3 border-t border-gray-700/50">
+          <div class="min-w-0">
+            <div class="text-[11px] text-gray-400 uppercase tracking-wide font-bold">Intensity</div>
+            <div id="psNightModePresetDesc" class="text-[11px] text-gray-600 mt-0.5">How hard to flatten the loud–quiet gap.</div>
+          </div>
+          <select id="psNightModePreset" onchange="setNightModePreset(this.value)"
+            class="bg-gray-700 text-gray-100 text-xs font-bold uppercase tracking-wide border-0 px-2 py-1.5 cursor-pointer focus:outline-none flex-shrink-0">
+            <option value="light">Light</option>
+            <option value="medium">Medium</option>
+            <option value="max">Max</option>
+          </select>
         </div>
-        <input id="psNightMode" type="checkbox" onchange="toggleNightMode(this)"
-          class="w-5 h-5 accent-indigo-500 cursor-pointer flex-shrink-0"/>
-      </label>
+      </div>
 
       <div class="bg-gray-800/60 px-4 py-3">
         <div class="flex items-center justify-between gap-3 mb-2">
@@ -1825,7 +1841,7 @@ let app = {
   vpn_secure:true, vpn_status:"Checking…", stream_status:"idle",
   active_title:null, progress:0, downloaded_mb:0, total_mb:0,
   dl_speed_bps:0, ul_speed_bps:0,
-  vlc_time:0, vlc_duration:0, vlc_volume:100, vlc_night_mode:false,
+  vlc_time:0, vlc_duration:0, vlc_volume:100, vlc_night_mode:false, vlc_night_mode_preset:"medium",
   library_playlist_count:0, library_current_index:-1, library_current_file:null,
   library_playlist:[], library_item_file_count:0, is_library_playback:false,
   library_item_id:null,
@@ -2648,6 +2664,13 @@ function renderNightMode(){
   const on = !!app.vlc_night_mode;
   const cb = document.getElementById("psNightMode");
   if(cb) cb.checked = on;
+  // Intensity preset (settings menu only) — syncs the picker + its blurb.
+  const sel = document.getElementById("psNightModePreset");
+  if(sel && app.vlc_night_mode_preset && sel.value !== app.vlc_night_mode_preset){
+    sel.value = app.vlc_night_mode_preset;
+  }
+  const desc = document.getElementById("psNightModePresetDesc");
+  if(desc) desc.textContent = NIGHT_PRESET_DESC[app.vlc_night_mode_preset] || NIGHT_PRESET_DESC.medium;
   const btn = document.getElementById("fcNightBtn");
   if(btn){
     btn.classList.toggle("text-indigo-400", on);
@@ -2655,6 +2678,40 @@ function renderNightMode(){
     const icon = document.getElementById("fcNightIcon");
     // Filled moon when active, outline when off — a quiet "it's on" signal.
     if(icon) icon.setAttribute("fill", on ? "currentColor" : "none");
+  }
+}
+const NIGHT_PRESET_DESC = {
+  light:  "Gentle leveling.",
+  medium: "Balanced (default).",
+  max:    "Strongest — flattens loud peaks hard.",
+};
+
+// Change night-mode intensity (settings menu only). Persists independently of
+// the on/off toggle, so it's remembered next time night mode is switched on.
+// The server only restarts VLC if night mode is currently on.
+async function setNightModePreset(preset){
+  const prev = app.vlc_night_mode_preset;
+  app.vlc_night_mode_preset = preset;
+  renderNightMode();
+  const s = document.getElementById("psStatus");
+  if(s){
+    s.textContent = app.vlc_night_mode ? "Intensity changed — restarting VLC…" : "Intensity saved.";
+    s.className = "text-[10px] text-indigo-400 uppercase tracking-widest pt-1";
+  }
+  const r = await fetch("/api/settings/night-mode",{
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({preset}),
+  }).catch(()=>null);
+  if(!r || !r.ok){
+    app.vlc_night_mode_preset = prev;   // revert on failure
+    renderNightMode();
+    showAlert("Couldn't change night-mode intensity.","error");
+  }
+  if(s){
+    setTimeout(()=>{
+      s.textContent = "Manual skip button is always available.";
+      s.className = "text-[10px] text-gray-600 uppercase tracking-widest pt-1";
+    }, 2500);
   }
 }
 
@@ -2983,6 +3040,7 @@ async function openProfileSettings(){
     const r = await fetch("/api/settings/night-mode");
     const d = r.ok ? await r.json() : {};
     app.vlc_night_mode = !!d.night_mode;
+    if(d.preset) app.vlc_night_mode_preset = d.preset;
   }catch(_){/* fall back to whatever SSE last reported */}
   renderNightMode();
   document.getElementById("profileSettingsModal").classList.remove("hidden");
@@ -7044,6 +7102,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.12.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.13.0</div>
 </body>
 </html>

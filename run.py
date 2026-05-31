@@ -278,28 +278,54 @@ def find_mullvad() -> str | None:
 
 
 # ── Service launchers ──────────────────────────────────────────────────────
-# Night mode (dynamic-range compressor). Mirrors main.py's NIGHT_MODE_ARGS and
-# watchdog.py's copy — change one, change all three. There's no runtime HTTP
-# command for audio filters, so the compressor is a launch arg gated on the
-# persisted library.json setting. See docs/GOTCHAS.md.
-NIGHT_MODE_ARGS = [
-    "--audio-filter=compressor",
-    "--compressor-rms-peak=0.00",
-    "--compressor-attack=25.0",
-    "--compressor-release=250.0",
-    "--compressor-threshold=-24.0",
-    "--compressor-ratio=8.0",
-    "--compressor-knee=3.0",
-    "--compressor-makeup-gain=12.0",
-]
+# Night mode (dynamic-range compressor) intensity presets. Mirrors main.py's
+# NIGHT_MODE_PRESETS and watchdog.py's copy — change one, change all three.
+# There's no runtime HTTP command for audio filters, so the compressor is a
+# launch arg gated on the persisted library.json settings. See docs/GOTCHAS.md.
+NIGHT_MODE_PRESETS = {
+    "light": [
+        "--audio-filter=compressor",
+        "--compressor-rms-peak=0.00",
+        "--compressor-attack=25.0",
+        "--compressor-release=250.0",
+        "--compressor-threshold=-20.0",
+        "--compressor-ratio=3.0",
+        "--compressor-knee=5.0",
+        "--compressor-makeup-gain=6.0",
+    ],
+    "medium": [
+        "--audio-filter=compressor",
+        "--compressor-rms-peak=0.00",
+        "--compressor-attack=25.0",
+        "--compressor-release=250.0",
+        "--compressor-threshold=-24.0",
+        "--compressor-ratio=6.0",
+        "--compressor-knee=3.0",
+        "--compressor-makeup-gain=10.0",
+    ],
+    "max": [
+        "--audio-filter=compressor",
+        "--compressor-rms-peak=0.00",
+        "--compressor-attack=15.0",
+        "--compressor-release=180.0",
+        "--compressor-threshold=-28.0",
+        "--compressor-ratio=12.0",
+        "--compressor-knee=2.0",
+        "--compressor-makeup-gain=13.0",
+    ],
+}
+NIGHT_MODE_DEFAULT_PRESET = "medium"
 
 
 def night_mode_args() -> list:
-    """Return NIGHT_MODE_ARGS when library.json → settings.vlc_night_mode is on."""
+    """Compressor args for the persisted preset when settings.vlc_night_mode is on."""
     try:
-        data = json.loads((HERE / "library.json").read_text(encoding="utf-8"))
-        if (data.get("settings", {}) or {}).get("vlc_night_mode"):
-            return list(NIGHT_MODE_ARGS)
+        s = (json.loads((HERE / "library.json").read_text(encoding="utf-8")).get("settings", {}) or {})
+        if s.get("vlc_night_mode"):
+            preset = s.get("vlc_night_mode_preset")
+            if preset not in NIGHT_MODE_PRESETS:
+                preset = NIGHT_MODE_DEFAULT_PRESET
+            return list(NIGHT_MODE_PRESETS[preset])
     except Exception:
         pass
     return []

@@ -1,5 +1,10 @@
 # Changelog
 
+## [4.13.0] — 2026-05-31
+- **New: Night Mode intensity presets — Light / Medium / Max.** A picker in **Profile Settings → Global** (under the Night Mode toggle) lets you choose how hard the compressor flattens the loud–quiet gap: Light (gentle leveling), Medium (balanced, default), or Max (strongest — low threshold + 12:1 ratio). The picker is **settings-menu only** (not in the fullscreen UI). The chosen preset is **remembered independently of the on/off toggle** — turn night mode off and back on and it reuses the same intensity.
+- **Backend:** `NIGHT_MODE_ARGS` → `NIGHT_MODE_PRESETS` (per-preset `compressor` arg sets), mirrored in `run.py`/`watchdog.py`. New `settings.vlc_night_mode_preset` + `state.vlc_night_mode_preset` (seeded at startup, in `state_snapshot`). `POST /api/settings/night-mode` now takes optional `{night_mode?, preset?}` (merged), and only relaunches VLC when it changes the *running* filter — turning on/off, or changing preset while on; a preset change while off just persists. `GET` returns `{night_mode, preset, presets[]}`.
+- **Docs:** [docs/API.md](docs/API.md), [docs/BACKEND.md](docs/BACKEND.md), [docs/FRONTEND.md](docs/FRONTEND.md), [docs/LIBRARY_DATA.md](docs/LIBRARY_DATA.md), [docs/GOTCHAS.md](docs/GOTCHAS.md).
+
 ## [4.12.0] — 2026-05-31
 - **New: Night Mode for VLC (dynamic-range compression).** Evens out the gap between the quietest and loudest sounds so quiet dialogue stays clear at low room volume without explosions being jarring — the classic "midnight mode". It's VLC's `compressor` audio filter (low threshold + high ratio to tame peaks, makeup gain to lift dialogue, RMS detection + slow release so it doesn't pump on speech). Persists until you turn it off.
   - **Two entry points, deliberately subtle:** a small moon toggle in the fullscreen-controls header (opposite Close) and a checkbox in the **Global** section of Profile Settings. Toggling restarts VLC briefly (see below) and resumes at the same spot.

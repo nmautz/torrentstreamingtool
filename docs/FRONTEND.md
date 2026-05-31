@@ -94,7 +94,11 @@ VLC's volume slider is debounced — `oninput="updateVolumeDisplay"` updates lab
 
 ### Night mode (VLC dynamic-range compression)
 
-A global toggle reachable from **two** controls: the subtle moon button in the fullscreen-overlay header (`#fcNightBtn`, opposite the Close button) and a checkbox in the **Global** section of profile settings (`#psNightMode`). Both call `toggleNightMode(el)`, which flips `app.vlc_night_mode` optimistically, `renderNightMode()`s both controls, then `POST`s `/api/settings/night-mode`. `renderNightMode()` (also called from the `state` SSE handler) recolors the moon + fills its icon when active and syncs the checkbox. The server relaunches VLC to apply the filter (see [GOTCHAS.md](GOTCHAS.md)), so playback briefly re-buffers — the toggle is intentionally low-prominence, not a hot-path tile. `openProfileSettings` fetches the fresh value so the checkbox is correct even before the first SSE state event.
+A global on/off toggle reachable from **two** controls: the subtle moon button in the fullscreen-overlay header (`#fcNightBtn`, opposite the Close button) and a checkbox in the **Global** section of profile settings (`#psNightMode`). Both call `toggleNightMode(el)`, which flips `app.vlc_night_mode` optimistically, `renderNightMode()`s the controls, then `POST`s `/api/settings/night-mode` with `{night_mode}`.
+
+The **intensity picker** (`#psNightModePreset`, Light/Medium/Max) is **settings-menu only** — deliberately not in the fullscreen UI. `setNightModePreset(preset)` POSTs `{preset}` only (so it never clobbers the on/off state) and persists independently of the toggle, so the chosen intensity is remembered the next time night mode is switched on. `NIGHT_PRESET_DESC` drives the one-line blurb under the picker.
+
+`renderNightMode()` (also called from the `state` SSE handler, since every snapshot carries `vlc_night_mode`) recolors the moon + fills its icon when active, checks the checkbox, and syncs the preset `<select>` + blurb. The server relaunches VLC to apply the filter (see [GOTCHAS.md](GOTCHAS.md)), so playback briefly re-buffers — these are intentionally low-prominence controls, not hot-path tiles (a preset change *while off* doesn't relaunch). `openProfileSettings` fetches the fresh `night_mode` + `preset` so both controls are correct even before the first SSE state event.
 
 ### Optimistic Play UI + in-flight guards
 
