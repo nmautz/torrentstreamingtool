@@ -11,6 +11,7 @@ The only persistent server-side state. Lives at the project root. Accessed via `
   "settings": {
     "library_paths": [ … ],            // UI-added paths (POST /api/settings/library-paths)
     "max_volume": 200,                  // global VLC volume cap 0–200; default 200 (no cap)
+    "vlc_night_mode": false,            // VLC dynamic-range compressor (night mode) on/off; default off
     "system_volume_default": 70,        // host OS volume (0–100) restored when a YouTube play stops; default 70
     "youtube_start_volume":  30,        // host OS volume (0–100) pre-set the moment a YouTube play starts; default 30
     "background_video": {               // idle background video (admin upload, .background/<name>)
@@ -77,6 +78,8 @@ The only persistent server-side state. Lives at the project root. Accessed via `
 PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "soft" — anyone with filesystem access can read the JSON. It's a UI gate, not a security boundary. Profiles with a PIN are hidden from the normal profile picker; users select them via the "Log in with PIN" button.
 
 `settings.max_volume`: VLC is uncapped (0–200, where 200 % is overdrive). Capping it system-wide stops anyone from accidentally blowing the speakers. Lives under `settings` because it applies to the physical playback host, not to individual viewers. Enforced server-side in `_global_max_volume`.
+
+`settings.vlc_night_mode`: night mode — VLC's `compressor` audio filter, which narrows the gap between the quietest and loudest sounds so dialogue stays clear at low room volume. Default off. Toggled from the fullscreen-controls moon button **or** the profile-settings panel (`POST /api/settings/night-mode`); reachable from both because it's a global host setting, not per-viewer. **There is no VLC HTTP command to add/remove an audio filter at runtime**, so the compressor is a launch arg (`NIGHT_MODE_ARGS`) and toggling it relaunches VLC — `_apply_night_mode` snapshots the current file + position, relaunches via `_restart_vlc_process` (which reads `state.vlc_night_mode`), then replays and seeks back. `run.py` (`start_vlc`) and `watchdog.py` (`vlc_spec`) read this same setting independently when they launch VLC (boot / crash recovery), so the three arg lists must stay in sync. Seeded into `state.vlc_night_mode` at lifespan startup and exposed in `state_snapshot`. See [GOTCHAS.md](GOTCHAS.md).
 
 `settings.system_volume_default`: the host's OS mixer volume (0–100) restored when a YouTube-on-TV play stops. Headphones at 100 % can blow eardrums and a movie session shouldn't leave the room loud, so on Stop `_stop_cleanup` calls `set_system_volume(target)` (pycaw on Windows / `osascript` on macOS / `pactl`/`amixer` on Linux). Default 70. Edited via **System Volume After YouTube** in the profile-settings panel (`POST /api/settings/system-volume-default`). **Global** (lives under `settings`, not per-profile). See [YOUTUBE.md](YOUTUBE.md).
 

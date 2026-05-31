@@ -313,6 +313,38 @@ def _vlc_marquee_args() -> list:
     ]
 
 
+# ── Night mode (dynamic-range compression) ──────────────────────────────────
+# "Night mode" narrows the gap between the quietest and loudest sounds so quiet
+# dialogue stays audible without explosions being jarring at low room volume.
+# It's VLC's `compressor` audio filter — there is no runtime HTTP command to add
+# an audio filter, so the filter is set at launch and toggling it restarts VLC
+# (see _apply_night_mode + _restart_vlc_process). The arg list below is mirrored
+# verbatim in run.py (start_vlc) and watchdog.py (vlc_spec); change one, change
+# all three (same contract as _vlc_marquee_args).
+#
+# Tuning notes (all dB / ms): a low threshold + high ratio pull loud peaks down
+# hard, a healthy makeup gain lifts the now-quieter dialogue back up, and an RMS
+# (not peak) detector with a slow-ish release keeps it from "pumping" on speech.
+NIGHT_MODE_ARGS = [
+    "--audio-filter=compressor",
+    "--compressor-rms-peak=0.00",   # 0 = pure RMS detection (smooth, dialogue-friendly)
+    "--compressor-attack=25.0",     # ms — fast enough to catch transients
+    "--compressor-release=250.0",   # ms — slow release avoids pumping
+    "--compressor-threshold=-24.0", # dB — start compressing well below peak
+    "--compressor-ratio=8.0",       # :1 — strong reduction of loud peaks
+    "--compressor-knee=3.0",        # dB — soft knee for a natural transition
+    "--compressor-makeup-gain=12.0",# dB — lift the compressed signal back up
+]
+
+
+def _vlc_audio_filter_args(night_mode: bool) -> list:
+    """VLC CLI args for the night-mode compressor, or [] when disabled.
+
+    Mirrored in run.py / watchdog.py via the shared NIGHT_MODE_ARGS contract.
+    """
+    return list(NIGHT_MODE_ARGS) if night_mode else []
+
+
 def _marquee_write(text: str) -> None:
     """Atomically replace the marquee file's contents (sync; tiny write).
 
@@ -332,7 +364,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "4.11.0"
+UI_VERSION = "4.12.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -445,6 +477,7 @@ class AppState:
     analyzer_log: deque = field(default_factory=lambda: deque(maxlen=200))
     background_playing: bool = False                      # True when the idle background video is the active VLC playlist
     user_volume_before_bg: int = 100                      # snapshot of state.vlc_volume taken when bg first took over
+    vlc_night_mode: bool = False                          # VLC compressor (dynamic-range) filter; persisted in library.json → settings.vlc_night_mode, seeded at lifespan startup. VLC must relaunch to apply (no runtime HTTP command for audio filters)
     last_activity: float = 0.0                            # time.time() of last user-initiated interaction (drives scheduled-reboot idle check)
     prep_paused: bool = False                             # True ⇒ bulk stream-prep jobs hold (set by the non-admin Pause control / overnight window end)
     auto_prep_engaged: bool = False                       # True while the unified auto_prep_loop has prep running (overnight window OR idle trigger) — edge flag for resume/pause
@@ -547,6 +580,9 @@ def state_snapshot() -> dict:
         "vlc_time": state.vlc_time,
         "vlc_duration": state.vlc_duration,
         "vlc_volume": state.vlc_volume,
+        # VLC night mode (compressor / dynamic-range reduction). Persisted global
+        # setting, mirrored here so the fullscreen-control toggle reflects it.
+        "vlc_night_mode": state.vlc_night_mode,
         "library_playlist_count": len(playlist),
         "library_current_index": cur_idx,
         "library_current_file": current,
@@ -1581,7 +1617,9 @@ async def _restart_vlc_process() -> bool:
     subprocess.Popen(
         [vlc_bin, "--extraintf=http", "--http-host=localhost",
          f"--http-port={vlc_port}", f"--http-password={settings.vlc_password}", "--no-random",
-         "--fullscreen", *_vlc_marquee_args()],
+         "--fullscreen", *_vlc_marquee_args(),
+         # Night mode (dynamic-range compressor) when enabled — see _apply_night_mode.
+         *_vlc_audio_filter_args(state.vlc_night_mode)],
         **kw,
     )
 
@@ -1626,6 +1664,111 @@ async def _retry_task(file_path: Path) -> None:
     except Exception as exc:
         state.stream_status = "error"
         await broadcast("stream_status", {"status": "error", "message": f"Retry failed: {exc}"})
+
+
+async def _apply_night_mode(enabled: bool) -> None:
+    """Toggle the VLC night-mode compressor by relaunching VLC, then resume.
+
+    VLC's HTTP interface has no command to add/remove an audio filter at runtime,
+    so the compressor can only be switched by relaunching VLC — it's a launch arg
+    (`NIGHT_MODE_ARGS`, read off `state.vlc_night_mode` in `_restart_vlc_process`).
+    To make the toggle seamless mid-playback we snapshot the current file +
+    position, relaunch, replay the file (and any remaining playlist tail), and
+    seek back. When only the idle background video (or nothing) is on screen we
+    just relaunch and let `background_video_loop` bring the bg video back with the
+    new filter applied.
+    """
+    state.vlc_night_mode = enabled
+
+    # Snapshot what's playing *before* killing VLC. Skip the bg video — the loop
+    # restarts it on its own.
+    resume_path: Optional[Path] = None
+    if not state.background_playing:
+        if state.library_current_file:
+            resume_path = Path(state.library_current_file)
+        elif state.active_file:
+            resume_path = state.active_file
+    vs = await vlc_status()
+    live_state = (vs or {}).get("state", "")
+    try:
+        resume_pos = int(float((vs or {}).get("time", 0) or 0))
+    except (TypeError, ValueError):
+        resume_pos = 0
+    has_content = resume_path is not None and live_state in ("playing", "paused")
+
+    # Remaining playlist tail (multi-episode plays) captured before the restart.
+    tail: list[str] = []
+    if has_content and state.library_playlist and state.library_current_file:
+        try:
+            idx = state.library_playlist.index(str(state.library_current_file))
+            tail = list(state.library_playlist[idx + 1:])
+        except ValueError:
+            tail = []
+
+    try:
+        if has_content:
+            # Buffering both shows the user something and tells
+            # background_video_loop to stand down during the restart gap.
+            state.stream_status = "buffering"
+            await broadcast("stream_status", {"status": "buffering", "message": "Applying night mode…"})
+            await broadcast("state", state_snapshot())
+
+        ok = await _restart_vlc_process()
+
+        if not has_content:
+            # Idle / background only: nothing to resume. The toggle still took
+            # effect (VLC relaunched with/without the filter); just republish.
+            await broadcast("state", state_snapshot())
+            return
+
+        if not ok:
+            state.stream_status = "error"
+            await broadcast("stream_status", {"status": "error", "message": "VLC could not be relaunched."})
+            return
+
+        first_resolved = resume_path.resolve()
+        play_task = asyncio.create_task(vlc("in_play", input=first_resolved.as_uri()))
+        ready = await _vlc_wait_until_ready(first_resolved, timeout=10.0)
+
+        state.stream_status = "playing"
+        state.current_audio_track = -1
+        state.current_subtitle_track = -1
+        await broadcast("stream_status", {"status": "playing", "message": f"Playing: {resume_path.name}"})
+        await broadcast("state", state_snapshot())
+        asyncio.create_task(vlc_focus_and_fullscreen())
+
+        # Seek back to where we were once the demuxer is up. Re-issue once if VLC
+        # ignored the first seek the instant it opened the file (same guard as
+        # the resume-seek in _library_play_launch).
+        if resume_pos > 5 and (ready or await _vlc_wait_until_ready(first_resolved, timeout=10.0)):
+            await vlc("seek", val=str(resume_pos))
+            await asyncio.sleep(0.6)
+            cur = await vlc_status()
+            if cur and float(cur.get("time", 0) or 0) < resume_pos - 15:
+                await vlc("seek", val=str(resume_pos))
+
+        # Re-apply the saved audio/subtitle track for a library item (the restart
+        # reset VLC's track selection to defaults).
+        if state.library_item_id and state.library_profile_id:
+            asyncio.create_task(_apply_track_prefs(
+                state.library_item_id, state.library_profile_id,
+                str(state.library_current_file), delay=3.5,
+            ))
+
+        # Append the tail after the current file is accepted so order is right.
+        if tail:
+            try:
+                await play_task
+            except Exception:
+                pass
+            for p in tail:
+                try:
+                    await vlc("in_enqueue", input=Path(p).resolve().as_uri())
+                except Exception:
+                    pass
+    except Exception as exc:
+        state.stream_status = "error"
+        await broadcast("stream_status", {"status": "error", "message": f"Night mode toggle failed: {exc}"})
 
 
 # ── Utilities ─────────────────────────────────────────────────────────────────
@@ -4027,6 +4170,14 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     Path(settings.qbit_download_path).mkdir(parents=True, exist_ok=True)
     _marquee_write("")  # wipe any stale countdown text from a prior run
 
+    # Seed the night-mode flag from the persisted setting so the snapshot + any
+    # mid-session VLC relaunch (retry / restart) reflect it. run.py / watchdog.py
+    # read the same setting independently when they launch VLC.
+    try:
+        state.vlc_night_mode = bool((await get_library()).get("settings", {}).get("vlc_night_mode", False))
+    except Exception:
+        state.vlc_night_mode = False
+
     # Default volume to half of the admin cap. Without this, state.vlc_volume
     # starts at 100 (the dataclass default) which can blast if the cap is low.
     _startup_vol = (await _global_max_volume()) // 2
@@ -4274,6 +4425,10 @@ class ProfileResumeModeReq(BaseModel):
 
 class MaxVolumeReq(BaseModel):
     max_volume: int   # 0-200; 200 = no cap
+
+
+class NightModeReq(BaseModel):
+    night_mode: bool   # VLC dynamic-range compressor on/off
 
 
 class SystemVolumeDefaultReq(BaseModel):
@@ -7156,6 +7311,35 @@ async def set_max_volume(req: MaxVolumeReq) -> JSONResponse:
         state.vlc_volume = capped
         await broadcast("state", state_snapshot())
     return JSONResponse({"ok": True, "max_volume": capped})
+
+
+@app.get("/api/settings/night-mode")
+async def get_night_mode() -> JSONResponse:
+    lib = await get_library()
+    return JSONResponse({"night_mode": bool(lib.get("settings", {}).get("vlc_night_mode", False))})
+
+
+@app.post("/api/settings/night-mode")
+async def set_night_mode(req: NightModeReq) -> JSONResponse:
+    """Toggle VLC night mode (dynamic-range compressor). Persisted globally.
+
+    Relaunches VLC in the background so the filter takes effect immediately on
+    whatever is playing — there's no runtime HTTP command to add an audio filter.
+    Returns 202; the SSE `state` stream reports buffering → playing. Idempotent:
+    a no-op toggle (already in the requested state) still persists but skips the
+    relaunch so the user isn't kicked out of playback for nothing.
+    """
+    enabled = bool(req.night_mode)
+    lib = await get_library()
+    lib.setdefault("settings", {})["vlc_night_mode"] = enabled
+    await put_library(lib)
+    if state.vlc_night_mode == enabled:
+        # Already in this state — keep state/snapshot honest, don't relaunch VLC.
+        state.vlc_night_mode = enabled
+        await broadcast("state", state_snapshot())
+        return JSONResponse({"ok": True, "night_mode": enabled, "applied": False})
+    asyncio.create_task(_apply_night_mode(enabled))
+    return JSONResponse({"ok": True, "night_mode": enabled, "applied": True})
 
 
 @app.get("/api/settings/system-volume-default")

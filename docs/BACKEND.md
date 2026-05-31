@@ -66,6 +66,7 @@
 | `current_audio_track`, `current_subtitle_track` | VLC ES IDs — VLC 3.x doesn't expose these in status, so we track them server-side. Reset to -1 on new playback |
 | `track_pref_applied_file` | Last file for which saved audio/sub track prefs were applied (avoid double-applying) |
 | `vlc_time`, `vlc_duration`, `vlc_volume` | Sampled by `stat_broadcaster` every 2 s |
+| `vlc_night_mode` | Night mode (VLC `compressor` audio filter) on/off. Persisted in `library.json → settings.vlc_night_mode`, seeded at lifespan startup, read by `_restart_vlc_process` to append `NIGHT_MODE_ARGS`. Toggling relaunches VLC (`_apply_night_mode`) — no runtime audio-filter command exists. See [GOTCHAS.md](GOTCHAS.md) |
 | `prepare_hash` | Torrent added by `/api/stream/prepare` pending user file selection — also cleaned up by `/api/stop` |
 | `skip_offer`, `skip_offer_file` | Current intro/credits skip offer (or `#intro-done` / `#credits-done` marker) |
 | `skip_countdown`, `skip_countdown_task` | Active auto-skip countdown `{type, file_path, n}` + its coroutine handle. Drives the on-TV marquee popup; see [ANALYZER.md](ANALYZER.md#auto-skip-countdown-on-tv-marquee) |
@@ -180,6 +181,7 @@ The legacy `print("[offline] …")` calls in the NVENC probe (`_has_nvenc`) pred
 - Volume scale: VLC uses 0–512 (256 = 100 %). Our API uses 0–200 (100 = normal). Conversion: `raw = volume / 100 * 256`.
 - Pre-roll volume: when sending `in_play`, we send `volume` first so VLC's default doesn't blast for half a second.
 - VLC 3.x quirk: `audiotrack` / `subtitletrack` are not in the XML response. We track them ourselves in `state.current_audio_track` / `current_subtitle_track`, reset on each new playback.
+- **Night mode** (`compressor` audio filter): launch-only — no runtime HTTP command adds an audio filter. `_apply_night_mode` snapshots the playing file + position, relaunches VLC via `_restart_vlc_process` (which appends `NIGHT_MODE_ARGS` when `state.vlc_night_mode`), then replays + seeks back + re-applies track prefs. The same arg list is duplicated in `run.py`/`watchdog.py` (boot / crash recovery), gated on `library.json → settings.vlc_night_mode`. See [GOTCHAS.md](GOTCHAS.md).
 
 ## See also
 

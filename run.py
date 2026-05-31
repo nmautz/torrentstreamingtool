@@ -12,6 +12,7 @@ and other venv packages are available without manual activation.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import platform
 import re
@@ -277,6 +278,33 @@ def find_mullvad() -> str | None:
 
 
 # ── Service launchers ──────────────────────────────────────────────────────
+# Night mode (dynamic-range compressor). Mirrors main.py's NIGHT_MODE_ARGS and
+# watchdog.py's copy — change one, change all three. There's no runtime HTTP
+# command for audio filters, so the compressor is a launch arg gated on the
+# persisted library.json setting. See docs/GOTCHAS.md.
+NIGHT_MODE_ARGS = [
+    "--audio-filter=compressor",
+    "--compressor-rms-peak=0.00",
+    "--compressor-attack=25.0",
+    "--compressor-release=250.0",
+    "--compressor-threshold=-24.0",
+    "--compressor-ratio=8.0",
+    "--compressor-knee=3.0",
+    "--compressor-makeup-gain=12.0",
+]
+
+
+def night_mode_args() -> list:
+    """Return NIGHT_MODE_ARGS when library.json → settings.vlc_night_mode is on."""
+    try:
+        data = json.loads((HERE / "library.json").read_text(encoding="utf-8"))
+        if (data.get("settings", {}) or {}).get("vlc_night_mode"):
+            return list(NIGHT_MODE_ARGS)
+    except Exception:
+        pass
+    return []
+
+
 def start_vlc() -> bool:
     vlc_port = extract_port(e("VLC_URL", "http://localhost:8080"), 8080)
     vlc_pwd  = e("VLC_PASSWORD", "vlcpassword")
@@ -331,6 +359,8 @@ def start_vlc() -> bool:
         "--marq-color=16777215",
         "--marq-opacity=255",
         "--marq-timeout=0",
+        # Night-mode compressor (empty list when the setting is off).
+        *night_mode_args(),
     ])
     return wait_for_port(vlc_port, 20.0, "VLC")
 

@@ -23,6 +23,7 @@ daemon service):
 """
 from __future__ import annotations
 
+import json
 import logging
 import os
 import platform
@@ -37,6 +38,32 @@ from pathlib import Path
 
 HERE   = Path(__file__).parent
 SYSTEM = platform.system()
+
+# Night mode (dynamic-range compressor). Mirrors main.py's NIGHT_MODE_ARGS and
+# run.py's copy — change one, change all three. VLC has no runtime HTTP command
+# for audio filters, so the compressor is a launch arg gated on the persisted
+# library.json setting. See docs/GOTCHAS.md.
+NIGHT_MODE_ARGS = [
+    "--audio-filter=compressor",
+    "--compressor-rms-peak=0.00",
+    "--compressor-attack=25.0",
+    "--compressor-release=250.0",
+    "--compressor-threshold=-24.0",
+    "--compressor-ratio=8.0",
+    "--compressor-knee=3.0",
+    "--compressor-makeup-gain=12.0",
+]
+
+
+def night_mode_args() -> list:
+    """Return NIGHT_MODE_ARGS when library.json → settings.vlc_night_mode is on."""
+    try:
+        data = json.loads((HERE / "library.json").read_text(encoding="utf-8"))
+        if (data.get("settings", {}) or {}).get("vlc_night_mode"):
+            return list(NIGHT_MODE_ARGS)
+    except Exception:
+        pass
+    return []
 
 # ── Logging ────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -595,6 +622,9 @@ def _build_specs() -> tuple[list[ServiceSpec], ServiceSpec]:
             "--marq-color=16777215",
             "--marq-opacity=255",
             "--marq-timeout=0",
+            # Night-mode compressor (empty list when the setting is off). Read at
+            # each (re)launch so a crash-recovery relaunch honours the toggle.
+            *night_mode_args(),
         ],
         startup_timeout=20.0,
         back_off=5.0,

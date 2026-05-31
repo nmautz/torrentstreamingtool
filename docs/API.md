@@ -182,6 +182,8 @@ See [STREAMING.md](STREAMING.md) for the full client/server flow.
 | GET | `/api/settings/disk-space` | Per-path `{total_bytes, free_bytes, free_pct}` |
 | GET | `/api/settings/max-volume` | `{max_volume}` — global VLC volume cap (0-200) |
 | POST | `/api/settings/max-volume` | `{max_volume: 0-200}` — immediately enforces if current VLC volume exceeds the new cap |
+| GET | `/api/settings/night-mode` | `{night_mode}` — VLC night mode (dynamic-range compressor) on/off. **Global** (`library.json → settings.vlc_night_mode`) |
+| POST | `/api/settings/night-mode` | `{night_mode: bool}` → **202-ish** `{ok, night_mode, applied}`. Persists the flag, then (when the value actually changed) relaunches VLC in the background so the `compressor` audio filter takes effect on whatever's playing, resuming at the same position; SSE reports `buffering`→`playing`. `applied:false` ⇒ already in that state, no relaunch. There's no runtime VLC HTTP command to add an audio filter — relaunch is the only way. `state_snapshot` carries `vlc_night_mode`. See [GOTCHAS.md](GOTCHAS.md) |
 | GET | `/api/settings/system-volume-default` | `{system_volume_default}` — host OS volume (0-100, default 70) restored when a YouTube play stops. **Global.** See [YOUTUBE.md](YOUTUBE.md) |
 | POST | `/api/settings/system-volume-default` | `{system_volume_default: 0-100}` — stores in `library.json → settings.system_volume_default`. Does NOT change the OS volume immediately, only at the next YouTube Stop |
 | GET | `/api/settings/youtube-start-volume` | `{youtube_start_volume}` — host OS volume (0-100, default 30) pre-set the moment a YouTube play starts (before the kiosk loads, before audio). **Global.** See [YOUTUBE.md](YOUTUBE.md) |

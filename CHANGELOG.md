@@ -1,5 +1,11 @@
 # Changelog
 
+## [4.12.0] — 2026-05-31
+- **New: Night Mode for VLC (dynamic-range compression).** Evens out the gap between the quietest and loudest sounds so quiet dialogue stays clear at low room volume without explosions being jarring — the classic "midnight mode". It's VLC's `compressor` audio filter (low threshold + high ratio to tame peaks, makeup gain to lift dialogue, RMS detection + slow release so it doesn't pump on speech). Persists until you turn it off.
+  - **Two entry points, deliberately subtle:** a small moon toggle in the fullscreen-controls header (opposite Close) and a checkbox in the **Global** section of Profile Settings. Toggling restarts VLC briefly (see below) and resumes at the same spot.
+- **Backend:** VLC has no runtime HTTP command to add/remove an audio filter, so night mode is a launch arg. `POST /api/settings/night-mode` persists `library.json → settings.vlc_night_mode` and `_apply_night_mode` snapshots the playing file + position, relaunches VLC (`_restart_vlc_process` appends `NIGHT_MODE_ARGS` when enabled), then replays the playlist tail, seeks back, and re-applies saved track prefs. `run.py` (`start_vlc`) and `watchdog.py` (`vlc_spec`) read the same setting so boot / crash-recovery relaunches honour it. New `state_snapshot.vlc_night_mode`; `state.vlc_night_mode` seeded at lifespan startup. A no-op toggle skips the relaunch.
+- **Docs:** [docs/API.md](docs/API.md), [docs/BACKEND.md](docs/BACKEND.md), [docs/FRONTEND.md](docs/FRONTEND.md), [docs/LIBRARY_DATA.md](docs/LIBRARY_DATA.md), [docs/GOTCHAS.md](docs/GOTCHAS.md).
+
 ## [4.11.0] — 2026-05-31
 - **New: admin can cap seeding and bandwidth (Admin → System → Seeding & Bandwidth).** Three global qBittorrent controls, applied live and persisted by qBit itself:
   - **Stop Seeding at Ratio** — enable + a share-ratio value. Once a torrent's uploaded ÷ downloaded hits the ratio, qBit **stops seeding it but keeps the files** (action fixed to "pause", not remove). E.g. a 1.0 ratio stops a 10 GB show after it has uploaded 10 GB.

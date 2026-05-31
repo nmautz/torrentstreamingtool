@@ -407,3 +407,10 @@ After idle-prep ran overnight, the box was barely usable in the morning and need
 
 ---
 
+## Milestone 30 — Night Mode (VLC dynamic-range compression)
+
+Even out loud vs. quiet sounds so dialogue stays clear at low room volume. A persistent toggle reachable from both the fullscreen controls (subtle) and the settings menu.
+
+- [x] **30.1** (v4.12.0) Backend. `state.vlc_night_mode` (seeded at lifespan startup from `library.json → settings.vlc_night_mode`); `NIGHT_MODE_ARGS` (`compressor` audio filter) appended by `_restart_vlc_process`. `GET`/`POST /api/settings/night-mode`; `_apply_night_mode` relaunches VLC + replays + seeks back + re-applies track prefs (no runtime audio-filter command exists). `state_snapshot.vlc_night_mode`. `run.py`/`watchdog.py` read the same setting at launch (boot / crash recovery). Docs: API, BACKEND, LIBRARY_DATA, GOTCHAS.
+- [x] **30.2** (v4.12.0) UI. Subtle moon toggle in the fullscreen-overlay header (`#fcNightBtn`) + a checkbox in the **Global** section of Profile Settings (`#psNightMode`); both via `toggleNightMode` / `renderNightMode`, synced from the `state` SSE event. Docs: FRONTEND, CHANGELOG.
+

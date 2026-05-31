@@ -375,6 +375,15 @@
         <span class="flex-1 h-px bg-gray-800"></span>
       </div>
 
+      <label class="flex items-center justify-between gap-3 bg-gray-800/60 px-4 py-3 cursor-pointer hover:bg-gray-800 transition-colors">
+        <div class="min-w-0">
+          <div class="text-sm font-bold text-gray-200 uppercase tracking-wide">Night Mode (VLC)</div>
+          <div class="text-[11px] text-gray-500 mt-0.5">Even out loud and quiet sounds so dialogue stays clear at low volume. Toggling restarts VLC briefly to apply.</div>
+        </div>
+        <input id="psNightMode" type="checkbox" onchange="toggleNightMode(this)"
+          class="w-5 h-5 accent-indigo-500 cursor-pointer flex-shrink-0"/>
+      </label>
+
       <div class="bg-gray-800/60 px-4 py-3">
         <div class="flex items-center justify-between gap-3 mb-2">
           <div class="min-w-0">
@@ -1320,10 +1329,20 @@
       <div class="flex-1 text-center pointer-events-none">
         <span class="text-[11px] uppercase tracking-widest text-gray-600 font-bold">Now Playing</span>
       </div>
-      <!-- Balancing spacer equal to close button width -->
-      <div class="px-5 flex-shrink-0 invisible" aria-hidden="true">
-        <span class="text-xs font-bold uppercase tracking-wide">Close</span>
-      </div>
+      <!-- Night mode (dynamic-range compression) — subtle moon toggle. Doubles
+           as the balancing element opposite the Close button so the title stays
+           centered. JS (renderNightMode) recolors it when active. -->
+      <button onclick="toggleNightMode(this)" id="fcNightBtn"
+        title="Night mode — even out loud and quiet sounds"
+        class="h-full px-5 flex items-center gap-2 text-gray-600 hover:text-indigo-300
+               hover:bg-gray-800 active:bg-gray-700 transition-colors text-xs font-bold
+               uppercase tracking-wide flex-shrink-0">
+        <svg id="fcNightIcon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
+        </svg>
+        Night
+      </button>
     </div>
   </div>
 
@@ -1806,7 +1825,7 @@ let app = {
   vpn_secure:true, vpn_status:"Checking…", stream_status:"idle",
   active_title:null, progress:0, downloaded_mb:0, total_mb:0,
   dl_speed_bps:0, ul_speed_bps:0,
-  vlc_time:0, vlc_duration:0, vlc_volume:100,
+  vlc_time:0, vlc_duration:0, vlc_volume:100, vlc_night_mode:false,
   library_playlist_count:0, library_current_index:-1, library_current_file:null,
   library_playlist:[], library_item_file_count:0, is_library_playback:false,
   library_item_id:null,
@@ -2590,6 +2609,55 @@ async function saveMaxVolume(){
   }
 }
 
+// ── Night mode (VLC dynamic-range compression) ──────────────────────────────
+// Global toggle reachable from both the fullscreen-control moon button and the
+// settings panel. Persists server-side; the server relaunches VLC to apply it,
+// so the toggle is intentionally infrequent. `el` is whichever control fired
+// (checkbox or button) — we derive the desired state from app.vlc_night_mode so
+// both controls agree regardless of which one was tapped.
+async function toggleNightMode(el){
+  const next = !app.vlc_night_mode;
+  // Optimistic flip so both controls update instantly; the SSE state event
+  // confirms (and renderNightMode re-syncs) once the server has relaunched VLC.
+  app.vlc_night_mode = next;
+  renderNightMode();
+  const s = document.getElementById("psStatus");
+  if(s){
+    s.textContent = next ? "Night mode on — restarting VLC…" : "Night mode off — restarting VLC…";
+    s.className = "text-[10px] text-indigo-400 uppercase tracking-widest pt-1";
+  }
+  const r = await fetch("/api/settings/night-mode",{
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({night_mode: next}),
+  }).catch(()=>null);
+  if(!r || !r.ok){
+    app.vlc_night_mode = !next;   // revert on failure
+    renderNightMode();
+    showAlert("Couldn't change night mode.","error");
+  }
+  if(s){
+    setTimeout(()=>{
+      s.textContent = "Manual skip button is always available.";
+      s.className = "text-[10px] text-gray-600 uppercase tracking-widest pt-1";
+    }, 2500);
+  }
+}
+
+// Reflect app.vlc_night_mode on both controls (fullscreen moon + settings box).
+function renderNightMode(){
+  const on = !!app.vlc_night_mode;
+  const cb = document.getElementById("psNightMode");
+  if(cb) cb.checked = on;
+  const btn = document.getElementById("fcNightBtn");
+  if(btn){
+    btn.classList.toggle("text-indigo-400", on);
+    btn.classList.toggle("text-gray-600", !on);
+    const icon = document.getElementById("fcNightIcon");
+    // Filled moon when active, outline when off — a quiet "it's on" signal.
+    if(icon) icon.setAttribute("fill", on ? "currentColor" : "none");
+  }
+}
+
 // System volume restored on YouTube stop (the "expected max"). 0-100 OS scale.
 async function saveSystemVolumeDefault(){
   const v = Math.max(0, Math.min(100, parseInt(document.getElementById("psSysVolume").value,10)));
@@ -2911,6 +2979,12 @@ async function openProfileSettings(){
     document.getElementById("psHostVolume").disabled = true;
     document.getElementById("psHostVolumeLabel").textContent = "N/A";
   }
+  try{
+    const r = await fetch("/api/settings/night-mode");
+    const d = r.ok ? await r.json() : {};
+    app.vlc_night_mode = !!d.night_mode;
+  }catch(_){/* fall back to whatever SSE last reported */}
+  renderNightMode();
   document.getElementById("profileSettingsModal").classList.remove("hidden");
 }
 
@@ -6820,6 +6894,7 @@ function connectSSE(){
     updateDlBadge(d.downloading_count||0);
     renderServerAttention(d);
     renderPerfBanner(d);
+    if(typeof d.vlc_night_mode==="boolean") renderNightMode();
   });
   es.addEventListener("vpn_status",e=>{
     const d=JSON.parse(e.data); app.vpn_secure=d.secure; app.vpn_status=d.status;
@@ -6969,6 +7044,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.11.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.12.0</div>
 </body>
 </html>

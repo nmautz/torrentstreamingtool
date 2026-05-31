@@ -109,6 +109,14 @@ Four traps:
 - **The marquee file path must resolve identically across processes.** It's anchored to the repo root via `Path(__file__).parent` (all three modules live there) — *not* `tempfile.gettempdir()`, which can differ between the system-Python `run.py`, the venv `main.py`, and a service-launched `watchdog.py`. Create it empty before launch so `marq` has something to open.
 - **Don't add `--freetype-background-*` for an opaque box.** The freetype background opacity/color is a *global* text-renderer setting — turning it on to box the marquee also boxes every regular subtitle line. The countdown is intentionally text-only (opaque white + VLC's default outline). `--marq-position=10` is natively Bottom-Right; `--marq-x`/`--marq-y` add the corner padding.
 
+### Night mode toggles by relaunching VLC — there's no runtime audio-filter command
+
+Night mode is VLC's `compressor` audio filter (dynamic-range compression: pull loud peaks down, lift quiet dialogue up). VLC's Lua HTTP interface has **no command to add or remove an audio filter on a running instance** — `--audio-filter` is read only at launch. So toggling night mode (`POST /api/settings/night-mode`) cannot be a live VLC command; `_apply_night_mode` snapshots the current file + position, calls `_restart_vlc_process` (which appends `NIGHT_MODE_ARGS` when `state.vlc_night_mode` is set), then replays the file + playlist tail and seeks back so it's seamless mid-movie. A no-op toggle (already in the requested state) persists the flag but skips the relaunch, so the user isn't kicked out of playback for nothing.
+
+Two consequences:
+- **The compressor args live in three places** — `main.py` `NIGHT_MODE_ARGS` (used by `_restart_vlc_process`), `run.py` `night_mode_args()` (boot), and `watchdog.py` `night_mode_args()` (crash recovery). Same rule as the marquee args: change one, change all three. `run.py`/`watchdog.py` read the flag straight from `library.json → settings.vlc_night_mode` (they don't import `main.py`), so the persisted setting is the single source of truth and boot/crash relaunches honour it.
+- **A toggle restarts VLC**, so it's deliberately a low-frequency control — surfaced as a subtle moon button in the fullscreen overlay header and a checkbox in the global section of profile settings, not a hot-path tile. The audio/subtitle track selection resets on the relaunch; `_apply_night_mode` re-applies the saved library track prefs via `_apply_track_prefs` to compensate.
+
 ## qBittorrent
 
 ### `setSequentialDownload` doesn't exist

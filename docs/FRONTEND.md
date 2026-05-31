@@ -92,6 +92,10 @@ The **Files** expander appears on a downloading item and **also on a finished pa
 
 VLC's volume slider is debounced — `oninput="updateVolumeDisplay"` updates label only, `onmouseup`/`ontouchend="vlcSetVolume"` sends the actual request. This was a fix for VLC lag when scrubbing the slider. Hard cap is the global `settings.max_volume` (fetched once at startup into `globalMaxVolume`, also refreshed when the profile-settings modal opens); `applyMaxVolumeToSliders` enforces it on the slider `max` attribute.
 
+### Night mode (VLC dynamic-range compression)
+
+A global toggle reachable from **two** controls: the subtle moon button in the fullscreen-overlay header (`#fcNightBtn`, opposite the Close button) and a checkbox in the **Global** section of profile settings (`#psNightMode`). Both call `toggleNightMode(el)`, which flips `app.vlc_night_mode` optimistically, `renderNightMode()`s both controls, then `POST`s `/api/settings/night-mode`. `renderNightMode()` (also called from the `state` SSE handler) recolors the moon + fills its icon when active and syncs the checkbox. The server relaunches VLC to apply the filter (see [GOTCHAS.md](GOTCHAS.md)), so playback briefly re-buffers — the toggle is intentionally low-prominence, not a hot-path tile. `openProfileSettings` fetches the fresh value so the checkbox is correct even before the first SSE state event.
+
 ### Optimistic Play UI + in-flight guards
 
 `continueLibraryItem` and `playLibraryFiles` run under `withInflight("play_${itemId}", …)` so a frustrated double-tap during a slow VLC handoff is dropped client-side instead of racing extra `in_play` requests to VLC. Before the fetch they call `_optimisticBuffering(label, itemId)` which:
