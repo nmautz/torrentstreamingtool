@@ -3185,6 +3185,12 @@ function renderLibrary(items){
         }
       }
 
+      // Partial-download badge: some files were deselected (Skip), so not every file
+      // in this torrent is on disk — shown even once the kept files are "ready".
+      const partialBadge = item.download_partial
+        ? `<span class="text-[10px] px-1.5 py-0.5 bg-orange-950 text-orange-300 border border-orange-900" title="Some files in this torrent were skipped — not everything is downloaded.">⊘ Partial</span>`
+        : "";
+
       // Buttons — multi-episode vs single
       let buttons="";
       if(isDownloading){
@@ -3361,6 +3367,7 @@ function renderLibrary(items){
           <div class="flex items-center gap-2 flex-wrap">
             <span class="text-sm font-medium text-gray-200 truncate">${epPrefix}${escHtml(item.title)}</span>
             ${statusBadge}
+            ${partialBadge}
             ${skipBadge}
           </div>
           <div class="text-[11px] text-gray-600 mt-0.5">${escHtml(meta)}</div>
@@ -4029,6 +4036,9 @@ function _epCardHtml(f){
   const isComplete=prog?.completed;
   const inProgress=prog&&!isComplete&&pct>2;
   const isNowPlaying=app.library_current_file&&f.path===app.library_current_file;
+  // Download completeness (from qBit, via /files). false ⇒ this file was skipped /
+  // isn't on disk — show it as part of the partial download but not playable.
+  const notDownloaded=f.complete===false;
 
   const label=epLabel(f);
   const epName=_epDisplayTitle(f);
@@ -4046,6 +4056,9 @@ function _epCardHtml(f){
   const watchedBadge = isComplete
     ? `<span class="text-[10px] text-green-500 font-bold uppercase tracking-widest">✓ Watched</span>`
     : inProgress ? `<span class="text-[10px] text-yellow-500 font-bold">${pct}%</span>` : "";
+  const notDlBadge = notDownloaded
+    ? `<span class="text-[10px] text-orange-400 font-bold uppercase tracking-widest" title="This file was skipped from the download — not on disk.">⊘ Not downloaded</span>`
+    : "";
 
   const prepState = prepFileState.get(offKey(epItemId,f.path));
   const isReady    = prepState === "ready";
@@ -4100,14 +4113,14 @@ function _epCardHtml(f){
     ? `<p class="text-[11px] sm:text-xs text-gray-400 mt-1 line-clamp-2">${escHtml(overview)}</p>`
     : `<p class="text-[11px] text-gray-600 mt-1 truncate font-mono">${escHtml(f.name)}</p>`;
 
-  return `<div class="ep-card px-2 sm:px-5 ${isNowPlaying?'playing':''}" data-path="${escHtml(f.path)}">
-      <!-- Still / thumbnail; click plays from this episode -->
-      <div class="ep-still" onclick="epPlayFrom(${epIdx})" role="button" aria-label="Play episode">
+  return `<div class="ep-card px-2 sm:px-5 ${isNowPlaying?'playing':''} ${notDownloaded?'opacity-60':''}" data-path="${escHtml(f.path)}">
+      <!-- Still / thumbnail; click plays from this episode (skipped files aren't on disk) -->
+      <div class="ep-still" ${notDownloaded?`onclick="showAlert('Not downloaded — this file was skipped from the download.','warn')"`:`onclick="epPlayFrom(${epIdx})"`} role="button" aria-label="${notDownloaded?'Not downloaded':'Play episode'}">
         ${stillBlock}
         ${progressBar}
-        <div class="ep-play-overlay">
-          <svg class="w-9 h-9" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-        </div>
+        ${notDownloaded
+          ? `<div class="ep-play-overlay" style="opacity:1"><svg class="w-8 h-8 text-orange-300" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/></svg></div>`
+          : `<div class="ep-play-overlay"><svg class="w-9 h-9" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></div>`}
       </div>
       <div class="flex-1 min-w-0 flex flex-col">
         <div class="flex items-start justify-between gap-2">
@@ -4116,7 +4129,8 @@ function _epCardHtml(f){
               ${headline}
               ${playingBadge}
               ${watchedBadge}
-              ${isReady?'<span class="text-[10px] text-emerald-500 font-bold uppercase tracking-widest">● Stream Ready</span>':''}
+              ${notDlBadge}
+              ${(isReady&&!notDownloaded)?'<span class="text-[10px] text-emerald-500 font-bold uppercase tracking-widest">● Stream Ready</span>':''}
             </div>
             ${subOverview}
             <div class="text-[10px] text-gray-700 mt-1 font-mono">${escHtml(f.size_human)}${dur?` · ${fmtTime(dur)}`:""}</div>
@@ -4142,15 +4156,15 @@ function _epCardHtml(f){
               <path stroke-linecap="round" stroke-width="2" d="M21 12a9 9 0 0 1-9 9"></path>
             </svg>
           </button>
-          ${offlineBtn}
-          <a href="/api/library/${escHtml(epItemId)}/download?file_path=${encodeURIComponent(f.path)}" download="${escHtml(f.name)}"
+          ${notDownloaded?"":offlineBtn}
+          ${notDownloaded?"":`<a href="/api/library/${escHtml(epItemId)}/download?file_path=${encodeURIComponent(f.path)}" download="${escHtml(f.name)}"
             class="w-9 h-9 flex items-center justify-center text-gray-600 hover:text-indigo-300 hover:bg-indigo-950/40 transition-colors"
             title="Download to device">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                 d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
             </svg>
-          </a>
+          </a>`}
         </div>
       </div>
     </div>`;
@@ -6825,6 +6839,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.7.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.7.1</div>
 </body>
 </html>

@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.7.1] — 2026-05-31
+- **Fixed: a partial download (some files skipped) looked fully complete once it finished.** The library monitor flipped an item to "ready" purely on qBittorrent's torrent state — but with skipped (and idle-deferred) files at priority 0, qBit reports the torrent "complete" while those files are still absent. So a partial selection showed every episode as downloaded, audio fingerprinting ran against a missing set, and an idle-deferred file could be abandoned (the item went ready before it fetched).
+  - **Ready is now gated on per-file completion**: an item flips ready (and only then audio-fingerprints) once **every non-skip file** is fully downloaded — including idle-deferred ones. Skipped files are excluded from fingerprinting and from the Smart Skip status.
+  - **Partial state is now visible**: the library card shows a **⊘ Partial** badge when any file was skipped, and the episode picker marks skipped episodes **⊘ Not downloaded** (dimmed, not playable, prep/download hidden). `GET /files` now reports true per-file `complete`/`dl_pct` from qBit for ready items too (a skipped file is never "complete").
+  - A mixed now+idle download correctly reads "Waiting for idle window" while it seeds the now-files and waits for the idle window to fetch the rest.
+- **Backend:** `_all_nonskip_complete` (the ready gate) + `_analyzable_files` (skip-aware file set, used by the monitor, `_run_series_analysis`, `_schedule_series_analysis_if_eligible`, and `_item_skip_status`); `get_item_files` queries qBit for any torrent-backed item; `library` list gains `download_partial`.
+- **Docs:** [docs/BACKEND.md](docs/BACKEND.md), [docs/API.md](docs/API.md), [docs/GOTCHAS.md](docs/GOTCHAS.md), [PLAN.md](PLAN.md).
+
 ## [4.7.0] — 2026-05-30
 - **New: download scheduling — pause, idle/night-only, and per-file/folder priority.** A new background task (`download_scheduler_loop`) is the single source of truth for each downloading item's qBittorrent file priorities + torrent pause/resume:
   - **Idle/night-only downloads.** A "Download at idle/night only" toggle in the download modal (and a per-card **⏸ Idle** / **▶ Resume** button) holds a download until the host is idle or the admin's overnight window is open, then auto-resumes there — and pauses again when activity returns. The idle window **reuses** the existing Admin → System prep schedules (Overnight Stream Prep / Idle Auto-Prep); no new admin config.

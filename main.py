@@ -1677,6 +1677,33 @@ def _file_mode_to_priority(mode: str, idle_open: bool) -> int:
     return 1   # "now"
 
 
+def _analyzable_files(item: dict) -> list[dict]:
+    """Item video files that should be treated as part of the download: excludes
+    files the user marked "skip" (deselected from the download). Those never land on
+    disk, so they must not be audio-fingerprinted, counted as "pending" Smart Skip,
+    or gate the ready flip."""
+    cfg = _download_cfg(item)
+    return [f for f in item.get("files", [])
+            if _effective_file_mode(cfg, f.get("path", "")) != "skip"]
+
+
+def _all_nonskip_complete(item: dict, qfiles: list, save_path: str) -> bool:
+    """True iff every non-skip file in the torrent is fully downloaded (and there is
+    at least one). The ready/fingerprint gate: a partial selection flips ready once
+    its kept files are done, and an idle-deferred file still has to finish first — so
+    audio fingerprinting only ever runs on the complete set the user asked for."""
+    cfg = _download_cfg(item)
+    saw = False
+    for i, qf in enumerate(qfiles):
+        full = str(Path(save_path) / qf.get("name", ""))
+        if _effective_file_mode(cfg, full) == "skip":
+            continue
+        saw = True
+        if qf.get("progress", 0.0) < 0.999:
+            return False
+    return saw
+
+
 def _file_progress(item: dict, profile_id: str, file_path: str) -> Optional[dict]:
     """Return per-file progress dict for a given profile and path, or None."""
     prof = item.get("progress", {}).get(profile_id, {})
@@ -2883,7 +2910,18 @@ async def library_download_monitor() -> None:
                     item["size_bytes"] = sum(f["size_bytes"] for f in new_files)
 
                 qstate = info.get("state", "")
-                if qstate in ("uploading", "stalledUP", "pausedUP", "queuedUP", "forcedUP"):
+                # Ready is gated on every NON-SKIP file being fully downloaded — not on
+                # qBit's torrent state. With skip/idle files at priority 0, qBit reports
+                # the torrent "complete" (uploading) while skipped files are absent and
+                # idle-deferred files haven't fetched yet; flipping ready on that would
+                # both mislabel a partial download as whole and fingerprint a missing set.
+                nonskip_done = _all_nonskip_complete(item, qfiles, save_path)
+                if qstate in ("error", "missingFiles"):
+                    item["status"] = "error"
+                    state.downloading_count = max(0, state.downloading_count - 1)
+                    changed = True
+                    await broadcast("library_update", {"item_id": item["id"], "status": "error"})
+                elif nonskip_done:
                     item["status"] = "ready"
                     state.downloading_count = max(0, state.downloading_count - 1)
                     changed = True
@@ -2896,15 +2934,20 @@ async def library_download_monitor() -> None:
                         state.play_when_ready_profile_id = None
                         state.play_when_ready_file_path = None
                         asyncio.create_task(_auto_play_item(item, pwr_profile or "", pwr_fp or ""))
-                elif qstate in ("error", "missingFiles"):
-                    item["status"] = "error"
-                    state.downloading_count = max(0, state.downloading_count - 1)
-                    changed = True
-                    await broadcast("library_update", {"item_id": item["id"], "status": "error"})
                 else:
                     # Still downloading — push live stats to the UI
                     eta = info.get("eta", 8640000)
                     cfg = _download_cfg(item)
+                    # "Waiting for idle window": either qBit paused us, or all the
+                    # kept-but-incomplete files are idle-deferred and the window is shut
+                    # (qBit may be seeding the now-files meanwhile, so check per-file).
+                    waiting_idle = qstate in ("pausedDL", "stoppedDL")
+                    if not waiting_idle and not state.download_idle_open:
+                        for i, qf in enumerate(qfiles):
+                            full = str(Path(save_path) / qf.get("name", ""))
+                            if _effective_file_mode(cfg, full) == "idle" and qf.get("progress", 0.0) < 0.999:
+                                waiting_idle = True
+                                break
                     await broadcast("library_progress", {
                         "item_id": item["id"],
                         "speed_bps": info.get("dlspeed", 0),
@@ -2913,9 +2956,9 @@ async def library_download_monitor() -> None:
                         "progress_pct": round(info.get("completed", 0) / max(info.get("size", 1), 1) * 100, 1),
                         "eta_secs": eta if eta < 8640000 else -1,
                         "download_mode": cfg["mode"],   # now | idle
-                        # Intentionally halted by the scheduler (idle window closed) —
-                        # the UI shows "Waiting for idle window" instead of "Downloading".
-                        "paused": qstate in ("pausedDL", "stoppedDL"),
+                        # Intentionally halted (idle window closed) — the UI shows
+                        # "Waiting for idle window" instead of "Downloading".
+                        "paused": waiting_idle,
                     })
                     changed = True  # file list updated
                     # Check if a specific queued file finished (even while torrent is still going)
@@ -2999,7 +3042,7 @@ def _item_skip_status(item: dict) -> str:
       `ok`          — every file produced usable intro/credits (or has been
                       manually edited)
     """
-    files = item.get("files", [])
+    files = _analyzable_files(item)   # skipped (not-downloaded) files aren't analyzed
     if not files:
         return "none"
     skip_data = item.get("skip_data", {}) or {}
@@ -3095,8 +3138,13 @@ async def _run_series_analysis(series_key: str) -> None:
         async def _on_progress(**kw):
             await _set_analysis_status(series_key, status="running", **kw)
 
+        # Fingerprint only the files the user actually downloaded — exclude "skip"
+        # files (deselected from the download) so a partial selection isn't dragged
+        # to "failed" by absent files. The persistence loop's `p in results` guard
+        # then naturally leaves skip files' skip_data untouched.
+        analyze_items = [dict(it, files=_analyzable_files(it)) for it in ready_items]
         try:
-            results = await analyzer.analyze_series(ready_items, progress_cb=_on_progress)
+            results = await analyzer.analyze_series(analyze_items, progress_cb=_on_progress)
         except Exception as exc:
             err_msg = f"Analysis crashed: {exc}"
             # Record an exception entry for every file in the series so the
@@ -3104,7 +3152,7 @@ async def _run_series_analysis(series_key: str) -> None:
             # when nothing else gets persisted.
             results = {}
             for it in ready_items:
-                for f in it.get("files", []):
+                for f in _analyzable_files(it):
                     p = f.get("path", "")
                     if p:
                         results[p] = {
@@ -3210,7 +3258,7 @@ def _schedule_series_analysis_if_eligible(item: dict, lib: dict) -> None:
     needs_run = False
     for peer in peers:
         sk = peer.get("skip_data", {})
-        for f in peer.get("files", []):
+        for f in _analyzable_files(peer):   # skip-moded files are never fingerprinted
             if _needs_reanalysis(sk.get(f.get("path", ""))):
                 needs_run = True
                 break
@@ -4122,6 +4170,7 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
             "hidden": _item_hidden_for_profile(it, profile_id),
             "skip_status": _item_skip_status(it),
             "download_mode": _download_cfg(it)["mode"],   # now | idle — drives the card's Pause/Resume control
+            "download_partial": any(m == "skip" for m in _download_cfg(it)["files"].values()),  # some files deselected → "Partial" badge
         })
     items.sort(key=lambda x: (
         x["series"] or "\xff" + x["title"],
@@ -4146,11 +4195,15 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
     )
 
     cfg = _download_cfg(item)
+    has_torrent = bool(item.get("torrent_hash"))
     is_ready = item.get("status") == "ready"
-    # For a still-downloading torrent, map per-file qBit download progress so the UI
-    # can show which files are complete (and playable) even while others lag behind.
+    # Map per-file qBit download progress so the UI shows which files are actually on
+    # disk — for a downloading torrent AND a "ready" one (a partial selection flips
+    # ready with skipped files still absent; without live progress they'd masquerade
+    # as complete). Falls back to status when qBit has no data (uploaded item, or the
+    # torrent was removed).
     qmap: dict[str, float] = {}
-    if not is_ready and item.get("torrent_hash"):
+    if has_torrent:
         info = await qbit_info(item["torrent_hash"])
         qfiles = await qbit_files(item["torrent_hash"])
         if info and qfiles:
@@ -4173,13 +4226,18 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
             }
         else:
             progress = None
-        if is_ready:
-            dl_pct, complete = 100.0, True
+        mode = _effective_file_mode(cfg, path)
+        if mode == "skip":
+            # Deselected from the download — never on disk, never "complete".
+            dl_pct = round(qmap[path] * 100, 1) if path in qmap else 0.0
+            complete = False
         elif path in qmap:
             dl_pct = round(qmap[path] * 100, 1)
             complete = qmap[path] >= 0.999
         else:
-            dl_pct, complete = None, False
+            # No live qBit data: trust status (uploaded item, or torrent gone).
+            complete = is_ready or not has_torrent
+            dl_pct = 100.0 if complete else None
         out.append({
             "name": f.get("name", Path(path).name),
             "path": path,
@@ -4188,7 +4246,7 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
             "season": f.get("season", 0),
             "episode": f.get("episode", 0),
             "progress": progress,
-            "mode": _effective_file_mode(cfg, path),   # now | high | idle | skip
+            "mode": mode,                               # now | high | idle | skip
             "dl_pct": dl_pct,                           # download % (None if unknown)
             "complete": complete,                       # file fully downloaded → playable
         })
