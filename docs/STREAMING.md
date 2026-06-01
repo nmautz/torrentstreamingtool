@@ -559,6 +559,43 @@ tick, which collapses `want` and triggers the kill=True pause.
 See [ADMIN.md § Overnight Stream Prep / § Idle Auto-Prep](ADMIN.md) for the
 panels + endpoints.
 
+### Auto-prep on play (server, admin-toggled)
+
+A third, **play-driven** prep trigger, independent of the two idle/overnight
+triggers above and **on by default** (`library.json → settings.play_prep.enabled`,
+`_play_prep_cfg`). Every VLC library play (`play_library_item`) calls
+`_maybe_start_play_prep(lib, item, profile_id, playlist, seek_sec)`:
+
+1. If the viewer is resuming the current episode with **< `PLAY_PREP_TAIL_SECS`
+   (300 s)** left — judged from the file's saved `duration_sec` (`_file_duration_sec`)
+   minus `seek_sec` — the current episode is dropped from the list (prepping the one
+   they're about to finish is wasted work) and the chain starts at the next episode.
+2. Any prior chain is cancelled (`state.play_prep_task`) so only the series being
+   watched is prepped ahead; then a new `_play_prep_chain(item_id, files)` task is
+   spawned.
+
+`_play_prep_chain` walks the files **one at a time** — it starts an interactive
+prep for a file (`_start_interactive_prep_job`), waits for that job to reach
+`done`/`error`, then moves to the next — so the episode most likely to be reached
+next is always prepped first (and a long series doesn't fan out 50 ffmpegs).
+`_start_interactive_prep_job` is the no-HTTP sibling of the queue-jumping branch in
+`offline_prepare`: it coalesces with an existing job (promoting it to interactive),
+else spawns a fresh `queue:"interactive"` job, and preempts any in-flight bulk
+encode.
+
+**Why `interactive` is load-bearing here.** The requirement is that this prep runs
+*regardless of the idle/overnight settings and live user activity*. Interactive
+jobs satisfy that for free: the pause gate in `_run_offline_job` only parks `bulk`
+jobs, `_pause_prep(kill=…)` only terminates `bulk` encodes, and `_activity_kick`
+calls `_pause_prep` — so none of them can stop a play-prep chain. The trade-off is
+that, like all interactive prep, it isn't stoppable from the non-admin Pause/Resume
+control and it makes `bulk` (overnight/idle/manual) prep defer while the chain has
+work pending. Cancelling the chain task only stops *further* enqueues; the ffmpeg
+already running finishes. Disabled (and the chain never starts) when `HLS_AVAILABLE`
+is false (macOS).
+
+See [ADMIN.md § Auto-Prep on Play](ADMIN.md) for the panel + endpoints.
+
 ---
 
 ## State + storage

@@ -594,6 +594,21 @@
       </div>
     </div>
 
+    <!-- Auto-prep on play -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Auto-Prep on Play</h2>
+          <p class="text-xs text-gray-500 mt-0.5">When a video is played on the TV, immediately prep that episode for on-device streaming, then the rest of the playlist one episode at a time. If the episode is resumed with under 5 minutes left, the next one is prepped instead. Runs no matter the idle/overnight settings or whether the box is in use.</p>
+        </div>
+        <button id="ppEnabledBtn" onclick="togglePlayPrep()"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+                 bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">
+          …
+        </button>
+      </div>
+    </div>
+
     <!-- qBittorrent seeding & bandwidth limits -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
@@ -1076,7 +1091,7 @@ function switchTab(tab){
   if(tab==="skip")       loadSkipPanel();
   if(tab==="offline")    loadOfflineCache();
   if(tab==="background") loadBackgroundVideo();
-  if(tab==="system")   { loadScheduledReboot(); loadOvernightPrep(); loadIdlePrep(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
+  if(tab==="system")   { loadScheduledReboot(); loadOvernightPrep(); loadIdlePrep(); loadPlayPrep(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
   else                 { stopSysHealthPolling(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
@@ -1471,6 +1486,56 @@ async function saveIdlePrep(){
     }
     showToast(_ipEnabled ? "Idle auto-prep saved." : "Idle auto-prep disabled.");
     await loadIdlePrep();
+  }catch(_){
+    showToast("Save failed.", true);
+  }finally{
+    btn.disabled = false;
+  }
+}
+
+// ── Auto-Prep on Play ─────────────────────────────────────────────────────────
+let _ppEnabled = true;
+
+function _renderPpEnabled(){
+  const btn = document.getElementById("ppEnabledBtn");
+  if(!btn) return;
+  if(_ppEnabled){
+    btn.textContent = "Enabled";
+    btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-emerald-950 border-emerald-700 text-emerald-300 hover:bg-emerald-900 disabled:opacity-50";
+  } else {
+    btn.textContent = "Disabled";
+    btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50";
+  }
+}
+
+async function loadPlayPrep(){
+  try{
+    const r = await fetch("/api/admin/play-prep", {headers: authHeader()});
+    if(!r.ok) return;
+    const d = await r.json();
+    _ppEnabled = !!d.enabled;
+    _renderPpEnabled();
+  }catch(_){}
+}
+
+async function togglePlayPrep(){
+  const btn = document.getElementById("ppEnabledBtn");
+  const next = !_ppEnabled;
+  btn.disabled = true;
+  try{
+    const r = await fetch("/api/admin/play-prep",{
+      method:"POST",
+      headers:{...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify({enabled: next}),
+    });
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      showToast(`Save failed: ${d.detail || r.status}`, true);
+      return;
+    }
+    _ppEnabled = next;
+    _renderPpEnabled();
+    showToast(_ppEnabled ? "Auto-prep on play enabled." : "Auto-prep on play disabled.");
   }catch(_){
     showToast("Save failed.", true);
   }finally{

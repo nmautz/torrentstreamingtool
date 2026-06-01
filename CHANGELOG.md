@@ -1,5 +1,14 @@
 # Changelog
 
+## [4.16.0] — 2026-05-31
+- **New: auto-prep for on-device when you play on the TV.** Playing any library episode on VLC now immediately HLS-preps **that episode** for on-device streaming, then works through the rest of the playlist one episode at a time. If you resume an episode with **under 5 minutes left**, that episode is skipped and the **next** one is prepped instead (prepping the one you're about to finish would be wasted). The chain prepares each episode fully before starting the next, so the episode you're most likely to reach next is always ready first.
+  - These prep jobs are **interactive**: they run **regardless of the Overnight / Idle Auto-Prep settings and regardless of whether someone is using the box** — the bulk pause gate and the activity-kill never touch them. They do preempt in-flight *bulk* prep so the watched series is prioritised.
+  - Starting a new play cancels the previous chain, so only the series you're currently watching is being prepped ahead.
+  - **Admin → System → Auto-Prep on Play** (new card): a single Enable/Disable toggle. **On by default.**
+  - **Not on macOS hosts** (no HLS) — same as every other on-device feature.
+- **Backend:** `_play_prep_cfg` / `PlayPrepReq`, `_maybe_start_play_prep` + `_play_prep_chain` + `_start_interactive_prep_job` (`PLAY_PREP_TAIL_SECS = 300`), `state.play_prep_task`, hook in `play_library_item`, and `GET`/`POST /api/admin/play-prep`.
+- **Docs:** [docs/STREAMING.md](docs/STREAMING.md), [docs/ADMIN.md](docs/ADMIN.md).
+
 ## [4.15.1] — 2026-05-31
 - **Fix: interactive prep now jumps the queue ahead of bulk prep.** Holding **Prep for Device** (or play-on-device) while overnight / idle / manual `/prep-all` work was running would still queue *behind* it — the single encode slot was busy, so your file waited (potentially minutes) for the in-flight bulk file to finish. Now an interactive prep **preempts** the running bulk encode (terminates it, re-queues that file to resume afterwards) and bulk jobs **defer** to any pending interactive prep, so the user-initiated file starts within a tick. The booted bulk file restarts from scratch (HLS can't checkpoint mid-file) once interactive prep clears; the global pause gate and overnight/idle scheduling are untouched.
 - **Backend:** `_preempt_running_bulk` (called from `offline_prepare` for every `bulk:false` request), `_interactive_hls_pending` (the precedence gate in `_run_offline_job` — bulk parks before acquiring the slot and yields it back if interactive arrives while queued), `_requeue_offline_job`, and a `_preempted` re-queue branch in `_run_offline_job`.

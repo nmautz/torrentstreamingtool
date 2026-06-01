@@ -103,7 +103,7 @@ For each profile:
 
 ### 7. System
 
-Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Overnight Stream Prep**, **Idle Auto-Prep**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
+Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Overnight Stream Prep**, **Idle Auto-Prep**, **Auto-Prep on Play**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
 
 #### System Health
 
@@ -194,6 +194,17 @@ Saving config resets `state.auto_prep_engaged` so the trigger is re-derived on t
 
 - `GET /api/admin/idle-prep` → config + `idle_now` (is the box idle right now) + `paused` + `active` (prepping while idle right now).
 - `POST /api/admin/idle-prep` → `{enabled, idle_minutes}`. Clamps `idle_minutes` to 1–720, resets the auto-prep edge flag.
+
+#### Auto-Prep on Play
+
+Play-driven on-device prep, separate from the idle/overnight triggers above. When enabled (**on by default**), every VLC library play (`POST /api/library/{id}/play`) immediately HLS-preps the playing episode for on-device, then the rest of the playlist **one episode at a time** (`_maybe_start_play_prep` → `_play_prep_chain`, started on `state.play_prep_task`). If the viewer resumes the current episode with **under 5 minutes left** (`PLAY_PREP_TAIL_SECS = 300`, judged from the saved `duration_sec` vs the resume seek), that episode is skipped and the chain starts at the next one. Each new play cancels the prior chain (so only the current series' tail is prepped); the in-flight ffmpeg of a cancelled chain keeps running.
+
+Crucially these jobs are queued as **`interactive`**, so — unlike Overnight/Idle bulk prep — they **ignore the global pause gate and are never killed by the activity-kill** (`_pause_prep`/`_activity_kick` only touch `bulk`). They run regardless of the idle/overnight settings or whether the box is in use, and they **preempt** any in-flight bulk encode so the watched series is prioritised. Config persists under `library.json → settings.play_prep` (`enabled`). Not available on macOS hosts (no HLS). See [STREAMING.md § Auto-prep on play](STREAMING.md).
+
+Panel control: a single enable/disable toggle (saves immediately on click).
+
+- `GET /api/admin/play-prep` → `{enabled}`.
+- `POST /api/admin/play-prep` → `{enabled}`.
 
 #### Optional Components
 

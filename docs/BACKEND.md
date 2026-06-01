@@ -80,6 +80,7 @@
 | `idle_prep_on` / `overnight_open` | Cached each `auto_prep_loop` tick (`settings.idle_prep.enabled`, and whether we're inside the overnight window) so `_activity_kick` can decide instantly without a library read |
 | `sys_status` | Latest host-resource sample + classification from `system_monitor_loop`: `{cpu, ram, gpu, net, overall, updated_at}`, each component `{…, status: ok\|degraded\|overloaded}`. Published in `state_snapshot()`; detailed via `GET /api/admin/system-resources` |
 | `auto_prep_engaged` | In-memory edge flag: True while `auto_prep_loop` has prep running (overnight window open OR idle trigger). Drives the rising/falling-edge resume/pause transitions (no persisted fire-guard); reset on any overnight/idle config save |
+| `play_prep_task` | The `asyncio.Task` running `_play_prep_chain` for the currently-playing series' tail (auto-prep-on-play, `settings.play_prep`). Cancelled + replaced on each new VLC play so only the watched series is prepped ahead. See [STREAMING.md § Auto-prep on play](../docs/STREAMING.md) |
 | `sse_queues` | One `asyncio.Queue` per connected client |
 
 ## Background tasks

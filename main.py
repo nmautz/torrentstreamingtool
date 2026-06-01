@@ -526,6 +526,7 @@ class AppState:
     last_activity: float = 0.0                            # time.time() of last user-initiated interaction (drives scheduled-reboot idle check)
     prep_paused: bool = False                             # True ⇒ bulk stream-prep jobs hold (set by the non-admin Pause control / overnight window end)
     auto_prep_engaged: bool = False                       # True while the unified auto_prep_loop has prep running (overnight window OR idle trigger) — edge flag for resume/pause
+    play_prep_task: Optional[asyncio.Task] = None         # the chain task prepping the currently-playing series' tail for on-device (settings.play_prep); cancelled + replaced on each new VLC play
     download_idle_open: bool = False                      # last computed idle/night DOWNLOAD window state (set by download_scheduler_loop) — drives the "waiting for idle" UI
     download_idle_configured: bool = False                # True if any admin prep window (overnight/idle) is enabled — so idle-only downloads have a window to run in
     idle_prep_on: bool = False                            # cached settings.idle_prep.enabled (set each auto_prep_loop tick) — lets the activity hook decide cheaply
@@ -2462,6 +2463,18 @@ def _idle_prep_cfg(lib: dict) -> dict:
         "enabled":      bool(cfg.get("enabled", False)),
         "idle_minutes": idle_minutes,
     }
+
+
+def _play_prep_cfg(lib: dict) -> dict:
+    """Read settings.play_prep (auto on-device prep when a video is played on VLC).
+
+    Enabled by default. When on, every VLC library play immediately HLS-preps the
+    playing episode for on-device, then the rest of the playlist one at a time —
+    regardless of the idle/overnight settings or live user activity (the jobs run
+    as 'interactive', so the bulk pause gate and the activity-kill don't touch
+    them). See `_maybe_start_play_prep` / `_play_prep_chain`."""
+    cfg = (lib.get("settings", {}) or {}).get("play_prep") or {}
+    return {"enabled": bool(cfg.get("enabled", True))}
 
 
 def _subs_cfg(lib: dict) -> dict:
@@ -4560,6 +4573,10 @@ class IdlePrepReq(BaseModel):
     idle_minutes: int = 30                     # auto-prep after this many minutes with no activity; clamped 1–720
 
 
+class PlayPrepReq(BaseModel):
+    enabled: bool = True                       # auto on-device prep of the playing episode (+ playlist tail) on every VLC play
+
+
 class SttConfigReq(BaseModel):
     enabled: bool = True
     translate: bool = True                     # also emit an English track for non-English audio
@@ -5295,6 +5312,10 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     state.library_play_task = asyncio.create_task(_library_play_launch(
         playlist, item_id, req.profile_id, seek_sec, resume_mode,
     ))
+
+    # Auto-prep this episode (and the rest of the playlist) for on-device, if
+    # enabled. Runs regardless of idle/activity settings — see _maybe_start_play_prep.
+    await _maybe_start_play_prep(lib, item, req.profile_id, playlist, seek_sec)
 
     return JSONResponse(
         {"ok": True, "playlist_count": len(playlist), "seek_to": seek_sec},
@@ -8282,6 +8303,24 @@ async def admin_set_idle_prep(request: Request, body: IdlePrepReq) -> JSONRespon
     return JSONResponse({"ok": True, **cfg})
 
 
+@app.get("/api/admin/play-prep")
+async def admin_get_play_prep(request: Request) -> JSONResponse:
+    """Return the auto-prep-on-play config (on-device prep triggered by VLC play)."""
+    _require_admin(request)
+    return JSONResponse(_play_prep_cfg(await get_library()))
+
+
+@app.post("/api/admin/play-prep")
+async def admin_set_play_prep(request: Request, body: PlayPrepReq) -> JSONResponse:
+    """Enable/disable auto on-device prep on VLC play."""
+    _require_admin(request)
+    lib = await get_library()
+    pp = lib.setdefault("settings", {}).setdefault("play_prep", {})
+    pp["enabled"] = bool(body.enabled)
+    await put_library(lib)
+    return JSONResponse({"ok": True, **_play_prep_cfg(lib)})
+
+
 def _subtitle_language_options() -> list[dict]:
     """The 3-letter language options for the admin subtitle-language picker."""
     return [{"code": c, "name": n}
@@ -9973,6 +10012,121 @@ async def _enqueue_library_prep() -> int:
             # the dashboard stays responsive during the overnight enqueue.
             await asyncio.sleep(0)
     return queued
+
+
+# ── Auto-prep on play (settings.play_prep) ───────────────────────────────────
+# When a video is played on VLC, immediately HLS-prep that episode for on-device
+# viewing, then the rest of the playlist one episode at a time. These jobs are
+# queued as "interactive" so they bypass the bulk pause gate AND survive the
+# activity-kill — by design they run regardless of the idle/overnight settings or
+# whether someone is actively using the box.
+
+PLAY_PREP_TAIL_SECS = 300  # <5 min left on the current episode ⇒ skip it, start at the next
+
+
+def _file_duration_sec(item: dict, profile_id: str, file_path: str) -> float:
+    """Best-known duration (s) of a file from saved progress, or 0 if unknown."""
+    fp = (item.get("progress", {}).get(profile_id, {})
+              .get("file_progress", {}).get(file_path, {}))
+    try:
+        return float(fp.get("duration_sec", 0) or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _start_interactive_prep_job(src: Path, item_id: str) -> Optional[str]:
+    """Start (or coalesce with) an *interactive* HLS-prep job for `src`.
+
+    Returns the job id, or None if the bundle is already cached or ffmpeg is
+    unavailable. Interactive jobs ignore the bulk pause gate and are never killed
+    by `_pause_prep` / `_activity_kick`, and they preempt any in-flight bulk encode
+    so play-driven prep takes the slot immediately. Mirrors the queue-jumping
+    branch of `offline_prepare` without an HTTP request."""
+    out_dir = OFFLINE_CACHE / _offline_cache_key(src)
+    if (out_dir / "master.m3u8").exists():
+        return None
+    existing = next(
+        (j for j in _offline_jobs.values()
+         if j["src"] == str(src) and j["status"] in ("pending", "processing", "paused")),
+        None,
+    )
+    if existing:
+        existing["queue"] = "interactive"
+        if existing.get("status") == "paused":
+            existing["status"] = "pending"
+            existing["_proc"] = None
+            existing.pop("_paused_kill", None)
+            asyncio.create_task(_run_offline_job(existing["id"]))
+        _preempt_running_bulk(except_job_id=existing["id"])
+        return existing["id"]
+    if not analyzer.ffmpeg_bin():
+        return None
+    job_id = secrets.token_hex(8)
+    _offline_jobs[job_id] = {
+        "id": job_id, "src": str(src), "out": str(out_dir),
+        "status": "pending", "operation": "hls",
+        "progress": 0.0, "error": None,
+        "started_at": time.time(), "item_id": item_id,
+        "queue": "interactive",
+    }
+    asyncio.create_task(_run_offline_job(job_id))
+    _preempt_running_bulk(except_job_id=job_id)
+    return job_id
+
+
+async def _play_prep_chain(item_id: str, files: list[str]) -> None:
+    """Sequentially HLS-prep each file in `files` for on-device, one at a time.
+
+    Started by a VLC play (`_maybe_start_play_prep`). Each file finishes before the
+    next starts, so the episode the viewer is most likely to reach next is always
+    prepped first. Cancellable: a new play cancels this chain (the in-flight ffmpeg
+    keeps running — only further enqueues stop)."""
+    if not HLS_AVAILABLE or not analyzer.ffmpeg_bin():
+        return
+    OFFLINE_CACHE.mkdir(exist_ok=True)
+    for path in files:
+        p = Path(path)
+        try:
+            if p.suffix.lower() not in VIDEO_EXTS or not p.exists():
+                continue
+        except OSError:
+            continue
+        out_dir = OFFLINE_CACHE / _offline_cache_key(p)
+        if (out_dir / "master.m3u8").exists():
+            continue
+        job_id = _start_interactive_prep_job(p, item_id)
+        if not job_id:
+            continue
+        # Block until this episode is done (or errored) before queuing the next.
+        while True:
+            await asyncio.sleep(2)
+            j = _offline_jobs.get(job_id)
+            if not j or j.get("status") in ("done", "error"):
+                break
+
+
+async def _maybe_start_play_prep(
+    lib: dict, item: dict, profile_id: str,
+    playlist: list[str], seek_sec: Optional[float],
+) -> None:
+    """If auto-prep-on-play is enabled, prep the playing episode (then the rest of
+    the playlist) for on-device. If the viewer is resuming within `PLAY_PREP_TAIL_SECS`
+    of the current episode's end, skip it and start at the next (prepping it would
+    finish after they've moved on). Cancels any prior chain so only the current
+    series' tail is being prepped."""
+    if not HLS_AVAILABLE or not _play_prep_cfg(lib)["enabled"]:
+        return
+    files = list(playlist)
+    if not files:
+        return
+    if seek_sec and seek_sec > 0 and len(files) > 1:
+        dur = _file_duration_sec(item, profile_id, files[0])
+        if dur and (dur - seek_sec) < PLAY_PREP_TAIL_SECS:
+            files = files[1:]
+    prior = state.play_prep_task
+    if prior and not prior.done():
+        prior.cancel()
+    state.play_prep_task = asyncio.create_task(_play_prep_chain(item["id"], files))
 
 
 # ── STT subtitle generation (whisper.cpp) ────────────────────────────────────
