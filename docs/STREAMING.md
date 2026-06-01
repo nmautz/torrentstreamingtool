@@ -261,6 +261,26 @@ Two ways to populate the cache:
 > ffmpegs. The CPU path uses `-threads OFFLINE_FFMPEG_THREADS` (2);
 > NVENC ignores it. See [GOTCHAS.md](GOTCHAS.md) for why the cap is 1.
 
+> **Interactive prep takes precedence over bulk.** A prep started by the user
+> *now* — play-on-device (`_lpLoadIndex`) or the fullscreen **Prep for Device**
+> tile (both POST `/offline-prepare {bulk:false}`) — must not sit behind
+> overnight / idle / manual `/prep-all` bulk work, even when a bulk file is
+> already mid-encode. Two pieces enforce this against the single concurrency slot:
+> 1. **Preemption.** `_preempt_running_bulk()` (called from `offline_prepare` for
+>    every interactive request) `terminate()`s the bulk encode currently holding the
+>    slot via its `job["_proc"]` handle, tagging it `_preempted` so `_run_offline_job`
+>    treats the non-zero rc as intentional and re-queues the file as `pending`
+>    (restarts from scratch — HLS has no mid-file checkpoint) via `_requeue_offline_job`.
+>    The global pause gate is **not** touched (distinct from `_pause_prep`).
+> 2. **Deferral.** Bulk jobs park before competing for the slot while
+>    `_interactive_hls_pending() > 0` (any `queue=="interactive"` HLS job that's
+>    `pending`/`processing`), and a bulk job that wins the slot re-checks and yields
+>    it back if an interactive prep appeared while it was queued. So queued bulk
+>    waiters drain past the interactive job rather than racing it for the freed slot.
+>
+> Net effect: holding **Prep for Device** boots the in-flight bulk encode and starts
+> your file within a tick; the booted bulk file resumes once interactive prep clears.
+
 > **Staying responsive while prepping.** Three layers keep controls/UI/VLC-control
 > snappy under heavy prep:
 > 1. **The server runs at raised OS priority.** `_raise_own_priority()` (called

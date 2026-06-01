@@ -9501,9 +9501,29 @@ async def _run_offline_job(job_id: str) -> None:
     if not HLS_AVAILABLE:
         job["status"] = "error"; job["error"] = HLS_UNAVAILABLE_MSG
         return
+    is_bulk = job.get("queue") == "bulk"
+    # Interactive-prep precedence. A bulk job parks here until no interactive
+    # (fullscreen "Prep for Device" / play-on-device) HLS prep is queued or
+    # encoding, so a user-initiated prep always runs ahead of overnight / idle /
+    # manual bulk prep. The file a bulk job is *currently* encoding is separately
+    # booted by _preempt_running_bulk so the slot frees without waiting for it.
+    # (The `not prep_paused` escape lets a bulk job fall through to park at the
+    # pause gate below instead of spinning here.)
+    if is_bulk:
+        while _interactive_hls_pending() > 0 and not state.prep_paused:
+            await asyncio.sleep(0.25)
     # Hold pending until the global concurrency slot frees up. This is what
     # keeps a 77-file /prep-all from spawning 77 ffmpegs at once.
     async with _offline_job_sem():
+        # An interactive prep may have arrived while this bulk job sat in the
+        # semaphore queue. Yield the slot straight back and re-queue so the
+        # interactive job (also waiting on the slot) takes it first. (When prep is
+        # paused, skip this and fall through to park at the pause gate instead — a
+        # paused job holds no slot, so interactive still wins without the churn.)
+        if is_bulk and not state.prep_paused and _interactive_hls_pending() > 0:
+            job["status"] = "pending"
+            asyncio.create_task(_requeue_offline_job(job_id))
+            return
         out_dir = Path(job["out"])
         # Sibling-job race: another worker may have produced this bundle while
         # we sat in the queue. If so, exit fast.
@@ -9517,7 +9537,7 @@ async def _run_offline_job(job_id: str) -> None:
         # play-on-device prep can still run. _resume_prep() re-spawns this worker
         # when the user (or the overnight window) resumes. Interactive jobs ignore
         # the gate entirely. See PrepPauseReq / _pause_prep / _resume_prep.
-        if job.get("queue") == "bulk" and state.prep_paused:
+        if is_bulk and state.prep_paused:
             job["status"] = "paused"
             return
         job["status"] = "processing"
@@ -9663,6 +9683,17 @@ async def _run_offline_job(job_id: str) -> None:
 
             job["_proc"] = None
             if proc.returncode != 0:
+                # Did _preempt_running_bulk() boot us for an interactive prep? If so,
+                # this isn't a failure — re-queue this bulk file as "pending" so it
+                # resumes once the interactive encode releases the slot (it restarts
+                # from scratch; HLS prep can't checkpoint mid-file).
+                if job.pop("_preempted", False):
+                    job["status"]   = "pending"
+                    job["progress"] = 0.0
+                    await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
+                    asyncio.create_task(_requeue_offline_job(job_id))
+                    hls_log.info("job %s re-queued after interactive preemption", job_id)
+                    return
                 # Did _pause_prep(kill=True) terminate us on purpose? If so, this
                 # isn't a real failure — re-queue the job as "paused" (it restarts
                 # from scratch on resume; HLS prep can't checkpoint mid-file) and
@@ -9843,6 +9874,49 @@ def _bulk_processing_now() -> bool:
     """True if any bulk HLS-prep or STT job is actively encoding/transcribing."""
     return any(j.get("queue") == "bulk" and j.get("status") == "processing"
                for j in (*_offline_jobs.values(), *_stt_jobs.values()))
+
+
+def _interactive_hls_pending() -> int:
+    """Count interactive (fullscreen "Prep for Device" / play-on-device) HLS jobs
+    that are queued or encoding. Bulk prep defers to these so a user-initiated prep
+    always jumps the queue ahead of overnight / idle / manual bulk prep — see the
+    precedence gate in `_run_offline_job`."""
+    return sum(1 for j in _offline_jobs.values()
+               if j.get("queue") == "interactive"
+               and j.get("status") in ("pending", "processing"))
+
+
+def _preempt_running_bulk(except_job_id: str = "") -> bool:
+    """Terminate the bulk HLS encode currently holding the single concurrency slot
+    (if any) so a just-queued interactive prep can take it over immediately, instead
+    of waiting — potentially minutes — for the in-flight bulk file to finish. The
+    killed job re-queues itself (see the `_preempted` branch in `_run_offline_job`)
+    and resumes once interactive prep clears; it is **not** abandoned, and the global
+    pause gate is left untouched. Returns True if an encode was preempted."""
+    for j in _offline_jobs.values():
+        if j.get("id") == except_job_id:
+            continue
+        if j.get("queue") != "bulk" or j.get("status") != "processing":
+            continue
+        proc = j.get("_proc")
+        if proc is not None and proc.returncode is None:
+            j["_preempted"] = True   # tells _run_offline_job this kill was intentional
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            hls_log.info("job %s PREEMPTED by interactive prep", j.get("id"))
+            return True
+    return False
+
+
+async def _requeue_offline_job(job_id: str, delay: float = 0.3) -> None:
+    """Re-spawn a worker for a bulk job that yielded its slot to interactive prep,
+    after a brief delay so the interactive encode claims the freed slot first."""
+    await asyncio.sleep(delay)
+    j = _offline_jobs.get(job_id)
+    if j and j.get("status") == "pending":
+        asyncio.create_task(_run_offline_job(job_id))
 
 
 def _activity_kick() -> None:
@@ -10330,14 +10404,18 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
         None,
     )
     if existing:
-        # An interactive (play-now) request must not be left stuck behind a paused
-        # bulk job — promote it to interactive so the pause gate lets it run.
-        if not req.bulk and existing.get("queue") == "bulk":
+        # An interactive (play-now / fullscreen prep) request must jump the queue.
+        # Promote it to interactive (bypasses the pause gate); re-spawn it if it was
+        # parked; and preempt any *other* bulk encode hogging the single slot so this
+        # file starts now instead of waiting behind overnight / idle / manual prep.
+        if not req.bulk:
             existing["queue"] = "interactive"
             if existing.get("status") == "paused":
                 existing["status"] = "pending"
                 existing["_proc"] = None
+                existing.pop("_paused_kill", None)
                 asyncio.create_task(_run_offline_job(existing["id"]))
+            _preempt_running_bulk(except_job_id=existing["id"])
         return JSONResponse({
             "ready":             False,
             "needs_processing":  True,
@@ -10361,6 +10439,10 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
         "queue": "bulk" if req.bulk else "interactive",
     }
     asyncio.create_task(_run_offline_job(job_id))
+    if not req.bulk:
+        # Interactive prep: boot any in-flight bulk encode so this file claims the
+        # slot immediately. The booted job re-queues and resumes afterwards.
+        _preempt_running_bulk(except_job_id=job_id)
     return JSONResponse({
         "ready":             False,
         "needs_processing":  True,

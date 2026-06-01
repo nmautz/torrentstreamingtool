@@ -1,5 +1,10 @@
 # Changelog
 
+## [4.15.1] — 2026-05-31
+- **Fix: interactive prep now jumps the queue ahead of bulk prep.** Holding **Prep for Device** (or play-on-device) while overnight / idle / manual `/prep-all` work was running would still queue *behind* it — the single encode slot was busy, so your file waited (potentially minutes) for the in-flight bulk file to finish. Now an interactive prep **preempts** the running bulk encode (terminates it, re-queues that file to resume afterwards) and bulk jobs **defer** to any pending interactive prep, so the user-initiated file starts within a tick. The booted bulk file restarts from scratch (HLS can't checkpoint mid-file) once interactive prep clears; the global pause gate and overnight/idle scheduling are untouched.
+- **Backend:** `_preempt_running_bulk` (called from `offline_prepare` for every `bulk:false` request), `_interactive_hls_pending` (the precedence gate in `_run_offline_job` — bulk parks before acquiring the slot and yields it back if interactive arrives while queued), `_requeue_offline_job`, and a `_preempted` re-queue branch in `_run_offline_job`.
+- **Docs:** [docs/STREAMING.md](docs/STREAMING.md).
+
 ## [4.15.0] — 2026-05-31
 - **New: prep-to-device straight from the fullscreen player.** When a library file playing on the TV isn't yet prepped for on-device streaming, the fullscreen **To Device** tile no longer just greys out — it asks **"Prep for Device?"**. **Hold** it and the HLS encode starts immediately **while VLC keeps playing** (the TV is *not* stopped). The tile then shows live progress (**"Prepping 42%"** with a fill bar), and once the bundle is ready it flips to **"Play To Device"** — hold again to resume on this device, time-synced, stopping the TV. Previously you had to leave the player, open the episode picker, and Prep the row by hand before any handoff was possible.
   - The hold gesture is the trigger; the once-per-session CPU-lag warning still appears the first time. Prep runs as an **interactive** job (bypasses the global prep-pause gate and the idle-prep activity kill) so it genuinely starts while you watch.
