@@ -6249,6 +6249,15 @@ async function lpPlay(itemId, files, seekTo, label) {
   const c = document.getElementById("localPlayer");
   c.classList.remove("lp-tiny");
   c.classList.add("lp-active");
+  // Hydrate prep-readiness for the whole item from the server's .offline_cache,
+  // so the Prev/Next dots are accurate even for an already-prepped earlier
+  // episode (which wouldn't be in the in-memory prepFileState yet). Awaited
+  // before _lpLoadIndex so it can't clobber the "prepping" mark _lpWarmNextEp
+  // sets for the next episode. Best-effort.
+  try {
+    const r = await fetch(`/api/library/${itemId}/prep-status`);
+    if (r.ok) _ingestPrepStatusFiles(itemId, (await r.json()).files);
+  } catch (_) {}
   await _lpLoadIndex(seekTo);
 }
 
@@ -7454,6 +7463,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.17.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.17.4</div>
 </body>
 </html>

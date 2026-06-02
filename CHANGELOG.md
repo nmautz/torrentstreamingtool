@@ -1,5 +1,8 @@
 # Changelog
 
+## [4.17.4] — 2026-06-01
+- **Fix: on-device Prev episode dot showed "not prepped" even when it was.** The readiness dot reads the in-memory `prepFileState`, which only knew about files prepped during the current session — an earlier episode already in the server's `.offline_cache` had no entry and so showed gray. `lpPlay` now hydrates prep-readiness for the whole item from `/api/library/{id}/prep-status` (which reports `cached` for on-disk bundles) before the player loads, so the Prev/Next dots are accurate from the start. The hydrate is awaited before the next-episode warm-prep so it can't clobber that "prepping" mark.
+
 ## [4.17.3] — 2026-06-01
 - **Fix: on-device Prev / Next episode buttons still didn't appear** (4.17.1 didn't fully fix it). The single-file→full-series expansion read `item.files` from the cached `/api/library` list, but that list only carries `first_file`, not the full `files` array — so the lookup was always empty and the playlist stayed a single file (no neighbours → buttons hidden). `lpPlay` now fetches `/api/library/{id}/files` (season/episode-sorted) to expand a single-file play to the whole series, positioned at the chosen file. Best-effort: falls back to the single file on any error. This is why the buttons worked on the TV (VLC `prev`/`next` already fall back to the item's full file list server-side) but not on-device.
 
