@@ -23,7 +23,8 @@ Read this when changing anything related to:
 - `/api/library/{id}/subtitle` (sidecar `.srt`/`.vtt`) or
   `/api/library/{id}/local-tracks` (persisted browser track picks)
 - The local player UI (`#localPlayer`, `#lpVideo`, `#lpPreparing`,
-  `#lpAudioSelect`, `#lpSubSelect`)
+  `#lpAudioSelect`, `#lpSubSelect`, the `#lpPrevEpBtn` / `#lpNextEpBtn`
+  episode-nav buttons + `_lpRenderNavButtons` / `_lpWarmNextEp`)
 - The per-row **Prep** button in the episode picker, `prepForStreaming`,
   `prepFileState`
 - The bulk **Prep for Streaming** button on library cards
@@ -396,13 +397,35 @@ exit/transition:
 `local_subtitle_idx` (HLS rendition indices) across writes, so a progress
 write doesn't wipe either track-pref system.
 
-### 5. Auto-advance
+### 5. Auto-advance + manual Prev/Next + next-episode warm-prep
 
 When `<video>` fires `ended`, `_lpAdvanceOrEnd` saves a final 100% progress
 write, increments `lp.pi`, and calls `_lpLoadIndex(0)`. That re-runs the
 prep flow for the next file. If the next episode has already been prepped,
 playback resumes within a network round-trip; otherwise the user sees the
 same "Building stream…" overlay.
+
+**Manual Prev/Next.** The player header (`.lp-chrome`, so hidden in tiny mode)
+has `#lpPrevEpBtn` / `#lpNextEpBtn` — **hold-to-activate** (`_holdStart`, the
+same 0.5 s gesture as Stop / the TV controls). `lpPrevEp` / `lpNextEp` →
+`lpNavEp(±1)` persists the *current* position (not 100% — the user is leaving
+mid-episode by choice, `t ≥ 5` guard), moves `lp.pi`, and calls
+`_lpLoadIndex(0)`. The hold fires **regardless of whether the target is
+prepped**; an un-prepped neighbour just shows the "Building stream…" overlay
+while it preps on demand. `_lpRenderNavButtons` shows/hides each button for the
+current `lp.pi` and paints its square prep-readiness dot from `prepFileState`:
+**green** = ready to stream, **amber** = prepping, **gray** = not prepped yet.
+
+**Next-episode warm-prep.** `_lpWarmNextEp` (fired from `_lpLoadIndex` once the
+current file is ready) kicks off an **interactive** HLS prep of `lp.playlist[lp.pi+1]`
+so auto-advance / a Next hold resumes instantly instead of cold-encoding. It's the
+on-device counterpart to the VLC `_play_prep_chain` (§ *Auto-prep on play*) — on-device
+playback never calls `play_library_item`, so the server-side chain doesn't cover it.
+Interactive (no `bulk` flag) so it bypasses the bulk pause gate and preempts bulk
+work — the user is actively watching the series. Fire-and-forget: it updates
+`prepFileState` + the nav dot as it polls `/offline-job/{id}`, and on any failure
+(error / paused / network) leaves the file un-prepped for the on-demand path to
+handle. No-op on macOS (`hlsAvailable` false).
 
 ### 6. Handoff from VLC (TV → device)
 

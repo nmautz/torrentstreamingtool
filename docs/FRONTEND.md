@@ -195,6 +195,17 @@ Single-element design avoids iOS Safari's per-page video budget and the audio
 desync that two synchronized videos would create. iOS-friendly: `playsinline`,
 `<track>` for VTT subs, no MediaSource.
 
+The header (`.lp-chrome`, hidden in tiny mode) carries **Prev** / **Next**
+episode buttons (`#lpPrevEpBtn` / `#lpNextEpBtn`), both **hold-to-activate**
+(`_holdStart`). `lpPrevEp` / `lpNextEp` → `lpNavEp(±1)` saves the current
+position then `_lpLoadIndex(0)`s the neighbour; the hold works whether or not
+that episode is prepped. `_lpRenderNavButtons` (called from `_lpLoadIndex`)
+shows/hides each button for the current `lp.pi` and paints a square dot from
+`prepFileState` — green = ready, amber = prepping, gray = not prepped.
+`_lpWarmNextEp` (also from `_lpLoadIndex`) fires an interactive `/offline-prepare`
+for the next episode so auto-advance / a Next hold resumes instantly. See
+[STREAMING.md § Auto-advance](STREAMING.md).
+
 `saveProgress(itemId, filePath, posSec, durSec)` is called every 15 s by
 `#lpVideo`'s `timeupdate` handler and POSTs `/api/library/{id}/progress`.
 **Writes with `posSec < 5` or `durSec ≤ 0` are dropped** — the server

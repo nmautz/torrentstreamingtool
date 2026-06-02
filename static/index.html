@@ -1745,6 +1745,30 @@
         </svg>
         Min
       </button>
+      <!-- Prev / Next episode. Hold-to-activate (works whether or not the
+           target is prepped); the square dot shows prep readiness:
+           green = ready to stream instantly, amber = prepping, gray = not yet
+           prepped (hold still plays it, it just preps first). _lpRenderNavButtons. -->
+      <button id="lpPrevEpBtn"
+        onpointerdown="_holdStart(this, lpPrevEp, event)"
+        onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
+        title="Hold for previous episode"
+        class="hold-btn hidden relative h-full px-3 flex items-center text-indigo-400 hover:text-indigo-200 hover:bg-indigo-950/40 active:bg-indigo-950/70 transition-colors">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 19l-7-7 7-7M18 12H5"/>
+        </svg>
+        <span class="lp-ep-dot absolute top-1.5 right-1.5 w-1.5 h-1.5 bg-gray-600"></span>
+      </button>
+      <button id="lpNextEpBtn"
+        onpointerdown="_holdStart(this, lpNextEp, event)"
+        onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
+        title="Hold for next episode"
+        class="hold-btn hidden relative h-full px-3 flex items-center text-indigo-400 hover:text-indigo-200 hover:bg-indigo-950/40 active:bg-indigo-950/70 transition-colors">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 5l7 7-7 7M6 12h13"/>
+        </svg>
+        <span class="lp-ep-dot absolute top-1.5 right-1.5 w-1.5 h-1.5 bg-gray-600"></span>
+      </button>
       <div class="flex-1 min-w-0 text-center px-2 pointer-events-none">
         <div id="lpTitle" class="text-xs font-bold text-gray-200 truncate">—</div>
         <div class="text-[10px] uppercase tracking-widest text-emerald-500 font-bold">On Device</div>
@@ -6299,6 +6323,11 @@ async function _lpLoadIndex(seekTo) {
   prepFileState.set(offKey(lp.itemId, filePath), "ready");
   if (epItemId === lp.itemId) { try { renderEpList(); } catch (_) {} }
 
+  // Refresh the header Prev/Next buttons for this position, and warm the next
+  // episode so auto-advance / a Next hold resumes instantly.
+  _lpRenderNavButtons();
+  _lpWarmNextEp();
+
   // Fetch skip-data in parallel — fire-and-forget; skip-offer logic just runs
   // off `lp.skipData` once it lands.
   (async () => {
@@ -6718,6 +6747,89 @@ async function _lpAdvanceOrEnd() {
   } else {
     lpStop();
   }
+}
+
+// Manual prev/next episode navigation (header hold buttons). Persists the
+// current position first (NOT 100%, since the user is leaving mid-episode by
+// choice), then loads the neighbouring file from the start. The hold gesture
+// fires regardless of whether the target is prepped — _lpLoadIndex shows the
+// "Building stream…" overlay if it isn't.
+async function lpNavEp(delta) {
+  const target = lp.pi + delta;
+  if (target < 0 || target >= lp.playlist.length) return;
+  const v = document.getElementById("lpVideo");
+  const t = v.currentTime || 0, d = v.duration || lp.duration || 0;
+  if (lp.itemId && lp.filePath && d > 0 && t >= 5) saveProgress(lp.itemId, lp.filePath, t, d);
+  lp.pi = target;
+  await _lpLoadIndex(0);
+}
+function lpPrevEp() { return lpNavEp(-1); }
+function lpNextEp() { return lpNavEp(1); }
+
+// Show/hide the header Prev/Next buttons for the current playlist position and
+// paint each one's prep-readiness dot (green = ready, amber = prepping,
+// gray = not prepped yet). Hold-to-play works in every state — the dot is
+// purely informational. Driven from _lpLoadIndex and _lpWarmNextEp.
+function _lpRenderNavButtons() {
+  const paint = (btnId, idx) => {
+    const btn = document.getElementById(btnId);
+    if (!btn) return;
+    const path = lp.playlist[idx];
+    if (!path) { btn.classList.add("hidden"); return; }
+    btn.classList.remove("hidden");
+    const dot = btn.querySelector(".lp-ep-dot");
+    if (!dot) return;
+    const st = prepFileState.get(offKey(lp.itemId, path));
+    dot.classList.remove("bg-emerald-500", "bg-amber-400", "bg-gray-600");
+    dot.classList.add(st === "ready" ? "bg-emerald-500" : st === "prepping" ? "bg-amber-400" : "bg-gray-600");
+    btn.title = (st === "ready" ? "Ready — " : st === "prepping" ? "Preparing — " : "Not prepped yet — ")
+              + (idx < lp.pi ? "hold for previous episode" : "hold for next episode");
+  };
+  paint("lpPrevEpBtn", lp.pi - 1);
+  paint("lpNextEpBtn", lp.pi + 1);
+}
+
+// Warm the NEXT episode's HLS bundle while the current one plays, so auto-advance
+// (or a Next hold) resumes within a network round-trip instead of a cold encode.
+// Interactive prep — like the VLC play-prep chain, it bypasses the bulk pause
+// gate and preempts bulk work, since the user is actively watching the series.
+// Fire-and-forget; updates prepFileState + the nav dot as it progresses.
+function _lpWarmNextEp() {
+  if (!hlsAvailable) return;
+  const itemId = lp.itemId;
+  const nextPath = lp.playlist[lp.pi + 1];
+  if (!itemId || !nextPath) return;
+  const k = offKey(itemId, nextPath);
+  const cur = prepFileState.get(k);
+  if (cur === "ready" || cur === "prepping") return;   // already done / in flight
+  prepFileState.set(k, "prepping");
+  _lpRenderNavButtons();
+  (async () => {
+    try {
+      const r = await fetch(`/api/library/${itemId}/offline-prepare`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file_path: nextPath, profile_id: profile.id || "" }),
+      });
+      if (!r.ok) throw new Error();
+      const prep = await r.json();
+      if (!prep.ready && prep.job_id) {
+        while (true) {
+          await new Promise(res => setTimeout(res, 2500));
+          const sr = await fetch(`/api/library/offline-job/${prep.job_id}`);
+          if (!sr.ok) throw new Error();
+          const s = await sr.json();
+          if (s.status === "done") break;
+          if (s.status === "error" || s.status === "paused") throw new Error();
+        }
+      }
+      prepFileState.set(k, "ready");
+    } catch (_) {
+      // Leave it un-prepped; the Next hold / auto-advance will prep on demand.
+      if (prepFileState.get(k) === "prepping") prepFileState.delete(k);
+    }
+    _lpRenderNavButtons();
+    if (epItemId === itemId) { try { renderEpList(); } catch (_) {} }
+  })();
 }
 
 // Flush the current playback position to the server. Called from `pause`,
@@ -7324,6 +7436,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.16.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.17.0</div>
 </body>
 </html>

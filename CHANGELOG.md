@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.17.0] — 2026-06-01
+- **New: Prev / Next episode buttons in the on-device player, with auto-prep of the next episode.** The fullscreen on-device player header now has **Prev** and **Next** episode buttons (hold-to-activate, same gesture as the TV controls and Stop). A small square dot on each shows whether that neighbouring episode is **ready to stream** (green), **preparing** (amber), or **not prepped yet** (gray) — but the **hold always works regardless of state**; if the target isn't prepped, the player just shows the usual "Building stream…" overlay while it preps on demand.
+  - While you watch an episode on-device, the **next episode is now warmed automatically** (interactive HLS prep) so auto-advance — or a Next hold — resumes within a network round-trip instead of a cold encode. This mirrors the VLC "auto-prep on play" chain but is driven client-side from the on-device player, since on-device playback doesn't go through VLC's `play_library_item`.
+  - The warm-prep is **interactive** (bypasses the bulk pause gate, preempts bulk work) because you're actively watching the series. Fire-and-forget: a failure just leaves the next episode un-prepped, and the Next hold / auto-advance preps it on demand.
+  - Buttons live in the player's `.lp-chrome`, so they're hidden in tiny/corner mode (maximize first) — same as the To TV / Stop controls. **Not on macOS hosts** (no HLS), like every other on-device feature.
+- **Frontend:** `lpNavEp` / `lpPrevEp` / `lpNextEp`, `_lpRenderNavButtons` (the prep-readiness dot), `_lpWarmNextEp`, `#lpPrevEpBtn` / `#lpNextEpBtn` in the local-player header, both hooked from `_lpLoadIndex`.
+- **Docs:** [docs/STREAMING.md](docs/STREAMING.md).
+
 ## [4.16.0] — 2026-05-31
 - **New: auto-prep for on-device when you play on the TV.** Playing any library episode on VLC now immediately HLS-preps **that episode** for on-device streaming, then works through the rest of the playlist one episode at a time. If you resume an episode with **under 5 minutes left**, that episode is skipped and the **next** one is prepped instead (prepping the one you're about to finish would be wasted). The chain prepares each episode fully before starting the next, so the episode you're most likely to reach next is always ready first.
   - These prep jobs are **interactive**: they run **regardless of the Overnight / Idle Auto-Prep settings and regardless of whether someone is using the box** — the bulk pause gate and the activity-kill never touch them. They do preempt in-flight *bulk* prep so the watched series is prioritised.
