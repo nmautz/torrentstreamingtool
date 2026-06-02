@@ -355,10 +355,19 @@ Two ways to populate the cache:
    - **Subtitles** (`<track>` children): `_lpLoadIndex` appends one `<track>`
      per bundle `sub_<i>.vtt` then per on-disk sidecar, recording each in
      `lp.subTracks` as `{el, key}` in dropdown order (key = `"i"` for bundle,
-     `"sidecar:i"` for on-disk). `_lpApplySubIdx(idx)` just sets
+     `"sidecar:i"` for on-disk). The on-disk sidecar list (`prep.subs`) comes
+     from `_list_sidecar_subs`, which **aggressively discovers** subs via
+     `_discover_local_subs` — next to the video *and* in `Subs/`-style folders
+     (see [GOTCHAS.md](GOTCHAS.md)) — so subs the bundle never extracted still
+     show up. It's returned in the not-ready/prepping response too, so disk subs
+     don't depend on the HLS bundle being built. `_lpApplySubIdx(idx)` just sets
      `tr.el.track.mode` to `"showing"` on the matching key and `"disabled"`
      elsewhere — identical for hls.js and Safari, since these are native
-     `<track>`s the browser renders independent of the MSE pipeline.
+     `<track>`s the browser renders independent of the MSE pipeline. Selecting a
+     sidecar triggers the browser to fetch its `<track>` src — the
+     `/subtitle` endpoint converts SRT/ASS/SSA → WebVTT **on demand** — and
+     `_lpIndicateSubLoading` flashes a "Loading subtitles…" hint until that
+     fetch lands (or errors).
    - Each switch POSTs to `/api/library/{id}/local-tracks` with the new
      pick so it persists across sessions (on-disk sidecar picks save as -1).
 6. The container toggles between fullscreen overlay and a corner tile via

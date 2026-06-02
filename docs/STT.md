@@ -28,9 +28,11 @@ with **no manifest/bundle changes**:
 
 - **VLC (TV):** `await vlc("addsubtitle", val=<abs path>)` loads + selects it
   (see `_attach_stt_to_vlc`, mirroring `download_subtitle`).
-- **On-device HLS player:** `_list_sidecar_subs()` already scans for `.srt`/`.vtt`
-  next to the source and serves them via `/api/library/{id}/subtitle` (SRT→VTT
-  on the fly). The player attaches each as a `<track>` child.
+- **On-device HLS player:** `_list_sidecar_subs()` discovers subs via
+  `_discover_local_subs` (next to the source *and* in `Subs/`-style folders) and
+  serves them via `/api/library/{id}/subtitle?path=…` (SRT→VTT inline, ASS/SSA
+  via ffmpeg, on demand). The player attaches each as a `<track>` child. AI subs
+  live next to the source, so they're always in the discovery set.
 
 The `.ai` segment marks the track as machine-generated; the segment after it is
 the **model name** that produced it (`base`/`small`/`medium`/… — derived from

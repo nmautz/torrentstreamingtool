@@ -9461,46 +9461,53 @@ def _discover_local_subs(video: Path) -> list[Path]:
 
 
 def _list_sidecar_subs(src: Path, item_id: str) -> list[dict]:
-    """Find .srt/.vtt files next to a video file. Match either exact stem or stem.<lang>.
+    """Aggressively list sidecar subtitle files for a video — everywhere
+    `_discover_local_subs` looks (next to the file, in `Subs/`-style folders,
+    one level up), not just exact-stem files beside it. This is what makes the
+    on-device player surface subs stored in a `Subs/` folder. Each entry is
+    servable via `/api/library/{id}/subtitle?path=…`, which converts
+    SRT/ASS/SSA → WebVTT on demand.
 
-    Files named `<stem>.<lang>.ai[.<model>].srt` (see stt.py) are machine-generated;
-    they carry `ai: true`, the generating `model` name, and `stale: true` when that
-    model differs from the currently-configured one (so the UI can offer Regenerate
-    and label the track with its model). The `.ai`/`.<model>` segments are stripped
-    from the parsed language tag.
+    AI-generated subs the box wrote itself (`<stem>.<lang>.ai[.<model>].srt`,
+    always next to the source) keep their `ai`/`model`/`stale` flags so the UI
+    can label them and offer Regenerate; for every other file the language is
+    guessed from the filename via `_parse_sub_lang`.
     """
     out: list[dict] = []
-    if not src.parent.exists():
-        return out
     stem = src.stem
     cur_model = stt.model_name()
     try:
-        for p in src.parent.iterdir():
-            if not p.is_file() or p.suffix.lower() not in (".srt", ".vtt"):
-                continue
-            ai = False
-            model = ""
-            if p.stem == stem:
-                lang = ""
-            elif p.stem.startswith(stem + "."):
-                segs = p.stem[len(stem) + 1:].split(".")
-                ai = stt.AI_SUFFIX in segs
-                lang = segs[0]
-                if ai:
-                    i = segs.index(stt.AI_SUFFIX)
-                    model = segs[i + 1] if i + 1 < len(segs) else ""
-            else:
-                continue
-            out.append({
-                "name": p.name,
-                "lang": lang or "und",
-                "ai":   ai,
-                "model": model,
-                "stale": bool(ai and model != cur_model),
-                "url": f"/api/library/{item_id}/subtitle?file={quote(p.name)}",
-            })
+        src_dir = src.resolve().parent
     except OSError:
-        pass
+        src_dir = src.parent
+    for p in _discover_local_subs(src):
+        # `.sub` is usually image-based VobSub (needs the .idx + OCR/burn-in) —
+        # the browser can't render it and ffmpeg can't make WebVTT from it, so
+        # don't offer it on-device. VLC still loads it natively on the TV path.
+        if p.suffix.lower() == ".sub":
+            continue
+        ai = False
+        model = ""
+        lang = ""
+        # AI subs live beside the source and encode lang + model in the stem.
+        if p.parent == src_dir and p.stem.startswith(stem + "."):
+            segs = p.stem[len(stem) + 1:].split(".")
+            ai = stt.AI_SUFFIX in segs
+            if ai:
+                i = segs.index(stt.AI_SUFFIX)
+                model = segs[i + 1] if i + 1 < len(segs) else ""
+                lang = _canon_lang(segs[0]) if segs[0] != stt.AI_SUFFIX else ""
+        if not lang:
+            lang = _parse_sub_lang(p.name)
+        out.append({
+            "name":  p.name,
+            "lang":  lang or "und",
+            "ai":    ai,
+            "model": model,
+            "stale": bool(ai and model != cur_model),
+            "fmt":   p.suffix.lower().lstrip("."),
+            "url":   f"/api/library/{item_id}/subtitle?path={quote(str(p))}",
+        })
     return out
 
 
@@ -9525,6 +9532,34 @@ def _srt_to_vtt(srt: str) -> str:
     """Convert SRT cues to WebVTT. SRT timestamps use a comma; VTT uses a period."""
     body = re.sub(r"(\d\d:\d\d:\d\d),(\d\d\d)", r"\1.\2", srt)
     return "WEBVTT\n\n" + body
+
+
+async def _sub_to_vtt(path: Path) -> str:
+    """Read a sidecar subtitle file and return WebVTT text the browser can render.
+
+    `.vtt` passes through and `.srt` is converted inline (both instant); `.ass`,
+    `.ssa` and text `.sub` are converted via ffmpeg on demand — this is the
+    "prep" for a non-WebVTT sub. Raises on conversion failure so the endpoint can
+    surface it. Styling (ASS karaoke/positioning) is lost in the WebVTT downgrade.
+    """
+    ext = path.suffix.lower()
+    if ext == ".vtt":
+        return path.read_text(encoding="utf-8", errors="replace")
+    if ext == ".srt":
+        return _srt_to_vtt(path.read_text(encoding="utf-8", errors="replace"))
+    ffmpeg = analyzer.ffmpeg_bin()
+    if not ffmpeg:
+        raise RuntimeError("ffmpeg unavailable for subtitle conversion")
+    proc = await asyncio.create_subprocess_exec(
+        ffmpeg, "-y", "-i", str(path), "-f", "webvtt", "pipe:1",
+        stdout=asyncio.subprocess.PIPE, stderr=asyncio.subprocess.PIPE,
+        **_FFMPEG_SUBPROCESS_KW,
+    )
+    stdout, stderr = await proc.communicate()
+    if proc.returncode != 0 or not stdout.strip():
+        tail = stderr.decode("utf-8", "replace")[-200:].strip()
+        raise RuntimeError(tail or "ffmpeg subtitle conversion failed")
+    return stdout.decode("utf-8", "replace")
 
 
 def _offline_cache_key(src: Path) -> str:
@@ -11494,28 +11529,58 @@ async def admin_offline_cache_delete_for_item(item_id: str, request: Request) ->
 
 
 @app.get("/api/library/{item_id}/subtitle")
-async def get_subtitle(item_id: str, file: str) -> Response:
-    """Return a sidecar subtitle file as WebVTT. SRT files are converted on the fly."""
-    if "/" in file or "\\" in file or ".." in file:
-        raise HTTPException(400, "Invalid filename.")
+async def get_subtitle(item_id: str, path: str = "", file: str = "") -> Response:
+    """Return a sidecar subtitle as WebVTT, converting SRT/ASS/SSA on demand.
+
+    `path` is the absolute path of a sub found by `_discover_local_subs` (the
+    aggressive search — so it may live in a `Subs/` folder). It's validated to
+    resolve *inside* the item's media tree (a video file's directory, that
+    directory's parent, or a child of either) before anything is read, so it
+    can't be used to fetch arbitrary files. `file` (a bare filename next to a
+    video) is still accepted for backward compatibility with old links.
+    """
     lib = await get_library()
     item = next((it for it in lib["items"] if it["id"] == item_id), None)
     if not item:
         raise HTTPException(404, "Item not found.")
-    seen_dirs: set[str] = set()
+
+    # Allowed roots: each video file's directory + that directory's parent
+    # (covers a shared `Subs/` one level up). A requested sub must resolve to,
+    # or under, one of these.
+    roots: set[Path] = set()
     for vf in item.get("files", []):
-        vp = Path(vf.get("path", ""))
-        d  = str(vp.parent)
-        if d in seen_dirs:
+        try:
+            d = Path(vf.get("path", "")).resolve().parent
+        except OSError:
             continue
-        seen_dirs.add(d)
-        cand = vp.parent / file
-        if cand.exists() and cand.is_file() and cand.suffix.lower() in (".srt", ".vtt"):
-            text = cand.read_text(encoding="utf-8", errors="replace")
-            if cand.suffix.lower() == ".vtt":
-                return Response(text, media_type="text/vtt")
-            return Response(_srt_to_vtt(text), media_type="text/vtt")
-    raise HTTPException(404, "Subtitle not found.")
+        roots.add(d)
+        roots.add(d.parent)
+
+    target: Optional[Path] = None
+    if path:
+        try:
+            cand = Path(path).resolve()
+        except OSError:
+            cand = None
+        if (cand and cand.is_file() and cand.suffix.lower() in _SUB_FILE_EXTS
+                and any(cand == r or r in cand.parents for r in roots)):
+            target = cand
+    elif file:
+        if "/" in file or "\\" in file or ".." in file:
+            raise HTTPException(400, "Invalid filename.")
+        for r in roots:
+            cand = r / file
+            if cand.is_file() and cand.suffix.lower() in _SUB_FILE_EXTS:
+                target = cand
+                break
+
+    if target is None:
+        raise HTTPException(404, "Subtitle not found.")
+    try:
+        vtt = await _sub_to_vtt(target)
+    except Exception as e:
+        raise HTTPException(422, f"Could not convert subtitle: {e}")
+    return Response(vtt, media_type="text/vtt")
 
 
 @app.get("/api/library/{item_id}/skip-data")

@@ -6660,7 +6660,38 @@ function lpSetAudio(idx) {
 function lpSetSubtitle(idx) {
   lp.pendingSubtitleIdx = idx;
   _lpApplySubIdx(idx);
+  _lpIndicateSubLoading(idx);
   _lpSaveLocalTracks();
+}
+
+// On-disk sidecar subs (esp. SRT/ASS) are converted to WebVTT by the server on
+// first request, so a freshly-selected one may take a moment to render. Setting
+// the <track> to "showing" is what triggers the browser to fetch it; we listen
+// for that fetch to land (or fail) and flash a hint so the pick feels responsive
+// instead of silently doing nothing while the conversion runs.
+function _lpIndicateSubLoading(idx) {
+  const key = String(idx);
+  if (!key.startsWith("sidecar:")) return;   // bundle .vtt is already on disk
+  const tr = (lp.subTracks || []).find(t => t.key === key);
+  if (!tr || !tr.el) return;
+  const tt = tr.el.track;
+  // readyState 2 = LOADED. Already-loaded (re-selected) tracks need no hint.
+  if (tt && (tr.el.readyState === 2 || (tt.cues && tt.cues.length))) return;
+  showAlert("Loading subtitles…", "info");
+  let done = false;
+  const finish = (ok) => {
+    if (done) return; done = true;
+    tr.el.removeEventListener("load", onLoad);
+    tr.el.removeEventListener("error", onErr);
+    if (!ok && lp.pendingSubtitleIdx === idx) {
+      showAlert("Couldn't load that subtitle track.", "error");
+    }
+  };
+  const onLoad = () => finish(true);
+  const onErr  = () => finish(false);
+  tr.el.addEventListener("load", onLoad);
+  tr.el.addEventListener("error", onErr);
+  setTimeout(() => finish(true), 10000);      // safety: never hang the hint
 }
 
 // Persist the user's track picks per-file so the same selection comes back
@@ -7463,6 +7494,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.18.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.19.0</div>
 </body>
 </html>
