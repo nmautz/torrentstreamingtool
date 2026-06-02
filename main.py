@@ -935,6 +935,30 @@ async def vlc(command: str, **params) -> None:
         pass
 
 
+async def vlc_clear_playlist() -> None:
+    """Empty VLC's playlist (`pl_empty`).
+
+    VLC's HTTP `in_play` *appends* the input to the playlist and plays it — it
+    never clears what's already there. So across a session VLC's playlist
+    silently grows: `[bg, epA, epB, epC, …]`. Two failure modes follow from the
+    leftover items, both of which look like "the wrong thing plays":
+
+    1. `in_play` of a URI already in the playlist plays that *existing* entry
+       (often mid-list). When it ends VLC auto-advances to the item after it —
+       e.g. replaying the bg video (already at index 0 from an earlier idle
+       period) ends and VLC advances into a stale episode → after **Stop** an
+       episode plays instead of the background video.
+    2. A stale bg/episode entry left in the list can win an end-of-file
+       auto-advance during a prev/next transition → the background video plays
+       instead of the next episode.
+
+    Calling this immediately *before* every fresh `in_play` keeps VLC's playlist
+    a faithful mirror of `state.library_playlist` (or just the bg video), so the
+    only auto-advance target is the intended tail. See docs/GOTCHAS.md.
+    """
+    await vlc("pl_empty")
+
+
 async def vlc_status() -> Optional[dict]:
     """Return VLC's current status JSON (includes 'time' and 'length' in seconds)."""
     try:
@@ -3313,6 +3337,11 @@ async def _play_background_video() -> bool:
 
     try:
         c = _vlc_http()
+        # Clear stale items (old episodes from the just-stopped playlist) before
+        # playing the bg video — otherwise replaying a bg entry that's already in
+        # the list ends and VLC auto-advances into a leftover episode. See
+        # vlc_clear_playlist() / docs/GOTCHAS.md.
+        await c.get("/requests/status.xml", params={"command": "pl_empty"})
         await c.get("/requests/status.xml", params={"command": "volume", "val": str(raw)})
         await c.get("/requests/status.xml", params={"command": "in_play", "input": p.resolve().as_uri()})
     except Exception:
@@ -4037,6 +4066,7 @@ async def vlc_next_file(current_file: str, item: dict) -> None:
     state.current_audio_track = -1
     state.current_subtitle_track = -1
     state.track_pref_applied_file = next_path
+    await vlc_clear_playlist()
     await vlc("in_play", input=Path(next_path).resolve().as_uri())
     for p in new_tail[1:]:
         await vlc("in_enqueue", input=Path(p).resolve().as_uri())
@@ -4248,6 +4278,7 @@ async def stream_pipeline(
         file_path = Path(save_path) / vid["name"]
         state.active_file = file_path
 
+        await vlc_clear_playlist()
         await vlc("in_play", input=file_path.resolve().as_uri())
         asyncio.create_task(vlc_focus_and_fullscreen())
         state.stream_status = "playing"
@@ -5167,6 +5198,10 @@ async def _library_play_launch(
     """
     first = Path(playlist[0])
     first_resolved = first.resolve()
+    # Clear any stale playlist items first (incl. the bg video) so VLC's list
+    # mirrors `playlist` and can't auto-advance into a leftover entry. Awaited
+    # so it completes before the in_play below appends the new item.
+    await vlc_clear_playlist()
     # Detached: don't let in_play's slow reply gate the UI flip or the seek.
     play_task = asyncio.create_task(vlc("in_play", input=first_resolved.as_uri()))
     try:
@@ -6544,6 +6579,10 @@ async def stop() -> JSONResponse:
                     await set_system_volume(target)
                     log.info("YouTube TV: restored system volume to %d%%", target)
             await vlc("pl_stop")
+            # Empty the playlist too — pl_stop leaves the enqueued episodes in
+            # the list, and a leftover entry can later win an auto-advance and
+            # play an episode instead of the bg video. See vlc_clear_playlist().
+            await vlc_clear_playlist()
             await vlc_minimize()
         except Exception:
             pass
@@ -6663,6 +6702,9 @@ async def _vlc_relaunch_playlist(playlist: list[str], target_name: str) -> None:
     """
     first = Path(playlist[0])
     first_resolved = first.resolve()
+    # Clear stale playlist items (a leftover bg entry could otherwise win an
+    # end-of-file auto-advance and play the bg video instead of this episode).
+    await vlc_clear_playlist()
     play_task = asyncio.create_task(vlc("in_play", input=first_resolved.as_uri()))
     try:
         await _vlc_wait_until_ready(first_resolved, timeout=10.0)

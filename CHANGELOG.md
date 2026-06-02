@@ -1,5 +1,10 @@
 # Changelog
 
+## [4.17.2] — 2026-06-01
+- **Fix: wrong item playing on VLC after Stop / Next (a stale episode, or the background video).** VLC's HTTP `in_play` **appends** to its playlist and never clears it, so over a session VLC's list grew to `[bg, epA, epB, …]` — and every leftover entry was a live auto-advance target. That caused two glitches: (1) hitting **Stop** sometimes played an *episode* instead of the background video (replaying the bg entry already in the list ended and VLC auto-advanced into a stale episode), and (2) skipping to the **next episode** sometimes played the *background video* instead (a leftover bg entry won an end-of-file auto-advance during the transition). Now VLC's playlist is **emptied (`pl_empty`) immediately before every fresh `in_play`**, so it always mirrors the intended playlist and the only auto-advance target is the real next episode.
+- **Backend:** new `vlc_clear_playlist()` helper, called from `_library_play_launch`, `_vlc_relaunch_playlist` (prev/next), `vlc_next_file` (natural auto-advance), the stream-now play, `_play_background_video`, and `_stop_cleanup`. The VLC-process-restart paths (retry, night-mode relaunch) are unaffected — they start with an empty playlist.
+- **Docs:** [docs/GOTCHAS.md](docs/GOTCHAS.md).
+
 ## [4.17.1] — 2026-06-01
 - **Fix: Prev / Next episode buttons weren't showing in the on-device player.** They only appear when the playlist has a neighbouring episode, but the common play paths (per-episode **Play**, **Resume**, single-file **On Device**) hand the player a one-file playlist — so there was nothing to navigate to and both buttons stayed hidden. `lpPlay` now expands a single-file play to the item's **full ordered episode list** (season/episode-sorted), positioned at the chosen file, so Prev/Next (and their prep-readiness dots) appear across the whole series. Intentional multi-file queues (selected episodes / **Play All** / handoff tail) are kept verbatim; falls back to the single file if the item isn't in the library cache.
 

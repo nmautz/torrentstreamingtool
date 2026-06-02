@@ -76,6 +76,15 @@ Don't drop either one thinking the other covers it — #1 is fast (no audible bl
 
 `POST /api/retry` ([main.py:2610](../main.py#L2610)) calls `_restart_vlc_process()` which kills all `vlc`/`VLC` processes, sleeps 1.5 s, relaunches with `--extraintf=http`, waits for the port. Then replays the current file + remainder of playlist. Used when VLC freezes on a partially-downloaded file.
 
+### `in_play` appends to the playlist — empty it first or VLC plays stale items
+
+VLC's HTTP `in_play` **adds the input to the playlist and plays it; it never clears what's already there.** So across a session VLC's playlist silently grows — `[bg, epA, epB, epC, …]` — and every leftover entry is a live auto-advance target. Two symptoms, both "the wrong thing plays":
+
+1. **After Stop, an episode plays instead of the background video.** `/api/stop`'s `pl_stop` leaves the enqueued episodes in the list. When `background_video_loop` then plays the bg video, `in_play` of a URI **already in the playlist** (the bg video is usually at index 0 from an earlier idle period) plays that *existing* entry mid-list; when it ends VLC auto-advances into the next item — a stale episode.
+2. **On prev/next, the bg video plays instead of the next episode.** A leftover bg entry left in the list can win an end-of-file auto-advance during the transition.
+
+Fix: `vlc_clear_playlist()` (`pl_empty`) is called, **awaited, immediately before every fresh `in_play`** so VLC's playlist is always a faithful mirror of `state.library_playlist` (or just the bg video) — the only auto-advance target is the intended tail. Call sites: `_library_play_launch`, `_vlc_relaunch_playlist` (prev/next), `vlc_next_file` (natural auto-advance), the stream-now single-file play, `_play_background_video` (raw `pl_empty` GET), and `_stop_cleanup` (after `pl_stop`). The VLC-process-restart paths (`/api/retry`, night-mode relaunch) **don't** need it — a freshly launched VLC starts with an empty playlist. If you add a new `in_play` caller that doesn't restart VLC, clear the playlist first.
+
 ### Boot-time fullscreen — pass `--fullscreen` AND loop the focus pass
 
 When StreamLink launches via the system service at boot/login, the dashboard's `background_video_loop` kicks `in_play` to VLC within a few seconds of the desktop coming up, then calls `vlc_focus_and_fullscreen()`. A single focus + minimize-others pass is **not enough**: startup apps (Discord, Steam, OneDrive, the browser, etc.) launch on a staggered schedule across the first ~20 s after logon and pop up *after* our pass already ran, leaving them on top of VLC with the taskbar/Dock visible. Pressing Stop in the UI doesn't have this problem because by then the desktop is fully settled, so a single pass catches every window.
