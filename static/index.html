@@ -6227,16 +6227,21 @@ async function lpPlay(itemId, files, seekTo, label) {
   await lpUnloadCurrent();
   // A single-file play (per-episode Play, resume, "On Device" on one file) still
   // gets Prev/Next across the whole series: expand to the item's full ordered
-  // file list (season/episode-sorted at build time), positioned at the chosen
-  // file. Multi-file playlists (selected episodes / "Play All" / handoff tail)
-  // are intentional queues and kept verbatim. Falls back to the passed file if
-  // the item or path isn't found in the library cache (no regression).
+  // file list, positioned at the chosen file. The /api/library list (window._libCache)
+  // only carries `first_file`, not the full `files` array, so fetch /files here
+  // (it's season/episode-sorted server-side). Multi-file playlists (selected
+  // episodes / "Play All" / handoff tail) are intentional queues, kept verbatim.
+  // Best-effort: on any failure we fall back to the single passed file.
   let playlist = files.slice(), startIdx = 0;
   if (playlist.length === 1) {
-    const item = (window._libCache || []).find(it => it && it.id === itemId);
-    const all = (item && Array.isArray(item.files)) ? item.files.map(f => f.path).filter(Boolean) : [];
-    const idx = all.indexOf(playlist[0]);
-    if (idx >= 0 && all.length > 1) { playlist = all; startIdx = idx; }
+    try {
+      const r = await fetch(`/api/library/${itemId}/files?profile_id=${encodeURIComponent(profile.id || "")}`);
+      if (r.ok) {
+        const all = ((await r.json()).files || []).map(f => f.path).filter(Boolean);
+        const idx = all.indexOf(playlist[0]);
+        if (idx >= 0 && all.length > 1) { playlist = all; startIdx = idx; }
+      }
+    } catch (_) {}
   }
   lp.itemId = itemId; lp.playlist = playlist; lp.pi = startIdx;
   lp.skipDoneFor = new Set();
@@ -7449,6 +7454,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.17.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.17.3</div>
 </body>
 </html>

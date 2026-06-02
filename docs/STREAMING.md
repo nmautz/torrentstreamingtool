@@ -318,9 +318,12 @@ Two ways to populate the cache:
    player sets `lp.itemId/playlist/pi`, applies the `.lp-active` class to
    `#localPlayer`, and calls `_lpLoadIndex(seekTo)`. A **single-file** `files`
    (per-episode Play / Resume / one-file On Device) is expanded to the item's
-   **full ordered file list** (from `window._libCache`, season/episode-sorted)
-   positioned at the chosen file, so Prev/Next span the whole series; multi-file
-   queues (selected episodes / Play All / handoff tail) are kept verbatim.
+   **full ordered file list** by fetching `/api/library/{id}/files`
+   (season/episode-sorted) positioned at the chosen file, so Prev/Next span the
+   whole series; multi-file queues (selected episodes / Play All / handoff tail)
+   are kept verbatim. (The `/api/library` list only carries `first_file`, not the
+   full `files` array, hence the extra fetch — this is why Prev/Next worked on
+   the TV but not on-device until v4.17.3.)
 3. `_lpLoadIndex` POSTs `/api/library/{id}/offline-prepare {file_path,
    profile_id}`.
    - If `ready: true` → grab `master_url`, `audios[]`, `subtitles[]`,
