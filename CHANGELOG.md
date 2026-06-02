@@ -1,5 +1,8 @@
 # Changelog
 
+## [4.17.1] — 2026-06-01
+- **Fix: Prev / Next episode buttons weren't showing in the on-device player.** They only appear when the playlist has a neighbouring episode, but the common play paths (per-episode **Play**, **Resume**, single-file **On Device**) hand the player a one-file playlist — so there was nothing to navigate to and both buttons stayed hidden. `lpPlay` now expands a single-file play to the item's **full ordered episode list** (season/episode-sorted), positioned at the chosen file, so Prev/Next (and their prep-readiness dots) appear across the whole series. Intentional multi-file queues (selected episodes / **Play All** / handoff tail) are kept verbatim; falls back to the single file if the item isn't in the library cache.
+
 ## [4.17.0] — 2026-06-01
 - **New: Prev / Next episode buttons in the on-device player, with auto-prep of the next episode.** The fullscreen on-device player header now has **Prev** and **Next** episode buttons (hold-to-activate, same gesture as the TV controls and Stop). A small square dot on each shows whether that neighbouring episode is **ready to stream** (green), **preparing** (amber), or **not prepped yet** (gray) — but the **hold always works regardless of state**; if the target isn't prepped, the player just shows the usual "Building stream…" overlay while it preps on demand.
   - While you watch an episode on-device, the **next episode is now warmed automatically** (interactive HLS prep) so auto-advance — or a Next hold — resumes within a network round-trip instead of a cold encode. This mirrors the VLC "auto-prep on play" chain but is driven client-side from the on-device player, since on-device playback doesn't go through VLC's `play_library_item`.

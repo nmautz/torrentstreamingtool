@@ -316,7 +316,11 @@ Two ways to populate the cache:
    `#playChooserModal` — **On TV (VLC)** vs **On This Device**.
 2. "On This Device" calls `lpPlay(itemId, files, seekTo, label)`. The
    player sets `lp.itemId/playlist/pi`, applies the `.lp-active` class to
-   `#localPlayer`, and calls `_lpLoadIndex(seekTo)`.
+   `#localPlayer`, and calls `_lpLoadIndex(seekTo)`. A **single-file** `files`
+   (per-episode Play / Resume / one-file On Device) is expanded to the item's
+   **full ordered file list** (from `window._libCache`, season/episode-sorted)
+   positioned at the chosen file, so Prev/Next span the whole series; multi-file
+   queues (selected episodes / Play All / handoff tail) are kept verbatim.
 3. `_lpLoadIndex` POSTs `/api/library/{id}/offline-prepare {file_path,
    profile_id}`.
    - If `ready: true` → grab `master_url`, `audios[]`, `subtitles[]`,

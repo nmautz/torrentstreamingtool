@@ -6225,7 +6225,20 @@ async function lpPlay(itemId, files, seekTo, label) {
     showAlert("Disconnected — streaming needs the host to be reachable.", "error"); return;
   }
   await lpUnloadCurrent();
-  lp.itemId = itemId; lp.playlist = files.slice(); lp.pi = 0;
+  // A single-file play (per-episode Play, resume, "On Device" on one file) still
+  // gets Prev/Next across the whole series: expand to the item's full ordered
+  // file list (season/episode-sorted at build time), positioned at the chosen
+  // file. Multi-file playlists (selected episodes / "Play All" / handoff tail)
+  // are intentional queues and kept verbatim. Falls back to the passed file if
+  // the item or path isn't found in the library cache (no regression).
+  let playlist = files.slice(), startIdx = 0;
+  if (playlist.length === 1) {
+    const item = (window._libCache || []).find(it => it && it.id === itemId);
+    const all = (item && Array.isArray(item.files)) ? item.files.map(f => f.path).filter(Boolean) : [];
+    const idx = all.indexOf(playlist[0]);
+    if (idx >= 0 && all.length > 1) { playlist = all; startIdx = idx; }
+  }
+  lp.itemId = itemId; lp.playlist = playlist; lp.pi = startIdx;
   lp.skipDoneFor = new Set();
   lp.maximized = true;
   const c = document.getElementById("localPlayer");
@@ -7436,6 +7449,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.17.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.17.1</div>
 </body>
 </html>
