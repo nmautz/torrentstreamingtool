@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.18.0] — 2026-06-01
+- **New: subtitles are now found aggressively and *all* of them load into VLC, with the default language auto-selected.** Releases stash sidecar subs in places VLC never auto-loads — most commonly a `Subs/` folder (flat for a single movie, or per-episode subfolders for season packs) — so subs were frequently "missing" even when present on disk. The subtitle-default policy now runs a new `_discover_local_subs(video)` sweep that covers the real layouts: subs next to the file (`Movie.srt`, `Movie.eng.srt`), and `Subs/` / `Subtitles/` / `Sub/` / `Subtitle/` folders **beside the video and one level up** (for video-in-its-own-subfolder releases), recursing into per-episode subfolders. Every match is loaded into VLC via `addsubtitle` so they're all selectable from the subtitle menu, then the track matching `settings.subtitles.default_language` is selected (embedded tracks rank ahead of sidecars; "Any" selects the first available).
+  - Languages are parsed from filenames including full names — `2_English.srt`, `3_Brazilian.Portuguese.srt`, `Movie.eng.srt` — via the new `_parse_sub_lang`, since VLC rarely tags loose sidecars. Recognised extensions: `.srt .vtt .ass .ssa .sub`.
+  - Season-pack safety: the lone-video "take every loose sub" fallback is restricted to the video's *own* directory, so a shared `Subs/` folder one level up can't leak a neighbouring episode's subs.
+  - AI sidecars (`<stem>.<lang>.ai[.<model>].srt`) are picked up by the same discovery, so the old separate AI-sidecar policy step is gone (no behaviour lost).
+  - **Windows/Linux/macOS:** discovery is pure `pathlib` (case-insensitive de-dupe, backslash paths handed to `addsubtitle` as `str(path)` exactly as the existing download path does), so it works identically across platforms.
+- **Docs:** [docs/GOTCHAS.md](docs/GOTCHAS.md) (two subtitle gotchas updated/added).
+
 ## [4.17.4] — 2026-06-01
 - **Fix: on-device Prev episode dot showed "not prepped" even when it was.** The readiness dot reads the in-memory `prepFileState`, which only knew about files prepped during the current session — an earlier episode already in the server's `.offline_cache` had no entry and so showed gray. `lpPlay` now hydrates prep-readiness for the whole item from `/api/library/{id}/prep-status` (which reports `cached` for on-disk bundles) before the player loads, so the Prev/Next dots are accurate from the start. The hydrate is awaited before the next-episode warm-prep so it can't clobber that "prepping" mark.
 

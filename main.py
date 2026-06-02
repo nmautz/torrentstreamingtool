@@ -2097,19 +2097,51 @@ async def _save_track_pref(
         pass
 
 
+async def _load_all_local_subs(video: Path) -> list[dict]:
+    """Load *every* sidecar subtitle found for `video` into VLC so they all show
+    up as selectable tracks, then return the resulting subtitle-track list — each
+    entry annotated with a best-guess `lang` (VLC's own tag when present, else
+    parsed from the source filename, since VLC rarely tags loose sidecars).
+
+    Subs are added one at a time so we can map each freshly-created ES ID back to
+    the language we parsed from its filename. Files VLC already auto-loaded (no
+    new track appears) are skipped, avoiding duplicate entries.
+    """
+    tracks = await _vlc_subtitle_tracks()
+    known_ids = {t["id"] for t in tracks}
+    lang_by_id = {t["id"]: _canon_lang(t.get("language", "")) for t in tracks}
+
+    for sub in _discover_local_subs(video):
+        guess = _parse_sub_lang(sub.name)
+        await vlc("addsubtitle", val=str(sub))
+        await asyncio.sleep(0.3)
+        after = await _vlc_subtitle_tracks()
+        new = [t for t in after if t["id"] not in known_ids]
+        if not new:
+            continue                      # VLC already had this sidecar loaded
+        for t in new:
+            known_ids.add(t["id"])
+            lang_by_id[t["id"]] = _canon_lang(t.get("language", "")) or guess
+        tracks = after
+
+    return [{**t, "lang": lang_by_id.get(t["id"], _canon_lang(t.get("language", "")))}
+            for t in tracks]
+
+
 async def _apply_subtitle_policy(lib: dict, profile_id: str, file_path: str) -> None:
     """Decide and *explicitly* set the subtitle track for a freshly-started file
     when the viewer has no saved per-file pick.
 
     Resolves subs on/off (profile `subtitles_on` override → admin `on_by_default`).
     Off ⇒ send `subtitle_track -1` so VLC can't sneak its auto/forced sub on (it
-    otherwise does, even when the UI says off — see docs/GOTCHAS.md). On ⇒ select,
-    in priority order:
+    otherwise does, even when the UI says off — see docs/GOTCHAS.md). On ⇒ first
+    aggressively load *all* sidecar subs for the file into VLC (covering `Subs/`
+    folders and the like — see `_discover_local_subs`), so every option is
+    selectable, then select, in priority order:
       (a) an embedded/loaded track in the preferred language (any track if the
-          admin chose "Any");
+          admin chose "Any") — embedded tracks rank ahead of sidecars;
       (b) an online auto-search download in the preferred language (if enabled);
-      (c) an AI sidecar (preferred language first), loaded + selected;
-      (d) otherwise leave subtitles off.
+      (c) otherwise leave subtitles off.
     """
     subs = _subs_cfg(lib)
     prof = next((p for p in lib.get("profiles", []) if p["id"] == profile_id), {})
@@ -2122,22 +2154,28 @@ async def _apply_subtitle_policy(lib: dict, profile_id: str, file_path: str) -> 
         return
 
     pref = _canon_lang(subs["default_language"]) if subs["default_language"] else ""
+    video = Path(file_path)
 
-    # (a) a track VLC already knows about (embedded + auto-loaded sidecars).
-    tracks = await _vlc_subtitle_tracks()
+    # (a) Load every local sidecar (Subs/ folders included) + embedded tracks,
+    #     then pick the preferred language. Tracks come embedded-first, so a
+    #     `next()` match prefers an embedded track over a loaded sidecar.
+    if video.exists():
+        tracks = await _load_all_local_subs(video)
+    else:
+        tracks = [{**t, "lang": _canon_lang(t.get("language", ""))}
+                  for t in await _vlc_subtitle_tracks()]
+
     if pref:
-        match = next((t for t in tracks if _canon_lang(t.get("language", "")) == pref), None)
+        match = next((t for t in tracks if t["lang"] == pref), None)
         if match:
             state.current_subtitle_track = match["id"]
             await vlc("subtitle_track", val=str(match["id"]))
             return
     elif tracks:
-        # "Any" preferred language — any embedded text sub is acceptable.
+        # "Any" preferred language — any text sub (embedded or sidecar) is fine.
         state.current_subtitle_track = tracks[0]["id"]
         await vlc("subtitle_track", val=str(tracks[0]["id"]))
         return
-
-    video = Path(file_path)
 
     # (b) auto-search OpenSubtitles for the preferred language.
     if subs["auto_search"] and pref and video.exists():
@@ -2145,30 +2183,7 @@ async def _apply_subtitle_policy(lib: dict, profile_id: str, file_path: str) -> 
         if new_id is not None:
             return
 
-    # (c) AI sidecar fallback (subs the box transcribed/translated itself). The
-    #     language is encoded in the filename `<stem>.<lang>.ai[.<model>].srt`.
-    try:
-        ai = stt._list_ai_subs(video)
-    except Exception:
-        ai = []
-    if ai:
-        def _ai_lang(p: Path) -> str:
-            seg = p.stem[len(video.stem) + 1:].split(".")
-            return seg[0] if seg else ""
-        chosen = None
-        if pref:
-            chosen = next((p for p, _m in ai if _canon_lang(_ai_lang(p)) == pref), None)
-        chosen = chosen or ai[0][0]
-        await vlc("addsubtitle", val=str(Path(chosen).resolve()))
-        await asyncio.sleep(0.6)
-        after = await _vlc_subtitle_tracks()
-        if after:
-            new_id = max(t["id"] for t in after)
-            state.current_subtitle_track = new_id
-            await vlc("subtitle_track", val=str(new_id))
-            return
-
-    # (d) nothing usable — leave subtitles off.
+    # (c) nothing usable — leave subtitles off.
     state.current_subtitle_track = -1
     await vlc("subtitle_track", val="-1")
 
@@ -9315,6 +9330,134 @@ def _video_can_copy(v: Optional[dict]) -> bool:
     return (v.get("codec") == "h264"
             and v.get("pix_fmt") == "yuv420p"
             and v.get("profile") not in _HLS_PROFILE_BAD)
+
+
+# ── Aggressive local subtitle discovery ──────────────────────────────────────
+# Sidecar subtitle file extensions VLC can load via `addsubtitle`.
+_SUB_FILE_EXTS = {".srt", ".vtt", ".ass", ".ssa", ".sub"}
+# Folder names releases commonly tuck subtitles into (alongside the video).
+_SUB_DIR_NAMES = {"subs", "subtitles", "sub", "subtitle"}
+# Full language names → canonical 3-letter codes (the reverse of _LANG_NAMES,
+# plus a few aliases torrents use). Lets us read a language out of names like
+# "2_English.srt", "Movie.Spanish.srt" or "3_Brazilian.Portuguese.srt".
+_LANG_NAME_TO_CODE = {
+    "english": "eng", "japanese": "jpn", "spanish": "spa", "castilian": "spa",
+    "french": "fre", "german": "ger", "italian": "ita", "portuguese": "por",
+    "brazilian": "por", "russian": "rus", "chinese": "chi", "mandarin": "chi",
+    "cantonese": "chi", "korean": "kor", "arabic": "ara", "hindi": "hin",
+    "dutch": "nld", "swedish": "swe", "finnish": "fin", "norwegian": "nor",
+    "danish": "dan", "polish": "pol", "turkish": "tur", "ukrainian": "ukr",
+    "thai": "tha", "vietnamese": "vie",
+}
+
+
+def _parse_sub_lang(name: str) -> str:
+    """Best-effort canonical language code from a subtitle filename. Recognises
+    ISO codes (en, eng) and English language names (English, 2_English.SDH),
+    splitting on the usual separators. Returns "" when nothing matches."""
+    tokens = re.split(r"[\s._\-\[\]()]+", Path(name).stem.lower())
+    for tok in tokens:
+        if tok in _LANG_NAME_TO_CODE:
+            return _LANG_NAME_TO_CODE[tok]
+    for tok in tokens:
+        c = _canon_lang(tok)
+        if c in _LANG_NAMES and c != "und":
+            return c
+    return ""
+
+
+def _discover_local_subs(video: Path) -> list[Path]:
+    """Aggressively locate every sidecar subtitle file for `video`.
+
+    Releases scatter subs across several layouts: next to the video
+    (`Movie.srt`, `Movie.eng.srt`), or inside a `Subs/` / `Subtitles/` folder —
+    flat for a single-video release, or in a per-episode subfolder named after
+    the video for season packs. We scan the video's own directory plus any
+    sibling subtitle folders (and one level up, in case the video sits in its
+    own subfolder), recursing into the subtitle folders. A file belongs to this
+    video when its name carries the stem, it lives in a folder named after the
+    stem, or the release holds only one video (so loose subs must be its). For a
+    lone-video release we take everything; for a season pack we keep only subs
+    that match the episode stem, so neighbours' subs don't leak in.
+
+    Returns de-duplicated absolute paths.
+    """
+    found: list[Path] = []
+    seen: set[str] = set()
+
+    def _is_sub(p: Path) -> bool:
+        try:
+            return p.is_file() and p.suffix.lower() in _SUB_FILE_EXTS
+        except OSError:
+            return False
+
+    def _add(p: Path) -> None:
+        try:
+            rp = p.resolve()
+        except OSError:
+            return
+        k = str(rp).lower()
+        if k not in seen and _is_sub(rp):
+            seen.add(k)
+            found.append(rp)
+
+    stem_l = video.stem.lower()
+    parent = video.parent
+    if not parent.exists():
+        return found
+
+    def _sole_video(d: Path) -> bool:
+        try:
+            vids = [f for f in d.iterdir()
+                    if f.is_file() and f.suffix.lower() in VIDEO_EXTS]
+        except OSError:
+            return False
+        return len(vids) <= 1
+
+    def _belongs(p: Path, sole: bool) -> bool:
+        n = p.stem.lower()
+        if n == stem_l or n.startswith(stem_l + ".") or stem_l in n:
+            return True
+        if stem_l and stem_l in p.parent.name.lower():
+            return True
+        return sole
+
+    sole_in_parent = _sole_video(parent)
+
+    # 1) Same directory as the video.
+    try:
+        for p in parent.iterdir():
+            if _is_sub(p) and _belongs(p, sole_in_parent):
+                _add(p)
+    except OSError:
+        pass
+
+    # 2) Dedicated subtitle folders beside the video and one level up, recursed.
+    bases = [parent]
+    if parent.parent != parent:
+        bases.append(parent.parent)
+    for base in bases:
+        # The lone-video "take everything" fallback only applies to the video's
+        # OWN directory. A shared Subs/ one level up may serve sibling episodes
+        # in their own subfolders, so there we match strictly by stem.
+        sole = sole_in_parent and base is parent
+        try:
+            entries = list(base.iterdir())
+        except OSError:
+            continue
+        for d in entries:
+            if not (d.is_dir() and d.name.lower() in _SUB_DIR_NAMES):
+                continue
+            try:
+                for p in d.rglob("*"):
+                    if _is_sub(p) and _belongs(p, sole):
+                        _add(p)
+            except OSError:
+                pass
+    # Stable order so loaded-sidecar ES IDs don't drift between replays
+    # (iterdir/rglob order is filesystem-dependent).
+    found.sort(key=lambda p: str(p).lower())
+    return found
 
 
 def _list_sidecar_subs(src: Path, item_id: str) -> list[dict]:
