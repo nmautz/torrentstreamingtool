@@ -100,6 +100,10 @@ The **intensity picker** (`#psNightModePreset`, Light/Medium/Max) is **settings-
 
 `renderNightMode()` (also called from the `state` SSE handler, since every snapshot carries `vlc_night_mode`) recolors the moon + fills its icon when active, checks the checkbox, and syncs the preset `<select>` + blurb. The server relaunches VLC to apply the filter (see [GOTCHAS.md](GOTCHAS.md)), so playback briefly re-buffers — these are intentionally low-prominence controls, not hot-path tiles (a preset change *while off* doesn't relaunch). `openProfileSettings` fetches the fresh `night_mode` + `preset` so both controls are correct even before the first SSE state event.
 
+### Profile Settings modal — progressive load
+
+`openProfileSettings()` is **synchronous**: it shows `#profileSettingsModal` immediately, calls `_psSetLoading()` (dims every control via `.ps-loading`, sets the value labels to "…"), then kicks off seven independent loaders that run **concurrently** (`_psLoadProfilePrefs`, `_psLoadMaxVolume`, `_psLoadVlcStartVolume`, `_psLoadSysVolume`, `_psLoadYtStartVolume`, `_psLoadHostVolume`, `_psLoadNightMode`). Each loader fetches its own setting and calls `_psReady(...ids)` to clear the loading state on just the controls it owns, so the window feels responsive instead of blocking on the slowest request. `_psLoadHostVolume` is the exception: it leaves the slider `disabled` when the host mixer is unavailable ("N/A") and only drops the `.ps-loading` pulse. `_PS_CONTROLS` / `_PS_VALUE_LABELS` list the affected element ids.
+
 ### Subtitle defaults (per-profile override + search filter)
 
 Profile Settings has a **Subtitles** `<select>` (`#psSubtitles`: Default / On / Off). `openProfileSettings` seeds it from the profile's `subtitles_on` (`true`→On, `false`→Off, null→Default); `saveSubtitlesPref()` POSTs `/api/profiles/{id}/subtitles` with `subtitles_on` = `true`/`false`/`null`. This is just the *preference* — VLC track selection happens server-side in `_apply_subtitle_policy` on the next play (see [GOTCHAS.md](GOTCHAS.md)), so there's no live VLC call here.

@@ -28,6 +28,8 @@
     .pulse-ring { animation: pulseRing 1.5s ease-out infinite; }
     @keyframes fadeIn { from{opacity:0} to{opacity:1} }
     .fade-in { animation: fadeIn 0.15s ease both; }
+    /* Settings controls still waiting on their fetch: dim + pulse, no pointer. */
+    .ps-loading { opacity:.45; pointer-events:none; animation:blink 1.4s ease-in-out infinite; }
     .profile-card:hover .profile-avatar { transform:scale(1.04); }
     .profile-avatar { transition:transform 0.12s; }
     .ep-row:hover { background:rgba(255,255,255,.03); }
@@ -3075,10 +3077,44 @@ function renderNavProfile(){
 }
 
 // ── Profile settings (per-profile auto-skip toggles + global max volume) ───
-async function openProfileSettings(){
+// Controls (per id) that get dimmed + pulsed while their fetch is in flight.
+const _PS_CONTROLS = ["psAutoSkipIntro","psAutoSkipCredits","psResumeMode","psSubtitles",
+  "psNightMode","psNightModePreset","psMaxVolume","psVlcStartVolume","psHostVolume",
+  "psYtStartVolume","psSysVolume"];
+const _PS_VALUE_LABELS = ["psMaxVolumeLabel","psVlcStartVolumeLabel","psHostVolumeLabel",
+  "psYtStartVolumeLabel","psSysVolumeLabel"];
+
+// Put every control into its loading state (dimmed, non-interactive, value "…").
+function _psSetLoading(){
+  _PS_CONTROLS.forEach(id=>{ const el=document.getElementById(id);
+    if(el){ el.disabled=true; el.classList.add("ps-loading"); } });
+  _PS_VALUE_LABELS.forEach(id=>{ const el=document.getElementById(id); if(el) el.textContent="…"; });
+}
+// Clear the loading state on the named controls once their data has landed.
+function _psReady(...ids){
+  ids.forEach(id=>{ const el=document.getElementById(id);
+    if(el){ el.disabled=false; el.classList.remove("ps-loading"); } });
+}
+
+function openProfileSettings(){
   if(!profile.id) return;
   document.getElementById("psProfileLabel").textContent = profile.name;
-  // Refetch the current profile from server to get freshest auto-skip values
+  // Show the window immediately with loading placeholders, then let each
+  // section fill in as its fetch resolves — feels far snappier than blocking
+  // the modal until every request has returned. Loaders run concurrently.
+  _psSetLoading();
+  document.getElementById("profileSettingsModal").classList.remove("hidden");
+  _psLoadProfilePrefs();
+  _psLoadMaxVolume();
+  _psLoadVlcStartVolume();
+  _psLoadSysVolume();
+  _psLoadYtStartVolume();
+  _psLoadHostVolume();
+  _psLoadNightMode();
+}
+
+// Refetch the current profile from server to get freshest auto-skip values.
+async function _psLoadProfilePrefs(){
   try{
     const profs = await fetchProfiles();
     const me = profs.find(p=>p.id===profile.id) || {};
@@ -3093,6 +3129,10 @@ async function openProfileSettings(){
     document.getElementById("psResumeMode").value = "auto";
     document.getElementById("psSubtitles").value = "default";
   }
+  _psReady("psAutoSkipIntro","psAutoSkipCredits","psResumeMode","psSubtitles");
+}
+
+async function _psLoadMaxVolume(){
   try{
     const r = await fetch("/api/settings/max-volume");
     const d = r.ok ? await r.json() : {};
@@ -3104,6 +3144,10 @@ async function openProfileSettings(){
     document.getElementById("psMaxVolume").value = globalMaxVolume;
     document.getElementById("psMaxVolumeLabel").textContent = globalMaxVolume + "%";
   }
+  _psReady("psMaxVolume");
+}
+
+async function _psLoadVlcStartVolume(){
   try{
     const r = await fetch("/api/settings/vlc-start-volume");
     const d = r.ok ? await r.json() : {};
@@ -3114,6 +3158,10 @@ async function openProfileSettings(){
     document.getElementById("psVlcStartVolume").value = 50;
     document.getElementById("psVlcStartVolumeLabel").textContent = "50%";
   }
+  _psReady("psVlcStartVolume");
+}
+
+async function _psLoadSysVolume(){
   try{
     const r = await fetch("/api/settings/system-volume-default");
     const d = r.ok ? await r.json() : {};
@@ -3124,6 +3172,10 @@ async function openProfileSettings(){
     document.getElementById("psSysVolume").value = 70;
     document.getElementById("psSysVolumeLabel").textContent = "70%";
   }
+  _psReady("psSysVolume");
+}
+
+async function _psLoadYtStartVolume(){
   try{
     const r = await fetch("/api/settings/youtube-start-volume");
     const d = r.ok ? await r.json() : {};
@@ -3134,12 +3186,16 @@ async function openProfileSettings(){
     document.getElementById("psYtStartVolume").value = 30;
     document.getElementById("psYtStartVolumeLabel").textContent = "30%";
   }
+  _psReady("psYtStartVolume");
+}
+
+async function _psLoadHostVolume(){
+  const slider = document.getElementById("psHostVolume");
+  const label  = document.getElementById("psHostVolumeLabel");
   try{
     const r = await fetch("/api/settings/host-volume");
     const d = r.ok ? await r.json() : {};
     const hv = (d.host_volume==null) ? null : Math.max(0,Math.min(100,parseInt(d.host_volume,10)));
-    const slider = document.getElementById("psHostVolume");
-    const label  = document.getElementById("psHostVolumeLabel");
     if(hv==null){
       slider.disabled = true;
       label.textContent = "N/A";
@@ -3153,9 +3209,14 @@ async function openProfileSettings(){
       _hostVolPending  = null;
     }
   }catch(_){
-    document.getElementById("psHostVolume").disabled = true;
-    document.getElementById("psHostVolumeLabel").textContent = "N/A";
+    slider.disabled = true;
+    label.textContent = "N/A";
   }
+  // Drop the loading pulse; disabled state above reflects N/A vs. ready.
+  slider.classList.remove("ps-loading");
+}
+
+async function _psLoadNightMode(){
   try{
     const r = await fetch("/api/settings/night-mode");
     const d = r.ok ? await r.json() : {};
@@ -3163,7 +3224,7 @@ async function openProfileSettings(){
     if(d.preset) app.vlc_night_mode_preset = d.preset;
   }catch(_){/* fall back to whatever SSE last reported */}
   renderNightMode();
-  document.getElementById("profileSettingsModal").classList.remove("hidden");
+  _psReady("psNightMode","psNightModePreset");
 }
 
 function closeProfileSettings(){
@@ -7537,6 +7598,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.21.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.22.0</div>
 </body>
 </html>

@@ -1,5 +1,10 @@
 # Changelog
 
+## [4.22.0] — 2026-06-02
+- **Improved: the Profile Settings window now opens instantly with per-section loading indicators instead of waiting for every fetch to return.** Previously `openProfileSettings()` `await`ed seven settings requests sequentially and only revealed the modal once all of them resolved — so on a slow link the settings button felt unresponsive (nothing happened until everything was ready). The modal now appears immediately; each control is dimmed + pulses (`.ps-loading`) with its value label showing "…", and fills in independently as its own request lands. All loaders fire concurrently, so total load time is bounded by the slowest request rather than their sum.
+  - No API or persistence changes — purely a frontend responsiveness improvement in `static/index.html`.
+- **Docs:** [docs/FRONTEND.md](docs/FRONTEND.md).
+
 ## [4.21.0] — 2026-06-02
 - **New: configurable VLC starting volume.** VLC previously always opened at exactly half the max-volume cap (hard-coded `cap // 2`). A new **VLC Starting Volume** slider in the dashboard settings panel sets the launch volume as a **% of the max-volume cap** (0–100, step 5), defaulting to **50%** — preserving the old half-max behaviour. Applied when VLC is launched at startup. Persisted under `library.json → settings.vlc_start_volume`.
   - `GET`/`POST /api/settings/vlc-start-volume`. Startup now computes `round(cap * pct / 100)` instead of `cap // 2`.
