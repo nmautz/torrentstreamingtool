@@ -9309,6 +9309,60 @@ async def _has_nvenc() -> bool:
         print("[offline] NVENC available — H.264 encodes will run on the GPU.")
     return ok
 
+
+# Lazy-probed once per process: True if this ffmpeg exposes the `scale_cuda`
+# filter, which the all-GPU prep pipeline needs to resize ON the GPU (keeping
+# decode→scale→encode resident in VRAM). Gyan/BtbN "full" builds carry it;
+# some "essentials" builds compile NVENC but not the CUDA filters, so we probe
+# and fall back to the transparent `-hwaccel cuda` path (GPU decode, CPU scale)
+# when it's missing.
+_cuda_scale_probe: dict[str, bool] = {}
+
+# Source codec / pixel-format combos NVDEC decodes reliably across every
+# NVENC-capable consumer GPU. The all-GPU pipeline pins the decoder output to
+# `cuda` (`-hwaccel_output_format cuda`), which — unlike the transparent
+# `-hwaccel cuda` — has NO software fallback: an unsupported source HARD-fails
+# the encode. So we only take that path for these safe 4:2:0 sources; anything
+# else (AV1 on older cards, 4:2:2/4:4:4, 12-bit, odd codecs) uses the
+# transparent path instead. A genuine failure still auto-retries on the
+# transparent path in _run_offline_job, but gating keeps that rare.
+_NVDEC_SAFE_CODECS  = {"h264", "hevc", "h265", "mpeg2video", "vc1", "vp9"}
+_NVDEC_SAFE_PIXFMTS = {"yuv420p", "yuvj420p", "yuv420p10le", "nv12", "p010le"}
+
+
+async def _has_cuda_scale() -> bool:
+    """True if this ffmpeg lists the scale_cuda filter (needed for all-GPU prep)."""
+    if "result" in _cuda_scale_probe:
+        return _cuda_scale_probe["result"]
+    ffmpeg = analyzer.ffmpeg_bin()
+    if not ffmpeg:
+        _cuda_scale_probe["result"] = False
+        return False
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            ffmpeg, "-hide_banner", "-filters",
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
+        )
+        out, _ = await proc.communicate()
+        ok = b"scale_cuda" in (out or b"")
+    except Exception:
+        ok = False
+    _cuda_scale_probe["result"] = ok
+    if not ok:
+        print("[offline] scale_cuda filter absent — prep will GPU-decode but "
+              "CPU-scale (transparent -hwaccel cuda).")
+    return ok
+
+
+def _source_nvdec_safe(info: dict) -> bool:
+    """True if the source is a codec+pixfmt NVDEC decodes reliably, so it's safe
+    to pin the decoder output to VRAM (`-hwaccel_output_format cuda`)."""
+    v = info.get("video") or {}
+    codec = (v.get("codec") or "").lower()
+    pix   = (v.get("pix_fmt") or "").lower()
+    return codec in _NVDEC_SAFE_CODECS and pix in _NVDEC_SAFE_PIXFMTS
+
 # HLS prep target — H.264 yuv420p video, AAC stereo audio, WebVTT subtitles.
 #   • Video that's already H.264 yuv420p with a browser-safe profile is stream-copied
 #     (no re-encode). Anything else transcodes to libx264 / h264_nvenc.
@@ -9747,6 +9801,7 @@ def _build_hls_ffmpeg_args(
     src: Path,
     info: dict,
     use_nvenc: bool,
+    full_gpu: bool = False,
 ) -> tuple[list[str], list[dict], list[dict], list[dict]]:
     """Construct the full ffmpeg invocation that emits one HLS bundle.
 
@@ -9790,25 +9845,29 @@ def _build_hls_ffmpeg_args(
         "-progress", "pipe:1", "-nostats",
     ]
 
-    # GPU-accelerated decode for the NVENC path. Without this, NVENC only
-    # offloads the *encode* while the source is decoded (and every down-rung
-    # scaled) on the CPU — so on a box with an NVIDIA GPU the CPU pegs at
-    # 80-90% while the GPU idles around 50% (it's only doing the small ABR
-    # encodes). `-hwaccel cuda` routes decode through NVDEC, the single
-    # heaviest CPU cost, freeing cores for the (cheaper) software scale.
+    # GPU-accelerated decode for the NVENC path, in two tiers. Without either,
+    # NVENC only offloads the *encode* while the source is decoded (and every
+    # down-rung scaled) on the CPU — so on a box with an NVIDIA GPU the CPU pegs
+    # while the GPU idles (it's only doing the small ABR encodes).
     #
-    # Deliberately the *transparent* form: we do NOT set
-    # `-hwaccel_output_format cuda`. Decoded frames auto-download to system
-    # memory to feed the existing `scale=-2:H` filter, and — critically —
-    # ffmpeg silently falls back to software decode for any source codec
-    # NVDEC can't handle, so this can never hard-fail a job that worked on the
-    # pure-CPU path. (Keeping frames in VRAM for `scale_cuda` would move the
-    # scale onto the GPU too, but removes that fallback — not worth the
-    # hard-failure risk on exotic codecs, Windows being the primary target.)
+    #   full_gpu  → `-hwaccel cuda -hwaccel_output_format cuda`: the WHOLE
+    #     pipeline (decode → scale_cuda → nvenc) stays resident in VRAM. No
+    #     per-frame GPU→CPU download and no CPU scaling at all — the biggest
+    #     remaining CPU cost once decode moved to NVDEC. Pinning the decoder
+    #     output to `cuda` removes the software fallback, so the caller only
+    #     sets full_gpu for NVDEC-safe sources (`_source_nvdec_safe`) and
+    #     auto-retries on the transparent path if it still fails.
+    #   else (transparent) → `-hwaccel cuda` only: NVDEC decodes, frames
+    #     auto-download to system memory for the CPU `scale` filter, and ffmpeg
+    #     silently falls back to software decode for any codec NVDEC can't
+    #     handle — so it can never hard-fail a job the pure-CPU path could do.
+    #
     # Only added when something actually decodes (a pure stream-copy rung has
     # no decode to accelerate).
     needs_decode = (not copy_original) or len(videos) > 1
-    if use_nvenc and needs_decode:
+    if full_gpu and needs_decode:
+        args += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+    elif use_nvenc and needs_decode:
         args += ["-hwaccel", "cuda"]
 
     args += [
@@ -9833,29 +9892,45 @@ def _build_hls_ffmpeg_args(
     #                      with a maxrate/bufsize VBV cap so the rendition is
     #                      genuinely smaller and the master BANDWIDTH is realistic
     # NVENC encodes on the GPU when available; decode runs on NVDEC too (see
-    # the `-hwaccel cuda` block above), and the CPU scale filter sits between.
+    # the `-hwaccel` block above). On the full_gpu path the scale happens on the
+    # GPU as well (scale_cuda), so frames never leave VRAM; otherwise a CPU
+    # `scale` filter sits between the NVDEC decode and the NVENC encode.
     def _encode_video(i: int, v: dict) -> list[str]:
         a: list[str] = []
-        if v["scale"]:
-            a += [f"-filter:v:{i}", f"scale=-2:{v['scale']}"]
-        if use_nvenc:
+        if full_gpu:
+            # All-GPU: scale_cuda both resizes AND pins the pixel format on the
+            # GPU, handing nvenc a ready cuda surface — so NO `-pix_fmt yuv420p`
+            # (that would force a hwdownload/CPU convert and defeat the point).
+            # The original full-res rung still routes through scale_cuda (to its
+            # own height) purely to normalise to browser-safe 8-bit 4:2:0.
             a += [
+                f"-filter:v:{i}", f"scale_cuda=-2:{v['height']}:format=yuv420p",
                 f"-c:v:{i}", "h264_nvenc",
                 "-preset", "medium", "-rc", "vbr", f"-cq:v:{i}", "23",
             ]
+        elif use_nvenc:
+            if v["scale"]:
+                a += [f"-filter:v:{i}", f"scale=-2:{v['scale']}"]
+            a += [
+                f"-c:v:{i}", "h264_nvenc",
+                "-preset", "medium", "-rc", "vbr", f"-cq:v:{i}", "23",
+                f"-pix_fmt:v:{i}", "yuv420p",
+            ]
         else:
+            if v["scale"]:
+                a += [f"-filter:v:{i}", f"scale=-2:{v['scale']}"]
             a += [
                 f"-c:v:{i}", "libx264",
                 "-preset", "veryfast", f"-crf:v:{i}", "23",
                 # Caps x264 worker threads so the host stays responsive during
                 # bulk /prep-all runs. NVENC ignores this (runs on the GPU).
                 "-threads", str(OFFLINE_FFMPEG_THREADS),
+                f"-pix_fmt:v:{i}", "yuv420p",
             ]
         if v.get("maxrate"):
             a += [f"-maxrate:v:{i}", f"{v['maxrate']}k",
                   f"-bufsize:v:{i}", f"{v['bufsize']}k"]
-        a += [f"-pix_fmt:v:{i}", "yuv420p",
-              f"-profile:v:{i}", "high", f"-level:v:{i}", "4.1"]
+        a += [f"-profile:v:{i}", "high", f"-level:v:{i}", "4.1"]
         return a
 
     for i, v in enumerate(videos):
@@ -10046,110 +10121,125 @@ async def _run_offline_job(job_id: str) -> None:
 
         try:
             use_nvenc = await _has_nvenc()
-            args, kept_audios, kept_subs, kept_videos = _build_hls_ffmpeg_args(
-                ffmpeg, src, info, use_nvenc,
+            # All-GPU pipeline (decode→scale_cuda→nvenc resident in VRAM) when the
+            # build has scale_cuda and the source is NVDEC-safe. Pinning frames to
+            # VRAM has no software fallback, so a genuine failure auto-retries on
+            # the transparent `-hwaccel cuda` path below (full_gpu=False) — which
+            # itself falls back to software decode — guaranteeing we never regress
+            # a file the slower path could prep.
+            full_gpu = (
+                use_nvenc
+                and await _has_cuda_scale()
+                and _source_nvdec_safe(info)
             )
-            # Record encoder for admin/UI display. The original rung may copy
-            # while the ABR down-rungs (if any) still transcode, so reflect both.
             down_encoder = "h264_nvenc" if use_nvenc else "libx264"
             copy_original = _video_can_copy(info.get("video"))
-            if copy_original and len(kept_videos) > 1:
-                job["encoder"] = f"copy+{down_encoder}"
-            elif copy_original:
-                job["encoder"] = "copy"
-            else:
-                job["encoder"] = down_encoder
 
-            hls_log.info(
-                "job %s encode: encoder=%s duration=%.1fs videos=%d audios=%d subs=%d nvenc=%s",
-                job_id, job["encoder"], duration,
-                len(kept_videos), len(kept_audios), len(kept_subs), use_nvenc,
-            )
-            # Run ffmpeg at lowered OS priority (POSIX: `nice -n 10`; Windows:
-            # BELOW_NORMAL via _FFMPEG_SUBPROCESS_KW) so the bulk encode yields CPU
-            # to the web server, VLC, and qBit — keeping the dashboard responsive.
-            cmd = _ffmpeg_nice_prefix() + args
-            hls_log.info(
-                "job %s ffmpeg cmd: %s",
-                job_id, " ".join(shlex.quote(a) for a in cmd),
-            )
+            while True:
+                args, kept_audios, kept_subs, kept_videos = _build_hls_ffmpeg_args(
+                    ffmpeg, src, info, use_nvenc, full_gpu=full_gpu,
+                )
+                # Record encoder for admin/UI display. The original rung may copy
+                # while the ABR down-rungs (if any) still transcode, so reflect both.
+                if copy_original and len(kept_videos) > 1:
+                    job["encoder"] = f"copy+{down_encoder}"
+                elif copy_original:
+                    job["encoder"] = "copy"
+                else:
+                    job["encoder"] = down_encoder
 
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                # Run inside the staging dir: every OUTPUT arg is a bare filename
-                # (init/segments/playlists/subs), so they all land here. This is
-                # what keeps the fmp4 init segment in the bundle on Windows,
-                # where a backslash playlist path otherwise misdirects it (→ 404
-                # → fragLoadError). The `-i` source is absolute, so cwd is safe.
-                cwd=str(tmp_dir),
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-                **_FFMPEG_SUBPROCESS_KW,
-            )
-            # Expose the handle so _pause_prep(kill=True) can terminate this encode.
-            job["_proc"] = proc
+                hls_log.info(
+                    "job %s encode: encoder=%s duration=%.1fs videos=%d audios=%d subs=%d nvenc=%s gpu=%s",
+                    job_id, job["encoder"], duration,
+                    len(kept_videos), len(kept_audios), len(kept_subs), use_nvenc, full_gpu,
+                )
+                # Run ffmpeg at lowered OS priority (POSIX: `nice -n 10`; Windows:
+                # BELOW_NORMAL via _FFMPEG_SUBPROCESS_KW) so the bulk encode yields CPU
+                # to the web server, VLC, and qBit — keeping the dashboard responsive.
+                cmd = _ffmpeg_nice_prefix() + args
+                hls_log.info(
+                    "job %s ffmpeg cmd: %s",
+                    job_id, " ".join(shlex.quote(a) for a in cmd),
+                )
 
-            # Drain stderr concurrently into a bounded buffer. Two reasons:
-            # (1) ffmpeg with -nostats still writes stream mapping, warnings and
-            #     the fatal error line to stderr; if nobody reads it the OS pipe
-            #     buffer can fill and ffmpeg blocks on write → proc.wait() hangs.
-            # (2) on failure we want the *whole* error, not the 500-char tail
-            #     job["error"] keeps for the UI — it goes to logs/hls.log.
-            stderr_tail: deque[str] = deque(maxlen=300)
+                proc = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    # Run inside the staging dir: every OUTPUT arg is a bare filename
+                    # (init/segments/playlists/subs), so they all land here. This is
+                    # what keeps the fmp4 init segment in the bundle on Windows,
+                    # where a backslash playlist path otherwise misdirects it (→ 404
+                    # → fragLoadError). The `-i` source is absolute, so cwd is safe.
+                    cwd=str(tmp_dir),
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                    **_FFMPEG_SUBPROCESS_KW,
+                )
+                # Expose the handle so _pause_prep(kill=True) can terminate this encode.
+                job["_proc"] = proc
 
-            async def _drain_stderr() -> None:
-                assert proc.stderr is not None
-                while True:
-                    try:
-                        line = await proc.stderr.readline()
-                    except Exception:
-                        return
-                    if not line:
-                        return
-                    stderr_tail.append(line.decode("utf-8", "replace").rstrip())
+                # Drain stderr concurrently into a bounded buffer. Two reasons:
+                # (1) ffmpeg with -nostats still writes stream mapping, warnings and
+                #     the fatal error line to stderr; if nobody reads it the OS pipe
+                #     buffer can fill and ffmpeg blocks on write → proc.wait() hangs.
+                # (2) on failure we want the *whole* error, not the 500-char tail
+                #     job["error"] keeps for the UI — it goes to logs/hls.log.
+                stderr_tail: deque[str] = deque(maxlen=300)
 
-            async def _drain_progress() -> None:
-                assert proc.stdout is not None
-                while True:
-                    try:
-                        line = await proc.stdout.readline()
-                    except Exception:
-                        return
-                    if not line:
-                        return
-                    try:
-                        txt = line.decode("ascii", "replace").strip()
-                    except Exception:
-                        continue
-                    if not txt or "=" not in txt:
-                        continue
-                    k, _, v = txt.partition("=")
-                    if k in ("out_time_ms", "out_time_us") and duration > 0:
-                        # out_time_ms is microseconds despite the name on
-                        # older ffmpeg; out_time_us is always microseconds.
+                async def _drain_stderr() -> None:
+                    assert proc.stderr is not None
+                    while True:
                         try:
-                            out_us = int(v)
-                            job["progress"] = max(0.0, min(0.99,
-                                (out_us / 1_000_000.0) / duration))
-                        except ValueError:
-                            pass
-                    elif k == "progress" and v == "end":
-                        job["progress"] = 1.0
-                        return
+                            line = await proc.stderr.readline()
+                        except Exception:
+                            return
+                        if not line:
+                            return
+                        stderr_tail.append(line.decode("utf-8", "replace").rstrip())
 
-            progress_task = asyncio.create_task(_drain_progress())
-            stderr_task   = asyncio.create_task(_drain_stderr())
-            await proc.wait()
-            # Both drain loops end on pipe EOF once the process exits; bound the
-            # wait so a wedged pipe can't hang the job indefinitely.
-            for t in (progress_task, stderr_task):
-                try:
-                    await asyncio.wait_for(t, timeout=5)
-                except (asyncio.TimeoutError, asyncio.CancelledError):
-                    t.cancel()
+                async def _drain_progress() -> None:
+                    assert proc.stdout is not None
+                    while True:
+                        try:
+                            line = await proc.stdout.readline()
+                        except Exception:
+                            return
+                        if not line:
+                            return
+                        try:
+                            txt = line.decode("ascii", "replace").strip()
+                        except Exception:
+                            continue
+                        if not txt or "=" not in txt:
+                            continue
+                        k, _, v = txt.partition("=")
+                        if k in ("out_time_ms", "out_time_us") and duration > 0:
+                            # out_time_ms is microseconds despite the name on
+                            # older ffmpeg; out_time_us is always microseconds.
+                            try:
+                                out_us = int(v)
+                                job["progress"] = max(0.0, min(0.99,
+                                    (out_us / 1_000_000.0) / duration))
+                            except ValueError:
+                                pass
+                        elif k == "progress" and v == "end":
+                            job["progress"] = 1.0
+                            return
 
-            job["_proc"] = None
-            if proc.returncode != 0:
+                progress_task = asyncio.create_task(_drain_progress())
+                stderr_task   = asyncio.create_task(_drain_stderr())
+                await proc.wait()
+                # Both drain loops end on pipe EOF once the process exits; bound the
+                # wait so a wedged pipe can't hang the job indefinitely.
+                for t in (progress_task, stderr_task):
+                    try:
+                        await asyncio.wait_for(t, timeout=5)
+                    except (asyncio.TimeoutError, asyncio.CancelledError):
+                        t.cancel()
+
+                job["_proc"] = None
+                if proc.returncode == 0:
+                    break  # success → leave the retry loop and write meta.json
+
                 # Did _preempt_running_bulk() boot us for an interactive prep? If so,
                 # this isn't a failure — re-queue this bulk file as "pending" so it
                 # resumes once the interactive encode releases the slot (it restarts
@@ -10180,6 +10270,23 @@ async def _run_offline_job(job_id: str) -> None:
                     await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
                     hls_log.info("job %s CANCELLED (admin hard-stop)", job_id)
                     return
+                # Genuine ffmpeg failure. If this was the all-GPU pipeline, the
+                # scale_cuda / cuda-decode chain may be unsupported for this exact
+                # source or driver — wipe the partial bundle and retry ONCE on the
+                # transparent CPU-scale path before surfacing an error.
+                if full_gpu:
+                    tail = "\n".join(stderr_tail).strip()
+                    hls_log.warning(
+                        "job %s all-GPU encode failed rc=%s — retrying on the "
+                        "transparent -hwaccel path.\n  stderr tail:\n%s",
+                        job_id, proc.returncode, tail[-800:] or "(no stderr captured)",
+                    )
+                    full_gpu = False
+                    await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
+                    tmp_dir.mkdir(parents=True, exist_ok=True)
+                    job["progress"] = 0.0
+                    continue
+
                 err = "\n".join(stderr_tail).strip()
                 elapsed = time.time() - job["started_at"]
                 hls_log.error(
@@ -10941,7 +11048,7 @@ async def _run_component_install(component: str, model: str = "base", build: str
             if not binp:
                 raise RuntimeError("ffmpeg.exe not found inside the downloaded archive.")
             _write_env_keys({"_FFMPEG_BIN": binp})
-            _ffmpeg_version_probe.clear(); _nvenc_probe.clear()
+            _ffmpeg_version_probe.clear(); _nvenc_probe.clear(); _cuda_scale_probe.clear()
 
         elif component == "fpcalc":
             sysname = platform.system()

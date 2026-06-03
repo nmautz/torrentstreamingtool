@@ -1,5 +1,11 @@
 # Changelog
 
+## [4.25.0] — 2026-06-02
+- **Improved: offline HLS prep can now run the *entire* transcode on the GPU (decode + scale + encode resident in VRAM), not just the encode.** v4.23.0 moved decode onto NVDEC (`-hwaccel cuda`) but frames still downloaded to system memory and every ABR down-rung was scaled on the CPU — so on a busy ladder the CPU still hovered ~50%. When the ffmpeg build has the `scale_cuda` filter **and** the source is NVDEC-safe, `_build_hls_ffmpeg_args` now emits `-hwaccel cuda -hwaccel_output_format cuda` and replaces the software `scale=-2:H` with `scale_cuda=-2:H:format=yuv420p`, so frames never leave the GPU — eliminating both the per-frame GPU↔CPU copy and the CPU scaling.
+  - **Safe-gated:** the all-GPU path is only taken for codec+pixfmt combos NVDEC reliably decodes (`_source_nvdec_safe`: h264/hevc/mpeg2/vc1/vp9 in 4:2:0 8/10-bit), because pinning the decoder output to VRAM removes ffmpeg's software-decode fallback. Everything else stays on the v4.23.0 transparent `-hwaccel cuda` path (GPU decode, CPU scale, automatic SW fallback).
+  - **Self-correcting:** if the all-GPU encode fails anyway (unsupported driver/build/source edge case), `_run_offline_job` wipes the partial bundle and **retries once** on the transparent path — so this can never regress a file the slower path could prep. New `_has_cuda_scale()` probe (cached; cleared on ffmpeg install).
+- **Docs:** [docs/STREAMING.md](docs/STREAMING.md), [docs/GOTCHAS.md](docs/GOTCHAS.md).
+
 ## [4.24.0] — 2026-06-02
 - **New: admin "Force Stream Prep" — an on-demand prep that viewers and host activity can't stop.** Overnight / Idle prep are deliberately interruptible (the non-admin Pause control and the activity-kill both halt bulk prep). Force-prep is the opposite: a new **Force Stream Prep** card on Admin → System preps the whole library (or one selected item) for on-device streaming *right now*, and it **runs to completion regardless of the viewer Pause control or live host activity**. Only the admin can stop it.
   - These jobs use a dedicated `"admin"` prep queue. Like interactive (play-on-device) prep they ignore the bulk pause gate (`state.prep_paused`) and the activity-kill (`_pause_prep` / `_activity_kick` only touch `bulk`), and they preempt any in-flight bulk encode. Unlike interactive prep, the admin can halt them.

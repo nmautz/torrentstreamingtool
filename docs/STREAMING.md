@@ -162,22 +162,38 @@ the **single** ffmpeg pass — no second invocation. The ladder rungs come from
 `_hls_video_variants(info)` — original always, `video_720`/`video_480` only when
 the source is taller than that rung (so a ≤480p source emits one variant and the
 player shows no quality menu). With NVENC, the `-c:v:i` for each transcoded rung
-becomes `h264_nvenc -preset medium -rc vbr -cq:v:i 23` (the CPU `scale` filter
-still feeds it); the original rung copies when `_video_can_copy` regardless of
-NVENC, so only the scaled down-rungs hit the encoder.
+becomes `h264_nvenc -preset medium -rc vbr -cq:v:i 23`, fed by either a GPU
+`scale_cuda` or a CPU `scale` filter depending on the offload tier (see the note
+below); the original rung copies when `_video_can_copy` regardless of NVENC, so
+only the scaled down-rungs hit the encoder.
 
-> **GPU decode on the NVENC path.** When NVENC is in use *and* something
-> actually decodes (i.e. not a single pure stream-copy rung), `-hwaccel cuda`
-> is inserted before `-i` so the source is decoded on NVDEC instead of the CPU.
-> Without it, NVENC offloaded only the encode while the CPU did the full-res
-> decode **and** every down-rung scale — pegging the CPU at 80-90% while the GPU
-> sat near 50% (only the small ABR encodes). It is deliberately the *transparent*
-> form (no `-hwaccel_output_format cuda`): decoded frames auto-download to system
-> memory to feed the existing `scale=-2:H` filter, and ffmpeg silently falls back
-> to **software** decode for any source codec NVDEC can't handle — so it never
-> hard-fails a job the pure-CPU path would have completed. (Keeping frames in VRAM
-> for `scale_cuda` would push the scale onto the GPU too but removes that fallback
-> — not worth the hard-failure risk; Windows is the primary target.)
+> **GPU offload on the NVENC path — two tiers.** Plain NVENC offloads only the
+> *encode*; the source was software-decoded and every down-rung software-scaled,
+> pegging the CPU (80-90%) while the GPU idled (~50%, only the small ABR encodes).
+> So when NVENC is in use *and* a rung actually decodes (not a single pure
+> stream-copy), the builder routes decode — and, when it can, scaling — onto the
+> GPU:
+>
+> - **All-GPU (`full_gpu`)** — chosen when the ffmpeg build has the `scale_cuda`
+>   filter (`_has_cuda_scale`, probed once) **and** the source is NVDEC-safe
+>   (`_source_nvdec_safe`: h264/hevc/mpeg2/vc1/vp9 in 4:2:0 8/10-bit). Emits
+>   `-hwaccel cuda -hwaccel_output_format cuda` so decoded frames **stay in VRAM**,
+>   and each transcoded rung uses `scale_cuda=-2:H:format=yuv420p` instead of the
+>   software `scale` (no `-pix_fmt`, which would force a host round-trip). Decode →
+>   scale → encode never leaves the GPU: no per-frame GPU↔CPU copy, no CPU scaling.
+>   The original full-res rung (when it can't stream-copy) still passes through
+>   `scale_cuda` purely to normalise to browser-safe 8-bit 4:2:0.
+> - **Transparent (`-hwaccel cuda` only)** — the fallback for everything else
+>   (no `scale_cuda`, or an exotic/4:2:2/4:4:4/12-bit source). NVDEC decodes,
+>   frames auto-download to system memory for the CPU `scale`, and ffmpeg silently
+>   falls back to **software** decode for any codec NVDEC can't handle.
+>
+> Why gate the all-GPU path: pinning the decoder output to `cuda` removes ffmpeg's
+> software-decode fallback, so an unsupported source would *hard-fail*. Gating to
+> NVDEC-safe codecs makes that rare, and `_run_offline_job` additionally **retries
+> once** on the transparent path if the all-GPU encode fails — so the optimisation
+> can never regress a file the slower path could prep (Windows is the primary
+> target; a working prep matters more than a slightly warmer CPU).
 
 > **All outputs are bare filenames and ffmpeg runs with `cwd=<bundle .part dir>`**
 > (`_run_offline_job` passes `cwd=str(tmp_dir)`). Only the `-i` source is an
