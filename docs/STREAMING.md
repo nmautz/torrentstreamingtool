@@ -126,6 +126,10 @@ orphans, listed in Admin → Offline Cache for one-click purge).
 # cwd = the bundle's .part/ dir; EVERY output below is a BARE filename.
 # Source video is mapped ONCE PER LADDER RUNG (here: original + 720p + 480p).
 ffmpeg -y -progress pipe:1 -nostats \
+  # `-hwaccel cuda` is inserted here (before -i) ONLY on the NVENC path when
+  # something actually decodes — routes decode through NVDEC so the CPU isn't
+  # the bottleneck. Transparent form (no -hwaccel_output_format): frames
+  # auto-download for the CPU scale and unsupported codecs fall back to SW.
   -thread_queue_size 1024 -rtbufsize 64M -i /abs/path/src.mkv \
   -map 0:v:0 -map 0:v:0 -map 0:v:0 -map 0:a:0 -map 0:a:1 \
   # v:0 = original (copy when browser-safe H.264, even with NVENC present):
@@ -161,6 +165,19 @@ player shows no quality menu). With NVENC, the `-c:v:i` for each transcoded rung
 becomes `h264_nvenc -preset medium -rc vbr -cq:v:i 23` (the CPU `scale` filter
 still feeds it); the original rung copies when `_video_can_copy` regardless of
 NVENC, so only the scaled down-rungs hit the encoder.
+
+> **GPU decode on the NVENC path.** When NVENC is in use *and* something
+> actually decodes (i.e. not a single pure stream-copy rung), `-hwaccel cuda`
+> is inserted before `-i` so the source is decoded on NVDEC instead of the CPU.
+> Without it, NVENC offloaded only the encode while the CPU did the full-res
+> decode **and** every down-rung scale — pegging the CPU at 80-90% while the GPU
+> sat near 50% (only the small ABR encodes). It is deliberately the *transparent*
+> form (no `-hwaccel_output_format cuda`): decoded frames auto-download to system
+> memory to feed the existing `scale=-2:H` filter, and ffmpeg silently falls back
+> to **software** decode for any source codec NVDEC can't handle — so it never
+> hard-fails a job the pure-CPU path would have completed. (Keeping frames in VRAM
+> for `scale_cuda` would push the scale onto the GPU too but removes that fallback
+> — not worth the hard-failure risk; Windows is the primary target.)
 
 > **All outputs are bare filenames and ffmpeg runs with `cwd=<bundle .part dir>`**
 > (`_run_offline_job` passes `cwd=str(tmp_dir)`). Only the `-i` source is an

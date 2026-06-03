@@ -1,5 +1,10 @@
 # Changelog
 
+## [4.23.0] — 2026-06-02
+- **Improved: offline HLS prep now decodes on the GPU (NVDEC) when NVENC is in use, instead of pegging the CPU.** Previously the NVENC path offloaded only the *encode* to the GPU — the source was software-decoded and every ABR down-rung software-scaled on the CPU. On a box with an NVIDIA GPU that left the CPU at 80-90% while the GPU idled near 50% (it was only doing the small 720p/480p encodes). `_build_hls_ffmpeg_args` now inserts `-hwaccel cuda` before `-i` whenever NVENC is selected *and* a rung actually decodes (not a lone stream-copy), routing decode through NVDEC — the single heaviest CPU cost.
+  - Deliberately the **transparent** form (no `-hwaccel_output_format cuda`): frames auto-download to system memory to feed the existing `scale=-2:H` filter, and ffmpeg **silently falls back to software decode** for any source codec NVDEC can't handle — so this can never hard-fail a job the pure-CPU path would have completed. The libx264 (no-GPU) path is unchanged.
+- **Docs:** [docs/STREAMING.md](docs/STREAMING.md).
+
 ## [4.22.0] — 2026-06-02
 - **Improved: the Profile Settings window now opens instantly with per-section loading indicators instead of waiting for every fetch to return.** Previously `openProfileSettings()` `await`ed seven settings requests sequentially and only revealed the modal once all of them resolved — so on a slow link the settings button felt unresponsive (nothing happened until everything was ready). The modal now appears immediately; each control is dimmed + pulses (`.ps-loading`) with its value label showing "…", and fills in independently as its own request lands. All loaders fire concurrently, so total load time is bounded by the slowest request rather than their sum.
   - No API or persistence changes — purely a frontend responsiveness improvement in `static/index.html`.

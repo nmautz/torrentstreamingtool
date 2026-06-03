@@ -9749,6 +9749,30 @@ def _build_hls_ffmpeg_args(
         # -progress emits machine-readable key=value to stdout — we tail it
         # below for an accurate % instead of guessing from output-dir growth.
         "-progress", "pipe:1", "-nostats",
+    ]
+
+    # GPU-accelerated decode for the NVENC path. Without this, NVENC only
+    # offloads the *encode* while the source is decoded (and every down-rung
+    # scaled) on the CPU — so on a box with an NVIDIA GPU the CPU pegs at
+    # 80-90% while the GPU idles around 50% (it's only doing the small ABR
+    # encodes). `-hwaccel cuda` routes decode through NVDEC, the single
+    # heaviest CPU cost, freeing cores for the (cheaper) software scale.
+    #
+    # Deliberately the *transparent* form: we do NOT set
+    # `-hwaccel_output_format cuda`. Decoded frames auto-download to system
+    # memory to feed the existing `scale=-2:H` filter, and — critically —
+    # ffmpeg silently falls back to software decode for any source codec
+    # NVDEC can't handle, so this can never hard-fail a job that worked on the
+    # pure-CPU path. (Keeping frames in VRAM for `scale_cuda` would move the
+    # scale onto the GPU too, but removes that fallback — not worth the
+    # hard-failure risk on exotic codecs, Windows being the primary target.)
+    # Only added when something actually decodes (a pure stream-copy rung has
+    # no decode to accelerate).
+    needs_decode = (not copy_original) or len(videos) > 1
+    if use_nvenc and needs_decode:
+        args += ["-hwaccel", "cuda"]
+
+    args += [
         # Larger input buffers coalesce disk reads; without these the Windows
         # storage stack can dominate kernel time during a fast encode.
         "-thread_queue_size", "1024",
@@ -9769,7 +9793,8 @@ def _build_hls_ffmpeg_args(
     #   • down-rungs:      always encode + scale=-2:<h> (even width for yuv420p),
     #                      with a maxrate/bufsize VBV cap so the rendition is
     #                      genuinely smaller and the master BANDWIDTH is realistic
-    # NVENC encodes on the GPU when available; the CPU scale filter feeds it.
+    # NVENC encodes on the GPU when available; decode runs on NVDEC too (see
+    # the `-hwaccel cuda` block above), and the CPU scale filter sits between.
     def _encode_video(i: int, v: dict) -> list[str]:
         a: list[str] = []
         if v["scale"]:
