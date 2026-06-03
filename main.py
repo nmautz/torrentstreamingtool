@@ -532,6 +532,7 @@ class AppState:
     idle_prep_on: bool = False                            # cached settings.idle_prep.enabled (set each auto_prep_loop tick) — lets the activity hook decide cheaply
     overnight_open: bool = False                          # cached: currently inside the overnight prep window (set each tick) — overnight load is intentional, so the activity hook stands down then
     sys_status: dict = field(default_factory=dict)        # latest CPU/GPU/RAM/network sample + ok/degraded/overloaded classification (set by system_monitor_loop)
+    cache_autopurge_last: dict = field(default_factory=dict)  # last auto-purge result (set by cache_autopurge_loop): {at, deleted, bytes_freed, total_bytes_before} — drives the admin card's "last run" line
     # ── YouTube-on-TV (browser playback on the host display, remote-controlled) ──
     youtube_active: bool = False                          # True while a YouTube video is the active TV playback (browser, not VLC)
     youtube_video_id: Optional[str] = None               # 11-char YouTube id currently loaded on the TV page
@@ -2516,6 +2517,27 @@ def _play_prep_cfg(lib: dict) -> dict:
     return {"enabled": bool(cfg.get("enabled", True))}
 
 
+def _cache_autopurge_cfg(lib: dict) -> dict:
+    """Read settings.cache_autopurge (auto-evict orphan offline-cache bundles when
+    the cache outgrows a size cap) with defaults.
+
+    `max_gb` is the total `.offline_cache/` size at which a purge fires. When the
+    walk reports the cache at/above this, every *orphan* bundle (cache/partial dirs
+    + legacy MP4s that no longer map to a live library file) is deleted. Bundles
+    backing current library files are never touched, so this can't evict something
+    a viewer might still want — see `cache_autopurge_loop`."""
+    cfg = (lib.get("settings", {}) or {}).get("cache_autopurge") or {}
+    try:
+        max_gb = float(cfg.get("max_gb", 50))
+    except (TypeError, ValueError):
+        max_gb = 50.0
+    max_gb = max(1.0, min(10000.0, max_gb))
+    return {
+        "enabled": bool(cfg.get("enabled", False)),
+        "max_gb":  max_gb,
+    }
+
+
 def _subs_cfg(lib: dict) -> dict:
     """Read settings.subtitles (the unified subtitle policy) with defaults.
 
@@ -2843,6 +2865,55 @@ async def system_monitor_loop() -> None:
             raise
         except Exception as exc:
             print(f"[sysmon] system_monitor_loop error: {exc}")
+
+
+async def cache_autopurge_loop() -> None:
+    """Auto-evict orphan offline-cache bundles once the cache outgrows a size cap.
+
+    When `settings.cache_autopurge.enabled` and the total `.offline_cache/` size
+    reaches `max_gb`, purge every orphan bundle (cache/partial dirs + legacy MP4s
+    that no longer map to any live library file). Only orphans are removed —
+    bundles backing current library files are never touched, so this can never
+    delete something a viewer might still want. Active prep jobs are skipped
+    (the same `_offline_cache_path_active` guard the manual purge uses).
+
+    The size check rides on `_build_offline_cache_inventory`, which offloads the
+    heavy recursive walk to a worker thread, so the event loop never stalls. We
+    only run that walk when the feature is enabled, and only every few minutes —
+    eviction is housekeeping, not something that needs to be instant.
+    """
+    await asyncio.sleep(45)   # let the app settle before the first (heavy) walk
+    while True:
+        try:
+            cfg = _cache_autopurge_cfg(await get_library())
+            if cfg["enabled"]:
+                inv = await _build_offline_cache_inventory()
+                cap_bytes = int(cfg["max_gb"] * (1024 ** 3))
+                if inv["total_bytes"] >= cap_bytes and inv["orphans"]:
+                    deleted = 0
+                    freed = 0
+                    for o in inv["orphans"]:
+                        if _offline_cache_path_active(o["cache_key"]):
+                            continue
+                        b = _delete_cache_artifacts(o["cache_key"])
+                        if b > 0:
+                            deleted += 1
+                            freed += b
+                    if deleted:
+                        state.cache_autopurge_last = {
+                            "at":                 time.time(),
+                            "deleted":            deleted,
+                            "bytes_freed":        freed,
+                            "total_bytes_before": inv["total_bytes"],
+                        }
+                        print(f"[cachepurge] auto-purged {deleted} orphan bundle(s), "
+                              f"freed {freed / (1024 ** 3):.2f} GiB (cache was "
+                              f"{inv['total_bytes'] / (1024 ** 3):.2f} GiB, cap {cfg['max_gb']:g} GiB)")
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            print(f"[cachepurge] cache_autopurge_loop error: {exc}")
+        await asyncio.sleep(300)   # re-check every 5 min
 
 
 async def scheduled_reboot_loop() -> None:
@@ -4440,11 +4511,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     update_loop = asyncio.create_task(updater_loop())
     dlsched_loop = asyncio.create_task(download_scheduler_loop())
     sysmon_loop = asyncio.create_task(system_monitor_loop())
+    cachepurge_loop = asyncio.create_task(cache_autopurge_loop())
 
     yield
 
     for t in (guard, broadcaster, dl_monitor, vlc_tracker, bg_loop, jackett_mon,
-              reboot_loop, autoprep_loop, update_loop, dlsched_loop, sysmon_loop):
+              reboot_loop, autoprep_loop, update_loop, dlsched_loop, sysmon_loop,
+              cachepurge_loop):
         t.cancel()
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
@@ -4621,6 +4694,11 @@ class IdlePrepReq(BaseModel):
 
 class PlayPrepReq(BaseModel):
     enabled: bool = True                       # auto on-device prep of the playing episode (+ playlist tail) on every VLC play
+
+
+class CacheAutopurgeReq(BaseModel):
+    enabled: bool = False
+    max_gb: float = 50.0                        # purge orphan offline-cache bundles once .offline_cache/ reaches this many GB; clamped 1–10000
 
 
 class SttConfigReq(BaseModel):
@@ -8376,6 +8454,34 @@ async def admin_set_play_prep(request: Request, body: PlayPrepReq) -> JSONRespon
     pp["enabled"] = bool(body.enabled)
     await put_library(lib)
     return JSONResponse({"ok": True, **_play_prep_cfg(lib)})
+
+
+@app.get("/api/admin/cache-autopurge")
+async def admin_get_cache_autopurge(request: Request) -> JSONResponse:
+    """Return the orphan-cache auto-purge config + the result of the last run."""
+    _require_admin(request)
+    cfg = _cache_autopurge_cfg(await get_library())
+    cfg["last"] = state.cache_autopurge_last or None
+    return JSONResponse(cfg)
+
+
+@app.post("/api/admin/cache-autopurge")
+async def admin_set_cache_autopurge(request: Request, body: CacheAutopurgeReq) -> JSONResponse:
+    """Save the orphan-cache auto-purge config. Clamps max_gb to 1–10000 GB. The
+    next `cache_autopurge_loop` tick (≤5 min) evaluates the cap against the new
+    value; nothing is purged inline here."""
+    _require_admin(request)
+    max_gb = max(1.0, min(10000.0, float(body.max_gb)))
+
+    lib = await get_library()
+    cp = lib.setdefault("settings", {}).setdefault("cache_autopurge", {})
+    cp["enabled"] = bool(body.enabled)
+    cp["max_gb"]  = max_gb
+    await put_library(lib)
+
+    cfg = _cache_autopurge_cfg(lib)
+    cfg["last"] = state.cache_autopurge_last or None
+    return JSONResponse({"ok": True, **cfg})
 
 
 def _subtitle_language_options() -> list[dict]:

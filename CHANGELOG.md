@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.20.0] — 2026-06-02
+- **New: auto-purge orphan offline-cache files once the cache outgrows a size cap (admin setting).** The `.offline_cache/` directory had no automatic eviction — orphan bundles (re-encoded/removed sources, or files left by a deleted library item) accumulated until an operator manually hit "Purge All Orphans". A new **Auto-Purge Orphans** card on the Admin → Offline Cache tab adds an enable toggle + a **Purge When Cache Reaches (GB)** threshold (1–10000, default 50). Persisted under `library.json → settings.cache_autopurge`.
+  - A new `cache_autopurge_loop` background task re-checks every 5 min: when enabled and the total cache size is at/above the cap, it deletes every *orphan* bundle (the same set the manual purge clears). **Bundles backing current library files are never touched**, so this can't evict something a viewer might still want, and active prep jobs are skipped (the existing `_offline_cache_path_active` guard).
+  - The size walk reuses `_build_offline_cache_inventory` (offloaded to a worker thread), so the event loop never stalls; the walk only runs while the feature is enabled. The card shows a "last run" line with what was freed.
+  - **Windows/Linux/macOS:** pure `pathlib` + `shutil.rmtree`, identical across platforms.
+  - `GET`/`POST /api/admin/cache-autopurge`.
+- **Docs:** [docs/ADMIN.md](docs/ADMIN.md), [docs/API.md](docs/API.md), [docs/LIBRARY_DATA.md](docs/LIBRARY_DATA.md).
+
 ## [4.19.0] — 2026-06-02
 - **New: on-device (in-browser) playback now surfaces aggressively-discovered sidecar subs too — including those in `Subs/` folders — independent of HLS prep, with on-demand conversion.** The on-device subtitle list came from `_list_sidecar_subs`, which only looked for exact-stem `.srt`/`.vtt` files *next to* the video, so subs tucked in a `Subs/`/`Subtitles/` folder never appeared. It now uses the same `_discover_local_subs` sweep as the TV path, so every sidecar the box can find is offered in the subtitle dropdown. These are served straight from disk and don't depend on the HLS bundle being prepped.
   - **On-demand conversion ("prep when clicked").** The `/api/library/{id}/subtitle` endpoint now serves subs from subfolders (validated via a `path` that must resolve *inside* the item's media tree — no arbitrary file reads) and converts `.ass`/`.ssa` → WebVTT via ffmpeg on demand (`.srt` inline, `.vtt` passthrough as before). So formats the browser can't render directly now work on-device.

@@ -221,6 +221,8 @@ All require admin auth.
 | DELETE | `/api/admin/offline-cache/{cache_key}` | Delete one cached MP4 by its 24-hex basename. 409 if a pending/processing prep job is currently writing that file |
 | DELETE | `/api/admin/offline-cache/orphans` | Purge every cache file whose source is gone or has been re-encoded. Returns `{deleted_count, bytes_freed}` |
 | DELETE | `/api/admin/library/{item_id}/offline-cache` | Delete every cached MP4 currently mapped to one library item. Skips files locked by an active prep job. Returns `{deleted_count, bytes_freed}` |
+| GET | `/api/admin/cache-autopurge` | `{enabled, max_gb, last}` — orphan auto-purge config (`library.json → settings.cache_autopurge`). `last` = the most recent auto-purge result `{at, deleted, bytes_freed, total_bytes_before}` or `null` |
+| POST | `/api/admin/cache-autopurge` | `{enabled, max_gb}` → saves it; `max_gb` clamped 1–10000. When on, `cache_autopurge_loop` (every 5 min) purges all orphan bundles once total `.offline_cache/` size ≥ `max_gb` GB. Only orphans are removed — bundles for live library files are never touched, active prep jobs skipped |
 | GET | `/api/admin/background-video` | `{name, volume, enabled, exists, size_bytes, currently_playing}` — idle background video settings + live status |
 | POST | `/api/admin/background-video` | Multipart `file` upload — replaces any existing `.background/` file. Hot-swaps on screen if bg is currently playing |
 | DELETE | `/api/admin/background-video` | Removes file + settings. Stops VLC if bg was on screen |

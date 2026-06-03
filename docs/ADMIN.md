@@ -74,6 +74,8 @@ Each per-file entry carries one of five statuses, surfaced as a coloured badge i
 
 Active prep jobs are protected: any `pending`/`processing` job whose `out` path matches a cache file is skipped during deletion (the per-file endpoint returns 409; bulk endpoints just skip and continue). The inventory does not auto-refresh — use the **Refresh** button (or any delete action, which reloads after completing) to update progress bars and statuses.
 
+**Auto-Purge Orphans card** — automates the orphan cleanup so an unattended box can't fill its disk. An enable toggle + a **Purge When Cache Reaches (GB)** threshold (1–10000, default 50) persist under `library.json → settings.cache_autopurge` (`enabled`, `max_gb`). The `cache_autopurge_loop` background task ([main.py](../main.py), registered in `lifespan`) re-checks every 5 min: when enabled and the **total** `.offline_cache/` size is at/above the cap, it purges every orphan bundle — exactly the set the manual **Purge All Orphans** clears (cache/partial dirs + legacy MP4s with no live library file). Bundles backing current library files are **never** touched, and active prep jobs are skipped (`_offline_cache_path_active`), so auto-purge can only ever reclaim space that was already safe to delete. The size walk reuses `_build_offline_cache_inventory` (offloaded to a worker thread) and only runs while the feature is on. The card shows a "last run" line (from `state.cache_autopurge_last`) with the count + bytes freed. `GET`/`POST /api/admin/cache-autopurge`.
+
 Single-key deletes are atomic: clicking **Delete**/**Clear** on one row removes `<key>.mp4`, `<key>.part.mp4`, AND any terminal (`done`/`error`) job entries that target it, via `_delete_cache_artifacts` in main.py.
 
 Endpoints:
@@ -81,6 +83,8 @@ Endpoints:
 - `DELETE /api/admin/offline-cache/{cache_key}` → `{deleted, bytes_freed}` (409 if a job is writing the file)
 - `DELETE /api/admin/offline-cache/orphans` → `{deleted_count, bytes_freed}`
 - `DELETE /api/admin/library/{item_id}/offline-cache` → `{deleted_count, bytes_freed}`
+- `GET /api/admin/cache-autopurge` → `{enabled, max_gb, last}` (`last` = `{at, deleted, bytes_freed, total_bytes_before}` or `null`)
+- `POST /api/admin/cache-autopurge` → `{enabled, max_gb}`; `max_gb` clamped 1–10000
 
 ### 5. Background Video
 

@@ -281,6 +281,32 @@
       </div>
     </div>
 
+    <!-- Auto-purge orphans when the cache outgrows a size cap -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h3 class="text-sm font-black uppercase tracking-wide">Auto-Purge Orphans</h3>
+          <p class="text-xs text-gray-500 mt-0.5">When the cache grows past the size below, orphan files are deleted automatically. Bundles for current library items are never touched.</p>
+        </div>
+        <label class="flex-shrink-0 inline-flex items-center cursor-pointer">
+          <input id="apEnabled" type="checkbox" class="sr-only peer" onchange="saveCacheAutopurge()">
+          <div class="w-11 h-6 bg-gray-700 peer-checked:bg-indigo-600 transition-colors relative after:content-[''] after:absolute after:top-0.5 after:left-0.5 after:bg-white after:h-5 after:w-5 after:transition-transform peer-checked:after:translate-x-5"></div>
+        </label>
+      </div>
+      <div class="px-5 py-4 flex items-end justify-between gap-3 flex-wrap">
+        <div>
+          <label class="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Purge When Cache Reaches (GB)</label>
+          <input id="apMaxGb" type="number" min="1" max="10000" step="1" value="50"
+            class="w-28 bg-gray-950 border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:outline-none focus:border-indigo-500"/>
+        </div>
+        <button onclick="saveCacheAutopurge(this)"
+          class="text-xs font-bold uppercase tracking-wide px-4 py-2 border border-indigo-700 bg-indigo-900/40 text-indigo-300 hover:bg-indigo-900 transition-colors">
+          Save
+        </button>
+      </div>
+      <div id="apLast" class="hidden px-5 py-3 border-t border-gray-800 text-[11px] text-gray-500"></div>
+    </div>
+
     <div id="offOrphanCard" class="hidden bg-gray-900 border border-amber-900/60">
       <div class="px-5 py-4 border-b border-amber-900/60 flex items-center justify-between gap-3">
         <div class="min-w-0">
@@ -2808,6 +2834,51 @@ async function loadOfflineCache(){
       </div>`;
     }).join("");
   }
+  loadCacheAutopurge();
+}
+
+// ── Auto-purge orphans config ────────────────────────────────────────────────
+async function loadCacheAutopurge(){
+  let r;
+  try{
+    r = await fetch("/api/admin/cache-autopurge", {headers: authHeader()});
+  }catch(_){ return; }
+  if(!r.ok) return;
+  const d = await r.json();
+  document.getElementById("apEnabled").checked = !!d.enabled;
+  document.getElementById("apMaxGb").value = d.max_gb;
+  const lastEl = document.getElementById("apLast");
+  if(d.last && d.last.deleted){
+    lastEl.classList.remove("hidden");
+    lastEl.textContent = `Last run ${new Date(d.last.at*1000).toLocaleString()}: purged ${d.last.deleted} orphan${d.last.deleted!==1?"s":""}, freed ${_fmtBytes(d.last.bytes_freed)}.`;
+  } else {
+    lastEl.classList.add("hidden");
+  }
+}
+
+async function saveCacheAutopurge(btn){
+  const enabled = document.getElementById("apEnabled").checked;
+  let maxGb = parseFloat(document.getElementById("apMaxGb").value);
+  if(!isFinite(maxGb) || maxGb < 1) maxGb = 1;
+  if(maxGb > 10000) maxGb = 10000;
+  if(btn){ btn.disabled = true; btn.classList.add("opacity-50"); }
+  let r;
+  try{
+    r = await fetch("/api/admin/cache-autopurge", {
+      method: "POST",
+      headers: {...authHeader(), "Content-Type": "application/json"},
+      body: JSON.stringify({enabled, max_gb: maxGb}),
+    });
+  }catch(_){
+    showToast("Network error — not saved.");
+    if(btn){ btn.disabled = false; btn.classList.remove("opacity-50"); }
+    return;
+  }
+  if(btn){ btn.disabled = false; btn.classList.remove("opacity-50"); }
+  if(!r.ok){ showToast(`Save failed (HTTP ${r.status}).`); return; }
+  const d = await r.json();
+  document.getElementById("apMaxGb").value = d.max_gb;
+  showToast(enabled ? `Auto-purge on — orphans cleared above ${d.max_gb} GB.` : "Auto-purge off.");
 }
 
 // Status → {label, classes for the badge}. Used for both per-file and per-item summaries.

@@ -430,3 +430,15 @@ Three subtitle problems: online search buried English (defaulted to all language
 - [x] **31.4** (v4.14.0) UI. Admin **Subtitles** card (language + on-by-default + auto-search toggles; `loadSubs`/`saveSubs`), AI card loses its language picker. Profile Settings **Subtitles** selector (Default/On/Off; `saveSubtitlesPref`). Find-Subtitles modal language filter (`#subSearchLang`, defaults to preferred, "All languages" option). Version badge → 4.14.0.
 - [x] **31.5** (v4.14.0) Docs — GOTCHAS (VLC auto-enables subs / selection priority), STT (unified language), API (endpoints + search + state field), ADMIN (Subtitles card), LIBRARY_DATA (settings.subtitles + profile.subtitles_on + migration), FRONTEND (controls), BACKEND (helpers + AppState), CHANGELOG.
 
+---
+
+## Milestone 32 — Auto-purge orphan offline-cache files at a size cap
+
+The `.offline_cache/` directory never auto-evicted — orphan bundles (re-encoded/removed sources, deleted library items) accumulated until an operator manually purged them, so an unattended box could fill its disk. Add an admin-configured size cap that auto-clears orphans.
+
+- [x] **32.1** (v4.20.0) Data + config. `settings.cache_autopurge` (`enabled` false, `max_gb` 50, clamped 1–10000) via `_cache_autopurge_cfg`. `state.cache_autopurge_last` holds the last run's `{at, deleted, bytes_freed, total_bytes_before}` (in-memory, not persisted).
+- [x] **32.2** (v4.20.0) Background loop. `cache_autopurge_loop` (registered in `lifespan`) re-checks every 5 min: when enabled and total `.offline_cache/` size ≥ `max_gb`, deletes every orphan bundle via the existing `_build_offline_cache_inventory` / `_delete_cache_artifacts` / `_offline_cache_path_active` helpers. Bundles for live library files are never touched; active prep jobs skipped. The size walk only runs while enabled.
+- [x] **32.3** (v4.20.0) Endpoints + model. `CacheAutopurgeReq`; `GET`/`POST /api/admin/cache-autopurge`.
+- [x] **32.4** (v4.20.0) UI. Admin **Offline Cache** tab → **Auto-Purge Orphans** card (enable toggle + GB threshold + "last run" line; `loadCacheAutopurge`/`saveCacheAutopurge`). Version badge → 4.20.0.
+- [x] **32.5** (v4.20.0) Docs — ADMIN (Auto-Purge card + endpoints), API (two endpoints), LIBRARY_DATA (settings.cache_autopurge), CHANGELOG.
+
