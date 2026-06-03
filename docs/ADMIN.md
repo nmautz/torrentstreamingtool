@@ -107,7 +107,7 @@ For each profile:
 
 ### 7. System
 
-Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Overnight Stream Prep**, **Idle Auto-Prep**, **Auto-Prep on Play**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
+Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Overnight Stream Prep**, **Idle Auto-Prep**, **Auto-Prep on Play**, **Force Stream Prep**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
 
 #### System Health
 
@@ -209,6 +209,21 @@ Panel control: a single enable/disable toggle (saves immediately on click).
 
 - `GET /api/admin/play-prep` → `{enabled}`.
 - `POST /api/admin/play-prep` → `{enabled}`.
+
+#### Force Stream Prep
+
+On-demand prep that **viewers and host activity cannot stop** — the deliberate opposite of Overnight / Idle prep (both of which the non-admin Pause control and the activity-kill can halt). The card preps the **whole library** or **one selected item** (a scope dropdown — "Whole library" plus every library item) for on-device streaming, immediately, and runs to completion no matter who's watching or how busy the box is. Only the admin's two Stop buttons halt it.
+
+Mechanics: force-prep jobs are queued on a dedicated **`"admin"` prep queue** (`_enqueue_admin_prep` → `_start_admin_prep_job`). Like interactive (play-on-device) prep, admin jobs **ignore the bulk pause gate** (`state.prep_paused`) and **survive the activity-kill** (`_pause_prep` / `_activity_kick` only touch `bulk`), and they **preempt** any in-flight bulk encode (`_preempt_running_bulk`). Bulk prep defers to them via `_priority_hls_pending` (which now counts both `interactive` and `admin`). The one thing that can stop them is the admin Stop control, gated on `state.admin_prep_stop`:
+
+- **Stop (finish file)** — `hard=false`: the in-flight encode runs to completion (and is cached); every queued admin job cancels at the gate. `_stop_admin_prep` sets `admin_prep_stop`, marking pending jobs `"cancelled"`.
+- **Stop Now** — `hard=true`: additionally `terminate()`s the running ffmpeg via `job["_proc"]` (tagged `_admin_stopped` so the non-zero rc is treated as an intentional cancel, partial bundle dropped), then cancels the queued rest.
+
+A stopped batch is **not** auto-resumed (unlike the bulk pause/resume); pressing **Force Prep** again clears `admin_prep_stop` and starts a fresh batch. Already-cached files are skipped. Disabled on macOS hosts (no HLS — `hls_available:false`). Status (counts + aggregate progress) polls `GET /api/admin/force-prep` every 3 s while the System tab is open. See [STREAMING.md § Force-prep (admin)](STREAMING.md).
+
+- `GET /api/admin/force-prep` → `{hls_available, active, stopped, total, processing, pending, progress}`.
+- `POST /api/admin/force-prep` → `{item_id?}` (None/"" ⇒ whole library); returns `{ok, queued, …status}`. 409 on macOS.
+- `POST /api/admin/force-prep/stop` → `{hard}`; returns `{ok, cancelled, killed, …status}`.
 
 #### Optional Components
 

@@ -525,6 +525,7 @@ class AppState:
     subtitle_default_language: str = "eng"                # preferred subtitle language (settings.subtitles.default_language; "" = Any), mirrored here for state_snapshot/UI defaults; seeded at lifespan, updated by the admin subtitles POST
     last_activity: float = 0.0                            # time.time() of last user-initiated interaction (drives scheduled-reboot idle check)
     prep_paused: bool = False                             # True ⇒ bulk stream-prep jobs hold (set by the non-admin Pause control / overnight window end)
+    admin_prep_stop: bool = False                         # True ⇒ admin force-prep ("admin" queue) jobs cancel at the gate (set by the admin Stop control). Cleared when a new force-prep batch starts. Independent of prep_paused — force-prep ignores the bulk gate + activity-kill by design
     auto_prep_engaged: bool = False                       # True while the unified auto_prep_loop has prep running (overnight window OR idle trigger) — edge flag for resume/pause
     play_prep_task: Optional[asyncio.Task] = None         # the chain task prepping the currently-playing series' tail for on-device (settings.play_prep); cancelled + replaced on each new VLC play
     download_idle_open: bool = False                      # last computed idle/night DOWNLOAD window state (set by download_scheduler_loop) — drives the "waiting for idle" UI
@@ -4697,6 +4698,14 @@ class PlayPrepReq(BaseModel):
     enabled: bool = True                       # auto on-device prep of the playing episode (+ playlist tail) on every VLC play
 
 
+class ForcePrepReq(BaseModel):
+    item_id: Optional[str] = None              # force-prep one library item; None/"" ⇒ whole library
+
+
+class ForcePrepStopReq(BaseModel):
+    hard: bool = False                         # True ⇒ kill the in-flight encode now; False ⇒ let the current file finish, then cancel the rest
+
+
 class CacheAutopurgeReq(BaseModel):
     enabled: bool = False
     max_gb: float = 50.0                        # purge orphan offline-cache bundles once .offline_cache/ reaches this many GB; clamped 1–10000
@@ -8485,6 +8494,36 @@ async def admin_set_play_prep(request: Request, body: PlayPrepReq) -> JSONRespon
     return JSONResponse({"ok": True, **_play_prep_cfg(lib)})
 
 
+@app.get("/api/admin/force-prep")
+async def admin_get_force_prep(request: Request) -> JSONResponse:
+    """Live status of the admin force-prep batch (counts + aggregate progress)."""
+    _require_admin(request)
+    return JSONResponse(_force_prep_status())
+
+
+@app.post("/api/admin/force-prep")
+async def admin_start_force_prep(request: Request, body: ForcePrepReq) -> JSONResponse:
+    """Force-prep the whole library (or one item) for on-device streaming. These
+    jobs ignore the bulk pause gate and the activity-kill — neither a viewer's
+    Pause control nor live host activity can stop them; only the admin Stop
+    control (POST /force-prep/stop) can. 409 on macOS hosts (no HLS)."""
+    _require_admin(request)
+    if not HLS_AVAILABLE:
+        raise HTTPException(409, HLS_UNAVAILABLE_MSG)
+    item_id = (body.item_id or "").strip()
+    queued = await _enqueue_admin_prep(item_id)
+    return JSONResponse({"ok": True, "queued": queued, **_force_prep_status()})
+
+
+@app.post("/api/admin/force-prep/stop")
+async def admin_stop_force_prep(request: Request, body: ForcePrepStopReq) -> JSONResponse:
+    """Stop the admin force-prep batch. `hard=False` lets the in-flight file finish
+    then cancels the rest; `hard=True` terminates the running encode immediately."""
+    _require_admin(request)
+    res = _stop_admin_prep(bool(body.hard))
+    return JSONResponse({"ok": True, **res, **_force_prep_status()})
+
+
 @app.get("/api/admin/cache-autopurge")
 async def admin_get_cache_autopurge(request: Request) -> JSONResponse:
     """Return the orphan-cache auto-purge config + the result of the last run."""
@@ -9921,15 +9960,15 @@ async def _run_offline_job(job_id: str) -> None:
         job["status"] = "error"; job["error"] = HLS_UNAVAILABLE_MSG
         return
     is_bulk = job.get("queue") == "bulk"
-    # Interactive-prep precedence. A bulk job parks here until no interactive
-    # (fullscreen "Prep for Device" / play-on-device) HLS prep is queued or
-    # encoding, so a user-initiated prep always runs ahead of overnight / idle /
-    # manual bulk prep. The file a bulk job is *currently* encoding is separately
-    # booted by _preempt_running_bulk so the slot frees without waiting for it.
-    # (The `not prep_paused` escape lets a bulk job fall through to park at the
-    # pause gate below instead of spinning here.)
+    # Priority-prep precedence. A bulk job parks here until no priority HLS prep is
+    # queued or encoding — that's interactive (fullscreen "Prep for Device" /
+    # play-on-device) AND admin force-prep, both of which must run ahead of
+    # overnight / idle / manual bulk prep. The file a bulk job is *currently*
+    # encoding is separately booted by _preempt_running_bulk so the slot frees
+    # without waiting for it. (The `not prep_paused` escape lets a bulk job fall
+    # through to park at the pause gate below instead of spinning here.)
     if is_bulk:
-        while _interactive_hls_pending() > 0 and not state.prep_paused:
+        while _priority_hls_pending() > 0 and not state.prep_paused:
             await asyncio.sleep(0.25)
     # Hold pending until the global concurrency slot frees up. This is what
     # keeps a 77-file /prep-all from spawning 77 ffmpegs at once.
@@ -9939,7 +9978,7 @@ async def _run_offline_job(job_id: str) -> None:
         # interactive job (also waiting on the slot) takes it first. (When prep is
         # paused, skip this and fall through to park at the pause gate instead — a
         # paused job holds no slot, so interactive still wins without the churn.)
-        if is_bulk and not state.prep_paused and _interactive_hls_pending() > 0:
+        if is_bulk and not state.prep_paused and _priority_hls_pending() > 0:
             job["status"] = "pending"
             asyncio.create_task(_requeue_offline_job(job_id))
             return
@@ -9958,6 +9997,15 @@ async def _run_offline_job(job_id: str) -> None:
         # the gate entirely. See PrepPauseReq / _pause_prep / _resume_prep.
         if is_bulk and state.prep_paused:
             job["status"] = "paused"
+            return
+        # Admin force-prep stop gate. The admin Stop control sets admin_prep_stop
+        # to cancel the whole force-prep batch; an "admin" job that reaches the
+        # slot after Stop was pressed cancels itself (releasing the slot so other
+        # work proceeds). A hard stop additionally terminates the in-flight encode
+        # — handled below via the `_admin_stopped` branch. Unlike the bulk pause
+        # gate, this is a one-way cancel: stopped jobs are not auto-resumed.
+        if job.get("queue") == "admin" and state.admin_prep_stop:
+            job["status"] = "cancelled"
             return
         job["status"] = "processing"
         # Re-baseline started_at to when the work actually begins so per-job
@@ -10122,6 +10170,15 @@ async def _run_offline_job(job_id: str) -> None:
                     job["progress"] = 0.0
                     await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
                     hls_log.info("job %s PAUSED (encode terminated by user)", job_id)
+                    return
+                # Did the admin hard-stop this force-prep encode? Same deal — the
+                # non-zero rc is intentional, so mark it cancelled (not an error)
+                # and drop the partial bundle. Not re-queued; the batch is over.
+                if job.pop("_admin_stopped", False):
+                    job["status"] = "cancelled"
+                    job["progress"] = 0.0
+                    await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
+                    hls_log.info("job %s CANCELLED (admin hard-stop)", job_id)
                     return
                 err = "\n".join(stderr_tail).strip()
                 elapsed = time.time() - job["started_at"]
@@ -10295,13 +10352,14 @@ def _bulk_processing_now() -> bool:
                for j in (*_offline_jobs.values(), *_stt_jobs.values()))
 
 
-def _interactive_hls_pending() -> int:
-    """Count interactive (fullscreen "Prep for Device" / play-on-device) HLS jobs
-    that are queued or encoding. Bulk prep defers to these so a user-initiated prep
-    always jumps the queue ahead of overnight / idle / manual bulk prep — see the
-    precedence gate in `_run_offline_job`."""
+def _priority_hls_pending() -> int:
+    """Count priority (non-bulk) HLS jobs that are queued or encoding — both
+    interactive (fullscreen "Prep for Device" / play-on-device) and admin
+    force-prep. Bulk prep defers to these so a user-initiated prep OR an admin
+    force-prep always jumps the queue ahead of overnight / idle / manual bulk
+    prep — see the precedence gate in `_run_offline_job`."""
     return sum(1 for j in _offline_jobs.values()
-               if j.get("queue") == "interactive"
+               if j.get("queue") in ("interactive", "admin")
                and j.get("status") in ("pending", "processing"))
 
 
@@ -10452,6 +10510,125 @@ def _start_interactive_prep_job(src: Path, item_id: str) -> Optional[str]:
     asyncio.create_task(_run_offline_job(job_id))
     _preempt_running_bulk(except_job_id=job_id)
     return job_id
+
+
+# ── Admin force-prep (settings-free, admin-only) ─────────────────────────────
+# An admin can force-prep the whole library (or one item) on demand. These jobs
+# use a dedicated "admin" queue: like "interactive" they ignore the bulk pause
+# gate and the activity-kill and preempt in-flight bulk work — so neither a
+# viewer's Pause control nor live host activity can stop them. UNLIKE
+# interactive, the admin can stop them via _stop_admin_prep (soft = let the
+# current file finish then cancel the rest; hard = kill the in-flight encode now).
+
+def _start_admin_prep_job(src: Path, item_id: str) -> Optional[str]:
+    """Start (or coalesce with) an *admin* force-prep HLS job for `src`.
+
+    Returns the job id, or None if the bundle is already cached or ffmpeg is
+    unavailable. Mirrors `_start_interactive_prep_job` but tags the job
+    `queue:"admin"` so the admin Stop control (and only it) can halt the batch."""
+    out_dir = OFFLINE_CACHE / _offline_cache_key(src)
+    if (out_dir / "master.m3u8").exists():
+        return None
+    existing = next(
+        (j for j in _offline_jobs.values()
+         if j["src"] == str(src) and j["status"] in ("pending", "processing", "paused")),
+        None,
+    )
+    if existing:
+        existing["queue"] = "admin"
+        if existing.get("status") == "paused":
+            existing["status"] = "pending"
+            existing["_proc"] = None
+            existing.pop("_paused_kill", None)
+            asyncio.create_task(_run_offline_job(existing["id"]))
+        _preempt_running_bulk(except_job_id=existing["id"])
+        return existing["id"]
+    if not analyzer.ffmpeg_bin():
+        return None
+    job_id = secrets.token_hex(8)
+    _offline_jobs[job_id] = {
+        "id": job_id, "src": str(src), "out": str(out_dir),
+        "status": "pending", "operation": "hls",
+        "progress": 0.0, "error": None,
+        "started_at": time.time(), "item_id": item_id,
+        "queue": "admin",
+    }
+    asyncio.create_task(_run_offline_job(job_id))
+    _preempt_running_bulk(except_job_id=job_id)
+    return job_id
+
+
+async def _enqueue_admin_prep(item_id: str = "") -> int:
+    """Force-queue an admin HLS-prep job for every un-prepped video file in the
+    library, or just in `item_id` when given. Clears any prior Stop so the new
+    batch runs. Returns the count of files newly queued (already-cached files are
+    skipped). Yields between files so scanning a large library never stalls the
+    event loop."""
+    if not HLS_AVAILABLE:
+        return 0
+    state.admin_prep_stop = False   # a fresh batch overrides a previous Stop
+    lib = await get_library()
+    queued = 0
+    for item in lib.get("items", []):
+        if item_id and item.get("id") != item_id:
+            continue
+        for f in item.get("files", []):
+            p = Path(f.get("path", ""))
+            if p.suffix.lower() not in VIDEO_EXTS:
+                continue
+            try:
+                if not p.exists():
+                    continue
+            except OSError:
+                continue
+            if _start_admin_prep_job(p, item.get("id", "")):
+                queued += 1
+            await asyncio.sleep(0)
+    return queued
+
+
+def _stop_admin_prep(hard: bool) -> dict:
+    """Stop the admin force-prep batch. Sets the gate so no further "admin" job
+    starts, and cancels every queued one. `hard=True` also terminates the
+    in-flight admin encode immediately; `hard=False` lets the current file finish
+    (it completes and is cached) while the rest are dropped. Returns counts."""
+    state.admin_prep_stop = True
+    cancelled = killed = 0
+    for j in _offline_jobs.values():
+        if j.get("queue") != "admin":
+            continue
+        st = j.get("status")
+        if st == "pending":
+            j["status"] = "cancelled"
+            cancelled += 1
+        elif st == "processing" and hard:
+            proc = j.get("_proc")
+            if proc is not None and proc.returncode is None:
+                j["_admin_stopped"] = True   # tells _run_offline_job this rc is intentional
+                try:
+                    proc.terminate()
+                except Exception:
+                    pass
+                killed += 1
+    return {"cancelled": cancelled, "killed": killed}
+
+
+def _force_prep_status() -> dict:
+    """Live status of the admin force-prep batch for the admin panel."""
+    admin_jobs = [j for j in _offline_jobs.values() if j.get("queue") == "admin"]
+    active = [j for j in admin_jobs if j.get("status") in ("pending", "processing")]
+    processing = [j for j in active if j.get("status") == "processing"]
+    progress = (sum(float(j.get("progress", 0)) for j in active) / len(active)
+                if active else 0.0)
+    return {
+        "hls_available": HLS_AVAILABLE,
+        "active":        bool(active),
+        "stopped":       state.admin_prep_stop,
+        "total":         len(active),
+        "processing":    len(processing),
+        "pending":       len(active) - len(processing),
+        "progress":      round(progress, 3),
+    }
 
 
 async def _play_prep_chain(item_id: str, files: list[str]) -> None:

@@ -543,8 +543,9 @@ does **not** warn — the user wants playback now.
 ### Global pause gate (server)
 
 Every prep job carries a `queue` field: `"bulk"` (per-item / per-row "prep for
-later" + overnight) or `"interactive"` (play-on-device). `state.prep_paused`
-gates **bulk** jobs only. The gate lives at the top of `_run_offline_job`, just
+later" + overnight), `"interactive"` (play-on-device), or `"admin"` (admin
+force-prep — see [§ Force-prep (admin)](#force-prep-admin)). `state.prep_paused`
+gates **bulk** jobs only; `interactive` and `admin` ignore it. The gate lives at the top of `_run_offline_job`, just
 after the semaphore is acquired:
 
 - A bulk job that reaches the head of the queue while paused marks itself
@@ -651,6 +652,36 @@ already running finishes. Disabled (and the chain never starts) when `HLS_AVAILA
 is false (macOS).
 
 See [ADMIN.md § Auto-Prep on Play](ADMIN.md) for the panel + endpoints.
+
+### Force-prep (admin)
+
+A fourth trigger, admin-initiated, that **viewers and host activity cannot stop**
+— the deliberate inverse of the interruptible bulk triggers above. The Admin →
+System **Force Stream Prep** card preps the whole library (or one selected item)
+on demand and runs it to completion regardless of the non-admin Pause control or
+live activity.
+
+These jobs ride a dedicated **`"admin"` queue**. Mechanically they behave like
+`interactive` prep — they skip the `state.prep_paused` gate, are never touched by
+`_pause_prep` / `_activity_kick` (both only act on `bulk`), and preempt any
+in-flight bulk encode (`_preempt_running_bulk`). `_priority_hls_pending` counts
+both `interactive` and `admin`, so bulk prep defers to a force-prep batch the same
+way it defers to a play-on-device prep.
+
+The difference from `interactive` is that the admin **can** halt them, via
+`_stop_admin_prep(hard)` gated on `state.admin_prep_stop`:
+
+- **Soft** (`hard=false`) — the in-flight encode finishes (and is cached); every
+  queued admin job marks itself `"cancelled"` at the gate in `_run_offline_job`.
+- **Hard** (`hard=true`) — additionally `terminate()`s the running ffmpeg
+  (`job["_admin_stopped"]` ⇒ the non-zero rc is an intentional cancel, partial
+  `.part` dir dropped), then cancels the queued rest.
+
+A stopped batch is **not** auto-resumed (no equivalent of `_resume_prep` for
+`admin`); a fresh **Force Prep** clears `admin_prep_stop` and re-queues. No-op on
+macOS (`HLS_AVAILABLE` false). Helpers: `_enqueue_admin_prep` /
+`_start_admin_prep_job` / `_stop_admin_prep` / `_force_prep_status`. Endpoints +
+UI in [ADMIN.md § Force Stream Prep](ADMIN.md).
 
 ---
 

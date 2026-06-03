@@ -635,6 +635,48 @@
       </div>
     </div>
 
+    <!-- Force stream prep -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Force Stream Prep</h2>
+        <p class="text-xs text-gray-500 mt-0.5">Prep the whole library (or one item) for on-device streaming right now. Unlike Overnight / Idle prep, a force-prep <strong>cannot be paused by viewers or stopped by host activity</strong> — it runs to completion. Only the Stop buttons below halt it.</p>
+      </div>
+
+      <div id="fpUnavail" class="hidden px-5 py-4 border-b border-gray-800 text-xs text-amber-300 bg-amber-950/30">
+        On-device prep isn't available on this host (macOS). Force prep is disabled.
+      </div>
+
+      <div class="px-5 py-4 border-b border-gray-800 grid grid-cols-1 sm:grid-cols-[1fr_auto] gap-3 items-end">
+        <div class="space-y-1.5 min-w-0">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Scope</label>
+          <select id="fpItem"
+            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none">
+            <option value="">Whole library</option>
+          </select>
+        </div>
+        <button id="fpStartBtn" onclick="startForcePrep()"
+          class="flex-shrink-0 bg-indigo-600 hover:bg-indigo-500 px-5 py-2.5 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">
+          Force Prep
+        </button>
+      </div>
+
+      <div class="px-5 py-4 flex items-center justify-between gap-3 flex-wrap">
+        <div id="fpStatus" class="text-[11px] text-gray-500 min-w-0">Not running.</div>
+        <div class="flex items-center gap-2 flex-shrink-0">
+          <button id="fpStopSoftBtn" onclick="stopForcePrep(false)"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-amber-800 bg-amber-950/40 text-amber-300 hover:bg-amber-900 transition-colors disabled:opacity-40"
+            disabled>
+            Stop (finish file)
+          </button>
+          <button id="fpStopHardBtn" onclick="stopForcePrep(true)"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-red-800 bg-red-950/40 text-red-300 hover:bg-red-900 transition-colors disabled:opacity-40"
+            disabled>
+            Stop Now
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- qBittorrent seeding & bandwidth limits -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
@@ -1117,8 +1159,8 @@ function switchTab(tab){
   if(tab==="skip")       loadSkipPanel();
   if(tab==="offline")    loadOfflineCache();
   if(tab==="background") loadBackgroundVideo();
-  if(tab==="system")   { loadScheduledReboot(); loadOvernightPrep(); loadIdlePrep(); loadPlayPrep(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
-  else                 { stopSysHealthPolling(); }
+  if(tab==="system")   { loadScheduledReboot(); loadOvernightPrep(); loadIdlePrep(); loadPlayPrep(); loadForcePrep(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
+  else                 { stopSysHealthPolling(); stopForcePrepPolling(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
 }
@@ -1566,6 +1608,120 @@ async function togglePlayPrep(){
     showToast("Save failed.", true);
   }finally{
     btn.disabled = false;
+  }
+}
+
+// ── Force Stream Prep ──────────────────────────────────────────────────────────
+let _fpTimer = null;
+let _fpItemsLoaded = false;
+
+function _renderForcePrep(d){
+  const status = document.getElementById("fpStatus");
+  const startBtn = document.getElementById("fpStartBtn");
+  const soft = document.getElementById("fpStopSoftBtn");
+  const hard = document.getElementById("fpStopHardBtn");
+  if(!status) return;
+  const unavail = d && d.hls_available === false;
+  document.getElementById("fpUnavail").classList.toggle("hidden", !unavail);
+  if(startBtn) startBtn.disabled = !!unavail;
+  document.getElementById("fpItem").disabled = !!unavail;
+  const active = d && d.active;
+  if(active){
+    const pct = Math.round((d.progress || 0) * 100);
+    status.innerHTML = `<span class="text-emerald-400 font-bold">Prepping</span> · `
+      + `${d.processing} encoding, ${d.pending} queued · ${pct}%`;
+  } else if(d && d.stopped){
+    status.textContent = "Stopped.";
+  } else {
+    status.textContent = "Not running.";
+  }
+  if(soft) soft.disabled = !active;
+  if(hard) hard.disabled = !active;
+}
+
+async function _fetchForcePrep(){
+  try{
+    const r = await fetch("/api/admin/force-prep", {headers: authHeader()});
+    if(!r.ok) return;
+    _renderForcePrep(await r.json());
+  }catch(_){}
+}
+
+function startForcePrepPolling(){
+  stopForcePrepPolling();
+  _fpTimer = setInterval(_fetchForcePrep, 3000);
+}
+function stopForcePrepPolling(){
+  if(_fpTimer){ clearInterval(_fpTimer); _fpTimer = null; }
+}
+
+async function _loadForcePrepItems(){
+  if(_fpItemsLoaded) return;
+  try{
+    const r = await fetch("/api/admin/library", {headers: authHeader()});
+    if(!r.ok) return;
+    const {items} = await r.json();
+    const sel = document.getElementById("fpItem");
+    if(!sel) return;
+    const cur = sel.value;
+    sel.innerHTML = `<option value="">Whole library</option>`
+      + (items || []).map(it=>`<option value="${escHtml(it.id)}">${escHtml(it.title)}</option>`).join("");
+    sel.value = cur;
+    _fpItemsLoaded = true;
+  }catch(_){}
+}
+
+async function loadForcePrep(){
+  _loadForcePrepItems();
+  await _fetchForcePrep();
+  startForcePrepPolling();
+}
+
+async function startForcePrep(){
+  const btn = document.getElementById("fpStartBtn");
+  const itemId = document.getElementById("fpItem").value;
+  btn.disabled = true;
+  try{
+    const r = await fetch("/api/admin/force-prep",{
+      method:"POST",
+      headers:{...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify({item_id: itemId || null}),
+    });
+    const d = await r.json().catch(()=>({}));
+    if(!r.ok){
+      showToast(`Force prep failed: ${d.detail || r.status}`, true);
+      return;
+    }
+    _renderForcePrep(d);
+    showToast(d.queued ? `Force-prepping ${d.queued} file${d.queued!==1?'s':''}.`
+                       : "Nothing to prep — all files are already cached.");
+  }catch(_){
+    showToast("Force prep failed.", true);
+  }finally{
+    btn.disabled = false;
+  }
+}
+
+async function stopForcePrep(hard){
+  const soft = document.getElementById("fpStopSoftBtn");
+  const hardBtn = document.getElementById("fpStopHardBtn");
+  soft.disabled = true; hardBtn.disabled = true;
+  try{
+    const r = await fetch("/api/admin/force-prep/stop",{
+      method:"POST",
+      headers:{...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify({hard: !!hard}),
+    });
+    const d = await r.json().catch(()=>({}));
+    if(!r.ok){
+      showToast(`Stop failed: ${d.detail || r.status}`, true);
+      return;
+    }
+    _renderForcePrep(d);
+    const killedNote = hard && d.killed ? ` (killed ${d.killed} in progress)` : "";
+    showToast(`Force prep stopped — cancelled ${d.cancelled || 0} queued${killedNote}.`);
+  }catch(_){
+    showToast("Stop failed.", true);
   }
 }
 

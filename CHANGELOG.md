@@ -1,5 +1,13 @@
 # Changelog
 
+## [4.24.0] — 2026-06-02
+- **New: admin "Force Stream Prep" — an on-demand prep that viewers and host activity can't stop.** Overnight / Idle prep are deliberately interruptible (the non-admin Pause control and the activity-kill both halt bulk prep). Force-prep is the opposite: a new **Force Stream Prep** card on Admin → System preps the whole library (or one selected item) for on-device streaming *right now*, and it **runs to completion regardless of the viewer Pause control or live host activity**. Only the admin can stop it.
+  - These jobs use a dedicated `"admin"` prep queue. Like interactive (play-on-device) prep they ignore the bulk pause gate (`state.prep_paused`) and the activity-kill (`_pause_prep` / `_activity_kick` only touch `bulk`), and they preempt any in-flight bulk encode. Unlike interactive prep, the admin can halt them.
+  - **Soft stop** ("Stop (finish file)") lets the in-flight encode finish — so it's cached — then cancels every queued file. **Hard stop** ("Stop Now") terminates the running ffmpeg immediately (the partial bundle is dropped) and cancels the rest. A stopped batch is *not* auto-resumed; starting a new force-prep clears the stop.
+  - Bulk (overnight / idle / manual) prep now defers to admin force-prep the same way it already defers to interactive prep (`_priority_hls_pending` counts both non-bulk queues). Disabled on macOS hosts (no HLS).
+  - `GET`/`POST /api/admin/force-prep` (`{item_id?}`) and `POST /api/admin/force-prep/stop` (`{hard}`).
+- **Docs:** [docs/STREAMING.md](docs/STREAMING.md), [docs/ADMIN.md](docs/ADMIN.md), [docs/API.md](docs/API.md).
+
 ## [4.23.0] — 2026-06-02
 - **Improved: offline HLS prep now decodes on the GPU (NVDEC) when NVENC is in use, instead of pegging the CPU.** Previously the NVENC path offloaded only the *encode* to the GPU — the source was software-decoded and every ABR down-rung software-scaled on the CPU. On a box with an NVIDIA GPU that left the CPU at 80-90% while the GPU idled near 50% (it was only doing the small 720p/480p encodes). `_build_hls_ffmpeg_args` now inserts `-hwaccel cuda` before `-i` whenever NVENC is selected *and* a rung actually decodes (not a lone stream-copy), routing decode through NVDEC — the single heaviest CPU cost.
   - Deliberately the **transparent** form (no `-hwaccel_output_format cuda`): frames auto-download to system memory to feed the existing `scale=-2:H` filter, and ffmpeg **silently falls back to software decode** for any source codec NVDEC can't handle — so this can never hard-fail a job the pure-CPU path would have completed. The libx264 (no-GPU) path is unchanged.
