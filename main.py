@@ -4487,9 +4487,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         state.vlc_night_mode = False
         state.vlc_night_mode_preset = NIGHT_MODE_DEFAULT_PRESET
 
-    # Default volume to half of the admin cap. Without this, state.vlc_volume
-    # starts at 100 (the dataclass default) which can blast if the cap is low.
-    _startup_vol = (await _global_max_volume()) // 2
+    # Apply the configured startup volume — a % of the admin cap (default 50%,
+    # i.e. half-max). Without this, state.vlc_volume starts at 100 (the dataclass
+    # default) which can blast if the cap is low.
+    _startup_vol = round((await _global_max_volume()) * (await _global_vlc_start_volume_pct()) / 100)
     state.vlc_volume = _startup_vol
     state.user_volume_before_bg = _startup_vol
     _startup_raw = max(0, min(512, round(_startup_vol / 100 * 256)))
@@ -4760,6 +4761,10 @@ class ProfileResumeModeReq(BaseModel):
 
 class MaxVolumeReq(BaseModel):
     max_volume: int   # 0-200; 200 = no cap
+
+
+class VlcStartVolumeReq(BaseModel):
+    vlc_start_volume: int   # 0-100; % of the max-volume cap applied to VLC at startup
 
 
 class NightModeReq(BaseModel):
@@ -6712,6 +6717,16 @@ async def _global_max_volume() -> int:
     return max(0, min(200, int(raw)))
 
 
+async def _global_vlc_start_volume_pct() -> int:
+    """Return the VLC startup volume as a % of the max-volume cap (0-100).
+
+    Defaults to 50 (half the cap), preserving the historical 1/2-max behaviour.
+    """
+    lib = await get_library()
+    raw = lib.get("settings", {}).get("vlc_start_volume", 50)
+    return max(0, min(100, int(raw)))
+
+
 @app.post("/api/vlc/volume/set")
 async def volume_set(volume: int) -> JSONResponse:
     # volume is 0-200 (100 = normal); VLC uses 0-512 (256 = 100%)
@@ -7732,6 +7747,20 @@ async def set_max_volume(req: MaxVolumeReq) -> JSONResponse:
         state.vlc_volume = capped
         await broadcast("state", state_snapshot())
     return JSONResponse({"ok": True, "max_volume": capped})
+
+
+@app.get("/api/settings/vlc-start-volume")
+async def get_vlc_start_volume() -> JSONResponse:
+    return JSONResponse({"vlc_start_volume": await _global_vlc_start_volume_pct()})
+
+
+@app.post("/api/settings/vlc-start-volume")
+async def set_vlc_start_volume(req: VlcStartVolumeReq) -> JSONResponse:
+    capped = max(0, min(100, int(req.vlc_start_volume)))
+    lib = await get_library()
+    lib.setdefault("settings", {})["vlc_start_volume"] = capped
+    await put_library(lib)
+    return JSONResponse({"ok": True, "vlc_start_volume": capped})
 
 
 @app.get("/api/settings/night-mode")

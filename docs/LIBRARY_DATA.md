@@ -11,6 +11,7 @@ The only persistent server-side state. Lives at the project root. Accessed via `
   "settings": {
     "library_paths": [ … ],            // UI-added paths (POST /api/settings/library-paths)
     "max_volume": 200,                  // global VLC volume cap 0–200; default 200 (no cap)
+    "vlc_start_volume": 50,             // VLC startup volume as % of max_volume; default 50 (half max)
     "vlc_night_mode": false,            // VLC dynamic-range compressor (night mode) on/off; default off
     "vlc_night_mode_preset": "medium",  // night-mode intensity: light|medium|max; remembered independently of on/off
     "system_volume_default": 70,        // host OS volume (0–100) restored when a YouTube play stops; default 70

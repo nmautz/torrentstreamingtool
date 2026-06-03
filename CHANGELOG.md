@@ -1,5 +1,10 @@
 # Changelog
 
+## [4.21.0] — 2026-06-02
+- **New: configurable VLC starting volume.** VLC previously always opened at exactly half the max-volume cap (hard-coded `cap // 2`). A new **VLC Starting Volume** slider in the dashboard settings panel sets the launch volume as a **% of the max-volume cap** (0–100, step 5), defaulting to **50%** — preserving the old half-max behaviour. Applied when VLC is launched at startup. Persisted under `library.json → settings.vlc_start_volume`.
+  - `GET`/`POST /api/settings/vlc-start-volume`. Startup now computes `round(cap * pct / 100)` instead of `cap // 2`.
+- **Docs:** [docs/API.md](docs/API.md), [docs/LIBRARY_DATA.md](docs/LIBRARY_DATA.md).
+
 ## [4.20.0] — 2026-06-02
 - **New: auto-purge orphan offline-cache files once the cache outgrows a size cap (admin setting).** The `.offline_cache/` directory had no automatic eviction — orphan bundles (re-encoded/removed sources, or files left by a deleted library item) accumulated until an operator manually hit "Purge All Orphans". A new **Auto-Purge Orphans** card on the Admin → Offline Cache tab adds an enable toggle + a **Purge When Cache Reaches (GB)** threshold (1–10000, default 50). Persisted under `library.json → settings.cache_autopurge`.
   - A new `cache_autopurge_loop` background task re-checks every 5 min: when enabled and the total cache size is at/above the cap, it deletes every *orphan* bundle (the same set the manual purge clears). **Bundles backing current library files are never touched**, so this can't evict something a viewer might still want, and active prep jobs are skipped (the existing `_offline_cache_path_active` guard).
