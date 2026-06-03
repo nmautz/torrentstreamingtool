@@ -130,6 +130,7 @@
        protected media). Hide every Prep / On-Device affordance, matched by the
        onclick handler name so new render sites stay covered automatically. */
     body.no-hls #pcLocalBtn,
+    body.no-hls #fcClipRow,
     body.no-hls [onclick^="prepForStreaming"],
     body.no-hls [onclick^="prepItemForStreaming"],
     body.no-hls [onclick^="playLibraryWithChooser"] { display: none !important; }
@@ -1570,6 +1571,26 @@
       </div>
     </div>
 
+    <!-- Row D2: Clip — save & share the last N seconds of TV playback. Library
+         playback only (toggled by JS); the 30s tile is prominent, the custom
+         length is a quieter sibling. Disabled until the file is stream-prepped.
+         See fcClip / fcClipCustom / _doClip. -->
+    <div id="fcClipRow" class="hidden flex-1 border-b border-gray-800 min-h-0">
+      <button id="fcClip30Btn" onclick="fcClip(30,this)" title="Save & share the last 30 seconds"
+        class="fc-tile flex flex-[2.2] border-r border-gray-800 bg-fuchsia-950/20
+               hover:bg-fuchsia-950/50 active:bg-fuchsia-950/70 text-fuchsia-300 transition-colors">
+        <svg class="w-7 h-7 mb-1" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+          <circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>
+          <path stroke-linecap="round" d="M20 4L8.12 15.88M14.47 14.48L20 20M8.12 8.12L12 12"/>
+        </svg>
+        <span class="text-sm font-black uppercase tracking-wide">Clip Last 30s</span>
+      </button>
+      <button id="fcClipCustomBtn" onclick="fcClipCustom(this)" title="Save & share a custom-length clip"
+        class="fc-tile flex flex-1 text-gray-500 hover:text-fuchsia-300 transition-colors">
+        <span class="text-[11px] font-bold uppercase tracking-wide">Clip last…</span>
+      </button>
+    </div>
+
     <!-- Row E: Stop (hold to confirm) + Save (streaming torrent only, toggled by JS) -->
     <div class="flex flex-1 min-h-0">
       <button onpointerdown="_holdStart(this, (b)=>{stopStream(b);closeFullscreenControls();}, event)"
@@ -1847,6 +1868,25 @@
       <button id="lpGenSubBtn" onclick="lpGenerateSubs()" title="Generate subtitles with AI"
         class="hidden flex-shrink-0 bg-purple-800 hover:bg-purple-700 text-white text-[10px] font-black uppercase tracking-wide px-2.5 py-1.5 transition-colors">
         AI
+      </button>
+    </div>
+    <!-- Clip — save & share the last N seconds of on-device playback. Prominent
+         30s button + a quieter custom-length sibling. Always available here (the
+         file is, by definition, already prepped). See lpClip / lpClipCustom. -->
+    <div id="lpClipRow" class="flex items-center gap-2">
+      <button onclick="lpClip(30,this)" title="Save & share the last 30 seconds"
+        class="flex-1 flex items-center justify-center gap-2 bg-fuchsia-800 hover:bg-fuchsia-700
+               text-white text-xs font-black uppercase tracking-wide px-3 py-2 transition-colors">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+          <circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>
+          <path stroke-linecap="round" d="M20 4L8.12 15.88M14.47 14.48L20 20M8.12 8.12L12 12"/>
+        </svg>
+        Clip Last 30s
+      </button>
+      <button onclick="lpClipCustom(this)" title="Save & share a custom-length clip"
+        class="flex-shrink-0 text-[10px] font-bold uppercase tracking-wide text-gray-500
+               hover:text-fuchsia-300 px-2 py-2 transition-colors">
+        Clip last…
       </button>
     </div>
   </div>
@@ -2379,6 +2419,25 @@ function renderPlayer(s){
   // The fullscreen "To Device" tile has its own richer state machine (ready →
   // hold-to-play, not-ready → hold-to-prep with a live progress fill).
   _renderFcHandoff(s);
+
+  // Fullscreen Clip row — same library-playback gate as handoff. Clipping needs
+  // the file stream-prepped, so disable (grey) the tiles until it's known-ready;
+  // when readiness is unknown we leave them enabled and let the backend explain.
+  const fcClipRow=document.getElementById("fcClipRow");
+  if(fcClipRow){
+    fcClipRow.classList.toggle("hidden",!canHandoff);
+    fcClipRow.classList.toggle("flex",canHandoff);
+    const clipReady=canHandoff&&_handoffReadyState(s)!==false;
+    [["fcClip30Btn","Save & share the last 30 seconds"],
+     ["fcClipCustomBtn","Save & share a custom-length clip"]].forEach(([id,tip])=>{
+      const b=document.getElementById(id);
+      if(!b) return;
+      b.disabled=!clipReady;
+      b.classList.toggle("opacity-40",!clipReady);
+      b.classList.toggle("cursor-not-allowed",!clipReady);
+      b.title=clipReady?tip:"Prep this episode for streaming first to enable clips";
+    });
+  }
 
   // Prev / Next episode buttons (footer) — show whenever library item has multiple files
   const prevBtn=document.getElementById("prevEpBtn");
@@ -6076,6 +6135,109 @@ async function handoffToDevice(btn) {
   });
 }
 
+// ── Clip: save & share the last N seconds ──────────────────────────────────
+// Two entry points share _doClip: the fullscreen VLC controls (fcClip — clips
+// what's on the TV) and the on-device player (lpClip — clips the <video>). The
+// server cuts a standalone, share-ready MP4 from the source; we then hand it to
+// the OS share sheet (mobile) or trigger a download (desktop).
+
+// Fetch the finished clip and offer it via the native share sheet when the
+// platform supports sharing files (iOS/Android), else fall back to a download.
+async function _shareOrDownload(url, filename) {
+  try {
+    const resp = await fetch(url);
+    if (!resp.ok) throw new Error("fetch failed");
+    const blob = await resp.blob();
+    const file = new File([blob], filename, { type: "video/mp4" });
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {
+      try { await navigator.share({ files: [file], title: filename }); }
+      catch (e) { if (e && e.name === "AbortError") return; throw e; }
+      return;
+    }
+    const objUrl = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = objUrl; a.download = filename;
+    document.body.appendChild(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(objUrl), 15000);
+  } catch (_) {
+    // Last resort: let the browser navigate to the attachment URL.
+    window.open(url, "_blank");
+  }
+}
+
+// Core: POST a clip request, then share/download the result. `endSec` is the
+// live playback position; the server grabs `seconds` back from there.
+async function _doClip(itemId, filePath, endSec, seconds, audioIdx, btn) {
+  if (!itemId || !filePath) { showAlert("Nothing is playing to clip.", "warn"); return; }
+  if (!navigator.onLine) { showAlert("Disconnected — clipping needs the host.", "error"); return; }
+  if (!(Number(endSec) > 0.5)) { showAlert("Play a little further in before clipping.", "warn"); return; }
+  if (btn) { btn.disabled = true; btn.classList.add("opacity-60"); }
+  try {
+    showAlert("Creating clip…", "info");
+    const r = await fetch(`/api/library/${itemId}/clip`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        file_path: filePath,
+        end_sec: Number(endSec),
+        duration_sec: Number(seconds) || 30,
+        audio_idx: Number(audioIdx) || 0,
+      }),
+    });
+    if (!r.ok) {
+      const d = await r.json().catch(() => ({}));
+      showAlert(d.detail || "Couldn't create the clip.", "error");
+      return;
+    }
+    const d = await r.json();
+    showAlert("Clip ready — sharing…", "success");
+    await _shareOrDownload(d.url, d.filename);
+  } catch (_) {
+    showAlert("Couldn't create the clip.", "error");
+  } finally {
+    if (btn) { btn.disabled = false; btn.classList.remove("opacity-60"); }
+  }
+}
+
+// Prompt for a custom clip length (seconds), clamped to the server's cap.
+function _clipPromptSeconds() {
+  const x = prompt("Clip the last how many seconds?", "60");
+  if (x == null) return null;
+  const n = Math.max(1, Math.min(300, parseInt(x, 10) || 0));
+  return n || null;
+}
+
+// On-device: clip the local <video>'s last `seconds`, using the selected audio.
+function lpClip(seconds, btn) {
+  const v = document.getElementById("lpVideo");
+  const end = v ? v.currentTime : 0;
+  _doClip(lp.itemId, lp.filePath, end, seconds || 30, lp.pendingAudioIdx || 0, btn);
+}
+function lpClipCustom(btn) {
+  const n = _clipPromptSeconds();
+  if (n) lpClip(n, btn);
+}
+
+// Fullscreen (TV): clip what VLC is playing. Grab the freshest position from a
+// live status read (the SSE snapshot lags up to ~2 s), like handoffToDevice.
+async function fcClip(seconds, btn) {
+  if (!app.is_library_playback || !app.library_item_id || !app.library_current_file) {
+    showAlert("Clipping works while a library item is playing on the TV.", "warn");
+    return;
+  }
+  let end = Math.max(0, Number(app.vlc_time) || 0);
+  try {
+    const tr = await fetch("/api/vlc/tracks").then(r => r.ok ? r.json() : null);
+    if (tr && Number(tr.time) > 0) end = Number(tr.time);
+  } catch (_) {}
+  // VLC ES-ID → source audio order isn't reliably resolvable, so clip the first
+  // audio track (idx 0). On-device passes its real rendition idx.
+  await _doClip(app.library_item_id, app.library_current_file, end, seconds || 30, 0, btn);
+}
+async function fcClipCustom(btn) {
+  const n = _clipPromptSeconds();
+  if (n) await fcClip(n, btn);
+}
+
 // Resolve whether the currently-playing VLC file is prepped for on-device
 // streaming: true (cached / Safari-native), false (needs prep / prepping / error
 // / missing), or null when we don't know yet (the async check is still pending).
@@ -6647,8 +6809,9 @@ function _lpRenderTrackRows() {
   document.getElementById("lpQualityRow").classList.toggle("hidden", qN <= 1);
   document.getElementById("lpAudioRow").classList.toggle("hidden", audN <= 1);
   document.getElementById("lpSubRow").classList.toggle("hidden", subN === 0 && !canGen);
-  document.getElementById("lpTrackRow").classList.toggle(
-    "hidden", audN <= 1 && (subN === 0 && !canGen) && qN <= 1);
+  // The track row used to hide when there were no multi-track selectors; it now
+  // always carries the Clip row, so keep it shown whenever the player is up.
+  document.getElementById("lpTrackRow").classList.remove("hidden");
 }
 
 // On-device AI subtitle generation for the current file. Non-blocking: the user
@@ -7598,6 +7761,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.25.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.26.0</div>
 </body>
 </html>

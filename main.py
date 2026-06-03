@@ -11724,6 +11724,174 @@ async def offline_cache_bundle_file(cache_key: str, filename: str) -> FileRespon
     return FileResponse(str(p), media_type=media, filename=p.name)
 
 
+# ── Clip: save & share the last N seconds of whatever is playing ────────────
+#
+# A "clip" is a short, standalone MP4 (H.264 + AAC, +faststart) cut from the end
+# of the current playback position — pressed from the fullscreen VLC controls
+# ("On TV") or the on-device player. It's re-encoded to a universally-compatible
+# container so it can be AirDropped / shared straight off the phone. Clips are
+# ephemeral: written under `.clips/<token>/` and purged after CLIP_TTL_SECS.
+#
+# We require the source to already be HLS-prepped (the bundle exists) before
+# clipping — that guarantees the file is on disk and probed, and matches the
+# product decision that clipping is a prepped-only feature. The clip itself is
+# cut from the ORIGINAL source (not the HLS segments) for best quality + precise
+# track mapping.
+CLIPS_CACHE = Path(__file__).parent / ".clips"
+CLIP_TTL_SECS = 2 * 3600           # generated clips are purged after 2 hours
+CLIP_MAX_SECONDS = 300             # cap "last X seconds" so a clip can't balloon into a huge re-encode
+CLIP_ENCODE_TIMEOUT = 240          # kill a wedged clip encode after this long
+_CLIP_TOKEN_RE = re.compile(r"^[a-f0-9]{16}$")
+_CLIP_FILE_RE = re.compile(r"^[A-Za-z0-9._-]+\.mp4$")
+
+
+def _safe_clip_stem(name: str) -> str:
+    """Filesystem/URL-safe stem (regex-validated charset, capped length)."""
+    stem = re.sub(r"[^A-Za-z0-9._-]+", "_", Path(name or "").stem).strip("._-")
+    return (stem or "clip")[:60]
+
+
+def _purge_old_clips() -> None:
+    """Drop clip dirs older than CLIP_TTL_SECS (best-effort; sync, tiny tree)."""
+    try:
+        cutoff = time.time() - CLIP_TTL_SECS
+        for d in CLIPS_CACHE.iterdir():
+            try:
+                if d.is_dir() and d.stat().st_mtime < cutoff:
+                    shutil.rmtree(d, ignore_errors=True)
+            except Exception:
+                pass
+    except FileNotFoundError:
+        pass
+    except Exception:
+        pass
+
+
+async def _build_clip(src: Path, start: float, dur: float, audio_idx: int,
+                      out_path: Path) -> tuple[bool, str]:
+    """Re-encode `[start, start+dur]` of `src` to a shareable MP4 at `out_path`.
+
+    `-ss` before `-i` keyframe-seeks for speed; the re-encode then lands on the
+    exact start. Maps the first video + the requested audio stream (optional, so
+    a bad index doesn't fail the encode). NVENC when available, else libx264.
+    Returns (ok, error_message).
+    """
+    ffmpeg = analyzer.ffmpeg_bin()
+    if not ffmpeg:
+        return False, "ffmpeg is not available."
+    use_nvenc = await _has_nvenc()
+    args = [
+        ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
+        "-ss", f"{max(0.0, start):.3f}", "-i", str(src), "-t", f"{dur:.3f}",
+        "-map", "0:v:0", "-map", f"0:a:{max(0, audio_idx)}?",
+    ]
+    if use_nvenc:
+        args += ["-c:v", "h264_nvenc", "-preset", "medium", "-rc", "vbr", "-cq", "23"]
+    else:
+        args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                 "-threads", str(OFFLINE_FFMPEG_THREADS)]
+    args += [
+        "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
+        "-c:a", "aac", "-b:a", "160k", "-ac", "2",
+        "-movflags", "+faststart", str(out_path),
+    ]
+    cmd = _ffmpeg_nice_prefix() + args
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+            **_FFMPEG_SUBPROCESS_KW,
+        )
+        try:
+            _, err = await asyncio.wait_for(proc.communicate(), timeout=CLIP_ENCODE_TIMEOUT)
+        except asyncio.TimeoutError:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+            return False, "Clip encode timed out."
+    except Exception as e:
+        return False, f"Failed to start clip encode: {e}"
+    if proc.returncode != 0 or not out_path.exists():
+        tail = (err or b"").decode("utf-8", "replace").strip().splitlines()[-1:]
+        hls_log.warning("clip encode failed rc=%s src=%s: %s",
+                        proc.returncode, src, "; ".join(tail) or "no detail")
+        return False, "; ".join(tail) or "Clip encode failed."
+    return True, ""
+
+
+class ClipReq(BaseModel):
+    file_path: str
+    end_sec: float                  # clip ENDS here (current playback position)
+    duration_sec: float = 30.0      # length to grab back from end_sec
+    audio_idx: int = 0              # source audio stream index (on-device passes its rendition idx)
+
+
+@app.post("/api/library/{item_id}/clip")
+async def make_clip(item_id: str, req: ClipReq) -> JSONResponse:
+    """Cut & re-encode a shareable MP4 of the last `duration_sec` seconds.
+
+    Ends at `end_sec` (the live playback position). Requires the file to be
+    HLS-prepped first (bundle on disk). Returns {ok, url, filename, duration_sec};
+    the browser then downloads / shares the URL. 503 on macOS (no HLS), 409 when
+    the file isn't prepped yet.
+    """
+    if not HLS_AVAILABLE:
+        raise HTTPException(503, HLS_UNAVAILABLE_MSG)
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    target = next((f for f in item.get("files", []) if f["path"] == req.file_path), None)
+    if not target:
+        raise HTTPException(404, "File not found in this item.")
+    src = Path(target["path"])
+    if not src.exists():
+        raise HTTPException(404, "File not on disk.")
+
+    # Prepped-only: require the HLS bundle to exist (matches the product gate and
+    # guarantees the source is readable + probed).
+    if not (OFFLINE_CACHE / _offline_cache_key(src) / "master.m3u8").exists():
+        raise HTTPException(409, "Prep this episode for streaming first, then you can clip it.")
+
+    dur = max(1.0, min(float(CLIP_MAX_SECONDS), float(req.duration_sec or 30.0)))
+    end = max(0.0, float(req.end_sec or 0.0))
+    start = max(0.0, end - dur)
+    real_dur = end - start
+    if real_dur < 0.5:
+        raise HTTPException(400, "Play a little further in before clipping.")
+
+    _purge_old_clips()
+    token = secrets.token_hex(8)
+    out_dir = CLIPS_CACHE / token
+    out_dir.mkdir(parents=True, exist_ok=True)
+    filename = f"{_safe_clip_stem(target.get('name') or src.name)}-clip-{int(round(real_dur))}s.mp4"
+    out_path = out_dir / filename
+
+    ok, err = await _build_clip(src, start, real_dur, int(req.audio_idx or 0), out_path)
+    if not ok:
+        shutil.rmtree(out_dir, ignore_errors=True)
+        raise HTTPException(500, err or "Couldn't create the clip.")
+    return JSONResponse({
+        "ok": True,
+        "url": f"/api/library/clip/{token}/{filename}",
+        "filename": filename,
+        "duration_sec": round(real_dur, 1),
+    })
+
+
+@app.get("/api/library/clip/{token}/{filename}")
+async def serve_clip(token: str, filename: str) -> FileResponse:
+    """Serve a generated clip as a downloadable MP4 attachment."""
+    if not _CLIP_TOKEN_RE.match(token) or not _CLIP_FILE_RE.match(filename):
+        raise HTTPException(400, "Invalid path.")
+    p = CLIPS_CACHE / token / filename
+    if not p.exists() or not p.is_file():
+        raise HTTPException(404, "Clip not found (it may have expired).")
+    return FileResponse(str(p), media_type="video/mp4", filename=p.name)
+
+
 # ── Admin: offline-cache inventory + cleanup ────────────────────────────────
 #
 # `.offline_cache/<cache_key>.mp4` accumulates indefinitely — there's no

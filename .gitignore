@@ -15,6 +15,9 @@ Downloads/
 .offline_cache/
 .background/
 
+# Ephemeral share clips (auto-purged after 2h; see /api/library/{id}/clip)
+.clips/
+
 # User library database (profiles + watch history)
 library.json
 

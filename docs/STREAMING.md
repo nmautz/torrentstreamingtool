@@ -549,6 +549,60 @@ Guarded by `withInflight("handoff_vlc")`.
 
 ---
 
+## Clip
+
+Save & share a short MP4 of the **last N seconds** of whatever's playing — a
+30 s clip by default, or a custom length (1–300 s). Two entry points, one
+backend.
+
+**UI.** Both spots lead with a prominent **Clip Last 30s** button and offer a
+quieter **Clip last…** custom-length button (`_clipPromptSeconds`):
+
+- **Fullscreen VLC controls** — `#fcClipRow` (Row D2, between the track
+  selectors and Stop). `fcClip(seconds, btn)` clips what's on the TV: it reads
+  the freshest position from a live `GET /api/vlc/tracks` (the SSE snapshot lags
+  ≤2 s, like `handoffToDevice`) and clips audio track 0 (VLC ES-ID → source
+  audio order isn't reliably resolvable). The row shows only during library
+  playback (same `canHandoff` gate) and the tiles **grey out until the file is
+  stream-prepped** (`_handoffReadyState(s)===false`); readiness-unknown stays
+  enabled and lets the backend explain.
+- **On-device player** — `#lpClipRow`, directly under the subtitle selector
+  inside `#lpTrackRow` (which is now always shown so the clip row is always
+  available). `lpClip(seconds, btn)` clips the local `<video>`'s `currentTime`
+  using the **selected audio** (`lp.pendingAudioIdx`, which is the source audio
+  rendition index). The file is prepped by definition here.
+
+**Shared client core.** `_doClip(itemId, filePath, endSec, seconds, audioIdx,
+btn)` POSTs `/api/library/{id}/clip`, then `_shareOrDownload(url, filename)`
+fetches the result and hands it to the OS **share sheet** when the platform can
+share files (`navigator.canShare({files})` — iOS/Android), else triggers a
+download (desktop), with a `window.open` last resort.
+
+**Server.** `POST /api/library/{id}/clip` re-encodes `[end_sec-duration,
+end_sec]` of the **original source** (not the HLS segments — best quality +
+precise track mapping) to a universally-compatible MP4 (`_build_clip`: H.264 +
+AAC stereo, `+faststart`, `-pix_fmt yuv420p`, NVENC when available else
+libx264). `-ss` keyframe-seeks before `-i` for speed; the re-encode lands on the
+exact start. The clip is written to `.clips/<token>/<filename>` and served by
+`GET /api/library/clip/{token}/{filename}` as a download attachment.
+
+**Prepped-only.** The endpoint requires the HLS bundle to exist
+(`master.m3u8`) — `409` otherwise. This both matches the product decision
+(clipping is a prepped-only feature) and guarantees the source is on disk +
+probed. `503` on macOS (`HLS_AVAILABLE` false).
+
+**Ephemeral.** Clips are cut on demand and auto-purged after `CLIP_TTL_SECS`
+(2 h) by `_purge_old_clips()`, called at the start of every clip request.
+`.clips/` is gitignored.
+
+> **Audio-track caveat (TV).** A VLC clip always grabs source audio track 0,
+> because there's no reliable mapping from VLC's live ES-ID back to the source
+> stream order. If a viewer is on a non-default audio track on the TV, the clip
+> won't match it. On-device clips don't have this problem — the player knows its
+> rendition index. Windows/Linux/macOS-agnostic; gated on HLS like all prep.
+
+---
+
 ## Pause / resume + auto-prep
 
 Prep is CPU-heavy enough to make the host laggy, so the work is interruptible

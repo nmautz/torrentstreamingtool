@@ -172,6 +172,18 @@ Per-file `status` values: `ready_native` (fast-path Safari MP4, no work needed),
 
 See [STREAMING.md](STREAMING.md) for the full client/server flow.
 
+## Clip (save & share the last N seconds)
+
+Cuts a short, standalone, share-ready MP4 from the **original source** ending at
+the live playback position. Pressed from the fullscreen VLC controls or the
+on-device player. Requires the file to already be HLS-prepped (the bundle on
+disk) — `409` otherwise. See [STREAMING.md § Clip](STREAMING.md#clip).
+
+| Method | Path | Notes |
+|--------|------|-------|
+| POST | `/api/library/{id}/clip` | `{file_path, end_sec, duration_sec?, audio_idx?}` → re-encodes `[end_sec-duration_sec, end_sec]` of the source to an MP4 (H.264 + AAC, `+faststart`; NVENC when available, else libx264) and returns `{ok, url, filename, duration_sec}`. `duration_sec` defaults to 30, clamped 1–`CLIP_MAX_SECONDS` (300); `audio_idx` is the source audio stream index (on-device passes its rendition idx; VLC defaults to 0). `-ss` keyframe-seeks before `-i`; the re-encode lands on the exact start. Clip written to `.clips/<token>/<filename>` and purged after 2 h. **409** if the file isn't prepped, **503** on macOS (`HLS_AVAILABLE` false) |
+| GET | `/api/library/clip/{token}/{filename}` | Serves a generated clip as a downloadable `video/mp4` attachment. `token` is 16 hex, `filename` regex-validated (`*.mp4`). **404** once the clip has expired |
+
 ## Settings
 
 | Method | Path | Notes |

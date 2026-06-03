@@ -443,3 +443,13 @@ The `.offline_cache/` directory never auto-evicted — orphan bundles (re-encode
 - [x] **32.4** (v4.20.0) UI. Admin **Offline Cache** tab → **Auto-Purge Orphans** card (enable toggle + GB threshold + "last run" line; `loadCacheAutopurge`/`saveCacheAutopurge`). Version badge → 4.20.0.
 - [x] **32.5** (v4.20.0) Docs — ADMIN (Auto-Purge card + endpoints), API (two endpoints), LIBRARY_DATA (settings.cache_autopurge), CHANGELOG.
 
+
+---
+
+## Milestone 33 — Clip & share the last N seconds
+
+A "make a clip" feature: save the last 30 s (or a custom length) of whatever's playing as a standalone, share-ready MP4. Two entry points — the fullscreen VLC controls (clips the TV) and the on-device player (clips the `<video>`, button under the subtitle selector). Clipping requires the file to already be stream-prepped.
+
+- [x] **33.1** (v4.26.0) Backend. `POST /api/library/{id}/clip {file_path, end_sec, duration_sec?, audio_idx?}` re-encodes `[end_sec-duration, end_sec]` of the **source** to a compatible MP4 (`_build_clip`: H.264 + AAC stereo, `+faststart`, `-pix_fmt yuv420p`, NVENC when available else libx264; `-ss` keyframe-seek before `-i`). Prepped-only (409 if no HLS bundle), 503 on macOS. Clips written to `.clips/<token>/` and auto-purged after 2 h (`_purge_old_clips`); served by `GET /api/library/clip/{token}/{filename}` as a download attachment. `.clips/` gitignored.
+- [x] **33.2** (v4.26.0) Frontend. Fullscreen `#fcClipRow` (Row D2) + on-device `#lpClipRow` (under `#lpSubRow`), each a prominent **Clip Last 30s** + quieter **Clip last…** (`_clipPromptSeconds`, 1–300 s). Shared `_doClip` POSTs then `_shareOrDownload` (OS share sheet via `navigator.canShare({files})`, else download). `fcClip` reads the freshest VLC position from `/api/vlc/tracks` (audio 0); `lpClip` uses `<video>.currentTime` + selected audio. Fc tiles grey until prepped; row hidden on macOS via `no-hls`. Track row now always shown so the clip row is always available on-device.
+- [x] **33.3** (v4.26.0) Docs — STREAMING (Clip section + audio-track caveat), API (two endpoints), FRONTEND (Clip section), CHANGELOG.

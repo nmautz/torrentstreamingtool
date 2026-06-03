@@ -305,6 +305,24 @@ seeked to the same moment. The **To TV** button sits in the local player's
 fullscreen header next to Stop (part of `.lp-chrome`, hidden in tiny mode).
 Guarded by `withInflight("handoff_vlc")`.
 
+### Clip (save & share the last N seconds)
+
+Two entry points, one core. `_doClip(itemId, filePath, endSec, seconds,
+audioIdx, btn)` POSTs `/api/library/{id}/clip`, then `_shareOrDownload(url,
+filename)` fetches the result and offers it via the OS share sheet
+(`navigator.canShare({files})` — iOS/Android) or a download (desktop).
+
+- **Fullscreen (TV):** `#fcClipRow` (Row D2). `fcClip(seconds, btn)` reads the
+  freshest position from a live `GET /api/vlc/tracks` and clips audio track 0.
+  `renderPlayer` shows the row under the same `canHandoff` gate and greys the
+  tiles until the file is prepped (`_handoffReadyState(s)===false`).
+- **On-device:** `#lpClipRow`, directly under `#lpSubRow` (the track row is now
+  always shown). `lpClip(seconds, btn)` clips the local `<video>.currentTime`
+  with the selected audio (`lp.pendingAudioIdx`).
+
+`fcClipCustom` / `lpClipCustom` prompt for a length via `_clipPromptSeconds()`
+(clamped 1–300 s). See [STREAMING.md § Clip](STREAMING.md#clip).
+
 ### Init ([static/index.html:3569](../static/index.html#L3569))
 
 On `DOMContentLoaded`:
