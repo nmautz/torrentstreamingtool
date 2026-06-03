@@ -174,25 +174,33 @@ only the scaled down-rungs hit the encoder.
 > stream-copy), the builder routes decode — and, when it can, scaling — onto the
 > GPU:
 >
-> - **All-GPU (`full_gpu`)** — chosen when the ffmpeg build has the `scale_cuda`
->   filter (`_has_cuda_scale`, probed once) **and** the source is NVDEC-safe
->   (`_source_nvdec_safe`: h264/hevc/mpeg2/vc1/vp9 in 4:2:0 8/10-bit). Emits
->   `-hwaccel cuda -hwaccel_output_format cuda` so decoded frames **stay in VRAM**,
->   and each transcoded rung uses `scale_cuda=-2:H:format=yuv420p` instead of the
->   software `scale` (no `-pix_fmt`, which would force a host round-trip). Decode →
->   scale → encode never leaves the GPU: no per-frame GPU↔CPU copy, no CPU scaling.
->   The original full-res rung (when it can't stream-copy) still passes through
->   `scale_cuda` purely to normalise to browser-safe 8-bit 4:2:0.
-> - **Transparent (`-hwaccel cuda` only)** — the fallback for everything else
->   (no `scale_cuda`, or an exotic/4:2:2/4:4:4/12-bit source). NVDEC decodes,
+> - **All-GPU (`full_gpu`)** — chosen when (a) the build has the `scale_cuda`
+>   filter (`_has_cuda_scale`, probed once), (b) the source is NVDEC-safe
+>   (`_source_nvdec_safe`: h264/hevc/mpeg2/vc1/vp9 in 4:2:0 8/10-bit), **and (c)
+>   the source must fully re-encode (`not copy_original`)** — i.e. there is NO
+>   `-c:v copy` rung. Emits `-hwaccel cuda -hwaccel_output_format cuda
+>   -extra_hw_frames 8` so decoded frames **stay in VRAM**, and every rung uses
+>   `scale_cuda=-2:H:format=yuv420p` instead of software `scale` (no `-pix_fmt`,
+>   which would force a host round-trip). Decode → scale → encode never leaves the
+>   GPU: no per-frame GPU↔CPU copy, no CPU scaling.
+> - **Transparent (`-hwaccel cuda` only)** — everything else: copyable H.264
+>   sources (so the original stream-copies and only down-rungs encode), builds
+>   without `scale_cuda`, or exotic/4:2:2/4:4:4/12-bit sources. NVDEC decodes,
 >   frames auto-download to system memory for the CPU `scale`, and ffmpeg silently
 >   falls back to **software** decode for any codec NVDEC can't handle.
 >
-> Why gate the all-GPU path: pinning the decoder output to `cuda` removes ffmpeg's
-> software-decode fallback, so an unsupported source would *hard-fail*. Gating to
-> NVDEC-safe codecs makes that rare, and `_run_offline_job` additionally **retries
-> once** on the transparent path if the all-GPU encode fails — so the optimisation
-> can never regress a file the slower path could prep (Windows is the primary
+> Why the three gates, and why no copy rung: pinning the decoder output to `cuda`
+> removes ffmpeg's software-decode fallback (an unsupported source would
+> *hard-fail*), and — the nastier failure — **mixing a `-c:v copy` rung with
+> cuda-filtered rungs DEADLOCKS ffmpeg**: the copy stream races ahead while the
+> muxer / NVDEC surface pool backs up, wedging at low CPU+GPU with no progress and
+> no exit. Restricting `full_gpu` to the all-encode case sidesteps that entirely
+> (and targets the worst CPU offender — h265 packs that re-encode all three rungs).
+> Two more safety nets: `-extra_hw_frames 8` enlarges the surface pool the parallel
+> `scale_cuda` branches draw from, and a **stall watchdog** in `_run_offline_job`
+> (`GPU_STALL_TIMEOUT_SECS`) kills the encode if `out_time` stops advancing for 90s,
+> so a residual deadlock auto-**retries once** on the transparent path. The
+> optimisation can therefore never leave a file unpreppable (Windows is the primary
 > target; a working prep matters more than a slightly warmer CPU).
 
 > **All outputs are bare filenames and ffmpeg runs with `cwd=<bundle .part dir>`**

@@ -9175,6 +9175,16 @@ HLS_UNAVAILABLE_MSG = (
 # Only used on the CPU (libx264) path; NVENC offloads to the GPU and ignores it.
 OFFLINE_FFMPEG_THREADS = 2
 
+# Watchdog timeout (seconds) for the all-GPU prep path only. The cuda-resident
+# decode→scale→encode pipeline can occasionally DEADLOCK ffmpeg (NVDEC surface
+# pool / muxer backpressure): it wedges at low CPU+GPU with no progress and no
+# exit, so neither the failure-retry nor a crash supervisor would ever fire. If
+# job["progress"] doesn't advance for this long while the encode is alive, we
+# kill ffmpeg and let _run_offline_job retry on the transparent -hwaccel path.
+# Generous enough that a genuinely-encoding job (out_time ticks every ~second)
+# never trips it; only a true stall does.
+GPU_STALL_TIMEOUT_SECS = 90
+
 # Lower ffmpeg's OS scheduling priority so a bulk prep can't starve the web
 # server (the asyncio event loop), VLC playback, or qBit — the whole point of
 # "the website still works while prepping". On Windows we pass
@@ -9847,26 +9857,30 @@ def _build_hls_ffmpeg_args(
 
     # GPU-accelerated decode for the NVENC path, in two tiers. Without either,
     # NVENC only offloads the *encode* while the source is decoded (and every
-    # down-rung scaled) on the CPU — so on a box with an NVIDIA GPU the CPU pegs
-    # while the GPU idles (it's only doing the small ABR encodes).
+    # down-rung scaled) on the CPU — so the CPU pegs while the GPU idles.
     #
-    #   full_gpu  → `-hwaccel cuda -hwaccel_output_format cuda`: the WHOLE
-    #     pipeline (decode → scale_cuda → nvenc) stays resident in VRAM. No
-    #     per-frame GPU→CPU download and no CPU scaling at all — the biggest
-    #     remaining CPU cost once decode moved to NVDEC. Pinning the decoder
-    #     output to `cuda` removes the software fallback, so the caller only
-    #     sets full_gpu for NVDEC-safe sources (`_source_nvdec_safe`) and
-    #     auto-retries on the transparent path if it still fails.
+    #   full_gpu  → `-hwaccel cuda -hwaccel_output_format cuda` + scale_cuda:
+    #     the WHOLE pipeline (decode → scale → nvenc) stays resident in VRAM —
+    #     no per-frame GPU↔CPU copy, no CPU scaling. The caller only sets this
+    #     when the source must fully re-encode (NOT copy_original) AND is
+    #     NVDEC-safe: that guarantees there's NO stream-copy rung in the ladder.
+    #     Mixing `-c:v copy` with cuda-filtered rungs DEADLOCKS ffmpeg (the copy
+    #     stream races ahead while the muxer/NVDEC surface pool backs up, wedging
+    #     at low CPU/GPU with no progress and no exit). `-extra_hw_frames`
+    #     enlarges the decoder surface pool so the parallel scale_cuda branches
+    #     don't starve it. A stall watchdog + retry in _run_offline_job still
+    #     guards against any residual hang.
     #   else (transparent) → `-hwaccel cuda` only: NVDEC decodes, frames
     #     auto-download to system memory for the CPU `scale` filter, and ffmpeg
     #     silently falls back to software decode for any codec NVDEC can't
-    #     handle — so it can never hard-fail a job the pure-CPU path could do.
+    #     handle — so it can never hard-fail (or hang) a copy+encode ladder.
     #
     # Only added when something actually decodes (a pure stream-copy rung has
     # no decode to accelerate).
     needs_decode = (not copy_original) or len(videos) > 1
     if full_gpu and needs_decode:
-        args += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda"]
+        args += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
+                 "-extra_hw_frames", "8"]
     elif use_nvenc and needs_decode:
         args += ["-hwaccel", "cuda"]
 
@@ -10121,19 +10135,27 @@ async def _run_offline_job(job_id: str) -> None:
 
         try:
             use_nvenc = await _has_nvenc()
-            # All-GPU pipeline (decode→scale_cuda→nvenc resident in VRAM) when the
-            # build has scale_cuda and the source is NVDEC-safe. Pinning frames to
-            # VRAM has no software fallback, so a genuine failure auto-retries on
-            # the transparent `-hwaccel cuda` path below (full_gpu=False) — which
-            # itself falls back to software decode — guaranteeing we never regress
-            # a file the slower path could prep.
+            down_encoder = "h264_nvenc" if use_nvenc else "libx264"
+            copy_original = _video_can_copy(info.get("video"))
+            # All-GPU pipeline (decode→scale_cuda→nvenc resident in VRAM), chosen
+            # only when:
+            #   • the build has scale_cuda (_has_cuda_scale), and
+            #   • the source is NVDEC-safe (_source_nvdec_safe), and
+            #   • the source must FULLY re-encode (not copy_original) — i.e. there
+            #     is NO `-c:v copy` rung in the ladder. Mixing stream-copy with
+            #     cuda-filtered rungs deadlocks ffmpeg (hangs at low CPU/GPU). By
+            #     restricting to the all-encode case we both dodge that and target
+            #     the worst CPU offender (e.g. h265 packs that re-encode 3 rungs).
+            # Copyable H.264 sources keep the proven transparent path (cheap copy
+            # original + CPU-scaled down-rungs). Pinning frames to VRAM has no
+            # software fallback, so a stall/failure auto-retries on the
+            # transparent path below (full_gpu=False) — never regressing a file.
             full_gpu = (
                 use_nvenc
+                and not copy_original
                 and await _has_cuda_scale()
                 and _source_nvdec_safe(info)
             )
-            down_encoder = "h264_nvenc" if use_nvenc else "libx264"
-            copy_original = _video_can_copy(info.get("video"))
 
             while True:
                 args, kept_audios, kept_subs, kept_videos = _build_hls_ffmpeg_args(
@@ -10225,12 +10247,52 @@ async def _run_offline_job(job_id: str) -> None:
                             job["progress"] = 1.0
                             return
 
+                # Stall watchdog — GUARDS THE ALL-GPU ATTEMPT ONLY. If the cuda
+                # pipeline deadlocks it hangs forever at low CPU/GPU with no exit;
+                # nothing else can break that, so we watch out_time and kill the
+                # encode if it stops advancing. The kill makes proc exit non-zero,
+                # which (since no intentional-kill flag is set) falls into the
+                # `if full_gpu:` retry below → transparent path. Skipped entirely
+                # on the transparent / libx264 paths, which are proven and whose
+                # progress always advances.
+                stall = {"killed": False}
+
+                async def _stall_watchdog() -> None:
+                    # Needs a known duration to read progress; without one,
+                    # job["progress"] never advances even on a healthy encode, so
+                    # skip rather than false-kill (the encode still runs).
+                    if not full_gpu or duration <= 0:
+                        return
+                    last = -1.0
+                    idle = 0.0
+                    while proc.returncode is None:
+                        await asyncio.sleep(5)
+                        cur = float(job.get("progress") or 0.0)
+                        if cur > last + 1e-9:
+                            last, idle = cur, 0.0
+                            continue
+                        idle += 5
+                        if idle >= GPU_STALL_TIMEOUT_SECS:
+                            stall["killed"] = True
+                            hls_log.warning(
+                                "job %s all-GPU encode STALLED %.0fs with no "
+                                "progress — killing to retry on transparent path",
+                                job_id, idle,
+                            )
+                            try:
+                                proc.kill()
+                            except Exception:
+                                pass
+                            return
+
                 progress_task = asyncio.create_task(_drain_progress())
                 stderr_task   = asyncio.create_task(_drain_stderr())
+                watchdog_task = asyncio.create_task(_stall_watchdog())
                 await proc.wait()
                 # Both drain loops end on pipe EOF once the process exits; bound the
-                # wait so a wedged pipe can't hang the job indefinitely.
-                for t in (progress_task, stderr_task):
+                # wait so a wedged pipe can't hang the job indefinitely. The
+                # watchdog ends on its own once proc.returncode is set.
+                for t in (progress_task, stderr_task, watchdog_task):
                     try:
                         await asyncio.wait_for(t, timeout=5)
                     except (asyncio.TimeoutError, asyncio.CancelledError):
@@ -10270,16 +10332,20 @@ async def _run_offline_job(job_id: str) -> None:
                     await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
                     hls_log.info("job %s CANCELLED (admin hard-stop)", job_id)
                     return
-                # Genuine ffmpeg failure. If this was the all-GPU pipeline, the
-                # scale_cuda / cuda-decode chain may be unsupported for this exact
-                # source or driver — wipe the partial bundle and retry ONCE on the
-                # transparent CPU-scale path before surfacing an error.
+                # All-GPU attempt failed or stalled. The cuda decode→scale_cuda→
+                # nvenc chain can be unsupported for this source/driver (non-zero
+                # exit) or DEADLOCK (the watchdog killed it). Either way, wipe the
+                # partial bundle and retry ONCE on the transparent CPU-scale path
+                # before surfacing an error — so the GPU pipeline can never leave a
+                # file unpreppable.
                 if full_gpu:
+                    reason = ("stalled (watchdog kill)" if stall["killed"]
+                              else f"failed rc={proc.returncode}")
                     tail = "\n".join(stderr_tail).strip()
                     hls_log.warning(
-                        "job %s all-GPU encode failed rc=%s — retrying on the "
-                        "transparent -hwaccel path.\n  stderr tail:\n%s",
-                        job_id, proc.returncode, tail[-800:] or "(no stderr captured)",
+                        "job %s all-GPU encode %s — retrying on the transparent "
+                        "-hwaccel path.\n  stderr tail:\n%s",
+                        job_id, reason, tail[-800:] or "(no stderr captured)",
                     )
                     full_gpu = False
                     await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
