@@ -2120,7 +2120,7 @@ async def _load_all_local_subs(video: Path) -> list[dict]:
     known_ids = {t["id"] for t in tracks}
     lang_by_id = {t["id"]: _canon_lang(t.get("language", "")) for t in tracks}
 
-    for sub in _discover_local_subs(video):
+    for sub in await asyncio.to_thread(_discover_local_subs, video):
         guess = _parse_sub_lang(sub.name)
         await vlc("addsubtitle", val=str(sub))
         await asyncio.sleep(0.3)
@@ -2903,7 +2903,7 @@ async def cache_autopurge_loop() -> None:
                     for o in inv["orphans"]:
                         if _offline_cache_path_active(o["cache_key"]):
                             continue
-                        b = _delete_cache_artifacts(o["cache_key"])
+                        b = await asyncio.to_thread(_delete_cache_artifacts, o["cache_key"])
                         if b > 0:
                             deleted += 1
                             freed += b
@@ -7244,7 +7244,7 @@ async def get_disk_space() -> JSONResponse:
     disks = []
     for info in await _all_library_paths():
         try:
-            usage = shutil.disk_usage(info["path"])
+            usage = await asyncio.to_thread(shutil.disk_usage, info["path"])
             disks.append({
                 "path":        info["path"],
                 "label":       info["label"],
@@ -11266,7 +11266,7 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
     if not src.exists():
         raise HTTPException(404, "File not on disk.")
 
-    sidecar_subs = _list_sidecar_subs(src, item_id)
+    sidecar_subs = await asyncio.to_thread(_list_sidecar_subs, src, item_id)
     saved_tracks = (_saved_local_tracks(item, req.profile_id, req.file_path)
                     if req.profile_id else {})
     OFFLINE_CACHE.mkdir(exist_ok=True)
@@ -11624,11 +11624,11 @@ async def offline_job_status(job_id: str) -> JSONResponse:
         out["audios"]            = meta.get("audios", [])
         out["subtitles"]         = meta.get("subtitles", [])
         out["skipped_image_subs"] = meta.get("skipped_image_subs", [])
-        out["bundle_size_bytes"] = _dir_size_bytes(out_dir)
+        out["bundle_size_bytes"] = await asyncio.to_thread(_dir_size_bytes, out_dir)
         # Include on-disk sidecars (incl. any generated `.ai.srt`) so the local
         # player can attach them as <track>s without a separate prep round-trip.
         src = Path(job.get("src", ""))
-        out["subs"] = _list_sidecar_subs(src, job.get("item_id", ""))
+        out["subs"] = await asyncio.to_thread(_list_sidecar_subs, src, job.get("item_id", ""))
     return JSONResponse(out)
 
 
@@ -11695,7 +11695,8 @@ async def stt_job_status(job_id: str) -> JSONResponse:
         "tracks":   job.get("tracks", []),
     }
     if job["status"] == "done":
-        out["subs"] = _list_sidecar_subs(Path(job["src"]), job.get("item_id", ""))
+        out["subs"] = await asyncio.to_thread(
+            _list_sidecar_subs, Path(job["src"]), job.get("item_id", ""))
     return JSONResponse(out)
 
 
@@ -12162,7 +12163,7 @@ async def admin_offline_cache_purge_orphans(request: Request) -> JSONResponse:
     for o in inv["orphans"]:
         if _offline_cache_path_active(o["cache_key"]):
             continue
-        freed = _delete_cache_artifacts(o["cache_key"])
+        freed = await asyncio.to_thread(_delete_cache_artifacts, o["cache_key"])
         if freed > 0:
             deleted += 1
             bytes_freed += freed
@@ -12186,7 +12187,7 @@ async def admin_offline_cache_delete_one(cache_key: str, request: Request) -> JS
     if not (out_dir.exists() or part_dir.exists() or legacy_a.exists() or legacy_b.exists()
             or any(Path(j.get("out", "")).name == cache_key for j in _offline_jobs.values())):
         raise HTTPException(404, "Nothing on disk and no job for that cache key.")
-    bytes_freed = _delete_cache_artifacts(cache_key)
+    bytes_freed = await asyncio.to_thread(_delete_cache_artifacts, cache_key)
     return JSONResponse({"deleted": True, "bytes_freed": bytes_freed})
 
 
@@ -12206,7 +12207,7 @@ async def admin_offline_cache_delete_for_item(item_id: str, request: Request) ->
     for f in item["files"]:
         if _offline_cache_path_active(f["cache_key"]):
             continue
-        freed = _delete_cache_artifacts(f["cache_key"])
+        freed = await asyncio.to_thread(_delete_cache_artifacts, f["cache_key"])
         if freed > 0 or f.get("status") == "error":
             deleted += 1
             bytes_freed += freed
