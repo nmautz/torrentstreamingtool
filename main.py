@@ -530,6 +530,9 @@ class AppState:
     vlc_night_mode: bool = False                          # VLC compressor (dynamic-range) filter; persisted in library.json → settings.vlc_night_mode, seeded at lifespan startup. VLC must relaunch to apply (no runtime HTTP command for audio filters)
     vlc_night_mode_preset: str = "medium"                 # intensity preset (light|medium|max); persisted in library.json → settings.vlc_night_mode_preset, remembered independently of the on/off toggle
     subtitle_default_language: str = "eng"                # preferred subtitle language (settings.subtitles.default_language; "" = Any), mirrored here for state_snapshot/UI defaults; seeded at lifespan, updated by the admin subtitles POST
+    subtitle_upgrade_late: bool = True                    # settings.subtitles.upgrade_late_subs, mirrored for the on-device upgrade poller
+    subtitle_single_option: bool = True                   # settings.subtitles.single_option, mirrored for client/UI
+    sub_auto_ai_path: str = ""                            # abs path of the AI sidecar currently auto-applied in VLC ("" = none); the upgrade loop watches this and swaps in a real sub when one arrives
     last_activity: float = 0.0                            # time.time() of last user-initiated interaction (drives scheduled-reboot idle check)
     prep_paused: bool = False                             # True ⇒ bulk stream-prep jobs hold (set by the non-admin Pause control / overnight window end)
     admin_prep_stop: bool = False                         # True ⇒ admin force-prep ("admin" queue) jobs cancel at the gate (set by the admin Stop control). Cleared when a new force-prep batch starts. Independent of prep_paused — force-prep ignores the bulk gate + activity-kill by design
@@ -644,6 +647,11 @@ def state_snapshot() -> dict:
         # Admin's preferred subtitle language ("" = Any); the dashboard uses it to
         # default the subtitle-search modal's language filter. See docs/API.md.
         "subtitle_default_language": state.subtitle_default_language,
+        # Auto-upgrade AI subs → real subs when they arrive, and single-option
+        # language assumption. The on-device player reads these to drive its
+        # subtitle-upgrade poller. See docs/STT.md / docs/STREAMING.md.
+        "subtitle_upgrade_late": state.subtitle_upgrade_late,
+        "subtitle_single_option": state.subtitle_single_option,
         "library_playlist_count": len(playlist),
         "library_current_index": cur_idx,
         "library_current_file": current,
@@ -2106,6 +2114,65 @@ async def _save_track_pref(
         pass
 
 
+# ── Subtitle-selection descriptor + per-series memory ─────────────────────────
+# A subtitle pick is remembered as a *resolvable descriptor* — not a VLC ES ID
+# or HLS sidecar index, which both drift between replays (and especially once a
+# late-downloaded sidecar shifts the list). The descriptor captures the user's
+# intent so it survives across episodes of a series, even weeks later:
+#   {off: bool, lang: "<canon>", ai: bool, name: "<sidecar filename>"}
+# `name` enables an exact re-match when the same file is present; `lang`+`ai`
+# drive the cross-episode / fallback match. Stored per-file (file_progress) and
+# per-series (profile["series_subtitle_prefs"][<series>]).
+
+def _norm_sub_sel(sel: Optional[dict]) -> Optional[dict]:
+    """Normalize/validate a subtitle-selection descriptor; None if unusable."""
+    if not isinstance(sel, dict):
+        return None
+    if sel.get("off"):
+        return {"off": True, "lang": "", "ai": False, "name": ""}
+    lang = _canon_lang(str(sel.get("lang") or "")) if sel.get("lang") else ""
+    name = str(sel.get("name") or "")
+    if not (lang or name):
+        return None                       # nothing matchable
+    return {"off": False, "lang": lang, "ai": bool(sel.get("ai")), "name": name}
+
+
+def _get_series_sub_sel(lib: dict, profile_id: str, series: str) -> Optional[dict]:
+    """The remembered subtitle descriptor for this profile + series, if any."""
+    series = (series or "").strip()
+    if not (series and profile_id):
+        return None
+    prof = next((p for p in lib.get("profiles", []) if p.get("id") == profile_id), None)
+    if not prof:
+        return None
+    return (prof.get("series_subtitle_prefs", {}) or {}).get(series)
+
+
+async def _save_series_sub_sel(profile_id: str, series: str, sel: Optional[dict]) -> None:
+    """Persist a subtitle descriptor for this profile + series so the same kind
+    of subtitle is auto-applied on the next episode (and on return weeks later)."""
+    series = (series or "").strip()
+    sel = _norm_sub_sel(sel)
+    if not (series and profile_id and sel):
+        return
+    try:
+        async with _lib_lock:
+            lib = _load_lib_raw()
+            prof = next((p for p in lib.get("profiles", []) if p.get("id") == profile_id), None)
+            if not prof:
+                return
+            prefs = prof.setdefault("series_subtitle_prefs", {})
+            prefs[series] = {**sel, "updated_at": _now_iso()}
+            _save_lib_raw(lib)
+    except Exception:
+        pass
+
+
+def _series_of_item(item: dict) -> str:
+    """The series grouping key for an item ("" for movies / one-offs)."""
+    return (item.get("series") or "").strip()
+
+
 async def _load_all_local_subs(video: Path) -> list[dict]:
     """Load *every* sidecar subtitle found for `video` into VLC so they all show
     up as selectable tracks, then return the resulting subtitle-track list — each
@@ -2119,9 +2186,14 @@ async def _load_all_local_subs(video: Path) -> list[dict]:
     tracks = await _vlc_subtitle_tracks()
     known_ids = {t["id"] for t in tracks}
     lang_by_id = {t["id"]: _canon_lang(t.get("language", "")) for t in tracks}
+    # Embedded tracks (present before we add anything) are real, not AI; sidecars
+    # we load get their `ai`/path tagged as they're added. Lets the policy prefer
+    # a real preferred-language sub over an AI one for the same language.
+    meta_by_id: dict[int, dict] = {}
 
     for sub in await asyncio.to_thread(_discover_local_subs, video):
         guess = _parse_sub_lang(sub.name)
+        is_ai = _is_ai_sub_file(sub)
         await vlc("addsubtitle", val=str(sub))
         await asyncio.sleep(0.3)
         after = await _vlc_subtitle_tracks()
@@ -2131,15 +2203,21 @@ async def _load_all_local_subs(video: Path) -> list[dict]:
         for t in new:
             known_ids.add(t["id"])
             lang_by_id[t["id"]] = _canon_lang(t.get("language", "")) or guess
+            meta_by_id[t["id"]] = {"ai": is_ai, "path": str(sub)}
         tracks = after
 
-    return [{**t, "lang": lang_by_id.get(t["id"], _canon_lang(t.get("language", "")))}
+    return [{**t,
+             "lang": lang_by_id.get(t["id"], _canon_lang(t.get("language", ""))),
+             "ai":   meta_by_id.get(t["id"], {}).get("ai", False),
+             "path": meta_by_id.get(t["id"], {}).get("path", "")}
             for t in tracks]
 
 
-async def _apply_subtitle_policy(lib: dict, profile_id: str, file_path: str) -> None:
+async def _apply_subtitle_policy(lib: dict, profile_id: str, file_path: str,
+                                 series_sel: Optional[dict] = None) -> None:
     """Decide and *explicitly* set the subtitle track for a freshly-started file
-    when the viewer has no saved per-file pick.
+    when the viewer has no saved per-file pick. `series_sel` is the remembered
+    per-series subtitle descriptor (if any), honoured ahead of the generic policy.
 
     Resolves subs on/off (profile `subtitles_on` override → admin `on_by_default`).
     Off ⇒ send `subtitle_track -1` so VLC can't sneak its auto/forced sub on (it
@@ -2157,6 +2235,10 @@ async def _apply_subtitle_policy(lib: dict, profile_id: str, file_path: str) -> 
     override = prof.get("subtitles_on")
     subs_on = subs["on_by_default"] if override is None else bool(override)
 
+    # Any prior auto-applied-AI marker is stale on a fresh selection; re-set
+    # below only if we deliberately land on an AI track.
+    state.sub_auto_ai_path = ""
+
     if not subs_on:
         state.current_subtitle_track = -1
         await vlc("subtitle_track", val="-1")
@@ -2171,19 +2253,59 @@ async def _apply_subtitle_policy(lib: dict, profile_id: str, file_path: str) -> 
     if video.exists():
         tracks = await _load_all_local_subs(video)
     else:
-        tracks = [{**t, "lang": _canon_lang(t.get("language", ""))}
+        tracks = [{**t, "lang": _canon_lang(t.get("language", "")), "ai": False, "path": ""}
                   for t in await _vlc_subtitle_tracks()]
 
+    async def _select(track: dict) -> None:
+        state.current_subtitle_track = track["id"]
+        # Remember when the chosen track is an AI sub so the upgrade loop can
+        # swap in a real preferred-language sub once it finishes downloading.
+        state.sub_auto_ai_path = track.get("path", "") if track.get("ai") else ""
+        await vlc("subtitle_track", val=str(track["id"]))
+
+    real = [t for t in tracks if not t.get("ai")]
+    ai   = [t for t in tracks if t.get("ai")]
+
+    # Per-series memory: honour the kind of subtitle the viewer last chose for
+    # this series (real vs AI vs off), falling back across kinds when the exact
+    # one isn't present on this episode. Takes priority over the generic policy.
+    if series_sel:
+        if series_sel.get("off"):
+            state.current_subtitle_track = -1
+            await vlc("subtitle_track", val="-1")
+            return
+        slang = series_sel.get("lang") or ""
+        sname = series_sel.get("name") or ""
+        cand = None
+        if sname:
+            cand = next((t for t in tracks if t.get("path")
+                         and Path(t["path"]).name == sname), None)
+        if cand is None and slang:
+            pool = ai if series_sel.get("ai") else real
+            cand = (next((t for t in pool if t["lang"] == slang), None)
+                    or next((t for t in tracks if t["lang"] == slang), None))
+        if cand is None and subs["single_option"] and len(real) == 1:
+            cand = real[0]
+        if cand:
+            await _select(cand)
+            return
+
     if pref:
-        match = next((t for t in tracks if t["lang"] == pref), None)
+        # Prefer a REAL preferred-language track over an AI one for that language.
+        match = next((t for t in real if t["lang"] == pref), None)
+        # Only one real option and no exact match → assume it's the right one.
+        if match is None and subs["single_option"] and len(real) == 1:
+            match = real[0]
+        # Fall back to an AI track in the preferred language; the upgrade loop
+        # will replace it with a real sub when one arrives (if enabled).
+        if match is None:
+            match = next((t for t in ai if t["lang"] == pref), None)
         if match:
-            state.current_subtitle_track = match["id"]
-            await vlc("subtitle_track", val=str(match["id"]))
+            await _select(match)
             return
     elif tracks:
-        # "Any" preferred language — any text sub (embedded or sidecar) is fine.
-        state.current_subtitle_track = tracks[0]["id"]
-        await vlc("subtitle_track", val=str(tracks[0]["id"]))
+        # "Any" preferred language — prefer a real track, else anything available.
+        await _select(real[0] if real else tracks[0])
         return
 
     # (b) auto-search OpenSubtitles for the preferred language.
@@ -2226,9 +2348,11 @@ async def _apply_track_prefs(
         if subtitle is not None:
             # Explicit per-file user pick wins over the default policy.
             state.current_subtitle_track = subtitle
+            state.sub_auto_ai_path = ""           # an explicit pick isn't auto-AI
             await vlc("subtitle_track", val=str(subtitle))
         else:
-            await _apply_subtitle_policy(lib, profile_id, file_path)
+            series_sel = _get_series_sub_sel(lib, profile_id, _series_of_item(item))
+            await _apply_subtitle_policy(lib, profile_id, file_path, series_sel=series_sel)
         state.track_pref_applied_file = file_path
     except Exception:
         pass
@@ -2577,6 +2701,13 @@ def _subs_cfg(lib: dict) -> dict:
         "default_language": default_language,
         "on_by_default":    bool(cfg.get("on_by_default", False)),
         "auto_search":      bool(cfg.get("auto_search", True)),
+        # When a real (downloaded/embedded) preferred-language subtitle arrives
+        # AFTER an AI sub was auto-applied (sidecars often finish downloading
+        # after the video), swap to it automatically. Default on.
+        "upgrade_late_subs": bool(cfg.get("upgrade_late_subs", True)),
+        # When exactly one real subtitle is found, treat it as the preferred
+        # language even if its filename doesn't declare one. Default on.
+        "single_option":     bool(cfg.get("single_option", True)),
     }
 
 
@@ -4466,6 +4597,60 @@ async def library_download_pipeline(
         await broadcast("library_update", {"item_id": item_id, "status": "error", "message": str(exc)})
 
 
+# ── Background Task: late-subtitle upgrade (TV/VLC) ──────────────────────────
+
+async def subtitle_upgrade_loop() -> None:
+    """Swap an auto-applied AI subtitle for a real one once it finishes downloading.
+
+    Real `.srt` sidecars routinely arrive *after* the video (streaming/sequential
+    download) and discovery happens in waves, so the playback policy often lands
+    on an AI sub first. While VLC is playing a library file whose subtitle is a
+    *system-auto-applied* AI track (`state.sub_auto_ai_path` set) and the admin
+    has `upgrade_late_subs` on, re-scan for a real preferred-language sidecar and
+    switch to it, then notify the dashboard. A manual pick clears the marker, so
+    we never override a deliberate choice. Runs only on the VLC path; the
+    on-device player polls for the same upgrade itself (it isn't server-driven)."""
+    while True:
+        try:
+            await asyncio.sleep(20)
+            if not (state.subtitle_upgrade_late and state.sub_auto_ai_path
+                    and state.library_item_id):
+                continue
+            video = await _current_playback_path()
+            if not video or not video.exists():
+                continue
+            lib = await get_library()
+            subs = _subs_cfg(lib)
+            pref = subs["default_language"]
+            # Cheap disk pre-check: is there a real (non-AI) preferred-language
+            # sidecar present yet? Skip the heavier VLC re-scan until there is.
+            files = await asyncio.to_thread(_discover_local_subs, video)
+            real_files = [f for f in files if not _is_ai_sub_file(f)]
+            has_pref = (any(_parse_sub_lang(f.name) == pref for f in real_files) if pref
+                        else bool(real_files))
+            if not has_pref and not (subs["single_option"] and len(real_files) == 1):
+                continue
+            tracks = await _load_all_local_subs(video)
+            real = [t for t in tracks if not t.get("ai")]
+            match = next((t for t in real if t["lang"] == pref), None) if pref else (real[0] if real else None)
+            if match is None and subs["single_option"] and len(real) == 1:
+                match = real[0]
+            if match is None:
+                continue                       # no real sub yet — keep watching
+            state.current_subtitle_track = match["id"]
+            state.sub_auto_ai_path = ""        # upgraded — stop watching this file
+            await vlc("subtitle_track", val=str(match["id"]))
+            lang = (match.get("lang") or pref or "").upper()
+            await broadcast("subtitle_upgraded", {
+                "lang": match.get("lang") or pref,
+                "label": f"Switched to downloaded {lang + ' ' if lang else ''}subtitles".strip(),
+            })
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+
+
 # ── FastAPI App ───────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -4490,7 +4675,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         _nm = _lib0.get("settings", {})
         state.vlc_night_mode = bool(_nm.get("vlc_night_mode", False))
         state.vlc_night_mode_preset = _night_mode_preset(_nm.get("vlc_night_mode_preset"))
-        state.subtitle_default_language = _subs_cfg(_lib0)["default_language"]
+        _subs0 = _subs_cfg(_lib0)
+        state.subtitle_default_language = _subs0["default_language"]
+        state.subtitle_upgrade_late = _subs0["upgrade_late_subs"]
+        state.subtitle_single_option = _subs0["single_option"]
     except Exception:
         state.vlc_night_mode = False
         state.vlc_night_mode_preset = NIGHT_MODE_DEFAULT_PRESET
@@ -4521,12 +4709,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     dlsched_loop = asyncio.create_task(download_scheduler_loop())
     sysmon_loop = asyncio.create_task(system_monitor_loop())
     cachepurge_loop = asyncio.create_task(cache_autopurge_loop())
+    subupgrade_loop = asyncio.create_task(subtitle_upgrade_loop())
 
     yield
 
     for t in (guard, broadcaster, dl_monitor, vlc_tracker, bg_loop, jackett_mon,
               reboot_loop, autoprep_loop, update_loop, dlsched_loop, sysmon_loop,
-              cachepurge_loop):
+              cachepurge_loop, subupgrade_loop):
         t.cancel()
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
@@ -4731,6 +4920,8 @@ class SubsConfigReq(BaseModel):
     default_language: str = "eng"
     on_by_default: bool = False
     auto_search: bool = True
+    upgrade_late_subs: bool = True
+    single_option: bool = True
 
 
 class ProfileSubsReq(BaseModel):
@@ -5503,7 +5694,11 @@ class LocalTracksReq(BaseModel):
     profile_id: str
     file_path: str
     audio_idx: Optional[int] = None
-    subtitle_idx: Optional[int] = None   # -1 = subtitles off
+    subtitle_idx: Optional[int] = None   # -1 = subtitles off (bundle index space only)
+    # Resolvable descriptor for the chosen subtitle, used to re-apply the pick on
+    # replay AND on other episodes of the same series. {off,lang,ai,name}.
+    # Supersedes subtitle_idx, which can't address sidecar/AI picks (see GOTCHAS).
+    subtitle_sel: Optional[dict] = None
 
 
 @app.post("/api/library/{item_id}/local-tracks")
@@ -5516,11 +5711,13 @@ async def set_local_tracks(item_id: str, req: LocalTracksReq) -> JSONResponse:
     dict. The two systems use different addressing schemes that don't
     interchange — that's why they're kept under separate keys.
     """
+    series = ""
     async with _lib_lock:
         lib = _load_lib_raw()
         item = next((it for it in lib["items"] if it["id"] == item_id), None)
         if not item:
             raise HTTPException(404, "Item not found.")
+        series = _series_of_item(item)
         fp = (item.setdefault("progress", {})
                   .setdefault(req.profile_id, {})
                   .setdefault("file_progress", {})
@@ -5529,7 +5726,14 @@ async def set_local_tracks(item_id: str, req: LocalTracksReq) -> JSONResponse:
             fp["local_audio_idx"] = req.audio_idx
         if req.subtitle_idx is not None:
             fp["local_subtitle_idx"] = req.subtitle_idx
+        if req.subtitle_sel is not None:
+            norm = _norm_sub_sel(req.subtitle_sel)
+            if norm:
+                fp["subtitle_sel"] = norm
         _save_lib_raw(lib)
+    # Remember this kind of subtitle for the rest of the series (separate lock).
+    if req.subtitle_sel is not None and series:
+        await _save_series_sub_sel(req.profile_id, series, req.subtitle_sel)
     return JSONResponse({"ok": True})
 
 
@@ -5566,7 +5770,8 @@ async def mark_watched(item_id: str, req: MarkWatchedReq) -> JSONResponse:
                 "updated_at": _now_iso(),
                 **{k: v for k, v in existing.items()
                    if k in ("audio_track", "subtitle_track",
-                            "local_audio_idx", "local_subtitle_idx")},
+                            "local_audio_idx", "local_subtitle_idx",
+                            "subtitle_sel")},
             }
         else:
             file_prog[path] = {
@@ -5576,7 +5781,8 @@ async def mark_watched(item_id: str, req: MarkWatchedReq) -> JSONResponse:
                 "updated_at": _now_iso(),
                 **{k: v for k, v in existing.items()
                    if k in ("audio_track", "subtitle_track",
-                            "local_audio_idx", "local_subtitle_idx")},
+                            "local_audio_idx", "local_subtitle_idx",
+                            "subtitle_sel")},
             }
 
     await put_library(lib)
@@ -7041,13 +7247,40 @@ async def set_audio_track(track_id: int) -> JSONResponse:
 @app.post("/api/vlc/track/subtitle/{track_id}")
 async def set_subtitle_track(track_id: int) -> JSONResponse:
     state.current_subtitle_track = track_id
+    state.sub_auto_ai_path = ""                    # explicit pick → not auto-AI
     await vlc("subtitle_track", val=str(track_id))
     if state.library_item_id and state.library_profile_id and state.library_current_file:
         asyncio.create_task(_save_track_pref(
             state.library_item_id, state.library_profile_id,
             state.library_current_file, subtitle=track_id,
         ))
+        asyncio.create_task(_remember_vlc_sub_pick(track_id))
     return JSONResponse({"ok": True})
+
+
+async def _remember_vlc_sub_pick(track_id: int) -> None:
+    """Best-effort: record the viewer's manual VLC subtitle pick as a per-series
+    descriptor so the same language (or 'off') comes back on the next episode.
+    VLC rarely tags loaded sidecars with a language, so an untaggable pick simply
+    isn't remembered (the on-device player carries the richer descriptor)."""
+    item_id, profile_id = state.library_item_id, state.library_profile_id
+    if not (item_id and profile_id):
+        return
+    if track_id is None or track_id < 0:
+        sel: dict = {"off": True}
+    else:
+        lang = ""
+        for t in await _vlc_subtitle_tracks():
+            if t.get("id") == track_id:
+                lang = _canon_lang(t.get("language", ""))
+                break
+        if not lang:
+            return
+        sel = {"off": False, "lang": lang, "ai": False, "name": ""}
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if item:
+        await _save_series_sub_sel(profile_id, _series_of_item(item), sel)
 
 
 @app.get("/api/subtitles/search")
@@ -8613,9 +8846,13 @@ async def admin_set_subtitles(request: Request, body: SubsConfigReq) -> JSONResp
     s["default_language"] = _canon_lang(body.default_language) if body.default_language.strip() else ""
     s["on_by_default"]    = bool(body.on_by_default)
     s["auto_search"]      = bool(body.auto_search)
+    s["upgrade_late_subs"] = bool(body.upgrade_late_subs)
+    s["single_option"]     = bool(body.single_option)
     await put_library(lib)
     cfg = _subs_cfg(lib)
     state.subtitle_default_language = cfg["default_language"]
+    state.subtitle_upgrade_late = cfg["upgrade_late_subs"]
+    state.subtitle_single_option = cfg["single_option"]
     await broadcast("state", state_snapshot())
     return JSONResponse({"ok": True, **cfg})
 
@@ -9609,6 +9846,13 @@ def _parse_sub_lang(name: str) -> str:
         if c in _LANG_NAMES and c != "und":
             return c
     return ""
+
+
+def _is_ai_sub_file(p: Path) -> bool:
+    """True when a sidecar `.srt` is one we generated (`<stem>.<lang>.ai[.<model>].srt`)
+    rather than a real downloaded/release subtitle. The upgrade watcher prefers a
+    real sub over one of these."""
+    return stt.AI_SUFFIX in p.stem.split(".")
 
 
 def _discover_local_subs(video: Path) -> list[Path]:
@@ -11220,8 +11464,13 @@ def _dir_size_bytes(p: Path) -> int:
     return total
 
 
-def _saved_local_tracks(item: dict, profile_id: str, file_path: str) -> dict:
-    """Return the local-player track picks saved for this profile + file."""
+def _saved_local_tracks(lib: dict, item: dict, profile_id: str, file_path: str) -> dict:
+    """Return the local-player track picks saved for this profile + file.
+
+    `subtitle_sel` is the per-file resolvable subtitle descriptor; `series_subtitle_sel`
+    is the per-series fallback (applied when this file has no own pick). The client
+    resolves whichever applies against its live track list. `subtitle_idx` is kept
+    for the legacy bundle-index path only."""
     fp = (item.get("progress", {})
               .get(profile_id, {})
               .get("file_progress", {})
@@ -11231,6 +11480,11 @@ def _saved_local_tracks(item: dict, profile_id: str, file_path: str) -> dict:
         out["audio_idx"] = fp["local_audio_idx"]
     if "local_subtitle_idx" in fp:
         out["subtitle_idx"] = fp["local_subtitle_idx"]
+    if isinstance(fp.get("subtitle_sel"), dict):
+        out["subtitle_sel"] = fp["subtitle_sel"]
+    series_sel = _get_series_sub_sel(lib, profile_id, _series_of_item(item))
+    if series_sel:
+        out["series_subtitle_sel"] = series_sel
     return out
 
 
@@ -11267,7 +11521,7 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
         raise HTTPException(404, "File not on disk.")
 
     sidecar_subs = await asyncio.to_thread(_list_sidecar_subs, src, item_id)
-    saved_tracks = (_saved_local_tracks(item, req.profile_id, req.file_path)
+    saved_tracks = (_saved_local_tracks(lib, item, req.profile_id, req.file_path)
                     if req.profile_id else {})
     OFFLINE_CACHE.mkdir(exist_ok=True)
     key = _offline_cache_key(src)
@@ -11342,6 +11596,26 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
         "subs":              sidecar_subs,
         "saved_tracks":      saved_tracks,
     })
+
+
+@app.get("/api/library/{item_id}/subs")
+async def list_file_subs(item_id: str, file_path: str = "") -> JSONResponse:
+    """Re-list a file's sidecar subtitles (incl. late-downloaded ones).
+
+    Cheap, no-prep endpoint the on-device player polls while watching: real subs
+    often finish downloading after playback starts, so the client re-checks this
+    to upgrade off an auto-applied AI sub. Mirrors the `subs` field of
+    /offline-prepare via `_list_sidecar_subs`."""
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    target = next((f for f in item.get("files", []) if f["path"] == file_path), None)
+    if not target:
+        raise HTTPException(404, "File not found in this item.")
+    src = Path(target["path"])
+    subs = await asyncio.to_thread(_list_sidecar_subs, src, item_id) if src.exists() else []
+    return JSONResponse({"subs": subs})
 
 
 async def _maybe_start_prep_job(src: Path, item_id: str = "") -> dict:

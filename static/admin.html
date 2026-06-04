@@ -766,6 +766,24 @@
             class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
                    bg-gray-800 border-gray-700 text-gray-400 hover:text-white">…</button>
         </div>
+        <div class="flex items-center justify-between gap-3">
+          <div class="min-w-0">
+            <div class="text-sm font-bold text-gray-200">Upgrade To Real Subs When Found</div>
+            <div class="text-[11px] text-gray-600 mt-0.5">Release subtitles often finish downloading after the video, so an AI sub may be applied first. When a real preferred-language sub turns up, switch to it automatically and notify the player.</div>
+          </div>
+          <button id="subUpgradeLateBtn" onclick="toggleSubUpgradeLate()"
+            class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+                   bg-gray-800 border-gray-700 text-gray-400 hover:text-white">…</button>
+        </div>
+        <div class="flex items-center justify-between gap-3">
+          <div class="min-w-0">
+            <div class="text-sm font-bold text-gray-200">Assume A Lone Subtitle Is Correct</div>
+            <div class="text-[11px] text-gray-600 mt-0.5">When exactly one subtitle is found and its language can't be read from the filename, treat it as the preferred language instead of skipping it.</div>
+          </div>
+          <button id="subSingleOptionBtn" onclick="toggleSubSingleOption()"
+            class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+                   bg-gray-800 border-gray-700 text-gray-400 hover:text-white">…</button>
+        </div>
       </div>
 
       <div class="px-5 py-4 flex items-center justify-between gap-3">
@@ -1878,6 +1896,8 @@ async function saveStt(){
 // ── Subtitles policy (preferred language + on/off default + auto-search) ────────
 let _subOnDefault = false;
 let _subAutoSearch = true;
+let _subUpgradeLate = true;
+let _subSingleOption = true;
 
 function _renderSubToggle(btn, on, onLabel, offLabel){
   if(!btn) return;
@@ -1893,6 +1913,8 @@ function _renderSubToggle(btn, on, onLabel, offLabel){
 function _renderSubToggles(){
   _renderSubToggle(document.getElementById("subOnDefaultBtn"),  _subOnDefault,  "On", "Off");
   _renderSubToggle(document.getElementById("subAutoSearchBtn"), _subAutoSearch, "Enabled", "Disabled");
+  _renderSubToggle(document.getElementById("subUpgradeLateBtn"),  _subUpgradeLate,  "Enabled", "Disabled");
+  _renderSubToggle(document.getElementById("subSingleOptionBtn"), _subSingleOption, "Enabled", "Disabled");
 }
 
 async function loadSubs(){
@@ -1902,6 +1924,8 @@ async function loadSubs(){
     const d = await r.json();
     _subOnDefault  = !!d.on_by_default;
     _subAutoSearch = d.auto_search !== false;
+    _subUpgradeLate = d.upgrade_late_subs !== false;
+    _subSingleOption = d.single_option !== false;
     _renderSubToggles();
     // Populate the language picker (server sends 3-letter code + display name).
     const langSel = document.getElementById("subLang");
@@ -1923,6 +1947,8 @@ async function loadSubs(){
 
 function toggleSubOnDefault(){ _subOnDefault = !_subOnDefault; _renderSubToggles(); }
 function toggleSubAutoSearch(){ _subAutoSearch = !_subAutoSearch; _renderSubToggles(); }
+function toggleSubUpgradeLate(){ _subUpgradeLate = !_subUpgradeLate; _renderSubToggles(); }
+function toggleSubSingleOption(){ _subSingleOption = !_subSingleOption; _renderSubToggles(); }
 
 async function saveSubs(){
   const btn = document.getElementById("subSaveBtn");
@@ -1930,6 +1956,8 @@ async function saveSubs(){
     default_language: document.getElementById("subLang").value || "",
     on_by_default:    _subOnDefault,
     auto_search:      _subAutoSearch,
+    upgrade_late_subs: _subUpgradeLate,
+    single_option:    _subSingleOption,
   };
   btn.disabled = true;
   try{

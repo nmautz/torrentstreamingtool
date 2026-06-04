@@ -410,7 +410,21 @@ Two ways to populate the cache:
      `_lpIndicateSubLoading` flashes a "Loading subtitles…" hint until that
      fetch lands (or errors).
    - Each switch POSTs to `/api/library/{id}/local-tracks` with the new
-     pick so it persists across sessions (on-disk sidecar picks save as -1).
+     pick so it persists across sessions. The pick travels as a resolvable
+     **descriptor** `subtitle_sel` (`{off, lang, ai, name}`), saved per-file
+     *and* per-series — so a sidecar/AI choice comes back on replay and on the
+     next episode. (Pre-v4.27 the on-device save dropped every non-bundle pick,
+     persisting `-1`/off — a chosen `.srt`/AI sub was never remembered.) On the
+     next play the resolver (`_lpResolveSubSel`) matches the file's, then the
+     series', descriptor against the live track list: `name` → `lang`+kind →
+     any-kind in that language → lone-option.
+   - **Late-sub upgrade.** When the default selection lands on an *auto-applied*
+     AI sub (`lp.subAutoApplied`), `_lpStartSubUpgradePoll` polls
+     `GET /api/library/{id}/subs` every 15 s for a real preferred-language sub
+     that finished downloading after playback began; on one it rebuilds the
+     sidecar `<track>`s (`_lpRebuildSidecars`), switches to it, toasts, and
+     remembers the upgrade. A manual pick clears `subAutoApplied`. Gated on
+     `subtitle_upgrade_late` (from `/api/state`). See [STT.md](STT.md).
 6. The container toggles between fullscreen overlay and a corner tile via
    the `.lp-tiny` class — pure CSS, no DOM moves. `lpMaximize` /
    `lpMinimize` flip the class; `lpStop` removes both `.lp-active` and
@@ -451,7 +465,8 @@ exit/transition:
 
 `update_progress` preserves the file's existing `audio_track` /
 `subtitle_track` (VLC ES IDs) **and** `local_audio_idx` /
-`local_subtitle_idx` (HLS rendition indices) across writes, so a progress
+`local_subtitle_idx` / `subtitle_sel` (HLS rendition indices + the subtitle
+descriptor) across writes, so a progress
 write doesn't wipe either track-pref system.
 
 ### 5. Auto-advance + manual Prev/Next + next-episode warm-prep

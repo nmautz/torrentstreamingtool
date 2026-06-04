@@ -158,6 +158,32 @@ offload.
 
 ---
 
+## AI is a fallback — real subs win, even when they arrive late
+
+An AI sub is a stopgap for *"no usable text sub right now."* Release `.srt`
+sidecars routinely finish downloading **after** the video (sequential/streaming
+download), and discovery happens in waves — so the playback policy often lands
+on the AI sub first, then the real one shows up minutes later. Two pieces keep
+the AI sub from sticking once a real one exists:
+
+- **Selection prefers real over AI.** `_apply_subtitle_policy` (VLC) ranks a
+  *real* (embedded or downloaded) preferred-language track ahead of an AI one for
+  the same language; the on-device resolver does the same. So a same-language AI
+  sub is only chosen when no real one is present. When the policy *does* land on
+  an AI track it records it (`state.sub_auto_ai_path` on VLC, `lp.subAutoApplied`
+  on-device) as **auto-applied** — distinct from a deliberate pick.
+- **Late upgrade.** With `settings.subtitles.upgrade_late_subs` on (default), the
+  system keeps watching after playback starts and swaps the auto-applied AI sub
+  for a real preferred-language sub the moment one is discoverable: VLC via the
+  `subtitle_upgrade_loop` background task (re-scans `_discover_local_subs`, then
+  `_load_all_local_subs` to select), the on-device player via a 15 s poll of
+  `GET /api/library/{id}/subs`. The swap shows a toast and is then remembered
+  (file + series). A **manual** subtitle pick clears the auto-applied marker, so
+  a deliberate choice (including choosing the AI track yourself) is never
+  overridden. `single_option` (default) treats a lone real sub as the preferred
+  language even when its filename carries no tag. See [STREAMING.md](STREAMING.md),
+  [LIBRARY_DATA.md](LIBRARY_DATA.md), [GOTCHAS.md](GOTCHAS.md).
+
 ## Concurrency & priority
 
 STT jobs share the single `OFFLINE_JOB_CONCURRENCY` semaphore with HLS prep, so

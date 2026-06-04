@@ -1998,6 +1998,10 @@ let sttAvailable = false;
 // subtitle-search modal's language filter so English (or the chosen language)
 // surfaces instead of being buried under foreign hits.
 let subtitleDefaultLang = "eng";
+// Auto-upgrade AI subs → real subs when they download later, and treat a lone
+// subtitle as the preferred language. Mirrored from /api/state. See docs/STT.md.
+let subtitleUpgradeLate = true;
+let subtitleSingleOption = true;
 let activeTab    = "search";
 let libShowHidden = false;   // true = library shows hidden items instead of main list
 let selectedColor = "indigo";
@@ -2046,7 +2050,14 @@ let lp = {
   subTracks: [],          // [{el,key}] every <track> we created, in dropdown order
   pendingAudioIdx: 0,     // applied on MANIFEST_PARSED / loadedmetadata
   pendingSubtitleIdx: -1, // -1 = off, integer = bundle idx, "sidecar:N" = on-disk sidecar idx
+  // True when the active subtitle was AUTO-applied AI (not a deliberate pick) —
+  // the upgrade poller may swap it for a real sub that downloads later. Cleared
+  // by any manual pick. See _lpSubUpgradePoll.
+  subAutoApplied: false,
 };
+// Subtitle upgrade poller — re-checks for late-downloaded real subs while an
+// auto-applied AI sub is showing. setInterval handle; cleared on stop.
+let _lpSubUpgradeTimer = null;
 // Play-chooser modal state
 let pcCtx = null;  // {itemId, files, seekTo, label}
 // Per-item prep-for-streaming state — populated when the user clicks "Prep for
@@ -6643,9 +6654,18 @@ async function _lpLoadIndex(seekTo) {
   const defAudioIdx = (saved.audio_idx != null) ? saved.audio_idx
                     : (lp.audios.findIndex(a => a.default) >= 0
                        ? lp.audios.findIndex(a => a.default) : 0);
-  const defSubIdx   = (saved.subtitle_idx != null) ? saved.subtitle_idx : -1;
+  // Subtitle default: a remembered descriptor (this file, else this series) wins;
+  // then the legacy bundle index; then the automatic policy (real over AI, lone
+  // option assumed correct). `subAutoApplied` marks an auto-chosen AI track so
+  // the upgrade poller can later swap in a real sub that finishes downloading.
+  const subSel = saved.subtitle_sel || saved.series_subtitle_sel || null;
+  let defSubIdx = subSel ? _lpResolveSubSel(subSel) : null;
+  if (defSubIdx == null && saved.subtitle_idx != null) defSubIdx = saved.subtitle_idx;
+  if (defSubIdx == null) defSubIdx = _lpDefaultSubKey();
+  if (defSubIdx == null) defSubIdx = -1;
   lp.pendingAudioIdx    = defAudioIdx;
   lp.pendingSubtitleIdx = defSubIdx;
+  lp.subAutoApplied = _lpKeyIsAiSidecar(defSubIdx) && !(subSel && subSel.ai === true);
 
   const v = document.getElementById("lpVideo");
   _lpDestroyHls();
@@ -6740,6 +6760,7 @@ async function _lpLoadIndex(seekTo) {
   });
 
   try { await v.play(); } catch (_) { /* iOS may block autoplay until user gesture */ }
+  _lpStartSubUpgradePoll();   // watch for late-downloaded real subs to upgrade off AI
 }
 
 // Populate the audio + subtitle dropdowns once the manifest has parsed.
@@ -6855,6 +6876,16 @@ async function lpGenerateSubs() {
 // finishes) without tearing down the HLS pipeline. Bundle subs (key "i") are
 // left untouched; only sidecar tracks (key "sidecar:i") are rebuilt.
 function _lpAttachSidecarSubs(subs) {
+  // On-demand STT just finished — rebuild sidecar tracks and auto-show the first
+  // generated track. It's an AUTO pick, so mark it upgradeable to a real sub.
+  const firstAi = (subs || []).findIndex(s => s.ai);
+  _lpRebuildSidecars(subs, firstAi >= 0 ? `sidecar:${firstAi}` : null);
+  if (firstAi >= 0) lp.subAutoApplied = true;
+}
+
+// Rebuild the on-disk sidecar <track>s from a fresh list, optionally selecting a
+// given key. Shared by on-demand STT attach and the late-sub upgrade poller.
+function _lpRebuildSidecars(subs, selectKey) {
   const v = document.getElementById("lpVideo");
   if (!v) return;
   lp.subTracks = (lp.subTracks || []).filter(tr => {
@@ -6869,13 +6900,118 @@ function _lpAttachSidecarSubs(subs) {
     v.appendChild(t);
     lp.subTracks.push({ el: t, key: `sidecar:${i}` });
   });
-  // Auto-select the first generated track so the user sees subs immediately.
-  const firstAi = lp.sidecarSubs.findIndex(s => s.ai);
-  if (firstAi >= 0) {
-    lp.pendingSubtitleIdx = `sidecar:${firstAi}`;
-    _lpApplySubIdx(lp.pendingSubtitleIdx);
+  if (selectKey != null) {
+    lp.pendingSubtitleIdx = selectKey;
+    _lpApplySubIdx(selectKey);
   }
   _lpRenderTrackRows();
+}
+
+// ── Subtitle selection: descriptor resolve + late-sub upgrade ────────────────
+// Light canonicalizer mirroring the backend so 2-letter and 3-letter language
+// tags compare equal (en==eng, ja==jpn, …).
+function _lpCanonLang(l) {
+  l = String(l || "").trim().toLowerCase();
+  const m = { en:"eng", ja:"jpn", es:"spa", fr:"fre", de:"ger", it:"ita",
+    pt:"por", ru:"rus", zh:"chi", ko:"kor", ar:"ara", hi:"hin", nl:"nld",
+    sv:"swe", fi:"fin", no:"nor", da:"dan", pl:"pol", tr:"tur", uk:"ukr",
+    th:"tha", vi:"vie" };
+  return m[l] || l;
+}
+
+function _lpKeyIsAiSidecar(key) {
+  const s = String(key);
+  if (!s.startsWith("sidecar:")) return false;
+  const i = Number(s.slice(8));
+  return !!(lp.sidecarSubs && lp.sidecarSubs[i] && lp.sidecarSubs[i].ai);
+}
+
+// Build a resolvable descriptor {off,lang,ai,name} for a track key, for saving.
+function _lpDescriptorForKey(key) {
+  const s = String(key);
+  if (s === "-1") return { off: true };
+  if (s.startsWith("sidecar:")) {
+    const sc = (lp.sidecarSubs || [])[Number(s.slice(8))];
+    if (!sc) return null;
+    return { off: false, lang: _lpCanonLang(sc.lang || ""), ai: !!sc.ai, name: sc.name || "" };
+  }
+  const b = (lp.subtitles || [])[Number(s)];
+  if (!b) return null;
+  return { off: false, lang: _lpCanonLang(b.language || ""), ai: false, name: "" };
+}
+
+// Resolve a remembered descriptor to a current track key, or null if unmatched.
+// Honors kind (real vs AI), falls back across kinds, and treats a lone real sub
+// as the preferred language (single-option). Returns "-1" for a remembered off.
+function _lpResolveSubSel(sel) {
+  if (!sel) return null;
+  if (sel.off) return "-1";
+  const want = _lpCanonLang(sel.lang || "");
+  const side = lp.sidecarSubs || [];
+  const bun  = lp.subtitles || [];
+  if (sel.name) {
+    const i = side.findIndex(s => s.name === sel.name);
+    if (i >= 0) return "sidecar:" + i;
+  }
+  const real = side.map((s, i) => ({ s, i })).filter(o => !o.s.ai);
+  const ai   = side.map((s, i) => ({ s, i })).filter(o =>  o.s.ai);
+  if (want) {
+    if (sel.ai) {
+      const a = ai.find(o => _lpCanonLang(o.s.lang) === want);
+      if (a) return "sidecar:" + a.i;
+    } else {
+      const r = real.find(o => _lpCanonLang(o.s.lang) === want);
+      if (r) return "sidecar:" + r.i;
+      const b = bun.findIndex(s => _lpCanonLang(s.language) === want);
+      if (b >= 0) return String(b);
+    }
+    // Fall back across kinds so a remembered choice still lands somewhere sane.
+    const b2 = bun.findIndex(s => _lpCanonLang(s.language) === want);
+    if (b2 >= 0) return String(b2);
+    const r2 = real.find(o => _lpCanonLang(o.s.lang) === want);
+    if (r2) return "sidecar:" + r2.i;
+    const a2 = ai.find(o => _lpCanonLang(o.s.lang) === want);
+    if (a2) return "sidecar:" + a2.i;
+  }
+  if (subtitleSingleOption && real.length === 1) return "sidecar:" + real[0].i;
+  return null;
+}
+
+// Automatic default when nothing is remembered. The on-device player leaves subs
+// OFF by default (returning null) — the real-over-AI policy lives on the VLC
+// path; here a real sub still gets surfaced by the upgrade poller once present.
+function _lpDefaultSubKey() { return null; }
+
+function _lpStartSubUpgradePoll() {
+  _lpStopSubUpgradePoll();
+  _lpSubUpgradeTimer = setInterval(_lpSubUpgradePoll, 15000);
+}
+function _lpStopSubUpgradePoll() {
+  if (_lpSubUpgradeTimer) { clearInterval(_lpSubUpgradeTimer); _lpSubUpgradeTimer = null; }
+}
+
+// While an auto-applied AI sub is showing, re-check for a real preferred-language
+// sidecar that finished downloading after playback started, and switch to it.
+async function _lpSubUpgradePoll() {
+  if (!subtitleUpgradeLate || !lp.subAutoApplied || !lp.itemId || !lp.filePath || !profile.id) return;
+  const fileAtStart = lp.filePath;
+  let subs;
+  try {
+    const r = await fetch(`/api/library/${lp.itemId}/subs?file_path=${encodeURIComponent(lp.filePath)}`);
+    if (!r.ok) return;
+    subs = (await r.json()).subs || [];
+  } catch (_) { return; }
+  if (lp.filePath !== fileAtStart || !lp.subAutoApplied) return;   // changed under us
+  const real = subs.map((s, i) => ({ s, i })).filter(o => !o.s.ai);
+  const pref = _lpCanonLang(subtitleDefaultLang || "");
+  let pick = pref ? real.find(o => _lpCanonLang(o.s.lang) === pref) : (real[0] || null);
+  if (!pick && subtitleSingleOption && real.length === 1) pick = real[0];
+  if (!pick) return;                                  // no real sub yet — keep watching
+  _lpRebuildSidecars(subs, "sidecar:" + pick.i);
+  lp.subAutoApplied = false;
+  _lpSaveLocalTracks();                               // remember the upgrade (file + series)
+  const lang = (pick.s.lang || pref || "").toUpperCase();
+  showAlert("Switched to downloaded " + (lang ? lang + " " : "") + "subtitles", "success");
 }
 
 function lpSetQuality(idx) {
@@ -6926,6 +7062,7 @@ function lpSetAudio(idx) {
 
 function lpSetSubtitle(idx) {
   lp.pendingSubtitleIdx = idx;
+  lp.subAutoApplied = false;          // a deliberate pick — never auto-upgrade it
   _lpApplySubIdx(idx);
   _lpIndicateSubLoading(idx);
   _lpSaveLocalTracks();
@@ -6961,9 +7098,11 @@ function _lpIndicateSubLoading(idx) {
   setTimeout(() => finish(true), 10000);      // safety: never hang the hint
 }
 
-// Persist the user's track picks per-file so the same selection comes back
-// the next time they hit Play. Sidecar picks are saved as -1 (off) — they
-// aren't part of the HLS bundle index space.
+// Persist the user's track picks per-file so the same selection comes back next
+// time they hit Play — AND as a resolvable descriptor (lang/kind) that re-applies
+// across other episodes of the series. The legacy `subtitle_idx` only addresses
+// bundle subs; `subtitle_sel` is what carries a sidecar/AI pick (the old code
+// dropped those, saving -1, so a chosen .srt/AI sub was never remembered).
 function _lpSaveLocalTracks() {
   if (!lp.itemId || !lp.filePath || !profile.id) return;
   const subIsBundle = lp.pendingSubtitleIdx != null
@@ -6973,6 +7112,7 @@ function _lpSaveLocalTracks() {
     file_path:  lp.filePath,
     audio_idx:  Number.isFinite(Number(lp.pendingAudioIdx)) ? Number(lp.pendingAudioIdx) : null,
     subtitle_idx: subIsBundle ? Number(lp.pendingSubtitleIdx) : -1,
+    subtitle_sel: _lpDescriptorForKey(lp.pendingSubtitleIdx),
   };
   fetch(`/api/library/${lp.itemId}/local-tracks`, {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -7005,6 +7145,8 @@ async function lpStop() {
     saveProgress(lp.itemId, lp.filePath, t, d);
   }
   await lpUnloadCurrent();
+  _lpStopSubUpgradePoll();
+  lp.subAutoApplied = false;
   const c = document.getElementById("localPlayer");
   c.classList.remove("lp-active", "lp-tiny");
   document.getElementById("lpSkipOffer").classList.add("hidden");
@@ -7606,6 +7748,8 @@ function connectSSE(){
       if(was !== sttAvailable && lp && lp.itemId){ try{ _lpRenderTrackRows(); }catch(_){} }
     }
     if(typeof d.subtitle_default_language === "string") subtitleDefaultLang = d.subtitle_default_language;
+    if(typeof d.subtitle_upgrade_late === "boolean") subtitleUpgradeLate = d.subtitle_upgrade_late;
+    if(typeof d.subtitle_single_option === "boolean") subtitleSingleOption = d.subtitle_single_option;
     renderVpn(d.vpn_secure,d.vpn_status); renderPlayer(app);
     updateDlBadge(d.downloading_count||0);
     renderServerAttention(d);
@@ -7666,6 +7810,11 @@ function connectSSE(){
         if(!d.item_id||d.item_id===epItemId) refreshEpFiles();
       } catch(_){ refreshEpFiles(); }
     }
+  });
+  es.addEventListener("subtitle_upgraded",e=>{
+    // VLC (TV) auto-swapped an AI sub for a real one that finished downloading.
+    try{ const d=JSON.parse(e.data||"{}"); showAlert(d.label||"Switched to downloaded subtitles","success"); }
+    catch(_){ showAlert("Switched to downloaded subtitles","success"); }
   });
   es.addEventListener("error",()=>{
     sseDot.className="w-2 h-2 bg-red-600 transition-colors";
@@ -7735,6 +7884,8 @@ document.addEventListener("DOMContentLoaded",async()=>{
     document.body.classList.toggle("no-hls", !hlsAvailable);
     sttAvailable = !!(d && d.stt_available === true);
     if(d && typeof d.subtitle_default_language === "string") subtitleDefaultLang = d.subtitle_default_language;
+    if(d && typeof d.subtitle_upgrade_late === "boolean") subtitleUpgradeLate = d.subtitle_upgrade_late;
+    if(d && typeof d.subtitle_single_option === "boolean") subtitleSingleOption = d.subtitle_single_option;
   }).catch(()=>{});
 
   // Fetch the global max-volume cap so sliders are clamped correctly
@@ -7761,6 +7912,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.26.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.27.0</div>
 </body>
 </html>

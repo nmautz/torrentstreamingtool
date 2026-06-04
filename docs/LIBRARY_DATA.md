@@ -54,7 +54,9 @@ The only persistent server-side state. Lives at the project root. Accessed via `
     "subtitles": {                      // unified subtitle policy (admin System tab)
       "default_language": "eng",        // 3-letter code; "" = Any. Absent ⇒ "eng"
       "on_by_default":    false,        // start playback with subs on? (profile may override)
-      "auto_search":      true          // fetch a preferred-lang sub online on play when none embedded
+      "auto_search":      true,         // fetch a preferred-lang sub online on play when none embedded
+      "upgrade_late_subs": true,        // swap an auto-applied AI sub for a real one once it downloads. Absent ⇒ true
+      "single_option":    true          // treat a lone subtitle as the preferred language. Absent ⇒ true
     },
     "stt": {                            // AI auto-subtitle generation (admin System tab)
       "enabled":          true,
@@ -86,7 +88,10 @@ The only persistent server-side state. Lives at the project root. Accessed via `
   "auto_skip_intro":   true,            // optional; default false
   "auto_skip_credits": true,            // optional; default false
   "resume_mode": "auto|prompt|off",     // default "auto"
-  "subtitles_on": true                  // optional; per-profile override of settings.subtitles.on_by_default. absent/null = inherit; true/false = force
+  "subtitles_on": true,                 // optional; per-profile override of settings.subtitles.on_by_default. absent/null = inherit; true/false = force
+  "series_subtitle_prefs": {            // optional; remembered subtitle pick per series (this profile)
+    "Series Title S01": { "off": false, "lang": "eng", "ai": false, "name": "...", "updated_at": "..." }
+  }
 }
 ```
 
@@ -116,7 +121,9 @@ PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "so
 
 `settings.autoupdate`: managed by the **Updates** admin tab (see [ADMIN.md §8](ADMIN.md)). Drives the `updater_loop` background task + the `/api/admin/updater/*` endpoints. `branch` is sanitised on read (`_autoupdate_cfg`): when `dev_mode` is false a non-canonical value snaps back to `main`; when `dev_mode` is true any structurally-valid branch name survives (so a developer can pin a feature branch). All branch operations route through `updater.branch_allowed(branch, allow_any=dev_mode)`. Lives under `settings` because the updater acts on the whole host install, not an individual viewer.
 
-`settings.subtitles`: managed by the **System** admin tab's *Subtitles* card; read via `_subs_cfg`. The single source of truth for the preferred subtitle language. `default_language` is a 3-letter code (`_canon_lang`-normalized) or `""` (Any). **Migration / defaults:** if the `subtitles` block is absent it's seeded from the legacy `settings.stt.default_language` when that's set, else `"eng"` — so an unconfigured box defaults to English; once the block exists its value is used verbatim (so an admin who picks "Any" → `""` keeps it). `on_by_default` is whether playback starts with subs on (default false; a profile's `subtitles_on` overrides). `auto_search` lets playback fetch a preferred-language sub from OpenSubtitles when none is embedded (default true). This is the central subtitle setting: `_stt_cfg` re-sources its `default_language` from here, the search endpoint defaults to it, and `_apply_subtitle_policy` selects tracks by it.
+`settings.subtitles`: managed by the **System** admin tab's *Subtitles* card; read via `_subs_cfg`. The single source of truth for the preferred subtitle language. `default_language` is a 3-letter code (`_canon_lang`-normalized) or `""` (Any). **Migration / defaults:** if the `subtitles` block is absent it's seeded from the legacy `settings.stt.default_language` when that's set, else `"eng"` — so an unconfigured box defaults to English; once the block exists its value is used verbatim (so an admin who picks "Any" → `""` keeps it). `on_by_default` is whether playback starts with subs on (default false; a profile's `subtitles_on` overrides). `auto_search` lets playback fetch a preferred-language sub from OpenSubtitles when none is embedded (default true). `upgrade_late_subs` (default true) swaps an auto-applied **AI** sub for a real preferred-language one once it finishes downloading — driven by the `subtitle_upgrade_loop` task (VLC) and the on-device player's poller (`GET /api/library/{id}/subs`). `single_option` (default true) treats a lone real subtitle as the preferred language even when its filename carries no language tag. This is the central subtitle setting: `_stt_cfg` re-sources its `default_language` from here, the search endpoint defaults to it, and `_apply_subtitle_policy` selects tracks by it (preferring a **real** track over an AI one for the same language).
+
+**Subtitle pick memory.** A subtitle choice is remembered as a *resolvable descriptor* — `{off, lang, ai, name}` — not a VLC ES ID or HLS sidecar index (both drift between replays, and a late-downloaded sidecar shifts the list). It's stored two ways: per file (`file_progress[path].subtitle_sel`) and per profile+series (`profile.series_subtitle_prefs[<series>]`, written by `_save_series_sub_sel`). On the next play `_apply_subtitle_policy` (VLC) / the on-device resolver consult the file pick, then the series pick, matching by `name` → `lang`+kind → any-kind in that language → lone-option, before falling back to the default policy. The legacy `file_progress[path].local_subtitle_idx` is kept only for the bundle-index path; sidecar/AI picks live in `subtitle_sel` (the old on-device save dropped them, persisting `-1`).
 
 `settings.stt`: managed by the **System** admin tab's *Auto-Generated Subtitles (AI)* card. Gates AI auto-subtitle generation (whisper.cpp): `enabled` + `translate` (adds an English-translated track for non-English audio). The **preferred language is unified** — `_stt_cfg.default_language` is read from `settings.subtitles` (above), not stored here. Consumed by `_needs_stt_subs` / `_ensure_stt_for`. See [STT.md](STT.md).
 
@@ -217,7 +224,12 @@ Season/episode are extracted by `parse_season_episode()` ([main.py:807](../main.
         "completed": false,                // true when pct > 0.92
         "updated_at": "2026-05-13T02:47:57+00:00",
         "audio_track": 3,                  // optional; VLC ES ID
-        "subtitle_track": -1               // optional; -1 = off
+        "subtitle_track": -1,              // optional; -1 = off (VLC ES ID — drifts between replays)
+        "local_audio_idx": 0,              // optional; on-device HLS bundle audio index
+        "local_subtitle_idx": -1,          // optional; LEGACY on-device bundle sub index (sidecar picks can't be addressed here)
+        "subtitle_sel": {                  // optional; resolvable subtitle descriptor — the robust per-file pick
+          "off": false, "lang": "eng", "ai": false, "name": "Movie.eng.srt"
+        }
       }
     }
   }

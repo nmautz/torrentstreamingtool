@@ -22,6 +22,8 @@
 - [x] **2.3** Playback Fix: "Play" on a specific episode selection reliably starts that file
   - ✅ Confirmed working for single-file items with watch progress.
 - [x] **2.4** Audio/Sub Track State Mem: Remember what audio track and subtitle track were selected for an episode and select those when playing it again
+  - Subtitle picks hardened + extended (v4.27.0): the on-device player previously dropped every sidecar/AI subtitle pick (`_lpSaveLocalTracks` saved `-1`), so a chosen `.srt`/AI sub was never remembered. Picks are now saved as a resolvable descriptor (`subtitle_sel` = `{off,lang,ai,name}`) that survives ES-ID / sidecar-index drift, and are **also remembered per profile, per series** (`profile.series_subtitle_prefs`) so the same kind of subtitle auto-applies on the next episode (weeks later included). See [docs/LIBRARY_DATA.md](docs/LIBRARY_DATA.md), [docs/STREAMING.md](docs/STREAMING.md).
+- [x] **2.5** Late-subtitle upgrade + lone-sub assumption (v4.27.0): real `.srt` sidecars often finish downloading after the video, so an AI sub gets applied first. With `settings.subtitles.upgrade_late_subs` (default on) the system keeps watching and swaps the auto-applied AI sub for a real preferred-language one once it's discoverable — VLC via `subtitle_upgrade_loop` (+ `subtitle_upgraded` toast), on-device via a 15 s poll of `GET /api/library/{id}/subs`. `single_option` (default on) treats a lone sub as the preferred language. A manual pick is never overridden. See [docs/STT.md](docs/STT.md), [docs/GOTCHAS.md](docs/GOTCHAS.md).
 
 
 ---
