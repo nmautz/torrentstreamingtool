@@ -407,7 +407,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "4.13.0"
+UI_VERSION = "4.26.1"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -459,13 +459,20 @@ def _save_lib_raw(data: dict) -> None:
 
 
 async def get_library() -> dict:
+    # The read + json.loads + _migrate_item-over-every-item is O(library size)
+    # and was previously run inline on the event loop. Hot loops call this every
+    # 2-5 s (progress tracker, download monitor) and it grows after every
+    # download (skip_data fingerprints), so a large library.json stalled the
+    # whole loop — the dashboard went laggy and the HTTPS proxy threw ReadErrors
+    # mid-request while the loop was blocked. Run the blocking work in a thread;
+    # the lock still serialises access, but the loop stays free.
     async with _lib_lock:
-        return _load_lib_raw()
+        return await asyncio.to_thread(_load_lib_raw)
 
 
 async def put_library(data: dict) -> None:
     async with _lib_lock:
-        _save_lib_raw(data)
+        await asyncio.to_thread(_save_lib_raw, data)
 
 
 def _now_iso() -> str:

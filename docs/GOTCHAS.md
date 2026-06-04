@@ -220,6 +220,10 @@ A non-elevated StreamLink (the normal install: Task Scheduler at logon, no `/RL 
 
 ## Library
 
+### `get_library`/`put_library` MUST keep the disk I/O off the event loop
+
+`get_library()` reads `library.json`, `json.loads`es it, and runs `_migrate_item` over **every** item; `put_library()` `json.dumps(indent=2)`es and writes the whole file. That cost is O(library size) and grows after every download (the analyzer writes per-file audio-fingerprint `skip_data`). These are called from hot loops — `vlc_progress_tracker` (every 2 s while playing), `library_download_monitor` (every 5 s while downloading), `download_scheduler_loop`, plus ~110 request handlers. When this ran **inline on the asyncio loop**, a large library stalled the entire event loop every few seconds: the dashboard went "incredibly laggy" while CPU/RAM and the box itself (RDP) stayed perfectly fine — because a blocked *event loop* is invisible to CPU% and the OS. The tell-tale collateral was a flood of `httpx.ReadError`s from `https_proxy.py` (the HTTPS→HTTP proxy's upstream read timing out while the app loop was blocked). Fixed in v4.26.1: both helpers run the blocking part via `await asyncio.to_thread(...)` **inside** `_lib_lock` (the lock still serialises access; the loop stays free). **Don't** revert these to inline I/O, and **don't** read/parse/serialize `library.json` synchronously anywhere on the request/loop path — route through these helpers.
+
 ### `library_item_id` is the "don't auto-delete" flag
 
 `/api/stop` ([main.py:2576](../main.py#L2576)) checks `if state.active_hash and not state.library_item_id` before deleting the torrent. If you're streaming a torrent and then call `/api/stream/save-to-library`, that sets `library_item_id` and the next `/api/stop` will leave files alone.

@@ -1,5 +1,9 @@
 # Changelog
 
+## [4.26.1] — 2026-06-03
+- **Fix: server going "incredibly laggy" after a download (with CPU/RAM and the machine itself perfectly fine).** `get_library()` / `put_library()` ran their disk read + `json.loads` + per-item migration (and the `json.dumps`/write) **synchronously on the asyncio event loop**. Hot loops call these constantly during/after a download — `vlc_progress_tracker` every 2 s, `library_download_monitor` every 5 s, plus every API request — and `library.json` grows after each download (the analyzer writes per-file audio-fingerprint `skip_data`). So every few seconds the whole event loop stalled re-parsing/serializing the entire library, which is invisible to CPU% and to the OS (RDP stayed responsive). The collateral was a flood of `httpx.ReadError`s from `https_proxy.py`: the HTTPS proxy's upstream read timed out while the app's loop was blocked. Fix: both helpers now run the blocking I/O via `asyncio.to_thread` while still holding `_lib_lock`, so the loop stays free.
+- **Also:** brought the stale `UI_VERSION` constant (was `4.13.0`) back in sync with the page badge so the client-side auto-reload version check works again.
+
 ## [4.26.0] — 2026-06-03
 - **New: "Clip" — save & share the last 30 seconds (or a custom length) of whatever's playing.** A new clip control appears in two places: the **fullscreen VLC controls** (clips what's on the TV) and the **on-device player**, where it sits directly under the subtitle selector. Each spot leads with a prominent **Clip Last 30s** button and offers a quieter **Clip last…** button for a custom length (1–300 s).
   - The server cuts a standalone, universally-compatible **MP4 (H.264 + AAC, +faststart)** from the original source ending at the live playback position — re-encoded so it plays/AirDrops anywhere. NVENC when available, else libx264. On mobile the finished clip is handed to the OS **share sheet** (`navigator.share`); on desktop it downloads.
