@@ -1,4 +1,4 @@
-# P2P StreamLink v2.0
+# P2P StreamLink
 
 Local dashboard for searching, buffering, and instantly streaming P2P media through VLC — with a Mullvad VPN kill-switch.
 

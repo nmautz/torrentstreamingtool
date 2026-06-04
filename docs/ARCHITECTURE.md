@@ -4,7 +4,7 @@ High-level system overview. Read this first if you're new to the project.
 
 ## What it is
 
-P2P StreamLink v2.0 — a local web dashboard that searches Jackett indexers, buffers magnet links through qBittorrent, and streams the file into VLC. Mullvad VPN is enforced as a kill-switch. There is also a persistent **library** (downloaded items kept around), per-profile watch history, intro/credits Smart Skip, subtitle download, and an admin panel.
+P2P StreamLink — a local web dashboard that searches Jackett indexers, buffers magnet links through qBittorrent, and streams the file into VLC. Mullvad VPN is enforced as a kill-switch. There is also a persistent **library** (downloaded items kept around), per-profile watch history, intro/credits Smart Skip, subtitle download, and an admin panel.
 
 ## Service topology
 

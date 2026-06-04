@@ -1500,7 +1500,7 @@ def merge_tool_paths(tools: dict) -> None:
 # ── Main ───────────────────────────────────────────────────────────────────
 def main():
     print(f"\n{BOLD}{CYN}  ┌──────────────────────────────┐")
-    print(f"  │   StreamLink v2.0  Setup   │")
+    print(f"  │       StreamLink Setup       │")
     print(f"  └──────────────────────────────┘{RESET}")
 
     check_python()

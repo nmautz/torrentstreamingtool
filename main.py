@@ -1,4 +1,4 @@
-"""P2P StreamLink v2.0 — FastAPI backend"""
+"""P2P StreamLink — FastAPI backend"""
 
 import asyncio
 import base64

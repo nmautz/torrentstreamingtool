@@ -928,7 +928,7 @@ def main():
         print(f"  Run {BOLD}python3 setup.py{RESET} again to finish installation.")
         sys.exit(1)
 
-    print(f"\n{BOLD}{CYN}  StreamLink v2.0 — Starting up{RESET}\n")
+    print(f"\n{BOLD}{CYN}  StreamLink — Starting up{RESET}\n")
 
     # ── Services ──────────────────────────────────────────────────────────
     print(f"{BOLD}  Services{RESET}")
