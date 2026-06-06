@@ -140,9 +140,6 @@
       min-height: 0;
       background: #000;
     }
-    /* AirPlay button while a wireless route is engaged — solid sky tint so it's
-       obvious playback is on the TV, not the phone. */
-    #lpCastBtn.lp-casting { background: #0369a1; color: #fff; }
     /* Tiny mode — overrides the fullscreen layout. The chrome rows hide; only
        the video + huge fullscreen button + close button remain. */
     #localPlayer.lp-tiny {
@@ -1817,18 +1814,6 @@
         <div id="lpTitle" class="text-xs font-bold text-gray-200 truncate">—</div>
         <div class="text-[10px] uppercase tracking-widest text-emerald-500 font-bold">On Device</div>
       </div>
-      <!-- AirPlay cast — Safari only (iOS/macOS). Hidden until an AirPlay route is
-           detected on the network (webkitplaybacktargetavailabilitychanged); opens
-           the system picker so the phone can throw the HLS stream onto an Apple TV.
-           See _lpAttachVideoEvents / lpCast and STREAMING.md § Cast to TV. -->
-      <button id="lpCastBtn" onclick="lpCast()" title="Cast to a TV (AirPlay)"
-        class="hidden h-full px-4 flex items-center gap-1.5 text-sky-400 hover:text-sky-200 hover:bg-sky-950/40 active:bg-sky-950/70 transition-colors text-xs font-bold uppercase tracking-wide">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" d="M5 17H4a1 1 0 01-1-1V6a1 1 0 011-1h16a1 1 0 011 1v10a1 1 0 01-1 1h-1"/>
-          <path stroke-linecap="round" stroke-linejoin="round" d="M12 15l4 5H8l4-5z"/>
-        </svg>
-        Cast
-      </button>
       <button onclick="lpHandoffToVlc(this)" title="Hand off to the TV (VLC) — resume there at the same time"
         class="h-full px-4 flex items-center gap-1.5 text-indigo-400 hover:text-indigo-200 hover:bg-indigo-950/40 active:bg-indigo-950/70 transition-colors text-xs font-bold uppercase tracking-wide">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
@@ -1842,7 +1827,15 @@
       </button>
     </div>
   </div>
-  <video id="lpVideo" controls playsinline crossorigin="anonymous" preload="auto"></video>
+  <!-- x-webkit-airplay="deny" + disableRemotePlayback keep the video INSIDE the
+       iOS screen mirror. Without them, iOS auto-routes a playing <video> to
+       video-only AirPlay the moment Control Center → Screen Mirroring is on, so
+       the TV shows just the video (breaking out of the mirror) instead of the
+       whole mirrored screen. Denying per-element AirPlay makes the video render
+       in the mirror, so "cast to TV" works via the native screen-share option.
+       See STREAMING.md § Cast to TV (screen mirroring). -->
+  <video id="lpVideo" controls playsinline x-webkit-airplay="deny" disableRemotePlayback
+         crossorigin="anonymous" preload="auto"></video>
   <!-- Stream-prep overlay: visible while the server is remuxing/transcoding the source file. -->
   <div id="lpPreparing"
        class="hidden absolute inset-0 z-30 flex items-center justify-center bg-black/70 text-amber-300 text-sm font-bold uppercase tracking-widest pointer-events-none">
@@ -6489,26 +6482,6 @@ async function lpHandoffToVlc(btn) {
   });
 }
 
-// --- Cast to TV (AirPlay) ----------------------------------------------------
-//
-// Open the system AirPlay route picker for the on-device <video>. Safari (iOS +
-// macOS) exposes webkitShowPlaybackTargetPicker on the media element; picking an
-// Apple TV / AirPlay-2 TV throws the native-HLS stream onto it (the TV fetches
-// the bundle from the host directly). Non-Safari engines lack the API, but the
-// button that calls this is hidden unless WebKit reported a route — see
-// _lpAttachVideoEvents. Audio-track switching keeps working over AirPlay (the
-// alternate renditions are in the manifest); subtitle <track>s may not render on
-// the receiver — that's an AirPlay/native-HLS limitation, noted in STREAMING.md.
-function lpCast() {
-  const v = document.getElementById("lpVideo");
-  if (!v || typeof v.webkitShowPlaybackTargetPicker !== "function") {
-    showAlert("Casting isn't supported by this browser — use Safari on iPhone/iPad/Mac.", "warn");
-    return;
-  }
-  try { v.webkitShowPlaybackTargetPicker(); }
-  catch (_) { showAlert("Couldn't open the cast picker.", "error"); }
-}
-
 // --- Local player (browser-side <video>) -------------------------------------
 //
 // Plays a server-prepared HLS bundle (master.m3u8 + per-rendition playlists +
@@ -7457,24 +7430,6 @@ function _lpAttachVideoEvents() {
   v.addEventListener("error", () => {
     showAlert("Stream playback error — check the host's network and try again.", "error");
   });
-  // AirPlay ("Cast to TV") — Safari (iOS/macOS) only. iOS Safari plays the bundle
-  // via native HLS (v.src = master_url), which AirPlay can route to an Apple TV /
-  // AirPlay-2 TV on the LAN. We surface an explicit button in the player chrome
-  // (the native control's own AirPlay glyph is easy to miss, and the chrome is
-  // hidden in tiny mode). The button stays hidden until WebKit reports a route is
-  // available; non-Safari engines never fire this event, so it never shows there.
-  if (window.WebKitPlaybackTargetAvailabilityEvent) {
-    v.addEventListener("webkitplaybacktargetavailabilitychanged", (e) => {
-      const btn = document.getElementById("lpCastBtn");
-      if (btn) btn.classList.toggle("hidden", e.availability !== "available");
-    });
-    // Tint the button when a wireless route is actually engaged, so the user can
-    // tell playback is on the TV rather than the phone.
-    v.addEventListener("webkitcurrentplaybacktargetiswirelesschanged", () => {
-      const btn = document.getElementById("lpCastBtn");
-      if (btn) btn.classList.toggle("lp-casting", !!v.webkitCurrentPlaybackTargetIsWireless);
-    });
-  }
   // Tab backgrounded / phone screen locked → flush via fetch (still alive).
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") _lpFlushProgress(false);

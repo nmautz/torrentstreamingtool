@@ -485,9 +485,9 @@ Goal: the separate **Overnight Stream Prep** (fixed nightly window) + **Idle Aut
 - [x] **36.3** (v5.2.0) Docs — STREAMING (auto-prep section), ADMIN (Automatic Stream Prep card + endpoints), API (auto-prep endpoints), LIBRARY_DATA (`settings.auto_prep` + migration), BACKEND (AppState + loop), GOTCHAS (activity-kick + idle-download window), CHANGELOG.
 
 
-## Milestone 37 — Cast to TV (AirPlay)
+## Milestone 37 — Cast to TV (iOS screen mirroring)
 
-Goal: let a viewer watching on-device in **Safari on iPhone/iPad** (and macOS Safari) throw the stream onto an Apple TV / AirPlay-2 TV. Client-only — AirPlay routes the existing native-HLS `<video>` to the receiver, which fetches the bundle from the host directly. AirPlay is the only TV-casting tech iOS Safari supports natively (no Google Cast sender in Safari). Distinct from the host-VLC "On TV" / "To TV" paths.
+Goal: let a viewer watching on-device in **Safari on iPhone/iPad** put playback on a real TV using iOS's native **Screen Mirroring** (Control Center), so the whole dashboard — UI + video — appears on the TV. The user casts from iOS's own screen-share options; there's no in-app button. The only app-side change is making the video cooperate with the mirror instead of auto-breaking-out into video-only AirPlay.
 
-- [x] **37.1** (v5.3.0) Frontend. `#lpCastBtn` in the local player header (next to **To TV**, `.lp-chrome` so hidden in tiny mode), starts hidden. `_lpAttachVideoEvents` (gated on `window.WebKitPlaybackTargetAvailabilityEvent`) reveals it on `webkitplaybacktargetavailabilitychanged` (`availability==="available"`) and tints it (`.lp-casting`) on `webkitcurrentplaybacktargetiswirelesschanged`. `lpCast()` calls `v.webkitShowPlaybackTargetPicker()`. Never shows on non-Safari engines (hls.js path). Version badge → 5.3.0.
-- [x] **37.2** (v5.3.0) Docs — STREAMING (Cast to TV section + limitations), FRONTEND (Cast to TV function note), CHANGELOG.
+- [x] **37.1** (v5.3.0) Frontend. `#lpVideo` gets `x-webkit-airplay="deny"` + `disableRemotePlayback` so a playing on-device video stays inside the iOS screen mirror rather than auto-routing to video-only AirPlay (which strands controls on the phone). No JS / no button. Version badge → 5.3.0.
+- [x] **37.2** (v5.3.0) Docs — STREAMING (Cast to TV via screen mirroring + rationale), FRONTEND (note), CHANGELOG.

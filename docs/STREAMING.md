@@ -37,9 +37,9 @@ Read this when changing anything related to:
 - **On-demand (JIT) streaming** — `stream-ondemand`, the `_od_*` session manager,
   the `/api/library/ondemand/<key>/…` virtual-playlist + segment endpoints, and the
   client `lp.mode === "ondemand"` path. See [§ On-Demand](#on-demand-just-in-time-streaming)
-- **Cast to TV (AirPlay)** — the `#lpCastBtn` header button, `lpCast`, and the
-  `webkitplaybacktargetavailabilitychanged` wiring in `_lpAttachVideoEvents`. See
-  [§ Cast to TV](#cast-to-tv-airplay)
+- **Cast to TV (screen mirroring)** — the `#lpVideo` AirPlay-opt-out attributes
+  (`x-webkit-airplay="deny"` + `disableRemotePlayback`) that keep the on-device
+  video inside an iOS screen mirror. See [§ Cast to TV](#cast-to-tv-screen-mirroring)
 - The play chooser (`#playChooserModal`, `playLibraryWithChooser`, `pcChoose`)
 - The **Handoff** (both directions): TV→device (`handoffToDevice`, `#handoffBtn`,
   `#fcHandoffBtn`) and device→TV (`lpHandoffToVlc`, the local player's **To TV** button)
@@ -710,51 +710,42 @@ probed. `503` on macOS (`HLS_AVAILABLE` false).
 
 ---
 
-## Cast to TV (AirPlay)
+## Cast to TV (screen mirroring)
 
-Throw the on-device stream onto a real TV from **Safari on iPhone/iPad** (and
-macOS Safari) via **AirPlay**. This is the only TV-casting tech iOS Safari
-supports natively — there is no Google Cast sender SDK in Safari, so Chromecast
-isn't an option from an iPhone browser. It's distinct from the two existing
-"TV" paths: the play chooser's **On TV (VLC)** and the **To TV** handoff both
-drive the *host's* VLC; AirPlay sends the stream to whatever Apple TV / AirPlay-2
-TV is on the LAN, decoded by the receiver itself.
+Get the on-device player onto a real TV from **Safari on iPhone/iPad** using
+iOS's native **Screen Mirroring** (Control Center → Screen Mirroring → Apple TV).
+The whole phone screen — the dashboard UI *and* the playing video — is mirrored
+to the TV. There is **no in-app cast button**: the user picks the TV from iOS's
+own AirPlay/screen-share options. This is distinct from the host-side "TV" paths
+(the play chooser's **On TV (VLC)** and the **To TV** handoff, which drive the
+*host's* VLC).
 
-**How it works.** iOS Safari plays the HLS bundle through **native HLS**
-(`v.src = master_url`, the non-hls.js branch of `_lpLoadIndex`), and AirPlay
-routes that element to the receiver — the Apple TV fetches `master.m3u8` and the
-segments from the host directly over the LAN. No transcode change, no new
-endpoint; it's purely a client affordance over the existing bundle.
+**The one thing the app must do: stay out of the mirror's way.** By default a
+playing `<video>` on iOS *auto-routes to video-only AirPlay* the moment screen
+mirroring turns on — the TV then shows only the video (broken out of the mirror)
+with controls left on the phone. That breakout is exactly the "cast just the
+stream" behavior we *don't* want. So `#lpVideo` opts out of per-element AirPlay:
 
-**UI.** `#lpCastBtn` lives in the local player header (`.lp-chrome`, so hidden in
-tiny mode — maximize first), next to **To TV**. It starts hidden and is revealed
-only when WebKit reports a route is available:
+```html
+<video id="lpVideo" controls playsinline x-webkit-airplay="deny" disableRemotePlayback …>
+```
 
-- `_lpAttachVideoEvents` (one-time, gated on `window.WebKitPlaybackTargetAvailabilityEvent`)
-  listens for `webkitplaybacktargetavailabilitychanged` and toggles the button on
-  `availability === "available"`. Non-Safari engines (Chrome/Firefox/Edge, where
-  hls.js owns playback) never fire this event, so the button never appears there.
-- `webkitcurrentplaybacktargetiswirelesschanged` toggles the `.lp-casting` class
-  (solid sky tint) while a wireless route is engaged, so it's obvious playback is
-  on the TV rather than the phone.
-- `lpCast()` calls `v.webkitShowPlaybackTargetPicker()` to open the system route
-  picker; it guards against the API being absent (warns to use Safari).
+- **`x-webkit-airplay="deny"`** — the legacy WebKit attribute; tells Safari not to
+  offer or auto-route AirPlay video for this element.
+- **`disableRemotePlayback`** — the standard Remote Playback API equivalent; both
+  are set for coverage across iOS versions.
 
-**Limitations.**
+With AirPlay denied on the element, the video renders *in* the mirrored screen, so
+it appears on the TV through Screen Mirroring like the rest of the page.
 
-- **Audio switching carries over** — the alternate audio renditions are in the
-  HLS manifest, so the receiver honors `video.audioTracks` selection.
-- **Subtitle `<track>` sidecars may not render on the receiver.** Our subs are
-  standalone WebVTT attached as `<track>` children (not in-manifest — see
-  [§ Output format](#output-format)); AirPlay of native HLS doesn't reliably
-  forward client-side text tracks to the Apple TV. Burn-in / in-manifest subs
-  would be needed for guaranteed subtitle display on the receiver — not
-  implemented.
-- **Quality** is auto-only on the Safari native path regardless (no manual ABR
-  level API), same as ordinary Safari on-device playback.
-- Platform note: this is an **iOS/macOS Safari** feature by nature. It does not
-  depend on the host OS — the bundle is served the same on Windows/Linux/macOS
-  hosts — but it's gated by the bundle existing at all, so it's unavailable when
+**Notes / limitations.**
+
+- It's whole-screen mirroring, so it carries everything the on-device player shows
+  — ABR quality, the selected audio track, and the `<track>` subtitle overlay all
+  appear on the TV exactly as on the phone (no separate-stream subtitle loss).
+- Mirroring is an **iOS Control Center** action; nothing in the dashboard triggers
+  or detects it. Non-Safari engines ignore the AirPlay attributes harmlessly.
+- Gated only by the on-device player existing at all — i.e. unavailable when
   `HLS_AVAILABLE` is false (macOS host), like every on-device path.
 
 ---

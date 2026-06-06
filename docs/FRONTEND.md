@@ -305,17 +305,14 @@ seeked to the same moment. The **To TV** button sits in the local player's
 fullscreen header next to Stop (part of `.lp-chrome`, hidden in tiny mode).
 Guarded by `withInflight("handoff_vlc")`.
 
-### Cast to TV (AirPlay)
+### Cast to TV (screen mirroring)
 
-`lpCast()` opens the system AirPlay route picker for `#lpVideo` via Safari's
-`webkitShowPlaybackTargetPicker()`, sending the native-HLS stream to an Apple TV /
-AirPlay-2 TV. The **Cast** button (`#lpCastBtn`, in the player header next to
-**To TV**, part of `.lp-chrome`) starts hidden; `_lpAttachVideoEvents` reveals it
-on `webkitplaybacktargetavailabilitychanged` (`availability === "available"`) and
-tints it (`.lp-casting`) on `webkitcurrentplaybacktargetiswirelesschanged`. Both
-are gated on `window.WebKitPlaybackTargetAvailabilityEvent`, so the button never
-shows on non-Safari engines (hls.js path). See
-[STREAMING.md § Cast to TV](STREAMING.md#cast-to-tv-airplay).
+No JS / no button. `#lpVideo` carries `x-webkit-airplay="deny"` +
+`disableRemotePlayback` so a playing on-device video stays *inside* an iOS Screen
+Mirror instead of auto-breaking-out into video-only AirPlay. The user casts by
+picking the TV from iOS Control Center → Screen Mirroring; the whole page
+(including the video) shows on the TV. See
+[STREAMING.md § Cast to TV](STREAMING.md#cast-to-tv-screen-mirroring).
 
 ### Clip (save & share the last N seconds)
 
