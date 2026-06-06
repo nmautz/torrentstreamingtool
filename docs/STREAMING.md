@@ -37,6 +37,9 @@ Read this when changing anything related to:
 - **On-demand (JIT) streaming** — `stream-ondemand`, the `_od_*` session manager,
   the `/api/library/ondemand/<key>/…` virtual-playlist + segment endpoints, and the
   client `lp.mode === "ondemand"` path. See [§ On-Demand](#on-demand-just-in-time-streaming)
+- **Cast to TV (AirPlay)** — the `#lpCastBtn` header button, `lpCast`, and the
+  `webkitplaybacktargetavailabilitychanged` wiring in `_lpAttachVideoEvents`. See
+  [§ Cast to TV](#cast-to-tv-airplay)
 - The play chooser (`#playChooserModal`, `playLibraryWithChooser`, `pcChoose`)
 - The **Handoff** (both directions): TV→device (`handoffToDevice`, `#handoffBtn`,
   `#fcHandoffBtn`) and device→TV (`lpHandoffToVlc`, the local player's **To TV** button)
@@ -704,6 +707,55 @@ probed. `503` on macOS (`HLS_AVAILABLE` false).
 > stream order. If a viewer is on a non-default audio track on the TV, the clip
 > won't match it. On-device clips don't have this problem — the player knows its
 > rendition index. Windows/Linux/macOS-agnostic; gated on HLS like all prep.
+
+---
+
+## Cast to TV (AirPlay)
+
+Throw the on-device stream onto a real TV from **Safari on iPhone/iPad** (and
+macOS Safari) via **AirPlay**. This is the only TV-casting tech iOS Safari
+supports natively — there is no Google Cast sender SDK in Safari, so Chromecast
+isn't an option from an iPhone browser. It's distinct from the two existing
+"TV" paths: the play chooser's **On TV (VLC)** and the **To TV** handoff both
+drive the *host's* VLC; AirPlay sends the stream to whatever Apple TV / AirPlay-2
+TV is on the LAN, decoded by the receiver itself.
+
+**How it works.** iOS Safari plays the HLS bundle through **native HLS**
+(`v.src = master_url`, the non-hls.js branch of `_lpLoadIndex`), and AirPlay
+routes that element to the receiver — the Apple TV fetches `master.m3u8` and the
+segments from the host directly over the LAN. No transcode change, no new
+endpoint; it's purely a client affordance over the existing bundle.
+
+**UI.** `#lpCastBtn` lives in the local player header (`.lp-chrome`, so hidden in
+tiny mode — maximize first), next to **To TV**. It starts hidden and is revealed
+only when WebKit reports a route is available:
+
+- `_lpAttachVideoEvents` (one-time, gated on `window.WebKitPlaybackTargetAvailabilityEvent`)
+  listens for `webkitplaybacktargetavailabilitychanged` and toggles the button on
+  `availability === "available"`. Non-Safari engines (Chrome/Firefox/Edge, where
+  hls.js owns playback) never fire this event, so the button never appears there.
+- `webkitcurrentplaybacktargetiswirelesschanged` toggles the `.lp-casting` class
+  (solid sky tint) while a wireless route is engaged, so it's obvious playback is
+  on the TV rather than the phone.
+- `lpCast()` calls `v.webkitShowPlaybackTargetPicker()` to open the system route
+  picker; it guards against the API being absent (warns to use Safari).
+
+**Limitations.**
+
+- **Audio switching carries over** — the alternate audio renditions are in the
+  HLS manifest, so the receiver honors `video.audioTracks` selection.
+- **Subtitle `<track>` sidecars may not render on the receiver.** Our subs are
+  standalone WebVTT attached as `<track>` children (not in-manifest — see
+  [§ Output format](#output-format)); AirPlay of native HLS doesn't reliably
+  forward client-side text tracks to the Apple TV. Burn-in / in-manifest subs
+  would be needed for guaranteed subtitle display on the receiver — not
+  implemented.
+- **Quality** is auto-only on the Safari native path regardless (no manual ABR
+  level API), same as ordinary Safari on-device playback.
+- Platform note: this is an **iOS/macOS Safari** feature by nature. It does not
+  depend on the host OS — the bundle is served the same on Windows/Linux/macOS
+  hosts — but it's gated by the bundle existing at all, so it's unavailable when
+  `HLS_AVAILABLE` is false (macOS host), like every on-device path.
 
 ---
 
