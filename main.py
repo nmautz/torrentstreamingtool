@@ -1710,6 +1710,11 @@ async def _restart_vlc_process() -> bool:
     subprocess.Popen(
         [vlc_bin, "--extraintf=http", "--http-host=localhost",
          f"--http-port={vlc_port}", f"--http-password={settings.vlc_password}", "--no-random",
+         # StreamLink owns sidecar loading via _load_all_local_subs (which tags AI
+         # subs). VLC's own autodetect would load AI `.srt`s first as *untagged*
+         # tracks, so the policy mistakes them for real subs — disable it. See
+         # docs/GOTCHAS.md.
+         "--no-sub-autodetect-file",
          "--fullscreen", *_vlc_marquee_args(),
          # Night mode (dynamic-range compressor) when enabled — see _apply_night_mode.
          *_vlc_audio_filter_args(state.vlc_night_mode, state.vlc_night_mode_preset)],
@@ -2180,8 +2185,13 @@ async def _load_all_local_subs(video: Path) -> list[dict]:
     parsed from the source filename, since VLC rarely tags loose sidecars).
 
     Subs are added one at a time so we can map each freshly-created ES ID back to
-    the language we parsed from its filename. Files VLC already auto-loaded (no
-    new track appears) are skipped, avoiding duplicate entries.
+    the language we parsed from its filename — and, crucially, whether it's an AI
+    sidecar (`_is_ai_sub_file`). VLC's own sidecar autodetect is disabled at launch
+    (`--no-sub-autodetect-file`) precisely so this is the *only* path that loads
+    sidecars: an AI `.srt` VLC auto-loaded would arrive untagged and read as a real
+    track, which the policy would then prefer over a genuine sub. Any track already
+    present here is therefore an embedded (in-container) track. The skip-on-no-new
+    branch below is a harmless safety net (e.g. a sub already loaded by a download).
     """
     tracks = await _vlc_subtitle_tracks()
     known_ids = {t["id"] for t in tracks}
@@ -2346,7 +2356,14 @@ async def _apply_track_prefs(
             state.current_audio_track = audio
             await vlc("audio_track", val=str(audio))
         if subtitle is not None:
-            # Explicit per-file user pick wins over the default policy.
+            # Explicit per-file user pick wins over the default policy. VLC's own
+            # sidecar autodetect is disabled, so load every sidecar ourselves first
+            # — otherwise the subtitle menu would show only embedded tracks and a
+            # saved sidecar ES ID wouldn't resolve. (The no-pick branch loads them
+            # via _apply_subtitle_policy.)
+            video = Path(file_path)
+            if video.exists():
+                await _load_all_local_subs(video)
             state.current_subtitle_track = subtitle
             state.sub_auto_ai_path = ""           # an explicit pick isn't auto-AI
             await vlc("subtitle_track", val=str(subtitle))

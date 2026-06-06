@@ -172,6 +172,10 @@ the AI sub from sticking once a real one exists:
   sub is only chosen when no real one is present. When the policy *does* land on
   an AI track it records it (`state.sub_auto_ai_path` on VLC, `lp.subAutoApplied`
   on-device) as **auto-applied** — distinct from a deliberate pick.
+  > This ranking only holds because VLC is launched with `--no-sub-autodetect-file`.
+  > Otherwise VLC auto-loads the AI `.srt` *before* `_load_all_local_subs` tags it,
+  > so it arrives looking like a real English track and is preferred over a genuine
+  > but untagged sub — see [GOTCHAS.md](GOTCHAS.md) § "VLC's own sidecar autodetect".
 - **Late upgrade.** With `settings.subtitles.upgrade_late_subs` on (default), the
   system keeps watching after playback starts and swaps the auto-applied AI sub
   for a real preferred-language sub the moment one is discoverable: VLC via the

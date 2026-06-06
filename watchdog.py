@@ -632,6 +632,10 @@ def _build_specs() -> tuple[list[ServiceSpec], ServiceSpec]:
             f"--http-port={vlc_port}",
             f"--http-password={vlc_pwd}",
             "--no-random",
+            # StreamLink owns sidecar loading (it tags AI subs); VLC's own
+            # autodetect would load AI `.srt`s as untagged "real" tracks and
+            # break subtitle auto-selection. Disable it. See docs/GOTCHAS.md.
+            "--no-sub-autodetect-file",
             # Start fullscreen so the idle background video covers the screen
             # on boot. Critical for the system-service path: at login, the
             # post-`in_play` HTTP fullscreen toggle is unreliable because the

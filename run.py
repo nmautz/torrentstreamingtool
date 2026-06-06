@@ -371,6 +371,10 @@ def start_vlc() -> bool:
         f"--http-port={vlc_port}",
         f"--http-password={vlc_pwd}",
         "--no-random",
+        # StreamLink owns sidecar loading (it tags AI subs); VLC's own autodetect
+        # would load AI `.srt`s as untagged "real" tracks and break subtitle
+        # auto-selection. Disable it. See docs/GOTCHAS.md.
+        "--no-sub-autodetect-file",
         # Mirror watchdog.py: come up fullscreen so the idle background video
         # (and any subsequent playback) covers the screen reliably, even at
         # boot when the post-play HTTP fullscreen toggle can race the desktop.
