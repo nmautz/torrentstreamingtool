@@ -1576,8 +1576,10 @@
          length is a quieter sibling. Disabled until the file is stream-prepped.
          See fcClip / fcClipCustom / _doClip. -->
     <div id="fcClipRow" class="hidden flex-1 border-b border-gray-800 min-h-0">
-      <button id="fcClip30Btn" onclick="fcClip(30,this)" title="Save & share the last 30 seconds"
-        class="fc-tile flex flex-[2.2] border-r border-gray-800 bg-fuchsia-950/20
+      <button id="fcClip30Btn" onpointerdown="_holdStart(this, (b)=>fcClip(30,b), event)"
+        onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
+        title="Hold to save & share the last 30 seconds"
+        class="hold-btn fc-tile flex flex-[2.2] border-r border-gray-800 bg-fuchsia-950/20
                hover:bg-fuchsia-950/50 active:bg-fuchsia-950/70 text-fuchsia-300 transition-colors">
         <svg class="w-7 h-7 mb-1" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
           <circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>
@@ -1585,8 +1587,10 @@
         </svg>
         <span class="text-sm font-black uppercase tracking-wide">Clip Last 30s</span>
       </button>
-      <button id="fcClipCustomBtn" onclick="fcClipCustom(this)" title="Save & share a custom-length clip"
-        class="fc-tile flex flex-1 text-gray-500 hover:text-fuchsia-300 transition-colors">
+      <button id="fcClipCustomBtn" onpointerdown="_holdStart(this, fcClipCustom, event)"
+        onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
+        title="Hold to save & share a custom-length clip"
+        class="hold-btn fc-tile flex flex-1 text-gray-500 hover:text-fuchsia-300 transition-colors">
         <span class="text-[11px] font-bold uppercase tracking-wide">Clip last…</span>
       </button>
     </div>
@@ -1874,8 +1878,10 @@
          30s button + a quieter custom-length sibling. Always available here (the
          file is, by definition, already prepped). See lpClip / lpClipCustom. -->
     <div id="lpClipRow" class="flex items-center gap-2">
-      <button onclick="lpClip(30,this)" title="Save & share the last 30 seconds"
-        class="flex-1 flex items-center justify-center gap-2 bg-fuchsia-800 hover:bg-fuchsia-700
+      <button onpointerdown="_holdStart(this, (b)=>lpClip(30,b), event)"
+        onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
+        title="Hold to save & share the last 30 seconds"
+        class="hold-btn flex-1 flex items-center justify-center gap-2 bg-fuchsia-800 hover:bg-fuchsia-700
                text-white text-xs font-black uppercase tracking-wide px-3 py-2 transition-colors">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
           <circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>
@@ -1883,8 +1889,10 @@
         </svg>
         Clip Last 30s
       </button>
-      <button onclick="lpClipCustom(this)" title="Save & share a custom-length clip"
-        class="flex-shrink-0 text-[10px] font-bold uppercase tracking-wide text-gray-500
+      <button onpointerdown="_holdStart(this, lpClipCustom, event)"
+        onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
+        title="Hold to save & share a custom-length clip"
+        class="hold-btn flex-shrink-0 text-[10px] font-bold uppercase tracking-wide text-gray-500
                hover:text-fuchsia-300 px-2 py-2 transition-colors">
         Clip last…
       </button>
@@ -7977,6 +7985,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.0.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.1.0</div>
 </body>
 </html>

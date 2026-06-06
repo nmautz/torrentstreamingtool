@@ -1,5 +1,8 @@
 # Changelog
 
+## [5.1.0] — 2026-06-06
+- **Clip buttons are now hold-to-activate.** The *Clip Last 30s* and *Clip last…* buttons — on both the fullscreen VLC controls and the on-device player — now require a press-and-hold (same gesture as Stop/Hand-off), with the familiar left-to-right fill showing hold progress. A stray tap no longer kicks off a clip. **UI:** [static/index.html](static/index.html).
+
 ## [5.0.1] — 2026-06-06
 - **Fix: VLC auto-picked AI subtitles over a real one, and ignored your saved/preferred pick.** When a file had a genuine embedded subtitle whose language VLC couldn't read from a tag (e.g. one titled *"Text with various tags"*) plus an AI-generated sidecar, the AI sub was chosen on every play — and re-selecting your sub on the next episode or on restart didn't stick. Root cause: VLC's *own* sidecar autodetection loaded the AI `.srt` (parsing `eng` from its filename) **before** `_load_all_local_subs` ran, so that pre-loaded track arrived **untagged as AI** and read as a "real English" track. The selection policy then ranked it above the untagged genuine sub (and the misclassification also defeated the lone-real-sub fallback that would otherwise carry your choice across episodes). VLC's sidecar autodetect is now disabled (`--no-sub-autodetect-file`) at all three launch sites so StreamLink is the only thing that loads sidecars — and tags AI subs correctly. Resumed files now load their sidecars up front too, so the subtitle menu stays complete and a saved sidecar pick still resolves. **Docs:** [docs/GOTCHAS.md](docs/GOTCHAS.md), [docs/STT.md](docs/STT.md).
 
