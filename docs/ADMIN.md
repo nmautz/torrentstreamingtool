@@ -109,7 +109,7 @@ For each profile:
 
 ### 7. System
 
-Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Overnight Stream Prep**, **Idle Auto-Prep**, **Auto-Prep on Play**, **Force Stream Prep**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
+Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Automatic Stream Prep**, **Auto-Prep on Play**, **Force Stream Prep**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
 
 #### System Health
 
@@ -171,41 +171,28 @@ The persisted `last_fired` date is what stops a just-rebooted machine from re-ar
 - `GET /api/admin/scheduled-reboot` → config + `now` (host time in the configured tz, for display).
 - `POST /api/admin/scheduled-reboot` → `{enabled, time, timezone, idle_minutes}`. Validates HH:MM, clamps `idle_minutes` to 1–720, resets `last_fired`.
 
-#### Overnight Stream Prep
+#### Automatic Stream Prep
 
-Auto-prepares the whole library for on-device streaming during a nightly window, when the heavy ffmpeg load won't bother anyone. Config persists under `library.json → settings.overnight_prep` (`enabled`, `start` HH:MM, `end` HH:MM, `timezone` IANA name, `on_end`). Driven by the unified `auto_prep_loop` background task ([main.py](../main.py), registered in `lifespan`), which also serves Idle Auto-Prep below.
+One control for when the whole library is auto-prepped for on-device streaming. Config persists under `library.json → settings.auto_prep` (`mode`, `idle_minutes`, `on_activity`), read via `_auto_prep_cfg`, and driven by the unified `auto_prep_loop` background task ([main.py](../main.py), registered in `lifespan`). Replaces the former separate *Overnight Stream Prep* + *Idle Auto-Prep* cards — the fixed nightly time-window concept is gone; modes are purely activity-based.
 
-Panel controls: enable toggle, **Start/End Time** (the window may cross midnight, e.g. `23:00 → 06:00`), **Timezone** (same preset list as Scheduled Restart), **When End Time Is Reached** (`pause` ⇒ hold until the next window · `continue` ⇒ run to completion), and a host-time display.
+Panel controls: a **When To Prep** mode chooser plus (for *When Idle*) an **Idle Time (min)** field (1–720), a **When Activity Returns** select, and a live **Status Now** readout.
 
-Loop mechanics: an in-memory edge flag (`state.auto_prep_engaged`) tracks whether prep is currently running, so entry/exit each fire once.
-1. **Entering the window** → clear any pause (`_resume_prep`, which also re-spawns previously-paused jobs) and queue a bulk HLS-prep job for every un-prepped library video file (`_enqueue_library_prep`, idempotent — `_maybe_start_prep_job` skips cached/already-queued files, so a mid-window restart re-enqueues safely).
-2. **Leaving the window** → if `on_end == "pause"`, call `_pause_prep(kill=False)` (the in-flight file finishes gracefully; the rest hold until the next window); if `on_end == "continue"`, leave the queue running to completion past the window.
+- **Always** (`mode: "always"`) — prep whenever there's anything un-prepped, regardless of host activity. The loop stays engaged and re-enqueues every ~5 min so freshly-downloaded content is picked up. Background work runs at below-normal priority (see [STREAMING.md](STREAMING.md)).
+- **When Idle** (`mode: "idle"`) — prep only after the box has been idle for `idle_minutes`, and stop the instant activity returns. **When Activity Returns** picks the stop kind: `hard` (`_pause_prep(kill=True)`) terminates the in-flight encode immediately (restarts from scratch later — HLS prep can't checkpoint), `soft` (`_pause_prep(kill=False)`) lets the in-flight file finish then holds the rest. "Idle" reuses `_machine_in_use(idle_minutes*60, for_prep=True)` — no live VLC playback of real content, no active stream, no running download, no mutating HTTP interaction, and no open dashboard. The cheap `_activity_kick` hook shortcuts the **hard** case so the kill lands on the request, not up to a tick later.
+- **Never** (`mode: "off"`) — no auto-prep; only play-on-TV (Auto-Prep on Play) and the admin Force button prep.
 
-Saving config resets `state.auto_prep_engaged` so the new schedule is re-evaluated on the next tick. Prep load relief is a separate, user-facing concern — see [STREAMING.md § Pause / resume + auto-prep](STREAMING.md) for the global pause gate and the non-admin Pause/Resume control.
+Loop mechanics: an in-memory edge flag (`state.auto_prep_engaged`) tracks whether prep is currently running. A rising edge clears any pause (`_resume_prep`, which re-spawns previously-paused jobs) and queues a bulk HLS-prep job for every un-prepped library video file (`_enqueue_library_prep`, idempotent — `_maybe_start_prep_job` skips cached/already-queued files). Saving config resets `state.auto_prep_engaged` so the new mode is re-evaluated on the next tick. Prep load relief is a separate, user-facing concern — see [STREAMING.md § Pause / resume + auto-prep](STREAMING.md) for the global pause gate and the non-admin Pause/Resume control.
 
-> **Doubles as the idle/night DOWNLOAD window.** The Overnight Stream Prep window **and** Idle Auto-Prep idleness also gate user-facing **idle-only library downloads** — the per-download Pause (defer to idle) control and the "Download at idle/night only" toggle in the download modal. `_download_idle_open` reuses both (so an idle-only download runs during the overnight window or whenever the box is idle), independently of whether prep itself is running. If **neither** is enabled, idle-only downloads have no window to run in and the download modal warns. See [docs/API.md § Download scheduling](API.md) and [docs/LIBRARY_DATA.md](LIBRARY_DATA.md).
+> **Doubles as the idle/night DOWNLOAD window.** Automatic Stream Prep also gates user-facing **idle-only library downloads** — the per-download Pause (defer to idle) control and the "Download at idle/night only" toggle in the download modal. `_download_idle_open` derives the window from `mode`: **Always** ⇒ always open, **When Idle** ⇒ open while the box is idle, **Never** ⇒ no window (the download modal warns), independently of whether prep itself is running. See [docs/API.md § Download scheduling](API.md) and [docs/LIBRARY_DATA.md](LIBRARY_DATA.md).
 
-- `GET /api/admin/overnight-prep` → config + `now` + `in_window` + `paused`.
-- `POST /api/admin/overnight-prep` → `{enabled, start, end, timezone, on_end}`. Validates both HH:MM, rejects `start == end`, resets the auto-prep edge flag.
-
-#### Idle Auto-Prep
-
-The activity-gated companion to the nightly window: instead of (or alongside) a fixed time, auto-prep runs **any time the host has been idle for `idle_minutes`** and pauses — *discarding* the in-flight encode — the instant activity returns. Config persists under `library.json → settings.idle_prep` (`enabled`, `idle_minutes`). Same `auto_prep_loop` task; same shared pause gate.
-
-Panel controls: enable toggle, **Idle Time (min)** (1–720), and a live **Status Now** readout (idle vs. in use).
-
-Loop mechanics: "idle" reuses `_machine_in_use(idle_minutes*60)` — the same helper the Scheduled Restart uses — so the box counts as idle only when there's no live VLC playback of real content, no active stream, no running download, and no mutating HTTP interaction within the window. That window doubles as the activity detector: a fresh interaction stamps `state.last_activity`, which flips `_machine_in_use` True within a tick and triggers `_pause_prep(kill=True)` (terminate the running ffmpeg; the file restarts from scratch on the next idle stretch — HLS prep can't checkpoint). When both triggers are enabled, the overnight window runs regardless of activity, and idle-prep's activity-pause overrides overnight `on_end == "continue"`. See [STREAMING.md § Pause / resume + auto-prep](STREAMING.md) for the combined `want` decision.
-
-Saving config resets `state.auto_prep_engaged` so the trigger is re-derived on the next tick.
-
-- `GET /api/admin/idle-prep` → config + `idle_now` (is the box idle right now) + `paused` + `active` (prepping while idle right now).
-- `POST /api/admin/idle-prep` → `{enabled, idle_minutes}`. Clamps `idle_minutes` to 1–720, resets the auto-prep edge flag.
+- `GET /api/admin/auto-prep` → config (`mode`, `idle_minutes`, `on_activity`) + `idle_now` + `paused` + `active` (prepping right now).
+- `POST /api/admin/auto-prep` → `{mode, idle_minutes, on_activity}`. Validates `mode ∈ {always, idle, off}` and `on_activity ∈ {soft, hard}`, clamps `idle_minutes` to 1–720, resets the auto-prep edge flag.
 
 #### Auto-Prep on Play
 
-Play-driven on-device prep, separate from the idle/overnight triggers above. When enabled (**on by default**), every VLC library play (`POST /api/library/{id}/play`) immediately HLS-preps the playing episode for on-device, then the rest of the playlist **one episode at a time** (`_maybe_start_play_prep` → `_play_prep_chain`, started on `state.play_prep_task`). If the viewer resumes the current episode with **under 5 minutes left** (`PLAY_PREP_TAIL_SECS = 300`, judged from the saved `duration_sec` vs the resume seek), that episode is skipped and the chain starts at the next one. Each new play cancels the prior chain (so only the current series' tail is prepped); the in-flight ffmpeg of a cancelled chain keeps running.
+Play-driven on-device prep, separate from the Automatic Stream Prep modes above. When enabled (**on by default**), every VLC library play (`POST /api/library/{id}/play`) immediately HLS-preps the playing episode for on-device, then the rest of the playlist **one episode at a time** (`_maybe_start_play_prep` → `_play_prep_chain`, started on `state.play_prep_task`). If the viewer resumes the current episode with **under 5 minutes left** (`PLAY_PREP_TAIL_SECS = 300`, judged from the saved `duration_sec` vs the resume seek), that episode is skipped and the chain starts at the next one. Each new play cancels the prior chain (so only the current series' tail is prepped); the in-flight ffmpeg of a cancelled chain keeps running.
 
-Crucially these jobs are queued as **`interactive`**, so — unlike Overnight/Idle bulk prep — they **ignore the global pause gate and are never killed by the activity-kill** (`_pause_prep`/`_activity_kick` only touch `bulk`). They run regardless of the idle/overnight settings or whether the box is in use, and they **preempt** any in-flight bulk encode so the watched series is prioritised. Config persists under `library.json → settings.play_prep` (`enabled`). Not available on macOS hosts (no HLS). See [STREAMING.md § Auto-prep on play](STREAMING.md).
+Crucially these jobs are queued as **`interactive`**, so — unlike Automatic Stream Prep's bulk jobs — they **ignore the global pause gate and are never killed by the activity-kill** (`_pause_prep`/`_activity_kick` only touch `bulk`). They run regardless of the Automatic Stream Prep mode or whether the box is in use, and they **preempt** any in-flight bulk encode so the watched series is prioritised. Config persists under `library.json → settings.play_prep` (`enabled`). Not available on macOS hosts (no HLS). See [STREAMING.md § Auto-prep on play](STREAMING.md).
 
 Panel control: a single enable/disable toggle (saves immediately on click).
 
@@ -214,7 +201,7 @@ Panel control: a single enable/disable toggle (saves immediately on click).
 
 #### Force Stream Prep
 
-On-demand prep that **viewers and host activity cannot stop** — the deliberate opposite of Overnight / Idle prep (both of which the non-admin Pause control and the activity-kill can halt). The card preps the **whole library** or **one selected item** (a scope dropdown — "Whole library" plus every library item) for on-device streaming, immediately, and runs to completion no matter who's watching or how busy the box is. Only the admin's two Stop buttons halt it.
+On-demand prep that **viewers and host activity cannot stop** — the deliberate opposite of Automatic Stream Prep (which the non-admin Pause control and the activity-kill can halt). The card preps the **whole library** or **one selected item** (a scope dropdown — "Whole library" plus every library item) for on-device streaming, immediately, and runs to completion no matter who's watching or how busy the box is. Only the admin's two Stop buttons halt it.
 
 Mechanics: force-prep jobs are queued on a dedicated **`"admin"` prep queue** (`_enqueue_admin_prep` → `_start_admin_prep_job`). Like interactive (play-on-device) prep, admin jobs **ignore the bulk pause gate** (`state.prep_paused`) and **survive the activity-kill** (`_pause_prep` / `_activity_kick` only touch `bulk`), and they **preempt** any in-flight bulk encode (`_preempt_running_bulk`). Bulk prep defers to them via `_priority_hls_pending` (which now counts both `interactive` and `admin`). The one thing that can stop them is the admin Stop control, gated on `state.admin_prep_stop`:
 

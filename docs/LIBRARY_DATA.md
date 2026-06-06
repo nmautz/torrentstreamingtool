@@ -33,16 +33,10 @@ The only persistent server-side state. Lives at the project root. Accessed via `
       "idle_minutes": 15,               // no usage for this long ⇒ reboot; clamped 1–720
       "last_fired":   ""                // internal: tz date last fired; loop guard, reset on save
     },
-    "overnight_prep": {                 // nightly auto stream-prep window (admin System tab)
-      "enabled":  false,
-      "start":    "02:00",              // local HH:MM in `timezone`; window may cross midnight
-      "end":      "06:00",
-      "timezone": "America/Los_Angeles",
-      "on_end":   "pause"               // "pause" ⇒ hold at window end · "continue" ⇒ run to completion
-    },
-    "idle_prep": {                      // activity-gated auto stream-prep (admin System tab)
-      "enabled":      false,
-      "idle_minutes": 30                // idle for this long ⇒ start; any activity pauses + discards in-flight; clamped 1–720
+    "auto_prep": {                      // unified Automatic Stream Prep (admin System tab)
+      "mode":         "off",            // "always" ⇒ prep regardless of activity · "idle" ⇒ prep only when idle · "off" ⇒ manual only
+      "idle_minutes": 30,               // idle mode: idle this long ⇒ start; clamped 1–720
+      "on_activity":  "hard"            // idle mode: "hard" ⇒ kill in-flight on activity · "soft" ⇒ let it finish then hold
     },
     "play_prep": {                      // auto on-device prep on VLC play (admin System tab)
       "enabled":  true                  // prep the playing episode + playlist tail (interactive; ignores pause gate + activity). Default ON
@@ -111,11 +105,9 @@ PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "so
 
 `settings.scheduled_reboot`: managed by the **System** admin tab (see [ADMIN.md §7](ADMIN.md)). The `scheduled_reboot_loop` task reboots the host daily at `time` (in `timezone`) once it's been idle for `idle_minutes`. `last_fired` is an internal guard (the tz date of the last fire) that stops the just-rebooted machine from re-arming and looping; it's reset to `""` whenever the config is saved so a newly-set time can arm the same day. Lives under `settings` because it applies to the physical host, not an individual viewer.
 
-`settings.overnight_prep`: managed by the **System** admin tab (see [ADMIN.md §7](ADMIN.md)). The unified `auto_prep_loop` task auto-preps every un-prepped library file for on-device streaming during the `[start, end)` window (in `timezone`; the window may cross midnight). At the window end, `on_end == "pause"` lets the in-flight file finish then holds the rest until the next window, while `"continue"` runs to completion. Engagement is tracked in-memory (`state.auto_prep_engaged`), so there's no persisted fire-guard. Lives under `settings` because it applies to the physical host.
+`settings.auto_prep`: managed by the **System** admin tab's *Automatic Stream Prep* card (see [ADMIN.md § Automatic Stream Prep](ADMIN.md)); read via `_auto_prep_cfg`. One `mode` drives the `auto_prep_loop` task — `"always"` preps every un-prepped library file regardless of activity (re-enqueuing new content ~every 5 min while engaged); `"idle"` preps only while the host has been idle (`_machine_in_use`) for `idle_minutes` and stops on activity, with `on_activity` choosing the stop kind (`"hard"` ⇒ `_pause_prep(kill=True)` discards the in-flight encode — restarts from scratch later, no mid-file checkpoint; `"soft"` ⇒ `kill=False` lets it finish then holds); `"off"` never auto-preps. `idle_minutes` is clamped 1–720. Engagement is tracked in-memory (`state.auto_prep_engaged`), so there's no persisted fire-guard. **Lazy migration:** if `auto_prep` is absent, `_auto_prep_cfg` derives a default from the legacy `idle_prep`/`overnight_prep` keys (either enabled ⇒ `mode:"idle"`, else `"off"`); the new key is written on first save and the legacy keys are then ignored. Replaces the former separate `overnight_prep` + `idle_prep` (the fixed nightly time-window is gone). Lives under `settings` because it applies to the physical host.
 
-`settings.idle_prep`: managed by the **System** admin tab (see [ADMIN.md §7](ADMIN.md)). The activity-gated companion to `overnight_prep`, served by the same `auto_prep_loop` task: any time the host has been idle (`_machine_in_use`) for `idle_minutes`, it queues bulk HLS-prep for the whole un-prepped library; the first sign of activity pauses it and **discards the in-flight encode** (`_pause_prep(kill=True)` — that file restarts from scratch on the next idle stretch, since HLS prep has no mid-file checkpoint). `idle_minutes` is clamped 1–720. Lives under `settings` because it applies to the physical host.
-
-`settings.play_prep`: managed by the **System** admin tab's *Auto-Prep on Play* card; read via `_play_prep_cfg`. **Default ON.** When enabled, every VLC library play preps the playing episode for on-device then the rest of the playlist one episode at a time (`_maybe_start_play_prep` → `_play_prep_chain`, tracked on `state.play_prep_task`). The episode is skipped if resumed with <5 min left (`PLAY_PREP_TAIL_SECS`). Unlike the two triggers above, its jobs are queued **interactive**, so they run regardless of `overnight_prep`/`idle_prep` and live activity (the bulk pause gate and activity-kill don't touch them). Lives under `settings` because it applies to the physical host. See [STREAMING.md § Auto-prep on play](STREAMING.md).
+`settings.play_prep`: managed by the **System** admin tab's *Auto-Prep on Play* card; read via `_play_prep_cfg`. **Default ON.** When enabled, every VLC library play preps the playing episode for on-device then the rest of the playlist one episode at a time (`_maybe_start_play_prep` → `_play_prep_chain`, tracked on `state.play_prep_task`). The episode is skipped if resumed with <5 min left (`PLAY_PREP_TAIL_SECS`). Unlike `auto_prep`'s bulk jobs, its jobs are queued **interactive**, so they run regardless of the `auto_prep` mode and live activity (the bulk pause gate and activity-kill don't touch them). Lives under `settings` because it applies to the physical host. See [STREAMING.md § Auto-prep on play](STREAMING.md).
 
 `settings.cache_autopurge`: managed by the **Offline Cache** admin tab's *Auto-Purge Orphans* card; read via `_cache_autopurge_cfg`. **Default OFF.** The `cache_autopurge_loop` task re-checks every 5 min: when `enabled` and the total `.offline_cache/` size is at/above `max_gb` GB, it deletes every orphan bundle (the same set the manual "Purge All Orphans" clears — cache/partial dirs + legacy MP4s that no longer map to a live library file). Bundles backing current library files are never touched, and active prep jobs are skipped, so it can only reclaim already-safe space. `max_gb` is clamped 1–10000. The last run's `{deleted, bytes_freed, …}` is held in-memory on `state.cache_autopurge_last` (not persisted). Lives under `settings` because it applies to the physical host's disk. See [ADMIN.md](ADMIN.md).
 
@@ -178,8 +170,9 @@ pause/resume every 15 s — never write qBit `filePrio`/`pause` for a scheduled 
 outside the reconcile path or the next tick reverts it (see
 [GOTCHAS.md](GOTCHAS.md)). Effective per-file schedule = `files[path]` if present,
 else `mode`. Mapping to a qBit priority depends on whether the idle/night DOWNLOAD
-window is open right now (`_download_idle_open`, which **reuses** the admin
-`overnight_prep` window + `idle_prep` idleness — see [ADMIN.md](ADMIN.md)):
+window is open right now (`_download_idle_open`, derived from the admin
+`auto_prep` mode — **Always** ⇒ always open, **When Idle** ⇒ open while idle,
+**Never** ⇒ closed — see [ADMIN.md](ADMIN.md)):
 
 | effective mode | qBit priority |
 |----------------|---------------|

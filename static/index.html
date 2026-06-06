@@ -651,12 +651,12 @@
         <label class="flex items-center justify-between gap-3 bg-gray-800/60 px-4 py-3 cursor-pointer hover:bg-gray-800 transition-colors">
           <div class="min-w-0">
             <div class="text-sm font-bold text-gray-200 uppercase tracking-wide">Download at idle/night only</div>
-            <div class="text-[11px] text-gray-500 mt-0.5">Hold off until the host is idle (or the admin's overnight window). You can flip this anytime from the Library card.</div>
+            <div class="text-[11px] text-gray-500 mt-0.5">Hold off until the host is idle. You can flip this anytime from the Library card.</div>
           </div>
           <input id="dlIdleOnly" type="checkbox" class="w-5 h-5 accent-indigo-500 cursor-pointer flex-shrink-0"/>
         </label>
         <p id="dlIdleWarn" class="hidden text-[11px] text-amber-400 mt-1.5 px-1">
-          ⚠ No idle/night window is configured — idle-only downloads won't start until an admin enables Overnight Stream Prep or Idle Auto-Prep.
+          ⚠ No idle window is configured — idle-only downloads won't start until an admin enables Automatic Stream Prep (When Idle or Always).
         </p>
       </div>
 
@@ -1662,7 +1662,7 @@
     </div>
     <div class="px-5 py-4 text-sm text-gray-300 space-y-2">
       <p>While files are being prepared, <strong class="text-amber-300">the server will get laggy</strong> and can become unusable at times — playback, search and downloads may stutter.</p>
-      <p class="text-xs text-gray-500">You can <strong class="text-gray-300">pause</strong> at any time from the indicator in the top-right and resume later. The admin can also schedule this to run automatically overnight.</p>
+      <p class="text-xs text-gray-500">You can <strong class="text-gray-300">pause</strong> at any time from the indicator in the top-right and resume later. The admin can also set this to run automatically when the box is idle.</p>
     </div>
     <div class="px-4 pb-4 safe-bottom grid grid-cols-1 gap-2">
       <button id="prepWarnGoBtn"
@@ -3638,7 +3638,7 @@ function renderLibrary(items){
           </svg><span class="dl-files-label text-xs">Files</span>
         </button>`;
         // Pause (defer to idle/night) ↔ Resume (download now). The download keeps
-        // its files; "idle" just gates them to the admin's idle/overnight window.
+        // its files; "idle" just gates them to the admin's idle download window.
         const isIdle=item.download_mode==="idle";
         buttons+=isIdle
           ?`<button onclick="setDownloadSchedule('${item.id}','now')"
@@ -7985,6 +7985,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.1.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.2.0</div>
 </body>
 </html>

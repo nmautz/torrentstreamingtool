@@ -523,100 +523,59 @@
       </div>
     </div>
 
-    <!-- Overnight stream prep -->
+    <!-- Automatic stream prep -->
     <div class="bg-gray-900 border border-gray-800">
-      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
-        <div class="min-w-0">
-          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Overnight Stream Prep</h2>
-          <p class="text-xs text-gray-500 mt-0.5">Automatically prepares every un-prepped library file for on-device streaming during a nightly window, when the heavy ffmpeg load won't bother anyone. Each bundle is roughly 1.7× the source size.</p>
-        </div>
-        <button id="opEnabledBtn" onclick="toggleOvernightPrep()"
-          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
-                 bg-gray-800 border-gray-700 text-gray-400 hover:text-white">
-          …
-        </button>
+      <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Automatic Stream Prep</h2>
+        <p class="text-xs text-gray-500 mt-0.5">Controls when un-prepped library files are automatically prepared for on-device streaming. Each bundle is roughly 1.7× the source size. (Playing on the TV and the Force button below prep regardless of this setting.)</p>
       </div>
 
-      <div class="px-5 py-4 border-b border-gray-800 grid grid-cols-1 sm:grid-cols-2 gap-4">
-        <div class="space-y-1.5">
-          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Start Time</label>
-          <input id="opStart" type="time" value="02:00"
-            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none"/>
-        </div>
-        <div class="space-y-1.5">
-          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">End Time</label>
-          <input id="opEnd" type="time" value="06:00"
-            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none"/>
-          <p class="text-[10px] text-gray-600">Windows may cross midnight (e.g. 23:00 → 06:00).</p>
-        </div>
-        <div class="space-y-1.5">
-          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Timezone</label>
-          <select id="opTimezone"
-            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-indigo-500 outline-none">
-            <option value="America/Los_Angeles">Pacific (Los Angeles)</option>
-            <option value="America/Denver">Mountain (Denver)</option>
-            <option value="America/Chicago">Central (Chicago)</option>
-            <option value="America/New_York">Eastern (New York)</option>
-            <option value="America/Anchorage">Alaska (Anchorage)</option>
-            <option value="Pacific/Honolulu">Hawaii (Honolulu)</option>
-            <option value="UTC">UTC</option>
-            <option value="">System local time</option>
-          </select>
-        </div>
-        <div class="space-y-1.5">
-          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">When End Time Is Reached</label>
-          <select id="opOnEnd"
-            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-indigo-500 outline-none">
-            <option value="pause">Pause until the next window</option>
-            <option value="continue">Continue until finished</option>
-          </select>
-          <p class="text-[10px] text-gray-600">Pause lets the in-flight file finish, then holds the rest.</p>
-        </div>
-        <div class="space-y-1.5 sm:col-span-2">
-          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Host Time Now</label>
-          <div id="opNow" class="w-full px-3 py-2 text-sm font-mono text-gray-400 border border-gray-800 bg-black/40">…</div>
+      <div class="px-5 py-4 border-b border-gray-800 space-y-2">
+        <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">When To Prep</label>
+        <div id="apModeBtns" class="grid grid-cols-1 sm:grid-cols-3 gap-2">
+          <button type="button" data-mode="always" onclick="setAutoPrepMode('always')"
+            class="ap-mode text-left px-3 py-2.5 border transition-colors bg-gray-800 border-gray-700 hover:border-gray-500">
+            <div class="text-xs font-black uppercase tracking-wide text-gray-200">Always</div>
+            <div class="text-[10px] text-gray-500 mt-0.5 leading-snug">Prep whenever there's anything to prep, no matter if the box is in use.</div>
+          </button>
+          <button type="button" data-mode="idle" onclick="setAutoPrepMode('idle')"
+            class="ap-mode text-left px-3 py-2.5 border transition-colors bg-gray-800 border-gray-700 hover:border-gray-500">
+            <div class="text-xs font-black uppercase tracking-wide text-gray-200">When Idle</div>
+            <div class="text-[10px] text-gray-500 mt-0.5 leading-snug">Prep only after the box has been idle, and stop when someone uses it.</div>
+          </button>
+          <button type="button" data-mode="off" onclick="setAutoPrepMode('off')"
+            class="ap-mode text-left px-3 py-2.5 border transition-colors bg-gray-800 border-gray-700 hover:border-gray-500">
+            <div class="text-xs font-black uppercase tracking-wide text-gray-200">Never</div>
+            <div class="text-[10px] text-gray-500 mt-0.5 leading-snug">Don't auto-prep — only the TV and the Force button below will prep.</div>
+          </button>
         </div>
       </div>
 
-      <div class="px-5 py-4 flex items-center justify-between gap-3">
-        <div id="opStatus" class="text-[11px] text-gray-600 min-w-0"></div>
-        <button id="opSaveBtn" onclick="saveOvernightPrep()"
-          class="flex-shrink-0 bg-indigo-600 hover:bg-indigo-500 px-5 py-2.5 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">
-          Save
-        </button>
-      </div>
-    </div>
-
-    <!-- Idle auto-prep -->
-    <div class="bg-gray-900 border border-gray-800">
-      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
-        <div class="min-w-0">
-          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Idle Auto-Prep</h2>
-          <p class="text-xs text-gray-500 mt-0.5">Prepares un-prepped library files for on-device streaming any time the box has been idle (no usage, playback, stream, or download) for the set time — then pauses the instant someone uses it again, discarding the file it was mid-encode on (HLS prep can't checkpoint). Runs independently of the nightly window above.</p>
-        </div>
-        <button id="ipEnabledBtn" onclick="toggleIdlePrep()"
-          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
-                 bg-gray-800 border-gray-700 text-gray-400 hover:text-white">
-          …
-        </button>
-      </div>
-
-      <div class="px-5 py-4 border-b border-gray-800 grid grid-cols-1 sm:grid-cols-2 gap-4">
+      <div id="apIdleFields" class="hidden px-5 py-4 border-b border-gray-800 grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div class="space-y-1.5">
           <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Idle Time (min)</label>
-          <input id="ipIdle" type="number" min="1" max="720" value="30"
+          <input id="apIdle" type="number" min="1" max="720" value="30"
             class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none"/>
-          <p class="text-[10px] text-gray-600">No usage for this long ⇒ start prepping. Any activity pauses it immediately.</p>
+          <p class="text-[10px] text-gray-600">No usage (playback, stream, download, or site activity) for this long ⇒ start prepping.</p>
         </div>
         <div class="space-y-1.5">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">When Activity Returns</label>
+          <select id="apOnActivity"
+            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-indigo-500 outline-none">
+            <option value="hard">Stop immediately (discard in-flight file)</option>
+            <option value="soft">Finish the current file, then hold</option>
+          </select>
+          <p class="text-[10px] text-gray-600">Hard stop is most responsive; the discarded file re-preps from scratch later (HLS prep can't checkpoint).</p>
+        </div>
+        <div class="space-y-1.5 sm:col-span-2">
           <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Status Now</label>
-          <div id="ipNow" class="w-full px-3 py-2 text-sm font-mono text-gray-400 border border-gray-800 bg-black/40">…</div>
+          <div id="apNow" class="w-full px-3 py-2 text-sm font-mono text-gray-400 border border-gray-800 bg-black/40">…</div>
         </div>
       </div>
 
       <div class="px-5 py-4 flex items-center justify-between gap-3">
-        <div id="ipStatus" class="text-[11px] text-gray-600 min-w-0"></div>
-        <button id="ipSaveBtn" onclick="saveIdlePrep()"
+        <div id="apStatus" class="text-[11px] text-gray-600 min-w-0"></div>
+        <button id="apSaveBtn" onclick="saveAutoPrep()"
           class="flex-shrink-0 bg-indigo-600 hover:bg-indigo-500 px-5 py-2.5 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">
           Save
         </button>
@@ -628,7 +587,7 @@
       <div class="px-5 py-4 flex items-center justify-between gap-3">
         <div class="min-w-0">
           <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Auto-Prep on Play</h2>
-          <p class="text-xs text-gray-500 mt-0.5">When a video is played on the TV, immediately prep that episode for on-device streaming, then the rest of the playlist one episode at a time. If the episode is resumed with under 5 minutes left, the next one is prepped instead. Runs no matter the idle/overnight settings or whether the box is in use.</p>
+          <p class="text-xs text-gray-500 mt-0.5">When a video is played on the TV, immediately prep that episode for on-device streaming, then the rest of the playlist one episode at a time. If the episode is resumed with under 5 minutes left, the next one is prepped instead. Runs no matter the Automatic Stream Prep setting above or whether the box is in use.</p>
         </div>
         <button id="ppEnabledBtn" onclick="togglePlayPrep()"
           class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
@@ -642,7 +601,7 @@
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800">
         <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Force Stream Prep</h2>
-        <p class="text-xs text-gray-500 mt-0.5">Prep the whole library (or one item) for on-device streaming right now. Unlike Overnight / Idle prep, a force-prep <strong>cannot be paused by viewers or stopped by host activity</strong> — it runs to completion. Only the Stop buttons below halt it.</p>
+        <p class="text-xs text-gray-500 mt-0.5">Prep the whole library (or one item) for on-device streaming right now. Unlike Automatic Stream Prep, a force-prep <strong>cannot be paused by viewers or stopped by host activity</strong> — it runs to completion. Only the Stop buttons below halt it.</p>
       </div>
 
       <div id="fpUnavail" class="hidden px-5 py-4 border-b border-gray-800 text-xs text-amber-300 bg-amber-950/30">
@@ -803,7 +762,7 @@
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
         <div class="min-w-0">
           <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Auto-Generated Subtitles (AI)</h2>
-          <p class="text-xs text-gray-500 mt-0.5">Transcribes audio into a subtitle track for files that ship none usable — during stream-prep / overnight, or on demand from the player. Uses whisper.cpp on the host (slower than real-time; best left to the overnight window).</p>
+          <p class="text-xs text-gray-500 mt-0.5">Transcribes audio into a subtitle track for files that ship none usable — during stream-prep, or on demand from the player. Uses whisper.cpp on the host (slower than real-time; best left to when the box is idle).</p>
         </div>
         <button id="sttEnabledBtn" onclick="toggleStt()"
           class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
@@ -1180,7 +1139,7 @@ function switchTab(tab){
   if(tab==="skip")       loadSkipPanel();
   if(tab==="offline")    loadOfflineCache();
   if(tab==="background") loadBackgroundVideo();
-  if(tab==="system")   { loadScheduledReboot(); loadOvernightPrep(); loadIdlePrep(); loadPlayPrep(); loadForcePrep(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
+  if(tab==="system")   { loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadForcePrep(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
   else                 { stopSysHealthPolling(); stopForcePrepPolling(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
@@ -1440,130 +1399,59 @@ async function saveScheduledReboot(){
   }
 }
 
-// ── Overnight Stream Prep ─────────────────────────────────────────────────────
-let _opEnabled = false;
+// ── Automatic Stream Prep ─────────────────────────────────────────────────────
+let _apMode = "off";
 
-function _renderOpEnabled(){
-  const btn = document.getElementById("opEnabledBtn");
-  if(!btn) return;
-  if(_opEnabled){
-    btn.textContent = "Enabled";
-    btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-emerald-950 border-emerald-700 text-emerald-300 hover:bg-emerald-900";
-  } else {
-    btn.textContent = "Disabled";
-    btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white";
-  }
+function _renderAutoPrepMode(){
+  document.querySelectorAll("#apModeBtns .ap-mode").forEach(btn=>{
+    const on = btn.dataset.mode === _apMode;
+    btn.classList.toggle("border-indigo-500", on);
+    btn.classList.toggle("bg-indigo-950", on);
+    btn.classList.toggle("border-gray-700", !on);
+    btn.classList.toggle("bg-gray-800", !on);
+  });
+  // Idle-only sub-fields show only in idle mode.
+  document.getElementById("apIdleFields").classList.toggle("hidden", _apMode !== "idle");
 }
 
-async function loadOvernightPrep(){
+function setAutoPrepMode(mode){
+  _apMode = mode;
+  _renderAutoPrepMode();
+}
+
+async function loadAutoPrep(){
   try{
-    const r = await fetch("/api/admin/overnight-prep", {headers: authHeader()});
+    const r = await fetch("/api/admin/auto-prep", {headers: authHeader()});
     if(!r.ok) return;
     const d = await r.json();
-    _opEnabled = !!d.enabled;
-    _renderOpEnabled();
-    document.getElementById("opStart").value = d.start || "02:00";
-    document.getElementById("opEnd").value   = d.end || "06:00";
-    document.getElementById("opOnEnd").value = (d.on_end === "continue") ? "continue" : "pause";
-    const tzSel = document.getElementById("opTimezone");
-    tzSel.value = (d.timezone ?? "America/Los_Angeles");
-    if(tzSel.value !== (d.timezone ?? "")) tzSel.value = "";   // unknown tz ⇒ System local
-    document.getElementById("opNow").textContent = d.now || "—";
-    const status = document.getElementById("opStatus");
-    if(d.enabled){
-      status.textContent = d.in_window
-        ? (d.paused ? "Window open · paused." : "Window open · prepping now.")
-        : "Armed — will start at the next window.";
-    } else {
-      status.textContent = "Overnight prep is off.";
-    }
-  }catch(_){}
-}
-
-function toggleOvernightPrep(){
-  _opEnabled = !_opEnabled;
-  _renderOpEnabled();
-}
-
-async function saveOvernightPrep(){
-  const btn = document.getElementById("opSaveBtn");
-  const body = {
-    enabled:  _opEnabled,
-    start:    document.getElementById("opStart").value || "02:00",
-    end:      document.getElementById("opEnd").value || "06:00",
-    timezone: document.getElementById("opTimezone").value,
-    on_end:   document.getElementById("opOnEnd").value || "pause",
-  };
-  btn.disabled = true;
-  try{
-    const r = await fetch("/api/admin/overnight-prep",{
-      method:"POST",
-      headers:{...authHeader(), "Content-Type":"application/json"},
-      body: JSON.stringify(body),
-    });
-    if(!r.ok){
-      const d = await r.json().catch(()=>({}));
-      showToast(`Save failed: ${d.detail || r.status}`, true);
-      return;
-    }
-    showToast(_opEnabled ? "Overnight prep saved." : "Overnight prep disabled.");
-    await loadOvernightPrep();
-  }catch(_){
-    showToast("Save failed.", true);
-  }finally{
-    btn.disabled = false;
-  }
-}
-
-// ── Idle Auto-Prep ────────────────────────────────────────────────────────────
-let _ipEnabled = false;
-
-function _renderIpEnabled(){
-  const btn = document.getElementById("ipEnabledBtn");
-  if(!btn) return;
-  if(_ipEnabled){
-    btn.textContent = "Enabled";
-    btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-emerald-950 border-emerald-700 text-emerald-300 hover:bg-emerald-900";
-  } else {
-    btn.textContent = "Disabled";
-    btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white";
-  }
-}
-
-async function loadIdlePrep(){
-  try{
-    const r = await fetch("/api/admin/idle-prep", {headers: authHeader()});
-    if(!r.ok) return;
-    const d = await r.json();
-    _ipEnabled = !!d.enabled;
-    _renderIpEnabled();
-    document.getElementById("ipIdle").value = d.idle_minutes ?? 30;
-    document.getElementById("ipNow").textContent = d.idle_now ? "Idle — eligible to prep" : "In use — holding";
-    const status = document.getElementById("ipStatus");
-    if(d.enabled){
+    _apMode = d.mode || "off";
+    document.getElementById("apIdle").value = d.idle_minutes ?? 30;
+    document.getElementById("apOnActivity").value = (d.on_activity === "soft") ? "soft" : "hard";
+    document.getElementById("apNow").textContent = d.idle_now ? "Idle — eligible to prep" : "In use — holding";
+    _renderAutoPrepMode();
+    const status = document.getElementById("apStatus");
+    if(_apMode === "always"){
+      status.textContent = d.active ? "Always on — prepping now." : "Always on — nothing left to prep.";
+    } else if(_apMode === "idle"){
       status.textContent = d.active
-        ? "Prepping now while idle."
+        ? "Idle — prepping now."
         : (d.idle_now ? "Idle — prep starting." : "Armed — waiting for the box to go idle.");
     } else {
-      status.textContent = "Idle auto-prep is off.";
+      status.textContent = "Auto-prep is off.";
     }
   }catch(_){}
 }
 
-function toggleIdlePrep(){
-  _ipEnabled = !_ipEnabled;
-  _renderIpEnabled();
-}
-
-async function saveIdlePrep(){
-  const btn = document.getElementById("ipSaveBtn");
+async function saveAutoPrep(){
+  const btn = document.getElementById("apSaveBtn");
   const body = {
-    enabled:      _ipEnabled,
-    idle_minutes: parseInt(document.getElementById("ipIdle").value, 10) || 30,
+    mode:         _apMode,
+    idle_minutes: parseInt(document.getElementById("apIdle").value, 10) || 30,
+    on_activity:  document.getElementById("apOnActivity").value || "hard",
   };
   btn.disabled = true;
   try{
-    const r = await fetch("/api/admin/idle-prep",{
+    const r = await fetch("/api/admin/auto-prep",{
       method:"POST",
       headers:{...authHeader(), "Content-Type":"application/json"},
       body: JSON.stringify(body),
@@ -1573,8 +1461,8 @@ async function saveIdlePrep(){
       showToast(`Save failed: ${d.detail || r.status}`, true);
       return;
     }
-    showToast(_ipEnabled ? "Idle auto-prep saved." : "Idle auto-prep disabled.");
-    await loadIdlePrep();
+    showToast(_apMode === "off" ? "Auto-prep disabled." : "Auto-prep saved.");
+    await loadAutoPrep();
   }catch(_){
     showToast("Save failed.", true);
   }finally{

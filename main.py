@@ -534,14 +534,14 @@ class AppState:
     subtitle_single_option: bool = True                   # settings.subtitles.single_option, mirrored for client/UI
     sub_auto_ai_path: str = ""                            # abs path of the AI sidecar currently auto-applied in VLC ("" = none); the upgrade loop watches this and swaps in a real sub when one arrives
     last_activity: float = 0.0                            # time.time() of last user-initiated interaction (drives scheduled-reboot idle check)
-    prep_paused: bool = False                             # True ⇒ bulk stream-prep jobs hold (set by the non-admin Pause control / overnight window end)
+    prep_paused: bool = False                             # True ⇒ bulk stream-prep jobs hold (set by the non-admin Pause control / auto-prep falling edge)
     admin_prep_stop: bool = False                         # True ⇒ admin force-prep ("admin" queue) jobs cancel at the gate (set by the admin Stop control). Cleared when a new force-prep batch starts. Independent of prep_paused — force-prep ignores the bulk gate + activity-kill by design
-    auto_prep_engaged: bool = False                       # True while the unified auto_prep_loop has prep running (overnight window OR idle trigger) — edge flag for resume/pause
+    auto_prep_engaged: bool = False                       # True while the unified auto_prep_loop has prep running (always mode OR idle trigger) — edge flag for resume/pause
     play_prep_task: Optional[asyncio.Task] = None         # the chain task prepping the currently-playing series' tail for on-device (settings.play_prep); cancelled + replaced on each new VLC play
     download_idle_open: bool = False                      # last computed idle/night DOWNLOAD window state (set by download_scheduler_loop) — drives the "waiting for idle" UI
-    download_idle_configured: bool = False                # True if any admin prep window (overnight/idle) is enabled — so idle-only downloads have a window to run in
-    idle_prep_on: bool = False                            # cached settings.idle_prep.enabled (set each auto_prep_loop tick) — lets the activity hook decide cheaply
-    overnight_open: bool = False                          # cached: currently inside the overnight prep window (set each tick) — overnight load is intentional, so the activity hook stands down then
+    download_idle_configured: bool = False                # True if Automatic Stream Prep is enabled (auto_prep mode != off) — so idle-only downloads have a window to run in
+    idle_prep_on: bool = False                            # cached: auto_prep mode == "idle" (set each auto_prep_loop tick) — lets the activity hook decide cheaply
+    idle_prep_hard: bool = False                          # cached: auto_prep idle mode with on_activity == "hard" (set each tick) — only then does the activity hook kill the in-flight encode immediately
     sys_status: dict = field(default_factory=dict)        # latest CPU/GPU/RAM/network sample + ok/degraded/overloaded classification (set by system_monitor_loop)
     cache_autopurge_last: dict = field(default_factory=dict)  # last auto-purge result (set by cache_autopurge_loop): {at, deleted, bytes_freed, total_bytes_before} — drives the admin card's "last run" line
     # ── YouTube-on-TV (browser playback on the host display, remote-controlled) ──
@@ -2620,37 +2620,51 @@ def _autoupdate_cfg(lib: dict) -> dict:
     }
 
 
-def _overnight_prep_cfg(lib: dict) -> dict:
-    """Read settings.overnight_prep (auto stream-prep window) with defaults."""
-    cfg = (lib.get("settings", {}) or {}).get("overnight_prep") or {}
-    on_end = str(cfg.get("on_end", "pause"))
-    if on_end not in ("pause", "continue"):
-        on_end = "pause"
-    return {
-        "enabled":  bool(cfg.get("enabled", False)),
-        "start":    str(cfg.get("start", "02:00")),
-        "end":      str(cfg.get("end", "06:00")),
-        "timezone": str(cfg.get("timezone", "America/Los_Angeles")),
-        "on_end":   on_end,
-    }
+def _auto_prep_cfg(lib: dict) -> dict:
+    """Read settings.auto_prep (the unified automatic stream-prep control) with
+    defaults. One mode replaces the old overnight-window + idle pair:
 
+      • "always" — prep every un-prepped file whenever there's anything to do,
+        regardless of host activity (background work runs at below-normal priority).
+      • "idle"   — prep only while the box has been idle for `idle_minutes`, and
+        stop the instant activity returns. `on_activity` picks the stop kind:
+        "hard" kills the in-flight encode immediately (restarts later — HLS prep
+        can't checkpoint); "soft" lets the in-flight file finish, then holds.
+      • "off"    — never auto-prep; only user/admin-triggered prep runs.
 
-def _idle_prep_cfg(lib: dict) -> dict:
-    """Read settings.idle_prep (activity-gated auto stream-prep) with defaults.
+    **Lazy migration:** if `settings.auto_prep` is absent, derive a sensible
+    default from the legacy `idle_prep` / `overnight_prep` keys so existing
+    installs keep behaving — either enabled ⇒ mode "idle" (carrying the old
+    idle_minutes), else "off". The new key is written on the first save."""
+    settings = lib.get("settings", {}) or {}
+    cfg = settings.get("auto_prep")
 
-    Unlike the fixed nightly window, this fires whenever the box has been idle —
-    no user interaction / VLC playback / active stream / running download — for
-    `idle_minutes`, and pauses (discarding the in-flight encode) the instant
-    activity returns. The same idle window doubles as the activity detector."""
-    cfg = (lib.get("settings", {}) or {}).get("idle_prep") or {}
+    if not isinstance(cfg, dict):
+        # Migrate from the legacy split config.
+        legacy_idle = settings.get("idle_prep") or {}
+        legacy_overnight = settings.get("overnight_prep") or {}
+        enabled = bool(legacy_idle.get("enabled")) or bool(legacy_overnight.get("enabled"))
+        cfg = {
+            "mode": "idle" if enabled else "off",
+            "idle_minutes": legacy_idle.get("idle_minutes", 30),
+            "on_activity": "hard",
+        }
+
+    mode = str(cfg.get("mode", "off"))
+    if mode not in ("always", "idle", "off"):
+        mode = "off"
+    on_activity = str(cfg.get("on_activity", "hard"))
+    if on_activity not in ("soft", "hard"):
+        on_activity = "hard"
     try:
         idle_minutes = int(cfg.get("idle_minutes", 30))
     except (TypeError, ValueError):
         idle_minutes = 30
     idle_minutes = max(1, min(720, idle_minutes))
     return {
-        "enabled":      bool(cfg.get("enabled", False)),
+        "mode":         mode,
         "idle_minutes": idle_minutes,
+        "on_activity":  on_activity,
     }
 
 
@@ -2659,7 +2673,7 @@ def _play_prep_cfg(lib: dict) -> dict:
 
     Enabled by default. When on, every VLC library play immediately HLS-preps the
     playing episode for on-device, then the rest of the playlist one at a time —
-    regardless of the idle/overnight settings or live user activity (the jobs run
+    regardless of the Automatic Stream Prep mode or live user activity (the jobs run
     as 'interactive', so the bulk pause gate and the activity-kill don't touch
     them). See `_maybe_start_play_prep` / `_play_prep_chain`."""
     cfg = (lib.get("settings", {}) or {}).get("play_prep") or {}
@@ -2775,44 +2789,31 @@ def _hhmm_to_min(s: str) -> Optional[int]:
     return None
 
 
-def _in_overnight_window(now: datetime, start_min: int, end_min: int) -> bool:
-    """True if `now` falls inside [start, end). Handles windows that wrap past
-    midnight (e.g. 23:00–06:00). A zero-length window (start == end) is never in."""
-    cur = now.hour * 60 + now.minute
-    if start_min == end_min:
-        return False
-    if start_min < end_min:
-        return start_min <= cur < end_min
-    return cur >= start_min or cur < end_min
-
-
 # ── Download scheduling: idle/night window + reconcile + loop ───────────────────
 
 async def _download_idle_open(lib: dict) -> bool:
-    """True if the moment is inside the idle/night DOWNLOAD window — reusing the
-    admin prep schedules: the Overnight Stream Prep window OR Idle Auto-Prep idleness.
+    """True if the moment is inside the idle/night DOWNLOAD window — derived from the
+    unified Automatic Stream Prep mode (`settings.auto_prep`):
+
+      • "always" — the window is always open (the owner wants background work to run).
+      • "idle"   — open while the box has been idle for `idle_minutes`.
+      • "off"    — never open (idle-only downloads have no window; the modal warns).
 
     Unlike auto_prep's idle check, a running download does NOT count as activity here
     (`ignore_downloads=True`), so an idle-only download that's actively fetching can't
     flip the box "in use" and immediately close its own window."""
-    on_cfg = _overnight_prep_cfg(lib)
-    if on_cfg["enabled"]:
-        s_min = _hhmm_to_min(on_cfg["start"])
-        e_min = _hhmm_to_min(on_cfg["end"])
-        if s_min is not None and e_min is not None:
-            if _in_overnight_window(_now_in_tz(on_cfg["timezone"]), s_min, e_min):
-                return True
-    id_cfg = _idle_prep_cfg(lib)
-    if id_cfg["enabled"]:
-        if not await _machine_in_use(id_cfg["idle_minutes"] * 60, ignore_downloads=True):
-            return True
+    cfg = _auto_prep_cfg(lib)
+    if cfg["mode"] == "always":
+        return True
+    if cfg["mode"] == "idle":
+        return not await _machine_in_use(cfg["idle_minutes"] * 60, ignore_downloads=True)
     return False
 
 
 def _download_idle_configured(lib: dict) -> bool:
-    """True if at least one admin prep window (overnight or idle) is enabled, i.e. an
-    idle-only download actually has a window to run in."""
-    return bool(_overnight_prep_cfg(lib)["enabled"] or _idle_prep_cfg(lib)["enabled"])
+    """True if Automatic Stream Prep is enabled (mode != off), i.e. an idle-only
+    download actually has a window to run in."""
+    return _auto_prep_cfg(lib)["mode"] != "off"
 
 
 async def _reconcile_item_downloads(item: dict, idle_open: bool) -> bool:
@@ -3141,77 +3142,79 @@ async def scheduled_reboot_loop() -> None:
 
 
 async def auto_prep_loop() -> None:
-    """Drive automatic stream-prep from two independent triggers that share the
-    one bulk-prep concurrency slot + pause gate:
+    """Drive automatic stream-prep from the single unified control
+    (`settings.auto_prep`, read via `_auto_prep_cfg`). One mode owns the decision,
+    so there's nothing to reconcile between competing triggers:
 
-      • **Overnight window** — runs during an admin-defined nightly window
-        regardless of activity (heavy ffmpeg load when nobody's watching).
-      • **Idle trigger** — runs any time the box has been idle for `idle_minutes`
-        (no interaction / VLC playback / active stream / running download), and
-        pauses *and discards the in-flight encode* the instant activity returns.
-
-    Because both write `state.prep_paused`, a single loop owns the decision so the
-    two triggers can't fight. The combined "should prep run now?" is:
-
-        want = overnight_window_open OR (idle_enabled AND idle_for_threshold)
+      • **always** — `want` is always True: prep every un-prepped file regardless
+        of host activity (background work runs at below-normal priority). Because
+        the loop stays engaged, it re-enqueues periodically so newly-downloaded
+        content gets picked up.
+      • **idle** — `want = not in_use`: prep only while the box has been idle for
+        `idle_minutes`. On the falling edge (activity returned) the pause kind is
+        the user's `on_activity` choice — "hard" kills the in-flight encode
+        immediately (restarts later — HLS prep can't checkpoint), "soft" lets the
+        in-flight file finish then holds the rest.
+      • **off** — `want` is always False; nothing auto-preps.
 
     A rising edge (`want` and not engaged) resumes + enqueues the whole un-prepped
-    library; a falling edge pauses. The pause is a hard **kill** when idle-prep is
-    the reason (activity returned — HLS prep can't checkpoint, so the file
-    restarts from scratch later); otherwise it honours the overnight `on_end` mode
-    (graceful pause vs. run-to-completion). When idle-prep is enabled its
-    activity-pause overrides `on_end` — activity always wins. `auto_prep_engaged`
-    is the in-memory edge flag (re-derived after any config save)."""
+    library; a falling edge pauses. `auto_prep_engaged` is the in-memory edge flag
+    (re-derived after any config save). `_machine_in_use` doubles as the activity
+    detector — a fresh interaction stamps last_activity, flipping it True within a
+    tick (the cheap `_activity_kick` hook shortcuts the hard-stop case)."""
+    # While engaged in "always" mode the loop stays up, so re-enqueue every
+    # ALWAYS_REQUEUE_TICKS ticks (~5 min at 15 s/tick) to catch new content.
+    ALWAYS_REQUEUE_TICKS = 20
+    ticks_since_enqueue = 0
     while True:
         await asyncio.sleep(15)
         try:
-            lib = await get_library()
-            on_cfg = _overnight_prep_cfg(lib)
-            id_cfg = _idle_prep_cfg(lib)
+            cfg = _auto_prep_cfg(await get_library())
+            mode = cfg["mode"]
 
-            # Overnight window membership (activity-independent).
-            overnight_open = False
-            if on_cfg["enabled"]:
-                s_min = _hhmm_to_min(on_cfg["start"])
-                e_min = _hhmm_to_min(on_cfg["end"])
-                if s_min is not None and e_min is not None:
-                    now = _now_in_tz(on_cfg["timezone"])
-                    overnight_open = _in_overnight_window(now, s_min, e_min)
-
-            # Idle trigger: busy within the idle window ⇒ not eligible. The same
-            # `_machine_in_use` window doubles as the activity detector — a fresh
-            # interaction stamps last_activity, flipping this True within a tick.
+            # Idle membership: busy within the idle window ⇒ not eligible. for_prep
+            # makes an open dashboard count as "in use" so idle prep won't hammer
+            # the box while a viewer is on the site (even if just looking).
             in_use = False
-            if id_cfg["enabled"]:
-                # for_prep: an open dashboard counts as "in use" so idle prep won't
-                # hammer the box while a viewer is on the site (even if just looking).
-                in_use = await _machine_in_use(id_cfg["idle_minutes"] * 60, for_prep=True)
+            if mode == "idle":
+                in_use = await _machine_in_use(cfg["idle_minutes"] * 60, for_prep=True)
 
-            # Cache for the cheap activity hook (`_activity_kick`): it pauses on
-            # interaction only when idle-prep governs and we're NOT inside the
-            # (intentional) overnight window.
-            state.idle_prep_on = id_cfg["enabled"]
-            state.overnight_open = overnight_open
+            # Cache for the cheap activity hook (`_activity_kick`): only the idle +
+            # hard-stop case kills the in-flight encode the moment activity returns.
+            state.idle_prep_on   = (mode == "idle")
+            state.idle_prep_hard = (mode == "idle" and cfg["on_activity"] == "hard")
 
-            want = overnight_open or (id_cfg["enabled"] and not in_use)
+            if mode == "always":
+                want = True
+            elif mode == "idle":
+                want = not in_use
+            else:
+                want = False
 
             if want and not state.auto_prep_engaged:
                 state.auto_prep_engaged = True
                 _resume_prep()   # clear any prior pause + re-spawn paused jobs
                 n = await _enqueue_library_prep()
-                reason = "overnight window open" if overnight_open \
-                    else f"idle {id_cfg['idle_minutes']} min"
+                ticks_since_enqueue = 0
+                reason = "always-on" if mode == "always" else f"idle {cfg['idle_minutes']} min"
                 print(f"[autoprep] {reason} — queued {n} file(s) for stream-prep")
+            elif want and state.auto_prep_engaged and mode == "always":
+                # Stays engaged in always mode — periodically re-enqueue so freshly
+                # downloaded files get prepped without waiting for an edge.
+                ticks_since_enqueue += 1
+                if ticks_since_enqueue >= ALWAYS_REQUEUE_TICKS:
+                    ticks_since_enqueue = 0
+                    await _enqueue_library_prep()
             elif state.auto_prep_engaged and not want:
                 state.auto_prep_engaged = False
-                if id_cfg["enabled"] and in_use:
-                    killed = _pause_prep(kill=True)   # activity returned — discard in-flight
-                    print(f"[autoprep] activity detected — pausing prep (killed {killed} in-flight)")
-                elif on_cfg["on_end"] == "continue":
-                    print("[autoprep] overnight window closed — continuing until prep finishes")
+                if mode == "idle":
+                    kill = (cfg["on_activity"] == "hard")
+                    killed = _pause_prep(kill=kill)
+                    how = f"killed {killed} in-flight" if kill else "finishing current file"
+                    print(f"[autoprep] activity detected — pausing prep ({how})")
                 else:
-                    _pause_prep(kill=False)           # graceful: let the current file finish
-                    print("[autoprep] overnight window closed — pausing remaining prep")
+                    _pause_prep(kill=False)           # mode turned off — graceful hold
+                    print("[autoprep] auto-prep disabled — pausing remaining prep")
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -4898,17 +4901,10 @@ class ScheduledRebootReq(BaseModel):
     idle_minutes: int = 15                     # idle window before a reboot fires
 
 
-class OvernightPrepReq(BaseModel):
-    enabled: bool = False
-    start: str = "02:00"                       # local HH:MM in `timezone` — window opens
-    end: str = "06:00"                         # local HH:MM in `timezone` — window closes
-    timezone: str = "America/Los_Angeles"     # IANA name; "" = system local
-    on_end: str = "pause"                      # "pause" ⇒ stop at window end · "continue" ⇒ run to completion
-
-
-class IdlePrepReq(BaseModel):
-    enabled: bool = False
-    idle_minutes: int = 30                     # auto-prep after this many minutes with no activity; clamped 1–720
+class AutoPrepReq(BaseModel):
+    mode: str = "off"                          # "always" | "idle" | "off"
+    idle_minutes: int = 30                     # idle mode: prep after this many minutes with no activity; clamped 1–720
+    on_activity: str = "hard"                  # idle mode: "hard" ⇒ kill in-flight on activity · "soft" ⇒ let it finish
 
 
 class PlayPrepReq(BaseModel):
@@ -8637,55 +8633,48 @@ async def admin_set_scheduled_reboot(
     return JSONResponse({"ok": True, **cfg})
 
 
-@app.get("/api/admin/overnight-prep")
-async def admin_get_overnight_prep(request: Request) -> JSONResponse:
-    """Return the overnight auto-prep config + the host's current time in the
-    configured timezone, and whether the window is open right now."""
+@app.get("/api/admin/auto-prep")
+async def admin_get_auto_prep(request: Request) -> JSONResponse:
+    """Return the unified Automatic Stream Prep config (`settings.auto_prep`) plus
+    live status: whether the box is idle right now, the bulk pause state, and
+    whether prep is actively running."""
     _require_admin(request)
-    cfg = _overnight_prep_cfg(await get_library())
-    now = _now_in_tz(cfg["timezone"])
-    cfg["now"] = now.strftime("%Y-%m-%d %H:%M %Z").strip()
-    s_min, e_min = _hhmm_to_min(cfg["start"]), _hhmm_to_min(cfg["end"])
-    cfg["in_window"] = bool(
-        cfg["enabled"] and s_min is not None and e_min is not None
-        and _in_overnight_window(now, s_min, e_min)
-    )
-    cfg["paused"] = state.prep_paused
+    cfg = _auto_prep_cfg(await get_library())
+    in_use = await _machine_in_use(cfg["idle_minutes"] * 60)
+    cfg["idle_now"] = not in_use
+    cfg["paused"]   = state.prep_paused
+    if cfg["mode"] == "always":
+        cfg["active"] = bool(state.auto_prep_engaged)
+    elif cfg["mode"] == "idle":
+        cfg["active"] = bool(state.auto_prep_engaged and not in_use)
+    else:
+        cfg["active"] = False
     return JSONResponse(cfg)
 
 
-@app.post("/api/admin/overnight-prep")
-async def admin_set_overnight_prep(
-    request: Request, body: OvernightPrepReq,
-) -> JSONResponse:
-    """Save the overnight auto-prep config. Validates both HH:MM times and the
-    on_end mode. Re-evaluates the window immediately so a change takes effect on
-    the next scheduler tick without waiting for a fresh entry/exit transition."""
+@app.post("/api/admin/auto-prep")
+async def admin_set_auto_prep(request: Request, body: AutoPrepReq) -> JSONResponse:
+    """Save the unified Automatic Stream Prep config. Validates `mode` /
+    `on_activity` and clamps `idle_minutes` (1–720). Re-derives the trigger on the
+    next scheduler tick by resetting the engagement edge flag."""
     _require_admin(request)
-
-    s_min = _hhmm_to_min(body.start)
-    e_min = _hhmm_to_min(body.end)
-    if s_min is None or e_min is None:
-        raise HTTPException(400, "start and end must be HH:MM (24-hour), e.g. 02:00")
-    if s_min == e_min:
-        raise HTTPException(400, "start and end can't be the same time (empty window).")
-    on_end = body.on_end if body.on_end in ("pause", "continue") else "pause"
+    mode = body.mode if body.mode in ("always", "idle", "off") else "off"
+    on_activity = body.on_activity if body.on_activity in ("soft", "hard") else "hard"
+    idle_minutes = max(1, min(720, int(body.idle_minutes)))
 
     lib = await get_library()
-    op = lib.setdefault("settings", {}).setdefault("overnight_prep", {})
-    op["enabled"]  = bool(body.enabled)
-    op["start"]    = f"{s_min // 60:02d}:{s_min % 60:02d}"
-    op["end"]      = f"{e_min // 60:02d}:{e_min % 60:02d}"
-    op["timezone"] = body.timezone.strip()
-    op["on_end"]   = on_end
+    ap = lib.setdefault("settings", {}).setdefault("auto_prep", {})
+    ap["mode"]         = mode
+    ap["idle_minutes"] = idle_minutes
+    ap["on_activity"]  = on_activity
     await put_library(lib)
 
-    # Reset the auto-prep edge flag so the loop re-derives "want" against the new
-    # config on its next tick (and applies the new on_end on exit).
+    # Re-derive "want" fresh against the new config on the next loop tick.
     state.auto_prep_engaged = False
 
-    cfg = _overnight_prep_cfg(lib)
-    cfg["now"] = _now_in_tz(cfg["timezone"]).strftime("%Y-%m-%d %H:%M %Z").strip()
+    cfg = _auto_prep_cfg(lib)
+    in_use = await _machine_in_use(cfg["idle_minutes"] * 60)
+    cfg["idle_now"] = not in_use
     return JSONResponse({"ok": True, **cfg})
 
 
@@ -8700,41 +8689,6 @@ async def admin_system_resources(request: Request) -> JSONResponse:
     s["prep_active"] = _bulk_processing_now()
     s["prep_paused"] = state.prep_paused
     return JSONResponse(s)
-
-
-@app.get("/api/admin/idle-prep")
-async def admin_get_idle_prep(request: Request) -> JSONResponse:
-    """Return the idle-triggered auto-prep config + whether the box is idle enough
-    to be prepping right now."""
-    _require_admin(request)
-    cfg = _idle_prep_cfg(await get_library())
-    in_use = await _machine_in_use(cfg["idle_minutes"] * 60)
-    cfg["idle_now"] = not in_use
-    cfg["paused"]   = state.prep_paused
-    cfg["active"]   = bool(cfg["enabled"] and state.auto_prep_engaged and not in_use)
-    return JSONResponse(cfg)
-
-
-@app.post("/api/admin/idle-prep")
-async def admin_set_idle_prep(request: Request, body: IdlePrepReq) -> JSONResponse:
-    """Save the idle-triggered auto-prep config. Clamps idle_minutes to 1–720 and
-    re-derives the trigger on the next scheduler tick."""
-    _require_admin(request)
-    idle_minutes = max(1, min(720, int(body.idle_minutes)))
-
-    lib = await get_library()
-    ip = lib.setdefault("settings", {}).setdefault("idle_prep", {})
-    ip["enabled"]      = bool(body.enabled)
-    ip["idle_minutes"] = idle_minutes
-    await put_library(lib)
-
-    # Re-derive "want" fresh against the new config on the next loop tick.
-    state.auto_prep_engaged = False
-
-    cfg = _idle_prep_cfg(lib)
-    in_use = await _machine_in_use(cfg["idle_minutes"] * 60)
-    cfg["idle_now"] = not in_use
-    return JSONResponse({"ok": True, **cfg})
 
 
 @app.get("/api/admin/play-prep")
@@ -10324,7 +10278,7 @@ async def _run_offline_job(job_id: str) -> None:
     # Priority-prep precedence. A bulk job parks here until no priority HLS prep is
     # queued or encoding — that's interactive (fullscreen "Prep for Device" /
     # play-on-device) AND admin force-prep, both of which must run ahead of
-    # overnight / idle / manual bulk prep. The file a bulk job is *currently*
+    # auto-prep / manual bulk prep. The file a bulk job is *currently*
     # encoding is separately booted by _preempt_running_bulk so the slot frees
     # without waiting for it. (The `not prep_paused` escape lets a bulk job fall
     # through to park at the pause gate below instead of spinning here.)
@@ -10350,11 +10304,11 @@ async def _run_offline_job(job_id: str) -> None:
             job["progress"] = 1.0
             job["status"]   = "done"
             return
-        # Global pause gate. A bulk ("Prep for later" / overnight) job that reaches
+        # Global pause gate. A bulk ("Prep for later" / auto-prep) job that reaches
         # the head of the queue while prep is paused marks itself "paused" and
         # EXITS — releasing the single concurrency slot so an interactive
         # play-on-device prep can still run. _resume_prep() re-spawns this worker
-        # when the user (or the overnight window) resumes. Interactive jobs ignore
+        # when the user (or the auto-prep loop) resumes. Interactive jobs ignore
         # the gate entirely. See PrepPauseReq / _pause_prep / _resume_prep.
         if is_bulk and state.prep_paused:
             job["status"] = "paused"
@@ -10801,7 +10755,7 @@ def _priority_hls_pending() -> int:
     """Count priority (non-bulk) HLS jobs that are queued or encoding — both
     interactive (fullscreen "Prep for Device" / play-on-device) and admin
     force-prep. Bulk prep defers to these so a user-initiated prep OR an admin
-    force-prep always jumps the queue ahead of overnight / idle / manual bulk
+    force-prep always jumps the queue ahead of auto-prep / manual bulk
     prep — see the precedence gate in `_run_offline_job`."""
     return sum(1 for j in _offline_jobs.values()
                if j.get("queue") in ("interactive", "admin")
@@ -10842,16 +10796,20 @@ async def _requeue_offline_job(job_id: str, delay: float = 0.3) -> None:
 
 
 def _activity_kick() -> None:
-    """Called on genuine user interaction. When idle-prep governs (and we're outside
-    the intentional overnight window), stop bulk background work *immediately* — kill
-    the in-flight HLS encode AND whisper — instead of waiting up to a full
+    """Called on genuine user interaction. When Automatic Stream Prep is in **idle
+    mode with a hard stop**, stop bulk background work *immediately* — kill the
+    in-flight HLS encode AND whisper — instead of waiting up to a full
     `auto_prep_loop` tick. This is the responsiveness lever: a user who shows up
     mid-idle-prep shouldn't sit through ~15 s (or, when whisper wasn't being killed,
     much longer) of a laggy box. The loop then leaves prep paused until the box is
-    idle again. No-op once already paused, so it's cheap to call on every request."""
+    idle again.
+
+    No-op for "always" mode (prep is meant to run through activity) and for idle
+    **soft** stop (the loop's falling-edge graceful pause lets the in-flight file
+    finish). No-op once already paused, so it's cheap to call on every request."""
     if state.prep_paused:
         return
-    if not state.idle_prep_on or state.overnight_open:
+    if not state.idle_prep_hard:
         return
     if not (state.auto_prep_engaged or _bulk_processing_now()):
         return
@@ -10863,7 +10821,7 @@ def _activity_kick() -> None:
 async def _enqueue_library_prep() -> int:
     """Queue a bulk HLS-prep job for every un-prepped video file in the library.
 
-    Used by the overnight auto-prep window. Idempotent: `_maybe_start_prep_job`
+    Used by `auto_prep_loop` (always / idle modes). Idempotent: `_maybe_start_prep_job`
     skips files already cached or already queued, so re-running (e.g. on a
     mid-window restart) only adds genuinely-new work. Returns the count of files
     that still need prep (newly-queued + already in flight).
@@ -10887,12 +10845,12 @@ async def _enqueue_library_prep() -> int:
                 queued += 1
             elif st.get("status") == "cached":
                 # Already HLS-prepped, so the post-encode STT hook never fires for
-                # it — check here so overnight still backfills generated subs for
+                # it — check here so auto-prep still backfills generated subs for
                 # files prepped before STT existed (or before the lang setting).
                 await _ensure_stt_for(p, item.get("id", ""), queue="bulk")
             # Yield between every file (sync FS stat + task spawn, no internal
             # await) so scanning a large library never stalls the event loop and
-            # the dashboard stays responsive during the overnight enqueue.
+            # the dashboard stays responsive during the auto-prep enqueue.
             await asyncio.sleep(0)
     return queued
 
@@ -10901,8 +10859,8 @@ async def _enqueue_library_prep() -> int:
 # When a video is played on VLC, immediately HLS-prep that episode for on-device
 # viewing, then the rest of the playlist one episode at a time. These jobs are
 # queued as "interactive" so they bypass the bulk pause gate AND survive the
-# activity-kill — by design they run regardless of the idle/overnight settings or
-# whether someone is actively using the box.
+# activity-kill — by design they run regardless of the Automatic Stream Prep mode
+# or whether someone is actively using the box.
 
 PLAY_PREP_TAIL_SECS = 300  # <5 min left on the current episode ⇒ skip it, start at the next
 
@@ -11573,7 +11531,7 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
         # An interactive (play-now / fullscreen prep) request must jump the queue.
         # Promote it to interactive (bypasses the pause gate); re-spawn it if it was
         # parked; and preempt any *other* bulk encode hogging the single slot so this
-        # file starts now instead of waiting behind overnight / idle / manual prep.
+        # file starts now instead of waiting behind auto-prep / manual prep.
         if not req.bulk:
             existing["queue"] = "interactive"
             if existing.get("status") == "paused":
@@ -11670,7 +11628,7 @@ async def _maybe_start_prep_job(src: Path, item_id: str = "") -> dict:
         "progress": 0.0, "error": None,
         "started_at": time.time(),
         "item_id": item_id,
-        # Bulk / per-item / overnight prep — honors the global pause gate.
+        # Bulk / per-item / auto-prep — honors the global pause gate.
         "queue": "bulk",
     }
     asyncio.create_task(_run_offline_job(job_id))

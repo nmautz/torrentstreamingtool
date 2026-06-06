@@ -32,7 +32,7 @@ Read this when changing anything related to:
 - The prep **lag warning** (`#prepWarnModal`, `confirmStreamPrepWarning`), the
   **Pause/Resume** controls on `#globalPrepBar` (`/api/offline-prep/pause` +
   `/resume`, `_pause_prep` / `_resume_prep`), or **automatic auto-prep**
-  (`auto_prep_loop`, `/api/admin/overnight-prep`, `/api/admin/idle-prep`) — see the
+  (`auto_prep_loop`, `/api/admin/auto-prep`) — see the
   [Pause / resume + auto-prep](#pause--resume--auto-prep) section
 - **On-demand (JIT) streaming** — `stream-ondemand`, the `_od_*` session manager,
   the `/api/library/ondemand/<key>/…` virtual-playlist + segment endpoints, and the
@@ -750,53 +750,45 @@ paused state so the UI can show "Prep paused" + a Resume button.
 
 ### Auto-prep (server, admin-configured)
 
-A single background loop, `auto_prep_loop` (registered in `lifespan`), drives
-**two independent triggers** that both auto-prep the **whole un-prepped
-library**. One loop owns the decision because both write the shared
-`state.prep_paused` gate and would otherwise fight. The combined question each
-tick (every 15 s) is:
+A single background loop, `auto_prep_loop` (registered in `lifespan`), drives the
+**unified Automatic Stream Prep** control — one `mode` (`library.json →
+settings.auto_prep`, read via `_auto_prep_cfg`) that auto-preps the **whole
+un-prepped library**. The mode decides the per-tick (every 15 s) `want`:
 
-```
-want = overnight_window_open  OR  (idle_prep_enabled AND host idle ≥ idle_minutes)
-```
+| mode | `want` | falling-edge pause |
+|------|--------|--------------------|
+| `always` | always `True` — prep regardless of activity | only when mode is turned off (graceful) |
+| `idle` | `not in_use` — prep only while the box is idle | `on_activity`: `hard` ⇒ `kill=True`, `soft` ⇒ `kill=False` |
+| `off` | always `False` | n/a |
 
 `state.auto_prep_engaged` is the in-memory edge flag:
 
 - **Rising edge** (`want` and not engaged) → `_resume_prep()` (clears any pause +
   re-spawns paused jobs) then `_enqueue_library_prep()` queues a bulk job for
   every un-prepped video file (idempotent).
-- **Falling edge** (engaged and not `want`) → pause, with the **kind** decided by
-  *why* it stopped:
-  - **idle-prep enabled and the box is now in use** ⇒ `_pause_prep(kill=True)` —
-    the in-flight encode is terminated immediately for instant responsiveness;
-    it restarts from scratch on the next idle stretch (HLS prep can't
-    checkpoint). Activity always wins, even over the overnight `on_end` mode.
-  - else, overnight `on_end == "continue"` ⇒ no pause, the queue runs to
-    completion past the window.
-  - else (overnight window closed, `on_end == "pause"`) ⇒ `_pause_prep(kill=False)`
-    (graceful: the in-flight file finishes, the rest wait for the next window).
+- **Stays engaged in `always`** → the loop re-runs `_enqueue_library_prep()` every
+  ~20 ticks (~5 min) so newly-downloaded content gets prepped without waiting for
+  an edge.
+- **Falling edge** (engaged and not `want`) → `_pause_prep(...)`:
+  - **`idle` + `on_activity == "hard"`** ⇒ `kill=True` — the in-flight encode is
+    terminated immediately for instant responsiveness; it restarts from scratch on
+    the next idle stretch (HLS prep can't checkpoint).
+  - **`idle` + `on_activity == "soft"`** ⇒ `kill=False` — graceful: the in-flight
+    file finishes, the rest hold until the box is idle again.
+  - **mode just turned off** ⇒ `kill=False` (graceful hold).
 
-**Trigger 1 — Overnight window.** Config: `library.json → settings.overnight_prep`
-(`enabled`, `start`/`end` HH:MM, `timezone`, `on_end ∈ {pause, continue}`). The
-window may cross midnight (`_in_overnight_window` handles the wrap) and runs
-regardless of activity — heavy load when nobody's watching.
+**Idle detection.** `idle` mode reuses `_machine_in_use(idle_minutes*60,
+for_prep=True)` — the same helper the scheduled reboot uses — so "idle" means no
+VLC playback of real content, no active stream, no running download, no mutating
+HTTP interaction, and (with `for_prep`) no open dashboard within the window.
+`idle_minutes` is clamped 1–720. That single window doubles as the activity
+detector: a fresh interaction stamps `state.last_activity`, flipping
+`_machine_in_use` True within a tick, which collapses `want`. The cheap
+`_activity_kick` hook (called from the `track_activity` middleware) shortcuts the
+**`idle` + hard** case so the kill lands on the request, not up to a tick later;
+`always`, `idle`+soft, and `off` are no-ops there (the loop handles them).
 
-**Trigger 2 — Idle.** Config: `library.json → settings.idle_prep` (`enabled`,
-`idle_minutes` clamped 1–720). It reuses `_machine_in_use(idle_minutes*60)` — the
-same helper the scheduled reboot uses — so "idle" means no VLC playback of real
-content, no active stream, no running download, and no mutating HTTP interaction
-within the window. That single window doubles as the activity detector: a fresh
-interaction stamps `state.last_activity`, flipping `_machine_in_use` True within a
-tick, which collapses `want` and triggers the kill=True pause.
-
-> **Coexistence.** Both triggers can be enabled at once. During the overnight
-> window prep runs regardless of activity; outside it, idle-prep governs (prep
-> when idle, pause on activity). If idle-prep is on, it naturally extends prep
-> past the overnight window whenever the box stays idle, and an activity pause
-> overrides overnight Continue.
-
-See [ADMIN.md § Overnight Stream Prep / § Idle Auto-Prep](ADMIN.md) for the
-panels + endpoints.
+See [ADMIN.md § Automatic Stream Prep](ADMIN.md) for the panel + endpoints.
 
 ### Auto-prep on play (server, admin-toggled)
 
