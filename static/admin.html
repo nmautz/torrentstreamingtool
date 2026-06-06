@@ -267,13 +267,16 @@
           <h2 class="text-sm font-black uppercase tracking-wide">Offline Cache</h2>
           <p class="text-xs text-gray-500 mt-0.5">Preprocessed MP4s stored in <code class="font-mono text-gray-400" id="offCacheDir">.offline_cache/</code>. Source files that have been re-encoded or removed leave their entries as orphans.</p>
         </div>
-        <button onclick="loadOfflineCache()"
-          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 hover:text-white text-gray-400 transition-colors">
+        <button id="offRefreshBtn" onclick="loadOfflineCache(true)"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 hover:text-white text-gray-400 transition-colors disabled:opacity-50">
           Refresh
         </button>
       </div>
       <div class="px-5 py-3 border-b border-gray-800 flex items-center justify-between gap-3">
-        <span class="text-xs text-gray-500 uppercase tracking-widest font-bold">Total on disk</span>
+        <div class="min-w-0">
+          <span class="text-xs text-gray-500 uppercase tracking-widest font-bold">Total on disk</span>
+          <div id="offGeneratedAt" class="text-[10px] text-gray-600 mt-0.5">&nbsp;</div>
+        </div>
         <span id="offTotal" class="text-sm font-mono font-bold text-indigo-300">…</span>
       </div>
       <div id="offItemList" class="divide-y divide-gray-800">
@@ -2955,17 +2958,35 @@ function _fmtBytes(n){
   return `${v.toFixed(v >= 100 ? 0 : v >= 10 ? 1 : 2)} ${units[i]}`;
 }
 
-async function loadOfflineCache(){
+function _fmtAgo(epochSecs){
+  if(!epochSecs) return "";
+  const secs = Math.max(0, Math.floor(Date.now()/1000 - epochSecs));
+  if(secs < 45)   return "just now";
+  if(secs < 90)   return "1 min ago";
+  if(secs < 3600) return `${Math.round(secs/60)} min ago`;
+  if(secs < 5400) return "1 hr ago";
+  if(secs < 86400)return `${Math.round(secs/3600)} hr ago`;
+  return new Date(epochSecs*1000).toLocaleString();
+}
+
+// forceRefresh=true re-walks the cache directory on the server (the Refresh
+// button). A plain call serves the server's cached snapshot for an instant open.
+async function loadOfflineCache(forceRefresh){
   const list = document.getElementById("offItemList");
   const totalEl = document.getElementById("offTotal");
-  list.innerHTML = `<div class="px-5 py-8 text-center text-gray-600 text-sm">Loading cache inventory…</div>`;
+  const genEl = document.getElementById("offGeneratedAt");
+  const btn = document.getElementById("offRefreshBtn");
+  list.innerHTML = `<div class="px-5 py-8 text-center text-gray-600 text-sm">${forceRefresh ? "Re-checking cache on disk…" : "Loading cache inventory…"}</div>`;
   totalEl.textContent = "…";
+  if(btn){ btn.disabled = true; btn.textContent = forceRefresh ? "Checking…" : "Refresh"; }
   let r;
   try{
-    r = await fetch("/api/admin/offline-cache", {headers: authHeader()});
+    r = await fetch(`/api/admin/offline-cache${forceRefresh ? "?refresh=1" : ""}`, {headers: authHeader()});
   }catch(_){
     list.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Network error — could not load inventory.</div>`;
     return;
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = "Refresh"; }
   }
   if(!r.ok){
     list.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Failed to load inventory (HTTP ${r.status}).</div>`;
@@ -2974,6 +2995,7 @@ async function loadOfflineCache(){
   const d = await r.json();
   document.getElementById("offCacheDir").textContent = d.cache_dir;
   totalEl.textContent = _fmtBytes(d.total_bytes);
+  if(genEl) genEl.textContent = d.generated_at ? `As of ${_fmtAgo(d.generated_at)} · Refresh to re-check` : " ";
   // Per-item rows.
   if(!d.items.length){
     list.innerHTML = `<div class="px-5 py-8 text-center text-gray-600 text-sm">No preprocessed files yet. Run "Prep Offline" on a library item to populate the cache.</div>`;

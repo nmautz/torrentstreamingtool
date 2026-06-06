@@ -3043,7 +3043,9 @@ async def cache_autopurge_loop() -> None:
         try:
             cfg = _cache_autopurge_cfg(await get_library())
             if cfg["enabled"]:
-                inv = await _build_offline_cache_inventory()
+                # force=True: eviction must act on the real current size, and
+                # this refreshes the admin snapshot for free every 5 min.
+                inv = await _build_offline_cache_inventory(force=True)
                 cap_bytes = int(cfg["max_gb"] * (1024 ** 3))
                 if inv["total_bytes"] >= cap_bytes and inv["orphans"]:
                     deleted = 0
@@ -3056,6 +3058,7 @@ async def cache_autopurge_loop() -> None:
                             deleted += 1
                             freed += b
                     if deleted:
+                        _invalidate_offline_cache_inventory()
                         state.cache_autopurge_last = {
                             "at":                 time.time(),
                             "deleted":            deleted,
@@ -12635,9 +12638,29 @@ async def serve_clip(token: str, filename: str) -> FileResponse:
 # shows what's there, how much space it costs, and lets the operator delete
 # per-file, per-item, or every orphan in one shot.
 
-async def _build_offline_cache_inventory() -> dict:
-    """Fetch the library + snapshot the jobs, then run the (heavy, blocking)
-    filesystem walk in a worker thread.
+# Cached inventory snapshot. The FS walk below is O(total segments) and on a
+# large ABR cache takes long enough that re-walking on every admin tab open felt
+# broken. We keep the last result + when it was built; reads serve the snapshot
+# instantly and the admin "Refresh" button forces a fresh walk (`force=True`).
+# Mutations (deletes) invalidate it via `_invalidate_offline_cache_inventory`.
+_offline_cache_inv_snapshot: "dict | None" = None
+_offline_cache_inv_lock = asyncio.Lock()
+
+
+def _invalidate_offline_cache_inventory() -> None:
+    """Drop the cached inventory so the next read rebuilds from disk. Called
+    after any delete so a stale snapshot can't show purged bundles."""
+    global _offline_cache_inv_snapshot
+    _offline_cache_inv_snapshot = None
+
+
+async def _build_offline_cache_inventory(*, force: bool = False) -> dict:
+    """Return the offline-cache inventory, serving a cached snapshot unless
+    `force` (or no snapshot yet). Adds `generated_at` (epoch secs) so the UI can
+    show how old the data is.
+
+    On a miss it fetches the library + snapshots the jobs, then runs the (heavy,
+    blocking) filesystem walk in a worker thread.
 
     The walk sums every file in every HLS bundle via `_dir_size_bytes` (recursive
     `rglob` + `stat`). Since the ABR ladder tripled the segment count per bundle,
@@ -12647,10 +12670,23 @@ async def _build_offline_cache_inventory() -> dict:
     Offloading keeps the loop free (same discipline as `_run_offline_job`). The
     job list is snapshotted here so the worker thread never iterates the live
     `_offline_jobs` dict while the loop mutates it.
+
+    The lock serialises concurrent builds so two near-simultaneous opens (or an
+    open racing the auto-purge loop) don't both walk the whole tree.
     """
-    lib = await get_library()
-    jobs = list(_offline_jobs.values())
-    return await asyncio.to_thread(_offline_cache_inventory_sync, lib, jobs)
+    global _offline_cache_inv_snapshot
+    if not force and _offline_cache_inv_snapshot is not None:
+        return _offline_cache_inv_snapshot
+    async with _offline_cache_inv_lock:
+        # Re-check inside the lock: a concurrent caller may have just built it.
+        if not force and _offline_cache_inv_snapshot is not None:
+            return _offline_cache_inv_snapshot
+        lib = await get_library()
+        jobs = list(_offline_jobs.values())
+        data = await asyncio.to_thread(_offline_cache_inventory_sync, lib, jobs)
+        data["generated_at"] = time.time()
+        _offline_cache_inv_snapshot = data
+        return data
 
 
 def _offline_cache_inventory_sync(lib: dict, jobs: list[dict]) -> dict:
@@ -12873,9 +12909,15 @@ def _offline_cache_path_active(cache_key: str) -> bool:
 
 @app.get("/api/admin/offline-cache")
 async def admin_offline_cache_list(request: Request) -> JSONResponse:
-    """Inventory: totals + per-item breakdown + orphans."""
+    """Inventory: totals + per-item breakdown + orphans.
+
+    Serves a cached snapshot for an instant open; `?refresh=1` forces a fresh
+    filesystem walk. The payload carries `generated_at` so the UI can show how
+    stale the data is.
+    """
     _require_admin(request)
-    return JSONResponse(await _build_offline_cache_inventory())
+    refresh = request.query_params.get("refresh") in ("1", "true", "yes")
+    return JSONResponse(await _build_offline_cache_inventory(force=refresh))
 
 
 # Route order matters — declare /orphans BEFORE /{cache_key} so FastAPI doesn't
@@ -12884,7 +12926,7 @@ async def admin_offline_cache_list(request: Request) -> JSONResponse:
 async def admin_offline_cache_purge_orphans(request: Request) -> JSONResponse:
     """Delete every cache/partial dir + legacy MP4 that no longer maps to any library file."""
     _require_admin(request)
-    inv = await _build_offline_cache_inventory()
+    inv = await _build_offline_cache_inventory(force=True)
     deleted = 0
     bytes_freed = 0
     for o in inv["orphans"]:
@@ -12894,6 +12936,7 @@ async def admin_offline_cache_purge_orphans(request: Request) -> JSONResponse:
         if freed > 0:
             deleted += 1
             bytes_freed += freed
+    _invalidate_offline_cache_inventory()
     return JSONResponse({"deleted_count": deleted, "bytes_freed": bytes_freed})
 
 
@@ -12915,6 +12958,7 @@ async def admin_offline_cache_delete_one(cache_key: str, request: Request) -> JS
             or any(Path(j.get("out", "")).name == cache_key for j in _offline_jobs.values())):
         raise HTTPException(404, "Nothing on disk and no job for that cache key.")
     bytes_freed = await asyncio.to_thread(_delete_cache_artifacts, cache_key)
+    _invalidate_offline_cache_inventory()
     return JSONResponse({"deleted": True, "bytes_freed": bytes_freed})
 
 
@@ -12925,7 +12969,7 @@ async def admin_offline_cache_delete_for_item(item_id: str, request: Request) ->
     them via the library card if they really want to abandon them).
     """
     _require_admin(request)
-    inv = await _build_offline_cache_inventory()
+    inv = await _build_offline_cache_inventory(force=True)
     item = next((x for x in inv["items"] if x["item_id"] == item_id), None)
     if not item:
         return JSONResponse({"deleted_count": 0, "bytes_freed": 0})
@@ -12938,6 +12982,7 @@ async def admin_offline_cache_delete_for_item(item_id: str, request: Request) ->
         if freed > 0 or f.get("status") == "error":
             deleted += 1
             bytes_freed += freed
+    _invalidate_offline_cache_inventory()
     return JSONResponse({"deleted_count": deleted, "bytes_freed": bytes_freed})
 
 

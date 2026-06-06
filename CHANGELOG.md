@@ -1,5 +1,8 @@
 # Changelog
 
+## [5.1.1] — 2026-06-06
+- **Fix: the admin Offline Cache tab no longer re-walks the whole cache on every open.** On a large ABR cache the recursive size walk took long enough that opening the tab felt broken. The server now caches the inventory snapshot and serves it instantly; the tab shows an **"As of …"** stamp so you know how fresh the numbers are, and the **Refresh** button forces a fresh on-disk re-check (it disables + shows *Checking…* while it works). Deletes and the auto-purge loop invalidate the snapshot so purged bundles never linger in the view. Concurrent opens (or an open racing auto-purge) share one walk via a lock. **Backend:** [main.py](main.py) (`_build_offline_cache_inventory` now snapshots; `?refresh=1` on `GET /api/admin/offline-cache`). **UI:** [static/admin.html](static/admin.html). **Docs:** [docs/ADMIN.md](docs/ADMIN.md), [docs/API.md](docs/API.md).
+
 ## [5.1.0] — 2026-06-06
 - **Clip buttons are now hold-to-activate.** The *Clip Last 30s* and *Clip last…* buttons — on both the fullscreen VLC controls and the on-device player — now require a press-and-hold (same gesture as Stop/Hand-off), with the familiar left-to-right fill showing hold progress. A stray tap no longer kicks off a clip. **UI:** [static/index.html](static/index.html).
 
