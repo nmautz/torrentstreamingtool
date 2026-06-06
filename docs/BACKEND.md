@@ -155,6 +155,17 @@ anymore.
 
 The fast-path of `/offline-prepare` returns the existing `/api/library/{id}/download` URL — no new file is created. Only when remux/transcode is needed do we hit `OFFLINE_CACHE`.
 
+### On-demand (just-in-time) session manager
+
+Separate from the bundle-prep job system above. When a non-prepped file is played, `stream-ondemand` registers a **session** (one ffmpeg per source+audio) and the player streams a *virtual* HLS playlist whose segments are transcoded on demand. See [STREAMING.md](STREAMING.md) § On-Demand for the full flow; the moving parts in `main.py`:
+
+- `_od_sessions: dict[session_key → {src, dir, duration, audio_idx, has_audio, start_seg, proc, last_access, lock}]` — process-local, no persistence. `session_key = _od_session_key(src, audio_idx)` (24-hex). Dir is `.ondemand_cache/<key>/`.
+- `_od_build_ffmpeg_args(...)` — the JIT command: `-ss <start_seg*OD_SEGMENT_SECS>` (input seek), forced keyframes, mpegts segments, `-start_number`, bare names run with `cwd=<session dir>`. Always transcodes video (NVENC transparent tier via `_has_nvenc`, else libx264 veryfast); single rendition + one audio.
+- `_od_start_encode(session, start_seg)` — terminate any prior proc, wipe stale segments (`_od_wipe_segments`), launch ffmpeg seeked to `start_seg`, drain stderr. Called under `session["lock"]` from the segment endpoint when the running encode can't reach the requested segment (a seek). `_od_max_seg_on_disk` drives the "is it ahead of n / within `OD_LOOKAHEAD_SEGS`" decision.
+- `_od_media_playlist(duration)` — generates the virtual VOD playlist from duration alone (no encoding).
+- `_od_teardown(key)` / `_od_reaper()` — terminate ffmpeg + `rmtree` the dir; the reaper (a `lifespan` task) reaps sessions idle past `OD_SESSION_IDLE_SECS` and caps the live count at `OD_MAX_SESSIONS`. `POST …/close` (sendBeacon) tears down promptly; reaper is the backstop.
+- Reuses `hls_log` for START / rc / teardown lines (so JIT diagnostics also land in `logs/hls.log`). 503 when `HLS_AVAILABLE` is false (macOS).
+
 ## Logging
 
 `main.py` configures Python `logging` at import time via `_init_logging()` (just below the imports). There is one logger tree under the name `streamlink`:

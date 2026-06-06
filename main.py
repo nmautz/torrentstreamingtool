@@ -407,7 +407,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "4.26.1"
+UI_VERSION = "5.0.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -4710,12 +4710,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     sysmon_loop = asyncio.create_task(system_monitor_loop())
     cachepurge_loop = asyncio.create_task(cache_autopurge_loop())
     subupgrade_loop = asyncio.create_task(subtitle_upgrade_loop())
+    od_reaper_loop  = asyncio.create_task(_od_reaper())
 
     yield
 
     for t in (guard, broadcaster, dl_monitor, vlc_tracker, bg_loop, jackett_mon,
               reboot_loop, autoprep_loop, update_loop, dlsched_loop, sysmon_loop,
-              cachepurge_loop, subupgrade_loop):
+              cachepurge_loop, subupgrade_loop, od_reaper_loop):
         t.cancel()
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
@@ -12004,6 +12005,441 @@ async def offline_cache_bundle_file(cache_key: str, filename: str) -> FileRespon
         raise HTTPException(404, "Cached file not found.")
     media = _HLS_MIME.get(p.suffix.lower(), "application/octet-stream")
     return FileResponse(str(p), media_type=media, filename=p.name)
+
+
+# ── On-demand (just-in-time) HLS streaming ──────────────────────────────────
+#
+# The full-prep bundle above encodes an ENTIRE file before playback can start.
+# On-demand is the opposite trade-off: playback begins almost immediately and
+# segments are transcoded just-in-time as the player requests them — the
+# Jellyfin/Plex model. It's the fallback when a file isn't fully prepped yet.
+#
+# How it works:
+#   1. POST /stream-ondemand registers a "session" (one ffmpeg per source+audio)
+#      and returns a master playlist URL. ffmpeg is NOT started yet (lazy).
+#   2. The player loads master.m3u8 → media.m3u8. media.m3u8 is VIRTUAL: it's
+#      computed from the source duration alone (no encoding), listing every
+#      6-second segment as if it already existed.
+#   3. When the player fetches seg_<n>.ts, the segment endpoint ensures an ffmpeg
+#      is running that covers segment n (starting one seeked to n*6 if the
+#      current encode can't reach it — i.e. the user seeked), then HOLDS the HTTP
+#      response open until that .ts lands on disk. The browser shows its native
+#      buffering spinner the whole time — that IS the "loading/waiting" UX.
+#
+# Key technical choices (see docs/STREAMING.md § On-Demand and docs/GOTCHAS.md):
+#   • mpegts segments (NOT fmp4): self-contained, no shared EXT-X-MAP init, so
+#     independently-seeked encodes never produce mismatched init segments.
+#   • video ALWAYS transcodes with forced keyframes every OD_SEGMENT_SECS
+#     (`-force_key_frames expr:gte(t,n_forced*6)`). With `-ss` BEFORE `-i`
+#     (fast keyframe seek, output PTS reset to 0) this guarantees segment N
+#     covers exactly [N*6,(N+1)*6) — which is what makes the virtual playlist's
+#     timing correct and seeking land precisely. Stream-copy can't guarantee
+#     that boundary alignment, so it's not used here (it stays a full-prep win).
+#   • single source-resolution rendition + one (switchable) audio track. The ABR
+#     ladder, seamless quality menu and seamless multi-audio stay full-prep-only.
+
+ONDEMAND_CACHE = Path(__file__).parent / ".ondemand_cache"
+OD_SEGMENT_SECS = HLS_SEGMENT_SECS    # MUST match for segment-index ↔ time math
+OD_SESSION_IDLE_SECS = 90             # reap a session this long without a fetch
+OD_SEG_WAIT_TIMEOUT  = 30             # max seconds to hold a segment request open
+OD_LOOKAHEAD_SEGS    = 12             # running encode may be this far behind a
+                                      # requested seg before we restart vs. wait
+OD_MAX_SESSIONS      = 4              # reap the least-recently-used beyond this
+_OD_SEG_RE = re.compile(r"^seg_(\d+)\.ts$")
+
+# session_key → {src, dir, duration, audio_idx, has_audio, start_seg, proc,
+#                last_access, lock}
+_od_sessions: dict[str, dict] = {}
+
+
+def _od_session_key(src: Path, audio_idx: int) -> str:
+    """Stable 24-hex key per (source bundle key + audio track). A different audio
+    selection is a different encode, hence a different session/dir."""
+    raw = f"{_offline_cache_key(src)}:{audio_idx}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+
+def _od_seg_path(session: dict, n: int) -> Path:
+    return session["dir"] / f"seg_{n}.ts"
+
+
+def _od_max_seg_on_disk(session: dict) -> int:
+    """Highest segment index currently written, or start_seg-1 if none yet."""
+    mx = session["start_seg"] - 1
+    try:
+        for f in session["dir"].iterdir():
+            m = _OD_SEG_RE.match(f.name)
+            if m:
+                mx = max(mx, int(m.group(1)))
+    except (FileNotFoundError, OSError):
+        pass
+    return mx
+
+
+def _od_wipe_segments(d: Path) -> None:
+    """Drop a session dir's segments + internal playlist (sync; tiny tree). Called
+    on every (re)start so a previous seek's stale far-ahead segments can't fool
+    the 'is the encode ahead of n' check."""
+    try:
+        for f in d.iterdir():
+            if _OD_SEG_RE.match(f.name) or f.name == "internal.m3u8":
+                try:
+                    f.unlink()
+                except OSError:
+                    pass
+    except (FileNotFoundError, OSError):
+        pass
+
+
+def _od_build_ffmpeg_args(
+    ffmpeg: str, src: Path, audio_idx: int, has_audio: bool,
+    start_seg: int, use_nvenc: bool,
+) -> list[str]:
+    """JIT ffmpeg command: transcode from segment `start_seg` forward, emitting
+    mpegts HLS segments named seg_<start_seg>.ts, seg_<start_seg+1>.ts, … . All
+    outputs are bare names — the caller runs ffmpeg with cwd=<session dir> (same
+    Windows-safe rule as the bundle path)."""
+    start_sec = start_seg * OD_SEGMENT_SECS
+    args = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
+    if use_nvenc:
+        # Transparent NVDEC tier (no -hwaccel_output_format): NVDEC decodes when
+        # it can and silently falls back to software for codecs it can't — so it
+        # never hard-fails, mirroring the full-prep transparent path.
+        args += ["-hwaccel", "cuda"]
+    # `-ss` BEFORE `-i` is a fast keyframe seek that resets output PTS to 0, so
+    # `-force_key_frames` (which reads output time t) places keyframes at exact
+    # 0/6/12… boundaries → segment N == [N*6,(N+1)*6).
+    args += ["-ss", str(start_sec), "-i", str(src), "-map", "0:v:0"]
+    if has_audio:
+        args += ["-map", f"0:a:{audio_idx}"]
+    if use_nvenc:
+        args += ["-c:v", "h264_nvenc", "-preset", "medium", "-rc", "vbr", "-cq", "23"]
+    else:
+        args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+                 "-threads", str(OFFLINE_FFMPEG_THREADS)]
+    args += [
+        "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
+        "-force_key_frames", f"expr:gte(t,n_forced*{OD_SEGMENT_SECS})",
+    ]
+    if has_audio:
+        args += ["-c:a", "aac", "-b:a", "160k", "-ac", "2"]
+    args += [
+        # Shift the MUXED timestamps to the absolute source position. `-ss` reset
+        # output PTS to 0 (so force_key_frames' `t` is correctly 0-based and
+        # boundaries land at 0/6/12…), but a player seeking across a session
+        # restart needs each segment's timestamps to match its playlist position.
+        # output_ts_offset is applied after encoding, so it shifts PTS to
+        # [start_sec, …] WITHOUT disturbing the keyframe spacing — segments from
+        # any seek-restarted session then share one consistent absolute timeline
+        # (no EXT-X-DISCONTINUITY needed; works on hls.js AND Safari native).
+        "-output_ts_offset", str(start_sec),
+        "-f", "hls",
+        "-hls_time", str(OD_SEGMENT_SECS),
+        "-hls_segment_type", "mpegts",
+        "-hls_flags", "independent_segments",
+        "-start_number", str(start_seg),
+        "-hls_segment_filename", "seg_%d.ts",   # bare name → lands in cwd (session dir)
+        "-hls_list_size", "0",
+        "internal.m3u8",   # ffmpeg's own playlist; ignored (we serve a virtual one)
+    ]
+    return args
+
+
+async def _od_drain_stderr(proc, tail: deque) -> None:
+    """Drain ffmpeg stderr so the OS pipe can't fill (which would wedge the
+    encode), keeping the last lines for failure logging."""
+    if proc.stderr is None:
+        return
+    while True:
+        try:
+            line = await proc.stderr.readline()
+        except Exception:
+            return
+        if not line:
+            return
+        tail.append(line.decode("utf-8", "replace").rstrip())
+
+
+async def _od_start_encode(session: dict, start_seg: int) -> None:
+    """(Re)start the session's ffmpeg seeked to `start_seg`. Caller holds
+    session['lock']. Terminates any prior encode and wipes stale segments first."""
+    start_seg = max(0, start_seg)
+    old = session.get("proc")
+    if old is not None and old.returncode is None:
+        try:
+            old.terminate()
+        except Exception:
+            pass
+    await asyncio.to_thread(_od_wipe_segments, session["dir"])
+    session["dir"].mkdir(parents=True, exist_ok=True)
+    session["start_seg"] = start_seg
+    ffmpeg = analyzer.ffmpeg_bin()
+    if not ffmpeg:
+        raise HTTPException(503, "ffmpeg is not available.")
+    use_nvenc = await _has_nvenc()
+    args = _od_build_ffmpeg_args(
+        ffmpeg, Path(session["src"]), session["audio_idx"],
+        session["has_audio"], start_seg, use_nvenc,
+    )
+    cmd = _ffmpeg_nice_prefix() + args
+    hls_log.info("ondemand %s START seg=%d nvenc=%s cmd: %s",
+                 session["key"], start_seg, use_nvenc,
+                 " ".join(shlex.quote(a) for a in cmd))
+    proc = await asyncio.create_subprocess_exec(
+        *cmd, cwd=str(session["dir"]),
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.PIPE,
+        **_FFMPEG_SUBPROCESS_KW,
+    )
+    session["proc"] = proc
+    session["last_access"] = time.time()
+    tail: deque = deque(maxlen=40)
+
+    async def _watch() -> None:
+        await _od_drain_stderr(proc, tail)
+        await proc.wait()
+        if proc.returncode not in (0, None) and session.get("proc") is proc:
+            # Non-zero AND still the live proc (i.e. not a deliberate restart):
+            # log the tail so a broken source surfaces in logs/hls.log.
+            hls_log.warning("ondemand %s ffmpeg rc=%s\n  %s",
+                            session["key"], proc.returncode,
+                            "\n  ".join(tail) or "(no stderr)")
+
+    asyncio.create_task(_watch())
+
+
+async def _od_teardown(session_key: str) -> None:
+    """Terminate a session's ffmpeg and delete its segment dir (best-effort)."""
+    session = _od_sessions.pop(session_key, None)
+    if not session:
+        return
+    proc = session.get("proc")
+    if proc is not None and proc.returncode is None:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    await asyncio.to_thread(shutil.rmtree, session["dir"], ignore_errors=True)
+    hls_log.info("ondemand %s torn down", session_key)
+
+
+async def _od_reaper() -> None:
+    """Background loop: reap idle sessions and cap the live count. Idle is long
+    (90 s) and active playback refreshes last_access on every segment fetch, so a
+    watching session is never reaped mid-stream."""
+    while True:
+        await asyncio.sleep(30)
+        try:
+            now = time.time()
+            for key, s in list(_od_sessions.items()):
+                if now - s.get("last_access", 0) > OD_SESSION_IDLE_SECS:
+                    await _od_teardown(key)
+            if len(_od_sessions) > OD_MAX_SESSIONS:
+                victims = sorted(_od_sessions.items(),
+                                 key=lambda kv: kv[1].get("last_access", 0))
+                for key, _s in victims[:len(_od_sessions) - OD_MAX_SESSIONS]:
+                    await _od_teardown(key)
+        except Exception:
+            hls_log.exception("ondemand reaper tick failed")
+
+
+class OnDemandReq(BaseModel):
+    file_path: str
+    profile_id: str = ""
+    audio_idx: Optional[int] = None   # source audio stream index; None ⇒ default
+
+
+@app.post("/api/library/{item_id}/stream-ondemand")
+async def stream_ondemand(item_id: str, req: OnDemandReq) -> JSONResponse:
+    """Begin (or re-attach to) a just-in-time HLS session for a file and return a
+    master playlist URL the player can load immediately. Also kicks off the normal
+    full background prep so the NEXT play gets the rich ABR/multi-audio bundle."""
+    if not HLS_AVAILABLE:
+        raise HTTPException(503, HLS_UNAVAILABLE_MSG)
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    target = next((f for f in item.get("files", []) if f["path"] == req.file_path), None)
+    if not target:
+        raise HTTPException(404, "File not found in this item.")
+    src = Path(target["path"])
+    if not src.exists():
+        raise HTTPException(404, "File not on disk.")
+
+    info = await asyncio.to_thread(_ffprobe_full, str(src))
+    duration = float(info.get("duration_sec", 0) or 0)
+    if not info.get("video"):
+        raise HTTPException(422, "No video stream in source.")
+    if duration <= 0:
+        raise HTTPException(422, "Could not determine source duration.")
+
+    src_audios = info.get("audios") or []
+    audios_meta = [
+        {
+            "idx":      a["idx"],
+            "label":    _track_label(a, f"Audio {a['idx']+1}"),
+            "language": a.get("language") or "und",
+            "title":    a.get("title") or "",
+            "default":  (a["idx"] == 0) if all(not x.get("default") for x in src_audios)
+                        else bool(a.get("default")),
+        }
+        for a in src_audios
+    ]
+    saved = (_saved_local_tracks(lib, item, req.profile_id, req.file_path)
+             if req.profile_id else {})
+
+    valid_idxs = {a["idx"] for a in src_audios}
+    if req.audio_idx is not None and req.audio_idx in valid_idxs:
+        aidx = req.audio_idx
+    elif isinstance(saved.get("audio_idx"), int) and saved["audio_idx"] in valid_idxs:
+        aidx = saved["audio_idx"]
+    elif src_audios:
+        aidx = next((a["idx"] for a in src_audios if a.get("default")), src_audios[0]["idx"])
+    else:
+        aidx = -1   # no audio in source
+
+    key = _od_session_key(src, aidx)
+    session = _od_sessions.get(key)
+    if session is None:
+        ONDEMAND_CACHE.mkdir(exist_ok=True)
+        session = {
+            "key":         key,
+            "src":         str(src),
+            "dir":         ONDEMAND_CACHE / key,
+            "duration":    duration,
+            "audio_idx":   aidx,
+            "has_audio":   aidx >= 0,
+            "start_seg":   0,
+            "proc":        None,
+            "last_access": time.time(),
+            "lock":        asyncio.Lock(),
+        }
+        session["dir"].mkdir(parents=True, exist_ok=True)
+        _od_sessions[key] = session
+        hls_log.info("ondemand %s session created src=%s audio=%d dur=%.1fs",
+                     key, src.name, aidx, duration)
+    else:
+        session["last_access"] = time.time()
+
+    # Kick off the full bundle prep in the background (bulk queue — low priority,
+    # honors the global pause) so a SUBSEQUENT play uses the rich multi-audio/ABR
+    # bundle instead of JIT. _maybe_start_prep_job only registers the job + spawns
+    # its own task (no long await), so this returns immediately; best-effort.
+    try:
+        await _maybe_start_prep_job(src, item_id)
+    except Exception as exc:
+        hls_log.warning("ondemand %s: background full-prep enqueue skipped: %s", key, exc)
+
+    sidecar_subs = await asyncio.to_thread(_list_sidecar_subs, src, item_id)
+    return JSONResponse({
+        "ready":             True,
+        "mode":              "ondemand",
+        "master_url":        f"/api/library/ondemand/{key}/master.m3u8",
+        "duration_sec":      duration,
+        "audios":            audios_meta,
+        "subtitles":         [],
+        "subs":              sidecar_subs,
+        "saved_tracks":      saved,
+        "default_audio_idx": aidx,
+    })
+
+
+def _od_media_playlist(duration: float) -> str:
+    """Build the VIRTUAL VOD media playlist from duration alone — no encoding.
+    Lists every OD_SEGMENT_SECS segment as if it already existed; the segment
+    endpoint conjures each .ts on demand when the player fetches it."""
+    n = int(duration // OD_SEGMENT_SECS)
+    if duration - n * OD_SEGMENT_SECS > 0.001:
+        n += 1
+    lines = [
+        "#EXTM3U",
+        "#EXT-X-VERSION:3",
+        f"#EXT-X-TARGETDURATION:{OD_SEGMENT_SECS + 1}",
+        "#EXT-X-MEDIA-SEQUENCE:0",
+        "#EXT-X-PLAYLIST-TYPE:VOD",
+    ]
+    for i in range(n):
+        seglen = duration - i * OD_SEGMENT_SECS if i == n - 1 else OD_SEGMENT_SECS
+        if seglen <= 0:
+            seglen = OD_SEGMENT_SECS
+        lines.append(f"#EXTINF:{seglen:.3f},")
+        lines.append(f"seg_{i}.ts")
+    lines.append("#EXT-X-ENDLIST")
+    return "\n".join(lines) + "\n"
+
+
+@app.get("/api/library/ondemand/{session_key}/{filename}")
+async def ondemand_file(session_key: str, filename: str):
+    """Serve a JIT session's master/media playlist or a segment (transcoding it
+    on demand). See the module comment above for the full flow."""
+    if not _CACHE_KEY_RE.match(session_key):
+        raise HTTPException(400, "Invalid session.")
+    session = _od_sessions.get(session_key)
+    if session is None:
+        # Reaped or never created — the client should re-POST /stream-ondemand.
+        raise HTTPException(410, "Streaming session expired.")
+    session["last_access"] = time.time()
+
+    if filename == "master.m3u8":
+        master = ("#EXTM3U\n"
+                  "#EXT-X-STREAM-INF:BANDWIDTH=4000000\n"
+                  "media.m3u8\n")
+        return Response(content=master, media_type="application/vnd.apple.mpegurl")
+
+    if filename == "media.m3u8":
+        return Response(content=_od_media_playlist(session["duration"]),
+                        media_type="application/vnd.apple.mpegurl")
+
+    m = _OD_SEG_RE.match(filename)
+    if not m:
+        raise HTTPException(400, "Invalid path.")
+    n = int(m.group(1))
+    seg_path = _od_seg_path(session, n)
+
+    # Already produced → serve straight away.
+    if seg_path.exists():
+        return FileResponse(str(seg_path), media_type="video/mp2t")
+
+    # Decide (under the session lock) whether the running encode will reach n soon
+    # or whether we must (re)start seeked to n. The lock is held only for this
+    # decision + any restart — NOT for the wait below — so concurrent segment
+    # requests during a seek don't each spawn an ffmpeg.
+    async with session["lock"]:
+        if not seg_path.exists():   # re-check inside the lock
+            proc = session.get("proc")
+            alive = proc is not None and proc.returncode is None
+            covered = alive and session["start_seg"] <= n
+            near = (n - _od_max_seg_on_disk(session)) <= OD_LOOKAHEAD_SEGS
+            if not (covered and near):
+                # n is before the current encode, or too far ahead of it (a seek)
+                # — start a fresh encode at n.
+                await _od_start_encode(session, n)
+
+    # Hold the response open until the segment lands — the browser's buffering
+    # spinner is the user-visible "generating that part" state.
+    deadline = time.time() + OD_SEG_WAIT_TIMEOUT
+    while time.time() < deadline:
+        if seg_path.exists():
+            session["last_access"] = time.time()
+            return FileResponse(str(seg_path), media_type="video/mp2t")
+        proc = session.get("proc")
+        # Encode ended without producing n (crash / unexpected EOF) — stop waiting.
+        if proc is not None and proc.returncode not in (None, 0) \
+                and _od_max_seg_on_disk(session) < n:
+            break
+        await asyncio.sleep(0.15)
+    raise HTTPException(504, "Segment generation timed out.")
+
+
+@app.post("/api/library/ondemand/{session_key}/close")
+async def ondemand_close(session_key: str) -> JSONResponse:
+    """Best-effort teardown when the player stops (sendBeacon on unload). The
+    reaper is the backstop if this never arrives."""
+    if not _CACHE_KEY_RE.match(session_key):
+        raise HTTPException(400, "Invalid session.")
+    await _od_teardown(session_key)
+    return JSONResponse({"ok": True})
 
 
 # ── Clip: save & share the last N seconds of whatever is playing ────────────

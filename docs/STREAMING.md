@@ -34,6 +34,9 @@ Read this when changing anything related to:
   `/resume`, `_pause_prep` / `_resume_prep`), or **automatic auto-prep**
   (`auto_prep_loop`, `/api/admin/overnight-prep`, `/api/admin/idle-prep`) — see the
   [Pause / resume + auto-prep](#pause--resume--auto-prep) section
+- **On-demand (JIT) streaming** — `stream-ondemand`, the `_od_*` session manager,
+  the `/api/library/ondemand/<key>/…` virtual-playlist + segment endpoints, and the
+  client `lp.mode === "ondemand"` path. See [§ On-Demand](#on-demand-just-in-time-streaming)
 - The play chooser (`#playChooserModal`, `playLibraryWithChooser`, `pcChoose`)
 - The **Handoff** (both directions): TV→device (`handoffToDevice`, `#handoffBtn`,
   `#fcHandoffBtn`) and device→TV (`lpHandoffToVlc`, the local player's **To TV** button)
@@ -561,6 +564,92 @@ onto the TV:
 The **To TV** button lives in the local player's fullscreen header (next to
 Stop); it's part of `.lp-chrome`, so it's hidden in tiny mode (maximize first).
 Guarded by `withInflight("handoff_vlc")`.
+
+---
+
+## On-Demand (just-in-time) streaming
+
+The full-prep bundle above encodes an **entire** file before playback can start.
+On-demand is the opposite trade-off — playback begins almost immediately and
+segments are transcoded **just-in-time** as the player requests them (the
+Jellyfin/Plex model). It's the path taken when a file **isn't fully prepped yet**:
+`_lpLoadIndex` calls `/offline-prepare`, and if the bundle isn't `ready`, instead
+of waiting out the full encode it switches to on-demand. An existing bundle always
+wins (on-demand is a supplement, never a replacement).
+
+### Server model (`main.py`, the "On-demand (just-in-time)" block)
+
+- **Sessions.** One ffmpeg per `(source bundle key + audio track)` lives in
+  `_od_sessions`, keyed by `_od_session_key(src, audio_idx)` (24-hex,
+  `_CACHE_KEY_RE`-shaped). Each session owns a dir `.ondemand_cache/<key>/`, the
+  source duration, the chosen audio index, the current `start_seg`, the running
+  `proc`, a `last_access` stamp, and an `asyncio.Lock`. ffmpeg is **not** started at
+  session creation — it's lazy, launched on the first segment fetch.
+- **Virtual playlist.** `media.m3u8` is generated from the duration alone
+  (`_od_media_playlist`) — `ceil(duration/OD_SEGMENT_SECS)` × `#EXTINF` entries
+  naming `seg_<i>.ts`, ending with `#EXT-X-ENDLIST`. No encoding happens to produce
+  it; the player believes the whole file already exists. `master.m3u8` is a one-line
+  wrapper pointing at it.
+- **JIT segment serve.** `GET …/seg_<n>.ts`: if on disk, serve. Else, under the
+  session lock, decide — if the running encode covers `n` and is within
+  `OD_LOOKAHEAD_SEGS` of it, just wait; otherwise (n is before `start_seg`, or far
+  ahead of it = a seek) `_od_start_encode(session, n)` restarts ffmpeg seeked to `n`.
+  Then the request is **held open** (async-polling the dir every 150 ms, capped at
+  `OD_SEG_WAIT_TIMEOUT`) until the `.ts` lands, and served; `504` on timeout. The
+  pending request **is** the browser's buffering spinner — that's the "loading while
+  it generates that part" UX.
+- **ffmpeg shape** (`_od_build_ffmpeg_args`): `-ss <start_seg*6>` **before** `-i`
+  (fast keyframe seek, output PTS reset to 0), `-map 0:v:0 -map 0:a:<idx>`, video
+  **always transcodes** (NVENC transparent tier when present, else `libx264
+  -preset veryfast`) with `-force_key_frames expr:gte(t,n_forced*OD_SEGMENT_SECS)`,
+  audio → AAC stereo, `-hls_segment_type mpegts -start_number <start_seg>
+  -hls_segment_filename seg_%d.ts -hls_list_size 0`. All outputs are **bare names**
+  run with `cwd=<session dir>` (same Windows-safe rule as the bundle path). Reuses
+  `_ffmpeg_nice_prefix()` / `_FFMPEG_SUBPROCESS_KW` (below-normal priority) and
+  `_has_nvenc()`.
+- **Why mpegts + forced keyframes** (see [GOTCHAS.md](GOTCHAS.md)): TS segments are
+  self-contained (no shared `EXT-X-MAP` init), so independently-seeked encodes never
+  produce mismatched init segments the way fmp4 would. Forcing keyframes every
+  `OD_SEGMENT_SECS` (with the PTS reset from input-seek) guarantees segment *N*
+  covers exactly `[N*6,(N+1)*6)` — which is what makes the virtual playlist's timing
+  correct and seeking land precisely. Stream-copy can't guarantee that boundary
+  alignment, so it stays a full-prep-only win.
+- **Lifecycle.** `_od_reaper` (a `lifespan` task) terminates ffmpeg + `rmtree`s the
+  dir for sessions idle past `OD_SESSION_IDLE_SECS` (90 s) and caps the live count at
+  `OD_MAX_SESSIONS`. Active playback refreshes `last_access` on every segment fetch,
+  so a watching session is never reaped mid-stream. `POST …/close` (a sendBeacon on
+  stop/unload) tears a session down promptly; the reaper is the backstop.
+- **Background full prep.** `stream-ondemand` also fires `_maybe_start_prep_job`
+  (**bulk** queue — low priority, honors the global pause / idle-kill) so a
+  *subsequent* play uses the rich ABR/multi-audio bundle. JIT only bridges the gap
+  for the current session. (Both can run at once — the below-normal priority on both
+  keeps the box usable; see [GOTCHAS.md](GOTCHAS.md).)
+
+### Client (`static/index.html`)
+
+- `lp.mode` is `"bundle"` or `"ondemand"`; `lp.odKey` holds the session key for the
+  close beacon. `_lpLoadIndex`'s not-ready branch POSTs `stream-ondemand`, sets
+  `lp.mode="ondemand"`, and hands `master_url` straight to hls.js / Safari — the old
+  "Building stream… 42%" full-encode wait is gone.
+- **Loading/seek UX.** A `waiting` listener shows the `#lpPreparing` overlay
+  ("Loading…") whenever playback stalls for data (initial start, or a seek into a
+  not-yet-generated region — the server is holding that segment request open while it
+  transcodes); `playing` hides it. A seek **back** into an already-generated region
+  fires no `waiting`, so it's instant. hls.js's `fragLoadingTimeOut` is raised to
+  45 s (> the server's `OD_SEG_WAIT_TIMEOUT`) so a still-progressing cold encode
+  isn't aborted.
+- **Tracks.** Single quality (the hls.js quality row auto-hides — one variant).
+  Audio: `lpSetAudio` in OD mode persists the pick (`_lpSaveLocalTracks`) and
+  re-enters `_lpLoadIndex` at the current time; `stream-ondemand` picks up the saved
+  `audio_idx` (or the background full prep may have finished, promoting playback to
+  bundle mode). Subtitles use the **existing** sidecar `<track>` machinery
+  (`prep.subs` from `_list_sidecar_subs`) unchanged. The **Clip** row is hidden in OD
+  mode — clipping needs the bundle (`409` otherwise), so it returns once the file is
+  fully prepped.
+
+> **Not on macOS.** Like all HLS prep, on-demand is disabled when `HLS_AVAILABLE` is
+> false (the TCC block). The endpoints `503` and the dashboard never reaches the OD
+> path (on-device controls are hidden, play routes to VLC).
 
 ---
 

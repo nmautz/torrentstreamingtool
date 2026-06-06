@@ -2042,6 +2042,11 @@ let lp = {
   // True after we've loaded the metadata once (so seek-to-resume only fires once)
   resumeApplied: false,
   resumeSec: 0,
+  // Streaming mode: "bundle" (a fully-prepped .offline_cache/<sha>/ HLS bundle)
+  // or "ondemand" (just-in-time — segments transcoded as the player requests
+  // them, used when the file isn't fully prepped yet). See STREAMING.md.
+  mode: "bundle",
+  odKey: null,            // on-demand session key (for the close beacon), null in bundle mode
   // HLS bundle state — set by _lpLoadIndex from /offline-prepare's meta.json
   hls: null,              // active hls.js instance, null on Safari native
   audios: [],             // [{idx,label,language,default}] from meta.json
@@ -6594,38 +6599,50 @@ async function _lpLoadIndex(seekTo) {
   }
 
   let masterUrl = prep.master_url;
-  if (!prep.ready && prep.job_id) {
+  lp.mode = "bundle";
+  lp.odKey = null;
+  if (!prep.ready) {
+    // The file isn't fully prepped. Instead of waiting for the WHOLE file to
+    // encode (the old "Building stream… 42%" wait), start playing immediately
+    // via on-demand (just-in-time) streaming: a virtual playlist whose segments
+    // are transcoded as the player fetches them. The server ALSO kicks off the
+    // full bundle prep in the background so the next play gets the rich bundle.
+    // See STREAMING.md § On-Demand.
+    _lpShowPreparing("Starting stream…");
     try {
-      while (true) {
-        // Abort if the user moved on (lpStop or another _lpLoadIndex).
-        if (lp.filePath !== filePath) return;
-        await new Promise(res => setTimeout(res, 1500));
-        const sr = await fetch(`/api/library/offline-job/${prep.job_id}`);
-        if (!sr.ok) throw new Error("Lost track of prep job.");
-        const s = await sr.json();
-        const pct = Math.round((s.progress || 0) * 100);
-        _lpShowPreparing(`Building stream… ${pct}%`);
-        if (s.status === "done") {
-          masterUrl    = s.master_url;
-          prep.audios  = s.audios || [];
-          prep.subtitles = s.subtitles || [];
-          prep.skipped_image_subs = s.skipped_image_subs || [];
-          break;
-        }
-        if (s.status === "error") throw new Error(s.error || "Prep failed.");
+      const r2 = await fetch(`/api/library/${lp.itemId}/stream-ondemand`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file_path: filePath, profile_id: profile.id || "" }),
+      });
+      if (!r2.ok) {
+        const e = await r2.json().catch(() => ({ detail: "Could not start stream." }));
+        throw new Error(e.detail || "Could not start stream.");
       }
+      const od = await r2.json();
+      if (lp.filePath !== filePath) return;   // raced with a stop/advance
+      masterUrl       = od.master_url;
+      lp.mode         = "ondemand";
+      lp.odKey        = _odKeyFromUrl(od.master_url);
+      prep.audios     = od.audios || [];
+      prep.subtitles  = [];                   // on-demand has no in-bundle subs
+      prep.subs       = od.subs || prep.subs || [];
+      prep.saved_tracks = od.saved_tracks || prep.saved_tracks || {};
     } catch (err) {
       _lpHidePreparing();
-      showAlert(err.message || "Streaming prep failed.", "error");
+      showAlert(err.message || "Could not start stream.", "error");
       lpStop(); return;
     }
   }
   if (lp.filePath !== filePath) return;  // raced with a stop/advance
   _lpHidePreparing();
 
-  // Mark the cache hit in prepFileState so per-row buttons reflect "Stream Ready".
-  prepFileState.set(offKey(lp.itemId, filePath), "ready");
-  if (epItemId === lp.itemId) { try { renderEpList(); } catch (_) {} }
+  // Mark the cache hit in prepFileState so per-row buttons reflect "Stream Ready"
+  // — only in bundle mode. On-demand playback doesn't mean the full bundle exists
+  // yet (it's prepping in the background), so leave the per-row state to /prep-status.
+  if (lp.mode === "bundle") {
+    prepFileState.set(offKey(lp.itemId, filePath), "ready");
+    if (epItemId === lp.itemId) { try { renderEpList(); } catch (_) {} }
+  }
 
   // Refresh the header Prev/Next buttons for this position, and warm the next
   // episode so auto-advance / a Next hold resumes instantly.
@@ -6683,6 +6700,12 @@ async function _lpLoadIndex(seekTo) {
       // Cap forward buffer; without this hls.js can preload 60+ MB of segments
       // on long files which hurts mobile data and stalls switching.
       maxBufferLength: 60,
+      // On-demand segments are transcoded just-in-time and the server holds the
+      // request open until the .ts is ready (up to ~30 s for a deep cold seek).
+      // hls.js's 20 s default fragment timeout would abort a still-progressing
+      // encode, so raise it above the server's wait window. Harmless in bundle
+      // mode (those segments load instantly). See STREAMING.md § On-Demand.
+      fragLoadingTimeOut: 45000,
     });
     lp.hls = hls;
     hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
@@ -6833,6 +6856,11 @@ function _lpRenderTrackRows() {
   // The track row used to hide when there were no multi-track selectors; it now
   // always carries the Clip row, so keep it shown whenever the player is up.
   document.getElementById("lpTrackRow").classList.remove("hidden");
+  // Clipping re-encodes from the prepped bundle (the server 409s without one),
+  // so it's unavailable while streaming on-demand — hide the row until the file
+  // is fully prepped (a subsequent play then runs in bundle mode).
+  const clipRow = document.getElementById("lpClipRow");
+  if (clipRow) clipRow.classList.toggle("hidden", lp.mode === "ondemand");
 }
 
 // On-device AI subtitle generation for the current file. Non-blocking: the user
@@ -7054,8 +7082,25 @@ function _lpApplySubIdx(idx) {
   });
 }
 
+// Extract the on-demand session key from a master_url like
+// /api/library/ondemand/<key>/master.m3u8.
+function _odKeyFromUrl(url) {
+  const m = /\/ondemand\/([a-f0-9]{24})\//.exec(url || "");
+  return m ? m[1] : null;
+}
+
 function lpSetAudio(idx) {
   lp.pendingAudioIdx = Number(idx);
+  if (lp.mode === "ondemand") {
+    // On-demand muxes a single audio track per session, so switching audio means
+    // re-encoding from a new session. Persist the pick, then re-enter _lpLoadIndex
+    // at the current time — stream-ondemand picks up the saved audio_idx (or the
+    // background full prep may have finished, promoting us to the bundle path).
+    _lpSaveLocalTracks();
+    const v = document.getElementById("lpVideo");
+    _lpLoadIndex(v.currentTime || 0);
+    return;
+  }
   _lpApplyAudioIdx(idx);
   _lpSaveLocalTracks();
 }
@@ -7144,6 +7189,12 @@ async function lpStop() {
   if (lp.itemId && lp.filePath && d > 0) {
     saveProgress(lp.itemId, lp.filePath, t, d);
   }
+  // Tear down any on-demand session promptly (the server-side reaper is the
+  // backstop if this beacon never lands). sendBeacon survives an unload.
+  if (lp.mode === "ondemand" && lp.odKey) {
+    try { navigator.sendBeacon(`/api/library/ondemand/${lp.odKey}/close`); } catch (_) {}
+  }
+  lp.mode = "bundle"; lp.odKey = null;
   await lpUnloadCurrent();
   _lpStopSubUpgradePoll();
   lp.subAutoApplied = false;
@@ -7351,6 +7402,15 @@ function _lpAttachVideoEvents() {
   v.addEventListener("pause",  () => _lpFlushProgress(false));
   v.addEventListener("seeked", () => _lpFlushProgress(false));
   v.addEventListener("ended", () => { _lpAdvanceOrEnd(); });
+  // On-demand: when playback stalls waiting for data (initial start, or a seek
+  // into a not-yet-generated region) the segment request is being held open
+  // server-side while ffmpeg transcodes that part. Surface a light "Loading…"
+  // hint; it clears the moment the segment arrives and playback resumes. A seek
+  // into an already-generated region never fires `waiting`, so it stays instant.
+  v.addEventListener("waiting", () => {
+    if (lp.mode === "ondemand" && lp.itemId) _lpShowPreparing("Loading…");
+  });
+  v.addEventListener("playing", () => { _lpHidePreparing(); });
   v.addEventListener("error", () => {
     showAlert("Stream playback error — check the host's network and try again.", "error");
   });
@@ -7360,7 +7420,12 @@ function _lpAttachVideoEvents() {
   });
   // Tab/window close, browser back, BFCache eviction → use sendBeacon since
   // any in-flight fetch is liable to be cancelled mid-request.
-  window.addEventListener("pagehide", () => _lpFlushProgress(true));
+  window.addEventListener("pagehide", () => {
+    _lpFlushProgress(true);
+    if (lp.mode === "ondemand" && lp.odKey) {
+      try { navigator.sendBeacon(`/api/library/ondemand/${lp.odKey}/close`); } catch (_) {}
+    }
+  });
 }
 
 // --- Service-worker eviction stub -------------------------------------------
@@ -7912,6 +7977,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">4.27.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.0.0</div>
 </body>
 </html>

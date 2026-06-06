@@ -13,6 +13,7 @@ build/
 # Downloaded media (configured via QBIT_DOWNLOAD_PATH)
 Downloads/
 .offline_cache/
+.ondemand_cache/
 .background/
 
 # Ephemeral share clips (auto-purged after 2h; see /api/library/{id}/clip)
