@@ -152,7 +152,9 @@ The native `EventSource` only auto-reconnects while it's in the `CONNECTING` sta
 
 ### Seek bar
 
-Handles click + touch (`handleSeekBarClick`) and pre-click hover tooltip (`handleSeekBarHover`/`Leave`). Calls `POST /api/vlc/seek/to?position_pct=N` — VLC's `seek` uses `val=N%` for absolute and `val=±Ns` for relative. **Don't mix the two**.
+Both the footer bar (`#seekBarWrapper`) and the fullscreen-controls bar share the `.seekBar` class and unified **Pointer Event** handlers (`handleSeekPointerDown`/`Up`/`Leave`) plus the hover tooltip (`handleSeekBarHover`/`Leave`). Use pointer events (not `onclick`/`ontouch*`): on `touchend` `e.touches` is an empty-but-truthy `TouchList`, so reading `e.touches[0].clientX` throws and used to leave the tooltip stuck over the bar on mobile — pointer events always carry `clientX`. A seek calls `POST /api/vlc/seek/to?position_pct=N` — VLC's `seek` uses `val=N%` for absolute and `val=±Ns` for relative. **Don't mix the two**.
+
+**Accidental-click lock.** The bar defaults to **LOCKED** (greyed track, "HOLD TO UNLOCK" padlock badge); taps are ignored and the tooltip is suppressed. Unlocking is a two-phase 1s gesture, both phases still locked: phase 1 `holding` (0.5s press-and-hold; a too-short release aborts via `_cancelArming`), phase 2 `settling` (0.5s grace, badge "UNLOCKING…", so the release that ended the hold can't seek), then `unlockSeekBar`. The `.arming` class drives a single `seekUnlockFill` fill across the whole 1s. State: `_seekUnlocked` / `_seekPhase` (0/1/2); `_seekHoldTimer`→`_seekSettleTimer`→unlock; `_armSeekRelock` re-locks 5s after the last interaction, and `updateState` calls `lockSeekBar()` whenever playback isn't active.
 
 ### Episode page (`#episodePage`, full-screen)
 

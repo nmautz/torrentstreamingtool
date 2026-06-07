@@ -113,6 +113,38 @@
       -webkit-tap-highlight-color: transparent;
     }
     .fc-tile { flex-direction:column; align-items:center; justify-content:center; }
+    /* ── Scrub-bar accidental-click guard ─────────────────────────────────────
+       The seek bar defaults to LOCKED: the track is greyed out and a centred
+       "HOLD TO UNLOCK" badge sits over it. A 0.5s press-and-hold unlocks it
+       (handled in JS); it re-locks 5s after the last interaction. While locked,
+       taps/clicks never seek and the scrub tooltip is suppressed. */
+    .seekBar:not(.unlocked) .seekTrack { opacity:.4; filter:grayscale(1); }
+    .seekBar.unlocked .seekLockBadge { display:none; }
+    .seekLockBadge {
+      position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
+      display:flex; align-items:center; gap:5px; z-index:1; pointer-events:none;
+      font-size:9px; font-weight:900; letter-spacing:.14em; text-transform:uppercase;
+      color:#9ca3af; background:#0b1220; border:1px solid #374151;
+      padding:3px 8px; white-space:nowrap;
+    }
+    .seekLockIcon { width:11px; height:11px; flex-shrink:0; }
+    .seekBar.holding .seekLockBadge,
+    .seekBar.settling .seekLockBadge { color:#818cf8; border-color:#6366f1; }
+    /* Two-phase unlock label: "HOLD TO UNLOCK" during the 0.5s hold, then
+       "UNLOCKING…" during the following 0.5s settle (both still LOCKED). */
+    .seekLabelUnlock { display:none; }
+    .seekBar.settling .seekLabelHold   { display:none; }
+    .seekBar.settling .seekLabelUnlock { display:inline; }
+    /* Unlocking progress: a single fill sweeps left→right over the FULL 1s
+       gesture (0.5s hold + 0.5s settle) so progress is obvious across both
+       phases; a too-short tap aborts and the fill snaps back to 0. */
+    .seekUnlockProgress {
+      position:absolute; left:0; top:50%; transform:translateY(-50%);
+      height:100%; width:0; background:rgba(99,102,241,.22);
+      pointer-events:none; z-index:0;
+    }
+    .seekBar.arming .seekUnlockProgress { animation:seekUnlockFill 1s linear forwards; }
+    @keyframes seekUnlockFill { from { width:0; } to { width:100%; } }
     /* ── Server notices over the fullscreen controls ──────────────────────────
        The normal top banners/toast are opaque and would either be hidden behind
        the z-50 fullscreen overlay or, if raised above it, cover the Close/Night
@@ -1297,15 +1329,20 @@
 <!-- ── Player Footer ──────────────────────────────────────────────────────── -->
 <footer class="fixed bottom-0 left-0 right-0 z-40 bg-gray-950 border-t-2 border-gray-800 safe-bottom">
   <!-- Seek bar — flat Metro track -->
-  <div id="seekBarWrapper" class="relative w-full cursor-pointer"
-       onclick="handleSeekBarClick(event, this)"
-       onmousemove="handleSeekBarHover(event, this)"
-       onmouseleave="handleSeekBarLeave()"
-       ontouchmove="handleSeekBarHover(event, this)"
-       ontouchend="handleSeekBarClick(event, this);handleSeekBarLeave()"
+  <div id="seekBarWrapper" class="seekBar relative w-full cursor-pointer"
+       onpointerdown="handleSeekPointerDown(event, this)"
+       onpointerup="handleSeekPointerUp(event, this)"
+       onpointermove="handleSeekBarHover(event, this)"
+       onpointerleave="handleSeekPointerLeave(event, this)"
+       onpointercancel="handleSeekPointerLeave(event, this)"
        style="touch-action:none; height:36px;">
-    <div class="absolute inset-x-0 top-1/2 -translate-y-1/2 bg-gray-800" style="height:3px">
+    <div class="seekTrack absolute inset-x-0 top-1/2 -translate-y-1/2 bg-gray-800" style="height:3px">
       <div id="progressBar" class="h-full bg-indigo-500 transition-all duration-700 pointer-events-none" style="width:0%"></div>
+    </div>
+    <div class="seekUnlockProgress"></div>
+    <div class="seekLockBadge">
+      <svg class="seekLockIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="11" width="14" height="9"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+      <span class="seekLabelHold">HOLD TO UNLOCK</span><span class="seekLabelUnlock">UNLOCKING…</span>
     </div>
     <div id="seekTooltip"
          class="hidden absolute -top-7 bg-gray-800 border border-gray-700 text-[11px] font-mono
@@ -1509,18 +1546,23 @@
   </div>
 
   <!-- Seek bar — full width, generously tall touch target -->
-  <div class="flex-shrink-0 border-b border-gray-800 relative cursor-pointer"
-       onclick="handleSeekBarClick(event, this)"
-       onmousemove="handleSeekBarHover(event, this)"
-       onmouseleave="handleSeekBarLeave()"
-       ontouchmove="handleSeekBarHover(event, this)"
-       ontouchend="handleSeekBarClick(event, this);handleSeekBarLeave()"
+  <div class="seekBar flex-shrink-0 border-b border-gray-800 relative cursor-pointer"
+       onpointerdown="handleSeekPointerDown(event, this)"
+       onpointerup="handleSeekPointerUp(event, this)"
+       onpointermove="handleSeekBarHover(event, this)"
+       onpointerleave="handleSeekPointerLeave(event, this)"
+       onpointercancel="handleSeekPointerLeave(event, this)"
        style="touch-action:none; height:44px;">
-    <div class="absolute inset-x-4 top-1/2 -translate-y-1/2 bg-gray-800"
+    <div class="seekTrack absolute inset-x-4 top-1/2 -translate-y-1/2 bg-gray-800"
          style="height:5px">
       <div id="fcProgressBar"
            class="h-full bg-indigo-500 transition-all duration-700"
            style="width:0%"></div>
+    </div>
+    <div class="seekUnlockProgress"></div>
+    <div class="seekLockBadge">
+      <svg class="seekLockIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="11" width="14" height="9"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+      <span class="seekLabelHold">HOLD TO UNLOCK</span><span class="seekLabelUnlock">UNLOCKING…</span>
     </div>
     <div id="fcSeekTooltip"
          class="hidden absolute top-1 bg-gray-800 border border-gray-700 text-[12px] font-mono
@@ -2627,6 +2669,9 @@ function renderPlayer(s){
   // Enable seek bar click only while playing
   const sw=document.getElementById("seekBarWrapper");
   sw.style.cursor=isPlaying?"pointer":"default";
+  // Re-lock the scrub bar whenever playback isn't active so each new stream
+  // starts protected against accidental seeks.
+  if(!isPlaying && _seekUnlocked) lockSeekBar();
 
   // Smart Skip — render the floating skip offer based on state.skip_offer
   renderSkipOffer(s.skip_offer || null);
@@ -2638,12 +2683,93 @@ function renderPlayer(s){
   else { tc.classList.add("hidden"); stopTrackPoll(); }
 }
 
-async function handleSeekBarClick(e, el){
+// ── Scrub-bar lock (guards against accidental seeks) ─────────────────────
+// The bar defaults to LOCKED (greyed out, "HOLD TO UNLOCK" badge); it re-locks
+// 5s after the last interaction. Both the footer bar and the fullscreen bar
+// share these handlers and the .seekBar class. We use Pointer Events so a
+// single code path covers mouse + touch and every event carries clientX
+// (touchend's empty TouchList used to throw and leave the tooltip stuck on
+// mobile). Unlock is a two-phase, 1s gesture, both phases still LOCKED so
+// neither the hold nor the release that ends it can be misread as a seek:
+//   phase 1 (0.5s "holding")  — press-and-hold; a too-short tap aborts.
+//   phase 2 (0.5s "settling") — grace period after the hold completes.
+// A single fill (.arming) sweeps the full 1s; only then is the bar seekable.
+let _seekUnlocked    = false;  // truly unlocked → taps seek
+let _seekPhase       = 0;      // 0 none, 1 holding (locked), 2 settling (locked)
+let _seekRelockTimer = null;   // 5s re-lock after last interaction
+let _seekHoldTimer   = null;   // phase 1 → phase 2
+let _seekSettleTimer = null;   // phase 2 → unlocked
+let _seekTipTimer    = null;   // safety auto-hide for the tooltip
+
+function _seekClassAll(cls, on){
+  document.querySelectorAll(".seekBar").forEach(el=>el.classList.toggle(cls, on));
+}
+function _applySeekLock(){
+  _seekClassAll("unlocked", _seekUnlocked);
+  if(!_seekUnlocked) handleSeekBarLeave();
+}
+function _armSeekRelock(){
+  clearTimeout(_seekRelockTimer);
+  _seekRelockTimer=setTimeout(lockSeekBar, 5000);
+}
+function _cancelArming(){
+  clearTimeout(_seekHoldTimer);
+  clearTimeout(_seekSettleTimer);
+  _seekPhase=0;
+  _seekClassAll("arming", false);
+  _seekClassAll("holding", false);
+  _seekClassAll("settling", false);
+}
+function unlockSeekBar(){
+  _cancelArming();
+  _seekUnlocked=true;
+  _applySeekLock();
+  _armSeekRelock();
+}
+function lockSeekBar(){
+  _seekUnlocked=false;
+  clearTimeout(_seekRelockTimer);
+  _cancelArming();
+  _applySeekLock();
+}
+
+function handleSeekPointerDown(e, el){
   if(app.stream_status!=="playing") return;
+  if(_seekUnlocked || _seekPhase) return;   // already unlocked or gesture in flight
+  // Phase 1: 0.5s hold (still locked). The .arming fill runs the full 1s.
+  _seekPhase=1;
+  _seekClassAll("arming", true);
+  _seekClassAll("holding", true);
+  clearTimeout(_seekHoldTimer);
+  _seekHoldTimer=setTimeout(()=>{
+    // Phase 2: 0.5s settle (still locked) so the release that ended the hold
+    // can't register as a seek; then truly unlock.
+    _seekPhase=2;
+    _seekClassAll("holding", false);
+    _seekClassAll("settling", true);
+    clearTimeout(_seekSettleTimer);
+    _seekSettleTimer=setTimeout(unlockSeekBar, 500);
+  }, 500);
+}
+
+function handleSeekPointerUp(e, el){
+  if(app.stream_status!=="playing"){ handleSeekBarLeave(); return; }
+  if(_seekPhase===1){ _cancelArming(); handleSeekBarLeave(); return; } // released too early → abort
+  if(_seekPhase===2){ handleSeekBarLeave(); return; }                  // committed; settling, never seek
+  if(!_seekUnlocked){ handleSeekBarLeave(); return; }
+  _doSeek(e, el);
+  _armSeekRelock();       // every real seek pushes the re-lock back 5s
+  handleSeekBarLeave();
+}
+
+function handleSeekPointerLeave(e, el){
+  if(_seekPhase===1) _cancelArming();   // wandered off mid-hold → abort (phase 2 is committed)
+  handleSeekBarLeave();
+}
+
+async function _doSeek(e, el){
   const rect=el.getBoundingClientRect();
-  const cx=e.touches?e.touches[0].clientX:e.clientX;
-  const x=cx-rect.left;
-  const pct=Math.max(0,Math.min(100,(x/rect.width)*100));
+  const pct=Math.max(0,Math.min(100,((e.clientX-rect.left)/rect.width)*100));
   document.getElementById("progressBar").style.width=pct+"%";
   const fcpb=document.getElementById("fcProgressBar");
   if(fcpb) fcpb.style.width=pct+"%";
@@ -2655,8 +2781,7 @@ async function handleSeekBarClick(e, el){
 
 function _seekTooltipPct(e, el){
   const rect=el.getBoundingClientRect();
-  const cx=e.touches?e.touches[0].clientX:e.clientX;
-  return Math.max(0,Math.min(100,(cx-rect.left)/rect.width*100));
+  return Math.max(0,Math.min(100,(e.clientX-rect.left)/rect.width*100));
 }
 
 function _showSeekTooltip(tooltipEl, pct, el){
@@ -2669,10 +2794,14 @@ function _showSeekTooltip(tooltipEl, pct, el){
   const left=Math.max(half, Math.min(barW-half, pct/100*barW));
   tooltipEl.style.left=left+"px";
   tooltipEl.classList.remove("hidden");
+  // Safety net: a stuck tooltip can't linger over the bar (mobile).
+  clearTimeout(_seekTipTimer);
+  _seekTipTimer=setTimeout(handleSeekBarLeave, 2000);
 }
 
 function handleSeekBarHover(e, el){
   if(app.stream_status!=="playing") return;
+  if(!_seekUnlocked) return;   // no scrub preview while the bar is locked
   const pct=_seekTooltipPct(e,el);
   // Show on both the footer bar and fc bar — determine which one we're hovering
   const tip=el.closest("#fullscreenControls")
@@ -2682,6 +2811,7 @@ function handleSeekBarHover(e, el){
 }
 
 function handleSeekBarLeave(){
+  clearTimeout(_seekTipTimer);
   document.getElementById("seekTooltip")?.classList.add("hidden");
   document.getElementById("fcSeekTooltip")?.classList.add("hidden");
 }
@@ -8231,6 +8361,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.12.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.13.0</div>
 </body>
 </html>
