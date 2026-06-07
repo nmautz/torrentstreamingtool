@@ -7790,12 +7790,60 @@ document.addEventListener("visibilitychange", () => {
   }
 });
 
+// ── SSE connection + reconnect supervision ──────────────────────────────────
+// The native EventSource auto-reconnects on *transient* errors, but two common
+// mobile failure modes defeat it:
+//   1. After the device locks / the app is backgrounded long enough, the browser
+//      fully CLOSES the stream and will NOT auto-reconnect on its own.
+//   2. The TCP connection silently dies while suspended; on return readyState
+//      still reads OPEN ("half-open"), so no `error` ever fires and the UI sits
+//      frozen showing stale data.
+// We handle (1) by manually reconnecting (with backoff) whenever the stream is
+// CLOSED, and (2) with a liveness watchdog: the server emits a `ping` event at
+// least every 20 s, so if we've heard nothing for a while we tear the socket
+// down and rebuild it. We also proactively re-check the connection the instant
+// the page returns to the foreground (visibilitychange / pageshow / focus) and
+// when the network comes back (online) — that's the high-value path for mobile.
 let _sseDisconnectTimer = null;
+let _sse = null;                  // current EventSource instance
+let _sseReconnectTimer = null;    // pending backoff reconnect
+let _sseBackoff = 1000;           // current reconnect delay (ms), reset on open
+const _SSE_BACKOFF_MAX = 15000;
+const _SSE_STALE_MS = 50000;      // no ping/event for this long ⇒ assume dead
+function _noteSSEMsg(){ app._lastSSEMsg = Date.now(); }
+function _scheduleSSEReconnect(){
+  if(_sseReconnectTimer) return;            // already queued
+  const delay = _sseBackoff;
+  _sseBackoff = Math.min(_sseBackoff * 2, _SSE_BACKOFF_MAX);
+  _sseReconnectTimer = setTimeout(()=>{ _sseReconnectTimer = null; connectSSE(); }, delay);
+}
+// Force an immediate reconnect when the connection is closed, stale, or we've
+// been flagged offline — used by the foreground/online re-check handlers.
+function _ensureSSEConnected(){
+  if(!app._sseStarted) return;              // not logged in yet
+  if(!navigator.onLine) return;             // nothing to do until the radio is back
+  const stale = (Date.now() - (app._lastSSEMsg||0)) > _SSE_STALE_MS;
+  const dead  = !_sse || _sse.readyState === EventSource.CLOSED;
+  if(dead || stale || app._connected === false){
+    _sseBackoff = 1000;                      // user is waiting — reconnect promptly
+    if(_sseReconnectTimer){ clearTimeout(_sseReconnectTimer); _sseReconnectTimer = null; }
+    connectSSE();
+  }
+}
 function connectSSE(){
   const sseDot=document.getElementById("sseDot"),sseLabel=document.getElementById("sseLabel");
+  // Tear down any prior stream so we never leave a dead/duplicate connection
+  // (each open EventSource holds a server-side queue).
+  if(_sse){ try{ _sse.close(); }catch(_){} _sse = null; }
+  if(_sseReconnectTimer){ clearTimeout(_sseReconnectTimer); _sseReconnectTimer = null; }
+  app._sseStarted = true;
+  _noteSSEMsg();
   const es=new EventSource("/api/events");
+  _sse = es;
   es.addEventListener("open",()=>{
     if(_sseDisconnectTimer){ clearTimeout(_sseDisconnectTimer); _sseDisconnectTimer = null; }
+    _sseBackoff = 1000;                       // healthy again — reset backoff
+    _noteSSEMsg();
     const wasOffline = !app._connected;
     app._connected = true;
     sseDot.className="w-2 h-2 bg-green-500 blink transition-colors";
@@ -7804,7 +7852,11 @@ function connectSSE(){
     sseLabel.textContent="LIVE"; sseLabel.className="text-[10px] font-black uppercase tracking-wide text-green-500";
     if(wasOffline) hideAlert();
   });
+  // Server keep-alive (≥ every 20 s). Carries no payload — it just proves the
+  // pipe is alive so the staleness watchdog stays quiet.
+  es.addEventListener("ping",()=>{ _noteSSEMsg(); });
   es.addEventListener("state",e=>{
+    _noteSSEMsg();
     const d=JSON.parse(e.data);
     const idleWas=app.download_idle_open;
     Object.assign(app,d);
@@ -7830,11 +7882,13 @@ function connectSSE(){
     if(typeof d.vlc_night_mode==="boolean") renderNightMode();
   });
   es.addEventListener("vpn_status",e=>{
+    _noteSSEMsg();
     const d=JSON.parse(e.data); app.vpn_secure=d.secure; app.vpn_status=d.status;
     renderVpn(d.secure,d.status);
     if(!d.secure) showAlert("VPN disconnected — qBittorrent has been terminated.","error");
   });
   es.addEventListener("stream_status",e=>{
+    _noteSSEMsg();
     const d=JSON.parse(e.data); app.stream_status=d.status;
     if(d.progress!==undefined) app.progress=d.progress;
     if(d.downloaded_mb!==undefined) app.downloaded_mb=d.downloaded_mb;
@@ -7848,6 +7902,7 @@ function connectSSE(){
     if(d.status==="idle")    hideAlert();
   });
   es.addEventListener("library_progress",e=>{
+    _noteSSEMsg();
     const d=JSON.parse(e.data||"{}");
     if(!d.item_id) return;
     libDownloadStats.set(d.item_id, d);
@@ -7857,6 +7912,7 @@ function connectSSE(){
     refreshDownloadFiles(d.item_id);
   });
   es.addEventListener("library_update",e=>{
+    _noteSSEMsg();
     const d=JSON.parse(e.data||"{}");
     // Clear cached stats for items that finished
     if(d.item_id&&(d.status==="ready"||d.status==="error")) libDownloadStats.delete(d.item_id);
@@ -7873,6 +7929,7 @@ function connectSSE(){
     }
   });
   es.addEventListener("progress_saved",e=>{
+    _noteSSEMsg();
     // Re-render library silently when episode progress is saved
     if(activeTab==="library") loadLibrary();
     // Keep the open episode picker in sync with the server's authoritative state
@@ -7885,6 +7942,7 @@ function connectSSE(){
     }
   });
   es.addEventListener("subtitle_upgraded",e=>{
+    _noteSSEMsg();
     // VLC (TV) auto-swapped an AI sub for a real one that finished downloading.
     try{ const d=JSON.parse(e.data||"{}"); showAlert(d.label||"Switched to downloaded subtitles","success"); }
     catch(_){ showAlert("Switched to downloaded subtitles","success"); }
@@ -7904,8 +7962,28 @@ function connectSSE(){
         showAlert("Lost connection to host — reconnecting…","warn");
       }, 4000);
     }
+    // The browser only auto-reconnects while readyState is CONNECTING. Once it's
+    // CLOSED (it gives up after backgrounding, or on some hard failures) nothing
+    // will bring it back unless we rebuild it ourselves.
+    if(es.readyState === EventSource.CLOSED) _scheduleSSEReconnect();
   });
 }
+
+// Liveness watchdog: while the page is visible, if no ping/event has arrived for
+// _SSE_STALE_MS the socket has gone half-open (dead but still reads OPEN) — force
+// a reconnect. Only runs in the foreground to avoid churning a backgrounded tab.
+setInterval(()=>{
+  if(document.visibilityState !== "visible") return;
+  if(!app._sseStarted) return;
+  if((Date.now() - (app._lastSSEMsg||0)) > _SSE_STALE_MS) _ensureSSEConnected();
+}, 15000);
+// High-value mobile path: the moment the user comes back to the tab (unlocks the
+// phone / switches back to the app) or the network returns, re-check the stream
+// and reconnect at once if it didn't survive the suspension.
+document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible") _ensureSSEConnected(); });
+window.addEventListener("pageshow",()=>{ _ensureSSEConnected(); });   // bfcache restore
+window.addEventListener("focus",()=>{ _ensureSSEConnected(); });
+window.addEventListener("online",()=>{ _renderOnlineBadge(); _ensureSSEConnected(); });
 
 // ── Keyboard shortcuts ─────────────────────────────────────────────────────
 document.addEventListener("keydown",e=>{
@@ -7985,6 +8063,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.3.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.4.0</div>
 </body>
 </html>

@@ -7755,7 +7755,13 @@ async def events(request: Request) -> StreamingResponse:
                 try:
                     yield await asyncio.wait_for(q.get(), timeout=20.0)
                 except asyncio.TimeoutError:
-                    yield ": heartbeat\n\n"
+                    # Named `ping` event (not a bare `: comment`) so the browser
+                    # EventSource fires a listener the client can observe — comment
+                    # lines are invisible to JS, leaving no way to detect a dead
+                    # connection that's silently gone half-open (common after a
+                    # mobile device sleeps / the app is backgrounded). See the
+                    # client liveness watchdog in static/index.html.
+                    yield f"event: ping\ndata: {int(time.time())}\n\n"
         finally:
             if q in state.sse_queues:
                 state.sse_queues.remove(q)

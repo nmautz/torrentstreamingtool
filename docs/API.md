@@ -11,11 +11,12 @@ All endpoints are defined in `main.py`. SSE event stream is `/api/events`.
 
 ## Server-Sent Events
 
-`GET /api/events` — opens an SSE stream. Initial payload is a `state` event. Heartbeat colon-comment every 20 s.
+`GET /api/events` — opens an SSE stream. Initial payload is a `state` event. A named `ping` keep-alive event fires at least every 20 s (was a colon-comment before 5.4.0 — changed to a real event so the client liveness watchdog can observe it; see [FRONTEND.md § SSE reconnect supervision](FRONTEND.md)).
 
 Event types:
 | Event | When | Payload shape |
 |-------|------|---------------|
+| `ping` | keep-alive, at least every 20 s of queue idle | `data` is the server unix time (seconds); carries no app state — only proves the connection is alive |
 | `state` | every 2 s; on any state change | full `state_snapshot()` ([main.py:292](../main.py#L292)). Includes `library_item_id` and the full ordered `library_playlist` (used by the TV→device Handoff to reconstruct the remaining tail), alongside `library_current_file` / `library_current_index` / `is_library_playback`, `jackett_ok` (last known indexer HTTP reachability), `download_idle_open` / `download_idle_configured` (idle/night download window state — see Download scheduling), and `sys_status` (host CPU/RAM/GPU/network health + `overall` ok\|degraded\|overloaded — drives the "host busy" perf banner), and `subtitle_default_language` (admin preferred subtitle language, "" = Any — defaults the search modal's language filter), `subtitle_upgrade_late` / `subtitle_single_option` (the two new subtitle-policy flags, read by the on-device upgrade poller) |
 | `vpn_status` | VPN connect/disconnect transition | `{secure, status}` |
 | `jackett_status` | Jackett HTTP reachability transition (from `jackett_health_monitor`, ~20 s poll) | `{ok, url}` |

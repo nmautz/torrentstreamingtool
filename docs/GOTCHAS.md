@@ -269,6 +269,12 @@ Every `/api/events` connection creates its own `asyncio.Queue(maxsize=100)`. `br
 
 For admin SSE, the token is passed via `?admin_token=…` query param. The middleware accepts it from query string too.
 
+### EventSource won't auto-reconnect a *closed* or *half-open* stream — the client supervises it
+
+The browser's built-in reconnect only fires while the `EventSource` is `CONNECTING`. On mobile, the two failure modes that actually strand the UI both dodge it: after the device locks / the app backgrounds, the browser **fully closes** the stream (`readyState === CLOSED`, never auto-reconnects), and a suspended socket can die silently and come back **half-open** (`readyState` still `OPEN`, so no `error` event ever fires — the UI just freezes on stale data). Don't assume "EventSource handles reconnection for us."
+
+The dashboard handles both in `connectSSE()` (`static/index.html`): a CLOSED stream triggers a self-rebuilding backoff reconnect (`_scheduleSSEReconnect`), and a liveness watchdog detects the half-open case — the server's keep-alive is a **named `ping` event** (not a `: comment`, which is invisible to JS) emitted ≥ every 20 s, every handler stamps `app._lastSSEMsg`, and a foreground-only 15 s interval reconnects if nothing arrived for 50 s. Reconnects also fire on `visibilitychange`→visible / `pageshow` / `focus` / `online`. **If you add a new SSE event handler, call `_noteSSEMsg()` first** or long-lived events won't count as liveness. **Don't revert the server heartbeat to a bare `: comment`** — that re-blinds the watchdog. Every reconnect `close()`s the prior `EventSource` first; skipping that leaks a server-side queue per stale connection. See [FRONTEND.md § SSE reconnect supervision](FRONTEND.md).
+
 ### Slow-network Play must be non-blocking
 
 `/api/library/{id}/play`, `/api/vlc/prev`, `/api/vlc/next`, `/api/stop`, and `/api/stream` all return **202** and do their VLC `in_play`/`in_enqueue` (and qBit deletes on stop/stream) in background tasks. They synchronously update `state`, broadcast a `buffering` / `idle` state event, then return. The SSE-driven UI repaints from that broadcast within ~tens of ms even when VLC is taking seconds to actually open the file.

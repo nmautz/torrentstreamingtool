@@ -54,7 +54,8 @@ let app = { vpn_secure, vpn_status, stream_status, active_title, progress,
 
 ### SSE event handlers ([static/index.html:3494](../static/index.html#L3494))
 
-Single `EventSource('/api/events')`. Handlers:
+Single `EventSource('/api/events')`. Every handler first calls `_noteSSEMsg()` (stamps `app._lastSSEMsg` for the liveness watchdog — see "SSE reconnect supervision"). Handlers:
+- `ping` — server keep-alive (≥ every 20 s), no payload; only proves the pipe is alive.
 - `state` — full snapshot; `Object.assign(app, d)`, then `renderVpn` + `renderPlayer` + `updateDlBadge`. Also re-renders the library (`loadLibrary()`) when `download_idle_open` flips while on the Library tab, so the cards' "Idle — waiting" ↔ "Idle download" chips update as the idle/night window opens/closes
 - `vpn_status` — show alert; update VPN pill + overlay
 - `stream_status` — phase transitions (`buffering`/`playing`/`error`/`idle`); push progress fields
@@ -125,6 +126,15 @@ Both functions also bail with a warn-toast if `app._connected === false` (SSE ha
 ### SSE pill ↔ `app._connected`
 
 `connectSSE()`'s open / error handlers maintain `app._connected` and the navbar `#sseLabel`. On `error`, a 4 s grace timer runs — brief reconnect hiccups don't flag the app as offline. Once the timer fires, `app._connected=false`, a "Lost connection to host — reconnecting…" toast shows, and Play guards block new actions until SSE re-opens. The pill itself is no longer mobile-hidden — it shows **LIVE** (green) / **OFFLINE** (red) on every viewport so the connection state is always visible.
+
+### SSE reconnect supervision (mobile resilience)
+
+The native `EventSource` only auto-reconnects while it's in the `CONNECTING` state. Two mobile failure modes defeat that, so `connectSSE()` adds its own supervision (all state in module-level `_sse`, `_sseReconnectTimer`, `_sseBackoff`, `app._lastSSEMsg`, `app._sseStarted`):
+
+1. **Browser closed the stream** (it gives up after the device locks / the app is backgrounded). The `error` handler checks `es.readyState === EventSource.CLOSED` and, if so, calls `_scheduleSSEReconnect()` — a self-rebuilding reconnect with **exponential backoff** (1 s → 15 s cap, reset to 1 s on a successful `open`).
+2. **Half-open connection** (the socket silently died while suspended but still reads `OPEN`, so no `error` ever fires and the UI freezes on stale data). Caught by a **liveness watchdog**: the server emits a `ping` event at least every 20 s, every SSE handler calls `_noteSSEMsg()` to stamp `app._lastSSEMsg`, and a 15 s `setInterval` (foreground-only) forces a reconnect via `_ensureSSEConnected()` if nothing has arrived for `_SSE_STALE_MS` (50 s).
+
+`_ensureSSEConnected()` reconnects immediately (backoff reset to 1 s) when the stream is closed, stale, or `app._connected===false` — gated on `app._sseStarted` (set true on first `connectSSE`) and `navigator.onLine`. It's wired to **`visibilitychange`→visible, `pageshow` (bfcache restore), `focus`, and `online`** — so the connection is re-checked the instant the user returns to the tab or the radio comes back, which is the high-value path on mobile. `connectSSE()` always `close()`s the prior `_sse` first so reconnects never leave a duplicate stream (each open `EventSource` holds a server-side queue).
 
 ### Seek bar
 
