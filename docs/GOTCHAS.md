@@ -500,6 +500,10 @@ The admin "Download All (.zip)" log bundle (`admin_download_logs_bundle`) used t
 
 `streamlink_service.log` is written by the **service-wrapper process** (`streamlink_service.py`), a different process from the uvicorn worker that serves `/api/admin/logs/{name}`, and it grows continuously. Serving the live file (the old `FileResponse(path)`) was unreliable for it — it "never downloaded" while the other logs (written by the worker itself) were fine. Both the per-file endpoint and the bundle now read each log into a **temp snapshot** first (per-file: `shutil.copyfileobj`; bundle: `open(p,"rb").read()` then `zf.writestr`), so an actively-appended log yields a stable, complete download. Don't revert to streaming the live file.
 
+### Post-update log archival must happen at startup, not inside the update flow
+
+When the updater applies a new version it would be natural to zip + clear the logs right there in `_run_apply`. **Don't** — the live uvicorn process holds `streamlink_app.log` / `hls.log` open via their `RotatingFileHandler`s, and on Windows you can't archive-then-clear (let alone `unlink`) a file the running process has open for writing. Instead `_run_apply` only drops a `logs/.rotate_pending` marker after a successful `setup.py`, and `_init_logging()` consumes it on the **next process start** — *before it adds any handler*, i.e. while no file is open yet — calling `_archive_old_logs()` to zip everything into `logs_old_<timestamp>.zip` and clear the originals. Keep the archive **best-effort per file**: reading an open file into the zip is safe on every OS, but clearing it isn't — a file another live process holds open (e.g. `streamlink_service.log` on Windows) is left in place rather than aborting the whole rotation. The marker is a dotfile and the `logs_old_*.zip` archives are name-excluded, so neither gets swept into the next archive. The marker also covers the `reboot=false` dev path: the rotation just waits until that process actually restarts.
+
 ## Scheduled reboot
 
 ### Scheduled-reboot loop guard

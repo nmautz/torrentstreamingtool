@@ -60,12 +60,89 @@ LOG_DIR = Path(__file__).parent / "logs"
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 
+# When the auto-updater applies a new version it drops this marker in LOG_DIR.
+# `_init_logging()` consumes it on the next process start — BEFORE any handler
+# opens a log file — to roll the previous version's logs into a timestamped zip
+# and start the new version with empty logs. Done at startup (not inside the
+# update flow) precisely because the running process holds open handles on
+# streamlink_app.log / hls.log; on Windows you can't archive + clear a file
+# while it's held open, so we defer to the clean post-restart state.
+_ROTATE_MARKER = LOG_DIR / ".rotate_pending"
+
+
+def _archive_old_logs() -> Optional[Path]:
+    """Zip every current log file in LOG_DIR into `logs_old_<timestamp>.zip`,
+    then clear the originals. Returns the archive path (if anything was
+    archived) or None.
+
+    Best-effort and platform-aware: *reading* an open file to add it to the zip
+    is safe everywhere, so the archive always captures the prior run's logs.
+    *Clearing* the original is allowed to fail — on Windows another live process
+    (the service-wrapper that owns streamlink_service.log) may still hold the
+    file open, in which case it's left in place (already safe in the zip). Past
+    archives (`logs_old_*.zip`) and dotfiles are never re-archived.
+    """
+    try:
+        candidates = [
+            p for p in LOG_DIR.iterdir()
+            if p.is_file()
+            and not p.name.startswith("logs_old_")
+            and not p.name.startswith(".")
+        ]
+    except OSError:
+        return None
+    if not candidates:
+        return None
+
+    archive = LOG_DIR / f"logs_old_{time.strftime('%Y%m%d-%H%M%S')}.zip"
+    archived = 0
+    try:
+        with zipfile.ZipFile(archive, "w", zipfile.ZIP_DEFLATED) as zf:
+            for p in candidates:
+                try:
+                    zf.write(p, arcname=p.name)
+                    archived += 1
+                except OSError:
+                    continue
+    except OSError:
+        return None
+    if archived == 0:
+        try:
+            archive.unlink()
+        except OSError:
+            pass
+        return None
+
+    # Clear the originals now they're safely in the zip: remove if we can, else
+    # truncate, else give up on that one file (it stays, but it's archived).
+    for p in candidates:
+        try:
+            p.unlink()
+        except OSError:
+            try:
+                with open(p, "w", encoding="utf-8"):
+                    pass
+            except OSError:
+                pass
+    return archive
+
+
 def _init_logging() -> logging.Logger:
     root = logging.getLogger("streamlink")
     if root.handlers:                    # idempotent across uvicorn reloads
         return root
     root.setLevel(logging.INFO)
     root.propagate = False               # don't double-log via the Python root
+
+    # Roll prior logs into a zip if the updater flagged a version change. This
+    # runs before any handler opens a file, so there's no open-handle conflict.
+    rotated_to: Optional[Path] = None
+    if _ROTATE_MARKER.exists():
+        rotated_to = _archive_old_logs()
+        try:
+            _ROTATE_MARKER.unlink()
+        except OSError:
+            pass
 
     fmt = logging.Formatter(
         "%(asctime)s  %(levelname)-7s [%(name)s] %(message)s",
@@ -95,11 +172,28 @@ def _init_logging() -> logging.Logger:
     )
     hls_fh.setFormatter(fmt)
     hls.addHandler(hls_fh)
+
+    if rotated_to is not None:
+        root.info("Previous version's logs archived to %s", rotated_to.name)
     return root
 
 
 log     = _init_logging()
 hls_log = logging.getLogger("streamlink.hls")
+
+
+async def _log_version_banner() -> None:
+    """Log the running version + git checkout once at startup, so every log
+    (and every post-update rotation) carries a clear marker of which build
+    produced the lines that follow it."""
+    branch = commit = ""
+    try:
+        branch = await updater.current_branch()
+        commit = await updater.current_commit()
+    except Exception:
+        pass
+    log.info("StreamLink v%s starting — branch=%s commit=%s",
+             UI_VERSION, branch or "?", commit or "?")
 
 
 # ── Settings ──────────────────────────────────────────────────────────────────
@@ -409,7 +503,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "5.3.0"
+UI_VERSION = "5.5.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -3334,6 +3428,16 @@ async def _run_apply(branch: str, reboot: bool = True, allow_any: bool = False) 
             last_applied_commit=new_commit,
         )
 
+        # Flag the logs to roll over on the next process start. We can't safely
+        # archive + clear streamlink_app.log / hls.log here — this live process
+        # still holds them open (fatal on Windows) — so we drop a marker that
+        # _init_logging() consumes on the post-restart clean slate, zipping the
+        # old version's logs to logs_old_<timestamp>.zip and starting fresh.
+        try:
+            _ROTATE_MARKER.write_text(new_commit or "update", encoding="utf-8")
+        except OSError as exc:
+            log.warning("Could not write log-rotate marker: %s", exc)
+
         if not reboot:
             await _set_updater_phase("idle",
                                     f"Updated to {new_commit}. Reboot pending.",
@@ -4792,6 +4896,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # Make StreamLink's request handling the box's top priority before anything
     # else — so controls / UI / VLC-control stay responsive under heavy prep load.
     _raise_own_priority()
+    await _log_version_banner()
     _lib_lock = asyncio.Lock()
     _jackett_cookie_lock = asyncio.Lock()
     qbit = httpx.AsyncClient(timeout=10.0)

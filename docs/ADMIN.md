@@ -262,6 +262,8 @@ underlying git/setup plumbing lives in [updater.py](../updater.py); the loop
 
 `reboot=false` (dev convenience) skips steps 3 and 4 — files refreshed in place, no service touch, no downtime. Used for one-off testing; not the auto-apply path.
 
+After a successful `setup.py` step (both the reboot and `reboot=false` paths), the updater writes a `logs/.rotate_pending` marker. On the **next process start**, `_init_logging()` consumes it — before any handler opens a file — and rolls the previous version's logs into `logs/logs_old_<timestamp>.zip`, then clears the originals so the new version starts with empty logs. This is deliberately deferred to startup rather than done inline: the live process holds `streamlink_app.log` / `hls.log` open, and on Windows you can't archive + clear an open log (see [GOTCHAS.md](GOTCHAS.md)). The zip is best-effort per file (an open file is still captured by read; one another process holds open is left in place). Each process start also logs a `StreamLink v<x.y.z> starting — branch=… commit=…` banner so a fresh/rotated log identifies the build that produced it. The `logs_old_*.zip` archives appear in the log inventory + Download All bundle alongside the live logs.
+
 Warnings the UI surfaces inline:
 - **System service not installed** — without a supervisor (launchd / systemd / Task Scheduler), the dashboard won't come back after the reboot. Admin is told to run `python run.py --install`.
 - **Not a git repository** — running from a tarball / unzipped archive instead of a clone. The updater is disabled; the buttons are greyed out.
