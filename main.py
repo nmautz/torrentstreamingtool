@@ -503,7 +503,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "5.5.0"
+UI_VERSION = "5.5.1"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -3215,10 +3215,15 @@ async def scheduled_reboot_loop() -> None:
             if asyncio.get_event_loop().time() < next_check:
                 continue
 
-            if await _machine_in_use(idle_secs):
+            # Prep counts as "in use" for the reboot even when no one's watching:
+            # idle stream-prep / STT runs precisely when the box is otherwise
+            # idle, and HLS prep can't checkpoint — a reboot mid-encode throws
+            # the work away. Downloads are already covered by _machine_in_use
+            # (downloading_count). Both must be quiet before the nightly reboot.
+            if await _machine_in_use(idle_secs) or _prep_in_progress():
                 next_check = asyncio.get_event_loop().time() + idle_secs
-                print(f"[reboot] scheduled restart deferred — machine in use; "
-                      f"re-checking in {cfg['idle_minutes']} min")
+                print(f"[reboot] scheduled restart deferred — machine in use / prep "
+                      f"in progress; re-checking in {cfg['idle_minutes']} min")
                 continue
 
             # Idle → record that we've fired for today (loop guard), then reboot.
@@ -11030,6 +11035,23 @@ def _bulk_processing_now() -> bool:
     """True if any bulk HLS-prep or STT job is actively encoding/transcribing."""
     return any(j.get("queue") == "bulk" and j.get("status") == "processing"
                for j in (*_offline_jobs.values(), *_stt_jobs.values()))
+
+
+def _prep_in_progress() -> bool:
+    """True if any HLS-prep or STT job is actively encoding/transcribing (any
+    queue), or a user/admin-priority prep is queued to start. Used by the
+    scheduled reboot's idle guard so the nightly reboot won't interrupt
+    in-flight prep — HLS prep can't checkpoint and restarts from scratch.
+
+    Paused bulk prep doesn't count: a soft-paused file still encoding shows as
+    `processing` (and is caught here), but jobs parked at the pause gate are
+    `paused` and won't run, so they don't hold off the reboot. A momentary
+    pending bulk job (slot free, about to start) is picked up on the next 20 s
+    loop tick once it flips to `processing`."""
+    if any(j.get("status") == "processing"
+           for j in (*_offline_jobs.values(), *_stt_jobs.values())):
+        return True
+    return _priority_hls_pending() > 0
 
 
 def _priority_hls_pending() -> int:

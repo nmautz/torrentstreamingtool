@@ -160,11 +160,11 @@ Path traversal is blocked server-side: `_safe_log_path` resolves the requested n
 
 A daily, idle-gated reboot. Config persists under `library.json → settings.scheduled_reboot` (`enabled`, `time` HH:MM, `timezone` IANA name, `idle_minutes`, plus an internal `last_fired` date). Driven by the `scheduled_reboot_loop` background task ([main.py](../main.py), registered in `lifespan`):
 
-1. At/after the configured local time (computed via `_now_in_tz`), if it hasn't already fired today, check `_machine_in_use(idle_minutes * 60)`.
+1. At/after the configured local time (computed via `_now_in_tz`), if it hasn't already fired today, check `_machine_in_use(idle_minutes * 60)` **and** `_prep_in_progress()`.
 2. **Idle** → write `last_fired = today` (loop guard), then `_reboot_machine()`.
-3. **In use** → wait `idle_minutes` and re-check, repeating until idle.
+3. **In use / prep running** → wait `idle_minutes` and re-check, repeating until idle.
 
-"In use" = live VLC playback/pause of non-background content, an active stream (`stream_status ∈ buffering|playing`), a running download (`downloading_count > 0`), or a user interaction within the window. User interactions are stamped onto `state.last_activity` by the `track_activity` middleware (mutating verbs + `/api/search`; routine GET polling is ignored).
+"In use" = live VLC playback/pause of non-background content, an active stream (`stream_status ∈ buffering|playing`), a running download (`downloading_count > 0`), or a user interaction within the window. User interactions are stamped onto `state.last_activity` by the `track_activity` middleware (mutating verbs + `/api/search`; routine GET polling is ignored). **In-progress stream prep also defers the reboot** via `_prep_in_progress()` — any HLS-prep or STT job actively encoding (any queue), or a user/admin-priority prep queued to start. This matters because idle prep runs exactly when the box looks idle, and HLS prep can't checkpoint, so a reboot mid-encode would discard the work. Jobs parked at the pause gate (`paused`) don't count; a soft-paused file still finishing its current encode does (it's `processing`).
 
 The persisted `last_fired` date is what stops a just-rebooted machine from re-arming and looping (it comes back up past the scheduled time, sees `last_fired == today`, and stands down until tomorrow). Saving new config clears `last_fired` so a freshly-set time can arm the same day.
 
