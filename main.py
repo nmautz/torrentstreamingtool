@@ -503,7 +503,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "5.6.0"
+UI_VERSION = "5.7.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -9267,6 +9267,25 @@ async def admin_updater_branches(request: Request) -> JSONResponse:
         "branches": branches,
         "allowed_branches": list(updater.ALLOWED_BRANCHES),
     })
+
+
+@app.get("/api/admin/updater/changelog")
+async def admin_updater_changelog(request: Request) -> JSONResponse:
+    """Return the raw CHANGELOG.md so the admin can see what each release changed
+    before (or after) updating. Lightly rendered client-side. Returns
+    `{ok:false}` (not an error) when the file is missing so the UI degrades
+    gracefully."""
+    _require_admin(request)
+    path = Path(__file__).parent / "CHANGELOG.md"
+    try:
+        text = await asyncio.to_thread(path.read_text, encoding="utf-8")
+    except OSError as exc:
+        return JSONResponse({"ok": False, "error": str(exc), "markdown": ""})
+    # Cap the payload — the whole history can grow large and the UI only needs
+    # the recent entries to be useful.
+    if len(text) > 200_000:
+        text = text[:200_000] + "\n\n…(truncated)"
+    return JSONResponse({"ok": True, "markdown": text})
 
 
 @app.post("/api/admin/updater/config")

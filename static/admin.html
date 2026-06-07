@@ -830,7 +830,7 @@
       <div class="px-5 py-4 border-b border-gray-800 grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div class="space-y-1.5">
           <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Branch</label>
-          <select id="auBranch" onchange="_auFormDirty=true"
+          <select id="auBranch" onchange="_auFormDirty=true; _renderBranchWarning()"
             class="w-full bg-black border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-indigo-500 outline-none">
             <option value="main">main (stable)</option>
             <option value="beta">beta (release candidate)</option>
@@ -841,6 +841,11 @@
             <span class="select-none">Show all branches (developer mode)</span>
           </label>
           <p id="auBranchHint" class="text-[10px] text-gray-600">Only main / beta / alpha may be selected.</p>
+          <div id="auBranchWarn" class="hidden text-[11px] px-3 py-2 mt-1 border-l-4"></div>
+          <div id="auDevWarn" class="hidden text-[11px] text-red-300 border-l-4 border-red-700 bg-red-950/40 px-3 py-2 mt-1">
+            <span class="font-bold uppercase tracking-wide">Developer mode.</span>
+            Not all branches are functional — switching to one may corrupt or wipe your data and require a full manual reinstall of StreamLink to recover. Only use this if you know what you're doing.
+          </div>
         </div>
         <div class="space-y-1.5">
           <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Check Every (hours)</label>
@@ -919,6 +924,23 @@
         </summary>
         <pre id="auOutputPre" class="px-5 py-3 text-[11px] font-mono text-gray-400 whitespace-pre-wrap break-all max-h-64 overflow-y-auto"></pre>
       </details>
+    </div>
+
+    <!-- Changelog -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Changelog</h2>
+          <p class="text-xs text-gray-500 mt-0.5">What changed in each release, newest first — review before applying an update.</p>
+        </div>
+        <button id="auChangelogBtn" onclick="loadChangelog()"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 text-gray-300 hover:bg-gray-700 transition-colors disabled:opacity-50">
+          Refresh
+        </button>
+      </div>
+      <div id="auChangelog" class="px-5 py-4 text-xs text-gray-400 leading-relaxed max-h-[28rem] overflow-y-auto">
+        <div class="text-center text-gray-600 py-6">Loading…</div>
+      </div>
     </div>
 
     <!-- Env-key configuration (post-update feature gating) -->
@@ -1141,7 +1163,7 @@ function switchTab(tab){
   if(tab==="background") loadBackgroundVideo();
   if(tab==="system")   { loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadForcePrep(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
   else                 { stopSysHealthPolling(); stopForcePrepPolling(); }
-  if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); startAutoupdatePolling(); }
+  if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); if(!_auChangelogLoaded) loadChangelog(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
 }
 
@@ -2051,6 +2073,30 @@ function _renderBranchPicker(devMode, selected){
     }
   }
   _setBranchValue(selected);
+  _renderBranchWarning();
+}
+
+// Surface the risk of the selected branch / developer mode. alpha gets a severe
+// (may-break-and-need-reinstall) warning; beta a milder one; dev mode its own
+// data-loss caveat (shown alongside whatever branch warning applies).
+function _renderBranchWarning(){
+  const sel = document.getElementById("auBranch");
+  const devWarn = document.getElementById("auDevWarn");
+  if(devWarn) devWarn.classList.toggle("hidden", !_auDevMode);
+  const bw = document.getElementById("auBranchWarn");
+  if(!bw || !sel) return;
+  const branch = sel.value;
+  if(branch === "alpha"){
+    bw.className = "text-[11px] px-3 py-2 mt-1 border-l-4 text-red-300 border-red-700 bg-red-950/40";
+    bw.innerHTML = `<span class="font-bold uppercase tracking-wide">Alpha — bleeding edge.</span> This branch may break StreamLink, requiring a manual reinstall to recover. Don't run it on a box you depend on.`;
+    bw.classList.remove("hidden");
+  } else if(branch === "beta"){
+    bw.className = "text-[11px] px-3 py-2 mt-1 border-l-4 text-amber-300 border-amber-700 bg-amber-950/40";
+    bw.innerHTML = `<span class="font-bold uppercase tracking-wide">Beta — release candidate.</span> Mostly stable, but issues may be present.`;
+    bw.classList.remove("hidden");
+  } else {
+    bw.classList.add("hidden");
+  }
 }
 
 async function toggleDevBranches(){
@@ -2329,6 +2375,62 @@ async function resetHardNow(){
   }finally{
     btn.disabled = false;
     btn.textContent = "Reset Hard";
+  }
+}
+
+// ── Changelog ─────────────────────────────────────────────────────────────────
+let _auChangelogLoaded = false;
+
+// Render an already-HTML-escaped string's lightweight inline markdown: drop the
+// repo-relative [text](link) targets (useless in a browser) but keep the text,
+// bold **…**, and `code` spans.
+function _fmtChangelogInline(esc){
+  return esc
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, '<span class="text-gray-300">$1</span>')
+    .replace(/\*\*([^*]+)\*\*/g, '<strong class="text-gray-200">$1</strong>')
+    .replace(/`([^`]+)`/g, '<code class="font-mono text-indigo-300">$1</code>');
+}
+
+function _renderChangelogMd(md){
+  let html = "";
+  for(const raw of md.split("\n")){
+    const line = raw.replace(/\s+$/,"");
+    if(!line.trim()) continue;
+    let m;
+    if(/^#\s+/.test(line)) continue;                 // top "# Changelog" title
+    if((m = line.match(/^##\s+(.*)$/))){             // version heading
+      html += `<div class="text-sm font-black text-indigo-300 uppercase tracking-wide mt-4 mb-1.5 first:mt-0">${_fmtChangelogInline(escHtml(m[1]))}</div>`;
+    } else if((m = line.match(/^\s*[-*]\s+(.*)$/))){ // bullet
+      html += `<div class="flex gap-2 mb-2"><span class="text-gray-600 select-none">•</span><div class="flex-1">${_fmtChangelogInline(escHtml(m[1]))}</div></div>`;
+    } else {
+      html += `<div class="mb-2">${_fmtChangelogInline(escHtml(line))}</div>`;
+    }
+  }
+  return html || '<div class="text-center text-gray-600 py-6">No changelog entries.</div>';
+}
+
+async function loadChangelog(){
+  const box = document.getElementById("auChangelog");
+  const btn = document.getElementById("auChangelogBtn");
+  if(!box) return;
+  if(btn) btn.disabled = true;
+  try{
+    const r = await fetch("/api/admin/updater/changelog", {headers: authHeader()});
+    if(!r.ok){
+      box.innerHTML = `<div class="text-center text-red-400 py-6">Failed to load changelog (${r.status}).</div>`;
+      return;
+    }
+    const d = await r.json();
+    if(!d.ok || !d.markdown){
+      box.innerHTML = `<div class="text-center text-gray-600 py-6">No changelog available.</div>`;
+      return;
+    }
+    box.innerHTML = _renderChangelogMd(d.markdown);
+    _auChangelogLoaded = true;
+  }catch(_){
+    box.innerHTML = `<div class="text-center text-red-400 py-6">Failed to load changelog.</div>`;
+  }finally{
+    if(btn) btn.disabled = false;
   }
 }
 
