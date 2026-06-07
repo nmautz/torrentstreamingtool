@@ -45,6 +45,9 @@ The only persistent server-side state. Lives at the project root. Accessed via `
       "enabled": false,
       "max_gb":  50                     // purge all orphans once total .offline_cache/ size ≥ this many GB; clamped 1–10000
     },
+    "vpn_killswitch": {                 // how far the Mullvad kill switch reaches (admin System tab)
+      "block_ui": true                  // true ⇒ a VPN drop locks the whole UI (overlay); false ⇒ only qBit is killed. qBit is killed either way. Absent ⇒ true
+    },
     "subtitles": {                      // unified subtitle policy (admin System tab)
       "default_language": "eng",        // 3-letter code; "" = Any. Absent ⇒ "eng"
       "on_by_default":    false,        // start playback with subs on? (profile may override)
@@ -118,6 +121,8 @@ PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "so
 **Subtitle pick memory.** A subtitle choice is remembered as a *resolvable descriptor* — `{off, lang, ai, name}` — not a VLC ES ID or HLS sidecar index (both drift between replays, and a late-downloaded sidecar shifts the list). It's stored two ways: per file (`file_progress[path].subtitle_sel`) and per profile+series (`profile.series_subtitle_prefs[<series>]`, written by `_save_series_sub_sel`). On the next play `_apply_subtitle_policy` (VLC) / the on-device resolver consult the file pick, then the series pick, matching by `name` → `lang`+kind → any-kind in that language → lone-option, before falling back to the default policy. The legacy `file_progress[path].local_subtitle_idx` is kept only for the bundle-index path; sidecar/AI picks live in `subtitle_sel` (the old on-device save dropped them, persisting `-1`).
 
 `settings.stt`: managed by the **System** admin tab's *Auto-Generated Subtitles (AI)* card. Gates AI auto-subtitle generation (whisper.cpp): `enabled` + `translate` (adds an English-translated track for non-English audio). The **preferred language is unified** — `_stt_cfg.default_language` is read from `settings.subtitles` (above), not stored here. Consumed by `_needs_stt_subs` / `_ensure_stt_for`. See [STT.md](STT.md).
+
+`settings.vpn_killswitch`: managed by the **System** admin tab's *VPN Kill Switch* card; read via `_vpn_killswitch_cfg`. `block_ui` (default `true`) decides how far the Mullvad kill switch reaches when the VPN drops: `true` locks the whole dashboard behind the full-screen overlay; `false` suppresses the overlay so only qBittorrent is killed and the rest of the UI stays usable. **It does not gate the qBit kill** — `vpn_guard` (in-process) and `watchdog.py` (process level) always terminate qBittorrent on a VPN drop regardless, and the P2P stream/download endpoints stay 403'd in both modes. Mirrored into `state.vpn_block_ui` at lifespan + on save, and broadcast in the `state` / `vpn_status` SSE events. Lives under `settings` because it applies to the physical host. See [ADMIN.md § VPN Kill Switch](ADMIN.md) / [GOTCHAS.md § VPN](GOTCHAS.md).
 
 `resume_mode`:
 - `"auto"` (default) — immediately seek to saved position

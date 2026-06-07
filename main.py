@@ -503,7 +503,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "5.9.0"
+UI_VERSION = "5.10.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -581,6 +581,10 @@ def _now_iso() -> str:
 class AppState:
     vpn_secure: bool = True
     vpn_status_text: str = "Checking…"
+    # VPN kill-switch reach: True ⇒ block the whole UI behind the overlay when the
+    # VPN drops; False ⇒ only kill qBit (qBit is killed either way). Mirror of
+    # settings.vpn_killswitch.block_ui; seeded at lifespan, updated by the admin POST.
+    vpn_block_ui: bool = True
     jackett_ok: bool = True               # last known Jackett HTTP reachability
     active_hash: Optional[str] = None
     active_title: Optional[str] = None
@@ -724,6 +728,8 @@ def state_snapshot() -> dict:
     return {
         "vpn_secure": state.vpn_secure,
         "vpn_status": state.vpn_status_text,
+        # Whether a VPN drop locks the whole UI (overlay) or only kills qBit.
+        "vpn_block_ui": state.vpn_block_ui,
         "jackett_ok": state.jackett_ok,
         "stream_status": state.stream_status,
         "active_title": state.active_title,
@@ -2499,11 +2505,11 @@ async def vpn_guard() -> None:
                             p.kill()
                         except psutil.NoSuchProcess:
                             pass
-                await broadcast("vpn_status", {"secure": False, "status": first_line})
+                await broadcast("vpn_status", {"secure": False, "status": first_line, "block_ui": state.vpn_block_ui})
 
             elif connected and not state.vpn_secure:
                 state.vpn_secure = True
-                await broadcast("vpn_status", {"secure": True, "status": first_line})
+                await broadcast("vpn_status", {"secure": True, "status": first_line, "block_ui": state.vpn_block_ui})
 
         except FileNotFoundError:
             state.vpn_status_text = "mullvad CLI not installed"
@@ -2857,6 +2863,26 @@ def _stt_cfg(lib: dict) -> dict:
         "default_language": _subs_cfg(lib)["default_language"],
         "translate":        bool(cfg.get("translate", True)),
     }
+
+
+def _vpn_killswitch_cfg(lib: dict) -> dict:
+    """Read settings.vpn_killswitch (the VPN kill-switch policy) with defaults.
+
+    `block_ui` decides how far the kill switch reaches when Mullvad drops:
+
+    - `True`  (default) — the whole dashboard is blocked behind a full-screen
+      "VPN DISCONNECTED" overlay until the VPN comes back.
+    - `False` — only qBittorrent is killed (and the P2P stream/download endpoints
+      stay 403'd); the rest of the UI keeps working so a viewer can still watch
+      already-prepped on-device content.
+
+    Regardless of this setting, **qBittorrent is always killed when the VPN is
+    down** — that invariant is enforced unconditionally by `vpn_guard` here and by
+    `watchdog.py` at the process level; `block_ui` only governs the UI lockout.
+    Default `True` preserves the historical behaviour (overlay on every drop).
+    """
+    cfg = (lib.get("settings", {}) or {}).get("vpn_killswitch") or {}
+    return {"block_ui": bool(cfg.get("block_ui", True))}
 
 
 # Canonicalize a language tag so 2- and 3-letter spellings of the same language
@@ -4923,6 +4949,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         state.subtitle_default_language = _subs0["default_language"]
         state.subtitle_upgrade_late = _subs0["upgrade_late_subs"]
         state.subtitle_single_option = _subs0["single_option"]
+        state.vpn_block_ui = _vpn_killswitch_cfg(_lib0)["block_ui"]
     except Exception:
         state.vlc_night_mode = False
         state.vlc_night_mode_preset = NIGHT_MODE_DEFAULT_PRESET
@@ -9115,6 +9142,37 @@ async def admin_set_subtitles(request: Request, body: SubsConfigReq) -> JSONResp
     state.subtitle_default_language = cfg["default_language"]
     state.subtitle_upgrade_late = cfg["upgrade_late_subs"]
     state.subtitle_single_option = cfg["single_option"]
+    await broadcast("state", state_snapshot())
+    return JSONResponse({"ok": True, **cfg})
+
+
+class VpnKillswitchReq(BaseModel):
+    block_ui: bool
+
+
+@app.get("/api/admin/vpn-killswitch")
+async def admin_get_vpn_killswitch(request: Request) -> JSONResponse:
+    """Return the VPN kill-switch policy. `block_ui=true` ⇒ a VPN drop locks the
+    whole dashboard behind the overlay; `false` ⇒ only qBittorrent is killed (it's
+    killed either way) and the rest of the UI keeps working."""
+    _require_admin(request)
+    return JSONResponse(_vpn_killswitch_cfg(await get_library()))
+
+
+@app.post("/api/admin/vpn-killswitch")
+async def admin_set_vpn_killswitch(request: Request, body: VpnKillswitchReq) -> JSONResponse:
+    """Save the VPN kill-switch policy. `block_ui` only governs the UI lockout —
+    qBittorrent is always killed when the VPN is down (enforced unconditionally by
+    `vpn_guard` and `watchdog.py`). Broadcasts a state snapshot so every client's
+    overlay updates live (e.g. the overlay clears the moment block_ui is turned
+    off while the VPN happens to be down)."""
+    _require_admin(request)
+    lib = await get_library()
+    s = lib.setdefault("settings", {}).setdefault("vpn_killswitch", {})
+    s["block_ui"] = bool(body.block_ui)
+    await put_library(lib)
+    cfg = _vpn_killswitch_cfg(lib)
+    state.vpn_block_ui = cfg["block_ui"]
     await broadcast("state", state_snapshot())
     return JSONResponse({"ok": True, **cfg})
 

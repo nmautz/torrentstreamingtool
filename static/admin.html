@@ -639,6 +639,25 @@
       </div>
     </div>
 
+    <!-- VPN kill switch -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">VPN Kill Switch</h2>
+        <p class="text-xs text-gray-500 mt-0.5">qBittorrent is <strong>always</strong> killed the moment Mullvad VPN drops — that can't be turned off. This setting only chooses how far the lockout reaches.</p>
+      </div>
+      <div class="px-5 py-4 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <div class="text-sm font-bold text-gray-200">Block The Entire UI On Drop</div>
+          <div id="vpnKsHint" class="text-[11px] text-gray-600 mt-0.5">When on, a VPN drop locks the whole dashboard behind a full-screen overlay. When off, only qBittorrent is killed (and torrent stream/download stay blocked) — the rest of the UI keeps working, so a viewer can still watch already-prepped on-device content.</div>
+        </div>
+        <button id="vpnKsBtn" onclick="toggleVpnKillswitch()"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+                 bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">
+          …
+        </button>
+      </div>
+    </div>
+
     <!-- qBittorrent seeding & bandwidth limits -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
@@ -1177,7 +1196,7 @@ function switchTab(tab){
   if(tab==="skip")       loadSkipPanel();
   if(tab==="offline")    loadOfflineCache();
   if(tab==="background") loadBackgroundVideo();
-  if(tab==="system")   { loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadForcePrep(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
+  if(tab==="system")   { loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadVpnKillswitch(); loadForcePrep(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
   else                 { stopSysHealthPolling(); stopForcePrepPolling(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); if(!_auChangelogLoaded) loadChangelog(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
@@ -1551,6 +1570,56 @@ async function togglePlayPrep(){
     _ppEnabled = next;
     _renderPpEnabled();
     showToast(_ppEnabled ? "Auto-prep on play enabled." : "Auto-prep on play disabled.");
+  }catch(_){
+    showToast("Save failed.", true);
+  }finally{
+    btn.disabled = false;
+  }
+}
+
+// ── VPN Kill Switch ────────────────────────────────────────────────────────────
+let _vpnKsBlockUi = true;
+
+function _renderVpnKs(){
+  const btn = document.getElementById("vpnKsBtn");
+  if(!btn) return;
+  if(_vpnKsBlockUi){
+    btn.textContent = "Block UI";
+    btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-emerald-950 border-emerald-700 text-emerald-300 hover:bg-emerald-900 disabled:opacity-50";
+  } else {
+    btn.textContent = "qBit Only";
+    btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50";
+  }
+}
+
+async function loadVpnKillswitch(){
+  try{
+    const r = await fetch("/api/admin/vpn-killswitch", {headers: authHeader()});
+    if(!r.ok) return;
+    const d = await r.json();
+    _vpnKsBlockUi = !!d.block_ui;
+    _renderVpnKs();
+  }catch(_){}
+}
+
+async function toggleVpnKillswitch(){
+  const btn = document.getElementById("vpnKsBtn");
+  const next = !_vpnKsBlockUi;
+  btn.disabled = true;
+  try{
+    const r = await fetch("/api/admin/vpn-killswitch",{
+      method:"POST",
+      headers:{...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify({block_ui: next}),
+    });
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      showToast(`Save failed: ${d.detail || r.status}`, true);
+      return;
+    }
+    _vpnKsBlockUi = next;
+    _renderVpnKs();
+    showToast(_vpnKsBlockUi ? "VPN drop will block the whole UI." : "VPN drop will only kill qBittorrent.");
   }catch(_){
     showToast("Save failed.", true);
   }finally{

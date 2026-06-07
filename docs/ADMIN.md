@@ -109,11 +109,23 @@ For each profile:
 
 ### 7. System
 
-Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Automatic Stream Prep**, **Auto-Prep on Play**, **Force Stream Prep**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
+Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Automatic Stream Prep**, **Auto-Prep on Play**, **Force Stream Prep**, **VPN Kill Switch**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
 
 #### System Health
 
 Live host load, so an operator can see at a glance whether the box is coping. A `system_monitor_loop` ([main.py](../main.py)) samples every 5 s and classifies **CPU**, **Memory**, **GPU** (via `nvidia-smi`; "Not detected" when absent), and **Network** (throughput + error/drop rate) as `ok` / `degraded` / `overloaded`, plus an **overall** badge (the worst component). The card polls `GET /api/admin/system-resources` every 4 s while the System tab is open and notes whether background prep/transcoding is running now (it runs below normal priority and is killed the instant a viewer is active — see [STT.md](STT.md) + [GOTCHAS.md](GOTCHAS.md)). The same `sys_status` rides in every `state` SSE event and drives the user-facing "host busy — performance may be reduced" banner on the dashboard.
+
+#### VPN Kill Switch
+
+Chooses how far the Mullvad kill switch reaches when the VPN drops. A single toggle, persisted under `library.json → settings.vpn_killswitch` (`block_ui`, default `true`), mirrored into `state.vpn_block_ui` and surfaced in the `state` + `vpn_status` SSE events so every dashboard reacts live.
+
+- **Block UI** (`block_ui: true`, the historical behaviour) — a VPN drop locks the whole dashboard behind the full-screen "VPN DISCONNECTED" overlay until the VPN returns.
+- **qBit Only** (`block_ui: false`) — only qBittorrent is killed; the overlay is suppressed (the VPN pill still turns red) so a viewer can keep using the dashboard, e.g. to watch already-prepped on-device content.
+
+**qBittorrent is killed on a VPN drop regardless of this setting** — that invariant is enforced unconditionally by `vpn_guard` (in-process) and `watchdog.py` (process level), and the P2P stream/download endpoints stay 403'd in both modes. `block_ui` governs the UI lockout only. See [GOTCHAS.md § VPN](GOTCHAS.md#vpn) and [DAEMON_WATCHDOG.md](DAEMON_WATCHDOG.md).
+
+- `GET /api/admin/vpn-killswitch` → `{block_ui}`.
+- `POST /api/admin/vpn-killswitch` → `{block_ui}`; broadcasts a `state` snapshot so the overlay appears/clears immediately.
 
 #### Seeding & Bandwidth
 

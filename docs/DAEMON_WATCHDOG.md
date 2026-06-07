@@ -89,6 +89,7 @@ Three steps each tick (default 3 s):
 2. **Enforce qBit ↔ VPN invariant**:
    - VPN down + qBit alive → kill qBit immediately via `_kill_by_name("qbittorrent")` (psutil-based, falls back to `taskkill`/`pkill`)
    - VPN up + qBit dead → wait back-off, re-check VPN didn't drop during sleep, then start qBit
+   - This kill is **unconditional**. The admin "VPN Kill Switch" toggle (`settings.vpn_killswitch.block_ui`, see [ADMIN.md](ADMIN.md)) only governs whether the *dashboard UI* is locked on a drop — the watchdog never reads it and always kills qBit when the VPN is down.
 3. **Plain services** (VLC, Jackett): port check → if down, wait back-off, restart
 
 `_interruptible_sleep` watches `_stop_event` so `stop_watchdog()` exits the back-off promptly.

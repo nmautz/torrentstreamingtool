@@ -1996,7 +1996,7 @@ const PROFILE_COLORS = {
 
 // ── App state ──────────────────────────────────────────────────────────────
 let app = {
-  vpn_secure:true, vpn_status:"Checking…", stream_status:"idle",
+  vpn_secure:true, vpn_status:"Checking…", vpn_block_ui:true, stream_status:"idle",
   active_title:null, progress:0, downloaded_mb:0, total_mb:0,
   dl_speed_bps:0, ul_speed_bps:0,
   vlc_time:0, vlc_duration:0, vlc_volume:100, vlc_night_mode:false, vlc_night_mode_preset:"medium",
@@ -2368,7 +2368,12 @@ function renderFcNotice(){
 }
 
 // ── VPN UI ─────────────────────────────────────────────────────────────────
-function renderVpn(secure,statusText){
+function renderVpn(secure,statusText,blockUi){
+  // blockUi (admin setting, default true): when the VPN drops, gate the whole UI
+  // behind the overlay. When false, only the pill turns red — qBit is still
+  // killed server-side and P2P stream/download stay 403'd, but the rest of the
+  // dashboard (e.g. already-prepped on-device playback) keeps working.
+  if(blockUi===undefined) blockUi = (typeof app!=="undefined" && app.vpn_block_ui!==undefined) ? app.vpn_block_ui : true;
   const dot=document.getElementById("vpnDot"),label=document.getElementById("vpnLabel");
   const pill=document.getElementById("vpnPill"),overlay=document.getElementById("vpnOverlay");
   const detail=document.getElementById("vpnOverlayDetail");
@@ -2381,7 +2386,7 @@ function renderVpn(secure,statusText){
     dot.className="w-2 h-2 bg-red-500 flex-shrink-0 transition-colors blink";
     label.className="text-xs font-medium text-red-400 whitespace-nowrap hidden sm:inline";
     label.textContent="VPN: DISCONNECTED"; pill.classList.add("border-red-800");
-    overlay.classList.remove("hidden");
+    overlay.classList.toggle("hidden",!blockUi);
     if(statusText) detail.textContent=statusText;
   }
 }
@@ -7974,7 +7979,8 @@ function connectSSE(){
     if(typeof d.subtitle_default_language === "string") subtitleDefaultLang = d.subtitle_default_language;
     if(typeof d.subtitle_upgrade_late === "boolean") subtitleUpgradeLate = d.subtitle_upgrade_late;
     if(typeof d.subtitle_single_option === "boolean") subtitleSingleOption = d.subtitle_single_option;
-    renderVpn(d.vpn_secure,d.vpn_status); renderPlayer(app);
+    if(typeof d.vpn_block_ui === "boolean") app.vpn_block_ui=d.vpn_block_ui;
+    renderVpn(d.vpn_secure,d.vpn_status,app.vpn_block_ui); renderPlayer(app);
     updateDlBadge(d.downloading_count||0);
     renderServerAttention(d);
     renderPerfBanner(d);
@@ -7983,7 +7989,8 @@ function connectSSE(){
   es.addEventListener("vpn_status",e=>{
     _noteSSEMsg();
     const d=JSON.parse(e.data); app.vpn_secure=d.secure; app.vpn_status=d.status;
-    renderVpn(d.secure,d.status);
+    if(typeof d.block_ui === "boolean") app.vpn_block_ui=d.block_ui;
+    renderVpn(d.secure,d.status,app.vpn_block_ui);
     if(!d.secure) showAlert("VPN disconnected — qBittorrent has been terminated.","error");
   });
   es.addEventListener("stream_status",e=>{
@@ -8162,6 +8169,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.9.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.10.0</div>
 </body>
 </html>

@@ -198,6 +198,10 @@ If you're tempted to remove one, **don't**. They cover different failure modes:
 
 Both guards return `vpn=False` if `mullvad` is not in PATH. Cannot-verify = unsafe. Make sure the CLI is on PATH (or set `_MULLVAD_BIN` in `.env`).
 
+### Kill-switch `block_ui` governs the UI lockout ONLY — never the qBit kill
+
+`settings.vpn_killswitch.block_ui` (admin toggle, default `true`) decides whether a VPN drop locks the whole dashboard behind the full-screen overlay (`true`) or only the qBit kill happens with the rest of the UI left usable (`false`). **It does not gate the qBit kill or the P2P endpoint 403s** — those are unconditional in both `vpn_guard` and `watchdog.py`. If you ever wire `block_ui` into the kill path you've reintroduced a leak: a VPN drop must always terminate qBittorrent regardless of this setting. The overlay is purely a frontend concern driven by `state.vpn_block_ui` (mirrored from the setting, broadcast in the `state` + `vpn_status` SSE events).
+
 ## Jackett
 
 ### `Category[]=0` returns no results
