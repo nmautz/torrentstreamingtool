@@ -4986,11 +4986,26 @@ function _epCardHtml(f){
 function _epSchedBtn(onclick, label, color){
   return `<button onclick="${onclick}" class="text-[11px] font-bold uppercase tracking-wide px-2 py-1 bg-gray-800 hover:bg-gray-700 ${color} transition-colors">${label}</button>`;
 }
-// Paths in the currently-visible scope (the active season, or every file when the
+// Stream-prep schedule button — like _epSchedBtn but highlights the active mode
+// (`cur`) so the bar reflects the scope's current prep schedule. "" cur = mixed.
+function _epPrepBtn(mode, label, color, cur){
+  const on={now:"bg-emerald-700 text-emerald-50",idle:"bg-sky-800 text-sky-100",never:"bg-red-900/70 text-red-200"};
+  const active=cur===mode;
+  return `<button onclick="epSchedPrep('${mode}')" class="text-[11px] font-bold uppercase tracking-wide px-2 py-1 transition-colors ${active?on[mode]:`bg-gray-800 hover:bg-gray-700 ${color}`}">${label}</button>`;
+}
+// Files in the currently-visible scope (the active season, or every file when the
 // item has no season grouping).
-function _visibleSeasonPaths(){
-  if(epSeasonList.length) return epFiles.filter(f=>(+f.season||0)===epCurrentSeason).map(f=>f.path);
-  return epFiles.map(f=>f.path);
+function _visibleSeasonFiles(){
+  if(epSeasonList.length) return epFiles.filter(f=>(+f.season||0)===epCurrentSeason);
+  return epFiles.slice();
+}
+// Paths in the currently-visible scope.
+function _visibleSeasonPaths(){ return _visibleSeasonFiles().map(f=>f.path); }
+// Shared prep_mode across the visible scope, or "" if mixed — highlights the active
+// segment of the stream-prep bar (mirrors the download bar's per-folder highlight).
+function _visibleSeasonPrepMode(){
+  const modes=new Set(_visibleSeasonFiles().map(f=>f.prep_mode||"idle"));
+  return modes.size===1?[...modes][0]:"";
 }
 // Set the download schedule (now/idle/skip) for the visible season's files.
 async function epSchedSeason(mode){
@@ -5005,6 +5020,57 @@ async function epSchedSeason(mode){
 async function epSchedItem(mode){
   await setDownloadSchedule(epItemId, mode, true);
   refreshEpFiles();
+}
+
+// Set the STREAM-PREP schedule (now/idle/never) for the visible season's files —
+// the sibling of epSchedSeason, but for HLS prep instead of the qBit download.
+async function epSchedPrep(mode){
+  const paths=_visibleSeasonPaths();
+  if(!paths.length) return;
+  try{
+    const r=await fetch(`/api/library/${epItemId}/prep-schedule`,{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({file_paths:paths,mode}),
+    });
+    if(!r.ok){ const e=await r.json().catch(()=>({detail:"Failed."})); showAlert(e.detail||"Failed.","error"); return; }
+    const d=await r.json().catch(()=>({}));
+    // Optimistically reflect the new prep mode so the bar's highlight updates at once.
+    const set=new Set(paths); epFiles.forEach(f=>{ if(set.has(f.path)) f.prep_mode=mode; });
+    showAlert(
+      mode==="now"   ? (d.started?`Prepping ${d.started} file(s) for streaming now.`:"Already prepped — nothing to do.")
+      : mode==="idle"? "Will stream-prep these during the idle/night window."
+      :                "These files won't be auto-prepped (existing bundles kept).",
+      "success");
+    // Live-update the per-row Prep icons while the new jobs encode.
+    if(mode==="now" && d.started){ try{ _startPrepPolling(epItemId); }catch(_){} }
+    refreshEpFiles();
+  }catch(_){ showAlert("Failed to set stream-prep schedule.","error"); }
+}
+
+// Recheck the CHECKED episodes against the torrent's piece hashes (qBittorrent
+// force-recheck). Any file that was complete but comes back damaged has its cached
+// HLS bundle purged so it re-preps from the repaired source.
+async function epRecheckSelected(){
+  const paths=[...epChecked];
+  if(!paths.length){ showAlert("Select the episodes you want to verify first.","warn"); return; }
+  if(!confirm(`Recheck ${paths.length} file hash(es)?\n\nThis runs a full piece-by-piece verify of the torrent in qBittorrent. Damaged files are re-fetched and their stream-prep cache is invalidated.`)) return;
+  showAlert(`Rechecking ${paths.length} file(s)… this may take a while.`,"success");
+  try{
+    const r=await fetch(`/api/library/${epItemId}/recheck`,{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({file_paths:paths}),
+    });
+    if(!r.ok){ const e=await r.json().catch(()=>({detail:"Recheck failed."})); showAlert(e.detail||"Recheck failed.","error"); return; }
+    const d=await r.json();
+    if(!d.checked){
+      showAlert("Recheck started but didn't finish in time — check qBittorrent.","warn");
+    } else if(d.damaged_count>0){
+      showAlert(`${d.damaged_count} damaged file(s) found — re-downloading; ${d.cache_purged} cached bundle(s) invalidated.`,"warn");
+    } else {
+      showAlert("All checked files verified OK — no damage found.","success");
+    }
+    refreshEpFiles();
+  }catch(_){ showAlert("Recheck failed.","error"); }
 }
 
 function renderEpList(){
@@ -5056,22 +5122,50 @@ function renderEpList(){
     }
   }
 
-  // Download-scheduling bar — host-side control over what downloads and when, at the
+  // Scheduling bar — host-side control over what downloads/preps and when, at the
   // current scope (this season, or all files) plus the whole torrent. Shown for any
-  // torrent-backed item, with or without TMDb metadata.
+  // torrent-backed item, with or without TMDb metadata. Three sub-sections:
+  //   • Download (Now/Idle/Skip) — hidden once every episode is on disk (scheduling
+  //     what to download is moot then).
+  //   • Stream-prep (Now/Idle/Never) — the HLS-prep sibling; hidden on macOS (no HLS).
+  //   • Recheck — force a piece-hash verify of the checked episodes.
   if(epHasTorrent){
     const scope=epSeasonList.length?`Season ${epCurrentSeason}`:"All files";
     const multi=epSeasonList.length>1;
-    html += `<div class="px-3 sm:px-5 py-2 border-b border-gray-800 flex items-center gap-1.5 flex-wrap bg-gray-900/40">
-      <span class="text-[10px] font-black text-gray-500 uppercase tracking-widest mr-0.5">${escHtml(scope)}:</span>
-      ${_epSchedBtn("epSchedSeason('now')","⬇ Now","text-emerald-300 hover:bg-emerald-950/40")}
-      ${_epSchedBtn("epSchedSeason('idle')","🌙 Idle","text-sky-300 hover:bg-sky-950/40")}
-      ${_epSchedBtn("epSchedSeason('skip')","⊘ Skip","text-red-300 hover:bg-red-950/40")}
-      ${multi?`<span class="w-px h-4 bg-gray-700 mx-1"></span>
-        <span class="text-[10px] font-black text-gray-500 uppercase tracking-widest mr-0.5">All:</span>
-        ${_epSchedBtn("epSchedItem('now')","⬇ Now","text-emerald-300 hover:bg-emerald-950/40")}
-        ${_epSchedBtn("epSchedItem('idle')","🌙 Idle","text-sky-300 hover:bg-sky-950/40")}`:""}
+    const allDownloaded=epFiles.length>0 && epFiles.every(f=>f.complete!==false);
+    const prepCur=_visibleSeasonPrepMode();
+    let rows="";
+    // Download row — only while something still needs downloading.
+    if(!allDownloaded){
+      rows += `<div class="flex items-center gap-1.5 flex-wrap">
+        <span class="text-[10px] font-black text-gray-500 uppercase tracking-widest mr-0.5">DL · ${escHtml(scope)}:</span>
+        ${_epSchedBtn("epSchedSeason('now')","⬇ Now","text-emerald-300 hover:bg-emerald-950/40")}
+        ${_epSchedBtn("epSchedSeason('idle')","🌙 Idle","text-sky-300 hover:bg-sky-950/40")}
+        ${_epSchedBtn("epSchedSeason('skip')","⊘ Skip","text-red-300 hover:bg-red-950/40")}
+        ${multi?`<span class="w-px h-4 bg-gray-700 mx-1"></span>
+          <span class="text-[10px] font-black text-gray-500 uppercase tracking-widest mr-0.5">All:</span>
+          ${_epSchedBtn("epSchedItem('now')","⬇ Now","text-emerald-300 hover:bg-emerald-950/40")}
+          ${_epSchedBtn("epSchedItem('idle')","🌙 Idle","text-sky-300 hover:bg-sky-950/40")}`:""}
+      </div>`;
+    }
+    // Stream-prep row (only when HLS is available on this host).
+    if(hlsAvailable){
+      rows += `<div class="flex items-center gap-1.5 flex-wrap">
+        <span class="text-[10px] font-black text-gray-500 uppercase tracking-widest mr-0.5">PREP · ${escHtml(scope)}:</span>
+        ${_epPrepBtn("now","⚡ Now","text-emerald-300 hover:bg-emerald-950/40",prepCur)}
+        ${_epPrepBtn("idle","🌙 Idle","text-sky-300 hover:bg-sky-950/40",prepCur)}
+        ${_epPrepBtn("never","⊘ Never","text-red-300 hover:bg-red-950/40",prepCur)}
+      </div>`;
+    }
+    // Recheck button.
+    rows += `<div class="flex items-center gap-1.5 flex-wrap">
+      <button onclick="epRecheckSelected()" title="Force a piece-hash verify of the checked episodes; damaged files are re-fetched and their stream-prep cache is invalidated"
+        class="text-[11px] font-bold uppercase tracking-wide px-2 py-1 bg-gray-800 hover:bg-amber-900/50 text-amber-300 hover:text-amber-200 transition-colors flex items-center gap-1">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
+        Recheck hashes (<span id="epRecheckCount">${epChecked.size}</span>)
+      </button>
     </div>`;
+    html += `<div class="px-3 sm:px-5 py-2 border-b border-gray-800 flex flex-col gap-1.5 bg-gray-900/40">${rows}</div>`;
   }
 
   html += `<div class="grid grid-cols-1 xl:grid-cols-2 items-start">`;
@@ -5111,6 +5205,8 @@ function epToggle(cb){
 function updateEpCount(){
   const n=epChecked.size;
   document.getElementById("epSelectedCount").textContent=n;
+  const rc=document.getElementById("epRecheckCount");
+  if(rc) rc.textContent=n;
 }
 function epSelectAll(v){
   epFiles.forEach(f=>{ if(v) epChecked.add(f.path); else epChecked.delete(f.path); });
@@ -8397,6 +8493,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.13.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.14.0</div>
 </body>
 </html>

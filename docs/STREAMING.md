@@ -798,6 +798,40 @@ detector: a fresh interaction stamps `state.last_activity`, flipping
 
 See [ADMIN.md § Automatic Stream Prep](ADMIN.md) for the panel + endpoints.
 
+#### Per-file prep schedule (`item.prep`)
+
+The whole-library auto-prep above can be overridden per file from the **episode
+picker's scheduling bar** — the stream-prep sibling of the per-file download
+schedule. `item["prep"]["files"][path] ∈ {now, idle, never}` (read via `_prep_cfg`
+/ `_effective_prep_mode`; default `idle`), written by
+`POST /api/library/{id}/prep-schedule`:
+
+- **now** — `/prep-schedule` immediately enqueues a bulk prep job per file (a scoped
+  `/prep-all`).
+- **idle** — the implicit default: `auto_prep_loop` builds the bundle during the
+  idle/always window.
+- **never** — opt out of **all** automatic prep. Both `_enqueue_library_prep` (the
+  idle/always loop) and the play-driven `_play_prep_chain` skip `never` files. It's
+  **non-destructive** — an already-built bundle is kept, and a `never` file still
+  plays via the on-demand (JIT) path. Admin **Force Stream Prep** ignores `never` by
+  design (explicit "prep everything" override).
+
+The mode surfaces as `prep_mode` in the `/files` response so the bar can highlight
+the active segment. See [LIBRARY_DATA.md § `prep`](LIBRARY_DATA.md) and
+[FRONTEND.md](FRONTEND.md) (`epSchedPrep`, `_epPrepBtn`).
+
+#### Recheck file hashes (`POST /recheck`)
+
+The same bar carries a **Recheck hashes** button that force-rechecks the item's
+torrent against its piece hashes for the **checked** episodes. `recheck_files`
+snapshots each requested file's qBit progress, calls `qbit_recheck` (whole-torrent —
+qBit has no per-file recheck), waits out the `checking*` states (~5 min cap), then
+flags any file that was complete **before** but isn't **after** as damaged: qBit
+re-fetches the bad pieces, and the file's cached HLS bundle is purged
+(`shutil.rmtree` on `OFFLINE_CACHE/<key>`) so playback re-preps from the repaired
+source. The torrent is re-resumed if anything was damaged. See
+[API.md](API.md) and [FRONTEND.md](FRONTEND.md) (`epRecheckSelected`).
+
 ### Auto-prep on play (server, admin-toggled)
 
 A third, **play-driven** prep trigger, independent of the two idle/overnight

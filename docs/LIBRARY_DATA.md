@@ -146,6 +146,7 @@ PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "so
   "status": "downloading|ready|error",
   "torrent_hash": "abc123...",          // empty for uploaded items
   "download": { /* download schedule; see below */ },
+  "prep": { /* stream-prep schedule; see below */ },
   "progress": { /* per-profile; see below */ },
   "admin_only": false,                  // optional; hides from non-elevated profiles
   "default_visible_profiles": [],       // optional; if non-empty, only these profile IDs see item by default
@@ -194,6 +195,37 @@ on the per-file overrides too, leaving explicit `skip` choices alone. Written by
 "Download at idle/night only" toggle (`DownloadReq.download_mode`), and
 `library_download_pipeline` (which seeds `skip` for files the picker deselected).
 Missing/legacy items read as `{mode: "now", files: {}}` (plain anytime download).
+
+### `prep` (stream-prep schedule)
+
+```jsonc
+"prep": {
+  "files": {                     // per-file stream-prep mode (by absolute path)
+    "/abs/path/S01E01.mkv": "now",    // prep immediately (the bar's "⚡ Now")
+    "/abs/path/S01E09.mkv": "idle",   // prep during the idle/always auto-prep window (default)
+    "/abs/path/extras.mkv": "never"   // opt out of all auto-prep
+  }
+}
+```
+
+The HLS-prep sibling of `download`, governing the `.offline_cache/<sha>/` bundles
+instead of the qBit download. Read via `_prep_cfg`; effective per-file mode =
+`files[path]` if present, else **`idle`** (the implicit default — eligible for
+Automatic Stream Prep, so a brand-new item preps exactly as it did before this
+control existed). Modes (`_PREP_MODES`):
+
+| mode | meaning |
+|------|---------|
+| `now`   | Prep immediately — `POST /prep-schedule` enqueues a bulk job per file (a scoped `/prep-all`). |
+| `idle`  | Let `auto_prep_loop` build the bundle during the idle/always window (the default). |
+| `never` | Exclude from **all** auto-prep — both `_enqueue_library_prep` (idle/always) and the play-driven `_play_prep_chain` skip these files. **Non-destructive:** an already-built bundle is kept. |
+
+Written by `POST /api/library/{id}/prep-schedule`. The per-file mode is surfaced as
+`prep_mode` in the `/files` response so the episode-picker prep bar can highlight the
+active segment. Missing/legacy items read as `{files: {}}` (everything defaults to
+`idle`). Note `never` only suppresses *building a bundle ahead of time* — playing a
+"never" file still works via the on-demand (JIT) streaming path. Admin **Force Stream
+Prep** ignores `never` by design (it's an explicit "prep everything" override).
 
 ### File
 

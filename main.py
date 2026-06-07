@@ -918,6 +918,13 @@ async def qbit_delete(h: str, delete_files: bool = True) -> None:
                 data={"hashes": h, "deleteFiles": "true" if delete_files else "false"})
 
 
+async def qbit_recheck(h: str) -> None:
+    """Force a piece-level recheck of a torrent (re-verifies every downloaded piece
+    against the .torrent hashes). qBit re-fetches any piece that fails. Operates on
+    whole torrents — there is no per-file recheck in the qBit API."""
+    await qreq("POST", "/api/v2/torrents/recheck", data={"hashes": h})
+
+
 async def qbit_pause(h: str) -> None:
     """Pause a torrent. qBittorrent 5.x renamed pause→stop; /pause still works there
     as a deprecated alias, but fall back to /stop on a 404 to stay correct on the
@@ -2077,6 +2084,37 @@ def _effective_file_mode(cfg: dict, path: str) -> str:
     """Resolve a single file's effective schedule from the item download cfg."""
     fm = cfg["files"].get(path)
     return fm if fm in _FILE_MODES else cfg["mode"]
+
+
+# Per-file STREAM-PREP schedule — the sibling of the download schedule above, but
+# governing HLS stream-prep (the .offline_cache bundles) instead of the qBit
+# download. Stored as:
+#
+#   item["prep"] = { "files": { "<abs path>": "now" | "idle" | "never" } }
+#
+# Effective per-file prep mode = files[path] if present else "idle" (the implicit
+# default — eligible for Automatic Stream Prep when the box is idle/always). The
+# modes parallel the download bar:
+#   now   → prep this file immediately (the /prep-schedule endpoint enqueues a job)
+#   idle  → let auto_prep_loop prep it during the idle/always window (default)
+#   never → exclude from auto-prep entirely (_enqueue_library_prep skips it). The
+#           existing cached bundle, if any, is left intact (non-destructive).
+_PREP_MODES = ("now", "idle", "never")
+
+
+def _prep_cfg(item: dict) -> dict:
+    """Return item['prep'] with defaults filled in (never mutates the item)."""
+    pr = item.get("prep") or {}
+    files = pr.get("files") or {}
+    return {"files": {k: v for k, v in files.items() if v in _PREP_MODES}}
+
+
+def _effective_prep_mode(cfg: dict, path: str) -> str:
+    """Resolve a single file's effective prep schedule. Default 'idle' = auto-prep
+    eligible (so a brand-new library item is prepped by Automatic Stream Prep
+    exactly as before this per-file control existed)."""
+    pm = cfg["files"].get(path)
+    return pm if pm in _PREP_MODES else "idle"
 
 
 def _file_mode_to_priority(mode: str, idle_open: bool) -> int:
@@ -5441,6 +5479,7 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
                 qmap[str(Path(sp) / name)] = prog
                 qbase[Path(name).name] = prog   # best-effort; collisions rare (SxxExx names)
 
+    prep_cfg = _prep_cfg(item)
     out = []
     for f in item.get("files", []):
         path = f.get("path", "")
@@ -5482,6 +5521,7 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
             "episode": f.get("episode", 0),
             "progress": progress,
             "mode": mode,                               # now | high | idle | skip
+            "prep_mode": _effective_prep_mode(prep_cfg, path),  # now | idle | never (stream-prep schedule)
             "dl_pct": dl_pct,                           # download % (None if unknown)
             "complete": complete,                       # file fully downloaded → playable
         })
@@ -5672,6 +5712,15 @@ class FileScheduleReq(BaseModel):
     mode: str   # "now" | "high" | "idle" | "skip"
 
 
+class PrepScheduleReq(BaseModel):
+    file_paths: list[str]
+    mode: str   # "now" (prep immediately) | "idle" (auto-prep when idle) | "never" (opt out)
+
+
+class RecheckReq(BaseModel):
+    file_paths: list[str]   # which files to verify (the episode-picker checkboxes)
+
+
 @app.post("/api/library/{item_id}/download-schedule")
 async def set_download_schedule(item_id: str, req: DownloadScheduleReq) -> JSONResponse:
     """Item-level download schedule. "idle" = Pause (download only during the idle/
@@ -5724,6 +5773,133 @@ async def set_file_schedule(item_id: str, req: FileScheduleReq) -> JSONResponse:
     await put_library(lib)
     await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "downloading")})
     return JSONResponse({"ok": True, "updated": len(req.file_paths), "mode": mode})
+
+
+@app.post("/api/library/{item_id}/prep-schedule")
+async def set_prep_schedule(item_id: str, req: PrepScheduleReq) -> JSONResponse:
+    """Set the STREAM-PREP schedule for specific files (the episode-picker prep bar):
+    "now" preps them immediately, "idle" lets Automatic Stream Prep build the bundle
+    while the box is idle, "never" opts them out of all auto-prep (the existing bundle
+    is kept). The sibling of /file-schedule, but for HLS prep instead of download."""
+    if not HLS_AVAILABLE:
+        raise HTTPException(503, HLS_UNAVAILABLE_MSG)
+    mode = req.mode if req.mode in _PREP_MODES else "idle"
+    if not req.file_paths:
+        raise HTTPException(400, "file_paths required.")
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    pr = item.setdefault("prep", {"files": {}})
+    files = pr.setdefault("files", {})
+    for p in req.file_paths:
+        files[p] = mode
+    await put_library(lib)
+
+    # "now" kicks off prep right away (bulk queue, like a scoped /prep-all). "idle"
+    # and "never" only persist intent — auto_prep_loop / the prep bar act on them.
+    started = 0
+    if mode == "now":
+        for p in req.file_paths:
+            src = Path(p)
+            try:
+                if src.suffix.lower() not in VIDEO_EXTS or not src.exists():
+                    continue
+            except OSError:
+                continue
+            st = await _maybe_start_prep_job(src, item_id)
+            if st.get("status") in ("processing", "pending", "paused"):
+                started += 1
+            await asyncio.sleep(0)
+    return JSONResponse({"ok": True, "updated": len(req.file_paths), "mode": mode, "started": started})
+
+
+@app.post("/api/library/{item_id}/recheck")
+async def recheck_files(item_id: str, req: RecheckReq) -> JSONResponse:
+    """Force a qBittorrent piece-level recheck of the item's torrent, then report
+    which of the requested files came back damaged. A file is "damaged" if it was
+    fully downloaded before the recheck but isn't after (qBit found bad pieces and
+    will re-fetch them). Each damaged file's cached HLS bundle is purged so it
+    re-preps from the repaired source.
+
+    qBit rechecks whole torrents, not individual files, so the recheck covers the
+    torrent; `file_paths` only narrows which files we report on + invalidate."""
+    if not req.file_paths:
+        raise HTTPException(400, "file_paths required.")
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    h = item.get("torrent_hash")
+    if not h:
+        raise HTTPException(400, "This item has no torrent to recheck (uploaded content).")
+
+    sel = set(req.file_paths)
+
+    # Map the requested paths to qBit files and snapshot their pre-recheck progress,
+    # so we can tell "was complete, now damaged" from "was never downloaded (skip)".
+    info = await qbit_info(h)
+    if not info:
+        raise HTTPException(409, "Torrent not found in qBittorrent.")
+    sp = info.get("save_path", settings.qbit_download_path)
+
+    def _qmap(qfiles: list) -> dict:
+        m = {}
+        for i, qf in enumerate(qfiles):
+            m[str(Path(sp) / qf.get("name", ""))] = float(qf.get("progress", 0.0))
+        return m
+
+    before = _qmap(await qbit_files(h))
+
+    # Kick the recheck and wait for it to leave the checking states (bounded so a
+    # stuck/huge torrent can't hang the request forever). A short initial grace lets
+    # qBit actually enter the checking state first, so a tiny torrent that rechecks
+    # in well under a tick isn't mistaken for "already done" before it even starts.
+    await qbit_recheck(h)
+    await asyncio.sleep(1.5)
+    checked = False
+    for _ in range(600):                       # up to ~5 min (600 × 0.5 s)
+        inf = await qbit_info(h)
+        st = (inf or {}).get("state", "")
+        if st and not st.startswith("checking") and st != "queuedForChecking":
+            checked = True
+            break
+        await asyncio.sleep(0.5)
+
+    after = _qmap(await qbit_files(h))
+
+    damaged: list[str] = []
+    purged = 0
+    for path in req.file_paths:
+        was_complete = before.get(path, 0.0) >= 0.999
+        now_complete = after.get(path, 0.0) >= 0.999
+        if was_complete and not now_complete:
+            damaged.append(path)
+            # Invalidate the cached bundle so playback re-preps from the repaired file.
+            src = Path(path)
+            try:
+                if src.exists():
+                    out_dir = OFFLINE_CACHE / _offline_cache_key(src)
+                    if out_dir.exists():
+                        await asyncio.to_thread(shutil.rmtree, out_dir, ignore_errors=True)
+                        purged += 1
+            except OSError:
+                pass
+
+    # If anything was damaged, make sure the torrent is allowed to re-fetch the bad
+    # pieces (recheck can leave a finished torrent paused).
+    if damaged:
+        await qbit_resume(h)
+        await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "downloading")})
+
+    return JSONResponse({
+        "ok": True,
+        "checked": checked,                    # False ⇒ recheck didn't finish within the timeout
+        "rechecked": len(sel),
+        "damaged": [Path(p).name for p in damaged],
+        "damaged_count": len(damaged),
+        "cache_purged": purged,
+    })
 
 
 async def _vlc_wait_until_ready(
@@ -11306,9 +11482,14 @@ async def _enqueue_library_prep() -> int:
     lib = await get_library()
     queued = 0
     for item in lib.get("items", []):
+        prep_cfg = _prep_cfg(item)
         for f in item.get("files", []):
             p = Path(f.get("path", ""))
             if p.suffix.lower() not in VIDEO_EXTS:
+                continue
+            # Per-file "never" opts a file out of all automatic stream-prep (the
+            # episode-picker prep bar). The bundle, if already built, is kept.
+            if _effective_prep_mode(prep_cfg, f.get("path", "")) == "never":
                 continue
             try:
                 if not p.exists():
@@ -11519,7 +11700,15 @@ async def _play_prep_chain(item_id: str, files: list[str]) -> None:
     if not HLS_AVAILABLE or not analyzer.ffmpeg_bin():
         return
     OFFLINE_CACHE.mkdir(exist_ok=True)
+    # Honor the per-file "never" prep opt-out — even on the play-driven warm-prep of
+    # the upcoming playlist (the file being watched still streams via the on-demand
+    # path; "never" only suppresses building a cached bundle ahead of time).
+    _lib = await get_library()
+    _item = next((it for it in _lib.get("items", []) if it.get("id") == item_id), None)
+    prep_cfg = _prep_cfg(_item) if _item else {"files": {}}
     for path in files:
+        if _effective_prep_mode(prep_cfg, path) == "never":
+            continue
         p = Path(path)
         try:
             if p.suffix.lower() not in VIDEO_EXTS or not p.exists():
