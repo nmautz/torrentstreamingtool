@@ -846,6 +846,18 @@
             <span class="font-bold uppercase tracking-wide">Developer mode.</span>
             Not all branches are functional — switching to one may corrupt or wipe your data and require a full manual reinstall of StreamLink to recover. Only use this if you know what you're doing.
           </div>
+          <div id="auCommitPin" class="hidden mt-2 space-y-1.5 border-t border-gray-800 pt-3">
+            <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Pin To Commit</label>
+            <div class="flex gap-2">
+              <input id="auCommit" type="text" placeholder="e.g. f8e920a40fd8" spellcheck="false"
+                class="flex-1 min-w-0 bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none"/>
+              <button id="auCommitBtn" onclick="switchCommitNow()"
+                class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border border-indigo-700 bg-indigo-900 text-indigo-200 hover:bg-indigo-800 transition-colors disabled:opacity-50">
+                Pin Commit
+              </button>
+            </div>
+            <p class="text-[10px] text-gray-600">Checks out an exact build by SHA (7–40 hex chars) as a detached HEAD. <span class="text-amber-400">Auto-update is disabled while pinned</span> — switch back to a branch to re-enable it.</p>
+          </div>
         </div>
         <div class="space-y-1.5">
           <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Check Every (hours)</label>
@@ -889,6 +901,10 @@
         </div>
         <div id="auRepoWarn" class="hidden sm:col-span-2 text-[11px] text-red-300 border-l-4 border-red-700 bg-red-950/40 px-3 py-2">
           This installation isn't a git checkout — automatic updates are disabled. Re-deploy by cloning the repository to enable the updater.
+        </div>
+        <div id="auDetachedWarn" class="hidden sm:col-span-2 text-[11px] text-amber-300 border-l-4 border-amber-700 bg-amber-950/40 px-3 py-2">
+          <span class="font-bold uppercase tracking-wide">Pinned to a commit (detached HEAD).</span>
+          Automatic updates are disabled while pinned to a specific commit. Pick a branch above and click <strong>Switch Branch</strong> (or <strong>Apply Now</strong>) to return to a branch and re-enable auto-update.
         </div>
       </div>
 
@@ -2114,6 +2130,14 @@ async function toggleDevBranches(){
     const keep = _AU_STATIC_BRANCHES.some(b => b[0] === cur) ? cur : "main";
     _renderBranchPicker(false, keep);
   }
+  _renderCommitPin(_auDevMode);
+}
+
+// The "Pin To Commit" control is developer-only — show it whenever the
+// "show all branches" toggle is on (same gate the server enforces).
+function _renderCommitPin(devMode){
+  const el = document.getElementById("auCommitPin");
+  if(el) el.classList.toggle("hidden", !devMode);
 }
 
 function _renderAuEnabled(){
@@ -2164,6 +2188,7 @@ async function loadAutoupdate(){
       // poll reuses the cache — _renderBranchPicker only rebuilds on a change.
       if(_auDevMode && _auBranches === null) await _loadBranchList();
       _renderBranchPicker(_auDevMode, cfg.branch || "main");
+      _renderCommitPin(_auDevMode);
       document.getElementById("auInterval").value   = cfg.interval_hours || 6;
       document.getElementById("auAutoApply").checked = cfg.auto_apply !== false;
     }
@@ -2175,6 +2200,10 @@ async function loadAutoupdate(){
       cfg.last_applied_at ? `${_fmtAgo(cfg.last_applied_at)} · ${cfg.last_applied_commit || ""}` : "Never";
     document.getElementById("auServiceWarn").classList.toggle("hidden", !!d.service_installed);
     document.getElementById("auRepoWarn").classList.toggle("hidden", !!d.is_git_repo);
+    // Detached HEAD (commit pinned) ⇒ auto-update is dormant; tell the admin how
+    // to get back. Only meaningful on a real git checkout.
+    document.getElementById("auDetachedWarn").classList.toggle(
+      "hidden", !(d.is_git_repo && d.detached_head));
 
     const msg = d.message
       || (cfg.last_error ? `Last error: ${cfg.last_error}` : "Idle.");
@@ -2187,6 +2216,7 @@ async function loadAutoupdate(){
     document.getElementById("auApplyBtn").disabled  = busy || !d.is_git_repo;
     document.getElementById("auSwitchBtn").disabled = busy || !d.is_git_repo;
     document.getElementById("auResetBtn").disabled  = busy || !d.is_git_repo;
+    document.getElementById("auCommitBtn").disabled = busy || !d.is_git_repo;
     document.getElementById("auSaveBtn").disabled   = busy;
 
     const out = d.last_output || "";
@@ -2342,6 +2372,44 @@ async function switchBranchNow(){
   }finally{
     btn.disabled = false;
     btn.textContent = "Switch Branch";
+  }
+}
+
+async function switchCommitNow(){
+  const commit = document.getElementById("auCommit").value.trim();
+  if(!commit){ showToast("Enter a commit id first.", true); return; }
+  if(!/^[0-9a-fA-F]{7,40}$/.test(commit)){
+    showToast("Commit id must be 7–40 hex characters.", true);
+    return;
+  }
+  if(!confirm(
+      `Pin the working tree to commit ${commit}?\n\n` +
+      `This hard-checks out the exact commit as a detached HEAD (any local edits to tracked files are discarded).\n\n` +
+      `AUTO-UPDATE WILL BE DISABLED while pinned. Switch back to a branch (Switch Branch / Apply Now) to re-enable it. Continue?`
+  )) return;
+  const btn = document.getElementById("auCommitBtn");
+  btn.disabled = true;
+  btn.textContent = "Pinning…";
+  try{
+    const r = await fetch("/api/admin/updater/switch-commit", {
+      method: "POST",
+      headers: {...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify({commit, dev_mode: _auDevMode}),
+    });
+    if(!r.ok){
+      const t = await r.text();
+      showToast(`Pin failed: ${t || r.status}`, true);
+      return;
+    }
+    const d = await r.json();
+    showToast(`Pinned to commit ${d.commit} (detached HEAD — auto-update disabled).`);
+    document.getElementById("auCommit").value = "";
+    await loadAutoupdate();
+  }catch(_){
+    showToast("Pin failed.", true);
+  }finally{
+    btn.disabled = false;
+    btn.textContent = "Pin Commit";
   }
 }
 

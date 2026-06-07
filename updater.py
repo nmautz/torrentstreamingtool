@@ -42,6 +42,11 @@ ALLOWED_BRANCHES: tuple[str, ...] = ("main", "beta", "alpha")
 # trailing "/"), or anything that isn't HTML-safe when echoed into the picker.
 _BRANCH_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/\-]*$")
 
+# A git commit id: 7–40 hex chars (abbreviated or full SHA-1). Anything else is
+# rejected so a dev-mode commit pin can't smuggle in a refspec, option injection
+# (leading "-"), or a branch name where a raw SHA is expected.
+_COMMIT_RE = re.compile(r"^[0-9a-fA-F]{7,40}$")
+
 log = logging.getLogger("streamlink.updater")
 
 
@@ -50,6 +55,11 @@ def _looks_like_branch(name: str) -> bool:
     if not name or ".." in name or name.endswith("/") or "//" in name:
         return False
     return bool(_BRANCH_RE.match(name))
+
+
+def _looks_like_commit(sha: str) -> bool:
+    """True if `sha` is a plausible abbreviated/full commit id (7–40 hex chars)."""
+    return bool(sha) and bool(_COMMIT_RE.match(sha))
 
 
 def branch_allowed(branch: str, allow_any: bool = False) -> tuple[bool, str]:
@@ -112,6 +122,18 @@ async def is_git_repo() -> bool:
 async def current_branch() -> str:
     rc, out, _ = await _git("rev-parse", "--abbrev-ref", "HEAD", timeout=10.0)
     return out if rc == 0 else ""
+
+
+async def is_detached_head() -> bool:
+    """True when HEAD points at a raw commit rather than a branch (the admin
+    pinned a specific commit via switch_commit). `git rev-parse --abbrev-ref
+    HEAD` echoes the literal string "HEAD" in that state.
+
+    The auto-updater stands down while detached — there is no branch to track —
+    until the admin switches back to a branch. See switch_commit() and the
+    detached-HEAD guard in main.py's updater_loop.
+    """
+    return (await current_branch()) == "HEAD"
 
 
 async def current_commit(short: bool = True) -> str:
@@ -239,6 +261,50 @@ async def switch_branch(branch: str, allow_any: bool = False) -> dict:
         return {"ok": False, "error": err or "git reset failed"}
 
     return {"ok": True, "branch": branch, "commit": await current_commit()}
+
+
+async def switch_commit(commit: str, allow_any: bool = False) -> dict:
+    """Force-detach HEAD onto a specific commit id. **Developer mode only.**
+
+    A developer pins an exact build by SHA (e.g. to bisect a regression). This
+    leaves the repo in a *detached HEAD* state, which deliberately **disables
+    the auto-updater** (is_detached_head + the updater_loop guard): there is no
+    branch to track. The admin returns to auto-update by selecting a branch and
+    using Switch Branch.
+
+    Gated on `allow_any` (the admin's "show all branches" developer toggle) —
+    without it we refuse, since pinning a commit is a developer-only operation
+    and never reachable from the default three-branch picker.
+    """
+    if not allow_any:
+        return {"ok": False, "error": "Pinning a commit requires developer mode."}
+    commit = (commit or "").strip()
+    if not _looks_like_commit(commit):
+        return {"ok": False,
+                "error": f"'{commit}' is not a valid commit id (7–40 hex chars)."}
+    if not await is_git_repo():
+        return {"ok": False, "error": "Not a git checkout."}
+
+    # Make sure the object is present locally. A fetch of every branch usually
+    # brings it in; if the commit isn't on a branch tip we also try fetching the
+    # bare SHA (GitHub serves any commit reachable from an advertised ref).
+    await _git("fetch", "--prune", "origin", timeout=180.0)
+    rc, _, _ = await _git("rev-parse", "--verify", "--quiet",
+                          f"{commit}^{{commit}}", timeout=10.0)
+    if rc != 0:
+        await _git("fetch", "origin", commit, timeout=180.0)
+        rc, _, _ = await _git("rev-parse", "--verify", "--quiet",
+                              f"{commit}^{{commit}}", timeout=10.0)
+        if rc != 0:
+            return {"ok": False, "error": f"Commit '{commit}' not found on origin."}
+
+    # Force-detach onto it. `-f` discards local edits to tracked files (we own
+    # the repo); `--detach` is explicit so git never resolves it as a branch.
+    rc, _, err = await _git("checkout", "-f", "--detach", commit, timeout=60.0)
+    if rc != 0:
+        return {"ok": False, "error": err or "git checkout failed"}
+
+    return {"ok": True, "commit": await current_commit(), "detached": True}
 
 
 async def apply_update(branch: str, allow_any: bool = False) -> dict:

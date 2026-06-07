@@ -503,7 +503,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "5.8.0"
+UI_VERSION = "5.9.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -3511,6 +3511,13 @@ async def updater_loop() -> None:
             lib = await get_library()
             cfg = _autoupdate_cfg(lib)
             if not cfg["enabled"]:
+                continue
+
+            # A pinned commit (detached HEAD, set via switch_commit in dev mode)
+            # has no branch to track — auto-update would be meaningless and would
+            # silently yank the admin off their pinned build. Stand down until
+            # they switch back to a branch from the admin panel.
+            if await updater.is_detached_head():
                 continue
 
             interval_secs = cfg["interval_hours"] * 3600
@@ -9203,6 +9210,11 @@ class UpdaterConfigReq(BaseModel):
     dev_mode:       Optional[bool] = None     # "show all branches" — relax the branch gate
 
 
+class UpdaterCommitReq(BaseModel):
+    commit: str                      # 7–40 hex chars — pin HEAD to this exact build
+    dev_mode: Optional[bool] = None  # picker's "show all branches" state; required (commit-pin is dev-only)
+
+
 class UpdaterApplyReq(BaseModel):
     branch: Optional[str] = None     # default: settings.autoupdate.branch
     dev_mode: Optional[bool] = None  # picker's "show all branches" state; gates a non-canonical branch
@@ -9240,6 +9252,10 @@ async def admin_get_updater(request: Request) -> JSONResponse:
         "is_git_repo":     is_repo,
         "current_branch":  (await updater.current_branch()) if is_repo else "",
         "current_commit":  (await updater.current_commit()) if is_repo else "",
+        # True when HEAD is pinned to a raw commit (dev-mode "switch to commit").
+        # Auto-update is disabled in this state — the UI surfaces a notice + the
+        # admin returns to auto-update by switching back to a branch.
+        "detached_head":   (await updater.is_detached_head()) if is_repo else False,
         "phase":           state.updater_phase,
         "message":         state.updater_message,
         "busy":            state.updater_busy,
@@ -9425,6 +9441,59 @@ async def admin_switch_branch(request: Request, body: UpdaterConfigReq) -> JSONR
                                 f"Switched to {body.branch} ({res['commit']}).",
                                 busy=False)
     return JSONResponse({"ok": True, "branch": body.branch, "commit": res["commit"]})
+
+
+@app.post("/api/admin/updater/switch-commit")
+async def admin_switch_commit(request: Request, body: UpdaterCommitReq) -> JSONResponse:
+    """Pin the working tree to a specific commit id — a detached HEAD. **Dev mode
+    only.**
+
+    Lets a developer ride an exact build by SHA (e.g. to reproduce a regression
+    on `f8e920a…`). The repo ends up in a detached-HEAD state, which
+    deliberately **disables the auto-updater** (no branch to track — see
+    `updater_loop`'s detached-HEAD guard). The admin re-enables auto-update by
+    selecting a branch and clicking Switch Branch.
+
+    Gated on the picker's developer-mode toggle: without it the request is
+    rejected, mirroring the way a non-canonical branch is gated.
+    """
+    _require_admin(request)
+    if state.updater_busy:
+        raise HTTPException(409, "An update operation is already running.")
+    commit = (body.commit or "").strip()
+    if not commit:
+        raise HTTPException(400, "commit is required.")
+
+    lib = await get_library()
+    allow_any = bool(body.dev_mode) if body.dev_mode is not None \
+        else _autoupdate_cfg(lib)["dev_mode"]
+    if not allow_any:
+        raise HTTPException(400, "Pinning a commit requires developer mode.")
+
+    async with _updater_lock:
+        await _set_updater_phase("applying",
+                                f"Pinning to commit {commit[:12]}…", busy=True)
+        res = await updater.switch_commit(commit, allow_any=allow_any)
+        if not res.get("ok"):
+            await _set_updater_phase("error", res.get("error", "switch failed"),
+                                    busy=False)
+            raise HTTPException(500, res.get("error", "switch failed"))
+
+        # Persist the dev-mode preference if the picker sent it, so the saved
+        # state matches the action just taken (the branch itself is left as-is —
+        # a detached HEAD has none, and the saved branch is what Switch Branch
+        # restores onto).
+        if body.dev_mode is not None:
+            lib = await get_library()
+            au = lib.setdefault("settings", {}).setdefault("autoupdate", {})
+            au["dev_mode"] = bool(body.dev_mode)
+            await put_library(lib)
+
+        await _set_updater_phase(
+            "idle",
+            f"Pinned to commit {res['commit']} (detached HEAD — auto-update disabled).",
+            busy=False)
+    return JSONResponse({"ok": True, "commit": res["commit"], "detached": True})
 
 
 @app.post("/api/admin/updater/reset-hard")
