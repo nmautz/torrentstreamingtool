@@ -12,6 +12,7 @@ one series at a time, with a per-series asyncio.Lock to prevent re-entry.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import os
 import re
 import shutil
@@ -197,7 +198,14 @@ def _find_longest_match(fp_a: list[int], fp_b: list[int],
     sequences, scan and find the longest consecutive run where Hamming
     distance per frame <= FRAME_HAMMING_MAX. This is O(N^2) over a bounded
     window; for ~6 minutes at 7.8 fps that's ~3000^2 = 9M ops, ~1s in C and
-    ~10-20s in pure Python. Acceptable for a background task.
+    ~10-20s in pure Python.
+
+    This is pure-Python CPU work — it holds the GIL for the whole run. Running
+    it in a worker *thread* (asyncio.to_thread) does NOT free the event loop:
+    the GIL convoy effect on multi-core hosts starves the loop thread for
+    seconds at a time, freezing the dashboard even though the box is healthy
+    (the classic "UI laggy but RDP fine" report). So `_run_match` dispatches it
+    to a separate low-priority *process* instead — see `_match_executor`.
     """
     if not fp_a or not fp_b:
         return None
@@ -234,6 +242,64 @@ def _find_longest_match(fp_a: list[int], fp_b: list[int],
                 break
 
     return best
+
+
+def _match_worker_init() -> None:
+    """Drop this matching worker to BELOW_NORMAL OS priority.
+
+    The StreamLink server raises itself to HIGH at startup and spawned children
+    inherit that, so without this the matching process would run at HIGH and lag
+    the controls/UI — the exact thing moving it off-process is meant to fix.
+    Mirrors `_LOWPRIO_KW` (which only works for `creationflags`-spawned
+    subprocesses, not ProcessPoolExecutor workers). Best-effort: a host without
+    psutil / nice privileges just runs at normal priority."""
+    try:
+        import psutil
+        p = psutil.Process()
+        if os.name == "nt":
+            p.nice(psutil.BELOW_NORMAL_PRIORITY_CLASS)
+        else:
+            p.nice(10)
+    except Exception:
+        try:
+            if os.name == "posix":
+                os.nice(10)
+        except Exception:
+            pass
+
+
+def _new_match_executor() -> Optional[concurrent.futures.ProcessPoolExecutor]:
+    """A single-worker, low-priority process pool for the CPU-bound matcher.
+
+    One worker is enough — the orchestrator awaits matches one at a time, so we
+    only need the work *off the server process*, not parallelism (which would
+    just peg more cores). Returns None if the host can't create a process pool
+    (restricted multiprocessing — e.g. no /dev/shm); callers fall back to a
+    thread, accepting the GIL hit rather than failing analysis outright."""
+    try:
+        return concurrent.futures.ProcessPoolExecutor(
+            max_workers=1, initializer=_match_worker_init,
+        )
+    except Exception:
+        return None
+
+
+async def _run_match(executor: Optional[concurrent.futures.ProcessPoolExecutor],
+                     fp_a: list[int], fp_b: list[int],
+                     min_frames: int, max_frames: int) -> Optional[tuple[int, int, int]]:
+    """Run `_find_longest_match` off the event loop. Prefers a separate process
+    (no GIL contention); falls back to a thread if the pool is missing/broken."""
+    if executor is not None:
+        try:
+            loop = asyncio.get_running_loop()
+            return await loop.run_in_executor(
+                executor, _find_longest_match, fp_a, fp_b, min_frames, max_frames,
+            )
+        except Exception:
+            # Broken pool (worker died, platform limit) — degrade to a thread so
+            # the analysis still completes. Worse for UI latency, but correct.
+            pass
+    return await asyncio.to_thread(_find_longest_match, fp_a, fp_b, min_frames, max_frames)
 
 
 def _intersect_match(matches: list[tuple[int, int, int]],
@@ -361,6 +427,7 @@ async def _build_clusters_async(
     episodes: list[dict],
     progress_cb,
     stage_label: str,
+    executor: Optional[concurrent.futures.ProcessPoolExecutor] = None,
 ) -> list[dict]:
     """Greedy clustering of episodes that share a fingerprint segment.
 
@@ -400,9 +467,7 @@ async def _build_clusters_async(
                 )
             except Exception:
                 pass
-            m = await asyncio.to_thread(
-                _find_longest_match, fps[anchor], fps[i], min_frames, max_frames,
-            )
+            m = await _run_match(executor, fps[anchor], fps[i], min_frames, max_frames)
             if m:
                 matches[i] = m
             else:
@@ -567,19 +632,28 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
     #     first cluster and form their own on the second pass.
     #   • Episode 0 being a special — first pass finds an empty cluster and
     #     moves on; the real intro group still gets detected from ep 1+.
-    max_intro_frames = int(MAX_INTRO_SEC * FP_FRAMES_PER_SEC)
-    intro_clusters = await _build_clusters_async(
-        head_fps, MIN_MATCH_FRAMES, max_intro_frames,
-        episodes, _emit, "matching-intros",
-    )
-    intro_by_ep = _build_ep_offset_map(intro_clusters)
+    # The pairwise matcher is pure-Python CPU work; run it in a separate
+    # low-priority process so it never starves the server's event loop (a worker
+    # *thread* wouldn't — the GIL convoy effect freezes the dashboard). One pool
+    # serves both stages; tear it down in finally so the worker never lingers.
+    executor = _new_match_executor()
+    try:
+        max_intro_frames = int(MAX_INTRO_SEC * FP_FRAMES_PER_SEC)
+        intro_clusters = await _build_clusters_async(
+            head_fps, MIN_MATCH_FRAMES, max_intro_frames,
+            episodes, _emit, "matching-intros", executor,
+        )
+        intro_by_ep = _build_ep_offset_map(intro_clusters)
 
-    max_outro_frames = int(MAX_OUTRO_SEC * FP_FRAMES_PER_SEC)
-    outro_clusters = await _build_clusters_async(
-        tail_fps, MIN_MATCH_FRAMES, max_outro_frames,
-        episodes, _emit, "matching-outros",
-    )
-    outro_by_ep = _build_ep_offset_map(outro_clusters)
+        max_outro_frames = int(MAX_OUTRO_SEC * FP_FRAMES_PER_SEC)
+        outro_clusters = await _build_clusters_async(
+            tail_fps, MIN_MATCH_FRAMES, max_outro_frames,
+            episodes, _emit, "matching-outros", executor,
+        )
+        outro_by_ep = _build_ep_offset_map(outro_clusters)
+    finally:
+        if executor is not None:
+            executor.shutdown(wait=False)
 
     # ── Build per-episode result ─────────────────────────────────────────────
     # `result` already carries per-path failure entries for missing files. Now

@@ -48,7 +48,8 @@ The greedy approach handles three failure modes the original single-anchor appro
 
 - One series at a time within a series — `lock_for_series(key)` returns a per-series `asyncio.Lock`
 - Different series can run in parallel (different locks)
-- All blocking work (subprocess calls) goes through `asyncio.to_thread` so the event loop stays responsive
+- **Subprocess work** (ffmpeg / fpcalc / ffprobe via `_media_duration`, `_fpcalc_raw`, `_detect_blackframe`) goes through `asyncio.to_thread` — a thread is fine because the subprocess releases the GIL while it runs
+- **The pure-Python matcher (`_find_longest_match`) runs in a separate low-priority *process***, not a thread. It's CPU-bound Python that holds the GIL for seconds per pair; a worker thread would still starve the event loop via the GIL convoy effect (dashboard freezes for seconds while the host looks healthy — the "UI laggy but RDP fine" report). `analyze_series` spins up a one-worker `ProcessPoolExecutor` (`_new_match_executor`, dropped to BELOW_NORMAL by `_match_worker_init`) for both matching stages and tears it down in `finally`; `_run_match` falls back to `asyncio.to_thread` if the host can't create a pool. See [GOTCHAS.md](GOTCHAS.md).
 
 ## Progress reporting
 
