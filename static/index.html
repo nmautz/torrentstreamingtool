@@ -74,6 +74,37 @@
       -webkit-tap-highlight-color: transparent;
     }
     .fc-tile { flex-direction:column; align-items:center; justify-content:center; }
+    /* ── Server notices over the fullscreen controls ──────────────────────────
+       The normal top banners/toast are opaque and would either be hidden behind
+       the z-50 fullscreen overlay or, if raised above it, cover the Close/Night
+       header buttons. So while the fullscreen overlay is open we hide them and
+       mirror their text into #fcNotice instead — a dedicated strip that is
+       ABSOLUTELY positioned (overlays the title/status row, never reflows the
+       control tiles below, since users rely on muscle memory for those) and has
+       pointer-events:none so it can never block a control. */
+    body.fc-open #serverAttentionBanner,
+    body.fc-open #perfBanner,
+    body.fc-open #globalToast { display:none !important; }
+    #fcNotice {
+      position:absolute; left:0; right:0;
+      top:calc(env(safe-area-inset-top, 0px) + 48px);
+      z-index:5; pointer-events:none;
+      display:flex; flex-direction:column;
+    }
+    .fc-notice-line {
+      font-size:.72rem; line-height:1.2; font-weight:700;
+      padding:.45rem .75rem; text-align:center;
+      border-bottom:1px solid rgba(0,0,0,.45);
+      display:flex; align-items:center; justify-content:center; gap:.4rem;
+    }
+    .fc-notice-line::before {
+      content:""; width:.45rem; height:.45rem; flex-shrink:0;
+      background:currentColor;
+    }
+    .fc-notice-amber  { background:rgba(120,53,15,.97);  color:#fcd34d; }
+    .fc-notice-red    { background:rgba(127,29,29,.97);   color:#fca5a5; }
+    .fc-notice-indigo { background:rgba(49,46,129,.97);   color:#c7d2fe; }
+    .fc-notice-green  { background:rgba(20,83,45,.97);    color:#86efac; }
     /* Handoff-to-device greyed state: shown when the current file isn't prepped
        for on-device streaming. Stays clickable so the tooltip / toast can explain. */
     .handoff-disabled { opacity:.4 !important; filter:grayscale(1); cursor:not-allowed; }
@@ -976,7 +1007,7 @@
 <!-- ── Global Toast (visible from any tab) ────────────────────────────────── -->
 <!-- top-24 on mobile (two-row navbar ≈ 92 px), top-16 on sm+ (single-row navbar ≈ 56 px). -->
 <div id="globalToast"
-  class="hidden fixed top-24 sm:top-16 inset-x-0 z-45 px-4 pointer-events-none">
+  class="hidden fixed top-24 sm:top-16 inset-x-0 z-[70] px-4 pointer-events-none">
   <div id="globalToastInner"
     class="max-w-2xl mx-auto px-4 py-2.5 text-sm text-center fade-in"></div>
 </div>
@@ -986,7 +1017,7 @@
      disabled because the admin hasn't supplied a required API key, or when
      an update is being applied. Stays out of the way otherwise. -->
 <div id="serverAttentionBanner"
-  class="hidden sticky top-0 z-30 bg-amber-950/95 border-b border-amber-800 text-amber-200 text-xs sm:text-sm px-3 py-2 flex items-center justify-between gap-3">
+  class="hidden sticky top-0 z-[70] bg-amber-950/95 border-b border-amber-800 text-amber-200 text-xs sm:text-sm px-3 py-2 flex items-center justify-between gap-3">
   <div id="serverAttentionMsg" class="min-w-0 flex-1 leading-tight"></div>
   <a id="serverAttentionLink" href="/admin"
     class="flex-shrink-0 text-[11px] font-bold uppercase tracking-wide px-3 py-1.5 border border-amber-700 hover:bg-amber-900 transition-colors">
@@ -998,7 +1029,7 @@
 <!-- Shown while the host is degraded/overloaded (e.g. catching up on background
      prep after you arrive). Auto-clears the moment resources return to normal. -->
 <div id="perfBanner"
-  class="hidden sticky top-0 z-30 border-b text-xs sm:text-sm px-3 py-2 flex items-center gap-2 leading-tight">
+  class="hidden sticky top-0 z-[70] border-b text-xs sm:text-sm px-3 py-2 flex items-center gap-2 leading-tight">
   <span id="perfBannerDot" class="w-2 h-2 flex-shrink-0"></span>
   <div id="perfBannerMsg" class="min-w-0 flex-1"></div>
 </div>
@@ -1408,6 +1439,10 @@
       </button>
     </div>
   </div>
+
+  <!-- Server notices (errors/warnings, reboot, network) — overlaid on the title
+       row so the control tiles below never shift. Painted by renderFcNotice(). -->
+  <div id="fcNotice" class="hidden"></div>
 
   <!-- Title + time info -->
   <div class="flex-shrink-0 flex items-center gap-3 px-4 py-2 border-b border-gray-800 min-h-[48px]">
@@ -2186,16 +2221,19 @@ function showAlert(msg,type="error") {
   const inner=document.getElementById("globalToastInner");
   inner.className=`px-4 py-2.5 text-sm text-center ${ALERT_STYLES[type]||ALERT_STYLES.error}`;
   inner.textContent=msg; toast.classList.remove("hidden");
+  renderFcNotice(); // mirror into the fullscreen-controls notice strip if open
   clearTimeout(alertTimer);
   const delay=type==="error"?7000:4000;
   alertTimer=setTimeout(()=>{
     el.classList.add("hidden");
     toast.classList.add("hidden");
+    renderFcNotice();
   },delay);
 }
 function hideAlert(){
   document.getElementById("alert").classList.add("hidden");
   document.getElementById("globalToast").classList.add("hidden");
+  renderFcNotice();
 }
 
 // ── Server-attention banner (missing env keys / pending update) ──────────
@@ -2221,20 +2259,22 @@ function renderServerAttention(d){
     const tone = (phase === "rebooting")
       ? "bg-red-950/95 border-red-700 text-red-200"
       : "bg-indigo-950/95 border-indigo-700 text-indigo-200";
-    el.className = `sticky top-0 z-30 ${tone} border-b text-xs sm:text-sm px-3 py-2 flex items-center justify-between gap-3`;
+    el.className = `sticky top-0 z-[70] ${tone} border-b text-xs sm:text-sm px-3 py-2 flex items-center justify-between gap-3`;
     const friendly = updaterMsg || phase;
     const verb = (phase === "rebooting") ? "Rebooting server" : "Updating server";
     msg.textContent = `${verb}… ${friendly}`;
     el.classList.remove("hidden");
+    renderFcNotice();
     return;
   }
 
   // Required env keys missing — banner everyone sees.
   if(requiredMissing.length){
     const labels = requiredMissing.map(k => k.label).join(", ");
-    el.className = "sticky top-0 z-30 bg-amber-950/95 border-b border-amber-800 text-amber-200 text-xs sm:text-sm px-3 py-2 flex items-center justify-between gap-3";
+    el.className = "sticky top-0 z-[70] bg-amber-950/95 border-b border-amber-800 text-amber-200 text-xs sm:text-sm px-3 py-2 flex items-center justify-between gap-3";
     msg.textContent = `Server needs admin attention: ${labels} not configured.`;
     el.classList.remove("hidden");
+    renderFcNotice();
     return;
   }
 
@@ -2242,6 +2282,7 @@ function renderServerAttention(d){
   // who can act on it. The non-admin UI hides this case entirely.
   // We don't know if the viewer is an admin here, so we just hide the banner.
   el.classList.add("hidden");
+  renderFcNotice();
 }
 
 // Host-performance banner. Shows while the box is degraded/overloaded — typically
@@ -2253,7 +2294,7 @@ function renderPerfBanner(d){
   if(!el) return;
   const s=d.sys_status||{};
   const overall=s.overall;
-  if(overall!=="degraded" && overall!=="overloaded"){ el.classList.add("hidden"); return; }
+  if(overall!=="degraded" && overall!=="overloaded"){ el.classList.add("hidden"); renderFcNotice(); return; }
   const msg=document.getElementById("perfBannerMsg");
   const dot=document.getElementById("perfBannerDot");
   // Name what's hot so it's not a mystery ("CPU, GPU…").
@@ -2263,13 +2304,67 @@ function renderPerfBanner(d){
   if(s.ram&&s.ram.status!=="ok") hot.push("RAM");
   if(s.net&&s.net.status!=="ok") hot.push("network");
   const over=overall==="overloaded";
-  el.className=`sticky top-0 z-30 border-b text-xs sm:text-sm px-3 py-2 flex items-center gap-2 leading-tight ${over?'bg-red-950/95 border-red-800 text-red-200':'bg-amber-950/95 border-amber-800 text-amber-200'}`;
+  el.className=`sticky top-0 z-[70] border-b text-xs sm:text-sm px-3 py-2 flex items-center gap-2 leading-tight ${over?'bg-red-950/95 border-red-800 text-red-200':'bg-amber-950/95 border-amber-800 text-amber-200'}`;
   dot.className=`w-2 h-2 flex-shrink-0 ${over?'bg-red-500 blink':'bg-amber-500'}`;
   const what=hot.length?` (${hot.join(", ")})`:"";
   msg.textContent=over
     ? `Host is overloaded${what} — finishing background work. Performance may be reduced for a moment.`
     : `Host is busy${what} — catching up on background work. Performance may be briefly reduced.`;
   el.classList.remove("hidden");
+  renderFcNotice();
+}
+
+// ── Server notices over the fullscreen controls ─────────────────────────────
+// While the fullscreen VLC controls are open, the normal top banners/toast are
+// CSS-hidden (body.fc-open) — they'd otherwise cover the Close/Night header
+// buttons or hide behind the overlay. This mirrors whatever those elements are
+// currently saying into #fcNotice, an absolutely-positioned strip over the
+// title row that never reflows the control tiles (muscle memory) and never
+// blocks them (pointer-events:none). It reads the live banner/toast DOM as the
+// single source of truth, so there's no parallel notice state to keep in sync.
+function _fcNoticeTone(cls){
+  // Map a Tailwind colour found in the source element's classes to a tone.
+  if(/\bred-|bg-red/.test(cls)) return "red";
+  if(/\bgreen-|bg-green/.test(cls)) return "green";
+  if(/\bindigo-|bg-indigo/.test(cls)) return "indigo";
+  return "amber"; // amber / yellow / blue / anything else
+}
+function renderFcNotice(){
+  const strip=document.getElementById("fcNotice");
+  if(!strip) return;
+  const fc=document.getElementById("fullscreenControls");
+  const inFC = fc && !fc.classList.contains("hidden");
+  strip.textContent="";
+  if(!inFC){ strip.classList.add("hidden"); return; }
+
+  // Collect active notices in priority order: reboot/update first, then host
+  // performance/network, then the latest error/warning toast.
+  const items=[];
+  const ban=document.getElementById("serverAttentionBanner");
+  if(ban && !ban.classList.contains("hidden")){
+    const m=document.getElementById("serverAttentionMsg");
+    items.push({msg:(m?m.textContent:"")||"", tone:_fcNoticeTone(ban.className)});
+  }
+  const perf=document.getElementById("perfBanner");
+  if(perf && !perf.classList.contains("hidden")){
+    const m=document.getElementById("perfBannerMsg");
+    items.push({msg:(m?m.textContent:"")||"", tone:_fcNoticeTone(perf.className)});
+  }
+  const toast=document.getElementById("globalToast");
+  if(toast && !toast.classList.contains("hidden")){
+    const inner=document.getElementById("globalToastInner");
+    items.push({msg:(inner?inner.textContent:"")||"", tone:_fcNoticeTone(inner?inner.className:"")});
+  }
+
+  if(!items.length){ strip.classList.add("hidden"); return; }
+  for(const it of items){
+    if(!it.msg) continue;
+    const line=document.createElement("div");
+    line.className=`fc-notice-line fc-notice-${it.tone}`;
+    line.textContent=it.msg;
+    strip.appendChild(line);
+  }
+  strip.classList.toggle("hidden", !strip.childElementCount);
 }
 
 // ── VPN UI ─────────────────────────────────────────────────────────────────
@@ -2648,10 +2743,14 @@ function openFullscreenControls(){
   const fvl=document.getElementById("fcVolumeLabel");
   if(fvl) fvl.textContent=vol+"%";
   fc.classList.remove("hidden");
+  document.body.classList.add("fc-open"); // hide top banners/toast, use #fcNotice
+  renderFcNotice();
 }
 
 function closeFullscreenControls(){
   document.getElementById("fullscreenControls").classList.add("hidden");
+  document.body.classList.remove("fc-open"); // restore the normal top banners/toast
+  renderFcNotice();
   _fcDismissed = true;
 }
 
@@ -8063,6 +8162,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.7.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.8.0</div>
 </body>
 </html>
