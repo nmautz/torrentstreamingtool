@@ -503,7 +503,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "5.10.0"
+UI_VERSION = "5.11.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -3897,7 +3897,9 @@ async def library_download_monitor() -> None:
                     state.downloading_count = max(0, state.downloading_count - 1)
                     changed = True
                     await broadcast("library_update", {"item_id": item["id"], "status": "ready"})
-                    _schedule_series_analysis_if_eligible(item, lib)
+                    # Smart Skip fingerprinting is NOT triggered here anymore — it
+                    # rides along with stream prep instead (`_ensure_analysis_for`
+                    # in `_run_offline_job`). See docs/ANALYZER.md § Trigger flow.
                     if state.play_when_ready_item_id == item["id"]:
                         pwr_profile = state.play_when_ready_profile_id
                         pwr_fp = state.play_when_ready_file_path
@@ -4212,6 +4214,12 @@ def _schedule_series_analysis_if_eligible(item: dict, lib: dict) -> None:
     if not analyzer.is_available():
         return
     key = _series_key(item)
+    # Don't stack runs: a /prep-all of a 77-file series fires the post-prep hook
+    # 77 times. The in-flight pass already fingerprints every ready file in the
+    # series, so later prep completions are covered without re-queuing.
+    job = state.analysis_jobs.get(key) or {}
+    if job.get("status") == "running":
+        return
     peers = [it for it in _items_for_series_key(lib, key) if it.get("status") == "ready"]
 
     def _needs_reanalysis(file_data: Optional[dict]) -> bool:
@@ -4220,10 +4228,12 @@ def _schedule_series_analysis_if_eligible(item: dict, lib: dict) -> None:
         analysis = file_data.get("analysis") or {}
         if analysis.get("source") == "manual":
             return False
-        # Previously-failed files retry whenever a peer in the series flips to
-        # ready — a new sibling can unlock a cluster that wasn't possible before.
-        if analysis.get("source") == "failed":
-            return True
+        # Failures are sticky: a previously-failed file is NOT auto-retried (it
+        # would otherwise re-run on every prep in the series). It only re-runs
+        # when ANALYZER_VERSION bumps (the version check below — failed entries
+        # store the current version, so they qualify after a bump) or when an
+        # admin forces it via the Smart Skip "Analyze" button (which calls
+        # _run_series_analysis directly and skips this guard). See docs/ANALYZER.md.
         return analysis.get("version", 0) < analyzer.ANALYZER_VERSION
 
     needs_run = False
@@ -4237,6 +4247,21 @@ def _schedule_series_analysis_if_eligible(item: dict, lib: dict) -> None:
             break
     if needs_run:
         asyncio.create_task(_run_series_analysis(key))
+
+
+async def _ensure_analysis_for(src: Path, item_id: str = "") -> None:
+    """Schedule a Smart Skip fingerprint pass for the item a freshly-prepped
+    source belongs to. The post-prep counterpart of `_ensure_stt_for` — called
+    from `_run_offline_job` once the HLS bundle lands. Best-effort and
+    non-blocking: it only does one library read + (at most) a `create_task`, so
+    it never holds up the prep job. `_schedule_series_analysis_if_eligible`
+    handles the running-guard, eligibility, and the per-series lock."""
+    if not analyzer.is_available() or not item_id:
+        return
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if item:
+        _schedule_series_analysis_if_eligible(item, lib)
 
 
 # Pre-roll: show the skip button this many seconds before the range starts so
@@ -11096,6 +11121,13 @@ async def _run_offline_job(job_id: str) -> None:
                 await _ensure_stt_for(src, job.get("item_id", ""), info=info, queue="bulk")
             except Exception as exc:
                 hls_log.warning("job %s: STT enqueue skipped: %s", job_id, exc)
+            # Smart Skip fingerprinting also rides along with prep now (replacing
+            # the old download-ready trigger). Fire-and-forget at BELOW_NORMAL
+            # priority — a failure here must never fail the HLS bundle.
+            try:
+                await _ensure_analysis_for(src, job.get("item_id", ""))
+            except Exception as exc:
+                hls_log.warning("job %s: fingerprint enqueue skipped: %s", job_id, exc)
         except Exception as e:
             hls_log.exception("job %s CRASHED: %s", job_id, e)
             job["status"] = "error"; job["error"] = str(e)

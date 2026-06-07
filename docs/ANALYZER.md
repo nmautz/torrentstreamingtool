@@ -56,11 +56,30 @@ The greedy approach handles three failure modes the original single-anchor appro
 
 ## Trigger flow (in `main.py`)
 
-1. `library_download_monitor` flips an item to `status="ready"`
-2. Calls `_schedule_series_analysis_if_eligible(item, lib)` ([main.py:1320](../main.py#L1320))
-3. Checks: analyzer available? AND at least one file in this series bucket still needs analysis (no `skip_data`, or stale `analysis.version`)? AND user did NOT manually mark it (manual entries are never overwritten)
-4. If yes, `asyncio.create_task(_run_series_analysis(key))`
-5. `_run_series_analysis` ([main.py:1244](../main.py#L1244)) acquires the lock, calls `analyzer.analyze_series`, writes results back into `library.json` under each item's `skip_data`, broadcasts `analysis_status`
+Fingerprinting **rides along with stream prep**, not with the download. When a
+file's HLS bundle finishes, `_run_offline_job` calls `_ensure_analysis_for(src,
+item_id)` (the post-prep sibling of `_ensure_stt_for`) — fire-and-forget, so a
+failure never fails the bundle and analysis never blocks prep. (Before, the
+trigger was `library_download_monitor`'s ready-flip; that call was removed so
+un-prepped content is never fingerprinted. Auto-prep is on by default, so
+prepped content is the right population.) On macOS prep is disabled
+(`HLS_AVAILABLE` false), so fingerprinting never triggers there — see
+[GOTCHAS.md](GOTCHAS.md).
+
+1. `_run_offline_job` completes an HLS bundle (`status="done"`)
+2. Calls `_ensure_analysis_for(src, item_id)` → looks up the item and calls
+   `_schedule_series_analysis_if_eligible(item, lib)`
+3. Running-guard: if a pass for this `series_key` is already `running`, return
+   (a `/prep-all` fires the hook once per file; the in-flight pass already covers
+   the whole series)
+4. Eligibility: analyzer available? AND at least one file in this series bucket
+   still needs analysis (no `skip_data`, or stale `analysis.version`)? AND user
+   did NOT manually mark it (manual entries are never overwritten)? **Failed
+   files are NOT eligible** (no auto-retry — see [Failure tracking](#failure-tracking))
+5. If yes, `asyncio.create_task(_run_series_analysis(key))`
+6. `_run_series_analysis` acquires the lock, calls `analyzer.analyze_series`,
+   writes results back into `library.json` under each item's `skip_data`,
+   broadcasts `analysis_status`
 
 ## `_series_key` ([main.py:1192](../main.py#L1192))
 
@@ -159,12 +178,21 @@ Error codes (defined as constants at the top of `analyzer.py`):
 | `no_duration`      | ffprobe couldn't read the container | Re-encode or remux; check codec support |
 | `fp_empty`         | fpcalc produced no fingerprint for the head | Unsupported audio codec, silent track, corruption |
 | `too_short`        | < 60 s — fallback heuristic is meaningless | None (expected for trailers, recap clips) |
-| `no_skip_points`   | Fingerprinted but no cluster and no black frame | Often resolves when more peers in the series arrive |
+| `no_skip_points`   | Fingerprinted but no cluster and no black frame | Admin re-run after more peers in the series are prepped (no longer auto-retries) |
 | `exception`        | Unhandled error inside `analyze_series` | See `streamlink_app.log` for the traceback |
 
-`_schedule_series_analysis_if_eligible` treats `source == "failed"` as
-eligible for re-analysis on the next ready-flip in the series, so a new
-sibling arriving can unlock a previously-failed file without an admin click.
+**Failures are sticky.** `_schedule_series_analysis_if_eligible` does **not**
+auto-retry `source == "failed"` files (it used to re-run them on every sibling
+ready-flip, which meant a failed file churned the analyzer on every prep in the
+series). A failed file re-runs only when:
+
+- **`ANALYZER_VERSION` is bumped** — failed entries store the current version, so
+  `version < ANALYZER_VERSION` qualifies them after a bump (the algorithm
+  changed, so the prior failure may no longer apply); or
+- **an admin forces it** — the Smart Skip tab's **Analyze** button
+  (`POST /api/admin/library/{id}/analyze` → `_run_series_analysis` directly)
+  re-runs the whole series unconditionally, skipping the eligibility guard.
+
 Manually-edited entries (`source == "manual"`) are still never overwritten.
 
 ## Frontend

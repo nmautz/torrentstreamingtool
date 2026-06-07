@@ -252,6 +252,14 @@ Key decisions:
   also returned by the job-done response) and the on-device player attaches it as
   a `<track>`. The episode picker's per-row Prep and the **AI** button in the
   player both feed the same machinery. Full detail in [STT.md](STT.md).
+- **Successful encode ⇒ Smart Skip fingerprinting.** After the bundle lands,
+  `_run_offline_job` also calls `_ensure_analysis_for(src, item_id)` — the
+  fire-and-forget sibling of the STT hook. This is the **only** trigger for
+  intro/credits audio fingerprinting now (the old download-ready trigger was
+  removed), so it runs on prepped content only. Non-blocking: it just schedules
+  a per-series pass (at BELOW_NORMAL priority) and never holds up prep, and a
+  failure never fails the bundle. Failed files don't auto-retry. Full detail in
+  [ANALYZER.md § Trigger flow](ANALYZER.md).
 - **6-second segments, fmp4, independent_segments.** Modern HLS defaults.
   Switching audio/sub mid-stream doesn't require an extra fetch.
 - **The fmp4 init filename is templated explicitly** (`-hls_fmp4_init_filename
