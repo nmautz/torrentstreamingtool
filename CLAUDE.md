@@ -20,10 +20,9 @@ When a capability can't be identical across all three, Windows wins. Note any pl
 
 ## ⚠️ Keeping documentation current — read this first
 
-This repo has **two** sources of truth you must keep current as the code changes:
+Keep the reference docs current as the code changes:
 
-1. **[PLAN.md](PLAN.md)** — the milestone-by-milestone roadmap. Every time you complete, defer, or add a task, update the corresponding checkbox and any inline notes. This is non-negotiable. If you ship a change that closes/opens a milestone, the very next thing you do is edit PLAN.md.
-2. **`docs/*.md`** — topic-specific reference docs. When you change behaviour the docs describe (an endpoint signature, a state field, the skip algorithm, the auth flow, etc.), update the relevant doc in the same patch. If you introduce a new gotcha, add it to `docs/GOTCHAS.md`.
+- **`docs/*.md`** — topic-specific reference docs. When you change behaviour the docs describe (an endpoint signature, a state field, the skip algorithm, the auth flow, etc.), update the relevant doc in the same patch. If you introduce a new gotcha, add it to `docs/GOTCHAS.md`.
 
 Default to editing existing docs. Only create a new `docs/<topic>.md` if a genuinely new subsystem appears that doesn't fit anywhere existing.
 
@@ -96,7 +95,6 @@ Current version lives in the `<div>` at the very bottom of `static/index.html`. 
 ## Working memory: where to put what
 
 - **In-flight task plan / todos** → ephemeral, not persisted (use TodoWrite during work).
-- **Roadmap of features** → [PLAN.md](PLAN.md). Update as you finish work.
 - **Reference docs about how the system works** → `docs/*.md`. Update alongside code changes.
 - **Non-obvious behaviours / footguns discovered during work** → `docs/GOTCHAS.md`.
 - **README.md** → user-facing install/quickstart only. Don't put architecture details here; link to `docs/` if needed.
