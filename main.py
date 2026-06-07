@@ -135,6 +135,14 @@ class Settings(BaseSettings):
     # is persisted in library.json → settings.admin_overrides.tmdb_api_key.
     tmdb_api_key: str = ""
 
+    # Windows host account (Administrator) used to run elevated installs silently —
+    # so StreamLink can complete a UAC-gated install (e.g. the AirPlay receiver
+    # .msi + Bonjour) on its own instead of needing someone at the host to click
+    # the UAC prompt. Optional, Windows-only. See _run_elevated_windows /
+    # docs/AIRPLAY.md. Stored in .env like the other secrets (plaintext on disk).
+    windows_admin_user: str = ""
+    windows_admin_password: str = ""
+
 
 settings = Settings()
 
@@ -187,6 +195,24 @@ ENV_KEY_FEATURES: list[dict] = [
         "attr": "tmdb_api_key",
         "label": "Episode metadata",
         "description": "Optional TMDb v3 API key for backdrops/posters/episode titles.",
+        "required": False,
+        "secret": True,
+    },
+    {
+        "key": "WINDOWS_ADMIN_USER",
+        "attr": "windows_admin_user",
+        "label": "Windows host account (for silent installs)",
+        "description": "Windows Administrator username on the host. Lets StreamLink run "
+                       "UAC-gated installs (e.g. the AirPlay receiver) on its own. Windows only.",
+        "required": False,
+        "secret": False,
+    },
+    {
+        "key": "WINDOWS_ADMIN_PASSWORD",
+        "attr": "windows_admin_password",
+        "label": "Windows host password (for silent installs)",
+        "description": "Password for the Windows account above. Stored in .env on the host "
+                       "(plaintext, like the other secrets). Enables self-elevating installs.",
         "required": False,
         "secret": True,
     },
@@ -276,6 +302,80 @@ def _reload_settings() -> None:
     global, so rebinding here propagates to all callers."""
     global settings
     settings = Settings()
+
+
+def _windows_admin_creds() -> tuple[str, str]:
+    """(user, password) for self-elevating installs, or ('','') if not configured."""
+    return (settings.windows_admin_user or "").strip(), settings.windows_admin_password or ""
+
+
+def _run_elevated_windows(cmdline: str, timeout: float = 600.0) -> tuple[int, str]:
+    """Run `cmdline` ELEVATED on Windows using the stored admin credentials, with
+    no interactive UAC prompt — so StreamLink can complete UAC-gated installs on
+    its own (the user's request).
+
+    Mechanism: register a one-shot Scheduled Task with `/RU <user> /RP <password>
+    /RL HIGHEST`, run it, poll until it finishes, then delete it. `/RL HIGHEST`
+    grants the full elevated token (Task Scheduler is the one place stored creds
+    can yield elevation without a UAC consent dialog); `/RP` supplies the password
+    non-interactively. We wrap the real command in a temp `.cmd` so quoting/spaces
+    in the command can't break `schtasks /TR` parsing, and read the task's exit
+    code back from "Last Result".
+
+    Returns (exit_code, detail). Raises RuntimeError if creds aren't configured.
+    NOTE: the password is briefly visible on the `schtasks` command line (a known
+    schtasks limitation). Windows-only; never call off Windows.
+    """
+    import tempfile, time as _time
+    user, pw = _windows_admin_creds()
+    if not user or not pw:
+        raise RuntimeError("No Windows admin credentials configured "
+                           "(set them in Admin → System / env keys).")
+    tn = "StreamLinkElevated"
+    work = Path(tempfile.mkdtemp(prefix="sl_elev_"))
+    cmd_file = work / "run.cmd"
+    cmd_file.write_text("@echo off\r\n" + cmdline + "\r\nexit /b %ERRORLEVEL%\r\n",
+                        encoding="ascii", errors="replace")
+    tr = f'cmd /c "{cmd_file}"'
+    try:
+        create = subprocess.run(
+            ["schtasks", "/Create", "/F", "/TN", tn, "/TR", tr,
+             "/SC", "ONCE", "/ST", "00:00", "/RU", user, "/RP", pw, "/RL", "HIGHEST"],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        if create.returncode != 0:
+            raise RuntimeError(f"schtasks create failed: {(create.stderr or create.stdout).strip()}")
+        run = subprocess.run(["schtasks", "/Run", "/TN", tn],
+                             capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        if run.returncode != 0:
+            raise RuntimeError(f"schtasks run failed: {(run.stderr or run.stdout).strip()}")
+        deadline = _time.time() + timeout
+        last_result = "0"
+        while _time.time() < deadline:
+            _time.sleep(2.0)
+            q = subprocess.run(["schtasks", "/Query", "/TN", tn, "/FO", "LIST", "/V"],
+                               capture_output=True, text=True, stdin=subprocess.DEVNULL)
+            out = q.stdout or ""
+            status = ""
+            for line in out.splitlines():
+                ls = line.strip()
+                if ls.startswith("Status:"):
+                    status = ls.split(":", 1)[1].strip()
+                elif ls.startswith("Last Result:"):
+                    last_result = ls.split(":", 1)[1].strip()
+            if status and status.lower() != "running":
+                break
+        try:
+            code = int(last_result, 0)
+        except ValueError:
+            code = 1
+        return code, f"exit={code}"
+    finally:
+        subprocess.run(["schtasks", "/Delete", "/F", "/TN", tn],
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        try:
+            shutil.rmtree(work, ignore_errors=True)
+        except Exception:
+            pass
 
 
 LIBRARY_FILE = Path(__file__).parent / "library.json"
@@ -11566,12 +11666,15 @@ async def _run_component_install(component: str, model: str = "base", build: str
             _write_env_keys({"_FPCALC_BIN": binp})
 
         elif component == "airplay":
-            # AirPlay screen-mirror receiver (uxplay-windows). Unlike the portable
-            # zips above, this is a GUI installer .exe — we download it and launch
-            # it best-effort (the wizard shows on the host's desktop; harmless if the
-            # server runs session-0). The admin finishes the wizard on the host TV,
-            # then Refresh detects the installed binary. Pre-enable AIRPLAY_RECEIVER
-            # so run.py launches it on next start. See docs/AIRPLAY.md.
+            # AirPlay screen-mirror receiver (uxplay-windows). The releases ship an
+            # x64 `.msi` installer (registers Apple Bonjour) and a portable `.zip`.
+            # Three install paths, best → fallback:
+            #   1. .msi + stored Windows admin creds → SILENT elevated install via
+            #      `msiexec /qn` through _run_elevated_windows (no UAC click needed).
+            #   2. .msi, no creds → best-effort GUI launch (`msiexec /i`); the user
+            #      approves UAC + finishes the wizard on the host, then hits Refresh.
+            #   3. .zip → extract in place (portable; may still need Bonjour).
+            # Either way pre-enable AIRPLAY_RECEIVER so run.py launches it next start.
             if os.name != "nt":
                 raise RuntimeError("The AirPlay screen-mirror receiver is Windows-only.")
             url = await asyncio.to_thread(setup._resolve_airplay_win_installer_url)
@@ -11580,16 +11683,40 @@ async def _run_component_install(component: str, model: str = "base", build: str
                                    "Install it manually: https://github.com/leapbtw/uxplay-windows/releases")
             dest = setup.TOOLS_DIR / "airplay" / url.rsplit("/", 1)[-1]
             await _download_to(url, dest, job)
-            # Pre-enable auto-launch; the receiver binary is detected on next status read.
             _write_env_keys({"AIRPLAY_RECEIVER": "1"})
-            # Best-effort detached launch of the wizard (no wait — never blocks/hangs).
-            try:
-                subprocess.Popen([str(dest)],
-                                 creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
-            except Exception as exc:
-                hls_log.info("airplay installer launch skipped: %s", exc)
-            job["message"] = ("Installer downloaded. Complete the wizard on the host "
-                              "(allow it through the firewall), then click Refresh.")
+            have_creds = bool(_windows_admin_creds()[0] and _windows_admin_creds()[1])
+            if dest.suffix.lower() == ".zip":
+                okz = await asyncio.to_thread(setup._extract_archive, dest, setup.TOOLS_DIR / "airplay")
+                if not okz:
+                    raise RuntimeError("Could not extract the AirPlay receiver archive.")
+                binp = setup.find_exe(*setup.uxplay_win_candidates())
+                if binp:
+                    _write_env_keys({"_UXPLAY_WIN": binp})
+                job["message"] = ("Portable AirPlay receiver extracted. If it doesn't appear "
+                                  "in your iPhone's Screen Mirroring list, install Apple Bonjour.")
+            elif have_creds:
+                # Silent, self-elevating MSI install — no UAC prompt on the host.
+                job["message"] = "Installing silently with the stored Windows credentials…"
+                code, detail = await asyncio.to_thread(
+                    _run_elevated_windows, f'msiexec /i "{dest}" /qn /norestart', 900.0)
+                if code not in (0, 3010):   # 3010 = success, reboot required
+                    raise RuntimeError(f"Silent MSI install failed ({detail}). "
+                                       f"Run it manually on the host: {dest}")
+                binp = setup.find_exe(*setup.uxplay_win_candidates())
+                if binp:
+                    _write_env_keys({"_UXPLAY_WIN": binp})
+                job["message"] = ("Installed silently. If it doesn't appear in Screen Mirroring, "
+                                  "confirm the Bonjour Service is running.")
+            else:
+                # No creds → best-effort GUI launch; the user finishes it on the host.
+                try:
+                    subprocess.Popen(["msiexec", "/i", str(dest)],
+                                     creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+                except Exception as exc:
+                    hls_log.info("airplay msiexec launch skipped: %s", exc)
+                job["message"] = ("Installer downloaded. Approve the UAC prompt + finish the "
+                                  "wizard on the host, then click Refresh. (Tip: set Windows "
+                                  "admin credentials in Admin → System to install silently.)")
 
         else:
             raise RuntimeError(f"Unknown component: {component}")
@@ -11630,16 +11757,24 @@ def _component_status_payload() -> dict:
     # is detected on disk; the GUI installer may sit downloaded-but-not-yet-run in
     # tools/airplay/, in which case we nudge the admin to finish the wizard.
     ap_bin = setup.find_exe(*setup.uxplay_win_candidates()) if win else None
+    creds_set = bool(settings.windows_admin_user and settings.windows_admin_password)
     ap_entry = {"label": "AirPlay receiver (iPhone screen mirror)",
                 "installed": bool(ap_bin), "path": ap_bin or "", "installable": win,
+                "windows_creds_set": creds_set,
                 "purpose": "Mirror an iPhone onto the host TV (Control Center → Screen Mirroring)"}
     if win and not ap_bin:
+        downloaded = False
         try:
             ap_dir = setup.TOOLS_DIR / "airplay"
-            if ap_dir.exists() and any(ap_dir.glob("*.exe")):
-                ap_entry["note"] = "Installer downloaded — run it on the host, then Refresh."
+            downloaded = ap_dir.exists() and any(
+                p.suffix.lower() in (".msi", ".exe", ".zip") for p in ap_dir.glob("*"))
         except Exception:
             pass
+        if downloaded and not creds_set:
+            ap_entry["note"] = "Installer downloaded — run it on the host, then Refresh."
+        elif not creds_set:
+            ap_entry["note"] = ("Tip: set Windows admin credentials (Admin → Updates → env keys) "
+                                "to install silently — otherwise approve the UAC prompt on the host.")
     comps["airplay"] = ap_entry
     for k, c in comps.items():
         j = _component_jobs.get(k)

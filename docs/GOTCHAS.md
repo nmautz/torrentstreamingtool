@@ -636,6 +636,10 @@ The Windows AirPlay receiver (see [AIRPLAY.md](AIRPLAY.md)) only appears in the 
 
 Second footgun: the **VLC-yield** logic (`main.py airplay_mirror_watch` → `_find_airplay_hwnds_windows`) detects "a mirror is live" by matching the receiver's window **process name / title** against `_AIRPLAY_PROC_HINTS` / `_AIRPLAY_WINDOW_HINTS`. Those markers were **not verifiable from the macOS dev box** — if VLC doesn't get out of the way when a mirror connects, the hints don't match this uxplay-windows build. Fix it in `.env` (`AIRPLAY_PROC_HINTS` / `AIRPLAY_WINDOW_HINTS`), not in code. The receiver is also **deliberately not watchdog-supervised** (it's a self-managing tray app with no health port — policing it would relaunch one the user intentionally closed).
 
+Third: the receiver download is a **`.msi`/`.zip`, not `.exe`** — the resolver (`setup._resolve_airplay_win_installer_url`) must match `.msi` (preferred, registers Bonjour) / `.zip` and **exclude `arm64`/`UNTESTED`** assets; matching `.exe` finds nothing (the v5.3.1 → v5.4.0 bug).
+
+Fourth: **self-elevating installs** (`_run_elevated_windows`) only work when `WINDOWS_ADMIN_USER`/`WINDOWS_ADMIN_PASSWORD` name a **local Administrator** — `schtasks /RL HIGHEST` is what yields the elevated token from stored creds without a UAC dialog, and a Standard account can't elevate to it (the task registers but the install fails with access-denied). The password is **plaintext in `.env`** and **briefly visible on the `schtasks` command line** during task creation — unavoidable with `schtasks /RP`. The installed StreamLink Task Scheduler service itself runs **non-elevated** (daemon.py deliberately omits `/RL HIGHEST`), which is *why* this stored-cred path is needed at all — the server can't elevate on its own.
+
 ## See also
 
 - [BACKEND.md](BACKEND.md) — invariants enforced by `main.py`

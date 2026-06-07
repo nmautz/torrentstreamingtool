@@ -69,14 +69,54 @@ and VLC don't fight over the TV.
 
 **Preferred / autoupdater-safe: the admin panel.** Admin → **Optional Components**
 lists **AirPlay receiver** (Windows only) next to ffmpeg/whisper. Click **Get
-installer** → the server downloads the uxplay-windows installer to `tools/airplay/`
+installer** → the server resolves + downloads the receiver to `tools/airplay/`
 (`_run_component_install`'s `airplay` branch, reusing `_download_to` +
-`setup._resolve_airplay_win_installer_url`), pre-enables `AIRPLAY_RECEIVER=1`, and
-best-effort launches the wizard. Finish the wizard **on the host's TV desktop**
-(allow the firewall), then click **Refresh** — the row flips to **Installed** once
-the binary is detected. This is the path that **works on auto-updating hosts**:
-`setup.py` skips every `install_*` step under `STREAMLINK_AUTOUPDATE=1`, so the
-interactive installer below never runs there.
+`setup._resolve_airplay_win_installer_url`) and pre-enables `AIRPLAY_RECEIVER=1`.
+This is the path that **works on auto-updating hosts**: `setup.py` skips every
+`install_*` step under `STREAMLINK_AUTOUPDATE=1`, so the interactive installer
+below never runs there.
+
+> **Asset selection.** The releases ship an x64 **`.msi`** installer
+> (`uxplaywindows-installer.msi` — registers Apple Bonjour), a portable **`.zip`**
+> (`uxplay-windows.zip`), and an `arm64-UNTESTED` variant of each. The resolver
+> prefers the x64 `.msi`, falls back to the `.zip`, and **excludes
+> arm64/untested**. (Matching only `.exe` was the v5.3.1 bug — there are no `.exe`
+> assets — fixed in v5.4.0.)
+
+**How the install completes — three paths** (in `_run_component_install`):
+
+1. **`.msi` + stored Windows credentials → silent, no UAC.** If
+   `WINDOWS_ADMIN_USER` / `WINDOWS_ADMIN_PASSWORD` are set (see below), the server
+   runs `msiexec /i <msi> /qn /norestart` **elevated** via `_run_elevated_windows`
+   — the receiver and Bonjour install with no one touching the host. Then the
+   binary is detected and `_UXPLAY_WIN` recorded.
+2. **`.msi`, no credentials → manual UAC.** The server best-effort launches
+   `msiexec /i <msi>`; someone approves the UAC prompt + finishes the wizard **on
+   the host's TV desktop** (allow the firewall), then clicks **Refresh** — the row
+   flips to **Installed** once the binary is detected. (If the server runs as a
+   session-0 service the GUI won't appear — use path 1, or run the downloaded MSI
+   in `tools/airplay/` directly.)
+3. **`.zip` (portable) → extract in place.** No installer; note the portable build
+   may still need Apple Bonjour installed for discovery.
+
+### Silent installs — Windows host credentials (self-elevation)
+
+So StreamLink can finish a UAC-gated install **on its own**, store the host's
+Windows Administrator account in the env-keys editor (Admin → Updates):
+`WINDOWS_ADMIN_USER` + `WINDOWS_ADMIN_PASSWORD`. `_run_elevated_windows(cmdline)`
+then runs the command elevated with **no UAC dialog** by registering a one-shot
+**Scheduled Task** with `/RU <user> /RP <password> /RL HIGHEST`, running it,
+polling its "Last Result" for the exit code, and deleting it. `/RL HIGHEST` is the
+one place stored credentials yield a full elevated token without an interactive
+consent prompt; `/RP` supplies the password non-interactively.
+
+> ⚠️ **Security.** The password lives in `.env` on the host (plaintext, like
+> `ADMIN_PASSWORD` / `JACKETT_PASSWORD`) and is **briefly visible on the
+> `schtasks` command line** while the task is created — a known `schtasks`
+> limitation. The account must be a **local Administrator** for `/RL HIGHEST` to
+> elevate. The helper is generic and reusable for other elevated host operations.
+
+**Interactive: `setup.py` (manual runs only).** `install_airplay_receiver` offers
 
 **Interactive: `setup.py` (manual runs only).** `install_airplay_receiver` offers
 (default **No** — large GStreamer download) the same download-and-run flow during a
@@ -137,8 +177,10 @@ initiated from iOS, and start/stop of the receiver itself belongs to its tray ap
 
 | Key | Meaning |
 |-----|---------|
-| `AIRPLAY_RECEIVER` | `1`/`true` to have `run.py` start the receiver + Bonjour. Default off. |
-| `_UXPLAY_WIN` | Auto-detected path to the receiver exe (written by `setup.py`). |
+| `AIRPLAY_RECEIVER` | `1`/`true` to have `run.py` start the receiver + Bonjour. Set automatically when installed from the admin panel. |
+| `_UXPLAY_WIN` | Auto-detected path to the receiver exe (written by `setup.py` / the component install). |
+| `WINDOWS_ADMIN_USER` | Windows Administrator username — enables silent, self-elevating installs (no UAC prompt). Optional. |
+| `WINDOWS_ADMIN_PASSWORD` | Password for that account. Plaintext in `.env`; see the security note above. Optional. |
 | `AIRPLAY_PROC_HINTS` | Optional CSV overriding the process-name match for mirror-window detection (default `uxplay,gst-launch,gstreamer`). |
 | `AIRPLAY_WINDOW_HINTS` | Optional CSV overriding the window-title match (default `uxplay,airplay,screen mirror`). |
 

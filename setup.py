@@ -621,9 +621,17 @@ def _bonjour_service_present() -> bool:
 
 
 def _resolve_airplay_win_installer_url() -> str | None:
-    """Resolve the latest uxplay-windows installer (.exe) URL from the GitHub
-    releases API. Returns None if the API is unreachable / no asset matches."""
+    """Resolve the latest uxplay-windows **MSI installer** URL from the GitHub
+    releases API. Returns None if the API is unreachable / no asset matches.
+
+    The releases ship `.msi` installers (which register Apple Bonjour — required
+    for iPhone discovery) and portable `.zip`s, each with an x64 build plus an
+    `arm64-UNTESTED` variant. We want the x64 `.msi` (e.g. `uxplaywindows-installer.msi`),
+    so we exclude arm64/untested and prefer the asset named like an installer.
+    """
     import json, urllib.request
+    def _bad(n: str) -> bool:
+        return "arm64" in n or "untested" in n
     try:
         req = urllib.request.Request(AIRPLAY_WIN_RELEASES_API,
                                      headers={"Accept": "application/vnd.github+json",
@@ -631,12 +639,16 @@ def _resolve_airplay_win_installer_url() -> str | None:
         with urllib.request.urlopen(req, timeout=15) as resp:
             data = json.loads(resp.read().decode("utf-8"))
         assets = data.get("assets", []) or []
-        # Prefer a Windows installer/setup .exe; fall back to any .exe asset.
-        for want in (lambda n: n.endswith(".exe") and ("setup" in n or "install" in n),
-                     lambda n: n.endswith(".exe")):
+        # Preference order: installer-named .msi → any .msi → installer-named .zip → any .zip.
+        # (.zip is the portable build; it's a fallback only — the .msi is what
+        # registers the Bonjour service.)
+        for want in (lambda n: n.endswith(".msi") and "install" in n,
+                     lambda n: n.endswith(".msi"),
+                     lambda n: n.endswith(".zip") and "install" in n,
+                     lambda n: n.endswith(".zip")):
             for a in assets:
                 name = (a.get("name") or "").lower()
-                if want(name):
+                if not _bad(name) and want(name):
                     return a.get("browser_download_url")
     except Exception as exc:
         vlog(f"uxplay-windows release lookup failed: {exc}")
@@ -687,14 +699,20 @@ def install_airplay_receiver(tools: dict) -> dict:
         note("Download failed — install manually from the link above, then re-run setup.py.")
         return refreshed
 
-    note("Launching the installer — complete the wizard (allow it through the")
-    note("Windows Firewall when prompted), then return here.")
-    try:
-        # GUI installer: run it and wait for the user to finish the wizard.
-        subprocess.run([str(dest)], check=False)
-    except Exception as exc:
-        warn(f"Couldn't launch the installer ({exc}). Run it manually: {dest}")
-        return refreshed
+    if dest.suffix.lower() == ".zip":
+        # Portable build — extract in place, no installer (note: portable may not
+        # register Bonjour; the .msi is preferred and resolved first).
+        note("Extracting the portable AirPlay receiver …")
+        _extract_archive(dest, TOOLS_DIR / "airplay")
+    else:
+        note("Launching the installer — approve the UAC prompt, complete the wizard")
+        note("(allow it through the Windows Firewall), then return here.")
+        try:
+            # MSI: msiexec shows the wizard + a UAC prompt the user approves here.
+            subprocess.run(["msiexec", "/i", str(dest)], check=False)
+        except Exception as exc:
+            warn(f"Couldn't launch the installer ({exc}). Run it manually: {dest}")
+            return refreshed
 
     found = find_exe(*uxplay_win_candidates())
     if found:
