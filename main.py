@@ -503,7 +503,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "5.11.1"
+UI_VERSION = "5.15.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -646,6 +646,24 @@ class AppState:
     idle_prep_hard: bool = False                          # cached: auto_prep idle mode with on_activity == "hard" (set each tick) — only then does the activity hook kill the in-flight encode immediately
     sys_status: dict = field(default_factory=dict)        # latest CPU/GPU/RAM/network sample + ok/degraded/overloaded classification (set by system_monitor_loop)
     cache_autopurge_last: dict = field(default_factory=dict)  # last auto-purge result (set by cache_autopurge_loop): {at, deleted, bytes_freed, total_bytes_before} — drives the admin card's "last run" line
+    # ── Source-file validator (admin System tab) ─────────────────────────────
+    # Decodes library video files with ffmpeg to find CORRUPT/unreadable SOURCES,
+    # independent of qBit's piece recheck (a torrent only proves the bytes match
+    # its hashes — it happily seeds a perfect copy of an already-damaged file).
+    # Snapshot of the current/last run for the admin card to poll; the runner
+    # coroutine task + the in-flight proc handle so Stop can terminate a long
+    # deep decode mid-file.
+    file_validation: dict = field(default_factory=dict)   # {running, deep, scope, total, scanned, current_name, damaged:[…], missing:[…], started_at, finished_at, stopped, error}
+    file_validation_task: Optional[asyncio.Task] = None
+    file_validation_stop: bool = False
+    file_validation_proc: Optional["asyncio.subprocess.Process"] = None
+    # Best-effort in-place repair of the files the validator flagged (remux, then
+    # optional lossy re-encode); replaces the original only when the candidate
+    # decodes clean, and purges the stale HLS bundle. Same job-state shape.
+    file_repair: dict = field(default_factory=dict)       # {running, reencode, total, scanned, current_name, repaired:[…], failed:[…], started_at, finished_at, stopped, error}
+    file_repair_task: Optional[asyncio.Task] = None
+    file_repair_stop: bool = False
+    file_repair_proc: Optional["asyncio.subprocess.Process"] = None
     # ── YouTube-on-TV (browser playback on the host display, remote-controlled) ──
     youtube_active: bool = False                          # True while a YouTube video is the active TV playback (browser, not VLC)
     youtube_video_id: Optional[str] = None               # 11-char YouTube id currently loaded on the TV page
@@ -5235,6 +5253,16 @@ class CacheAutopurgeReq(BaseModel):
     max_gb: float = 50.0                        # purge orphan offline-cache bundles once .offline_cache/ reaches this many GB; clamped 1–10000
 
 
+class ValidateFilesReq(BaseModel):
+    scope: Optional[str] = None                 # None/""/"all" ⇒ whole library; else a library item id
+    deep: bool = True                           # True ⇒ full ffmpeg decode (catches mid-file corruption); False ⇒ quick ffprobe header check
+
+
+class RepairFilesReq(BaseModel):
+    paths: Optional[list[str]] = None           # specific files to repair; defaults to the last validation scan's damaged list
+    reencode: bool = False                      # allow a lossy re-encode fallback when a lossless remux can't fix it
+
+
 class SttConfigReq(BaseModel):
     enabled: bool = True
     translate: bool = True                     # also emit an English track for non-English audio
@@ -9254,6 +9282,114 @@ async def admin_stop_force_prep(request: Request, body: ForcePrepStopReq) -> JSO
     return JSONResponse({"ok": True, **res, **_force_prep_status()})
 
 
+@app.get("/api/admin/validate-files")
+async def admin_get_validate_files(request: Request) -> JSONResponse:
+    """Current/last source-file validation run (progress + damaged/missing lists)."""
+    _require_admin(request)
+    return JSONResponse(_file_validation_status())
+
+
+@app.post("/api/admin/validate-files")
+async def admin_start_validate_files(request: Request, body: ValidateFilesReq) -> JSONResponse:
+    """Start a source-file validation scan. Decodes each library video with ffmpeg
+    to find corrupt/unreadable SOURCE files — independent of qBit's piece recheck
+    (a torrent can seed a perfect copy of an already-damaged file). `scope`
+    None/""/"all" ⇒ whole library, else one item id. `deep` (default) fully
+    decodes the media; quick just ffprobes the header. 409 if a scan is running."""
+    _require_admin(request)
+    if not analyzer.ffmpeg_bin():
+        raise HTTPException(503, "ffmpeg is not installed — cannot validate files.")
+    if state.file_validation.get("running"):
+        raise HTTPException(409, "A validation scan is already running.")
+    scope = (body.scope or "all").strip() or "all"
+    deep = bool(body.deep)
+    state.file_validation_stop = False
+    state.file_validation_proc = None
+    state.file_validation = {
+        "running": True, "deep": deep, "scope": scope,
+        "total": 0, "scanned": 0, "current_name": "",
+        "damaged": [], "missing": [], "stopped": False, "error": "",
+        "started_at": _now_iso(), "finished_at": None,
+    }
+    state.file_validation_task = asyncio.create_task(_run_file_validation(scope, deep))
+    return JSONResponse(_file_validation_status())
+
+
+@app.post("/api/admin/validate-files/stop")
+async def admin_stop_validate_files(request: Request) -> JSONResponse:
+    """Stop the in-progress validation scan: set the stop flag (the loop halts
+    between files) and terminate the in-flight ffmpeg decode."""
+    _require_admin(request)
+    state.file_validation_stop = True
+    proc = state.file_validation_proc
+    if proc is not None and proc.returncode is None:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    return JSONResponse({"ok": True, **_file_validation_status()})
+
+
+@app.get("/api/admin/repair-files")
+async def admin_get_repair_files(request: Request) -> JSONResponse:
+    """Current/last source-file repair run (progress + repaired/failed lists)."""
+    _require_admin(request)
+    return JSONResponse(_file_repair_status())
+
+
+@app.post("/api/admin/repair-files")
+async def admin_start_repair_files(request: Request, body: RepairFilesReq) -> JSONResponse:
+    """Attempt to repair damaged source files. Each file is remuxed (lossless),
+    and — when `reencode` is set — re-encoded as a last resort; the original is
+    replaced only when the result decodes clean, and its stale HLS bundle is then
+    purged. `paths` defaults to the last validation scan's damaged list.
+
+    Rewriting a file stops a torrent-backed copy from seeding (the bytes no
+    longer match its pieces) — repair is aimed at uploaded / non-torrent content;
+    re-download is the better fix for torrent files. 409 if a repair or a
+    validation scan is already running, 503 if ffmpeg is missing, 400 if there's
+    nothing to repair."""
+    _require_admin(request)
+    if not analyzer.ffmpeg_bin():
+        raise HTTPException(503, "ffmpeg is not installed — cannot repair files.")
+    if state.file_repair.get("running"):
+        raise HTTPException(409, "A repair is already running.")
+    if state.file_validation.get("running"):
+        raise HTTPException(409, "A validation scan is running — wait for it to finish.")
+    paths = [p for p in (body.paths or []) if p]
+    if not paths:
+        paths = [d.get("path", "") for d in (state.file_validation.get("damaged") or []) if d.get("path")]
+    if not paths:
+        raise HTTPException(400, "No damaged files to repair — run a validation scan first.")
+    reencode = bool(body.reencode)
+    state.file_repair_stop = False
+    state.file_repair_proc = None
+    state.file_repair = {
+        "running": True, "reencode": reencode,
+        "total": len(paths), "scanned": 0, "current_name": "",
+        "repaired": [], "failed": [], "stopped": False, "error": "",
+        "started_at": _now_iso(), "finished_at": None,
+    }
+    state.file_repair_task = asyncio.create_task(_run_file_repair(paths, reencode))
+    return JSONResponse(_file_repair_status())
+
+
+@app.post("/api/admin/repair-files/stop")
+async def admin_stop_repair_files(request: Request) -> JSONResponse:
+    """Stop the in-progress repair: set the stop flag (the loop halts between
+    files) and terminate the in-flight ffmpeg. A file already replaced stays
+    repaired; the current in-flight candidate is discarded."""
+    _require_admin(request)
+    state.file_repair_stop = True
+    proc = state.file_repair_proc
+    if proc is not None and proc.returncode is None:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    return JSONResponse({"ok": True, **_file_repair_status()})
+
+
 @app.get("/api/admin/cache-autopurge")
 async def admin_get_cache_autopurge(request: Request) -> JSONResponse:
     """Return the orphan-cache auto-purge config + the result of the last run."""
@@ -11688,6 +11824,322 @@ def _force_prep_status() -> dict:
         "pending":       len(active) - len(processing),
         "progress":      round(progress, 3),
     }
+
+
+# ── Source-file validator ─────────────────────────────────────────────────────
+# Decodes each library video with ffmpeg to surface CORRUPT or unreadable SOURCE
+# files. Deliberately independent of qBit's piece recheck: a torrent only proves
+# the bytes on disk match the torrent's hashes, so it happily seeds a perfect
+# copy of a file that was already damaged at the source (bad encode, truncated
+# rip, bit-rot before it was added). This actually decodes the media.
+#
+#   • deep  (default) — full ffmpeg decode of every video+audio stream
+#     (`-f null -`, `-xerror` to bail on the first error); any ffmpeg error
+#     output ⇒ damaged. Catches mid-file corruption a header probe misses, at
+#     the cost of reading the whole file.
+#   • quick — ffprobe the container only (header + stream list + duration). Fast,
+#     but only catches files that won't even open.
+#
+# ffmpeg runs BELOW normal priority (_FFMPEG_SUBPROCESS_KW / nice) so a scan
+# can't starve playback, one file at a time. The Stop flag is checked between
+# files and the in-flight proc is terminated. Works on every OS (plain decode —
+# not HLS, so unlike prep it is NOT macOS-gated).
+
+def _safe_unlink(p: Path) -> None:
+    """Best-effort delete of a temp file; never raises."""
+    try:
+        if p.exists():
+            p.unlink()
+    except OSError:
+        pass
+
+
+async def _run_ffmpeg_capture(args: list[str], set_proc) -> tuple[int, str]:
+    """Run an ffmpeg command at below-normal priority, capturing the last line of
+    its stderr. `set_proc(proc)` stashes the live process so a Stop control can
+    terminate it (and `set_proc(None)` clears it on exit). Returns (rc, tail)."""
+    cmd = _ffmpeg_nice_prefix() + args
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *cmd,
+            stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
+            **_FFMPEG_SUBPROCESS_KW,
+        )
+    except Exception as e:
+        return 1, f"Could not launch ffmpeg: {e}"
+    set_proc(proc)
+    try:
+        _, err = await proc.communicate()
+    finally:
+        set_proc(None)
+    errtext = (err or b"").decode("utf-8", "replace").strip()
+    tail = errtext.splitlines()[-1][:300] if errtext else ""
+    return (proc.returncode or 0), tail
+
+
+async def _ffmpeg_decode_scan(ffmpeg: str, path: str, set_proc, is_stopped) -> tuple[int, str]:
+    """Full decode of every video+audio stream (`-f null -`, `-xerror`). Returns
+    (rc, error_tail); rc 0 + empty tail ⇒ clean. If the scan was Stopped mid-decode
+    (`is_stopped()` true), returns (0, "") so a cancelled file isn't judged."""
+    args = [
+        ffmpeg, "-hide_banner", "-v", "error", "-xerror",
+        "-i", path, "-map", "0:v?", "-map", "0:a?",
+        "-f", "null", "-",
+    ]
+    rc, tail = await _run_ffmpeg_capture(args, set_proc)
+    if is_stopped():
+        return 0, ""
+    return rc, tail
+
+
+def _file_validation_status() -> dict:
+    """JSON-safe snapshot of the current/last validation run for the admin card."""
+    fv = dict(state.file_validation)
+    fv.pop("_proc", None)
+    fv.setdefault("running", False)
+    fv.setdefault("scanned", 0)
+    fv.setdefault("total", 0)
+    fv.setdefault("damaged", [])
+    fv.setdefault("missing", [])
+    fv["available"] = bool(analyzer.ffmpeg_bin())
+    return fv
+
+
+async def _validate_one_file(ffmpeg: str, path: str, deep: bool) -> tuple[bool, str]:
+    """Return (ok, detail). ok=False ⇒ the file is damaged/unreadable; `detail` is
+    a short human-readable reason (the tail of ffmpeg/ffprobe's error output)."""
+    if not deep:
+        info = await asyncio.to_thread(_ffprobe_full, path)
+        if not info:
+            return False, "ffprobe could not read the file (corrupt or unsupported container)."
+        if not info.get("video"):
+            return False, "No decodable video stream found."
+        if float(info.get("duration_sec") or 0) <= 0:
+            return False, "Container reports no / zero duration."
+        return True, ""
+    # Deep: decode the whole file. `-xerror` aborts on the first decode error so a
+    # badly-damaged file fails fast.
+    rc, tail = await _ffmpeg_decode_scan(
+        ffmpeg, path,
+        lambda p: setattr(state, "file_validation_proc", p),
+        lambda: state.file_validation_stop,
+    )
+    # A Stop-terminated decode is not a verdict — don't flag a cancelled file as
+    # damaged. The runner halts the loop separately on the same flag.
+    if state.file_validation_stop:
+        return True, ""
+    if rc != 0 or tail:
+        return False, tail or f"ffmpeg exited with code {rc}."
+    return True, ""
+
+
+async def _run_file_validation(scope: str, deep: bool) -> None:
+    """Walk the library (or one item) and validate each video file, updating
+    state.file_validation in place so the admin card can poll progress."""
+    fv = state.file_validation
+    ffmpeg = analyzer.ffmpeg_bin()
+    try:
+        lib = await get_library()
+        targets: list[tuple[str, str, str, str]] = []   # (item_id, item_title, path, name)
+        for item in lib.get("items", []):
+            if scope not in ("", "all") and item.get("id") != scope:
+                continue
+            for f in item.get("files", []):
+                p = f.get("path", "")
+                if Path(p).suffix.lower() not in VIDEO_EXTS:
+                    continue
+                targets.append((item.get("id", ""), item.get("title", ""),
+                                p, f.get("name") or Path(p).name))
+                await asyncio.sleep(0)
+        fv["total"] = len(targets)
+        for (iid, title, path, name) in targets:
+            if state.file_validation_stop:
+                fv["stopped"] = True
+                break
+            fv["current_name"] = name
+            src = Path(path)
+            try:
+                exists = src.exists()
+            except OSError:
+                exists = False
+            if not exists:
+                fv["missing"].append({"item_id": iid, "item_title": title,
+                                      "path": path, "name": name})
+            elif not ffmpeg:
+                fv["error"] = "ffmpeg is not installed — cannot validate files."
+                break
+            else:
+                ok, detail = await _validate_one_file(ffmpeg, path, deep)
+                if not ok and not state.file_validation_stop:
+                    fv["damaged"].append({"item_id": iid, "item_title": title,
+                                          "path": path, "name": name, "error": detail})
+            fv["scanned"] = fv.get("scanned", 0) + 1
+    except asyncio.CancelledError:
+        fv["stopped"] = True
+        raise
+    except Exception as e:
+        fv["error"] = str(e)
+    finally:
+        fv["running"] = False
+        fv["current_name"] = ""
+        fv["finished_at"] = _now_iso()
+        state.file_validation_proc = None
+
+
+# ── Source-file repair ────────────────────────────────────────────────────────
+# Best-effort, in-place repair of a damaged source file. Two staged attempts,
+# each validated with the same deep decode the validator uses; the original is
+# only replaced when a candidate decodes CLEAN:
+#
+#   1. REMUX (lossless, fast) — `-c copy` with `-err_detect ignore_err` and
+#      regenerated timestamps. Fixes the common cases: broken index / moov atom,
+#      bad/missing PTS, a few recoverable stream errors. No quality loss.
+#   2. RE-ENCODE (lossy, slow, opt-in) — decode with error concealment and
+#      re-encode the video (libx264) so genuinely corrupt frames are dropped /
+#      concealed rather than aborting playback.
+#
+# On success the stale HLS bundle (keyed on the OLD path|mtime|size) is purged so
+# playback re-preps from the repaired file. NOTE: this rewrites the file, so a
+# torrent-backed file will stop matching its pieces and seeding will halt — for
+# those, re-downloading (qBit recheck) is usually the better fix; repair is aimed
+# at uploaded / non-torrent content. Surfaced as a caveat in the UI.
+
+def _file_repair_status() -> dict:
+    """JSON-safe snapshot of the current/last repair run for the admin card."""
+    fr = dict(state.file_repair)
+    fr.setdefault("running", False)
+    fr.setdefault("scanned", 0)
+    fr.setdefault("total", 0)
+    fr.setdefault("repaired", [])
+    fr.setdefault("failed", [])
+    fr["available"] = bool(analyzer.ffmpeg_bin())
+    return fr
+
+
+async def _repair_one_file(ffmpeg: str, path: str, reencode: bool) -> tuple[str, str]:
+    """Attempt to repair a damaged file in place. Returns (result, detail) where
+    result ∈ "repaired" | "failed". On success the original is atomically replaced
+    by the validated repair and its stale HLS bundle is purged; `detail` is the
+    method ("remux" / "re-encode") or, on failure, the reason."""
+    src = Path(path)
+    try:
+        if not src.exists():
+            return "failed", "File is no longer on disk."
+        old_key = _offline_cache_key(src)        # stash BEFORE we change mtime/size
+    except OSError as e:
+        return "failed", f"Cannot access file: {e}"
+
+    set_proc = lambda p: setattr(state, "file_repair_proc", p)
+    stopped = lambda: state.file_repair_stop
+    suffix = src.suffix or ".mkv"
+
+    attempts: list[tuple[str, Path, list[str]]] = []
+    tmp_remux = src.with_name(src.stem + ".repair-remux" + suffix)
+    attempts.append(("remux", tmp_remux, [
+        ffmpeg, "-hide_banner", "-v", "error", "-y",
+        "-err_detect", "ignore_err", "-fflags", "+genpts+igndts",
+        "-i", str(src), "-map", "0", "-ignore_unknown",
+        "-c", "copy", str(tmp_remux),
+    ]))
+    if reencode:
+        tmp_reenc = src.with_name(src.stem + ".repair-reenc" + suffix)
+        attempts.append(("re-encode", tmp_reenc, [
+            ffmpeg, "-hide_banner", "-v", "error", "-y",
+            "-err_detect", "ignore_err", "-fflags", "+genpts",
+            "-i", str(src), "-map", "0:v:0?", "-map", "0:a?",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            "-c:a", "aac", "-b:a", "192k",
+            "-threads", str(OFFLINE_FFMPEG_THREADS), str(tmp_reenc),
+        ]))
+
+    last_err = "Repair did not produce a playable file."
+    for method, tmp, args in attempts:
+        if state.file_repair_stop:
+            break
+        rc, tail = await _run_ffmpeg_capture(args, set_proc)
+        if state.file_repair_stop:
+            _safe_unlink(tmp)
+            break
+        try:
+            ok_file = tmp.exists() and tmp.stat().st_size > 0
+        except OSError:
+            ok_file = False
+        if rc != 0 or not ok_file:
+            last_err = tail or f"{method} failed (ffmpeg exited {rc})."
+            _safe_unlink(tmp)
+            continue
+        # Validate the candidate with the same deep decode used by the scanner.
+        vrc, vtail = await _ffmpeg_decode_scan(ffmpeg, str(tmp), set_proc, stopped)
+        if state.file_repair_stop:
+            _safe_unlink(tmp)
+            break
+        if vrc != 0 or vtail:
+            last_err = f"{method} ran but the result still has decode errors" + (f": {vtail}" if vtail else ".")
+            _safe_unlink(tmp)
+            continue
+        # Clean — atomically replace the original, then purge its stale HLS bundle.
+        try:
+            os.replace(str(tmp), str(src))
+        except OSError as e:
+            _safe_unlink(tmp)
+            return "failed", f"Could not replace the original file: {e}"
+        try:
+            old_dir = OFFLINE_CACHE / old_key
+            if old_dir.exists():
+                await asyncio.to_thread(shutil.rmtree, old_dir, ignore_errors=True)
+            _invalidate_offline_cache_inventory()
+        except Exception:
+            pass
+        return "repaired", method
+    return "failed", last_err
+
+
+async def _run_file_repair(paths: list[str], reencode: bool) -> None:
+    """Repair each path in turn (remux, then optional re-encode), updating
+    state.file_repair in place so the admin card can poll progress."""
+    fr = state.file_repair
+    ffmpeg = analyzer.ffmpeg_bin()
+    try:
+        lib = await get_library()
+        meta: dict[str, tuple[str, str, bool]] = {}   # path → (item_title, name, torrent-backed)
+        for item in lib.get("items", []):
+            torrent = bool(item.get("torrent_hash"))
+            for f in item.get("files", []):
+                p = f.get("path", "")
+                meta[p] = (item.get("title", ""), f.get("name") or Path(p).name, torrent)
+        fr["total"] = len(paths)
+        for path in paths:
+            if state.file_repair_stop:
+                fr["stopped"] = True
+                break
+            title, name, torrent = meta.get(path, ("", Path(path).name, False))
+            fr["current_name"] = name
+            if not ffmpeg:
+                fr["error"] = "ffmpeg is not installed — cannot repair files."
+                break
+            result, detail = await _repair_one_file(ffmpeg, path, reencode)
+            if state.file_repair_stop and result != "repaired":
+                fr["stopped"] = True
+                break
+            entry = {"path": path, "name": name, "item_title": title, "torrent": torrent}
+            if result == "repaired":
+                entry["method"] = detail
+                fr["repaired"].append(entry)
+            else:
+                entry["error"] = detail
+                fr["failed"].append(entry)
+            fr["scanned"] = fr.get("scanned", 0) + 1
+    except asyncio.CancelledError:
+        fr["stopped"] = True
+        raise
+    except Exception as e:
+        fr["error"] = str(e)
+    finally:
+        fr["running"] = False
+        fr["current_name"] = ""
+        fr["finished_at"] = _now_iso()
+        state.file_repair_proc = None
 
 
 async def _play_prep_chain(item_id: str, files: list[str]) -> None:

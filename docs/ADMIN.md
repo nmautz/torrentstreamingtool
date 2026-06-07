@@ -109,7 +109,7 @@ For each profile:
 
 ### 7. System
 
-Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Automatic Stream Prep**, **Auto-Prep on Play**, **Force Stream Prep**, **VPN Kill Switch**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
+Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Automatic Stream Prep**, **Auto-Prep on Play**, **Force Stream Prep**, **File Validator**, **VPN Kill Switch**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
 
 #### System Health
 
@@ -236,6 +236,35 @@ Mechanics ([main.py](../main.py) `_run_component_install`): reuses `setup.py`'s 
 
 - `GET /api/admin/components` → per-component status + any in-flight install job.
 - `POST /api/admin/components/install` → `{component, model?}`; 400 for ffmpeg/whisper off-Windows.
+
+#### File Validator
+
+Decodes the actual **source files** with ffmpeg to find ones that are damaged or corrupt. **This is deliberately separate from the qBittorrent piece recheck** (the episode-picker "Recheck hashes" button / `POST /api/library/{id}/recheck`): a torrent recheck only proves the bytes on disk match the torrent's hashes, so it happily seeds — and validates — a perfect copy of a file that was *already* damaged at the source (bad encode, truncated rip, bit-rot before it was added). The validator opens and decodes the media itself, so it catches a bad source even when the download was byte-perfect.
+
+Two modes:
+- **Deep** (default) — runs each library video through `ffmpeg -v error -xerror -i … -map 0:v? -map 0:a? -f null -` and flags any file that emits a decode error. Reads the whole file, so it catches mid-file corruption a header probe misses; the slow option.
+- **Quick** — only ffprobes the container (must open, have a decodable video stream, and report a non-zero duration). Fast, but only catches files that won't open at all.
+
+Scope is **Whole library** or a single item (a dropdown of every library item). ffmpeg runs at **below-normal priority** (`_FFMPEG_SUBPROCESS_KW` / `nice`) and **one file at a time** so a scan can't starve playback or the dashboard. **Stop** sets a flag the loop checks between files and terminates the in-flight decode; a cancelled file is never reported as damaged. Works on **every OS** — it's a plain decode, not HLS, so unlike stream prep it is *not* macOS-gated (it only needs ffmpeg installed; the card shows an "ffmpeg isn't installed" notice otherwise).
+
+The card polls `GET /api/admin/validate-files` every 2 s while a scan runs (it self-stops polling once the run finishes), showing live `scanned/total` + the current filename + a running damaged count. On completion it lists every **damaged** file (with the ffmpeg/ffprobe error tail) and any **missing** file (in the library but no longer on disk). State lives in-memory on `state.file_validation` (`running`, `deep`, `scope`, `total`, `scanned`, `current_name`, `damaged[]`, `missing[]`, `started_at`, `finished_at`, `stopped`, `error`) — not persisted, so it resets on restart.
+
+- `GET /api/admin/validate-files` → current/last run snapshot + `available` (ffmpeg present).
+- `POST /api/admin/validate-files` → `{scope?, deep?}`; starts a scan (409 if one is running, 503 if ffmpeg is missing).
+- `POST /api/admin/validate-files/stop` → halts the running scan.
+
+**Repair.** Once a scan finds damaged files, a **Repair Damaged** control is revealed. It tries to fix each file in two staged attempts, each **validated with the same deep decode** before it's trusted:
+
+1. **Remux** (lossless, fast) — `ffmpeg -err_detect ignore_err -fflags +genpts+igndts -i src -map 0 -ignore_unknown -c copy` to a temp file. Fixes the common breakage: broken index / moov atom, bad or missing PTS, a few recoverable stream errors. No quality loss.
+2. **Re-encode** (lossy, slow, opt-in via the **Allow lossy re-encode** checkbox) — decode with error concealment and re-encode the video (libx264 CRF 20 + AAC) so genuinely corrupt frames are dropped/concealed instead of aborting playback.
+
+A candidate is run back through the deep decode; the original is **atomically replaced only when the repair decodes clean** (`os.replace`), so a failed repair never touches the source. On success the file's **stale HLS bundle is purged** (the bundle is keyed on path+mtime+size, so the rewritten file would orphan it anyway — `_repair_one_file` stashes the old key *before* the replace and `rmtree`s that dir, then invalidates the offline-cache inventory snapshot) so on-device playback re-preps from the repaired source. Repaired/failed files are listed (failures keep the ffmpeg reason); **Stop** halts between files and kills the in-flight ffmpeg — a file already replaced stays repaired.
+
+> **Torrent-backed caveat.** Repair rewrites the file in place, so a torrent-backed copy will stop matching its pieces and **seeding halts**. Repair is aimed at uploaded / non-torrent content; for a torrent file, re-downloading the bad pieces (the episode-picker **Recheck hashes** / `POST /api/library/{id}/recheck`) is the better fix. The UI flags repaired files that were torrent-backed.
+
+- `GET /api/admin/repair-files` → current/last repair run snapshot.
+- `POST /api/admin/repair-files` → `{paths?, reencode?}`; `paths` defaults to the last scan's damaged list. 409 if a repair *or* a validation scan is running, 503 if ffmpeg is missing, 400 if there's nothing to repair.
+- `POST /api/admin/repair-files/stop` → halts the running repair.
 
 #### Subtitles
 

@@ -639,6 +639,77 @@
       </div>
     </div>
 
+    <!-- File validator -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">File Validator</h2>
+        <p class="text-xs text-gray-500 mt-0.5">Decode your source files with ffmpeg to find ones that are <strong>damaged or corrupt</strong>. This is separate from the torrent recheck — it catches a bad source even when the download was perfect. <strong>Deep</strong> reads each file end to end (slow, catches mid-file corruption); <strong>Quick</strong> only checks that the file opens.</p>
+      </div>
+
+      <div id="fvUnavail" class="hidden px-5 py-4 border-b border-gray-800 text-xs text-amber-300 bg-amber-950/30">
+        ffmpeg isn't installed on this host — file validation is unavailable. Install it from the Optional Components card.
+      </div>
+
+      <div class="px-5 py-4 border-b border-gray-800 grid grid-cols-1 sm:grid-cols-[1fr_auto_auto] gap-3 items-end">
+        <div class="space-y-1.5 min-w-0">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Scope</label>
+          <select id="fvItem"
+            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none">
+            <option value="">Whole library</option>
+          </select>
+        </div>
+        <div class="space-y-1.5">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Mode</label>
+          <select id="fvDeep"
+            class="bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none">
+            <option value="1">Deep (full decode)</option>
+            <option value="0">Quick (header only)</option>
+          </select>
+        </div>
+        <button id="fvStartBtn" onclick="startFileValidation()"
+          class="flex-shrink-0 bg-indigo-600 hover:bg-indigo-500 px-5 py-2.5 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">
+          Validate
+        </button>
+      </div>
+
+      <div class="px-5 py-4 flex items-center justify-between gap-3 flex-wrap">
+        <div id="fvStatus" class="text-[11px] text-gray-500 min-w-0">Not run yet.</div>
+        <button id="fvStopBtn" onclick="stopFileValidation()"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border border-amber-800 bg-amber-950/40 text-amber-300 hover:bg-amber-900 transition-colors disabled:opacity-40"
+          disabled>
+          Stop
+        </button>
+      </div>
+
+      <div id="fvResults" class="hidden px-5 py-4 border-t border-gray-800 space-y-2"></div>
+
+      <!-- Repair (revealed once a scan finds damaged files) -->
+      <div id="fvRepairRow" class="hidden px-5 py-4 border-t border-gray-800 space-y-3">
+        <div class="text-[11px] text-amber-300/90 bg-amber-950/20 border border-amber-900/60 px-3 py-2">
+          Repair rewrites the file in place (lossless remux first; optional lossy re-encode). The original is replaced <strong>only</strong> if the repaired copy decodes cleanly, and its cached on-device bundle is then rebuilt. <strong>Heads-up:</strong> rewriting a <em>torrent-backed</em> file stops it seeding — for those, re-downloading (Recheck hashes) is the better fix.
+        </div>
+        <div class="flex items-center justify-between gap-3 flex-wrap">
+          <label class="flex items-center gap-2 text-[11px] text-gray-400 cursor-pointer select-none">
+            <input type="checkbox" id="fvReencode" class="accent-indigo-500">
+            Allow lossy re-encode if a remux can't fix it
+          </label>
+          <div class="flex items-center gap-2">
+            <button id="fvRepairBtn" onclick="startFileRepair()"
+              class="bg-amber-700 hover:bg-amber-600 px-4 py-2 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">
+              Repair Damaged
+            </button>
+            <button id="fvRepairStopBtn" onclick="stopFileRepair()"
+              class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-amber-800 bg-amber-950/40 text-amber-300 hover:bg-amber-900 transition-colors disabled:opacity-40"
+              disabled>
+              Stop
+            </button>
+          </div>
+        </div>
+        <div id="fvRepairStatus" class="text-[11px] text-gray-500">Ready.</div>
+        <div id="fvRepairResults" class="hidden space-y-2"></div>
+      </div>
+    </div>
+
     <!-- VPN kill switch -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800">
@@ -1196,8 +1267,8 @@ function switchTab(tab){
   if(tab==="skip")       loadSkipPanel();
   if(tab==="offline")    loadOfflineCache();
   if(tab==="background") loadBackgroundVideo();
-  if(tab==="system")   { loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadVpnKillswitch(); loadForcePrep(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
-  else                 { stopSysHealthPolling(); stopForcePrepPolling(); }
+  if(tab==="system")   { loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadVpnKillswitch(); loadForcePrep(); loadFileValidation(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
+  else                 { stopSysHealthPolling(); stopForcePrepPolling(); stopFileValidationPolling(); stopFileRepairPolling(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); if(!_auChangelogLoaded) loadChangelog(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
 }
@@ -1736,6 +1807,277 @@ async function stopForcePrep(hard){
     _renderForcePrep(d);
     const killedNote = hard && d.killed ? ` (killed ${d.killed} in progress)` : "";
     showToast(`Force prep stopped — cancelled ${d.cancelled || 0} queued${killedNote}.`);
+  }catch(_){
+    showToast("Stop failed.", true);
+  }
+}
+
+// ── File Validator (ffmpeg decode of source files) ─────────────────────────────
+let _fvTimer = null;
+let _fvItemsLoaded = false;
+
+function _renderFileValidation(d){
+  const status = document.getElementById("fvStatus");
+  const startBtn = document.getElementById("fvStartBtn");
+  const stopBtn = document.getElementById("fvStopBtn");
+  const results = document.getElementById("fvResults");
+  if(!status) return;
+  const unavail = d && d.available === false;
+  document.getElementById("fvUnavail").classList.toggle("hidden", !unavail);
+  if(startBtn) startBtn.disabled = !!unavail || _frRunning;
+  document.getElementById("fvItem").disabled = !!unavail;
+  document.getElementById("fvDeep").disabled = !!unavail;
+
+  const running = d && d.running;
+  const total = (d && d.total) || 0;
+  const scanned = (d && d.scanned) || 0;
+  const damaged = (d && d.damaged) || [];
+  const missing = (d && d.missing) || [];
+
+  if(running){
+    const cur = d.current_name ? ` · ${escHtml(d.current_name)}` : "";
+    status.innerHTML = `<span class="text-emerald-400 font-bold">Checking</span> · `
+      + `${scanned}/${total}${cur} · ${damaged.length} damaged`;
+  } else if(d && d.error){
+    status.innerHTML = `<span class="text-red-400 font-bold">Error:</span> ${escHtml(d.error)}`;
+  } else if(d && d.finished_at){
+    const verdict = damaged.length
+      ? `<span class="text-red-400 font-bold">${damaged.length} damaged</span>`
+      : `<span class="text-emerald-400 font-bold">All ${scanned} OK</span>`;
+    const stopped = d.stopped ? " (stopped early)" : "";
+    const miss = missing.length ? ` · ${missing.length} missing` : "";
+    status.innerHTML = `${verdict} of ${scanned} checked${miss}${stopped}.`;
+  } else {
+    status.textContent = "Not run yet.";
+  }
+  if(stopBtn) stopBtn.disabled = !running;
+
+  // Reveal the repair controls once a finished scan has damaged files to fix.
+  const repairRow = document.getElementById("fvRepairRow");
+  if(repairRow) repairRow.classList.toggle("hidden", !(damaged.length && !running));
+
+  // Results list — damaged first, then missing-on-disk.
+  if((damaged.length || missing.length) && (d.finished_at || running)){
+    results.classList.remove("hidden");
+    const dmg = damaged.map(f=>`
+      <div class="border border-red-900 bg-red-950/30 px-3 py-2">
+        <div class="text-xs font-bold text-red-300 break-all">${escHtml(f.name)}</div>
+        <div class="text-[10px] text-gray-500 break-all mt-0.5">${escHtml(f.item_title || "")}</div>
+        ${f.error ? `<div class="text-[10px] text-red-400/80 font-mono break-all mt-1">${escHtml(f.error)}</div>` : ""}
+      </div>`).join("");
+    const mis = missing.map(f=>`
+      <div class="border border-gray-700 bg-gray-950/40 px-3 py-2">
+        <div class="text-xs font-bold text-gray-400 break-all">${escHtml(f.name)}</div>
+        <div class="text-[10px] text-gray-600 break-all mt-0.5">${escHtml(f.item_title || "")} · not on disk</div>
+      </div>`).join("");
+    results.innerHTML =
+      (damaged.length ? `<div class="text-[10px] font-bold text-red-400 uppercase tracking-widest">Damaged (${damaged.length})</div>${dmg}` : "")
+      + (missing.length ? `<div class="text-[10px] font-bold text-gray-500 uppercase tracking-widest ${damaged.length?'mt-2':''}">Missing (${missing.length})</div>${mis}` : "");
+  } else {
+    results.classList.add("hidden");
+    results.innerHTML = "";
+  }
+}
+
+async function _fetchFileValidation(){
+  try{
+    const r = await fetch("/api/admin/validate-files", {headers: authHeader()});
+    if(!r.ok) return false;
+    const d = await r.json();
+    _renderFileValidation(d);
+    if(!d.running) stopFileValidationPolling();   // settle once the scan ends
+    return !!d.running;
+  }catch(_){ return false; }
+}
+
+function startFileValidationPolling(){
+  stopFileValidationPolling();
+  _fvTimer = setInterval(_fetchFileValidation, 2000);
+}
+function stopFileValidationPolling(){
+  if(_fvTimer){ clearInterval(_fvTimer); _fvTimer = null; }
+}
+
+async function _loadFileValidationItems(){
+  if(_fvItemsLoaded) return;
+  try{
+    const r = await fetch("/api/admin/library", {headers: authHeader()});
+    if(!r.ok) return;
+    const {items} = await r.json();
+    const sel = document.getElementById("fvItem");
+    if(!sel) return;
+    const cur = sel.value;
+    sel.innerHTML = `<option value="">Whole library</option>`
+      + (items || []).map(it=>`<option value="${escHtml(it.id)}">${escHtml(it.title)}</option>`).join("");
+    sel.value = cur;
+    _fvItemsLoaded = true;
+  }catch(_){}
+}
+
+async function loadFileValidation(){
+  _loadFileValidationItems();
+  const running = await _fetchFileValidation();
+  if(running) startFileValidationPolling();
+  // Pick up an in-flight repair (and render its last result) on tab open.
+  const repairing = await _fetchFileRepair();
+  if(repairing) startFileRepairPolling();
+}
+
+async function startFileValidation(){
+  const btn = document.getElementById("fvStartBtn");
+  const itemId = document.getElementById("fvItem").value;
+  const deep = document.getElementById("fvDeep").value === "1";
+  btn.disabled = true;
+  try{
+    const r = await fetch("/api/admin/validate-files",{
+      method:"POST",
+      headers:{...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify({scope: itemId || "all", deep}),
+    });
+    const d = await r.json().catch(()=>({}));
+    if(!r.ok){
+      showToast(`Validation failed: ${d.detail || r.status}`, true);
+      return;
+    }
+    _renderFileValidation(d);
+    startFileValidationPolling();
+    showToast(`Validating ${deep ? "(deep)" : "(quick)"}…`);
+  }catch(_){
+    showToast("Validation failed.", true);
+  }finally{
+    btn.disabled = false;
+  }
+}
+
+async function stopFileValidation(){
+  const btn = document.getElementById("fvStopBtn");
+  btn.disabled = true;
+  try{
+    const r = await fetch("/api/admin/validate-files/stop",{
+      method:"POST",
+      headers:{...authHeader(), "Content-Type":"application/json"},
+    });
+    const d = await r.json().catch(()=>({}));
+    if(r.ok) _renderFileValidation(d);
+    showToast("Validation stopped.");
+  }catch(_){
+    showToast("Stop failed.", true);
+  }
+}
+
+// ── File Repair (attempt to fix damaged files) ─────────────────────────────────
+let _frTimer = null;
+let _frRunning = false;
+
+function _renderFileRepair(d){
+  const row = document.getElementById("fvRepairRow");
+  const status = document.getElementById("fvRepairStatus");
+  const results = document.getElementById("fvRepairResults");
+  const repairBtn = document.getElementById("fvRepairBtn");
+  const stopBtn = document.getElementById("fvRepairStopBtn");
+  if(!row || !status) return;
+  _frRunning = !!(d && d.running);
+
+  const repaired = (d && d.repaired) || [];
+  const failed = (d && d.failed) || [];
+  const total = (d && d.total) || 0;
+  const scanned = (d && d.scanned) || 0;
+
+  if(_frRunning){
+    const cur = d.current_name ? ` · ${escHtml(d.current_name)}` : "";
+    status.innerHTML = `<span class="text-amber-400 font-bold">Repairing</span> · ${scanned}/${total}${cur}`
+      + ` · ${repaired.length} fixed, ${failed.length} failed`;
+  } else if(d && d.error){
+    status.innerHTML = `<span class="text-red-400 font-bold">Error:</span> ${escHtml(d.error)}`;
+  } else if(d && d.finished_at){
+    const stopped = d.stopped ? " (stopped early)" : "";
+    status.innerHTML = `<span class="text-emerald-400 font-bold">${repaired.length} repaired</span>, `
+      + `${failed.length} could not be fixed${stopped}. Run the validator again to confirm.`;
+  } else {
+    status.textContent = "Ready.";
+  }
+  if(repairBtn) repairBtn.disabled = _frRunning;
+  if(stopBtn) stopBtn.disabled = !_frRunning;
+
+  if(repaired.length || failed.length){
+    results.classList.remove("hidden");
+    const ok = repaired.map(f=>`
+      <div class="border border-emerald-900 bg-emerald-950/20 px-3 py-2">
+        <div class="text-xs font-bold text-emerald-300 break-all">${escHtml(f.name)}</div>
+        <div class="text-[10px] text-gray-500 break-all mt-0.5">Fixed by ${escHtml(f.method || "repair")}${f.torrent ? " · was torrent-backed — seeding will stop" : ""}</div>
+      </div>`).join("");
+    const bad = failed.map(f=>`
+      <div class="border border-red-900 bg-red-950/20 px-3 py-2">
+        <div class="text-xs font-bold text-red-300 break-all">${escHtml(f.name)}</div>
+        ${f.error ? `<div class="text-[10px] text-red-400/80 font-mono break-all mt-0.5">${escHtml(f.error)}</div>` : ""}
+      </div>`).join("");
+    results.innerHTML =
+      (repaired.length ? `<div class="text-[10px] font-bold text-emerald-400 uppercase tracking-widest">Repaired (${repaired.length})</div>${ok}` : "")
+      + (failed.length ? `<div class="text-[10px] font-bold text-red-400 uppercase tracking-widest ${repaired.length?'mt-2':''}">Could not fix (${failed.length})</div>${bad}` : "");
+  } else {
+    results.classList.add("hidden");
+    results.innerHTML = "";
+  }
+  // Keep the validate Start button disabled while a repair is running.
+  const startBtn = document.getElementById("fvStartBtn");
+  if(startBtn && _frRunning) startBtn.disabled = true;
+}
+
+async function _fetchFileRepair(){
+  try{
+    const r = await fetch("/api/admin/repair-files", {headers: authHeader()});
+    if(!r.ok) return false;
+    const d = await r.json();
+    _renderFileRepair(d);
+    if(!d.running) stopFileRepairPolling();
+    return !!d.running;
+  }catch(_){ return false; }
+}
+
+function startFileRepairPolling(){
+  stopFileRepairPolling();
+  _frTimer = setInterval(_fetchFileRepair, 2000);
+}
+function stopFileRepairPolling(){
+  if(_frTimer){ clearInterval(_frTimer); _frTimer = null; }
+}
+
+async function startFileRepair(){
+  const btn = document.getElementById("fvRepairBtn");
+  const reencode = document.getElementById("fvReencode").checked;
+  btn.disabled = true;
+  try{
+    const r = await fetch("/api/admin/repair-files",{
+      method:"POST",
+      headers:{...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify({reencode}),   // paths default to the last scan's damaged list
+    });
+    const d = await r.json().catch(()=>({}));
+    if(!r.ok){
+      showToast(`Repair failed: ${d.detail || r.status}`, true);
+      btn.disabled = false;
+      return;
+    }
+    _renderFileRepair(d);
+    startFileRepairPolling();
+    showToast("Attempting repair…");
+  }catch(_){
+    showToast("Repair failed.", true);
+    btn.disabled = false;
+  }
+}
+
+async function stopFileRepair(){
+  const btn = document.getElementById("fvRepairStopBtn");
+  btn.disabled = true;
+  try{
+    const r = await fetch("/api/admin/repair-files/stop",{
+      method:"POST",
+      headers:{...authHeader(), "Content-Type":"application/json"},
+    });
+    const d = await r.json().catch(()=>({}));
+    if(r.ok) _renderFileRepair(d);
+    showToast("Repair stopped.");
   }catch(_){
     showToast("Stop failed.", true);
   }
