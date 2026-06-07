@@ -305,15 +305,6 @@ seeked to the same moment. The **To TV** button sits in the local player's
 fullscreen header next to Stop (part of `.lp-chrome`, hidden in tiny mode).
 Guarded by `withInflight("handoff_vlc")`.
 
-### Cast to TV (screen mirroring)
-
-No JS / no button. `#lpVideo` carries `x-webkit-airplay="deny"` +
-`disableRemotePlayback` so a playing on-device video stays *inside* an iOS Screen
-Mirror instead of auto-breaking-out into video-only AirPlay. The user casts by
-picking the TV from iOS Control Center → Screen Mirroring; the whole page
-(including the video) shows on the TV. See
-[STREAMING.md § Cast to TV](STREAMING.md#cast-to-tv-screen-mirroring).
-
 ### Clip (save & share the last N seconds)
 
 Two entry points, one core. `_doClip(itemId, filePath, endSec, seconds,

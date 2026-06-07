@@ -12,6 +12,7 @@
 5. `install_jackett_service()` — Windows only: register `Jackett` as a Windows service (auto-elevates via UAC)
 6. `install_smart_skip_deps()` — install ffmpeg + chromaprint (brew/apt/dnf/pacman/portable zip)
 6b. `install_stt_deps()` — install whisper.cpp + a multilingual GGML model for AI auto-subtitles (optional)
+6c. `install_airplay_receiver()` — Windows only, optional: download + run the uxplay-windows AirPlay screen-mirror receiver so an iPhone can mirror onto the host TV. Bundles GStreamer + Apple Bonjour; records `_UXPLAY_WIN`. Defaults to **No**. See [AIRPLAY.md](AIRPLAY.md)
 7. Either reuse existing `.env` (merge tool paths only) or re-prompt for full config — see [Interactive configuration](#interactive-configuration-setuppyl930)
 8. `configure_qbittorrent()` — write `qBittorrent.ini` directly
 9. `write_env()` — save `.env` with both user config and `_VLC_BIN` / `_QBIT_BIN` / etc.
@@ -45,6 +46,24 @@
 - **Linux**: no reliable prebuilt — build whisper.cpp so `whisper-cli` is on PATH; the model still downloads (it's platform-independent).
 - The model **must be multilingual** (not `*.en`) so whisper's translate task can emit English from foreign audio. `detect_tools()` finds the binary via `whisper_candidates()` and the model via `whisper_model_candidates()` (any `tools/whisper/**/ggml-*.bin`).
 - The Windows binary zip's asset name is stable (`whisper-bin-x64.zip`) but the release tag isn't, so `_resolve_whisper_win_url()` queries the GitHub releases API at install time and only falls back to a pinned known-good tag if the API is unreachable.
+
+## AirPlay screen-mirror receiver — uxplay-windows (Windows only) ([setup.py](../setup.py))
+
+`install_airplay_receiver()` lets an iPhone screen-mirror (Control Center → Screen
+Mirroring) onto the TV wired to the host. **Optional + Windows-only**, defaults to
+No (it's a large GStreamer download).
+
+- Detects an existing install via `uxplay_win_candidates()` (LOCALAPPDATA /
+  ProgramFiles roots, a few exe names). If found, records `_UXPLAY_WIN` and checks
+  `_bonjour_service_present()` (`sc query "Bonjour Service"`).
+- Otherwise resolves the latest installer `.exe` from the
+  `leapbtw/uxplay-windows` releases API (`_resolve_airplay_win_installer_url`),
+  downloads it (`_download_with_progress`), and launches the **GUI installer**
+  (waits for the user to finish + allow the Windows Firewall). The installer
+  bundles GStreamer + Apple Bonjour.
+- The receiver only runs at launch when `AIRPLAY_RECEIVER=1` (see
+  [RUNTIME.md](RUNTIME.md) `start_airplay`). StreamLink downloads it from upstream
+  and does not redistribute it (GPL). Full detail in [AIRPLAY.md](AIRPLAY.md).
 
 ## Installing optional components after setup (admin panel)
 
@@ -97,7 +116,7 @@ Uses the `cryptography` package (in requirements.txt). Generates a self-signed C
 
 ## .env shape
 
-`write_env()` writes user-facing keys then a "Auto-detected binary paths" section with `_VLC_BIN`, `_QBIT_BIN`, `_JACKETT_BIN`, `_MULLVAD_BIN`, `_FFMPEG_BIN`, `_FPCALC_BIN`, and (when present) `_WHISPER_BIN` / `_WHISPER_MODEL`. These are read by `run.py`, `watchdog.py`, `analyzer.py`, and `stt.py` to skip path discovery on subsequent runs.
+`write_env()` writes user-facing keys then a "Auto-detected binary paths" section with `_VLC_BIN`, `_QBIT_BIN`, `_JACKETT_BIN`, `_MULLVAD_BIN`, `_FFMPEG_BIN`, `_FPCALC_BIN`, and (when present) `_WHISPER_BIN` / `_WHISPER_MODEL` / `_UXPLAY_WIN` (Windows AirPlay receiver). These are read by `run.py`, `watchdog.py`, `analyzer.py`, and `stt.py` to skip path discovery on subsequent runs. The AirPlay receiver also reads the user-set `AIRPLAY_RECEIVER` flag (`1` to launch it) and the optional `AIRPLAY_PROC_HINTS` / `AIRPLAY_WINDOW_HINTS` overrides — see [AIRPLAY.md](AIRPLAY.md).
 
 `merge_tool_paths()` ([setup.py:1440](../setup.py#L1440)) re-runs without re-prompting (the reuse-`.env` path, incl. every auto-update): keeps user settings, drops stale `_*_BIN` entries that no longer exist, appends new ones.
 

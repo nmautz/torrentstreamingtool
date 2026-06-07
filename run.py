@@ -214,6 +214,31 @@ def find_qbit() -> str | None:
     return None
 
 
+def find_airplay() -> str | None:
+    """Locate the AirPlay screen-mirror receiver (uxplay-windows). Windows only."""
+    if SYSTEM != "Windows":
+        return None
+    saved = e("_UXPLAY_WIN")
+    if saved and Path(saved).exists():
+        return saved
+    roots = [
+        os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")),
+        os.environ.get("ProgramFiles", r"C:\Program Files"),
+        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+        os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")),
+    ]
+    names = ("uxplay-windows.exe", "uxplay_windows.exe", "UxPlay.exe", "uxplay.exe")
+    subs = ("uxplay-windows", "UxPlay-Windows", "UxPlay",
+            os.path.join("Programs", "uxplay-windows"), os.path.join("Programs", "UxPlay"))
+    for r in roots:
+        for sub in subs:
+            for n in names:
+                p = Path(r) / sub / n
+                if p.exists():
+                    return str(p)
+    return None
+
+
 def _windows_jackett_candidates() -> list[str]:
     """Every location the Jackett Windows installer / winget may use.
 
@@ -530,6 +555,45 @@ def start_jackett() -> bool:
         info("Starting Jackett …")
         launch_bg([jackett_bin, "--NoRestart"])
     return wait_for_port(jackett_port, 25.0, "Jackett", jackett_host)
+
+
+def start_airplay() -> None:
+    """Start the AirPlay screen-mirror receiver so an iPhone can mirror onto the
+    host's TV (Control Center → Screen Mirroring). Windows-only, opt-in, and
+    strictly best-effort — never blocks startup or fails the run (like Jackett).
+
+    Gated on AIRPLAY_RECEIVER=1 in .env so hosts that don't want it pay nothing.
+    Ensures Apple Bonjour (the mDNS discovery the iPhone needs) is running, then
+    launches the receiver tray app if it isn't already up. The app self-advertises
+    over Bonjour; the dashboard mediates the screen (VLC yields when a mirror
+    connects). See docs/AIRPLAY.md.
+    """
+    if SYSTEM != "Windows":
+        return
+    if e("AIRPLAY_RECEIVER", "0").strip().lower() not in ("1", "true", "yes", "on"):
+        return
+
+    bin_path = find_airplay()
+    if not bin_path:
+        info("AirPlay receiver enabled but not installed — re-run setup.py to add it")
+        return
+
+    # Bonjour is what makes the host appear in the iPhone's Screen Mirroring list.
+    # `net start` is idempotent (returns non-zero if already running) — ignore rc.
+    try:
+        vrun(["net", "start", "Bonjour Service"])
+    except Exception as exc:
+        vlog(f"net start 'Bonjour Service' raised: {exc}")
+
+    if is_running(Path(bin_path).stem):
+        ok("AirPlay receiver already running")
+        return
+    info("Starting AirPlay screen-mirror receiver …")
+    try:
+        launch_bg([bin_path])
+        ok("AirPlay receiver started — mirror from iPhone: Control Center → Screen Mirroring")
+    except Exception as exc:
+        warn(f"Couldn't start AirPlay receiver: {exc}")
 
 
 def _diagnose_jackett_service_state() -> None:
@@ -939,6 +1003,7 @@ def main():
     vlc_ok     = start_vlc()
     mullvad_ok = check_mullvad()
     _          = start_jackett()          # optional; don't block on failure
+    start_airplay()                       # optional iPhone screen-mirror receiver (Win)
 
     if not mullvad_ok:
         # No-stdin context (system service / piped invocation) → continue

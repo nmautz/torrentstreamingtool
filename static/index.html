@@ -1086,6 +1086,25 @@
           </button>
         </div>
       </div>
+
+      <!-- AirPlay screen-mirror hint — only shown when an AirPlay receiver is
+           installed on the host (airplay_available). Tells the user how to mirror
+           their iPhone onto the TV, and flips to a live "Mirroring now" state when
+           airplay_active. Pure status; mirroring is started from iOS, not here.
+           See _renderAirplayHint / docs/AIRPLAY.md. -->
+      <div id="airplayHint" class="hidden mb-3 border-l-2 border-sky-700 bg-sky-950/30 px-3 py-2 flex items-center gap-3">
+        <svg class="w-5 h-5 flex-shrink-0 text-sky-400" fill="none" stroke="currentColor" stroke-width="1.6" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M5 17H4a1 1 0 01-1-1V6a1 1 0 011-1h16a1 1 0 011 1v10a1 1 0 01-1 1h-1"/>
+          <path stroke-linecap="round" stroke-linejoin="round" d="M12 15l4 5H8l4-5z"/>
+        </svg>
+        <div class="min-w-0">
+          <div id="airplayHintTitle" class="text-[11px] font-black uppercase tracking-widest text-sky-300">Mirror iPhone to TV</div>
+          <div id="airplayHintBody" class="text-[11px] text-gray-400 leading-snug">
+            On your iPhone: open <b>Control Center</b> → <b>Screen Mirroring</b> → pick this PC. Anything on your phone (TikTok, etc.) shows on the TV.
+          </div>
+        </div>
+      </div>
+
       <div class="mb-5">
         <div class="flex gap-0">
           <input id="searchInput" type="search" autocomplete="off"
@@ -1827,15 +1846,7 @@
       </button>
     </div>
   </div>
-  <!-- x-webkit-airplay="deny" + disableRemotePlayback keep the video INSIDE the
-       iOS screen mirror. Without them, iOS auto-routes a playing <video> to
-       video-only AirPlay the moment Control Center → Screen Mirroring is on, so
-       the TV shows just the video (breaking out of the mirror) instead of the
-       whole mirrored screen. Denying per-element AirPlay makes the video render
-       in the mirror, so "cast to TV" works via the native screen-share option.
-       See STREAMING.md § Cast to TV (screen mirroring). -->
-  <video id="lpVideo" controls playsinline x-webkit-airplay="deny" disableRemotePlayback
-         crossorigin="anonymous" preload="auto"></video>
+  <video id="lpVideo" controls playsinline crossorigin="anonymous" preload="auto"></video>
   <!-- Stream-prep overlay: visible while the server is remuxing/transcoding the source file. -->
   <div id="lpPreparing"
        class="hidden absolute inset-0 z-30 flex items-center justify-center bg-black/70 text-amber-300 text-sm font-bold uppercase tracking-widest pointer-events-none">
@@ -2305,6 +2316,27 @@ const BADGE={buffering:"bg-yellow-900/50 text-yellow-400 border-yellow-800",
              error:"bg-red-900/50 text-red-400 border-red-800"};
 const BAR_COLOR={buffering:"bg-yellow-500",playing:"bg-green-500",error:"bg-red-500",idle:"bg-indigo-500"};
 const DOT_COLOR={buffering:"bg-yellow-500 blink",playing:"bg-green-500",error:"bg-red-500",idle:"bg-gray-700"};
+
+// AirPlay screen-mirror hint (Search tab). Shows how to mirror an iPhone onto the
+// TV when a receiver is installed on the host (airplay_available), and flips to a
+// live "Mirroring now" state while a mirror is connected (airplay_active). The
+// mirror is started from iOS Control Center, not here — this is status only.
+function _renderAirplayHint(s){
+  const box=document.getElementById("airplayHint"); if(!box) return;
+  if(!s || !s.airplay_available){ box.classList.add("hidden"); return; }
+  box.classList.remove("hidden");
+  const title=document.getElementById("airplayHintTitle");
+  const body=document.getElementById("airplayHintBody");
+  if(s.airplay_active){
+    box.classList.add("border-emerald-500"); box.classList.remove("border-sky-700");
+    if(title){ title.textContent="Mirroring now"; title.className="text-[11px] font-black uppercase tracking-widest text-emerald-300"; }
+    if(body) body.textContent="Your iPhone is mirroring to the TV. Stop from Control Center → Screen Mirroring.";
+  } else {
+    box.classList.add("border-sky-700"); box.classList.remove("border-emerald-500");
+    if(title){ title.textContent="Mirror iPhone to TV"; title.className="text-[11px] font-black uppercase tracking-widest text-sky-300"; }
+    if(body) body.innerHTML='On your iPhone: open <b>Control Center</b> → <b>Screen Mirroring</b> → pick this PC. Anything on your phone (TikTok, etc.) shows on the TV.';
+  }
+}
 
 function renderPlayer(s){
   const np=document.getElementById("nowPlaying"),si=document.getElementById("streamInfo");
@@ -7835,6 +7867,7 @@ function connectSSE(){
     updateDlBadge(d.downloading_count||0);
     renderServerAttention(d);
     renderPerfBanner(d);
+    _renderAirplayHint(app);
     if(typeof d.vlc_night_mode==="boolean") renderNightMode();
   });
   es.addEventListener("vpn_status",e=>{

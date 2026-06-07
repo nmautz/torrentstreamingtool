@@ -20,6 +20,8 @@ Browser  ─SSE/HTTP→  FastAPI (main.py, port 80)
 
 All four services (VLC, qBittorrent, Jackett, dashboard) run on the same host except Jackett, which `run.py` can talk to remotely (`INDEXER_URL` parsed for hostname). VLC, qBittorrent, and Mullvad must always be local.
 
+An **optional** fifth host process (Windows only): an **AirPlay screen-mirror receiver** (uxplay-windows) so an iPhone can mirror onto the host's TV. It self-advertises over Bonjour and is launched by `run.py` when `AIRPLAY_RECEIVER=1`; the dashboard only mediates the screen (VLC yields when a mirror connects). See [AIRPLAY.md](AIRPLAY.md).
+
 ## Process model
 
 - **One Python process** runs FastAPI/uvicorn (the dashboard). All state is in-memory in `AppState` ([main.py:138](../main.py#L138)).

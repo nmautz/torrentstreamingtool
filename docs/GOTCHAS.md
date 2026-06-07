@@ -630,9 +630,16 @@ For subtitle *timing* accuracy `_run_whisper` passes `-dtw <preset>` (Dynamic Ti
 
 `_build_offline_cache_inventory` (admin → Offline Cache tab) sums every file in every HLS bundle via `_dir_size_bytes` (recursive `rglob` + `stat`) and `stat()`s every library file. Doing that **synchronously in the async handler** blocks the asyncio event loop for the whole walk — and since the ABR ladder (v3.3.0) tripled the segment count per bundle, a real-world cache makes that long enough to freeze the *entire* server (SSE, VLC polling, all requests) until it looks crashed and the service restarts. The symptom is the tab stuck on "Loading cache inventory…" forever (the request never returns; the frontend *does* handle 500/network errors, so a permanent "Loading…" means a blocked loop, not an error). Fixed in v4.0.1 by running the walk in `asyncio.to_thread` (`_offline_cache_inventory_sync`), snapshotting `_offline_jobs` first so the thread doesn't iterate the live dict. Rule: any admin/inventory path that touches the full cache or many files on disk must offload to a thread — same as `_run_offline_job` already does for `_dir_size_bytes` / `shutil.rmtree`.
 
+### AirPlay screen mirroring: Bonjour + same-subnet are load-bearing, and the mirror-window markers are unverified
+
+The Windows AirPlay receiver (see [AIRPLAY.md](AIRPLAY.md)) only appears in the iPhone's Screen Mirroring list if **Apple Bonjour (`Bonjour Service`) is running** *and* the phone and PC are on the **same subnet**. Guest Wi-Fi, AP "client isolation", or split 2.4/5 GHz VLANs silently block the mDNS discovery — the receiver process is fine, it's just undiscoverable. The firewall must also allow the receiver + mDNS (UDP 5353) + the AirPlay ports. None of this is something the dashboard can detect or fix; it's host/network setup. `start_airplay()` does `net start "Bonjour Service"` but can't fix a blocked subnet.
+
+Second footgun: the **VLC-yield** logic (`main.py airplay_mirror_watch` → `_find_airplay_hwnds_windows`) detects "a mirror is live" by matching the receiver's window **process name / title** against `_AIRPLAY_PROC_HINTS` / `_AIRPLAY_WINDOW_HINTS`. Those markers were **not verifiable from the macOS dev box** — if VLC doesn't get out of the way when a mirror connects, the hints don't match this uxplay-windows build. Fix it in `.env` (`AIRPLAY_PROC_HINTS` / `AIRPLAY_WINDOW_HINTS`), not in code. The receiver is also **deliberately not watchdog-supervised** (it's a self-managing tray app with no health port — policing it would relaunch one the user intentionally closed).
+
 ## See also
 
 - [BACKEND.md](BACKEND.md) — invariants enforced by `main.py`
 - [DAEMON_WATCHDOG.md](DAEMON_WATCHDOG.md) — VPN guard at the process level
 - [ANALYZER.md](ANALYZER.md) — Smart Skip algorithm details and fallback chain
 - [STT.md](STT.md) — AI auto-subtitle pipeline
+- [AIRPLAY.md](AIRPLAY.md) — iPhone screen-mirror receiver (Windows)

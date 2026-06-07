@@ -550,6 +550,9 @@ class AppState:
     youtube_playback: str = ""                            # last player state from /tv: unstarted|buffering|playing|paused|ended
     youtube_tv_seen_at: float = 0.0                       # time.time() of last /tv heartbeat (drives relaunch-vs-load decision)
     system_volume_before_yt: Optional[int] = None        # OS volume (0-100) snapshot at YouTube start; falls back when no default configured
+    # ── AirPlay screen-mirror receiver (iPhone mirrors onto the host TV; Win-only) ──
+    airplay_available: bool = False                       # True if an AirPlay receiver (uxplay-windows) is installed on this host
+    airplay_active: bool = False                          # True while an iPhone screen-mirror is live on the TV — VLC yields the screen (like youtube_active)
     # ── Auto-updater (transient view of the current update operation) ──
     # All persisted updater state lives in library.json → settings.autoupdate.
     # These fields just expose the live state of an in-flight check/apply so
@@ -686,6 +689,11 @@ def state_snapshot() -> dict:
         # populated from the /tv page's heartbeat (see /api/youtube/tv-state).
         "youtube_active": state.youtube_active,
         "youtube_video_id": state.youtube_video_id,
+        # AirPlay screen mirroring: airplay_available = a receiver is installed on
+        # the host (dashboard shows the "how to mirror" hint); airplay_active = an
+        # iPhone mirror is live on the TV (VLC has yielded the screen).
+        "airplay_available": state.airplay_available,
+        "airplay_active": state.airplay_active,
         # Env keys whose absence disables features. The non-admin UI shows a
         # passive banner ("server needs admin attention") when this is non-empty
         # AND any entry has `required=True`; the admin Updates tab renders the
@@ -1647,7 +1655,8 @@ async def vlc_focus_and_fullscreen() -> None:
         # YouTube took over the TV (browser kiosk) — stop fighting it. Without
         # this, a still-running background focus loop would keep minimizing the
         # kiosk window (via _minimize_other_windows) and re-focusing VLC.
-        if state.youtube_active:
+        # An active iPhone screen-mirror likewise owns the TV — yield to it too.
+        if state.youtube_active or state.airplay_active:
             return
         # Always re-assert focus + minimize-others, even if VLC reports
         # fullscreen=True. The reported flag tracks VLC's internal state and
@@ -3611,7 +3620,8 @@ async def background_video_loop() -> None:
         try:
             # YouTube is playing in the browser on the TV — VLC is intentionally
             # stopped. Don't let the idle-background loop start a video over it.
-            if state.youtube_active:
+            # An active iPhone screen-mirror likewise owns the TV — stay out of it.
+            if state.youtube_active or state.airplay_active:
                 continue
             lib = await get_library()
             bg = lib.get("settings", {}).get("background_video") or {}
@@ -4720,6 +4730,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # at "No active stream" until someone presses Stop.
     await _sync_state_from_vlc()
 
+    # AirPlay screen-mirror receiver availability (Windows-only, opt-in). Drives
+    # the dashboard's "mirror your iPhone" hint and the VLC-yield watcher.
+    state.airplay_available = _airplay_receiver_enabled()
+
     guard       = asyncio.create_task(vpn_guard())
     broadcaster = asyncio.create_task(stat_broadcaster())
     dl_monitor  = asyncio.create_task(library_download_monitor())
@@ -4734,12 +4748,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     cachepurge_loop = asyncio.create_task(cache_autopurge_loop())
     subupgrade_loop = asyncio.create_task(subtitle_upgrade_loop())
     od_reaper_loop  = asyncio.create_task(_od_reaper())
+    airplay_watch   = asyncio.create_task(airplay_mirror_watch())
 
     yield
 
     for t in (guard, broadcaster, dl_monitor, vlc_tracker, bg_loop, jackett_mon,
               reboot_loop, autoprep_loop, update_loop, dlsched_loop, sysmon_loop,
-              cachepurge_loop, subupgrade_loop, od_reaper_loop):
+              cachepurge_loop, subupgrade_loop, od_reaper_loop, airplay_watch):
         t.cancel()
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
@@ -6613,6 +6628,159 @@ async def _bring_tv_to_front(video_id: str) -> None:
             if reinforced >= 3:   # found + two reinforcing passes → settle
                 return
         await asyncio.sleep(delay)
+
+
+# ── AirPlay screen-mirror receiver (iPhone → host TV) ───────────────────────
+#
+# The receiver (uxplay-windows) is launched by run.py and self-advertises over
+# Bonjour, so the iPhone lists it under Control Center → Screen Mirroring. The
+# server's only job is to MEDIATE THE SCREEN: when a mirror connects, the
+# receiver's video window appears over VLC, so we minimize VLC + pull the mirror
+# forward and set state.airplay_active (which makes vlc_focus_and_fullscreen and
+# background_video_loop stand down, exactly like youtube_active). When the mirror
+# ends, VLC/background reclaim the TV.
+#
+# Process/window MARKERS below are best-effort — the exact uxplay-windows window
+# title/process name must be confirmed on Windows (see docs/AIRPLAY.md); they're
+# overridable via .env so a mismatch can be fixed without a code change.
+_AIRPLAY_PROC_HINTS   = ("uxplay", "gst-launch", "gstreamer")
+_AIRPLAY_WINDOW_HINTS = ("uxplay", "airplay", "screen mirror")
+
+
+def _airplay_receiver_enabled() -> bool:
+    """True if an AirPlay receiver is configured to run on this (Windows) host."""
+    if platform.system() != "Windows":
+        return False
+    if os.environ.get("AIRPLAY_RECEIVER", "0").strip().lower() not in ("1", "true", "yes", "on"):
+        return False
+    return bool(os.environ.get("_UXPLAY_WIN"))
+
+
+def _find_airplay_hwnds_windows() -> list:
+    """Visible top-level windows that look like a live AirPlay mirror.
+
+    A mirror window only exists while an iPhone is actively mirroring (the tray
+    app otherwise has no visible window), so its presence == mirroring. Match by
+    owning-process name OR window title against the (env-overridable) hints, and
+    require a non-trivial size to skip tray/helper popups."""
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        proc_hints = tuple(h.lower() for h in os.environ.get(
+            "AIRPLAY_PROC_HINTS", ",".join(_AIRPLAY_PROC_HINTS)).split(",") if h.strip())
+        win_hints = tuple(h.lower() for h in os.environ.get(
+            "AIRPLAY_WINDOW_HINTS", ",".join(_AIRPLAY_WINDOW_HINTS)).split(",") if h.strip())
+
+        ap_pids: set = set()
+        for p in psutil.process_iter(["name", "pid"]):
+            nm = (p.info["name"] or "").lower()
+            if any(h in nm for h in proc_hints):
+                ap_pids.add(p.info["pid"])
+
+        user32 = ctypes.windll.user32
+        found: list = []
+        EnumWindowsProc = ctypes.WINFUNCTYPE(ctypes.c_bool, wintypes.HWND, wintypes.LPARAM)
+
+        def _cb(hwnd, _):
+            if not user32.IsWindowVisible(hwnd):
+                return True
+            # Owning process match.
+            pid = wintypes.DWORD()
+            user32.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+            is_proc = pid.value in ap_pids
+            # Title match.
+            is_title = False
+            n = user32.GetWindowTextLengthW(hwnd)
+            if n:
+                buf = ctypes.create_unicode_buffer(n + 1)
+                user32.GetWindowTextW(hwnd, buf, n + 1)
+                t = buf.value.lower()
+                is_title = any(h in t for h in win_hints)
+            if not (is_proc or is_title):
+                return True
+            # Size gate: skip tiny tray/helper windows.
+            rect = wintypes.RECT()
+            if user32.GetWindowRect(hwnd, ctypes.byref(rect)):
+                if (rect.right - rect.left) >= 320 and (rect.bottom - rect.top) >= 240:
+                    found.append(hwnd)
+            return True
+
+        cb = EnumWindowsProc(_cb)   # keep ref alive — ctypes GC pitfall
+        user32.EnumWindows(cb, 0)
+        return found
+    except Exception:
+        return []
+
+
+def _focus_airplay_windows() -> bool:
+    """Pull the AirPlay mirror window forward past focus-stealing prevention.
+
+    Same cocktail as `_focus_tv_browser_windows`. Returns True if a mirror
+    window exists (so the caller can stop retrying)."""
+    hwnds = _find_airplay_hwnds_windows()
+    if not hwnds:
+        return False
+    hwnd = hwnds[0]
+    try:
+        import ctypes
+        from ctypes import wintypes
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+
+        SPI_SETFOREGROUNDLOCKTIMEOUT = 0x2001
+        SPIF_SENDCHANGE = 0x02
+        user32.SystemParametersInfoW(SPI_SETFOREGROUNDLOCKTIMEOUT, 0, 0, SPIF_SENDCHANGE)
+
+        VK_MENU = 0x12
+        KEYEVENTF_KEYUP = 0x0002
+        user32.keybd_event(VK_MENU, 0, 0, 0)
+        user32.keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0)
+
+        fg_thread = user32.GetWindowThreadProcessId(user32.GetForegroundWindow(), None)
+        my_thread = kernel32.GetCurrentThreadId()
+        if fg_thread != my_thread:
+            user32.AttachThreadInput(my_thread, fg_thread, True)
+        user32.ShowWindow(hwnd, 9)   # SW_RESTORE
+        user32.BringWindowToTop(hwnd)
+        user32.SetForegroundWindow(hwnd)
+        if fg_thread != my_thread:
+            user32.AttachThreadInput(my_thread, fg_thread, False)
+    except Exception:
+        pass
+    return True
+
+
+async def airplay_mirror_watch() -> None:
+    """Poll for a live iPhone screen-mirror and make VLC yield the TV to it.
+
+    Windows-only and a no-op unless an AirPlay receiver is enabled+installed. On
+    the rising edge (mirror appears) minimize VLC, pull the mirror forward, set
+    state.airplay_active + broadcast. On the falling edge clear it + broadcast so
+    background_video_loop / vlc_focus_and_fullscreen reclaim the TV within a tick.
+    """
+    if platform.system() != "Windows" or not state.airplay_available:
+        return
+    loop = asyncio.get_running_loop()
+    while True:
+        await asyncio.sleep(2.0)
+        try:
+            present = bool(await loop.run_in_executor(None, _find_airplay_hwnds_windows))
+            if present and not state.airplay_active:
+                state.airplay_active = True
+                await vlc_minimize()
+                await loop.run_in_executor(None, _focus_airplay_windows)
+                await broadcast("state", state_snapshot())
+            elif present and state.airplay_active:
+                # Keep reinforcing focus so a late shell/app can't bury the mirror.
+                await loop.run_in_executor(None, _focus_airplay_windows)
+            elif not present and state.airplay_active:
+                state.airplay_active = False
+                await broadcast("state", state_snapshot())
+                # Reclaim the TV for VLC/background now that the mirror is gone.
+                asyncio.create_task(vlc_focus_and_fullscreen())
+        except Exception:
+            pass
 
 
 @app.get("/tv", include_in_schema=False)

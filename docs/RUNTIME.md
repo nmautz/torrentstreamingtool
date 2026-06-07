@@ -47,6 +47,11 @@ if _VENV_PY.exists() and Path(sys.prefix).resolve() != VENV.resolve():
 - Runs `mullvad status`; returns True if "Connected" in output
 - If not connected, asks for confirmation before continuing (VPN kill-switch will be inactive)
 
+### `start_airplay()` (Windows only, optional)
+- Starts the **AirPlay screen-mirror receiver** (uxplay-windows) so an iPhone can mirror onto the host's TV. Best-effort — never blocks or fails startup (like Jackett).
+- **Gated on `AIRPLAY_RECEIVER=1`** in `.env`; a no-op otherwise (and off Windows).
+- `net start "Bonjour Service"` (idempotent — Bonjour/mDNS is what makes the host discoverable on the iPhone), then `launch_bg`s the receiver (path from `_UXPLAY_WIN` / `find_airplay()`) if it isn't already running. The receiver self-advertises; the dashboard mediates the screen (`main.py airplay_mirror_watch`). See [AIRPLAY.md](AIRPLAY.md).
+
 ## Watchdog ([run.py:766](../run.py#L766))
 
 After all services are up, `start_watchdog()` is called. It returns a daemon thread that monitors VLC/qBit/Jackett and restarts crashed ones — see [DAEMON_WATCHDOG.md](DAEMON_WATCHDOG.md).

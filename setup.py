@@ -216,6 +216,32 @@ def mullvad_candidates() -> list[str]:
     return ["/usr/bin/mullvad", "mullvad"]
 
 
+def uxplay_win_candidates() -> list[str]:
+    """Places the leapbtw/uxplay-windows AirPlay receiver may install to.
+
+    Windows-only. The installer is a per-user/per-machine app; the launchable
+    tray exe has shipped under a couple of names across releases, so search a few.
+    """
+    if SYSTEM != "Windows":
+        return []
+    roots = [
+        os.environ.get("LOCALAPPDATA", str(Path.home() / "AppData" / "Local")),
+        os.environ.get("ProgramFiles", r"C:\Program Files"),
+        os.environ.get("ProgramFiles(x86)", r"C:\Program Files (x86)"),
+        os.environ.get("APPDATA", str(Path.home() / "AppData" / "Roaming")),
+    ]
+    names = ("uxplay-windows.exe", "uxplay_windows.exe", "UxPlay.exe", "uxplay.exe")
+    subs = ("uxplay-windows", "UxPlay-Windows", "UxPlay", os.path.join("Programs", "uxplay-windows"),
+            os.path.join("Programs", "UxPlay"))
+    out: list[str] = []
+    for r in roots:
+        for sub in subs:
+            base = Path(r) / sub
+            for n in names:
+                out.append(str(base / n))
+    return out
+
+
 def _portable_matches(subdir: str, *exe_names: str) -> list[str]:
     """Resolve already-extracted portable binaries under ./tools/<subdir>/.
 
@@ -313,6 +339,14 @@ FPCALC_MAC_URL   = "https://github.com/acoustid/chromaprint/releases/download/v1
 # compatible NVIDIA driver; whisper.cpp auto-offloads to the GPU when run, and
 # we force-fall-back to CPU at runtime (`-ng`) if CUDA init fails. CPU is the
 # portable default; the GPU build is opt-in via the admin Components panel.
+# AirPlay screen-mirror receiver (Windows only) — lets an iPhone screen-mirror
+# (Control Center → Screen Mirroring) onto the TV wired to the host PC. We use the
+# prebuilt leapbtw/uxplay-windows installer, which bundles GStreamer + Apple
+# Bonjour (Bonjour is what makes the host appear in the iPhone's mirror list). The
+# release TAG moves, so resolve the installer asset from the releases API at
+# install time. This is a Windows-only, opt-in extra; see docs/AIRPLAY.md.
+AIRPLAY_WIN_RELEASES_API = "https://api.github.com/repos/leapbtw/uxplay-windows/releases/latest"
+
 WHISPER_RELEASES_API     = "https://api.github.com/repos/ggml-org/whisper.cpp/releases/latest"
 WHISPER_FALLBACK_VERSION = "1.8.4"   # known-good tag that publishes all three builds
 WHISPER_MODEL_NAME = "ggml-base.bin"
@@ -566,6 +600,112 @@ def install_stt_deps(tools: dict) -> dict:
         ok("Auto-subtitles ready.")
     else:
         note("Auto-subtitles will stay disabled until both the binary and model are present.")
+    return refreshed
+
+
+# ── AirPlay screen-mirror receiver (Windows only) ──────────────────────────
+def _bonjour_service_present() -> bool:
+    """True if the Apple 'Bonjour Service' Windows service exists (any state).
+
+    Bonjour/mDNS is what makes the host discoverable in the iPhone's Screen
+    Mirroring list. The uxplay-windows installer bundles + registers it.
+    """
+    if SYSTEM != "Windows":
+        return False
+    try:
+        r = vrun(["sc.exe", "query", "Bonjour Service"], timeout=5)
+    except Exception as exc:
+        vlog(f"sc.exe query 'Bonjour Service' raised: {exc}")
+        return False
+    return r.returncode == 0
+
+
+def _resolve_airplay_win_installer_url() -> str | None:
+    """Resolve the latest uxplay-windows installer (.exe) URL from the GitHub
+    releases API. Returns None if the API is unreachable / no asset matches."""
+    import json, urllib.request
+    try:
+        req = urllib.request.Request(AIRPLAY_WIN_RELEASES_API,
+                                     headers={"Accept": "application/vnd.github+json",
+                                              "User-Agent": "streamlink-setup"})
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+        assets = data.get("assets", []) or []
+        # Prefer a Windows installer/setup .exe; fall back to any .exe asset.
+        for want in (lambda n: n.endswith(".exe") and ("setup" in n or "install" in n),
+                     lambda n: n.endswith(".exe")):
+            for a in assets:
+                name = (a.get("name") or "").lower()
+                if want(name):
+                    return a.get("browser_download_url")
+    except Exception as exc:
+        vlog(f"uxplay-windows release lookup failed: {exc}")
+    return None
+
+
+def install_airplay_receiver(tools: dict) -> dict:
+    """Offer to install the AirPlay screen-mirror receiver (Windows only).
+
+    Lets an iPhone screen-mirror (Control Center → Screen Mirroring) onto the TV
+    wired to the host PC. Uses the prebuilt leapbtw/uxplay-windows installer,
+    which bundles GStreamer + Apple Bonjour. Optional — declining only disables
+    iPhone screen mirroring; everything else works. No-op off Windows.
+    """
+    if SYSTEM != "Windows":
+        # The host is the box wired to the TV; only Windows is supported as an
+        # AirPlay receiver here (macOS has native AirPlay Receiver; Linux uses
+        # UxPlay/Avahi). Both are out of scope — Windows is the deploy target.
+        return tools
+
+    refreshed = dict(tools)
+    existing = find_exe(*uxplay_win_candidates())
+    if existing:
+        refreshed["uxplay_win"] = existing
+        ok(f"AirPlay receiver: {existing}")
+        if not _bonjour_service_present():
+            warn("Apple 'Bonjour Service' not detected — the host may not appear in")
+            note("the iPhone's Screen Mirroring list. Reinstall the AirPlay receiver,")
+            note("or install Bonjour (ships with the uxplay-windows installer / iTunes).")
+        return refreshed
+
+    header("iPhone Screen-Mirror Receiver (AirPlay, optional)")
+    note("Lets you screen-mirror an iPhone (Control Center → Screen Mirroring)")
+    note("onto the TV wired to this PC. Bundles GStreamer + Apple Bonjour (large).")
+    if not ask_bool("Download + run the AirPlay receiver installer (uxplay-windows) now?",
+                    default=False):
+        note("Skipped. Re-run setup.py later to add iPhone screen mirroring.")
+        return refreshed
+
+    url = _resolve_airplay_win_installer_url()
+    if not url:
+        warn("Couldn't resolve the uxplay-windows installer from GitHub.")
+        note("Install it manually: https://github.com/leapbtw/uxplay-windows/releases")
+        return refreshed
+
+    dest = TOOLS_DIR / "airplay" / url.rsplit("/", 1)[-1]
+    if not _download_with_progress(url, dest):
+        note("Download failed — install manually from the link above, then re-run setup.py.")
+        return refreshed
+
+    note("Launching the installer — complete the wizard (allow it through the")
+    note("Windows Firewall when prompted), then return here.")
+    try:
+        # GUI installer: run it and wait for the user to finish the wizard.
+        subprocess.run([str(dest)], check=False)
+    except Exception as exc:
+        warn(f"Couldn't launch the installer ({exc}). Run it manually: {dest}")
+        return refreshed
+
+    found = find_exe(*uxplay_win_candidates())
+    if found:
+        refreshed["uxplay_win"] = found
+        ok(f"AirPlay receiver installed: {found}")
+        if not _bonjour_service_present():
+            warn("Bonjour Service still not detected — screen mirroring may not work")
+            note("until Apple Bonjour is installed and running.")
+    else:
+        warn("AirPlay receiver not detected after install — a reboot/new shell may be needed.")
+        note("If it's installed, run.py will still find it on next launch.")
     return refreshed
 
 
@@ -1165,6 +1305,13 @@ def detect_tools() -> dict:
     if model_path:
         ok(f"whisper model: {model_path}")
 
+    # AirPlay screen-mirror receiver (Windows only, optional) — quiet probe.
+    if SYSTEM == "Windows":
+        ap = find_exe(*uxplay_win_candidates())
+        tools["uxplay_win"] = ap
+        if ap:
+            ok(f"AirPlay receiver: {ap}")
+
     if not tools.get("ffmpeg") or not tools.get("fpcalc"):
         note(f"Smart Skip (intro/credits auto-detection) needs both ffmpeg and fpcalc.")
         note(f"Install: {chromaprint_install_hint()}")
@@ -1406,7 +1553,8 @@ def write_env(cfg: dict, tools: dict) -> None:
     mapping = {"vlc": "_VLC_BIN", "qbit": "_QBIT_BIN",
                "jackett": "_JACKETT_BIN", "mullvad": "_MULLVAD_BIN",
                "ffmpeg": "_FFMPEG_BIN", "fpcalc": "_FPCALC_BIN",
-               "whisper": "_WHISPER_BIN", "whisper_model": "_WHISPER_MODEL"}
+               "whisper": "_WHISPER_BIN", "whisper_model": "_WHISPER_MODEL",
+               "uxplay_win": "_UXPLAY_WIN"}
     for key, env_key in mapping.items():
         if tools.get(key):
             lines.append(f"{env_key}={tools[key]}")
@@ -1450,7 +1598,8 @@ def merge_tool_paths(tools: dict) -> None:
     mapping = {"vlc": "_VLC_BIN", "qbit": "_QBIT_BIN",
                "jackett": "_JACKETT_BIN", "mullvad": "_MULLVAD_BIN",
                "ffmpeg": "_FFMPEG_BIN", "fpcalc": "_FPCALC_BIN",
-               "whisper": "_WHISPER_BIN", "whisper_model": "_WHISPER_MODEL"}
+               "whisper": "_WHISPER_BIN", "whisper_model": "_WHISPER_MODEL",
+               "uxplay_win": "_UXPLAY_WIN"}
     desired = {env_key: tools[key] for key, env_key in mapping.items() if tools.get(key)}
 
     # _WHISPER_MODEL is a user CHOICE among possibly several installed GGML
@@ -1517,6 +1666,7 @@ def main():
         install_jackett_service()
         tools = install_smart_skip_deps(tools)
         tools = install_stt_deps(tools)
+        tools = install_airplay_receiver(tools)
 
     existing = parse_existing_env() if ENV.exists() else {}
     reuse_env = False

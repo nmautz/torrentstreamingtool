@@ -49,6 +49,7 @@ Each entry is a short hook so future Claude instances can jump straight to the r
 | [docs/STREAMING.md](docs/STREAMING.md) | Working on Stream-to-Device — `/offline-prepare`, `.offline_cache/`, per-row Prep buttons, the local `<video>` player, progress sync. (Successor to the old `OFFLINE.md`.) |
 | [docs/STT.md](docs/STT.md) | Working on AI auto-subtitles — `stt.py` (whisper.cpp), the `_needs_stt_subs` trigger, STT jobs, `/api/.../generate-subtitles`, the Generate-with-AI UI, whisper bundling in `setup.py`. |
 | [docs/YOUTUBE.md](docs/YOUTUBE.md) | Working on YouTube-on-TV — `/api/youtube*`, the Chrome kiosk + `static/tv.html` IFrame player, the `yt_command` SSE relay, the dashboard control routing (`app.youtube_active`). |
+| [docs/AIRPLAY.md](docs/AIRPLAY.md) | Working on the iPhone screen-mirror receiver (Windows-only) — `setup.py install_airplay_receiver`, `run.py start_airplay`, `main.py airplay_mirror_watch` + `state.airplay_active`/`airplay_available` (VLC yields the TV), the `#airplayHint` UI, the `AIRPLAY_RECEIVER`/`_UXPLAY_WIN` env keys. |
 | [docs/GOTCHAS.md](docs/GOTCHAS.md) | **Read before any non-trivial change.** VLC ES-ID quirks, qBit sequential-download traps, VPN dual-enforcement, Jackett `Category[]=0`, canonical path matching, etc. |
 
 ---
