@@ -101,34 +101,43 @@ below never runs there.
 
 ### Silent installs — Windows host credentials (self-elevation)
 
-So StreamLink can finish a UAC-gated install **on its own**, store the host's
-Windows Administrator account in the env-keys editor (Admin → Updates):
-`WINDOWS_ADMIN_USER` + `WINDOWS_ADMIN_PASSWORD`. `_run_elevated_windows(cmdline)`
-then runs the command elevated with **no UAC dialog** via **`CreateProcessWithLogonW`**
-— the Secondary Logon service (what `runas /user:` uses). It launches the command
-as the supplied admin account and waits for its exit code.
+**The hard Windows truth first:** a process running as a **standard user cannot
+silently gain administrator rights** — even with an admin password. That's the
+entire point of UAC, and it's why the first attempts failed (a credential logon
+hands back a UAC-*filtered* token, so a per-machine MSI dies with **1603**; and
+`schtasks /Create /RL HIGHEST` is refused with *"Access is denied"* because
+**creating** an elevated task itself needs an already-elevated caller). On this
+project the server runs **non-elevated** (the TV box's interactive user is a
+standard account, and StreamLink must run in *their* desktop session to control
+VLC), so it can't elevate itself on the fly.
 
-> **Why not `schtasks`?** An earlier version used `schtasks /Create … /RL HIGHEST`,
-> but that **requires the *creating* process to already be elevated** — and the
-> StreamLink service runs as a *standard* user (daemon.py deliberately omits
-> `/RL HIGHEST`). On a non-admin host it failed with *"ERROR: Access is denied."*
-> `CreateProcessWithLogonW` has no such requirement: a standard-user process can
-> launch a process as a *different* admin account by supplying its credentials.
-> Because that's a fresh full logon of an admin account (not the standard user's
-> token-filtered interactive session), the child gets the **full elevated token** —
-> credential authentication *is* the elevation authorization, so no consent dialog.
+**What actually works: an install-time elevation helper.** Store the host's admin
+account in the env-keys editor (Admin → Updates): `WINDOWS_ADMIN_USER` +
+`WINDOWS_ADMIN_PASSWORD`, then **re-run `python run.py --install` once** and approve
+the single UAC prompt. Because `--install` is elevated, `daemon.py`
+(`_windows_register_elevation_helper`) can register a **`/RL HIGHEST` Scheduled
+Task** (`StreamLinkElevate`) that runs as that admin account with the stored
+password. Creating it needs elevation (hence install-time); **running** an existing
+task does **not** — so afterwards the standard-user server triggers it on demand:
+`_run_elevated_windows(cmdline)` writes the command to `.elevate\run.cmd` (the
+task's fixed action), `schtasks /Run`s the task, and reads the exit code back from
+`.elevate\result.txt`. That yields a genuine elevated, silent `msiexec /qn` with no
+prompt. (If StreamLink itself is already elevated, it skips all this and runs the
+command directly.)
 
 The account formats accepted: `Administrator` (local), `HOST\\Administrator` /
 `DOMAIN\\user`, or `user@domain` (UPN) — see `_split_win_account`.
 
 > ⚠️ **Requirements / security.** The named account must be a **local
-> Administrator** (so its full token can do a per-machine MSI install), the
-> **Secondary Logon service** (`seclogon`) must be enabled (Manual/Automatic), and
-> blank passwords won't work. The password lives in `.env` on the host (plaintext,
-> like `ADMIN_PASSWORD` / `JACKETT_PASSWORD`). Common `CreateProcessWithLogonW`
-> errors are surfaced verbatim: WinError 1326 (bad user/password), 1327 (account
-> restriction), 1058 (Secondary Logon disabled), 1385 (no batch-logon right). The
-> helper is generic and reusable for other elevated host operations.
+> Administrator**; the password lives in `.env` on the host (plaintext, like
+> `ADMIN_PASSWORD` / `JACKETT_PASSWORD`) **and** Task Scheduler stores it for the
+> helper task. The `.elevate\run.cmd` action is rewritten per call by the
+> (standard-user-writable) server, so anything able to write that file gets
+> elevated execution — it lives in the repo dir, same trust boundary as the app.
+> If you'd rather not store credentials, just **run the `.msi` once manually** (the
+> Optional Components row shows its path) — the receiver only needs installing once.
+> The last-ditch `CreateProcessWithLogonW` path (no helper task) surfaces WinErrors
+> verbatim: 1326 (bad user/password), 1058 (Secondary Logon disabled), etc.
 
 **Interactive: `setup.py` (manual runs only).** `install_airplay_receiver` offers
 

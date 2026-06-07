@@ -324,31 +324,98 @@ def _split_win_account(user: str) -> tuple[str, str | None]:
     return user, "."               # bare name → local account
 
 
+def _is_elevated_windows() -> bool:
+    """True if THIS process holds a full admin token (can install per-machine)."""
+    if platform.system() != "Windows":
+        return False
+    try:
+        import ctypes
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except Exception:
+        return False
+
+
+ELEVATE_TASK_NAME = "StreamLinkElevate"
+ELEVATE_DIR = Path(__file__).parent / ".elevate"
+
+
+def _elevation_task_exists() -> bool:
+    """True if the install-time elevation-helper Scheduled Task is registered."""
+    if platform.system() != "Windows":
+        return False
+    try:
+        r = subprocess.run(["schtasks", "/Query", "/TN", ELEVATE_TASK_NAME],
+                           capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        return r.returncode == 0
+    except Exception:
+        return False
+
+
 def _run_elevated_windows(cmdline: str, timeout: float = 900.0) -> tuple[int, str]:
-    """Run `cmdline` ELEVATED on Windows using the stored admin credentials, with
-    no interactive UAC prompt — so StreamLink (running as a *standard* user) can
-    complete UAC-gated installs on its own (the user's request).
+    """Run `cmdline` with administrative rights on Windows so StreamLink can
+    complete a UAC-gated install (the user's request). Returns (exit_code, detail).
 
-    Mechanism: **`CreateProcessWithLogonW`** (the Secondary Logon service — what
-    `runas /user:` uses). Unlike `schtasks /Create /RL HIGHEST`, this does **not**
-    require the caller to be an administrator, which is the whole point: the
-    StreamLink process is a standard user. Because we supply a *different* admin
-    account's credentials, Windows performs a fresh full logon of that account and
-    the child (`msiexec /qn`) runs with its **full elevated token** — credential
-    authentication is the elevation authorization, so there's no consent dialog.
+    Paths, in order:
+    1. **Already elevated** (`IsUserAnAdmin`) — run directly with the full token.
+    2. **Elevation-helper task** — a `/RL HIGHEST` Scheduled Task (`StreamLinkElevate`)
+       that `daemon.py` registers during the elevated `python run.py --install` using
+       the stored `WINDOWS_ADMIN_USER`/`PASSWORD`. **Creating** a HIGHEST task needs an
+       elevated caller (hence install-time), but **running** an existing task does not —
+       so a standard-user server can trigger it on demand. We write the command to a
+       fixed `.elevate\run.cmd` (the task's action), `schtasks /Run` it, and read the
+       exit code back from `.elevate\result.txt`. This is what makes the stored
+       password deliver silent installs when the logged-in user is a standard account.
+    3. **Secondary Logon** (`CreateProcessWithLogonW`) — last-ditch; usually yields a
+       UAC-filtered token so a per-machine MSI fails 1603. The caller surfaces the
+       remedy on failure.
 
-    Returns (exit_code, detail). Raises RuntimeError if creds aren't configured or
-    the logon/launch fails (bad password, Secondary Logon service disabled, etc.).
     Windows-only; never call off Windows.
     """
+    if _is_elevated_windows():
+        p = subprocess.run(cmdline, shell=True, capture_output=True, text=True,
+                           timeout=timeout,
+                           creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+        return p.returncode, f"exit={p.returncode} (elevated)"
+
+    # Path 2 — the install-time elevation-helper task. Running an existing task
+    # needs no elevation, so a standard-user server can drive it.
+    if _elevation_task_exists():
+        import time as _time
+        ELEVATE_DIR.mkdir(exist_ok=True)
+        run_cmd = ELEVATE_DIR / "run.cmd"
+        result = ELEVATE_DIR / "result.txt"
+        try:
+            result.unlink()
+        except OSError:
+            pass
+        # The task's action is `cmd /c "<repo>\.elevate\run.cmd"` (set at install).
+        run_cmd.write_text(
+            "@echo off\r\n" + cmdline + "\r\n>\"" + str(result) + "\" echo %ERRORLEVEL%\r\n",
+            encoding="ascii", errors="replace")
+        r = subprocess.run(["schtasks", "/Run", "/TN", ELEVATE_TASK_NAME],
+                          capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        if r.returncode != 0:
+            raise RuntimeError(f"Couldn't trigger the elevation task: {(r.stderr or r.stdout).strip()}")
+        deadline = _time.time() + timeout
+        while _time.time() < deadline:
+            _time.sleep(2.0)
+            if result.exists():
+                try:
+                    code = int((result.read_text(errors="replace").strip() or "1"), 0)
+                except ValueError:
+                    code = 1
+                return code, f"exit={code} (elevate-task)"
+        return 1, "elevation task timed out"
+
     import ctypes
     from ctypes import wintypes
 
     user_in, pw = _windows_admin_creds()
     if not user_in or not pw:
-        raise RuntimeError("No Windows admin credentials configured "
-                           "(set WINDOWS_ADMIN_USER / WINDOWS_ADMIN_PASSWORD in "
-                           "Admin → Updates → environment keys).")
+        raise RuntimeError("StreamLink isn't running elevated and no Windows admin "
+                           "credentials are configured. Either launch StreamLink elevated, "
+                           "or set WINDOWS_ADMIN_USER / WINDOWS_ADMIN_PASSWORD in "
+                           "Admin → Updates → environment keys and re-run `python run.py --install`.")
     username, domain = _split_win_account(user_in)
 
     class STARTUPINFOW(ctypes.Structure):
@@ -401,7 +468,7 @@ def _run_elevated_windows(cmdline: str, timeout: float = 900.0) -> tuple[int, st
             return 1, "timed out"
         code = wintypes.DWORD()
         kernel32.GetExitCodeProcess(pi.hProcess, ctypes.byref(code))
-        return int(code.value), f"exit={int(code.value)}"
+        return int(code.value), f"exit={int(code.value)} (seclogon)"
     finally:
         if pi.hProcess:
             kernel32.CloseHandle(pi.hProcess)
@@ -11716,6 +11783,7 @@ async def _run_component_install(component: str, model: str = "base", build: str
             await _download_to(url, dest, job)
             _write_env_keys({"AIRPLAY_RECEIVER": "1"})
             have_creds = bool(_windows_admin_creds()[0] and _windows_admin_creds()[1])
+            can_silent = _is_elevated_windows() or _elevation_task_exists() or have_creds
             if dest.suffix.lower() == ".zip":
                 okz = await asyncio.to_thread(setup._extract_archive, dest, setup.TOOLS_DIR / "airplay")
                 if not okz:
@@ -11725,29 +11793,50 @@ async def _run_component_install(component: str, model: str = "base", build: str
                     _write_env_keys({"_UXPLAY_WIN": binp})
                 job["message"] = ("Portable AirPlay receiver extracted. If it doesn't appear "
                                   "in your iPhone's Screen Mirroring list, install Apple Bonjour.")
-            elif have_creds:
-                # Silent, self-elevating MSI install — no UAC prompt on the host.
-                job["message"] = "Installing silently with the stored Windows credentials…"
+            elif can_silent:
+                # Silent MSI install. Works when StreamLink runs elevated (full token);
+                # with stored creds + a non-elevated server it usually FAILS 1603 because
+                # Secondary Logon hands back a UAC-filtered token (a standard-user process
+                # can't silently elevate). Capture a verbose MSI log so the failure is
+                # diagnosable, and surface the real remedy.
+                job["message"] = "Installing silently…"
+                log_file = setup.TOOLS_DIR / "airplay" / "install.log"
                 code, detail = await asyncio.to_thread(
-                    _run_elevated_windows, f'msiexec /i "{dest}" /qn /norestart', 900.0)
+                    _run_elevated_windows,
+                    f'msiexec /i "{dest}" /qn /norestart /l*v "{log_file}"', 900.0)
                 if code not in (0, 3010):   # 3010 = success, reboot required
-                    raise RuntimeError(f"Silent MSI install failed ({detail}). "
-                                       f"Run it manually on the host: {dest}")
+                    tail = ""
+                    try:
+                        tail = log_file.read_text(errors="replace")[-1500:]
+                    except Exception:
+                        pass
+                    hls_log.error("airplay MSI failed (%s); log tail:\n%s", detail, tail)
+                    remedy = ("StreamLink isn't elevated, so Windows blocked the per-machine "
+                              "install (a standard-user process can't silently gain admin "
+                              "rights even with a password). Fix: set Windows admin credentials "
+                              "(Admin → Updates → env keys) and re-run `python run.py --install` "
+                              "once (approve the UAC prompt) — that registers an elevation helper "
+                              "so future installs are silent. Or launch StreamLink elevated, or "
+                              "run the .msi manually: ") if not _is_elevated_windows() else \
+                             "The installer itself failed — see the log. Run it manually: "
+                    raise RuntimeError(f"Silent MSI install failed ({detail}, exit {code}). {remedy}{dest}")
                 binp = setup.find_exe(*setup.uxplay_win_candidates())
                 if binp:
                     _write_env_keys({"_UXPLAY_WIN": binp})
                 job["message"] = ("Installed silently. If it doesn't appear in Screen Mirroring, "
                                   "confirm the Bonjour Service is running.")
             else:
-                # No creds → best-effort GUI launch; the user finishes it on the host.
+                # Not elevated + no creds → best-effort GUI launch; someone approves
+                # UAC + finishes the wizard on the host. (Truly silent installs need
+                # StreamLink to be elevated — see the credentials note below.)
                 try:
                     subprocess.Popen(["msiexec", "/i", str(dest)],
                                      creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
                 except Exception as exc:
                     hls_log.info("airplay msiexec launch skipped: %s", exc)
                 job["message"] = ("Installer downloaded. Approve the UAC prompt + finish the "
-                                  "wizard on the host, then click Refresh. (Tip: set Windows "
-                                  "admin credentials in Admin → System to install silently.)")
+                                  "wizard on the host, then click Refresh. (For silent installs, "
+                                  "run StreamLink elevated — see docs/AIRPLAY.md.)")
 
         else:
             raise RuntimeError(f"Unknown component: {component}")

@@ -28,6 +28,9 @@ library.json
 # Dedicated Chrome profile for the YouTube-on-TV kiosk window
 .tv_chrome_profile/
 
+# Windows elevation-helper scratch dir (run.cmd / result.txt for silent installs)
+.elevate/
+
 # macOS
 .DS_Store
 ._*

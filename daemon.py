@@ -465,6 +465,12 @@ def _linux_status() -> None:
 #  Windows — Task Scheduler
 # ══════════════════════════════════════════════════════════════════════════
 _WIN_TASK_NAME = "StreamLink"
+# Elevation-helper task: a `/RL HIGHEST` task created here (while --install is
+# elevated) that the standard-user server can trigger on demand to run commands
+# elevated — see main.py `_run_elevated_windows`. The action runs a fixed batch
+# the server rewrites per call. Only created when Windows admin creds are set.
+_WIN_ELEVATE_TASK = "StreamLinkElevate"
+_WIN_ELEVATE_DIR  = HERE / ".elevate"
 
 
 def _is_windows_admin() -> bool:
@@ -473,6 +479,54 @@ def _is_windows_admin() -> bool:
         return bool(ctypes.windll.shell32.IsUserAnAdmin())
     except Exception:
         return False
+
+
+def _read_env_value(key: str) -> str:
+    """Read a single KEY=value from the repo .env (daemon.py has no Settings)."""
+    env = HERE / ".env"
+    if not env.exists():
+        return ""
+    try:
+        for line in env.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            k, _, v = line.partition("=")
+            if k.strip() == key:
+                return v.strip()
+    except OSError:
+        pass
+    return ""
+
+
+def _windows_register_elevation_helper() -> None:
+    """If Windows admin creds are configured, register the `/RL HIGHEST` elevation
+    helper task so the (standard-user) server can run installs silently. Must be
+    called from the elevated --install path. Best-effort; never fails the install.
+    """
+    user = _read_env_value("WINDOWS_ADMIN_USER")
+    pw   = _read_env_value("WINDOWS_ADMIN_PASSWORD")
+    if not user or not pw:
+        return
+    try:
+        _WIN_ELEVATE_DIR.mkdir(exist_ok=True)
+        run_cmd = _WIN_ELEVATE_DIR / "run.cmd"
+        if not run_cmd.exists():
+            run_cmd.write_text("@echo off\r\nrem placeholder — rewritten per call by StreamLink\r\n",
+                               encoding="ascii", errors="replace")
+        action = f'cmd /c "{run_cmd}"'
+        r = subprocess.run(
+            ["schtasks", "/Create", "/F", "/TN", _WIN_ELEVATE_TASK,
+             "/TR", action, "/SC", "ONCE", "/ST", "00:00",
+             "/RU", user, "/RP", pw, "/RL", "HIGHEST"],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        if r.returncode == 0:
+            ok(f"Elevation helper '{_WIN_ELEVATE_TASK}' registered — silent installs enabled")
+        else:
+            warn(f"Could not register elevation helper (silent installs unavailable): "
+                 f"{(r.stderr or r.stdout).strip()}")
+    except Exception as exc:
+        warn(f"Could not register elevation helper: {exc}")
 
 
 def _windows_console_user() -> str:
@@ -656,6 +710,10 @@ def _windows_install() -> bool:
             return False
         ok(f"Task '{_WIN_TASK_NAME}' created in Task Scheduler (RunAs: {run_user})")
 
+        # We're elevated here (UAC just gave us a token), so this is the one place
+        # a `/RL HIGHEST` helper task can be created — register it if creds are set.
+        _windows_register_elevation_helper()
+
         # Start it now. schtasks /Run respects /RU — if that user is logged
         # in, the wrapper launches in their session. If not, it may report
         # success but never actually start, so we don't over-trust the rc here.
@@ -693,6 +751,9 @@ def _windows_uninstall() -> bool:
         ok(f"Task '{_WIN_TASK_NAME}' removed from Task Scheduler")
     else:
         warn(f"Could not remove task (may not exist): {result.stderr.strip()}")
+    # Remove the elevation helper task too (best-effort; may not exist).
+    subprocess.run(["schtasks", "/Delete", "/F", "/TN", _WIN_ELEVATE_TASK],
+                   capture_output=True, text=True, stdin=subprocess.DEVNULL)
     if _WRAPPER_PATH.exists():
         _WRAPPER_PATH.unlink()
         ok("Removed wrapper script")

@@ -54,6 +54,7 @@ The wrapper does **not** explicitly launch VLC / qBit / Jackett at boot — the 
 - **No `/RL HIGHEST`** — Windows doesn't restrict ports < 1024, so the wrapper doesn't need elevation to bind 80/443. HIGHEST on a Standard-User task fails silently (no admin token to elevate to), leaving the task registered but never running. See `docs/GOTCHAS.md` for the gory detail
 - `schtasks /Create /SC ONLOGON /TN StreamLink /TR "<py> <wrapper>" /RU <console_user>`
 - Then `schtasks /Run /TN StreamLink` to start immediately
+- **Elevation helper (optional)** — `_windows_register_elevation_helper()` runs here too (only while elevated). If `WINDOWS_ADMIN_USER`/`WINDOWS_ADMIN_PASSWORD` are set in `.env`, it registers a second task `StreamLinkElevate` with `/RL HIGHEST /RU <admin> /RP <pw>` whose action is `cmd /c "<repo>\.elevate\run.cmd"`. The main StreamLink task stays non-elevated (it must run in the user's desktop session); this helper exists so the standard-user server can **run** a HIGHEST task on demand (running an existing task needs no elevation) to perform silent installs — see [AIRPLAY.md](AIRPLAY.md) + `main.py _run_elevated_windows`. Removed on uninstall.
 
 ### Public API
 
