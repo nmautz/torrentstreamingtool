@@ -128,23 +128,43 @@
       padding:3px 8px; white-space:nowrap;
     }
     .seekLockIcon { width:11px; height:11px; flex-shrink:0; }
-    .seekBar.holding .seekLockBadge,
-    .seekBar.settling .seekLockBadge { color:#818cf8; border-color:#6366f1; }
-    /* Two-phase unlock label: "HOLD TO UNLOCK" during the 0.5s hold, then
-       "UNLOCKING…" during the following 0.5s settle (both still LOCKED). */
-    .seekLabelUnlock { display:none; }
-    .seekBar.settling .seekLabelHold   { display:none; }
-    .seekBar.settling .seekLabelUnlock { display:inline; }
-    /* Unlocking progress: a single fill sweeps left→right over the FULL 1s
-       gesture (0.5s hold + 0.5s settle) so progress is obvious across both
-       phases; a too-short tap aborts and the fill snaps back to 0. */
+    .seekBar.holding  .seekLockBadge { color:#818cf8; border-color:#6366f1; }
+    /* "ready" = hold satisfied, now WAITING for the user to lift: badge turns
+       green and pulses "RELEASE" so it's obvious to let go (no timer runs yet,
+       so gripping the whole time can't lead to an accidental seek). */
+    .seekBar.ready    .seekLockBadge {
+      color:#22c55e; border-color:#22c55e;
+      animation:seekBadgePulse .55s ease-in-out infinite;
+    }
+    .seekBar.settling .seekLockBadge { color:#22c55e; border-color:#22c55e; }
+    @keyframes seekBadgePulse {
+      0%,100% { transform:translate(-50%,-50%) scale(1); }
+      50%     { transform:translate(-50%,-50%) scale(1.16); }
+    }
+    /* Label: HOLD TO UNLOCK (hold) → RELEASE (ready) → UNLOCKING… (settle). */
+    .seekLabelRelease, .seekLabelUnlock { display:none; }
+    .seekBar.ready    .seekLabelHold    { display:none; }
+    .seekBar.ready    .seekLabelRelease { display:inline; }
+    .seekBar.settling .seekLabelHold    { display:none; }
+    .seekBar.settling .seekLabelUnlock  { display:inline; }
+    /* Unlock fill: grows left→right over the 0.5s hold; holds full + green while
+       waiting for release; then re-fills green over the 0.5s post-release settle.
+       A too-short tap aborts and the fill snaps back to 0. */
     .seekUnlockProgress {
       position:absolute; left:0; top:50%; transform:translateY(-50%);
       height:100%; width:0; background:rgba(99,102,241,.22);
       pointer-events:none; z-index:0;
     }
-    .seekBar.arming .seekUnlockProgress { animation:seekUnlockFill 1s linear forwards; }
+    .seekBar.holding  .seekUnlockProgress { animation:seekUnlockFill .5s linear forwards; }
+    .seekBar.ready    .seekUnlockProgress {
+      width:100%; background:rgba(34,197,94,.28);
+      animation:seekUnlockGlow .55s ease-in-out infinite;
+    }
+    .seekBar.settling .seekUnlockProgress {
+      background:rgba(34,197,94,.28); animation:seekUnlockFill .5s linear forwards;
+    }
     @keyframes seekUnlockFill { from { width:0; } to { width:100%; } }
+    @keyframes seekUnlockGlow { 0%,100% { opacity:1; } 50% { opacity:.35; } }
     /* ── Server notices over the fullscreen controls ──────────────────────────
        The normal top banners/toast are opaque and would either be hidden behind
        the z-50 fullscreen overlay or, if raised above it, cover the Close/Night
@@ -1342,7 +1362,7 @@
     <div class="seekUnlockProgress"></div>
     <div class="seekLockBadge">
       <svg class="seekLockIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="11" width="14" height="9"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
-      <span class="seekLabelHold">HOLD TO UNLOCK</span><span class="seekLabelUnlock">UNLOCKING…</span>
+      <span class="seekLabelHold">HOLD TO UNLOCK</span><span class="seekLabelRelease">RELEASE</span><span class="seekLabelUnlock">UNLOCKING…</span>
     </div>
     <div id="seekTooltip"
          class="hidden absolute -top-7 bg-gray-800 border border-gray-700 text-[11px] font-mono
@@ -1562,7 +1582,7 @@
     <div class="seekUnlockProgress"></div>
     <div class="seekLockBadge">
       <svg class="seekLockIcon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="11" width="14" height="9"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
-      <span class="seekLabelHold">HOLD TO UNLOCK</span><span class="seekLabelUnlock">UNLOCKING…</span>
+      <span class="seekLabelHold">HOLD TO UNLOCK</span><span class="seekLabelRelease">RELEASE</span><span class="seekLabelUnlock">UNLOCKING…</span>
     </div>
     <div id="fcSeekTooltip"
          class="hidden absolute top-1 bg-gray-800 border border-gray-700 text-[12px] font-mono
@@ -2689,16 +2709,21 @@ function renderPlayer(s){
 // share these handlers and the .seekBar class. We use Pointer Events so a
 // single code path covers mouse + touch and every event carries clientX
 // (touchend's empty TouchList used to throw and leave the tooltip stuck on
-// mobile). Unlock is a two-phase, 1s gesture, both phases still LOCKED so
+// mobile). Unlock is a three-phase gesture; all three phases stay LOCKED so
 // neither the hold nor the release that ends it can be misread as a seek:
-//   phase 1 (0.5s "holding")  — press-and-hold; a too-short tap aborts.
-//   phase 2 (0.5s "settling") — grace period after the hold completes.
-// A single fill (.arming) sweeps the full 1s; only then is the bar seekable.
+//   phase 1 (0.5s "holding")  — press-and-hold; the indigo fill grows. A
+//                               too-short release aborts.
+//   phase 2 ("ready", no timer) — hold satisfied: badge turns green and pulses
+//                               "RELEASE", then WAITS for the user to lift. No
+//                               timer runs, so gripping the whole time can't
+//                               lead to an accidental seek.
+//   phase 3 (0.5s "settling") — starts only once the user releases: a green
+//                               fill re-sweeps, then the bar truly unlocks.
 let _seekUnlocked    = false;  // truly unlocked → taps seek
-let _seekPhase       = 0;      // 0 none, 1 holding (locked), 2 settling (locked)
+let _seekPhase       = 0;      // 0 idle, 1 holding, 2 ready (awaiting release), 3 settling — 1-3 still LOCKED
 let _seekRelockTimer = null;   // 5s re-lock after last interaction
 let _seekHoldTimer   = null;   // phase 1 → phase 2
-let _seekSettleTimer = null;   // phase 2 → unlocked
+let _seekSettleTimer = null;   // phase 3 → unlocked
 let _seekTipTimer    = null;   // safety auto-hide for the tooltip
 
 function _seekClassAll(cls, on){
@@ -2716,8 +2741,8 @@ function _cancelArming(){
   clearTimeout(_seekHoldTimer);
   clearTimeout(_seekSettleTimer);
   _seekPhase=0;
-  _seekClassAll("arming", false);
   _seekClassAll("holding", false);
+  _seekClassAll("ready", false);
   _seekClassAll("settling", false);
 }
 function unlockSeekBar(){
@@ -2735,27 +2760,35 @@ function lockSeekBar(){
 
 function handleSeekPointerDown(e, el){
   if(app.stream_status!=="playing") return;
-  if(_seekUnlocked || _seekPhase) return;   // already unlocked or gesture in flight
-  // Phase 1: 0.5s hold (still locked). The .arming fill runs the full 1s.
+  if(_seekUnlocked) return;   // unlocked: a real seek happens on release
+  if(_seekPhase) return;      // a gesture is already in flight
+  // Phase 1: 0.5s hold (still locked). The fill grows left→right.
   _seekPhase=1;
-  _seekClassAll("arming", true);
   _seekClassAll("holding", true);
   clearTimeout(_seekHoldTimer);
   _seekHoldTimer=setTimeout(()=>{
-    // Phase 2: 0.5s settle (still locked) so the release that ended the hold
-    // can't register as a seek; then truly unlock.
+    // Phase 2: hold satisfied — prompt RELEASE and just WAIT (no timer runs
+    // until the user lifts, so they can't grip through to an accidental seek).
     _seekPhase=2;
     _seekClassAll("holding", false);
-    _seekClassAll("settling", true);
-    clearTimeout(_seekSettleTimer);
-    _seekSettleTimer=setTimeout(unlockSeekBar, 500);
+    _seekClassAll("ready", true);
   }, 500);
 }
 
 function handleSeekPointerUp(e, el){
   if(app.stream_status!=="playing"){ handleSeekBarLeave(); return; }
-  if(_seekPhase===1){ _cancelArming(); handleSeekBarLeave(); return; } // released too early → abort
-  if(_seekPhase===2){ handleSeekBarLeave(); return; }                  // committed; settling, never seek
+  if(_seekPhase===1){ _cancelArming(); handleSeekBarLeave(); return; } // released before hold completed → abort
+  if(_seekPhase===2){
+    // Released during the prompt → NOW start the 0.5s settle, then unlock.
+    _seekPhase=3;
+    _seekClassAll("ready", false);
+    _seekClassAll("settling", true);
+    clearTimeout(_seekSettleTimer);
+    _seekSettleTimer=setTimeout(unlockSeekBar, 500);
+    handleSeekBarLeave();
+    return;
+  }
+  if(_seekPhase===3){ handleSeekBarLeave(); return; }  // settling (finger already up) — ignore stray taps
   if(!_seekUnlocked){ handleSeekBarLeave(); return; }
   _doSeek(e, el);
   _armSeekRelock();       // every real seek pushes the re-lock back 5s
@@ -2763,7 +2796,10 @@ function handleSeekPointerUp(e, el){
 }
 
 function handleSeekPointerLeave(e, el){
-  if(_seekPhase===1) _cancelArming();   // wandered off mid-hold → abort (phase 2 is committed)
+  // Wandering off during the hold or while awaiting release aborts (mouse only —
+  // touch keeps implicit pointer capture, so its leave fires after release).
+  // Phase 3 is post-release and committed.
+  if(_seekPhase===1 || _seekPhase===2) _cancelArming();
   handleSeekBarLeave();
 }
 
