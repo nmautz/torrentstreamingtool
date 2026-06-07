@@ -503,7 +503,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "5.5.1"
+UI_VERSION = "5.6.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -614,7 +614,7 @@ class AppState:
     skip_countdown: Optional[dict] = None                 # {"type", "file_path", "n"} active auto-skip countdown (TV marquee)
     skip_countdown_task: Optional[asyncio.Task] = None    # in-flight countdown coroutine
     resume_offer: Optional[dict] = None                   # {"position_sec": N, "file_path": "..."} when resume_mode="prompt"
-    pending_watch: Optional[dict] = None                  # {"item_id","profile_id","file_path","duration_sec"} deferred "mark watched" armed when the viewer skips to the next episode from within the last quarter (likely just skipped the credits/ending). Cleared if they return to that file.
+    pending_watch: Optional[dict] = None                  # {"item_id","profile_id","file_path","duration_sec"} deferred "mark watched" armed when the viewer skips to the next episode from any position. Cleared if they return to that file.
     pending_watch_task: Optional[asyncio.Task] = None     # in-flight grace-period coroutine for pending_watch (one at a time)
     analysis_jobs: dict = field(default_factory=dict)     # series_key → {status, stage, current, total, message, item_ids, started_at, finished_at}
     # Ring buffer of Smart Skip events (most recent first). Each entry:
@@ -4216,14 +4216,11 @@ SKIP_COUNTDOWN_INTRO_SEC = 5
 SKIP_COUNTDOWN_CREDITS_SEC = 10
 
 # Deferred "mark watched" on skip-to-next-episode. When the viewer advances to
-# the next episode from within the last quarter of the current one, they've
-# almost certainly finished it and are just skipping the credits/ending — but
-# the normal 0.92 "completed" threshold won't have tripped yet. We arm a grace
-# timer instead of marking immediately: if Smart Skip guessed the credits early
-# (and they were actually skipping real content), the viewer comes back within
-# the window and we leave their real progress alone. If they don't return, we
-# mark it watched.
-CREDIT_SKIP_WATCH_MIN_PCT = 0.75   # only arm from within the last quarter
+# the next episode, treat the current one as finished — regardless of how far in
+# they were when they skipped. We arm a grace timer instead of marking
+# immediately: if they were actually skipping real content (or skipped by
+# mistake), the viewer comes back to that file within the window and we leave
+# their real progress alone. If they don't return, we mark it watched.
 CREDIT_SKIP_WATCH_DELAY_SEC = 60   # grace period before marking watched
 
 
@@ -4240,13 +4237,10 @@ def _arm_credit_skip_watch(
     item_id: Optional[str], profile_id: Optional[str], file_path: Optional[str],
     pos_sec: float, dur_sec: float,
 ) -> None:
-    """Schedule `file_path` to be marked watched after a grace period if the
-    viewer is leaving it from within its last quarter (see
-    CREDIT_SKIP_WATCH_MIN_PCT). No-op outside that window. Only one timer is
-    armed at a time — a newer skip supersedes an older pending one."""
+    """Schedule `file_path` to be marked watched after a grace period when the
+    viewer skips away from it to the next episode, from any position. Only one
+    timer is armed at a time — a newer skip supersedes an older pending one."""
     if not (item_id and profile_id and file_path) or dur_sec <= 0:
-        return
-    if pos_sec / dur_sec < CREDIT_SKIP_WATCH_MIN_PCT:
         return
     _cancel_pending_watch()
     state.pending_watch = {
@@ -7377,8 +7371,8 @@ async def vlc_next() -> JSONResponse:
     if not Path(next_file).exists():
         raise HTTPException(400, f"File not found: {Path(next_file).name}")
 
-    # If they're skipping forward from the last quarter, they've likely finished
-    # this episode (just dodging the credits/ending) — arm the deferred watch.
+    # Skipping forward to the next episode — arm the deferred watch from any
+    # position (cancelled if they return to this file within the grace window).
     vs_now = await vlc_status()
     _arm_credit_skip_watch(
         state.library_item_id, state.library_profile_id, current,

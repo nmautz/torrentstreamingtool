@@ -116,7 +116,7 @@ Per-item download scheduling persists in `library.json → item.download` (`{mod
 | POST | `/api/vlc/seek?delta=N` | Relative — `val=±Ns` |
 | POST | `/api/vlc/seek/to?position_pct=N` | Absolute — `val=N%`. NOTE: VLC treats `val=N` (no suffix) as a 0–1 fraction. Don't confuse the two |
 | POST | `/api/vlc/prev` | Previous episode in series order. Uses `library_playlist` then `item.files`. Returns **202** — VLC handoff runs in background (`state.library_play_task`); buffering state is broadcast immediately, `playing` once VLC accepts the new track |
-| POST | `/api/vlc/next` | Next episode in series order. Same 202 + background-handoff pattern as `/prev`. Side effect: if skipping from within the last quarter, arms a 60 s deferred "mark watched" on the file being left (`_arm_credit_skip_watch`) — see [ANALYZER.md](ANALYZER.md) |
+| POST | `/api/vlc/next` | Next episode in series order. Same 202 + background-handoff pattern as `/prev`. Side effect: arms a 60 s deferred "mark watched" on the file being left, from any position (`_arm_credit_skip_watch`) — see [ANALYZER.md](ANALYZER.md) |
 | GET | `/api/vlc/tracks` | `{audio[], subtitle[], current_audio, current_subtitle, time, length}` — IDs are VLC ES IDs, not 1/2/3 counters |
 | POST | `/api/vlc/track/audio/{track_id}` | Switch audio. Saves as profile track-pref for the current file |
 | POST | `/api/vlc/track/subtitle/{track_id}` | Switch subtitle (`-1` = off). Saves as a per-file track-pref AND (best-effort, via `_remember_vlc_sub_pick`) a per-series subtitle descriptor; clears the auto-AI upgrade marker so a deliberate pick is never overridden |
@@ -146,7 +146,7 @@ whisper.cpp / its model isn't installed (`state.stt_available` false).
 
 | Method | Path | Notes |
 |--------|------|-------|
-| POST | `/api/skip-now` | `{type: "intro"\|"credits"}` — execute the current offer. Intro = seek to `end_at+1`. Credits = `vlc_next_file` (or `pl_stop` if no next); when it advances and the skip is from the last quarter, also arms the 60 s deferred "mark watched" (see [ANALYZER.md](ANALYZER.md)) |
+| POST | `/api/skip-now` | `{type: "intro"\|"credits"}` — execute the current offer. Intro = seek to `end_at+1`. Credits = `vlc_next_file` (or `pl_stop` if no next); when it advances, also arms the 60 s deferred "mark watched" from any position (see [ANALYZER.md](ANALYZER.md)) |
 | DELETE | `/api/skip-now` | Dismiss without acting. Marks `state.skip_offer_file` with a `#intro-done` / `#credits-done` suffix so it doesn't re-emit |
 | POST | `/api/resume-now` | Apply the current `resume_offer` (seek to saved position) |
 | DELETE | `/api/resume-now` | Dismiss; start from beginning |
