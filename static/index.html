@@ -66,6 +66,13 @@
     .ep-prog-fill { height:100%; background:#22c55e; }
     .safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }
     .safe-top    { padding-top:    env(safe-area-inset-top,    0px); }
+    /* Library card action row — keep every primary button the same height and on
+       a single line (no 2-line "☰ / Episodes" wrap) so the row reads as a clean
+       Metro strip; the icon cluster follows immediately (no ml-auto gap). */
+    .lib-card-actions > button, .lib-card-actions > a {
+      display:flex; align-items:center; justify-content:center;
+      white-space:nowrap; min-height:44px; line-height:1;
+    }
     /* ── Mobile landscape (short viewport) ──────────────────────────────────
        Phones in landscape are ~320-430px tall. The episode page hero and the
        player footer were sized for portrait and ate the whole screen, leaving
@@ -73,12 +80,17 @@
        scrollable content always gets usable height. The 500px ceiling keeps
        tablets (≈744px+ tall in landscape) on the full-size layout. */
     @media (orientation:landscape) and (max-height:500px){
-      /* Episode page — shrink the hero so #epList actually has height */
-      #epOverview { display:none; }
-      #epPosterWrap { width:3.25rem; }
-      #epTitle { font-size:1rem; line-height:1.15; }
-      #epMetaLine { margin-top:.1rem; }
-      #epHeroContent { padding-top:.15rem; padding-bottom:.4rem; }
+      /* Episode page → two-pane split: the hero (series art + description) becomes
+         a scrollable left column at ~1/4 width; the season tabs + episode list +
+         actions fill the right ~3/4. A stacked hero would otherwise leave the list
+         no height in a short landscape viewport. */
+      #episodePage { flex-direction:row; }
+      #epHero { width:26%; min-width:26%; max-width:26%; height:100%; overflow-y:auto; }
+      #epHeroContent { flex-direction:column; padding-top:.25rem; padding-bottom:.5rem; gap:.5rem; }
+      #epPosterWrap { width:5.5rem; aspect-ratio:2/3; }
+      #epTitle { font-size:1.05rem; line-height:1.15; }
+      #epMetaLine { margin-top:.15rem; }
+      #epRightPane { flex:1 1 0%; min-width:0; }
       #epBulkChips { padding-top:.3rem; padding-bottom:.3rem; }
       #episodePage .ep-season-tab { padding-top:.45rem; padding-bottom:.45rem; }
       /* Player footer — trim row heights so the library stays browsable */
@@ -906,6 +918,11 @@
     </div>
   </div>
 
+  <!-- Right pane — in mobile landscape this becomes the right 3/4 (season tabs +
+       episode list + actions); in portrait/desktop it's the normal vertical flow
+       below the hero. Wrapping these lets a single CSS flex-direction flip split
+       the page into art/desc | seasons+episodes. -->
+  <div id="epRightPane" class="flex flex-col flex-1 min-h-0 min-w-0">
   <!-- Bulk action chips -->
   <div id="epBulkChips" class="px-2 sm:px-5 py-2 border-b border-gray-800 flex gap-1.5 flex-wrap flex-shrink-0">
     <button onclick="epSelectAll(true)"
@@ -955,10 +972,11 @@
       </button>
       <button onclick="epPlay()"
         class="flex-[1.4] bg-indigo-600 hover:bg-indigo-500 py-3 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors min-h-[44px]">
-        ▶ Play
+        ▶︎ Play
       </button>
     </div>
   </div>
+  </div><!-- /#epRightPane -->
 </div>
 
 <!-- ── Stream File Picker Modal ────────────────────────────────────────────── -->
@@ -3970,7 +3988,7 @@ function renderLibrary(items){
           ${prepChip}
           ${progBar}
         </div>
-        ${(buttons||iconBtns)?`<div class="flex items-center gap-2 flex-wrap">${buttons}${iconBtns?`<div class="flex items-center gap-1 ml-auto">${iconBtns}</div>`:""}</div>`:""}
+        ${(buttons||iconBtns)?`<div class="lib-card-actions flex items-center gap-2 flex-wrap">${buttons}${iconBtns?`<div class="flex items-center gap-1">${iconBtns}</div>`:""}</div>`:""}
         ${(isDownloading||(isReady&&item.download_partial&&item.torrent_hash))?`<div id="dl-files-${item.id}" class="hidden"></div>`:""}
       </div>`;
     });
