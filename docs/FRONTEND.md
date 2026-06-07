@@ -6,6 +6,8 @@ Vanilla JS, Tailwind CDN, no build step. Two pages: `static/index.html` (main da
 
 Metro UI throughout — flat tiles, no rounded corners, bold uppercase typography, accent stripes, sharp dividers. No `backdrop-blur`. All status dots are square. Modals are bottom-sheets on mobile, centered on desktop.
 
+**Layout — mobile-first, use all available space.** The app shell (navbar, `<main>`, player footer rows) is capped at `max-w-screen-2xl` (1536px) and centered, so it fills wide desktops/TVs (the Windows-primary target) instead of stranding margins. The three list surfaces are **responsive grids** that stay single-column on phones and add columns as the viewport grows: search results (`#resultsGrid`) → `grid-cols-1 sm:grid-cols-2 xl:grid-cols-3`; library cards (the per-series group wrapper in `renderLibrary`) → `grid-cols-1 lg:grid-cols-2`; the episode list (unwatched/watched wrappers in `renderEpList`) → `grid-cols-1 xl:grid-cols-2`. All use `items-start` so a card growing (e.g. the library Files expander) doesn't stretch its row neighbour. Don't reintroduce a narrower fixed-width column or revert these to `space-y-*` / `divide-y` single-column stacks.
+
 ## `static/index.html` (3608 lines)
 
 ### HTML structure (in order)

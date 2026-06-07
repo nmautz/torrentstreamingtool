@@ -1049,7 +1049,7 @@
      sm+ : single row, same as before. ml-auto on the right block doubles as the desktop spacer. -->
 <header class="sticky top-0 z-40 bg-gray-950 border-b border-gray-800 flex-shrink-0">
   <div class="safe-top">
-    <div class="max-w-5xl mx-auto px-2 sm:px-3">
+    <div class="max-w-screen-2xl mx-auto px-2 sm:px-3">
       <div class="flex items-center gap-1 sm:gap-2 flex-wrap sm:flex-nowrap">
         <!-- Logo -->
         <div class="font-black text-base sm:text-lg tracking-wide uppercase whitespace-nowrap flex-shrink-0 h-12 sm:h-14 flex items-center mr-0 sm:mr-1">
@@ -1106,7 +1106,7 @@
 
 <!-- ── Main ───────────────────────────────────────────────────────────────── -->
 <main class="flex-1 pb-36 overflow-y-auto overflow-x-hidden">
-  <div class="max-w-5xl mx-auto px-3 sm:px-4 py-5">
+  <div class="max-w-screen-2xl mx-auto px-3 sm:px-4 py-5">
 
     <!-- Search tab -->
     <div id="searchTab">
@@ -1145,7 +1145,7 @@
       </div>
       <div id="alert" class="hidden mb-4 px-4 py-3 border-l-4 text-sm"></div>
       <div id="resultsWrap" class="hidden">
-        <div id="resultsGrid" class="divide-y divide-gray-800/60 border-t border-gray-800/60"></div>
+        <div id="resultsGrid" class="grid grid-cols-1 sm:grid-cols-2 xl:grid-cols-3 gap-2 items-start"></div>
       </div>
       <div id="emptyState" class="flex flex-col items-center justify-center py-20 text-center">
         <div class="w-16 h-16 bg-gray-900 border border-gray-800 flex items-center justify-center mb-4">
@@ -1269,7 +1269,7 @@
   </div>
   <!-- Track selectors — only while playing -->
   <div id="trackControls" class="hidden border-b border-gray-800">
-    <div class="max-w-5xl mx-auto px-3 py-2 flex items-center gap-3">
+    <div class="max-w-screen-2xl mx-auto px-3 py-2 flex items-center gap-3">
       <div class="flex items-center gap-2 flex-1 min-w-0">
         <span class="text-[9px] font-black uppercase tracking-widest text-gray-600 whitespace-nowrap flex-shrink-0">AUDIO</span>
         <select id="audioSelect" onchange="setAudioTrack(this.value, this)"
@@ -1296,7 +1296,7 @@
     </div>
   </div>
   <!-- Status row — title + badge -->
-  <div class="max-w-5xl mx-auto px-3 pt-1.5 pb-1 flex items-center gap-2">
+  <div class="max-w-screen-2xl mx-auto px-3 pt-1.5 pb-1 flex items-center gap-2">
     <div id="playerDot" class="w-2 h-2 bg-gray-700 flex-shrink-0"></div>
     <div class="flex-1 min-w-0">
       <div id="nowPlaying" class="text-sm font-bold text-gray-500 truncate uppercase tracking-wide">No active stream</div>
@@ -1309,7 +1309,7 @@
     <div id="statusBadge" class="hidden text-[10px] font-black px-2 py-0.5 border flex-shrink-0 uppercase tracking-wide"></div>
   </div>
   <!-- Controls row — Metro tiles with dividers -->
-  <div class="max-w-5xl mx-auto px-0 pb-1 flex items-stretch">
+  <div class="max-w-screen-2xl mx-auto px-0 pb-1 flex items-stretch">
     <button onclick="vlcSeek(-30, this)" title="−30s"
       class="hidden sm:flex flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
              text-gray-600 hover:text-gray-300 hover:bg-gray-900 active:bg-gray-800 transition-colors">
@@ -3688,9 +3688,9 @@ function renderLibrary(items){
   groups.forEach(({label,items:gItems})=>{
     if(label){
       html+=`<div class="mb-6">
-        <h3 class="text-xs font-black text-gray-600 uppercase tracking-widest mb-2 border-l-2 border-indigo-800 pl-2">${escHtml(label)}</h3><div class="space-y-2">`;
+        <h3 class="text-xs font-black text-gray-600 uppercase tracking-widest mb-2 border-l-2 border-indigo-800 pl-2">${escHtml(label)}</h3><div class="grid grid-cols-1 lg:grid-cols-2 gap-2 items-start">`;
     } else {
-      html+=`<div class="mb-2"><div class="space-y-2">`;
+      html+=`<div class="mb-2"><div class="grid grid-cols-1 lg:grid-cols-2 gap-2 items-start">`;
     }
 
     gItems.forEach(item=>{
@@ -4856,7 +4856,7 @@ function renderEpList(){
     </div>`;
   }
 
-  html += `<div class="divide-y divide-gray-900">`;
+  html += `<div class="grid grid-cols-1 xl:grid-cols-2 items-start">`;
   unwatched.forEach(f=>{ html += _epCardHtml(f); });
   html += `</div>`;
 
@@ -4869,7 +4869,7 @@ function renderEpList(){
                </svg>
              </button>`;
     if(watchedExpanded){
-      html += `<div class="divide-y divide-gray-900 opacity-70">`;
+      html += `<div class="grid grid-cols-1 xl:grid-cols-2 items-start opacity-70">`;
       watched.forEach(f=>{ html += _epCardHtml(f); });
       html += `</div>`;
     }
@@ -5672,7 +5672,7 @@ async function doSearch(q){
         <div class="flex gap-2">
           <button class="dl-btn flex-1 flex items-center justify-center gap-1.5
                          bg-gray-800 hover:bg-gray-700 border border-gray-700
-                         text-gray-300 hover:text-white text-sm font-medium
+                         text-gray-300 hover:text-white text-sm font-black uppercase tracking-wide
                          py-3 transition-all active:scale-95"
             data-magnet="${escHtml(item.magnet)}" data-title="${escHtml(item.title)}">
             <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -5682,7 +5682,7 @@ async function doSearch(q){
           </button>
           <button class="play-btn flex-1 flex items-center justify-center gap-1.5
                          bg-indigo-600 hover:bg-indigo-500 text-white
-                         text-sm font-semibold py-3 transition-all active:scale-95
+                         text-sm font-black uppercase tracking-wide py-3 transition-all active:scale-95
                          disabled:opacity-40 disabled:cursor-not-allowed"
             data-magnet="${escHtml(item.magnet)}" data-title="${escHtml(item.title)}">
             ▶ Play
@@ -8179,6 +8179,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.11.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.12.0</div>
 </body>
 </html>
