@@ -490,6 +490,16 @@ Port 443 serves `https_proxy:app`, a tiny FastAPI app that streams every request
 
 Task Scheduler launches the wrapper with **CWD = `C:\Windows\System32`** — there is no `schtasks` flag that sets a working directory the way launchd's `WorkingDirectory` plist key or systemd's `WorkingDirectory=` does. `main.py` mounts `app.mount("/static", StaticFiles(directory="static"))` with a *relative* path, so `StaticFiles.__init__` immediately raises `RuntimeError: Directory 'static' does not exist`. Symptom: the service starts, logs `Server 0/1 exited with exception: RuntimeError: Directory 'static' does not exist` ~5× in a second, hits the fast-death circuit breaker, and stops. `streamlink_service.py` (and the `_WRAPPER_CONTENT` template in `daemon.py`) now does `os.chdir(HERE)` right after defining `HERE`, before any of the `from run import ...` calls or `_launch_servers()` runs uvicorn. Don't move it later — uvicorn imports `main` at `serve()` time, and `main` resolves `static/`, `cert.pem`, `library.json` etc. relative to CWD. macOS/Linux were unaffected because both unit files set `WorkingDirectory={HERE}`.
 
+## Admin logs
+
+### A pipe-streamed ZIP can't be extracted by Windows Explorer
+
+The admin "Download All (.zip)" log bundle (`admin_download_logs_bundle`) used to build the ZIP in a writer thread feeding an `os.pipe()` and stream the read end to the client. A pipe is **non-seekable**, so `zipfile` can't go back and patch each local file header after it knows the CRC/compressed size — it sets **general-purpose bit 3** and emits a *data descriptor* after each member, leaving the local header's CRC and sizes as zero. macOS Archive Utility and 7-Zip read the **central directory** (which has the real values) so they extract fine — which is exactly why the bug was invisible on the dev Mac. **Windows Explorer's built-in extractor trusts the local headers**, sees zero sizes, and refuses the archive as "invalid." Since Windows is the primary target, build the ZIP into a **seekable temp file** instead (then serve it with `FileResponse` + a `BackgroundTask` to unlink it); `zipfile` back-patches real local headers and Windows extracts it. The same trap applies to any future "stream a ZIP through a pipe/socket" idea — verify on Windows, not just macOS.
+
+### Live logs are served as snapshot copies, not the live file
+
+`streamlink_service.log` is written by the **service-wrapper process** (`streamlink_service.py`), a different process from the uvicorn worker that serves `/api/admin/logs/{name}`, and it grows continuously. Serving the live file (the old `FileResponse(path)`) was unreliable for it — it "never downloaded" while the other logs (written by the worker itself) were fine. Both the per-file endpoint and the bundle now read each log into a **temp snapshot** first (per-file: `shutil.copyfileobj`; bundle: `open(p,"rb").read()` then `zf.writestr`), so an actively-appended log yields a stable, complete download. Don't revert to streaming the live file.
+
 ## Scheduled reboot
 
 ### Scheduled-reboot loop guard

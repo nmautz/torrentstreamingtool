@@ -19,6 +19,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import uuid
@@ -37,6 +38,7 @@ import psutil
 from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from starlette.background import BackgroundTask
 from pydantic import BaseModel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -8582,13 +8584,26 @@ async def admin_list_logs(request: Request) -> JSONResponse:
 
 
 @app.get("/api/admin/logs/_bundle")
-async def admin_download_logs_bundle(request: Request) -> StreamingResponse:
-    """Stream a ZIP of every file in LOG_DIR.
+async def admin_download_logs_bundle(request: Request) -> FileResponse:
+    """Download a ZIP of every file in LOG_DIR.
 
     Path is `_bundle` (underscore prefix) so it can't collide with a real log
     filename — `_safe_log_path` rejects names containing slashes anyway, but
     matching against the literal `_bundle` route ensures the per-file handler
     never sees this name.
+
+    The ZIP is built into a *seekable* temp file rather than streamed through a
+    pipe. A streamed (non-seekable) ZIP forces `zipfile` to emit data
+    descriptors (general-purpose bit 3) with zero CRC/sizes in each local
+    header; macOS/7-Zip read the central directory so they cope, but **Windows
+    Explorer's built-in extractor reads the local headers and rejects the
+    archive as "invalid."** Writing to a seekable file lets `zipfile`
+    back-patch real local headers, so Windows (our primary target) can extract
+    it. See docs/GOTCHAS.md.
+
+    Each member is read via its own handle so a log that another process is
+    actively appending to (e.g. `streamlink_service.log`, held open by the
+    service-wrapper process) is still captured.
     """
     _require_admin(request)
     files: list[Path] = []
@@ -8602,50 +8617,82 @@ async def admin_download_logs_bundle(request: Request) -> StreamingResponse:
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     zip_name = f"streamlink-logs-{stamp}.zip"
 
-    r_fd, w_fd = os.pipe()
-
-    def _write_zip() -> None:
+    def _build_zip() -> str:
+        fd, tmp_path = tempfile.mkstemp(prefix="streamlink-logs-", suffix=".zip")
         try:
-            with os.fdopen(w_fd, "wb") as wf, \
+            with os.fdopen(fd, "wb") as wf, \
                     zipfile.ZipFile(wf, "w", zipfile.ZIP_DEFLATED) as zf:
                 for p in files:
                     try:
-                        zf.write(str(p), p.name)
+                        with open(p, "rb") as src:
+                            data = src.read()
                     except OSError:
                         continue
+                    zf.writestr(p.name, data)
         except Exception:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+        return tmp_path
+
+    tmp_path = await asyncio.to_thread(_build_zip)
+
+    def _cleanup() -> None:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
             pass
 
-    threading.Thread(target=_write_zip, daemon=True).start()
-
-    async def _read_pipe() -> AsyncGenerator[bytes, None]:
-        rf = os.fdopen(r_fd, "rb")
-        try:
-            while True:
-                chunk = await asyncio.to_thread(rf.read, 65536)
-                if not chunk:
-                    break
-                yield chunk
-        finally:
-            rf.close()
-
-    return StreamingResponse(
-        _read_pipe(),
+    return FileResponse(
+        tmp_path,
         media_type="application/zip",
+        filename=zip_name,
         headers={"Content-Disposition": f'attachment; filename="{zip_name}"'},
+        background=BackgroundTask(_cleanup),
     )
 
 
 @app.get("/api/admin/logs/{name}")
 async def admin_download_log(request: Request, name: str) -> FileResponse:
-    """Download one file from LOG_DIR by name. Forces attachment disposition."""
+    """Download one file from LOG_DIR by name. Forces attachment disposition.
+
+    The file is snapshotted to a temp copy before being served. Logs such as
+    `streamlink_service.log` are held open by another process (the
+    service-wrapper) and grow continuously; serving a stable copy sidesteps the
+    read-while-appended races that otherwise made that log fail to download.
+    """
     _require_admin(request)
     path = _safe_log_path(name)
+
+    def _snapshot() -> str:
+        fd, tmp_path = tempfile.mkstemp(prefix="streamlink-log-", suffix=".log")
+        try:
+            with os.fdopen(fd, "wb") as dst, open(path, "rb") as src:
+                shutil.copyfileobj(src, dst, 1024 * 1024)
+        except OSError:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise HTTPException(500, "Could not read log file.")
+        return tmp_path
+
+    tmp_path = await asyncio.to_thread(_snapshot)
+
+    def _cleanup() -> None:
+        try:
+            os.unlink(tmp_path)
+        except OSError:
+            pass
+
     return FileResponse(
-        str(path),
+        tmp_path,
         media_type="text/plain; charset=utf-8",
         filename=path.name,
         headers={"Content-Disposition": f'attachment; filename="{path.name}"'},
+        background=BackgroundTask(_cleanup),
     )
 
 
