@@ -407,7 +407,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "5.0.0"
+UI_VERSION = "5.3.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -518,6 +518,8 @@ class AppState:
     skip_countdown: Optional[dict] = None                 # {"type", "file_path", "n"} active auto-skip countdown (TV marquee)
     skip_countdown_task: Optional[asyncio.Task] = None    # in-flight countdown coroutine
     resume_offer: Optional[dict] = None                   # {"position_sec": N, "file_path": "..."} when resume_mode="prompt"
+    pending_watch: Optional[dict] = None                  # {"item_id","profile_id","file_path","duration_sec"} deferred "mark watched" armed when the viewer skips to the next episode from within the last quarter (likely just skipped the credits/ending). Cleared if they return to that file.
+    pending_watch_task: Optional[asyncio.Task] = None     # in-flight grace-period coroutine for pending_watch (one at a time)
     analysis_jobs: dict = field(default_factory=dict)     # series_key → {status, stage, current, total, message, item_ids, started_at, finished_at}
     # Ring buffer of Smart Skip events (most recent first). Each entry:
     # {ts, level: "info"|"warn"|"error", series_key, item_id, file_path,
@@ -4102,6 +4104,103 @@ SKIP_PREROLL_SEC = 2.0
 SKIP_COUNTDOWN_INTRO_SEC = 5
 SKIP_COUNTDOWN_CREDITS_SEC = 10
 
+# Deferred "mark watched" on skip-to-next-episode. When the viewer advances to
+# the next episode from within the last quarter of the current one, they've
+# almost certainly finished it and are just skipping the credits/ending — but
+# the normal 0.92 "completed" threshold won't have tripped yet. We arm a grace
+# timer instead of marking immediately: if Smart Skip guessed the credits early
+# (and they were actually skipping real content), the viewer comes back within
+# the window and we leave their real progress alone. If they don't return, we
+# mark it watched.
+CREDIT_SKIP_WATCH_MIN_PCT = 0.75   # only arm from within the last quarter
+CREDIT_SKIP_WATCH_DELAY_SEC = 60   # grace period before marking watched
+
+
+def _cancel_pending_watch() -> None:
+    """Drop any armed deferred-watch timer (viewer returned, or it's superseded)."""
+    t = state.pending_watch_task
+    state.pending_watch_task = None
+    state.pending_watch = None
+    if t and not t.done():
+        t.cancel()
+
+
+def _arm_credit_skip_watch(
+    item_id: Optional[str], profile_id: Optional[str], file_path: Optional[str],
+    pos_sec: float, dur_sec: float,
+) -> None:
+    """Schedule `file_path` to be marked watched after a grace period if the
+    viewer is leaving it from within its last quarter (see
+    CREDIT_SKIP_WATCH_MIN_PCT). No-op outside that window. Only one timer is
+    armed at a time — a newer skip supersedes an older pending one."""
+    if not (item_id and profile_id and file_path) or dur_sec <= 0:
+        return
+    if pos_sec / dur_sec < CREDIT_SKIP_WATCH_MIN_PCT:
+        return
+    _cancel_pending_watch()
+    state.pending_watch = {
+        "item_id": item_id, "profile_id": profile_id,
+        "file_path": file_path, "duration_sec": round(dur_sec, 1),
+    }
+    state.pending_watch_task = asyncio.create_task(
+        _credit_skip_watch_grace(item_id, profile_id, file_path, dur_sec)
+    )
+
+
+async def _credit_skip_watch_grace(
+    item_id: str, profile_id: str, file_path: str, dur_sec: float,
+) -> None:
+    """Wait out the grace period, then mark `file_path` watched unless the viewer
+    has returned to it (vlc_progress_tracker cancels us on return; this is the
+    backstop check for the case where playback simply stopped on a different
+    file)."""
+    try:
+        await asyncio.sleep(CREDIT_SKIP_WATCH_DELAY_SEC)
+    except asyncio.CancelledError:
+        return
+    cur = state.library_current_file
+    if cur and file_path:
+        try:
+            if Path(cur).resolve() == Path(file_path).resolve():
+                return  # viewer came back to it — leave their real progress alone
+        except OSError:
+            if cur == file_path:
+                return
+    await _mark_file_watched_internal(item_id, profile_id, file_path, dur_sec)
+    if state.pending_watch and state.pending_watch.get("file_path") == file_path:
+        state.pending_watch = None
+        state.pending_watch_task = None
+
+
+async def _mark_file_watched_internal(
+    item_id: str, profile_id: str, file_path: str, dur_sec: float,
+) -> None:
+    """Set completed=True for one file/profile (used by the deferred credit-skip
+    watch). Preserves any saved track prefs; never clobbers an already-completed
+    entry."""
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        return
+    canon = _canonical_item_path(file_path, item)
+    prof_prog = item.setdefault("progress", {}).setdefault(profile_id, {})
+    file_prog = prof_prog.setdefault("file_progress", {})
+    existing = file_prog.get(canon) or file_prog.get(file_path) or {}
+    if existing.get("completed"):
+        return
+    dur = existing.get("duration_sec") or dur_sec or 0
+    file_prog[canon] = {
+        "position_sec": round(dur, 1),
+        "duration_sec": round(dur, 1),
+        "completed": True,
+        "updated_at": _now_iso(),
+        **{k: v for k, v in existing.items()
+           if k in ("audio_track", "subtitle_track",
+                    "local_audio_idx", "local_subtitle_idx", "subtitle_sel")},
+    }
+    await put_library(lib)
+    await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "ready")})
+
 
 async def _vlc_marquee(text: str) -> None:
     """Show `text` on the TV (or clear it when empty). Offloads the file I/O."""
@@ -4194,6 +4293,11 @@ async def _run_skip_countdown(
             state.skip_offer_file = f"{file_path}#credits-done"
             next_path = _next_file_in_item(item, file_path)
             if next_path and Path(next_path).exists():
+                _arm_credit_skip_watch(
+                    state.library_item_id, state.library_profile_id, file_path,
+                    float((vs or {}).get("time", 0) or 0),
+                    float((vs or {}).get("length", 0) or 0),
+                )
                 await vlc_next_file(file_path, item)
             else:
                 await vlc("pl_stop")
@@ -4370,6 +4474,10 @@ async def vlc_progress_tracker() -> None:
                 if item_q:
                     cur_file = _canonical_item_path(cur_file, item_q)
                     state.library_current_file = cur_file
+                    # Viewer returned to a file we'd armed for deferred-watch
+                    # (the credits were skipped wrong) — cancel the timer.
+                    if state.pending_watch and state.pending_watch.get("file_path") == cur_file:
+                        _cancel_pending_watch()
                     meta = _find_file_meta(item_q, cur_file)
                     prefs = _skip_settings_for_profile(lib_q, state.library_profile_id)
                     await _maybe_emit_skip_offer(item_q, cur_file, meta, prefs, pos_sec, dur_sec)
@@ -7157,6 +7265,15 @@ async def vlc_next() -> JSONResponse:
     if not Path(next_file).exists():
         raise HTTPException(400, f"File not found: {Path(next_file).name}")
 
+    # If they're skipping forward from the last quarter, they've likely finished
+    # this episode (just dodging the credits/ending) — arm the deferred watch.
+    vs_now = await vlc_status()
+    _arm_credit_skip_watch(
+        state.library_item_id, state.library_profile_id, current,
+        float((vs_now or {}).get("time", 0) or 0),
+        float((vs_now or {}).get("length", 0) or 0),
+    )
+
     prior = state.library_play_task
     if prior and not prior.done():
         prior.cancel()
@@ -8184,6 +8301,12 @@ async def skip_now(req: SkipNowReq) -> JSONResponse:
             item = next((it for it in lib["items"] if it["id"] == state.library_item_id), None)
             if not item:
                 raise HTTPException(404, "Item not found.")
+            vs_now = await vlc_status()
+            _arm_credit_skip_watch(
+                state.library_item_id, state.library_profile_id, cur_file,
+                float((vs_now or {}).get("time", 0) or 0),
+                float((vs_now or {}).get("length", 0) or 0),
+            )
             await vlc_next_file(cur_file, item)
             state.skip_offer = None
             state.skip_offer_file = f"{cur_file}#credits-done"
