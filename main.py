@@ -309,73 +309,104 @@ def _windows_admin_creds() -> tuple[str, str]:
     return (settings.windows_admin_user or "").strip(), settings.windows_admin_password or ""
 
 
-def _run_elevated_windows(cmdline: str, timeout: float = 600.0) -> tuple[int, str]:
-    """Run `cmdline` ELEVATED on Windows using the stored admin credentials, with
-    no interactive UAC prompt — so StreamLink can complete UAC-gated installs on
-    its own (the user's request).
+def _split_win_account(user: str) -> tuple[str, str | None]:
+    """Split an entered Windows account into (username, domain) for the logon API.
 
-    Mechanism: register a one-shot Scheduled Task with `/RU <user> /RP <password>
-    /RL HIGHEST`, run it, poll until it finishes, then delete it. `/RL HIGHEST`
-    grants the full elevated token (Task Scheduler is the one place stored creds
-    can yield elevation without a UAC consent dialog); `/RP` supplies the password
-    non-interactively. We wrap the real command in a temp `.cmd` so quoting/spaces
-    in the command can't break `schtasks /TR` parsing, and read the task's exit
-    code back from "Last Result".
-
-    Returns (exit_code, detail). Raises RuntimeError if creds aren't configured.
-    NOTE: the password is briefly visible on the `schtasks` command line (a known
-    schtasks limitation). Windows-only; never call off Windows.
+    Accepts `Administrator` (→ local, domain "."), `HOST\\Administrator` or
+    `DOMAIN\\user` (→ split), and `user@domain.com` UPN (→ domain None).
     """
-    import tempfile, time as _time
-    user, pw = _windows_admin_creds()
-    if not user or not pw:
+    user = user.strip()
+    if "\\" in user:
+        dom, _, name = user.partition("\\")
+        return name, (dom or ".")
+    if "@" in user:
+        return user, None          # UPN — pass whole thing as username, NULL domain
+    return user, "."               # bare name → local account
+
+
+def _run_elevated_windows(cmdline: str, timeout: float = 900.0) -> tuple[int, str]:
+    """Run `cmdline` ELEVATED on Windows using the stored admin credentials, with
+    no interactive UAC prompt — so StreamLink (running as a *standard* user) can
+    complete UAC-gated installs on its own (the user's request).
+
+    Mechanism: **`CreateProcessWithLogonW`** (the Secondary Logon service — what
+    `runas /user:` uses). Unlike `schtasks /Create /RL HIGHEST`, this does **not**
+    require the caller to be an administrator, which is the whole point: the
+    StreamLink process is a standard user. Because we supply a *different* admin
+    account's credentials, Windows performs a fresh full logon of that account and
+    the child (`msiexec /qn`) runs with its **full elevated token** — credential
+    authentication is the elevation authorization, so there's no consent dialog.
+
+    Returns (exit_code, detail). Raises RuntimeError if creds aren't configured or
+    the logon/launch fails (bad password, Secondary Logon service disabled, etc.).
+    Windows-only; never call off Windows.
+    """
+    import ctypes
+    from ctypes import wintypes
+
+    user_in, pw = _windows_admin_creds()
+    if not user_in or not pw:
         raise RuntimeError("No Windows admin credentials configured "
-                           "(set them in Admin → System / env keys).")
-    tn = "StreamLinkElevated"
-    work = Path(tempfile.mkdtemp(prefix="sl_elev_"))
-    cmd_file = work / "run.cmd"
-    cmd_file.write_text("@echo off\r\n" + cmdline + "\r\nexit /b %ERRORLEVEL%\r\n",
-                        encoding="ascii", errors="replace")
-    tr = f'cmd /c "{cmd_file}"'
+                           "(set WINDOWS_ADMIN_USER / WINDOWS_ADMIN_PASSWORD in "
+                           "Admin → Updates → environment keys).")
+    username, domain = _split_win_account(user_in)
+
+    class STARTUPINFOW(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("lpReserved", wintypes.LPWSTR),
+                    ("lpDesktop", wintypes.LPWSTR), ("lpTitle", wintypes.LPWSTR),
+                    ("dwX", wintypes.DWORD), ("dwY", wintypes.DWORD),
+                    ("dwXSize", wintypes.DWORD), ("dwYSize", wintypes.DWORD),
+                    ("dwXCountChars", wintypes.DWORD), ("dwYCountChars", wintypes.DWORD),
+                    ("dwFillAttribute", wintypes.DWORD), ("dwFlags", wintypes.DWORD),
+                    ("wShowWindow", wintypes.WORD), ("cbReserved2", wintypes.WORD),
+                    ("lpReserved2", ctypes.c_void_p), ("hStdInput", wintypes.HANDLE),
+                    ("hStdOutput", wintypes.HANDLE), ("hStdError", wintypes.HANDLE)]
+
+    class PROCESS_INFORMATION(ctypes.Structure):
+        _fields_ = [("hProcess", wintypes.HANDLE), ("hThread", wintypes.HANDLE),
+                    ("dwProcessId", wintypes.DWORD), ("dwThreadId", wintypes.DWORD)]
+
+    advapi32 = ctypes.WinDLL("advapi32", use_last_error=True)
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    CreateProcessWithLogonW = advapi32.CreateProcessWithLogonW
+    CreateProcessWithLogonW.argtypes = [
+        wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.DWORD,
+        wintypes.LPCWSTR, wintypes.LPWSTR, wintypes.DWORD, ctypes.c_void_p,
+        wintypes.LPCWSTR, ctypes.POINTER(STARTUPINFOW), ctypes.POINTER(PROCESS_INFORMATION)]
+    CreateProcessWithLogonW.restype = wintypes.BOOL
+
+    LOGON_WITH_PROFILE = 0x00000001
+    CREATE_NO_WINDOW = 0x08000000
+    CREATE_UNICODE_ENVIRONMENT = 0x00000400
+    si = STARTUPINFOW(); si.cb = ctypes.sizeof(STARTUPINFOW)
+    pi = PROCESS_INFORMATION()
+    cmd_buf = ctypes.create_unicode_buffer(cmdline)   # mutable — API may modify it
+
+    okp = CreateProcessWithLogonW(
+        username, domain, pw, LOGON_WITH_PROFILE,
+        None, cmd_buf, CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+        None, None, ctypes.byref(si), ctypes.byref(pi))
+    if not okp:
+        err = ctypes.get_last_error()
+        hint = {1326: "bad username or password",
+                1327: "account restriction (blank passwords not allowed / hours / etc.)",
+                1385: "the account lacks the 'Log on as a batch job' right",
+                1058: "the Secondary Logon service is disabled — set it to Manual/Automatic",
+                }.get(err, "")
+        raise RuntimeError(f"CreateProcessWithLogonW failed (WinError {err}{': ' + hint if hint else ''})")
     try:
-        create = subprocess.run(
-            ["schtasks", "/Create", "/F", "/TN", tn, "/TR", tr,
-             "/SC", "ONCE", "/ST", "00:00", "/RU", user, "/RP", pw, "/RL", "HIGHEST"],
-            capture_output=True, text=True, stdin=subprocess.DEVNULL)
-        if create.returncode != 0:
-            raise RuntimeError(f"schtasks create failed: {(create.stderr or create.stdout).strip()}")
-        run = subprocess.run(["schtasks", "/Run", "/TN", tn],
-                             capture_output=True, text=True, stdin=subprocess.DEVNULL)
-        if run.returncode != 0:
-            raise RuntimeError(f"schtasks run failed: {(run.stderr or run.stdout).strip()}")
-        deadline = _time.time() + timeout
-        last_result = "0"
-        while _time.time() < deadline:
-            _time.sleep(2.0)
-            q = subprocess.run(["schtasks", "/Query", "/TN", tn, "/FO", "LIST", "/V"],
-                               capture_output=True, text=True, stdin=subprocess.DEVNULL)
-            out = q.stdout or ""
-            status = ""
-            for line in out.splitlines():
-                ls = line.strip()
-                if ls.startswith("Status:"):
-                    status = ls.split(":", 1)[1].strip()
-                elif ls.startswith("Last Result:"):
-                    last_result = ls.split(":", 1)[1].strip()
-            if status and status.lower() != "running":
-                break
-        try:
-            code = int(last_result, 0)
-        except ValueError:
-            code = 1
-        return code, f"exit={code}"
+        WAIT_TIMEOUT = 0x00000102
+        wait = kernel32.WaitForSingleObject(pi.hProcess, int(max(1, timeout) * 1000))
+        if wait == WAIT_TIMEOUT:
+            return 1, "timed out"
+        code = wintypes.DWORD()
+        kernel32.GetExitCodeProcess(pi.hProcess, ctypes.byref(code))
+        return int(code.value), f"exit={int(code.value)}"
     finally:
-        subprocess.run(["schtasks", "/Delete", "/F", "/TN", tn],
-                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
-        try:
-            shutil.rmtree(work, ignore_errors=True)
-        except Exception:
-            pass
+        if pi.hProcess:
+            kernel32.CloseHandle(pi.hProcess)
+        if pi.hThread:
+            kernel32.CloseHandle(pi.hThread)
 
 
 LIBRARY_FILE = Path(__file__).parent / "library.json"
