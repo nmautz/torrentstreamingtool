@@ -23,6 +23,7 @@ When a capability can't be identical across all three, Windows wins. Note any pl
 Keep the reference docs current as the code changes:
 
 - **`docs/*.md`** — topic-specific reference docs. When you change behaviour the docs describe (an endpoint signature, a state field, the skip algorithm, the auth flow, etc.), update the relevant doc in the same patch. If you introduce a new gotcha, add it to `docs/GOTCHAS.md`.
+- **`README.md`** — this is the **Windows-first setup guide** and must always function as one: a user should be able to go from a clean machine to a running dashboard by following it top to bottom. Whenever you change anything that affects install or first-run — `setup.py`/`run.py` steps, what's automated vs. manual, ports, dependencies, the `.env` keys, service install, VPN/Jackett requirements — **update `README.md` in the same patch** so it never drifts from reality. Keep its "what's automatic vs. what you do by hand" distinction accurate. Keep it user-facing (install/quickstart); deep reference belongs in `docs/`.
 
 Default to editing existing docs. Only create a new `docs/<topic>.md` if a genuinely new subsystem appears that doesn't fit anywhere existing.
 
@@ -97,6 +98,6 @@ Current version lives in the `<div>` at the very bottom of `static/index.html`. 
 - **In-flight task plan / todos** → ephemeral, not persisted (use TodoWrite during work).
 - **Reference docs about how the system works** → `docs/*.md`. Update alongside code changes.
 - **Non-obvious behaviours / footguns discovered during work** → `docs/GOTCHAS.md`.
-- **README.md** → user-facing install/quickstart only. Don't put architecture details here; link to `docs/` if needed.
+- **README.md** → the user-facing, **Windows-first setup guide**; keep it accurate and runnable top-to-bottom (see "Keeping documentation current" above). Don't put architecture details here; link to `docs/` if needed.
 
 If something doesn't fit any of the above, ask before creating a new file at the repo root.
