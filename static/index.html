@@ -85,6 +85,16 @@
     body.fc-open #serverAttentionBanner,
     body.fc-open #perfBanner,
     body.fc-open #globalToast { display:none !important; }
+    /* These notice banners float at z-70 — above the on-device player (z-50) and
+       its Stop / To TV control bar. They are purely informational, so they must
+       never intercept a tap meant for the player underneath (on mobile the
+       host-busy banner would otherwise completely block those buttons). Make the
+       whole banner click-through; only the Admin Panel link re-enables pointer
+       events. (#globalToast already sets pointer-events:none on its container.)
+       Click-through is set by ID so it survives the className rewrites in
+       renderServerAttention() / renderPerfBanner(). */
+    #serverAttentionBanner, #perfBanner { pointer-events: none; }
+    #serverAttentionLink { pointer-events: auto; }
     #fcNotice {
       position:absolute; left:0; right:0;
       top:calc(env(safe-area-inset-top, 0px) + 48px);
@@ -1017,7 +1027,7 @@
      disabled because the admin hasn't supplied a required API key, or when
      an update is being applied. Stays out of the way otherwise. -->
 <div id="serverAttentionBanner"
-  class="hidden sticky top-0 z-[70] bg-amber-950/95 border-b border-amber-800 text-amber-200 text-xs sm:text-sm px-3 py-2 flex items-center justify-between gap-3">
+  class="hidden sticky top-0 z-[70] bg-amber-950/70 border-b border-amber-800 text-amber-200 text-xs sm:text-sm px-3 py-2 flex items-center justify-between gap-3">
   <div id="serverAttentionMsg" class="min-w-0 flex-1 leading-tight"></div>
   <a id="serverAttentionLink" href="/admin"
     class="flex-shrink-0 text-[11px] font-bold uppercase tracking-wide px-3 py-1.5 border border-amber-700 hover:bg-amber-900 transition-colors">
@@ -2205,10 +2215,10 @@ function setFcTitle(title, filePath) {
 
 // ── Alert ──────────────────────────────────────────────────────────────────
 const ALERT_STYLES = {
-  error:"border-l-4 border-red-600 bg-red-950/80 text-red-300",
-  warn:"border-l-4 border-yellow-600 bg-yellow-950/80 text-yellow-300",
-  info:"border-l-4 border-blue-600 bg-blue-950/80 text-blue-300",
-  success:"border-l-4 border-green-600 bg-green-950/80 text-green-300",
+  error:"border-l-4 border-red-600 bg-red-950/70 text-red-300",
+  warn:"border-l-4 border-yellow-600 bg-yellow-950/70 text-yellow-300",
+  info:"border-l-4 border-blue-600 bg-blue-950/70 text-blue-300",
+  success:"border-l-4 border-green-600 bg-green-950/70 text-green-300",
 };
 let alertTimer;
 function showAlert(msg,type="error") {
@@ -2257,8 +2267,8 @@ function renderServerAttention(d){
   const UPDATE_PHASES = new Set(["applying","setup","refreshing-service","reinstalling-service","rebooting","restarting"]);
   if(UPDATE_PHASES.has(phase)){
     const tone = (phase === "rebooting")
-      ? "bg-red-950/95 border-red-700 text-red-200"
-      : "bg-indigo-950/95 border-indigo-700 text-indigo-200";
+      ? "bg-red-950/70 border-red-700 text-red-200"
+      : "bg-indigo-950/70 border-indigo-700 text-indigo-200";
     el.className = `sticky top-0 z-[70] ${tone} border-b text-xs sm:text-sm px-3 py-2 flex items-center justify-between gap-3`;
     const friendly = updaterMsg || phase;
     const verb = (phase === "rebooting") ? "Rebooting server" : "Updating server";
@@ -2271,7 +2281,7 @@ function renderServerAttention(d){
   // Required env keys missing — banner everyone sees.
   if(requiredMissing.length){
     const labels = requiredMissing.map(k => k.label).join(", ");
-    el.className = "sticky top-0 z-[70] bg-amber-950/95 border-b border-amber-800 text-amber-200 text-xs sm:text-sm px-3 py-2 flex items-center justify-between gap-3";
+    el.className = "sticky top-0 z-[70] bg-amber-950/70 border-b border-amber-800 text-amber-200 text-xs sm:text-sm px-3 py-2 flex items-center justify-between gap-3";
     msg.textContent = `Server needs admin attention: ${labels} not configured.`;
     el.classList.remove("hidden");
     renderFcNotice();
@@ -2304,7 +2314,7 @@ function renderPerfBanner(d){
   if(s.ram&&s.ram.status!=="ok") hot.push("RAM");
   if(s.net&&s.net.status!=="ok") hot.push("network");
   const over=overall==="overloaded";
-  el.className=`sticky top-0 z-[70] border-b text-xs sm:text-sm px-3 py-2 flex items-center gap-2 leading-tight ${over?'bg-red-950/95 border-red-800 text-red-200':'bg-amber-950/95 border-amber-800 text-amber-200'}`;
+  el.className=`sticky top-0 z-[70] border-b text-xs sm:text-sm px-3 py-2 flex items-center gap-2 leading-tight ${over?'bg-red-950/70 border-red-800 text-red-200':'bg-amber-950/70 border-amber-800 text-amber-200'}`;
   dot.className=`w-2 h-2 flex-shrink-0 ${over?'bg-red-500 blink':'bg-amber-500'}`;
   const what=hot.length?` (${hot.join(", ")})`:"";
   msg.textContent=over
@@ -8169,6 +8179,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.11.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.11.2</div>
 </body>
 </html>
