@@ -66,6 +66,33 @@
     .ep-prog-fill { height:100%; background:#22c55e; }
     .safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }
     .safe-top    { padding-top:    env(safe-area-inset-top,    0px); }
+    /* ── Mobile landscape (short viewport) ──────────────────────────────────
+       Phones in landscape are ~320-430px tall. The episode page hero and the
+       player footer were sized for portrait and ate the whole screen, leaving
+       no room for the episode list / library behind them. Compact them so the
+       scrollable content always gets usable height. The 500px ceiling keeps
+       tablets (≈744px+ tall in landscape) on the full-size layout. */
+    @media (orientation:landscape) and (max-height:500px){
+      /* Episode page — shrink the hero so #epList actually has height */
+      #epOverview { display:none; }
+      #epPosterWrap { width:3.25rem; }
+      #epTitle { font-size:1rem; line-height:1.15; }
+      #epMetaLine { margin-top:.1rem; }
+      #epHeroContent { padding-top:.15rem; padding-bottom:.4rem; }
+      #epBulkChips { padding-top:.3rem; padding-bottom:.3rem; }
+      #episodePage .ep-season-tab { padding-top:.45rem; padding-bottom:.45rem; }
+      /* Player footer — trim row heights so the library stays browsable */
+      footer.fixed button { padding-top:.4rem !important; padding-bottom:.4rem !important; }
+      footer.fixed select { padding-top:.25rem !important; padding-bottom:.25rem !important; }
+      #seekBarWrapper { height:24px !important; }
+      /* Fullscreen player controls: the up-to-6 stacked tile rows can't share a
+         short landscape viewport with flex-1 — they get crushed below their
+         content height and overlap into an unreadable pile. Give each row its
+         natural (min-)height and let the grid scroll instead. */
+      #fcTileGrid { overflow-y:auto; }
+      #fcTileGrid > div { flex:0 0 auto !important; }
+      #fcTileGrid .fc-tile { min-height:46px; }
+    }
     button, select { touch-action: manipulation; user-select: none; -webkit-user-select: none; }
     /* Fullscreen controls overlay: no text selection / tap highlight on any
        child element (tiles, header buttons, title, time, labels). */
@@ -862,7 +889,7 @@
       <div class="w-12 flex-shrink-0"></div>
     </div>
     <!-- Hero content -->
-    <div class="relative px-3 sm:px-6 pb-4 pt-1 flex gap-3 sm:gap-5">
+    <div id="epHeroContent" class="relative px-3 sm:px-6 pb-4 pt-1 flex gap-3 sm:gap-5">
       <div id="epPosterWrap" class="flex-shrink-0 w-24 sm:w-32 bg-gray-900 border border-gray-800
                                       flex items-center justify-center overflow-hidden">
         <img id="epPoster" class="w-full h-full object-cover hidden" alt=""/>
@@ -880,7 +907,7 @@
   </div>
 
   <!-- Bulk action chips -->
-  <div class="px-2 sm:px-5 py-2 border-b border-gray-800 flex gap-1.5 flex-wrap flex-shrink-0">
+  <div id="epBulkChips" class="px-2 sm:px-5 py-2 border-b border-gray-800 flex gap-1.5 flex-wrap flex-shrink-0">
     <button onclick="epSelectAll(true)"
       class="text-[11px] px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 uppercase tracking-wide transition-colors">
       Select all
@@ -1484,7 +1511,7 @@
   </div>
 
   <!-- Tile grid — all remaining space between seek bar and safe-bottom -->
-  <div class="flex-1 flex flex-col min-h-0">
+  <div id="fcTileGrid" class="flex-1 flex flex-col min-h-0">
 
     <!-- Row A: Rewind / Play-Pause / Forward — 5 tiles, play is wider -->
     <div class="flex flex-1 border-b border-gray-800 min-h-0">
@@ -3686,11 +3713,14 @@ function renderLibrary(items){
   });
 
   groups.forEach(({label,items:gItems})=>{
+    // Only split a series into 2 columns when it actually has multiple items —
+    // a single-item series spans full width instead of stranding an empty column.
+    const gridCls=gItems.length>1?"grid grid-cols-1 lg:grid-cols-2 gap-2 items-start":"space-y-2";
     if(label){
       html+=`<div class="mb-6">
-        <h3 class="text-xs font-black text-gray-600 uppercase tracking-widest mb-2 border-l-2 border-indigo-800 pl-2">${escHtml(label)}</h3><div class="grid grid-cols-1 lg:grid-cols-2 gap-2 items-start">`;
+        <h3 class="text-xs font-black text-gray-600 uppercase tracking-widest mb-2 border-l-2 border-indigo-800 pl-2">${escHtml(label)}</h3><div class="${gridCls}">`;
     } else {
-      html+=`<div class="mb-2"><div class="grid grid-cols-1 lg:grid-cols-2 gap-2 items-start">`;
+      html+=`<div class="mb-2"><div class="${gridCls}">`;
     }
 
     gItems.forEach(item=>{
@@ -3740,8 +3770,12 @@ function renderLibrary(items){
         ? `<span class="text-[10px] px-1.5 py-0.5 bg-orange-950 text-orange-300 border border-orange-900" title="Some files in this torrent were skipped — not everything is downloaded.">⊘ Partial</span>`
         : "";
 
-      // Buttons — multi-episode vs single
+      // Buttons — multi-episode vs single. Primary actions go in `buttons`;
+      // icon-only buttons (download / prep / hide / delete) collect in `iconBtns`
+      // so they render as one right-aligned cluster that wraps together on mobile
+      // instead of a single stray icon dropping to its own line.
       let buttons="";
+      let iconBtns="";
       if(isDownloading){
         // "Files" toggle — expands per-file priority/play controls
         buttons+=`<button id="dl-files-btn-${item.id}" onclick="toggleDownloadFiles('${item.id}')"
@@ -3757,21 +3791,21 @@ function renderLibrary(items){
         buttons+=isIdle
           ?`<button onclick="setDownloadSchedule('${item.id}','now')"
               class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white px-3 py-2.5 transition-colors min-h-[44px] flex items-center gap-1.5 flex-shrink-0"
-              title="Download now (stop waiting for the idle window)">▶ Resume</button>`
+              title="Download now (stop waiting for the idle window)">▶︎ Resume</button>`
           :`<button onclick="setDownloadSchedule('${item.id}','idle')"
               class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 hover:text-white px-3 py-2.5 transition-colors min-h-[44px] flex items-center gap-1.5 flex-shrink-0"
-              title="Pause — only download during the idle/night window">⏸ Idle</button>`;
+              title="Pause — only download during the idle/night window">⏸︎ Idle</button>`;
         // Whole-item Play When Ready (only shown as queued when no specific file is targeted)
         const isItemQueued=app.play_when_ready_item_id===item.id&&!app.play_when_ready_file_path;
         if(isItemQueued){
           buttons+=`<button onclick="cancelQueuePlay('${item.id}')"
             class="text-sm bg-indigo-900/50 border border-indigo-700 text-indigo-300 flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
-            ⏳ Queued — tap to cancel
+            ⏳︎ Queued — tap to cancel
           </button>`;
         } else {
           buttons+=`<button onclick="queuePlay('${item.id}')"
             class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
-            ▶ When Ready
+            ▶︎ When Ready
           </button>`;
         }
       }
@@ -3789,7 +3823,7 @@ function renderLibrary(items){
           </button>`;
         }
         if(isMulti){
-          const contLabel=hasProgress?`↩ Resume ${Math.round(pct)}%`:`▶ Play All`;
+          const contLabel=hasProgress?`↩︎ Resume ${Math.round(pct)}%`:`▶︎ Play All`;
           buttons+=`<button onclick="openEpisodePicker('${item.id}',${escHtml(JSON.stringify(item.title))})"
             class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white
                    flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
@@ -3805,16 +3839,16 @@ function renderLibrary(items){
             buttons+=`<button onclick="continueLibraryItem('${item.id}')"
               class="text-sm bg-green-900/50 hover:bg-green-800/60 text-green-300 border border-green-800
                      flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
-              ↩ Resume ${Math.round(pct)}%
+              ↩︎ Resume ${Math.round(pct)}%
             </button>
             <button class="lib-restart-btn text-sm bg-indigo-700 hover:bg-indigo-600 text-white flex-1 py-2.5 transition-colors min-h-[44px]"
               data-item-id="${item.id}" data-path="${escHtml(resume.file_path)}">
-              ▶ Restart
+              ▶︎ Restart
             </button>`;
           } else {
             buttons+=`<button onclick="continueLibraryItem('${item.id}')"
               class="text-sm bg-indigo-700 hover:bg-indigo-600 text-white flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
-              ▶ Play
+              ▶︎ Play
             </button>`;
           }
           // Direct "Stream to this device" button — opens the chooser, where
@@ -3837,7 +3871,7 @@ function renderLibrary(items){
       // Download button — single file uses direct link; multi-file uses ZIP endpoint
       if(isReady){
         if(isMulti){
-          buttons+=`<button onclick="epDownloadAll('${item.id}',${escHtml(JSON.stringify(item.title))})"
+          iconBtns+=`<button onclick="epDownloadAll('${item.id}',${escHtml(JSON.stringify(item.title))})"
             class="text-gray-500 hover:text-indigo-300 p-2.5 hover:bg-indigo-950/40 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0"
             title="Download all to device (ZIP)">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -3846,7 +3880,7 @@ function renderLibrary(items){
             </svg>
           </button>`;
         } else {
-          buttons+=`<a href="/api/library/${item.id}/download" download
+          iconBtns+=`<a href="/api/library/${item.id}/download" download
             class="text-gray-500 hover:text-indigo-300 p-2.5 hover:bg-indigo-950/40 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0"
             title="Download to device">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -3861,7 +3895,7 @@ function renderLibrary(items){
       // the item so a subsequent device-side Play taps a cached MP4 and the
       // browser starts streaming immediately instead of waiting on ffmpeg.
       if(isReady){
-        buttons+=`<button onclick="prepItemForStreaming('${item.id}')"
+        iconBtns+=`<button onclick="prepItemForStreaming('${item.id}')"
           title="Pre-convert all files to a stream-friendly MP4 (server-side)"
           class="text-gray-500 hover:text-amber-300 p-2.5 hover:bg-amber-950/40 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0">
           <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -3873,7 +3907,7 @@ function renderLibrary(items){
       // Hide/show eye button (per-profile; only when a profile is active)
       if(profile.id){
         if(item.hidden){
-          buttons+=`<button onclick="toggleItemVisibility('${item.id}',false)"
+          iconBtns+=`<button onclick="toggleItemVisibility('${item.id}',false)"
             title="Show in main list"
             class="text-gray-500 hover:text-indigo-300 p-2.5 hover:bg-indigo-950/40 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -3884,7 +3918,7 @@ function renderLibrary(items){
             </svg>
           </button>`;
         } else {
-          buttons+=`<button onclick="toggleItemVisibility('${item.id}',true)"
+          iconBtns+=`<button onclick="toggleItemVisibility('${item.id}',true)"
             title="Hide for me"
             class="text-gray-600 hover:text-gray-400 p-2.5 hover:bg-gray-800/60 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -3896,7 +3930,7 @@ function renderLibrary(items){
       }
 
       // Delete button (fixed width, doesn't flex-grow)
-      buttons+=`<button onclick="deleteLibraryItem('${item.id}')"
+      iconBtns+=`<button onclick="deleteLibraryItem('${item.id}')"
         class="text-gray-600 hover:text-red-400 p-2.5 hover:bg-red-950/30 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -3936,7 +3970,7 @@ function renderLibrary(items){
           ${prepChip}
           ${progBar}
         </div>
-        ${buttons?"<div class='flex items-center gap-2 flex-wrap'>"+buttons+"</div>":""}
+        ${(buttons||iconBtns)?`<div class="flex items-center gap-2 flex-wrap">${buttons}${iconBtns?`<div class="flex items-center gap-1 ml-auto">${iconBtns}</div>`:""}</div>`:""}
         ${(isDownloading||(isReady&&item.download_partial&&item.torrent_hash))?`<div id="dl-files-${item.id}" class="hidden"></div>`:""}
       </div>`;
     });
