@@ -1902,7 +1902,7 @@ async function loadComponents(){
 }
 
 function _renderComponents(d){
-  const order = ["ffmpeg","fpcalc","whisper","whisper_model"];
+  const order = ["ffmpeg","fpcalc","whisper","whisper_model","airplay"];
   const sizes = d.model_sizes || ["base","small","medium"];
   const html = order.map(key=>{
     const c = (d.components || {})[key];
@@ -1935,12 +1935,18 @@ function _renderComponents(d){
     } else if(!c.installable){
       action = `<span class="text-[10px] text-gray-600 uppercase tracking-wide">OS package manager</span>`;
     } else {
+      // AirPlay is a GUI installer (not a portable zip) — label it "Get installer".
+      const verb = c.installed ? "Reinstall" : (key === "airplay" ? "Get installer" : "Install");
       action = `<button onclick="installComponent('${key}')"
         class="text-[11px] font-bold uppercase tracking-wide px-3 py-1.5 border border-indigo-700 bg-indigo-950/60 text-indigo-200 hover:bg-indigo-900 transition-colors">
-        ${c.installed ? "Reinstall" : "Install"}</button>`;
+        ${verb}</button>`;
     }
     const err = (job && job.status === "error")
       ? `<div class="text-[10px] text-red-400 mt-1">${escHtml(job.error || "Install failed.")}</div>` : "";
+    // Post-download guidance (e.g. AirPlay: "run the wizard, then Refresh"), from
+    // either the in-flight job message or the component's static note.
+    const note = ((job && job.status === "done" && job.message) ? job.message : (c.note || ""));
+    const noteHtml = note ? `<div class="text-[10px] text-amber-400 mt-1">${escHtml(note)}</div>` : "";
     return `
     <div class="px-5 py-3">
       <div class="flex items-center justify-between gap-3">
@@ -1949,7 +1955,7 @@ function _renderComponents(d){
           <div class="text-[10px] text-gray-600 mt-0.5">${escHtml(c.purpose || "")}</div>
           ${c.path ? `<div class="text-[10px] font-mono text-gray-700 mt-0.5 truncate">${escHtml(c.path)}</div>` : ""}
           ${(key === "whisper" && gpu) ? `<div class="text-[10px] text-emerald-500 mt-0.5">NVIDIA GPU detected — a CUDA build runs STT far faster (falls back to CPU if the driver can't init).</div>` : ""}
-          ${err}
+          ${err}${noteHtml}
         </div>
         <div class="flex items-center gap-2 flex-shrink-0">${sizeSel}${buildSel}${action}</div>
       </div>

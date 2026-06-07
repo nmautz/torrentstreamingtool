@@ -19,6 +19,9 @@ Changing any of:
 - `setup.py` — `install_airplay_receiver`, `uxplay_win_candidates`,
   `_resolve_airplay_win_installer_url`, `_bonjour_service_present`, the
   `_UXPLAY_WIN` `.env` key.
+- `main.py` admin **Optional Components** pipeline — the `airplay` branch of
+  `_run_component_install` + entry in `_component_status_payload` + `_COMPONENT_KEYS`
+  (this is the autoupdater-safe install path), and `_airplay_installed`.
 - `run.py` — `start_airplay`, `find_airplay`, the `AIRPLAY_RECEIVER` gate.
 - `main.py` — `airplay_mirror_watch`, `_find_airplay_hwnds_windows`,
   `_focus_airplay_windows`, `_airplay_receiver_enabled`, `state.airplay_active` /
@@ -62,16 +65,27 @@ The receiver runs as its **own tray app** and owns start/stop of the actual
 mirror. StreamLink's only runtime job is to **mediate the screen** so the mirror
 and VLC don't fight over the TV.
 
-### 1. Install (`setup.py`, Windows, opt-in)
+### 1. Install — two paths
 
-`install_airplay_receiver` offers (default **No** — it's a large GStreamer
-download) to fetch + run the uxplay-windows installer
-(`_resolve_airplay_win_installer_url` resolves the latest `.exe` asset from the
-GitHub releases API). The installer is a GUI wizard — setup launches it and waits
-for the user to finish (and to allow it through the Windows Firewall). Afterwards
-the receiver path is recorded as `_UXPLAY_WIN` in `.env`, and
-`_bonjour_service_present` (`sc query "Bonjour Service"`) warns if Bonjour didn't
-register. Re-running setup detects an existing install via `uxplay_win_candidates`.
+**Preferred / autoupdater-safe: the admin panel.** Admin → **Optional Components**
+lists **AirPlay receiver** (Windows only) next to ffmpeg/whisper. Click **Get
+installer** → the server downloads the uxplay-windows installer to `tools/airplay/`
+(`_run_component_install`'s `airplay` branch, reusing `_download_to` +
+`setup._resolve_airplay_win_installer_url`), pre-enables `AIRPLAY_RECEIVER=1`, and
+best-effort launches the wizard. Finish the wizard **on the host's TV desktop**
+(allow the firewall), then click **Refresh** — the row flips to **Installed** once
+the binary is detected. This is the path that **works on auto-updating hosts**:
+`setup.py` skips every `install_*` step under `STREAMLINK_AUTOUPDATE=1`, so the
+interactive installer below never runs there.
+
+**Interactive: `setup.py` (manual runs only).** `install_airplay_receiver` offers
+(default **No** — large GStreamer download) the same download-and-run flow during a
+manual `python setup.py`, records `_UXPLAY_WIN`, and `_bonjour_service_present`
+(`sc query "Bonjour Service"`) warns if Bonjour didn't register. Skipped under
+auto-update.
+
+Either way the receiver path persists across auto-updates: `merge_tool_paths` keeps
+`_UXPLAY_WIN` and the reused `.env` keeps `AIRPLAY_RECEIVER`.
 
 ### 2. Launch (`run.py`, Windows)
 
@@ -82,12 +96,16 @@ best-effort — like Jackett, it never blocks or fails startup.
 
 ### 3. Screen mediation (`main.py`)
 
-`state.airplay_available` is set at lifespan start from `_airplay_receiver_enabled`
-(Windows + `AIRPLAY_RECEIVER` on + `_UXPLAY_WIN` set) and surfaced in
-`state_snapshot` to drive the dashboard hint.
+`state.airplay_available` is **detection-based** (`_airplay_installed`: Windows +
+the receiver binary present on disk, via `_UXPLAY_WIN` or `uxplay_win_candidates`)
+— *not* the `AIRPLAY_RECEIVER` env toggle. It's set at lifespan start, surfaced in
+`state_snapshot` to drive the dashboard hint, and **re-checked by the watcher every
+~15 s** so an admin-panel install goes live without a server restart.
+`AIRPLAY_RECEIVER` only gates `run.py`'s auto-launch.
 
-`airplay_mirror_watch` (a lifespan task, Windows-only, no-op unless
-`airplay_available`) polls every 2 s for a live mirror window via
+`airplay_mirror_watch` (a lifespan task, Windows-only) runs continuously; it
+refreshes `state.airplay_available` periodically (broadcasting on change) and, while
+available, polls every 2 s for a live mirror window via
 `_find_airplay_hwnds_windows` — visible top-level windows whose owning **process
 name** or **title** matches the (env-overridable) hints and that are at least
 320×240 (to skip tray/helper popups). A mirror window only exists while an iPhone

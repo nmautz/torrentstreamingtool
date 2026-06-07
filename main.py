@@ -4730,9 +4730,11 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # at "No active stream" until someone presses Stop.
     await _sync_state_from_vlc()
 
-    # AirPlay screen-mirror receiver availability (Windows-only, opt-in). Drives
-    # the dashboard's "mirror your iPhone" hint and the VLC-yield watcher.
-    state.airplay_available = _airplay_receiver_enabled()
+    # AirPlay screen-mirror receiver availability (Windows-only). Detection-based
+    # (the receiver binary on disk) so an admin install takes effect live. Drives
+    # the dashboard's "mirror your iPhone" hint and the VLC-yield watcher; the
+    # watcher re-checks it periodically too.
+    state.airplay_available = _airplay_installed()
 
     guard       = asyncio.create_task(vpn_guard())
     broadcaster = asyncio.create_task(stat_broadcaster())
@@ -6647,13 +6649,24 @@ _AIRPLAY_PROC_HINTS   = ("uxplay", "gst-launch", "gstreamer")
 _AIRPLAY_WINDOW_HINTS = ("uxplay", "airplay", "screen mirror")
 
 
-def _airplay_receiver_enabled() -> bool:
-    """True if an AirPlay receiver is configured to run on this (Windows) host."""
+def _airplay_installed() -> bool:
+    """True if an AirPlay receiver **binary** is present on this (Windows) host.
+
+    Detection is filesystem-based (the receiver exe on disk), NOT the
+    `AIRPLAY_RECEIVER` env toggle — so an install via the admin Optional Components
+    card takes effect live (drives the dashboard hint + the mirror watcher) without
+    a server restart, and works regardless of whether run.py launched it or the
+    tray app autostarted. `AIRPLAY_RECEIVER` only gates run.py's auto-launch.
+    """
     if platform.system() != "Windows":
         return False
-    if os.environ.get("AIRPLAY_RECEIVER", "0").strip().lower() not in ("1", "true", "yes", "on"):
+    try:
+        import setup
+        if os.environ.get("_UXPLAY_WIN") and Path(os.environ["_UXPLAY_WIN"]).exists():
+            return True
+        return bool(setup.find_exe(*setup.uxplay_win_candidates()))
+    except Exception:
         return False
-    return bool(os.environ.get("_UXPLAY_WIN"))
 
 
 def _find_airplay_hwnds_windows() -> list:
@@ -6754,17 +6767,30 @@ def _focus_airplay_windows() -> bool:
 async def airplay_mirror_watch() -> None:
     """Poll for a live iPhone screen-mirror and make VLC yield the TV to it.
 
-    Windows-only and a no-op unless an AirPlay receiver is enabled+installed. On
-    the rising edge (mirror appears) minimize VLC, pull the mirror forward, set
-    state.airplay_active + broadcast. On the falling edge clear it + broadcast so
-    background_video_loop / vlc_focus_and_fullscreen reclaim the TV within a tick.
+    Windows-only. Runs continuously and re-checks whether a receiver is installed
+    every ~15 s (so an admin install via Optional Components goes live without a
+    restart), only window-scanning while one is present. On the rising edge (mirror
+    appears) minimize VLC, pull the mirror forward, set state.airplay_active +
+    broadcast. On the falling edge clear it + broadcast so background_video_loop /
+    vlc_focus_and_fullscreen reclaim the TV within a tick.
     """
-    if platform.system() != "Windows" or not state.airplay_available:
+    if platform.system() != "Windows":
         return
     loop = asyncio.get_running_loop()
+    since_avail_check = 999.0
     while True:
         await asyncio.sleep(2.0)
         try:
+            # Refresh availability roughly every 15 s (cheap filesystem probe).
+            since_avail_check += 2.0
+            if since_avail_check >= 15.0:
+                since_avail_check = 0.0
+                avail = await loop.run_in_executor(None, _airplay_installed)
+                if avail != state.airplay_available:
+                    state.airplay_available = avail
+                    await broadcast("state", state_snapshot())
+            if not state.airplay_available:
+                continue
             present = bool(await loop.run_in_executor(None, _find_airplay_hwnds_windows))
             if present and not state.airplay_active:
                 state.airplay_active = True
@@ -9063,7 +9089,7 @@ async def admin_components_install(request: Request, req: ComponentInstallReq) -
     _require_admin(request)
     if req.component not in _COMPONENT_KEYS:
         raise HTTPException(400, "Unknown component.")
-    if req.component in ("ffmpeg", "whisper") and platform.system() != "Windows":
+    if req.component in ("ffmpeg", "whisper", "airplay") and platform.system() != "Windows":
         raise HTTPException(400, "This component can only be auto-installed on Windows. "
                                  "Install it via your OS package manager instead.")
     existing = _component_jobs.get(req.component)
@@ -11433,7 +11459,7 @@ async def _ensure_stt_for(src: Path, item_id: str = "", *,
 # across future auto-updates, so a one-time install here persists. See docs/SETUP.md.
 
 _component_jobs: dict[str, dict] = {}   # component → {status, progress, error, ...}
-_COMPONENT_KEYS = ("ffmpeg", "fpcalc", "whisper", "whisper_model")
+_COMPONENT_KEYS = ("ffmpeg", "fpcalc", "whisper", "whisper_model", "airplay")
 _WHISPER_MODEL_SIZES = ("base", "small", "medium")
 
 
@@ -11538,6 +11564,33 @@ async def _run_component_install(component: str, model: str = "base", build: str
                 except OSError:
                     pass
             _write_env_keys({"_FPCALC_BIN": binp})
+
+        elif component == "airplay":
+            # AirPlay screen-mirror receiver (uxplay-windows). Unlike the portable
+            # zips above, this is a GUI installer .exe — we download it and launch
+            # it best-effort (the wizard shows on the host's desktop; harmless if the
+            # server runs session-0). The admin finishes the wizard on the host TV,
+            # then Refresh detects the installed binary. Pre-enable AIRPLAY_RECEIVER
+            # so run.py launches it on next start. See docs/AIRPLAY.md.
+            if os.name != "nt":
+                raise RuntimeError("The AirPlay screen-mirror receiver is Windows-only.")
+            url = await asyncio.to_thread(setup._resolve_airplay_win_installer_url)
+            if not url:
+                raise RuntimeError("Couldn't resolve the uxplay-windows installer from GitHub. "
+                                   "Install it manually: https://github.com/leapbtw/uxplay-windows/releases")
+            dest = setup.TOOLS_DIR / "airplay" / url.rsplit("/", 1)[-1]
+            await _download_to(url, dest, job)
+            # Pre-enable auto-launch; the receiver binary is detected on next status read.
+            _write_env_keys({"AIRPLAY_RECEIVER": "1"})
+            # Best-effort detached launch of the wizard (no wait — never blocks/hangs).
+            try:
+                subprocess.Popen([str(dest)],
+                                 creationflags=getattr(subprocess, "DETACHED_PROCESS", 0))
+            except Exception as exc:
+                hls_log.info("airplay installer launch skipped: %s", exc)
+            job["message"] = ("Installer downloaded. Complete the wizard on the host "
+                              "(allow it through the firewall), then click Refresh.")
+
         else:
             raise RuntimeError(f"Unknown component: {component}")
 
@@ -11573,11 +11626,26 @@ def _component_status_payload() -> dict:
                           "path": model or "",   "installable": True,
                           "purpose": "AI subtitle language model (multilingual)"},
     }
+    # AirPlay screen-mirror receiver (Windows only). Installed = the receiver binary
+    # is detected on disk; the GUI installer may sit downloaded-but-not-yet-run in
+    # tools/airplay/, in which case we nudge the admin to finish the wizard.
+    ap_bin = setup.find_exe(*setup.uxplay_win_candidates()) if win else None
+    ap_entry = {"label": "AirPlay receiver (iPhone screen mirror)",
+                "installed": bool(ap_bin), "path": ap_bin or "", "installable": win,
+                "purpose": "Mirror an iPhone onto the host TV (Control Center → Screen Mirroring)"}
+    if win and not ap_bin:
+        try:
+            ap_dir = setup.TOOLS_DIR / "airplay"
+            if ap_dir.exists() and any(ap_dir.glob("*.exe")):
+                ap_entry["note"] = "Installer downloaded — run it on the host, then Refresh."
+        except Exception:
+            pass
+    comps["airplay"] = ap_entry
     for k, c in comps.items():
         j = _component_jobs.get(k)
         if j:
             c["job"] = {"status": j["status"], "progress": round(j.get("progress", 0.0), 3),
-                        "error": j.get("error")}
+                        "error": j.get("error"), "message": j.get("message")}
     return {
         "components":   comps,
         "platform":     platform.system(),
