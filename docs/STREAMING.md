@@ -563,7 +563,12 @@ four states: **ready** ("Play To Device", hold → `handoffToDevice`); **not-rea
 ("Prep for Device?", hold → `prepCurrentForDevice`); **prepping** ("Prepping 42%"
 with a `#fcHandoffBar` fill, driven by `app._fcPrepPct`); and **unknown/macOS**
 (neutral, or the old greyed "Not prepped" note when HLS is unavailable).
-`fcDeviceTileHold` is the hold dispatcher. `prepCurrentForDevice` POSTs
+`fcDeviceTileHold` is the hold dispatcher. **Holding the tile while it's `prepping`
+hands off to the device immediately** via `handoffToDevice(btn, allowOnDemand=true)`
+— the device starts the JIT on-demand stream (`_lpLoadIndex`'s un-prepped fallback)
+within a tick rather than waiting out the full encode, and the full ABR bundle keeps
+building in the background. The `allowOnDemand` flag is what lets `handoffToDevice`
+skip its `_handoffReadyState === false` block in that case. `prepCurrentForDevice` POSTs
 `/offline-prepare {bulk:false}` (interactive — bypasses the global pause gate and
 the idle-prep kill so the encode starts **while VLC keeps playing the TV**), polls
 `/offline-job/{id}` for progress, then `_finishFcPrep` flips the tile to
