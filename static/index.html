@@ -462,7 +462,7 @@
     <div class="px-4 pb-4 safe-bottom flex gap-2">
       <button onclick="closeChangePinModal()"
         class="flex-1 bg-gray-800 hover:bg-gray-700 py-4 text-sm font-bold uppercase tracking-wide transition-colors">Cancel</button>
-      <button onclick="submitChangePinModal()"
+      <button onclick="submitChangePinModal(this)"
         class="flex-1 bg-indigo-600 hover:bg-indigo-500 py-4 text-sm font-black uppercase tracking-wide transition-colors">Save PIN</button>
     </div>
   </div>
@@ -697,7 +697,7 @@
     <div class="px-4 pb-4 safe-bottom flex gap-2">
       <button onclick="closeProfileModal()"
         class="flex-1 bg-gray-800 hover:bg-gray-700 py-4 text-sm font-bold uppercase tracking-wide transition-colors min-h-[52px]">Cancel</button>
-      <button onclick="submitProfile()"
+      <button onclick="submitProfile(this)"
         class="flex-1 bg-indigo-600 hover:bg-indigo-500 py-4 text-sm font-black uppercase tracking-wide transition-colors min-h-[52px]">Add</button>
     </div>
   </div>
@@ -918,7 +918,7 @@
           <input id="storageNewPath" type="text" placeholder="/Volumes/MyDrive/Movies"
             class="flex-1 bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500 px-3 py-2.5 text-sm
                    focus:outline-none transition-colors placeholder-gray-700 font-mono"/>
-          <button onclick="addStoragePath()"
+          <button onclick="addStoragePath(this)"
             class="bg-indigo-700 hover:bg-indigo-600 text-white text-sm font-black uppercase tracking-wide px-5 py-2.5 transition-colors flex-shrink-0">
             Add
           </button>
@@ -989,11 +989,11 @@
       class="text-[11px] px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 uppercase tracking-wide transition-colors">
       Unwatched
     </button>
-    <button onclick="epMarkWatched(true)"
+    <button onclick="epMarkWatched(true, this)"
       class="text-[11px] px-2.5 py-1.5 bg-gray-800 hover:bg-green-900/60 text-gray-400 hover:text-green-400 uppercase tracking-wide transition-colors">
       ✓ Watched
     </button>
-    <button onclick="epMarkWatched(false)"
+    <button onclick="epMarkWatched(false, this)"
       class="text-[11px] px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 uppercase tracking-wide transition-colors">
       ✗ Unwatched
     </button>
@@ -1288,7 +1288,7 @@
                 d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"/>
             </svg><span id="libHiddenToggleLabel">Hidden</span>
           </button>
-          <button onclick="loadLibrary()"
+          <button onclick="loadLibrary(this)"
             class="text-xs text-gray-600 hover:text-gray-300 transition-colors flex items-center gap-1 font-bold uppercase tracking-wide">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -3720,7 +3720,7 @@ function closeChangePinModal(){
   _changePinTarget=null;
   document.getElementById("changePinModal").classList.add("hidden");
 }
-async function submitChangePinModal(){
+async function submitChangePinModal(btn){
   if(!_changePinTarget) return;
   const p=_changePinTarget;
   const currentPin=document.getElementById("changePinCurrent").value.trim();
@@ -3735,17 +3735,19 @@ async function submitChangePinModal(){
   }
   const body={pin:newPin};
   if(p.has_pin) body.current_pin=currentPin;
-  const r=await fetch(`/api/profiles/${p.id}/set-pin`,{
-    method:"POST", headers:{"Content-Type":"application/json"},
-    body:JSON.stringify(body),
+  await withInflight("change_pin", btn, async () => {
+    const r=await fetch(`/api/profiles/${p.id}/set-pin`,{
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(body),
+    });
+    if(r.ok){
+      closeChangePinModal();
+      await fetchProfiles(); renderProfileGrid(); renderExistingProfilesList();
+    } else {
+      const d=await r.json().catch(()=>({}));
+      errEl.textContent=d.detail||"Failed to update PIN."; errEl.classList.remove("hidden");
+    }
   });
-  if(r.ok){
-    closeChangePinModal();
-    await fetchProfiles(); renderProfileGrid(); renderExistingProfilesList();
-  } else {
-    const d=await r.json().catch(()=>({}));
-    errEl.textContent=d.detail||"Failed to update PIN."; errEl.classList.remove("hidden");
-  }
 }
 function selectColor(c){
   selectedColor=c;
@@ -3755,30 +3757,40 @@ function selectColor(c){
     btn.className=`color-swatch w-7 h-7 ${avatarBg(bc)} ${bc===c?`ring-2 ring-offset-2 ring-offset-gray-900 ${ring}`:""}`;
   });
 }
-async function submitProfile(){
+async function submitProfile(btn){
   const name=document.getElementById("profileNameInput").value.trim();
   if(!name){ document.getElementById("profileNameInput").focus(); return; }
-  const r=await fetch("/api/profiles",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,color:selectedColor})});
-  if(!r.ok){ alert("Could not create profile."); return; }
-  const d=await r.json(); closeProfileModal();
-  allProfiles=[...allProfiles,d.profile]; renderProfileGrid(); selectProfile(d.profile);
+  await withInflight("create_profile", btn, async () => {
+    const r=await fetch("/api/profiles",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({name,color:selectedColor})});
+    if(!r.ok){ alert("Could not create profile."); return; }
+    const d=await r.json(); closeProfileModal();
+    allProfiles=[...allProfiles,d.profile]; renderProfileGrid(); selectProfile(d.profile);
+  });
 }
 
 // ── Library ────────────────────────────────────────────────────────────────
-async function loadLibrary(){
-  const pid=profile.id?`?profile_id=${profile.id}`:"";
-  const [libRes] = await Promise.all([
-    fetch(`/api/library${pid}`),
-    loadDiskSpace(),
-  ]);
-  const items=(await libRes.json()).items||[];
-  // Cache the latest library list so continueLibraryItem() can consult resume hints
-  // before deciding whether to show the local-vs-VLC chooser.
-  window._libCache = items;
-  renderLibrary(items);
-  // Re-expand any file lists that were open before the re-render
-  for(const itemId of expandedDownloads){
-    await showDownloadFiles(itemId);
+async function loadLibrary(btn){
+  // `btn` is only passed by the manual Refresh button — show its spinner while
+  // we wait on the server. Programmatic (SSE-driven) callers pass nothing, so
+  // _markLoading is a no-op for them and their concurrency isn't affected.
+  _markLoading(btn, true);
+  try {
+    const pid=profile.id?`?profile_id=${profile.id}`:"";
+    const [libRes] = await Promise.all([
+      fetch(`/api/library${pid}`),
+      loadDiskSpace(),
+    ]);
+    const items=(await libRes.json()).items||[];
+    // Cache the latest library list so continueLibraryItem() can consult resume hints
+    // before deciding whether to show the local-vs-VLC chooser.
+    window._libCache = items;
+    renderLibrary(items);
+    // Re-expand any file lists that were open before the re-render
+    for(const itemId of expandedDownloads){
+      await showDownloadFiles(itemId);
+    }
+  } finally {
+    _markLoading(btn, false);
   }
 }
 
@@ -3973,21 +3985,21 @@ function renderLibrary(items){
         // its files; "idle" just gates them to the admin's idle download window.
         const isIdle=item.download_mode==="idle";
         buttons+=isIdle
-          ?`<button onclick="setDownloadSchedule('${item.id}','now')"
+          ?`<button onclick="setDownloadSchedule('${item.id}','now',false,this)"
               class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white px-3 py-2.5 transition-colors min-h-[44px] flex items-center gap-1.5 flex-shrink-0"
               title="Download now (stop waiting for the idle window)">▶︎ Resume</button>`
-          :`<button onclick="setDownloadSchedule('${item.id}','idle')"
+          :`<button onclick="setDownloadSchedule('${item.id}','idle',false,this)"
               class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 hover:text-white px-3 py-2.5 transition-colors min-h-[44px] flex items-center gap-1.5 flex-shrink-0"
               title="Pause — only download during the idle/night window">⏸︎ Idle</button>`;
         // Whole-item Play When Ready (only shown as queued when no specific file is targeted)
         const isItemQueued=app.play_when_ready_item_id===item.id&&!app.play_when_ready_file_path;
         if(isItemQueued){
-          buttons+=`<button onclick="cancelQueuePlay('${item.id}')"
+          buttons+=`<button onclick="cancelQueuePlay('${item.id}',this)"
             class="text-sm bg-indigo-900/50 border border-indigo-700 text-indigo-300 flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
             ⏳︎ Queued — tap to cancel
           </button>`;
         } else {
-          buttons+=`<button onclick="queuePlay('${item.id}')"
+          buttons+=`<button onclick="queuePlay('${item.id}',this)"
             class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
             ▶︎ When Ready
           </button>`;
@@ -4114,7 +4126,7 @@ function renderLibrary(items){
       }
 
       // Delete button (fixed width, doesn't flex-grow)
-      iconBtns+=`<button onclick="deleteLibraryItem('${item.id}')"
+      iconBtns+=`<button onclick="deleteLibraryItem('${item.id}',this)"
         class="text-gray-600 hover:text-red-400 p-2.5 hover:bg-red-950/30 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -4257,37 +4269,43 @@ function _revertOptimistic(){
   }
 }
 
-async function deleteLibraryItem(itemId){
+async function deleteLibraryItem(itemId, btn){
   if(!confirm("Remove from library and delete the file(s)?")) return;
-  const r=await fetch(`/api/library/${itemId}?delete_file=true`,{method:"DELETE"});
-  if(r.ok){
-    expandedDownloads.delete(itemId);
-    downloadFilesData.delete(itemId);
-    loadLibrary();
-  } else showAlert("Could not delete item.","error");
+  await withInflight(`del_${itemId}`, btn, async () => {
+    const r=await fetch(`/api/library/${itemId}?delete_file=true`,{method:"DELETE"});
+    if(r.ok){
+      expandedDownloads.delete(itemId);
+      downloadFilesData.delete(itemId);
+      loadLibrary();
+    } else showAlert("Could not delete item.","error");
+  });
 }
 
-async function queuePlay(itemId){
+async function queuePlay(itemId, btn){
   if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
-  const r=await fetch(`/api/library/${itemId}/queue-play?profile_id=${encodeURIComponent(profile.id)}`,{method:"POST"});
-  if(r.ok){
-    app.play_when_ready_item_id=itemId;
-    app.play_when_ready_file_path=null;
-    loadLibrary();
-    showAlert("Queued — will auto-play when download finishes.","success");
-  } else {
-    const e=await r.json().catch(()=>({detail:"Could not queue."}));
-    showAlert(e.detail||"Could not queue.","error");
-  }
+  await withInflight(`queue_${itemId}`, btn, async () => {
+    const r=await fetch(`/api/library/${itemId}/queue-play?profile_id=${encodeURIComponent(profile.id)}`,{method:"POST"});
+    if(r.ok){
+      app.play_when_ready_item_id=itemId;
+      app.play_when_ready_file_path=null;
+      loadLibrary();
+      showAlert("Queued — will auto-play when download finishes.","success");
+    } else {
+      const e=await r.json().catch(()=>({detail:"Could not queue."}));
+      showAlert(e.detail||"Could not queue.","error");
+    }
+  });
 }
 
-async function cancelQueuePlay(itemId){
-  await fetch(`/api/library/${itemId}/queue-play`,{method:"DELETE"});
-  app.play_when_ready_item_id=null;
-  app.play_when_ready_file_path=null;
-  const files=downloadFilesData.get(itemId);
-  if(files&&expandedDownloads.has(itemId)) renderDownloadFiles(itemId,files);
-  loadLibrary();
+async function cancelQueuePlay(itemId, btn){
+  await withInflight(`queue_${itemId}`, btn, async () => {
+    await fetch(`/api/library/${itemId}/queue-play`,{method:"DELETE"});
+    app.play_when_ready_item_id=null;
+    app.play_when_ready_file_path=null;
+    const files=downloadFilesData.get(itemId);
+    if(files&&expandedDownloads.has(itemId)) renderDownloadFiles(itemId,files);
+    loadLibrary();
+  });
 }
 
 // ── Storage Path Management ────────────────────────────────────────────────
@@ -4344,36 +4362,40 @@ async function refreshStoragePathList(){
       </div>`;
     }).join("");
     list.querySelectorAll(".storage-remove-btn").forEach(btn=>{
-      btn.addEventListener("click",()=>removeStoragePath(btn.dataset.path));
+      btn.addEventListener("click",()=>removeStoragePath(btn.dataset.path, btn));
     });
   }catch(err){
     list.innerHTML=`<p class="text-xs text-red-400 text-center py-3">${escHtml(err.message)}</p>`;
   }
 }
 
-async function addStoragePath(){
+async function addStoragePath(btn){
   const path=document.getElementById("storageNewPath").value.trim();
   if(!path){ showAlert("Enter a directory path.","warn"); return; }
-  const r=await fetch(`/api/settings/library-paths?path=${encodeURIComponent(path)}`,{method:"POST"});
-  if(r.ok){
-    document.getElementById("storageNewPath").value="";
-    await Promise.all([refreshStoragePathList(), loadDiskSpace()]);
-    _libraryPaths=null;
-  } else {
-    const e=await r.json().catch(()=>({detail:"Failed."}));
-    showAlert(e.detail||"Failed.","error");
-  }
+  await withInflight("storage_add", btn, async () => {
+    const r=await fetch(`/api/settings/library-paths?path=${encodeURIComponent(path)}`,{method:"POST"});
+    if(r.ok){
+      document.getElementById("storageNewPath").value="";
+      await Promise.all([refreshStoragePathList(), loadDiskSpace()]);
+      _libraryPaths=null;
+    } else {
+      const e=await r.json().catch(()=>({detail:"Failed."}));
+      showAlert(e.detail||"Failed.","error");
+    }
+  });
 }
 
-async function removeStoragePath(path){
-  const r=await fetch(`/api/settings/library-paths?path=${encodeURIComponent(path)}`,{method:"DELETE"});
-  if(r.ok){
-    await Promise.all([refreshStoragePathList(), loadDiskSpace()]);
-    _libraryPaths=null;
-  } else {
-    const e=await r.json().catch(()=>({detail:"Failed."}));
-    showAlert(e.detail||"Failed.","error");
-  }
+async function removeStoragePath(path, btn){
+  await withInflight(`storage_rm_${path}`, btn, async () => {
+    const r=await fetch(`/api/settings/library-paths?path=${encodeURIComponent(path)}`,{method:"DELETE"});
+    if(r.ok){
+      await Promise.all([refreshStoragePathList(), loadDiskSpace()]);
+      _libraryPaths=null;
+    } else {
+      const e=await r.json().catch(()=>({detail:"Failed."}));
+      showAlert(e.detail||"Failed.","error");
+    }
+  });
 }
 
 // ── Per-file download controls ─────────────────────────────────────────────
@@ -4516,7 +4538,7 @@ function renderDownloadFiles(itemId,files){
   const cached=downloadFilesData.get(itemId)||files;
   const pathsFor=(attr)=>String(attr).split(",").map(s=>cached[parseInt(s)]?.path).filter(Boolean);
   el.querySelectorAll(".dl-sched-btn,.dl-fsched-btn").forEach(btn=>{
-    btn.addEventListener("click",()=>setFileSchedule(itemId, pathsFor(btn.dataset.idxs), btn.dataset.mode));
+    btn.addEventListener("click",()=>setFileSchedule(itemId, pathsFor(btn.dataset.idxs), btn.dataset.mode, btn));
   });
   el.querySelectorAll(".dl-play-btn").forEach(btn=>{
     btn.addEventListener("click",()=>{
@@ -4549,45 +4571,51 @@ async function refreshDownloadFiles(itemId){
   }catch(_){}
 }
 
-async function setFileSchedule(itemId, paths, mode){
+async function setFileSchedule(itemId, paths, mode, btn){
   if(!paths||!paths.length) return;
-  const r=await fetch(`/api/library/${itemId}/file-schedule`,{
-    method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({file_paths:paths,mode}),
+  await withInflight(`fsched_${itemId}_${mode}_${paths.join(",")}`, btn, async () => {
+    const r=await fetch(`/api/library/${itemId}/file-schedule`,{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({file_paths:paths,mode}),
+    });
+    if(r.ok){
+      // Optimistically reflect the new mode in the cache, then re-render + refresh.
+      const files=downloadFilesData.get(itemId);
+      if(files){ const set=new Set(paths); files.forEach(f=>{ if(set.has(f.path)) f.mode=mode; }); renderDownloadFiles(itemId,files); }
+      refreshDownloadFiles(itemId);
+    } else {
+      const e=await r.json().catch(()=>({detail:"Failed."}));
+      showAlert(e.detail||"Failed.","error");
+    }
   });
-  if(r.ok){
-    // Optimistically reflect the new mode in the cache, then re-render + refresh.
-    const files=downloadFilesData.get(itemId);
-    if(files){ const set=new Set(paths); files.forEach(f=>{ if(set.has(f.path)) f.mode=mode; }); renderDownloadFiles(itemId,files); }
-    refreshDownloadFiles(itemId);
-  } else {
-    const e=await r.json().catch(()=>({detail:"Failed."}));
-    showAlert(e.detail||"Failed.","error");
-  }
 }
 
-async function setDownloadSchedule(itemId, mode, resetFiles){
-  const r=await fetch(`/api/library/${itemId}/download-schedule`,{
-    method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({mode, reset_files:!!resetFiles}),
+async function setDownloadSchedule(itemId, mode, resetFiles, btn){
+  await withInflight(`dsched_${itemId}`, btn, async () => {
+    const r=await fetch(`/api/library/${itemId}/download-schedule`,{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({mode, reset_files:!!resetFiles}),
+    });
+    if(r.ok){
+      showAlert(mode==="idle"?"Paused — will download during the idle/night window.":"Resuming download now.","success");
+      loadLibrary();
+      refreshDownloadFiles(itemId);
+    } else {
+      const e=await r.json().catch(()=>({detail:"Failed."}));
+      showAlert(e.detail||"Failed.","error");
+    }
   });
-  if(r.ok){
-    showAlert(mode==="idle"?"Paused — will download during the idle/night window.":"Resuming download now.","success");
-    loadLibrary();
-    refreshDownloadFiles(itemId);
-  } else {
-    const e=await r.json().catch(()=>({detail:"Failed."}));
-    showAlert(e.detail||"Failed.","error");
-  }
 }
 
 // Episode-picker action on a "Not downloaded" (skipped) episode: fetch it now. The
 // server re-enables the file and flips the item back to downloading; refresh the
 // open picker so the row turns into a live "Downloading…" state.
-async function epDownloadSkipped(itemId, filePath){
-  await setFileSchedule(itemId,[filePath],"now");
-  if(epItemId===itemId) refreshEpFiles();
-  showAlert("Downloading this file now.","success");
+async function epDownloadSkipped(itemId, filePath, btn){
+  await withInflight(`ep_dl_skipped_${filePath}`, btn, async () => {
+    await setFileSchedule(itemId,[filePath],"now");
+    if(epItemId===itemId) refreshEpFiles();
+    showAlert("Downloading this file now.","success");
+  });
 }
 
 async function queuePlayFile(itemId,filePath){
@@ -4960,7 +4988,7 @@ function _epCardHtml(f){
             </svg>
           </button>
           ${canFetchNow
-            ? `<button onclick="epDownloadSkipped(${_id},${_p})"
+            ? `<button onclick="epDownloadSkipped(${_id},${_p},this)"
                 class="h-9 px-2.5 flex items-center gap-1 text-[11px] font-bold uppercase tracking-wide text-emerald-300 hover:text-emerald-200 hover:bg-emerald-950/40 transition-colors"
                 title="Download this file to the host now">
                 <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -4991,7 +5019,7 @@ function _epSchedBtn(onclick, label, color){
 function _epPrepBtn(mode, label, color, cur){
   const on={now:"bg-emerald-700 text-emerald-50",idle:"bg-sky-800 text-sky-100",never:"bg-red-900/70 text-red-200"};
   const active=cur===mode;
-  return `<button onclick="epSchedPrep('${mode}')" class="text-[11px] font-bold uppercase tracking-wide px-2 py-1 transition-colors ${active?on[mode]:`bg-gray-800 hover:bg-gray-700 ${color}`}">${label}</button>`;
+  return `<button onclick="epSchedPrep('${mode}',this)" class="text-[11px] font-bold uppercase tracking-wide px-2 py-1 transition-colors ${active?on[mode]:`bg-gray-800 hover:bg-gray-700 ${color}`}">${label}</button>`;
 }
 // Files in the currently-visible scope (the active season, or every file when the
 // item has no season grouping).
@@ -5008,69 +5036,73 @@ function _visibleSeasonPrepMode(){
   return modes.size===1?[...modes][0]:"";
 }
 // Set the download schedule (now/idle/skip) for the visible season's files.
-async function epSchedSeason(mode){
+async function epSchedSeason(mode, btn){
   const paths=_visibleSeasonPaths();
   if(!paths.length) return;
-  await setFileSchedule(epItemId, paths, mode);
+  await setFileSchedule(epItemId, paths, mode, btn);
   refreshEpFiles();
 }
 // Whole-torrent download schedule. reset_files=true so EVERY file (including any
 // previously skipped) inherits the mode — "now" grabs the entire torrent, "idle"
 // defers all of it.
-async function epSchedItem(mode){
-  await setDownloadSchedule(epItemId, mode, true);
+async function epSchedItem(mode, btn){
+  await setDownloadSchedule(epItemId, mode, true, btn);
   refreshEpFiles();
 }
 
 // Set the STREAM-PREP schedule (now/idle/never) for the visible season's files —
 // the sibling of epSchedSeason, but for HLS prep instead of the qBit download.
-async function epSchedPrep(mode){
+async function epSchedPrep(mode, btn){
   const paths=_visibleSeasonPaths();
   if(!paths.length) return;
-  try{
-    const r=await fetch(`/api/library/${epItemId}/prep-schedule`,{
-      method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({file_paths:paths,mode}),
-    });
-    if(!r.ok){ const e=await r.json().catch(()=>({detail:"Failed."})); showAlert(e.detail||"Failed.","error"); return; }
-    const d=await r.json().catch(()=>({}));
-    // Optimistically reflect the new prep mode so the bar's highlight updates at once.
-    const set=new Set(paths); epFiles.forEach(f=>{ if(set.has(f.path)) f.prep_mode=mode; });
-    showAlert(
-      mode==="now"   ? (d.started?`Prepping ${d.started} file(s) for streaming now.`:"Already prepped — nothing to do.")
-      : mode==="idle"? "Will stream-prep these during the idle/night window."
-      :                "These files won't be auto-prepped (existing bundles kept).",
-      "success");
-    // Live-update the per-row Prep icons while the new jobs encode.
-    if(mode==="now" && d.started){ try{ _startPrepPolling(epItemId); }catch(_){} }
-    refreshEpFiles();
-  }catch(_){ showAlert("Failed to set stream-prep schedule.","error"); }
+  await withInflight(`epprep_${mode}`, btn, async () => {
+    try{
+      const r=await fetch(`/api/library/${epItemId}/prep-schedule`,{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({file_paths:paths,mode}),
+      });
+      if(!r.ok){ const e=await r.json().catch(()=>({detail:"Failed."})); showAlert(e.detail||"Failed.","error"); return; }
+      const d=await r.json().catch(()=>({}));
+      // Optimistically reflect the new prep mode so the bar's highlight updates at once.
+      const set=new Set(paths); epFiles.forEach(f=>{ if(set.has(f.path)) f.prep_mode=mode; });
+      showAlert(
+        mode==="now"   ? (d.started?`Prepping ${d.started} file(s) for streaming now.`:"Already prepped — nothing to do.")
+        : mode==="idle"? "Will stream-prep these during the idle/night window."
+        :                "These files won't be auto-prepped (existing bundles kept).",
+        "success");
+      // Live-update the per-row Prep icons while the new jobs encode.
+      if(mode==="now" && d.started){ try{ _startPrepPolling(epItemId); }catch(_){} }
+      refreshEpFiles();
+    }catch(_){ showAlert("Failed to set stream-prep schedule.","error"); }
+  });
 }
 
 // Recheck the CHECKED episodes against the torrent's piece hashes (qBittorrent
 // force-recheck). Any file that was complete but comes back damaged has its cached
 // HLS bundle purged so it re-preps from the repaired source.
-async function epRecheckSelected(){
+async function epRecheckSelected(btn){
   const paths=[...epChecked];
   if(!paths.length){ showAlert("Select the episodes you want to verify first.","warn"); return; }
   if(!confirm(`Recheck ${paths.length} file hash(es)?\n\nThis runs a full piece-by-piece verify of the torrent in qBittorrent. Damaged files are re-fetched and their stream-prep cache is invalidated.`)) return;
   showAlert(`Rechecking ${paths.length} file(s)… this may take a while.`,"success");
-  try{
-    const r=await fetch(`/api/library/${epItemId}/recheck`,{
-      method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({file_paths:paths}),
-    });
-    if(!r.ok){ const e=await r.json().catch(()=>({detail:"Recheck failed."})); showAlert(e.detail||"Recheck failed.","error"); return; }
-    const d=await r.json();
-    if(!d.checked){
-      showAlert("Recheck started but didn't finish in time — check qBittorrent.","warn");
-    } else if(d.damaged_count>0){
-      showAlert(`${d.damaged_count} damaged file(s) found — re-downloading; ${d.cache_purged} cached bundle(s) invalidated.`,"warn");
-    } else {
-      showAlert("All checked files verified OK — no damage found.","success");
-    }
-    refreshEpFiles();
-  }catch(_){ showAlert("Recheck failed.","error"); }
+  await withInflight("ep_recheck", btn, async () => {
+    try{
+      const r=await fetch(`/api/library/${epItemId}/recheck`,{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({file_paths:paths}),
+      });
+      if(!r.ok){ const e=await r.json().catch(()=>({detail:"Recheck failed."})); showAlert(e.detail||"Recheck failed.","error"); return; }
+      const d=await r.json();
+      if(!d.checked){
+        showAlert("Recheck started but didn't finish in time — check qBittorrent.","warn");
+      } else if(d.damaged_count>0){
+        showAlert(`${d.damaged_count} damaged file(s) found — re-downloading; ${d.cache_purged} cached bundle(s) invalidated.`,"warn");
+      } else {
+        showAlert("All checked files verified OK — no damage found.","success");
+      }
+      refreshEpFiles();
+    }catch(_){ showAlert("Recheck failed.","error"); }
+  });
 }
 
 function renderEpList(){
@@ -5139,13 +5171,13 @@ function renderEpList(){
     if(!allDownloaded){
       rows += `<div class="flex items-center gap-1.5 flex-wrap">
         <span class="text-[10px] font-black text-gray-500 uppercase tracking-widest mr-0.5">DL · ${escHtml(scope)}:</span>
-        ${_epSchedBtn("epSchedSeason('now')","⬇ Now","text-emerald-300 hover:bg-emerald-950/40")}
-        ${_epSchedBtn("epSchedSeason('idle')","🌙 Idle","text-sky-300 hover:bg-sky-950/40")}
-        ${_epSchedBtn("epSchedSeason('skip')","⊘ Skip","text-red-300 hover:bg-red-950/40")}
+        ${_epSchedBtn("epSchedSeason('now',this)","⬇ Now","text-emerald-300 hover:bg-emerald-950/40")}
+        ${_epSchedBtn("epSchedSeason('idle',this)","🌙 Idle","text-sky-300 hover:bg-sky-950/40")}
+        ${_epSchedBtn("epSchedSeason('skip',this)","⊘ Skip","text-red-300 hover:bg-red-950/40")}
         ${multi?`<span class="w-px h-4 bg-gray-700 mx-1"></span>
           <span class="text-[10px] font-black text-gray-500 uppercase tracking-widest mr-0.5">All:</span>
-          ${_epSchedBtn("epSchedItem('now')","⬇ Now","text-emerald-300 hover:bg-emerald-950/40")}
-          ${_epSchedBtn("epSchedItem('idle')","🌙 Idle","text-sky-300 hover:bg-sky-950/40")}`:""}
+          ${_epSchedBtn("epSchedItem('now',this)","⬇ Now","text-emerald-300 hover:bg-emerald-950/40")}
+          ${_epSchedBtn("epSchedItem('idle',this)","🌙 Idle","text-sky-300 hover:bg-sky-950/40")}`:""}
       </div>`;
     }
     // Stream-prep row (only when HLS is available on this host).
@@ -5159,7 +5191,7 @@ function renderEpList(){
     }
     // Recheck button.
     rows += `<div class="flex items-center gap-1.5 flex-wrap">
-      <button onclick="epRecheckSelected()" title="Force a piece-hash verify of the checked episodes; damaged files are re-fetched and their stream-prep cache is invalidated"
+      <button onclick="epRecheckSelected(this)" title="Force a piece-hash verify of the checked episodes; damaged files are re-fetched and their stream-prep cache is invalidated"
         class="text-[11px] font-bold uppercase tracking-wide px-2 py-1 bg-gray-800 hover:bg-amber-900/50 text-amber-300 hover:text-amber-200 transition-colors flex items-center gap-1">
         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
         Recheck hashes (<span id="epRecheckCount">${epChecked.size}</span>)
@@ -5355,22 +5387,24 @@ function epDownloadAll(itemId, title){
   _triggerZipDownload(itemId, [], title||"download");
 }
 
-async function epMarkWatched(watched){
+async function epMarkWatched(watched, btn){
   if(!epChecked.size){ showAlert("Select at least one episode.","warn"); return; }
   if(!epItemId) return;
   if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
   const paths=[...epChecked];
-  const r=await fetch(`/api/library/${epItemId}/mark-watched`,{
-    method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({profile_id:profile.id,watched,file_paths:paths}),
+  await withInflight("mark_watched", btn, async () => {
+    const r=await fetch(`/api/library/${epItemId}/mark-watched`,{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({profile_id:profile.id,watched,file_paths:paths}),
+    });
+    if(r.ok){
+      showAlert(`Marked ${paths.length} episode${paths.length>1?"s":""} as ${watched?"watched":"unwatched"}.`,"success");
+      await openEpisodePicker(epItemId);
+    } else {
+      const e=await r.json().catch(()=>({detail:"Failed."}));
+      showAlert(e.detail||"Failed.","error");
+    }
   });
-  if(r.ok){
-    showAlert(`Marked ${paths.length} episode${paths.length>1?"s":""} as ${watched?"watched":"unwatched"}.`,"success");
-    await openEpisodePicker(epItemId);
-  } else {
-    const e=await r.json().catch(()=>({detail:"Failed."}));
-    showAlert(e.detail||"Failed.","error");
-  }
 }
 
 async function epToggleWatched(btn){
@@ -5747,7 +5781,7 @@ async function submitDownload(){
   const title    =_saveStreamMode?(app.active_title||""):(downloadTarget?.title||"");
 
   const btn=document.getElementById("dlSubmitBtn");
-  btn.disabled=true;
+  _markLoading(btn, true);
 
   try{
     let r;
@@ -5786,7 +5820,7 @@ async function submitDownload(){
       showAlert(e.detail||"Failed.","error");
     }
   } finally {
-    btn.disabled=false;
+    _markLoading(btn, false);
   }
 }
 
@@ -5952,7 +5986,7 @@ async function doSearch(q){
   const grid=document.getElementById("resultsGrid");
   const wrap=document.getElementById("resultsWrap"),empty=document.getElementById("emptyState");
   const count=document.getElementById("resultCount");
-  btn.disabled=true; btn.textContent="…";
+  btn.disabled=true; btn.textContent="…"; _markLoading(btn, true);
   grid.innerHTML=""; wrap.classList.add("hidden"); empty.classList.add("hidden"); hideAlert();
   try{
     const r=await fetch(`/api/search?q=${encodeURIComponent(q)}`);
@@ -6014,7 +6048,7 @@ async function doSearch(q){
   } catch(err){
     showAlert(err.message,"error"); empty.classList.remove("hidden");
   } finally {
-    btn.disabled=false; btn.textContent="Search";
+    btn.disabled=false; btn.textContent="Search"; _markLoading(btn, false);
   }
 }
 
@@ -8499,6 +8533,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.17.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.18.0</div>
 </body>
 </html>

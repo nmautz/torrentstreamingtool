@@ -131,6 +131,15 @@ Profile Settings has a **Subtitles** `<select>` (`#psSubtitles`: Default / On / 
 
 The **Find Subtitles** modal's language filter (`#subSearchLang`) is populated from a small common-language list plus `subtitleDefaultLang` (the admin preferred language, carried in every `state` snapshot as `subtitle_default_language`), and defaults to it (or "All languages" when Any). `runSubtitleSearch` passes the selected `lang` to `/api/subtitles/search`; the per-result download still uses each result's own language.
 
+### Pending-state feedback (the responsiveness standard)
+
+Every control that waits on a server round-trip must show an **immediate** pending state so the UI never looks dead. The single mechanism is `_markLoading(el, on)` + `withInflight(key, el, fn)` (defined just after `doSearch` in `static/index.html`):
+
+- `_markLoading(el, on)` toggles the spinner: buttons get `.ctrl-loading` (an inline 18px spinner overlay + dim + `pointer-events:none`), `<select>`/`<input>` get `.ctrl-loading-form` (dim + `disabled`), and `aria-busy` is set either way. It's a **no-op when `el` is falsy**, which is why functions called both manually (passing `this`) and programmatically (passing nothing) — e.g. `loadLibrary`, `loadComponents` — can share one body.
+- `withInflight(key, el, fn)` wraps `fn` in `_markLoading(el, true/false)` (always cleared in `finally`) **and** dedupes by `key`: while a `key` is in flight, repeat invocations are dropped. Use it for any fetch-backed action; pass the clicked element so its spinner shows. For inline handlers add `this` to the `onclick` (`foo()` → `foo(this)`); for `addEventListener`-wired buttons pass the `btn` you already have.
+
+The CSS (`@keyframes ctrl-spin`, `.ctrl-loading`, `.ctrl-loading-form`) lives in both `static/index.html` and `static/admin.html`. **`admin.html` carries its own copy of `_markLoading`/`withInflight`** (ported verbatim, same names) so admin buttons get the identical treatment. When adding a new server-waiting control, route it through this — don't invent a per-button `disabled` toggle. Controls with their own richer feedback (upload progress bars; in-region "Loading…/Searching…" text painted into a results box) are the only exceptions and are intentionally left without the overlay.
+
 ### Optimistic Play UI + in-flight guards
 
 `continueLibraryItem` and `playLibraryFiles` run under `withInflight("play_${itemId}", …)` so a frustrated double-tap during a slow VLC handoff is dropped client-side instead of racing extra `in_play` requests to VLC. Before the fetch they call `_optimisticBuffering(label, itemId)` which:

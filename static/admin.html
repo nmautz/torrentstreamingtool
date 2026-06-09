@@ -19,6 +19,19 @@
     /* Tab bar: horizontal scroll on narrow viewports, no scrollbar gutter */
     .admin-tabs { scrollbar-width: none; -ms-overflow-style: none; }
     .admin-tabs::-webkit-scrollbar { display: none; }
+    /* ── Pending-state spinner (mirrors static/index.html) ──────────────────
+       Any control waiting on a server round-trip gets .ctrl-loading (buttons)
+       or .ctrl-loading-form (<select>/<input>) so the UI never looks dead. */
+    @keyframes ctrl-spin { to { transform: rotate(360deg); } }
+    .ctrl-loading { position: relative; opacity: 0.55; cursor: not-allowed !important; pointer-events: none; }
+    .ctrl-loading::after {
+      content: ""; position: absolute; top: 50%; left: 50%;
+      width: 18px; height: 18px; margin: -9px 0 0 -9px;
+      border: 2px solid rgba(255,255,255,0.25);
+      border-top-color: #818cf8; border-radius: 50%;
+      animation: ctrl-spin 0.7s linear infinite; pointer-events: none; z-index: 5;
+    }
+    .ctrl-loading-form { opacity: 0.55; cursor: not-allowed !important; }
   </style>
 </head>
 <body class="dark bg-gray-950 text-gray-100 min-h-screen flex flex-col">
@@ -38,7 +51,7 @@
              px-4 py-4 text-sm focus:outline-none transition-colors"
       onkeydown="if(event.key==='Enter') doLogin()"/>
     <div id="loginError" class="hidden text-red-400 text-xs font-bold uppercase tracking-wide text-center"></div>
-    <button onclick="doLogin()"
+    <button onclick="doLogin(this)"
       class="w-full bg-indigo-600 hover:bg-indigo-500 py-4 text-sm font-black uppercase tracking-wide transition-colors">
       Sign In
     </button>
@@ -131,7 +144,7 @@
             class="w-full bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500
                    px-3 py-3 text-sm font-mono focus:outline-none transition-colors"/>
         </div>
-        <button onclick="saveCategories()"
+        <button onclick="saveCategories(this)"
           class="bg-indigo-600 hover:bg-indigo-500 px-5 py-3 text-sm font-black uppercase tracking-wide transition-colors flex-shrink-0">
           Save
         </button>
@@ -156,7 +169,7 @@
             class="w-full bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500
                    px-3 py-3 text-sm font-mono focus:outline-none transition-colors"/>
         </div>
-        <button onclick="saveTmdbKey()"
+        <button onclick="saveTmdbKey(this)"
           class="bg-indigo-600 hover:bg-indigo-500 px-5 py-3 text-sm font-black uppercase tracking-wide transition-colors flex-shrink-0">
           Save
         </button>
@@ -171,7 +184,7 @@
           <p class="text-xs text-gray-500 mt-0.5">Indexers currently set up in Jackett.</p>
         </div>
         <div class="flex gap-2">
-          <button onclick="loadIndexers()"
+          <button onclick="loadIndexers(this)"
             class="text-xs text-indigo-400 hover:text-indigo-300 uppercase tracking-wide font-bold transition-colors">
             Refresh
           </button>
@@ -235,7 +248,7 @@
           <h3 class="text-sm font-black uppercase tracking-wide">Fingerprint Log</h3>
           <p class="text-xs text-gray-500 mt-0.5">Recent Smart Skip events (most recent first). In-memory only — resets on server restart.</p>
         </div>
-        <button onclick="loadAnalyzerLog()"
+        <button onclick="loadAnalyzerLog(this)"
           class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 hover:text-white text-gray-400 transition-colors">
           Refresh
         </button>
@@ -913,7 +926,7 @@
           <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Optional Components</h2>
           <p class="text-xs text-gray-500 mt-0.5">Install the portable dependencies the auto-updater can't fetch on its own — ffmpeg, fpcalc, and the whisper.cpp engine + model for AI subtitles. Downloads run on the host and persist across updates. ffmpeg / whisper.cpp binaries are Windows-only here; on Linux/macOS use your package manager.</p>
         </div>
-        <button onclick="loadComponents()"
+        <button onclick="loadComponents(this)"
           class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 text-gray-300 hover:text-white transition-colors">
           Refresh
         </button>
@@ -1156,7 +1169,7 @@
         class="flex-1 bg-gray-800 hover:bg-gray-700 py-4 text-sm font-bold uppercase tracking-wide transition-colors">
         Cancel
       </button>
-      <button onclick="submitPin()"
+      <button onclick="submitPin(this)"
         class="flex-1 bg-indigo-600 hover:bg-indigo-500 py-4 text-sm font-black uppercase tracking-wide transition-colors">
         Save
       </button>
@@ -1193,6 +1206,36 @@ function showToast(msg, isErr=false){
   el._t=setTimeout(()=>el.classList.add("hidden"), 3000);
 }
 
+// ── Pending-state helper (mirrors static/index.html) ───────────────────────────
+// Any control that waits on a server round-trip should route through these so the
+// UI always shows immediate feedback (spinner + dim + disable) and clears it when
+// done — even on errors. withInflight also drops double-taps by `key`.
+const _inflightActions = new Set();
+function _markLoading(el, on){
+  if(!el) return;
+  const isFormCtl = (el.tagName === "SELECT" || el.tagName === "INPUT");
+  const cls = isFormCtl ? "ctrl-loading-form" : "ctrl-loading";
+  if(on){
+    el.classList.add(cls);
+    el.setAttribute("aria-busy","true");
+    if(isFormCtl) el.disabled = true;
+  } else {
+    el.classList.remove(cls);
+    el.removeAttribute("aria-busy");
+    if(isFormCtl) el.disabled = false;
+  }
+}
+async function withInflight(key, el, fn){
+  if(_inflightActions.has(key)) return;
+  _inflightActions.add(key);
+  _markLoading(el, true);
+  try { return await fn(); }
+  finally {
+    _inflightActions.delete(key);
+    _markLoading(el, false);
+  }
+}
+
 // ── Auth ──────────────────────────────────────────────────────────────────────
 function authHeader(){
   return adminToken ? {"Authorization":`Bearer ${adminToken}`} : {};
@@ -1218,24 +1261,26 @@ async function checkAuth(){
   }
 }
 
-async function doLogin(){
+async function doLogin(btn){
   const pw = document.getElementById("loginPassword").value;
   const errEl = document.getElementById("loginError");
   errEl.classList.add("hidden");
-  const r = await fetch("/api/admin/login",{
-    method:"POST", headers:{"Content-Type":"application/json"},
-    body: JSON.stringify({password: pw}),
+  await withInflight("admin_login", btn, async () => {
+    const r = await fetch("/api/admin/login",{
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body: JSON.stringify({password: pw}),
+    });
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      errEl.textContent = d.detail || "Incorrect password.";
+      errEl.classList.remove("hidden");
+      return;
+    }
+    const d = await r.json();
+    adminToken = d.token;
+    localStorage.setItem("streamlink_admin_token", adminToken);
+    showDashboard();
   });
-  if(!r.ok){
-    const d = await r.json().catch(()=>({}));
-    errEl.textContent = d.detail || "Incorrect password.";
-    errEl.classList.remove("hidden");
-    return;
-  }
-  const d = await r.json();
-  adminToken = d.token;
-  localStorage.setItem("streamlink_admin_token", adminToken);
-  showDashboard();
 }
 
 async function doLogout(){
@@ -1347,6 +1392,7 @@ async function doShutdownServer(){
   const btn = document.getElementById("shutdownBtn");
   btn.disabled = true;
   btn.textContent = "Shutting down…";
+  _markLoading(btn, true);
   try{
     const r = await fetch("/api/admin/shutdown",{method:"POST", headers: authHeader()});
     if(!r.ok){
@@ -1354,6 +1400,7 @@ async function doShutdownServer(){
       showToast(`Shutdown failed: ${t || r.status}`, true);
       btn.disabled = false;
       btn.textContent = "Shut Down";
+      _markLoading(btn, false);
       return;
     }
     showToast("Server shutting down…");
@@ -1367,6 +1414,7 @@ async function doRebootMachine(){
   const btn = document.getElementById("rebootBtn");
   btn.disabled = true;
   btn.textContent = "Rebooting…";
+  _markLoading(btn, true);
   try{
     const r = await fetch("/api/admin/reboot",{method:"POST", headers: authHeader()});
     if(!r.ok){
@@ -1374,6 +1422,7 @@ async function doRebootMachine(){
       showToast(`Reboot failed: ${t || r.status}`, true);
       btn.disabled = false;
       btn.textContent = "Reboot";
+      _markLoading(btn, false);
       return;
     }
     showToast("Rebooting host machine…");
@@ -1528,25 +1577,24 @@ async function saveScheduledReboot(){
     timezone:     document.getElementById("srTimezone").value,
     idle_minutes: parseInt(document.getElementById("srIdle").value, 10) || 15,
   };
-  btn.disabled = true;
-  try{
-    const r = await fetch("/api/admin/scheduled-reboot",{
-      method:"POST",
-      headers:{...authHeader(), "Content-Type":"application/json"},
-      body: JSON.stringify(body),
-    });
-    if(!r.ok){
-      const d = await r.json().catch(()=>({}));
-      showToast(`Save failed: ${d.detail || r.status}`, true);
-      return;
+  await withInflight("save_sched_reboot", btn, async () => {
+    try{
+      const r = await fetch("/api/admin/scheduled-reboot",{
+        method:"POST",
+        headers:{...authHeader(), "Content-Type":"application/json"},
+        body: JSON.stringify(body),
+      });
+      if(!r.ok){
+        const d = await r.json().catch(()=>({}));
+        showToast(`Save failed: ${d.detail || r.status}`, true);
+        return;
+      }
+      showToast(_srEnabled ? "Scheduled restart saved." : "Scheduled restart disabled.");
+      await loadScheduledReboot();
+    }catch(_){
+      showToast("Save failed.", true);
     }
-    showToast(_srEnabled ? "Scheduled restart saved." : "Scheduled restart disabled.");
-    await loadScheduledReboot();
-  }catch(_){
-    showToast("Save failed.", true);
-  }finally{
-    btn.disabled = false;
-  }
+  });
 }
 
 // ── Automatic Stream Prep ─────────────────────────────────────────────────────
@@ -1599,25 +1647,24 @@ async function saveAutoPrep(){
     idle_minutes: parseInt(document.getElementById("apIdle").value, 10) || 30,
     on_activity:  document.getElementById("apOnActivity").value || "hard",
   };
-  btn.disabled = true;
-  try{
-    const r = await fetch("/api/admin/auto-prep",{
-      method:"POST",
-      headers:{...authHeader(), "Content-Type":"application/json"},
-      body: JSON.stringify(body),
-    });
-    if(!r.ok){
-      const d = await r.json().catch(()=>({}));
-      showToast(`Save failed: ${d.detail || r.status}`, true);
-      return;
+  await withInflight("save_autoprep", btn, async () => {
+    try{
+      const r = await fetch("/api/admin/auto-prep",{
+        method:"POST",
+        headers:{...authHeader(), "Content-Type":"application/json"},
+        body: JSON.stringify(body),
+      });
+      if(!r.ok){
+        const d = await r.json().catch(()=>({}));
+        showToast(`Save failed: ${d.detail || r.status}`, true);
+        return;
+      }
+      showToast(_apMode === "off" ? "Auto-prep disabled." : "Auto-prep saved.");
+      await loadAutoPrep();
+    }catch(_){
+      showToast("Save failed.", true);
     }
-    showToast(_apMode === "off" ? "Auto-prep disabled." : "Auto-prep saved.");
-    await loadAutoPrep();
-  }catch(_){
-    showToast("Save failed.", true);
-  }finally{
-    btn.disabled = false;
-  }
+  });
 }
 
 // ── Auto-Prep on Play ─────────────────────────────────────────────────────────
@@ -1839,49 +1886,48 @@ async function loadForcePrep(){
 async function startForcePrep(){
   const btn = document.getElementById("fpStartBtn");
   const itemId = document.getElementById("fpItem").value;
-  btn.disabled = true;
-  try{
-    const r = await fetch("/api/admin/force-prep",{
-      method:"POST",
-      headers:{...authHeader(), "Content-Type":"application/json"},
-      body: JSON.stringify({item_id: itemId || null}),
-    });
-    const d = await r.json().catch(()=>({}));
-    if(!r.ok){
-      showToast(`Force prep failed: ${d.detail || r.status}`, true);
-      return;
+  await withInflight("force_prep", btn, async () => {
+    try{
+      const r = await fetch("/api/admin/force-prep",{
+        method:"POST",
+        headers:{...authHeader(), "Content-Type":"application/json"},
+        body: JSON.stringify({item_id: itemId || null}),
+      });
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok){
+        showToast(`Force prep failed: ${d.detail || r.status}`, true);
+        return;
+      }
+      _renderForcePrep(d);
+      showToast(d.queued ? `Force-prepping ${d.queued} file${d.queued!==1?'s':''}.`
+                         : "Nothing to prep — all files are already cached.");
+    }catch(_){
+      showToast("Force prep failed.", true);
     }
-    _renderForcePrep(d);
-    showToast(d.queued ? `Force-prepping ${d.queued} file${d.queued!==1?'s':''}.`
-                       : "Nothing to prep — all files are already cached.");
-  }catch(_){
-    showToast("Force prep failed.", true);
-  }finally{
-    btn.disabled = false;
-  }
+  });
 }
 
 async function stopForcePrep(hard){
-  const soft = document.getElementById("fpStopSoftBtn");
-  const hardBtn = document.getElementById("fpStopHardBtn");
-  soft.disabled = true; hardBtn.disabled = true;
-  try{
-    const r = await fetch("/api/admin/force-prep/stop",{
-      method:"POST",
-      headers:{...authHeader(), "Content-Type":"application/json"},
-      body: JSON.stringify({hard: !!hard}),
-    });
-    const d = await r.json().catch(()=>({}));
-    if(!r.ok){
-      showToast(`Stop failed: ${d.detail || r.status}`, true);
-      return;
+  const btn = hard ? document.getElementById("fpStopHardBtn") : document.getElementById("fpStopSoftBtn");
+  await withInflight(`force_prep_stop_${hard?'hard':'soft'}`, btn, async () => {
+    try{
+      const r = await fetch("/api/admin/force-prep/stop",{
+        method:"POST",
+        headers:{...authHeader(), "Content-Type":"application/json"},
+        body: JSON.stringify({hard: !!hard}),
+      });
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok){
+        showToast(`Stop failed: ${d.detail || r.status}`, true);
+        return;
+      }
+      _renderForcePrep(d);
+      const killedNote = hard && d.killed ? ` (killed ${d.killed} in progress)` : "";
+      showToast(`Force prep stopped — cancelled ${d.cancelled || 0} queued${killedNote}.`);
+    }catch(_){
+      showToast("Stop failed.", true);
     }
-    _renderForcePrep(d);
-    const killedNote = hard && d.killed ? ` (killed ${d.killed} in progress)` : "";
-    showToast(`Force prep stopped — cancelled ${d.cancelled || 0} queued${killedNote}.`);
-  }catch(_){
-    showToast("Stop failed.", true);
-  }
+  });
 }
 
 // ── File Validator (ffmpeg decode of source files) ─────────────────────────────
@@ -1999,42 +2045,42 @@ async function startFileValidation(){
   const btn = document.getElementById("fvStartBtn");
   const itemId = document.getElementById("fvItem").value;
   const deep = document.getElementById("fvDeep").value === "1";
-  btn.disabled = true;
-  try{
-    const r = await fetch("/api/admin/validate-files",{
-      method:"POST",
-      headers:{...authHeader(), "Content-Type":"application/json"},
-      body: JSON.stringify({scope: itemId || "all", deep}),
-    });
-    const d = await r.json().catch(()=>({}));
-    if(!r.ok){
-      showToast(`Validation failed: ${d.detail || r.status}`, true);
-      return;
+  await withInflight("validate_files", btn, async () => {
+    try{
+      const r = await fetch("/api/admin/validate-files",{
+        method:"POST",
+        headers:{...authHeader(), "Content-Type":"application/json"},
+        body: JSON.stringify({scope: itemId || "all", deep}),
+      });
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok){
+        showToast(`Validation failed: ${d.detail || r.status}`, true);
+        return;
+      }
+      _renderFileValidation(d);
+      startFileValidationPolling();
+      showToast(`Validating ${deep ? "(deep)" : "(quick)"}…`);
+    }catch(_){
+      showToast("Validation failed.", true);
     }
-    _renderFileValidation(d);
-    startFileValidationPolling();
-    showToast(`Validating ${deep ? "(deep)" : "(quick)"}…`);
-  }catch(_){
-    showToast("Validation failed.", true);
-  }finally{
-    btn.disabled = false;
-  }
+  });
 }
 
 async function stopFileValidation(){
   const btn = document.getElementById("fvStopBtn");
-  btn.disabled = true;
-  try{
-    const r = await fetch("/api/admin/validate-files/stop",{
-      method:"POST",
-      headers:{...authHeader(), "Content-Type":"application/json"},
-    });
-    const d = await r.json().catch(()=>({}));
-    if(r.ok) _renderFileValidation(d);
-    showToast("Validation stopped.");
-  }catch(_){
-    showToast("Stop failed.", true);
-  }
+  await withInflight("validate_files_stop", btn, async () => {
+    try{
+      const r = await fetch("/api/admin/validate-files/stop",{
+        method:"POST",
+        headers:{...authHeader(), "Content-Type":"application/json"},
+      });
+      const d = await r.json().catch(()=>({}));
+      if(r.ok) _renderFileValidation(d);
+      showToast("Validation stopped.");
+    }catch(_){
+      showToast("Stop failed.", true);
+    }
+  });
 }
 
 // ── File Repair (attempt to fix damaged files) ─────────────────────────────────
@@ -2117,42 +2163,42 @@ function stopFileRepairPolling(){
 async function startFileRepair(){
   const btn = document.getElementById("fvRepairBtn");
   const reencode = document.getElementById("fvReencode").checked;
-  btn.disabled = true;
-  try{
-    const r = await fetch("/api/admin/repair-files",{
-      method:"POST",
-      headers:{...authHeader(), "Content-Type":"application/json"},
-      body: JSON.stringify({reencode}),   // paths default to the last scan's damaged list
-    });
-    const d = await r.json().catch(()=>({}));
-    if(!r.ok){
-      showToast(`Repair failed: ${d.detail || r.status}`, true);
-      btn.disabled = false;
-      return;
+  await withInflight("repair_files", btn, async () => {
+    try{
+      const r = await fetch("/api/admin/repair-files",{
+        method:"POST",
+        headers:{...authHeader(), "Content-Type":"application/json"},
+        body: JSON.stringify({reencode}),   // paths default to the last scan's damaged list
+      });
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok){
+        showToast(`Repair failed: ${d.detail || r.status}`, true);
+        return;
+      }
+      _renderFileRepair(d);
+      startFileRepairPolling();
+      showToast("Attempting repair…");
+    }catch(_){
+      showToast("Repair failed.", true);
     }
-    _renderFileRepair(d);
-    startFileRepairPolling();
-    showToast("Attempting repair…");
-  }catch(_){
-    showToast("Repair failed.", true);
-    btn.disabled = false;
-  }
+  });
 }
 
 async function stopFileRepair(){
   const btn = document.getElementById("fvRepairStopBtn");
-  btn.disabled = true;
-  try{
-    const r = await fetch("/api/admin/repair-files/stop",{
-      method:"POST",
-      headers:{...authHeader(), "Content-Type":"application/json"},
-    });
-    const d = await r.json().catch(()=>({}));
-    if(r.ok) _renderFileRepair(d);
-    showToast("Repair stopped.");
-  }catch(_){
-    showToast("Stop failed.", true);
-  }
+  await withInflight("repair_files_stop", btn, async () => {
+    try{
+      const r = await fetch("/api/admin/repair-files/stop",{
+        method:"POST",
+        headers:{...authHeader(), "Content-Type":"application/json"},
+      });
+      const d = await r.json().catch(()=>({}));
+      if(r.ok) _renderFileRepair(d);
+      showToast("Repair stopped.");
+    }catch(_){
+      showToast("Stop failed.", true);
+    }
+  });
 }
 
 // ── qBittorrent Seeding & Bandwidth ────────────────────────────────────────────
@@ -2215,25 +2261,24 @@ async function saveQbitLimits(){
     up_limit_bytes:   Math.max(0, Math.round((parseFloat(document.getElementById("qbUp").value)   || 0) * _QB_MIB)),
     dl_limit_bytes:   Math.max(0, Math.round((parseFloat(document.getElementById("qbDown").value) || 0) * _QB_MIB)),
   };
-  btn.disabled = true;
-  try{
-    const r = await fetch("/api/admin/qbit-limits",{
-      method:"POST",
-      headers:{...authHeader(), "Content-Type":"application/json"},
-      body: JSON.stringify(body),
-    });
-    if(!r.ok){
-      const d = await r.json().catch(()=>({}));
-      showToast(`Save failed: ${d.detail || r.status}`, true);
-      return;
+  await withInflight("save_qbit", btn, async () => {
+    try{
+      const r = await fetch("/api/admin/qbit-limits",{
+        method:"POST",
+        headers:{...authHeader(), "Content-Type":"application/json"},
+        body: JSON.stringify(body),
+      });
+      if(!r.ok){
+        const d = await r.json().catch(()=>({}));
+        showToast(`Save failed: ${d.detail || r.status}`, true);
+        return;
+      }
+      showToast("Seeding & bandwidth limits saved.");
+      await loadQbitLimits();
+    }catch(_){
+      showToast("Save failed.", true);
     }
-    showToast("Seeding & bandwidth limits saved.");
-    await loadQbitLimits();
-  }catch(_){
-    showToast("Save failed.", true);
-  }finally{
-    btn.disabled = false;
-  }
+  });
 }
 
 // ── Auto-Generated Subtitles (STT) ─────────────────────────────────────────────
@@ -2284,25 +2329,24 @@ async function saveStt(){
     enabled:   _sttEnabled,
     translate: document.getElementById("sttTranslate").value !== "0",
   };
-  btn.disabled = true;
-  try{
-    const r = await fetch("/api/admin/stt",{
-      method:"POST",
-      headers:{...authHeader(), "Content-Type":"application/json"},
-      body: JSON.stringify(body),
-    });
-    if(!r.ok){
-      const d = await r.json().catch(()=>({}));
-      showToast(`Save failed: ${d.detail || r.status}`, true);
-      return;
+  await withInflight("save_stt", btn, async () => {
+    try{
+      const r = await fetch("/api/admin/stt",{
+        method:"POST",
+        headers:{...authHeader(), "Content-Type":"application/json"},
+        body: JSON.stringify(body),
+      });
+      if(!r.ok){
+        const d = await r.json().catch(()=>({}));
+        showToast(`Save failed: ${d.detail || r.status}`, true);
+        return;
+      }
+      showToast(_sttEnabled ? "Subtitle generation saved." : "Subtitle generation disabled.");
+      await loadStt();
+    }catch(_){
+      showToast("Save failed.", true);
     }
-    showToast(_sttEnabled ? "Subtitle generation saved." : "Subtitle generation disabled.");
-    await loadStt();
-  }catch(_){
-    showToast("Save failed.", true);
-  }finally{
-    btn.disabled = false;
-  }
+  });
 }
 
 // ── Subtitles policy (preferred language + on/off default + auto-search) ────────
@@ -2371,54 +2415,60 @@ async function saveSubs(){
     upgrade_late_subs: _subUpgradeLate,
     single_option:    _subSingleOption,
   };
-  btn.disabled = true;
-  try{
-    const r = await fetch("/api/admin/subtitles",{
-      method:"POST",
-      headers:{...authHeader(), "Content-Type":"application/json"},
-      body: JSON.stringify(body),
-    });
-    if(!r.ok){
-      const d = await r.json().catch(()=>({}));
-      showToast(`Save failed: ${d.detail || r.status}`, true);
-      return;
+  await withInflight("save_subs", btn, async () => {
+    try{
+      const r = await fetch("/api/admin/subtitles",{
+        method:"POST",
+        headers:{...authHeader(), "Content-Type":"application/json"},
+        body: JSON.stringify(body),
+      });
+      if(!r.ok){
+        const d = await r.json().catch(()=>({}));
+        showToast(`Save failed: ${d.detail || r.status}`, true);
+        return;
+      }
+      showToast("Subtitle settings saved.");
+      await loadSubs();
+      // The AI card's status line echoes the preferred language — refresh it too.
+      loadStt();
+    }catch(_){
+      showToast("Save failed.", true);
     }
-    showToast("Subtitle settings saved.");
-    await loadSubs();
-    // The AI card's status line echoes the preferred language — refresh it too.
-    loadStt();
-  }catch(_){
-    showToast("Save failed.", true);
-  }finally{
-    btn.disabled = false;
-  }
+  });
 }
 
 // ── Optional Components (portable dependency installer) ─────────────────────────
 let _compPollTimer = null;
 
-async function loadComponents(){
+async function loadComponents(btn){
   const list = document.getElementById("compList");
   if(!list) return;
-  let r;
+  // _markLoading is a no-op for the interval-poll callers (no btn); only the
+  // manual Refresh button (passes `this`) shows the spinner.
+  _markLoading(btn, true);
   try{
-    r = await fetch("/api/admin/components", {headers: authHeader()});
-  }catch(_){
-    list.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Network error — could not load components.</div>`;
-    return;
-  }
-  if(!r.ok){
-    list.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Failed to load components (HTTP ${r.status}).</div>`;
-    return;
-  }
-  const d = await r.json();
-  _renderComponents(d);
-  // Poll while any install is running; self-stop when all jobs settle.
-  const active = Object.values(d.components || {}).some(c => c.job && (c.job.status === "pending" || c.job.status === "downloading"));
-  if(active){
-    if(!_compPollTimer) _compPollTimer = setInterval(loadComponents, 1500);
-  } else if(_compPollTimer){
-    clearInterval(_compPollTimer); _compPollTimer = null;
+    let r;
+    try{
+      r = await fetch("/api/admin/components", {headers: authHeader()});
+    }catch(_){
+      list.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Network error — could not load components.</div>`;
+      return;
+    }
+    if(!r.ok){
+      list.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Failed to load components (HTTP ${r.status}).</div>`;
+      return;
+    }
+    const d = await r.json();
+    _renderComponents(d);
+    // Poll while any install is running; self-stop when all jobs settle.
+    const active = Object.values(d.components || {}).some(c => c.job && (c.job.status === "pending" || c.job.status === "downloading"));
+    if(active){
+      if(!_compPollTimer) _compPollTimer = setInterval(loadComponents, 1500);
+    } else if(_compPollTimer){
+      clearInterval(_compPollTimer); _compPollTimer = null;
+    }
+  } finally {
+    _markLoading(btn, false);
   }
 }
 
@@ -2456,7 +2506,7 @@ function _renderComponents(d){
     } else if(!c.installable){
       action = `<span class="text-[10px] text-gray-600 uppercase tracking-wide">OS package manager</span>`;
     } else {
-      action = `<button onclick="installComponent('${key}')"
+      action = `<button onclick="installComponent('${key}',this)"
         class="text-[11px] font-bold uppercase tracking-wide px-3 py-1.5 border border-indigo-700 bg-indigo-950/60 text-indigo-200 hover:bg-indigo-900 transition-colors">
         ${c.installed ? "Reinstall" : "Install"}</button>`;
     }
@@ -2480,7 +2530,7 @@ function _renderComponents(d){
   document.getElementById("compList").innerHTML = html;
 }
 
-async function installComponent(key){
+async function installComponent(key, btn){
   const body = { component: key };
   if(key === "whisper_model"){
     const sel = document.getElementById("compModelSize");
@@ -2490,22 +2540,24 @@ async function installComponent(key){
     const sel = document.getElementById("compWhisperBuild");
     if(sel) body.build = sel.value;
   }
-  try{
-    const r = await fetch("/api/admin/components/install", {
-      method: "POST",
-      headers: {...authHeader(), "Content-Type": "application/json"},
-      body: JSON.stringify(body),
-    });
-    if(!r.ok){
-      const e = await r.json().catch(()=>({}));
-      showToast(`Install failed: ${e.detail || r.status}`, true);
-      return;
+  await withInflight(`install_${key}`, btn, async () => {
+    try{
+      const r = await fetch("/api/admin/components/install", {
+        method: "POST",
+        headers: {...authHeader(), "Content-Type": "application/json"},
+        body: JSON.stringify(body),
+      });
+      if(!r.ok){
+        const e = await r.json().catch(()=>({}));
+        showToast(`Install failed: ${e.detail || r.status}`, true);
+        return;
+      }
+      showToast("Install started…");
+      loadComponents();
+    }catch(_){
+      showToast("Could not start install.", true);
     }
-    showToast("Install started…");
-    loadComponents();
-  }catch(_){
-    showToast("Could not start install.", true);
-  }
+  });
 }
 
 // ── Auto-Updater ──────────────────────────────────────────────────────────────
@@ -2720,33 +2772,32 @@ function stopAutoupdatePolling(){
 
 async function saveAutoupdate(){
   const btn = document.getElementById("auSaveBtn");
-  btn.disabled = true;
-  try{
-    const body = {
-      enabled:        _auEnabled,
-      branch:         document.getElementById("auBranch").value,
-      interval_hours: parseInt(document.getElementById("auInterval").value,10) || 6,
-      auto_apply:     document.getElementById("auAutoApply").checked,
-      dev_mode:       _auDevMode,
-    };
-    const r = await fetch("/api/admin/updater/config", {
-      method: "POST",
-      headers: {...authHeader(), "Content-Type":"application/json"},
-      body: JSON.stringify(body),
-    });
-    if(!r.ok){
-      const t = await r.text();
-      showToast(`Save failed: ${t || r.status}`, true);
-      return;
+  await withInflight("save_autoupdate", btn, async () => {
+    try{
+      const body = {
+        enabled:        _auEnabled,
+        branch:         document.getElementById("auBranch").value,
+        interval_hours: parseInt(document.getElementById("auInterval").value,10) || 6,
+        auto_apply:     document.getElementById("auAutoApply").checked,
+        dev_mode:       _auDevMode,
+      };
+      const r = await fetch("/api/admin/updater/config", {
+        method: "POST",
+        headers: {...authHeader(), "Content-Type":"application/json"},
+        body: JSON.stringify(body),
+      });
+      if(!r.ok){
+        const t = await r.text();
+        showToast(`Save failed: ${t || r.status}`, true);
+        return;
+      }
+      showToast(_auEnabled ? "Auto-update settings saved." : "Auto-update disabled.");
+      _auFormDirty = false;
+      await loadAutoupdate();
+    }catch(_){
+      showToast("Save failed.", true);
     }
-    showToast(_auEnabled ? "Auto-update settings saved." : "Auto-update disabled.");
-    _auFormDirty = false;
-    await loadAutoupdate();
-  }catch(_){
-    showToast("Save failed.", true);
-  }finally{
-    btn.disabled = false;
-  }
+  });
 }
 
 async function checkUpdateNow(){
@@ -2835,6 +2886,7 @@ async function switchBranchNow(){
   const btn = document.getElementById("auSwitchBtn");
   btn.disabled = true;
   btn.textContent = "Switching…";
+  _markLoading(btn, true);
   try{
     const r = await fetch("/api/admin/updater/switch-branch", {
       method: "POST",
@@ -2855,6 +2907,7 @@ async function switchBranchNow(){
   }finally{
     btn.disabled = false;
     btn.textContent = "Switch Branch";
+    _markLoading(btn, false);
   }
 }
 
@@ -2873,6 +2926,7 @@ async function switchCommitNow(){
   const btn = document.getElementById("auCommitBtn");
   btn.disabled = true;
   btn.textContent = "Pinning…";
+  _markLoading(btn, true);
   try{
     const r = await fetch("/api/admin/updater/switch-commit", {
       method: "POST",
@@ -2893,6 +2947,7 @@ async function switchCommitNow(){
   }finally{
     btn.disabled = false;
     btn.textContent = "Pin Commit";
+    _markLoading(btn, false);
   }
 }
 
@@ -2908,6 +2963,7 @@ async function resetHardNow(){
   const btn = document.getElementById("auResetBtn");
   btn.disabled = true;
   btn.textContent = "Resetting…";
+  _markLoading(btn, true);
   try{
     const r = await fetch("/api/admin/updater/reset-hard", {
       method: "POST",
@@ -2926,6 +2982,7 @@ async function resetHardNow(){
   }finally{
     btn.disabled = false;
     btn.textContent = "Reset Hard";
+    _markLoading(btn, false);
   }
 }
 
@@ -2964,7 +3021,7 @@ async function loadChangelog(){
   const box = document.getElementById("auChangelog");
   const btn = document.getElementById("auChangelogBtn");
   if(!box) return;
-  if(btn) btn.disabled = true;
+  if(btn){ btn.disabled = true; _markLoading(btn, true); }
   try{
     const r = await fetch("/api/admin/updater/changelog", {headers: authHeader()});
     if(!r.ok){
@@ -2981,7 +3038,7 @@ async function loadChangelog(){
   }catch(_){
     box.innerHTML = `<div class="text-center text-red-400 py-6">Failed to load changelog.</div>`;
   }finally{
-    if(btn) btn.disabled = false;
+    if(btn){ btn.disabled = false; _markLoading(btn, false); }
   }
 }
 
@@ -3044,6 +3101,7 @@ async function saveEnvKeys(){
   const btn = document.getElementById("auEnvSaveBtn");
   btn.disabled = true;
   btn.textContent = "Saving…";
+  _markLoading(btn, true);
   try{
     const r = await fetch("/api/admin/env-keys", {
       method: "POST",
@@ -3063,6 +3121,7 @@ async function saveEnvKeys(){
   }finally{
     btn.disabled = false;
     btn.textContent = "Save Keys";
+    _markLoading(btn, false);
   }
 }
 
@@ -3149,9 +3208,10 @@ function _renderSkipRow(it, job){
     </div>`;
 }
 
-async function loadAnalyzerLog(){
+async function loadAnalyzerLog(btn){
   const el = document.getElementById("skipLogList");
   if(!el) return;
+  _markLoading(btn, true);
   try{
     const r = await fetch("/api/admin/analyzer-log?limit=100", {headers: authHeader()});
     if(!r.ok){
@@ -3182,6 +3242,8 @@ async function loadAnalyzerLog(){
     }).join("");
   }catch(_){
     el.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Failed to load log.</div>`;
+  }finally{
+    _markLoading(btn, false);
   }
 }
 
@@ -3354,13 +3416,13 @@ async function saveSkipEntry(filePath, idx, btn){
     intro_end:     introE===""?null:parseFloat(introE),
     credits_start: credS===""?null:parseFloat(credS),
   };
-  btn.disabled = true;
-  const r = await fetch(`/api/admin/library/${_skipEditorItemId}/skip-data`,{
-    method:"PATCH", headers:{...authHeader(),"Content-Type":"application/json"},
-    body: JSON.stringify(body),
+  await withInflight(`save_skip_${idx}`, btn, async () => {
+    const r = await fetch(`/api/admin/library/${_skipEditorItemId}/skip-data`,{
+      method:"PATCH", headers:{...authHeader(),"Content-Type":"application/json"},
+      body: JSON.stringify(body),
+    });
+    showToast(r.ok ? "Saved." : "Save failed.", !r.ok);
   });
-  btn.disabled = false;
-  showToast(r.ok ? "Saved." : "Save failed.", !r.ok);
 }
 
 // ── Indexers ──────────────────────────────────────────────────────────────────
@@ -3379,29 +3441,39 @@ async function loadAdminSettings(){
   }
 }
 
-async function saveCategories(){
+async function saveCategories(btn){
   const cats = document.getElementById("catInput").value.trim();
-  const r = await fetch("/api/admin/settings",{
-    method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
-    body: JSON.stringify({indexer_categories: cats}),
+  await withInflight("save_categories", btn, async () => {
+    const r = await fetch("/api/admin/settings",{
+      method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+      body: JSON.stringify({indexer_categories: cats}),
+    });
+    showToast(r.ok ? "Categories saved." : "Save failed.", !r.ok);
   });
-  showToast(r.ok ? "Categories saved." : "Save failed.", !r.ok);
 }
 
-async function saveTmdbKey(){
+async function saveTmdbKey(btn){
   const key = document.getElementById("tmdbInput").value.trim();
-  const r = await fetch("/api/admin/settings",{
-    method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
-    body: JSON.stringify({tmdb_api_key: key}),
+  await withInflight("save_tmdb", btn, async () => {
+    const r = await fetch("/api/admin/settings",{
+      method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+      body: JSON.stringify({tmdb_api_key: key}),
+    });
+    if (r.ok) await loadAdminSettings();
+    showToast(r.ok ? (key ? "TMDb key saved." : "TMDb key cleared.") : "Save failed.", !r.ok);
   });
-  if (r.ok) await loadAdminSettings();
-  showToast(r.ok ? (key ? "TMDb key saved." : "TMDb key cleared.") : "Save failed.", !r.ok);
 }
 
-async function loadIndexers(){
+async function loadIndexers(btn){
   const el = document.getElementById("indexerList");
   el.innerHTML = `<div class="px-5 py-8 text-center text-gray-600 text-sm">Loading…</div>`;
-  const r = await fetch("/api/admin/indexers", {headers: authHeader()});
+  _markLoading(btn, true);
+  let r;
+  try{
+    r = await fetch("/api/admin/indexers", {headers: authHeader()});
+  } finally {
+    _markLoading(btn, false);
+  }
   if(!r.ok){
     el.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Could not reach Jackett.</div>`;
     return;
@@ -3519,7 +3591,7 @@ async function loadOfflineCache(forceRefresh){
   const btn = document.getElementById("offRefreshBtn");
   list.innerHTML = `<div class="px-5 py-8 text-center text-gray-600 text-sm">${forceRefresh ? "Re-checking cache on disk…" : "Loading cache inventory…"}</div>`;
   totalEl.textContent = "…";
-  if(btn){ btn.disabled = true; btn.textContent = forceRefresh ? "Checking…" : "Refresh"; }
+  if(btn){ btn.disabled = true; btn.textContent = forceRefresh ? "Checking…" : "Refresh"; _markLoading(btn, true); }
   let r;
   try{
     r = await fetch(`/api/admin/offline-cache${forceRefresh ? "?refresh=1" : ""}`, {headers: authHeader()});
@@ -3527,7 +3599,7 @@ async function loadOfflineCache(forceRefresh){
     list.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Network error — could not load inventory.</div>`;
     return;
   }finally{
-    if(btn){ btn.disabled = false; btn.textContent = "Refresh"; }
+    if(btn){ btn.disabled = false; btn.textContent = "Refresh"; _markLoading(btn, false); }
   }
   if(!r.ok){
     list.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Failed to load inventory (HTTP ${r.status}).</div>`;
@@ -3608,7 +3680,7 @@ async function saveCacheAutopurge(btn){
   let maxGb = parseFloat(document.getElementById("apMaxGb").value);
   if(!isFinite(maxGb) || maxGb < 1) maxGb = 1;
   if(maxGb > 10000) maxGb = 10000;
-  if(btn){ btn.disabled = true; btn.classList.add("opacity-50"); }
+  if(btn){ btn.disabled = true; btn.classList.add("opacity-50"); _markLoading(btn, true); }
   let r;
   try{
     r = await fetch("/api/admin/cache-autopurge", {
@@ -3618,10 +3690,10 @@ async function saveCacheAutopurge(btn){
     });
   }catch(_){
     showToast("Network error — not saved.");
-    if(btn){ btn.disabled = false; btn.classList.remove("opacity-50"); }
+    if(btn){ btn.disabled = false; btn.classList.remove("opacity-50"); _markLoading(btn, false); }
     return;
   }
-  if(btn){ btn.disabled = false; btn.classList.remove("opacity-50"); }
+  if(btn){ btn.disabled = false; btn.classList.remove("opacity-50"); _markLoading(btn, false); }
   if(!r.ok){ showToast(`Save failed (HTTP ${r.status}).`); return; }
   const d = await r.json();
   document.getElementById("apMaxGb").value = d.max_gb;
@@ -3743,6 +3815,7 @@ function toggleOffItemExpand(itemId){
 
 async function deleteOfflineCacheFile(cacheKey, btn){
   btn.disabled = true;
+  _markLoading(btn, true);
   let r;
   try{
     r = await fetch(`/api/admin/offline-cache/${encodeURIComponent(cacheKey)}`, {
@@ -3750,6 +3823,7 @@ async function deleteOfflineCacheFile(cacheKey, btn){
     });
   }catch(_){
     btn.disabled = false;
+    _markLoading(btn, false);
     showToast("Network error.", true); return;
   }
   if(r.ok){
@@ -3759,15 +3833,18 @@ async function deleteOfflineCacheFile(cacheKey, btn){
   } else if(r.status === 409){
     showToast("Skipped — file is being written by an active prep job.", true);
     btn.disabled = false;
+    _markLoading(btn, false);
   } else {
     showToast(`Delete failed (HTTP ${r.status}).`, true);
     btn.disabled = false;
+    _markLoading(btn, false);
   }
 }
 
 async function deleteOfflineCacheForItem(itemId, title, btn){
   if(!confirm(`Delete all preprocessed offline files for "${title}"? Source files are not affected — they can be re-prepped.`)) return;
   btn.disabled = true;
+  _markLoading(btn, true);
   let r;
   try{
     r = await fetch(`/api/admin/library/${encodeURIComponent(itemId)}/offline-cache`, {
@@ -3775,6 +3852,7 @@ async function deleteOfflineCacheForItem(itemId, title, btn){
     });
   }catch(_){
     btn.disabled = false;
+    _markLoading(btn, false);
     showToast("Network error.", true); return;
   }
   if(r.ok){
@@ -3784,12 +3862,14 @@ async function deleteOfflineCacheForItem(itemId, title, btn){
   } else {
     showToast(`Delete failed (HTTP ${r.status}).`, true);
     btn.disabled = false;
+    _markLoading(btn, false);
   }
 }
 
 async function purgeOfflineOrphans(btn){
   if(!confirm("Delete every orphan cache file? These no longer correspond to any library file and are safe to remove.")) return;
   btn.disabled = true;
+  _markLoading(btn, true);
   let r;
   try{
     r = await fetch(`/api/admin/offline-cache/orphans`, {
@@ -3797,8 +3877,10 @@ async function purgeOfflineOrphans(btn){
     });
   }catch(_){
     btn.disabled = false;
+    _markLoading(btn, false);
     showToast("Network error.", true); return;
   }
+  _markLoading(btn, false);
   if(r.ok){
     const d = await r.json();
     showToast(`Purged ${d.deleted_count} orphan${d.deleted_count!==1?"s":""} (${_fmtBytes(d.bytes_freed)} freed).`);
@@ -3876,7 +3958,7 @@ function closePinModal(){
   document.getElementById("pinModal").classList.add("hidden");
 }
 
-async function submitPin(){
+async function submitPin(btn){
   if(!pinTarget) return;
   const pin = document.getElementById("pinInput").value.trim();
   const errEl = document.getElementById("pinError");
@@ -3886,19 +3968,21 @@ async function submitPin(){
     errEl.classList.remove("hidden");
     return;
   }
-  const r = await fetch(`/api/profiles/${pinTarget.id}/set-pin`,{
-    method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
-    body: JSON.stringify({pin}),
+  await withInflight("submit_pin", btn, async () => {
+    const r = await fetch(`/api/profiles/${pinTarget.id}/set-pin`,{
+      method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+      body: JSON.stringify({pin}),
+    });
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      errEl.textContent = d.detail || "Failed to save PIN.";
+      errEl.classList.remove("hidden");
+      return;
+    }
+    closePinModal();
+    showToast(pin ? "PIN saved." : "PIN cleared.");
+    loadProfilePins();
   });
-  if(!r.ok){
-    const d = await r.json().catch(()=>({}));
-    errEl.textContent = d.detail || "Failed to save PIN.";
-    errEl.classList.remove("hidden");
-    return;
-  }
-  closePinModal();
-  showToast(pin ? "PIN saved." : "PIN cleared.");
-  loadProfilePins();
 }
 
 async function toggleElevated(profileId, newValue, btn){
@@ -4062,6 +4146,7 @@ async function saveIndexerConfig(){
   const errEl = document.getElementById("aiConfigError");
   btn.disabled = true;
   btn.textContent = "Adding…";
+  _markLoading(btn, true);
   errEl.classList.add("hidden");
 
   const values = {};
@@ -4080,6 +4165,7 @@ async function saveIndexerConfig(){
 
   btn.disabled = false;
   btn.textContent = "Add Indexer";
+  _markLoading(btn, false);
 
   if(r.ok){
     closeAddIndexer();
