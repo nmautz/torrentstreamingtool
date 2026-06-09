@@ -109,7 +109,7 @@ For each profile:
 
 ### 7. System
 
-Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Automatic Stream Prep**, **Auto-Prep on Play**, **Force Stream Prep**, **File Validator**, **VPN Kill Switch**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
+Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Automatic Stream Prep**, **Auto-Prep on Play**, **Force Stream Prep**, **Validate & Repair on Prep**, **File Validator**, **VPN Kill Switch**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
 
 #### System Health
 
@@ -210,6 +210,21 @@ Panel control: a single enable/disable toggle (saves immediately on click).
 
 - `GET /api/admin/play-prep` → `{enabled}`.
 - `POST /api/admin/play-prep` → `{enabled}`.
+
+#### Validate & Repair on Prep
+
+Folds the **File Validator** (below) into automatic / bulk stream prep, so the unattended idle/overnight prep run can also heal corrupt sources. A three-way mode (`library.json → settings.prep_validate.mode`, read via `_prep_validate_cfg`, **default `off`**):
+
+- **`off`** — never validate during prep (current behaviour; manual File Validator only).
+- **`before`** — before building a file's HLS bundle, deep-decode the source (`_validate_one_file(deep=True)`); if damaged, **remux-repair** it in place (`_repair_one_file(reencode=False)` — lossless, no lossy re-encode), then prep the *healed* file. Because a repair rewrites the file its `_offline_cache_key` changes, so `_run_offline_job` re-points `out`/`tmp_dir` at the new key (and short-circuits if that bundle already exists) before encoding.
+- **`after`** — build the bundle first, then deep-decode the source in the post-prep hook block. A repair purges the just-built bundle (keyed on the old path/mtime/size) so the file re-preps from the healed source on the next idle cycle.
+
+Only **bulk** jobs honour the setting (`job["queue"] == "bulk"` — idle auto-prep + the per-row/per-item Prep buttons); **interactive** play-on-device preps are never validated so playback isn't delayed. The work runs inside the single prep concurrency slot (one ffmpeg at a time) via the shared helper `_prep_validate_repair`, which stashes the live ffmpeg in the prep job's own `_proc` slot — so `_pause_prep(kill=True)`, **Stop Now**, and the activity-kick terminate an in-flight scan/repair with no extra plumbing. The validator/repair `ffmpeg` decodes on the **GPU when NVENC is present** (`_decode_hwaccel_args` → transparent `-hwaccel cuda`, CPU fallback); the optional repair re-encode uses `h264_nvenc`. Not available on macOS hosts (no HLS prep to ride on).
+
+Panel control: three buttons (**Don't Validate** / **Repair Before Prep** / **Repair After Prep**); the active mode is highlighted and saves immediately on click.
+
+- `GET /api/admin/prep-validate` → `{mode}`.
+- `POST /api/admin/prep-validate` → `{mode}` ∈ `off`/`before`/`after` (400 on an unknown mode).
 
 #### Force Stream Prep
 

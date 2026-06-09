@@ -2840,6 +2840,31 @@ def _play_prep_cfg(lib: dict) -> dict:
     return {"enabled": bool(cfg.get("enabled", True))}
 
 
+_PREP_VALIDATE_MODES = ("off", "before", "after")
+
+
+def _prep_validate_cfg(lib: dict) -> dict:
+    """Read settings.prep_validate — auto deep-validate (and remux-repair) of a
+    source file as it rides through bulk/idle stream prep.
+
+    `mode` is one of:
+      • "off"    — never validate during prep (default; manual admin scan only).
+      • "before" — deep-decode the source BEFORE building its HLS bundle; if
+                   damaged, remux-repair in place, then prep the healed file.
+      • "after"  — build the HLS bundle first, THEN deep-decode the source; a
+                   repair purges the just-built bundle so it re-preps next cycle.
+
+    Only bulk jobs (idle auto-prep + the per-row/per-item Prep buttons) honour
+    this; interactive play-on-device preps never validate so playback isn't
+    delayed. The scan/repair ffmpeg runs on the GPU when NVENC is present (see
+    `_decode_hwaccel_args`). Consumed in `_run_offline_job`."""
+    cfg = (lib.get("settings", {}) or {}).get("prep_validate") or {}
+    mode = str(cfg.get("mode", "off")).lower()
+    if mode not in _PREP_VALIDATE_MODES:
+        mode = "off"
+    return {"mode": mode}
+
+
 def _cache_autopurge_cfg(lib: dict) -> dict:
     """Read settings.cache_autopurge (auto-evict orphan offline-cache bundles when
     the cache outgrows a size cap) with defaults.
@@ -5238,6 +5263,10 @@ class AutoPrepReq(BaseModel):
 
 class PlayPrepReq(BaseModel):
     enabled: bool = True                       # auto on-device prep of the playing episode (+ playlist tail) on every VLC play
+
+
+class PrepValidateReq(BaseModel):
+    mode: str = "off"                          # "off" | "before" | "after" — auto deep-validate/remux-repair a source as it rides through bulk prep
 
 
 class ForcePrepReq(BaseModel):
@@ -9252,6 +9281,27 @@ async def admin_set_play_prep(request: Request, body: PlayPrepReq) -> JSONRespon
     return JSONResponse({"ok": True, **_play_prep_cfg(lib)})
 
 
+@app.get("/api/admin/prep-validate")
+async def admin_get_prep_validate(request: Request) -> JSONResponse:
+    """Return the validate-and-repair-on-prep mode (off/before/after)."""
+    _require_admin(request)
+    return JSONResponse(_prep_validate_cfg(await get_library()))
+
+
+@app.post("/api/admin/prep-validate")
+async def admin_set_prep_validate(request: Request, body: PrepValidateReq) -> JSONResponse:
+    """Set whether (and when) bulk prep deep-validates + remux-repairs its source."""
+    _require_admin(request)
+    mode = str(body.mode or "off").lower()
+    if mode not in _PREP_VALIDATE_MODES:
+        return JSONResponse({"error": f"mode must be one of {_PREP_VALIDATE_MODES}"}, status_code=400)
+    lib = await get_library()
+    pv = lib.setdefault("settings", {}).setdefault("prep_validate", {})
+    pv["mode"] = mode
+    await put_library(lib)
+    return JSONResponse({"ok": True, **_prep_validate_cfg(lib)})
+
+
 @app.get("/api/admin/force-prep")
 async def admin_get_force_prep(request: Request) -> JSONResponse:
     """Live status of the admin force-prep batch (counts + aggregate progress)."""
@@ -10355,6 +10405,16 @@ def _source_nvdec_safe(info: dict) -> bool:
     pix   = (v.get("pix_fmt") or "").lower()
     return codec in _NVDEC_SAFE_CODECS and pix in _NVDEC_SAFE_PIXFMTS
 
+
+async def _decode_hwaccel_args() -> list[str]:
+    """GPU decode prefix (`-hwaccel cuda`) for the validator/repair ffmpeg when
+    NVENC is present, else `[]`. Uses the TRANSPARENT `-hwaccel cuda` form — it
+    keeps a per-frame CPU fallback, so an odd source still decodes (unlike the
+    all-GPU `-hwaccel_output_format cuda` path, which hard-fails). Goes BEFORE
+    `-i`. NOTE: hardware decode can surface decode errors slightly differently
+    from software — fine for the bulk scan (see docs/GOTCHAS.md)."""
+    return ["-hwaccel", "cuda"] if await _has_nvenc() else []
+
 # HLS prep target — H.264 yuv420p video, AAC stereo audio, WebVTT subtitles.
 #   • Video that's already H.264 yuv420p with a browser-safe profile is stream-copied
 #     (no re-encode). Anything else transcodes to libx264 / h264_nvenc.
@@ -11026,6 +11086,43 @@ def _build_hls_ffmpeg_args(
     return args, audios, subs, videos
 
 
+async def _prep_validate_repair(job: dict, src: Path) -> str:
+    """In-prep hook for settings.prep_validate: deep-decode `src` and, if damaged,
+    remux-repair it in place (lossless, no re-encode). Returns one of
+    "clean" | "repaired" | "damaged" | "skipped". Best-effort — any failure
+    returns "skipped" and never fails the prep job.
+
+    The live ffmpeg is stashed in job["_proc"] (same slot the encode uses), so the
+    existing pause/kill machinery — `_pause_prep(kill=True)` and the activity-kick
+    hard-stop — terminates an in-flight scan/repair with no extra plumbing; the
+    same flags drive cancellation via `is_stopped`."""
+    ffmpeg = analyzer.ffmpeg_bin()
+    if not ffmpeg:
+        return "skipped"
+    set_proc   = lambda p: job.__setitem__("_proc", p)
+    is_stopped = lambda: bool(job.get("_paused_kill")) or state.prep_paused
+    try:
+        ok, detail = await _validate_one_file(
+            ffmpeg, str(src), True, set_proc=set_proc, is_stopped=is_stopped)
+        if is_stopped():
+            return "skipped"
+        if ok:
+            return "clean"
+        hls_log.info("prep-validate: %s is damaged (%s) — attempting remux repair", src.name, detail)
+        result, rdetail = await _repair_one_file(
+            ffmpeg, str(src), False, set_proc=set_proc, is_stopped=is_stopped)
+        if result == "repaired":
+            hls_log.info("prep-validate: repaired %s via %s", src.name, rdetail)
+            return "repaired"
+        hls_log.warning("prep-validate: could not repair %s (%s)", src.name, rdetail)
+        return "damaged"
+    except Exception as exc:
+        hls_log.warning("prep-validate: scan/repair of %s skipped: %s", src.name, exc)
+        return "skipped"
+    finally:
+        job["_proc"] = None
+
+
 async def _run_offline_job(job_id: str) -> None:
     """Build an HLS bundle for one source file. The output is a directory
     keyed by `_offline_cache_key(src)` under OFFLINE_CACHE containing the
@@ -11114,6 +11211,40 @@ async def _run_offline_job(job_id: str) -> None:
                 job_id, src, sorted(info.keys()),
             )
             return
+
+        # Validate-and-repair-on-prep (settings.prep_validate). Bulk jobs only —
+        # interactive play-on-device preps never validate so playback isn't
+        # delayed. "before" heals the source ahead of the encode; "after" runs
+        # post-encode (in the done-hook block below). GPU-accelerated when NVENC
+        # is present (see _prep_validate_repair / _decode_hwaccel_args).
+        prep_validate_mode = "off"
+        if is_bulk:
+            try:
+                prep_validate_mode = _prep_validate_cfg(await get_library())["mode"]
+            except Exception:
+                prep_validate_mode = "off"
+        if prep_validate_mode == "before":
+            res = await _prep_validate_repair(job, src)
+            if res == "repaired":
+                # The repair rewrote the file, so its cache key (path|mtime|size)
+                # changed. out_dir/tmp_dir were keyed off the OLD source, leaving
+                # the bundle we'd build orphaned — re-point them at the healed
+                # file's key, and short-circuit if that bundle already exists.
+                new_out = OFFLINE_CACHE / _offline_cache_key(src)
+                if new_out != out_dir:
+                    out_dir   = new_out
+                    job["out"] = str(out_dir)
+                    tmp_dir   = out_dir.with_name(out_dir.name + ".part")
+                    if (out_dir / "master.m3u8").exists():
+                        job["progress"] = 1.0
+                        job["status"]   = "done"
+                        return
+                # Re-probe the healed file so the encode sees its real streams.
+                info = await asyncio.to_thread(_ffprobe_full, str(src))
+                duration = float(info.get("duration_sec", 0) or 0)
+                if not info.get("video"):
+                    job["status"] = "error"; job["error"] = "No video stream after repair."
+                    return
 
         # Clean any leftover .part dir from a previous crashed run. Offloaded to a
         # thread so a large stale bundle's recursive unlink can't stall the event
@@ -11440,6 +11571,16 @@ async def _run_offline_job(job_id: str) -> None:
                 await _ensure_analysis_for(src, job.get("item_id", ""))
             except Exception as exc:
                 hls_log.warning("job %s: fingerprint enqueue skipped: %s", job_id, exc)
+            # Validate-and-repair-on-prep, "after" mode: deep-decode the source now
+            # that the bundle is built. A repair rewrites the file and purges the
+            # just-built bundle (keyed on the OLD path|mtime|size), so it re-preps
+            # from the healed file next idle cycle — correct, since the bundle was
+            # encoded from a damaged source. Best-effort.
+            if prep_validate_mode == "after":
+                try:
+                    await _prep_validate_repair(job, src)
+                except Exception as exc:
+                    hls_log.warning("job %s: post-prep validate skipped: %s", job_id, exc)
         except Exception as e:
             hls_log.exception("job %s CRASHED: %s", job_id, e)
             job["status"] = "error"; job["error"] = str(e)
@@ -11881,9 +12022,11 @@ async def _run_ffmpeg_capture(args: list[str], set_proc) -> tuple[int, str]:
 async def _ffmpeg_decode_scan(ffmpeg: str, path: str, set_proc, is_stopped) -> tuple[int, str]:
     """Full decode of every video+audio stream (`-f null -`, `-xerror`). Returns
     (rc, error_tail); rc 0 + empty tail ⇒ clean. If the scan was Stopped mid-decode
-    (`is_stopped()` true), returns (0, "") so a cancelled file isn't judged."""
+    (`is_stopped()` true), returns (0, "") so a cancelled file isn't judged.
+    Decodes on the GPU when NVENC is present (`_decode_hwaccel_args`)."""
     args = [
         ffmpeg, "-hide_banner", "-v", "error", "-xerror",
+        *(await _decode_hwaccel_args()),
         "-i", path, "-map", "0:v?", "-map", "0:a?",
         "-f", "null", "-",
     ]
@@ -11906,9 +12049,13 @@ def _file_validation_status() -> dict:
     return fv
 
 
-async def _validate_one_file(ffmpeg: str, path: str, deep: bool) -> tuple[bool, str]:
+async def _validate_one_file(ffmpeg: str, path: str, deep: bool, *,
+                             set_proc, is_stopped) -> tuple[bool, str]:
     """Return (ok, detail). ok=False ⇒ the file is damaged/unreadable; `detail` is
-    a short human-readable reason (the tail of ffmpeg/ffprobe's error output)."""
+    a short human-readable reason (the tail of ffmpeg/ffprobe's error output).
+    `set_proc`/`is_stopped` thread the live ffmpeg + a cancel check through so the
+    same helper serves both the admin scan and the in-prep hook (each bound to its
+    own process slot / stop flag)."""
     if not deep:
         info = await asyncio.to_thread(_ffprobe_full, path)
         if not info:
@@ -11920,14 +12067,10 @@ async def _validate_one_file(ffmpeg: str, path: str, deep: bool) -> tuple[bool, 
         return True, ""
     # Deep: decode the whole file. `-xerror` aborts on the first decode error so a
     # badly-damaged file fails fast.
-    rc, tail = await _ffmpeg_decode_scan(
-        ffmpeg, path,
-        lambda p: setattr(state, "file_validation_proc", p),
-        lambda: state.file_validation_stop,
-    )
+    rc, tail = await _ffmpeg_decode_scan(ffmpeg, path, set_proc, is_stopped)
     # A Stop-terminated decode is not a verdict — don't flag a cancelled file as
     # damaged. The runner halts the loop separately on the same flag.
-    if state.file_validation_stop:
+    if is_stopped():
         return True, ""
     if rc != 0 or tail:
         return False, tail or f"ffmpeg exited with code {rc}."
@@ -11970,7 +12113,11 @@ async def _run_file_validation(scope: str, deep: bool) -> None:
                 fv["error"] = "ffmpeg is not installed — cannot validate files."
                 break
             else:
-                ok, detail = await _validate_one_file(ffmpeg, path, deep)
+                ok, detail = await _validate_one_file(
+                    ffmpeg, path, deep,
+                    set_proc=lambda p: setattr(state, "file_validation_proc", p),
+                    is_stopped=lambda: state.file_validation_stop,
+                )
                 if not ok and not state.file_validation_stop:
                     fv["damaged"].append({"item_id": iid, "item_title": title,
                                           "path": path, "name": name, "error": detail})
@@ -12017,11 +12164,14 @@ def _file_repair_status() -> dict:
     return fr
 
 
-async def _repair_one_file(ffmpeg: str, path: str, reencode: bool) -> tuple[str, str]:
+async def _repair_one_file(ffmpeg: str, path: str, reencode: bool, *,
+                           set_proc, is_stopped) -> tuple[str, str]:
     """Attempt to repair a damaged file in place. Returns (result, detail) where
     result ∈ "repaired" | "failed". On success the original is atomically replaced
     by the validated repair and its stale HLS bundle is purged; `detail` is the
-    method ("remux" / "re-encode") or, on failure, the reason."""
+    method ("remux" / "re-encode") or, on failure, the reason. `set_proc`/
+    `is_stopped` thread the live ffmpeg + cancel check through so the same helper
+    serves both the admin repair and the in-prep hook."""
     src = Path(path)
     try:
         if not src.exists():
@@ -12030,8 +12180,7 @@ async def _repair_one_file(ffmpeg: str, path: str, reencode: bool) -> tuple[str,
     except OSError as e:
         return "failed", f"Cannot access file: {e}"
 
-    set_proc = lambda p: setattr(state, "file_repair_proc", p)
-    stopped = lambda: state.file_repair_stop
+    stopped = is_stopped
     suffix = src.suffix or ".mkv"
 
     attempts: list[tuple[str, Path, list[str]]] = []
@@ -12044,21 +12193,31 @@ async def _repair_one_file(ffmpeg: str, path: str, reencode: bool) -> tuple[str,
     ]))
     if reencode:
         tmp_reenc = src.with_name(src.stem + ".repair-reenc" + suffix)
+        # GPU the heavy re-encode when NVENC is present (decode on the GPU too,
+        # transparent `-hwaccel cuda` with a CPU fallback). NVENC uses p-presets
+        # + `-cq` rather than libx264's veryfast/crf, so swap the whole video leg.
+        hw = await _decode_hwaccel_args()
+        if hw:
+            venc = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23"]
+        else:
+            venc = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+                    "-threads", str(OFFLINE_FFMPEG_THREADS)]
         attempts.append(("re-encode", tmp_reenc, [
             ffmpeg, "-hide_banner", "-v", "error", "-y",
             "-err_detect", "ignore_err", "-fflags", "+genpts",
+            *hw,
             "-i", str(src), "-map", "0:v:0?", "-map", "0:a?",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
+            *venc,
             "-c:a", "aac", "-b:a", "192k",
-            "-threads", str(OFFLINE_FFMPEG_THREADS), str(tmp_reenc),
+            str(tmp_reenc),
         ]))
 
     last_err = "Repair did not produce a playable file."
     for method, tmp, args in attempts:
-        if state.file_repair_stop:
+        if stopped():
             break
         rc, tail = await _run_ffmpeg_capture(args, set_proc)
-        if state.file_repair_stop:
+        if stopped():
             _safe_unlink(tmp)
             break
         try:
@@ -12071,7 +12230,7 @@ async def _repair_one_file(ffmpeg: str, path: str, reencode: bool) -> tuple[str,
             continue
         # Validate the candidate with the same deep decode used by the scanner.
         vrc, vtail = await _ffmpeg_decode_scan(ffmpeg, str(tmp), set_proc, stopped)
-        if state.file_repair_stop:
+        if stopped():
             _safe_unlink(tmp)
             break
         if vrc != 0 or vtail:
@@ -12118,7 +12277,11 @@ async def _run_file_repair(paths: list[str], reencode: bool) -> None:
             if not ffmpeg:
                 fr["error"] = "ffmpeg is not installed — cannot repair files."
                 break
-            result, detail = await _repair_one_file(ffmpeg, path, reencode)
+            result, detail = await _repair_one_file(
+                ffmpeg, path, reencode,
+                set_proc=lambda p: setattr(state, "file_repair_proc", p),
+                is_stopped=lambda: state.file_repair_stop,
+            )
             if state.file_repair_stop and result != "repaired":
                 fr["stopped"] = True
                 break

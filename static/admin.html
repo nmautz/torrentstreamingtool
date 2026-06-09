@@ -639,6 +639,28 @@
       </div>
     </div>
 
+    <!-- Validate & repair on prep -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Validate &amp; Repair on Prep</h2>
+        <p class="text-xs text-gray-500 mt-0.5">Have automatic / bulk stream prep also <strong>deep-validate</strong> each source file and <strong>remux-repair</strong> it in place if it's damaged — so the unattended overnight prep run heals corrupt files too. Runs on the <strong>GPU when available</strong>. Only bulk &amp; idle preps trigger it; play-on-device preps are never delayed. <strong>Before</strong> repairs the file ahead of the encode; <strong>After</strong> builds the bundle first, then validates (a repair re-preps the file next cycle).</p>
+      </div>
+      <div class="px-5 py-4 flex flex-wrap items-center gap-2">
+        <button id="pvOffBtn" onclick="setPrepValidate('off')"
+          class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">
+          Don't Validate
+        </button>
+        <button id="pvBeforeBtn" onclick="setPrepValidate('before')"
+          class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">
+          Repair Before Prep
+        </button>
+        <button id="pvAfterBtn" onclick="setPrepValidate('after')"
+          class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">
+          Repair After Prep
+        </button>
+      </div>
+    </div>
+
     <!-- File validator -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800">
@@ -1267,7 +1289,7 @@ function switchTab(tab){
   if(tab==="skip")       loadSkipPanel();
   if(tab==="offline")    loadOfflineCache();
   if(tab==="background") loadBackgroundVideo();
-  if(tab==="system")   { loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadVpnKillswitch(); loadForcePrep(); loadFileValidation(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
+  if(tab==="system")   { loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadPrepValidate(); loadVpnKillswitch(); loadForcePrep(); loadFileValidation(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
   else                 { stopSysHealthPolling(); stopForcePrepPolling(); stopFileValidationPolling(); stopFileRepairPolling(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); if(!_auChangelogLoaded) loadChangelog(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
@@ -1645,6 +1667,56 @@ async function togglePlayPrep(){
     showToast("Save failed.", true);
   }finally{
     btn.disabled = false;
+  }
+}
+
+// ── Validate & Repair on Prep ─────────────────────────────────────────────────
+let _pvMode = "off";
+
+function _renderPrepValidate(){
+  const on  = "text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-emerald-950 border-emerald-700 text-emerald-300 disabled:opacity-50";
+  const off = "text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50";
+  const map = {off:"pvOffBtn", before:"pvBeforeBtn", after:"pvAfterBtn"};
+  for(const [mode, id] of Object.entries(map)){
+    const btn = document.getElementById(id);
+    if(btn) btn.className = (mode === _pvMode) ? on : off;
+  }
+}
+
+async function loadPrepValidate(){
+  try{
+    const r = await fetch("/api/admin/prep-validate", {headers: authHeader()});
+    if(!r.ok) return;
+    const d = await r.json();
+    _pvMode = d.mode || "off";
+    _renderPrepValidate();
+  }catch(_){}
+}
+
+async function setPrepValidate(mode){
+  if(mode === _pvMode) return;
+  const ids = ["pvOffBtn","pvBeforeBtn","pvAfterBtn"];
+  ids.forEach(id => { const b = document.getElementById(id); if(b) b.disabled = true; });
+  try{
+    const r = await fetch("/api/admin/prep-validate",{
+      method:"POST",
+      headers:{...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify({mode}),
+    });
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      showToast(`Save failed: ${d.detail || d.error || r.status}`, true);
+      return;
+    }
+    const d = await r.json();
+    _pvMode = d.mode || mode;
+    _renderPrepValidate();
+    const label = {off:"Off", before:"repair before prep", after:"repair after prep"}[_pvMode] || _pvMode;
+    showToast(`Validate on prep: ${label}.`);
+  }catch(_){
+    showToast("Save failed.", true);
+  }finally{
+    ids.forEach(id => { const b = document.getElementById(id); if(b) b.disabled = false; });
   }
 }
 

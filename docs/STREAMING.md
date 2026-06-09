@@ -260,6 +260,21 @@ Key decisions:
   a per-series pass (at BELOW_NORMAL priority) and never holds up prep, and a
   failure never fails the bundle. Failed files don't auto-retry. Full detail in
   [ANALYZER.md § Trigger flow](ANALYZER.md).
+- **Optional validate & repair on prep (admin `settings.prep_validate`).** When
+  the admin sets the *Validate & Repair on Prep* mode to `before` or `after`,
+  **bulk/idle** prep jobs also run the source through the File Validator's deep
+  decode and, if damaged, **remux-repair** it in place (lossless; no lossy
+  re-encode) — via the shared helper `_prep_validate_repair` (reusing
+  `_validate_one_file`/`_repair_one_file`). `before` heals the file ahead of the
+  encode and re-points `out`/`tmp_dir` at the healed file's new
+  `_offline_cache_key`; `after` validates in this post-prep hook block (alongside
+  STT + fingerprinting), where a repair purges the just-built bundle so the file
+  re-preps from the healed source next idle cycle. **Bulk jobs only** —
+  interactive play-on-device preps never validate (no playback latency). The work
+  runs inside the single prep slot and uses the job's own `_proc`, so Pause /
+  Stop Now / activity-kick terminate it. GPU-accelerated when NVENC is present
+  (`_decode_hwaccel_args`). Default `off`. See [ADMIN.md § Validate & Repair on
+  Prep](ADMIN.md).
 - **6-second segments, fmp4, independent_segments.** Modern HLS defaults.
   Switching audio/sub mid-stream doesn't require an extra fetch.
 - **The fmp4 init filename is templated explicitly** (`-hls_fmp4_init_filename
