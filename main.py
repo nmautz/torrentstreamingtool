@@ -503,7 +503,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "5.15.0"
+UI_VERSION = "5.16.1"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 
@@ -12202,13 +12202,26 @@ async def _repair_one_file(ffmpeg: str, path: str, reencode: bool, *,
         else:
             venc = ["-c:v", "libx264", "-preset", "veryfast", "-crf", "20",
                     "-threads", str(OFFLINE_FFMPEG_THREADS)]
+        # Carry every embedded subtitle through the re-encode — the remux leg keeps
+        # them via `-map 0`, and the re-encode must too, or repairing a damaged file
+        # would silently strip its baked-in subs. `-c:s copy` survives in MKV (and
+        # also preserves image subs like PGS/VOBSUB); MP4/MOV can't copy subrip, so
+        # text subs go in as mov_text. Attachments (ASS fonts) only ride along in
+        # MKV — MP4 can't hold them, and mapping `0:t?` there would fail the encode.
+        is_mp4ish = suffix.lower() in {".mp4", ".m4v", ".mov"}
+        sub_map = ["-map", "0:v:0?", "-map", "0:a?", "-map", "0:s?"]
+        if not is_mp4ish:
+            sub_map += ["-map", "0:t?"]
         attempts.append(("re-encode", tmp_reenc, [
             ffmpeg, "-hide_banner", "-v", "error", "-y",
             "-err_detect", "ignore_err", "-fflags", "+genpts",
             *hw,
-            "-i", str(src), "-map", "0:v:0?", "-map", "0:a?",
+            "-i", str(src),
+            *sub_map,
+            "-ignore_unknown",
             *venc,
             "-c:a", "aac", "-b:a", "192k",
+            "-c:s", "mov_text" if is_mp4ish else "copy",
             str(tmp_reenc),
         ]))
 
