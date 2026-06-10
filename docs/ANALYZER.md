@@ -24,7 +24,12 @@ fallback), so manual mode keeps automatic credit skipping.
 Templates live at `settings.series_skip[<key>].templates` as
 `{id, name, source_path, start, end, created_at}` — **raw fingerprints are not
 persisted**; they're recomputed from `source_path[start:end]` on each
-extrapolation (`analyzer._fingerprint_templates`). The matching/alignment is
+extrapolation (`analyzer._fingerprint_templates`). **Editing the mode or the
+templates does not auto-run analysis** — the admin marks all their selections,
+then triggers extrapolation explicitly with the Smart Skip tab's **Re-fingerprint**
+button (`POST …/analyze` → `_run_series_analysis`). Newly-prepped episodes in a
+manual series still get template-extrapolated automatically via the post-prep
+hook (they have no `skip_data` yet, so they're eligible). The matching/alignment is
 `analyzer._match_templates_to_heads` (reuses `_find_longest_match` against the
 existing first-6-min head fingerprint; floor relaxed via `TEMPLATE_MIN_MATCH_SEC`
 so short stingers can match without false-positiving). See

@@ -154,7 +154,9 @@ Manual mode (`settings.series_skip[<key>].mode == "manual"`) stores admin intro 
 
 Two distinct `source` values that look similar but behave oppositely: **`manual`** is a *hand-typed* edit in the Smart Skip editor and is **never overwritten** (guarded in `_run_series_analysis`'s persist loop); **`template`** is an intro *auto-applied from a manual template* and **is** overwritten on every re-run/mode switch. Don't collapse them — a re-extrapolation must refresh template results while leaving hand edits intact.
 
-The in-player **Mark Intro Template** capture is gated purely on the presence of the same-origin `localStorage["streamlink_admin_token"]` (it adds `lp-admin` to `#localPlayer`); the actual security boundary is the server's `_require_admin` on `POST …/skip-template`, which re-checks the Bearer token. The CSS gate is convenience only — never rely on it for authorization.
+The in-player **Mark Intro Template** capture is a deliberate admin action launched from the admin Smart Skip tab (**▶ Mark Intro On Device** → opens the dashboard with `?skipcapture=…`), which adds **`lp-capture`** to `#localPlayer`. The `#lpTemplateRow` controls are CSS-hidden (`lp-capture-only`) on every *normal* on-device play — so admins watching normally, and regular users always, never see them. Don't switch this back to "show on any admin play": it'd clutter the normal viewer. The actual security boundary is the server's `_require_admin` on `POST …/skip-template` (re-checks the Bearer token); the CSS gate is convenience only.
+
+**Mode/template edits don't auto-fingerprint.** `POST …/skip-mode`, `POST …/skip-template`, and `DELETE …/skip-template/{id}` persist only — none of them kicks off `_run_series_analysis`. Extrapolation is triggered explicitly by the **Re-fingerprint** button (`POST …/analyze`) so the admin can mark several templates / flip the mode without the analyzer churning on each edit. Don't "helpfully" re-add an auto-run to those endpoints.
 
 ### Smart Skip progress bar must read `job.progress`, not `current/total`
 

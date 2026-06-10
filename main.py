@@ -9070,8 +9070,10 @@ async def admin_get_skip_config(item_id: str, request: Request) -> JSONResponse:
 async def admin_set_skip_mode(item_id: str, request: Request, req: SkipModeReq) -> JSONResponse:
     """Set the Smart Skip operational mode (auto/manual) for an item's series.
 
-    Switching modes re-runs analysis for the whole series so the change takes
-    effect immediately (manual → extrapolate templates; auto → re-cluster)."""
+    Persists the mode only — it does NOT re-fingerprint. The admin adds their
+    template selections first, then triggers extrapolation explicitly with the
+    Smart Skip tab's "Re-fingerprint" button (`POST …/analyze`). This avoids
+    churning the analyzer the instant the mode flips."""
     _require_admin(request)
     if req.mode not in _SKIP_MODES:
         raise HTTPException(400, f"mode must be one of {_SKIP_MODES}.")
@@ -9084,19 +9086,18 @@ async def admin_set_skip_mode(item_id: str, request: Request, req: SkipModeReq) 
     cfg["mode"] = req.mode
     _series_skip_put(lib, key, cfg)
     await put_library(lib)
-    if analyzer.is_available():
-        asyncio.create_task(_run_series_analysis(key))
     return JSONResponse({"ok": True, "mode": req.mode, "series_key": key})
 
 
 @app.post("/api/admin/library/{item_id}/skip-template")
 async def admin_add_skip_template(item_id: str, request: Request, req: SkipTemplateReq) -> JSONResponse:
-    """Add a manual intro template to an item's series, then extrapolate it.
+    """Add a manual intro template to an item's series.
 
     The window is validated and stored (no fingerprint persisted — it's
-    recomputed from `source_path` at extrapolation time). Adding a template
-    kicks off a series analysis; it only *applies* when the series is in manual
-    mode, so the response echoes the current mode for the UI to nudge the admin."""
+    recomputed from `source_path` at extrapolation time). Adding a template does
+    NOT auto-extrapolate: the admin marks all their templates first, then runs
+    the Smart Skip tab's "Re-fingerprint" button when ready. The response echoes
+    the current mode so the UI can nudge the admin to enable manual mode."""
     _require_admin(request)
     name = (req.name or "").strip()[:60]
     if not name:
@@ -9126,15 +9127,16 @@ async def admin_add_skip_template(item_id: str, request: Request, req: SkipTempl
     cfg["templates"] = [*cfg["templates"], template]
     _series_skip_put(lib, key, cfg)
     await put_library(lib)
-    if analyzer.is_available() and cfg["mode"] == "manual":
-        asyncio.create_task(_run_series_analysis(key))
     return JSONResponse({"ok": True, "template": template,
                          "mode": cfg["mode"], "series_key": key})
 
 
 @app.delete("/api/admin/library/{item_id}/skip-template/{template_id}")
 async def admin_delete_skip_template(item_id: str, template_id: str, request: Request) -> JSONResponse:
-    """Remove a manual intro template and re-extrapolate the series."""
+    """Remove a manual intro template.
+
+    Does not re-extrapolate — any intros this template already applied stay until
+    the admin runs the Smart Skip tab's "Re-fingerprint" button."""
     _require_admin(request)
     lib = await get_library()
     item = next((it for it in lib["items"] if it["id"] == item_id), None)
@@ -9148,8 +9150,6 @@ async def admin_delete_skip_template(item_id: str, template_id: str, request: Re
         raise HTTPException(404, "Template not found.")
     _series_skip_put(lib, key, cfg)
     await put_library(lib)
-    if analyzer.is_available() and cfg["mode"] == "manual":
-        asyncio.create_task(_run_series_analysis(key))
     return JSONResponse({"ok": True, "series_key": key,
                          "templates_remaining": len(cfg["templates"])})
 

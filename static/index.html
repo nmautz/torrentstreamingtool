@@ -309,9 +309,11 @@
       border-right: none;
     }
     #localPlayer.lp-tiny .lp-chrome { display: none !important; }
-    /* Admin-only Smart Skip template capture — shown only when an admin token
-       is present (lp-admin class set on player load). */
-    #localPlayer:not(.lp-admin) .lp-admin-only { display: none !important; }
+    /* Smart Skip template capture — a deliberate admin action, launched from
+       the admin Smart Skip tab. The controls show ONLY in capture mode
+       (lp-capture set by _startSkipCapture); a normal on-device play never
+       shows them, so regular users (and admins just watching) don't see them. */
+    #localPlayer:not(.lp-capture) .lp-capture-only { display: none !important; }
     #localPlayer.lp-tiny #lpVideo {
       width: 96px;
       height: 56px;
@@ -2098,11 +2100,12 @@
         Clip last…
       </button>
     </div>
-    <!-- Smart Skip — capture an intro template (Manual mode). Admin-only:
-         hidden unless an admin token is present (lp-admin on #localPlayer).
+    <!-- Smart Skip — capture an intro template (Manual mode). Shown ONLY in
+         capture mode (lp-capture on #localPlayer), which is entered exclusively
+         by launching "Mark Intro (On Device)" from the admin Smart Skip tab.
          Scrub the player to the intro start/end, capture each, name it, save.
-         See lpToggleTemplateCapture / lpSaveTemplate + docs/ANALYZER.md. -->
-    <div id="lpTemplateRow" class="lp-admin-only flex-col gap-2">
+         See _startSkipCapture / lpSaveTemplate + docs/ANALYZER.md. -->
+    <div id="lpTemplateRow" class="lp-capture-only flex-col gap-2">
       <button id="lpMarkIntroBtn" onclick="lpToggleTemplateCapture()"
         class="w-full flex items-center justify-center gap-2 bg-indigo-900 hover:bg-indigo-800
                text-indigo-200 text-xs font-black uppercase tracking-wide px-3 py-2 transition-colors">
@@ -3517,6 +3520,9 @@ function _doSelectProfile(p){
   renderNavProfile();
   applyMaxVolumeToSliders();
   if(activeTab==="library") loadLibrary();
+  // If we arrived via the admin "Mark Intro (On Device)" launcher, start the
+  // capture session now that a profile is active.
+  _maybeStartSkipCapture();
 }
 
 function applyMaxVolumeToSliders(){
@@ -7112,10 +7118,10 @@ async function lpPlay(itemId, files, seekTo, label) {
   const c = document.getElementById("localPlayer");
   c.classList.remove("lp-tiny");
   c.classList.add("lp-active");
-  // Reveal the admin-only Smart Skip template-capture controls when an admin
-  // token is present (same-origin token shared with /admin). Reset any prior
-  // capture session.
-  c.classList.toggle("lp-admin", !!localStorage.getItem("streamlink_admin_token"));
+  // A normal on-device play is never a capture session — clear any prior
+  // capture mode/state. The admin "Mark Intro (On Device)" launcher
+  // (_startSkipCapture) re-enables it after this resolves.
+  c.classList.remove("lp-capture");
   lpCancelTemplateCapture();
   // Hydrate prep-readiness for the whole item from the server's .offline_cache,
   // so the Prev/Next dots are accurate even for an already-prepped earlier
@@ -7189,6 +7195,30 @@ async function lpSaveTemplate(btn) {
       showAlert(d.detail || "Failed to save template.", "error");
     }
   });
+}
+
+// Launch on-device playback specifically to mark an intro template. Entered
+// only from the admin Smart Skip tab (which navigates here with ?skipcapture=…),
+// and only when an admin token is present — so it never appears for a regular
+// user. Starts the normal on-device player, then flips it into capture mode so
+// the ONLY added control is "Mark Intro Template".
+let pendingSkipCapture = null;   // {itemId, file} parsed from the URL on load
+async function _startSkipCapture(itemId, file) {
+  if (!localStorage.getItem("streamlink_admin_token")) return;   // not an admin
+  await lpPlay(itemId, file ? [file] : [], 0);
+  const c = document.getElementById("localPlayer");
+  c.classList.add("lp-capture");
+  // Surface the Mark Intro controls immediately (and prefill nothing).
+  const box = document.getElementById("lpTemplateCapture");
+  if (box) box.classList.remove("hidden");
+  lp.tmplStart = null; lp.tmplEnd = null; _lpRenderTemplateBounds();
+}
+function _maybeStartSkipCapture() {
+  if (!pendingSkipCapture) return;
+  if (!localStorage.getItem("streamlink_admin_token")) { pendingSkipCapture = null; return; }
+  const { itemId, file } = pendingSkipCapture;
+  pendingSkipCapture = null;
+  _startSkipCapture(itemId, file);
 }
 
 function _lpShowPreparing(text) {
@@ -7847,7 +7877,8 @@ async function lpStop() {
   _lpStopSubUpgradePoll();
   lp.subAutoApplied = false;
   const c = document.getElementById("localPlayer");
-  c.classList.remove("lp-active", "lp-tiny");
+  c.classList.remove("lp-active", "lp-tiny", "lp-capture");
+  lpCancelTemplateCapture();
   document.getElementById("lpSkipOffer").classList.add("hidden");
   _lpHidePreparing();
   lp.itemId = null; lp.filePath = null; lp.playlist = []; lp.pi = 0;
@@ -8698,6 +8729,18 @@ document.addEventListener("DOMContentLoaded",async()=>{
     }
   }).catch(()=>{});
 
+  // Admin "Mark Intro (On Device)" launch — the admin Smart Skip tab navigates
+  // here with ?skipcapture=<itemId>&file=<path>. Stash it (and clean the URL),
+  // then fire once a profile is active. Ignored without an admin token.
+  try{
+    const qs=new URLSearchParams(location.search);
+    const capId=qs.get("skipcapture");
+    if(capId && localStorage.getItem("streamlink_admin_token")){
+      pendingSkipCapture={itemId:capId, file:qs.get("file")||""};
+      history.replaceState(null,"",location.pathname);
+    }
+  }catch(_){}
+
   // Restore profile from localStorage
   const saved=localStorage.getItem("streamlink_profile");
   if(saved){
@@ -8705,7 +8748,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
       const p=JSON.parse(saved);
       const profiles=await fetchProfiles();
       const found=profiles.find(x=>x.id===p.id);
-      if(found){ profile=found; renderNavProfile(); applyMaxVolumeToSliders(); connectSSE(); return; }
+      if(found){ profile=found; renderNavProfile(); applyMaxVolumeToSliders(); connectSSE(); _maybeStartSkipCapture(); return; }
     } catch(_){}
   }
   await fetchProfiles();
@@ -8714,6 +8757,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.1.0</div>
 </body>
 </html>

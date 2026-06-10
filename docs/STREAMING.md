@@ -743,21 +743,27 @@ probed. `503` on macOS (`HLS_AVAILABLE` false).
 The on-device player doubles as the **visual selection tool** for Smart Skip's
 Manual mode: an admin plays/scrubs an episode, marks the intro's start and end on
 the real timeline, names it, and saves it as a per-series **template** that the
-analyzer then extrapolates across the whole series (see
+analyzer extrapolates across the series when the admin runs Re-fingerprint (see
 [ANALYZER.md § Operational modes](ANALYZER.md)).
 
-- **Gate.** The `#lpTemplateRow` controls carry the `lp-admin-only` class and are
-  hidden by CSS unless `#localPlayer` has `lp-admin`, which `lpPlay` sets when
-  `localStorage["streamlink_admin_token"]` is present (the same same-origin admin
-  token the `/admin` page mints). So only a browser that's logged into the admin
-  panel sees the capture UI; the Save request carries that token as a `Bearer`
-  header to the admin-gated `POST …/skip-template`.
-- **Flow.** **Mark Intro Template** reveals the capture box →
-  `lpSetTemplateBound('start'|'end')` snapshots `lpVideo.currentTime` into
-  `lp.tmplStart` / `lp.tmplEnd` (shown as `fmtTimeSecs`) → name it →
-  **Save Template** POSTs `{name, source_path: lp.filePath, start, end}`. The
-  toast nudges the admin to enable **Manual** mode in Admin → Smart Skip if the
-  series isn't already there (saving a template doesn't flip the mode by itself).
+- **Launched from the admin menu, not shown on normal plays.** Capture is a
+  deliberate admin action: the admin Smart Skip editor's **▶ Mark Intro On
+  Device** button opens the dashboard in a new tab with
+  `?skipcapture=<itemId>&file=<path>`. On load (with a same-origin admin token
+  present) `_startSkipCapture` starts on-device playback and adds the
+  **`lp-capture`** class to `#localPlayer`. The `#lpTemplateRow` controls carry
+  `lp-capture-only` and are CSS-hidden unless that class is set — so a *normal*
+  on-device play (even by an admin) never shows them, and a regular user never
+  sees them at all.
+- **Flow.** In capture mode the box is already open → **Set Start** / **Set End**
+  (`lpSetTemplateBound`) snapshot `lpVideo.currentTime` into `lp.tmplStart` /
+  `lp.tmplEnd` (shown as `fmtTimeSecs`) → name it → **Save Template** POSTs
+  `{name, source_path: lp.filePath, start, end}` with the admin `Bearer` token.
+  The toast nudges the admin to enable **Manual** mode + click **Re-fingerprint**
+  back in Admin → Smart Skip (saving a template neither flips the mode nor
+  triggers analysis on its own).
+- **Boundary.** The CSS gate is convenience only — the real boundary is the
+  server's `_require_admin` on every `…/skip-template` write.
 - **macOS.** Like everything in this doc it rides HLS, so the capture UI is
   unavailable on macOS hosts (the on-device player is hidden there). The
   `/skip-template` endpoint and the analyzer extrapolation are host-agnostic and

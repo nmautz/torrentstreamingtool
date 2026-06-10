@@ -241,9 +241,9 @@ All require admin auth.
 | PATCH | `/api/admin/library/{id}/skip-data` | `{file_path, intro_start?, intro_end?, credits_start?}` — manual override; sets `analysis.source="manual"` |
 | POST | `/api/admin/library/{id}/analyze` | Force re-run of series analysis (dispatches by the series' mode) |
 | GET | `/api/admin/library/{id}/skip-config` | Smart Skip operational mode + manual templates for the item's series: `{series_key, mode ∈ {auto, manual}, templates:[{id, name, source_path, start, end, created_at}], files:[{name, path}]}` |
-| POST | `/api/admin/library/{id}/skip-mode` | `{mode}` (`auto`/`manual`) — set the series mode; re-runs analysis so the change applies immediately |
-| POST | `/api/admin/library/{id}/skip-template` | `{name, source_path, start, end}` — add a manual intro template to the series (validated: `end>start≥0`, span ≤ `MAX_INTRO_SEC`, `source_path` ∈ series). Extrapolates when the series is in manual mode. Returns `{ok, template, mode, series_key}` |
-| DELETE | `/api/admin/library/{id}/skip-template/{template_id}` | Remove a template; re-extrapolates the series |
+| POST | `/api/admin/library/{id}/skip-mode` | `{mode}` (`auto`/`manual`) — set the series mode. **Persists only — does not re-fingerprint** (the admin triggers that explicitly via `…/analyze`) |
+| POST | `/api/admin/library/{id}/skip-template` | `{name, source_path, start, end}` — add a manual intro template (validated: `end>start≥0`, span ≤ `MAX_INTRO_SEC`, `source_path` ∈ series). **Does not auto-extrapolate.** Returns `{ok, template, mode, series_key}` |
+| DELETE | `/api/admin/library/{id}/skip-template/{template_id}` | Remove a template. **Does not re-run** — applied intros persist until the next `…/analyze` |
 | GET | `/api/admin/analyzer-status` | `{available, ffmpeg, fpcalc}` |
 | GET | `/api/admin/analyzer-log?limit=N` | In-memory Smart Skip event ring buffer (200-deep, resets on restart). Returns `{entries:[{ts, level, series_key, item_id, file_path, error_code, message}], available, ffmpeg, fpcalc}` — drives the Fingerprint Log panel under the Smart Skip admin tab |
 | GET | `/api/admin/offline-encoder` | `{nvenc_available, encoder, ffmpeg}` — which encoder offline Save Offline jobs use (h264_nvenc when an NVIDIA GPU + NVENC-built ffmpeg are present, else libx264). Result is cached for the process lifetime. |

@@ -3755,15 +3755,22 @@ function _renderSkipConfig(cfg){
     }).join("");
   }
   const manualHint = (mode!=="manual" && templates.length)
-    ? `<div class="text-[11px] px-2 py-1.5 border bg-amber-950 border-amber-800 text-amber-200 mt-2">Templates won't apply until <span class="font-bold">Manual</span> mode is on.</div>`
+    ? `<div class="text-[11px] px-2 py-1.5 border bg-amber-950 border-amber-800 text-amber-200 mt-2">Templates won't apply until <span class="font-bold">Manual</span> mode is on, then click <span class="font-bold">Re-fingerprint</span>.</div>`
     : "";
+  // Changing mode / adding / deleting templates does NOT auto-run analysis — the
+  // admin marks everything first, then triggers extrapolation here on demand.
+  const refingerprint = `
+    <button onclick="refingerprintSeries(this)"
+      class="w-full text-xs font-bold uppercase tracking-wide px-3 py-2 border bg-emerald-900 border-emerald-700 text-emerald-200 hover:bg-emerald-800 transition-colors">
+      ⟳ Re-fingerprint Now${mode==='manual'?' (apply templates)':''}
+    </button>`;
   return `
     <div class="px-5 py-4 border-b border-gray-800 space-y-3">
       <div>
         <div class="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Mode</div>
         <div class="flex gap-2">${btn('auto','Automatic')}${btn('manual','Manual / Templates')}</div>
         <div class="text-[10px] text-gray-600 mt-1.5">${mode==='manual'
-          ? 'Intros come from your templates below; credits are still auto-detected.'
+          ? 'Intros come from your templates below; credits are still auto-detected. Changes apply when you Re-fingerprint.'
           : 'Intros and credits are auto-detected by audio fingerprint clustering.'}</div>
       </div>
       <div>
@@ -3771,6 +3778,7 @@ function _renderSkipConfig(cfg){
         <div class="space-y-1.5">${tmplHtml}</div>
         ${manualHint}
       </div>
+      ${refingerprint}
     </div>`;
 }
 
@@ -3781,9 +3789,30 @@ async function setSkipMode(mode, btn){
       method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
       body: JSON.stringify({mode}),
     });
-    if(r.ok){ showToast(`Mode set to ${mode}. Re-analyzing…`); openSkipEditor(_skipEditorItemId, _skipEditorTitle); }
+    if(r.ok){ showToast(`Mode set to ${mode}.`); openSkipEditor(_skipEditorItemId, _skipEditorTitle); }
     else { const d=await r.json().catch(()=>({})); showToast(d.detail||"Failed to set mode.", true); }
   });
+}
+
+// Explicit, on-demand extrapolation/re-fingerprint for the whole series. The
+// dedicated trigger so mode/template edits don't churn the analyzer on their own.
+async function refingerprintSeries(btn){
+  if(!_skipEditorItemId) return;
+  await withInflight("refingerprint", btn, async () => {
+    const r = await fetch(`/api/admin/library/${_skipEditorItemId}/analyze`,{
+      method:"POST", headers: authHeader(),
+    });
+    showToast(r.ok ? "Re-fingerprinting started — watch the progress bar." : "Failed to start.", !r.ok);
+  });
+}
+
+// Open the on-device player on the dashboard to visually mark an intro on this
+// file. Navigates to "/" with the capture params; the dashboard starts playback
+// and shows the Mark Intro controls (admin-token-gated there too).
+function markIntroOnDevice(filePath){
+  if(!_skipEditorItemId) return;
+  const url = `/?skipcapture=${encodeURIComponent(_skipEditorItemId)}&file=${encodeURIComponent(filePath)}`;
+  window.open(url, "_blank");
 }
 
 async function deleteSkipTemplate(tid, btn){
@@ -3852,10 +3881,14 @@ async function openSkipEditor(itemId, title){
             class="w-full bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500 px-2 py-1.5 text-sm font-mono focus:outline-none"/>
         </label>
       </div>
-      <div class="pt-2">
+      <div class="pt-2 flex items-center gap-2">
         <button onclick="saveSkipEntry('${escHtml(f.path)}', ${i}, this)"
           class="text-xs font-bold uppercase tracking-wide px-3 py-1.5 border bg-indigo-600 border-indigo-500 hover:bg-indigo-500 transition-colors">
           Save
+        </button>
+        <button onclick="markIntroOnDevice('${escHtml(f.path)}')" title="Open this episode on-device to visually mark an intro template"
+          class="text-xs font-bold uppercase tracking-wide px-3 py-1.5 border bg-gray-800 border-gray-700 text-indigo-300 hover:text-white transition-colors">
+          ▶ Mark Intro On Device
         </button>
       </div>
     </div>`;
