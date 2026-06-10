@@ -35,7 +35,21 @@ Each activity row carries:
 
 A **summary strip** shows the active count, the **Lost On Restart** count, Host Idle/In-Use (`_machine_in_use(300)`), the Auto-Prep mode, and the `prep_paused` / `admin_prep_stop` / `vpn_secure` gates. When any fragile job is active a **heads-up banner** warns that restarting now would interrupt non-resumable work.
 
-- `GET /api/admin/activity` → `{generated_at, host_busy, gates:{prep_paused, prep_pause_reason, auto_prep_mode, admin_prep_stop, vpn_secure}, activities:[{category, title, detail, status, progress, reason, resumes_after_restart, restart_note, elapsed_sec}], count, fragile_count}`.
+**Outstanding Work** (second card): the *backlog* — work that hasn't run yet, distinct from the live `activities` list. Without this the tab looked empty when idle even though most content was un-fingerprinted / never validated (those run on a trigger, not continuously). Shows a per-category count (un-prepped / un-fingerprinted / never-validated) and *why it isn't running* — e.g. "Auto-fingerprint is ON — runs while idle" vs "Auto-validate is OFF". Counts are cheap library reads (`_fingerprint_backlog`, `_validation_backlog`); the prep backlog reuses the cached offline-cache inventory snapshot (never forces a fresh FS walk). The idle **auto-validation** pass also appears in the live `activities` list and is flagged **Survives restart** (its verdicts persist — see Automatic Maintenance below).
+
+- `GET /api/admin/activity` → `{generated_at, host_busy, gates:{prep_paused, prep_pause_reason, auto_prep_mode, admin_prep_stop, vpn_secure, auto_fingerprint, auto_validate}, activities:[{category, title, detail, status, progress, reason, resumes_after_restart, restart_note, elapsed_sec}], outstanding:[{category, count, label, why, auto}], count, fragile_count}`.
+
+### Automatic Maintenance (System tab)
+
+Two idle-gated background workers that drain the Outstanding Work backlog so it doesn't sit waiting on a manual trigger (`settings.auto_maintenance`, both **default ON**), driven by `background_maintenance_loop` (every 30 s):
+
+- **Auto-Fingerprint** — runs Smart Skip analysis for any eligible series that's never been fingerprinted, one series at a time (`_find_unfingerprinted_series` → `_run_series_analysis`). The periodic counterpart to the on-ready / post-prep hook, which only fires for newly-added content. Failed/manual entries are sticky (not auto-retried in a loop).
+- **Auto-Validate** — deep-decodes source files that have never been validated (or whose file changed), one at a time (`_run_auto_validation`), and **persists each verdict** into `library.json → files[].validation`. So it skips already-checked files and **resumes after a restart** instead of starting over — the resumable counterpart to the in-memory admin scan. Manual admin scans now persist verdicts too, so both drain the same backlog.
+
+Both run **only while the host is idle** (`_machine_in_use(300)` — deliberately *not* `for_prep=True`, so an admin watching the Activity tab doesn't block the very work it shows) and at below-normal OS priority, and bail the instant the box is used. They're serialized so the two heavy passes never run at once, and auto-validate yields to a manual scan.
+
+- `GET /api/admin/auto-maintenance` → `{fingerprint, validate, analyzer_available, ffmpeg_available, fingerprint_backlog, validate_backlog, validate_running, analysis_running}`.
+- `POST /api/admin/auto-maintenance` → `{fingerprint, validate}` saves the toggles; turning validate off also halts an in-flight auto-validation pass.
 
 ### 1. Indexers ([static/admin.html:95](../static/admin.html#L95))
 

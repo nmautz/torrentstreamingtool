@@ -39,7 +39,7 @@ from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 import analyzer
@@ -669,6 +669,15 @@ class AppState:
     file_repair_task: Optional[asyncio.Task] = None
     file_repair_stop: bool = False
     file_repair_proc: Optional["asyncio.subprocess.Process"] = None
+    # Idle-gated automatic background validation (separate from the admin scan so
+    # they never collide). Walks files whose persisted `validation` verdict is
+    # missing/stale, one at a time, ONLY while the box is idle — and persists each
+    # verdict into library.json, so it RESUMES after a restart/auto-update instead
+    # of starting over (the resumable counterpart to the in-memory admin scan).
+    auto_validate: dict = field(default_factory=dict)     # {running, total, scanned, current_name, started_at}
+    auto_validate_task: Optional[asyncio.Task] = None
+    auto_validate_stop: bool = False
+    auto_validate_proc: Optional["asyncio.subprocess.Process"] = None
     # ── YouTube-on-TV (browser playback on the host display, remote-controlled) ──
     youtube_active: bool = False                          # True while a YouTube video is the active TV playback (browser, not VLC)
     youtube_video_id: Optional[str] = None               # 11-char YouTube id currently loaded on the TV page
@@ -2868,6 +2877,28 @@ def _prep_validate_cfg(lib: dict) -> dict:
     if mode not in _PREP_VALIDATE_MODES:
         mode = "off"
     return {"mode": mode}
+
+
+def _auto_maint_cfg(lib: dict) -> dict:
+    """Read settings.auto_maintenance — the idle-gated background workers that
+    drain the library's *outstanding* (never-run) work so it doesn't sit forever
+    waiting on a manual trigger:
+
+      • fingerprint — auto-run Smart Skip analysis for any eligible series that
+        has never been fingerprinted (the periodic counterpart to the on-ready /
+        post-prep hook, which only fires for newly-added content).
+      • validate    — auto deep-validate source files whose persisted verdict is
+        missing or stale, one at a time.
+
+    Both run ONLY while the host is idle (no playback / recent activity) and at
+    below-normal OS priority, so they never compete with viewing. Defaults ON —
+    the whole point is that the backlog clears itself. Consumed by
+    `background_maintenance_loop`."""
+    cfg = (lib.get("settings", {}) or {}).get("auto_maintenance") or {}
+    return {
+        "fingerprint": bool(cfg.get("fingerprint", True)),
+        "validate":    bool(cfg.get("validate", True)),
+    }
 
 
 def _cache_autopurge_cfg(lib: dict) -> dict:
@@ -5106,12 +5137,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     cachepurge_loop = asyncio.create_task(cache_autopurge_loop())
     subupgrade_loop = asyncio.create_task(subtitle_upgrade_loop())
     od_reaper_loop  = asyncio.create_task(_od_reaper())
+    maint_loop      = asyncio.create_task(background_maintenance_loop())
 
     yield
 
     for t in (guard, broadcaster, dl_monitor, vlc_tracker, bg_loop, jackett_mon,
               reboot_loop, autoprep_loop, update_loop, dlsched_loop, sysmon_loop,
-              cachepurge_loop, subupgrade_loop, od_reaper_loop):
+              cachepurge_loop, subupgrade_loop, od_reaper_loop, maint_loop):
         t.cancel()
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
@@ -5351,6 +5383,14 @@ class ValidateFilesReq(BaseModel):
 class RepairFilesReq(BaseModel):
     paths: Optional[list[str]] = None           # specific files to repair; defaults to the last validation scan's damaged list
     reencode: bool = False                      # allow a lossy re-encode fallback when a lossless remux can't fix it
+
+
+class AutoMaintReq(BaseModel):
+    # `validate` is the wire/JSON key (UI sends {fingerprint, validate}); the Python
+    # attribute is renamed via alias so it doesn't shadow pydantic BaseModel.validate.
+    model_config = ConfigDict(populate_by_name=True)
+    fingerprint: bool = True                              # auto-run Smart Skip analysis for never-fingerprinted series while idle
+    validate_files: bool = Field(True, alias="validate")  # auto deep-validate never-validated source files while idle
 
 
 class SttConfigReq(BaseModel):
@@ -9529,6 +9569,45 @@ async def admin_set_cache_autopurge(request: Request, body: CacheAutopurgeReq) -
     return JSONResponse({"ok": True, **cfg})
 
 
+@app.get("/api/admin/auto-maintenance")
+async def admin_get_auto_maintenance(request: Request) -> JSONResponse:
+    """Auto-maintenance config + live backlog counts for the admin card."""
+    _require_admin(request)
+    lib = await get_library()
+    cfg = _auto_maint_cfg(lib)
+    return JSONResponse({
+        **cfg,
+        "analyzer_available": analyzer.is_available(),
+        "ffmpeg_available":   bool(analyzer.ffmpeg_bin()),
+        "fingerprint_backlog": _fingerprint_backlog(lib),
+        "validate_backlog":    _validation_backlog(lib),
+        "validate_running":    bool(state.auto_validate.get("running")),
+        "analysis_running":    _any_analysis_running(),
+    })
+
+
+@app.post("/api/admin/auto-maintenance")
+async def admin_set_auto_maintenance(request: Request, body: AutoMaintReq) -> JSONResponse:
+    """Enable/disable the idle background fingerprint + validate workers
+    (`library.json → settings.auto_maintenance`). Turning a worker off also stops
+    its in-flight run: the next `background_maintenance_loop` tick won't restart
+    it, and auto-validation checks the stop flag between files."""
+    _require_admin(request)
+    lib = await get_library()
+    am = lib.setdefault("settings", {}).setdefault("auto_maintenance", {})
+    am["fingerprint"] = bool(body.fingerprint)
+    am["validate"]    = bool(body.validate_files)
+    await put_library(lib)
+    if not body.validate_files:
+        state.auto_validate_stop = True   # halt an in-flight auto-validation pass
+    cfg = _auto_maint_cfg(lib)
+    return JSONResponse({
+        "ok": True, **cfg,
+        "fingerprint_backlog": _fingerprint_backlog(lib),
+        "validate_backlog":    _validation_backlog(lib),
+    })
+
+
 # ── Background activity snapshot (admin "Activity" tab) ──────────────────────
 # A single, human-readable view of everything the server is doing in the
 # background RIGHT NOW, and — crucially — WHY, plus whether each piece of work
@@ -9658,6 +9737,20 @@ async def _activity_snapshot() -> dict:
             restart_note="Repair state is in-memory and does NOT resume after a restart — a file already replaced stays repaired; the rest must be re-run.",
             progress=(scanned / total if total else None))
 
+    # 5b. Automatic background validation (idle-gated, resumable)
+    av = state.auto_validate or {}
+    if av.get("running"):
+        total = av.get("total") or 0
+        scanned = av.get("scanned") or 0
+        add(category="File Validation",
+            title="Automatic validation",
+            status="running",
+            detail=av.get("current_name", ""),
+            reason="Background source-file validation — deep-decoding files that have never been validated, while the box is idle.",
+            resumes=True,
+            restart_note="Each verdict is persisted per file, so this resumes right where it left off after a restart or auto-update (it does not start over).",
+            progress=(scanned / total if total else None))
+
     # 6. Smart Skip analysis
     for sk, job in (state.analysis_jobs or {}).items():
         if job.get("status") != "running":
@@ -9670,7 +9763,7 @@ async def _activity_snapshot() -> dict:
             detail=job.get("message", "") or job.get("stage", ""),
             reason="Analyzing episodes to detect intro/credits boundaries so the player can offer skip buttons.",
             resumes=False,
-            restart_note="Analysis is in-memory; an interrupted run does not auto-resume but is re-scheduled when the series is next eligible.",
+            restart_note="Analysis is in-memory; an interrupted run restarts from scratch, but background maintenance re-picks the series automatically once the box is idle (if auto-fingerprint is on).",
             progress=(cur / total if total else None))
 
     # 7. On-demand transcode sessions (live just-in-time streaming)
@@ -9686,8 +9779,53 @@ async def _activity_snapshot() -> dict:
             resumes=False,
             restart_note="Tied to the live viewer — sessions end on restart and resume only when the viewer resumes playback.")
 
-    fragile = sum(1 for a in acts if not a["resumes_after_restart"])
+    # ── Outstanding / idle work: what HASN'T been done, and why it isn't running ──
+    # Distinct from `activities` (running NOW). This is the backlog — the answer to
+    # "lots of shows aren't fingerprinted/validated, why is nothing happening?".
     cfg = _auto_prep_cfg(lib)
+    maint = _auto_maint_cfg(lib)
+    outstanding: list[dict] = []
+
+    prep_mode = cfg.get("mode", "off")
+    prep_n = _prep_backlog_from_snapshot()
+    if prep_n:
+        outstanding.append({
+            "category": "Stream Prep",
+            "count": prep_n,
+            "label": f"{prep_n} file(s) not prepped for on-device streaming",
+            "auto": prep_mode != "off",
+            "why": ("Automatic Stream Prep is ON (always) — these prep in the background."
+                    if prep_mode == "always" else
+                    "Automatic Stream Prep runs WHEN IDLE — these prep once the box is idle."
+                    if prep_mode == "idle" else
+                    "Automatic Stream Prep is OFF — nothing preps unless you Prep a row or run admin Force Prep."),
+        })
+
+    fp_n = _fingerprint_backlog(lib)
+    if fp_n:
+        outstanding.append({
+            "category": "Smart Skip",
+            "count": fp_n,
+            "label": f"{fp_n} file(s) not fingerprinted for intro/credits skip",
+            "auto": maint["fingerprint"],
+            "why": ("Auto-fingerprint is ON — these run automatically, one series at a time, while the box is idle."
+                    if maint["fingerprint"] else
+                    "Auto-fingerprint is OFF — enable it under Automatic Maintenance, or analyze a series by hand on the Smart Skip tab."),
+        })
+
+    val_n = _validation_backlog(lib)
+    if val_n:
+        outstanding.append({
+            "category": "File Validation",
+            "count": val_n,
+            "label": f"{val_n} file(s) never validated for corruption",
+            "auto": maint["validate"],
+            "why": ("Auto-validate is ON — these deep-decode automatically, one at a time, while the box is idle (and the result is remembered)."
+                    if maint["validate"] else
+                    "Auto-validate is OFF — enable it under Automatic Maintenance, or run a scan from the System tab."),
+        })
+
+    fragile = sum(1 for a in acts if not a["resumes_after_restart"])
     return {
         "generated_at": _now_iso(),
         "host_busy": await _machine_in_use(300),
@@ -9696,13 +9834,16 @@ async def _activity_snapshot() -> dict:
             "prep_pause_reason": ("Bulk stream prep is paused — the manual Pause control or activity "
                                   "returning in idle Auto-Prep mode holds it at the gate."
                                   if state.prep_paused else ""),
-            "auto_prep_mode":  cfg.get("mode", "off"),
+            "auto_prep_mode":  prep_mode,
             "admin_prep_stop": state.admin_prep_stop,
             "vpn_secure":      state.vpn_secure,
+            "auto_fingerprint": maint["fingerprint"],
+            "auto_validate":    maint["validate"],
         },
         "activities": acts,
         "count": len(acts),
         "fragile_count": fragile,
+        "outstanding": outstanding,
     }
 
 
@@ -12385,11 +12526,259 @@ async def _validate_one_file(ffmpeg: str, path: str, deep: bool, *,
     return True, ""
 
 
+# ── Persistent validation verdicts + backlog accounting ──────────────────────
+# Validation results are written back into library.json (`files[].validation`)
+# so: (a) the outstanding-work counts are a cheap library read, (b) a file is
+# never re-validated until it actually changes, and (c) the idle auto-validator
+# RESUMES across restarts instead of starting the whole library over.
+
+def _file_sig(path: str) -> str:
+    """`mtime:size` signature used to detect a file changing under a stored
+    verdict (re-download, repair, re-encode). Empty when the file is gone."""
+    try:
+        st = os.stat(path)
+        return f"{int(st.st_mtime)}:{st.st_size}"
+    except OSError:
+        return ""
+
+
+def _make_verdict(status: str, error: str, path: str) -> dict:
+    """Build a persisted validation verdict. `status ∈ ok|damaged|missing`."""
+    return {
+        "status": status,
+        "error":  (error or "")[:300],
+        "sig":    "" if status == "missing" else _file_sig(path),
+        "at":     _now_iso(),
+    }
+
+
+def _needs_validation(f: dict) -> bool:
+    """True if a video file needs a (re)validation pass: never validated, or its
+    signature changed since the stored verdict. A file last seen *missing* is only
+    re-validated once it actually exists again (non-empty signature) — so a
+    deselected / not-yet-downloaded file doesn't get decoded on every idle cycle.
+    Stats the file (used by the auto-validator to decide real work)."""
+    if Path(f.get("path", "")).suffix.lower() not in VIDEO_EXTS:
+        return False
+    v = f.get("validation")
+    if not isinstance(v, dict) or not v.get("status"):
+        return True
+    if v.get("status") == "missing":
+        return bool(_file_sig(f.get("path", "")))   # only when the file is back
+    return v.get("sig", "") != _file_sig(f.get("path", ""))
+
+
+def _needs_validation_cheap(f: dict) -> bool:
+    """Backlog-count variant of `_needs_validation` that does NOT stat the file
+    (so the outstanding-work counts stay cheap on the 4 s Activity poll). A file
+    is counted only until it has ANY settled verdict — including `missing`, so a
+    deselected file doesn't keep the backlog non-zero forever."""
+    if Path(f.get("path", "")).suffix.lower() not in VIDEO_EXTS:
+        return False
+    v = f.get("validation")
+    return not (isinstance(v, dict) and v.get("status"))
+
+
+async def _persist_validations(verdicts: dict) -> None:
+    """Write a batch of {path → verdict} into the matching `files[].validation`."""
+    if not verdicts:
+        return
+    lib = await get_library()
+    changed = False
+    for it in lib.get("items", []):
+        for f in it.get("files", []):
+            v = verdicts.get(f.get("path", ""))
+            if v is not None:
+                f["validation"] = v
+                changed = True
+    if changed:
+        await put_library(lib)
+
+
+def _validation_backlog(lib: dict) -> int:
+    return sum(1 for it in lib.get("items", [])
+               for f in it.get("files", []) if _needs_validation_cheap(f))
+
+
+def _needs_fingerprint(f: dict, skip_data: dict) -> bool:
+    """Whether a file still needs Smart Skip fingerprinting (mirrors the eligibility
+    test in `_schedule_series_analysis_if_eligible`: manual edits and prior
+    failures are sticky; a version bump re-qualifies)."""
+    fd = skip_data.get(f.get("path", ""))
+    if not fd:
+        return True
+    ana = fd.get("analysis") or {}
+    if ana.get("source") == "manual":
+        return False
+    return ana.get("version", 0) < analyzer.ANALYZER_VERSION
+
+
+def _fingerprint_backlog(lib: dict) -> int:
+    if not analyzer.is_available():
+        return 0
+    n = 0
+    for it in lib.get("items", []):
+        if it.get("status") != "ready":
+            continue
+        sk = it.get("skip_data", {})
+        for f in _analyzable_files(it):
+            if _needs_fingerprint(f, sk):
+                n += 1
+    return n
+
+
+def _any_analysis_running() -> bool:
+    return any((j or {}).get("status") == "running"
+               for j in state.analysis_jobs.values())
+
+
+def _find_unfingerprinted_series(lib: dict) -> Optional[str]:
+    """First series key with a never-fingerprinted analyzable file among its ready
+    items, skipping series already running or marked failed this session (failures
+    are sticky — don't auto-retry in a loop)."""
+    seen: set[str] = set()
+    for it in lib.get("items", []):
+        if it.get("status") != "ready":
+            continue
+        key = _series_key(it)
+        if key in seen:
+            continue
+        seen.add(key)
+        job = state.analysis_jobs.get(key) or {}
+        if job.get("status") in ("running", "failed"):
+            continue
+        for peer in _items_for_series_key(lib, key):
+            if peer.get("status") != "ready":
+                continue
+            sk = peer.get("skip_data", {})
+            if any(_needs_fingerprint(f, sk) for f in _analyzable_files(peer)):
+                return key
+    return None
+
+
+def _prep_backlog_from_snapshot() -> Optional[int]:
+    """Un-prepped (no HLS bundle) video-file count from the cached offline-cache
+    inventory, or None if no snapshot has been built yet. Deliberately reuses the
+    cached walk — never triggers a fresh (heavy) filesystem walk from a poll."""
+    snap = _offline_cache_inv_snapshot
+    if not snap:
+        return None
+    n = 0
+    for it in snap.get("items", []):
+        n += max(0, int(it.get("file_count", 0)) - int(it.get("cached_count", 0)))
+    return n
+
+
+async def _run_auto_validation() -> None:
+    """Idle-gated background validation of files lacking a current verdict. One
+    file at a time at below-normal priority; persists each verdict (incrementally)
+    so it resumes after a restart. Bails the instant the box becomes active or an
+    admin scan starts, so it never competes with viewing or the manual scan."""
+    av = state.auto_validate
+    ffmpeg = analyzer.ffmpeg_bin()
+    if not ffmpeg:
+        av["running"] = False
+        return
+    verdicts: dict[str, dict] = {}
+
+    def _interrupted() -> bool:
+        return bool(state.auto_validate_stop) or bool(state.file_validation.get("running"))
+
+    try:
+        lib = await get_library()
+        targets: list[tuple[str, str]] = []   # (path, name)
+        for it in lib.get("items", []):
+            for f in it.get("files", []):
+                if _needs_validation(f):
+                    targets.append((f.get("path", ""),
+                                    f.get("name") or Path(f.get("path", "")).name))
+                await asyncio.sleep(0)
+        av["total"] = len(targets)
+        av["scanned"] = 0
+        for (path, name) in targets:
+            if _interrupted() or await _machine_in_use(60):
+                break
+            av["current_name"] = name
+            src = Path(path)
+            try:
+                exists = src.exists()
+            except OSError:
+                exists = False
+            if not exists:
+                verdicts[path] = _make_verdict("missing", "File not found on disk.", path)
+            else:
+                ok, detail = await _validate_one_file(
+                    ffmpeg, path, True,
+                    set_proc=lambda p: setattr(state, "auto_validate_proc", p),
+                    is_stopped=_interrupted,
+                )
+                if _interrupted():
+                    break
+                verdicts[path] = _make_verdict("ok" if ok else "damaged",
+                                               "" if ok else detail, path)
+            av["scanned"] = av.get("scanned", 0) + 1
+            if len(verdicts) >= 5:        # checkpoint so a crash loses ≤5 files
+                await _persist_validations(verdicts)
+                verdicts = {}
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        av["error"] = str(e)
+        log.warning("auto-validation: %s", e)
+    finally:
+        await _persist_validations(verdicts)
+        av["running"] = False
+        av["current_name"] = ""
+        state.auto_validate_proc = None
+
+
+async def background_maintenance_loop() -> None:
+    """Every 30 s, while the host is idle, drain outstanding background work that
+    would otherwise wait for a manual trigger — Smart Skip fingerprinting and
+    source-file validation (see `_auto_maint_cfg`). Idle-gated and serialized so
+    it never competes with viewing and never runs both heavy passes at once.
+
+    NB: idle is checked WITHOUT `for_prep=True` on purpose — an admin watching the
+    Activity tab (which holds an SSE connection) must not block the very work the
+    tab exists to show. Genuine playback / recent interaction still pauses it."""
+    await asyncio.sleep(20)   # let startup settle before the first sweep
+    while True:
+        try:
+            lib = await get_library()
+            cfg = _auto_maint_cfg(lib)
+            if (cfg["fingerprint"] or cfg["validate"]) and not await _machine_in_use(300):
+                started_fp = False
+                if cfg["fingerprint"] and analyzer.is_available() and not _any_analysis_running():
+                    key = _find_unfingerprinted_series(lib)
+                    if key:
+                        asyncio.create_task(_run_series_analysis(key))
+                        started_fp = True
+                # Don't stack the two heavy passes: skip validation on a tick that
+                # just kicked off a fingerprint run, or while either is active.
+                if (cfg["validate"] and not started_fp and analyzer.ffmpeg_bin()
+                        and not state.auto_validate.get("running")
+                        and not state.file_validation.get("running")
+                        and not _any_analysis_running()
+                        # Accurate (stat-based) check — a flat os.stat per library
+                        # file is cheap (unlike the recursive cache walk), and it
+                        # catches sig-changed files the no-stat count would miss.
+                        and any(_needs_validation(f)
+                                for it in lib.get("items", []) for f in it.get("files", []))):
+                    state.auto_validate_stop = False
+                    state.auto_validate = {"running": True, "total": 0, "scanned": 0,
+                                           "current_name": "", "started_at": _now_iso()}
+                    state.auto_validate_task = asyncio.create_task(_run_auto_validation())
+        except Exception as e:
+            log.warning("background_maintenance_loop: %s", e)
+        await asyncio.sleep(30)
+
+
 async def _run_file_validation(scope: str, deep: bool) -> None:
     """Walk the library (or one item) and validate each video file, updating
     state.file_validation in place so the admin card can poll progress."""
     fv = state.file_validation
     ffmpeg = analyzer.ffmpeg_bin()
+    verdicts: dict[str, dict] = {}   # path → persisted verdict (drains the backlog)
     try:
         lib = await get_library()
         targets: list[tuple[str, str, str, str]] = []   # (item_id, item_title, path, name)
@@ -12417,6 +12806,7 @@ async def _run_file_validation(scope: str, deep: bool) -> None:
             if not exists:
                 fv["missing"].append({"item_id": iid, "item_title": title,
                                       "path": path, "name": name})
+                verdicts[path] = _make_verdict("missing", "File not found on disk.", path)
             elif not ffmpeg:
                 fv["error"] = "ffmpeg is not installed — cannot validate files."
                 break
@@ -12426,9 +12816,12 @@ async def _run_file_validation(scope: str, deep: bool) -> None:
                     set_proc=lambda p: setattr(state, "file_validation_proc", p),
                     is_stopped=lambda: state.file_validation_stop,
                 )
-                if not ok and not state.file_validation_stop:
-                    fv["damaged"].append({"item_id": iid, "item_title": title,
-                                          "path": path, "name": name, "error": detail})
+                if not state.file_validation_stop:
+                    if not ok:
+                        fv["damaged"].append({"item_id": iid, "item_title": title,
+                                              "path": path, "name": name, "error": detail})
+                    verdicts[path] = _make_verdict("ok" if ok else "damaged",
+                                                   "" if ok else detail, path)
             fv["scanned"] = fv.get("scanned", 0) + 1
     except asyncio.CancelledError:
         fv["stopped"] = True
@@ -12436,6 +12829,7 @@ async def _run_file_validation(scope: str, deep: bool) -> None:
     except Exception as e:
         fv["error"] = str(e)
     finally:
+        await _persist_validations(verdicts)
         fv["running"] = False
         fv["current_name"] = ""
         fv["finished_at"] = _now_iso()

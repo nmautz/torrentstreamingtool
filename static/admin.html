@@ -154,6 +154,15 @@
         <div class="px-5 py-8 text-center text-gray-600 text-sm">Loading…</div>
       </div>
     </div>
+
+    <!-- Outstanding / idle backlog -->
+    <div id="activityOutstandingCard" class="hidden bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-sm font-black uppercase tracking-wide">Outstanding Work</h2>
+        <p class="text-xs text-gray-500 mt-0.5">Not running right now — what's left to do, and why it isn't happening. Idle workers drain these automatically while the box is idle.</p>
+      </div>
+      <div id="activityOutstanding" class="divide-y divide-gray-800"></div>
+    </div>
     <p class="text-[11px] text-gray-600 leading-relaxed px-1">
       A <span class="text-amber-400 font-bold">Lost on restart</span> badge means the work has no on-disk checkpoint:
       a server restart or auto-update discards it (and any progress bar resets). Use this before rebooting or applying an
@@ -640,6 +649,36 @@
                  bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">
           …
         </button>
+      </div>
+    </div>
+
+    <!-- Automatic maintenance (idle background fingerprint + validate) -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Automatic Maintenance</h2>
+        <p class="text-xs text-gray-500 mt-0.5">Background workers that drain outstanding library work <strong>while the box is idle</strong> (and at low priority), so it doesn't sit waiting for a manual trigger. They pause the moment the box is used. Progress is shown on the <strong>Activity</strong> tab.</p>
+      </div>
+
+      <!-- Auto-fingerprint -->
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h3 class="text-xs font-black uppercase tracking-wide text-gray-200">Auto-Fingerprint (Smart Skip)</h3>
+          <p class="text-[11px] text-gray-500 mt-0.5">Analyze any series that's never been fingerprinted for intro/credits skip, one at a time.</p>
+          <p id="amFpBacklog" class="text-[11px] text-indigo-400 mt-1 font-mono"></p>
+        </div>
+        <button id="amFpBtn" onclick="toggleAutoMaint('fingerprint')"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">…</button>
+      </div>
+
+      <!-- Auto-validate -->
+      <div class="px-5 py-4 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h3 class="text-xs font-black uppercase tracking-wide text-gray-200">Auto-Validate Files</h3>
+          <p class="text-[11px] text-gray-500 mt-0.5">Deep-decode source files that have never been validated, to surface corruption. Each verdict is remembered, so this resumes after a restart instead of starting over.</p>
+          <p id="amValBacklog" class="text-[11px] text-indigo-400 mt-1 font-mono"></p>
+        </div>
+        <button id="amValBtn" onclick="toggleAutoMaint('validate')"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">…</button>
       </div>
     </div>
 
@@ -1399,7 +1438,7 @@ function switchTab(tab){
   if(tab==="skip")       loadSkipPanel();
   if(tab==="offline")    loadOfflineCache();
   if(tab==="background") loadBackgroundVideo();
-  if(tab==="system")   { loadNetwork(); loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadPrepValidate(); loadVpnKillswitch(); loadForcePrep(); loadFileValidation(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
+  if(tab==="system")   { loadNetwork(); loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadAutoMaint(); loadPrepValidate(); loadVpnKillswitch(); loadForcePrep(); loadFileValidation(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
   else                 { stopSysHealthPolling(); stopForcePrepPolling(); stopFileValidationPolling(); stopFileRepairPolling(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); if(!_auChangelogLoaded) loadChangelog(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
@@ -1459,6 +1498,36 @@ async function loadActivity(btn){
       warn.innerHTML = `<span class="font-bold uppercase tracking-wide">Heads up:</span> ${d.fragile_count} active job(s) won't survive a restart or auto-update — restarting now discards that work (it restarts from scratch, if at all). Let them finish first, or expect their progress to reset.`;
     } else {
       warn.classList.add("hidden");
+    }
+
+    // Outstanding / idle backlog
+    const outCard = document.getElementById("activityOutstandingCard");
+    const outList = document.getElementById("activityOutstanding");
+    const outs = d.outstanding || [];
+    if(outCard && outList){
+      if(!outs.length){
+        outCard.classList.add("hidden");
+      }else{
+        outCard.classList.remove("hidden");
+        outList.innerHTML = outs.map(o=>{
+          const tone = o.auto ? "border-indigo-700 text-indigo-300 bg-indigo-950/40"
+                              : "border-gray-700 text-gray-400";
+          const badge = o.auto ? "Auto" : "Manual";
+          return `<div class="px-5 py-4">
+            <div class="flex items-start justify-between gap-3">
+              <div class="min-w-0 flex-1">
+                <div class="flex items-center gap-2 flex-wrap">
+                  <span class="text-[10px] font-black uppercase tracking-widest text-gray-500">${_esc(o.category)}</span>
+                  <span class="px-2 py-0.5 text-[9px] font-black uppercase tracking-widest border ${tone}">${badge}</span>
+                </div>
+                <div class="text-sm font-bold text-gray-100 mt-1">${_esc(o.label)}</div>
+                <div class="text-xs text-gray-400 mt-1.5 leading-relaxed">${_esc(o.why)}</div>
+              </div>
+              <span class="text-2xl font-black text-gray-200 font-mono flex-shrink-0">${o.count}</span>
+            </div>
+          </div>`;
+        }).join("");
+      }
     }
 
     // Activity rows
@@ -1877,6 +1946,77 @@ async function togglePlayPrep(){
     showToast("Save failed.", true);
   }finally{
     btn.disabled = false;
+  }
+}
+
+// ── Automatic Maintenance (idle fingerprint + validate) ───────────────────────
+let _amCfg = {fingerprint:true, validate:true};
+
+function _amRenderBtn(id, on){
+  const btn = document.getElementById(id);
+  if(!btn) return;
+  btn.textContent = on ? "On" : "Off";
+  btn.className = on
+    ? "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-emerald-950 border-emerald-700 text-emerald-300 hover:bg-emerald-900 disabled:opacity-50"
+    : "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50";
+}
+
+function _amRender(d){
+  _amRenderBtn("amFpBtn",  _amCfg.fingerprint);
+  _amRenderBtn("amValBtn", _amCfg.validate);
+  const fp = document.getElementById("amFpBacklog");
+  const val = document.getElementById("amValBacklog");
+  if(fp){
+    if(d && !d.analyzer_available) fp.textContent = "Smart Skip unavailable (ffmpeg/fpcalc missing).";
+    else if(d) fp.textContent = d.fingerprint_backlog
+      ? `${d.fingerprint_backlog} file(s) awaiting fingerprint` + (d.analysis_running ? " · running now" : "")
+      : "All files fingerprinted.";
+    else fp.textContent = "";
+  }
+  if(val){
+    if(d && !d.ffmpeg_available) val.textContent = "ffmpeg not installed — validation unavailable.";
+    else if(d) val.textContent = d.validate_backlog
+      ? `${d.validate_backlog} file(s) awaiting validation` + (d.validate_running ? " · running now" : "")
+      : "All files validated.";
+    else val.textContent = "";
+  }
+}
+
+async function loadAutoMaint(){
+  try{
+    const r = await fetch("/api/admin/auto-maintenance", {headers: authHeader()});
+    if(!r.ok) return;
+    const d = await r.json();
+    _amCfg = {fingerprint: !!d.fingerprint, validate: !!d.validate};
+    _amRender(d);
+  }catch(_){}
+}
+
+async function toggleAutoMaint(which){
+  const id = which==="fingerprint" ? "amFpBtn" : "amValBtn";
+  const btn = document.getElementById(id);
+  const next = {..._amCfg, [which]: !_amCfg[which]};
+  if(btn) btn.disabled = true;
+  try{
+    const r = await fetch("/api/admin/auto-maintenance",{
+      method:"POST",
+      headers:{...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify(next),
+    });
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      showToast(`Save failed: ${d.detail || r.status}`, true);
+      return;
+    }
+    const d = await r.json();
+    _amCfg = {fingerprint: !!d.fingerprint, validate: !!d.validate};
+    _amRender(d);
+    const label = which==="fingerprint" ? "Auto-fingerprint" : "Auto-validate";
+    showToast(`${label} ${_amCfg[which] ? "enabled" : "disabled"}.`);
+  }catch(_){
+    showToast("Save failed.", true);
+  }finally{
+    if(btn) btn.disabled = false;
   }
 }
 

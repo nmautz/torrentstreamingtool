@@ -240,11 +240,19 @@ Prep** ignores `never` by design (it's an explicit "prep everything" override).
   "path": "/abs/path/to/file.mkv",       // canonical for matching against VLC playlist
   "size_bytes": 1329062039,
   "season": 1,
-  "episode": 1
+  "episode": 1,
+  "validation": {                        // optional; written by the file validator
+    "status": "ok",                      //   ok | damaged | missing
+    "error":  "",                        //   ffmpeg/ffprobe tail when damaged
+    "sig":    "1718900000:1329062039",   //   mtime:size — re-validate when it changes
+    "at":     "2026-06-09T17:40:00Z"
+  }
 }
 ```
 
 Season/episode are extracted by `parse_season_episode()` ([main.py:807](../main.py#L807)) — matches `S01E03`, `s2e5`, `1x03`. Returns `(0, 0)` if no match.
+
+`validation` is the persisted verdict from the source-file validator (the manual admin scan **and** the idle `background_maintenance_loop` auto-validator both write it). It lets the validator skip already-checked files, drives the Activity tab's "never-validated" backlog count, and makes auto-validation **resume after a restart**. A file is re-validated only when its `sig` (mtime:size) changes — i.e. it was re-downloaded, repaired, or re-encoded — or, for a `missing` verdict, once the file exists again. See [BACKEND.md](BACKEND.md) and [ADMIN.md § Automatic Maintenance](ADMIN.md).
 
 ### Progress (per profile)
 
