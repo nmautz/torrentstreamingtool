@@ -186,6 +186,20 @@
        renderServerAttention() / renderPerfBanner(). */
     #serverAttentionBanner, #perfBanner { pointer-events: none; }
     #serverAttentionLink { pointer-events: auto; }
+    /* Host-performance banner collapse/expand. Collapsed = a small chevron tab
+       only (transparent strip, click-through except the chevron), so it never
+       covers the navbar / prep pill. The chevron itself keeps its tone colour so
+       it stays visible. Expanded = the full message; chevron flips to point up. */
+    #perfBannerToggle { pointer-events: auto; cursor: pointer; }
+    #perfBannerChevron { transition: transform .2s ease; }
+    #perfBanner:not(.perf-collapsed) #perfBannerChevron { transform: rotate(180deg); }
+    #perfBanner.perf-collapsed {
+      background: transparent !important; border-color: transparent !important;
+      padding-top: 0; padding-bottom: 0; justify-content: flex-end;
+    }
+    #perfBanner.perf-collapsed > #perfBannerDot,
+    #perfBanner.perf-collapsed > #perfBannerMsg { display: none; }
+    #perfBanner.perf-collapsed > #perfBannerToggle { margin: 0; padding: .35rem .5rem; }
     #fcNotice {
       position:absolute; left:0; right:0;
       top:calc(env(safe-area-inset-top, 0px) + 48px);
@@ -1135,10 +1149,21 @@
 <!-- ── Host performance banner ──────────────────────────────────────────────── -->
 <!-- Shown while the host is degraded/overloaded (e.g. catching up on background
      prep after you arrive). Auto-clears the moment resources return to normal. -->
+<!-- Starts collapsed (just the chevron tab) so it never blocks the navbar / prep
+     pill underneath. Click the chevron to expand the full message; click again to
+     re-collapse. Collapse state lives in perfBannerExpanded; see renderPerfBanner. -->
 <div id="perfBanner"
-  class="hidden sticky top-0 z-[70] border-b text-xs sm:text-sm px-3 py-2 flex items-center gap-2 leading-tight">
+  class="hidden perf-collapsed sticky top-0 z-[70] border-b text-xs sm:text-sm px-3 py-2 flex items-center gap-2 leading-tight">
   <span id="perfBannerDot" class="w-2 h-2 flex-shrink-0"></span>
   <div id="perfBannerMsg" class="min-w-0 flex-1"></div>
+  <button id="perfBannerToggle" type="button" onclick="togglePerfBanner()"
+    aria-label="Toggle host status detail"
+    class="flex-shrink-0 -my-1.5 -mr-1 p-1.5 flex items-center justify-center">
+    <svg id="perfBannerChevron" width="14" height="14" viewBox="0 0 24 24" fill="none"
+      stroke="currentColor" stroke-width="3" stroke-linecap="square">
+      <polyline points="6 9 12 15 18 9"></polyline>
+    </svg>
+  </button>
 </div>
 
 <!-- ── Navbar ─────────────────────────────────────────────────────────────── -->
@@ -2406,6 +2431,15 @@ function renderServerAttention(d){
 // when a user arrives mid-prep and the host is shedding/finishing background work.
 // Auto-clears the instant resources return to "ok". Driven by the SSE state's
 // `sys_status.overall` (set by system_monitor_loop).
+// Collapsed by default so the banner is just a chevron tab and never blocks the
+// navbar / prep pill. The user clicks the chevron to reveal the full message.
+let perfBannerExpanded=false;
+function togglePerfBanner(){
+  perfBannerExpanded=!perfBannerExpanded;
+  const el=document.getElementById("perfBanner");
+  if(el) el.classList.toggle("perf-collapsed", !perfBannerExpanded);
+  renderFcNotice();
+}
 function renderPerfBanner(d){
   const el=document.getElementById("perfBanner");
   if(!el) return;
@@ -2421,7 +2455,8 @@ function renderPerfBanner(d){
   if(s.ram&&s.ram.status!=="ok") hot.push("RAM");
   if(s.net&&s.net.status!=="ok") hot.push("network");
   const over=overall==="overloaded";
-  el.className=`sticky top-0 z-[70] border-b text-xs sm:text-sm px-3 py-2 flex items-center gap-2 leading-tight ${over?'bg-red-950/70 border-red-800 text-red-200':'bg-amber-950/70 border-amber-800 text-amber-200'}`;
+  // Rewriting className drops perf-collapsed, so re-apply it from current state.
+  el.className=`${perfBannerExpanded?'':'perf-collapsed '}sticky top-0 z-[70] border-b text-xs sm:text-sm px-3 py-2 flex items-center gap-2 leading-tight ${over?'bg-red-950/70 border-red-800 text-red-200':'bg-amber-950/70 border-amber-800 text-amber-200'}`;
   dot.className=`w-2 h-2 flex-shrink-0 ${over?'bg-red-500 blink':'bg-amber-500'}`;
   const what=hot.length?` (${hot.join(", ")})`:"";
   msg.textContent=over
@@ -8533,6 +8568,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.21.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.22.0</div>
 </body>
 </html>
