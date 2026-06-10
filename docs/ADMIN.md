@@ -109,11 +109,40 @@ For each profile:
 
 ### 7. System
 
-Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Automatic Stream Prep**, **Auto-Prep on Play**, **Force Stream Prep**, **Validate & Repair on Prep**, **File Validator**, **VPN Kill Switch**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
+Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Automatic Stream Prep**, **Auto-Prep on Play**, **Force Stream Prep**, **Validate & Repair on Prep**, **File Validator**, **Network Adapter**, **VPN Kill Switch**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
 
 #### System Health
 
 Live host load, so an operator can see at a glance whether the box is coping. A `system_monitor_loop` ([main.py](../main.py)) samples every 5 s and classifies **CPU**, **Memory**, **GPU** (via `nvidia-smi`; "Not detected" when absent), and **Network** (throughput + error/drop rate) as `ok` / `degraded` / `overloaded`, plus an **overall** badge (the worst component). The card polls `GET /api/admin/system-resources` every 4 s while the System tab is open and notes whether background prep/transcoding is running now (it runs below normal priority and is killed the instant a viewer is active — see [STT.md](STT.md) + [GOTCHAS.md](GOTCHAS.md)). The same `sys_status` rides in every `state` SSE event and drives the user-facing "host busy — performance may be reduced" banner on the dashboard.
+
+#### Network Adapter
+
+Chooses which physical network adapter the server treats as its **primary**
+address on a multi-NIC host (e.g. a box with both Wi-Fi and Ethernet). The
+dashboard stays bound to `0.0.0.0`, so it answers on **every** adapter — but a
+client that connects on any *other* adapter's IP is redirected to the chosen
+one. Example: Wi-Fi on `192.168.0.104`, Ethernet on `192.168.0.106`, admin picks
+Ethernet → hitting `http://192.168.0.104` 307-redirects to `http://192.168.0.106`.
+
+- The selection is stored as the interface **name** (`library.json →
+  settings.network.preferred_adapter`, `""` = auto-pick) so it survives DHCP IP
+  changes. Mirrored into `state.preferred_adapter` (seeded at lifespan, updated
+  on POST) so the `network_adapter_redirect` middleware reads it per-request
+  without a library load.
+- The chosen adapter's current IP is also what `remote.local` (mDNS) and the
+  printed launcher URL resolve to (via `run.py`'s `get_local_ip`).
+- **Graceful fallback** — if the preferred adapter is offline, the server falls
+  back to the route-table heuristic (`netadapters.auto_ip`), advertises/redirects
+  to that instead, and logs the issue once. The card surfaces the fallback inline
+  (`used_fallback` / `fallback_reason`).
+- The card validates the pick against the live adapter list, so a stale/typo'd
+  name can't strand every other adapter on a dead redirect target.
+
+Adapter enumeration + resolution live in the shared [`netadapters.py`](../netadapters.py).
+See [RUNTIME.md § LAN detection](RUNTIME.md) and [GOTCHAS.md](GOTCHAS.md).
+
+- `GET /api/admin/network` → `{preferred_adapter, active_ip, used_fallback, fallback_reason, adapters:[{name, ip, priority, is_preferred, is_active}]}`.
+- `POST /api/admin/network` → `{preferred_adapter}` (interface name, `""` = auto); 400 on an unknown adapter name.
 
 #### VPN Kill Switch
 

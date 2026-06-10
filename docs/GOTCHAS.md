@@ -548,6 +548,24 @@ There is intentionally **no upper time window** on arming: if the host was power
 
 ## Networking / mDNS
 
+### Preferred adapter selects an IP — it does NOT bind uvicorn to one NIC
+
+The admin's "primary network adapter" pick (System → Network Adapter) must **not**
+narrow the uvicorn bind from `0.0.0.0`. Binding to a single adapter's IP would
+(a) make every other adapter dead — but the requirement is that they still serve
+*something* (a redirect), and (b) risk an unreachable server when that IP isn't
+up yet at boot — the exact fragility we already fight for mDNS. Instead the bind
+stays `0.0.0.0` and the `network_adapter_redirect` middleware ([main.py](../main.py))
+307-redirects a client that connected on a *non-preferred* adapter's LAN IP to
+the preferred adapter's current IP. The preferred adapter is stored by interface
+**name**, not IP (IPs move with DHCP), and resolved to a live IP at request time
+via [`netadapters.py`](../netadapters.py). When the preferred adapter is offline
+the resolver falls back to the route-table heuristic and logs once — never hard-
+fail. Only bare-IPv4 hosts are redirected; `remote.local` and `localhost` /
+`127.0.0.1` (the loopback the 443 proxy rides) pass through. The middleware
+honours `X-Forwarded-Host`/`-Proto` so a request arriving via the port-443
+reverse proxy redirects on the real client host + scheme, not `127.0.0.1`.
+
 ### `remote.local` doesn't resolve after a reboot
 
 mDNS registration must be **resilient, not one-shot**. The installed service (launchd/systemd) starts at login/boot **before Wi-Fi has associated and the interface has a LAN IP**. A single `start_mdns(get_local_ip(), …)` at startup sees `get_local_ip() == ""` and silently skips registration — so `remote.local` never resolves, even though uvicorn binds `0.0.0.0` and becomes reachable **by IP** the moment the network comes up. Classic symptom: "remote.local works right after `run.py --install` (network was already up) but not after a reboot; the IP still works." Both `run.py` and the service wrapper use `start_mdns_resilient()`, which registers from a daemon thread that waits for the IP and re-registers if it changes. Don't revert either call to the bare one-shot `start_mdns()`. After changing the wrapper, re-run `python3 run.py --install` to regenerate `streamlink_service.py`. See [RUNTIME.md](RUNTIME.md#mdns-runpy734).

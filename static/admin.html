@@ -745,6 +745,34 @@
       </div>
     </div>
 
+    <!-- Network adapter -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Network Adapter</h2>
+        <p class="text-xs text-gray-500 mt-0.5">Pick which network adapter the server treats as its primary address. The dashboard stays reachable on <strong>every</strong> adapter, but connecting on any other one just redirects to the primary. If the chosen adapter goes offline, the server falls back to another and logs it.</p>
+      </div>
+      <div class="px-5 py-4 space-y-3">
+        <div class="space-y-1.5 max-w-md">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Primary Adapter</label>
+          <select id="netAdapterSel"
+            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-indigo-500 outline-none">
+            <option value="">Auto (route-table pick)</option>
+          </select>
+        </div>
+        <div id="netStatus" class="text-[11px] text-gray-600"></div>
+        <div class="flex items-center gap-2">
+          <button id="netSaveBtn" onclick="saveNetwork()"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">
+            Save &amp; Switch
+          </button>
+          <button onclick="loadNetwork()"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white">
+            Refresh
+          </button>
+        </div>
+      </div>
+    </div>
+
     <!-- VPN kill switch -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800">
@@ -1334,7 +1362,7 @@ function switchTab(tab){
   if(tab==="skip")       loadSkipPanel();
   if(tab==="offline")    loadOfflineCache();
   if(tab==="background") loadBackgroundVideo();
-  if(tab==="system")   { loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadPrepValidate(); loadVpnKillswitch(); loadForcePrep(); loadFileValidation(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
+  if(tab==="system")   { loadNetwork(); loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadPrepValidate(); loadVpnKillswitch(); loadForcePrep(); loadFileValidation(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
   else                 { stopSysHealthPolling(); stopForcePrepPolling(); stopFileValidationPolling(); stopFileRepairPolling(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); if(!_auChangelogLoaded) loadChangelog(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
@@ -1810,6 +1838,77 @@ async function toggleVpnKillswitch(){
     _vpnKsBlockUi = next;
     _renderVpnKs();
     showToast(_vpnKsBlockUi ? "VPN drop will block the whole UI." : "VPN drop will only kill qBittorrent.");
+  }catch(_){
+    showToast("Save failed.", true);
+  }finally{
+    btn.disabled = false;
+  }
+}
+
+// ── Network Adapter ────────────────────────────────────────────────────────────
+function _renderNetwork(d){
+  const sel = document.getElementById("netAdapterSel");
+  const status = document.getElementById("netStatus");
+  if(!sel || !status) return;
+  const adapters = d.adapters || [];
+  const pref = d.preferred_adapter || "";
+  // Rebuild the option list (auto + one per detected adapter). If the saved
+  // preferred adapter isn't currently online, keep it as a selectable option so
+  // the admin can see/keep it rather than have it silently reset to auto.
+  let opts = `<option value="">Auto (route-table pick)</option>`;
+  const seen = new Set();
+  for(const a of adapters){
+    seen.add(a.name);
+    const tag = a.is_active ? "  • active" : "";
+    opts += `<option value="${_esc(a.name)}">${_esc(a.name)} — ${_esc(a.ip)}${tag}</option>`;
+  }
+  if(pref && !seen.has(pref)){
+    opts += `<option value="${_esc(pref)}">${_esc(pref)} — offline</option>`;
+  }
+  sel.innerHTML = opts;
+  sel.value = pref;
+  if(d.used_fallback && d.fallback_reason){
+    status.innerHTML = `<span class="text-amber-400">⚠ ${_esc(d.fallback_reason)}.</span> Other adapters redirect to <span class="font-mono text-gray-400">${_esc(d.active_ip||"")}</span>.`;
+  } else if(d.active_ip){
+    const where = pref ? `the selected adapter` : `auto-picked`;
+    status.innerHTML = `Primary address (${where}): <span class="font-mono text-gray-300">${_esc(d.active_ip)}</span>. Other adapters redirect here.`;
+  } else {
+    status.innerHTML = `<span class="text-amber-400">No LAN adapter detected.</span>`;
+  }
+}
+
+function _esc(s){
+  return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));
+}
+
+async function loadNetwork(){
+  try{
+    const r = await fetch("/api/admin/network", {headers: authHeader()});
+    if(!r.ok) return;
+    _renderNetwork(await r.json());
+  }catch(_){}
+}
+
+async function saveNetwork(){
+  const sel = document.getElementById("netAdapterSel");
+  const btn = document.getElementById("netSaveBtn");
+  if(!sel) return;
+  const name = sel.value || "";
+  btn.disabled = true;
+  try{
+    const r = await fetch("/api/admin/network",{
+      method:"POST",
+      headers:{...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify({preferred_adapter: name}),
+    });
+    const d = await r.json().catch(()=>({}));
+    if(!r.ok){
+      showToast(`Save failed: ${d.detail || r.status}`, true);
+      return;
+    }
+    _renderNetwork(d);
+    showToast(name ? `Primary adapter set — clients on other adapters now redirect to ${d.active_ip||name}.`
+                   : "Primary adapter set to auto-pick.");
   }catch(_){
     showToast("Save failed.", true);
   }finally{

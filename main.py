@@ -585,6 +585,11 @@ class AppState:
     # VPN drops; False ⇒ only kill qBit (qBit is killed either way). Mirror of
     # settings.vpn_killswitch.block_ui; seeded at lifespan, updated by the admin POST.
     vpn_block_ui: bool = True
+    # Admin-selected primary network adapter (interface *name*, "" = auto). The
+    # network_adapter_redirect middleware bounces a client that connected on any
+    # other adapter's IP to this adapter's current IP. Mirror of
+    # settings.network.preferred_adapter; seeded at lifespan, updated by the POST.
+    preferred_adapter: str = ""
     jackett_ok: bool = True               # last known Jackett HTTP reachability
     active_hash: Optional[str] = None
     active_title: Optional[str] = None
@@ -2966,6 +2971,18 @@ def _vpn_killswitch_cfg(lib: dict) -> dict:
     return {"block_ui": bool(cfg.get("block_ui", True))}
 
 
+def _network_cfg(lib: dict) -> dict:
+    """Read settings.network (the preferred primary adapter) with defaults.
+
+    `preferred_adapter` is a physical interface *name* (not an IP, which moves
+    with DHCP); "" means auto-pick. The redirect middleware + run.py's mDNS
+    advertise resolve it to that adapter's current IP at runtime, falling back
+    to the route-table heuristic when it's offline. See netadapters.py.
+    """
+    cfg = (lib.get("settings", {}) or {}).get("network") or {}
+    return {"preferred_adapter": str(cfg.get("preferred_adapter", "") or "")}
+
+
 # Canonicalize a language tag so 2- and 3-letter spellings of the same language
 # compare equal (en/eng, ja/jpn, …). Anything unknown maps to itself.
 _LANG_CANON = {
@@ -5056,6 +5073,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         state.subtitle_upgrade_late = _subs0["upgrade_late_subs"]
         state.subtitle_single_option = _subs0["single_option"]
         state.vpn_block_ui = _vpn_killswitch_cfg(_lib0)["block_ui"]
+        state.preferred_adapter = _network_cfg(_lib0)["preferred_adapter"]
     except Exception:
         state.vlc_night_mode = False
         state.vlc_night_mode_preset = NIGHT_MODE_DEFAULT_PRESET
@@ -5155,6 +5173,45 @@ async def track_activity(request: Request, call_next):
             _activity_kick()
         except Exception:
             pass
+    return await call_next(request)
+
+
+# Bare IPv4 literal (with an optional :port), e.g. "192.168.0.104" or
+# "192.168.0.104:80". Group 1 is the address. Used by the adapter redirect to
+# tell an IP-based connection apart from `remote.local` / `localhost`.
+_IPV4_HOST_RE = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?$")
+
+
+@app.middleware("http")
+async def network_adapter_redirect(request: Request, call_next):
+    """Bounce a client that connected on a non-preferred adapter to the chosen one.
+
+    uvicorn stays bound to 0.0.0.0, so every adapter answers — but when the admin
+    has picked a primary adapter, a request that arrived on a *different* LAN
+    adapter's IP is 307-redirected to the preferred adapter's current IP (e.g.
+    http://192.168.0.104/ → http://192.168.0.106/). This keeps a single canonical
+    address while still serving "something" on every adapter.
+
+    Only bare-IPv4 hosts are touched: `remote.local` (mDNS) and `localhost` /
+    `127.0.0.1` (the loopback the 443 reverse proxy uses) pass through untouched.
+    `X-Forwarded-Host` / `-Proto` are honoured so requests arriving via the
+    port-443 proxy redirect on the real client host + scheme, not 127.0.0.1.
+    """
+    raw_host = (request.headers.get("x-forwarded-host") or request.url.hostname or "")
+    m = _IPV4_HOST_RE.match(raw_host)
+    if m:
+        host_ip = m.group(1)
+        if host_ip != "127.0.0.1":
+            try:
+                import netadapters
+                target = netadapters.redirect_target(state.preferred_adapter, host_ip)
+            except Exception:
+                target = None
+            if target:
+                proto = (request.headers.get("x-forwarded-proto") or request.url.scheme).lower()
+                qs = ("?" + request.url.query) if request.url.query else ""
+                return RedirectResponse(
+                    f"{proto}://{target}{request.url.path}{qs}", status_code=307)
     return await call_next(request)
 
 
@@ -5267,6 +5324,10 @@ class PlayPrepReq(BaseModel):
 
 class PrepValidateReq(BaseModel):
     mode: str = "off"                          # "off" | "before" | "after" — auto deep-validate/remux-repair a source as it rides through bulk prep
+
+
+class NetworkReq(BaseModel):
+    preferred_adapter: str = ""                # physical interface NAME to make primary; "" = auto-pick
 
 
 class ForcePrepReq(BaseModel):
@@ -9562,6 +9623,68 @@ async def admin_set_vpn_killswitch(request: Request, body: VpnKillswitchReq) -> 
     state.vpn_block_ui = cfg["block_ui"]
     await broadcast("state", state_snapshot())
     return JSONResponse({"ok": True, **cfg})
+
+
+def _network_status(lib: dict) -> dict:
+    """Enumerate physical LAN adapters + resolve the active primary IP.
+
+    Shape: `{preferred_adapter, active_ip, used_fallback, fallback_reason,
+    adapters:[{name, ip, priority, is_preferred, is_active}]}`. `active_ip` is
+    the IP everything (mDNS, redirect target, printed URL) currently resolves to.
+    """
+    import netadapters
+    name = _network_cfg(lib)["preferred_adapter"]
+    adapters = netadapters.list_adapters()
+    active_ip, used_fallback, reason = netadapters.resolve_preferred(name, adapters)
+    return {
+        "preferred_adapter": name,
+        "active_ip": active_ip,
+        "used_fallback": used_fallback,
+        "fallback_reason": reason,
+        "adapters": [
+            {
+                "name": a["name"],
+                "ip": a["ip"],
+                "priority": a["priority"],
+                "is_preferred": bool(name) and a["name"] == name,
+                "is_active": a["ip"] == active_ip,
+            }
+            for a in adapters
+        ],
+    }
+
+
+@app.get("/api/admin/network")
+async def admin_get_network(request: Request) -> JSONResponse:
+    """List the host's physical network adapters + the admin-selected primary.
+
+    `active_ip` is whatever the server currently advertises (mDNS / redirect
+    target); when the preferred adapter is offline, `used_fallback` is true and
+    `fallback_reason` explains which adapter was used instead."""
+    _require_admin(request)
+    return JSONResponse(_network_status(await get_library()))
+
+
+@app.post("/api/admin/network")
+async def admin_set_network(request: Request, body: NetworkReq) -> JSONResponse:
+    """Choose which physical adapter is the server's primary. Stores the interface
+    *name* (survives DHCP IP changes); "" restores auto-pick. The redirect
+    middleware re-points immediately (it reads `state.preferred_adapter`); mDNS
+    re-advertises within one keepalive cycle. Validated against the live adapter
+    list so a typo can't silently strand every other adapter on a dead target."""
+    _require_admin(request)
+    name = (body.preferred_adapter or "").strip()
+    import netadapters
+    adapters = netadapters.list_adapters()
+    if name and name not in {a["name"] for a in adapters}:
+        names = ", ".join(a["name"] for a in adapters) or "(none detected)"
+        raise HTTPException(400, f"Unknown network adapter '{name}'. Available: {names}")
+    lib = await get_library()
+    net = lib.setdefault("settings", {}).setdefault("network", {})
+    net["preferred_adapter"] = name
+    await put_library(lib)
+    state.preferred_adapter = name
+    return JSONResponse({"ok": True, **_network_status(lib)})
 
 
 @app.get("/api/admin/qbit-limits")

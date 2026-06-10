@@ -61,16 +61,36 @@ After all services are up, `start_watchdog()` is called. It returns a daemon thr
 - `admin_https_redirect` middleware ensures admin routes go through 443; it honors `X-Forwarded-Proto` so requests arriving via the proxy aren't bounced into a redirect loop
 - No browser auto-open. `run.py` is a server launcher — the URL is printed for the operator, but `webbrowser.open` is intentionally not called so headless / service installs don't try to pop a UI on a box that may have no display.
 
-## LAN detection ([run.py:516](../run.py#L516))
+## LAN detection ([run.py](../run.py)) + preferred-adapter selection
 
-`get_local_ip()` returns the LAN IP the phone should use:
-1. Enumerates physical interfaces via `psutil.net_if_addrs()`
-2. Drops interfaces by **name** (`utun*`, `tun*`, `tap*`, `wg*`, `ppp*`, `lo`, anything containing `mullvad`/`wireguard`/`vpn`/`vmware`/`vbox`/`hyper-v`/`virtual`/`loopback`)
-3. Drops by **subnet** (`192.168.56.*` VirtualBox, `192.168.99.*` Docker Machine, `192.168.137.*` Windows ICS, `169.254.*` APIPA)
-4. Prefers `192.168.*` → `10.*` → `172.16-31.*`
-5. Uses a `connect()` to `8.8.8.8:80` (no packet sent) to learn which interface the OS routing table would pick — but only accepts the result if it's already in the candidate set. This means an active VPN that captured the default route can never win.
+`get_local_ip()` returns the LAN IP the phone should use. The adapter
+enumeration + selection heuristic now lives in the shared module
+[`netadapters.py`](../netadapters.py) (imported by both `run.py` and `main.py`);
+`get_local_ip()` is a thin wrapper that reads the admin's preferred adapter and
+delegates:
+
+1. `netadapters.list_adapters()` enumerates physical interfaces via `psutil.net_if_addrs()`, dropping interfaces by **name** (`utun*`, `tun*`, `tap*`, `wg*`, `ppp*`, `lo`, anything containing `mullvad`/`wireguard`/`vpn`/`vmware`/`vbox`/`hyper-v`/`virtual`/`loopback`) and by **subnet** (`192.168.56.*` VirtualBox, `192.168.99.*` Docker Machine, `192.168.137.*` Windows ICS, `169.254.*` APIPA).
+2. **Preferred adapter** — `get_local_ip()` reads `library.json → settings.network.preferred_adapter` (a read-only `json.load`; the launcher never imports `main.py`'s locked accessor). `netadapters.resolve_preferred(name)` returns that adapter's current IPv4 if it's online.
+3. **Fallback** — if the preferred adapter is offline (or none is set), `netadapters.auto_ip()` applies the heuristic: prefer `192.168.*` → `10.*` → `172.16-31.*`, then a `connect()` to `8.8.8.8:80` (no packet sent) to learn which interface the OS routing table would pick — accepted only if it's already in the candidate set, so an active VPN that captured the default route can never win. A fallback is logged **once** (tracked in `_last_net_fallback`) so the 30 s mDNS keepalive poll doesn't spam.
+
+Because mDNS re-registers via the resilient keepalive whenever `get_local_ip()`
+changes, switching the preferred adapter in the admin panel re-points
+`remote.local` within one watch cycle without a restart.
 
 `get_wifi_ssid()` is best-effort: `airport -I` (macOS, with `networksetup` fallback), `iwgetid -r` (Linux), `netsh wlan show interfaces` (Windows).
+
+### Non-preferred adapters redirect ([main.py](../main.py) `network_adapter_redirect`)
+
+uvicorn binds `0.0.0.0`, so every adapter answers. The `network_adapter_redirect`
+middleware in `main.py` turns the *other* adapters into redirectors: a request
+whose host is a bare LAN IPv4 belonging to a non-preferred adapter is
+**307-redirected** to the preferred adapter's current IP (via
+`netadapters.redirect_target`, which caches the adapter scan for 8 s). The admin
+picks the adapter (by name) under **System → Network Adapter** — see
+[ADMIN.md](ADMIN.md) and the `GET`/`POST /api/admin/network` endpoints in
+[API.md](API.md). `remote.local` and `localhost`/`127.0.0.1` pass through
+untouched; `X-Forwarded-Host`/`-Proto` are honoured so the port-443 reverse
+proxy's requests redirect on the real client host + scheme.
 
 ## mDNS ([run.py:734](../run.py#L734))
 

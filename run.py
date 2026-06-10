@@ -649,79 +649,48 @@ def check_mullvad() -> bool:
 
 
 # ── Network info ───────────────────────────────────────────────────────────
-def get_local_ip() -> str:
-    """Return the LAN IP phones should use to connect."""
-    _VPN_STARTS = ("utun", "tun", "tap", "wg", "ppp", "lo")
-    _VPN_SUBS   = ("mullvad", "wireguard", "vpn", "virtual",
-                   "vmware", "vbox", "hyper-v", "loopback")
+def _preferred_adapter_name() -> str:
+    """Read the admin's preferred network adapter from library.json (best effort).
 
-    def _is_lan(ip: str) -> bool:
-        return (ip.startswith("192.168.") or
-                ip.startswith("10.") or
-                bool(re.match(r"^172\.(1[6-9]|2\d|3[01])\.", ip)))
-
-    # Subnets used by virtual adapters whose friendly names don't always reveal
-    # them on Windows (e.g. VirtualBox Host-Only shows up as "Ethernet 2").
-    # These IPs route only to the owning host — never advertise on mDNS.
-    _VIRTUAL_PREFIXES = (
-        "192.168.56.",   # VirtualBox host-only default
-        "192.168.99.",   # Docker Machine default
-        "192.168.137.",  # Windows ICS / Mobile Hotspot default
-        "169.254.",      # APIPA / link-local
-    )
-
-    def _is_virtual(ip: str) -> bool:
-        return any(ip.startswith(p) for p in _VIRTUAL_PREFIXES)
-
-    # Step 1: enumerate physical interfaces, dropping VPN and virtual adapters
-    # by name AND by IP subnet. This yields the set of IPs we'd ever want to
-    # advertise on mDNS.
-    candidates: list[tuple[int, str]] = []  # (priority, ip)
+    A read-only json.load is fine here: the launcher is the only writer at
+    startup and the keepalive poll only reads. The canonical locked accessor
+    (`get_library`/`put_library`) lives in main.py, which we deliberately don't
+    import from the launcher.
+    """
     try:
-        import psutil
-        for iface, addrs in psutil.net_if_addrs().items():
-            n = iface.lower()
-            if any(n.startswith(p) for p in _VPN_STARTS):
-                continue
-            if any(p in n for p in _VPN_SUBS):
-                continue
-            for addr in addrs:
-                if addr.family != socket.AF_INET:
-                    continue
-                ip = addr.address
-                if not _is_lan(ip) or _is_virtual(ip):
-                    continue
-                if ip.startswith("192.168."):
-                    candidates.append((0, ip))
-                elif ip.startswith("10."):
-                    candidates.append((1, ip))
-                else:
-                    candidates.append((2, ip))
+        import json
+        data = json.loads((HERE / "library.json").read_text(encoding="utf-8"))
+        net = data.get("settings", {}).get("network", {})
+        return str(net.get("preferred_adapter", "") or "")
     except Exception:
-        pass
-
-    if not candidates:
         return ""
 
-    candidate_ips = {ip for _, ip in candidates}
 
-    # Step 2: prefer whichever candidate the OS routing table picks. The UDP
-    # connect() doesn't send a packet but sets the source IP to whatever
-    # interface would reach the destination — useful on multi-NIC hosts. We
-    # gate it through `candidate_ips` so an active VPN (e.g. Mullvad capturing
-    # the default route) can never win.
+# Last fallback message we logged, so a 30 s mDNS keepalive poll doesn't spam.
+_last_net_fallback = {"msg": ""}
+
+
+def get_local_ip() -> str:
+    """Return the LAN IP phones should use to connect.
+
+    Prefers the admin-selected adapter (settings.network.preferred_adapter). If
+    that adapter isn't online, falls back to the route-table heuristic and logs
+    the issue once (not on every keepalive poll). Adapter enumeration + the
+    fallback heuristic live in netadapters.py, shared with main.py's redirect.
+    """
     try:
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        if ip in candidate_ips:
-            return ip
+        import netadapters
     except Exception:
-        pass
-
-    candidates.sort()
-    return candidates[0][1]
+        return ""
+    name = _preferred_adapter_name()
+    ip, used_fallback, reason = netadapters.resolve_preferred(name)
+    if used_fallback and reason:
+        if reason != _last_net_fallback["msg"]:
+            warn(f"Network: {reason}")
+            _last_net_fallback["msg"] = reason
+    else:
+        _last_net_fallback["msg"] = ""
+    return ip
 
 
 def get_wifi_ssid() -> str:
