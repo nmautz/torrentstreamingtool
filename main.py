@@ -9529,6 +9529,191 @@ async def admin_set_cache_autopurge(request: Request, body: CacheAutopurgeReq) -
     return JSONResponse({"ok": True, **cfg})
 
 
+# ── Background activity snapshot (admin "Activity" tab) ──────────────────────
+# A single, human-readable view of everything the server is doing in the
+# background RIGHT NOW, and — crucially — WHY, plus whether each piece of work
+# survives a server restart / auto-update. Most background work (HLS prep, STT,
+# file validation/repair, Smart Skip analysis, on-demand transcode sessions) is
+# process-local with no on-disk checkpoint, so a restart or auto-update silently
+# discards it. This endpoint makes that visible so an operator understands that a
+# progress bar that "reset" wasn't a bug — the process restarted under it.
+
+def _activity_title(item_id: str, src: str, items_by_id: dict) -> str:
+    """Best display name for a job: the library item's title, else the filename."""
+    it = items_by_id.get(item_id) if item_id else None
+    if it and it.get("title"):
+        return it["title"]
+    if src:
+        try:
+            return Path(src).name
+        except Exception:
+            pass
+    return "Library content"
+
+
+async def _activity_snapshot() -> dict:
+    """Aggregate every in-flight background activity with a plain-English reason
+    and a restart-survival flag. Read-only; safe to poll."""
+    lib = await get_library()
+    items_by_id = {it["id"]: it for it in lib.get("items", [])}
+    now = time.time()
+    acts: list[dict] = []
+
+    def add(*, category, title, status, reason, resumes, restart_note,
+            progress=None, detail="", started_at=None):
+        acts.append({
+            "category":   category,
+            "title":      title,
+            "detail":     detail,
+            "status":     status,
+            "progress":   (round(float(progress), 3) if progress is not None else None),
+            "reason":     reason,
+            "resumes_after_restart": bool(resumes),
+            "restart_note": restart_note,
+            "elapsed_sec": (round(now - started_at) if started_at else None),
+        })
+
+    # 1. HLS stream prep (interactive / admin force / bulk auto-prep)
+    for j in _offline_jobs.values():
+        st = j.get("status")
+        if st not in ("pending", "processing", "paused"):
+            continue
+        queue = j.get("queue", "bulk")
+        if queue == "interactive":
+            reason = "On-device play prep — a viewer is (or recently was) playing this, so it's being prepped for smooth streaming to the browser player."
+            resumes = False
+            note = "The in-flight encode is discarded on restart and only re-preps if the episode is played again."
+        elif queue == "admin":
+            reason = "Admin Force Prep is preparing this for on-device streaming (ignores host activity and the Pause gate)."
+            resumes = False
+            note = "Force Prep does NOT auto-resume after a restart — re-run Force Prep from the System tab to continue."
+        else:  # bulk
+            reason = "Automatic Stream Prep is preparing un-prepped library files for on-device streaming."
+            resumes = True
+            note = "The in-flight encode restarts from scratch (HLS prep can't checkpoint), but Automatic Stream Prep re-queues remaining files automatically after restart."
+        if st == "paused":
+            reason += " (Currently paused — held at the prep gate.)"
+        add(category="Stream Prep",
+            title=_activity_title(j.get("item_id", ""), j.get("src", ""), items_by_id),
+            status=st, reason=reason, resumes=resumes, restart_note=note,
+            progress=j.get("progress"), started_at=j.get("started_at"))
+
+    # 2. AI subtitles (whisper.cpp STT)
+    for j in _stt_jobs.values():
+        st = j.get("status")
+        if st not in ("pending", "processing", "paused"):
+            continue
+        queue = j.get("queue", "bulk")
+        resumes = (queue == "bulk")
+        reason = ("AI subtitle generation (whisper.cpp) for a file with no usable "
+                  "subtitle track" + (" — requested for the file now playing." if queue == "interactive"
+                  else ", from Automatic Stream Prep."))
+        note = ("Transcription has no checkpoint; an interrupted run restarts from the beginning. "
+                + ("Auto-prep re-queues it after restart." if resumes
+                   else "It only restarts if the file is played again."))
+        if st == "paused":
+            reason += " (Currently paused.)"
+        add(category="AI Subtitles",
+            title=_activity_title(j.get("item_id", ""), j.get("src", ""), items_by_id),
+            status=st, reason=reason, resumes=resumes, restart_note=note,
+            progress=j.get("progress"), started_at=j.get("started_at"))
+
+    # 3. Torrent downloads (qBittorrent — separate process, persists state)
+    for it in lib.get("items", []):
+        if it.get("status") != "downloading":
+            continue
+        add(category="Download",
+            title=it.get("title") or "Library content",
+            status="downloading",
+            reason="A library torrent is still downloading from peers (subject to any idle/night download window and seeding limits).",
+            resumes=True,
+            restart_note="qBittorrent stores download state independently of this server and resumes automatically after a restart.",
+            progress=None)
+
+    # 4. File validation scan
+    fv = state.file_validation or {}
+    if fv.get("running"):
+        total = fv.get("total") or 0
+        scanned = fv.get("scanned") or 0
+        add(category="File Validation",
+            title=("Whole library" if (fv.get("scope") in ("all", "", None)) else _activity_title(fv.get("scope", ""), "", items_by_id)),
+            status="running",
+            detail=fv.get("current_name", ""),
+            reason="Deep-decoding source files with ffmpeg to find corrupt/unreadable media (independent of qBit's piece check).",
+            resumes=False,
+            restart_note="Validation state lives only in memory and does NOT resume after a restart — re-run it from the System tab.",
+            progress=(scanned / total if total else None))
+
+    # 5. File repair run
+    fr = state.file_repair or {}
+    if fr.get("running"):
+        total = fr.get("total") or 0
+        scanned = fr.get("scanned") or 0
+        add(category="File Repair",
+            title=f"{total} damaged file(s)" if total else "Damaged files",
+            status="running",
+            detail=fr.get("current_name", ""),
+            reason="Repairing damaged source files (remux, then optional re-encode); each candidate is re-validated before it replaces the original.",
+            resumes=False,
+            restart_note="Repair state is in-memory and does NOT resume after a restart — a file already replaced stays repaired; the rest must be re-run.",
+            progress=(scanned / total if total else None))
+
+    # 6. Smart Skip analysis
+    for sk, job in (state.analysis_jobs or {}).items():
+        if job.get("status") != "running":
+            continue
+        total = job.get("total") or 0
+        cur = job.get("current") or 0
+        add(category="Smart Skip",
+            title=sk or "Series analysis",
+            status="running",
+            detail=job.get("message", "") or job.get("stage", ""),
+            reason="Analyzing episodes to detect intro/credits boundaries so the player can offer skip buttons.",
+            resumes=False,
+            restart_note="Analysis is in-memory; an interrupted run does not auto-resume but is re-scheduled when the series is next eligible.",
+            progress=(cur / total if total else None))
+
+    # 7. On-demand transcode sessions (live just-in-time streaming)
+    try:
+        od_n = len(_od_sessions)
+    except Exception:
+        od_n = 0
+    if od_n:
+        add(category="On-Demand Stream",
+            title=f"{od_n} live transcode session(s)",
+            status="processing",
+            reason="A viewer is streaming a non-prepped file; ffmpeg transcodes HLS segments just-in-time as they watch.",
+            resumes=False,
+            restart_note="Tied to the live viewer — sessions end on restart and resume only when the viewer resumes playback.")
+
+    fragile = sum(1 for a in acts if not a["resumes_after_restart"])
+    cfg = _auto_prep_cfg(lib)
+    return {
+        "generated_at": _now_iso(),
+        "host_busy": _machine_in_use(300),
+        "gates": {
+            "prep_paused":     state.prep_paused,
+            "prep_pause_reason": ("Bulk stream prep is paused — the manual Pause control or activity "
+                                  "returning in idle Auto-Prep mode holds it at the gate."
+                                  if state.prep_paused else ""),
+            "auto_prep_mode":  cfg.get("mode", "off"),
+            "admin_prep_stop": state.admin_prep_stop,
+            "vpn_secure":      state.vpn_secure,
+        },
+        "activities": acts,
+        "count": len(acts),
+        "fragile_count": fragile,
+    }
+
+
+@app.get("/api/admin/activity")
+async def admin_activity(request: Request) -> JSONResponse:
+    """Unified background-activity view: what's running, why, and whether it
+    survives a restart/auto-update. Drives the admin Activity tab."""
+    _require_admin(request)
+    return JSONResponse(await _activity_snapshot())
+
+
 def _subtitle_language_options() -> list[dict]:
     """The 3-letter language options for the admin subtitle-language picker."""
     return [{"code": c, "name": n}

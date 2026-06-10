@@ -21,6 +21,22 @@ Browsers will show a warning until `ca.pem` is added to the system trust store. 
 
 ## Tabs
 
+### 0. Activity (default landing tab)
+
+A single read-only view of **everything the server is doing in the background right now, why, and whether it survives a restart**. Motivated by server restarts / auto-updates silently discarding in-flight work — none of the background jobs checkpoint, so a progress bar that "reset" was actually a fresh start under a restarted process, with no operator-visible reason. This is the admin **landing tab** (`activeTab = "activity"`).
+
+Backed by `GET /api/admin/activity` → `_activity_snapshot()` ([main.py](../main.py)), which aggregates the in-memory job tables (`_offline_jobs`, `_stt_jobs`, `state.file_validation`, `state.file_repair`, `state.analysis_jobs`, `_od_sessions`) plus downloading library items. The card polls every 4 s while open (`startActivityPolling`).
+
+Each activity row carries:
+- **category** — `Stream Prep`, `AI Subtitles`, `Download`, `File Validation`, `File Repair`, `Smart Skip`, `On-Demand Stream`.
+- **reason** — a plain-English explanation of *why* it's running (e.g. interactive play prep vs. admin Force Prep vs. bulk Automatic Stream Prep — derived from the job's `queue`).
+- **resumes_after_restart** — drives a **Survives restart** (emerald) vs **Lost on restart** (amber) badge. Only **Download** survives (qBittorrent persists download state out-of-process). Everything in-memory is fragile; the `restart_note` tooltip says what re-queues automatically (bulk auto-prep) vs. what must be manually re-triggered (Force Prep, file validation/repair, the play-prep chain).
+- **progress** (0–1, where known) + **elapsed_sec**.
+
+A **summary strip** shows the active count, the **Lost On Restart** count, Host Idle/In-Use (`_machine_in_use(300)`), the Auto-Prep mode, and the `prep_paused` / `admin_prep_stop` / `vpn_secure` gates. When any fragile job is active a **heads-up banner** warns that restarting now would interrupt non-resumable work.
+
+- `GET /api/admin/activity` → `{generated_at, host_busy, gates:{prep_paused, prep_pause_reason, auto_prep_mode, admin_prep_stop, vpn_secure}, activities:[{category, title, detail, status, progress, reason, resumes_after_restart, restart_note, elapsed_sec}], count, fragile_count}`.
+
 ### 1. Indexers ([static/admin.html:95](../static/admin.html#L95))
 
 Lists configured Jackett indexers. Each row shows the indexer name + test result + delete button. Add button opens a modal that:

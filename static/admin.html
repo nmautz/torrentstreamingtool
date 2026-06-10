@@ -88,8 +88,12 @@
 
   <!-- Tabs — horizontally scrollable on narrow viewports -->
   <div class="admin-tabs bg-gray-900 border-b border-gray-800 flex flex-shrink-0 overflow-x-auto">
-    <button onclick="switchTab('indexers')" id="tab-indexers"
+    <button onclick="switchTab('activity')" id="tab-activity"
       class="tab-active px-4 sm:px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors whitespace-nowrap flex-shrink-0">
+      Activity
+    </button>
+    <button onclick="switchTab('indexers')" id="tab-indexers"
+      class="tab-inactive px-4 sm:px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors whitespace-nowrap flex-shrink-0">
       Indexers
     </button>
     <button onclick="switchTab('content')" id="tab-content"
@@ -128,8 +132,37 @@
            text-sm font-bold uppercase tracking-wide bg-indigo-600 text-white shadow-xl">
   </div>
 
+  <!-- ── Activity Tab ──────────────────────────────────────────────────────────── -->
+  <div id="panelActivity" class="flex-1 overflow-y-auto p-3 sm:p-5 max-w-3xl mx-auto w-full space-y-4">
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div>
+          <h2 class="text-sm font-black uppercase tracking-wide">Background Activity</h2>
+          <p class="text-xs text-gray-500 mt-0.5">Everything the server is doing right now — and why. Auto-refreshes every 4 s while this tab is open.</p>
+        </div>
+        <button onclick="loadActivity(this)"
+          class="text-xs text-indigo-400 hover:text-indigo-300 uppercase tracking-wide font-bold transition-colors flex-shrink-0">
+          Refresh
+        </button>
+      </div>
+      <!-- Status summary strip -->
+      <div id="activitySummary" class="px-5 py-3 border-b border-gray-800 flex flex-wrap gap-2 text-[10px] font-bold uppercase tracking-widest"></div>
+      <!-- Restart-fragility warning -->
+      <div id="activityFragileWarn" class="hidden px-5 py-3 border-b border-amber-800 bg-amber-950/30 text-xs text-amber-300"></div>
+      <!-- Activity list -->
+      <div id="activityList" class="divide-y divide-gray-800">
+        <div class="px-5 py-8 text-center text-gray-600 text-sm">Loading…</div>
+      </div>
+    </div>
+    <p class="text-[11px] text-gray-600 leading-relaxed px-1">
+      A <span class="text-amber-400 font-bold">Lost on restart</span> badge means the work has no on-disk checkpoint:
+      a server restart or auto-update discards it (and any progress bar resets). Use this before rebooting or applying an
+      update to avoid interrupting work that won't pick up where it left off.
+    </p>
+  </div>
+
   <!-- ── Indexers Tab ──────────────────────────────────────────────────────────── -->
-  <div id="panelIndexers" class="flex-1 overflow-y-auto p-3 sm:p-5 space-y-6 max-w-2xl mx-auto w-full">
+  <div id="panelIndexers" class="hidden flex-1 overflow-y-auto p-3 sm:p-5 space-y-6 max-w-2xl mx-auto w-full">
 
     <!-- Categories override -->
     <div class="bg-gray-900 border border-gray-800">
@@ -1208,7 +1241,7 @@
 <script>
 // ── State ─────────────────────────────────────────────────────────────────────
 let adminToken = localStorage.getItem("streamlink_admin_token") || "";
-let activeTab  = "indexers";
+let activeTab  = "activity";
 let pinTarget  = null;   // { id, name } of profile being PIN-edited
 
 const AVATAR_BG = {
@@ -1324,6 +1357,8 @@ function showDashboard(){
   loadAdminSettings();
   loadIndexers();
   loadOfflineEncoder();
+  loadActivity();
+  startActivityPolling();
 }
 
 async function loadOfflineEncoder(){
@@ -1351,12 +1386,14 @@ async function loadOfflineEncoder(){
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 function switchTab(tab){
   activeTab = tab;
-  ["indexers","content","profiles","skip","offline","background","system","updates"].forEach(t=>{
+  ["activity","indexers","content","profiles","skip","offline","background","system","updates"].forEach(t=>{
     document.getElementById(`tab-${t}`).className =
       t===tab ? "tab-active px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors"
                : "tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors";
     document.getElementById(`panel${t.charAt(0).toUpperCase()+t.slice(1)}`).classList.toggle("hidden", t!==tab);
   });
+  if(tab==="activity")   { loadActivity(); startActivityPolling(); }
+  else                   { stopActivityPolling(); }
   if(tab==="content")    loadContentList();
   if(tab==="profiles")   loadProfilePins();
   if(tab==="skip")       loadSkipPanel();
@@ -1366,6 +1403,104 @@ function switchTab(tab){
   else                 { stopSysHealthPolling(); stopForcePrepPolling(); stopFileValidationPolling(); stopFileRepairPolling(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); if(!_auChangelogLoaded) loadChangelog(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
+}
+
+// ── Background Activity ─────────────────────────────────────────────────────────
+let _activityTimer = null;
+const _ACT_TONE = {
+  processing:  {dot:"bg-indigo-500 animate-pulse", text:"text-indigo-300", label:"Running"},
+  running:     {dot:"bg-indigo-500 animate-pulse", text:"text-indigo-300", label:"Running"},
+  downloading: {dot:"bg-sky-500 animate-pulse",    text:"text-sky-300",    label:"Downloading"},
+  pending:     {dot:"bg-gray-500",                 text:"text-gray-400",   label:"Queued"},
+  paused:      {dot:"bg-amber-500",                text:"text-amber-300",  label:"Paused"},
+};
+function _actTone(s){ return _ACT_TONE[s] || {dot:"bg-gray-600", text:"text-gray-400", label:(s||"—")}; }
+function _fmtElapsed(sec){
+  if(sec==null) return "";
+  if(sec < 60) return sec+"s";
+  if(sec < 3600) return Math.floor(sec/60)+"m "+(sec%60)+"s";
+  return Math.floor(sec/3600)+"h "+Math.floor((sec%3600)/60)+"m";
+}
+function _esc(s){ return (s==null?"":String(s)).replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+function startActivityPolling(){
+  stopActivityPolling();
+  _activityTimer = setInterval(()=>{ if(activeTab==="activity") loadActivity(); }, 4000);
+}
+function stopActivityPolling(){ if(_activityTimer){ clearInterval(_activityTimer); _activityTimer=null; } }
+
+async function loadActivity(btn){
+  const list = document.getElementById("activityList");
+  const sum  = document.getElementById("activitySummary");
+  const warn = document.getElementById("activityFragileWarn");
+  if(!list) return;
+  if(btn){ btn.disabled = true; btn.textContent = "Refreshing…"; }
+  try{
+    const r = await fetch("/api/admin/activity", {headers: authHeader()});
+    if(!r.ok) throw new Error("status "+r.status);
+    const d = await r.json();
+
+    // Summary chips
+    const g = d.gates || {};
+    const chips = [];
+    chips.push(`<span class="px-2.5 py-1 border ${d.count? "border-indigo-700 text-indigo-300 bg-indigo-950/40":"border-gray-700 text-gray-500"}">${d.count||0} Active</span>`);
+    if(d.fragile_count) chips.push(`<span class="px-2.5 py-1 border border-amber-700 text-amber-300 bg-amber-950/40">${d.fragile_count} Lost On Restart</span>`);
+    chips.push(`<span class="px-2.5 py-1 border ${d.host_busy? "border-amber-700 text-amber-300 bg-amber-950/40":"border-emerald-800 text-emerald-400 bg-emerald-950/30"}">${d.host_busy? "Host In Use":"Host Idle"}</span>`);
+    const apm = (g.auto_prep_mode||"off");
+    chips.push(`<span class="px-2.5 py-1 border border-gray-700 text-gray-400">Auto-Prep: ${apm==="off"?"Off":(apm==="always"?"Always":"When Idle")}</span>`);
+    if(g.prep_paused) chips.push(`<span class="px-2.5 py-1 border border-amber-700 text-amber-300 bg-amber-950/40" title="${_esc(g.prep_pause_reason)}">Prep Paused</span>`);
+    if(g.admin_prep_stop) chips.push(`<span class="px-2.5 py-1 border border-amber-700 text-amber-300 bg-amber-950/40">Force-Prep Stopped</span>`);
+    if(!g.vpn_secure) chips.push(`<span class="px-2.5 py-1 border border-red-700 text-red-300 bg-red-950/40">VPN Down</span>`);
+    sum.innerHTML = chips.join("");
+
+    // Fragility warning
+    if(d.fragile_count){
+      warn.classList.remove("hidden");
+      warn.innerHTML = `<span class="font-bold uppercase tracking-wide">Heads up:</span> ${d.fragile_count} active job(s) won't survive a restart or auto-update — restarting now discards that work (it restarts from scratch, if at all). Let them finish first, or expect their progress to reset.`;
+    } else {
+      warn.classList.add("hidden");
+    }
+
+    // Activity rows
+    if(!d.activities || !d.activities.length){
+      list.innerHTML = `<div class="px-5 py-10 text-center text-gray-600 text-sm">Nothing running in the background right now.</div>`;
+      return;
+    }
+    list.innerHTML = d.activities.map(a=>{
+      const t = _actTone(a.status);
+      const pct = (a.progress!=null) ? Math.round(a.progress*100) : null;
+      const fragile = !a.resumes_after_restart;
+      const restartBadge = fragile
+        ? `<span class="px-2 py-0.5 text-[9px] font-black uppercase tracking-widest border border-amber-700 text-amber-400 bg-amber-950/40 flex-shrink-0" title="${_esc(a.restart_note)}">Lost on restart</span>`
+        : `<span class="px-2 py-0.5 text-[9px] font-black uppercase tracking-widest border border-emerald-800 text-emerald-400 bg-emerald-950/30 flex-shrink-0" title="${_esc(a.restart_note)}">Survives restart</span>`;
+      const bar = (pct!=null) ? `
+        <div class="mt-2 h-1.5 bg-gray-800 w-full">
+          <div class="h-full bg-indigo-500 transition-all" style="width:${pct}%"></div>
+        </div>` : "";
+      const elapsed = _fmtElapsed(a.elapsed_sec);
+      return `<div class="px-5 py-4">
+        <div class="flex items-start justify-between gap-3">
+          <div class="min-w-0 flex-1">
+            <div class="flex items-center gap-2 flex-wrap">
+              <span class="w-2 h-2 ${t.dot} flex-shrink-0"></span>
+              <span class="text-[10px] font-black uppercase tracking-widest text-gray-500">${_esc(a.category)}</span>
+              <span class="text-[10px] font-bold uppercase tracking-wide ${t.text}">${t.label}${pct!=null?" · "+pct+"%":""}</span>
+              ${elapsed?`<span class="text-[10px] text-gray-600 font-mono">${elapsed}</span>`:""}
+            </div>
+            <div class="text-sm font-bold text-gray-100 mt-1 truncate" title="${_esc(a.title)}">${_esc(a.title)}</div>
+            ${a.detail?`<div class="text-[11px] text-gray-500 font-mono mt-0.5 truncate" title="${_esc(a.detail)}">${_esc(a.detail)}</div>`:""}
+            <div class="text-xs text-gray-400 mt-1.5 leading-relaxed">${_esc(a.reason)}</div>
+          </div>
+          ${restartBadge}
+        </div>
+        ${bar}
+      </div>`;
+    }).join("");
+  }catch(e){
+    list.innerHTML = `<div class="px-5 py-8 text-center text-red-400 text-sm">Couldn't load activity (${_esc(e.message)}).</div>`;
+  }finally{
+    if(btn){ btn.disabled = false; btn.textContent = "Refresh"; }
+  }
 }
 
 // ── System Health (CPU / GPU / RAM / network) ──────────────────────────────────
