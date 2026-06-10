@@ -9690,7 +9690,7 @@ async def _activity_snapshot() -> dict:
     cfg = _auto_prep_cfg(lib)
     return {
         "generated_at": _now_iso(),
-        "host_busy": _machine_in_use(300),
+        "host_busy": await _machine_in_use(300),
         "gates": {
             "prep_paused":     state.prep_paused,
             "prep_pause_reason": ("Bulk stream prep is paused — the manual Pause control or activity "
