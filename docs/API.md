@@ -24,7 +24,7 @@ Event types:
 | `library_progress` | per-download stats, ~every 5 s while downloading | `{item_id, speed_bps, downloaded_bytes, total_bytes, progress_pct, eta_secs, download_mode, paused}` — `paused: true` ⇒ the scheduler is holding this item (idle window closed); the UI shows "Waiting for idle window" |
 | `library_update` | library item status changed | `{item_id, status, message?}` |
 | `progress_saved` | every 15 s while a library item is playing | `{item_id, profile_id, file_path, episode_name, position_sec, duration_sec, pct}` |
-| `analysis_status` | Smart Skip job progress | `{series_key, job: {status, stage, current, total, message, episode_name?, …}}` |
+| `analysis_status` | Smart Skip job progress | `{series_key, job: {status, stage, current, total, progress (0..1, monotonic — drives the bar), mode ∈ {auto, manual}, message, episode_name?, …}}` |
 | `yt_command` | YouTube-on-TV: a playback command for the `/tv` kiosk page | `{action, value?, video_id?}` — `action ∈ load\|play\|pause\|playpause\|seek\|seek_to\|volume_set\|volume_step\|close`. Broadcast to all SSE clients; only `static/tv.html` acts on it. See [YOUTUBE.md](YOUTUBE.md) |
 | `subtitle_upgraded` | VLC auto-swapped an AI sub for a real one that finished downloading (`subtitle_upgrade_loop`) | `{lang, label}` — the dashboard shows `label` as a toast. The on-device player does its own upgrade (no event) |
 
@@ -239,7 +239,11 @@ All require admin auth.
 | POST | `/api/library/{id}/admin-lock` | `{admin_only}` |
 | GET | `/api/admin/library/{id}/skip-data` | Per-file intro/credits times for the editor. Failed files also carry `error_code` and `error` so the editor can render the failure reason |
 | PATCH | `/api/admin/library/{id}/skip-data` | `{file_path, intro_start?, intro_end?, credits_start?}` — manual override; sets `analysis.source="manual"` |
-| POST | `/api/admin/library/{id}/analyze` | Force re-run of series analysis |
+| POST | `/api/admin/library/{id}/analyze` | Force re-run of series analysis (dispatches by the series' mode) |
+| GET | `/api/admin/library/{id}/skip-config` | Smart Skip operational mode + manual templates for the item's series: `{series_key, mode ∈ {auto, manual}, templates:[{id, name, source_path, start, end, created_at}], files:[{name, path}]}` |
+| POST | `/api/admin/library/{id}/skip-mode` | `{mode}` (`auto`/`manual`) — set the series mode; re-runs analysis so the change applies immediately |
+| POST | `/api/admin/library/{id}/skip-template` | `{name, source_path, start, end}` — add a manual intro template to the series (validated: `end>start≥0`, span ≤ `MAX_INTRO_SEC`, `source_path` ∈ series). Extrapolates when the series is in manual mode. Returns `{ok, template, mode, series_key}` |
+| DELETE | `/api/admin/library/{id}/skip-template/{template_id}` | Remove a template; re-extrapolates the series |
 | GET | `/api/admin/analyzer-status` | `{available, ffmpeg, fpcalc}` |
 | GET | `/api/admin/analyzer-log?limit=N` | In-memory Smart Skip event ring buffer (200-deep, resets on restart). Returns `{entries:[{ts, level, series_key, item_id, file_path, error_code, message}], available, ffmpeg, fpcalc}` — drives the Fingerprint Log panel under the Smart Skip admin tab |
 | GET | `/api/admin/offline-encoder` | `{nvenc_available, encoder, ffmpeg}` — which encoder offline Save Offline jobs use (h264_nvenc when an NVIDIA GPU + NVENC-built ffmpeg are present, else libx264). Result is cached for the process lifetime. |

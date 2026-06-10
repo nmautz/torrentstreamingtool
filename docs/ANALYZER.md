@@ -2,6 +2,35 @@
 
 Audio-fingerprint-driven intro/credits detection. Runs per-series; results stored as `skip_data` on each item.
 
+## Operational modes (per series)
+
+Each series picks one of two intro-detection strategies, stored under
+`library.json → settings.series_skip[<series_key>].mode` (default `"auto"`;
+helpers `_series_skip_cfg` / `_series_skip_put` in `main.py`). **Credits
+detection is identical in both modes** (outro clustering → blackframe → 92 %
+fallback), so manual mode keeps automatic credit skipping.
+
+- **`auto`** (default, original behaviour) — greedy-cluster the episode heads to
+  *guess* the shared intro. No human input.
+- **`manual`** — the admin marks an intro window on one episode using the
+  on-device local player (`#localPlayer`, see [STREAMING.md](STREAMING.md)),
+  names it, and saves it as a **template**. The system fingerprints that exact
+  span and extrapolates it across every episode of the series. Multiple
+  templates per series are supported (mid-season theme changes); each episode is
+  checked against all of them and the **longest match wins**. A template-applied
+  intro is stored with `analysis.source == "template"` and the matched template
+  `name`.
+
+Templates live at `settings.series_skip[<key>].templates` as
+`{id, name, source_path, start, end, created_at}` — **raw fingerprints are not
+persisted**; they're recomputed from `source_path[start:end]` on each
+extrapolation (`analyzer._fingerprint_templates`). The matching/alignment is
+`analyzer._match_templates_to_heads` (reuses `_find_longest_match` against the
+existing first-6-min head fingerprint; floor relaxed via `TEMPLATE_MIN_MATCH_SEC`
+so short stingers can match without false-positiving). See
+[LIBRARY_DATA.md](LIBRARY_DATA.md) for the schema and [ADMIN.md](ADMIN.md) for the
+management UI.
+
 ## Dependencies
 
 - **`ffmpeg`** — audio decode + ffprobe duration + blackdetect fallback
@@ -53,7 +82,18 @@ The greedy approach handles three failure modes the original single-anchor appro
 
 ## Progress reporting
 
-`analyze_series(items, progress_cb)` invokes `progress_cb(stage, current, total, message, episode_name)` at each step. `main.py`'s `_set_analysis_status` broadcasts these as SSE `analysis_status` events. Stages: `starting` → `fingerprinting` → `matching-intros` → `matching-outros` → `finalizing` → `done`.
+`analyze_series(items, progress_cb, templates=None)` invokes `progress_cb(stage, current, total, message, episode_name)` at each step. `main.py`'s `_set_analysis_status` broadcasts these as SSE `analysis_status` events. Stages: `starting` → `fingerprinting` → `matching-intros` → `matching-outros` → `finalizing` → `done`. (In manual mode `matching-intros` is template extrapolation; `matching-outros` is unchanged.)
+
+**Monotonic overall progress (bug fix).** The per-stage `current/total` *resets*
+every stage, so it can't drive a single progress bar without it visually jumping
+backwards each time a new stage starts (the "bar regresses after hitting 100%"
+report). The orchestrator's `_on_progress` therefore maps each stage's local
+fraction onto one global `progress` (0..1) via `_analysis_overall_progress` /
+`_ANALYSIS_STAGE_RANGES` (fingerprinting 0–40 %, matching-intros 40–65 %,
+matching-outros 65–90 %, finalizing 90–100 %), clamped so it **never decreases**
+within a run (terminal states set `progress = 1.0`). The job carries `progress`
+in the `analysis_status` event; the admin bar reads that, keeping the
+`current/total` only as stage-counter text.
 
 ## Trigger flow (in `main.py`)
 
@@ -124,7 +164,11 @@ User-facing:
 Admin:
 - `GET /api/admin/library/{id}/skip-data` — per-file editor data (now also returns `error_code` / `error` for failed files)
 - `PATCH /api/admin/library/{id}/skip-data` — manual override (sets `analysis.source="manual"`)
-- `POST /api/admin/library/{id}/analyze` — force re-run for the item's series
+- `POST /api/admin/library/{id}/analyze` — force re-run for the item's series (dispatches by mode)
+- `GET /api/admin/library/{id}/skip-config` — `{mode, templates, series_key, files}` for the series
+- `POST /api/admin/library/{id}/skip-mode {mode}` — set `auto`/`manual` for the series + re-run
+- `POST /api/admin/library/{id}/skip-template {name, source_path, start, end}` — add an intro template + extrapolate
+- `DELETE /api/admin/library/{id}/skip-template/{template_id}` — remove a template + re-extrapolate
 - `GET /api/admin/analyzer-status` — `{available, ffmpeg, fpcalc}`
 - `GET /api/admin/analyzer-log?limit=N` — ring buffer of fingerprint events; each entry is `{ts, level, series_key, item_id, file_path, error_code, message}`
 
@@ -137,7 +181,9 @@ Admin:
     "credits_start": 2940.0,                       // or null
     "analysis": {
       "version": 2,
-      "source": "auto" | "auto-blackframe" | "auto-fallback" | "manual" | "failed",
+      "source": "auto" | "auto-blackframe" | "auto-fallback" |
+                "template" | "manual" | "failed",
+      "template": "Season 1 Opening",   // only when source == "template"
       // Only present when source == "failed":
       "error_code": "no_binary" | "file_missing" | "no_duration" |
                     "fp_empty"  | "too_short"    | "no_skip_points" | "exception",

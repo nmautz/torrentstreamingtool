@@ -37,6 +37,9 @@ Read this when changing anything related to:
 - **On-demand (JIT) streaming** — `stream-ondemand`, the `_od_*` session manager,
   the `/api/library/ondemand/<key>/…` virtual-playlist + segment endpoints, and the
   client `lp.mode === "ondemand"` path. See [§ On-Demand](#on-demand-just-in-time-streaming)
+- The **Smart Skip intro-template capture** (admin-only): the `#lpTemplateRow`
+  controls (`lpToggleTemplateCapture` / `lpSetTemplateBound` / `lpSaveTemplate`)
+  — see [§ Smart Skip template capture](#smart-skip-template-capture-admin)
 - The play chooser (`#playChooserModal`, `playLibraryWithChooser`, `pcChoose`)
 - The **Handoff** (both directions): TV→device (`handoffToDevice`, `#handoffBtn`,
   `#fcHandoffBtn`) and device→TV (`lpHandoffToVlc`, the local player's **To TV** button)
@@ -734,6 +737,31 @@ probed. `503` on macOS (`HLS_AVAILABLE` false).
 > rendition index. Windows/Linux/macOS-agnostic; gated on HLS like all prep.
 
 ---
+
+## Smart Skip template capture (admin)
+
+The on-device player doubles as the **visual selection tool** for Smart Skip's
+Manual mode: an admin plays/scrubs an episode, marks the intro's start and end on
+the real timeline, names it, and saves it as a per-series **template** that the
+analyzer then extrapolates across the whole series (see
+[ANALYZER.md § Operational modes](ANALYZER.md)).
+
+- **Gate.** The `#lpTemplateRow` controls carry the `lp-admin-only` class and are
+  hidden by CSS unless `#localPlayer` has `lp-admin`, which `lpPlay` sets when
+  `localStorage["streamlink_admin_token"]` is present (the same same-origin admin
+  token the `/admin` page mints). So only a browser that's logged into the admin
+  panel sees the capture UI; the Save request carries that token as a `Bearer`
+  header to the admin-gated `POST …/skip-template`.
+- **Flow.** **Mark Intro Template** reveals the capture box →
+  `lpSetTemplateBound('start'|'end')` snapshots `lpVideo.currentTime` into
+  `lp.tmplStart` / `lp.tmplEnd` (shown as `fmtTimeSecs`) → name it →
+  **Save Template** POSTs `{name, source_path: lp.filePath, start, end}`. The
+  toast nudges the admin to enable **Manual** mode in Admin → Smart Skip if the
+  series isn't already there (saving a template doesn't flip the mode by itself).
+- **macOS.** Like everything in this doc it rides HLS, so the capture UI is
+  unavailable on macOS hosts (the on-device player is hidden there). The
+  `/skip-template` endpoint and the analyzer extrapolation are host-agnostic and
+  testable independently. See [GOTCHAS.md](GOTCHAS.md).
 
 ## Pause / resume + auto-prep
 

@@ -68,6 +68,14 @@ FRAME_HAMMING_MAX = 6         # ≤6 bits differ = "same" frame (32-bit hash)
 MIN_MATCH_FRAMES  = int(MIN_INTRO_SEC * FP_FRAMES_PER_SEC)
 CREDITS_FALLBACK_PCT = 0.92   # if no outro found, mark credits at 92%
 
+# Manual / template extrapolation (mode == "manual"). An admin marks an intro
+# window on one episode in the on-device player; we fingerprint that exact span
+# and search for it in every other episode's head. A template can be shorter
+# than the 15 s auto-intro floor (a stinger / short theme), so the match floor
+# is relaxed here — but never below TEMPLATE_MIN_MATCH_SEC of audio, otherwise a
+# few coincidentally-similar frames would false-positive an intro.
+TEMPLATE_MIN_MATCH_SEC = 8
+
 
 def _env_bin(env_key: str) -> Optional[str]:
     """Read a binary path from the .env file. Falls back to PATH lookup."""
@@ -348,6 +356,105 @@ def _build_ep_offset_map(clusters: list[dict]) -> dict[int, tuple[int, int]]:
     return out
 
 
+# ── Manual template extrapolation ────────────────────────────────────────────
+
+def _template_min_frames(tmpl_len_frames: int) -> int:
+    """Minimum matched-run length for a template, in frames.
+
+    Relax the 15 s auto floor for short templates, but never accept a run
+    shorter than TEMPLATE_MIN_MATCH_SEC of audio (or 60 % of the template,
+    whichever is smaller) so a handful of similar frames can't false-positive.
+    """
+    floor = int(TEMPLATE_MIN_MATCH_SEC * FP_FRAMES_PER_SEC)
+    return max(floor, min(MIN_MATCH_FRAMES, int(tmpl_len_frames * 0.6)))
+
+
+def _fingerprint_templates(templates: list[dict]) -> list[dict]:
+    """Compute the raw fingerprint of each template's [start, end] source window.
+
+    Returns a parallel list of {name, id, fp, frames} — fp empty when the source
+    file is missing/unreadable or the span fingerprinted to nothing (that
+    template is then skipped during matching). Runs fpcalc/ffmpeg, so callers
+    must invoke it via asyncio.to_thread.
+    """
+    out: list[dict] = []
+    for t in templates:
+        try:
+            start = max(0.0, float(t.get("start", 0)))
+            end = float(t.get("end", 0))
+        except (TypeError, ValueError):
+            start, end = 0.0, 0.0
+        length = int(round(end - start))
+        src = t.get("source_path", "")
+        fp: list[int] = []
+        if length >= 1 and src and Path(src).exists():
+            fp = _fpcalc_raw(src, length, int(start))
+        out.append({
+            "name":   t.get("name", ""),
+            "id":     t.get("id", ""),
+            "fp":     fp,
+            "frames": len(fp),
+            "secs":   round(end - start, 1),
+        })
+    return out
+
+
+async def _match_templates_to_heads(
+    template_fps: list[dict],
+    head_fps: list[list[int]],
+    progress_cb,
+    executor: Optional[concurrent.futures.ProcessPoolExecutor] = None,
+    episodes: Optional[list[dict]] = None,
+) -> dict[int, tuple[float, float, str]]:
+    """For each episode head, find the best-matching template and align it.
+
+    Returns dict[ep_idx -> (intro_start_sec, intro_end_sec, template_name)].
+    Episodes that match no template are absent (intro stays None — they still
+    get the auto credits fallback downstream).
+
+    Alignment: `_find_longest_match(template_fp, head_fp)` returns
+    (offset_in_template, offset_in_head, run_len). The template window is the
+    intro, so the episode's intro start is where the template's *own* start
+    lands in the head: `head_offset − template_offset` (clamped ≥0). The intro
+    length is the template's real duration (end − start), independent of how
+    much of it matched.
+    """
+    out: dict[int, tuple[float, float, str]] = {}
+    usable = [t for t in template_fps if t["fp"]]
+    if not usable:
+        return out
+    total = len(head_fps)
+    for idx, head in enumerate(head_fps):
+        ep_name = (Path(episodes[idx]["path"]).name
+                   if episodes and 0 <= idx < len(episodes) else "")
+        try:
+            await progress_cb(
+                stage="matching-intros", current=idx + 1, total=total,
+                message=f"Matching templates {idx + 1} of {total}",
+                episode_name=ep_name,
+            )
+        except Exception:
+            pass
+        if not head:
+            continue
+        # (run_len, start_sec, secs, name) of the best-matching template so far.
+        best: Optional[tuple[int, float, float, str]] = None
+        for t in usable:
+            min_fr = _template_min_frames(t["frames"])
+            max_fr = int(MAX_INTRO_SEC * FP_FRAMES_PER_SEC)
+            m = await _run_match(executor, t["fp"], head, min_fr, max_fr)
+            if not m:
+                continue
+            off_in_tmpl, off_in_head, run_len = m
+            start_fr = max(0, off_in_head - off_in_tmpl)
+            if best is None or run_len > best[0]:
+                best = (run_len, frames_to_seconds(start_fr), t["secs"], t["name"])
+        if best is not None:
+            _, start_sec, secs, name = best
+            out[idx] = (round(start_sec, 1), round(start_sec + secs, 1), name)
+    return out
+
+
 # ── Public API ───────────────────────────────────────────────────────────────
 
 def frames_to_seconds(frames: int) -> float:
@@ -487,7 +594,8 @@ async def _build_clusters_async(
     return clusters
 
 
-async def analyze_series(items: list[dict], progress_cb=None) -> dict:
+async def analyze_series(items: list[dict], progress_cb=None,
+                         templates: Optional[list[dict]] = None) -> dict:
     """Analyze a series of items, returning per-file intro/credits ranges.
 
     Input: a list of library items belonging to the same series, each with a
@@ -501,6 +609,16 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
     same series are analyzed. Movies (1 file, no peers) get the 92% credits
     heuristic only.
 
+    `templates` selects the intro-detection strategy:
+      - None  → **Automatic** mode (current behaviour): greedy-cluster the
+        episode heads to discover the shared intro.
+      - list  → **Manual / template** mode: each template is an admin-marked
+        intro window `{name, source_path, start, end}`; we fingerprint that span
+        and align it into every episode's head. Credits detection is identical
+        in both modes (outro clustering → blackframe → 92 % fallback), so manual
+        mode keeps automatic credit skipping. A template-applied intro carries
+        `analysis.source == "template"` and a `template` name.
+
     progress_cb is an optional async callable invoked with kwargs:
         stage:    "fingerprinting" | "matching-intros" | "matching-outros" | "finalizing"
         current:  int (1-based item being processed)
@@ -508,6 +626,7 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
         message:  short human-readable string
         episode_name: optional basename of file being processed
     """
+    manual_mode = templates is not None
     async def _emit(**kw):
         if progress_cb is None:
             return
@@ -637,14 +756,25 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
     # *thread* wouldn't — the GIL convoy effect freezes the dashboard). One pool
     # serves both stages; tear it down in finally so the worker never lingers.
     executor = _new_match_executor()
+    intro_by_ep: dict[int, tuple[int, int]] = {}          # auto mode (frames)
+    manual_intro_by_ep: dict[int, tuple[float, float, str]] = {}  # manual (secs)
     try:
-        max_intro_frames = int(MAX_INTRO_SEC * FP_FRAMES_PER_SEC)
-        intro_clusters = await _build_clusters_async(
-            head_fps, MIN_MATCH_FRAMES, max_intro_frames,
-            episodes, _emit, "matching-intros", executor,
-        )
-        intro_by_ep = _build_ep_offset_map(intro_clusters)
+        if manual_mode:
+            # Template extrapolation: fingerprint each marked window once, then
+            # align it into every episode head. No intro clustering.
+            template_fps = await asyncio.to_thread(_fingerprint_templates, templates)
+            manual_intro_by_ep = await _match_templates_to_heads(
+                template_fps, head_fps, _emit, executor, episodes,
+            )
+        else:
+            max_intro_frames = int(MAX_INTRO_SEC * FP_FRAMES_PER_SEC)
+            intro_clusters = await _build_clusters_async(
+                head_fps, MIN_MATCH_FRAMES, max_intro_frames,
+                episodes, _emit, "matching-intros", executor,
+            )
+            intro_by_ep = _build_ep_offset_map(intro_clusters)
 
+        # Credits detection is shared by both modes.
         max_outro_frames = int(MAX_OUTRO_SEC * FP_FRAMES_PER_SEC)
         outro_clusters = await _build_clusters_async(
             tail_fps, MIN_MATCH_FRAMES, max_outro_frames,
@@ -669,7 +799,14 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
                     episode_name=ep_name)
 
         intro: Optional[dict] = None
-        if idx in intro_by_ep:
+        intro_template: Optional[str] = None   # set in manual mode when a template matched
+        if manual_mode:
+            mi = manual_intro_by_ep.get(idx)
+            if mi:
+                start_s, end_s, tmpl_name = mi
+                intro = {"start": start_s, "end": end_s}
+                intro_template = tmpl_name
+        elif idx in intro_by_ep:
             s_fr, l_fr = intro_by_ep[idx]
             intro = {
                 "start": round(frames_to_seconds(s_fr), 1),
@@ -695,13 +832,19 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
                 source = "auto-fallback"
 
         if intro or credits_start is not None:
+            if intro and intro_template is not None:
+                intro_source = "template"
+            elif intro:
+                intro_source = "auto"
+            else:
+                intro_source = source
+            analysis = {"version": ANALYZER_VERSION, "source": intro_source}
+            if intro_template is not None:
+                analysis["template"] = intro_template
             result[path] = {
                 "intro": intro,
                 "credits_start": credits_start,
-                "analysis": {
-                    "version": ANALYZER_VERSION,
-                    "source": "auto" if intro else source,
-                },
+                "analysis": analysis,
             }
         else:
             # Nothing usable — record why so the admin can see it and the user

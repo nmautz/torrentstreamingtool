@@ -148,6 +148,18 @@ Audio fingerprinting (`analyzer.py`) is kicked off by `_ensure_analysis_for` at 
 
 **macOS: no fingerprinting at all.** Since prep is the only trigger and prep is disabled on macOS (`HLS_AVAILABLE` false, the TCC `~/Downloads` block), fingerprinting never runs on a macOS host. This is acceptable — the analyzer's ffmpeg/fpcalc children read the source from the same protected dirs and would hit the identical TCC block. Windows/Linux (the real targets) are unaffected.
 
+### Smart Skip modes — `manual` vs `template` source, and recompute-don't-store
+
+Manual mode (`settings.series_skip[<key>].mode == "manual"`) stores admin intro **templates** as `{name, source_path, start, end}` and **never persists the raw fingerprint** — `analyzer._fingerprint_templates` recomputes it from `source_path[start:end]` on every extrapolation. So (a) the template's source file must be on disk at run time (a deleted source silently yields no match — by design, not an error), and (b) don't "optimise" by caching the fp into `library.json`; that's what bloated earlier schemas and the recompute is cheap (one fpcalc on a ≤3-min span).
+
+Two distinct `source` values that look similar but behave oppositely: **`manual`** is a *hand-typed* edit in the Smart Skip editor and is **never overwritten** (guarded in `_run_series_analysis`'s persist loop); **`template`** is an intro *auto-applied from a manual template* and **is** overwritten on every re-run/mode switch. Don't collapse them — a re-extrapolation must refresh template results while leaving hand edits intact.
+
+The in-player **Mark Intro Template** capture is gated purely on the presence of the same-origin `localStorage["streamlink_admin_token"]` (it adds `lp-admin` to `#localPlayer`); the actual security boundary is the server's `_require_admin` on `POST …/skip-template`, which re-checks the Bearer token. The CSS gate is convenience only — never rely on it for authorization.
+
+### Smart Skip progress bar must read `job.progress`, not `current/total`
+
+The analyzer emits `current/total` **per stage**, and every stage restarts the counter (fingerprinting 1/N, then matching-intros 1/M, …). Driving a progress bar off `current/total` makes it slam to 100 % then jump back to ~0 % at each stage boundary (the original bug). The orchestrator now publishes a monotonic overall `progress` (0..1) on the job via `_analysis_overall_progress` / `_ANALYSIS_STAGE_RANGES`; the admin bar reads **that**. If you add a stage, add its weight range — and don't reintroduce a `current/total`-driven width.
+
 ### Night mode toggles by relaunching VLC — there's no runtime audio-filter command
 
 Night mode is VLC's `compressor` audio filter (dynamic-range compression: pull loud peaks down, lift quiet dialogue up), with three user-selectable intensity presets (`light`/`medium`/`max`). VLC's Lua HTTP interface has **no command to add or remove an audio filter on a running instance** — `--audio-filter` is read only at launch. So changing night mode (`POST /api/settings/night-mode`) cannot be a live VLC command; `_apply_night_mode` snapshots the current file + position, calls `_restart_vlc_process` (which appends `NIGHT_MODE_PRESETS[state.vlc_night_mode_preset]` when `state.vlc_night_mode` is set), then replays the file + playlist tail and seeks back so it's seamless mid-movie. A no-op (already in the requested state), **or a preset change while night mode is off**, persists the setting but skips the relaunch — so the user isn't kicked out of playback for nothing.

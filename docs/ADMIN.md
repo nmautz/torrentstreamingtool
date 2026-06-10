@@ -77,10 +77,13 @@ To grant a profile elevated access without making them an admin, use the Profile
 ### 3. Smart Skip ([static/admin.html:155](../static/admin.html#L155))
 
 For each item:
-- **Series key**, file count, "X/Y files have skip data"
-- If an analysis job is running for the series, shows a live progress bar (driven by `analysis_status` SSE events)
-- **Analyze** button → `POST /api/admin/library/{id}/analyze` — force re-run for the entire series
-- **Edit** button → opens inline editor with three numeric fields per file (intro start, intro end, credits start). Empty → clear. Save calls `PATCH /api/admin/library/{id}/skip-data`. Manual edits set `analysis.source="manual"` so they survive future analyzer runs
+- **Series key**, file count, "X/Y files have skip data", and a **Manual** tag when the series is in template mode
+- If an analysis job is running for the series, shows a live progress bar. The bar is driven by the job's monotonic `progress` (0..1) from the `analysis_status` SSE event — **not** the per-stage `current/total`, which resets each stage and used to make the bar jump backwards. The counter text still shows `current/total`
+- **Analyze** button → `POST /api/admin/library/{id}/analyze` — force re-run for the entire series (uses the series' current mode)
+- **Edit** button → opens the inline editor. At the top:
+  - **Mode** toggle (**Automatic** | **Manual / Templates**) → `POST /api/admin/library/{id}/skip-mode`. Automatic is the fingerprint-clustering pipeline; Manual extrapolates admin-marked intro **templates** (credits stay auto). Switching re-runs analysis.
+  - **Intro Templates** list (manual mode) — each template's name · source file · `start–end`, with a **Delete** button (`DELETE …/skip-template/{id}`). Templates are *created* from the on-device player's **Mark Intro Template** capture (admin-only — see [STREAMING.md](STREAMING.md)); a hint shows when templates exist but the series is still on Automatic.
+  - Per file: three numeric fields (intro start, intro end, credits start). Empty → clear. Save calls `PATCH /api/admin/library/{id}/skip-data`. Manual edits set `analysis.source="manual"` and are **never overwritten** by analyzer/template re-runs (a `source="template"` auto-applied intro is overwritten normally).
 
 Admin SSE: `ensureAdminSSE()` opens `/api/events?admin_token=…` so the progress bars live-update.
 

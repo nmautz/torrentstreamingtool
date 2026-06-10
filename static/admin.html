@@ -3527,23 +3527,27 @@ function _statusBadge(job, filesWithSkip, fileCount, filesFailed){
     return `<span class="text-[10px] font-bold uppercase tracking-widest px-2 py-1 border bg-gray-900 border-gray-800 text-gray-600">Not analyzed</span>`;
   }
   if(job.status === "running"){
-    const pct = (job.total>0) ? Math.round((job.current||0)/job.total*100) : null;
+    // Bar is driven by the server's monotonic overall `progress` (0..1), which
+    // spans the whole multi-stage pipeline — so it never regresses when a new
+    // stage restarts its own current/total counter. The counter is kept as text.
+    const overall = (job.progress!=null)
+      ? Math.max(0, Math.min(100, Math.round(job.progress*100)))
+      : ((job.total>0) ? Math.round((job.current||0)/job.total*100) : 0);
     const stageLabel = ({
       "starting": "Starting…",
       "fingerprinting": "Fingerprinting",
-      "matching-intros": "Matching intros",
+      "matching-intros": (job.mode==="manual" ? "Matching templates" : "Matching intros"),
       "matching-outros": "Matching credits",
       "finalizing": "Finalizing",
     })[job.stage] || (job.stage||"Working");
     const counter = (job.total>0) ? ` ${job.current||0}/${job.total}` : "";
-    const pctTxt = pct!==null ? ` · ${pct}%` : "";
     return `
       <div class="flex flex-col items-end gap-1 min-w-[140px]">
         <span class="text-[10px] font-bold uppercase tracking-widest px-2 py-1 border bg-indigo-950 border-indigo-700 text-indigo-300">
-          ${escHtml(stageLabel)}${escHtml(counter)}${escHtml(pctTxt)}
+          ${escHtml(stageLabel)}${escHtml(counter)} · ${overall}%
         </span>
         <div class="w-full h-1 bg-gray-800 overflow-hidden">
-          <div class="h-full bg-indigo-500 transition-all" style="width:${pct ?? 0}%"></div>
+          <div class="h-full bg-indigo-500 transition-all" style="width:${overall}%"></div>
         </div>
         ${job.episode_name?`<span class="text-[9px] text-gray-600 truncate max-w-[180px]" title="${escHtml(job.episode_name)}">${escHtml(job.episode_name)}</span>`:""}
       </div>`;
@@ -3566,6 +3570,7 @@ function _renderSkipRow(it, job){
         <div class="text-xs text-gray-600 mt-0.5">
           ${it.series?escHtml(it.series)+' · ':''}${it.file_count} file${it.file_count!==1?'s':''}
           · <span class="uppercase">${escHtml(it.status)}</span>
+          ${it.skip_mode==="manual"?` · <span class="uppercase text-indigo-400 font-bold">Manual</span>`:''}
         </div>
       </div>
       <div class="skip-row-status flex-shrink-0">${_statusBadge(job, it.files_with_skip||0, it.file_count||0, it.files_failed||0)}</div>
@@ -3718,23 +3723,106 @@ async function analyzeSkipForItem(itemId, btn){
 
 let _skipEditorItemId = null;
 
+// Render the per-series operational mode toggle + manual template list at the
+// top of the skip editor. Auto = the clustering pipeline; Manual = extrapolate
+// admin-marked intro templates (credits stay automatic). Templates are captured
+// in the on-device player (index.html) — managed/deleted here.
+function _renderSkipConfig(cfg){
+  const mode = cfg.mode || "auto";
+  const btn = (m,label)=>`
+    <button onclick="setSkipMode('${m}', this)"
+      class="flex-1 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors ${
+        mode===m ? 'bg-indigo-600 border-indigo-500 text-white'
+                 : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white'}">${label}</button>`;
+  const templates = cfg.templates || [];
+  let tmplHtml;
+  if(!templates.length){
+    tmplHtml = `<div class="text-[11px] text-gray-600 px-1 py-2">
+      No intro templates yet. Play an episode <span class="text-emerald-400 font-bold">On Device</span> and use
+      <span class="text-indigo-300 font-bold">Mark Intro Template</span> in the player to capture one.</div>`;
+  } else {
+    tmplHtml = templates.map(t=>{
+      const src = (t.source_path||'').split(/[\\/]/).pop();
+      const span = `${Math.round(t.start)}s–${Math.round(t.end)}s`;
+      return `<div class="flex items-center justify-between gap-2 px-2 py-1.5 border border-gray-800 bg-gray-950/50">
+        <div class="min-w-0">
+          <div class="text-xs font-bold text-gray-200 truncate">${escHtml(t.name||'(unnamed)')}</div>
+          <div class="text-[10px] text-gray-600 truncate" title="${escHtml(t.source_path||'')}">${escHtml(src)} · ${escHtml(span)}</div>
+        </div>
+        <button onclick="deleteSkipTemplate('${escHtml(t.id)}', this)"
+          class="flex-shrink-0 text-[10px] font-bold uppercase tracking-wide px-2 py-1 border bg-red-950 border-red-800 text-red-300 hover:bg-red-900 transition-colors">Delete</button>
+      </div>`;
+    }).join("");
+  }
+  const manualHint = (mode!=="manual" && templates.length)
+    ? `<div class="text-[11px] px-2 py-1.5 border bg-amber-950 border-amber-800 text-amber-200 mt-2">Templates won't apply until <span class="font-bold">Manual</span> mode is on.</div>`
+    : "";
+  return `
+    <div class="px-5 py-4 border-b border-gray-800 space-y-3">
+      <div>
+        <div class="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Mode</div>
+        <div class="flex gap-2">${btn('auto','Automatic')}${btn('manual','Manual / Templates')}</div>
+        <div class="text-[10px] text-gray-600 mt-1.5">${mode==='manual'
+          ? 'Intros come from your templates below; credits are still auto-detected.'
+          : 'Intros and credits are auto-detected by audio fingerprint clustering.'}</div>
+      </div>
+      <div>
+        <div class="text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Intro Templates</div>
+        <div class="space-y-1.5">${tmplHtml}</div>
+        ${manualHint}
+      </div>
+    </div>`;
+}
+
+async function setSkipMode(mode, btn){
+  if(!_skipEditorItemId) return;
+  await withInflight("set_skip_mode", btn, async () => {
+    const r = await fetch(`/api/admin/library/${_skipEditorItemId}/skip-mode`,{
+      method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+      body: JSON.stringify({mode}),
+    });
+    if(r.ok){ showToast(`Mode set to ${mode}. Re-analyzing…`); openSkipEditor(_skipEditorItemId, _skipEditorTitle); }
+    else { const d=await r.json().catch(()=>({})); showToast(d.detail||"Failed to set mode.", true); }
+  });
+}
+
+async function deleteSkipTemplate(tid, btn){
+  if(!_skipEditorItemId) return;
+  if(!confirm("Delete this intro template? The series will be re-extrapolated.")) return;
+  await withInflight(`del_tmpl_${tid}`, btn, async () => {
+    const r = await fetch(`/api/admin/library/${_skipEditorItemId}/skip-template/${encodeURIComponent(tid)}`,{
+      method:"DELETE", headers: authHeader(),
+    });
+    if(r.ok){ showToast("Template deleted."); openSkipEditor(_skipEditorItemId, _skipEditorTitle); }
+    else { const d=await r.json().catch(()=>({})); showToast(d.detail||"Delete failed.", true); }
+  });
+}
+
+let _skipEditorTitle = "";
+
 async function openSkipEditor(itemId, title){
   _skipEditorItemId = itemId;
+  _skipEditorTitle = title;
   document.getElementById("skipEditorTitle").textContent = `Edit Skip Times — ${title}`;
   document.getElementById("skipEditor").classList.remove("hidden");
   const container = document.getElementById("skipEditorFiles");
   container.innerHTML = `<div class="px-5 py-8 text-center text-gray-600 text-sm">Loading…</div>`;
-  const r = await fetch(`/api/admin/library/${itemId}/skip-data`, {headers: authHeader()});
-  if(!r.ok){
+  const [rData, rCfg] = await Promise.all([
+    fetch(`/api/admin/library/${itemId}/skip-data`, {headers: authHeader()}),
+    fetch(`/api/admin/library/${itemId}/skip-config`, {headers: authHeader()}),
+  ]);
+  if(!rData.ok){
     container.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Failed to load.</div>`;
     return;
   }
-  const {files} = await r.json();
+  const {files} = await rData.json();
+  const cfg = rCfg.ok ? await rCfg.json() : {mode:"auto", templates:[]};
+  const configHtml = _renderSkipConfig(cfg);
   if(!files.length){
-    container.innerHTML = `<div class="px-5 py-8 text-center text-gray-600 text-sm">No files.</div>`;
+    container.innerHTML = configHtml + `<div class="px-5 py-8 text-center text-gray-600 text-sm">No files.</div>`;
     return;
   }
-  container.innerHTML = files.map((f,i)=>{
+  container.innerHTML = configHtml + files.map((f,i)=>{
     const failed = f.source === "failed";
     const errBlock = failed
       ? `<div class="text-[11px] px-2 py-1.5 border bg-red-950 border-red-800 text-red-200">

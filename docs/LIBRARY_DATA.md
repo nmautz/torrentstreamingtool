@@ -63,6 +63,17 @@ The only persistent server-side state. Lives at the project root. Accessed via `
       "translate":        true          // add an English track for non-English audio
       // default_language is UNIFIED — sourced from settings.subtitles, not stored here
     },
+    "series_skip": {                    // Smart Skip operational mode, per series_key
+      "series:the boys s01": {
+        "mode": "manual",               // "auto" (default) | "manual" (template extrapolation)
+        "templates": [                  // manual intro templates; empty/absent ⇒ none
+          { "id": "hex", "name": "Season 1 Opening",
+            "source_path": "/abs/S01E01.mkv",  // the episode the window was marked on
+            "start": 12.0, "end": 105.0,       // intro window (seconds) in source_path
+            "created_at": "2026-06-10T…" }
+        ]
+      }
+    },
     "autoupdate": {                     // dashboard auto-updater (admin Updates tab)
       "enabled":        false,
       "branch":         "main",         // main/beta/alpha — or any branch when dev_mode
@@ -120,6 +131,8 @@ PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "so
 `settings.cache_autopurge`: managed by the **Offline Cache** admin tab's *Auto-Purge Orphans* card; read via `_cache_autopurge_cfg`. **Default OFF.** The `cache_autopurge_loop` task re-checks every 5 min: when `enabled` and the total `.offline_cache/` size is at/above `max_gb` GB, it deletes every orphan bundle (the same set the manual "Purge All Orphans" clears — cache/partial dirs + legacy MP4s that no longer map to a live library file). Bundles backing current library files are never touched, and active prep jobs are skipped, so it can only reclaim already-safe space. `max_gb` is clamped 1–10000. The last run's `{deleted, bytes_freed, …}` is held in-memory on `state.cache_autopurge_last` (not persisted). Lives under `settings` because it applies to the physical host's disk. See [ADMIN.md](ADMIN.md).
 
 `settings.autoupdate`: managed by the **Updates** admin tab (see [ADMIN.md §8](ADMIN.md)). Drives the `updater_loop` background task + the `/api/admin/updater/*` endpoints. `branch` is sanitised on read (`_autoupdate_cfg`): when `dev_mode` is false a non-canonical value snaps back to `main`; when `dev_mode` is true any structurally-valid branch name survives (so a developer can pin a feature branch). All branch operations route through `updater.branch_allowed(branch, allow_any=dev_mode)`. Lives under `settings` because the updater acts on the whole host install, not an individual viewer.
+
+`settings.series_skip`: managed by the **Smart Skip** admin tab (mode toggle + template list) and the on-device player's *Mark Intro Template* capture (admin-only). Keyed by `_series_key(item)` (`series:<name>` or `item:<id>`); read via `_series_skip_cfg`, written via `_series_skip_put` (which prunes an entry back to nothing when it returns to the default `auto` + no templates). `mode` is `"auto"` (greedy-cluster intro guessing — the default) or `"manual"` (extrapolate the admin-marked `templates` across the series; credits stay auto). Each template is `{id, name, source_path, start, end, created_at}`; **no fingerprint is stored** — it's recomputed from `source_path[start:end]` on each extrapolation, so the source file must be on disk at run time. Lives under `settings` because it's host/library policy, not per-viewer. See [ANALYZER.md § Operational modes](ANALYZER.md) and [ADMIN.md](ADMIN.md).
 
 `settings.subtitles`: managed by the **System** admin tab's *Subtitles* card; read via `_subs_cfg`. The single source of truth for the preferred subtitle language. `default_language` is a 3-letter code (`_canon_lang`-normalized) or `""` (Any). **Migration / defaults:** if the `subtitles` block is absent it's seeded from the legacy `settings.stt.default_language` when that's set, else `"eng"` — so an unconfigured box defaults to English; once the block exists its value is used verbatim (so an admin who picks "Any" → `""` keeps it). `on_by_default` is whether playback starts with subs on (default false; a profile's `subtitles_on` overrides). `auto_search` lets playback fetch a preferred-language sub from OpenSubtitles when none is embedded (default true). `upgrade_late_subs` (default true) swaps an auto-applied **AI** sub for a real preferred-language one once it finishes downloading — driven by the `subtitle_upgrade_loop` task (VLC) and the on-device player's poller (`GET /api/library/{id}/subs`). `single_option` (default true) treats a lone real subtitle as the preferred language even when its filename carries no language tag. This is the central subtitle setting: `_stt_cfg` re-sources its `default_language` from here, the search endpoint defaults to it, and `_apply_subtitle_policy` selects tracks by it (preferring a **real** track over an AI one for the same language).
 
@@ -292,7 +305,9 @@ Written by `vlc_progress_tracker` every 15 s. `mark_watched` ([main.py:2221](../
     "credits_start": 2940.0,                     // or null
     "analysis": {
       "version": 2,                              // analyzer.ANALYZER_VERSION
-      "source": "auto" | "auto-blackframe" | "auto-fallback" | "manual" | "failed",
+      "source": "auto" | "auto-blackframe" | "auto-fallback" |
+                "template" | "manual" | "failed",
+      // "template": "Season 1 Opening",         // present when source == "template"
       // Only present when source == "failed":
       "error_code": "no_binary" | "file_missing" | "no_duration" |
                     "fp_empty"  | "too_short"    | "no_skip_points" | "exception",
@@ -302,7 +317,7 @@ Written by `vlc_progress_tracker` every 15 s. `mark_watched` ([main.py:2221](../
 }
 ```
 
-`source="manual"` entries are never overwritten by re-runs. Entries with `analysis.version < ANALYZER_VERSION` are eligible for re-analysis. `source="failed"` entries are also retried on the next ready-flip in the series — when a new sibling episode arrives, the larger fingerprint pool can unlock a previously-failed file. See [ANALYZER.md](ANALYZER.md#failure-tracking) for the full table of error codes and how the failure is surfaced to users + admins.
+`source="manual"` (hand-typed in the editor) entries are never overwritten by re-runs — enforced by a guard in `_run_series_analysis`'s persist loop. `source="template"` (auto-applied from a manual template) and the `auto*` sources **are** overwritten by re-runs/mode switches. Entries with `analysis.version < ANALYZER_VERSION` are eligible for re-analysis. `source="failed"` entries are also retried on the next ready-flip in the series — when a new sibling episode arrives, the larger fingerprint pool can unlock a previously-failed file. See [ANALYZER.md](ANALYZER.md#failure-tracking) for the full table of error codes and how the failure is surfaced to users + admins.
 
 ### `metadata` (TMDb cache, optional)
 

@@ -4100,6 +4100,45 @@ def _items_for_series_key(lib: dict, key: str) -> list[dict]:
     return [it for it in lib["items"] if _series_key(it) == key]
 
 
+# ── Smart Skip operational mode (Auto vs Manual template extrapolation) ────────
+# Stored per series_key under settings.series_skip. See docs/ANALYZER.md +
+# docs/LIBRARY_DATA.md. Default is "auto" (the original clustering pipeline);
+# "manual" replaces intro guessing with admin-marked templates (credits stay
+# automatic). Raw fingerprints are NOT persisted — they're recomputed from each
+# template's source file at extrapolation time, so library.json stays lean.
+_SKIP_MODES = ("auto", "manual")
+
+
+def _series_skip_cfg(lib: dict, key: str) -> dict:
+    """Return {mode, templates} for a series_key (defaults: auto / no templates)."""
+    store = (lib.get("settings", {}) or {}).get("series_skip") or {}
+    cfg = store.get(key) or {}
+    mode = cfg.get("mode")
+    if mode not in _SKIP_MODES:
+        mode = "auto"
+    templates = cfg.get("templates")
+    if not isinstance(templates, list):
+        templates = []
+    return {"mode": mode, "templates": templates}
+
+
+def _series_skip_put(lib: dict, key: str, cfg: dict) -> None:
+    """Write {mode, templates} for a series_key into settings.series_skip.
+
+    Prunes the entry entirely when it's back to the default (auto + no
+    templates) so the settings block doesn't accumulate dead keys."""
+    settings = lib.setdefault("settings", {})
+    store = settings.setdefault("series_skip", {})
+    mode = cfg.get("mode") if cfg.get("mode") in _SKIP_MODES else "auto"
+    templates = cfg.get("templates") or []
+    if mode == "auto" and not templates:
+        store.pop(key, None)
+    else:
+        store[key] = {"mode": mode, "templates": templates}
+    if not store:
+        settings.pop("series_skip", None)
+
+
 def _skip_settings_for_profile(lib: dict, profile_id: str) -> dict:
     """Return {auto_skip_intro, auto_skip_credits} for a profile (defaults False)."""
     if not profile_id:
@@ -4175,6 +4214,34 @@ def _item_skip_status(item: dict) -> str:
     return "ok"
 
 
+# Weighted span each analyzer stage occupies in the overall 0..1 progress. The
+# per-stage current/total resets every stage, so the raw fraction can't drive a
+# single bar without it jumping backwards — these ranges map each stage's local
+# fraction into a global one that only ever advances. (matching-intros also
+# covers manual template matching, which reuses that stage label.)
+_ANALYSIS_STAGE_RANGES = {
+    "starting":        (0.00, 0.00),
+    "fingerprinting":  (0.00, 0.40),
+    "matching-intros": (0.40, 0.65),
+    "matching-outros": (0.65, 0.90),
+    "finalizing":      (0.90, 1.00),
+    "done":            (1.00, 1.00),
+}
+
+
+def _analysis_overall_progress(stage: str, current: int, total: int,
+                               prev: float = 0.0) -> float:
+    """Map a stage's local (current/total) onto the monotonic overall fraction.
+
+    Clamped to [0,1] and never allowed to drop below `prev`, so a new stage that
+    restarts current/total at 1/N can't visually rewind the bar."""
+    lo, hi = _ANALYSIS_STAGE_RANGES.get(stage, (prev, prev))
+    frac = (current / total) if total else 0.0
+    frac = max(0.0, min(1.0, frac))
+    overall = lo + (hi - lo) * frac
+    return max(float(prev or 0.0), min(1.0, overall))
+
+
 async def _set_analysis_status(series_key: str, **patch) -> None:
     """Update state.analysis_jobs[series_key] and broadcast the change."""
     job = state.analysis_jobs.setdefault(series_key, {})
@@ -4227,10 +4294,17 @@ async def _run_series_analysis(series_key: str) -> None:
         if not ready_items:
             return
 
+        # Operational mode for this series. "manual" extrapolates admin-marked
+        # intro templates (credits still auto); "auto" is the clustering pipeline.
+        skip_cfg = _series_skip_cfg(lib, series_key)
+        manual_mode = skip_cfg["mode"] == "manual"
+        templates = skip_cfg["templates"] if manual_mode else None
+
         # Start
         await _set_analysis_status(
             series_key, status="running",
-            stage="starting", current=0, total=0,
+            stage="starting", current=0, total=0, progress=0.0,
+            mode=skip_cfg["mode"],
             message="Preparing analysis…",
             item_ids=item_ids,
             started_at=_now_iso(),
@@ -4238,7 +4312,15 @@ async def _run_series_analysis(series_key: str) -> None:
         )
 
         async def _on_progress(**kw):
-            await _set_analysis_status(series_key, status="running", **kw)
+            # Collapse the per-stage current/total into one monotonic overall
+            # fraction so the admin progress bar never regresses when the pipeline
+            # advances to the next stage. See _analysis_overall_progress.
+            overall = _analysis_overall_progress(
+                kw.get("stage", ""), kw.get("current", 0), kw.get("total", 0),
+                state.analysis_jobs.get(series_key, {}).get("progress", 0.0),
+            )
+            await _set_analysis_status(series_key, status="running",
+                                       progress=overall, **kw)
 
         # Fingerprint only the files the user actually downloaded — exclude "skip"
         # files (deselected from the download) so a partial selection isn't dragged
@@ -4246,7 +4328,8 @@ async def _run_series_analysis(series_key: str) -> None:
         # then naturally leaves skip files' skip_data untouched.
         analyze_items = [dict(it, files=_analyzable_files(it)) for it in ready_items]
         try:
-            results = await analyzer.analyze_series(analyze_items, progress_cb=_on_progress)
+            results = await analyzer.analyze_series(
+                analyze_items, progress_cb=_on_progress, templates=templates)
         except Exception as exc:
             err_msg = f"Analysis crashed: {exc}"
             # Record an exception entry for every file in the series so the
@@ -4273,7 +4356,7 @@ async def _run_series_analysis(series_key: str) -> None:
             await _set_analysis_status(
                 series_key, status="failed",
                 stage="error", message=err_msg,
-                finished_at=_now_iso(),
+                progress=1.0, finished_at=_now_iso(),
             )
             # fall through to persistence so per-file failures still get recorded
 
@@ -4289,6 +4372,12 @@ async def _run_series_analysis(series_key: str) -> None:
             for f in it.get("files", []):
                 p = f.get("path", "")
                 if p in results:
+                    # Never clobber a hand-typed admin edit (source == "manual").
+                    # Auto/template re-runs may overwrite their own prior results,
+                    # but the editor's manual override is sticky in both modes.
+                    existing = (skip_data.get(p, {}).get("analysis") or {})
+                    if existing.get("source") == "manual":
+                        continue
                     skip_data[p] = results[p]
                     files_updated += 1
                     changed = True
@@ -4314,7 +4403,7 @@ async def _run_series_analysis(series_key: str) -> None:
                 await _set_analysis_status(
                     series_key, status="failed",
                     stage="error", message="No analyzable episodes found",
-                    finished_at=_now_iso(),
+                    progress=1.0, finished_at=_now_iso(),
                 )
             elif files_failed and not successes:
                 await _set_analysis_status(
@@ -4322,7 +4411,7 @@ async def _run_series_analysis(series_key: str) -> None:
                     stage="error",
                     message=f"All {files_failed} file(s) failed fingerprinting",
                     current=files_updated, total=files_updated,
-                    finished_at=_now_iso(),
+                    progress=1.0, finished_at=_now_iso(),
                 )
             else:
                 msg = f"Updated {successes} file(s)"
@@ -4332,7 +4421,7 @@ async def _run_series_analysis(series_key: str) -> None:
                     series_key, status="complete",
                     stage="done", message=msg,
                     current=files_updated, total=files_updated,
-                    finished_at=_now_iso(),
+                    progress=1.0, finished_at=_now_iso(),
                 )
 
 
@@ -5486,6 +5575,17 @@ class AdminSkipDataReq(BaseModel):
     intro_start: Optional[float] = None    # null = clear intro
     intro_end:   Optional[float] = None
     credits_start: Optional[float] = None  # null = clear credits
+
+
+class SkipModeReq(BaseModel):
+    mode: str                              # "auto" | "manual"
+
+
+class SkipTemplateReq(BaseModel):
+    name: str                              # admin-given label, e.g. "Season 1 Opening"
+    source_path: str                       # the episode file the window was marked on
+    start: float                           # intro start (seconds) in source_path
+    end:   float                           # intro end (seconds) in source_path
 
 
 class BackgroundVolumeReq(BaseModel):
@@ -8458,6 +8558,7 @@ async def admin_list_library(request: Request) -> JSONResponse:
             "status": it.get("status", "ready"),
             "admin_only": it.get("admin_only", False),
             "series_key": series_key,
+            "skip_mode": _series_skip_cfg(lib, series_key)["mode"],
             "files_with_skip": files_with_skip,
             "files_failed": files_failed,
             "skip_status": _item_skip_status(it),
@@ -8934,6 +9035,123 @@ async def admin_analyze_series(item_id: str, request: Request) -> JSONResponse:
     key = _series_key(item)
     asyncio.create_task(_run_series_analysis(key))
     return JSONResponse({"ok": True, "series_key": key})
+
+
+@app.get("/api/admin/library/{item_id}/skip-config")
+async def admin_get_skip_config(item_id: str, request: Request) -> JSONResponse:
+    """Return the Smart Skip operational mode + manual templates for an item's series.
+
+    Drives the admin Smart Skip editor's mode toggle / template list AND the
+    in-player capture UI (which reads `series_key` + existing templates).
+    """
+    _require_admin(request)
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    key = _series_key(item)
+    cfg = _series_skip_cfg(lib, key)
+    # The files that could host / receive a template (this whole series).
+    files_out = []
+    for it in _items_for_series_key(lib, key):
+        for f in it.get("files", []):
+            p = f.get("path", "")
+            if p:
+                files_out.append({"name": f.get("name", Path(p).name), "path": p})
+    return JSONResponse({
+        "series_key": key,
+        "mode":       cfg["mode"],
+        "templates":  cfg["templates"],
+        "files":      files_out,
+    })
+
+
+@app.post("/api/admin/library/{item_id}/skip-mode")
+async def admin_set_skip_mode(item_id: str, request: Request, req: SkipModeReq) -> JSONResponse:
+    """Set the Smart Skip operational mode (auto/manual) for an item's series.
+
+    Switching modes re-runs analysis for the whole series so the change takes
+    effect immediately (manual → extrapolate templates; auto → re-cluster)."""
+    _require_admin(request)
+    if req.mode not in _SKIP_MODES:
+        raise HTTPException(400, f"mode must be one of {_SKIP_MODES}.")
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    key = _series_key(item)
+    cfg = _series_skip_cfg(lib, key)
+    cfg["mode"] = req.mode
+    _series_skip_put(lib, key, cfg)
+    await put_library(lib)
+    if analyzer.is_available():
+        asyncio.create_task(_run_series_analysis(key))
+    return JSONResponse({"ok": True, "mode": req.mode, "series_key": key})
+
+
+@app.post("/api/admin/library/{item_id}/skip-template")
+async def admin_add_skip_template(item_id: str, request: Request, req: SkipTemplateReq) -> JSONResponse:
+    """Add a manual intro template to an item's series, then extrapolate it.
+
+    The window is validated and stored (no fingerprint persisted — it's
+    recomputed from `source_path` at extrapolation time). Adding a template
+    kicks off a series analysis; it only *applies* when the series is in manual
+    mode, so the response echoes the current mode for the UI to nudge the admin."""
+    _require_admin(request)
+    name = (req.name or "").strip()[:60]
+    if not name:
+        raise HTTPException(400, "Template name is required.")
+    if req.end <= req.start or req.start < 0:
+        raise HTTPException(400, "Template needs end > start ≥ 0.")
+    if (req.end - req.start) > analyzer.MAX_INTRO_SEC:
+        raise HTTPException(400, f"Template span exceeds {analyzer.MAX_INTRO_SEC}s cap.")
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    key = _series_key(item)
+    series_paths = {f.get("path", "") for it in _items_for_series_key(lib, key)
+                    for f in it.get("files", [])}
+    if req.source_path not in series_paths:
+        raise HTTPException(400, "source_path is not a file in this series.")
+    cfg = _series_skip_cfg(lib, key)
+    template = {
+        "id":          uuid.uuid4().hex,
+        "name":        name,
+        "source_path": req.source_path,
+        "start":       round(float(req.start), 1),
+        "end":         round(float(req.end), 1),
+        "created_at":  _now_iso(),
+    }
+    cfg["templates"] = [*cfg["templates"], template]
+    _series_skip_put(lib, key, cfg)
+    await put_library(lib)
+    if analyzer.is_available() and cfg["mode"] == "manual":
+        asyncio.create_task(_run_series_analysis(key))
+    return JSONResponse({"ok": True, "template": template,
+                         "mode": cfg["mode"], "series_key": key})
+
+
+@app.delete("/api/admin/library/{item_id}/skip-template/{template_id}")
+async def admin_delete_skip_template(item_id: str, template_id: str, request: Request) -> JSONResponse:
+    """Remove a manual intro template and re-extrapolate the series."""
+    _require_admin(request)
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    key = _series_key(item)
+    cfg = _series_skip_cfg(lib, key)
+    before = len(cfg["templates"])
+    cfg["templates"] = [t for t in cfg["templates"] if t.get("id") != template_id]
+    if len(cfg["templates"]) == before:
+        raise HTTPException(404, "Template not found.")
+    _series_skip_put(lib, key, cfg)
+    await put_library(lib)
+    if analyzer.is_available() and cfg["mode"] == "manual":
+        asyncio.create_task(_run_series_analysis(key))
+    return JSONResponse({"ok": True, "series_key": key,
+                         "templates_remaining": len(cfg["templates"])})
 
 
 @app.get("/api/admin/analyzer-status")
