@@ -200,6 +200,15 @@
     #perfBanner.perf-collapsed > #perfBannerDot,
     #perfBanner.perf-collapsed > #perfBannerMsg { display: none; }
     #perfBanner.perf-collapsed > #perfBannerToggle { margin: 0; padding: .35rem .5rem; }
+    /* Global prep pill collapse/expand. Collapsed = just the pulsing dot + chevron
+       (everything below the header hidden, the title text hidden), so the pill
+       shrinks to a small tab in the corner. Chevron flips up when expanded. */
+    #globalPrepToggle { cursor: pointer; }
+    #globalPrepChevron { transition: transform .2s ease; }
+    #globalPrepBar:not(.prep-collapsed) #globalPrepChevron { transform: rotate(180deg); }
+    #globalPrepBar.prep-collapsed { min-width: 0 !important; }
+    #globalPrepBar.prep-collapsed > :not(.gp-header) { display: none !important; }
+    #globalPrepBar.prep-collapsed #globalPrepText { display: none; }
     #fcNotice {
       position:absolute; left:0; right:0;
       top:calc(env(safe-area-inset-top, 0px) + 48px);
@@ -358,14 +367,26 @@
      /prep-all job is running on the host, regardless of which tab the user is
      on. Restored on page reload by polling /api/offline-active.
 -->
+<!-- Starts collapsed (.prep-collapsed → just the pulsing dot + chevron tab) so it
+     doesn't cover the navbar / corner. Click the chevron to expand the full pill
+     (progress bar, detail, Pause/Resume); click again to re-collapse. State lives
+     in prepBarExpanded; toggled by togglePrepBar(). -->
 <div id="globalPrepBar"
-  class="hidden fixed top-3 right-3 z-40 bg-amber-950/95 border border-amber-700
+  class="hidden prep-collapsed fixed top-3 right-3 z-40 bg-amber-950/95 border border-amber-700
          text-amber-200 text-xs px-3 py-2 min-w-[220px] max-w-[340px] shadow-lg
          font-mono select-none"
   aria-live="polite">
-  <div class="flex items-center gap-2">
+  <div class="gp-header flex items-center gap-2">
     <span id="globalPrepDot" class="inline-block w-2 h-2 bg-amber-400 animate-pulse flex-shrink-0"></span>
-    <span id="globalPrepText" class="font-bold uppercase tracking-wide truncate">Prepping…</span>
+    <span id="globalPrepText" class="font-bold uppercase tracking-wide truncate min-w-0 flex-1">Prepping…</span>
+    <button id="globalPrepToggle" type="button" onclick="togglePrepBar()"
+      aria-label="Toggle prep detail"
+      class="flex-shrink-0 -my-1 -mr-1 p-1 flex items-center justify-center text-amber-200">
+      <svg id="globalPrepChevron" width="13" height="13" viewBox="0 0 24 24" fill="none"
+        stroke="currentColor" stroke-width="3" stroke-linecap="square">
+        <polyline points="6 9 12 15 18 9"></polyline>
+      </svg>
+    </button>
   </div>
   <div class="w-full bg-amber-900/60 h-1 mt-1.5">
     <div id="globalPrepFill" class="bg-amber-400 h-1 transition-all duration-500" style="width:0%"></div>
@@ -8233,6 +8254,15 @@ async function pollGlobalPrep(){
     }
   }catch(_){ /* swallow — try again next tick */ }
   _prepPollTimer = setTimeout(pollGlobalPrep, interval);
+}
+// Collapsed by default → just the pulsing dot + chevron tab. Clicking the chevron
+// expands the full pill; _renderGlobalPrep only toggles `hidden`/textContent, so
+// the prep-collapsed class survives its re-renders untouched.
+let prepBarExpanded=false;
+function togglePrepBar(){
+  prepBarExpanded=!prepBarExpanded;
+  const bar=document.getElementById("globalPrepBar");
+  if(bar) bar.classList.toggle("prep-collapsed", !prepBarExpanded);
 }
 function _renderGlobalPrep(d){
   const bar = document.getElementById("globalPrepBar");

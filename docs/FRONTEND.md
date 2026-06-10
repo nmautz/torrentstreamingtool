@@ -278,6 +278,11 @@ whenever the picker opens or `/prep-all` runs on the library card.
 mid-encode shows "Pausing — finishing current file" until it completes (or, if
 the user chose "Stop now", it's cancelled at once). The per-card chip
 (`prepChipHtml`) shows "Prep paused" when `processing === 0 && paused > 0`.
+It's also **collapsible**: `.prep-collapsed` (the default) shrinks the pill to just
+its pulsing dot + a chevron tab; `togglePrepBar()` (the `#globalPrepToggle` chevron)
+expands the full pill (bar, detail, Pause/Resume) and flips the chevron up. The
+`prepBarExpanded` flag survives `_renderGlobalPrep`'s re-renders (it only mutates
+`hidden`/`textContent`, never the `className`).
 
 The service worker (`static/sw.js`) is now a one-shot eviction stub registered
 via `evictLegacyServiceWorker()` so devices that PWA-installed the old build
