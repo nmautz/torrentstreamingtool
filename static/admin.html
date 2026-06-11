@@ -3527,7 +3527,11 @@ function _statusBadge(job, filesWithSkip, fileCount, filesFailed){
     return `<span class="text-[10px] font-bold uppercase tracking-widest px-2 py-1 border bg-gray-900 border-gray-800 text-gray-600">Not analyzed</span>`;
   }
   if(job.status === "running"){
-    const pct = (job.total>0) ? Math.round((job.current||0)/job.total*100) : null;
+    // job.progress is the analyzer's overall, monotonic fraction across all
+    // stages; the per-stage current/total resets at every stage boundary,
+    // which read as the bar "restarting". Fall back for older payloads.
+    const pct = (job.progress!=null) ? Math.round(job.progress*100)
+              : ((job.total>0) ? Math.round((job.current||0)/job.total*100) : null);
     const stageLabel = ({
       "starting": "Starting…",
       "fingerprinting": "Fingerprinting",

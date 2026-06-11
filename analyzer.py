@@ -20,7 +20,17 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
-ANALYZER_VERSION = 2
+# numpy powers the vectorized matcher fast path (~50-100x the pure-Python
+# loop). Optional: a venv that predates the dependency still analyzes via the
+# pure-Python fallback, just slower.
+try:
+    import numpy as _np
+    _POP16 = _np.array([bin(i).count("1") for i in range(1 << 16)], dtype=_np.uint8)
+except Exception:           # pragma: no cover - numpy missing
+    _np = None
+    _POP16 = None
+
+ANALYZER_VERSION = 3
 
 # Per-file failure codes recorded in skip_data[path].analysis when fingerprinting
 # could not produce usable skip points. The user-facing UI shows a "Skip
@@ -67,6 +77,43 @@ MAX_OUTRO_SEC     = 180
 FRAME_HAMMING_MAX = 6         # ≤6 bits differ = "same" frame (32-bit hash)
 MIN_MATCH_FRAMES  = int(MIN_INTRO_SEC * FP_FRAMES_PER_SEC)
 CREDITS_FALLBACK_PCT = 0.92   # if no outro found, mark credits at 92%
+
+# Gap tolerance. Each chromaprint frame is computed over a ~2.4 s audio window
+# (hopped every ~0.128 s), so ONE second of audio that differs between episodes
+# — a title card voiceover, an episode-specific sound under the theme — smears
+# across ~20 consecutive frames. Requiring a perfectly consecutive run (the old
+# behaviour) truncated or killed real intro matches. The matcher now bridges
+# mismatch gaps up to MATCH_GAP_FRAMES (~4 s) as long as the merged run is
+# mostly matching frames (MATCH_MIN_RATIO). Random cross-episode frame matches
+# are ~0.03% likely, so a long mostly-matching run is never a false positive.
+MATCH_GAP_FRAMES = int(4.0 * FP_FRAMES_PER_SEC)
+MATCH_MIN_RATIO  = 0.6
+
+# Stationary-audio guard. Silence, drones, and sustained tones make chromaprint
+# emit runs of near-identical hash frames — degenerate regions that "match"
+# anything similar for tens of seconds (observed: a 22 s consecutive bogus run
+# between two different sine sweeps). A frame only counts as match evidence
+# when it's *informative* — ≥ this many bits changed vs its own predecessor —
+# in BOTH episodes; uninformative stretches are treated as gaps instead.
+MIN_FRAME_DELTA_BITS = 2
+
+# Head/tail fingerprinting decodes audio with ffmpeg/fpcalc at below-normal
+# priority; two at a time roughly halves the wall-clock of the (I/O-heavy)
+# fingerprinting stage without saturating the host.
+FP_CONCURRENCY = 2
+
+# Overall-progress spans per stage: (start_fraction, end_fraction). Emitted as a
+# monotonic `progress` float so progress bars never restart at stage boundaries
+# (the matching stages' `total` is a growing estimate — per-stage current/total
+# jumps backward; `progress` never does).
+_STAGE_SPAN = {
+    "starting":        (0.00, 0.00),
+    "fingerprinting":  (0.00, 0.55),
+    "matching-intros": (0.55, 0.75),
+    "matching-outros": (0.75, 0.95),
+    "finalizing":      (0.95, 1.00),
+    "done":            (1.00, 1.00),
+}
 
 
 def _env_bin(env_key: str) -> Optional[str]:
@@ -195,21 +242,116 @@ def _find_longest_match(fp_a: list[int], fp_b: list[int],
     fingerprint and how many frames matched. Returns None if no run >= min_frames.
 
     Uses a sliding alignment: for each offset d = -W..W between the two
-    sequences, scan and find the longest consecutive run where Hamming
-    distance per frame <= FRAME_HAMMING_MAX. This is O(N^2) over a bounded
-    window; for ~6 minutes at 7.8 fps that's ~3000^2 = 9M ops, ~1s in C and
-    ~10-20s in pure Python.
+    sequences, find the longest run where Hamming distance per frame is
+    <= FRAME_HAMMING_MAX, bridging brief mismatch gaps (MATCH_GAP_FRAMES /
+    MATCH_MIN_RATIO — see the constants block for why gaps are essential).
 
-    This is pure-Python CPU work — it holds the GIL for the whole run. Running
-    it in a worker *thread* (asyncio.to_thread) does NOT free the event loop:
-    the GIL convoy effect on multi-core hosts starves the loop thread for
-    seconds at a time, freezing the dashboard even though the box is healthy
-    (the classic "UI laggy but RDP fine" report). So `_run_match` dispatches it
-    to a separate low-priority *process* instead — see `_match_executor`.
+    Two implementations with identical coordinates/semantics: a numpy
+    vectorized fast path (fractions of a second per pair) and a pure-Python
+    fallback (tens of seconds per pair, strict consecutive runs only) for
+    hosts whose venv predates the numpy dependency.
+
+    Either way this is CPU work that holds the GIL (numpy releases it only
+    inside individual ops) — `_run_match` dispatches it to a separate
+    low-priority *process* so the event loop never starves (the GIL convoy
+    effect made a worker thread freeze the dashboard — the classic "UI laggy
+    but RDP fine" report). See `_match_executor`.
     """
     if not fp_a or not fp_b:
         return None
+    if _np is not None:
+        return _find_longest_match_np(fp_a, fp_b, min_frames, max_frames)
+    return _find_longest_match_py(fp_a, fp_b, min_frames, max_frames)
 
+
+def _best_gap_run(match: "_np.ndarray", min_frames: int) -> Optional[tuple[int, int]]:
+    """Longest run of True in a boolean match array, bridging False gaps of up
+    to MATCH_GAP_FRAMES when the merged span stays >= MATCH_MIN_RATIO matched.
+    Returns (start, span_length) or None. Runs start/end on true matches by
+    construction, so the reported window never includes leading/trailing noise."""
+    m = match
+    d = _np.diff(m.astype(_np.int8))
+    starts = _np.flatnonzero(d == 1) + 1
+    ends = _np.flatnonzero(d == -1) + 1
+    if m[0]:
+        starts = _np.concatenate(([0], starts))
+    if m[-1]:
+        ends = _np.concatenate((ends, [m.size]))
+    best: Optional[tuple[int, int]] = None
+    k, n = 0, int(starts.size)
+    while k < n:
+        s, e = int(starts[k]), int(ends[k])
+        matched = e - s
+        j = k + 1
+        while j < n and int(starts[j]) - e <= MATCH_GAP_FRAMES:
+            matched += int(ends[j]) - int(starts[j])
+            e = int(ends[j])
+            j += 1
+        span = e - s
+        if span >= min_frames and matched / span >= MATCH_MIN_RATIO:
+            if best is None or span > best[1]:
+                best = (s, span)
+        k = j
+    return best
+
+
+def _informative_mask(fp: "_np.ndarray") -> "_np.ndarray":
+    """Boolean mask of frames that changed >= MIN_FRAME_DELTA_BITS vs their
+    predecessor — i.e. frames carrying actual audio structure rather than a
+    repeated hash from stationary audio. Frame 0 has no predecessor → False."""
+    out = _np.empty(fp.size, dtype=bool)
+    out[0] = False
+    d = fp[1:] ^ fp[:-1]
+    out[1:] = (_POP16[d & 0xFFFF] + _POP16[d >> _np.uint32(16)]) >= MIN_FRAME_DELTA_BITS
+    return out
+
+
+def _find_longest_match_np(fp_a: list[int], fp_b: list[int],
+                           min_frames: int, max_frames: int) -> Optional[tuple[int, int, int]]:
+    """numpy fast path: per shift, Hamming distances come from a vectorized
+    XOR + 16-bit popcount LUT; shifts that can't possibly beat the current best
+    (too few matching frames in total) are rejected before run analysis."""
+    a = _np.asarray(fp_a, dtype=_np.uint32)
+    b = _np.asarray(fp_b, dtype=_np.uint32)
+    max_shift = int(min(a.size, b.size)) - min_frames
+    if max_shift < 1:
+        return None
+    info_a = _informative_mask(a)
+    info_b = _informative_mask(b)
+    best: Optional[tuple[int, int, int]] = None
+    best_len = min_frames - 1
+    for shift in range(-max_shift, max_shift + 1):
+        if shift >= 0:
+            i0, j0 = shift, 0
+        else:
+            i0, j0 = 0, -shift
+        ln = min(int(a.size) - i0, int(b.size) - j0)
+        if ln < min_frames:
+            continue
+        x = a[i0:i0 + ln] ^ b[j0:j0 + ln]
+        hd = _POP16[x & 0xFFFF] + _POP16[x >> _np.uint32(16)]
+        match = (hd <= FRAME_HAMMING_MAX) & info_a[i0:i0 + ln] & info_b[j0:j0 + ln]
+        # A span must be >= MATCH_MIN_RATIO matched, so fewer matches than
+        # ratio * (best span + 1) can't produce a new best — skip the RLE.
+        if int(match.sum()) < MATCH_MIN_RATIO * max(min_frames, best_len + 1):
+            continue
+        run = _best_gap_run(match, min_frames)
+        if run is None:
+            continue
+        s, span = run
+        if span > max_frames:
+            span = max_frames
+        if span > best_len:
+            best_len = span
+            best = (i0 + s, j0 + s, span)
+    return best
+
+
+def _find_longest_match_py(fp_a: list[int], fp_b: list[int],
+                           min_frames: int, max_frames: int) -> Optional[tuple[int, int, int]]:
+    """Pure-Python fallback (no gap bridging — strict consecutive runs).
+    O(N^2): ~10-20 s per pair for a 6-minute head. Only used when numpy is
+    missing from the venv."""
     best: Optional[tuple[int, int, int]] = None
 
     # Search alignments within ±half the shorter fingerprint
@@ -507,8 +649,21 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
         total:    int (total items in this stage)
         message:  short human-readable string
         episode_name: optional basename of file being processed
+        progress: float 0..1 — overall run fraction across ALL stages,
+                  guaranteed monotonic (use this for progress bars; the
+                  per-stage current/total resets at stage boundaries and the
+                  matching stages' total is a growing estimate)
     """
+    last_progress = 0.0
+
     async def _emit(**kw):
+        nonlocal last_progress
+        lo, hi = _STAGE_SPAN.get(kw.get("stage", ""), (0.0, 1.0))
+        total = kw.get("total") or 0
+        cur = min(kw.get("current") or 0, total) if total else 0
+        frac = (cur / total) if total else 0.0
+        last_progress = max(last_progress, lo + (hi - lo) * frac)
+        kw["progress"] = round(last_progress, 4)
         if progress_cb is None:
             return
         try:
@@ -588,7 +743,10 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
                 )
         return result
 
-    # Compute fingerprints for the head and tail of each episode in parallel chunks.
+    # Compute fingerprints for the head and tail of each episode, FP_CONCURRENCY
+    # at a time (the ffmpeg/fpcalc decodes are subprocess work that releases the
+    # GIL, so a small parallel window roughly halves stage wall-clock). Results
+    # land in index order; the progress counter advances per *completed* episode.
     # Track per-episode failures so files where fpcalc returned nothing are
     # recorded as failures instead of silently disappearing from the result.
     head_fps: list[list[int]] = []
@@ -596,29 +754,38 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
     durations: list[Optional[float]] = []
     fp_errors: dict[int, tuple[str, str]] = {}   # ep idx → (code, message)
     total_eps = len(episodes)
+    fp_sem = asyncio.Semaphore(FP_CONCURRENCY)
+    fp_done = 0
 
-    for idx, ep in enumerate(episodes, start=1):
-        ep_name = Path(ep["path"]).name
-        await _emit(stage="fingerprinting", current=idx, total=total_eps,
-                    message=f"Fingerprinting episode {idx} of {total_eps}",
-                    episode_name=ep_name)
-        dur = await asyncio.to_thread(_media_duration, ep["path"])
+    async def _fingerprint_one(ep: dict) -> tuple[Optional[float], list[int], list[int]]:
+        nonlocal fp_done
+        async with fp_sem:
+            dur = await asyncio.to_thread(_media_duration, ep["path"])
+            head = await asyncio.to_thread(_fpcalc_raw, ep["path"], INTRO_SEARCH_SECS, 0)
+            if dur and dur > OUTRO_SEARCH_SECS + 60:
+                tail_start = int(dur - OUTRO_SEARCH_SECS)
+                tail = await asyncio.to_thread(_fpcalc_raw, ep["path"], OUTRO_SEARCH_SECS, tail_start)
+            else:
+                tail = []
+        fp_done += 1
+        await _emit(stage="fingerprinting", current=fp_done, total=total_eps,
+                    message=f"Fingerprinting episode {fp_done} of {total_eps}",
+                    episode_name=Path(ep["path"]).name)
+        return dur, head, tail
+
+    await _emit(stage="fingerprinting", current=0, total=total_eps,
+                message=f"Fingerprinting {total_eps} episode(s)")
+    fp_results = await asyncio.gather(*(_fingerprint_one(ep) for ep in episodes))
+    for idx, (dur, head, tail) in enumerate(fp_results):
         durations.append(dur)
-        head = await asyncio.to_thread(_fpcalc_raw, ep["path"], INTRO_SEARCH_SECS, 0)
         head_fps.append(head)
+        tail_fps.append(tail)
         if not head:
-            fp_errors[idx - 1] = (
+            fp_errors[idx] = (
                 ERR_FP_EMPTY,
                 "fpcalc produced no fingerprint for the head of this file "
                 "(unsupported audio codec, silent track, or corrupted container).",
             )
-
-        if dur and dur > OUTRO_SEARCH_SECS + 60:
-            tail_start = int(dur - OUTRO_SEARCH_SECS)
-            tail = await asyncio.to_thread(_fpcalc_raw, ep["path"], OUTRO_SEARCH_SECS, tail_start)
-        else:
-            tail = []
-        tail_fps.append(tail)
 
     # ── Cluster intros and outros independently.
     #

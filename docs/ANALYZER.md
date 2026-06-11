@@ -13,8 +13,8 @@ Audio-fingerprint-driven intro/credits detection. Runs per-series; results store
 
 Chromaprint emits ~7.8 32-bit hash frames per second of audio.
 
-1. **Fingerprint** ([analyzer.py:69](../analyzer.py#L69)): For each episode, call `fpcalc -raw -length 360 <path>` for the head (first 6 min) and `ffmpeg -ss <tail_start> -t 600 | fpcalc -raw -length 600 -` for the tail (last 10 min)
-2. **Greedy clustering** ([analyzer.py:307](../analyzer.py#L307)): pick first un-clustered episode as anchor; pairwise `_find_longest_match` against every other. The longest run ≥ `MIN_MATCH_FRAMES` (~15 s) with Hamming distance ≤ 6 bits per frame is kept. Unmatched episodes recurse on the next pass (new anchor)
+1. **Fingerprint** ([analyzer.py:69](../analyzer.py#L69)): For each episode, call `fpcalc -raw -length 360 <path>` for the head (first 6 min) and `ffmpeg -ss <tail_start> -t 600 | fpcalc -raw -length 600 -` for the tail (last 10 min). Episodes are fingerprinted `FP_CONCURRENCY` (2) at a time
+2. **Greedy clustering** ([analyzer.py:307](../analyzer.py#L307)): pick first un-clustered episode as anchor; pairwise `_find_longest_match` against every other. The longest run ≥ `MIN_MATCH_FRAMES` (~15 s) with Hamming distance ≤ 6 bits per frame is kept — **bridging mismatch gaps** up to `MATCH_GAP_FRAMES` (~4 s) as long as the merged run stays ≥ `MATCH_MIN_RATIO` matched (each chromaprint frame spans ~2.4 s of audio, so 1 s of episode-specific audio inside the theme smears across ~20 frames; a strict-consecutive matcher truncated real intros). A match only counts where the frame is **informative** (`MIN_FRAME_DELTA_BITS` vs its predecessor, in both episodes) — stationary audio (silence/drones/tones) emits runs of near-identical hashes that bogus-match for tens of seconds otherwise. Matching is numpy-vectorized (`_find_longest_match_np`, XOR + 16-bit popcount LUT, ~50-100× the pure-Python `_find_longest_match_py` fallback used when numpy is missing — the fallback is strict: no gap bridging, no informative mask). Unmatched episodes recurse on the next pass (new anchor)
 3. **Intersection** ([analyzer.py:209](../analyzer.py#L209)): within a cluster, the anchor's intro/outro range is the intersection of anchor-side windows across all pair matches. Per-non-anchor episodes use the `offset_in_other` from their pair match — so cold opens of different lengths still align correctly
 4. **Credits fallback chain** ([analyzer.py:480](../analyzer.py#L480)):
    - Outro cluster matched → `credits_start = tail_start + frames_to_seconds(offset)`, `source="auto"`
@@ -25,7 +25,7 @@ Chromaprint emits ~7.8 32-bit hash frames per second of audio.
 
 | Name | Value | Meaning |
 |------|-------|---------|
-| `ANALYZER_VERSION` | 2 | Bumped to force re-analysis when the algorithm changes |
+| `ANALYZER_VERSION` | 3 | Bumped to force re-analysis when the algorithm changes (3 = gap-tolerant matcher) |
 | `FP_FRAMES_PER_SEC` | 7.8 | Chromaprint's emission rate |
 | `INTRO_SEARCH_SECS` | 360 | Look for intro in first 6 min |
 | `OUTRO_SEARCH_SECS` | 600 | Look for outro in last 10 min |
@@ -34,7 +34,11 @@ Chromaprint emits ~7.8 32-bit hash frames per second of audio.
 | `MIN_OUTRO_SEC` | 15 | Same for credits |
 | `MAX_OUTRO_SEC` | 180 | |
 | `FRAME_HAMMING_MAX` | 6 | ≤6 bits differ in a 32-bit hash → "same" frame |
-| `MIN_MATCH_FRAMES` | int(15 × 7.8) | Minimum consecutive frames for a match |
+| `MIN_MATCH_FRAMES` | int(15 × 7.8) | Minimum frames (span) for a match |
+| `MATCH_GAP_FRAMES` | int(4 × 7.8) | Mismatch gap the matcher bridges inside a run (chromaprint frame smear — see §Algorithm) |
+| `MATCH_MIN_RATIO` | 0.6 | Min fraction of matched frames in a gap-bridged run |
+| `MIN_FRAME_DELTA_BITS` | 2 | Frame must differ ≥ this from its predecessor to count as match evidence (stationary-audio guard) |
+| `FP_CONCURRENCY` | 2 | Episodes fingerprinted in parallel |
 | `CREDITS_FALLBACK_PCT` | 0.92 | Time-based fallback when no outro is found |
 
 ## Greedy clustering ([analyzer.py:307](../analyzer.py#L307))
@@ -48,12 +52,14 @@ The greedy approach handles three failure modes the original single-anchor appro
 
 - One series at a time within a series — `lock_for_series(key)` returns a per-series `asyncio.Lock`
 - Different series can run in parallel (different locks)
-- **Subprocess work** (ffmpeg / fpcalc / ffprobe via `_media_duration`, `_fpcalc_raw`, `_detect_blackframe`) goes through `asyncio.to_thread` — a thread is fine because the subprocess releases the GIL while it runs
+- **Subprocess work** (ffmpeg / fpcalc / ffprobe via `_media_duration`, `_fpcalc_raw`, `_detect_blackframe`) goes through `asyncio.to_thread` — a thread is fine because the subprocess releases the GIL while it runs. Fingerprinting runs `FP_CONCURRENCY` (2) episodes at a time behind a semaphore
 - **The pure-Python matcher (`_find_longest_match`) runs in a separate low-priority *process***, not a thread. It's CPU-bound Python that holds the GIL for seconds per pair; a worker thread would still starve the event loop via the GIL convoy effect (dashboard freezes for seconds while the host looks healthy — the "UI laggy but RDP fine" report). `analyze_series` spins up a one-worker `ProcessPoolExecutor` (`_new_match_executor`, dropped to BELOW_NORMAL by `_match_worker_init`) for both matching stages and tears it down in `finally`; `_run_match` falls back to `asyncio.to_thread` if the host can't create a pool. See [GOTCHAS.md](GOTCHAS.md).
 
 ## Progress reporting
 
-`analyze_series(items, progress_cb)` invokes `progress_cb(stage, current, total, message, episode_name)` at each step. `main.py`'s `_set_analysis_status` broadcasts these as SSE `analysis_status` events. Stages: `starting` → `fingerprinting` → `matching-intros` → `matching-outros` → `finalizing` → `done`.
+`analyze_series(items, progress_cb)` invokes `progress_cb(stage, current, total, message, episode_name, progress)` at each step. `main.py`'s `_set_analysis_status` broadcasts these as SSE `analysis_status` events. Stages: `starting` → `fingerprinting` → `matching-intros` → `matching-outros` → `finalizing` → `done`.
+
+`progress` is a **monotonic 0..1 fraction across the whole run** (stage spans in `_STAGE_SPAN`) — progress bars must use it, not `current/total`: `current/total` resets at every stage boundary, and the matching stages' `total` is a *growing estimate* (greedy clustering can't know its pair count up front), both of which read as the bar "restarting"/jumping backward. The admin Smart Skip badge and the Activity tab both consume `job.progress`.
 
 ## Trigger flow (in `main.py`)
 
@@ -73,6 +79,16 @@ prepped content is the right population.) On macOS prep is disabled
 3. Running-guard: if a pass for this `series_key` is already `running`, return
    (a `/prep-all` fires the hook once per file; the in-flight pass already covers
    the whole series)
+3b. **Coalescing-guard**: if any prep job for an item in this series is still
+   `pending`/`processing` (`_series_prep_active`), the run is **deferred** — each
+   pass re-fingerprints the whole series, so triggering per prepped file used to
+   restart the analyzer from episode 1 after every bundle (quadratic work and the
+   "progress keeps restarting" symptom). The next prep completion re-fires the
+   hook; `_watch_prep_then_analyze` (deduped via `_deferred_analysis_watch`)
+   polls every 15 s as a backstop for prep exit paths that don't fire the hook
+   (crash/error, sibling-race early `done`). `"paused"` prep does **not** defer —
+   a parked queue can sit for hours. The admin **Analyze** button bypasses this
+   guard (calls `_run_series_analysis` directly)
 4. Eligibility: analyzer available? AND at least one file in this series bucket
    still needs analysis (no `skip_data`, or stale `analysis.version`)? AND user
    did NOT manually mark it (manual entries are never overwritten)? **Failed
@@ -194,7 +210,10 @@ series). A failed file re-runs only when:
   (`POST /api/admin/library/{id}/analyze` → `_run_series_analysis` directly)
   re-runs the whole series unconditionally, skipping the eligibility guard.
 
-Manually-edited entries (`source == "manual"`) are still never overwritten.
+Manually-edited entries (`source == "manual"`) are still never overwritten —
+enforced at persistence time in `_run_series_analysis` (the file is still
+fingerprinted, since its print helps cluster the peers, but its stored entry is
+left untouched even on a forced admin re-run).
 
 ## Frontend
 

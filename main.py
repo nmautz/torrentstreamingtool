@@ -4289,6 +4289,13 @@ async def _run_series_analysis(series_key: str) -> None:
             for f in it.get("files", []):
                 p = f.get("path", "")
                 if p in results:
+                    # Manual admin edits are never overwritten — not even by a
+                    # forced re-run (docs/ANALYZER.md). The file still gets
+                    # fingerprinted (its print helps cluster the peers), but
+                    # its stored entry stays as the admin set it.
+                    prev_ana = (skip_data.get(p) or {}).get("analysis") or {}
+                    if prev_ana.get("source") == "manual":
+                        continue
                     skip_data[p] = results[p]
                     files_updated += 1
                     changed = True
@@ -4374,8 +4381,53 @@ def _schedule_series_analysis_if_eligible(item: dict, lib: dict) -> None:
                 break
         if needs_run:
             break
-    if needs_run:
-        asyncio.create_task(_run_series_analysis(key))
+    if not needs_run:
+        return
+    # Coalesce: while more prep for this series is queued/encoding, defer. Each
+    # pass re-fingerprints the WHOLE series, so triggering per prepped file made
+    # the analyzer restart from episode 1 after every bundle (quadratic work +
+    # the admin "progress keeps restarting" report). The next completion re-fires
+    # this hook, and the watcher backstops prep exit paths that don't (crash,
+    # sibling-race done) — so the series gets one pass after the last file lands.
+    if _series_prep_active(key, lib):
+        if key not in _deferred_analysis_watch:
+            _deferred_analysis_watch.add(key)
+            asyncio.create_task(_watch_prep_then_analyze(key))
+        return
+    asyncio.create_task(_run_series_analysis(key))
+
+
+# Series keys with an active deferred-analysis watcher (so repeated post-prep
+# hook firings while a season preps don't stack watcher tasks).
+_deferred_analysis_watch: set[str] = set()
+
+
+def _series_prep_active(key: str, lib: dict) -> bool:
+    """True while any HLS prep job for an item in this series is queued or
+    encoding. "paused" deliberately doesn't count — a parked queue can sit for
+    hours and the below-normal-priority analysis is safe to run during it."""
+    ids = {it.get("id") for it in _items_for_series_key(lib, key)}
+    return any(j.get("item_id") in ids and j.get("status") in ("pending", "processing")
+               for j in _offline_jobs.values())
+
+
+async def _watch_prep_then_analyze(key: str) -> None:
+    """Self-healing tail for a deferred series analysis: poll until the series
+    has no active prep jobs, then re-run the eligibility check. Needed because
+    not every prep exit path fires the post-prep hook (errors, the sibling-race
+    early "done") — without this a deferred pass could be stranded forever."""
+    lib = None
+    try:
+        while True:
+            await asyncio.sleep(15)
+            lib = await get_library()
+            if not _series_prep_active(key, lib):
+                break
+    finally:
+        _deferred_analysis_watch.discard(key)
+    items = _items_for_series_key(lib, key) if lib else []
+    if items:
+        _schedule_series_analysis_if_eligible(items[0], lib)
 
 
 async def _ensure_analysis_for(src: Path, item_id: str = "") -> None:
@@ -9764,7 +9816,10 @@ async def _activity_snapshot() -> dict:
             reason="Analyzing episodes to detect intro/credits boundaries so the player can offer skip buttons.",
             resumes=False,
             restart_note="Analysis is in-memory; an interrupted run restarts from scratch, but background maintenance re-picks the series automatically once the box is idle (if auto-fingerprint is on).",
-            progress=(cur / total if total else None))
+            # Prefer the analyzer's monotonic all-stages fraction; the per-stage
+            # current/total resets at each stage boundary (looks like restarts).
+            progress=(job.get("progress") if job.get("progress") is not None
+                      else (cur / total if total else None)))
 
     # 7. On-demand transcode sessions (live just-in-time streaming)
     try:
