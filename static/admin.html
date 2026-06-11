@@ -3882,11 +3882,11 @@ async function openSkipEditor(itemId, title){
         </label>
       </div>
       <div class="pt-2 flex items-center gap-2">
-        <button onclick="saveSkipEntry('${escHtml(f.path)}', ${i}, this)"
+        <button onclick="saveSkipEntry(${escHtml(JSON.stringify(f.path))}, ${i}, this)"
           class="text-xs font-bold uppercase tracking-wide px-3 py-1.5 border bg-indigo-600 border-indigo-500 hover:bg-indigo-500 transition-colors">
           Save
         </button>
-        <button onclick="markIntroOnDevice('${escHtml(f.path)}')" title="Open this episode on-device to visually mark an intro template"
+        <button onclick="markIntroOnDevice(${escHtml(JSON.stringify(f.path))})" title="Open this episode on-device to visually mark an intro template"
           class="text-xs font-bold uppercase tracking-wide px-3 py-1.5 border bg-gray-800 border-gray-700 text-indigo-300 hover:text-white transition-colors">
           ▶ Mark Intro On Device
         </button>
