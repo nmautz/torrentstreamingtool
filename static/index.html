@@ -2265,6 +2265,10 @@ let lp = {
   // the upgrade poller may swap it for a real sub that downloads later. Cleared
   // by any manual pick. See _lpSubUpgradePoll.
   subAutoApplied: false,
+  // True while the connection to the host is down and the background reconnect
+  // loop is running (playback keeps draining the buffer meanwhile). See
+  // _lpNetLost / _lpNetRetryNow / _lpNetReset.
+  netDown: false,
 };
 // Subtitle upgrade poller — re-checks for late-downloaded real subs while an
 // auto-applied AI sub is showing. setInterval handle; cleared on stop.
@@ -7094,6 +7098,64 @@ function _lpDestroyHls() {
     try { lp.hls.destroy(); } catch (_) {}
     lp.hls = null;
   }
+  _lpNetReset();
+}
+
+// --- Network-loss recovery ----------------------------------------------
+// Survive unstable connections (tunnels, Wi-Fi↔LTE swaps) the way YouTube
+// does: keep playing the buffer, quietly retry loading in the background
+// (with backoff, forever — the user decides when to give up, not us), and
+// only surface "Reconnecting…" once the buffer actually runs dry. The
+// `online` event short-circuits the backoff the moment the radio is back.
+let _lpNetRetryTimer = null;
+let _lpNetRetryDelay = 0;
+
+function _lpNetReset() {
+  lp.netDown = false;
+  _lpNetRetryDelay = 0;
+  if (_lpNetRetryTimer) { clearTimeout(_lpNetRetryTimer); _lpNetRetryTimer = null; }
+}
+
+function _lpNetLost() {
+  lp.netDown = true;
+  // If playback is already starved (no decodable data ahead), tell the user;
+  // otherwise stay silent — the buffer is still playing. The `waiting`
+  // listener covers the stall happening AFTER this point.
+  const v = document.getElementById("lpVideo");
+  if (v && v.readyState < 3) _lpShowPreparing("Reconnecting…");
+  if (_lpNetRetryTimer) return;   // a retry is already scheduled
+  _lpNetRetryDelay = Math.min(Math.max(_lpNetRetryDelay * 2, 2000), 15000);
+  _lpNetRetryTimer = setTimeout(_lpNetRetryNow, _lpNetRetryDelay);
+}
+
+function _lpNetRetryNow() {
+  _lpNetRetryTimer = null;
+  if (!lp.netDown || !lp.itemId) return;
+  if (lp.hls) {
+    // Resume loading from the current position. Success fires FRAG_LOADED
+    // (→ _lpNetReset); failure raises another fatal NETWORK_ERROR, which
+    // re-enters _lpNetLost with a longer delay.
+    try { lp.hls.startLoad(-1); } catch (_) {}
+  } else {
+    // Safari native HLS: reload the (still-set) src and seek back to where
+    // playback died via the existing resume machinery. Success fires
+    // `playing` (→ reset); failure fires `error` (→ _lpNetLost again).
+    const v = document.getElementById("lpVideo");
+    if (!v) return;
+    // First attempt: currentTime still holds the death position (load() resets
+    // it to 0, so later attempts keep the resumeSec captured here instead).
+    const t = v.currentTime || 0;
+    if (t > 2) { lp.resumeSec = t; lp.resumeApplied = false; }
+    try { v.load(); v.play().catch(() => {}); } catch (_) {}
+  }
+}
+
+// Wired into the global `online` listener — retry immediately, skipping
+// whatever backoff delay is pending.
+function _lpNetOnline() {
+  if (!lp.netDown || !lp.itemId) return;
+  if (_lpNetRetryTimer) { clearTimeout(_lpNetRetryTimer); _lpNetRetryTimer = null; }
+  _lpNetRetryNow();
 }
 
 async function _lpLoadIndex(seekTo) {
@@ -7229,9 +7291,18 @@ async function _lpLoadIndex(seekTo) {
       // Default xhr-based loader is fine; we set lowLatencyMode off because
       // VOD playback gets no benefit from LL-HLS and it doubles fetch volume.
       lowLatencyMode: false,
-      // Cap forward buffer; without this hls.js can preload 60+ MB of segments
-      // on long files which hurts mobile data and stalls switching.
-      maxBufferLength: 60,
+      // Buffer aggressively (YouTube-style) so brief outages — tunnels,
+      // Wi-Fi↔LTE swaps, the host's uplink hiccuping — play through from
+      // buffer instead of cutting out. 3 min target; the byte cap must rise
+      // with it (the 60 MB default ≈ only ~60 s of a high-bitrate original
+      // rung, which would silently defeat maxBufferLength). The browser's own
+      // SourceBuffer quota is the real ceiling — hls.js backs off on
+      // QuotaExceededError — and backBufferLength frees memory behind the
+      // playhead so mobile devices can afford the forward buffer.
+      maxBufferLength: 180,
+      maxMaxBufferLength: 600,
+      maxBufferSize: 240 * 1000 * 1000,
+      backBufferLength: 90,
       // On-demand segments are transcoded just-in-time and the server holds the
       // request open until the .ts is ready (up to ~30 s for a deep cold seek).
       // hls.js's 20 s default fragment timeout would abort a still-progressing
@@ -7261,6 +7332,17 @@ async function _lpLoadIndex(seekTo) {
         });
       }
       if (!data.fatal) return;
+      // Fatal NETWORK_ERROR = the connection dropped (tunnel, Wi-Fi↔LTE swap,
+      // host briefly unreachable). hls.js stops loading but the <video> keeps
+      // playing whatever's buffered — so DON'T tear down or alert. Retry
+      // loading in the background until the connection returns; FRAG_LOADED
+      // marks recovery. A real 404 (bad bundle) also lands here, but hls.js
+      // only goes fatal after its own retries, and our loop backs off to a
+      // slow poll — harmless, and the console.error above still diagnoses it.
+      if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
+        _lpNetLost();
+        return;
+      }
       // Media errors are MSE decoding crashes — `recoverMediaError` re-attaches
       // the buffer; if that fails, fall through to surface the error.
       if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
@@ -7269,6 +7351,10 @@ async function _lpLoadIndex(seekTo) {
       // Surface a code + filename so a "won't play" report is self-diagnosing.
       const where = url ? (" (" + url.split("/").pop() + (code ? " → HTTP " + code : "") + ")") : "";
       showAlert("Playback error: " + (data.details || data.type) + where, "error");
+    });
+    // Any successfully loaded fragment means the network is back.
+    hls.on(window.Hls.Events.FRAG_LOADED, () => {
+      if (lp.netDown) _lpNetReset();
     });
     hls.loadSource(masterUrl);
     hls.attachMedia(v);
@@ -7940,11 +8026,28 @@ function _lpAttachVideoEvents() {
   // hint; it clears the moment the segment arrives and playback resumes. A seek
   // into an already-generated region never fires `waiting`, so it stays instant.
   v.addEventListener("waiting", () => {
+    // Buffer ran dry while the reconnect loop is active → now the outage is
+    // user-visible. (While the buffer covered it, we stayed silent.)
+    if (lp.netDown) { _lpShowPreparing("Reconnecting…"); return; }
     if (lp.mode === "ondemand" && lp.itemId) _lpShowPreparing("Loading…");
   });
-  v.addEventListener("playing", () => { _lpHidePreparing(); });
+  v.addEventListener("playing", () => {
+    // Safari-native recovery success lands here (hls.js recovery is detected
+    // on FRAG_LOADED instead — buffered playback also fires `playing`).
+    if (!lp.hls && lp.netDown) _lpNetReset();
+    _lpHidePreparing();
+  });
   v.addEventListener("error", () => {
-    showAlert("Stream playback error — check the host's network and try again.", "error");
+    if (lp.hls) return;                  // hls.js path recovers via Hls.Events.ERROR
+    if (!lp.itemId || !lp.filePath) return;  // teardown noise, not a playback error
+    // MEDIA_ERR_SRC_NOT_SUPPORTED is permanent — retrying can't help.
+    if (v.error && v.error.code === 4) {
+      showAlert("Stream playback error — this file can't be played on this device.", "error");
+      return;
+    }
+    // Network/decode death on the Safari-native path: reload at position,
+    // forever, with backoff — same policy as the hls.js path.
+    _lpNetLost();
   });
   // Tab backgrounded / phone screen locked → flush via fetch (still alive).
   document.addEventListener("visibilitychange", () => {
@@ -8518,7 +8621,7 @@ setInterval(()=>{
 document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible") _ensureSSEConnected(); });
 window.addEventListener("pageshow",()=>{ _ensureSSEConnected(); });   // bfcache restore
 window.addEventListener("focus",()=>{ _ensureSSEConnected(); });
-window.addEventListener("online",()=>{ _renderOnlineBadge(); _ensureSSEConnected(); });
+window.addEventListener("online",()=>{ _renderOnlineBadge(); _ensureSSEConnected(); _lpNetOnline(); });
 
 // ── Keyboard shortcuts ─────────────────────────────────────────────────────
 document.addEventListener("keydown",e=>{
@@ -8598,6 +8701,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.23.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.24.0</div>
 </body>
 </html>

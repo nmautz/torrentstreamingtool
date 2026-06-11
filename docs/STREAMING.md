@@ -403,7 +403,38 @@ Two ways to populate the cache:
    - **`Hls.isSupported()` true** (Chrome, Firefox, Edge, Android Chrome):
      instantiate hls.js, `attachMedia(<video>)`, `loadSource(master_url)`.
      Wait for `MANIFEST_PARSED` → populate dropdowns and apply saved
-     track picks. Errors recoverable via `hls.recoverMediaError()`.
+     track picks. MSE decode crashes recover via `hls.recoverMediaError()`;
+     network loss recovers via the reconnect loop below.
+
+> **Unstable connections (tunnels, Wi-Fi↔LTE swaps).** Playback is built to
+> survive brief outages the way YouTube does — three pieces, all in
+> `static/index.html`:
+>
+> 1. **Aggressive forward buffer.** hls.js is configured with
+>    `maxBufferLength: 180` / `maxBufferSize: 240 MB` / `backBufferLength: 90`
+>    so ~3 minutes of video are buffered ahead and a tunnel-length outage plays
+>    through silently. The byte cap must scale with the length target — the
+>    60 MB default is only ~60 s of a high-bitrate original rung and would
+>    silently defeat `maxBufferLength`. The browser's SourceBuffer quota is the
+>    real ceiling (hls.js backs off on `QuotaExceededError`); `backBufferLength`
+>    frees memory behind the playhead so mobile devices can afford it.
+> 2. **Indefinite reconnect loop** (`_lpNetLost` / `_lpNetRetryNow` /
+>    `_lpNetReset`, state in `lp.netDown`). A **fatal hls.js `NETWORK_ERROR`
+>    never tears playback down or alerts** — the `<video>` keeps draining its
+>    buffer while the loop retries `hls.startLoad(-1)` with backoff (2 s → 15 s
+>    cap), forever; the user decides when to give up, not us. Recovery is
+>    detected on `FRAG_LOADED`. The global `online` event short-circuits the
+>    backoff (`_lpNetOnline`) — note the loop does **not** gate retries on
+>    `navigator.onLine`, since a phone in a tunnel often reports online with no
+>    usable data. On the Safari-native path the `<video>` `error` event enters
+>    the same loop; a retry reloads the still-set `src` and seeks back via the
+>    resume machinery (`lp.resumeSec`/`resumeApplied`); recovery is detected on
+>    `playing`. Only `MEDIA_ERR_SRC_NOT_SUPPORTED` (permanent) still alerts.
+> 3. **"Reconnecting…" only when it's user-visible.** While the buffer covers
+>    the outage nothing is shown; once `waiting` fires (or `_lpNetLost` finds
+>    `readyState < 3`) the `#lpPreparing` overlay shows "Reconnecting…", cleared
+>    by `playing`. Retry state is reset in `_lpDestroyHls` (so every load /
+>    stop / episode change starts clean).
    - **Safari** (iOS + macOS): set `<video>.src = master_url` directly.
      Safari plays HLS natively, exposing `AudioTrackList` for audio
      switching. Wait for `loadedmetadata` → populate dropdowns. (Subtitles
