@@ -97,8 +97,12 @@ fraction onto one global `progress` (0..1) via `_analysis_overall_progress` /
 `_ANALYSIS_STAGE_RANGES` (fingerprinting 0–40 %, matching-intros 40–65 %,
 matching-outros 65–90 %, finalizing 90–100 %), clamped so it **never decreases**
 within a run (terminal states set `progress = 1.0`). The job carries `progress`
-in the `analysis_status` event; the admin bar reads that, keeping the
-`current/total` only as stage-counter text.
+in the `analysis_status` event. The admin bar **also derives the same overall %
+itself** from `stage` + `current/total` (`_analysisOverallPct` in
+`static/admin.html`, mirroring the weight ranges) and prefers `job.progress` only
+when present — so the bar is monotonic even against an older/un-restarted server
+that sends just `current/total`. The `current/total` is kept only as
+stage-counter text. See [GOTCHAS.md](GOTCHAS.md).
 
 ## Trigger flow (in `main.py`)
 

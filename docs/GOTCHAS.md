@@ -158,9 +158,9 @@ The in-player **Mark Intro Template** capture is a deliberate admin action launc
 
 **Mode/template edits don't auto-fingerprint.** `POST …/skip-mode`, `POST …/skip-template`, and `DELETE …/skip-template/{id}` persist only — none of them kicks off `_run_series_analysis`. Extrapolation is triggered explicitly by the **Re-fingerprint** button (`POST …/analyze`) so the admin can mark several templates / flip the mode without the analyzer churning on each edit. Don't "helpfully" re-add an auto-run to those endpoints.
 
-### Smart Skip progress bar must read `job.progress`, not `current/total`
+### Smart Skip progress bar — one monotonic bar across stages, derived on BOTH ends
 
-The analyzer emits `current/total` **per stage**, and every stage restarts the counter (fingerprinting 1/N, then matching-intros 1/M, …). Driving a progress bar off `current/total` makes it slam to 100 % then jump back to ~0 % at each stage boundary (the original bug). The orchestrator now publishes a monotonic overall `progress` (0..1) on the job via `_analysis_overall_progress` / `_ANALYSIS_STAGE_RANGES`; the admin bar reads **that**. If you add a stage, add its weight range — and don't reintroduce a `current/total`-driven width.
+The analyzer emits `current/total` **per stage**, and every stage restarts the counter (fingerprinting 1/N, then matching-intros 1/M, …). Driving a progress bar off `current/total` makes it slam to 100 % then jump back to ~0 % at each stage boundary (the original bug). Fixed on **both** ends: the orchestrator publishes a monotonic overall `progress` (0..1) on the job (`_analysis_overall_progress` / `_ANALYSIS_STAGE_RANGES`), **and** the admin bar derives the same overall % itself from `job.stage` + `current/total` (`_analysisOverallPct` in `static/admin.html`, mirroring the weight ranges), preferring `job.progress` when present. The frontend derivation is what makes the bar correct even against an un-restarted/older server that only sends `current/total` — don't drop it and assume the server value is always there. A per-series memo keyed on `started_at` clamps it monotonic within a run and resets on a new one. If you add a stage, add its weight range **in both** `_ANALYSIS_STAGE_RANGES` dicts, and never reintroduce a raw `current/total`-driven width.
 
 ### Night mode toggles by relaunching VLC — there's no runtime audio-filter command
 
