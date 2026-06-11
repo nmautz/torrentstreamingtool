@@ -289,12 +289,45 @@
     body.no-hls [onclick^="prepForStreaming"],
     body.no-hls [onclick^="prepItemForStreaming"],
     body.no-hls [onclick^="playLibraryWithChooser"] { display: none !important; }
+    /* The stage fills the WHOLE player — header, transport, and options panel
+       are all absolute overlays on top of the video, so the video always gets
+       every pixel of the screen and nothing can overflow the viewport. */
     #lpStage {
-      position: relative;
-      flex: 1 1 auto;
-      min-height: 0;
+      position: absolute;
+      inset: 0;
       background: #000;
     }
+    /* Header bar overlays the top edge; fades with .lp-idle via .lp-chrome. */
+    #lpHeader {
+      position: absolute;
+      top: 0; left: 0; right: 0;
+      z-index: 30;
+    }
+    #lpHeader > div { background: rgba(3,7,18,0.85); }
+    /* Narrow phones: icon-only header buttons so the bar never overflows. */
+    @media (max-width: 480px) {
+      .lp-btn-label { display: none; }
+      #lpHeader button { padding-left: 10px; padding-right: 10px; }
+    }
+    /* Options panel (#lpTrackRow) — gear-toggled overlay anchored above the
+       bottom control strip (72px = seek bar 28 + button row 44). */
+    #lpTrackRow {
+      display: none;
+      position: absolute;
+      right: 0;
+      bottom: calc(72px + env(safe-area-inset-bottom, 0px));
+      width: min(100%, 380px);
+      max-height: calc(100% - 170px);
+      overflow-y: auto;
+      z-index: 35;
+      background: rgba(3,7,18,0.95);
+      border: 1px solid #1f2937;
+      flex-direction: column;
+      gap: 10px;
+      padding: 12px;
+    }
+    #localPlayer.lp-opts #lpTrackRow { display: flex; }
+    #localPlayer.lp-opts #lpOptsBtn { background: #4338ca; color: #fff; }
     #lpVideo {
       width: 100%;
       height: 100%;
@@ -375,7 +408,7 @@
       background: rgba(3,7,18,0.82);
       border-top: 1px solid rgba(255,255,255,0.08);
       pointer-events: auto;
-      padding: 0 10px;
+      padding: 0 10px env(safe-area-inset-bottom, 0px);
     }
     #localPlayer.lp-idle .lp-ctl-bottom { pointer-events: none; }
     /* Seek bar: 28px touch target, 4px visual track that thickens on scrub. */
@@ -451,6 +484,7 @@
     #localPlayer.lp-tiny #lpControls { display: none !important; }
     #localPlayer.lp-tiny #lpBuffSpin { display: none !important; }
     #localPlayer.lp-tiny #lpStage {
+      position: static;     /* back into the flex row (full mode is absolute) */
       width: 96px;
       height: 56px;
       flex: 0 0 auto;
@@ -2115,15 +2149,18 @@
 
 <!-- ── Local Player — single <video>, two visual modes (full / tiny). ─────── -->
 <div id="localPlayer">
-  <!-- Fullscreen chrome: header bar (close + title) above the video -->
-  <div class="lp-chrome safe-top flex-shrink-0">
+  <!-- Fullscreen chrome: header bar (close + title) OVERLAID on the video
+       (absolute top — the video underneath takes the full screen). Fades with
+       .lp-idle like the transport. On narrow screens the text labels collapse
+       to icons (.lp-btn-label) so the bar never overflows. -->
+  <div id="lpHeader" class="lp-chrome safe-top">
     <div class="flex items-center h-12 border-b border-gray-800 bg-gray-950">
       <button onclick="lpMinimize()"
         class="h-full px-4 flex items-center gap-1.5 text-gray-500 hover:text-white hover:bg-gray-800 active:bg-gray-700 transition-colors text-xs font-bold uppercase tracking-wide">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 14l-7 7m0 0l-7-7m7 7V3"/>
         </svg>
-        Min
+        <span class="lp-btn-label">Min</span>
       </button>
       <!-- Prev / Next episode. Hold-to-activate (works whether or not the
            target is prepped); the square dot shows prep readiness:
@@ -2158,7 +2195,7 @@
         <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
           <rect x="2" y="4" width="20" height="14" rx="0"/><path stroke-linecap="round" d="M8 20h8M12 18v2"/>
         </svg>
-        To TV
+        <span class="lp-btn-label">To TV</span>
       </button>
       <button onclick="lpStop()"
         class="h-full px-4 flex items-center gap-1.5 text-red-500 hover:text-red-300 hover:bg-red-950/40 active:bg-red-950/70 transition-colors text-xs font-bold uppercase tracking-wide">
@@ -2214,6 +2251,12 @@
           <span class="lp-ctl-time lp-ctl-dim">/</span>
           <span id="lpTimeDur" class="lp-ctl-time lp-ctl-dim">–:––</span>
           <div class="flex-1"></div>
+          <button id="lpOptsBtn" class="lp-ctl-sm" onclick="lpToggleOpts()" title="Options — quality, audio, subtitles, clip">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
+              <circle cx="12" cy="12" r="3"/>
+            </svg>
+          </button>
           <button id="lpMuteBtn" class="lp-ctl-sm" onclick="lpToggleMute()" title="Mute / Unmute">
             <svg class="lp-ic-vol w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" d="M11 5L6 9H2v6h4l5 4V5zM15.5 8.5a5 5 0 010 7M18.5 5.5a9 9 0 010 13"/>
@@ -2251,9 +2294,13 @@
     <button onclick="lpDismissSkipOffer()"
       class="block mt-1.5 mx-auto text-[10px] text-gray-400 hover:text-gray-200 uppercase tracking-wide">Hide</button>
   </div>
-  <!-- Audio + subtitle selectors. Each row hides itself when only one track
+  <!-- Options panel — quality/audio/subtitle selectors + the Clip row. Hidden
+       until the gear button (#lpOptsBtn) toggles .lp-opts on #localPlayer; an
+       absolute overlay anchored above the bottom control strip so the video
+       keeps the full screen. Each row still hides itself when only one track
        exists for its type (or zero, in the case of subs). -->
-  <div id="lpTrackRow" class="lp-chrome hidden border-t border-gray-800 bg-gray-950 px-3 py-2 flex flex-col gap-2 flex-shrink-0">
+  <div id="lpTrackRow" class="lp-chrome">
+    <div class="text-[9px] font-black uppercase tracking-widest text-gray-500">Options</div>
     <div id="lpQualityRow" class="hidden flex items-center gap-3">
       <span class="text-[9px] font-black uppercase tracking-widest text-gray-600 flex-shrink-0 w-8">Res</span>
       <select id="lpQualitySelect" onchange="lpSetQuality(this.value)"
@@ -2304,7 +2351,6 @@
       </button>
     </div>
   </div>
-  <div class="lp-chrome safe-bottom flex-shrink-0 bg-gray-950"></div>
   <!-- Tiny-only chrome: huge fullscreen button + close button. -->
   <button class="lp-tiny-only lp-tiny-fs" onclick="lpMaximize()" title="Fullscreen">
     <svg class="w-6 h-6 mb-1" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -7680,9 +7726,9 @@ function _lpRenderTrackRows() {
   document.getElementById("lpQualityRow").classList.toggle("hidden", qN <= 1);
   document.getElementById("lpAudioRow").classList.toggle("hidden", audN <= 1);
   document.getElementById("lpSubRow").classList.toggle("hidden", subN === 0 && !canGen);
-  // The track row used to hide when there were no multi-track selectors; it now
-  // always carries the Clip row, so keep it shown whenever the player is up.
-  document.getElementById("lpTrackRow").classList.remove("hidden");
+  // The track row's visibility is owned by the gear toggle (.lp-opts on
+  // #localPlayer — see lpToggleOpts), not by track counts: it always carries
+  // the Clip row, so the gear button is always meaningful.
   // Clipping re-encodes from the prepped bundle (the server 409s without one),
   // so it's unavailable while streaming on-demand — hide the row until the file
   // is fully prepped (a subsequent play then runs in bundle mode).
@@ -8007,12 +8053,23 @@ const LP_CTL_HIDE_MS = 3000;
 
 function _lpV() { return document.getElementById("lpVideo"); }
 
+function _lpOptsOpen() {
+  return document.getElementById("localPlayer").classList.contains("lp-opts");
+}
+
+// Gear button: toggle the options panel (quality / audio / subtitles / clip).
+// While open, the overlay never auto-hides.
+function lpToggleOpts() {
+  document.getElementById("localPlayer").classList.toggle("lp-opts");
+  _lpCtlShow();
+}
+
 function _lpCtlShow() {
   const c = document.getElementById("localPlayer");
   c.classList.remove("lp-idle");
   if (_lpCtlTimer) { clearTimeout(_lpCtlTimer); _lpCtlTimer = null; }
   const v = _lpV();
-  if (v && !v.paused && !lp.netDown && !_lpScrub) {
+  if (v && !v.paused && !lp.netDown && !_lpScrub && !_lpOptsOpen()) {
     _lpCtlTimer = setTimeout(_lpCtlIdle, LP_CTL_HIDE_MS);
   }
 }
@@ -8020,19 +8077,22 @@ function _lpCtlShow() {
 function _lpCtlIdle() {
   _lpCtlTimer = null;
   const v = _lpV();
-  // Never hide while paused / scrubbing / reconnecting — the user needs the UI.
-  if (!v || v.paused || _lpScrub || lp.netDown) return;
+  // Never hide while paused / scrubbing / reconnecting / options open — the
+  // user needs the UI.
+  if (!v || v.paused || _lpScrub || lp.netDown || _lpOptsOpen()) return;
   document.getElementById("localPlayer").classList.add("lp-idle");
 }
 
 // Tap anywhere on the player that isn't an interactive element: tiny mode →
-// maximize; full mode → toggle the control overlay (hide only while playing).
+// maximize; options open → close them; otherwise toggle the control overlay
+// (hide only while playing).
 function lpStageTap(e) {
-  // Interactive elements (and anything inside the control overlay — seek bar
-  // included) never toggle visibility; only bare video / chrome-free areas do.
-  if (e.target.closest("button,select,input,a,#lpControls")) return;
+  // Interactive elements (and anything inside the control overlay or the
+  // options panel) never toggle visibility; only bare video areas do.
+  if (e.target.closest("button,select,input,a,#lpControls,#lpTrackRow")) return;
   const c = document.getElementById("localPlayer");
   if (c.classList.contains("lp-tiny")) { lpMaximize(); return; }
+  if (_lpOptsOpen()) { c.classList.remove("lp-opts"); _lpCtlShow(); return; }
   const v = _lpV();
   if (c.classList.contains("lp-idle") || !v || v.paused) {
     _lpCtlShow();
@@ -8176,7 +8236,9 @@ function lpMaximize() {
 function lpMinimize() {
   lp.maximized = false;
   _lpExitFullscreen();   // a tiny corner tile inside OS fullscreen makes no sense
-  document.getElementById("localPlayer").classList.add("lp-tiny");
+  const c = document.getElementById("localPlayer");
+  c.classList.remove("lp-opts");
+  c.classList.add("lp-tiny");
 }
 
 async function lpUnloadCurrent() {
@@ -8206,7 +8268,7 @@ async function lpStop() {
   if (_lpCtlTimer) { clearTimeout(_lpCtlTimer); _lpCtlTimer = null; }
   _lpScrub = null;
   const c = document.getElementById("localPlayer");
-  c.classList.remove("lp-active", "lp-tiny", "lp-idle", "lp-buffering", "lp-scrub");
+  c.classList.remove("lp-active", "lp-tiny", "lp-idle", "lp-buffering", "lp-scrub", "lp-opts");
   document.getElementById("lpSkipOffer").classList.add("hidden");
   _lpHidePreparing();
   lp.itemId = null; lp.filePath = null; lp.playlist = []; lp.pi = 0;
@@ -9133,6 +9195,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.25.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.26.0</div>
 </body>
 </html>

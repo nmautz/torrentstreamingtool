@@ -492,11 +492,15 @@ Two ways to populate the cache:
    `_lpDestroyHls`.
 7. Transport is the **custom Metro control overlay** (`#lpControls`) — the
    native `controls` attribute is deliberately absent so every OS/browser
-   shows the identical UI: seek bar with buffered fill + drag-to-scrub
+   shows the identical UI. The video takes the **entire screen** (`#lpStage`
+   is `absolute inset:0`); the header, transport, and options are all
+   overlays. Pieces: seek bar with buffered fill + drag-to-scrub
    (the seek commits once on release — in on-demand mode every cold seek
    restarts the JIT ffmpeg, so don't seek per pointermove), ±10 s tiles,
-   play/pause, mute, and OS fullscreen on the **whole container** (so the
-   track selectors stay usable in fullscreen; iPhone Safari lacks
+   play/pause, mute, a **gear button** that opens the options panel
+   (`#lpTrackRow`: quality / audio / subtitles / AI / Clip — hidden
+   otherwise), and OS fullscreen on the **whole container** (so the gear
+   panel stays usable in fullscreen; iPhone Safari lacks
    element-fullscreen and hides the button — the player is already a
    full-viewport overlay). Auto-hides 3 s into playback; tap to toggle.
    Full detail in [FRONTEND.md](FRONTEND.md); the iOS/fullscreen footgun is
@@ -744,8 +748,10 @@ quieter **Clip last…** custom-length button (`_clipPromptSeconds`):
   stream-prepped** (`_handoffReadyState(s)===false`); readiness-unknown stays
   enabled and lets the backend explain.
 - **On-device player** — `#lpClipRow`, directly under the subtitle selector
-  inside `#lpTrackRow` (which is now always shown so the clip row is always
-  available). `lpClip(seconds, btn)` clips the local `<video>`'s `currentTime`
+  inside `#lpTrackRow` (the gear-toggled **options panel** — open it via the
+  gear button in the bottom control strip; see
+  [FRONTEND.md § Local player](FRONTEND.md)).
+  `lpClip(seconds, btn)` clips the local `<video>`'s `currentTime`
   using the **selected audio** (`lp.pendingAudioIdx`, which is the source audio
   rendition index). The file is prepped by definition here.
 

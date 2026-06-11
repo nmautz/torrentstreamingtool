@@ -231,12 +231,18 @@ is fetched in parallel from `/api/library/{id}/skip-data?file_path=…` and
 assigned to `lp.skipData` for the skip-intro / skip-credits logic in
 `lpEvaluateSkipOffer`.
 
-There is **one** `<video id="lpVideo">` inside `#localPlayer` (wrapped in the
-relative-positioned `#lpStage` that also hosts the control overlay). The
+There is **one** `<video id="lpVideo">` inside `#localPlayer`, wrapped in
+`#lpStage`. In full mode the stage is `absolute inset:0` — **the video takes
+the entire screen** and every piece of chrome (header `#lpHeader`, transport
+`#lpControls`, options panel `#lpTrackRow`) is an absolute overlay on top, so
+nothing can shrink the video or overflow a short mobile viewport. The
 container has two visual modes toggled via class:
 - default (no `.lp-tiny`) — fullscreen overlay with **custom Metro controls**
   (see below); the native `controls` attribute is deliberately absent.
-- `.lp-tiny` — corner tile (96×56 stage + huge fullscreen button + close), repositioned via CSS only (no DOM move, no video re-load). The control overlay hides; a tap on the tile maximizes (`lpStageTap`).
+- `.lp-tiny` — corner tile (96×56 stage, `position:static` back in the flex
+  row + huge fullscreen button + close), repositioned via CSS only (no DOM
+  move, no video re-load). All overlays hide; a tap on the tile maximizes
+  (`lpStageTap`).
 
 Single-element design avoids iOS Safari's per-page video budget and the audio
 desync that two synchronized videos would create. iOS-friendly: `playsinline`,
@@ -254,6 +260,14 @@ Don't re-add the `controls` attribute. Pieces:
   `currentTime`; the seek commits **once on release** (matters in on-demand
   mode, where each cold seek restarts the JIT ffmpeg). Time labels use
   `fmtTimeSecs`.
+- **Options panel** — the **gear button** (`#lpOptsBtn`, `lpToggleOpts`)
+  toggles `.lp-opts` on `#localPlayer`, showing `#lpTrackRow` (quality /
+  audio / subtitle selectors, AI button, Clip row) as an absolute panel
+  anchored above the bottom strip — scrollable, ≤380px wide. The panel is
+  **never** visible otherwise (`_lpRenderTrackRows` doesn't unhide it; the
+  gear owns visibility). While open, the overlay won't auto-hide
+  (`_lpCtlShow`/`_lpCtlIdle` guard on `_lpOptsOpen`); a tap on the video
+  closes the panel first, and `lpStop`/`lpMinimize` clear `.lp-opts`.
 - **Mute** (`lpToggleMute`) and **fullscreen** (`lpToggleFullscreen`) buttons.
   Fullscreen requests OS fullscreen on **the whole `#localPlayer` container**,
   never the bare `<video>` — so the header, transport, and track selectors stay
@@ -271,7 +285,9 @@ Don't re-add the `controls` attribute. Pieces:
   shows the square Metro spinner `#lpBuffSpin`, independent of overlay
   visibility.
 
-The header (`.lp-chrome`, hidden in tiny mode) carries **Prev** / **Next**
+The header (`#lpHeader`, `.lp-chrome`, hidden in tiny mode; on phones ≤480px
+the Min / To TV text labels collapse to icons via `.lp-btn-label` so the bar
+never overflows) carries **Prev** / **Next**
 episode buttons (`#lpPrevEpBtn` / `#lpNextEpBtn`), both **hold-to-activate**
 (`_holdStart`). `lpPrevEp` / `lpNextEp` → `lpNavEp(±1)` saves the current
 position then `_lpLoadIndex(0)`s the neighbour; the hold works whether or not
