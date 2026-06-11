@@ -289,12 +289,151 @@
     body.no-hls [onclick^="prepForStreaming"],
     body.no-hls [onclick^="prepItemForStreaming"],
     body.no-hls [onclick^="playLibraryWithChooser"] { display: none !important; }
-    #lpVideo {
-      flex: 1;
-      width: 100%;
+    #lpStage {
+      position: relative;
+      flex: 1 1 auto;
       min-height: 0;
       background: #000;
     }
+    #lpVideo {
+      width: 100%;
+      height: 100%;
+      background: #000;
+      display: block;
+    }
+    /* ── Custom player controls (Metro: flat strips, square tiles, no blur) ──
+       The overlay root is pointer-events:none so taps on the bare video reach
+       #lpStage (tap-to-toggle); only the control clusters take pointer events.
+       Visibility is opacity-only (.lp-idle on #localPlayer) — no reflow, the
+       faded chrome blends into the letterbox bars. */
+    #lpControls {
+      position: absolute;
+      inset: 0;
+      z-index: 20;
+      pointer-events: none;
+      opacity: 1;
+      transition: opacity 0.2s;
+    }
+    #localPlayer.lp-idle #lpControls { opacity: 0; }
+    /* Header + track rows fade with the transport (immersive view), but stay
+       laid out so the video never resizes. */
+    #localPlayer.lp-idle .lp-chrome { opacity: 0; pointer-events: none; }
+    #localPlayer.lp-idle { cursor: none; }
+    .lp-chrome { transition: opacity 0.2s; }
+    .lp-ctl-center {
+      position: absolute;
+      top: 50%; left: 50%;
+      transform: translate(-50%, -50%);
+      display: flex;
+      align-items: center;
+      gap: 28px;
+      pointer-events: auto;
+    }
+    #localPlayer.lp-idle .lp-ctl-center { pointer-events: none; }
+    .lp-ctl-big {
+      position: relative;
+      width: 56px; height: 56px;
+      background: rgba(0,0,0,0.6);
+      border: 1px solid rgba(255,255,255,0.25);
+      color: #fff;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      cursor: pointer;
+    }
+    .lp-ctl-big:active { background: rgba(255,255,255,0.2); }
+    .lp-ctl-play { width: 68px; height: 68px; background: rgba(67,56,202,0.85); border-color: rgba(255,255,255,0.35); }
+    .lp-ctl-play:active { background: #4f46e5; }
+    .lp-ctl-big-num {
+      position: absolute;
+      bottom: 4px; right: 5px;
+      font-size: 9px;
+      font-weight: 900;
+      letter-spacing: 0.05em;
+    }
+    /* Buffering spinner — square, Metro. Visible whenever the engine stalls
+       for data, independent of overlay visibility. */
+    #lpBuffSpin {
+      display: none;
+      position: absolute;
+      top: 50%; left: 50%;
+      width: 34px; height: 34px;
+      margin: -17px 0 0 -17px;
+      border: 4px solid rgba(255,255,255,0.2);
+      border-top-color: #f59e0b;
+      animation: lpspin 0.8s steps(8) infinite;
+      pointer-events: none;
+      z-index: 25;
+    }
+    #localPlayer.lp-buffering #lpBuffSpin { display: block; }
+    /* Spinner replaces the play tile's glyph so they don't stack visually. */
+    #localPlayer.lp-buffering .lp-ctl-play svg { opacity: 0.25; }
+    @keyframes lpspin { to { transform: rotate(360deg); } }
+    .lp-ctl-bottom {
+      position: absolute;
+      left: 0; right: 0; bottom: 0;
+      background: rgba(3,7,18,0.82);
+      border-top: 1px solid rgba(255,255,255,0.08);
+      pointer-events: auto;
+      padding: 0 10px;
+    }
+    #localPlayer.lp-idle .lp-ctl-bottom { pointer-events: none; }
+    /* Seek bar: 28px touch target, 4px visual track that thickens on scrub. */
+    #lpSeekBar {
+      position: relative;
+      height: 28px;
+      cursor: pointer;
+      touch-action: none;
+    }
+    .lp-seek-track {
+      position: absolute;
+      left: 0; right: 0;
+      top: 50%;
+      height: 4px;
+      margin-top: -2px;
+      background: rgba(255,255,255,0.18);
+      transition: height 0.1s, margin-top 0.1s;
+    }
+    #localPlayer.lp-scrub .lp-seek-track { height: 8px; margin-top: -4px; }
+    #lpSeekBuf, #lpSeekFill {
+      position: absolute;
+      left: 0; top: 0; bottom: 0;
+      width: 0;
+    }
+    #lpSeekBuf  { background: rgba(255,255,255,0.25); }
+    #lpSeekFill { background: #6366f1; }
+    #lpSeekDot {
+      position: absolute;
+      top: 50%; left: 0;
+      width: 14px; height: 14px;
+      margin: -7px 0 0 -7px;
+      background: #fff;
+      pointer-events: none;
+    }
+    .lp-ctl-row {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      height: 44px;
+    }
+    .lp-ctl-time {
+      font-size: 11px;
+      font-weight: 700;
+      color: #e5e7eb;
+      font-variant-numeric: tabular-nums;
+    }
+    .lp-ctl-dim { color: #6b7280; }
+    .lp-ctl-sm {
+      width: 44px; height: 44px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: #d1d5db;
+      background: transparent;
+      border: none;
+      cursor: pointer;
+    }
+    .lp-ctl-sm:active { background: rgba(255,255,255,0.15); color: #fff; }
     /* Tiny mode — overrides the fullscreen layout. The chrome rows hide; only
        the video + huge fullscreen button + close button remain. */
     #localPlayer.lp-tiny {
@@ -309,12 +448,14 @@
       border-right: none;
     }
     #localPlayer.lp-tiny .lp-chrome { display: none !important; }
-    #localPlayer.lp-tiny #lpVideo {
+    #localPlayer.lp-tiny #lpControls { display: none !important; }
+    #localPlayer.lp-tiny #lpBuffSpin { display: none !important; }
+    #localPlayer.lp-tiny #lpStage {
       width: 96px;
       height: 56px;
       flex: 0 0 auto;
-      object-fit: cover;
     }
+    #localPlayer.lp-tiny #lpVideo { object-fit: cover; }
     .lp-tiny-only { display: none; }
     #localPlayer.lp-tiny .lp-tiny-only { display: flex; }
     #localPlayer.lp-tiny .lp-tiny-fs {
@@ -2025,7 +2166,74 @@
       </button>
     </div>
   </div>
-  <video id="lpVideo" controls playsinline crossorigin="anonymous" preload="auto"></video>
+  <!-- Stage: video + the custom Metro control overlay. Native browser controls
+       are deliberately OFF (no `controls` attribute) — the overlay below is the
+       only transport UI, so every OS/browser shows the identical player chrome.
+       Tap the stage to toggle the overlay (auto-hides after 3 s while playing);
+       see lpStageTap / _lpCtlShow / _lpCtlTick. Don't re-add `controls`. -->
+  <div id="lpStage">
+    <video id="lpVideo" playsinline crossorigin="anonymous" preload="auto"></video>
+    <!-- Square Metro buffering spinner — shown via .lp-buffering on #localPlayer,
+         independent of overlay visibility (like YouTube's). -->
+    <div id="lpBuffSpin"></div>
+    <div id="lpControls">
+      <!-- Center transport: back 10 / play-pause / forward 10 -->
+      <div class="lp-ctl-center">
+        <button class="lp-ctl-big" onclick="lpSeekBy(-10)" title="Back 10 seconds">
+          <svg class="w-7 h-7" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M9 15L3 9m0 0l6-6M3 9h11a7 7 0 017 7v0"/>
+          </svg>
+          <span class="lp-ctl-big-num">10</span>
+        </button>
+        <button id="lpPlayBtn" class="lp-ctl-big lp-ctl-play" onclick="lpTogglePlay()" title="Play / Pause">
+          <svg class="lp-ic-play w-9 h-9" fill="currentColor" viewBox="0 0 24 24">
+            <path d="M8 5v14l11-7z"/>
+          </svg>
+          <svg class="lp-ic-pause w-9 h-9 hidden" fill="currentColor" viewBox="0 0 24 24">
+            <path d="M6 4h4v16H6zM14 4h4v16h-4z"/>
+          </svg>
+        </button>
+        <button class="lp-ctl-big" onclick="lpSeekBy(10)" title="Forward 10 seconds">
+          <svg class="w-7 h-7" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" d="M15 15l6-6m0 0l-6-6m6 6H10a7 7 0 00-7 7v0"/>
+          </svg>
+          <span class="lp-ctl-big-num">10</span>
+        </button>
+      </div>
+      <!-- Bottom strip: seek bar + time / mute / fullscreen -->
+      <div class="lp-ctl-bottom">
+        <div id="lpSeekBar">
+          <div class="lp-seek-track">
+            <div id="lpSeekBuf"></div>
+            <div id="lpSeekFill"></div>
+          </div>
+          <div id="lpSeekDot"></div>
+        </div>
+        <div class="lp-ctl-row">
+          <span id="lpTimeCur" class="lp-ctl-time">0:00</span>
+          <span class="lp-ctl-time lp-ctl-dim">/</span>
+          <span id="lpTimeDur" class="lp-ctl-time lp-ctl-dim">–:––</span>
+          <div class="flex-1"></div>
+          <button id="lpMuteBtn" class="lp-ctl-sm" onclick="lpToggleMute()" title="Mute / Unmute">
+            <svg class="lp-ic-vol w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M11 5L6 9H2v6h4l5 4V5zM15.5 8.5a5 5 0 010 7M18.5 5.5a9 9 0 010 13"/>
+            </svg>
+            <svg class="lp-ic-muted w-5 h-5 hidden" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M11 5L6 9H2v6h4l5 4V5zM16 9l6 6M22 9l-6 6"/>
+            </svg>
+          </button>
+          <button id="lpFsBtn" class="lp-ctl-sm" onclick="lpToggleFullscreen()" title="Fullscreen">
+            <svg class="lp-ic-fs w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>
+            </svg>
+            <svg class="lp-ic-unfs w-5 h-5 hidden" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M9 4v5H4M15 4v5h5M9 20v-5H4M15 20v-5h5"/>
+            </svg>
+          </button>
+        </div>
+      </div>
+    </div>
+  </div>
   <!-- Stream-prep overlay: visible while the server is remuxing/transcoding the source file. -->
   <div id="lpPreparing"
        class="hidden absolute inset-0 z-30 flex items-center justify-center bg-black/70 text-amber-300 text-sm font-bold uppercase tracking-widest pointer-events-none">
@@ -7401,6 +7609,7 @@ async function _lpLoadIndex(seekTo) {
   });
 
   try { await v.play(); } catch (_) { /* iOS may block autoplay until user gesture */ }
+  _lpCtlSync(); _lpCtlTick(); _lpCtlShow();   // fresh custom-controls state for the new file
   _lpStartSubUpgradePoll();   // watch for late-downloaded real subs to upgrade off AI
 }
 
@@ -7783,13 +7992,190 @@ function _lpSaveLocalTracks() {
   }).catch(() => {});
 }
 
+// ── Custom player controls ──────────────────────────────────────────────────
+// The on-device player draws its own transport UI (#lpControls) instead of the
+// browser's native <video> controls, so the player looks and behaves the same
+// on every OS/browser: same seek bar, same ±10 s tiles, same fullscreen, and
+// the subtitle/audio/quality selectors stay reachable in fullscreen. Overlay
+// visibility = the .lp-idle class on #localPlayer (opacity-only — no reflow);
+// it auto-hides 3 s into playback and never hides while paused, scrubbing,
+// buffering, or reconnecting.
+let _lpCtlTimer = null;   // auto-hide timeout handle
+let _lpScrub = null;      // {t} while the user is dragging the seek bar
+
+const LP_CTL_HIDE_MS = 3000;
+
+function _lpV() { return document.getElementById("lpVideo"); }
+
+function _lpCtlShow() {
+  const c = document.getElementById("localPlayer");
+  c.classList.remove("lp-idle");
+  if (_lpCtlTimer) { clearTimeout(_lpCtlTimer); _lpCtlTimer = null; }
+  const v = _lpV();
+  if (v && !v.paused && !lp.netDown && !_lpScrub) {
+    _lpCtlTimer = setTimeout(_lpCtlIdle, LP_CTL_HIDE_MS);
+  }
+}
+
+function _lpCtlIdle() {
+  _lpCtlTimer = null;
+  const v = _lpV();
+  // Never hide while paused / scrubbing / reconnecting — the user needs the UI.
+  if (!v || v.paused || _lpScrub || lp.netDown) return;
+  document.getElementById("localPlayer").classList.add("lp-idle");
+}
+
+// Tap anywhere on the player that isn't an interactive element: tiny mode →
+// maximize; full mode → toggle the control overlay (hide only while playing).
+function lpStageTap(e) {
+  // Interactive elements (and anything inside the control overlay — seek bar
+  // included) never toggle visibility; only bare video / chrome-free areas do.
+  if (e.target.closest("button,select,input,a,#lpControls")) return;
+  const c = document.getElementById("localPlayer");
+  if (c.classList.contains("lp-tiny")) { lpMaximize(); return; }
+  const v = _lpV();
+  if (c.classList.contains("lp-idle") || !v || v.paused) {
+    _lpCtlShow();
+  } else {
+    if (_lpCtlTimer) { clearTimeout(_lpCtlTimer); _lpCtlTimer = null; }
+    c.classList.add("lp-idle");
+  }
+}
+
+function lpTogglePlay() {
+  const v = _lpV();
+  if (v.paused) v.play().catch(() => {});
+  else v.pause();
+  _lpCtlShow();
+}
+
+function lpSeekBy(delta) {
+  const v = _lpV();
+  const d = v.duration || lp.duration || 0;
+  if (!d) return;
+  v.currentTime = Math.min(Math.max((v.currentTime || 0) + delta, 0), d - 0.5);
+  _lpCtlShow(); _lpCtlTick();
+}
+
+function lpToggleMute() {
+  const v = _lpV();
+  v.muted = !v.muted;
+  _lpCtlSync(); _lpCtlShow();
+}
+
+// OS fullscreen on the whole #localPlayer container (not the <video>), so the
+// custom chrome — header, transport, track selectors — stays visible inside
+// fullscreen. iPhone Safari can't fullscreen a non-<video> element; the button
+// is hidden there at init (the player is already a full-viewport overlay, so
+// nothing is lost). Don't "fix" this by fullscreening the <video> — that
+// summons the native controls, defeating the cross-OS UI.
+function _lpFsEl() {
+  return document.fullscreenElement || document.webkitFullscreenElement || null;
+}
+function lpToggleFullscreen() {
+  const el = document.getElementById("localPlayer");
+  if (_lpFsEl()) {
+    const exit = document.exitFullscreen || document.webkitExitFullscreen;
+    if (exit) try { exit.call(document); } catch (_) {}
+  } else {
+    const req = el.requestFullscreen || el.webkitRequestFullscreen;
+    if (req) try { req.call(el); } catch (_) {}
+  }
+  _lpCtlShow();
+}
+function _lpExitFullscreen() {
+  if (!_lpFsEl()) return;
+  const exit = document.exitFullscreen || document.webkitExitFullscreen;
+  if (exit) try { exit.call(document); } catch (_) {}
+}
+
+// Icon states: play/pause, muted, fullscreen in/out.
+function _lpCtlSync() {
+  const v = _lpV(); if (!v) return;
+  const btn = document.getElementById("lpPlayBtn");
+  btn.querySelector(".lp-ic-play").classList.toggle("hidden", !v.paused);
+  btn.querySelector(".lp-ic-pause").classList.toggle("hidden", v.paused);
+  const mute = document.getElementById("lpMuteBtn");
+  mute.querySelector(".lp-ic-vol").classList.toggle("hidden", v.muted);
+  mute.querySelector(".lp-ic-muted").classList.toggle("hidden", !v.muted);
+  const fs = document.getElementById("lpFsBtn");
+  fs.querySelector(".lp-ic-fs").classList.toggle("hidden", !!_lpFsEl());
+  fs.querySelector(".lp-ic-unfs").classList.toggle("hidden", !_lpFsEl());
+}
+
+// Seek bar + time labels. Cheap enough to run on every `timeupdate`; while
+// scrubbing it previews the drag position without touching currentTime.
+function _lpCtlTick() {
+  const v = _lpV(); if (!v) return;
+  const d = v.duration || lp.duration || 0;
+  const t = _lpScrub ? _lpScrub.t : (v.currentTime || 0);
+  document.getElementById("lpTimeCur").textContent = fmtTimeSecs(t);
+  document.getElementById("lpTimeDur").textContent = d ? fmtTimeSecs(d) : "–:––";
+  const pct = d ? Math.min(t / d * 100, 100) : 0;
+  document.getElementById("lpSeekFill").style.width = pct + "%";
+  document.getElementById("lpSeekDot").style.left = pct + "%";
+  // Buffered: the range containing the playhead (last range as fallback).
+  let buf = 0;
+  try {
+    const b = v.buffered;
+    for (let i = 0; i < b.length; i++) {
+      if (b.start(i) <= v.currentTime + 0.5 && v.currentTime <= b.end(i) + 0.5) { buf = b.end(i); break; }
+      buf = b.end(i);
+    }
+  } catch (_) {}
+  document.getElementById("lpSeekBuf").style.width = (d ? Math.min(buf / d * 100, 100) : 0) + "%";
+}
+
+function _lpSeekPosFromEvent(e, bar, d) {
+  const r = bar.getBoundingClientRect();
+  const frac = Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1);
+  return frac * d;
+}
+
+// Pointer-based scrub: preview while dragging, commit currentTime on release
+// (a single seek — important in on-demand mode, where every seek into a cold
+// region restarts the JIT ffmpeg).
+function _lpSeekBarInit() {
+  const bar = document.getElementById("lpSeekBar");
+  const c = document.getElementById("localPlayer");
+  bar.addEventListener("pointerdown", e => {
+    const v = _lpV();
+    const d = v.duration || lp.duration || 0;
+    if (!d) return;
+    try { bar.setPointerCapture(e.pointerId); } catch (_) {}
+    _lpScrub = { t: _lpSeekPosFromEvent(e, bar, d) };
+    c.classList.add("lp-scrub");
+    _lpCtlShow(); _lpCtlTick();
+    e.preventDefault();
+  });
+  bar.addEventListener("pointermove", e => {
+    if (!_lpScrub) return;
+    const v = _lpV();
+    const d = v.duration || lp.duration || 0;
+    _lpScrub.t = _lpSeekPosFromEvent(e, bar, d);
+    _lpCtlTick();
+  });
+  const end = commit => e => {
+    if (!_lpScrub) return;
+    const t = _lpScrub.t;
+    _lpScrub = null;
+    c.classList.remove("lp-scrub");
+    if (commit) { const v = _lpV(); try { v.currentTime = t; } catch (_) {} }
+    _lpCtlShow(); _lpCtlTick();
+  };
+  bar.addEventListener("pointerup", end(true));
+  bar.addEventListener("pointercancel", end(false));
+}
+
 function lpMaximize() {
   lp.maximized = true;
   document.getElementById("localPlayer").classList.remove("lp-tiny");
+  _lpCtlShow();
 }
 
 function lpMinimize() {
   lp.maximized = false;
+  _lpExitFullscreen();   // a tiny corner tile inside OS fullscreen makes no sense
   document.getElementById("localPlayer").classList.add("lp-tiny");
 }
 
@@ -7816,8 +8202,11 @@ async function lpStop() {
   await lpUnloadCurrent();
   _lpStopSubUpgradePoll();
   lp.subAutoApplied = false;
+  _lpExitFullscreen();
+  if (_lpCtlTimer) { clearTimeout(_lpCtlTimer); _lpCtlTimer = null; }
+  _lpScrub = null;
   const c = document.getElementById("localPlayer");
-  c.classList.remove("lp-active", "lp-tiny");
+  c.classList.remove("lp-active", "lp-tiny", "lp-idle", "lp-buffering", "lp-scrub");
   document.getElementById("lpSkipOffer").classList.add("hidden");
   _lpHidePreparing();
   lp.itemId = null; lp.filePath = null; lp.playlist = []; lp.pi = 0;
@@ -8010,6 +8399,7 @@ function _lpAttachVideoEvents() {
   v.addEventListener("timeupdate", () => {
     const t = v.currentTime || 0;
     lpEvaluateSkipOffer(t);
+    _lpCtlTick();
     // Throttle progress saves to once every 15 s (matches vlc_progress_tracker).
     const now = Date.now();
     if (now - lp.lastSaveAt > 15000 && (v.duration||0) > 0 && lp.itemId && lp.filePath) {
@@ -8017,7 +8407,12 @@ function _lpAttachVideoEvents() {
       saveProgress(lp.itemId, lp.filePath, t, v.duration);
     }
   });
-  v.addEventListener("pause",  () => _lpFlushProgress(false));
+  // Custom control overlay sync (see "Custom player controls" section).
+  v.addEventListener("play",  () => { _lpCtlSync(); _lpCtlShow(); });
+  v.addEventListener("pause", () => { _lpCtlSync(); _lpCtlShow(); _lpFlushProgress(false); });
+  v.addEventListener("volumechange",   () => _lpCtlSync());
+  v.addEventListener("durationchange", () => _lpCtlTick());
+  v.addEventListener("progress",       () => _lpCtlTick());
   v.addEventListener("seeked", () => _lpFlushProgress(false));
   v.addEventListener("ended", () => { _lpAdvanceOrEnd(); });
   // On-demand: when playback stalls waiting for data (initial start, or a seek
@@ -8026,6 +8421,10 @@ function _lpAttachVideoEvents() {
   // hint; it clears the moment the segment arrives and playback resumes. A seek
   // into an already-generated region never fires `waiting`, so it stays instant.
   v.addEventListener("waiting", () => {
+    // Stalled for data → square Metro spinner (shown even when the control
+    // overlay is hidden, YouTube-style), plus keep the overlay from auto-hiding.
+    document.getElementById("localPlayer").classList.add("lp-buffering");
+    _lpCtlShow();
     // Buffer ran dry while the reconnect loop is active → now the outage is
     // user-visible. (While the buffer covered it, we stayed silent.)
     if (lp.netDown) { _lpShowPreparing("Reconnecting…"); return; }
@@ -8035,6 +8434,8 @@ function _lpAttachVideoEvents() {
     // Safari-native recovery success lands here (hls.js recovery is detected
     // on FRAG_LOADED instead — buffered playback also fires `playing`).
     if (!lp.hls && lp.netDown) _lpNetReset();
+    document.getElementById("localPlayer").classList.remove("lp-buffering");
+    _lpCtlSync(); _lpCtlShow();
     _lpHidePreparing();
   });
   v.addEventListener("error", () => {
@@ -8061,6 +8462,25 @@ function _lpAttachVideoEvents() {
       try { navigator.sendBeacon(`/api/library/ondemand/${lp.odKey}/close`); } catch (_) {}
     }
   });
+
+  // ── Custom control overlay wiring ──
+  const c = document.getElementById("localPlayer");
+  _lpSeekBarInit();
+  // Tap-to-toggle the overlay (tiny mode: tap = maximize). Guarded inside
+  // lpStageTap so taps on buttons/selects never double-act.
+  c.addEventListener("click", lpStageTap);
+  // Desktop: moving the mouse over the player reveals the controls.
+  c.addEventListener("pointermove", e => {
+    if (e.pointerType === "mouse" && c.classList.contains("lp-idle")) _lpCtlShow();
+  });
+  // Keep the fullscreen icon honest when the user exits via Esc / system UI.
+  document.addEventListener("fullscreenchange", _lpCtlSync);
+  document.addEventListener("webkitfullscreenchange", _lpCtlSync);
+  // iPhone Safari can't fullscreen a non-<video> element — hide the button
+  // there (the player is already a full-viewport overlay, so nothing is lost).
+  if (!(c.requestFullscreen || c.webkitRequestFullscreen)) {
+    document.getElementById("lpFsBtn").classList.add("hidden");
+  }
 }
 
 // --- Service-worker eviction stub -------------------------------------------
@@ -8625,6 +9045,18 @@ window.addEventListener("online",()=>{ _renderOnlineBadge(); _ensureSSEConnected
 
 // ── Keyboard shortcuts ─────────────────────────────────────────────────────
 document.addEventListener("keydown",e=>{
+  // On-device player transport (custom controls have no native keyboard
+  // handling to fall back on). Active only while the player is fullscreen-mode
+  // and focus isn't in a form control.
+  const lpc=document.getElementById("localPlayer");
+  if(lpc.classList.contains("lp-active") && !lpc.classList.contains("lp-tiny")
+     && !e.target.closest("input,select,textarea") && !e.altKey && !e.ctrlKey && !e.metaKey){
+    if(e.key===" "||e.key==="k"){ e.preventDefault(); lpTogglePlay(); return; }
+    if(e.key==="ArrowLeft"){ e.preventDefault(); lpSeekBy(-10); return; }
+    if(e.key==="ArrowRight"){ e.preventDefault(); lpSeekBy(10); return; }
+    if(e.key==="f"){ lpToggleFullscreen(); return; }
+    if(e.key==="m"){ lpToggleMute(); return; }
+  }
   if(e.key==="Escape"){
     closeFullscreenControls();
     closeDownloadModal(); closeProfileModal(); closeEpisodeModal(); closeStorageModal();
@@ -8701,6 +9133,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.24.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.25.0</div>
 </body>
 </html>

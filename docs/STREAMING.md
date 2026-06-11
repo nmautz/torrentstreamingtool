@@ -24,7 +24,10 @@ Read this when changing anything related to:
   `/api/library/{id}/local-tracks` (persisted browser track picks)
 - The local player UI (`#localPlayer`, `#lpVideo`, `#lpPreparing`,
   `#lpAudioSelect`, `#lpSubSelect`, the `#lpPrevEpBtn` / `#lpNextEpBtn`
-  episode-nav buttons + `_lpRenderNavButtons` / `_lpWarmNextEp`)
+  episode-nav buttons + `_lpRenderNavButtons` / `_lpWarmNextEp`, and the
+  custom control overlay `#lpControls` — seek bar / play-pause / ±10 s /
+  mute / OS fullscreen; detailed in
+  [FRONTEND.md § Local player](FRONTEND.md))
 - The per-row **Prep** button in the episode picker, `prepForStreaming`,
   `prepFileState`
 - The bulk **Prep for Streaming** button on library cards
@@ -487,6 +490,17 @@ Two ways to populate the cache:
    `lpMinimize` flip the class; `lpStop` removes both `.lp-active` and
    `.lp-tiny` and destroys the active hls.js instance via
    `_lpDestroyHls`.
+7. Transport is the **custom Metro control overlay** (`#lpControls`) — the
+   native `controls` attribute is deliberately absent so every OS/browser
+   shows the identical UI: seek bar with buffered fill + drag-to-scrub
+   (the seek commits once on release — in on-demand mode every cold seek
+   restarts the JIT ffmpeg, so don't seek per pointermove), ±10 s tiles,
+   play/pause, mute, and OS fullscreen on the **whole container** (so the
+   track selectors stay usable in fullscreen; iPhone Safari lacks
+   element-fullscreen and hides the button — the player is already a
+   full-viewport overlay). Auto-hides 3 s into playback; tap to toggle.
+   Full detail in [FRONTEND.md](FRONTEND.md); the iOS/fullscreen footgun is
+   in [GOTCHAS.md](GOTCHAS.md).
 
 ### 3. Skip-intro / credits
 

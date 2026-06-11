@@ -422,6 +422,15 @@ The prep UI only shows the last 500 chars of `job["error"]` (an ffmpeg stderr ta
 
 **Subtitles are the exception and are now engine-agnostic:** they're `<track>` children of `<video>` (bundle `sub_<i>.vtt` + on-disk sidecars), so `_lpApplySubIdx` toggles `tr.el.track.mode` the same way regardless of `lp.hls`. Don't route subtitles back through `hls.subtitleTrack` — there are no in-manifest subtitle renditions to select.
 
+### The on-device player draws its own controls — never re-add the `controls` attribute, never fullscreen the bare `<video>`
+
+`#lpVideo` deliberately has **no `controls` attribute**: the custom Metro overlay (`#lpControls` — seek bar, ±10 s, play/pause, mute, fullscreen) is the only transport UI, so the player is pixel-identical on every OS/browser (native controls differ wildly — seek bar style, subtitle menus, and iOS hijacks fullscreen into its own player with its own sub rendering). Three traps:
+- **Fullscreen targets the whole `#localPlayer` container, not the `<video>`.** `lpToggleFullscreen` calls `requestFullscreen` on the container so the header, transport, and audio/sub/quality selectors stay visible and usable inside OS fullscreen. Fullscreening the `<video>` element summons the native controls and (on iOS) the system player — exactly what this feature removes.
+- **iPhone Safari has no element-fullscreen API** (only `<video>.webkitEnterFullscreen`, which is the native player). The FS button is hidden at init when `requestFullscreen`/`webkitRequestFullscreen` is missing on the container; nothing is lost because `#localPlayer` is already a `position:fixed; inset:0` overlay.
+- **Scrub commits the seek on pointer-release only.** While dragging, `_lpScrub.t` previews the position; `currentTime` is set once on `pointerup`. Seeking per `pointermove` would, in on-demand mode, restart the JIT ffmpeg on every pixel of drag (each cold seek tears down and re-launches the encoder — see § On-demand).
+
+Overlay visibility is the `.lp-idle` class (opacity-only fade of overlay + header + track rows — no reflow, the video never resizes); `.lp-buffering` shows the square spinner on `waiting`. Both classes (plus `.lp-scrub`) are cleared in `lpStop` — if you add a new teardown path, clear them there too.
+
 ### The quality (Res) menu is hls.js-only and driven by `hls.levels`, not meta.json
 
 `_lpRenderTrackRows` builds the **Res** dropdown from `lp.hls.levels` (the hls.js master-playlist parse) and `lpSetQuality` sets `lp.hls.currentLevel` (`-1` = Auto/ABR; a level index pins a rung). Two things to keep in mind:

@@ -231,14 +231,45 @@ is fetched in parallel from `/api/library/{id}/skip-data?file_path=…` and
 assigned to `lp.skipData` for the skip-intro / skip-credits logic in
 `lpEvaluateSkipOffer`.
 
-There is **one** `<video id="lpVideo">` inside `#localPlayer`. The container
-has two visual modes toggled via class:
-- default (no `.lp-tiny`) — fullscreen overlay, uses native browser `<video>` controls.
-- `.lp-tiny` — corner tile (96×56 video + huge fullscreen button + close), repositioned via CSS only (no DOM move, no video re-load).
+There is **one** `<video id="lpVideo">` inside `#localPlayer` (wrapped in the
+relative-positioned `#lpStage` that also hosts the control overlay). The
+container has two visual modes toggled via class:
+- default (no `.lp-tiny`) — fullscreen overlay with **custom Metro controls**
+  (see below); the native `controls` attribute is deliberately absent.
+- `.lp-tiny` — corner tile (96×56 stage + huge fullscreen button + close), repositioned via CSS only (no DOM move, no video re-load). The control overlay hides; a tap on the tile maximizes (`lpStageTap`).
 
 Single-element design avoids iOS Safari's per-page video budget and the audio
 desync that two synchronized videos would create. iOS-friendly: `playsinline`,
 `<track>` for VTT subs, no MediaSource.
+
+**Custom controls (`#lpControls`).** The player never uses the browser's native
+`<video>` controls — they differ per OS/browser (seek bar style, sub menus, iOS
+fullscreen hijack), so a custom overlay guarantees the identical UI everywhere.
+Don't re-add the `controls` attribute. Pieces:
+- **Transport** — center cluster: ±10 s tiles (`lpSeekBy`) around a play/pause
+  tile (`lpTogglePlay`, icons synced by `_lpCtlSync`).
+- **Seek bar** (`#lpSeekBar`) — bottom strip; played fill + buffered fill +
+  square handle, updated by `_lpCtlTick` on `timeupdate`/`progress`. Pointer
+  scrub (`_lpSeekBarInit`): dragging previews via `_lpScrub.t` without touching
+  `currentTime`; the seek commits **once on release** (matters in on-demand
+  mode, where each cold seek restarts the JIT ffmpeg). Time labels use
+  `fmtTimeSecs`.
+- **Mute** (`lpToggleMute`) and **fullscreen** (`lpToggleFullscreen`) buttons.
+  Fullscreen requests OS fullscreen on **the whole `#localPlayer` container**,
+  never the bare `<video>` — so the header, transport, and track selectors stay
+  usable inside fullscreen. iPhone Safari has no element-fullscreen API; the
+  button is hidden there at init (the player is already a full-viewport
+  overlay). See [GOTCHAS.md](GOTCHAS.md).
+- **Visibility** — `.lp-idle` on `#localPlayer` fades **all** chrome (overlay +
+  header + track rows) opacity-only, no reflow. Tap the video to toggle
+  (`lpStageTap`, guarded so taps on buttons/selects/the overlay never
+  double-act); auto-hides after 3 s of playback (`_lpCtlShow`/`_lpCtlIdle`) but
+  never while paused, scrubbing, buffering, or reconnecting. Desktop: mouse
+  move reveals; keyboard Space/K, ←/→ (±10 s), F, M in the global `keydown`
+  handler.
+- **Buffering** — `.lp-buffering` (set on `waiting`, cleared on `playing`)
+  shows the square Metro spinner `#lpBuffSpin`, independent of overlay
+  visibility.
 
 The header (`.lp-chrome`, hidden in tiny mode) carries **Prev** / **Next**
 episode buttons (`#lpPrevEpBtn` / `#lpNextEpBtn`), both **hold-to-activate**
