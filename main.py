@@ -4276,7 +4276,32 @@ def _log_analyzer_event(*, level: str, message: str, series_key: str = "",
     log_fn(f"[analyzer]{code} {fname}: {message}")
 
 
-async def _run_series_analysis(series_key: str) -> None:
+# Series keys with a scheduled-or-running analysis. Set SYNCHRONOUSLY at schedule
+# time (before any await) so a burst of triggers — e.g. a /prep-all firing the
+# post-prep hook once per file, or the admin button racing the 30 s background
+# sweep — can't each queue their own run. Without it they all read
+# `status != "running"` (which is only set later, after `_run_series_analysis`
+# awaits the library) and stack behind the per-series lock, replaying the whole
+# pass several times (the "progress bar keeps restarting 0→100" report).
+_analysis_inflight: set[str] = set()
+
+
+def _schedule_analysis(series_key: str, trigger: str) -> bool:
+    """De-duped entry point for kicking off a series analysis. Returns True if a
+    new run was scheduled, False if one is already queued/running for this key."""
+    job = state.analysis_jobs.get(series_key) or {}
+    if series_key in _analysis_inflight or job.get("status") == "running":
+        log.info("[analyzer] skip schedule series=%s trigger=%s (already %s)",
+                 series_key, trigger,
+                 "in-flight" if series_key in _analysis_inflight else "running")
+        return False
+    _analysis_inflight.add(series_key)
+    log.info("[analyzer] schedule series=%s trigger=%s", series_key, trigger)
+    asyncio.create_task(_run_series_analysis(series_key, trigger))
+    return True
+
+
+async def _run_series_analysis(series_key: str, trigger: str = "manual") -> None:
     """Background task: analyze a series, save results, broadcast progress.
 
     `analyzer.analyze_series` now always returns an entry per file (success or
@@ -4284,14 +4309,22 @@ async def _run_series_analysis(series_key: str) -> None:
     `analysis.source == "failed"` to drive the admin log + user-facing chip.
     Missing-binary and exception cases are still surfaced as a series-level
     `analysis_jobs.status = "failed"` for the admin UI.
+
+    `trigger` is logged so the fingerprint log shows *what* kicked off each pass
+    (post-prep / auto-maint / admin / mode-change …) — invaluable for spotting a
+    runaway re-trigger.
     """
-    lock = analyzer.lock_for_series(series_key)
-    async with lock:
+    t0 = time.monotonic()
+    try:
+      lock = analyzer.lock_for_series(series_key)
+      async with lock:
         lib = await get_library()
         items = _items_for_series_key(lib, series_key)
         ready_items = [it for it in items if it.get("status") == "ready"]
         item_ids = [it["id"] for it in ready_items]
         if not ready_items:
+            log.info("[analyzer] run series=%s trigger=%s — no ready items, skipping",
+                     series_key, trigger)
             return
 
         # Operational mode for this series. "manual" extrapolates admin-marked
@@ -4299,6 +4332,11 @@ async def _run_series_analysis(series_key: str) -> None:
         skip_cfg = _series_skip_cfg(lib, series_key)
         manual_mode = skip_cfg["mode"] == "manual"
         templates = skip_cfg["templates"] if manual_mode else None
+        analyzable_n = sum(len(_analyzable_files(it)) for it in ready_items)
+        log.info("[analyzer] run START series=%s trigger=%s mode=%s ready_items=%d "
+                 "analyzable_files=%d templates=%d",
+                 series_key, trigger, skip_cfg["mode"], len(ready_items),
+                 analyzable_n, len(templates or []))
 
         # Start
         await _set_analysis_status(
@@ -4424,6 +4462,17 @@ async def _run_series_analysis(series_key: str) -> None:
                     progress=1.0, finished_at=_now_iso(),
                 )
 
+        final_status = (state.analysis_jobs.get(series_key) or {}).get("status")
+        log.info("[analyzer] run END series=%s trigger=%s status=%s updated=%d "
+                 "failed=%d elapsed=%.1fs",
+                 series_key, trigger, final_status, files_updated, files_failed,
+                 time.monotonic() - t0)
+    finally:
+        # Always release the in-flight marker so a *later* legitimate trigger can
+        # re-run — but only after this pass has fully settled, so duplicates that
+        # arrived during the run were correctly suppressed.
+        _analysis_inflight.discard(series_key)
+
 
 def _schedule_series_analysis_if_eligible(item: dict, lib: dict) -> None:
     """When an item flips to 'ready', kick off series analysis if 2+ ready episodes
@@ -4433,10 +4482,12 @@ def _schedule_series_analysis_if_eligible(item: dict, lib: dict) -> None:
         return
     key = _series_key(item)
     # Don't stack runs: a /prep-all of a 77-file series fires the post-prep hook
-    # 77 times. The in-flight pass already fingerprints every ready file in the
-    # series, so later prep completions are covered without re-queuing.
+    # 77 times. The in-flight (or already-running) pass fingerprints every ready
+    # file in the series, so later prep completions are covered without re-queuing.
+    # `_analysis_inflight` is checked SYNCHRONOUSLY here (and again in
+    # `_schedule_analysis`) to close the create_task → status="running" race.
     job = state.analysis_jobs.get(key) or {}
-    if job.get("status") == "running":
+    if key in _analysis_inflight or job.get("status") == "running":
         return
     peers = [it for it in _items_for_series_key(lib, key) if it.get("status") == "ready"]
 
@@ -4464,7 +4515,7 @@ def _schedule_series_analysis_if_eligible(item: dict, lib: dict) -> None:
         if needs_run:
             break
     if needs_run:
-        asyncio.create_task(_run_series_analysis(key))
+        _schedule_analysis(key, "post-prep")
 
 
 async def _ensure_analysis_for(src: Path, item_id: str = "") -> None:
@@ -9033,8 +9084,8 @@ async def admin_analyze_series(item_id: str, request: Request) -> JSONResponse:
     if not item:
         raise HTTPException(404, "Item not found.")
     key = _series_key(item)
-    asyncio.create_task(_run_series_analysis(key))
-    return JSONResponse({"ok": True, "series_key": key})
+    scheduled = _schedule_analysis(key, "admin")
+    return JSONResponse({"ok": True, "series_key": key, "scheduled": scheduled})
 
 
 @app.get("/api/admin/library/{item_id}/skip-config")
@@ -12846,8 +12897,10 @@ def _fingerprint_backlog(lib: dict) -> int:
 
 
 def _any_analysis_running() -> bool:
-    return any((j or {}).get("status") == "running"
-               for j in state.analysis_jobs.values())
+    # `_analysis_inflight` covers the gap between scheduling a run and its status
+    # flipping to "running", so the background sweep never double-schedules.
+    return bool(_analysis_inflight) or any(
+        (j or {}).get("status") == "running" for j in state.analysis_jobs.values())
 
 
 def _find_unfingerprinted_series(lib: dict) -> Optional[str]:
@@ -12863,7 +12916,7 @@ def _find_unfingerprinted_series(lib: dict) -> Optional[str]:
             continue
         seen.add(key)
         job = state.analysis_jobs.get(key) or {}
-        if job.get("status") in ("running", "failed"):
+        if key in _analysis_inflight or job.get("status") in ("running", "failed"):
             continue
         for peer in _items_for_series_key(lib, key):
             if peer.get("status") != "ready":
@@ -12969,8 +13022,7 @@ async def background_maintenance_loop() -> None:
                 if cfg["fingerprint"] and analyzer.is_available() and not _any_analysis_running():
                     key = _find_unfingerprinted_series(lib)
                     if key:
-                        asyncio.create_task(_run_series_analysis(key))
-                        started_fp = True
+                        started_fp = _schedule_analysis(key, "auto-maint")
                 # Don't stack the two heavy passes: skip validation on a tick that
                 # just kicked off a fingerprint run, or while either is active.
                 if (cfg["validate"] and not started_fp and analyzer.ffmpeg_bin()

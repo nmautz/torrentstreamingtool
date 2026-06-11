@@ -119,17 +119,25 @@ prepped content is the right population.) On macOS prep is disabled
 1. `_run_offline_job` completes an HLS bundle (`status="done"`)
 2. Calls `_ensure_analysis_for(src, item_id)` → looks up the item and calls
    `_schedule_series_analysis_if_eligible(item, lib)`
-3. Running-guard: if a pass for this `series_key` is already `running`, return
-   (a `/prep-all` fires the hook once per file; the in-flight pass already covers
-   the whole series)
+3. Running-guard: if a pass for this `series_key` is already in-flight
+   (`_analysis_inflight`) or `running`, return (a `/prep-all` fires the hook once
+   per file; the in-flight pass already covers the whole series)
 4. Eligibility: analyzer available? AND at least one file in this series bucket
    still needs analysis (no `skip_data`, or stale `analysis.version`)? AND user
    did NOT manually mark it (manual entries are never overwritten)? **Failed
    files are NOT eligible** (no auto-retry — see [Failure tracking](#failure-tracking))
-5. If yes, `asyncio.create_task(_run_series_analysis(key))`
-6. `_run_series_analysis` acquires the lock, calls `analyzer.analyze_series`,
-   writes results back into `library.json` under each item's `skip_data`,
-   broadcasts `analysis_status`
+5. If yes, **`_schedule_analysis(key, trigger)`** — the single deduped entry point
+   for *every* trigger (post-prep, `auto-maint`, `admin`, mode-change). It adds the
+   key to `_analysis_inflight` **synchronously** (before any await) so a burst of
+   triggers can't each `create_task` their own run and replay the pass back-to-back
+   (the bug behind the "progress bar restarts 0→100" report — see
+   [GOTCHAS.md](GOTCHAS.md)), then `create_task(_run_series_analysis(key, trigger))`
+6. `_run_series_analysis` acquires the lock, logs `run START …` (with the
+   `trigger`, mode, and file counts), calls `analyzer.analyze_series`, writes
+   results back into `library.json` under each item's `skip_data`, broadcasts
+   `analysis_status`, logs `run END …` (status / updated / failed / elapsed), and
+   clears `_analysis_inflight` in `finally`. These log lines land in
+   `streamlink_app.log` — the place to look when diagnosing unexpected re-runs.
 
 ## `_series_key` ([main.py:1192](../main.py#L1192))
 
