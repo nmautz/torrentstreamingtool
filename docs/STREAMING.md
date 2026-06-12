@@ -508,7 +508,12 @@ Two ways to populate the cache:
    resyncs the custom UI on exit; this is the only true-fullscreen path on
    iPhone, where browser chrome otherwise never fully leaves. A swipe up on
    the video also minimizes the browser bar (app-shell escape hatch — see
-   [FRONTEND.md](FRONTEND.md) § Layout). Auto-hides 3 s into playback; tap to toggle.
+   [FRONTEND.md](FRONTEND.md) § Layout). An **orientation-lock button**
+   (`#lpRotBtn`, touch devices only) keeps playback landscape even when the
+   phone auto-rotates to portrait: native `screen.orientation.lock` where it
+   works (Android + OS fullscreen), CSS 90°-rotation fallback everywhere
+   else (iPhone Safari has no lock API) — see the footgun in
+   [GOTCHAS.md](GOTCHAS.md). Auto-hides 3 s into playback; tap to toggle.
    Full detail in [FRONTEND.md](FRONTEND.md); the iOS/fullscreen footgun is
    in [GOTCHAS.md](GOTCHAS.md).
 

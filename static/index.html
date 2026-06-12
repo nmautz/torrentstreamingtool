@@ -376,6 +376,30 @@
     }
     #localPlayer.lp-opts #lpTrackRow { display: flex; }
     #localPlayer.lp-opts #lpOptsBtn { background: #4338ca; color: #fff; }
+    /* ── Orientation lock (#lpRotBtn → .lp-lock-landscape) ──────────────────
+       Keeps the video + custom controls rendering landscape even when the
+       phone auto-rotates to portrait. Where the Screen Orientation API works
+       (Android, in OS fullscreen) the native lock pins the real viewport and
+       this media query never matches; everywhere else (iPhone Safari has no
+       lock API) the fallback rotates the whole player 90° inside the portrait
+       viewport — sized to the SWAPPED viewport dimensions, centered, then
+       rotated. Hit-testing follows the transform automatically; the one
+       manual mapping is the seek bar's pointer math (_lpSeekPosFromEvent
+       scrubs along clientY while rotated). NOTE: the transform makes
+       #localPlayer a containing block for fixed descendants — keep the
+       player's children position:absolute (they all are), never fixed. */
+    @media (orientation: portrait) {
+      #localPlayer.lp-lock-landscape:not(.lp-tiny) {
+        inset: auto;
+        top: 50%; left: 50%;
+        width: 100vh;  width: 100dvh;
+        height: 100vw; height: 100dvw;
+        transform: translate(-50%, -50%) rotate(90deg);
+      }
+    }
+    #localPlayer.lp-lock-landscape #lpRotBtn { background: #4338ca; color: #fff; }
+    /* Pointless with a mouse/desktop — orientation can't change there. */
+    @media (pointer: fine) { #lpRotBtn { display: none; } }
     #lpVideo {
       width: 100%;
       height: 100%;
@@ -2303,6 +2327,14 @@
             <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z"/>
               <circle cx="12" cy="12" r="3"/>
+            </svg>
+          </button>
+          <button id="lpRotBtn" class="lp-ctl-sm" onclick="lpToggleOrientLock()"
+                  title="Lock landscape — keep playing sideways even if the phone rotates">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <rect x="9" y="6.5" width="6" height="11"/>
+              <path stroke-linecap="round" stroke-linejoin="round" d="M19.5 10a8 8 0 00-4.5-5.5M19.5 10h-3M19.5 10V7"/>
+              <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 14a8 8 0 004.5 5.5M4.5 14h3M4.5 14v3"/>
             </svg>
           </button>
           <button id="lpMuteBtn" class="lp-ctl-sm" onclick="lpToggleMute()" title="Mute / Unmute">
@@ -8205,6 +8237,39 @@ function _lpExitFullscreen() {
   if (exit) try { exit.call(document); } catch (_) {}
 }
 
+// ── Orientation lock ─────────────────────────────────────────────────────────
+// .lp-lock-landscape on #localPlayer is the source of truth (it also tints
+// #lpRotBtn via CSS). The native Screen Orientation lock is attempted as a
+// bonus — it only succeeds on platforms/states that allow it (Android in OS
+// fullscreen); when it holds, the real viewport stays landscape and the CSS
+// rotation fallback's (orientation:portrait) media query simply never fires.
+// iPhone Safari has no lock API at all, so there the CSS fallback is the
+// whole mechanism. Both paths coexist safely for the same reason.
+function lpToggleOrientLock() {
+  const c = document.getElementById("localPlayer");
+  const on = c.classList.toggle("lp-lock-landscape");
+  try {
+    if (on && screen.orientation && screen.orientation.lock) {
+      screen.orientation.lock("landscape").catch(() => {});
+    } else if (!on && screen.orientation && screen.orientation.unlock) {
+      screen.orientation.unlock();
+    }
+  } catch (_) {}
+  _lpCtlShow();
+}
+function _lpClearOrientLock() {
+  const c = document.getElementById("localPlayer");
+  if (!c.classList.contains("lp-lock-landscape")) return;
+  c.classList.remove("lp-lock-landscape");
+  try { if (screen.orientation && screen.orientation.unlock) screen.orientation.unlock(); } catch (_) {}
+}
+// True while the CSS rotation fallback is actually rendering (lock engaged AND
+// the viewport really is portrait) — screen-space pointer math must swap axes.
+function _lpRotated() {
+  return document.getElementById("localPlayer").classList.contains("lp-lock-landscape")
+      && matchMedia("(orientation: portrait)").matches;
+}
+
 // Icon states: play/pause, muted, fullscreen in/out.
 function _lpCtlSync() {
   const v = _lpV(); if (!v) return;
@@ -8243,8 +8308,13 @@ function _lpCtlTick() {
 }
 
 function _lpSeekPosFromEvent(e, bar, d) {
+  // getBoundingClientRect returns the bar's screen-space AABB. Under the
+  // orientation-lock rotation the bar renders vertically (the container's
+  // x-axis maps to the screen's y-axis, top = 0:00), so scrub along clientY.
   const r = bar.getBoundingClientRect();
-  const frac = Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1);
+  const frac = _lpRotated()
+    ? Math.min(Math.max((e.clientY - r.top) / r.height, 0), 1)
+    : Math.min(Math.max((e.clientX - r.left) / r.width, 0), 1);
   return frac * d;
 }
 
@@ -8292,6 +8362,7 @@ function lpMaximize() {
 function lpMinimize() {
   lp.maximized = false;
   _lpExitFullscreen();   // a tiny corner tile inside OS fullscreen makes no sense
+  _lpClearOrientLock();  // …and neither is a rotated one
   const c = document.getElementById("localPlayer");
   c.classList.remove("lp-opts");
   c.classList.add("lp-tiny");
@@ -8324,6 +8395,7 @@ async function lpStop() {
   if (_lpCtlTimer) { clearTimeout(_lpCtlTimer); _lpCtlTimer = null; }
   _lpScrub = null;
   const c = document.getElementById("localPlayer");
+  _lpClearOrientLock();
   c.classList.remove("lp-active", "lp-tiny", "lp-idle", "lp-buffering", "lp-scrub", "lp-opts");
   document.getElementById("lpSkipOffer").classList.add("hidden");
   _lpHidePreparing();
@@ -9258,6 +9330,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.27.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.28.0</div>
 </body>
 </html>
