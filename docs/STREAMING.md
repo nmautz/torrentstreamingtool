@@ -421,6 +421,12 @@ Two ways to populate the cache:
 >    silently defeat `maxBufferLength`. The browser's SourceBuffer quota is the
 >    real ceiling (hls.js backs off on `QuotaExceededError`); `backBufferLength`
 >    frees memory behind the playhead so mobile devices can afford it.
+>    `preferManagedMediaSource: false` is required for this to actually work on
+>    macOS Safari — otherwise hls.js prefers Safari 17.1+'s ManagedMediaSource,
+>    whose OS-owned fetch cadence caps the forward buffer at ~30 s. **On iPhone
+>    the ~30 s cap remains** (MMS is the only MSE iOS has, so hls.js falls back
+>    to it there); outages on iOS fall through to the reconnect loop sooner.
+>    See [GOTCHAS.md](GOTCHAS.md) § ManagedMediaSource.
 > 2. **Indefinite reconnect loop** (`_lpNetLost` / `_lpNetRetryNow` /
 >    `_lpNetReset`, state in `lp.netDown`). A **fatal hls.js `NETWORK_ERROR`
 >    never tears playback down or alerts** — the `<video>` keeps draining its

@@ -420,11 +420,15 @@ The prep UI only shows the last 500 chars of `job["error"]` (an ffmpeg stderr ta
 
 ### hls.js vs Safari native is a runtime branch, not a build-time pick
 
-`_lpLoadIndex` checks `window.Hls.isSupported()` (which returns true on every MSE-capable browser and false on iOS Safari, which has no MSE — Safari plays HLS via the platform stack instead). The two paths read/write **different APIs** for **audio** selection:
+`_lpLoadIndex` checks `window.Hls.isSupported()`. With the bundled hls.js 1.5, that's true on every classic-MSE browser **and on iOS/macOS Safari 17.1+** (via ManagedMediaSource — see the next gotcha), so modern iPhones take the hls.js path too. The Safari-native branch is now the fallback for old Safari (< 17.1 iOS) or a failed hls.js load. The two paths read/write **different APIs** for **audio** selection:
 - **hls.js**: `hls.audioTrack = idx`, `hls.recoverMediaError()`. The element's `<video>.audioTracks` will be empty — hls.js owns audio-rendition selection.
 - **Safari native**: `<video>.audioTracks[i].enabled`. There is no hls.js instance — `lp.hls` is null.
 
 **Subtitles are the exception and are now engine-agnostic:** they're `<track>` children of `<video>` (bundle `sub_<i>.vtt` + on-disk sidecars), so `_lpApplySubIdx` toggles `tr.el.track.mode` the same way regardless of `lp.hls`. Don't route subtitles back through `hls.subtitleTrack` — there are no in-manifest subtitle renditions to select.
+
+### ManagedMediaSource silently caps the forward buffer at ~30 s — set `preferManagedMediaSource: false`
+
+Safari 17.1+ ships **ManagedMediaSource** (MMS) — on iOS as the *only* MSE, on macOS *alongside* classic `MediaSource` — and hls.js 1.5 prefers MMS by default. Under MMS the **OS owns the fetch cadence**: it fires `endstreaming` once it deems the buffer full (~30 s), hls.js pauses segment loading, the buffer drains to ~10–15 s, then `startstreaming` tops it back up. The symptom is a sawtooth buffer that never exceeds ~30 s **no matter what `maxBufferLength` says** — the 180 s outage buffer is silently defeated, with no error and a healthy-looking bandwidth estimate. The fix (v5.28.1) is `preferManagedMediaSource: false` in the Hls config: browsers with classic MSE (macOS Safari, Chrome, Firefox, Edge) then honor the full buffer target. **iOS cannot be fixed** — classic MSE doesn't exist there, hls.js falls back to MMS regardless of the flag (the fallback is built into its `getMediaSource()`), and the ~30 s duty cycle is an OS battery optimization with no override. Treat the short buffer on iPhone as expected platform behavior; the reconnect loop is the outage story there.
 
 ### The on-device player draws its own controls — never re-add the `controls` attribute, never fullscreen the bare `<video>`
 

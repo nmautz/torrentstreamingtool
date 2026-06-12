@@ -7637,6 +7637,15 @@ async function _lpLoadIndex(seekTo) {
       maxMaxBufferLength: 600,
       maxBufferSize: 240 * 1000 * 1000,
       backBufferLength: 90,
+      // Safari 17.1+ exposes ManagedMediaSource even on macOS where classic
+      // MediaSource is fully available, and hls.js prefers MMS by default.
+      // Under MMS the *OS* owns the fetch cadence (startstreaming/endstreaming)
+      // and caps the forward buffer at ~30 s regardless of maxBufferLength —
+      // silently defeating the outage buffer above. Prefer classic MSE where it
+      // exists (macOS Safari, Chrome, Firefox, Edge). On iOS classic MSE
+      // doesn't exist, so hls.js still falls back to MMS there — the ~30 s
+      // ceiling on iPhone is an OS limit we can't lift. See GOTCHAS.md.
+      preferManagedMediaSource: false,
       // On-demand segments are transcoded just-in-time and the server holds the
       // request open until the .ts is ready (up to ~30 s for a deep cold seek).
       // hls.js's 20 s default fragment timeout would abort a still-progressing
@@ -9330,6 +9339,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.28.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.28.1</div>
 </body>
 </html>
