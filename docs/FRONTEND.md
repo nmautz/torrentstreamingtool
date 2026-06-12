@@ -126,6 +126,8 @@ The **intensity picker** (`#psNightModePreset`, Light/Medium/Max) is **settings-
 
 `openProfileSettings()` is **synchronous**: it shows `#profileSettingsModal` immediately, calls `_psSetLoading()` (dims every control via `.ps-loading`, sets the value labels to "…"), then kicks off seven independent loaders that run **concurrently** (`_psLoadProfilePrefs`, `_psLoadMaxVolume`, `_psLoadVlcStartVolume`, `_psLoadSysVolume`, `_psLoadYtStartVolume`, `_psLoadHostVolume`, `_psLoadNightMode`). Each loader fetches its own setting and calls `_psReady(...ids)` to clear the loading state on just the controls it owns, so the window feels responsive instead of blocking on the slowest request. `_psLoadHostVolume` is the exception: it leaves the slider `disabled` when the host mixer is unavailable ("N/A") and only drops the `.ps-loading` pulse. `_PS_CONTROLS` / `_PS_VALUE_LABELS` list the affected element ids.
 
+The modal ends with a **This Device** section — settings persisted in the browser's `localStorage`, never on the server (they're not in `_PS_CONTROLS`, so they have no loading state). Currently one control: the **Dev Mode** checkbox (`#psDevMode`, `toggleDevMode`), which enables the on-device player's diagnostics HUD (see § Dev Mode HUD below). Seeded synchronously in `openProfileSettings` from the `devMode` flag (`localStorage.streamlink_devmode`).
+
 ### Subtitle defaults (per-profile override + search filter)
 
 Profile Settings has a **Subtitles** `<select>` (`#psSubtitles`: Default / On / Off). `openProfileSettings` seeds it from the profile's `subtitles_on` (`true`→On, `false`→Off, null→Default); `saveSubtitlesPref()` POSTs `/api/profiles/{id}/subtitles` with `subtitles_on` = `true`/`false`/`null`. This is just the *preference* — VLC track selection happens server-side in `_apply_subtitle_policy` on the next play (see [GOTCHAS.md](GOTCHAS.md)), so there's no live VLC call here.
@@ -331,6 +333,28 @@ its pulsing dot + a chevron tab; `togglePrepBar()` (the `#globalPrepToggle` chev
 expands the full pill (bar, detail, Pause/Resume) and flips the chevron up. The
 `prepBarExpanded` flag survives `_renderGlobalPrep`'s re-renders (it only mutates
 `hidden`/`textContent`, never the `className`).
+
+#### Dev Mode HUD
+
+**Settings → This Device → Dev Mode** (`#psDevMode` → `toggleDevMode`; persisted
+device-locally in `localStorage.streamlink_devmode` as the `devMode` flag — the
+stats are properties of *this* browser's session, so the toggle never touches the
+server). While on, the local player shows `#lpDevHud` — a pointer-through
+monospace overlay top-left under the header, repainted at 1 Hz by
+`_lpDevHudTick` (interval started by `_lpDevHudStart` in `lpPlay`, cleared by
+`_lpDevHudStop` in `lpStop`; toggling mid-playback applies live). Rows: engine +
+mode (hls.js/native · bundle/ondemand, `RECONNECTING` while `lp.netDown`),
+active quality rung (`lp.hls.levels[currentLevel]` height + bitrate, auto vs.
+pinned), the hls.js `bandwidthEstimate`, the decoded `videoWidth×videoHeight`,
+the last segment's transfer stats (`_lpDevNoteFrag`, recorded from `FRAG_LOADED`
+only while `devMode` is on), forward buffer (seconds past the playhead +
+buffered-range count), dropped/total frames (`getVideoPlaybackQuality`), and a
+stall counter (`lp._devStalls`, bumped by the `waiting` listener) + `readyState`.
+Deliberately **not** `.lp-chrome` — it stays visible through the controls'
+auto-hide; hidden in tiny mode by CSS. Safari native HLS has no level/bandwidth
+API, so those rows degrade to a "auto (native HLS)" note. Everything reads from
+objects already in hand (the `<video>`, `lp.hls`) — zero extra network traffic,
+and no interval or stat collection while off.
 
 The service worker (`static/sw.js`) is now a one-shot eviction stub registered
 via `evictLegacyServiceWorker()` so devices that PWA-installed the old build
