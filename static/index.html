@@ -474,6 +474,28 @@
     /* Spinner replaces the play tile's glyph so they don't stack visually. */
     #localPlayer.lp-buffering .lp-ctl-play svg { opacity: 0.25; }
     @keyframes lpspin { to { transform: rotate(360deg); } }
+    /* Dev-mode diagnostics HUD (Settings → Dev Mode, device-local). Pointer-
+       through, top-left under the header bar; deliberately NOT .lp-chrome so it
+       stays visible while the controls auto-hide — it exists to be watched. */
+    #lpDevHud {
+      position: absolute;
+      left: 8px;
+      top: calc(env(safe-area-inset-top, 0px) + 56px);
+      z-index: 25;
+      pointer-events: none;
+      background: rgba(3, 7, 18, 0.72);
+      color: #6ee7b7;
+      font: 10px/1.6 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      padding: 6px 9px;
+      max-width: min(72vw, 340px);
+    }
+    #lpDevHud .lp-dev-k {
+      display: inline-block;
+      min-width: 78px;
+      color: #64748b;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+    }
     .lp-ctl-bottom {
       position: absolute;
       left: 0; right: 0; bottom: 0;
@@ -555,6 +577,7 @@
     #localPlayer.lp-tiny .lp-chrome { display: none !important; }
     #localPlayer.lp-tiny #lpControls { display: none !important; }
     #localPlayer.lp-tiny #lpBuffSpin { display: none !important; }
+    #localPlayer.lp-tiny #lpDevHud { display: none !important; }
     #localPlayer.lp-tiny #lpStage {
       position: static;     /* back into the flex row (full mode is absolute) */
       width: 96px;
@@ -907,6 +930,23 @@
           oninput="document.getElementById('psSysVolumeLabel').textContent=this.value+'%'"
           onchange="saveSystemVolumeDefault()"/>
       </div>
+
+      <!-- Divider: settings below this point are DEVICE-LOCAL (stored in this
+           browser's localStorage — not on the server, not per-profile). -->
+      <div class="flex items-center gap-2 pt-2 pb-1 px-1 select-none">
+        <span class="text-[10px] font-black uppercase tracking-widest text-emerald-500">This Device</span>
+        <span class="text-[10px] text-gray-600 uppercase tracking-widest">Saved in this browser only</span>
+        <span class="flex-1 h-px bg-gray-800"></span>
+      </div>
+
+      <label class="flex items-center justify-between gap-3 bg-gray-800/60 px-4 py-3 cursor-pointer hover:bg-gray-800 transition-colors">
+        <div class="min-w-0">
+          <div class="text-sm font-bold text-gray-200 uppercase tracking-wide">Dev Mode</div>
+          <div class="text-[11px] text-gray-500 mt-0.5">Show a live diagnostics overlay during on-device playback — how far ahead the stream has buffered, connection speed, the quality being played, dropped frames.</div>
+        </div>
+        <input id="psDevMode" type="checkbox" onchange="toggleDevMode(this)"
+          class="w-5 h-5 accent-emerald-500 cursor-pointer flex-shrink-0"/>
+      </label>
 
       <p id="psStatus" class="text-[10px] text-gray-600 uppercase tracking-widest pt-1">Manual skip button is always available.</p>
     </div>
@@ -2285,6 +2325,10 @@
     <!-- Square Metro buffering spinner — shown via .lp-buffering on #localPlayer,
          independent of overlay visibility (like YouTube's). -->
     <div id="lpBuffSpin"></div>
+    <!-- Dev-mode diagnostics HUD (Settings → Dev Mode, device-local) — engine,
+         active quality rung, bandwidth estimate, last-segment speed, buffer
+         ahead, dropped frames, stalls. Painted 1 Hz by _lpDevHudTick. -->
+    <div id="lpDevHud" class="hidden"></div>
     <div id="lpControls">
       <!-- Center transport: back 10 / play-pause / forward 10 -->
       <div class="lp-ctl-center">
@@ -2607,6 +2651,12 @@ let lp = {
 // Subtitle upgrade poller — re-checks for late-downloaded real subs while an
 // auto-applied AI sub is showing. setInterval handle; cleared on stop.
 let _lpSubUpgradeTimer = null;
+// Dev mode (Settings → This Device) — device-local diagnostics HUD on the
+// on-device player. localStorage, never the server: the stats it surfaces
+// (buffer, bandwidth, quality rung) are properties of THIS browser's session.
+let devMode = false;
+try { devMode = localStorage.getItem("streamlink_devmode") === "1"; } catch (_) {}
+let _lpDevTimer = null;   // 1 Hz HUD repaint interval, live only while shown
 // Play-chooser modal state
 let pcCtx = null;  // {itemId, files, seekTo, label}
 // Per-item prep-for-streaming state — populated when the user clicks "Prep for
@@ -3906,6 +3956,8 @@ function openProfileSettings(){
   // the modal until every request has returned. Loaders run concurrently.
   _psSetLoading();
   document.getElementById("profileSettingsModal").classList.remove("hidden");
+  // Device-local, synchronous (localStorage) — no loader needed.
+  document.getElementById("psDevMode").checked = devMode;
   _psLoadProfilePrefs();
   _psLoadMaxVolume();
   _psLoadVlcStartVolume();
@@ -3913,6 +3965,17 @@ function openProfileSettings(){
   _psLoadYtStartVolume();
   _psLoadHostVolume();
   _psLoadNightMode();
+}
+
+// Dev Mode (Settings → This Device) — toggles the on-device player's
+// diagnostics HUD. Device-local: persisted to localStorage, applied live if
+// the player is already open.
+function toggleDevMode(el){
+  devMode = !!el.checked;
+  try { localStorage.setItem("streamlink_devmode", devMode ? "1" : "0"); } catch (_) {}
+  if (document.getElementById("localPlayer").classList.contains("lp-active")) {
+    devMode ? _lpDevHudStart() : _lpDevHudStop();
+  }
 }
 
 // Refetch the current profile from server to get freshest auto-skip values.
@@ -7401,6 +7464,7 @@ async function lpPlay(itemId, files, seekTo, label) {
   const c = document.getElementById("localPlayer");
   c.classList.remove("lp-tiny");
   c.classList.add("lp-active");
+  _lpDevHudStart();   // no-op unless Dev Mode is on (Settings → This Device)
   // Hydrate prep-readiness for the whole item from the server's .offline_cache,
   // so the Prev/Next dots are accurate even for an already-prepped earlier
   // episode (which wouldn't be in the in-memory prepFileState yet). Awaited
@@ -7687,8 +7751,9 @@ async function _lpLoadIndex(seekTo) {
       showAlert("Playback error: " + (data.details || data.type) + where, "error");
     });
     // Any successfully loaded fragment means the network is back.
-    hls.on(window.Hls.Events.FRAG_LOADED, () => {
+    hls.on(window.Hls.Events.FRAG_LOADED, (_evt, data) => {
       if (lp.netDown) _lpNetReset();
+      if (devMode) _lpDevNoteFrag(data);
     });
     hls.loadSource(masterUrl);
     hls.attachMedia(v);
@@ -8353,6 +8418,82 @@ function _lpSeekBarInit() {
   bar.addEventListener("pointercancel", end(false));
 }
 
+// ── Dev-mode diagnostics HUD ───────────────────────────────────────────────
+// Settings → This Device → Dev Mode. A pointer-through overlay on the local
+// player repainted at 1 Hz, showing the live streaming internals: engine +
+// mode, active quality rung, hls.js bandwidth estimate, last-segment download
+// speed, forward buffer, dropped frames, stall count. Everything is read from
+// objects we already hold (the <video>, lp.hls) — no extra network traffic.
+function _lpDevFmtBits(bps) {
+  if (!bps || bps <= 0 || !isFinite(bps)) return "—";
+  return bps >= 1e6 ? (bps / 1e6).toFixed(1) + " Mb/s" : Math.round(bps / 1e3) + " kb/s";
+}
+// Record per-fragment transfer stats from hls.js FRAG_LOADED (gated on devMode
+// at the call site so the hot path stays free when the HUD is off).
+function _lpDevNoteFrag(data) {
+  try {
+    const st = (data.frag && data.frag.stats) || data.stats;
+    if (!st || !st.loading) return;
+    const ms = Math.max(st.loading.end - st.loading.start, 1);
+    const bytes = st.loaded || st.total || 0;
+    if (!bytes) return;
+    lp._devFrag = `${fmtSize(bytes)} in ${Math.round(ms)} ms (${_lpDevFmtBits(bytes * 8000 / ms)})`;
+  } catch (_) {}
+}
+function _lpDevHudStart() {
+  if (!devMode) { _lpDevHudStop(); return; }
+  const el = document.getElementById("lpDevHud");
+  if (!el) return;
+  lp._devStalls = 0; lp._devFrag = null;
+  el.classList.remove("hidden");
+  if (!_lpDevTimer) _lpDevTimer = setInterval(_lpDevHudTick, 1000);
+  _lpDevHudTick();
+}
+function _lpDevHudStop() {
+  if (_lpDevTimer) { clearInterval(_lpDevTimer); _lpDevTimer = null; }
+  const el = document.getElementById("lpDevHud");
+  if (el) el.classList.add("hidden");
+}
+function _lpDevHudTick() {
+  const el = document.getElementById("lpDevHud");
+  const v = _lpV();
+  if (!el || !v) return;
+  const rows = [];
+  rows.push(["engine", (lp.hls ? "hls.js" : "native") + " · " + lp.mode
+                       + (lp.netDown ? " · RECONNECTING" : "")]);
+  if (lp.hls) {
+    const h = lp.hls;
+    const lv = (h.levels || [])[h.currentLevel];
+    rows.push(["quality", (lv ? `${lv.height}p @ ${_lpDevFmtBits(lv.bitrate)}` : "—")
+                          + (h.autoLevelEnabled ? " (auto)" : " (pinned)")]);
+    rows.push(["net est", _lpDevFmtBits(h.bandwidthEstimate)]);
+  } else {
+    // Safari native HLS exposes no level/bandwidth API — decode size below is
+    // the only quality signal.
+    rows.push(["quality", "auto (native HLS)"]);
+  }
+  rows.push(["decode", (v.videoWidth || 0) + "×" + (v.videoHeight || 0)]);
+  if (lp._devFrag) rows.push(["last seg", lp._devFrag]);
+  // Forward buffer: seconds past the playhead in the range containing it.
+  let ahead = 0, ranges = 0;
+  try {
+    const b = v.buffered; ranges = b.length;
+    for (let i = 0; i < b.length; i++) {
+      if (b.start(i) <= v.currentTime + 0.5 && v.currentTime <= b.end(i)) {
+        ahead = b.end(i) - v.currentTime; break;
+      }
+    }
+  } catch (_) {}
+  rows.push(["buffer", ahead.toFixed(1) + "s ahead · " + ranges + (ranges === 1 ? " range" : " ranges")]);
+  try {
+    const q = v.getVideoPlaybackQuality && v.getVideoPlaybackQuality();
+    if (q) rows.push(["frames", q.droppedVideoFrames + " dropped / " + q.totalVideoFrames]);
+  } catch (_) {}
+  rows.push(["stalls", (lp._devStalls || 0) + " · readyState " + v.readyState]);
+  el.innerHTML = rows.map(([k, val]) =>
+    `<div><span class="lp-dev-k">${k}</span>${escHtml(val)}</div>`).join("");
+}
+
 function lpMaximize() {
   lp.maximized = true;
   document.getElementById("localPlayer").classList.remove("lp-tiny");
@@ -8399,6 +8540,7 @@ async function lpStop() {
   c.classList.remove("lp-active", "lp-tiny", "lp-idle", "lp-buffering", "lp-scrub", "lp-opts");
   document.getElementById("lpSkipOffer").classList.add("hidden");
   _lpHidePreparing();
+  _lpDevHudStop();
   lp.itemId = null; lp.filePath = null; lp.playlist = []; lp.pi = 0;
 }
 
@@ -8611,6 +8753,7 @@ function _lpAttachVideoEvents() {
   // hint; it clears the moment the segment arrives and playback resumes. A seek
   // into an already-generated region never fires `waiting`, so it stays instant.
   v.addEventListener("waiting", () => {
+    lp._devStalls = (lp._devStalls || 0) + 1;   // dev-mode HUD stall counter
     // Stalled for data → square Metro spinner (shown even when the control
     // overlay is hidden, YouTube-style), plus keep the overlay from auto-hiding.
     document.getElementById("localPlayer").classList.add("lp-buffering");
@@ -9330,6 +9473,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.28.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.29.0</div>
 </body>
 </html>
