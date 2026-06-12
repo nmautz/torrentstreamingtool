@@ -11,7 +11,52 @@
   <script>tailwind.config = { darkMode: 'class' }</script>
   <style>
     :root { color-scheme: dark; }
-    html, body { overflow-x: hidden; max-width: 100vw; }
+    /* ── App shell: the document itself never scrolls ──────────────────────
+       <main> and the overlay lists are the only scroll containers. When the
+       body was the scroller, mobile browsers rubber-banded the whole page:
+       the fixed footer/overlays visibly detached, pull-to-refresh fired
+       mid-scroll, and flicking past the end of a modal list scrolled the
+       page underneath. Height-locking the shell makes all of that
+       impossible. (body must NOT carry min-h-screen — 100vh > 100dvh while
+       the mobile URL bar is visible, which would push the shell past the
+       viewport and clip the bottom.) */
+    html, body {
+      height: 100%;
+      overflow: hidden;
+      max-width: 100vw;
+      overscroll-behavior: none;   /* no pull-to-refresh / rubber-band chaining */
+      touch-action: manipulation;  /* no accidental double-tap zoom; pinch still works */
+    }
+    body { height: 100vh; height: 100dvh; } /* track the real visual viewport */
+    /* Scrollable regions trap their own momentum: flicking past the end of a
+       list/modal must never move whatever sits behind it, and overscrolling a
+       horizontal strip (season tabs) must never trigger back/forward swipe. */
+    main, .overflow-y-auto, #fcTileGrid, #lpTrackRow, #epHero { overscroll-behavior: contain; }
+    .overflow-x-auto { overscroll-behavior-x: contain; }
+    /* ── App-shell escape hatch: swipe-to-hide the browser bar in the player ──
+       Mobile browsers only auto-hide their top/URL bar on a real DOCUMENT
+       scroll, which the height-locked shell forbids — and iPhone Safari has
+       no element-fullscreen API, so a swipe is the only way to reclaim that
+       space during on-device playback. While the player is open full-screen
+       (not the tiny corner tile), the root regains a hidden 45vh scroll
+       buffer (body::after, absolute — stays out of the body's flex layout):
+       swiping up on the video scrolls it, the browser chrome collapses, and
+       100dvh + the player's fixed inset-0 grow the video into the freed
+       space. The player is opaque, so nothing visibly moves. Closing or
+       minimizing the player drops the rule, which clamps the root scroll
+       offset back to 0 — <main>'s own scroll position is untouched. The
+       buffer must hang off the ROOT scroller: overflow on <body> alone would
+       make body an inner scroll container (html stays overflow:hidden), and
+       inner scrolling never collapses the browser bar. Coarse-pointer only —
+       desktops have a real fullscreen API and would just grow a stray
+       scrollbar next to the player. */
+    @media (pointer: coarse) {
+      html:has(#localPlayer.lp-active:not(.lp-tiny)) { overflow-y: auto; }
+      html:has(#localPlayer.lp-active:not(.lp-tiny)) body { position: relative; }
+      html:has(#localPlayer.lp-active:not(.lp-tiny)) body::after {
+        content: ""; position: absolute; left: 0; top: 100%; width: 1px; height: 45vh;
+      }
+    }
     ::-webkit-scrollbar { width: 4px; }
     ::-webkit-scrollbar-track { background: #030712; }
     ::-webkit-scrollbar-thumb { background: #1f2937; }
@@ -535,7 +580,7 @@
     body:has(#profilePicker:not(.hidden)) #localPlayer { display: none !important; }
   </style>
 </head>
-<body class="dark bg-gray-950 text-gray-100 min-h-screen flex flex-col">
+<body class="dark bg-gray-950 text-gray-100 flex flex-col">
 
 <!-- ── Global Offline-Prep Indicator ──────────────────────────────────────────
      Fixed-position pill that's visible whenever any /offline-prepare or
@@ -9195,6 +9240,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.26.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.26.2</div>
 </body>
 </html>
