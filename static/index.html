@@ -11,7 +11,28 @@
   <script>tailwind.config = { darkMode: 'class' }</script>
   <style>
     :root { color-scheme: dark; }
-    html, body { overflow-x: hidden; max-width: 100vw; }
+    /* ── App shell: the document itself never scrolls ──────────────────────
+       <main> and the overlay lists are the only scroll containers. When the
+       body was the scroller, mobile browsers rubber-banded the whole page:
+       the fixed footer/overlays visibly detached, pull-to-refresh fired
+       mid-scroll, and flicking past the end of a modal list scrolled the
+       page underneath. Height-locking the shell makes all of that
+       impossible. (body must NOT carry min-h-screen — 100vh > 100dvh while
+       the mobile URL bar is visible, which would push the shell past the
+       viewport and clip the bottom.) */
+    html, body {
+      height: 100%;
+      overflow: hidden;
+      max-width: 100vw;
+      overscroll-behavior: none;   /* no pull-to-refresh / rubber-band chaining */
+      touch-action: manipulation;  /* no accidental double-tap zoom; pinch still works */
+    }
+    body { height: 100vh; height: 100dvh; } /* track the real visual viewport */
+    /* Scrollable regions trap their own momentum: flicking past the end of a
+       list/modal must never move whatever sits behind it, and overscrolling a
+       horizontal strip (season tabs) must never trigger back/forward swipe. */
+    main, .overflow-y-auto, #fcTileGrid, #lpTrackRow, #epHero { overscroll-behavior: contain; }
+    .overflow-x-auto { overscroll-behavior-x: contain; }
     ::-webkit-scrollbar { width: 4px; }
     ::-webkit-scrollbar-track { background: #030712; }
     ::-webkit-scrollbar-thumb { background: #1f2937; }
@@ -535,7 +556,7 @@
     body:has(#profilePicker:not(.hidden)) #localPlayer { display: none !important; }
   </style>
 </head>
-<body class="dark bg-gray-950 text-gray-100 min-h-screen flex flex-col">
+<body class="dark bg-gray-950 text-gray-100 flex flex-col">
 
 <!-- ── Global Offline-Prep Indicator ──────────────────────────────────────────
      Fixed-position pill that's visible whenever any /offline-prepare or
@@ -9195,6 +9216,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.26.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.26.2</div>
 </body>
 </html>
