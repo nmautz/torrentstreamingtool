@@ -35,26 +35,29 @@
     .overflow-x-auto { overscroll-behavior-x: contain; }
     /* ── App-shell escape hatch: swipe-to-hide the browser bar in the player ──
        Mobile browsers only auto-hide their top/URL bar on a real DOCUMENT
-       scroll, which the height-locked shell forbids — and iPhone Safari has
-       no element-fullscreen API, so a swipe is the only way to reclaim that
-       space during on-device playback. While the player is open full-screen
-       (not the tiny corner tile), the root regains a hidden 45vh scroll
-       buffer (body::after, absolute — stays out of the body's flex layout):
-       swiping up on the video scrolls it, the browser chrome collapses, and
-       100dvh + the player's fixed inset-0 grow the video into the freed
-       space. The player is opaque, so nothing visibly moves. Closing or
-       minimizing the player drops the rule, which clamps the root scroll
-       offset back to 0 — <main>'s own scroll position is untouched. The
-       buffer must hang off the ROOT scroller: overflow on <body> alone would
-       make body an inner scroll container (html stays overflow:hidden), and
-       inner scrolling never collapses the browser bar. Coarse-pointer only —
+       scroll, which the height-locked shell forbids. While the player is
+       open full-screen (not the tiny corner tile), the root regains a 45vh
+       scroll range by making <body> itself taller than the viewport: swiping
+       up on the video scrolls it, the browser chrome collapses, and 100dvh +
+       the player's fixed inset-0 grow the video into the freed space. The
+       player is opaque, so nothing visibly moves (<main> stretches behind
+       it). Closing or minimizing the player drops the rule, which clamps the
+       root scroll offset back to 0 — <main>'s own scroll position is
+       untouched. Two traps: the overflow must come from the BODY'S OWN BOX —
+       an absolutely-positioned spacer hanging below body doesn't reliably
+       extend Safari's root scroll range; and the overflow must hang off the
+       ROOT scroller — overflow-y:auto on <body> alone would make body an
+       inner scroll container (html stays overflow:hidden), and inner
+       scrolling never collapses the browser bar. Coarse-pointer only —
        desktops have a real fullscreen API and would just grow a stray
-       scrollbar next to the player. */
+       scrollbar next to the player. (True fullscreen on iPhone Safari comes
+       from the player's fullscreen button → video.webkitEnterFullscreen();
+       this swipe affordance is the lighter, chrome-minimizing variant.) */
     @media (pointer: coarse) {
       html:has(#localPlayer.lp-active:not(.lp-tiny)) { overflow-y: auto; }
-      html:has(#localPlayer.lp-active:not(.lp-tiny)) body { position: relative; }
-      html:has(#localPlayer.lp-active:not(.lp-tiny)) body::after {
-        content: ""; position: absolute; left: 0; top: 100%; width: 1px; height: 45vh;
+      html:has(#localPlayer.lp-active:not(.lp-tiny)) body {
+        height: calc(100vh + 45vh);
+        height: calc(100dvh + 45vh);
       }
     }
     ::-webkit-scrollbar { width: 4px; }
@@ -8170,10 +8173,14 @@ function lpToggleMute() {
 
 // OS fullscreen on the whole #localPlayer container (not the <video>), so the
 // custom chrome — header, transport, track selectors — stays visible inside
-// fullscreen. iPhone Safari can't fullscreen a non-<video> element; the button
-// is hidden there at init (the player is already a full-viewport overlay, so
-// nothing is lost). Don't "fix" this by fullscreening the <video> — that
-// summons the native controls, defeating the cross-OS UI.
+// fullscreen. iPhone Safari can't fullscreen a non-<video> element, and the
+// browser chrome (URL/tab bar) otherwise never fully leaves — so there, and
+// ONLY there, the button falls back to video.webkitEnterFullscreen(): the
+// native iOS player takes over while fullscreen (native transport, in-stream
+// audio/sub tracks still work — they're in the HLS manifest on the Safari-
+// native path) and returns to the custom UI on exit. Don't extend the native-
+// player fallback to platforms that have element fullscreen — it forfeits the
+// cross-OS custom chrome for no gain.
 function _lpFsEl() {
   return document.fullscreenElement || document.webkitFullscreenElement || null;
 }
@@ -8184,7 +8191,11 @@ function lpToggleFullscreen() {
     if (exit) try { exit.call(document); } catch (_) {}
   } else {
     const req = el.requestFullscreen || el.webkitRequestFullscreen;
-    if (req) try { req.call(el); } catch (_) {}
+    if (req) { try { req.call(el); } catch (_) {} }
+    else {
+      const v = _lpV();
+      if (v && v.webkitEnterFullscreen) try { v.webkitEnterFullscreen(); } catch (_) {}
+    }
   }
   _lpCtlShow();
 }
@@ -8583,11 +8594,18 @@ function _lpAttachVideoEvents() {
   // Keep the fullscreen icon honest when the user exits via Esc / system UI.
   document.addEventListener("fullscreenchange", _lpCtlSync);
   document.addEventListener("webkitfullscreenchange", _lpCtlSync);
-  // iPhone Safari can't fullscreen a non-<video> element — hide the button
-  // there (the player is already a full-viewport overlay, so nothing is lost).
-  if (!(c.requestFullscreen || c.webkitRequestFullscreen)) {
+  // iPhone Safari can't fullscreen a non-<video> element — there the button
+  // falls back to the <video>'s native fullscreen (lpToggleFullscreen), which
+  // is the only true-fullscreen path on that platform. Hide the button only
+  // if even that is missing. Resync the icons/controls when the native player
+  // is dismissed (it fires webkitendfullscreen on the video, not the
+  // document, and often exits paused).
+  const lpv = document.getElementById("lpVideo");
+  if (!(c.requestFullscreen || c.webkitRequestFullscreen) &&
+      !(lpv && lpv.webkitEnterFullscreen)) {
     document.getElementById("lpFsBtn").classList.add("hidden");
   }
+  if (lpv) lpv.addEventListener("webkitendfullscreen", () => { _lpCtlSync(); _lpCtlShow(); });
 }
 
 // --- Service-worker eviction stub -------------------------------------------
@@ -9240,6 +9258,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.26.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.27.0</div>
 </body>
 </html>

@@ -500,9 +500,15 @@ Two ways to populate the cache:
    play/pause, mute, a **gear button** that opens the options panel
    (`#lpTrackRow`: quality / audio / subtitles / AI / Clip — hidden
    otherwise), and OS fullscreen on the **whole container** (so the gear
-   panel stays usable in fullscreen; iPhone Safari lacks
-   element-fullscreen and hides the button — the player is already a
-   full-viewport overlay). Auto-hides 3 s into playback; tap to toggle.
+   panel stays usable in fullscreen). iPhone Safari lacks
+   element-fullscreen, so there the button falls back to
+   `video.webkitEnterFullscreen()` — the native iOS player takes over
+   (native transport; in-stream audio/sub tracks still work — they're in
+   the HLS manifest on the Safari-native path) and `webkitendfullscreen`
+   resyncs the custom UI on exit; this is the only true-fullscreen path on
+   iPhone, where browser chrome otherwise never fully leaves. A swipe up on
+   the video also minimizes the browser bar (app-shell escape hatch — see
+   [FRONTEND.md](FRONTEND.md) § Layout). Auto-hides 3 s into playback; tap to toggle.
    Full detail in [FRONTEND.md](FRONTEND.md); the iOS/fullscreen footgun is
    in [GOTCHAS.md](GOTCHAS.md).
 
