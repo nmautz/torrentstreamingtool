@@ -4,6 +4,10 @@ Non-obvious behaviours and footguns. Read before changing anything load-bearing.
 
 ## VLC
 
+### VLC can't open Windows paths ≥ 260 chars — build every input MRL with `vlc_file_uri()`
+
+qBittorrent writes files at any path length (it uses `\\?\` extended-length paths internally), but VLC opens its inputs with the plain Win32 API, which hard-fails past MAX_PATH (259 usable chars). The symptom is maddening: one episode in a pack throws *"unable to open the MRL"* while its siblings play fine, the file exists on disk, and nothing is in any log — the difference is just an extra-long filename (multi-part finales are the classic case; the Avatar S03E18-E21 four-parter is 271 chars total). The fix is `vlc_file_uri()` ([main.py](../main.py)): identical to `Path.resolve().as_uri()` except that on Windows an over-259-char resolved path is swapped for its **8.3 short form** (`GetShortPathNameW`) before URI-encoding. Never call `.resolve().as_uri()` directly for a VLC input. Round-tripping is safe because every consumer that maps VLC's reported URI back to a library path (`_vlc_wait_until_ready`, `_canonical_item_path`, the bg-video check, `vlc_progress_tracker`) compares via `Path.resolve()`, which expands 8.3 names back to the canonical long path — so progress keys, skip data, and resume hints never see the short form. Caveat: if 8.3 name generation is disabled on the volume (`fsutil 8dot3name query`), there's no short form; the helper logs a warning and falls back to the long URI, which VLC will still fail on — the real cure then is enabling 8.3 names or shortening the filename.
+
 ### Track IDs are ES IDs, not 1/2/3 counters
 
 VLC's `audio_track` / `subtitle_track` commands accept **elementary stream IDs** — the number N in each `"Stream N"` key of `vs.information.category`. Using sequential per-type counters (1, 2, 3 for audio; 1, 2, 3 for subs) sends the wrong ID and the command silently does nothing. The `<audiotrack>`/`<subtitletrack>` values in the XML status are also ES IDs, so the "current" highlight in the UI dropdown only works if they're compared as ES IDs.

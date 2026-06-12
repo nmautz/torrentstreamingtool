@@ -14,7 +14,7 @@
 | 215–260 | SSE broadcast + `state_snapshot()` |
 | 263–291 | Admin auth (`_check_admin`, `_require_admin`, `_pin_hash`) |
 | 294–373 | qBittorrent client: `qreq`, `qbit_add_magnet`, `qbit_streaming_mode`, `qbit_info`, `qbit_files`, `qbit_delete`, `qbit_set_file_priority` |
-| 376–448 | VLC client: `vlc()`, `vlc_status`, `vlc_playlist_uri`, `uri_to_path` |
+| 376–448 | VLC client: `vlc()`, `vlc_status`, `vlc_playlist_uri`, `uri_to_path`, `vlc_file_uri` (builds every VLC input MRL; on Windows swaps over-MAX_PATH paths for their 8.3 short form — see [GOTCHAS.md](GOTCHAS.md)) |
 | 450–552 | OpenSubtitles: `_opensubtitles_hash`, `_current_playback_path`, `_opensubtitles_search`. Download/attach + playback auto-search helpers live with the routes: `_download_and_attach_subtitle`, `_auto_fetch_subtitle` |
 | 555–773 | VLC window control (Windows ctypes / macOS osascript / Linux xdotool): focus, fullscreen, minimize. Windows focus path first minimizes all non-VLC top-level windows so the player owns the screen on TV playback. |
 | 776–847 | VLC restart + `_retry_task` |
@@ -125,7 +125,7 @@ Background tasks are then started in `lifespan` ([main.py:1746](../main.py#L1746
 5. If `file_index` is set, zero out priority for all other files.
 6. Buffer loop (1 s sleep): poll `qbit_info` and `qbit_files`. Push `stream_status` with progress every tick. Break when `BUFFER_MIN_MB` or `BUFFER_MIN_PCT` is crossed.
 7. Resolve the video file (`largest_video` or `_file_by_index`), build `file_path` from `info["save_path"]`.
-8. `vlc("in_play", input=file_path.resolve().as_uri())`. Spawn `vlc_focus_and_fullscreen` task. Set `stream_status="playing"`.
+8. `vlc("in_play", input=vlc_file_uri(file_path))`. Spawn `vlc_focus_and_fullscreen` task. Set `stream_status="playing"`.
 
 Cancellation: on new `/api/stream` or `/api/stop`, `state.stream_task.cancel()` is called. If `library_item_id is None`, the torrent is deleted by `qbit_delete(active_hash)`.
 

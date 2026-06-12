@@ -1158,6 +1158,47 @@ def uri_to_path(uri: str) -> str:
     return path
 
 
+def vlc_file_uri(p: Path) -> str:
+    """Build the file:// URI handed to VLC as an input MRL. Use this — never
+    `.resolve().as_uri()` directly — for anything VLC must open.
+
+    Equivalent to `Path.resolve().as_uri()` everywhere except Windows paths at
+    or over MAX_PATH: VLC opens file inputs with the plain Win32 API (no `\\\\?\\`
+    extended-length prefix), so a 260+-character path fails with "unable to open
+    the MRL" even though the file exists (qBittorrent can WRITE such files — it
+    uses extended-length paths internally; long multi-episode filenames are the
+    usual culprit). For those, substitute the 8.3 short form (GetShortPathNameW),
+    which stays under the limit. Round-tripping is safe: everything that maps
+    VLC's reported URI back to a library path goes through `Path.resolve()`,
+    which expands short names to the canonical long path. Falls back to the
+    long URI (and logs) if 8.3 names are disabled on the volume.
+    """
+    try:
+        rp = p.resolve()
+    except Exception:
+        rp = p
+    sp = str(rp)
+    if platform.system() == "Windows" and len(sp) > 259:
+        try:
+            import ctypes
+            # \\?\ prefix so the lookup itself accepts the over-long input.
+            src = sp if sp.startswith("\\\\?\\") else "\\\\?\\" + sp
+            need = ctypes.windll.kernel32.GetShortPathNameW(src, None, 0)
+            if need:
+                buf = ctypes.create_unicode_buffer(need)
+                if ctypes.windll.kernel32.GetShortPathNameW(src, buf, need):
+                    short = buf.value
+                    if short.startswith("\\\\?\\"):
+                        short = short[4:]
+                    if short and len(short) <= 259:
+                        return Path(short).as_uri()
+            print(f"[vlc] WARNING: path exceeds MAX_PATH and has no 8.3 short name — "
+                  f"VLC will likely fail to open it: {sp}")
+        except Exception as exc:
+            print(f"[vlc] short-path conversion failed for over-long path ({exc}): {sp}")
+    return rp.as_uri()
+
+
 # ── Subtitle Download (OpenSubtitles) ─────────────────────────────────────────
 
 def _opensubtitles_hash(path: Path) -> Optional[str]:
@@ -1886,14 +1927,14 @@ async def _retry_task(file_path: Path) -> None:
             await broadcast("stream_status", {"status": "error", "message": "VLC could not be relaunched."})
             return
 
-        await vlc("in_play", input=file_path.resolve().as_uri())
+        await vlc("in_play", input=vlc_file_uri(file_path))
 
         if state.library_playlist and state.library_current_file:
             try:
                 cur = str(state.library_current_file)
                 idx = state.library_playlist.index(cur)
                 for p in state.library_playlist[idx + 1:]:
-                    await vlc("in_enqueue", input=Path(p).resolve().as_uri())
+                    await vlc("in_enqueue", input=vlc_file_uri(Path(p)))
             except (ValueError, Exception):
                 pass
 
@@ -1968,7 +2009,7 @@ async def _apply_night_mode(enabled: bool) -> None:
             return
 
         first_resolved = resume_path.resolve()
-        play_task = asyncio.create_task(vlc("in_play", input=first_resolved.as_uri()))
+        play_task = asyncio.create_task(vlc("in_play", input=vlc_file_uri(first_resolved)))
         ready = await _vlc_wait_until_ready(first_resolved, timeout=10.0)
 
         state.stream_status = "playing"
@@ -2004,7 +2045,7 @@ async def _apply_night_mode(enabled: bool) -> None:
                 pass
             for p in tail:
                 try:
-                    await vlc("in_enqueue", input=Path(p).resolve().as_uri())
+                    await vlc("in_enqueue", input=vlc_file_uri(Path(p)))
                 except Exception:
                     pass
     except Exception as exc:
@@ -2196,9 +2237,11 @@ def _file_progress(item: dict, profile_id: str, file_path: str) -> Optional[dict
 def _canonical_item_path(vlc_path: str, item: dict) -> str:
     """Return the item["files"] path that resolves to the same file as vlc_path.
 
-    VLC receives Path(p).resolve().as_uri() which follows symlinks.  The stored
-    path may not be resolved, so we compare resolved forms and return the stored
-    path so progress keys always match what get_item_files and find_resume_hint
+    VLC receives vlc_file_uri(p) — a resolved path (symlinks followed; on
+    Windows possibly an 8.3 short form for over-MAX_PATH files).  The stored
+    path may not be resolved, so we compare resolved forms (resolve() also
+    expands 8.3 short names back to the long path) and return the stored path
+    so progress keys always match what get_item_files and find_resume_hint
     expect.  Falls back to vlc_path if no match is found.
     """
     try:
@@ -3796,9 +3839,9 @@ async def _auto_play_item(item: dict, profile_id: str, file_path: str = "") -> N
             await asyncio.sleep(1)
 
         first = Path(playlist[0])
-        await vlc("in_play", input=first.resolve().as_uri())
+        await vlc("in_play", input=vlc_file_uri(first))
         for p in playlist[1:]:
-            await vlc("in_enqueue", input=Path(p).resolve().as_uri())
+            await vlc("in_enqueue", input=vlc_file_uri(Path(p)))
         asyncio.create_task(vlc_focus_and_fullscreen())
 
         state.stream_status = "playing"
@@ -3866,7 +3909,7 @@ async def _play_background_video() -> bool:
         # vlc_clear_playlist() / docs/GOTCHAS.md.
         await c.get("/requests/status.xml", params={"command": "pl_empty"})
         await c.get("/requests/status.xml", params={"command": "volume", "val": str(raw)})
-        await c.get("/requests/status.xml", params={"command": "in_play", "input": p.resolve().as_uri()})
+        await c.get("/requests/status.xml", params={"command": "in_play", "input": vlc_file_uri(p)})
     except Exception:
         return False
     asyncio.create_task(vlc_focus_and_fullscreen())
@@ -4763,9 +4806,9 @@ async def vlc_next_file(current_file: str, item: dict) -> None:
     state.current_subtitle_track = -1
     state.track_pref_applied_file = next_path
     await vlc_clear_playlist()
-    await vlc("in_play", input=Path(next_path).resolve().as_uri())
+    await vlc("in_play", input=vlc_file_uri(Path(next_path)))
     for p in new_tail[1:]:
-        await vlc("in_enqueue", input=Path(p).resolve().as_uri())
+        await vlc("in_enqueue", input=vlc_file_uri(Path(p)))
     if state.library_item_id and state.library_profile_id:
         asyncio.create_task(_apply_track_prefs(
             state.library_item_id, state.library_profile_id, next_path, delay=2.0,
@@ -4979,7 +5022,7 @@ async def stream_pipeline(
         state.active_file = file_path
 
         await vlc_clear_playlist()
-        await vlc("in_play", input=file_path.resolve().as_uri())
+        await vlc("in_play", input=vlc_file_uri(file_path))
         asyncio.create_task(vlc_focus_and_fullscreen())
         state.stream_status = "playing"
         await broadcast("stream_status", {"status": "playing", "message": f"Playing: {file_path.name}"})
@@ -6184,7 +6227,7 @@ async def _library_play_launch(
     # so it completes before the in_play below appends the new item.
     await vlc_clear_playlist()
     # Detached: don't let in_play's slow reply gate the UI flip or the seek.
-    play_task = asyncio.create_task(vlc("in_play", input=first_resolved.as_uri()))
+    play_task = asyncio.create_task(vlc("in_play", input=vlc_file_uri(first_resolved)))
     try:
         # Wait for VLC to actually be playing the new file (poll, not the slow
         # in_play reply). Falls through after the timeout and flips optimistically
@@ -6244,7 +6287,7 @@ async def _library_play_launch(
             except Exception:
                 pass
             await asyncio.gather(
-                *(vlc("in_enqueue", input=Path(p).resolve().as_uri()) for p in rest),
+                *(vlc("in_enqueue", input=vlc_file_uri(Path(p))) for p in rest),
                 return_exceptions=True,
             )
     except asyncio.CancelledError:
@@ -7711,7 +7754,7 @@ async def _vlc_relaunch_playlist(playlist: list[str], target_name: str) -> None:
     # Clear stale playlist items (a leftover bg entry could otherwise win an
     # end-of-file auto-advance and play the bg video instead of this episode).
     await vlc_clear_playlist()
-    play_task = asyncio.create_task(vlc("in_play", input=first_resolved.as_uri()))
+    play_task = asyncio.create_task(vlc("in_play", input=vlc_file_uri(first_resolved)))
     try:
         await _vlc_wait_until_ready(first_resolved, timeout=10.0)
         state.stream_status = "playing"
@@ -7728,7 +7771,7 @@ async def _vlc_relaunch_playlist(playlist: list[str], target_name: str) -> None:
             except Exception:
                 pass
             await asyncio.gather(
-                *(vlc("in_enqueue", input=Path(p).resolve().as_uri()) for p in rest),
+                *(vlc("in_enqueue", input=vlc_file_uri(Path(p))) for p in rest),
                 return_exceptions=True,
             )
     except asyncio.CancelledError:
