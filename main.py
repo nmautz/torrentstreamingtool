@@ -634,6 +634,13 @@ class AppState:
     analyzer_log: deque = field(default_factory=lambda: deque(maxlen=200))
     background_playing: bool = False                      # True when the idle background video is the active VLC playlist
     user_volume_before_bg: int = 100                      # snapshot of state.vlc_volume taken when bg first took over
+    # Non-admin "let me use the computer" override. While set, the idle background
+    # video loop AND every focus/minimize/fullscreen assertion stand down so VLC
+    # stops grabbing the screen and other windows stop being minimized. Values:
+    # 0.0 = active (normal behaviour); a future time.time() = paused until then;
+    # float('inf') = paused until the user resumes. See window_mgmt_paused() and
+    # POST /api/window-control.
+    window_mgmt_paused_until: float = 0.0
     vlc_night_mode: bool = False                          # VLC compressor (dynamic-range) filter; persisted in library.json → settings.vlc_night_mode, seeded at lifespan startup. VLC must relaunch to apply (no runtime HTTP command for audio filters)
     vlc_night_mode_preset: str = "medium"                 # intensity preset (light|medium|max); persisted in library.json → settings.vlc_night_mode_preset, remembered independently of the on/off toggle
     subtitle_default_language: str = "eng"                # preferred subtitle language (settings.subtitles.default_language; "" = Any), mirrored here for state_snapshot/UI defaults; seeded at lifespan, updated by the admin subtitles POST
@@ -757,6 +764,16 @@ def state_snapshot() -> dict:
         cur_idx = playlist.index(current) if (current and current in playlist) else -1
     except (ValueError, AttributeError):
         cur_idx = -1
+    # Window control pause: compute the live remaining seconds for the UI.
+    # window_mgmt_paused() auto-expires a finished timed pause as a side effect.
+    wm_until = state.window_mgmt_paused_until
+    wm_paused = window_mgmt_paused()
+    if not wm_paused:
+        wm_remaining = 0                       # 0 ⇒ active (normal behaviour)
+    elif wm_until == WINDOW_MGMT_PAUSE_INDEFINITE:
+        wm_remaining = -1                      # -1 ⇒ paused until the user resumes
+    else:
+        wm_remaining = max(0, int(round(wm_until - time.time())))
     return {
         "vpn_secure": state.vpn_secure,
         "vpn_status": state.vpn_status_text,
@@ -808,6 +825,12 @@ def state_snapshot() -> dict:
         "stt_available": _stt_available(),
         # True ⇒ bulk stream-prep is paused (drives the global prep bar's Resume control).
         "prep_paused": state.prep_paused,
+        # Window control pause (non-admin "use the computer normally" override).
+        # paused: idle background video + focus/minimize/fullscreen loops are
+        # standing down. remaining: seconds left for a timed pause, -1 if until
+        # the user resumes, 0 if active. See POST /api/window-control.
+        "window_mgmt_paused": wm_paused,
+        "window_mgmt_pause_remaining": wm_remaining,
         # Idle/night DOWNLOAD window: whether it's open right now, and whether any
         # admin prep window is even configured (so the UI can warn that an idle-only
         # download has no window to run in). See docs/STREAMING.md + the scheduler.
@@ -1620,6 +1643,26 @@ def _stop_vlc_flash_windows() -> None:
         pass
 
 
+WINDOW_MGMT_PAUSE_INDEFINITE = float("inf")
+
+
+def window_mgmt_paused() -> bool:
+    """True while the user has paused window control via POST /api/window-control.
+
+    When paused, the idle background video loop and every focus / minimize-others
+    / fullscreen assertion stand down so the user can use the desktop normally
+    without VLC grabbing the screen or their windows being minimized. A timed
+    pause auto-expires on read, so callers don't need their own clock.
+    """
+    until = state.window_mgmt_paused_until
+    if until <= 0:
+        return False
+    if until != WINDOW_MGMT_PAUSE_INDEFINITE and time.time() >= until:
+        state.window_mgmt_paused_until = 0.0   # auto-expire a finished timed pause
+        return False
+    return True
+
+
 def _minimize_other_windows_windows() -> None:
     """Minimize every visible top-level window that isn't owned by a VLC process.
 
@@ -1820,6 +1863,10 @@ async def vlc_focus_and_fullscreen() -> None:
     the call, on a slowing cadence (0.5 s → 1 s → 2 s). This catches late-
     launching apps without hammering the desktop forever once things settle.
     """
+    # User asked to use the computer normally — don't grab focus or minimize
+    # anything. The background_video_loop will re-engage once the pause lifts.
+    if window_mgmt_paused():
+        return
     await asyncio.sleep(1.5)
     system = platform.system()
 
@@ -1832,6 +1879,9 @@ async def vlc_focus_and_fullscreen() -> None:
         # this, a still-running background focus loop would keep minimizing the
         # kiosk window (via _minimize_other_windows) and re-focusing VLC.
         if state.youtube_active:
+            return
+        # User paused window control mid-loop — stop fighting for the screen.
+        if window_mgmt_paused():
             return
         # Always re-assert focus + minimize-others, even if VLC reports
         # fullscreen=True. The reported flag tracks VLC's internal state and
@@ -3931,6 +3981,10 @@ async def background_video_loop() -> None:
             # stopped. Don't let the idle-background loop start a video over it.
             if state.youtube_active:
                 continue
+            # Window control paused by the user — leave the desktop alone and
+            # don't (re)start the idle background video over their work.
+            if window_mgmt_paused():
+                continue
             lib = await get_library()
             bg = lib.get("settings", {}).get("background_video") or {}
             if not bg.get("path") or not bg.get("enabled", True):
@@ -5570,6 +5624,11 @@ class YouTubeStartVolumeReq(BaseModel):
 
 class HostVolumeReq(BaseModel):
     host_volume: int  # 0-100; live host OS mixer volume
+
+
+class WindowControlReq(BaseModel):
+    action: str = "toggle"        # "pause" | "resume" | "toggle"
+    seconds: int = 0              # pause duration; 0 (or omitted) = until the user resumes
 
 
 class SkipNowReq(BaseModel):
@@ -8791,6 +8850,52 @@ async def set_night_mode(req: NightModeReq) -> JSONResponse:
     else:
         await broadcast("state", state_snapshot())
     return JSONResponse({"ok": True, "night_mode": new_on, "preset": new_preset, "applied": need_apply})
+
+
+@app.post("/api/window-control")
+async def window_control(req: WindowControlReq) -> JSONResponse:
+    """Pause/resume the host window control (non-admin "use the computer" override).
+
+    While paused, `background_video_loop` stops (re)starting the idle background
+    video and every `vlc_focus_and_fullscreen` / minimize-others / fullscreen
+    assertion stands down (gated by `window_mgmt_paused()`), so VLC stops grabbing
+    the screen and the user's other windows stop being minimized.
+
+    Body: `{action, seconds}`.
+      action: "pause" | "resume" | "toggle" (default — pause if active, else resume)
+      seconds: pause duration; 0 / omitted = pause until the user resumes.
+
+    On pause we also minimize VLC immediately so the desktop is usable right away
+    (otherwise a fullscreen idle background video would just sit there until it
+    ends). On resume we kick `vlc_focus_and_fullscreen` so the background video
+    comes back to the foreground without waiting for the loop's 3 s poll.
+    """
+    action = (req.action or "toggle").lower()
+    if action == "toggle":
+        action = "resume" if window_mgmt_paused() else "pause"
+
+    if action == "pause":
+        secs = int(req.seconds or 0)
+        if secs > 0:
+            secs = max(1, min(3600, secs))     # clamp to a sane 1 s … 1 h window
+            state.window_mgmt_paused_until = time.time() + secs
+        else:
+            state.window_mgmt_paused_until = WINDOW_MGMT_PAUSE_INDEFINITE
+        # Get VLC out of the way now so the user isn't staring at a fullscreen
+        # idle video while "paused". Best-effort; never blocks the response long.
+        asyncio.create_task(vlc_minimize())
+    else:  # resume
+        state.window_mgmt_paused_until = 0.0
+        # Bring the background video back to the foreground promptly.
+        asyncio.create_task(vlc_focus_and_fullscreen())
+
+    snap = state_snapshot()
+    await broadcast("state", snap)
+    return JSONResponse({
+        "ok": True,
+        "paused": snap["window_mgmt_paused"],
+        "remaining": snap["window_mgmt_pause_remaining"],
+    })
 
 
 @app.get("/api/settings/system-volume-default")

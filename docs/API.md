@@ -214,6 +214,7 @@ disk) — `409` otherwise. See [STREAMING.md § Clip](STREAMING.md#clip).
 | POST | `/api/settings/youtube-start-volume` | `{youtube_start_volume: 0-100}` — stores in `library.json → settings.youtube_start_volume`. Does NOT change the OS volume immediately, only at the next YouTube play |
 | GET | `/api/settings/host-volume` | `{host_volume}` — current host OS mixer volume (0-100), or `null` if the platform helper failed (pycaw missing on Windows, no `pactl`/`amixer` on Linux) |
 | POST | `/api/settings/host-volume` | `{host_volume: 0-100}` — **immediately** pushes to the host OS mixer via pycaw / `osascript` / `pactl`/`amixer`. Not persisted in `library.json` — the OS owns its own mixer state |
+| POST | `/api/window-control` | `{action: "pause"\|"resume"\|"toggle", seconds?: int}` → `{ok, paused, remaining}`. Non-admin "Use My Computer" override: pauses the idle background video + all VLC focus/minimize/fullscreen assertions (gated by `window_mgmt_paused()`) so the user can use the desktop. `seconds > 0` = timed pause (clamped 1…3600, auto-expires server-side); `0`/omitted = until resume. `pause` also minimizes VLC now; `resume` kicks `vlc_focus_and_fullscreen` to bring the background video back. Runtime-only (not persisted). `state_snapshot` carries `window_mgmt_paused` + `window_mgmt_pause_remaining` (-1 = until resume, 0 = active). See [BACKEND.md](BACKEND.md) |
 
 ## Admin
 

@@ -128,6 +128,10 @@ The **intensity picker** (`#psNightModePreset`, Light/Medium/Max) is **settings-
 
 The modal ends with a **This Device** section — settings persisted in the browser's `localStorage`, never on the server (they're not in `_PS_CONTROLS`, so they have no loading state). Currently one control: the **Dev Mode** checkbox (`#psDevMode`, `toggleDevMode`), which enables the on-device player's diagnostics HUD (see § Dev Mode HUD below). Seeded synchronously in `openProfileSettings` from the `devMode` flag (`localStorage.streamlink_devmode`).
 
+### Use My Computer (window-control pause)
+
+The **Global** section has a **Use My Computer** tile (`#wcButtons`: **60 Sec** / **2 Min** / **Until I Stop**) that tells the server to pause the idle background video + every VLC focus/minimize/fullscreen assertion so the user can use the desktop. `pauseWindowControl(seconds)` POSTs `/api/window-control` `{action:"pause", seconds}` (0 = until resume) optimistically; `resumeWindowControl()` POSTs `{action:"resume"}`. State rides the SSE `state` event as `app.window_mgmt_paused` / `app.window_mgmt_pause_remaining` (-1 = until resume). `renderWindowControl()` (called from the `state` handler and `openProfileSettings`) swaps `#wcButtons` for `#wcResume` (a "Paused — resumes in m:ss" line + Resume button) and runs a 1 s local countdown ticker (`wcCountdownTimer`) between SSE updates, flipping back to the buttons when it hits 0 (the server auto-expires server-side). `closeProfileSettings` clears the ticker.
+
 ### Subtitle defaults (per-profile override + search filter)
 
 Profile Settings has a **Subtitles** `<select>` (`#psSubtitles`: Default / On / Off). `openProfileSettings` seeds it from the profile's `subtitles_on` (`true`→On, `false`→Off, null→Default); `saveSubtitlesPref()` POSTs `/api/profiles/{id}/subtitles` with `subtitles_on` = `true`/`false`/`null`. This is just the *preference* — VLC track selection happens server-side in `_apply_subtitle_policy` on the next play (see [GOTCHAS.md](GOTCHAS.md)), so there's no live VLC call here.

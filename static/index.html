@@ -861,6 +861,30 @@
         </div>
       </div>
 
+      <!-- Window control pause — temporarily reclaim the desktop so VLC stops
+           grabbing the screen and other windows stop being minimized. -->
+      <div class="bg-gray-800/60 px-4 py-3">
+        <div class="min-w-0 mb-2">
+          <div class="text-sm font-bold text-gray-200 uppercase tracking-wide">Use My Computer</div>
+          <div class="text-[11px] text-gray-500 mt-0.5">Pause the background video and stop VLC from taking over the screen or minimizing your windows, so you can use the computer normally.</div>
+        </div>
+        <div id="wcButtons" class="grid grid-cols-3 gap-2">
+          <button onclick="pauseWindowControl(60)"
+            class="bg-gray-700 hover:bg-indigo-700 text-gray-100 text-xs font-bold uppercase tracking-wide py-2.5 transition-colors">60 Sec</button>
+          <button onclick="pauseWindowControl(120)"
+            class="bg-gray-700 hover:bg-indigo-700 text-gray-100 text-xs font-bold uppercase tracking-wide py-2.5 transition-colors">2 Min</button>
+          <button onclick="pauseWindowControl(0)"
+            class="bg-gray-700 hover:bg-indigo-700 text-gray-100 text-xs font-bold uppercase tracking-wide py-2.5 transition-colors">Until I Stop</button>
+        </div>
+        <div id="wcResume" class="hidden mt-1">
+          <div class="flex items-center justify-between gap-3 bg-indigo-950/60 border border-indigo-800 px-3 py-2.5">
+            <div id="wcStatusLabel" class="text-[11px] text-indigo-300 uppercase tracking-wide font-bold">Paused</div>
+            <button onclick="resumeWindowControl()"
+              class="bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-bold uppercase tracking-wide px-4 py-2 transition-colors flex-shrink-0">Resume</button>
+          </div>
+        </div>
+      </div>
+
       <div class="bg-gray-800/60 px-4 py-3">
         <div class="flex items-center justify-between gap-3 mb-2">
           <div class="min-w-0">
@@ -3635,6 +3659,78 @@ const NIGHT_PRESET_DESC = {
   max:    "Strongest — flattens loud peaks hard.",
 };
 
+// ── Window control pause ("Use My Computer") ───────────────────────────────
+// Tells the server to stop the idle background video + every VLC focus/minimize/
+// fullscreen assertion for a while, so the user can use the desktop normally.
+// app.window_mgmt_paused / app.window_mgmt_pause_remaining ride the SSE state
+// event (remaining: seconds left, -1 = until resumed, 0 = active).
+let wcCountdownTimer = null;
+
+async function pauseWindowControl(seconds){
+  // Optimistic flip so the panel updates instantly; the SSE state confirms.
+  app.window_mgmt_paused = true;
+  app.window_mgmt_pause_remaining = seconds > 0 ? seconds : -1;
+  renderWindowControl();
+  const r = await fetch("/api/window-control",{
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({action:"pause", seconds}),
+  }).catch(()=>null);
+  if(!r || !r.ok){
+    app.window_mgmt_paused = false;
+    app.window_mgmt_pause_remaining = 0;
+    renderWindowControl();
+    showAlert("Couldn't pause window control.","error");
+  }
+}
+
+async function resumeWindowControl(){
+  app.window_mgmt_paused = false;
+  app.window_mgmt_pause_remaining = 0;
+  renderWindowControl();
+  const r = await fetch("/api/window-control",{
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({action:"resume"}),
+  }).catch(()=>null);
+  if(!r || !r.ok) showAlert("Couldn't resume window control.","error");
+}
+
+// Reflect app.window_mgmt_* on the settings panel: show the timed buttons when
+// active, or a "Paused — resumes in m:ss" line + Resume button when paused.
+function renderWindowControl(){
+  const btns   = document.getElementById("wcButtons");
+  const resume = document.getElementById("wcResume");
+  const label  = document.getElementById("wcStatusLabel");
+  if(!btns || !resume || !label) return;
+  const paused = !!app.window_mgmt_paused;
+  btns.classList.toggle("hidden", paused);
+  resume.classList.toggle("hidden", !paused);
+  if(wcCountdownTimer){ clearInterval(wcCountdownTimer); wcCountdownTimer = null; }
+  if(!paused) return;
+
+  const draw = () => {
+    let rem = Number(app.window_mgmt_pause_remaining);
+    if(rem === -1){ label.textContent = "Paused — until you resume"; return; }
+    if(!(rem > 0)){
+      // Timed pause elapsed locally — flip back to the buttons. The next SSE
+      // state (server auto-expires on read) will confirm.
+      app.window_mgmt_paused = false;
+      app.window_mgmt_pause_remaining = 0;
+      renderWindowControl();
+      return;
+    }
+    const m = Math.floor(rem/60), s = rem%60;
+    label.textContent = `Paused — resumes in ${m}:${String(s).padStart(2,"0")}`;
+  };
+  draw();
+  // Tick the countdown locally each second between SSE state events.
+  if(app.window_mgmt_pause_remaining > 0){
+    wcCountdownTimer = setInterval(() => {
+      if(app.window_mgmt_pause_remaining > 0) app.window_mgmt_pause_remaining--;
+      draw();
+    }, 1000);
+  }
+}
+
 // Change night-mode intensity (settings menu only). Persists independently of
 // the on/off toggle, so it's remembered next time night mode is switched on.
 // The server only restarts VLC if night mode is currently on.
@@ -3965,6 +4061,8 @@ function openProfileSettings(){
   _psLoadYtStartVolume();
   _psLoadHostVolume();
   _psLoadNightMode();
+  // Window control pause state rides the SSE `state` event (already in `app`).
+  renderWindowControl();
 }
 
 // Dev Mode (Settings → This Device) — toggles the on-device player's
@@ -4094,6 +4192,8 @@ async function _psLoadNightMode(){
 
 function closeProfileSettings(){
   document.getElementById("profileSettingsModal").classList.add("hidden");
+  // Stop the window-control countdown ticker while the panel is hidden.
+  if(wcCountdownTimer){ clearInterval(wcCountdownTimer); wcCountdownTimer = null; }
 }
 
 async function saveAutoSkip(){
@@ -9286,6 +9386,7 @@ function connectSSE(){
     renderServerAttention(d);
     renderPerfBanner(d);
     if(typeof d.vlc_night_mode==="boolean") renderNightMode();
+    if(typeof d.window_mgmt_paused==="boolean") renderWindowControl();
   });
   es.addEventListener("vpn_status",e=>{
     _noteSSEMsg();
@@ -9482,6 +9583,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.29.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.30.0</div>
 </body>
 </html>
