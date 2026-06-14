@@ -17,7 +17,7 @@ Event types:
 | Event | When | Payload shape |
 |-------|------|---------------|
 | `ping` | keep-alive, at least every 20 s of queue idle | `data` is the server unix time (seconds); carries no app state — only proves the connection is alive |
-| `state` | every 2 s; on any state change | full `state_snapshot()` ([main.py:292](../main.py#L292)). Includes `library_item_id` and the full ordered `library_playlist` (used by the TV→device Handoff to reconstruct the remaining tail), alongside `library_current_file` / `library_current_index` / `is_library_playback`, `jackett_ok` (last known indexer HTTP reachability), `download_idle_open` / `download_idle_configured` (idle/night download window state — see Download scheduling), and `sys_status` (host CPU/RAM/GPU/network health + `overall` ok\|degraded\|overloaded — drives the "host busy" perf banner), and `subtitle_default_language` (admin preferred subtitle language, "" = Any — defaults the search modal's language filter), `subtitle_upgrade_late` / `subtitle_single_option` (the two new subtitle-policy flags, read by the on-device upgrade poller) |
+| `state` | every 2 s; on any state change | full `state_snapshot()` ([main.py:292](../main.py#L292)). Includes `library_item_id` and the full ordered `library_playlist` (used by the TV→device Handoff to reconstruct the remaining tail), alongside `library_current_file` / `library_current_index` / `is_library_playback`, `jackett_ok` (last known indexer HTTP reachability), `indexers_degraded`/`indexers_total`/`indexers_failing` (some configured indexers failing while others work — set on search, drives the non-specific "some search sources aren't responding" banner; never names which), `download_idle_open` / `download_idle_configured` (idle/night download window state — see Download scheduling), and `sys_status` (host CPU/RAM/GPU/network health + `overall` ok\|degraded\|overloaded — drives the "host busy" perf banner), and `subtitle_default_language` (admin preferred subtitle language, "" = Any — defaults the search modal's language filter), `subtitle_upgrade_late` / `subtitle_single_option` (the two new subtitle-policy flags, read by the on-device upgrade poller) |
 | `vpn_status` | VPN connect/disconnect transition | `{secure, status, block_ui}` (`block_ui` = whether a drop locks the whole UI vs. only killing qBit; mirrors `settings.vpn_killswitch.block_ui`) |
 | `jackett_status` | Jackett HTTP reachability transition (from `jackett_health_monitor`, ~20 s poll) | `{ok, url}` |
 | `stream_status` | stream pipeline phase transition | `{status, message, progress?, downloaded_mb?, total_mb?, dl_speed_bps?, ul_speed_bps?}` |
@@ -39,7 +39,7 @@ Event types:
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/api/search?q=…&limit=30` | Calls Jackett `/api/v2.0/indexers/all/results`, sorts by seeders. `INDEXER_CATEGORIES` can be overridden in library.json admin overrides; `0` = no category filter |
+| GET | `/api/search?q=…&limit=30` | Calls Jackett `/api/v2.0/indexers/all/results`, sorts by seeders. `INDEXER_CATEGORIES` can be overridden in library.json admin overrides; `0` = no category filter. **Partial-failure tolerant:** Jackett's aggregate endpoint returns results from the indexers that responded even when others error, so a single broken indexer never fails the search. `_record_indexer_health` reads the response's `Indexers` block, updates the per-indexer health snapshot, and sets a non-specific `indexers_degraded` flag (+ `indexers_total`/`indexers_failing` counts) when some indexers fail while others succeed. Only a total request failure raises `502` |
 
 ## Stream-now (transient, auto-deleted on stop)
 
@@ -236,6 +236,9 @@ All require admin auth.
 | GET | `/api/admin/indexers/{id}/config` | Indexer config schema for setup form |
 | POST | `/api/admin/indexers/{id}/config` | Persist indexer config (POSTs through to Jackett) |
 | DELETE | `/api/admin/indexers/{id}` | Remove indexer from Jackett |
+| GET | `/api/admin/indexers/health` | `{degraded, total, failing, checked_at, indexers:[{id, name, ok, error, results}], jackett_url}` — last observed per-indexer health (set on user searches + Test runs) for the admin Indexer Health card. Read-only; does not probe. `jackett_url` = the Jackett dashboard link |
+| POST | `/api/admin/indexers/{id}/test` | Actively test one configured indexer via Jackett's per-indexer test endpoint → `{id, ok, error}` |
+| POST | `/api/admin/indexers/test-all` | Test every configured indexer through Jackett (parallel) and refresh the health snapshot + `indexers_degraded` flag → `{degraded, total, failing, indexers:[…], jackett_url}` |
 | POST | `/api/library/{id}/visibility` | `{profile_id, hidden: bool}` — toggle per-profile visibility. `hidden=true` moves the item to the user's hidden tab; `hidden=false` restores it to the main list. Distinct from `admin_only` (admin content lock) |
 | POST | `/api/library/{id}/admin-lock` | `{admin_only}` |
 | GET | `/api/admin/library/{id}/skip-data` | Per-file intro/credits times for the editor. Failed files also carry `error_code` and `error` so the editor can render the failure reason |

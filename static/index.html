@@ -2853,6 +2853,17 @@ function renderServerAttention(d){
     return;
   }
 
+  // Some indexers are failing while others still work. Search stays usable, so
+  // this is an amber heads-up rather than a hard error. Deliberately non-specific
+  // — we never name which indexers are down (the admin tab has the detail).
+  if(d.indexers_degraded){
+    el.className = "sticky top-0 z-[70] bg-amber-950/70 border-b border-amber-800 text-amber-200 text-xs sm:text-sm px-3 py-2 flex items-center justify-between gap-3";
+    msg.textContent = "Some search sources aren't responding — results may be incomplete.";
+    el.classList.remove("hidden");
+    renderFcNotice();
+    return;
+  }
+
   // Optional env keys still missing — show a quieter hint, but only to admins
   // who can act on it. The non-admin UI hides this case entirely.
   // We don't know if the viewer is an admin here, so we just hide the banner.
@@ -9583,6 +9594,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.30.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.31.0</div>
 </body>
 </html>

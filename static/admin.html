@@ -218,6 +218,31 @@
       </div>
     </div>
 
+    <!-- Indexer health -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-sm font-black uppercase tracking-wide">Indexer Health</h2>
+          <p class="text-xs text-gray-500 mt-0.5">Whether each indexer is responding. Search keeps working as long as at least one is healthy.</p>
+        </div>
+        <button onclick="testAllIndexers(this)"
+          class="text-xs text-indigo-400 hover:text-indigo-300 uppercase tracking-wide font-bold transition-colors border border-indigo-800 hover:border-indigo-600 px-3 py-1.5 flex-shrink-0">
+          Test All
+        </button>
+      </div>
+      <div id="indexerHealthBanner" class="hidden px-5 py-3 border-b border-gray-800"></div>
+      <div id="indexerHealthList" class="divide-y divide-gray-800">
+        <div class="px-5 py-8 text-center text-gray-600 text-sm">Loading health…</div>
+      </div>
+      <div class="px-5 py-3 border-t border-gray-800">
+        <a id="jackettLink" href="#" target="_blank" rel="noopener"
+          class="text-xs text-indigo-400 hover:text-indigo-300 uppercase tracking-wide font-bold transition-colors">
+          Open Jackett Admin ↗
+        </a>
+        <span class="text-xs text-gray-600 ml-2">— log in to add, configure, or remove indexers directly.</span>
+      </div>
+    </div>
+
     <!-- Jackett indexers list -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between">
@@ -1395,6 +1420,7 @@ function showDashboard(){
   document.getElementById("dashboard").classList.remove("hidden");
   loadAdminSettings();
   loadIndexers();
+  loadIndexerHealth();
   loadOfflineEncoder();
   loadActivity();
   startActivityPolling();
@@ -3882,9 +3908,103 @@ async function deleteIndexer(id, name){
   if(r.ok){
     document.getElementById(`ix-${id}`)?.remove();
     showToast(`Removed ${name}.`);
+    loadIndexerHealth();
   } else {
     showToast("Failed to remove indexer.", true);
   }
+}
+
+// ── Indexer health ─────────────────────────────────────────────────────────────
+function _renderIndexerHealth(d){
+  const link = document.getElementById("jackettLink");
+  if(link && d.jackett_url) link.href = d.jackett_url;
+
+  const banner = document.getElementById("indexerHealthBanner");
+  if(banner){
+    if(d.degraded){
+      banner.className = "px-5 py-3 border-b border-gray-800 bg-amber-950/50 text-amber-300 text-xs";
+      banner.textContent = `${d.failing} of ${d.total} indexers are failing. Search still works from the healthy ones — fix or remove the failing indexers in Jackett.`;
+      banner.classList.remove("hidden");
+    } else if(d.total && !d.failing){
+      banner.className = "px-5 py-3 border-b border-gray-800 bg-emerald-950/40 text-emerald-300 text-xs";
+      banner.textContent = `All ${d.total} indexers responding.`;
+      banner.classList.remove("hidden");
+    } else {
+      banner.classList.add("hidden");
+    }
+  }
+
+  const el = document.getElementById("indexerHealthList");
+  if(!el) return;
+  const list = d.indexers || [];
+  if(!list.length){
+    el.innerHTML = `<div class="px-5 py-6 text-center text-gray-600 text-sm">No health data yet — run a search or click Test All.</div>`;
+    return;
+  }
+  el.innerHTML = list.map(h=>{
+    const ok = !!h.ok;
+    const dot = ok ? "bg-emerald-500" : "bg-red-500";
+    const stat = ok ? `<span class="text-emerald-400">Responding</span>`
+                    : `<span class="text-red-400">Failing</span>`;
+    const err = (!ok && h.error) ? `<div class="text-xs text-red-400/80 mt-0.5 truncate" title="${escHtml(h.error)}">${escHtml(h.error)}</div>` : "";
+    return `
+    <div class="flex items-center justify-between px-5 py-3 gap-3" id="ixh-${escHtml(h.id)}">
+      <div class="flex items-start gap-2.5 min-w-0">
+        <span class="w-2 h-2 mt-1.5 flex-shrink-0 ${dot}"></span>
+        <div class="min-w-0">
+          <div class="text-sm font-bold text-gray-200 truncate">${escHtml(h.name||h.id)}</div>
+          <div class="text-xs text-gray-500 mt-0.5">${stat}</div>
+          ${err}
+        </div>
+      </div>
+      <button onclick="testOneIndexer('${escHtml(h.id)}', this)"
+        class="text-xs text-indigo-400 hover:text-indigo-300 font-bold uppercase tracking-wide transition-colors flex-shrink-0 px-3 py-1.5 border border-indigo-900 hover:border-indigo-700">
+        Test
+      </button>
+    </div>`;
+  }).join("");
+}
+
+async function loadIndexerHealth(){
+  let r;
+  try{
+    r = await fetch("/api/admin/indexers/health", {headers: authHeader()});
+  }catch(e){ return; }
+  if(!r.ok) return;
+  _renderIndexerHealth(await r.json());
+}
+
+async function testAllIndexers(btn){
+  const el = document.getElementById("indexerHealthList");
+  el.innerHTML = `<div class="px-5 py-8 text-center text-gray-600 text-sm">Testing all indexers…</div>`;
+  await withInflight("test_all_indexers", btn, async () => {
+    const r = await fetch("/api/admin/indexers/test-all", {
+      method:"POST", headers: authHeader(),
+    });
+    if(!r.ok){
+      el.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Could not reach Jackett.</div>`;
+      return;
+    }
+    const d = await r.json();
+    _renderIndexerHealth(d);
+    showToast(d.failing ? `${d.failing} of ${d.total} indexers failing.` : `All ${d.total} indexers OK.`, !!d.failing);
+  });
+}
+
+async function testOneIndexer(id, btn){
+  _markLoading(btn, true);
+  let r;
+  try{
+    r = await fetch(`/api/admin/indexers/${encodeURIComponent(id)}/test`, {
+      method:"POST", headers: authHeader(),
+    });
+  } finally {
+    _markLoading(btn, false);
+  }
+  if(!r.ok){ showToast("Test failed — could not reach Jackett.", true); return; }
+  const res = await r.json();
+  showToast(res.ok ? "Indexer responding." : `Failing: ${res.error||"unknown error"}`, !res.ok);
+  loadIndexerHealth();
 }
 
 // ── Content Lock ──────────────────────────────────────────────────────────────

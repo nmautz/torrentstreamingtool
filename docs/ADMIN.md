@@ -53,6 +53,20 @@ Both run **only while the host is idle** (`_machine_in_use(300)` — deliberatel
 
 ### 1. Indexers ([static/admin.html:95](../static/admin.html#L95))
 
+#### Indexer Health
+
+A card above the configured-indexers list that surfaces **resilience to a partly-broken Jackett**. Jackett's aggregate `/indexers/all/results` endpoint returns results from the indexers that *did* respond and flags the ones that errored, so a single broken indexer never sinks a search — `_record_indexer_health` (called from `/api/search`) records the per-indexer status and raises a **non-specific** `indexers_degraded` flag when some fail while others succeed. The flag drives a quiet amber banner on the **user** dashboard ("Some search sources aren't responding — results may be incomplete.") that deliberately **never names which** indexers are down; the names + failure reasons live only here, for the admin.
+
+The card shows:
+- A degraded/all-OK summary banner (`X of Y indexers are failing` / `All Y indexers responding`).
+- A per-indexer **Responding** / **Failing** list (with the failure reason inline for failing ones). Populated from the last user search and refreshed by the Test buttons.
+- **Test** (per indexer) and **Test All** buttons → `POST /api/admin/indexers/{id}/test` / `POST /api/admin/indexers/test-all`, which probe Jackett's per-indexer test endpoint live and refresh the snapshot + degraded flag.
+- An **Open Jackett Admin ↗** link (to `{INDEXER_URL}/UI/Dashboard`, returned by `/api/admin/indexers/health` as `jackett_url`) so the admin can log into Jackett directly to fix or remove the failing indexers.
+
+`GET /api/admin/indexers/health` serves the read-only snapshot (`{degraded, total, failing, checked_at, indexers, jackett_url}`).
+
+#### Configured Indexers
+
 Lists configured Jackett indexers. Each row shows the indexer name + test result + delete button. Add button opens a modal that:
 1. Calls `GET /api/admin/indexers/available` for the full Jackett catalog
 2. Renders a filterable list. Selecting one calls `GET /api/admin/indexers/{id}/config` for the config form schema (Jackett returns field types: text, password, checkbox, select)

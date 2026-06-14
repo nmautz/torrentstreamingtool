@@ -591,6 +591,15 @@ class AppState:
     # settings.network.preferred_adapter; seeded at lifespan, updated by the POST.
     preferred_adapter: str = ""
     jackett_ok: bool = True               # last known Jackett HTTP reachability
+    # Indexer degradation. Set from /api/search when Jackett reports that some
+    # configured indexers errored while others still returned results — search
+    # stays usable, but we flag it. Drives a non-specific user banner (never
+    # names which indexers); the admin Indexers tab shows the per-indexer detail.
+    indexers_degraded: bool = False
+    indexers_total: int = 0
+    indexers_failing: int = 0
+    indexer_health: list = field(default_factory=list)  # [{id, name, ok, error, results}] — last observed per-indexer health (search-derived or test-derived)
+    indexer_health_checked_at: float = 0.0
     active_hash: Optional[str] = None
     active_title: Optional[str] = None
     active_file: Optional[Path] = None
@@ -780,6 +789,11 @@ def state_snapshot() -> dict:
         # Whether a VPN drop locks the whole UI (overlay) or only kills qBit.
         "vpn_block_ui": state.vpn_block_ui,
         "jackett_ok": state.jackett_ok,
+        # Some configured indexers are failing while others work (set on search).
+        # The user-facing banner only needs the boolean + counts — never the names.
+        "indexers_degraded": state.indexers_degraded,
+        "indexers_total": state.indexers_total,
+        "indexers_failing": state.indexers_failing,
         "stream_status": state.stream_status,
         "active_title": state.active_title,
         "progress": round(state.progress, 2),
@@ -6570,6 +6584,44 @@ async def mark_watched(item_id: str, req: MarkWatchedReq) -> JSONResponse:
 
 # ── Routes: Search & Stream ───────────────────────────────────────────────────
 
+async def _record_indexer_health(idx_info: list) -> None:
+    """Update indexer-health state from a Jackett aggregate-results 'Indexers' block.
+
+    Each entry carries an ``Error`` string when that indexer failed the query.
+    We record a per-indexer snapshot for the admin tab and set a *non-specific*
+    degraded flag (counts only — never names) the moment some indexers fail while
+    others still return results. Broadcasts a fresh ``state`` only on a transition
+    so it doesn't spam every keystroke-debounced search.
+    """
+    health = []
+    for it in idx_info or []:
+        err = (it.get("Error") or "").strip()
+        health.append({
+            "id": it.get("ID", ""),
+            "name": it.get("Name", it.get("ID", "Unknown")),
+            "ok": not err,
+            "error": err,
+            "results": it.get("Results", 0),
+        })
+
+    total = len(health)
+    failing = sum(1 for h in health if not h["ok"])
+    # "Degraded" = at least one failed AND at least one worked. All-failing is a
+    # different condition (likely Jackett/VPN down) already covered by jackett_ok.
+    degraded = failing > 0 and failing < total
+
+    state.indexer_health = health
+    state.indexer_health_checked_at = time.time()
+    state.indexers_total = total
+    state.indexers_failing = failing
+
+    if degraded != state.indexers_degraded:
+        state.indexers_degraded = degraded
+        if degraded:
+            print(f"[indexers] DEGRADED — {failing}/{total} configured indexers failing")
+        await broadcast("state", state_snapshot())
+
+
 @app.get("/api/search")
 async def search(q: str, limit: int = 30) -> JSONResponse:
     if not q.strip():
@@ -6588,9 +6640,16 @@ async def search(q: str, limit: int = 30) -> JSONResponse:
                 f"{settings.indexer_url}/api/v2.0/indexers/all/results",
                 params=params,
             )
-        items = r.json().get("Results", [])
+        data = r.json()
+        items = data.get("Results", [])
     except Exception as e:
         raise HTTPException(502, f"Indexer unreachable: {e}")
+
+    # Jackett's aggregate endpoint returns results from the indexers that *did*
+    # respond and flags the ones that errored in the "Indexers" array. So a single
+    # broken indexer never sinks the whole search — record per-indexer health and
+    # raise a non-specific "degraded" flag rather than failing the request.
+    await _record_indexer_health(data.get("Indexers", []))
 
     results = []
     for it in items[: limit * 2]:
@@ -8534,6 +8593,112 @@ async def admin_delete_indexer(indexer_id: str, request: Request) -> JSONRespons
         raise
     except Exception as e:
         raise HTTPException(502, f"Could not reach Jackett: {e}")
+
+
+def _jackett_dashboard_url() -> str:
+    """The Jackett web-UI dashboard URL, so the admin can jump over to log in and
+    tweak indexers there directly."""
+    return f"{settings.indexer_url.rstrip('/')}/UI/Dashboard"
+
+
+@app.get("/api/admin/indexers/health")
+async def admin_indexer_health(request: Request) -> JSONResponse:
+    """Indexer-health detail for the admin Indexers tab: the last observed
+    per-indexer status (set on user searches and on Test runs), the degraded
+    flag + counts, and the Jackett dashboard link. Read-only — does not probe."""
+    _require_admin(request)
+    return JSONResponse({
+        "degraded": state.indexers_degraded,
+        "total": state.indexers_total,
+        "failing": state.indexers_failing,
+        "checked_at": state.indexer_health_checked_at or None,
+        "indexers": state.indexer_health,
+        "jackett_url": _jackett_dashboard_url(),
+    })
+
+
+async def _test_one_indexer(c, indexer_id: str) -> dict:
+    """POST Jackett's per-indexer test endpoint; normalise to {id, ok, error}."""
+    try:
+        r = await c.post(f"{settings.indexer_url}/api/v2.0/indexers/{indexer_id}/test")
+        if r.status_code < 300:
+            return {"id": indexer_id, "ok": True, "error": ""}
+        # Jackett returns the failure reason in the body on a non-2xx.
+        try:
+            err = (r.json() or {}).get("error") or f"HTTP {r.status_code}"
+        except Exception:
+            err = (r.text or f"HTTP {r.status_code}")[:300]
+        return {"id": indexer_id, "ok": False, "error": err}
+    except Exception as e:
+        return {"id": indexer_id, "ok": False, "error": str(e)}
+
+
+@app.post("/api/admin/indexers/{indexer_id}/test")
+async def admin_test_indexer(indexer_id: str, request: Request) -> JSONResponse:
+    """Actively test a single configured indexer through Jackett."""
+    _require_admin(request)
+    try:
+        async with _jackett_admin() as c:
+            res = await _test_one_indexer(c, indexer_id)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Could not reach Jackett: {e}")
+    return JSONResponse(res)
+
+
+@app.post("/api/admin/indexers/test-all")
+async def admin_test_all_indexers(request: Request) -> JSONResponse:
+    """Test every configured indexer through Jackett and refresh the health
+    snapshot (+ the degraded flag) from the live results."""
+    _require_admin(request)
+    try:
+        async with _jackett_admin() as c:
+            lr = await c.get(
+                f"{settings.indexer_url}/api/v2.0/indexers",
+                params={"configured": "true"},
+            )
+            configured = lr.json() if lr.status_code == 200 else []
+            results = await asyncio.gather(*[
+                _test_one_indexer(c, ix.get("id", "")) for ix in configured if ix.get("id")
+            ])
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(502, f"Could not reach Jackett: {e}")
+
+    by_id = {r["id"]: r for r in results}
+    health = []
+    for ix in configured:
+        ixid = ix.get("id", "")
+        res = by_id.get(ixid, {"ok": False, "error": "not tested"})
+        health.append({
+            "id": ixid,
+            "name": ix.get("name", ixid) or ixid,
+            "ok": res["ok"],
+            "error": res["error"],
+            "results": 0,
+        })
+
+    total = len(health)
+    failing = sum(1 for h in health if not h["ok"])
+    degraded = failing > 0 and failing < total
+
+    state.indexer_health = health
+    state.indexer_health_checked_at = time.time()
+    state.indexers_total = total
+    state.indexers_failing = failing
+    if degraded != state.indexers_degraded:
+        state.indexers_degraded = degraded
+    await broadcast("state", state_snapshot())
+
+    return JSONResponse({
+        "degraded": degraded,
+        "total": total,
+        "failing": failing,
+        "indexers": health,
+        "jackett_url": _jackett_dashboard_url(),
+    })
 
 
 @app.get("/api/admin/settings")
