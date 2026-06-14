@@ -61,7 +61,7 @@ The card shows:
 - A degraded/all-OK summary banner (`X of Y indexers are failing` / `All Y indexers responding`).
 - A per-indexer **Responding** / **Failing** list (with the failure reason inline for failing ones). Populated from the last user search and refreshed by the Test buttons.
 - **Test** (per indexer) and **Test All** buttons → `POST /api/admin/indexers/{id}/test` / `POST /api/admin/indexers/test-all`, which probe Jackett's per-indexer test endpoint live and refresh the snapshot + degraded flag.
-- An **Open Jackett Admin ↗** link (to `{INDEXER_URL}/UI/Dashboard`, returned by `/api/admin/indexers/health` as `jackett_url`) so the admin can log into Jackett directly to fix or remove the failing indexers.
+- An **Open Jackett Admin ↗** link (Jackett's `/UI/Dashboard`, returned by `/api/admin/indexers/health` as `jackett_url`) so the admin can log into Jackett directly to fix or remove the failing indexers. `_jackett_dashboard_url(request)` rewrites the server-internal loopback host in `INDEXER_URL` to the hostname the admin actually connected on (keeping Jackett's port), so the link works from a remote browser instead of pointing at `localhost`; a non-loopback `INDEXER_URL` (remote Jackett) is used as-is.
 
 `GET /api/admin/indexers/health` serves the read-only snapshot (`{degraded, total, failing, checked_at, indexers, jackett_url}`).
 

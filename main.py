@@ -6584,30 +6584,15 @@ async def mark_watched(item_id: str, req: MarkWatchedReq) -> JSONResponse:
 
 # ── Routes: Search & Stream ───────────────────────────────────────────────────
 
-async def _record_indexer_health(idx_info: list) -> None:
-    """Update indexer-health state from a Jackett aggregate-results 'Indexers' block.
-
-    Each entry carries an ``Error`` string when that indexer failed the query.
-    We record a per-indexer snapshot for the admin tab and set a *non-specific*
-    degraded flag (counts only — never names) the moment some indexers fail while
-    others still return results. Broadcasts a fresh ``state`` only on a transition
-    so it doesn't spam every keystroke-debounced search.
-    """
-    health = []
-    for it in idx_info or []:
-        err = (it.get("Error") or "").strip()
-        health.append({
-            "id": it.get("ID", ""),
-            "name": it.get("Name", it.get("ID", "Unknown")),
-            "ok": not err,
-            "error": err,
-            "results": it.get("Results", 0),
-        })
-
+async def _apply_indexer_health(health: list) -> None:
+    """Update indexer-health state from a *normalised* health list
+    (``[{id, name, ok, error, results}]``) and broadcast a fresh ``state`` only on
+    a degraded↔healthy transition so it doesn't spam every keystroke-debounced
+    search. "Degraded" = at least one indexer failed AND at least one worked
+    (all-failing is a different condition — likely Jackett/VPN down — covered by
+    ``jackett_ok``)."""
     total = len(health)
     failing = sum(1 for h in health if not h["ok"])
-    # "Degraded" = at least one failed AND at least one worked. All-failing is a
-    # different condition (likely Jackett/VPN down) already covered by jackett_ok.
     degraded = failing > 0 and failing < total
 
     state.indexer_health = health
@@ -6622,37 +6607,43 @@ async def _record_indexer_health(idx_info: list) -> None:
         await broadcast("state", state_snapshot())
 
 
-@app.get("/api/search")
-async def search(q: str, limit: int = 30) -> JSONResponse:
-    if not q.strip():
-        return JSONResponse({"results": []})
+async def _record_indexer_health(idx_info: list) -> None:
+    """Normalise a Jackett results-payload 'Indexers' block (each entry carries an
+    ``Error`` string when that indexer failed) and feed it to ``_apply_indexer_health``."""
+    health = [{
+        "id": it.get("ID", ""),
+        "name": it.get("Name", it.get("ID", "Unknown")),
+        "ok": not (it.get("Error") or "").strip(),
+        "error": (it.get("Error") or "").strip(),
+        "results": it.get("Results", 0),
+    } for it in (idx_info or [])]
+    await _apply_indexer_health(health)
 
-    lib = await get_library()
-    cats_override = lib.get("settings", {}).get("admin_overrides", {}).get("indexer_categories")
-    cats = (cats_override if cats_override is not None else settings.indexer_categories).strip()
-    params: dict = {"apikey": settings.indexer_api_key, "Query": q}
-    if cats and cats != "0":
-        params["Category[]"] = cats
 
+async def _list_configured_indexers() -> Optional[list]:
+    """Return ``[{id, name}]`` for every configured Jackett indexer, or ``None`` if
+    the list can't be fetched (so the caller can fall back to the aggregate query)."""
     try:
-        async with httpx.AsyncClient(timeout=15.0) as c:
+        async with _jackett_admin() as c:
             r = await c.get(
-                f"{settings.indexer_url}/api/v2.0/indexers/all/results",
-                params=params,
+                f"{settings.indexer_url}/api/v2.0/indexers",
+                params={"configured": "true"},
             )
-        data = r.json()
-        items = data.get("Results", [])
-    except Exception as e:
-        raise HTTPException(502, f"Indexer unreachable: {e}")
+        if r.status_code != 200:
+            return None
+        return [
+            {"id": ix.get("id", ""), "name": ix.get("name", ix.get("id", "")) or ix.get("id", "")}
+            for ix in r.json() if ix.get("id")
+        ]
+    except Exception:
+        return None
 
-    # Jackett's aggregate endpoint returns results from the indexers that *did*
-    # respond and flags the ones that errored in the "Indexers" array. So a single
-    # broken indexer never sinks the whole search — record per-indexer health and
-    # raise a non-specific "degraded" flag rather than failing the request.
-    await _record_indexer_health(data.get("Indexers", []))
 
+def _shape_search_results(items: list, limit: int) -> list:
+    """Map raw Jackett result dicts → the trimmed UI shape, drop entries with no
+    magnet/link, and sort by seeders."""
     results = []
-    for it in items[: limit * 2]:
+    for it in items:
         mag = it.get("MagnetUri") or it.get("Link", "")
         if not mag:
             continue
@@ -6665,9 +6656,79 @@ async def search(q: str, limit: int = 30) -> JSONResponse:
             "magnet": mag,
             "tracker": it.get("Tracker", ""),
         })
-
     results.sort(key=lambda x: x["seeders"], reverse=True)
-    return JSONResponse({"results": results[:limit]})
+    return results[:limit]
+
+
+@app.get("/api/search")
+async def search(q: str, limit: int = 30) -> JSONResponse:
+    if not q.strip():
+        return JSONResponse({"results": []})
+
+    lib = await get_library()
+    cats_override = lib.get("settings", {}).get("admin_overrides", {}).get("indexer_categories")
+    cats = (cats_override if cats_override is not None else settings.indexer_categories).strip()
+    params: dict = {"apikey": settings.indexer_api_key, "Query": q}
+    if cats and cats != "0":
+        params["Category[]"] = cats
+
+    # Query each configured indexer *independently and concurrently* rather than via
+    # Jackett's aggregate /indexers/all/results. The aggregate waits for the slowest
+    # indexer, so a single hung/broken one would blow our client timeout and discard
+    # ALL results — including the good ones. Per-indexer, a failing one only loses its
+    # own results (bounded by its own short timeout) and we still return the rest.
+    indexers = await _list_configured_indexers()
+
+    if not indexers:
+        # Couldn't enumerate (Jackett auth/list failure) — fall back to the aggregate
+        # endpoint so search still works, just without per-indexer isolation.
+        try:
+            async with httpx.AsyncClient(timeout=20.0) as c:
+                r = await c.get(
+                    f"{settings.indexer_url}/api/v2.0/indexers/all/results",
+                    params=params,
+                )
+            data = r.json()
+        except Exception as e:
+            raise HTTPException(502, f"Indexer unreachable: {e}")
+        await _record_indexer_health(data.get("Indexers", []))
+        return JSONResponse({"results": _shape_search_results(data.get("Results", []), limit)})
+
+    PER_INDEXER_TIMEOUT = 12.0
+
+    async def _query_one(ix: dict) -> tuple:
+        ixid, name = ix["id"], ix["name"]
+        try:
+            async with httpx.AsyncClient(timeout=PER_INDEXER_TIMEOUT) as c:
+                r = await c.get(
+                    f"{settings.indexer_url}/api/v2.0/indexers/{ixid}/results",
+                    params=params,
+                )
+            if r.status_code >= 300:
+                return [], {"id": ixid, "name": name, "ok": False, "error": f"HTTP {r.status_code}", "results": 0}
+            d = r.json()
+            res = d.get("Results", []) or []
+            # A single-indexer query echoes that indexer's own error in its block.
+            blk = (d.get("Indexers") or [{}])
+            err = (blk[0].get("Error") or "").strip() if blk else ""
+            return res, {"id": ixid, "name": name, "ok": not err, "error": err, "results": len(res)}
+        except Exception as e:
+            return [], {"id": ixid, "name": name, "ok": False, "error": str(e)[:200], "results": 0}
+
+    pairs = await asyncio.gather(*[_query_one(ix) for ix in indexers])
+    items: list = []
+    health: list = []
+    for res, h in pairs:
+        items.extend(res)
+        health.append(h)
+
+    await _apply_indexer_health(health)
+
+    # Only error out when *every* indexer failed — otherwise show whatever came back.
+    if health and all(not h["ok"] for h in health):
+        raise HTTPException(502, "All indexers failed to respond. Check Jackett / your VPN.")
+
+    return JSONResponse({"results": _shape_search_results(items, limit)})
 
 
 @app.post("/api/stream/prepare")
@@ -8595,10 +8656,26 @@ async def admin_delete_indexer(indexer_id: str, request: Request) -> JSONRespons
         raise HTTPException(502, f"Could not reach Jackett: {e}")
 
 
-def _jackett_dashboard_url() -> str:
-    """The Jackett web-UI dashboard URL, so the admin can jump over to log in and
-    tweak indexers there directly."""
-    return f"{settings.indexer_url.rstrip('/')}/UI/Dashboard"
+def _jackett_dashboard_url(request: Request) -> str:
+    """The Jackett web-UI dashboard URL for the admin to log in and tweak indexers.
+
+    ``settings.indexer_url`` is server-internal (``http://localhost:9117``) — useless
+    as a link target, since "localhost" resolves to the admin's *own* browser machine,
+    not the server. So when Jackett is on a loopback address we swap in the hostname
+    the admin actually connected on (``request.url.hostname``), keeping Jackett's own
+    scheme + port. A non-loopback indexer URL (admin pointed at a remote Jackett) is
+    used as-is."""
+    base = settings.indexer_url.rstrip("/")
+    try:
+        parts = urlparse(base)
+        host = (parts.hostname or "").lower()
+        if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
+            req_host = request.url.hostname or host
+            port = f":{parts.port}" if parts.port else ""
+            base = f"{parts.scheme or 'http'}://{req_host}{port}"
+    except Exception:
+        pass
+    return f"{base}/UI/Dashboard"
 
 
 @app.get("/api/admin/indexers/health")
@@ -8613,7 +8690,7 @@ async def admin_indexer_health(request: Request) -> JSONResponse:
         "failing": state.indexers_failing,
         "checked_at": state.indexer_health_checked_at or None,
         "indexers": state.indexer_health,
-        "jackett_url": _jackett_dashboard_url(),
+        "jackett_url": _jackett_dashboard_url(request),
     })
 
 
@@ -8680,24 +8757,14 @@ async def admin_test_all_indexers(request: Request) -> JSONResponse:
             "results": 0,
         })
 
-    total = len(health)
-    failing = sum(1 for h in health if not h["ok"])
-    degraded = failing > 0 and failing < total
-
-    state.indexer_health = health
-    state.indexer_health_checked_at = time.time()
-    state.indexers_total = total
-    state.indexers_failing = failing
-    if degraded != state.indexers_degraded:
-        state.indexers_degraded = degraded
-    await broadcast("state", state_snapshot())
+    await _apply_indexer_health(health)
 
     return JSONResponse({
-        "degraded": degraded,
-        "total": total,
-        "failing": failing,
+        "degraded": state.indexers_degraded,
+        "total": state.indexers_total,
+        "failing": state.indexers_failing,
         "indexers": health,
-        "jackett_url": _jackett_dashboard_url(),
+        "jackett_url": _jackett_dashboard_url(request),
     })
 
 

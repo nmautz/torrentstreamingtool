@@ -39,7 +39,7 @@ Event types:
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/api/search?q=…&limit=30` | Calls Jackett `/api/v2.0/indexers/all/results`, sorts by seeders. `INDEXER_CATEGORIES` can be overridden in library.json admin overrides; `0` = no category filter. **Partial-failure tolerant:** Jackett's aggregate endpoint returns results from the indexers that responded even when others error, so a single broken indexer never fails the search. `_record_indexer_health` reads the response's `Indexers` block, updates the per-indexer health snapshot, and sets a non-specific `indexers_degraded` flag (+ `indexers_total`/`indexers_failing` counts) when some indexers fail while others succeed. Only a total request failure raises `502` |
+| GET | `/api/search?q=…&limit=30` | Sorts by seeders. `INDEXER_CATEGORIES` can be overridden in library.json admin overrides; `0` = no category filter. **Partial-failure tolerant by per-indexer fan-out:** enumerates the configured indexers (`_list_configured_indexers`) and queries each `/api/v2.0/indexers/{id}/results` **independently and concurrently** (12 s per-indexer timeout), then merges whatever came back — so one slow/broken indexer can't time out the whole search and discard the good results (which the aggregate `/indexers/all/results` endpoint does, since it waits for the slowest indexer). Falls back to the aggregate endpoint if the indexer list can't be fetched. `_apply_indexer_health` records the per-indexer outcomes and sets a non-specific `indexers_degraded` flag (+ `indexers_total`/`indexers_failing` counts) when some fail while others succeed. Raises `502` only when **every** indexer fails (or, on the fallback path, the aggregate request fails) |
 
 ## Stream-now (transient, auto-deleted on stop)
 
