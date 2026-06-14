@@ -79,6 +79,8 @@ A small dataclass-like class:
 - `find_bin` — callable returning the binary path (or None)
 - `build_args(bin_path)` → list[str] **OR** None (when the start command was already run inline, e.g. Windows `sc.exe start`)
 - `startup_timeout`, `back_off`
+- `health_check`, `pre_restart` (optional; see Jackett specifics)
+- `failure_grace` — consecutive failed liveness probes tolerated before the service counts as down (default **0**). Port-checked services (VLC, qBit) keep 0 so crash recovery is immediate; Jackett uses **2** (its HTTP probe can falsely fail on a single slow response). Tracked via `_health_misses`, reset on any successful probe and after a (re)start.
 - Tracks `_failures` for exponential back-off capped at 120 s
 
 ### Loop ([watchdog.py:327](../watchdog.py#L327))
@@ -90,7 +92,7 @@ Three steps each tick (default 3 s):
    - VPN down + qBit alive → kill qBit immediately via `_kill_by_name("qbittorrent")` (psutil-based, falls back to `taskkill`/`pkill`)
    - VPN up + qBit dead → wait back-off, re-check VPN didn't drop during sleep, then start qBit
    - This kill is **unconditional**. The admin "VPN Kill Switch" toggle (`settings.vpn_killswitch.block_ui`, see [ADMIN.md](ADMIN.md)) only governs whether the *dashboard UI* is locked on a drop — the watchdog never reads it and always kills qBit when the VPN is down.
-3. **Plain services** (VLC, Jackett): port check → if down, wait back-off, restart
+3. **Plain services** (VLC, Jackett): liveness probe → on failure increment `_health_misses`; only once it exceeds `failure_grace` is the service treated as down (wait back-off, restart, reset misses). A failed probe still inside the grace window is logged but **not** acted on. This stops a single slow Jackett HTTP probe from triggering a destructive force-kill + ~40 s mono cold restart that takes the indexer offline mid-search.
 
 `_interruptible_sleep` watches `_stop_event` so `stop_watchdog()` exits the back-off promptly.
 
@@ -104,7 +106,9 @@ On Windows, Jackett's `build_args` runs `sc.exe query Jackett` + `sc.exe start J
 
 Jackett is only added to plain_specs when `INDEXER_URL` points at localhost. Remote Jackett is unwatched — `run.py` already warned at startup if it wasn't reachable.
 
-**HTTP health check, not a port check.** Jackett's `ServiceSpec` is built with a `health_check` (`_jackett_alive`) that requires both an open port *and* a successful `GET {INDEXER_URL}/UI/Login` (`_http_ok`). A hung Jackett holds the port open while it stops serving — a bare port check would call that alive forever. `ServiceSpec.is_alive()` uses `health_check` when present, else the port check (VLC/qBit are unchanged).
+**HTTP health check, not a port check.** Jackett's `ServiceSpec` is built with a `health_check` (`_jackett_alive`) that requires both an open port *and* a successful `GET {INDEXER_URL}/UI/Login` (`_http_ok`, 6 s timeout). A hung Jackett holds the port open while it stops serving — a bare port check would call that alive forever. `ServiceSpec.is_alive()` uses `health_check` when present, else the port check (VLC/qBit are unchanged).
+
+**Don't kill on one slow probe (`failure_grace=2`).** The HTTP probe can falsely fail when Jackett is merely *busy* — its mono/.NET web stack briefly stops answering `/UI/Login` within the timeout while fanning a search out to every indexer, or under CPU load from the idle auto-fingerprint/auto-validate maintenance. Because the restart is destructive (force-kill + ~40 s cold start), the Jackett spec tolerates 2 consecutive misses before acting (~1 min of *sustained* failure with the 6 s timeout + 3 s poll), so a genuinely wedged Jackett still recovers within ~1 min but a transient slow response no longer takes the indexer offline. This mirrors the in-app `jackett_health_monitor`, which likewise waits for sustained failure before its backstop restart. Earlier behaviour (a single failed probe → immediate cold restart) was the regression behind "indexer unreachable until I retry a few times."
 
 **Force-down before restart.** The Jackett spec also sets `pre_restart=_jackett_force_down`. `ServiceSpec.start()` runs it first: on Windows `_force_stop_jackett_windows()` does `sc stop` + waits for STOPPED (hard-kill fallback); elsewhere `_kill_by_name("jackett")`. This clears a wedged Jackett so the relaunch can re-bind 9117 — `sc start` alone is a 1056 no-op on a hung service. `start()` then waits on `is_alive()` (HTTP), not just the port, so it doesn't tight-loop before Jackett's web stack is ready (`startup_timeout=40s`).
 

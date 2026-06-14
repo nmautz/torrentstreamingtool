@@ -413,6 +413,7 @@ class ServiceSpec:
         back_off: float = 5.0,
         health_check: callable = None,   # () -> bool; overrides the port check
         pre_restart: callable = None,    # () -> None; run before (re)launching
+        failure_grace: int = 0,          # consecutive failed probes tolerated before "down"
     ):
         self.name            = name
         self.port            = port
@@ -423,6 +424,19 @@ class ServiceSpec:
         self.back_off        = back_off
         self.health_check    = health_check
         self.pre_restart     = pre_restart
+        # How many *consecutive* failed liveness probes to tolerate before we
+        # treat the service as actually down and restart it. A bare TCP port
+        # check (VLC, qBit) is reliable, so 0 keeps crash recovery immediate.
+        # An HTTP health check (Jackett) can falsely fail on a single slow
+        # response — Jackett's mono/.NET web stack briefly stops answering
+        # /UI/Login within the probe timeout while it's busy (fanning a search
+        # out to every indexer, or under CPU load from idle maintenance). A
+        # single such miss must NOT trigger a force-kill + ~40 s mono cold
+        # restart that makes the indexer "unreachable" mid-search, so Jackett
+        # gets a grace window. Mirrors the in-app jackett_health_monitor, which
+        # likewise waits for sustained failure before its backstop restart.
+        self.failure_grace   = max(0, int(failure_grace))
+        self._health_misses  = 0
         self._failures       = 0
         self._MAX_BACK_OFF   = 120.0
 
@@ -566,22 +580,48 @@ def _watchdog_loop(
 
             alive = spec.is_alive()
 
-            if not alive:
-                if prev_alive.get(spec.name, True):
+            # Tolerate transient probe failures before declaring the service
+            # down. A single slow HTTP probe (busy Jackett) must not force a
+            # destructive cold restart — only restart once it has missed more
+            # than `failure_grace` probes in a row. Port-checked services use
+            # grace=0, so this is a no-op for them.
+            if alive:
+                spec._health_misses = 0
+            else:
+                spec._health_misses += 1
+
+            down    = spec._health_misses > spec.failure_grace
+            was_up  = prev_alive.get(spec.name, True)
+
+            if down:
+                if was_up:
                     log.warning(
-                        "%s is DOWN on port %d — will restart after back-off.",
-                        spec.name, spec.port,
+                        "%s is DOWN on port %d (%d consecutive failed probes) — "
+                        "will restart after back-off.",
+                        spec.name, spec.port, spec._health_misses,
                     )
                 back_off = spec.current_back_off()
                 if back_off > _POLL_INTERVAL:
                     log.info("%s back-off: %.0fs", spec.name, back_off)
                 _interruptible_sleep(back_off)
                 if not _stop_event.is_set() and not spec.is_alive():
-                    spec.start()
-            elif not prev_alive.get(spec.name, True):
+                    # Reset the miss counter only on a successful (re)launch; a
+                    # failed start leaves it above grace so we retry next tick
+                    # (back-off still escalates via _failures) instead of waiting
+                    # out the whole grace window again on a truly-dead service.
+                    if spec.start():
+                        spec._health_misses = 0
+            elif not alive and was_up:
+                # Failing but still inside the grace window — note it, don't kill.
+                log.info(
+                    "%s health probe failed (%d/%d) — tolerating transient "
+                    "slowness, not restarting yet.",
+                    spec.name, spec._health_misses, spec.failure_grace + 1,
+                )
+            elif alive and not was_up:
                 log.info("%s recovered.", spec.name)
 
-            prev_alive[spec.name] = spec.is_alive()
+            prev_alive[spec.name] = not down
 
         _stop_event.wait(timeout=_POLL_INTERVAL)
 
@@ -680,7 +720,9 @@ def _build_specs() -> tuple[list[ServiceSpec], ServiceSpec]:
             # is served without auth, so any HTTP response means it's healthy.
             if not _port_open(jackett_port, jackett_host, timeout=0.5):
                 return False
-            return _http_ok(f"{jackett_base}/UI/Login", timeout=4.0)
+            # 6 s (not 4) so a merely-slow mono response under load still counts
+            # as alive instead of tripping a false "wedged" verdict.
+            return _http_ok(f"{jackett_base}/UI/Login", timeout=6.0)
 
         def _jackett_force_down() -> None:
             # Clear a hung/zombie Jackett before relaunching so the port frees.
@@ -700,6 +742,11 @@ def _build_specs() -> tuple[list[ServiceSpec], ServiceSpec]:
             back_off=5.0,
             health_check=_jackett_alive,
             pre_restart=_jackett_force_down,
+            # Require 3 consecutive failed HTTP probes (~ a full minute with the
+            # 6 s timeout + 3 s poll) before the destructive force-kill + cold
+            # restart. A genuinely wedged Jackett still recovers in ~1 min; a
+            # transient slow response no longer takes the indexer offline.
+            failure_grace=2,
         ))
 
     return plain_specs, qbit_spec
