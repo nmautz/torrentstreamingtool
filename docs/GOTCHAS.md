@@ -290,12 +290,15 @@ The `library.json` stall above is the canonical case, but the rule is general: *
 
 VLC plays `Path(p).resolve().as_uri()` (resolved). The stored item file path may not be resolved. `_canonical_item_path` ([main.py:868](../main.py#L868)) compares both as resolved Paths and returns the stored path — so progress and skip-data lookups key correctly against `item.files[].path`.
 
-### Resume hint walks files in order
+### Resume hint continues *forward* from the last-watched episode
 
-`find_resume_hint` ([main.py:890](../main.py#L890)):
-1. If `last_file` has meaningful in-progress position (>5 s, not completed) → return it
-2. Walk `files` in order, return first not-completed file
-3. If all completed → return file[0] with `all_completed: true` (UI lets user rewatch from start)
+`find_resume_hint` ([main.py](../main.py)) resolves the show-card Play target. The key rule is **never go backwards to an episode the viewer skipped** — it continues forward from whatever they last played:
+1. If `last_file` is **in-progress** (>5 s, not completed) → resume it.
+2. If `last_file` is present, scan **from `last_file` onward** and return the first not-completed file (skipping `last_file` itself only when it's completed). So watching ep6 and skipping ep5 resumes ep6; finishing ep6 advances to ep7 — **not** back to the still-unwatched ep5.
+3. Only if nothing ahead of `last_file` is unwatched does it fall through to the global walk: first not-completed file anywhere (this is also the cold-start path with no `last_file`, and is what finally surfaces a genuinely-skipped earlier episode once the rest of the series is done).
+4. If all completed → return file[0] with `all_completed: true` (UI lets user rewatch from start).
+
+This only applies *within* one library item (e.g. a season pack). A series split into one item per episode has an independent per-item hint each.
 
 ### Frontend drops saveProgress writes under t=5 s
 

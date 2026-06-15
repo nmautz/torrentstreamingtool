@@ -2333,34 +2333,43 @@ def find_resume_hint(item: dict, profile_id: str) -> Optional[dict]:
     file_progs = prof.get("file_progress", {})
     last_file = prof.get("last_file")
 
-    # Prefer the last-watched file if it has meaningful in-progress position
-    if last_file:
-        fp = file_progs.get(last_file, {})
-        if not fp.get("completed") and fp.get("position_sec", 0) > 5:
-            dur = fp.get("duration_sec", 0)
-            pos = fp.get("position_sec", 0)
-            return {
-                "file_path": last_file,
-                "episode_name": Path(last_file).name,
-                "position_sec": pos,
-                "duration_sec": dur,
-                "pct": round(pos / dur * 100, 1) if dur else 0,
-            }
+    def _hint_for(f: dict) -> dict:
+        path = f.get("path", "")
+        fp = file_progs.get(path, {})
+        pos = fp.get("position_sec", 0)
+        dur = fp.get("duration_sec", 0)
+        return {
+            "file_path": path,
+            "episode_name": f.get("name", Path(path).name),
+            "position_sec": pos,
+            "duration_sec": dur,
+            "pct": round(pos / dur * 100, 1) if dur else 0,
+        }
+
+    paths = [f.get("path", "") for f in files]
+
+    # Continue forward from whatever the viewer last played, never backwards to an
+    # earlier episode they skipped. If they watched ep6 (skipping ep5) and stopped
+    # partway, resume ep6; once ep6 is finished, advance to ep7 — not back to ep5.
+    if last_file and last_file in paths:
+        idx = paths.index(last_file)
+        lf = file_progs.get(last_file, {})
+        # Still mid-episode → resume the last-watched file itself.
+        if not lf.get("completed") and lf.get("position_sec", 0) > 5:
+            return _hint_for(files[idx])
+        # Finished it (or barely started) → first un-completed episode at/after it.
+        # Skip the last file only when it's actually completed.
+        start = idx + 1 if lf.get("completed") else idx
+        for f in files[start:]:
+            if not file_progs.get(f.get("path", ""), {}).get("completed"):
+                return _hint_for(f)
+        # Nothing left ahead — fall through to the global scan so a genuinely
+        # skipped earlier episode (or the all-completed rewatch) is surfaced.
 
     # Walk files in order — return first that isn't completed
     for f in files:
-        path = f.get("path", "")
-        fp = file_progs.get(path, {})
-        if not fp.get("completed"):
-            pos = fp.get("position_sec", 0)
-            dur = fp.get("duration_sec", 0)
-            return {
-                "file_path": path,
-                "episode_name": f.get("name", Path(path).name),
-                "position_sec": pos,
-                "duration_sec": dur,
-                "pct": round(pos / dur * 100, 1) if dur else 0,
-            }
+        if not file_progs.get(f.get("path", ""), {}).get("completed"):
+            return _hint_for(f)
 
     # All completed — point back to first so user can rewatch
     f = files[0]
