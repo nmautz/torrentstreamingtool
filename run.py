@@ -164,9 +164,12 @@ def is_running(name: str) -> bool:
     return False
 
 
-def launch_bg(args: list[str]) -> None:
-    """Start a process detached from this terminal."""
+def launch_bg(args: list[str], env: dict | None = None) -> None:
+    """Start a process detached from this terminal. `env` overrides the child's
+    environment (used by FlareSolverr to set HOST/PORT)."""
     kw: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if env is not None:
+        kw["env"] = env
     if SYSTEM == "Windows":
         kw["creationflags"] = (
             subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
@@ -530,6 +533,38 @@ def start_jackett() -> bool:
         info("Starting Jackett …")
         launch_bg([jackett_bin, "--NoRestart"])
     return wait_for_port(jackett_port, 25.0, "Jackett", jackett_host)
+
+
+def start_flaresolverr() -> bool:
+    """Launch the optional FlareSolverr proxy if it's installed (`_FLARESOLVERR_BIN`).
+
+    FlareSolverr solves Cloudflare / DDoS-Guard challenges for Jackett indexers
+    that need it. Entirely optional — if it was never installed (via the admin
+    Indexers tab / Optional Components), this is a silent no-op. Binds to the
+    host/port in FLARESOLVERR_URL via the HOST/PORT env vars FlareSolverr reads.
+    """
+    fs_bin = e("_FLARESOLVERR_BIN")
+    if not fs_bin or not Path(fs_bin).exists():
+        return False   # not installed — optional component
+
+    fs_url = e("FLARESOLVERR_URL", "http://localhost:8191")
+    fs_port = extract_port(fs_url, 8191)
+    m = re.search(r"https?://([^:/]+)", fs_url)
+    fs_host = m.group(1) if m else "127.0.0.1"
+    if fs_host in ("localhost", "::1", "0.0.0.0"):
+        fs_host = "127.0.0.1"
+
+    if port_open(fs_port, fs_host):
+        ok(f"FlareSolverr already on port {fs_port}")
+        return True
+
+    info("Starting FlareSolverr …")
+    child_env = dict(os.environ)
+    child_env["HOST"] = fs_host
+    child_env["PORT"] = str(fs_port)
+    child_env.setdefault("LOG_LEVEL", "info")
+    launch_bg([fs_bin], env=child_env)
+    return wait_for_port(fs_port, 30.0, "FlareSolverr", fs_host)
 
 
 def _diagnose_jackett_service_state() -> None:
@@ -908,6 +943,7 @@ def main():
     vlc_ok     = start_vlc()
     mullvad_ok = check_mullvad()
     _          = start_jackett()          # optional; don't block on failure
+    _          = start_flaresolverr()     # optional Cloudflare proxy; no-op if not installed
 
     if not mullvad_ok:
         # No-stdin context (system service / piped invocation) → continue

@@ -251,6 +251,20 @@ def fpcalc_candidates() -> list[str]:
     return portable + ["/usr/bin/fpcalc", "/usr/local/bin/fpcalc", "fpcalc"]
 
 
+def flaresolverr_candidates() -> list[str]:
+    """Locate the portable FlareSolverr server extracted under ./tools/flaresolverr/.
+
+    FlareSolverr ships as a PyInstaller bundle (`flaresolverr/flaresolverr[.exe]`
+    plus its runtime). Portable matches come first so a re-run reuses the
+    download. Optional — only indexers behind Cloudflare need it."""
+    portable = _portable_matches("flaresolverr", "flaresolverr.exe", "flaresolverr")
+    if SYSTEM == "Windows":
+        return portable + ["flaresolverr.exe"]
+    if SYSTEM == "Darwin":
+        return portable + ["/opt/homebrew/bin/flaresolverr", "flaresolverr"]
+    return portable + ["/usr/bin/flaresolverr", "/usr/local/bin/flaresolverr", "flaresolverr"]
+
+
 def whisper_candidates() -> list[str]:
     portable = _portable_matches("whisper", "whisper-cli.exe", "whisper-cli",
                                  "main.exe", "whisper.exe")
@@ -352,6 +366,46 @@ def _resolve_whisper_win_url(build: str = "cpu") -> str:
         warn(f"whisper {build} build not found in the latest release; using pinned fallback.")
     except Exception as e:
         warn(f"Could not query whisper.cpp releases ({e}); using pinned fallback.")
+    return fallback
+
+
+# FlareSolverr — optional Cloudflare/DDoS-Guard challenge solver used by Jackett
+# for indexers that sit behind a browser challenge. Ships as a self-contained
+# PyInstaller bundle per platform; only Windows + Linux have official prebuilt
+# binaries (macOS users run it via Docker). The asset NAME is stable but the
+# release TAG isn't, so we resolve the URL from the GitHub releases API at
+# install time and fall back to a pinned known-good tag if the API is unreachable.
+FLARESOLVERR_RELEASES_API     = "https://api.github.com/repos/FlareSolverr/FlareSolverr/releases/latest"
+FLARESOLVERR_FALLBACK_VERSION = "3.3.21"   # known-good tag publishing both prebuilt bundles
+_FLARESOLVERR_ASSETS = {
+    "Windows": "flaresolverr_windows_x64.zip",
+    "Linux":   "flaresolverr_linux_x64.tar.gz",
+}
+
+
+def _resolve_flaresolverr_url(system: str) -> str:
+    """Return the FlareSolverr download URL for `system` (Windows/Linux) from the
+    GitHub releases API, or the pinned fallback if the API can't be reached."""
+    asset = _FLARESOLVERR_ASSETS.get(system)
+    if not asset:
+        raise RuntimeError("FlareSolverr has no prebuilt binary for this OS — run it via Docker.")
+    fallback = (f"https://github.com/FlareSolverr/FlareSolverr/releases/download/"
+                f"v{FLARESOLVERR_FALLBACK_VERSION}/{asset}")
+    import urllib.request, json as _json
+    try:
+        req = urllib.request.Request(
+            FLARESOLVERR_RELEASES_API,
+            headers={"User-Agent": "StreamLink-setup",
+                     "Accept": "application/vnd.github+json"},
+        )
+        with urllib.request.urlopen(req, timeout=15) as resp:
+            data = _json.loads(resp.read().decode("utf-8", "replace"))
+        for a in data.get("assets", []):
+            if a.get("name") == asset and a.get("browser_download_url"):
+                return a["browser_download_url"]
+        warn(f"FlareSolverr asset {asset} not found in the latest release; using pinned fallback.")
+    except Exception as e:
+        warn(f"Could not query FlareSolverr releases ({e}); using pinned fallback.")
     return fallback
 
 
@@ -1149,6 +1203,7 @@ def detect_tools() -> dict:
         ("ffmpeg",  "ffmpeg",        ffmpeg_candidates(),  "https://ffmpeg.org/download.html"),
         ("fpcalc",  "fpcalc (chromaprint)", fpcalc_candidates(), "https://acoustid.org/chromaprint"),
         ("whisper", "whisper.cpp",   whisper_candidates(), "https://github.com/ggml-org/whisper.cpp/releases"),
+        ("flaresolverr", "FlareSolverr", flaresolverr_candidates(), "https://github.com/FlareSolverr/FlareSolverr/releases"),
     ]
 
     for key, label, candidates, url in checks:
@@ -1406,7 +1461,8 @@ def write_env(cfg: dict, tools: dict) -> None:
     mapping = {"vlc": "_VLC_BIN", "qbit": "_QBIT_BIN",
                "jackett": "_JACKETT_BIN", "mullvad": "_MULLVAD_BIN",
                "ffmpeg": "_FFMPEG_BIN", "fpcalc": "_FPCALC_BIN",
-               "whisper": "_WHISPER_BIN", "whisper_model": "_WHISPER_MODEL"}
+               "whisper": "_WHISPER_BIN", "whisper_model": "_WHISPER_MODEL",
+               "flaresolverr": "_FLARESOLVERR_BIN"}
     for key, env_key in mapping.items():
         if tools.get(key):
             lines.append(f"{env_key}={tools[key]}")
@@ -1450,7 +1506,8 @@ def merge_tool_paths(tools: dict) -> None:
     mapping = {"vlc": "_VLC_BIN", "qbit": "_QBIT_BIN",
                "jackett": "_JACKETT_BIN", "mullvad": "_MULLVAD_BIN",
                "ffmpeg": "_FFMPEG_BIN", "fpcalc": "_FPCALC_BIN",
-               "whisper": "_WHISPER_BIN", "whisper_model": "_WHISPER_MODEL"}
+               "whisper": "_WHISPER_BIN", "whisper_model": "_WHISPER_MODEL",
+               "flaresolverr": "_FLARESOLVERR_BIN"}
     desired = {env_key: tools[key] for key, env_key in mapping.items() if tools.get(key)}
 
     # _WHISPER_MODEL is a user CHOICE among possibly several installed GGML

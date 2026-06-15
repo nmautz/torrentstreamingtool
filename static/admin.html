@@ -243,6 +243,26 @@
       </div>
     </div>
 
+    <!-- FlareSolverr (optional Cloudflare-bypass proxy) -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-sm font-black uppercase tracking-wide flex items-center gap-2">
+            FlareSolverr
+            <span id="fsBadge" class="text-[10px] font-black uppercase tracking-widest px-1.5 py-0.5 bg-gray-800 text-gray-400">…</span>
+          </h2>
+          <p class="text-xs text-gray-500 mt-0.5">Optional proxy that solves Cloudflare / DDoS-Guard browser challenges for indexers that need it. Install it here, then point Jackett at its API URL by hand.</p>
+        </div>
+        <button onclick="loadFlaresolverr(this)"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 text-gray-300 hover:text-white transition-colors">
+          Refresh
+        </button>
+      </div>
+      <div id="fsBody" class="px-5 py-4 space-y-3 text-sm text-gray-300">
+        <div class="text-gray-600 text-sm">Loading…</div>
+      </div>
+    </div>
+
     <!-- Jackett indexers list -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between">
@@ -1049,7 +1069,7 @@
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
         <div class="min-w-0">
           <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Optional Components</h2>
-          <p class="text-xs text-gray-500 mt-0.5">Install the portable dependencies the auto-updater can't fetch on its own — ffmpeg, fpcalc, and the whisper.cpp engine + model for AI subtitles. Downloads run on the host and persist across updates. ffmpeg / whisper.cpp binaries are Windows-only here; on Linux/macOS use your package manager.</p>
+          <p class="text-xs text-gray-500 mt-0.5">Install the portable dependencies the auto-updater can't fetch on its own — ffmpeg, fpcalc, the whisper.cpp engine + model for AI subtitles, and the optional FlareSolverr proxy for Cloudflare-protected indexers. Downloads run on the host and persist across updates. ffmpeg / whisper.cpp binaries are Windows-only here (FlareSolverr is Windows + Linux); on the rest use your package manager / Docker.</p>
         </div>
         <button onclick="loadComponents(this)"
           class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 text-gray-300 hover:text-white transition-colors">
@@ -1421,6 +1441,7 @@ function showDashboard(){
   loadAdminSettings();
   loadIndexers();
   loadIndexerHealth();
+  loadFlaresolverr();
   loadOfflineEncoder();
   loadActivity();
   startActivityPolling();
@@ -1459,6 +1480,8 @@ function switchTab(tab){
   });
   if(tab==="activity")   { loadActivity(); startActivityPolling(); }
   else                   { stopActivityPolling(); }
+  if(tab==="indexers")   { loadIndexerHealth(); loadFlaresolverr(); }
+  else if(_fsPollTimer)  { clearInterval(_fsPollTimer); _fsPollTimer = null; }
   if(tab==="content")    loadContentList();
   if(tab==="profiles")   loadProfilePins();
   if(tab==="skip")       loadSkipPanel();
@@ -2873,7 +2896,7 @@ async function loadComponents(btn){
 }
 
 function _renderComponents(d){
-  const order = ["ffmpeg","fpcalc","whisper","whisper_model"];
+  const order = ["ffmpeg","fpcalc","whisper","whisper_model","flaresolverr"];
   const sizes = d.model_sizes || ["base","small","medium"];
   const html = order.map(key=>{
     const c = (d.components || {})[key];
@@ -4005,6 +4028,162 @@ async function testOneIndexer(id, btn){
   const res = await r.json();
   showToast(res.ok ? "Indexer responding." : `Failing: ${res.error||"unknown error"}`, !res.ok);
   loadIndexerHealth();
+}
+
+// ── FlareSolverr (optional Cloudflare-bypass proxy) ─────────────────────────────
+let _fsPollTimer = null;
+
+async function loadFlaresolverr(btn){
+  const body = document.getElementById("fsBody");
+  if(!body) return;
+  _markLoading(btn, true);
+  try{
+    let r;
+    try{
+      r = await fetch("/api/admin/flaresolverr", {headers: authHeader()});
+    }catch(_){
+      body.innerHTML = `<div class="text-red-400 text-sm">Network error — could not load FlareSolverr status.</div>`;
+      return;
+    }
+    if(!r.ok){
+      body.innerHTML = `<div class="text-red-400 text-sm">Failed to load FlareSolverr status (HTTP ${r.status}).</div>`;
+      return;
+    }
+    const d = await r.json();
+    _renderFlaresolverr(d);
+    // Poll while an install is running; self-stop once it settles.
+    const installing = d.job && (d.job.status === "pending" || d.job.status === "downloading");
+    if(installing){
+      if(!_fsPollTimer) _fsPollTimer = setInterval(loadFlaresolverr, 1500);
+    } else if(_fsPollTimer){
+      clearInterval(_fsPollTimer); _fsPollTimer = null;
+    }
+  } finally {
+    _markLoading(btn, false);
+  }
+}
+
+function _renderFlaresolverr(d){
+  const badge = document.getElementById("fsBadge");
+  if(badge){
+    if(d.running){
+      badge.textContent = "Running";
+      badge.className = "text-[10px] font-black uppercase tracking-widest px-1.5 py-0.5 bg-emerald-950 text-emerald-300";
+    } else if(d.installed){
+      badge.textContent = "Installed · Stopped";
+      badge.className = "text-[10px] font-black uppercase tracking-widest px-1.5 py-0.5 bg-amber-950 text-amber-300";
+    } else {
+      badge.textContent = "Not installed";
+      badge.className = "text-[10px] font-black uppercase tracking-widest px-1.5 py-0.5 bg-gray-800 text-gray-400";
+    }
+  }
+
+  const job = d.job;
+  const installing = job && (job.status === "pending" || job.status === "downloading");
+  const pct = job ? Math.round((job.progress || 0) * 100) : 0;
+  const err = (job && job.status === "error")
+    ? `<div class="text-[11px] text-red-400">${escHtml(job.error || "Install failed.")}</div>` : "";
+
+  // Install / reinstall control
+  let installCtl;
+  if(installing){
+    installCtl = `<span class="text-[11px] font-bold uppercase tracking-wide text-indigo-300">Installing… ${pct}%</span>`;
+  } else if(!d.installable){
+    installCtl = `<span class="text-[10px] text-gray-600 uppercase tracking-wide">macOS: run via Docker</span>`;
+  } else {
+    installCtl = `<button onclick="installFlaresolverr(this)"
+      class="text-[11px] font-bold uppercase tracking-wide px-3 py-1.5 border border-indigo-700 bg-indigo-950/60 text-indigo-200 hover:bg-indigo-900 transition-colors">
+      ${d.installed ? "Reinstall" : "Install FlareSolverr"}</button>`;
+  }
+  const startCtl = (d.installed && !d.running && !installing)
+    ? `<button onclick="startFlaresolverr(this)"
+         class="text-[11px] font-bold uppercase tracking-wide px-3 py-1.5 border border-emerald-800 bg-emerald-950/50 text-emerald-200 hover:bg-emerald-900 transition-colors">
+         Start</button>`
+    : "";
+
+  // API URL + Jackett wiring instructions (only useful once it's installed)
+  const wiring = d.installed ? `
+    <div class="border border-gray-800 bg-black/40 p-3 space-y-2">
+      <div class="text-[10px] font-bold text-gray-500 uppercase tracking-widest">FlareSolverr API URL</div>
+      <div class="flex gap-2 items-center">
+        <input id="fsApiUrl" type="text" readonly value="${escHtml(d.api_url)}"
+          class="flex-1 bg-gray-800 border border-gray-700 px-3 py-2 text-xs font-mono text-gray-200 focus:outline-none"/>
+        <button onclick="copyFsUrl(this)"
+          class="text-[11px] font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 text-gray-300 hover:text-white transition-colors flex-shrink-0">
+          Copy</button>
+      </div>
+      <p class="text-xs text-gray-500 leading-relaxed">
+        StreamLink can't configure Jackett for you — set this <span class="text-gray-300 font-semibold">by hand</span>:
+        open Jackett, click the <span class="text-gray-300 font-semibold">cog (Configure Jackett)</span>, paste the URL above into
+        <span class="text-gray-300 font-semibold">FlareSolverr API URL</span>, then Save. Jackett will then route Cloudflare-protected indexers through it.
+      </p>
+      <a href="${escHtml(d.jackett_url)}" target="_blank" rel="noopener"
+        class="inline-block text-xs text-indigo-400 hover:text-indigo-300 uppercase tracking-wide font-bold transition-colors">
+        Open Jackett ↗</a>
+    </div>` : `
+    <p class="text-xs text-gray-500 leading-relaxed">
+      Not installed. Most indexers don't need FlareSolverr — install it only if an indexer fails with a Cloudflare / "challenge" error.
+      Once installed, StreamLink runs it at <span class="font-mono text-gray-400">${escHtml(d.api_url)}</span> and shows the URL to paste into Jackett here.
+    </p>`;
+
+  document.getElementById("fsBody").innerHTML = `
+    <div class="flex items-center justify-between gap-3 flex-wrap">
+      <div class="min-w-0">
+        ${d.path ? `<div class="text-[10px] font-mono text-gray-600 truncate" title="${escHtml(d.path)}">${escHtml(d.path)}</div>` : ""}
+        ${err}
+      </div>
+      <div class="flex items-center gap-2 flex-shrink-0">${startCtl}${installCtl}</div>
+    </div>
+    ${installing ? `<div class="h-1 bg-gray-800"><div class="h-1 bg-indigo-500 transition-all" style="width:${pct}%"></div></div>` : ""}
+    ${wiring}`;
+}
+
+async function installFlaresolverr(btn){
+  await withInflight("install_flaresolverr", btn, async () => {
+    try{
+      const r = await fetch("/api/admin/components/install", {
+        method: "POST",
+        headers: {...authHeader(), "Content-Type": "application/json"},
+        body: JSON.stringify({component: "flaresolverr"}),
+      });
+      if(!r.ok){
+        const e = await r.json().catch(()=>({}));
+        showToast(`Install failed: ${e.detail || r.status}`, true);
+        return;
+      }
+      showToast("Installing FlareSolverr… it'll start automatically when done.");
+      loadFlaresolverr();
+    }catch(_){
+      showToast("Could not start install.", true);
+    }
+  });
+}
+
+async function startFlaresolverr(btn){
+  await withInflight("start_flaresolverr", btn, async () => {
+    try{
+      const r = await fetch("/api/admin/flaresolverr/start", {
+        method: "POST", headers: authHeader(),
+      });
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok){ showToast(`Could not start FlareSolverr: ${d.detail || r.status}`, true); return; }
+      showToast(d.running ? "FlareSolverr is running." : "Started FlareSolverr — still coming up…", !d.running);
+      loadFlaresolverr();
+    }catch(_){
+      showToast("Could not reach the server.", true);
+    }
+  });
+}
+
+function copyFsUrl(btn){
+  const inp = document.getElementById("fsApiUrl");
+  if(!inp) return;
+  const done = () => { const t = btn.textContent; btn.textContent = "Copied"; setTimeout(()=>btn.textContent=t, 1200); };
+  if(navigator.clipboard && navigator.clipboard.writeText){
+    navigator.clipboard.writeText(inp.value).then(done).catch(()=>{ inp.select(); document.execCommand("copy"); done(); });
+  } else {
+    inp.select(); document.execCommand("copy"); done();
+  }
 }
 
 // ── Content Lock ──────────────────────────────────────────────────────────────

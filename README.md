@@ -193,6 +193,16 @@ Adding indexers requires Jackett's own web UI — this can't be automated.
 
 Until an indexer is added and the API key is set, searches return `Indexer unreachable`.
 
+### FlareSolverr (optional — only for Cloudflare-protected indexers)
+
+Some indexers sit behind a Cloudflare / DDoS-Guard browser challenge and fail in Jackett with a "challenge" error. **FlareSolverr** is an optional proxy that solves those. Most indexers don't need it — only set it up if one is failing this way.
+
+1. In the admin panel, open **Indexers → FlareSolverr** and click **Install FlareSolverr** (Windows + Linux only; on macOS run it via Docker). StreamLink downloads the portable bundle and starts it automatically.
+2. Copy the **FlareSolverr API URL** shown on that card (default **http://localhost:8191**).
+3. In Jackett, click the **cog (Configure Jackett)**, paste the URL into **FlareSolverr API URL**, and **Save**. StreamLink can't set this for you — Jackett has no API for it.
+
+`run.py` relaunches FlareSolverr on every startup once it's installed.
+
 ---
 
 ## Unattended restarts (optional)

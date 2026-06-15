@@ -76,6 +76,20 @@ Also a small form to override `INDEXER_CATEGORIES` at the top of the tab. This w
 
 A second form on the same tab — **TMDb Metadata** — accepts a free [TMDb v3 API key](https://www.themoviedb.org/settings/api) used by the Netflix-style episode page to fetch show overviews, episode titles, and stills. Persists as `library.json` → `settings.admin_overrides.tmdb_api_key` (admin override beats `.env → TMDB_API_KEY`). `GET /api/admin/settings` also returns `tmdb_api_key_source ∈ {admin, env, unset}` so the UI can show where the active key came from. Empty save clears the override.
 
+#### FlareSolverr (optional Cloudflare proxy)
+
+A card on the Indexers tab for the optional **FlareSolverr** proxy — a standalone server (default `http://localhost:8191`) that solves Cloudflare / DDoS-Guard browser challenges so Jackett can scrape protected indexers. Fully optional; most indexers don't need it.
+
+The card surfaces three states via a header badge — **Running** (emerald), **Installed · Stopped** (amber), **Not installed** (grey):
+- **Install FlareSolverr** downloads the portable bundle via the shared Optional Components installer (`POST /api/admin/components/install {component:"flaresolverr"}`) with a live progress bar, then **auto-launches** it (`_spawn_flaresolverr`). The binary lands in `tools/flaresolverr/`, so it persists across auto-updates. Prebuilt binaries are **Windows + Linux only** (macOS shows a "run via Docker" note).
+- **Start** relaunches a stopped install (`POST /api/admin/flaresolverr/start`) — useful after a crash or a restart where `run.py` didn't relaunch it.
+- The **FlareSolverr API URL** (the base URL from `settings.flaresolverr_url`) is shown with a **Copy** button. Crucially the card explains StreamLink **cannot** configure Jackett for you (Jackett exposes no API for the FlareSolverr setting): the admin must open Jackett, click the **cog (Configure Jackett)**, paste the URL into **FlareSolverr API URL**, and Save. An **Open Jackett ↗** link (`_jackett_dashboard_url`) is provided.
+
+`run.py`'s `start_flaresolverr()` launches it on every startup when `_FLARESOLVERR_BIN` is set (binding to the `FLARESOLVERR_URL` host/port via FlareSolverr's `HOST`/`PORT` env vars). Like Jackett, FlareSolverr is **not** VPN-gated — only qBittorrent is.
+
+- `GET /api/admin/flaresolverr` → `{installed, path, running, api_url, v1_url, installable, platform, jackett_url, job}`.
+- `POST /api/admin/flaresolverr/start` → `{ok, running, already_running?}` (404 if not installed).
+
 #### Jackett authentication
 
 If `JACKETT_PASSWORD` is set in `.env`, `_jackett_admin()` ([main.py:200](../main.py#L200)) calls `/UI/Login` (POSTing `{password}`) and caches the `Jackett` session cookie for 1 hour. All admin indexer endpoints use this cookie. If the password is wrong, returns 502 with "Could not authenticate with Jackett".
@@ -318,12 +332,12 @@ A stopped batch is **not** auto-resumed (unlike the bulk pause/resume); pressing
 
 Installs the portable dependencies the auto-updater can't fetch on its own. `setup.py` under `STREAMLINK_AUTOUPDATE=1` skips all `install_*` steps, so on an auto-updating box anything not already present (most often whisper.cpp + its model, sometimes ffmpeg/fpcalc) never downloads. This card installs them from the web instead of a terminal `setup.py` run.
 
-Lists four components — **ffmpeg**, **fpcalc**, **whisper.cpp** (binary), **whisper model** — each with an Installed/Missing badge, its resolved path, and an Install/Reinstall button. The whisper model has a size picker (base/small/medium, all multilingual). whisper.cpp has a **build picker** — CPU, GPU · CUDA 12 (~440 MB), or GPU · CUDA 11 (~60 MB); when the `nvenc` probe reports an NVIDIA GPU the card recommends a CUDA build (much faster STT) and a CUDA build is preselected. A CUDA build auto-offloads to the GPU and falls back to CPU at runtime if the driver can't initialize CUDA (so a wrong pick degrades rather than fails). Installs stream on the host with a live progress bar.
+Lists five components — **ffmpeg**, **fpcalc**, **whisper.cpp** (binary), **whisper model**, and **FlareSolverr** (the optional Cloudflare proxy, also surfaced with full wiring instructions on the Indexers tab — see [§ FlareSolverr](#flaresolverr-optional-cloudflare-proxy)) — each with an Installed/Missing badge, its resolved path, and an Install/Reinstall button. The whisper model has a size picker (base/small/medium, all multilingual). whisper.cpp has a **build picker** — CPU, GPU · CUDA 12 (~440 MB), or GPU · CUDA 11 (~60 MB); when the `nvenc` probe reports an NVIDIA GPU the card recommends a CUDA build (much faster STT) and a CUDA build is preselected. A CUDA build auto-offloads to the GPU and falls back to CPU at runtime if the driver can't initialize CUDA (so a wrong pick degrades rather than fails). Installs stream on the host with a live progress bar.
 
-Mechanics ([main.py](../main.py) `_run_component_install`): reuses `setup.py`'s URL/extract/detect helpers (safe to `import setup` — its prompts are gated under `__main__`), streams the download via httpx for progress, extracts into `tools/`, writes the path into `.env` (`_write_env_keys`), and clears the ffmpeg-version / NVENC / STT-availability caches so the new binary takes effect without a restart. Because the files live in `tools/`, the next auto-update's `detect_tools()` + `merge_tool_paths()` re-detect them — a one-time install persists. **ffmpeg and whisper.cpp binaries are Windows-only here** (off-Windows the button is disabled with an "OS package manager" note); fpcalc and the model install on any OS.
+Mechanics ([main.py](../main.py) `_run_component_install`): reuses `setup.py`'s URL/extract/detect helpers (safe to `import setup` — its prompts are gated under `__main__`), streams the download via httpx for progress, extracts into `tools/`, writes the path into `.env` (`_write_env_keys`), and clears the ffmpeg-version / NVENC / STT-availability caches so the new binary takes effect without a restart. Because the files live in `tools/`, the next auto-update's `detect_tools()` + `merge_tool_paths()` re-detect them — a one-time install persists. **ffmpeg and whisper.cpp binaries are Windows-only here** (off-Windows the button is disabled with an "OS package manager" note); fpcalc and the model install on any OS; **FlareSolverr is Windows + Linux** (macOS uses Docker).
 
 - `GET /api/admin/components` → per-component status + any in-flight install job.
-- `POST /api/admin/components/install` → `{component, model?}`; 400 for ffmpeg/whisper off-Windows.
+- `POST /api/admin/components/install` → `{component, model?}`; 400 for ffmpeg/whisper off-Windows, and for FlareSolverr off Windows/Linux.
 
 #### File Validator
 

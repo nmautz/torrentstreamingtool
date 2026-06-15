@@ -205,6 +205,11 @@ class Settings(BaseSettings):
     indexer_api_key: str = ""
     indexer_categories: str = "0"
 
+    # Optional FlareSolverr proxy (Cloudflare/DDoS-Guard challenge solver) that
+    # Jackett can use for protected indexers. The base URL the proxy listens on;
+    # the admin pastes this into Jackett's "FlareSolverr API URL" setting.
+    flaresolverr_url: str = "http://localhost:8191"
+
     qbit_url: str = "http://localhost:8081"
     qbit_username: str = "admin"
     qbit_password: str = "adminadmin"
@@ -8703,6 +8708,111 @@ async def admin_indexer_health(request: Request) -> JSONResponse:
     })
 
 
+# ── FlareSolverr (optional Cloudflare-bypass proxy for Jackett) ────────────────
+# FlareSolverr is a standalone server (default http://localhost:8191) that solves
+# Cloudflare / DDoS-Guard browser challenges so Jackett can scrape protected
+# indexers. StreamLink can install + launch the portable bundle, but the admin
+# must paste its API URL into Jackett's own settings by hand (Jackett has no API
+# to set it). These helpers back the FlareSolverr card on the Indexers tab.
+
+def _flaresolverr_bin_path() -> str:
+    """Resolve the installed FlareSolverr binary from .env (`_FLARESOLVERR_BIN`),
+    falling back to PATH. Empty string when not installed."""
+    env_file = Path(__file__).parent / ".env"
+    if env_file.exists():
+        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
+            line = line.strip()
+            if line.startswith("_FLARESOLVERR_BIN="):
+                val = line.split("=", 1)[1].strip()
+                if val and Path(val).exists():
+                    return val
+    return shutil.which("flaresolverr") or ""
+
+
+async def _flaresolverr_running() -> bool:
+    """True if a FlareSolverr server is answering at `settings.flaresolverr_url`.
+    Its root route returns `{"msg": "FlareSolverr is ready!"}` with HTTP 200."""
+    base = settings.flaresolverr_url.rstrip("/")
+    try:
+        async with httpx.AsyncClient(timeout=3.0) as c:
+            r = await c.get(base + "/")
+        return r.status_code == 200 and "FlareSolverr" in r.text
+    except Exception:
+        return False
+
+
+def _spawn_flaresolverr() -> bool:
+    """Launch the installed FlareSolverr binary detached, bound to the host/port in
+    `settings.flaresolverr_url`. Windows-first (DETACHED_PROCESS), POSIX uses a new
+    session. Best-effort — returns False if not installed or the spawn fails."""
+    binp = _flaresolverr_bin_path()
+    if not binp:
+        return False
+    parts = urlparse(settings.flaresolverr_url.rstrip("/"))
+    host = (parts.hostname or "127.0.0.1")
+    if host in ("localhost", "::1", "0.0.0.0"):
+        host = "127.0.0.1"
+    env = dict(os.environ)
+    env["HOST"] = host
+    env["PORT"] = str(parts.port or 8191)
+    env.setdefault("LOG_LEVEL", "info")
+    kw: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL, "env": env}
+    if os.name == "nt":
+        kw["creationflags"] = (subprocess.DETACHED_PROCESS  # type: ignore[attr-defined]
+                               | subprocess.CREATE_NEW_PROCESS_GROUP)
+    else:
+        kw["start_new_session"] = True
+    try:
+        subprocess.Popen([binp], **kw)
+        hls_log.info("FlareSolverr launched: %s (HOST=%s PORT=%s)", binp, host, env["PORT"])
+        return True
+    except Exception as e:
+        hls_log.warning("FlareSolverr spawn failed: %s", e)
+        return False
+
+
+@app.get("/api/admin/flaresolverr")
+async def admin_flaresolverr(request: Request) -> JSONResponse:
+    """Status of the optional FlareSolverr proxy for the Indexers tab: whether it's
+    installed + running, the API URL to paste into Jackett, the Jackett dashboard
+    link, and any in-flight install job (so the card can show install progress)."""
+    _require_admin(request)
+    binp = _flaresolverr_bin_path()
+    base = settings.flaresolverr_url.rstrip("/")
+    sysname = platform.system()
+    job = _component_jobs.get("flaresolverr")
+    return JSONResponse({
+        "installed":   bool(binp),
+        "path":        binp,
+        "running":     await _flaresolverr_running(),
+        "api_url":     base,            # paste this into Jackett's FlareSolverr API URL
+        "v1_url":      base + "/v1",     # the actual solve endpoint
+        "installable": sysname in ("Windows", "Linux"),
+        "platform":    sysname,
+        "jackett_url": _jackett_dashboard_url(request),
+        "job": ({"status": job["status"], "progress": round(job.get("progress", 0.0), 3),
+                 "error": job.get("error")} if job else None),
+    })
+
+
+@app.post("/api/admin/flaresolverr/start")
+async def admin_flaresolverr_start(request: Request) -> JSONResponse:
+    """Launch the installed FlareSolverr binary (e.g. after it crashed or the box
+    restarted without run.py relaunching it). 404 if not installed."""
+    _require_admin(request)
+    if not _flaresolverr_bin_path():
+        raise HTTPException(404, "FlareSolverr is not installed.")
+    if await _flaresolverr_running():
+        return JSONResponse({"ok": True, "running": True, "already_running": True})
+    _spawn_flaresolverr()
+    # Give it a moment to bind, then report whether it came up.
+    for _ in range(10):
+        await asyncio.sleep(0.5)
+        if await _flaresolverr_running():
+            return JSONResponse({"ok": True, "running": True})
+    return JSONResponse({"ok": True, "running": False})
+
+
 async def _test_one_indexer(c, indexer_id: str) -> dict:
     """POST Jackett's per-indexer test endpoint; normalise to {id, ok, error}."""
     try:
@@ -10523,6 +10633,9 @@ async def admin_components_install(request: Request, req: ComponentInstallReq) -
     if req.component in ("ffmpeg", "whisper") and platform.system() != "Windows":
         raise HTTPException(400, "This component can only be auto-installed on Windows. "
                                  "Install it via your OS package manager instead.")
+    if req.component == "flaresolverr" and platform.system() not in ("Windows", "Linux"):
+        raise HTTPException(400, "FlareSolverr has a prebuilt binary only for Windows/Linux. "
+                                 "On macOS run it via Docker instead.")
     existing = _component_jobs.get(req.component)
     if existing and existing.get("status") in ("pending", "downloading"):
         return JSONResponse({"ok": True, "status": existing["status"], "already_running": True})
@@ -13703,7 +13816,7 @@ async def _ensure_stt_for(src: Path, item_id: str = "", *,
 # across future auto-updates, so a one-time install here persists. See docs/SETUP.md.
 
 _component_jobs: dict[str, dict] = {}   # component → {status, progress, error, ...}
-_COMPONENT_KEYS = ("ffmpeg", "fpcalc", "whisper", "whisper_model")
+_COMPONENT_KEYS = ("ffmpeg", "fpcalc", "whisper", "whisper_model", "flaresolverr")
 _WHISPER_MODEL_SIZES = ("base", "small", "medium")
 
 
@@ -13808,6 +13921,32 @@ async def _run_component_install(component: str, model: str = "base", build: str
                 except OSError:
                     pass
             _write_env_keys({"_FPCALC_BIN": binp})
+
+        elif component == "flaresolverr":
+            sysname = platform.system()
+            if sysname not in ("Windows", "Linux"):
+                raise RuntimeError("FlareSolverr has a prebuilt binary only for Windows/Linux "
+                                   "here — on macOS run it via Docker.")
+            url = await asyncio.to_thread(setup._resolve_flaresolverr_url, sysname)
+            fs_dir = setup.TOOLS_DIR / "flaresolverr"
+            suffix = ".zip" if sysname == "Windows" else ".tar.gz"
+            tmp_arc = setup.TOOLS_DIR / f"_dl_flaresolverr{suffix}"
+            await _download_to(url, tmp_arc, job)
+            ok = await asyncio.to_thread(setup._extract_archive, tmp_arc, fs_dir)
+            tmp_arc.unlink(missing_ok=True)
+            if not ok:
+                raise RuntimeError("Could not extract the FlareSolverr archive.")
+            exe = "flaresolverr.exe" if sysname == "Windows" else "flaresolverr"
+            binp = setup._find_in_tree(fs_dir, [exe])
+            if not binp:
+                raise RuntimeError(f"{exe} not found inside the downloaded archive.")
+            if os.name == "posix":
+                try:
+                    os.chmod(binp, 0o755)
+                except OSError:
+                    pass
+            _write_env_keys({"_FLARESOLVERR_BIN": binp})
+            _spawn_flaresolverr()   # best-effort: start it now so it's usable immediately
         else:
             raise RuntimeError(f"Unknown component: {component}")
 
@@ -13842,6 +13981,9 @@ def _component_status_payload() -> dict:
         "whisper_model": {"label": "whisper model",        "installed": bool(model),
                           "path": model or "",   "installable": True,
                           "purpose": "AI subtitle language model (multilingual)"},
+        "flaresolverr":  {"label": "FlareSolverr",          "installed": bool(_flaresolverr_bin_path()),
+                          "path": _flaresolverr_bin_path(), "installable": win or platform.system() == "Linux",
+                          "purpose": "Cloudflare/DDoS-Guard challenge solver for protected Jackett indexers"},
     }
     for k, c in comps.items():
         j = _component_jobs.get(k)

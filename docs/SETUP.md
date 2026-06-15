@@ -97,7 +97,9 @@ Uses the `cryptography` package (in requirements.txt). Generates a self-signed C
 
 ## .env shape
 
-`write_env()` writes user-facing keys then a "Auto-detected binary paths" section with `_VLC_BIN`, `_QBIT_BIN`, `_JACKETT_BIN`, `_MULLVAD_BIN`, `_FFMPEG_BIN`, `_FPCALC_BIN`, and (when present) `_WHISPER_BIN` / `_WHISPER_MODEL`. These are read by `run.py`, `watchdog.py`, `analyzer.py`, and `stt.py` to skip path discovery on subsequent runs.
+`write_env()` writes user-facing keys then a "Auto-detected binary paths" section with `_VLC_BIN`, `_QBIT_BIN`, `_JACKETT_BIN`, `_MULLVAD_BIN`, `_FFMPEG_BIN`, `_FPCALC_BIN`, and (when present) `_WHISPER_BIN` / `_WHISPER_MODEL` / `_FLARESOLVERR_BIN`. These are read by `run.py`, `watchdog.py`, `analyzer.py`, and `stt.py` to skip path discovery on subsequent runs.
+
+`detect_tools()` also probes for the optional **FlareSolverr** proxy (`flaresolverr_candidates()` — portable matches under `tools/flaresolverr/` first, then PATH) and records it as `_FLARESOLVERR_BIN`. It's installed on demand from the admin Indexers tab / Optional Components, not by `setup.py` itself; `_resolve_flaresolverr_url(system)` resolves the GitHub-release asset URL (Windows / Linux only) at install time, mirroring the whisper resolver. See [docs/ADMIN.md § FlareSolverr](ADMIN.md) and [docs/RUNTIME.md](RUNTIME.md).
 
 `merge_tool_paths()` ([setup.py:1440](../setup.py#L1440)) re-runs without re-prompting (the reuse-`.env` path, incl. every auto-update): keeps user settings, drops stale `_*_BIN` entries that no longer exist, appends new ones.
 
