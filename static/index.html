@@ -1343,6 +1343,15 @@
       class="text-[11px] px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 uppercase tracking-wide transition-colors">
       ✗ Unwatched
     </button>
+    <button onclick="epDeleteSelected(this)"
+      title="Delete the selected files from disk to free space (stays re-downloadable)"
+      class="text-[11px] px-2.5 py-1.5 bg-gray-800 hover:bg-red-900/60 text-gray-400 hover:text-red-300 uppercase tracking-wide transition-colors flex items-center gap-1">
+      <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+          d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+      </svg>
+      Delete (<span id="epDeleteCount">0</span>)
+    </button>
   </div>
 
   <!-- Season tabs (auto-hidden when the item has zero / one season) -->
@@ -1360,7 +1369,7 @@
         class="flex-1 bg-gray-800 hover:bg-gray-700 py-3 text-xs sm:text-sm font-bold uppercase tracking-wide transition-colors min-h-[44px]">
         Close
       </button>
-      <button onclick="epDownloadSelected()"
+      <button id="epDownloadSelBtn" onclick="epDownloadSelected()"
         class="flex-1 bg-gray-800 hover:bg-indigo-900/60 text-gray-400 hover:text-indigo-300 py-3 text-xs sm:text-sm font-bold uppercase tracking-wide transition-colors min-h-[44px] flex items-center justify-center gap-1.5">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -1368,8 +1377,13 @@
         </svg>
         <span class="hidden sm:inline">Download</span><span>(<span id="epSelectedCount">0</span>)</span>
       </button>
-      <button onclick="epPlay()"
+      <button id="epPlaySelBtn" onclick="epPlay()"
         class="flex-[1.4] bg-indigo-600 hover:bg-indigo-500 py-3 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors min-h-[44px]">
+        ▶︎ Play
+      </button>
+      <!-- Movie mode: a single Play that resumes/plays the one file (epPlayFrom(0)). -->
+      <button id="epMoviePlayBtn" onclick="epPlayFrom(0)"
+        class="hidden flex-[1.4] bg-indigo-600 hover:bg-indigo-500 py-3 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors min-h-[44px]">
         ▶︎ Play
       </button>
     </div>
@@ -2625,6 +2639,7 @@ let epSeasonList = [];     // sorted seasons present in epFiles (positive ints o
 let epWatchedExpanded = new Set(); // season keys whose watched-episode section is expanded
 let epHasTorrent = false;  // item has a qBit torrent → download-scheduling controls apply
 let epDownloadMode = "now"; // item-level download mode (now | idle) from /files
+let epIsMovie = false;     // single-file item → movie-info panel instead of an episode list
 // Stream file picker state
 let streamPrepData = null;   // {hash, files, magnet, title} from /stream/prepare
 let streamPrepAbort = null;  // AbortController for the in-flight prepare request
@@ -4541,14 +4556,16 @@ function renderLibrary(items){
       let buttons="";
       let iconBtns="";
       if(isDownloading){
-        // "Files" toggle — expands per-file priority/play controls
-        buttons+=`<button id="dl-files-btn-${item.id}" onclick="toggleDownloadFiles('${item.id}')"
-          class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 hover:text-white px-3 py-2.5 transition-colors min-h-[44px] flex items-center gap-1.5 flex-shrink-0">
-          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-              d="M4 6h16M4 10h16M4 14h16M4 18h16"/>
-          </svg><span class="dl-files-label text-xs">Files</span>
-        </button>`;
+        // Episodes — the clean episode UI replaces the old inline per-file download
+        // menu. The episode page supports in-flight downloads (per-episode progress +
+        // the per-season download/prep scheduling bar), so it's the single surface
+        // for managing what downloads while it's still in progress.
+        if(isMulti){
+          buttons+=`<button onclick="openEpisodePicker('${item.id}',${escHtml(JSON.stringify(item.title))})"
+            class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 hover:text-white px-3 py-2.5 transition-colors min-h-[44px] flex items-center gap-1.5 flex-shrink-0">
+            ☰ <span class="text-xs">Episodes</span>
+          </button>`;
+        }
         // Pause (defer to idle/night) ↔ Resume (download now). The download keeps
         // its files; "idle" just gates them to the admin's idle download window.
         const isIdle=item.download_mode==="idle";
@@ -4721,10 +4738,15 @@ function renderLibrary(items){
         ?`<div id="prep-stat-${item.id}" class="text-[11px] mt-0.5">${prepChipHtml(prepStats.get(item.id))}</div>`
         :`<div id="prep-stat-${item.id}" class="hidden"></div>`;
       const borderAccent=isDownloading?"border-l-yellow-600":isError?"border-l-red-600":"border-l-indigo-800";
+      // The title/meta block is a clickable surface that opens the info page
+      // (episode list for series, movie-info panel for single-file items). Wired
+      // via .lib-tile-open + data attrs after render so quoted titles are safe.
+      const tileOpen=(isReady||isDownloading);
       html+=`<div class="bg-gray-900 border border-gray-800 border-l-4 ${borderAccent} px-4 py-3 flex flex-col gap-2" data-item-id="${item.id}">
-        <div class="min-w-0">
+        <div class="min-w-0 ${tileOpen?'lib-tile-open cursor-pointer hover:bg-gray-800/40 -mx-1 px-1 transition-colors':''}"
+          ${tileOpen?`data-item-id="${item.id}" data-title="${escHtml(item.title)}" role="button" tabindex="0" title="View details"`:''}>
           <div class="flex items-center gap-2 flex-wrap">
-            <span class="text-sm font-medium text-gray-200 truncate">${epPrefix}${escHtml(item.title)}</span>
+            <span class="text-sm font-medium text-gray-200 truncate ${tileOpen?'hover:text-white':''}">${epPrefix}${escHtml(item.title)}</span>
             ${statusBadge}
             ${partialBadge}
             ${skipBadge}
@@ -4735,7 +4757,7 @@ function renderLibrary(items){
           ${progBar}
         </div>
         ${(buttons||iconBtns)?`<div class="lib-card-actions flex items-center gap-2 flex-wrap">${buttons}${iconBtns?`<div class="flex items-center gap-1">${iconBtns}</div>`:""}</div>`:""}
-        ${(isDownloading||(isReady&&item.download_partial&&item.torrent_hash))?`<div id="dl-files-${item.id}" class="hidden"></div>`:""}
+        ${(isReady&&item.download_partial&&item.torrent_hash)?`<div id="dl-files-${item.id}" class="hidden"></div>`:""}
       </div>`;
     });
     html+=`</div></div>`;
@@ -4744,6 +4766,13 @@ function renderLibrary(items){
   // Wire restart buttons via data attributes so paths never need JS-string escaping
   el.querySelectorAll(".lib-restart-btn").forEach(btn=>{
     btn.addEventListener("click",()=>playLibraryWithChooser(btn.dataset.itemId,[btn.dataset.path],0,""));
+  });
+  // Wire the clickable tile (title/meta) → info page. Same data-attr pattern so a
+  // title with quotes can't break an inline onclick.
+  el.querySelectorAll(".lib-tile-open").forEach(tile=>{
+    const open=()=>openEpisodePicker(tile.dataset.itemId, tile.dataset.title||"");
+    tile.addEventListener("click",open);
+    tile.addEventListener("keydown",e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); open(); }});
   });
   // Re-populate any Files expander that was open before this re-render (a status
   // flip — e.g. un-skipping a file — rebuilds the card with an empty container).
@@ -5207,7 +5236,7 @@ async function openEpisodePicker(itemId, title){
   // Backwards-compatible name; under the hood we render the full-screen page.
   epItemId=itemId;
   epFiles=[]; epChecked=new Set();
-  epMetadata=null; epMetaImgBase=""; epCurrentSeason=0; epSeasonList=[];
+  epMetadata=null; epMetaImgBase=""; epCurrentSeason=0; epSeasonList=[]; epIsMovie=false;
 
   document.getElementById("episodePage").classList.remove("hidden");
   document.body.style.overflow="hidden";  // lock background scroll
@@ -5274,9 +5303,30 @@ async function openEpisodePicker(itemId, title){
   // has any unwatched episodes, else the first available.
   epCurrentSeason = pickDefaultSeason();
 
+  // Single-file item (movie / one-episode series) → render the movie-info panel
+  // instead of an episode list, and swap the multi-select chrome for it.
+  epIsMovie = epFiles.length === 1;
+  _epApplyMovieChrome(epIsMovie);
+
   renderEpHero(title);
   renderEpSeasonTabs();
   renderEpList();
+}
+
+// Toggle the episode-page chrome between episode mode (bulk chips + multi-select
+// action bar) and movie mode (no checkboxes; a single Play in the bottom bar — the
+// movie panel itself carries the full action set).
+function _epApplyMovieChrome(isMovie){
+  const chips=document.getElementById("epBulkChips");
+  const dlBtn=document.getElementById("epDownloadSelBtn");
+  const playBtn=document.getElementById("epPlaySelBtn");
+  if(chips) chips.classList.toggle("hidden", isMovie);
+  if(dlBtn) dlBtn.classList.toggle("hidden", isMovie);
+  if(playBtn){
+    playBtn.classList.toggle("hidden", isMovie);
+  }
+  const moviePlay=document.getElementById("epMoviePlayBtn");
+  if(moviePlay) moviePlay.classList.toggle("hidden", !isMovie);
 }
 
 function pickDefaultSeason(){
@@ -5392,6 +5442,7 @@ function closeEpisodePage(){
   document.body.style.overflow="";
   epItemId=null; epFiles=[]; epChecked=new Set();
   epMetadata=null; epMetaImgBase=""; epCurrentSeason=0; epSeasonList=[]; epWatchedExpanded=new Set();
+  epIsMovie=false; _epApplyMovieChrome(false);
 }
 // Back-compat alias for existing callers (refreshEpFiles, mark-watched etc).
 function closeEpisodeModal(){ closeEpisodePage(); }
@@ -5673,10 +5724,125 @@ async function epRecheckSelected(btn){
   });
 }
 
+// Movie / single-episode detail panel — replaces the episode list for a one-file
+// item. The hero (poster/overview/meta) is already painted by renderEpHero; this
+// adds the file's watch/download status plus the secondary action set (the primary
+// Play lives in the sticky bottom bar as #epMoviePlayBtn). Mirrors the per-episode
+// card's badges + actions but laid out for a single title.
+function _epMoviePanel(f){
+  const prog=f.progress;
+  const dur=prog?.duration_sec||0;
+  const pct=prog?Math.round((prog.position_sec/(dur||1))*100):0;
+  const isComplete=prog?.completed;
+  const inProgress=prog&&!isComplete&&pct>2;
+  const notDownloaded=f.complete===false;
+  const epDlPct=(typeof f.dl_pct==="number")?f.dl_pct:null;
+  const _id=escHtml(JSON.stringify(epItemId));
+  const _p =escHtml(JSON.stringify(f.path));
+
+  // Sync the sticky bottom Play button: label reflects resume, hidden when the
+  // file isn't on disk yet (nothing to play).
+  const playBtn=document.getElementById("epMoviePlayBtn");
+  if(playBtn){
+    playBtn.innerHTML = inProgress?`↩︎ Resume ${pct}%`:`▶︎ Play`;
+    playBtn.classList.toggle("hidden", notDownloaded);
+  }
+
+  // Status line.
+  let statusHtml="";
+  if(notDownloaded){
+    statusHtml = f.mode==="skip"
+      ? `<span class="text-[11px] text-orange-400 font-bold uppercase tracking-widest">⊘ Not downloaded</span>`
+      : f.mode==="idle"
+      ? `<span class="text-[11px] text-sky-400 font-bold uppercase tracking-widest">🌙 Idle — deferred</span>`
+      : `<span class="text-[11px] text-sky-400 font-bold uppercase tracking-widest">⬇ Downloading ${epDlPct!=null?epDlPct.toFixed(0)+'%':'…'}</span>`;
+  } else if(isComplete){
+    statusHtml = `<span class="text-[11px] text-green-500 font-bold uppercase tracking-widest">✓ Watched</span>`;
+  } else if(inProgress){
+    statusHtml = `<span class="text-[11px] text-yellow-500 font-bold uppercase tracking-widest">${pct}% watched</span>`;
+  }
+
+  const progressBar = (inProgress||isComplete)
+    ? `<div class="w-full bg-gray-800 h-1 mt-2"><div class="bg-green-500 h-1" style="width:${isComplete?100:pct}%"></div></div>`
+    : (notDownloaded && epDlPct!=null && f.mode!=="skip" && f.mode!=="idle")
+    ? `<div class="w-full bg-gray-800 h-1 mt-2"><div class="bg-sky-500 h-1" style="width:${epDlPct}%"></div></div>`
+    : "";
+
+  const prepState=prepFileState.get(offKey(epItemId,f.path));
+  const isReady=prepState==="ready";
+  const isPrepping=prepState==="prepping";
+
+  // Action buttons.
+  const actions=[];
+  if(notDownloaded){
+    // Re-fetch to the host (it was skipped/deferred). Mirrors epDownloadSkipped.
+    if(f.mode==="skip"||f.mode==="idle"){
+      actions.push(`<button onclick="epDownloadSkipped(${_id},${_p},this)"
+        class="bg-emerald-900/50 hover:bg-emerald-800/60 text-emerald-200 border border-emerald-800 py-3 px-4 text-sm font-bold uppercase tracking-wide transition-colors min-h-[44px] flex items-center justify-center gap-1.5">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+        Download to host
+      </button>`);
+    }
+  } else {
+    // Download to device.
+    actions.push(`<a href="/api/library/${escHtml(epItemId)}/download?file_path=${encodeURIComponent(f.path)}" download="${escHtml(f.name)}"
+      class="bg-gray-800 hover:bg-indigo-900/60 text-gray-300 hover:text-indigo-300 border border-gray-700 py-3 px-4 text-sm font-bold uppercase tracking-wide transition-colors min-h-[44px] flex items-center justify-center gap-1.5">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/></svg>
+      Download to device
+    </a>`);
+    // Stream prep (host-side), when HLS is available.
+    if(hlsAvailable){
+      if(isReady){
+        actions.push(`<div class="bg-emerald-950/40 text-emerald-300 border border-emerald-900 py-3 px-4 text-sm font-bold uppercase tracking-wide min-h-[44px] flex items-center justify-center gap-1.5">● Stream Ready</div>`);
+      } else if(isPrepping){
+        actions.push(`<div class="bg-amber-950/40 text-amber-300 border border-amber-900 py-3 px-4 text-sm font-bold uppercase tracking-wide min-h-[44px] flex items-center justify-center gap-1.5">⏳︎ Prepping…</div>`);
+      } else {
+        actions.push(`<button onclick="prepForStreaming(${_id},${_p},${escHtml(JSON.stringify(f.name))})"
+          class="bg-gray-800 hover:bg-amber-900/50 text-gray-300 hover:text-amber-300 border border-gray-700 py-3 px-4 text-sm font-bold uppercase tracking-wide transition-colors min-h-[44px] flex items-center justify-center gap-1.5">
+          ⚡ Prep for streaming
+        </button>`);
+      }
+    }
+    // Delete to free space (only meaningful when the file is on disk).
+    actions.push(`<button onclick="epDeleteFiles([${_p}],this)"
+      class="bg-gray-800 hover:bg-red-900/60 text-gray-400 hover:text-red-300 border border-gray-700 py-3 px-4 text-sm font-bold uppercase tracking-wide transition-colors min-h-[44px] flex items-center justify-center gap-1.5">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+      Delete (free space)
+    </button>`);
+  }
+
+  // Download scheduling for an item still fetching (Now / Idle), like the episode bar.
+  let schedHtml="";
+  if(epHasTorrent && notDownloaded){
+    schedHtml = `<div class="flex items-center gap-1.5 flex-wrap mt-1">
+      <span class="text-[10px] font-black text-gray-500 uppercase tracking-widest mr-0.5">Download:</span>
+      ${_epSchedBtn("epSchedSeason('now',this)","⬇ Now","text-emerald-300 hover:bg-emerald-950/40")}
+      ${_epSchedBtn("epSchedSeason('idle',this)","🌙 Idle","text-sky-300 hover:bg-sky-950/40")}
+    </div>`;
+  }
+
+  const meta=`${escHtml(f.size_human||"")}${dur?` · ${fmtTime(dur)}`:""}`;
+
+  return `<div class="px-3 sm:px-6 py-5 max-w-2xl">
+    <div class="flex items-center gap-3 flex-wrap">${statusHtml}</div>
+    ${progressBar}
+    <div class="text-[11px] text-gray-600 mt-2 font-mono">${meta}</div>
+    <p class="text-[11px] text-gray-700 mt-1 font-mono break-all">${escHtml(f.name)}</p>
+    ${schedHtml}
+    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-4">${actions.join("")}</div>
+  </div>`;
+}
+
 function renderEpList(){
   const el=document.getElementById("epList");
   if(!epFiles.length){
     el.innerHTML=`<p class="text-gray-600 text-sm text-center py-12">No video files found.</p>`;
+    return;
+  }
+
+  // Movie / single-episode item: render the detail panel instead of an episode list.
+  if(epIsMovie){
+    el.innerHTML=_epMoviePanel(epFiles[0]);
     return;
   }
 
@@ -5807,6 +5973,8 @@ function updateEpCount(){
   document.getElementById("epSelectedCount").textContent=n;
   const rc=document.getElementById("epRecheckCount");
   if(rc) rc.textContent=n;
+  const dc=document.getElementById("epDeleteCount");
+  if(dc) dc.textContent=n;
 }
 function epSelectAll(v){
   epFiles.forEach(f=>{ if(v) epChecked.add(f.path); else epChecked.delete(f.path); });
@@ -5953,6 +6121,36 @@ function epDownloadSeason(season){
 
 function epDownloadAll(itemId, title){
   _triggerZipDownload(itemId, [], title||"download");
+}
+
+// Delete files from disk to reclaim space. Files are marked Skip server-side so
+// qBit won't refetch them; their rows stay (showing "not downloaded") with a
+// Download button to grab them again later.
+async function epDeleteFiles(paths, btn){
+  if(!epItemId) return;
+  if(!paths || !paths.length){ showAlert("Select at least one episode.","warn"); return; }
+  const n=paths.length;
+  if(!confirm(`Delete ${n} file${n>1?"s":""} from the host to free space?\n\nThe bytes are removed from disk but the ${n>1?"episodes stay":"title stays"} re-downloadable — a ⬇ Download button reappears so you can fetch ${n>1?"them":"it"} again later.`)) return;
+  const itemId=epItemId;
+  await withInflight("ep_delete", btn, async () => {
+    try{
+      const r=await fetch(`/api/library/${itemId}/delete-files`,{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({file_paths:paths}),
+      });
+      if(!r.ok){ const e=await r.json().catch(()=>({detail:"Delete failed."})); showAlert(e.detail||"Delete failed.","error"); return; }
+      const d=await r.json().catch(()=>({}));
+      const freed = d.freed_bytes ? ` — freed ${_fmtBytes(d.freed_bytes)}` : "";
+      showAlert(`Deleted ${d.deleted||n} file${(d.deleted||n)>1?"s":""}${freed}.`,"success");
+      await refreshEpFiles();
+      loadLibrary();   // card meta / badges update too
+    }catch(_){ showAlert("Delete failed.","error"); }
+  });
+}
+
+function epDeleteSelected(btn){
+  if(!epChecked.size){ showAlert("Select at least one episode.","warn"); return; }
+  epDeleteFiles([...epChecked], btn);
 }
 
 async function epMarkWatched(watched, btn){
@@ -9594,6 +9792,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.33.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.34.0</div>
 </body>
 </html>

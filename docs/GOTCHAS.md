@@ -217,6 +217,10 @@ A skipped file (priority 0) and an idle-deferred file (priority 0 while the wind
 
 `/api/library/{id}/play` filters the playlist to `Path(p).exists()`, but qBit **pre-allocates** files, so a half-downloaded file *exists* on disk and would play as a stuttering/truncated stream. The "▶ Play" affordance on a download card's file row therefore renders **only** when the enriched `/files` reports `complete: true` (qBit per-file `progress >= 0.999`). Don't surface Play off mere existence. Playing sets `library_item_id`, so a subsequent `/api/stop` won't delete the still-downloading torrent (the usual library-playback guard).
 
+### qBit keeps `progress=1.0` after a file is deleted out from under it — `delete-files` grounds skip-file completeness in disk existence
+
+`POST /api/library/{id}/delete-files` (the "delete to free space, keep re-downloadable" action) marks files `skip` and `unlink`s their bytes, but qBittorrent's per-file `progress` stays at the cached `1.0` until a full recheck. So `get_item_files`, which derives `complete`/`dl_pct` from that qBit progress, would keep reporting a just-deleted file as complete and playable. The fix: for a file whose effective `mode == "skip"`, completeness is grounded in **`Path(path).exists()`** — `complete = qp>=0.999 and exists`, else `(0.0, False)`. Only skip-mode files are stat-ed (the only ones that can be stale this way), keeping the hot path cheap. Don't move the disk check ahead of the mode test for every file, and don't drop it — without it a freed file masquerades as on-disk and the "⊘ Not downloaded → ⬇ Download" UI never appears.
+
 ## VPN
 
 ### Two enforcement points

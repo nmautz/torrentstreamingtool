@@ -5851,18 +5851,25 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
         else:
             progress = None
         mode = _effective_file_mode(cfg, path)
-        # Live qBit progress is the truth, regardless of mode — a file that was
-        # downloaded then later marked "skip" is still on disk and playable. Fall
-        # back to basename match if the full-path key didn't line up (save-path drift).
+        # Live qBit progress drives completeness for active files. Fall back to a
+        # basename match if the full-path key didn't line up (save-path drift).
+        # Skipped files are special-cased below (disk truth, not qBit's stale view).
         qp = qmap.get(path)
         if qp is None:
             qp = qbase.get(Path(path).name)
-        if qp is not None:
+        if mode == "skip":
+            # Skipped files: trust the disk, not qBit. qBit keeps a file's progress at
+            # 1.0 after we delete it out from under it (until a recheck), so a freed
+            # file would otherwise masquerade as complete. Grounding "complete" in
+            # actual existence makes a deleted file fall into the "not downloaded →
+            # Download" UI path immediately.
+            if qp is not None and qp >= 0.999 and Path(path).exists():
+                dl_pct, complete = round(qp * 100, 1), True
+            else:
+                dl_pct, complete = 0.0, False
+        elif qp is not None:
             dl_pct = round(qp * 100, 1)
             complete = qp >= 0.999
-        elif mode == "skip":
-            # No live data + skipped ⇒ assume it was never fetched.
-            dl_pct, complete = 0.0, False
         else:
             # No live qBit data at all (uploaded item, or torrent gone): trust status.
             complete = is_ready or not has_torrent
@@ -6076,6 +6083,10 @@ class RecheckReq(BaseModel):
     file_paths: list[str]   # which files to verify (the episode-picker checkboxes)
 
 
+class DeleteFilesReq(BaseModel):
+    file_paths: list[str]   # which files to delete from disk to reclaim space
+
+
 @app.post("/api/library/{item_id}/download-schedule")
 async def set_download_schedule(item_id: str, req: DownloadScheduleReq) -> JSONResponse:
     """Item-level download schedule. "idle" = Pause (download only during the idle/
@@ -6128,6 +6139,57 @@ async def set_file_schedule(item_id: str, req: FileScheduleReq) -> JSONResponse:
     await put_library(lib)
     await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "downloading")})
     return JSONResponse({"ok": True, "updated": len(req.file_paths), "mode": mode})
+
+
+@app.post("/api/library/{item_id}/delete-files")
+async def delete_item_files(item_id: str, req: DeleteFilesReq) -> JSONResponse:
+    """Delete specific files from disk to reclaim space, keeping them re-downloadable.
+    Each file is marked "skip" (so qBit drops it to priority 0 and never refetches),
+    its bytes are removed from disk, and its cached HLS bundle is purged. The file's
+    metadata stays in the item, so the episode picker shows it as "not downloaded"
+    with a Download button to grab it again later."""
+    if not req.file_paths:
+        raise HTTPException(400, "file_paths required.")
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+
+    # Map paths → declared sizes so we can report how much space was freed.
+    sizes = {f.get("path", ""): f.get("size_bytes", 0) for f in item.get("files", [])}
+    targets = [p for p in req.file_paths if p in sizes]
+
+    # 1) Mark skip + reconcile FIRST, so qBit drops these files to priority 0 and
+    #    stops writing to them before we remove the bytes (no recreate-mid-delete).
+    dl = item.setdefault("download", {"mode": "now", "files": {}})
+    files = dl.setdefault("files", {})
+    for p in targets:
+        files[p] = "skip"
+    await _apply_item_schedule(item, lib)
+
+    # 2) Remove the bytes from disk + 3) purge the cached HLS bundle.
+    freed = 0
+    deleted = 0
+    for p in targets:
+        src = Path(p)
+        try:
+            existed = src.exists()
+            await asyncio.to_thread(src.unlink, missing_ok=True)
+            if existed:
+                freed += sizes.get(p, 0)
+                deleted += 1
+        except OSError:
+            pass
+        try:
+            out_dir = OFFLINE_CACHE / _offline_cache_key(src)
+            if out_dir.exists():
+                await asyncio.to_thread(shutil.rmtree, out_dir, ignore_errors=True)
+        except OSError:
+            pass
+
+    await put_library(lib)
+    await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "downloading")})
+    return JSONResponse({"ok": True, "deleted": deleted, "freed_bytes": freed})
 
 
 @app.post("/api/library/{item_id}/prep-schedule")
