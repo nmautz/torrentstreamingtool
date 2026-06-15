@@ -6,8 +6,12 @@ the start of each file is the intro; the one near the end (if present) is the
 credits/outro. Falls back to ffmpeg blackdetect + a 92% heuristic when
 chromaprint cannot find a clean repeating outro.
 
-All blocking work runs in threads (asyncio.to_thread). The orchestrator runs
-one series at a time, with a per-series asyncio.Lock to prevent re-entry.
+Blocking subprocess work (ffmpeg/fpcalc/ffprobe) runs off the loop on a
+DEDICATED thread pool (`_FP_EXECUTOR` via `_fp_thread`), not the shared default
+asyncio executor — see `_FP_EXECUTOR` for why that isolation matters. The
+orchestrator runs one series at a time per series (a per-series asyncio.Lock
+prevents re-entry) and bounds cross-series concurrency with main.py's
+`_analysis_gate`.
 """
 from __future__ import annotations
 
@@ -113,6 +117,38 @@ MIN_FRAME_DELTA_BITS = 2
 # priority; two at a time roughly halves the wall-clock of the (I/O-heavy)
 # fingerprinting stage without saturating the host.
 FP_CONCURRENCY = 2
+
+# Dedicated thread pool for the analyzer's blocking subprocess waits
+# (ffmpeg / fpcalc / ffprobe). Deliberately SEPARATE from asyncio's default loop
+# executor: `asyncio.to_thread` shares one bounded pool process-wide, and
+# main.py's get_library() / put_library() ride that same pool. Each fingerprint
+# parks its worker thread for the whole decode (head = 6 min, tail = 10 min of
+# audio → seconds of wall-clock per call). Fingerprint several series at once and
+# enough of those blocking waits pile into the default pool that library reads/
+# writes — which every hot loop (progress tracker, download monitor) and HTTP
+# handler depend on — queue behind the decodes. The event loop stays alive
+# (the host and RDP look healthy) but the dashboard freezes: the exact
+# "fingerprinting many shows stalls the server" report. Routing analyzer
+# subprocess work through its OWN pool keeps the default pool free for library
+# I/O. Created lazily, and only ever from the event-loop thread, so no lock.
+_FP_EXECUTOR: Optional[concurrent.futures.ThreadPoolExecutor] = None
+
+
+def _fp_executor() -> concurrent.futures.ThreadPoolExecutor:
+    global _FP_EXECUTOR
+    if _FP_EXECUTOR is None:
+        _FP_EXECUTOR = concurrent.futures.ThreadPoolExecutor(
+            max_workers=FP_CONCURRENCY * 4, thread_name_prefix="smartskip-fp",
+        )
+    return _FP_EXECUTOR
+
+
+async def _fp_thread(fn, *args):
+    """Run a blocking analyzer subprocess call off the loop on the analyzer's OWN
+    thread pool — never the shared default pool get_library()/put_library() use.
+    See `_FP_EXECUTOR` for why the isolation matters."""
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(_fp_executor(), fn, *args)
 
 # Overall-progress spans per stage: (start_fraction, end_fraction). Emitted as a
 # monotonic `progress` float so progress bars never restart at stage boundaries
@@ -723,7 +759,7 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
             await _emit(stage="finalizing", current=idx, total=len(episodes),
                         message="No peer episodes to fingerprint against",
                         episode_name=Path(ep["path"]).name)
-            dur = await asyncio.to_thread(_media_duration, ep["path"])
+            dur = await _fp_thread(_media_duration, ep["path"])
             if dur:
                 result[ep["path"]] = _failed_entry(
                     ERR_NO_SKIP,
@@ -755,11 +791,11 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
     async def _fingerprint_one(ep: dict) -> tuple[Optional[float], list[int], list[int]]:
         nonlocal fp_done
         async with fp_sem:
-            dur = await asyncio.to_thread(_media_duration, ep["path"])
-            head = await asyncio.to_thread(_fpcalc_raw, ep["path"], INTRO_SEARCH_SECS, 0)
+            dur = await _fp_thread(_media_duration, ep["path"])
+            head = await _fp_thread(_fpcalc_raw, ep["path"], INTRO_SEARCH_SECS, 0)
             if dur and dur > OUTRO_SEARCH_SECS + 60:
                 tail_start = int(dur - OUTRO_SEARCH_SECS)
-                tail = await asyncio.to_thread(_fpcalc_raw, ep["path"], OUTRO_SEARCH_SECS, tail_start)
+                tail = await _fp_thread(_fpcalc_raw, ep["path"], OUTRO_SEARCH_SECS, tail_start)
             else:
                 tail = []
         fp_done += 1

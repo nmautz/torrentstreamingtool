@@ -511,6 +511,15 @@ def _marquee_write(text: str) -> None:
 UI_VERSION = "5.16.1"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
+# Cap how many series fingerprint at once. Each series pipeline parks blocking
+# ffmpeg/fpcalc decodes (now on the analyzer's own thread pool) AND spins up a
+# low-priority match process; left unbounded, hitting "Analyze" on many shows
+# fans both out across every series at once and oversubscribes the host. The
+# gate serialises the heavy work so a bulk analyze drains as a queue instead of
+# a thundering herd. See docs/ANALYZER.md § Concurrency.
+ANALYSIS_CONCURRENCY = 2
+_analysis_gate: asyncio.Semaphore  # initialised in lifespan
+
 
 # ── Library Storage ───────────────────────────────────────────────────────────
 
@@ -4344,7 +4353,12 @@ async def _run_series_analysis(series_key: str) -> None:
     `analysis_jobs.status = "failed"` for the admin UI.
     """
     lock = analyzer.lock_for_series(series_key)
-    async with lock:
+    # Per-series lock dedups re-entry for the SAME series; the global gate bounds
+    # how many DIFFERENT series fingerprint at once so a bulk "Analyze" doesn't
+    # oversubscribe the host (see ANALYSIS_CONCURRENCY). Acquire the lock first so
+    # duplicate triggers for one series collapse before they ever queue on the
+    # gate.
+    async with lock, _analysis_gate:
         lib = await get_library()
         items = _items_for_series_key(lib, series_key)
         ready_items = [it for it in items if it.get("status") == "ready"]
@@ -5255,13 +5269,14 @@ async def subtitle_upgrade_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
-    global qbit, vlc_client, _lib_lock, _jackett_cookie_lock
+    global qbit, vlc_client, _lib_lock, _jackett_cookie_lock, _analysis_gate
     # Make StreamLink's request handling the box's top priority before anything
     # else — so controls / UI / VLC-control stay responsive under heavy prep load.
     _raise_own_priority()
     await _log_version_banner()
     _lib_lock = asyncio.Lock()
     _jackett_cookie_lock = asyncio.Lock()
+    _analysis_gate = asyncio.Semaphore(ANALYSIS_CONCURRENCY)
     qbit = httpx.AsyncClient(timeout=10.0)
     _vlc_http()   # build the persistent keep-alive VLC client up front
     await qbit_login()
