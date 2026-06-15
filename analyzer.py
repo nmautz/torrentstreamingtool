@@ -30,7 +30,7 @@ except Exception:           # pragma: no cover - numpy missing
     _np = None
     _POP16 = None
 
-ANALYZER_VERSION = 3
+ANALYZER_VERSION = 4
 
 # Per-file failure codes recorded in skip_data[path].analysis when fingerprinting
 # could not produce usable skip points. The user-facing UI shows a "Skip
@@ -40,8 +40,7 @@ ERR_NO_BINARY    = "no_binary"      # ffmpeg or fpcalc not installed on host
 ERR_FILE_MISSING = "file_missing"   # video file is not on disk
 ERR_NO_DURATION  = "no_duration"    # ffprobe could not read duration
 ERR_FP_EMPTY     = "fp_empty"       # fpcalc returned no fingerprint (codec/corruption)
-ERR_TOO_SHORT    = "too_short"      # file shorter than the credits-fallback threshold
-ERR_NO_SKIP      = "no_skip_points" # fingerprinting ran but produced nothing usable
+ERR_NO_SKIP      = "no_skip_points" # fingerprinting ran but produced no usable match
 ERR_EXCEPTION    = "exception"      # raised inside analyze_series — message carries detail
 
 # Run analyzer subprocesses (ffmpeg decode, fpcalc, ffprobe) at lowered OS
@@ -76,7 +75,20 @@ MAX_OUTRO_SEC     = 180
 # Matching thresholds
 FRAME_HAMMING_MAX = 6         # ≤6 bits differ = "same" frame (32-bit hash)
 MIN_MATCH_FRAMES  = int(MIN_INTRO_SEC * FP_FRAMES_PER_SEC)
-CREDITS_FALLBACK_PCT = 0.92   # if no outro found, mark credits at 92%
+
+# Outro acceptance. Credits time comes ONLY from a confirmed cross-episode
+# fingerprint match — there is no fabricated fallback (no flat-% guess, no
+# black-frame detector). A matched tail run is only accepted as credits when it
+# both starts late enough AND runs to ~the end of the file. This rejects a
+# recurring NON-credits cue (a stinger/gag) that some shows repeat near the end:
+# real credits run to the end, a recurring gag is followed by more content.
+MIN_CREDITS_PCT      = 0.75   # credits may not start before 75% of runtime
+OUTRO_END_MARGIN_SEC = 120    # matched run must reach within 2 min of the end
+# Cluster consensus: members of a real-credits cluster all match the SAME anchor
+# region, so their anchor-side offsets agree. An outlier that matched the anchor
+# on a different region (a recurring gag, not the credits) is pruned when its
+# anchor offset deviates by more than this from the cluster median.
+CLUSTER_OFFSET_TOL_FRAMES = int(8.0 * FP_FRAMES_PER_SEC)
 
 # Gap tolerance. Each chromaprint frame is computed over a ~2.4 s audio window
 # (hopped every ~0.128 s), so ONE second of audio that differs between episodes
@@ -480,6 +492,40 @@ def _resolve_offset_in_cluster(idx: int, cluster: dict) -> Optional[tuple[int, i
     return (m[1], m[2])
 
 
+def _filter_cluster_consensus(cluster: dict) -> None:
+    """Prune cluster members that matched the anchor on a *different* region.
+
+    Real shared intro/credits make every member match the SAME stretch of the
+    anchor, so their anchor-side offsets agree. An outlier episode whose real
+    intro/credits is absent can still pairwise-match the anchor on some OTHER
+    recurring audio — a stinger, a repeated gag, a transition sting — landing at
+    a different anchor offset. Left in, that member gets a bogus skip point (the
+    reported "credits kick in early, cut off the end" bug).
+
+    Mutates `cluster` in place: drop members whose `offset_in_anchor` deviates
+    from the cluster median by more than CLUSTER_OFFSET_TOL_FRAMES, then recompute
+    `anchor_range` over the survivors. The median member always survives, so a
+    genuine cluster is left intact; an outlier simply disappears from the offset
+    map and gets no skip point.
+    """
+    matches = cluster["matches"]
+    if len(matches) <= 1:
+        return  # nothing to compare against — a lone pairwise match stays
+    anchor_offsets = sorted(m[0] for m in matches.values())
+    median = anchor_offsets[len(anchor_offsets) // 2]
+    survivors = {
+        idx: m for idx, m in matches.items()
+        if abs(m[0] - median) <= CLUSTER_OFFSET_TOL_FRAMES
+    }
+    if len(survivors) == len(matches):
+        return  # consensus already unanimous
+    cluster["matches"] = survivors
+    cluster["anchor_range"] = (
+        _intersect_match(list(survivors.values()), MIN_MATCH_FRAMES)
+        if survivors else None
+    )
+
+
 def _build_ep_offset_map(clusters: list[dict]) -> dict[int, tuple[int, int]]:
     out: dict[int, tuple[int, int]] = {}
     for cluster in clusters:
@@ -514,52 +560,6 @@ def _failed_entry(error_code: str, error: str) -> dict:
             "error":      error,
         },
     }
-
-
-def _detect_blackframe(file_path: str, start_at_sec: float,
-                       scan_duration_sec: float = 300.0) -> Optional[float]:
-    """Use ffmpeg blackdetect to find the first long black segment after start_at_sec.
-
-    Scans at most scan_duration_sec of video (default 5 minutes) — long enough
-    to catch the credits transition on virtually any show but short enough that
-    a single episode finishes in seconds, not minutes. Decoding the full tail
-    of a long episode here is what made the analyzer appear to hang at 100%.
-
-    Returns absolute seconds at which the credits/black-fade begins, or None.
-    """
-    ff = ffmpeg_bin()
-    if not ff:
-        return None
-    # Two-pass strategy: keyframes-only first (~1-2s per episode) for the
-    # common case where credits start with a clear black fade aligned to a
-    # keyframe boundary. If that misses, fall back to a full-decode pass at
-    # 4 fps which is ~10x faster than realtime decode.
-    proc = subprocess.run(
-        _lp([ff, "-skip_frame", "nokey",
-             "-ss", str(int(start_at_sec)), "-t", str(int(scan_duration_sec)),
-             "-i", file_path,
-             "-vf", "scale=64:-2,blackdetect=d=0.2:pix_th=0.10",
-             "-an", "-sn", "-f", "null", "-"]),
-        capture_output=True, text=True, timeout=120, **_LOWPRIO_KW,
-    )
-    matches = re.findall(r"black_start:(\d+(?:\.\d+)?)\s+black_end:(\d+(?:\.\d+)?)", proc.stderr)
-    if not matches:
-        proc = subprocess.run(
-            _lp([ff, "-ss", str(int(start_at_sec)), "-t", str(int(scan_duration_sec)),
-                 "-i", file_path,
-                 "-vf", "scale=64:-2,fps=4,blackdetect=d=0.4:pix_th=0.10",
-                 "-an", "-sn", "-f", "null", "-"]),
-            capture_output=True, text=True, timeout=120, **_LOWPRIO_KW,
-        )
-    # ffmpeg prints lines like:  [blackdetect @ 0x..] black_start:120.5 black_end:122.0 black_duration:1.5
-    matches = re.findall(r"black_start:(\d+(?:\.\d+)?)\s+black_end:(\d+(?:\.\d+)?)", proc.stderr)
-    if not matches:
-        return None
-    # First substantial black segment past start_at_sec is our credits start
-    for m in matches:
-        bs = float(m[0]) + start_at_sec
-        return bs
-    return None
 
 
 async def _build_clusters_async(
@@ -715,25 +715,20 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
             episodes.append({"path": p})
 
     if len(episodes) < 2:
-        # No peers — return fallback credits only. A duration-less or too-short
-        # file is recorded as a per-file failure (no shared intro can be found,
-        # and the 92 % credits heuristic only makes sense for full-length
-        # content).
+        # No peers — nothing to fingerprint against. Credits time is derived ONLY
+        # from a confirmed cross-episode match (there is no fabricated fallback),
+        # so a lone file (e.g. a single movie) gets no skip points and is recorded
+        # as a per-file failure that drives the "Skip unavailable" chip.
         for idx, ep in enumerate(episodes, start=1):
             await _emit(stage="finalizing", current=idx, total=len(episodes),
-                        message="No peers — applying credits fallback",
+                        message="No peer episodes to fingerprint against",
                         episode_name=Path(ep["path"]).name)
             dur = await asyncio.to_thread(_media_duration, ep["path"])
-            if dur and dur > 60:
-                result[ep["path"]] = {
-                    "intro": None,
-                    "credits_start": round(dur * CREDITS_FALLBACK_PCT, 1),
-                    "analysis": {"version": ANALYZER_VERSION, "source": "auto-fallback"},
-                }
-            elif dur:
+            if dur:
                 result[ep["path"]] = _failed_entry(
-                    ERR_TOO_SHORT,
-                    f"File duration ({dur:.0f}s) is below the 60 s minimum for credits fallback.",
+                    ERR_NO_SKIP,
+                    "No peer episodes to fingerprint against — Smart Skip needs at "
+                    "least two episodes that share an intro/credits sequence.",
                 )
             else:
                 result[ep["path"]] = _failed_entry(
@@ -810,6 +805,8 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
             head_fps, MIN_MATCH_FRAMES, max_intro_frames,
             episodes, _emit, "matching-intros", executor,
         )
+        for c in intro_clusters:
+            _filter_cluster_consensus(c)
         intro_by_ep = _build_ep_offset_map(intro_clusters)
 
         max_outro_frames = int(MAX_OUTRO_SEC * FP_FRAMES_PER_SEC)
@@ -817,6 +814,8 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
             tail_fps, MIN_MATCH_FRAMES, max_outro_frames,
             episodes, _emit, "matching-outros", executor,
         )
+        for c in outro_clusters:
+            _filter_cluster_consensus(c)
         outro_by_ep = _build_ep_offset_map(outro_clusters)
     finally:
         if executor is not None:
@@ -843,23 +842,20 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
                 "end":   round(frames_to_seconds(s_fr + l_fr), 1),
             }
 
+        # Credits time comes ONLY from a confirmed cross-episode fingerprint
+        # match — no fabricated fallback. The matched tail run is accepted as
+        # credits only when it both starts late enough (MIN_CREDITS_PCT) and runs
+        # to ~the end of the file (within OUTRO_END_MARGIN_SEC). A recurring
+        # non-credits cue near the end (a stinger/gag) is followed by more
+        # content, so its run ends well before the file end → rejected → no skip.
         credits_start: Optional[float] = None
-        source = "auto-fallback"
         if idx in outro_by_ep and dur:
-            offset_fr, _ = outro_by_ep[idx]
+            offset_fr, length_fr = outro_by_ep[idx]
             tail_start = dur - OUTRO_SEARCH_SECS
-            credits_start = round(tail_start + frames_to_seconds(offset_fr), 1)
-            source = "auto"
-        elif dur and dur > 60:
-            # Blackdetect fallback — scan only the last 5 minutes to keep this snappy
-            search_at = max(dur * 0.85, dur - 300)
-            black = await asyncio.to_thread(_detect_blackframe, path, search_at, 300.0)
-            if black and black < dur - 5:
-                credits_start = round(black, 1)
-                source = "auto-blackframe"
-            else:
-                credits_start = round(dur * CREDITS_FALLBACK_PCT, 1)
-                source = "auto-fallback"
+            cs = tail_start + frames_to_seconds(offset_fr)
+            ce = tail_start + frames_to_seconds(offset_fr + length_fr)
+            if cs >= dur * MIN_CREDITS_PCT and ce >= dur - OUTRO_END_MARGIN_SEC:
+                credits_start = round(cs, 1)
 
         if intro or credits_start is not None:
             result[path] = {
@@ -867,21 +863,20 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
                 "credits_start": credits_start,
                 "analysis": {
                     "version": ANALYZER_VERSION,
-                    "source": "auto" if intro else source,
+                    "source": "auto",
                 },
             }
         else:
             # Nothing usable — record why so the admin can see it and the user
             # gets the "Skip unavailable" chip. fpcalc emptiness is the most
-            # specific cause; missing duration is the next; otherwise we hit
-            # the matcher with usable input but nothing aligned and no black
-            # frame was found.
+            # specific cause; missing duration is the next; otherwise the matcher
+            # ran on usable input but found no shared intro and no qualifying
+            # credits run (credits time is fingerprint-only — no fallback).
             if idx in fp_errors:
                 code, msg = fp_errors[idx]
             elif not dur:
                 code, msg = ERR_NO_DURATION, (
-                    "ffprobe could not determine the media duration — no credits "
-                    "fallback could be applied."
+                    "ffprobe could not determine the media duration."
                 )
             else:
                 code, msg = ERR_NO_SKIP, (

@@ -291,11 +291,11 @@ Written by `vlc_progress_tracker` every 15 s. `mark_watched` ([main.py:2221](../
     "intro": { "start": 12.0, "end": 105.0 },    // or null
     "credits_start": 2940.0,                     // or null
     "analysis": {
-      "version": 2,                              // analyzer.ANALYZER_VERSION
-      "source": "auto" | "auto-blackframe" | "auto-fallback" | "manual" | "failed",
+      "version": 4,                              // analyzer.ANALYZER_VERSION
+      "source": "auto" | "manual" | "failed",    // credits time is fingerprint-only ("auto")
       // Only present when source == "failed":
       "error_code": "no_binary" | "file_missing" | "no_duration" |
-                    "fp_empty"  | "too_short"    | "no_skip_points" | "exception",
+                    "fp_empty"  | "no_skip_points" | "exception",
       "error":      "Human-readable detail surfaced in the admin editor + log."
     }
   }
