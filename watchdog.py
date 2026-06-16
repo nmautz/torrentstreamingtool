@@ -2,8 +2,9 @@
 """
 StreamLink Watchdog (7.2)
 =========================
-Monitors VLC, qBittorrent, and Jackett.  When a service disappears it
-waits a short back-off, then re-launches it — BUT qBittorrent is special:
+Monitors VLC, qBittorrent, Jackett, and (when installed) FlareSolverr.
+When a service disappears it waits a short back-off, then re-launches it —
+BUT qBittorrent is special:
 
   • If Mullvad VPN is CONNECTED    → qBit is kept alive (restarted if it dies)
   • If Mullvad VPN is DISCONNECTED → qBit is killed immediately and will NOT
@@ -343,9 +344,21 @@ def find_mullvad() -> str | None:
     }, ["mullvad"])
 
 
+def find_flaresolverr() -> str | None:
+    """Resolve the optional FlareSolverr binary. Installed via the admin Indexers
+    tab, which writes `_FLARESOLVERR_BIN` to .env; we only ever monitor the one
+    StreamLink installed, so the saved path is the only source of truth here."""
+    return _find("_FLARESOLVERR_BIN", {
+        "Windows": ["flaresolverr.exe"],
+    }, ["flaresolverr"])
+
+
 # ── Background launcher (detached) ─────────────────────────────────────────
-def _launch_bg(args: list[str]) -> None:
+def _launch_bg(args: list[str], env: dict | None = None) -> None:
     kw: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
+    if env is not None:
+        # FlareSolverr reads its bind HOST/PORT from the environment, not argv.
+        kw["env"] = env
     if SYSTEM == "Windows":
         kw["creationflags"] = (
             subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
@@ -414,6 +427,7 @@ class ServiceSpec:
         health_check: callable = None,   # () -> bool; overrides the port check
         pre_restart: callable = None,    # () -> None; run before (re)launching
         failure_grace: int = 0,          # consecutive failed probes tolerated before "down"
+        launch_env: dict | None = None,  # child-process env override (FlareSolverr HOST/PORT)
     ):
         self.name            = name
         self.port            = port
@@ -424,6 +438,7 @@ class ServiceSpec:
         self.back_off        = back_off
         self.health_check    = health_check
         self.pre_restart     = pre_restart
+        self.launch_env      = launch_env
         # How many *consecutive* failed liveness probes to tolerate before we
         # treat the service as actually down and restart it. A bare TCP port
         # check (VLC, qBit) is reliable, so 0 keeps crash recovery immediate.
@@ -478,7 +493,7 @@ class ServiceSpec:
             log.info("Starting %s (handled inline)", self.name)
         else:
             log.info("Starting %s: %s", self.name, " ".join(str(a) for a in args))
-            _launch_bg(args)
+            _launch_bg(args, env=self.launch_env)
         # Wait on the real liveness check, not just the port — for Jackett this
         # means we wait until it actually serves HTTP, which prevents a tight
         # restart loop where the port opens before the web stack is ready.
@@ -747,6 +762,36 @@ def _build_specs() -> tuple[list[ServiceSpec], ServiceSpec]:
             # restart. A genuinely wedged Jackett still recovers in ~1 min; a
             # transient slow response no longer takes the indexer offline.
             failure_grace=2,
+        ))
+
+    # ── FlareSolverr (optional Cloudflare/DDoS-Guard solver for Jackett) ──────
+    # Only monitored when it has actually been installed (the admin Indexers tab
+    # writes `_FLARESOLVERR_BIN` to .env). It binds the host/port from
+    # FLARESOLVERR_URL via the HOST/PORT env vars it reads — not argv — so the
+    # spec carries a launch_env. Mirrors run.py's start_flaresolverr().
+    fs_bin = _e("_FLARESOLVERR_BIN")
+    if fs_bin and Path(fs_bin).exists():
+        fs_url  = _e("FLARESOLVERR_URL", "http://localhost:8191")
+        fs_port = _extract_port(fs_url, 8191)
+        fm = re.search(r"https?://([^:/]+)", fs_url)
+        fs_host = fm.group(1) if fm else "127.0.0.1"
+        if fs_host in ("localhost", "::1", "0.0.0.0"):
+            fs_host = "127.0.0.1"
+
+        fs_env = dict(os.environ)
+        fs_env["HOST"] = fs_host
+        fs_env["PORT"] = str(fs_port)
+        fs_env.setdefault("LOG_LEVEL", "info")
+
+        plain_specs.append(ServiceSpec(
+            name="FlareSolverr",
+            port=fs_port,
+            host=fs_host,
+            find_bin=find_flaresolverr,
+            build_args=lambda b: [b],
+            startup_timeout=30.0,   # spins up a headless Chrome — slow to bind
+            back_off=5.0,
+            launch_env=fs_env,
         ))
 
     return plain_specs, qbit_spec

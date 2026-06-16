@@ -3,7 +3,7 @@
 Two related but distinct pieces:
 
 - **`daemon.py`** — installs StreamLink as a system service so it starts on boot/login. Called from `setup.py` (optional) or `run.py --install`.
-- **`watchdog.py`** — runs as a thread inside `run.py` (or standalone when the service runs it) and re-launches crashed VLC / qBittorrent / Jackett.
+- **`watchdog.py`** — runs as a thread inside `run.py` (or standalone when the service runs it) and re-launches crashed VLC / qBittorrent / Jackett / FlareSolverr (the last only when installed).
 
 ## `daemon.py`
 
@@ -14,7 +14,7 @@ Two related but distinct pieces:
 `streamlink_service.py` is a generated Python file that mirrors the network-facing startup of `python run.py` so the installed service and interactive launch behave identically:
 1. Sets up file logging (`logs/streamlink_service.log`) — the service has no console
 2. Adds the venv `site-packages` to `sys.path` so `watchdog.py` can import `psutil` and `run.py` helpers can import `zeroconf`. Handles both Windows (`Lib/site-packages`) and Unix (`lib/pythonX.Y/site-packages`) layouts
-3. Calls `start_watchdog()` (monitors VLC/qBit/Jackett — and launches them when missing)
+3. Calls `start_watchdog()` (monitors VLC/qBit/Jackett/FlareSolverr — and launches them when missing)
 4. Calls `run.get_local_ip()` to detect the LAN IP for mDNS
 5. On Windows: calls `run.setup_windows_firewall(80)` and `(443)` if certs exist (idempotent — Task Scheduler runs the wrapper elevated so `netsh add rule` succeeds)
 6. Calls `run.start_mdns_resilient(80, 443 if certs)` so `remote.local` resolves for LAN clients. **Resilient, not one-shot:** the service starts at boot before Wi-Fi has a LAN IP, so a single `start_mdns()` would see no IP and silently skip — `remote.local` would never resolve until a manual relaunch even though the dashboard is reachable by IP. The resilient version registers from a daemon thread that waits for the IP and re-registers on change. See [GOTCHAS.md](GOTCHAS.md#remotelocal-doesnt-resolve-after-a-reboot)
@@ -80,6 +80,7 @@ A small dataclass-like class:
 - `build_args(bin_path)` → list[str] **OR** None (when the start command was already run inline, e.g. Windows `sc.exe start`)
 - `startup_timeout`, `back_off`
 - `health_check`, `pre_restart` (optional; see Jackett specifics)
+- `launch_env` — optional child-process environment override passed to `_launch_bg`. Used by FlareSolverr, which reads its bind `HOST`/`PORT` from the environment rather than argv.
 - `failure_grace` — consecutive failed liveness probes tolerated before the service counts as down (default **0**). Port-checked services (VLC, qBit) keep 0 so crash recovery is immediate; Jackett uses **2** (its HTTP probe can falsely fail on a single slow response). Tracked via `_health_misses`, reset on any successful probe and after a (re)start.
 - Tracks `_failures` for exponential back-off capped at 120 s
 
@@ -115,6 +116,12 @@ Jackett is only added to plain_specs when `INDEXER_URL` points at localhost. Rem
 **Admin requirement.** Stopping/starting a LocalSystem `Jackett` service needs admin; a non-elevated watchdog gets access-denied and logs a clear hint. `setup.py`'s `grant_jackett_service_control()` grants the rights once so the watchdog can recover Jackett without elevation. See [GOTCHAS.md](GOTCHAS.md#controlling-the-localsystem-jackett-service-needs-admin).
 
 **Reusable restart.** `restart_jackett()` / `jackett_healthy()` ([watchdog.py:670](../watchdog.py#L670)) expose the same force-down+launch and HTTP-liveness logic so the dashboard process (`main.py`'s `jackett_health_monitor`) can use them as a backstop when no watchdog is running.
+
+### FlareSolverr specifics
+
+FlareSolverr is the optional Cloudflare/DDoS-Guard challenge solver Jackett can proxy protected indexers through. The watchdog only adds it to `plain_specs` when it has actually been installed — i.e. `.env` has a `_FLARESOLVERR_BIN` pointing at an existing file (written by the admin Indexers tab / Optional Components install). If it was never installed the watchdog ignores it entirely.
+
+When present it's a plain, always-kept-alive service (not VPN-gated) with a bare port check on `FLARESOLVERR_URL`'s port (`8191` default), `failure_grace=0`, and a 30 s `startup_timeout` (it boots a headless Chrome, so binding the port is slow). It binds the host/port from `FLARESOLVERR_URL` via the `HOST`/`PORT` env vars FlareSolverr reads — set through the spec's `launch_env`, mirroring `run.py`'s `start_flaresolverr()`. `localhost`/`::1`/`0.0.0.0` hosts are normalised to `127.0.0.1` to match `run.py`.
 
 ### Building specs ([watchdog.py:431](../watchdog.py#L431))
 
