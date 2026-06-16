@@ -3309,7 +3309,20 @@ async def download_scheduler_loop() -> None:
 # psutil for CPU/RAM/net, nvidia-smi (if present) for GPU.
 
 _net_prev: dict = {}                 # last net counters + timestamp, for rate deltas
+_net_bad_streak: int = 0             # consecutive bad net samples (debounce ramp-up spikes)
 _gpu_smi_ok: Optional[bool] = None   # None=untested, True=usable, False=give up probing
+
+# Network health is classified by *packet-loss rate*, not an absolute drop count.
+# A handful of drops while a fast transfer ramps up (TCP probing for bandwidth)
+# or while the NIC settles after boot is normal — flagging that as "overloaded"
+# spammed the user-facing banner. So: ignore loss until enough packets have
+# actually flowed this window (_NET_MIN_*), measure it as a fraction of traffic,
+# and only escalate once it persists for _NET_CONFIRM consecutive samples.
+_NET_MIN_PKTS = 2000     # need real traffic before a loss rate is meaningful (~5 s window)
+_NET_MIN_ERRS = 20       # ignore a trickle of drops regardless of rate
+_NET_LOSS_DEG = 0.02     # ≥2% sustained packet loss → degraded
+_NET_LOSS_OVER = 0.08    # ≥8% sustained packet loss → overloaded
+_NET_CONFIRM = 2         # consecutive bad samples (~10 s) required before flagging
 
 
 def _classify(value: float, deg: float, over: float) -> str:
@@ -3365,19 +3378,29 @@ async def system_monitor_loop() -> None:
             vm = psutil.virtual_memory()
             ram = float(vm.percent)
 
-            # Network: throughput + error/drop deltas from the counters.
+            # Network: throughput + packet-loss rate from the counters. Loss is
+            # measured as a fraction of traffic (not an absolute count) and only
+            # flagged once it persists, so ramp-up/boot transients don't trip it.
+            global _net_bad_streak
             net = await asyncio.to_thread(psutil.net_io_counters)
             now = time.time()
             up_mbps = down_mbps = 0.0
             net_status = "ok"
             errs = net.errin + net.errout + net.dropin + net.dropout
+            pkts = net.packets_sent + net.packets_recv
             if _net_prev:
                 dt = max(0.001, now - _net_prev["ts"])
                 down_mbps = max(0.0, (net.bytes_recv - _net_prev["recv"]) * 8 / 1e6 / dt)
                 up_mbps   = max(0.0, (net.bytes_sent - _net_prev["sent"]) * 8 / 1e6 / dt)
-                d_err = errs - _net_prev["errs"]
-                net_status = "overloaded" if d_err > 50 else "degraded" if d_err > 0 else "ok"
-            _net_prev.update(ts=now, recv=net.bytes_recv, sent=net.bytes_sent, errs=errs)
+                d_err  = max(0, errs - _net_prev["errs"])
+                d_pkts = max(0, pkts - _net_prev["pkts"])
+                # Only meaningful once enough packets flowed and the drops aren't a trickle.
+                loss = (d_err / d_pkts) if (d_pkts >= _NET_MIN_PKTS and d_err >= _NET_MIN_ERRS) else 0.0
+                raw = "overloaded" if loss >= _NET_LOSS_OVER else "degraded" if loss >= _NET_LOSS_DEG else "ok"
+                # Debounce: a bad sample must repeat before we surface it; recovery is instant.
+                _net_bad_streak = _net_bad_streak + 1 if raw != "ok" else 0
+                net_status = raw if _net_bad_streak >= _NET_CONFIRM else "ok"
+            _net_prev.update(ts=now, recv=net.bytes_recv, sent=net.bytes_sent, errs=errs, pkts=pkts)
 
             gpu = await _sample_gpu()
 
