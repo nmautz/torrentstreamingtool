@@ -221,13 +221,14 @@ only the scaled down-rungs hit the encoder.
 
 Key decisions:
 
-- **ABR ladder: Original + 720p + 480p.** The source video is mapped once per
-  rung (`_hls_video_variants` caps the ladder at source height — no upscaling).
-  All variants share one audio group, so the player switches video quality
-  without re-fetching audio. Each down-rung gets a `scale=-2:<h>` filter (the
-  `-2` keeps an even width for yuv420p) and a `maxrate`/`bufsize` VBV cap so the
-  rendition is genuinely smaller and the master playlist's `BANDWIDTH` is
-  realistic for ABR selection.
+- **ABR ladder: Original + admin-selected down-rungs (default 720p + 480p).** The
+  source video is mapped once per rung (`_hls_video_variants` caps the ladder at
+  source height — no upscaling). All variants share one audio group, so the player
+  switches video quality without re-fetching audio. Each down-rung gets a
+  `scale=-2:<h>` filter (the `-2` keeps an even width for yuv420p) and a
+  `maxrate`/`bufsize` VBV cap so the rendition is genuinely smaller and the master
+  playlist's `BANDWIDTH` is realistic for ABR selection. **The down-rung set is
+  admin-configurable** — see [§ Configurable ABR ladder + trimming](#configurable-abr-ladder--bundle-trimming).
 - **The original rung stream-copies when possible** — if source video is already
   H.264 / yuv420p with a browser-safe profile (anything other than Hi10P / 4:2:2
   / 4:4:4), `-c:v:0 copy` is used **even when NVENC is present** (decoupled from
@@ -292,6 +293,47 @@ Key decisions:
 - **ffmpeg ≥ 4.3** is enforced via `_ffmpeg_version()` cache. Older builds
   fail-fast at prep start with a clear error message — multi-rendition
   `-var_stream_map` is unreliable on 4.0–4.2.
+
+---
+
+## Configurable ABR ladder + bundle trimming
+
+The down-rung set isn't fixed. `HLS_ABR_LADDER` carries four rungs (1080/720/480/360
+with their VBV caps); which of them a prep emits is the admin selection
+`settings.admin_overrides.hls_ladder`, read by `_hls_ladder_heights(lib)` and passed
+into `_build_hls_ffmpeg_args(..., ladder_heights=…)` → `_hls_video_variants(info,
+heights)`. The original (source-resolution) rung is **always** emitted; a down-rung
+appears only when the source is taller than it **and** its height is in the selected
+set. Default (no override) is `[720, 480]` — today's behaviour. `meta.json videos[]`
+derives from the same `kept_videos`, so the manifest, the master playlist, and the
+UI's quality menu stay consistent.
+
+Changing the default is **forward-only** and intentionally does **not** bump
+`OFFLINE_CACHE_VERSION` (no global rebuild). To slim **existing** bundles, the admin
+**Drop HLS Resolutions** tool (`_hls_trim_bundles` → `_trim_one_bundle`, `POST
+/api/admin/hls-trim`) deletes a dropped rung's playlist + init + segments from each
+`.offline_cache/<sha>/`, rewrites `master.m3u8` (dropping the rung's
+`#EXT-X-STREAM-INF` + its following URI line — audio `#EXT-X-MEDIA` lines untouched),
+and rewrites `meta.json videos[]`. Bundles with an active prep job are skipped; a
+`dry_run` sums the bytes that *would* be freed for the UI estimate. See
+[ADMIN.md § Storage & Compression](ADMIN.md).
+
+## Source-file compression
+
+`_compress_one_file` / `_run_file_compression` re-encode **source** files in place to
+reclaim disk (admin Storage & Compression card) — distinct from prep, which only
+writes derived bundles. It reuses the File-Repair re-encode shape: re-encode the video
+(libx264/libx265, or h264_nvenc/hevc_nvenc when `_decode_hwaccel_args` reports NVENC),
+**copy** audio + every embedded subtitle/attachment, deep-decode the candidate
+(`_ffmpeg_decode_scan`), then `os.replace` the original and purge its stale HLS bundle
+(keyed on the old path|mtime|size) — but **only** when the result decodes clean **and**
+is smaller (`_compression_params` maps presets → CRF + optional down-scale cap). An
+already-efficient source re-encodes no smaller and is reported `skipped`, original
+untouched. The savings estimator (`_compress_estimate`) is a per-(resolution × preset)
+target-bitrate model plus the current bundle size (`_dir_size_bytes`), shown before
+committing. Same footguns as repair: lossy/irreversible, and a torrent-backed file
+stops seeding once rewritten. Not macOS-gated (a plain decode, like the File
+Validator). See [ADMIN.md § Storage & Compression](ADMIN.md).
 
 ---
 

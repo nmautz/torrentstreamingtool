@@ -699,6 +699,14 @@ class AppState:
     file_repair_task: Optional[asyncio.Task] = None
     file_repair_stop: bool = False
     file_repair_proc: Optional["asyncio.subprocess.Process"] = None
+    # In-place lossy re-encode of source files to reclaim disk space (admin
+    # Storage & Compression card). Replaces each source only when the re-encode
+    # decodes clean AND came out smaller, then purges the stale HLS bundle. Same
+    # job-state shape as the validator/repair.
+    file_compression: dict = field(default_factory=dict)  # {running, scope, level, codec, total, scanned, current_name, results:[…], bytes_before, bytes_after, started_at, finished_at, stopped, error}
+    file_compression_task: Optional[asyncio.Task] = None
+    file_compression_stop: bool = False
+    file_compression_proc: Optional["asyncio.subprocess.Process"] = None
     # Idle-gated automatic background validation (separate from the admin scan so
     # they never collide). Walks files whose persisted `validation` verdict is
     # missing/stale, one at a time, ONLY while the box is idle — and persists each
@@ -5550,6 +5558,7 @@ class AdminItemLockReq(BaseModel):
 class AdminSettingsReq(BaseModel):
     indexer_categories: Optional[str] = None
     tmdb_api_key: Optional[str] = None
+    hls_ladder: Optional[list[int]] = None   # ABR down-rung heights for new preps
 
 
 class ScheduledRebootReq(BaseModel):
@@ -5598,6 +5607,24 @@ class ValidateFilesReq(BaseModel):
 class RepairFilesReq(BaseModel):
     paths: Optional[list[str]] = None           # specific files to repair; defaults to the last validation scan's damaged list
     reencode: bool = False                      # allow a lossy re-encode fallback when a lossless remux can't fix it
+
+
+class CompressFilesReq(BaseModel):
+    scope: Optional[str] = None                 # None/""/"all" ⇒ whole library; else a library item id
+    level: str = "balanced"                     # light | balanced | maximum (ignored when `crf` is set)
+    codec: str = "h264"                         # h264 | hevc
+    crf: Optional[int] = None                   # Advanced override (18–32); disables the preset's down-scaling
+
+
+class CompressEstimateReq(BaseModel):
+    scope: Optional[str] = None
+    level: str = "balanced"
+    codec: str = "h264"
+
+
+class HlsTrimReq(BaseModel):
+    heights: list[int] = []                     # ABR down-rung heights to KEEP (original is always kept)
+    dry_run: bool = False                       # True ⇒ only report bytes that WOULD be freed
 
 
 class AutoMaintReq(BaseModel):
@@ -8999,6 +9026,8 @@ async def admin_get_settings(request: Request) -> JSONResponse:
         "tmdb_api_key": overrides.get("tmdb_api_key", settings.tmdb_api_key),
         "tmdb_api_key_source": "admin" if overrides.get("tmdb_api_key") else
                                ("env" if settings.tmdb_api_key else "unset"),
+        "hls_ladder": _hls_ladder_heights(lib),
+        "hls_ladder_options": sorted(HLS_LADDER_HEIGHTS, reverse=True),
     })
 
 
@@ -9015,6 +9044,17 @@ async def admin_update_settings(request: Request, req: AdminSettingsReq) -> JSON
             overrides["tmdb_api_key"] = v
         else:
             overrides.pop("tmdb_api_key", None)
+    if req.hls_ladder is not None:
+        # Keep only valid ladder heights, dedupe, order high→low. Exactly the
+        # built-in default removes the override (cleaner); any other selection —
+        # including an explicit empty list (source-only bundles, a valid
+        # space-saving choice) — is stored verbatim.
+        heights = sorted({int(h) for h in req.hls_ladder if int(h) in HLS_LADDER_HEIGHTS},
+                         reverse=True)
+        if heights == sorted(DEFAULT_HLS_LADDER_HEIGHTS, reverse=True):
+            overrides.pop("hls_ladder", None)
+        else:
+            overrides["hls_ladder"] = heights
     await put_library(lib)
     return JSONResponse({"ok": True})
 
@@ -10190,6 +10230,92 @@ async def admin_stop_repair_files(request: Request) -> JSONResponse:
         except Exception:
             pass
     return JSONResponse({"ok": True, **_file_repair_status()})
+
+
+@app.get("/api/admin/compress-files")
+async def admin_get_compress_files(request: Request) -> JSONResponse:
+    """Current/last source-compression run (progress + per-file results + bytes freed)."""
+    _require_admin(request)
+    return JSONResponse(_file_compression_status())
+
+
+@app.post("/api/admin/compress-estimate")
+async def admin_compress_estimate(request: Request, body: CompressEstimateReq) -> JSONResponse:
+    """Estimate disk space a compression run would reclaim (source re-encode + the
+    HLS bundle freed on replace). A bitrate model — labelled "estimated" in the UI."""
+    _require_admin(request)
+    if not analyzer.ffmpeg_bin():
+        raise HTTPException(503, "ffmpeg is not installed — cannot estimate compression.")
+    level = (body.level or "balanced").strip()
+    codec = (body.codec or "h264").strip().lower()
+    if level not in COMPRESSION_PRESETS:
+        raise HTTPException(400, "Unknown compression level.")
+    if codec not in ("h264", "hevc"):
+        raise HTTPException(400, "Unknown codec.")
+    scope = (body.scope or "all").strip() or "all"
+    return JSONResponse(await _compress_estimate(scope, level, codec))
+
+
+@app.post("/api/admin/compress-files")
+async def admin_start_compress_files(request: Request, body: CompressFilesReq) -> JSONResponse:
+    """Start an in-place source-compression run. Re-encodes each library video (or
+    one item) at the chosen quality, replacing the source only when the result
+    decodes clean AND is smaller, then purges its stale HLS bundle. Rewriting a file
+    stops a torrent-backed copy from seeding (re-download is the better fix there).
+    409 if a run is already going, 503 if ffmpeg is missing, 400 on bad level/codec."""
+    _require_admin(request)
+    if not analyzer.ffmpeg_bin():
+        raise HTTPException(503, "ffmpeg is not installed — cannot compress files.")
+    if state.file_compression.get("running"):
+        raise HTTPException(409, "A compression run is already in progress.")
+    codec = (body.codec or "h264").strip().lower()
+    level = (body.level or "balanced").strip()
+    if codec not in ("h264", "hevc"):
+        raise HTTPException(400, "Unknown codec.")
+    if body.crf is None and level not in COMPRESSION_PRESETS:
+        raise HTTPException(400, "Unknown compression level.")
+    crf, max_height = _compression_params(level, codec, body.crf)
+    scope = (body.scope or "all").strip() or "all"
+    state.file_compression_stop = False
+    state.file_compression_proc = None
+    state.file_compression = {
+        "running": True, "scope": scope, "level": level, "codec": codec,
+        "crf": crf, "max_height": max_height,
+        "total": 0, "scanned": 0, "current_name": "",
+        "results": [], "bytes_before": 0, "bytes_after": 0,
+        "stopped": False, "error": "", "started_at": _now_iso(), "finished_at": None,
+    }
+    state.file_compression_task = asyncio.create_task(
+        _run_file_compression(scope, crf, codec, max_height))
+    return JSONResponse(_file_compression_status())
+
+
+@app.post("/api/admin/compress-files/stop")
+async def admin_stop_compress_files(request: Request) -> JSONResponse:
+    """Stop the in-progress compression run: set the stop flag (the loop halts
+    between files) and terminate the in-flight ffmpeg. A file already replaced stays
+    compressed; the current in-flight candidate is discarded (original untouched)."""
+    _require_admin(request)
+    state.file_compression_stop = True
+    proc = state.file_compression_proc
+    if proc is not None and proc.returncode is None:
+        try:
+            proc.terminate()
+        except Exception:
+            pass
+    return JSONResponse({"ok": True, **_file_compression_status()})
+
+
+@app.post("/api/admin/hls-trim")
+async def admin_hls_trim(request: Request, body: HlsTrimReq) -> JSONResponse:
+    """Drop surplus ABR down-rungs from EXISTING .offline_cache bundles to reclaim
+    space now. `heights` lists the down-rung heights to KEEP (the original rendition
+    is always kept). `dry_run` reports the bytes that would be freed without touching
+    anything — it powers the UI estimate."""
+    _require_admin(request)
+    keep = {int(h) for h in body.heights if int(h) in HLS_LADDER_HEIGHTS}
+    res = await _hls_trim_bundles(keep, dry_run=bool(body.dry_run))
+    return JSONResponse({"ok": True, **res})
 
 
 @app.get("/api/admin/cache-autopurge")
@@ -11551,23 +11677,46 @@ HLS_SEGMENT_SECS = 6
 # keep the down-rungs genuinely smaller and give the master playlist realistic
 # BANDWIDTH numbers so hls.js / Safari pick sensibly under ABR.
 HLS_ABR_LADDER = [
-    ("video_720", 720, 3000, 6000),
-    ("video_480", 480, 1200, 2400),
+    ("video_1080", 1080, 6000, 12000),
+    ("video_720",   720, 3000,  6000),
+    ("video_480",   480, 1200,  2400),
+    ("video_360",   360,  700,  1400),
 ]
+# Rungs emitted by default when the admin hasn't overridden the ladder. Keeps
+# the historical behaviour (Original + 720p + 480p down-rungs); the admin can
+# pick any subset of the ladder heights via settings.admin_overrides.hls_ladder.
+DEFAULT_HLS_LADDER_HEIGHTS = [720, 480]
+HLS_LADDER_HEIGHTS = {h for _n, h, _m, _b in HLS_ABR_LADDER}
 
 
-def _hls_video_variants(info: dict) -> list[dict]:
+def _hls_ladder_heights(lib: dict) -> list[int]:
+    """Admin-selected ABR down-rung heights (settings.admin_overrides.hls_ladder),
+    falling back to DEFAULT_HLS_LADDER_HEIGHTS. The original (source-resolution)
+    rendition is always emitted regardless and is NOT listed here. Unknown
+    heights are dropped so a stale value can't request a rung that doesn't exist."""
+    ov = (lib.get("settings", {}) or {}).get("admin_overrides", {}) or {}
+    raw = ov.get("hls_ladder")
+    if not isinstance(raw, list):
+        return list(DEFAULT_HLS_LADDER_HEIGHTS)
+    heights = [int(h) for h in raw if isinstance(h, (int, float)) and int(h) in HLS_LADDER_HEIGHTS]
+    return heights
+
+
+def _hls_video_variants(info: dict, heights: Optional[list[int]] = None) -> list[dict]:
     """Video renditions to emit for this source, capped at its height.
 
     Returns a list ordered original-first:
       [{name, height, scale}]  where scale=None means "no -filter, keep source".
-    Down-rungs carry maxrate/bufsize too. A ≤480p source yields a single
-    variant (the original) — i.e. no ABR menu, today's behaviour.
+    Down-rungs carry maxrate/bufsize too. A down-rung is emitted only when the
+    source is TALLER than it AND its height is in `heights` (the admin-selected
+    ladder; defaults to DEFAULT_HLS_LADDER_HEIGHTS). A source shorter than every
+    selected rung yields a single variant (the original) — i.e. no ABR menu.
     """
+    allowed = set(DEFAULT_HLS_LADDER_HEIGHTS if heights is None else heights)
     src_h = int((info.get("video") or {}).get("height") or 0)
     variants: list[dict] = [{"name": "video", "height": src_h, "scale": None}]
     for name, h, maxrate, bufsize in HLS_ABR_LADDER:
-        if src_h > h:
+        if src_h > h and h in allowed:
             variants.append({
                 "name": name, "height": h, "scale": h,
                 "maxrate": maxrate, "bufsize": bufsize,
@@ -11967,6 +12116,7 @@ def _build_hls_ffmpeg_args(
     info: dict,
     use_nvenc: bool,
     full_gpu: bool = False,
+    ladder_heights: Optional[list[int]] = None,
 ) -> tuple[list[str], list[dict], list[dict], list[dict]]:
     """Construct the full ffmpeg invocation that emits one HLS bundle.
 
@@ -11989,7 +12139,7 @@ def _build_hls_ffmpeg_args(
     """
     audios = list(info.get("audios") or [])
     subs   = [s for s in (info.get("subtitles") or []) if not s.get("image_based")]
-    videos = _hls_video_variants(info)
+    videos = _hls_video_variants(info, ladder_heights)
     # Original can stream-copy when already browser-safe H.264; down-rungs must
     # always re-encode (they're scaled). Decoupled from use_nvenc so the source
     # rung stays a cheap remux even when the GPU encoder is present.
@@ -12324,11 +12474,13 @@ async def _run_offline_job(job_id: str) -> None:
         # post-encode (in the done-hook block below). GPU-accelerated when NVENC
         # is present (see _prep_validate_repair / _decode_hwaccel_args).
         prep_validate_mode = "off"
-        if is_bulk:
-            try:
-                prep_validate_mode = _prep_validate_cfg(await get_library())["mode"]
-            except Exception:
-                prep_validate_mode = "off"
+        try:
+            _lib_for_cfg = await get_library()
+            ladder_heights = _hls_ladder_heights(_lib_for_cfg)
+            if is_bulk:
+                prep_validate_mode = _prep_validate_cfg(_lib_for_cfg)["mode"]
+        except Exception:
+            ladder_heights = list(DEFAULT_HLS_LADDER_HEIGHTS)
         if prep_validate_mode == "before":
             res = await _prep_validate_repair(job, src)
             if res == "repaired":
@@ -12386,6 +12538,7 @@ async def _run_offline_job(job_id: str) -> None:
             while True:
                 args, kept_audios, kept_subs, kept_videos = _build_hls_ffmpeg_args(
                     ffmpeg, src, info, use_nvenc, full_gpu=full_gpu,
+                    ladder_heights=ladder_heights,
                 )
                 # Record encoder for admin/UI display. The original rung may copy
                 # while the ABR down-rungs (if any) still transcode, so reflect both.
@@ -13675,6 +13828,286 @@ async def _run_file_repair(paths: list[str], reencode: bool) -> None:
         fr["current_name"] = ""
         fr["finished_at"] = _now_iso()
         state.file_repair_proc = None
+
+
+# ── Source-file compression ──────────────────────────────────────────────────
+# In-place lossy re-encode of source files to reclaim disk space, modelled on the
+# repair re-encode: re-encode the video (H.264 or HEVC) at a chosen quality, copy
+# audio + every embedded subtitle/attachment, deep-decode the candidate, and
+# replace the original ONLY when it decodes clean AND came out smaller — then purge
+# the stale HLS bundle so on-device playback re-preps from the smaller source.
+# Like repair, this rewrites the file, so a torrent-backed copy stops seeding;
+# aimed at uploaded / non-torrent content. Surfaced as a caveat in the UI.
+
+# Compression presets → (x264 CRF, x265 CRF, max output height | None = keep).
+# Higher CRF = smaller + lower quality. The down-scale cap on the stronger tiers
+# is where most of the savings come from on 4K/1080p sources.
+COMPRESSION_PRESETS = {
+    "light":    {"crf264": 21, "crf265": 24, "max_height": None},
+    "balanced": {"crf264": 24, "crf265": 27, "max_height": 1080},
+    "maximum":  {"crf264": 28, "crf265": 30, "max_height": 720},
+}
+# Rough target VIDEO bitrate (kbps) by output-height bucket × preset, used ONLY by
+# the savings estimator (the real encode is CRF/quality-driven). HEVC is scaled by
+# ~0.6 for the same perceptual quality.
+_COMPRESS_EST_KBPS = {
+    1080: {"light": 4000, "balanced": 2500, "maximum": 1500},
+    720:  {"light": 2000, "balanced": 1400, "maximum": 900},
+    480:  {"light": 1000, "balanced": 800,  "maximum": 500},
+    0:    {"light": 600,  "balanced": 450,  "maximum": 300},
+}
+
+
+def _compression_params(level: str, codec: str, crf: Optional[int]) -> tuple[int, Optional[int]]:
+    """Resolve (crf, max_height) for a compression run. An explicit `crf` (Advanced
+    mode) overrides the preset's CRF and disables down-scaling; otherwise the preset
+    maps to a codec-appropriate CRF + optional height cap."""
+    preset = COMPRESSION_PRESETS.get(level, COMPRESSION_PRESETS["balanced"])
+    if crf is not None:
+        return max(18, min(32, int(crf))), None
+    return (preset["crf265"] if codec == "hevc" else preset["crf264"]), preset["max_height"]
+
+
+def _est_bucket(height: int) -> int:
+    for b in (1080, 720, 480):
+        if height >= b:
+            return b
+    return 0
+
+
+def _file_compression_status() -> dict:
+    """JSON-safe snapshot of the current/last compression run for the admin card."""
+    fc = dict(state.file_compression)
+    fc.setdefault("running", False)
+    fc.setdefault("scanned", 0)
+    fc.setdefault("total", 0)
+    fc.setdefault("results", [])
+    fc.setdefault("bytes_before", 0)
+    fc.setdefault("bytes_after", 0)
+    fc["bytes_freed"] = max(0, fc.get("bytes_before", 0) - fc.get("bytes_after", 0))
+    fc["available"] = bool(analyzer.ffmpeg_bin())
+    return fc
+
+
+async def _compress_one_file(ffmpeg: str, path: str, *, crf: int, codec: str,
+                             max_height: Optional[int], set_proc, is_stopped
+                             ) -> tuple[str, str, int, int]:
+    """Re-encode one source file in place to save space. Returns
+    (status, detail, bytes_before, bytes_after) where status ∈
+    "compressed" | "skipped" | "failed". On success the original is atomically
+    replaced and its stale HLS bundle purged; "skipped" means the re-encode wasn't
+    smaller (already-efficient source) and the original is left untouched."""
+    src = Path(path)
+    try:
+        if not src.exists():
+            return "failed", "File is no longer on disk.", 0, 0
+        before = src.stat().st_size
+        old_key = _offline_cache_key(src)        # stash BEFORE we change mtime/size
+    except OSError as e:
+        return "failed", f"Cannot access file: {e}", 0, 0
+
+    stopped = is_stopped
+    info = await asyncio.to_thread(_ffprobe_full, str(src))
+    if not info.get("video"):
+        return "failed", "No decodable video stream.", before, before
+    src_h = int((info.get("video") or {}).get("height") or 0)
+
+    suffix = src.suffix or ".mkv"
+    is_mp4ish = suffix.lower() in {".mp4", ".m4v", ".mov"}
+    tmp = src.with_name(src.stem + ".compress" + suffix)
+
+    # GPU-accelerate decode (and encode) when NVENC is present; CPU fallback uses
+    # libx264/libx265. NVENC uses p-presets + `-cq`; libx26x uses `-preset/-crf`.
+    hw = await _decode_hwaccel_args()
+    if hw:
+        venc = ["-c:v", ("hevc_nvenc" if codec == "hevc" else "h264_nvenc"),
+                "-preset", "p4", "-cq", str(crf)]
+    else:
+        venc = ["-c:v", ("libx265" if codec == "hevc" else "libx264"),
+                "-preset", "medium", "-crf", str(crf),
+                "-threads", str(OFFLINE_FFMPEG_THREADS)]
+        if codec == "hevc":
+            venc += ["-x265-params", "log-level=error"]
+    if codec == "hevc" and is_mp4ish:
+        venc += ["-tag:v", "hvc1"]            # so QuickTime/Safari recognise the HEVC
+
+    vf = []
+    if max_height and src_h and src_h > max_height:
+        vf = ["-vf", f"scale=-2:{max_height}"]   # -2 keeps an even width for yuv420p
+
+    # Keep every audio + embedded subtitle/attachment (copy), like the repair leg —
+    # we re-encode only the video. Same container ⇒ audio copy is always muxable.
+    sub_map = ["-map", "0:v:0?", "-map", "0:a?", "-map", "0:s?"]
+    if not is_mp4ish:
+        sub_map += ["-map", "0:t?"]
+    args = [
+        ffmpeg, "-hide_banner", "-v", "error", "-y",
+        *hw,
+        "-i", str(src),
+        *sub_map, "-ignore_unknown",
+        *vf, *venc, "-pix_fmt", "yuv420p",
+        "-c:a", "copy",
+        "-c:s", "mov_text" if is_mp4ish else "copy",
+        str(tmp),
+    ]
+
+    if stopped():
+        return "skipped", "stopped", before, before
+    rc, tail = await _run_ffmpeg_capture(args, set_proc)
+    if stopped():
+        _safe_unlink(tmp)
+        return "skipped", "stopped", before, before
+    try:
+        ok_file = tmp.exists() and tmp.stat().st_size > 0
+    except OSError:
+        ok_file = False
+    if rc != 0 or not ok_file:
+        _safe_unlink(tmp)
+        return "failed", (tail or f"ffmpeg exited {rc}."), before, before
+
+    # Trust the result only if it decodes clean — a re-encode that introduced
+    # corruption must never replace a good source.
+    vrc, vtail = await _ffmpeg_decode_scan(ffmpeg, str(tmp), set_proc, stopped)
+    if stopped():
+        _safe_unlink(tmp)
+        return "skipped", "stopped", before, before
+    if vrc != 0 or vtail:
+        _safe_unlink(tmp)
+        return "failed", ("re-encode produced decode errors" + (f": {vtail}" if vtail else ".")), before, before
+
+    try:
+        after = tmp.stat().st_size
+    except OSError:
+        after = before
+    # Only replace when we actually saved space — an already-efficient source can
+    # re-encode LARGER, in which case keep the original untouched.
+    if after >= before:
+        _safe_unlink(tmp)
+        return "skipped", "already efficient (no smaller result)", before, before
+    try:
+        os.replace(str(tmp), str(src))
+    except OSError as e:
+        _safe_unlink(tmp)
+        return "failed", f"Could not replace the original file: {e}", before, before
+    try:
+        old_dir = OFFLINE_CACHE / old_key
+        if old_dir.exists():
+            await asyncio.to_thread(shutil.rmtree, old_dir, ignore_errors=True)
+        _invalidate_offline_cache_inventory()
+    except Exception:
+        pass
+    return "compressed", (f"{codec.upper()} CRF {crf}"), before, after
+
+
+async def _run_file_compression(scope: str, crf: int, codec: str,
+                                 max_height: Optional[int]) -> None:
+    """Walk the library (or one item) and compress each video in turn, updating
+    state.file_compression in place so the admin card can poll progress."""
+    fc = state.file_compression
+    ffmpeg = analyzer.ffmpeg_bin()
+    try:
+        lib = await get_library()
+        targets: list[tuple[str, str, str, bool]] = []   # (item_title, path, name, torrent)
+        for item in lib.get("items", []):
+            if scope not in ("", "all") and item.get("id") != scope:
+                continue
+            torrent = bool(item.get("torrent_hash"))
+            for f in item.get("files", []):
+                p = f.get("path", "")
+                if Path(p).suffix.lower() not in VIDEO_EXTS:
+                    continue
+                targets.append((item.get("title", ""), p, f.get("name") or Path(p).name, torrent))
+                await asyncio.sleep(0)
+        fc["total"] = len(targets)
+        for (title, path, name, torrent) in targets:
+            if state.file_compression_stop:
+                fc["stopped"] = True
+                break
+            fc["current_name"] = name
+            if not ffmpeg:
+                fc["error"] = "ffmpeg is not installed — cannot compress files."
+                break
+            status, detail, before, after = await _compress_one_file(
+                ffmpeg, path, crf=crf, codec=codec, max_height=max_height,
+                set_proc=lambda p: setattr(state, "file_compression_proc", p),
+                is_stopped=lambda: state.file_compression_stop,
+            )
+            if state.file_compression_stop and status != "compressed":
+                fc["stopped"] = True
+                break
+            fc["results"].append({
+                "path": path, "name": name, "item_title": title, "torrent": torrent,
+                "status": status, "detail": detail, "before": before, "after": after,
+                "saved": max(0, before - after) if status == "compressed" else 0,
+            })
+            fc["bytes_before"] = fc.get("bytes_before", 0) + before
+            fc["bytes_after"]  = fc.get("bytes_after", 0) + (after if status == "compressed" else before)
+            fc["scanned"] = fc.get("scanned", 0) + 1
+    except asyncio.CancelledError:
+        fc["stopped"] = True
+        raise
+    except Exception as e:
+        fc["error"] = str(e)
+    finally:
+        fc["running"] = False
+        fc["current_name"] = ""
+        fc["finished_at"] = _now_iso()
+        state.file_compression_proc = None
+
+
+async def _compress_estimate(scope: str, level: str, codec: str) -> dict:
+    """Estimate the disk space a compression run would reclaim across the target
+    files — both the re-encoded SOURCE (a bitrate model — the real result depends
+    on content) and the current HLS bundle (deleted on replace, re-built smaller on
+    next prep). Runs probes in a worker thread; returns a JSON-safe summary."""
+    _crf, max_height = _compression_params(level, codec, None)
+    hevc_factor = 0.6 if codec == "hevc" else 1.0
+    lib = await get_library()
+    paths: list[str] = []
+    for item in lib.get("items", []):
+        if scope not in ("", "all") and item.get("id") != scope:
+            continue
+        for f in item.get("files", []):
+            p = f.get("path", "")
+            if Path(p).suffix.lower() in VIDEO_EXTS:
+                paths.append(p)
+
+    cur_src = est_src = cur_hls = 0
+    counted = 0
+    for p in paths:
+        src = Path(p)
+        try:
+            size = src.stat().st_size
+        except OSError:
+            continue
+        info = await asyncio.to_thread(_ffprobe_full, p)
+        dur = float(info.get("duration_sec") or 0)
+        src_h = int((info.get("video") or {}).get("height") or 0)
+        cur_src += size
+        counted += 1
+        # current HLS bundle for this source (freed immediately on replace)
+        try:
+            cur_hls += await asyncio.to_thread(_dir_size_bytes, OFFLINE_CACHE / _offline_cache_key(src))
+        except Exception:
+            pass
+        if dur <= 0 or src_h <= 0:
+            est_src += size          # can't model → assume unchanged
+            continue
+        out_h = min(src_h, max_height) if max_height else src_h
+        kbps = _COMPRESS_EST_KBPS[_est_bucket(out_h)][level] * hevc_factor
+        est_video = kbps * 1000 / 8 * dur
+        est_new = est_video + 0.10 * size      # +copied audio/container overhead
+        est_src += int(min(size, est_new))     # never claim a negative saving
+
+    src_saved = max(0, cur_src - est_src)
+    return {
+        "files": counted,
+        "current_source_bytes": cur_src,
+        "est_source_bytes": est_src,
+        "est_source_saved": src_saved,
+        "current_hls_bytes": cur_hls,
+        "est_total_saved": src_saved + cur_hls,
+    }
 
 
 async def _play_prep_chain(item_id: str, files: list[str]) -> None:
@@ -15543,6 +15976,98 @@ def _offline_cache_path_active(cache_key: str) -> bool:
     return any(Path(j.get("out", "")).name == cache_key
                and j.get("status") in ("pending", "processing")
                for j in _offline_jobs.values())
+
+
+def _trim_one_bundle(bdir: Path, keep: set[int], dry_run: bool) -> int:
+    """Drop every down-rung whose height ∉ `keep` from one HLS bundle dir (the
+    original rendition, idx 0, is always kept). Deletes the rung's playlist + init
+    + segments, rewrites master.m3u8 (dropping its #EXT-X-STREAM-INF + URI pair),
+    and updates meta.json. Returns the bytes freed (or that WOULD be freed on a
+    dry run). Sync — call via asyncio.to_thread."""
+    meta_path = bdir / "meta.json"
+    try:
+        meta = json.loads(meta_path.read_text("utf-8"))
+    except Exception:
+        return 0
+    videos = meta.get("videos") or []
+    drop_names = {v.get("name") for v in videos
+                  if v.get("idx", 0) != 0 and int(v.get("height") or 0) not in keep}
+    if not drop_names:
+        return 0
+
+    victims: list[Path] = []
+    for name in drop_names:
+        victims += list(bdir.glob(f"{name}.m3u8"))
+        victims += list(bdir.glob(f"init_{name}.mp4"))
+        victims += list(bdir.glob(f"seg_{name}_*.m4s"))
+    freed = 0
+    for f in victims:
+        try:
+            freed += f.stat().st_size
+        except OSError:
+            pass
+    if dry_run:
+        return freed
+
+    # Rewrite master.m3u8: drop each #EXT-X-STREAM-INF whose following URI line
+    # names a dropped rung (the audio #EXT-X-MEDIA lines are left untouched).
+    master = bdir / "master.m3u8"
+    drop_uris = {f"{n}.m3u8" for n in drop_names}
+    try:
+        lines = master.read_text("utf-8").splitlines()
+        out: list[str] = []
+        i = 0
+        while i < len(lines):
+            line = lines[i]
+            if line.startswith("#EXT-X-STREAM-INF"):
+                uri = lines[i + 1].strip() if i + 1 < len(lines) else ""
+                if uri in drop_uris:
+                    i += 2
+                    continue
+                out.append(line)
+                if i + 1 < len(lines):
+                    out.append(lines[i + 1])
+                i += 2
+                continue
+            out.append(line)
+            i += 1
+        master.write_text("\n".join(out) + "\n", "utf-8")
+    except Exception:
+        return 0   # leave the bundle intact rather than orphan its segments
+
+    for f in victims:
+        try:
+            f.unlink()
+        except OSError:
+            pass
+    meta["videos"] = [v for v in videos
+                      if v.get("idx", 0) == 0 or int(v.get("height") or 0) in keep]
+    try:
+        meta_path.write_text(json.dumps(meta), "utf-8")
+    except Exception:
+        pass
+    return freed
+
+
+async def _hls_trim_bundles(keep: set[int], *, dry_run: bool) -> dict:
+    """Trim every existing bundle down to the original + the `keep` heights. Skips
+    bundles with an active prep job. Returns {bundles, bytes_freed, dry_run}."""
+    bundles = 0
+    freed = 0
+    if OFFLINE_CACHE.exists():
+        for p in sorted(OFFLINE_CACHE.iterdir()):
+            if not (p.is_dir() and _CACHE_KEY_RE.match(p.name)):
+                continue
+            if _offline_cache_path_active(p.name):
+                continue
+            b = await asyncio.to_thread(_trim_one_bundle, p, keep, dry_run)
+            if b > 0:
+                bundles += 1
+                freed += b
+            await asyncio.sleep(0)
+    if not dry_run and freed > 0:
+        _invalidate_offline_cache_inventory()
+    return {"bundles": bundles, "bytes_freed": freed, "dry_run": dry_run}
 
 
 @app.get("/api/admin/offline-cache")

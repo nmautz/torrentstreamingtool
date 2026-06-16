@@ -862,6 +862,121 @@
       </div>
     </div>
 
+    <!-- Storage & compression -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Storage &amp; Compression</h2>
+        <p class="text-xs text-gray-500 mt-0.5">Reclaim disk space. Choose which quality rungs on-device streaming generates, compress source files in place, or drop extra rungs from already-prepped bundles.</p>
+      </div>
+
+      <!-- Section A: default HLS resolutions -->
+      <div class="px-5 py-4 border-b border-gray-800 space-y-3">
+        <div class="text-[11px] font-bold text-gray-300 uppercase tracking-widest">Default On-Device Resolutions</div>
+        <p class="text-[11px] text-gray-500">Which adaptive-quality down-rungs new stream preps build. The <strong>source resolution</strong> is always included. Fewer rungs = smaller bundles, but fewer quality options for the player to drop to on a weak connection. <strong>Affects future preps only</strong> — use <em>Drop HLS Resolutions</em> below to shrink existing bundles.</p>
+        <div id="hlsLadderBoxes" class="flex flex-wrap gap-3 text-[11px] text-gray-400">
+          <label class="flex items-center gap-1.5 opacity-60"><input type="checkbox" checked disabled class="accent-indigo-500"> Source (always)</label>
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="hlsLadderSaveBtn" onclick="saveHlsLadder(this)"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">
+            Save Default Rungs
+          </button>
+        </div>
+      </div>
+
+      <!-- Section B: compress source files -->
+      <div class="px-5 py-4 border-b border-gray-800 space-y-3">
+        <div class="text-[11px] font-bold text-gray-300 uppercase tracking-widest">Compress Source Files</div>
+        <p class="text-[11px] text-gray-500">Re-encode source files smaller. A file is replaced <strong>only</strong> if the result decodes cleanly <strong>and</strong> is actually smaller; its on-device bundle is rebuilt smaller on next prep.</p>
+        <div class="text-[11px] text-amber-300/90 bg-amber-950/20 border border-amber-900/60 px-3 py-2">
+          This <strong>permanently re-encodes</strong> your files (lossy, can't be undone) and rewrites them in place — a <em>torrent-backed</em> file will stop seeding. Aimed at uploaded / non-torrent content.
+        </div>
+
+        <div id="fcUnavail" class="hidden text-xs text-amber-300 bg-amber-950/30 px-3 py-2">
+          ffmpeg isn't installed on this host — compression is unavailable. Install it from the Optional Components card.
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div class="space-y-1.5 min-w-0">
+            <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Scope</label>
+            <select id="fcItem"
+              class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none">
+              <option value="">Whole library</option>
+            </select>
+          </div>
+          <div class="space-y-1.5 min-w-0">
+            <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Codec</label>
+            <select id="fcCodec" onchange="_fcCodecChanged()"
+              class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none">
+              <option value="h264">H.264 — universal, fast</option>
+              <option value="hevc">HEVC (H.265) — ~40% smaller</option>
+            </select>
+          </div>
+        </div>
+        <p id="fcCodecNote" class="text-[10px] text-gray-600">H.264 plays everywhere and encodes fastest, with modest savings.</p>
+
+        <div class="space-y-1.5">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Strength</label>
+          <div id="fcLevelRow" class="flex flex-wrap gap-2">
+            <button data-level="light"    onclick="_fcPickLevel('light')"    class="fc-level text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white">Light</button>
+            <button data-level="balanced" onclick="_fcPickLevel('balanced')" class="fc-level text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white">Balanced</button>
+            <button data-level="maximum"  onclick="_fcPickLevel('maximum')"  class="fc-level text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white">Maximum</button>
+          </div>
+          <p id="fcLevelNote" class="text-[10px] text-gray-600">Balanced — caps at 1080p, good size/quality trade-off.</p>
+        </div>
+
+        <label class="flex items-center gap-2 text-[11px] text-gray-400 cursor-pointer select-none">
+          <input type="checkbox" id="fcAdvanced" onchange="_fcAdvancedChanged()" class="accent-indigo-500">
+          Advanced: set CRF manually (no savings estimate)
+        </label>
+        <div id="fcCrfRow" class="hidden flex items-center gap-3">
+          <input type="range" id="fcCrf" min="18" max="32" value="24" oninput="document.getElementById('fcCrfVal').textContent=this.value"
+            class="flex-1 accent-indigo-500">
+          <span class="text-xs font-mono text-gray-300">CRF <span id="fcCrfVal">24</span></span>
+        </div>
+
+        <div class="flex items-center gap-2 flex-wrap">
+          <button id="fcEstimateBtn" onclick="estimateCompression()"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-300 hover:text-white disabled:opacity-50">
+            Estimate Savings
+          </button>
+          <button id="fcStartBtn" onclick="startCompression()"
+            class="bg-indigo-600 hover:bg-indigo-500 px-5 py-2.5 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">
+            Compress
+          </button>
+          <button id="fcStopBtn" onclick="stopCompression()"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-amber-800 bg-amber-950/40 text-amber-300 hover:bg-amber-900 transition-colors disabled:opacity-40"
+            disabled>
+            Stop
+          </button>
+        </div>
+
+        <div id="fcEstimate" class="hidden text-[11px] text-gray-400 bg-gray-950/50 border border-gray-800 px-3 py-2"></div>
+        <div id="fcStatus" class="text-[11px] text-gray-500">Not run yet.</div>
+        <div id="fcResults" class="hidden space-y-2"></div>
+      </div>
+
+      <!-- Section C: drop HLS resolutions from existing bundles -->
+      <div class="px-5 py-4 space-y-3">
+        <div class="text-[11px] font-bold text-gray-300 uppercase tracking-widest">Drop HLS Resolutions</div>
+        <p class="text-[11px] text-gray-500">Remove extra quality rungs from <strong>already-prepped</strong> bundles to reclaim space now, without re-encoding. The source-resolution rung is always kept; pick which down-rungs to keep.</p>
+        <div id="hlsTrimBoxes" class="flex flex-wrap gap-3 text-[11px] text-gray-400">
+          <label class="flex items-center gap-1.5 opacity-60"><input type="checkbox" checked disabled class="accent-indigo-500"> Source (always)</label>
+        </div>
+        <div class="flex items-center gap-2 flex-wrap">
+          <button id="hlsTrimEstBtn" onclick="estimateHlsTrim()"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-300 hover:text-white disabled:opacity-50">
+            Estimate
+          </button>
+          <button id="hlsTrimBtn" onclick="runHlsTrim()"
+            class="bg-amber-700 hover:bg-amber-600 px-4 py-2 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">
+            Trim Now
+          </button>
+        </div>
+        <div id="hlsTrimStatus" class="text-[11px] text-gray-500"></div>
+      </div>
+    </div>
+
     <!-- Network adapter -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800">
@@ -1487,7 +1602,7 @@ function switchTab(tab){
   if(tab==="skip")       loadSkipPanel();
   if(tab==="offline")    loadOfflineCache();
   if(tab==="background") loadBackgroundVideo();
-  if(tab==="system")   { loadNetwork(); loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadAutoMaint(); loadPrepValidate(); loadVpnKillswitch(); loadForcePrep(); loadFileValidation(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
+  if(tab==="system")   { loadNetwork(); loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadAutoMaint(); loadPrepValidate(); loadVpnKillswitch(); loadForcePrep(); loadFileValidation(); loadStorageCompression(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
   else                 { stopSysHealthPolling(); stopForcePrepPolling(); stopFileValidationPolling(); stopFileRepairPolling(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); if(!_auChangelogLoaded) loadChangelog(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
@@ -2621,6 +2736,278 @@ async function stopFileRepair(){
     }catch(_){
       showToast("Stop failed.", true);
     }
+  });
+}
+
+// ── Storage & Compression ──────────────────────────────────────────────────────
+let _fcTimer = null;
+let _fcItemsLoaded = false;
+let _fcLevel = "balanced";
+let _hlsOptions = [];
+const _FC_LEVEL_NOTES = {
+  light:    "Light — keeps full resolution, gentle quality trim. Smallest savings, best quality.",
+  balanced: "Balanced — caps at 1080p, good size/quality trade-off.",
+  maximum:  "Maximum — caps at 720p, strongest compression. Biggest savings, visible quality loss.",
+};
+
+function _buildLadderBoxes(containerId, options, checked, cls){
+  const c = document.getElementById(containerId);
+  if(!c) return;
+  const base = `<label class="flex items-center gap-1.5 opacity-60"><input type="checkbox" checked disabled class="accent-indigo-500"> Source (always)</label>`;
+  c.innerHTML = base + (options || []).map(h=>`
+    <label class="flex items-center gap-1.5 cursor-pointer">
+      <input type="checkbox" class="accent-indigo-500 ${cls}" value="${h}" ${(checked||[]).includes(h)?'checked':''}> ${h}p
+    </label>`).join("");
+}
+function _readLadderBoxes(cls){
+  return [...document.querySelectorAll("input."+cls+":checked")].map(el=>parseInt(el.value,10));
+}
+
+function _fcPickLevel(l){
+  _fcLevel = l;
+  document.querySelectorAll(".fc-level").forEach(b=>{
+    const on = b.dataset.level === l;
+    b.classList.toggle("bg-indigo-600", on);  b.classList.toggle("border-indigo-500", on);  b.classList.toggle("text-white", on);
+    b.classList.toggle("bg-gray-800", !on);   b.classList.toggle("border-gray-700", !on);   b.classList.toggle("text-gray-400", !on);
+  });
+  const note = document.getElementById("fcLevelNote");
+  if(note) note.textContent = _FC_LEVEL_NOTES[l] || "";
+}
+function _fcAdvancedChanged(){
+  const adv = document.getElementById("fcAdvanced").checked;
+  document.getElementById("fcCrfRow").classList.toggle("hidden", !adv);
+  document.getElementById("fcLevelRow").classList.toggle("opacity-40", adv);
+  document.querySelectorAll(".fc-level").forEach(b=>b.disabled = adv);
+  document.getElementById("fcEstimateBtn").disabled = adv;
+}
+function _fcCodecChanged(){
+  const c = document.getElementById("fcCodec").value;
+  const note = document.getElementById("fcCodecNote");
+  if(note) note.textContent = c === "hevc"
+    ? "HEVC (H.265) is ~40% smaller at the same quality, but encodes slower and makes on-device playback re-encode the source (more CPU/GPU later). Some older devices can't play it."
+    : "H.264 plays everywhere and encodes fastest, with modest savings.";
+}
+
+function _fcResultClasses(status){
+  if(status === "compressed") return ["emerald-900", "emerald-950/20", "emerald-300"];
+  if(status === "failed")     return ["red-900", "red-950/20", "red-300"];
+  return ["gray-700", "gray-950/40", "gray-400"];
+}
+function _renderCompression(d){
+  const status = document.getElementById("fcStatus");
+  const startBtn = document.getElementById("fcStartBtn");
+  const stopBtn = document.getElementById("fcStopBtn");
+  const estBtn = document.getElementById("fcEstimateBtn");
+  const results = document.getElementById("fcResults");
+  if(!status) return;
+  const unavail = d && d.available === false;
+  document.getElementById("fcUnavail").classList.toggle("hidden", !unavail);
+  const running = d && d.running;
+  const adv = document.getElementById("fcAdvanced").checked;
+  if(startBtn) startBtn.disabled = !!unavail || running;
+  if(estBtn)   estBtn.disabled   = !!unavail || running || adv;
+  if(stopBtn)  stopBtn.disabled  = !running;
+  document.getElementById("fcItem").disabled = running;
+
+  const total = (d && d.total) || 0, scanned = (d && d.scanned) || 0;
+  const res = (d && d.results) || [];
+  const freed = (d && d.bytes_freed) || 0;
+  const okN = res.filter(x=>x.status === "compressed").length;
+  if(running){
+    const cur = d.current_name ? ` · ${escHtml(d.current_name)}` : "";
+    status.innerHTML = `<span class="text-emerald-400 font-bold">Compressing</span> · ${scanned}/${total}${cur} · ${okN} done · ${_fmtBytes(freed)} freed`;
+  } else if(d && d.error){
+    status.innerHTML = `<span class="text-red-400 font-bold">Error:</span> ${escHtml(d.error)}`;
+  } else if(d && d.finished_at){
+    const stopped = d.stopped ? " (stopped early)" : "";
+    status.innerHTML = `<span class="text-emerald-400 font-bold">${okN} compressed</span> · ${_fmtBytes(freed)} freed${stopped}.`;
+  } else {
+    status.textContent = "Not run yet.";
+  }
+
+  if(res.length && (d.finished_at || running)){
+    results.classList.remove("hidden");
+    results.innerHTML = res.map(f=>{
+      const [bc, bg, tc] = _fcResultClasses(f.status);
+      const detail = f.status === "compressed"
+        ? `${_fmtBytes(f.before)} → ${_fmtBytes(f.after)} (saved ${_fmtBytes(f.saved)})`
+          + (f.torrent ? " · was torrent-backed — seeding stopped" : "")
+        : escHtml(f.detail || f.status);
+      return `<div class="border border-${bc} bg-${bg} px-3 py-2">
+        <div class="text-xs font-bold text-${tc} break-all">${escHtml(f.name)}</div>
+        <div class="text-[10px] text-gray-500 break-all mt-0.5">${detail}</div>
+      </div>`;
+    }).join("");
+  } else {
+    results.classList.add("hidden");
+    results.innerHTML = "";
+  }
+}
+
+async function _fetchCompression(){
+  try{
+    const r = await fetch("/api/admin/compress-files", {headers: authHeader()});
+    if(!r.ok) return false;
+    const d = await r.json();
+    _renderCompression(d);
+    if(!d.running) stopCompressionPolling();
+    return !!d.running;
+  }catch(_){ return false; }
+}
+function startCompressionPolling(){ stopCompressionPolling(); _fcTimer = setInterval(_fetchCompression, 2000); }
+function stopCompressionPolling(){ if(_fcTimer){ clearInterval(_fcTimer); _fcTimer = null; } }
+
+async function _loadCompressionItems(){
+  if(_fcItemsLoaded) return;
+  try{
+    const r = await fetch("/api/admin/library", {headers: authHeader()});
+    if(!r.ok) return;
+    const {items} = await r.json();
+    const sel = document.getElementById("fcItem");
+    if(!sel) return;
+    const cur = sel.value;
+    sel.innerHTML = `<option value="">Whole library</option>`
+      + (items || []).map(it=>`<option value="${escHtml(it.id)}">${escHtml(it.title)}</option>`).join("");
+    sel.value = cur;
+    _fcItemsLoaded = true;
+  }catch(_){}
+}
+
+async function loadStorageCompression(){
+  try{
+    const r = await fetch("/api/admin/settings", {headers: authHeader()});
+    if(r.ok){
+      const d = await r.json();
+      _hlsOptions = d.hls_ladder_options || [1080, 720, 480, 360];
+      const cur = d.hls_ladder || [];
+      _buildLadderBoxes("hlsLadderBoxes", _hlsOptions, cur, "hlsLadderBox");
+      _buildLadderBoxes("hlsTrimBoxes", _hlsOptions, cur, "hlsTrimBox");
+    }
+  }catch(_){}
+  _fcPickLevel(_fcLevel);
+  _fcCodecChanged();
+  _loadCompressionItems();
+  const running = await _fetchCompression();
+  if(running) startCompressionPolling();
+}
+
+async function saveHlsLadder(btn){
+  const heights = _readLadderBoxes("hlsLadderBox");
+  await withInflight("save_hls_ladder", btn, async ()=>{
+    const r = await fetch("/api/admin/settings",{
+      method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+      body: JSON.stringify({hls_ladder: heights}),
+    });
+    showToast(r.ok ? "Default rungs saved — applies to new preps." : "Save failed.", !r.ok);
+  });
+}
+
+async function estimateCompression(){
+  const btn = document.getElementById("fcEstimateBtn");
+  const box = document.getElementById("fcEstimate");
+  box.classList.remove("hidden");
+  if(document.getElementById("fcAdvanced").checked){
+    box.textContent = "No estimate in Advanced (manual CRF) mode — result size depends entirely on content.";
+    return;
+  }
+  await withInflight("compress_est", btn, async ()=>{
+    box.textContent = "Estimating…";
+    try{
+      const r = await fetch("/api/admin/compress-estimate",{
+        method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+        body: JSON.stringify({
+          scope: document.getElementById("fcItem").value || "all",
+          level: _fcLevel, codec: document.getElementById("fcCodec").value,
+        }),
+      });
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok){ box.textContent = `Estimate failed: ${d.detail || r.status}`; return; }
+      box.innerHTML = `<span class="font-bold text-gray-200">Estimated savings (approximate)</span><br>`
+        + `Source files: ${_fmtBytes(d.current_source_bytes)} → ~${_fmtBytes(d.est_source_bytes)} `
+        + `(save ~<span class="text-emerald-400 font-bold">${_fmtBytes(d.est_source_saved)}</span>)<br>`
+        + `On-device bundles freed now: ${_fmtBytes(d.current_hls_bytes)}<br>`
+        + `<span class="font-bold">Total reclaimed: ~${_fmtBytes(d.est_total_saved)}</span> across ${d.files} file(s).`;
+    }catch(_){ box.textContent = "Estimate failed."; }
+  });
+}
+
+async function startCompression(){
+  const btn = document.getElementById("fcStartBtn");
+  const sel = document.getElementById("fcItem");
+  const scope = sel.value;
+  const codec = document.getElementById("fcCodec").value;
+  const adv = document.getElementById("fcAdvanced").checked;
+  const scopeLabel = scope ? `"${sel.selectedOptions[0]?.text || "this item"}"` : "the WHOLE library";
+  if(!confirm(`Compress ${scopeLabel}?\n\nThis permanently re-encodes source files (lossy — cannot be undone) and rewrites them in place. Torrent-backed files will STOP seeding. A file is only replaced if the result decodes cleanly and is actually smaller.\n\nProceed?`)) return;
+  const body = {scope: scope || "all", codec};
+  if(adv) body.crf = parseInt(document.getElementById("fcCrf").value, 10);
+  else    body.level = _fcLevel;
+  await withInflight("compress_files", btn, async ()=>{
+    try{
+      const r = await fetch("/api/admin/compress-files",{
+        method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+        body: JSON.stringify(body),
+      });
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok){ showToast(`Compression failed: ${d.detail || r.status}`, true); return; }
+      _renderCompression(d);
+      startCompressionPolling();
+      showToast("Compressing…");
+    }catch(_){ showToast("Compression failed.", true); }
+  });
+}
+
+async function stopCompression(){
+  const btn = document.getElementById("fcStopBtn");
+  await withInflight("compress_files_stop", btn, async ()=>{
+    try{
+      const r = await fetch("/api/admin/compress-files/stop",{
+        method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+      });
+      const d = await r.json().catch(()=>({}));
+      if(r.ok) _renderCompression(d);
+      showToast("Compression stopped.");
+    }catch(_){ showToast("Stop failed.", true); }
+  });
+}
+
+async function estimateHlsTrim(){
+  const btn = document.getElementById("hlsTrimEstBtn");
+  const keep = _readLadderBoxes("hlsTrimBox");
+  const box = document.getElementById("hlsTrimStatus");
+  await withInflight("hls_trim_est", btn, async ()=>{
+    box.textContent = "Estimating…";
+    try{
+      const r = await fetch("/api/admin/hls-trim",{
+        method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+        body: JSON.stringify({heights: keep, dry_run: true}),
+      });
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok){ box.textContent = `Estimate failed: ${d.detail || r.status}`; return; }
+      box.innerHTML = d.bytes_freed
+        ? `Trimming would free <span class="text-emerald-400 font-bold">${_fmtBytes(d.bytes_freed)}</span> across ${d.bundles} bundle(s).`
+        : "Nothing to trim — existing bundles already match this selection.";
+    }catch(_){ box.textContent = "Estimate failed."; }
+  });
+}
+
+async function runHlsTrim(){
+  const btn = document.getElementById("hlsTrimBtn");
+  const keep = _readLadderBoxes("hlsTrimBox");
+  if(!confirm("Drop the unselected resolutions from every existing on-device bundle?\n\nThose rungs' segments are deleted now. Playback keeps the remaining qualities; nothing is re-encoded.\n\nProceed?")) return;
+  await withInflight("hls_trim", btn, async ()=>{
+    const box = document.getElementById("hlsTrimStatus");
+    box.textContent = "Trimming…";
+    try{
+      const r = await fetch("/api/admin/hls-trim",{
+        method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+        body: JSON.stringify({heights: keep, dry_run: false}),
+      });
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok){ showToast(`Trim failed: ${d.detail || r.status}`, true); box.textContent = ""; return; }
+      box.innerHTML = `Freed <span class="text-emerald-400 font-bold">${_fmtBytes(d.bytes_freed)}</span> from ${d.bundles} bundle(s).`;
+      showToast(`Trimmed ${d.bundles} bundle(s), freed ${_fmtBytes(d.bytes_freed)}.`);
+    }catch(_){ showToast("Trim failed.", true); box.textContent = ""; }
   });
 }
 

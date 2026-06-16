@@ -167,7 +167,7 @@ For each profile:
 
 ### 7. System
 
-Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Automatic Stream Prep**, **Auto-Prep on Play**, **Force Stream Prep**, **Validate & Repair on Prep**, **File Validator**, **Network Adapter**, **VPN Kill Switch**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
+Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Automatic Stream Prep**, **Auto-Prep on Play**, **Force Stream Prep**, **Validate & Repair on Prep**, **File Validator**, **Storage & Compression**, **Network Adapter**, **VPN Kill Switch**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
 
 #### System Health
 
@@ -367,6 +367,21 @@ A candidate is run back through the deep decode; the original is **atomically re
 - `GET /api/admin/repair-files` → current/last repair run snapshot.
 - `POST /api/admin/repair-files` → `{paths?, reencode?}`; `paths` defaults to the last scan's damaged list. 409 if a repair *or* a validation scan is running, 503 if ffmpeg is missing, 400 if there's nothing to repair.
 - `POST /api/admin/repair-files/stop` → halts the running repair.
+
+#### Storage & Compression
+
+One card, three space-saving tools — two that shrink the **source files** and the **on-device (HLS) bundles** they generate, and one that picks the bundle quality ladder going forward. See [STREAMING.md § Configurable ABR ladder](STREAMING.md) for the encode-side detail.
+
+**1. Default On-Device Resolutions.** Checkboxes choosing which adaptive-bitrate **down-rungs** new stream preps build (the source-resolution rung is always emitted, so it's shown as a disabled "Source (always)"). Options are `1080 / 720 / 480 / 360`; the default (unchanged) is `720 + 480`. The selection persists to `library.json → settings.admin_overrides.hls_ladder` (an empty/default pick removes the override) and is read by `_hls_ladder_heights` → `_hls_video_variants`, so it shapes the `-var_stream_map` of every subsequent prep. **Affects future preps only** — existing bundles keep their rungs (use *Drop HLS Resolutions* to slim those). `OFFLINE_CACHE_VERSION` is deliberately **not** bumped, so changing the default doesn't force a global rebuild. Saved via the shared `POST /api/admin/settings {hls_ladder}` (also returned by `GET`, alongside `hls_ladder_options`).
+
+**2. Compress Source Files.** In-place lossy re-encode to reclaim disk, modelled on the File-Repair re-encode (`_compress_one_file` reuses the repair pattern: re-encode video, **copy** audio + every embedded sub/attachment, deep-decode the candidate, then `os.replace` + purge the stale HLS bundle). Controls: **Scope** (whole library or one item), **Codec** (`h264` / `hevc`, with an inline tradeoff note — HEVC ~40% smaller but slower and forces on-device prep to transcode), and **Strength** (Light / Balanced / Maximum presets → codec-appropriate CRF + an optional down-scale cap, or an **Advanced** checkbox exposing a raw CRF 18–32 slider). A file is replaced **only** when the re-encode decodes clean **and** comes out smaller (an already-efficient source reports `skipped`, original untouched). Runs one file at a time at below-normal priority, NVENC-accelerated when present; live `scanned/total` + bytes-freed poll, per-file results, and a **Stop** that halts between files and kills the in-flight ffmpeg. Same caveats as Repair: **lossy/irreversible**, and rewriting a **torrent-backed** file stops it seeding (flagged per-row). Disabled when ffmpeg is missing (not macOS-gated — a plain decode, like the validator).
+
+- **Estimate Savings** (`POST /api/admin/compress-estimate {scope, level, codec}`) projects the reclaimed bytes **before** committing: a per-(resolution-bucket × preset) target-bitrate model for the re-encoded source (HEVC ×0.6) plus the current HLS bundle bytes (freed on replace). Labelled "approximate" — it's a model, not a guarantee, and is hidden in Advanced/manual-CRF mode.
+- `GET /api/admin/compress-files` → run snapshot (`running, scope, level, codec, crf, total, scanned, current_name, results:[{name, status, detail, before, after, saved, torrent}], bytes_before, bytes_after, bytes_freed, available`).
+- `POST /api/admin/compress-files` → `{scope?, level?, codec?, crf?}`; 409 if running, 503 if no ffmpeg, 400 on bad level/codec.
+- `POST /api/admin/compress-files/stop` → halts between files + kills the in-flight encode.
+
+**3. Drop HLS Resolutions.** Trims surplus down-rungs out of **already-prepped** bundles to reclaim space *now*, without re-encoding. Keep-checkboxes (source always kept) feed `POST /api/admin/hls-trim {heights, dry_run}`: for each `.offline_cache/<sha>/` bundle (skipping any with an active prep job), it deletes the dropped rungs' playlist + init + segments, rewrites `master.m3u8` (dropping each `#EXT-X-STREAM-INF` + its URI line), and updates `meta.json videos[]`. `dry_run:true` returns the bytes that **would** be freed (powers the **Estimate** button) without touching anything; a real run returns `{bundles, bytes_freed}` and invalidates the offline-cache inventory snapshot.
 
 #### Subtitles
 
