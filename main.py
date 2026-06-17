@@ -707,6 +707,12 @@ class AppState:
     file_compression_task: Optional[asyncio.Task] = None
     file_compression_stop: bool = False
     file_compression_proc: Optional["asyncio.subprocess.Process"] = None
+    # Normalised paths of source files currently mid-compress. A robust playback
+    # LOCK: while a file is here, every playback/read entry point (VLC play,
+    # on-device prep, on-demand JIT, clip) refuses it, and the compressor stops
+    # any in-flight playback of it first — because the in-place replace (os.replace)
+    # fails on Windows while anything holds the file open (WinError 5).
+    compressing_paths: set = field(default_factory=set)
     # Idle-gated automatic background validation (separate from the admin scan so
     # they never collide). Walks files whose persisted `validation` verdict is
     # missing/stale, one at a time, ONLY while the box is idle — and persists each
@@ -6545,6 +6551,9 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
         raise HTTPException(400, f"File(s) not yet downloaded: {', '.join(Path(p).name for p in playlist[:3])}")
     playlist = existing
     first = Path(playlist[0])
+    # Robust playback lock — refuse to start VLC on a file mid-compress (it would
+    # hold the source open and break the in-place replace).
+    _assert_not_compressing(str(first))
 
     # Resolve seek position and resume mode synchronously
     seek_sec = req.seek_first_to
@@ -10514,6 +10523,23 @@ async def _activity_snapshot() -> dict:
             restart_note="Repair state is in-memory and does NOT resume after a restart — a file already replaced stays repaired; the rest must be re-run.",
             progress=(scanned / total if total else None))
 
+    # 5a. Source compression run
+    fc = state.file_compression or {}
+    if fc.get("running"):
+        total = fc.get("total") or 0
+        scanned = fc.get("scanned") or 0
+        freed = max(0, (fc.get("bytes_before") or 0) - (fc.get("bytes_after") or 0))
+        codec = (fc.get("codec") or "").upper()
+        add(category="Compression",
+            title=("Whole library" if (fc.get("scope") in ("all", "", None)) else _activity_title(fc.get("scope", ""), "", items_by_id)),
+            status="running",
+            detail=fc.get("current_name", ""),
+            reason=f"Re-encoding source files smaller ({codec or 'video'}) to reclaim disk space; "
+                   f"{human_size(freed)} freed so far.",
+            resumes=False,
+            restart_note="Compression state is in-memory and does NOT resume after a restart — a file already replaced stays compressed; the rest must be re-run from the Storage tab.",
+            progress=(scanned / total if total else None))
+
     # 5b. Automatic background validation (idle-gated, resumable)
     av = state.auto_validate or {}
     if av.get("running"):
@@ -12443,6 +12469,15 @@ async def _run_offline_job(job_id: str) -> None:
         # ETAs reflect real ffmpeg throughput, not queue wait time.
         job["started_at"] = time.time()
         src = Path(job["src"])
+        # Compression playback lock — never read a source that's being rewritten in
+        # place (it would race the os.replace and could read a half-written file).
+        # Park as pending and re-check shortly; the compressor releases the lock the
+        # moment that file finishes.
+        if _is_compressing(str(src)):
+            job["status"] = "pending"
+            job.pop("_compress_block", None)
+            asyncio.create_task(_requeue_offline_job(job_id, delay=3.0))
+            return
         hls_log.info("job %s START src=%s out=%s", job_id, src, out_dir.name)
         tmp_dir = out_dir.with_name(out_dir.name + ".part")
         ffmpeg = analyzer.ffmpeg_bin()
@@ -12681,6 +12716,17 @@ async def _run_offline_job(job_id: str) -> None:
                 if proc.returncode == 0:
                     break  # success → leave the retry loop and write meta.json
 
+                # Did _free_file_for_compression() terminate us so the source could
+                # be rewritten in place? Not a failure — re-queue as pending; the
+                # start-of-job compression-lock check parks it until the compress
+                # finishes, then it re-preps from the (now smaller) source.
+                if job.pop("_compress_block", False):
+                    job["status"]   = "pending"
+                    job["progress"] = 0.0
+                    await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
+                    asyncio.create_task(_requeue_offline_job(job_id, delay=3.0))
+                    hls_log.info("job %s re-queued (source being compressed)", job_id)
+                    return
                 # Did _preempt_running_bulk() boot us for an interactive prep? If so,
                 # this isn't a failure — re-queue this bulk file as "pending" so it
                 # resumes once the interactive encode releases the slot (it restarts
@@ -13889,9 +13935,91 @@ def _file_compression_status() -> dict:
     return fc
 
 
+def _compress_lock_key(path: str) -> str:
+    """Normalised path key for the compression playback-lock set — case- and
+    separator-insensitive so Windows path variants of the same file collide."""
+    try:
+        return os.path.normcase(os.path.normpath(os.path.abspath(str(path))))
+    except Exception:
+        return os.path.normcase(str(path))
+
+
+def _is_compressing(path: str) -> bool:
+    """True if `path` is currently being compressed (playback is locked)."""
+    return _compress_lock_key(path) in state.compressing_paths
+
+
+def _assert_not_compressing(path: str) -> None:
+    """Raise 423 if a file is mid-compress. The robust server-side gate behind
+    every playback/read path — even the ones the user didn't click (auto-advance,
+    warm-prep, on-demand, clip, handoff) — so nothing can hold the file open while
+    it's being rewritten in place."""
+    if _is_compressing(path):
+        raise HTTPException(
+            423, "This episode is being compressed to save space — playback is "
+                 "locked until it finishes. Try again in a moment.")
+
+
+async def _free_file_for_compression(path: str) -> None:
+    """Release every handle on `path` so the in-place replace can't hit WinError 5:
+    stop VLC if it's playing this exact file, tear down any on-demand JIT session
+    reading it, and terminate any in-flight HLS prep encoding it. The lock (already
+    set by the caller) stops anything new from grabbing it again."""
+    key = _compress_lock_key(path)
+    # 1. VLC (TV) — holds the source open for the whole playback. Stop it.
+    try:
+        cur = state.library_current_file
+        if cur and _compress_lock_key(cur) == key:
+            hls_log.info("compression: stopping VLC playback of %s", Path(path).name)
+            await stop()
+    except Exception:
+        pass
+    # 2. On-demand JIT sessions — ffmpeg reads the source live; tear them down.
+    try:
+        for skey, s in list(_od_sessions.items()):
+            if _compress_lock_key(s.get("src", "")) == key:
+                await _od_teardown(skey)
+    except Exception:
+        pass
+    # 3. In-flight HLS prep of this file — terminate it so it stops reading the
+    #    source. `_compress_block` makes _run_offline_job re-queue (defer) rather
+    #    than error, so it picks the file back up after the lock clears.
+    try:
+        for j in list(_offline_jobs.values()):
+            if (_compress_lock_key(j.get("src", "")) == key
+                    and j.get("status") in ("pending", "processing")):
+                j["_compress_block"] = True
+                proc = j.get("_proc")
+                if proc is not None and proc.returncode is None:
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+
 async def _compress_one_file(ffmpeg: str, path: str, *, crf: int, codec: str,
                              max_height: Optional[int], set_proc, is_stopped
                              ) -> tuple[str, str, int, int]:
+    """Lock-guarded wrapper around the actual compress. Adds the file to the
+    playback lock, frees any in-flight reader (VLC / on-demand / prep), runs the
+    re-encode, then always releases the lock — so a file is never left
+    unplayable if the encode errors or is cancelled."""
+    lock_key = _compress_lock_key(path)
+    state.compressing_paths.add(lock_key)
+    try:
+        await _free_file_for_compression(path)
+        return await _compress_one_file_inner(
+            ffmpeg, path, crf=crf, codec=codec, max_height=max_height,
+            set_proc=set_proc, is_stopped=is_stopped)
+    finally:
+        state.compressing_paths.discard(lock_key)
+
+
+async def _compress_one_file_inner(ffmpeg: str, path: str, *, crf: int, codec: str,
+                                   max_height: Optional[int], set_proc, is_stopped
+                                   ) -> tuple[str, str, int, int]:
     """Re-encode one source file in place to save space. Returns
     (status, detail, bytes_before, bytes_after) where status ∈
     "compressed" | "skipped" | "failed". On success the original is atomically
@@ -13984,11 +14112,22 @@ async def _compress_one_file(ffmpeg: str, path: str, *, crf: int, codec: str,
     if after >= before:
         _safe_unlink(tmp)
         return "skipped", "already efficient (no smaller result)", before, before
-    try:
-        os.replace(str(tmp), str(src))
-    except OSError as e:
+    # Replace in place. The lock + _free_file_for_compression already released
+    # every known reader, but on Windows a handle can linger briefly after the
+    # process is told to stop, so retry across that release latency before giving up.
+    replace_err: Optional[OSError] = None
+    for attempt in range(6):
+        try:
+            os.replace(str(tmp), str(src))
+            replace_err = None
+            break
+        except OSError as e:
+            replace_err = e
+            await _free_file_for_compression(path)   # re-kick any reader that reappeared
+            await asyncio.sleep(0.5 * (attempt + 1))
+    if replace_err is not None:
         _safe_unlink(tmp)
-        return "failed", f"Could not replace the original file: {e}", before, before
+        return "failed", f"Could not replace the original file: {replace_err}", before, before
     try:
         old_dir = OFFLINE_CACHE / old_key
         if old_dir.exists():
@@ -14611,6 +14750,7 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
     src = Path(target["path"])
     if not src.exists():
         raise HTTPException(404, "File not on disk.")
+    _assert_not_compressing(str(src))
 
     sidecar_subs = await asyncio.to_thread(_list_sidecar_subs, src, item_id)
     saved_tracks = (_saved_local_tracks(lib, item, req.profile_id, req.file_path)
@@ -15357,6 +15497,7 @@ async def stream_ondemand(item_id: str, req: OnDemandReq) -> JSONResponse:
     src = Path(target["path"])
     if not src.exists():
         raise HTTPException(404, "File not on disk.")
+    _assert_not_compressing(str(src))
 
     info = await asyncio.to_thread(_ffprobe_full, str(src))
     duration = float(info.get("duration_sec", 0) or 0)
@@ -15658,6 +15799,7 @@ async def make_clip(item_id: str, req: ClipReq) -> JSONResponse:
     src = Path(target["path"])
     if not src.exists():
         raise HTTPException(404, "File not on disk.")
+    _assert_not_compressing(str(src))
 
     # Prepped-only: require the HLS bundle to exist (matches the product gate and
     # guarantees the source is readable + probed).

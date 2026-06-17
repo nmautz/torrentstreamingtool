@@ -112,6 +112,10 @@
       class="tab-inactive px-4 sm:px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors whitespace-nowrap flex-shrink-0">
       Offline Cache
     </button>
+    <button onclick="switchTab('storage')" id="tab-storage"
+      class="tab-inactive px-4 sm:px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors whitespace-nowrap flex-shrink-0">
+      Storage
+    </button>
     <button onclick="switchTab('background')" id="tab-background"
       class="tab-inactive px-4 sm:px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors whitespace-nowrap flex-shrink-0">
       Background
@@ -422,6 +426,124 @@
         </button>
       </div>
       <div id="offOrphanList" class="divide-y divide-gray-800"></div>
+    </div>
+  </div>
+
+  <!-- ── Storage & Compression Tab ────────────────────────────────────────────── -->
+  <div id="panelStorage" class="hidden flex-1 overflow-y-auto p-3 sm:p-5 max-w-2xl mx-auto w-full space-y-4">
+    <!-- Storage & compression -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800">
+        <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Storage &amp; Compression</h2>
+        <p class="text-xs text-gray-500 mt-0.5">Reclaim disk space. Choose which quality rungs on-device streaming generates, compress source files in place, or drop extra rungs from already-prepped bundles.</p>
+      </div>
+
+      <!-- Section A: default HLS resolutions -->
+      <div class="px-5 py-4 border-b border-gray-800 space-y-3">
+        <div class="text-[11px] font-bold text-gray-300 uppercase tracking-widest">Default On-Device Resolutions</div>
+        <p class="text-[11px] text-gray-500">Which adaptive-quality down-rungs new stream preps build. The <strong>source resolution</strong> is always included. Fewer rungs = smaller bundles, but fewer quality options for the player to drop to on a weak connection. <strong>Affects future preps only</strong> — use <em>Drop HLS Resolutions</em> below to shrink existing bundles.</p>
+        <div id="hlsLadderBoxes" class="flex flex-wrap gap-3 text-[11px] text-gray-400">
+          <label class="flex items-center gap-1.5 opacity-60"><input type="checkbox" checked disabled class="accent-indigo-500"> Source (always)</label>
+        </div>
+        <div class="flex items-center gap-2">
+          <button id="hlsLadderSaveBtn" onclick="saveHlsLadder(this)"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">
+            Save Default Rungs
+          </button>
+        </div>
+      </div>
+
+      <!-- Section B: compress source files -->
+      <div class="px-5 py-4 border-b border-gray-800 space-y-3">
+        <div class="text-[11px] font-bold text-gray-300 uppercase tracking-widest">Compress Source Files</div>
+        <p class="text-[11px] text-gray-500">Re-encode source files smaller. A file is replaced <strong>only</strong> if the result decodes cleanly <strong>and</strong> is actually smaller; its on-device bundle is rebuilt smaller on next prep.</p>
+        <div class="text-[11px] text-amber-300/90 bg-amber-950/20 border border-amber-900/60 px-3 py-2">
+          This <strong>permanently re-encodes</strong> your files (lossy, can't be undone) and rewrites them in place — a <em>torrent-backed</em> file will stop seeding. Aimed at uploaded / non-torrent content.
+        </div>
+
+        <div id="fcUnavail" class="hidden text-xs text-amber-300 bg-amber-950/30 px-3 py-2">
+          ffmpeg isn't installed on this host — compression is unavailable. Install it from the Optional Components card.
+        </div>
+
+        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+          <div class="space-y-1.5 min-w-0">
+            <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Scope</label>
+            <select id="fcItem"
+              class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none">
+              <option value="">Whole library</option>
+            </select>
+          </div>
+          <div class="space-y-1.5 min-w-0">
+            <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Codec</label>
+            <select id="fcCodec" onchange="_fcCodecChanged()"
+              class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none">
+              <option value="h264">H.264 — universal, fast</option>
+              <option value="hevc">HEVC (H.265) — ~40% smaller</option>
+            </select>
+          </div>
+        </div>
+        <p id="fcCodecNote" class="text-[10px] text-gray-600">H.264 plays everywhere and encodes fastest, with modest savings.</p>
+
+        <div class="space-y-1.5">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Strength</label>
+          <div id="fcLevelRow" class="flex flex-wrap gap-2">
+            <button data-level="light"    onclick="_fcPickLevel('light')"    class="fc-level text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white">Light</button>
+            <button data-level="balanced" onclick="_fcPickLevel('balanced')" class="fc-level text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white">Balanced</button>
+            <button data-level="maximum"  onclick="_fcPickLevel('maximum')"  class="fc-level text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white">Maximum</button>
+          </div>
+          <p id="fcLevelNote" class="text-[10px] text-gray-600">Balanced — caps at 1080p, good size/quality trade-off.</p>
+        </div>
+
+        <label class="flex items-center gap-2 text-[11px] text-gray-400 cursor-pointer select-none">
+          <input type="checkbox" id="fcAdvanced" onchange="_fcAdvancedChanged()" class="accent-indigo-500">
+          Advanced: set CRF manually (no savings estimate)
+        </label>
+        <div id="fcCrfRow" class="hidden flex items-center gap-3">
+          <input type="range" id="fcCrf" min="18" max="32" value="24" oninput="document.getElementById('fcCrfVal').textContent=this.value"
+            class="flex-1 accent-indigo-500">
+          <span class="text-xs font-mono text-gray-300">CRF <span id="fcCrfVal">24</span></span>
+        </div>
+
+        <div class="flex items-center gap-2 flex-wrap">
+          <button id="fcEstimateBtn" onclick="estimateCompression()"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-300 hover:text-white disabled:opacity-50">
+            Estimate Savings
+          </button>
+          <button id="fcStartBtn" onclick="startCompression()"
+            class="bg-indigo-600 hover:bg-indigo-500 px-5 py-2.5 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">
+            Compress
+          </button>
+          <button id="fcStopBtn" onclick="stopCompression()"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-amber-800 bg-amber-950/40 text-amber-300 hover:bg-amber-900 transition-colors disabled:opacity-40"
+            disabled>
+            Stop
+          </button>
+        </div>
+
+        <div id="fcEstimate" class="hidden text-[11px] text-gray-400 bg-gray-950/50 border border-gray-800 px-3 py-2"></div>
+        <div id="fcStatus" class="text-[11px] text-gray-500">Not run yet.</div>
+        <div id="fcResults" class="hidden space-y-2"></div>
+      </div>
+
+      <!-- Section C: drop HLS resolutions from existing bundles -->
+      <div class="px-5 py-4 space-y-3">
+        <div class="text-[11px] font-bold text-gray-300 uppercase tracking-widest">Drop HLS Resolutions</div>
+        <p class="text-[11px] text-gray-500">Remove extra quality rungs from <strong>already-prepped</strong> bundles to reclaim space now, without re-encoding. The source-resolution rung is always kept; pick which down-rungs to keep.</p>
+        <div id="hlsTrimBoxes" class="flex flex-wrap gap-3 text-[11px] text-gray-400">
+          <label class="flex items-center gap-1.5 opacity-60"><input type="checkbox" checked disabled class="accent-indigo-500"> Source (always)</label>
+        </div>
+        <div class="flex items-center gap-2 flex-wrap">
+          <button id="hlsTrimEstBtn" onclick="estimateHlsTrim()"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-300 hover:text-white disabled:opacity-50">
+            Estimate
+          </button>
+          <button id="hlsTrimBtn" onclick="runHlsTrim()"
+            class="bg-amber-700 hover:bg-amber-600 px-4 py-2 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">
+            Trim Now
+          </button>
+        </div>
+        <div id="hlsTrimStatus" class="text-[11px] text-gray-500"></div>
+      </div>
     </div>
   </div>
 
@@ -859,121 +981,6 @@
         </div>
         <div id="fvRepairStatus" class="text-[11px] text-gray-500">Ready.</div>
         <div id="fvRepairResults" class="hidden space-y-2"></div>
-      </div>
-    </div>
-
-    <!-- Storage & compression -->
-    <div class="bg-gray-900 border border-gray-800">
-      <div class="px-5 py-4 border-b border-gray-800">
-        <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Storage &amp; Compression</h2>
-        <p class="text-xs text-gray-500 mt-0.5">Reclaim disk space. Choose which quality rungs on-device streaming generates, compress source files in place, or drop extra rungs from already-prepped bundles.</p>
-      </div>
-
-      <!-- Section A: default HLS resolutions -->
-      <div class="px-5 py-4 border-b border-gray-800 space-y-3">
-        <div class="text-[11px] font-bold text-gray-300 uppercase tracking-widest">Default On-Device Resolutions</div>
-        <p class="text-[11px] text-gray-500">Which adaptive-quality down-rungs new stream preps build. The <strong>source resolution</strong> is always included. Fewer rungs = smaller bundles, but fewer quality options for the player to drop to on a weak connection. <strong>Affects future preps only</strong> — use <em>Drop HLS Resolutions</em> below to shrink existing bundles.</p>
-        <div id="hlsLadderBoxes" class="flex flex-wrap gap-3 text-[11px] text-gray-400">
-          <label class="flex items-center gap-1.5 opacity-60"><input type="checkbox" checked disabled class="accent-indigo-500"> Source (always)</label>
-        </div>
-        <div class="flex items-center gap-2">
-          <button id="hlsLadderSaveBtn" onclick="saveHlsLadder(this)"
-            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">
-            Save Default Rungs
-          </button>
-        </div>
-      </div>
-
-      <!-- Section B: compress source files -->
-      <div class="px-5 py-4 border-b border-gray-800 space-y-3">
-        <div class="text-[11px] font-bold text-gray-300 uppercase tracking-widest">Compress Source Files</div>
-        <p class="text-[11px] text-gray-500">Re-encode source files smaller. A file is replaced <strong>only</strong> if the result decodes cleanly <strong>and</strong> is actually smaller; its on-device bundle is rebuilt smaller on next prep.</p>
-        <div class="text-[11px] text-amber-300/90 bg-amber-950/20 border border-amber-900/60 px-3 py-2">
-          This <strong>permanently re-encodes</strong> your files (lossy, can't be undone) and rewrites them in place — a <em>torrent-backed</em> file will stop seeding. Aimed at uploaded / non-torrent content.
-        </div>
-
-        <div id="fcUnavail" class="hidden text-xs text-amber-300 bg-amber-950/30 px-3 py-2">
-          ffmpeg isn't installed on this host — compression is unavailable. Install it from the Optional Components card.
-        </div>
-
-        <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
-          <div class="space-y-1.5 min-w-0">
-            <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Scope</label>
-            <select id="fcItem"
-              class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none">
-              <option value="">Whole library</option>
-            </select>
-          </div>
-          <div class="space-y-1.5 min-w-0">
-            <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Codec</label>
-            <select id="fcCodec" onchange="_fcCodecChanged()"
-              class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none">
-              <option value="h264">H.264 — universal, fast</option>
-              <option value="hevc">HEVC (H.265) — ~40% smaller</option>
-            </select>
-          </div>
-        </div>
-        <p id="fcCodecNote" class="text-[10px] text-gray-600">H.264 plays everywhere and encodes fastest, with modest savings.</p>
-
-        <div class="space-y-1.5">
-          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Strength</label>
-          <div id="fcLevelRow" class="flex flex-wrap gap-2">
-            <button data-level="light"    onclick="_fcPickLevel('light')"    class="fc-level text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white">Light</button>
-            <button data-level="balanced" onclick="_fcPickLevel('balanced')" class="fc-level text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white">Balanced</button>
-            <button data-level="maximum"  onclick="_fcPickLevel('maximum')"  class="fc-level text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white">Maximum</button>
-          </div>
-          <p id="fcLevelNote" class="text-[10px] text-gray-600">Balanced — caps at 1080p, good size/quality trade-off.</p>
-        </div>
-
-        <label class="flex items-center gap-2 text-[11px] text-gray-400 cursor-pointer select-none">
-          <input type="checkbox" id="fcAdvanced" onchange="_fcAdvancedChanged()" class="accent-indigo-500">
-          Advanced: set CRF manually (no savings estimate)
-        </label>
-        <div id="fcCrfRow" class="hidden flex items-center gap-3">
-          <input type="range" id="fcCrf" min="18" max="32" value="24" oninput="document.getElementById('fcCrfVal').textContent=this.value"
-            class="flex-1 accent-indigo-500">
-          <span class="text-xs font-mono text-gray-300">CRF <span id="fcCrfVal">24</span></span>
-        </div>
-
-        <div class="flex items-center gap-2 flex-wrap">
-          <button id="fcEstimateBtn" onclick="estimateCompression()"
-            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-300 hover:text-white disabled:opacity-50">
-            Estimate Savings
-          </button>
-          <button id="fcStartBtn" onclick="startCompression()"
-            class="bg-indigo-600 hover:bg-indigo-500 px-5 py-2.5 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">
-            Compress
-          </button>
-          <button id="fcStopBtn" onclick="stopCompression()"
-            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-amber-800 bg-amber-950/40 text-amber-300 hover:bg-amber-900 transition-colors disabled:opacity-40"
-            disabled>
-            Stop
-          </button>
-        </div>
-
-        <div id="fcEstimate" class="hidden text-[11px] text-gray-400 bg-gray-950/50 border border-gray-800 px-3 py-2"></div>
-        <div id="fcStatus" class="text-[11px] text-gray-500">Not run yet.</div>
-        <div id="fcResults" class="hidden space-y-2"></div>
-      </div>
-
-      <!-- Section C: drop HLS resolutions from existing bundles -->
-      <div class="px-5 py-4 space-y-3">
-        <div class="text-[11px] font-bold text-gray-300 uppercase tracking-widest">Drop HLS Resolutions</div>
-        <p class="text-[11px] text-gray-500">Remove extra quality rungs from <strong>already-prepped</strong> bundles to reclaim space now, without re-encoding. The source-resolution rung is always kept; pick which down-rungs to keep.</p>
-        <div id="hlsTrimBoxes" class="flex flex-wrap gap-3 text-[11px] text-gray-400">
-          <label class="flex items-center gap-1.5 opacity-60"><input type="checkbox" checked disabled class="accent-indigo-500"> Source (always)</label>
-        </div>
-        <div class="flex items-center gap-2 flex-wrap">
-          <button id="hlsTrimEstBtn" onclick="estimateHlsTrim()"
-            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-300 hover:text-white disabled:opacity-50">
-            Estimate
-          </button>
-          <button id="hlsTrimBtn" onclick="runHlsTrim()"
-            class="bg-amber-700 hover:bg-amber-600 px-4 py-2 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">
-            Trim Now
-          </button>
-        </div>
-        <div id="hlsTrimStatus" class="text-[11px] text-gray-500"></div>
       </div>
     </div>
 
@@ -1587,7 +1594,7 @@ async function loadOfflineEncoder(){
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 function switchTab(tab){
   activeTab = tab;
-  ["activity","indexers","content","profiles","skip","offline","background","system","updates"].forEach(t=>{
+  ["activity","indexers","content","profiles","skip","offline","storage","background","system","updates"].forEach(t=>{
     document.getElementById(`tab-${t}`).className =
       t===tab ? "tab-active px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors"
                : "tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors";
@@ -1601,8 +1608,10 @@ function switchTab(tab){
   if(tab==="profiles")   loadProfilePins();
   if(tab==="skip")       loadSkipPanel();
   if(tab==="offline")    loadOfflineCache();
+  if(tab==="storage")    loadStorageCompression();
+  else                   stopCompressionPolling();
   if(tab==="background") loadBackgroundVideo();
-  if(tab==="system")   { loadNetwork(); loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadAutoMaint(); loadPrepValidate(); loadVpnKillswitch(); loadForcePrep(); loadFileValidation(); loadStorageCompression(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
+  if(tab==="system")   { loadNetwork(); loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadAutoMaint(); loadPrepValidate(); loadVpnKillswitch(); loadForcePrep(); loadFileValidation(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
   else                 { stopSysHealthPolling(); stopForcePrepPolling(); stopFileValidationPolling(); stopFileRepairPolling(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); if(!_auChangelogLoaded) loadChangelog(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
