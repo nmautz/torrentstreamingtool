@@ -1609,6 +1609,33 @@
                    text-sm font-black uppercase tracking-wide transition-colors
                    disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap">Search</button>
         </div>
+        <!-- Search sources: pick which indexers to query (within what the profile is allowed) -->
+        <div id="srcWrap" class="hidden mt-2 px-1">
+          <button id="srcToggle" type="button" onclick="toggleSourcePanel()"
+            class="flex items-center gap-1.5 text-[11px] font-bold uppercase tracking-wide
+                   text-gray-500 hover:text-gray-300 transition-colors">
+            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M4 6h16M4 12h16M4 18h7"/>
+            </svg>
+            Sources <span id="srcSummary" class="text-indigo-400">All</span>
+            <svg id="srcChevron" class="w-3 h-3 transition-transform" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+          </button>
+          <div id="srcPanel" class="hidden mt-2 bg-gray-900 border border-gray-800">
+            <div class="flex items-center justify-between px-3 py-2 border-b border-gray-800">
+              <span class="text-[11px] font-black uppercase tracking-widest text-gray-500">Search Sources</span>
+              <div class="flex gap-2">
+                <button type="button" onclick="setAllSources(true)"
+                  class="text-[10px] font-bold uppercase tracking-wide text-gray-400 hover:text-white">All</button>
+                <span class="text-gray-700">·</span>
+                <button type="button" onclick="setAllSources(false)"
+                  class="text-[10px] font-bold uppercase tracking-wide text-gray-400 hover:text-white">None</button>
+              </div>
+            </div>
+            <div id="srcList" class="max-h-64 overflow-y-auto divide-y divide-gray-800"></div>
+          </div>
+        </div>
         <div class="flex justify-between mt-2 px-1">
           <span id="resultCount" class="text-[11px] text-gray-600 uppercase tracking-wide"></span>
           <span class="text-[11px] text-gray-700 uppercase tracking-wide">sorted by seeders</span>
@@ -4006,6 +4033,7 @@ function _doSelectProfile(p){
   document.getElementById("pinPromptModal").classList.add("hidden");
   renderNavProfile();
   applyMaxVolumeToSliders();
+  loadSearchIndexers();
   if(activeTab==="library") loadLibrary();
 }
 
@@ -6805,6 +6833,108 @@ async function openStreamPicker(magnet, title, btn){
   }
 }
 
+// ── Search sources (indexer picker) ─────────────────────────────────────────
+// The indexers this profile is allowed to search (admin-curated), each with the
+// content types it carries. `selectedSources` is the user's chosen subset; an
+// empty/full set means "all". Selection is remembered per profile.
+let searchIndexers = [];            // [{id,name,content_types}]
+let selectedSources = new Set();    // chosen indexer IDs (empty ⇒ all)
+
+const _SRC_TYPE_LABELS = {
+  movies:"Movies", tv:"TV", anime:"Anime", music:"Music",
+  books:"Books", games:"Games", apps:"Apps", xxx:"XXX", other:"Other",
+};
+const _SRC_TYPE_STYLE = {
+  movies:"bg-indigo-950 text-indigo-300", tv:"bg-sky-950 text-sky-300",
+  anime:"bg-pink-950 text-pink-300", music:"bg-emerald-950 text-emerald-300",
+  books:"bg-amber-950 text-amber-300", games:"bg-purple-950 text-purple-300",
+  apps:"bg-gray-800 text-gray-400", xxx:"bg-red-950 text-red-300",
+  other:"bg-gray-800 text-gray-400",
+};
+
+function _srcStoreKey(){ return "streamlink_search_sources_" + (profile.id||"_"); }
+
+async function loadSearchIndexers(){
+  const wrap=document.getElementById("srcWrap");
+  try{
+    const pid=profile.id?`?profile_id=${encodeURIComponent(profile.id)}`:"";
+    const r=await fetch(`/api/search/indexers${pid}`);
+    const d=r.ok?await r.json():{indexers:[]};
+    searchIndexers=d.indexers||[];
+  } catch(_){ searchIndexers=[]; }
+  // Restore the saved subset, intersected with what's currently available.
+  selectedSources=new Set();
+  try{
+    const saved=JSON.parse(localStorage.getItem(_srcStoreKey())||"[]");
+    const avail=new Set(searchIndexers.map(ix=>ix.id));
+    saved.forEach(id=>{ if(avail.has(id)) selectedSources.add(id); });
+  } catch(_){}
+  // Only show the picker when there's a real choice to make (2+ sources).
+  if(searchIndexers.length>=2){ wrap.classList.remove("hidden"); }
+  else { wrap.classList.add("hidden"); document.getElementById("srcPanel").classList.add("hidden"); }
+  renderSourceList(); updateSrcSummary();
+}
+
+function renderSourceList(){
+  const el=document.getElementById("srcList");
+  if(!searchIndexers.length){ el.innerHTML=""; return; }
+  el.innerHTML=searchIndexers.map(ix=>{
+    const on=selectedSources.size===0||selectedSources.has(ix.id);
+    const chips=(ix.content_types||[]).map(t=>
+      `<span class="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 ${_SRC_TYPE_STYLE[t]||_SRC_TYPE_STYLE.other}">${_SRC_TYPE_LABELS[t]||t}</span>`
+    ).join("");
+    return `<label class="flex items-center gap-3 px-3 py-2.5 cursor-pointer hover:bg-gray-800/60 transition-colors">
+      <input type="checkbox" ${on?"checked":""} onchange="toggleSource('${escHtml(ix.id)}',this.checked)"
+        class="w-4 h-4 accent-indigo-500 flex-shrink-0">
+      <span class="text-sm text-gray-200 font-medium truncate flex-1 min-w-0">${escHtml(ix.name)}</span>
+      <span class="flex gap-1 flex-wrap justify-end flex-shrink-0">${chips||'<span class="text-[9px] text-gray-700 uppercase">—</span>'}</span>
+    </label>`;
+  }).join("");
+}
+
+function toggleSource(id, on){
+  // selectedSources is a strict subset; an empty set means "all". So when the
+  // user unticks one while in "all" mode, materialise the full set first.
+  if(selectedSources.has("__none__")) selectedSources.delete("__none__");
+  else if(selectedSources.size===0) searchIndexers.forEach(ix=>selectedSources.add(ix.id));
+  if(on) selectedSources.add(id); else selectedSources.delete(id);
+  if(selectedSources.size===searchIndexers.length) selectedSources.clear(); // back to "all"
+  _persistSources(); updateSrcSummary();
+}
+
+function setAllSources(on){
+  // "All" ⇒ empty set (interpreted as every source). "None" ⇒ a `__none__`
+  // sentinel, since an empty set already means "all" — doSearch reads it to skip.
+  selectedSources = on ? new Set() : new Set(["__none__"]);
+  _persistSources(); renderSourceList(); updateSrcSummary();
+}
+
+function _persistSources(){
+  try{ localStorage.setItem(_srcStoreKey(), JSON.stringify([...selectedSources])); }catch(_){}
+}
+
+function updateSrcSummary(){
+  const sum=document.getElementById("srcSummary");
+  const n=searchIndexers.length;
+  if(selectedSources.has("__none__")){ sum.textContent="None"; sum.className="text-red-400"; return; }
+  if(selectedSources.size===0){ sum.textContent=`All ${n}`; sum.className="text-indigo-400"; return; }
+  sum.textContent=`${selectedSources.size} of ${n}`; sum.className="text-indigo-400";
+}
+
+function toggleSourcePanel(){
+  const p=document.getElementById("srcPanel"), c=document.getElementById("srcChevron");
+  const open=p.classList.toggle("hidden");
+  c.style.transform=open?"":"rotate(180deg)";
+}
+
+// The `indexers=` query value for doSearch, or null to query everything allowed.
+function _selectedSourcesParam(){
+  if(selectedSources.has("__none__")) return "";           // explicit none
+  if(selectedSources.size===0) return null;                // all
+  if(selectedSources.size===searchIndexers.length) return null;
+  return [...selectedSources].join(",");
+}
+
 // ── Search ─────────────────────────────────────────────────────────────────
 async function doSearch(q){
   q=q.trim(); if(!q) return;
@@ -6815,7 +6945,11 @@ async function doSearch(q){
   btn.disabled=true; btn.textContent="…"; _markLoading(btn, true);
   grid.innerHTML=""; wrap.classList.add("hidden"); empty.classList.add("hidden"); hideAlert();
   try{
-    const r=await fetch(`/api/search?q=${encodeURIComponent(q)}`);
+    const srcParam=_selectedSourcesParam();
+    let url=`/api/search?q=${encodeURIComponent(q)}`;
+    if(profile.id) url+=`&profile_id=${encodeURIComponent(profile.id)}`;
+    if(srcParam!==null) url+=`&indexers=${encodeURIComponent(srcParam)}`;
+    const r=await fetch(url);
     if(!r.ok){ const e=await r.json().catch(()=>({detail:"Search failed"})); throw new Error(e.detail||`HTTP ${r.status}`); }
     const items=(await r.json()).results||[];
     count.textContent=items.length?`${items.length} results`:"";
@@ -9930,7 +10064,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
       const p=JSON.parse(saved);
       const profiles=await fetchProfiles();
       const found=profiles.find(x=>x.id===p.id);
-      if(found){ profile=found; renderNavProfile(); applyMaxVolumeToSliders(); connectSSE(); return; }
+      if(found){ profile=found; renderNavProfile(); applyMaxVolumeToSliders(); loadSearchIndexers(); connectSSE(); return; }
     } catch(_){}
   }
   await fetchProfiles();
@@ -9939,6 +10073,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.39.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.40.0</div>
 </body>
 </html>

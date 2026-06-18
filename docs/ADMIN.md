@@ -164,6 +164,7 @@ For each profile:
 - **Set PIN** — admin overrides the usual current-PIN check
 - **Clear PIN** — same
 - **Elevated** toggle → `POST /api/profiles/{id}/set-elevated {elevated}` — grants view of `admin_only` items
+- **Search Sources** (All / Limited) → opens a modal listing every configured indexer (`GET /api/admin/indexers/catalog`, with caps-derived content-type chips). Saving a strict subset writes `profile.allowed_indexers`; saving with all (or none) ticked clears it (unrestricted) via `POST /api/profiles/{id}/set-indexers {allowed}`. The allowlist is enforced at search time — `/api/search` intersects it with the user's own Sources picker (see [API.md § Search](API.md)), so a profile can never search an indexer the admin didn't allow. An empty/absent list = all configured indexers.
 
 ### 7. System
 

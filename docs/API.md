@@ -39,7 +39,8 @@ Event types:
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/api/search?q=…&limit=30` | Sorts by seeders. `INDEXER_CATEGORIES` can be overridden in library.json admin overrides; `0` = no category filter. **Partial-failure tolerant by per-indexer fan-out:** enumerates the configured indexers (`_list_configured_indexers`) and queries each `/api/v2.0/indexers/{id}/results` **independently and concurrently** (12 s per-indexer timeout), then merges whatever came back — so one slow/broken indexer can't time out the whole search and discard the good results (which the aggregate `/indexers/all/results` endpoint does, since it waits for the slowest indexer). Falls back to the aggregate endpoint if the indexer list can't be fetched. `_apply_indexer_health` records the per-indexer outcomes and sets a non-specific `indexers_degraded` flag (+ `indexers_total`/`indexers_failing` counts) when some fail while others succeed. Raises `502` only when **every** indexer fails (or, on the fallback path, the aggregate request fails) |
+| GET | `/api/search?q=…&limit=30&indexers=…&profile_id=…` | Sorts by seeders. `INDEXER_CATEGORIES` can be overridden in library.json admin overrides; `0` = no category filter. **Source narrowing:** `indexers` (comma-separated Jackett indexer IDs) is the **user's** chosen subset (search Sources picker); `profile_id` enforces the **admin's** per-profile allowlist (`_profile_allowed_indexers`). The two **intersect** — a user can only ever search within what the admin allows. An empty effective set returns `{results:[]}` (it does **not** fall through to querying everything). **Partial-failure tolerant by per-indexer fan-out:** enumerates the configured indexers (`_list_configured_indexers`), applies the allowlist+selection filter, then queries each remaining `/api/v2.0/indexers/{id}/results` **independently and concurrently** (12 s per-indexer timeout), then merges whatever came back — so one slow/broken indexer can't time out the whole search and discard the good results (which the aggregate `/indexers/all/results` endpoint does, since it waits for the slowest indexer). Falls back to the aggregate endpoint if the indexer list can't be fetched (no per-indexer filter applied on that fallback). `_apply_indexer_health` records the per-indexer outcomes and sets a non-specific `indexers_degraded` flag (+ `indexers_total`/`indexers_failing` counts) when some fail while others succeed. Raises `502` only when **every** queried indexer fails (or, on the fallback path, the aggregate request fails) |
+| GET | `/api/search/indexers?profile_id=…` | Indexers this profile may search, for the search **Sources** picker: `{indexers:[{id, name, type, content_types}]}`. `content_types` is caps-derived (`_indexer_content_types` → movies/tv/anime/music/books/games/apps/xxx/other). Honors the per-profile allowlist; returns `{indexers:[]}` if Jackett can't be enumerated |
 
 ## Stream-now (transient, auto-deleted on stop)
 
@@ -70,12 +71,13 @@ Up to 6 profiles. No passwords. Optional 4-digit PIN per profile.
 
 | Method | Path | Notes |
 |--------|------|-------|
-| GET | `/api/profiles` | List all (no PIN exposed; has_pin boolean only) |
+| GET | `/api/profiles` | List all (no PIN exposed; `has_pin` boolean only). Includes `allowed_indexers` (per-profile search-source allowlist; `[]` = unrestricted) |
 | POST | `/api/profiles` | `{name, color}` |
 | DELETE | `/api/profiles/{profile_id}` | Removes profile + all its progress entries |
 | POST | `/api/profiles/{id}/set-pin` | `{pin, current_pin}` — 4 digits or empty to clear. Admin token can override `current_pin` check |
 | POST | `/api/profiles/{id}/verify-pin` | `{pin}` — used by the profile picker |
 | POST | `/api/profiles/{id}/set-elevated` | `{elevated}` — admin only; grants view of `admin_only` items |
+| POST | `/api/profiles/{id}/set-indexers` | `{allowed:[indexer_id,…]}` — admin only; restricts which Jackett indexers this profile may search. Empty list clears the restriction (all indexers allowed). Stored as `profile.allowed_indexers` |
 | POST | `/api/profiles/{id}/auto-skip` | `{auto_skip_intro?, auto_skip_credits?}` |
 | POST | `/api/profiles/{id}/resume-mode` | `{resume_mode: "auto"|"prompt"|"off"}` |
 | POST | `/api/profiles/{id}/subtitles` | `{subtitles_on: bool|null}` — per-profile override of the admin subs-on/off default. `null` ⇒ inherit; stored as `profile.subtitles_on`. Applied on the next play by `_apply_subtitle_policy` |
@@ -234,6 +236,7 @@ All require admin auth.
 | GET | `/api/admin/library` | All items including admin-only; includes `series_key`, `files_with_skip`, `files_failed` (count of files marked `analysis.source == "failed"`), `skip_status` (item-level summary), and `analysis_job` for each |
 | GET | `/api/admin/indexers` | List configured Jackett indexers |
 | GET | `/api/admin/indexers/available` | List all Jackett-known indexers (configured + available) |
+| GET | `/api/admin/indexers/catalog` | Configured indexers with caps-derived content types (`{indexers:[{id, name, type, content_types}]}`) — feeds the per-profile allowlist editor on the Profile PINs tab |
 | GET | `/api/admin/indexers/{id}/config` | Indexer config schema for setup form |
 | POST | `/api/admin/indexers/{id}/config` | Persist indexer config (POSTs through to Jackett) |
 | DELETE | `/api/admin/indexers/{id}` | Remove indexer from Jackett |

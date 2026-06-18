@@ -1466,6 +1466,33 @@
   </div>
 </div>
 
+<!-- Per-profile search-source allowlist -->
+<div id="srcAllowModal" class="hidden fixed inset-0 z-50 bg-black/60 flex items-end sm:items-center justify-center sm:px-4">
+  <div class="bg-gray-900 w-full sm:max-w-md border-t-[3px] border-indigo-600 max-h-[85vh] flex flex-col">
+    <div class="px-5 pt-5 pb-4 border-b border-gray-800 flex items-start justify-between gap-3">
+      <div class="min-w-0">
+        <h2 class="text-lg font-black uppercase tracking-wide" id="srcAllowTitle">Search Sources</h2>
+        <p class="text-xs text-gray-500 mt-0.5">Choose which indexers this profile may search. Leave all checked to allow every source.</p>
+      </div>
+      <div class="flex gap-2 flex-shrink-0 pt-1">
+        <button type="button" onclick="srcAllowSetAll(true)" class="text-[10px] font-bold uppercase tracking-wide text-gray-400 hover:text-white">All</button>
+        <span class="text-gray-700">·</span>
+        <button type="button" onclick="srcAllowSetAll(false)" class="text-[10px] font-bold uppercase tracking-wide text-gray-400 hover:text-white">None</button>
+      </div>
+    </div>
+    <div id="srcAllowList" class="flex-1 overflow-y-auto divide-y divide-gray-800">
+      <div class="px-5 py-8 text-center text-gray-600 text-sm">Loading indexers…</div>
+    </div>
+    <div id="srcAllowError" class="hidden px-5 pt-3 text-red-400 text-xs font-bold uppercase tracking-wide text-center"></div>
+    <div class="px-4 py-4 flex gap-2 border-t border-gray-800">
+      <button onclick="closeSrcAllow()"
+        class="flex-1 bg-gray-800 hover:bg-gray-700 py-4 text-sm font-bold uppercase tracking-wide transition-colors">Cancel</button>
+      <button onclick="submitSrcAllow(this)"
+        class="flex-1 bg-indigo-600 hover:bg-indigo-500 py-4 text-sm font-black uppercase tracking-wide transition-colors">Save</button>
+    </div>
+  </div>
+</div>
+
 <script>
 // ── State ─────────────────────────────────────────────────────────────────────
 let adminToken = localStorage.getItem("streamlink_admin_token") || "";
@@ -5107,6 +5134,19 @@ async function loadProfilePins(){
           ${p.elevated ? '✓ Allowed' : 'Blocked'}
         </button>
       </div>
+      <div class="flex items-center justify-between pl-12 gap-3">
+        <div>
+          <div class="text-xs font-bold text-gray-400 uppercase tracking-wide">Search Sources</div>
+          <div class="text-[11px] text-gray-600 mt-0.5">${(p.allowed_indexers&&p.allowed_indexers.length)?`Limited to ${p.allowed_indexers.length} indexer${p.allowed_indexers.length===1?'':'s'}`:'All indexers allowed'}</div>
+        </div>
+        <button onclick="openSrcAllow('${escHtml(p.id)}','${escHtml(p.name)}')"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+                 ${(p.allowed_indexers&&p.allowed_indexers.length)
+                   ? 'bg-indigo-900 border-indigo-700 text-indigo-300 hover:bg-indigo-800'
+                   : 'bg-gray-800 border-gray-700 text-gray-500 hover:text-white'}">
+          ${(p.allowed_indexers&&p.allowed_indexers.length)?'Limited':'All'}
+        </button>
+      </div>
     </div>`).join("");
 }
 
@@ -5167,6 +5207,102 @@ async function toggleElevated(profileId, newValue, btn){
   } else {
     showToast("Failed to update.", true);
   }
+}
+
+// ── Per-profile search-source allowlist ──────────────────────────────────────
+let _indexerCatalog = null;        // [{id,name,content_types}] cached
+let srcAllowTarget  = null;        // { id, name }
+let srcAllowChecked = new Set();   // currently-ticked indexer IDs
+
+const _SRCA_TYPE_LABELS = {
+  movies:"Movies", tv:"TV", anime:"Anime", music:"Music",
+  books:"Books", games:"Games", apps:"Apps", xxx:"XXX", other:"Other",
+};
+const _SRCA_TYPE_STYLE = {
+  movies:"bg-indigo-950 text-indigo-300", tv:"bg-sky-950 text-sky-300",
+  anime:"bg-pink-950 text-pink-300", music:"bg-emerald-950 text-emerald-300",
+  books:"bg-amber-950 text-amber-300", games:"bg-purple-950 text-purple-300",
+  apps:"bg-gray-800 text-gray-400", xxx:"bg-red-950 text-red-300",
+  other:"bg-gray-800 text-gray-400",
+};
+
+async function openSrcAllow(profileId, name){
+  srcAllowTarget = { id: profileId, name };
+  document.getElementById("srcAllowTitle").textContent = `Search Sources — ${name}`;
+  document.getElementById("srcAllowError").classList.add("hidden");
+  document.getElementById("srcAllowModal").classList.remove("hidden");
+  const listEl = document.getElementById("srcAllowList");
+  listEl.innerHTML = `<div class="px-5 py-8 text-center text-gray-600 text-sm">Loading indexers…</div>`;
+  // Catalog (cached) + this profile's current allowlist.
+  if(!_indexerCatalog){
+    try{
+      const r = await fetch("/api/admin/indexers/catalog", {headers: authHeader()});
+      _indexerCatalog = r.ok ? ((await r.json()).indexers || []) : [];
+    } catch(_){ _indexerCatalog = []; }
+  }
+  let allowed = [];
+  try{
+    const pr = await fetch("/api/profiles");
+    const prof = pr.ok ? (await pr.json()).profiles.find(x=>x.id===profileId) : null;
+    allowed = (prof && prof.allowed_indexers) || [];
+  } catch(_){}
+  // Empty allowlist ⇒ unrestricted ⇒ everything ticked.
+  const avail = _indexerCatalog.map(ix=>ix.id);
+  srcAllowChecked = new Set(allowed.length ? allowed.filter(id=>avail.includes(id)) : avail);
+  renderSrcAllowList();
+}
+
+function renderSrcAllowList(){
+  const el = document.getElementById("srcAllowList");
+  if(!_indexerCatalog || !_indexerCatalog.length){
+    el.innerHTML = `<div class="px-5 py-8 text-center text-gray-600 text-sm">No configured indexers found in Jackett.</div>`;
+    return;
+  }
+  el.innerHTML = _indexerCatalog.map(ix=>{
+    const on = srcAllowChecked.has(ix.id);
+    const chips = (ix.content_types||[]).map(t=>
+      `<span class="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 ${_SRCA_TYPE_STYLE[t]||_SRCA_TYPE_STYLE.other}">${_SRCA_TYPE_LABELS[t]||t}</span>`
+    ).join("");
+    return `<label class="flex items-center gap-3 px-5 py-3 cursor-pointer hover:bg-gray-800/60 transition-colors">
+      <input type="checkbox" ${on?"checked":""} onchange="srcAllowToggle('${escHtml(ix.id)}',this.checked)"
+        class="w-4 h-4 accent-indigo-500 flex-shrink-0">
+      <span class="text-sm text-gray-200 font-medium truncate flex-1 min-w-0">${escHtml(ix.name)}</span>
+      <span class="flex gap-1 flex-wrap justify-end flex-shrink-0">${chips||'<span class="text-[9px] text-gray-700 uppercase">—</span>'}</span>
+    </label>`;
+  }).join("");
+}
+
+function srcAllowToggle(id, on){ if(on) srcAllowChecked.add(id); else srcAllowChecked.delete(id); }
+function srcAllowSetAll(on){
+  srcAllowChecked = on ? new Set(_indexerCatalog.map(ix=>ix.id)) : new Set();
+  renderSrcAllowList();
+}
+function closeSrcAllow(){
+  srcAllowTarget = null;
+  document.getElementById("srcAllowModal").classList.add("hidden");
+}
+
+async function submitSrcAllow(btn){
+  if(!srcAllowTarget) return;
+  // All ticked ⇒ unrestricted ⇒ send empty list (clears the restriction).
+  const all = _indexerCatalog && srcAllowChecked.size === _indexerCatalog.length;
+  const allowed = all ? [] : [..._indexerCatalog.map(ix=>ix.id).filter(id=>srcAllowChecked.has(id))];
+  await withInflight("save_src_allow", btn, async () => {
+    const r = await fetch(`/api/profiles/${srcAllowTarget.id}/set-indexers`,{
+      method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+      body: JSON.stringify({allowed}),
+    });
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      const errEl = document.getElementById("srcAllowError");
+      errEl.textContent = d.detail || "Failed to save.";
+      errEl.classList.remove("hidden");
+      return;
+    }
+    closeSrcAllow();
+    showToast(allowed.length ? `Limited to ${allowed.length} source${allowed.length===1?'':'s'}.` : "All sources allowed.");
+    loadProfilePins();
+  });
 }
 
 // ── Add Indexer Modal ─────────────────────────────────────────────────────────

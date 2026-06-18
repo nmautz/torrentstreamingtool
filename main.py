@@ -5720,6 +5720,10 @@ class ProfileElevatedReq(BaseModel):
     elevated: bool    # whether this profile can view admin-only library items
 
 
+class ProfileIndexersReq(BaseModel):
+    allowed: list[str] = []   # indexer IDs this profile may search; [] = unrestricted
+
+
 class ProfileAutoSkipReq(BaseModel):
     auto_skip_intro: Optional[bool] = None
     auto_skip_credits: Optional[bool] = None
@@ -5794,6 +5798,7 @@ async def list_profiles() -> JSONResponse:
             "auto_skip_credits": bool(p.get("auto_skip_credits", False)),
             "resume_mode":       p.get("resume_mode", "auto"),
             "subtitles_on":      p.get("subtitles_on"),
+            "allowed_indexers":  list(p.get("allowed_indexers", [])),
         }
         for p in lib["profiles"]
     ]
@@ -6818,6 +6823,83 @@ async def _list_configured_indexers() -> Optional[list]:
         return None
 
 
+# Torznab top-level category buckets (an ID's first digit-group) → friendly
+# content-type label, so the search UI can show what each indexer carries.
+_TORZNAB_TOP_TYPES = {
+    "1000": "games",
+    "2000": "movies",
+    "3000": "music",
+    "4000": "apps",
+    "5000": "tv",
+    "6000": "xxx",
+    "7000": "books",
+    "8000": "other",
+}
+# Friendly, stable display order for content-type chips.
+_CONTENT_TYPE_ORDER = ["movies", "tv", "anime", "music", "books", "games", "apps", "xxx", "other"]
+
+
+def _indexer_content_types(caps: list) -> list:
+    """Derive friendly content-type tags (movies, tv, anime, xxx, music, …) from a
+    Jackett indexer's ``caps`` list of ``{ID, Name}`` Torznab categories. Anime is a
+    name match (its Torznab cats — 5070/2070 or custom 1xxxxx — vary by indexer)."""
+    types: set = set()
+    for cap in caps or []:
+        cid = str(cap.get("ID") or cap.get("id") or "")
+        name = (cap.get("Name") or cap.get("name") or "")
+        if "anime" in name.lower():
+            types.add("anime")
+        if not cid.isdigit():
+            continue
+        label = _TORZNAB_TOP_TYPES.get(f"{(int(cid) // 1000) * 1000}")
+        if label:
+            types.add(label)
+    return [t for t in _CONTENT_TYPE_ORDER if t in types]
+
+
+async def _configured_indexers_full() -> Optional[list]:
+    """Return ``[{id, name, type, content_types}]`` for every configured Jackett
+    indexer (with caps-derived content types), or ``None`` if the list can't be
+    fetched. Feeds the search-source picker + the admin per-profile editor."""
+    try:
+        async with _jackett_admin() as c:
+            r = await c.get(
+                f"{settings.indexer_url}/api/v2.0/indexers",
+                params={"configured": "true"},
+            )
+        if r.status_code != 200:
+            return None
+        out = []
+        for ix in r.json():
+            ixid = ix.get("id", "")
+            if not ixid:
+                continue
+            out.append({
+                "id": ixid,
+                "name": ix.get("name", ixid) or ixid,
+                "type": ix.get("type", ""),
+                "content_types": _indexer_content_types(ix.get("caps", [])),
+            })
+        return out
+    except Exception:
+        return None
+
+
+def _profile_allowed_indexers(lib: dict, profile_id: str) -> Optional[set]:
+    """The set of indexer IDs a profile may search, or ``None`` for 'no restriction'.
+    A profile's ``allowed_indexers`` that is absent or empty means unrestricted (all
+    configured indexers) — the admin opt-in is to *narrow* it to a chosen subset."""
+    if not profile_id:
+        return None
+    prof = next((p for p in lib.get("profiles", []) if p.get("id") == profile_id), None)
+    if not prof:
+        return None
+    allowed = prof.get("allowed_indexers")
+    if not allowed:
+        return None
+    return {str(x) for x in allowed}
+
+
 def _shape_search_results(items: list, limit: int) -> list:
     """Map raw Jackett result dicts → the trimmed UI shape, drop entries with no
     magnet/link, and sort by seeders."""
@@ -6840,7 +6922,13 @@ def _shape_search_results(items: list, limit: int) -> list:
 
 
 @app.get("/api/search")
-async def search(q: str, limit: int = 30) -> JSONResponse:
+async def search(q: str, limit: int = 30,
+                 indexers: Optional[str] = None,
+                 profile_id: Optional[str] = None) -> JSONResponse:
+    """Search configured indexers. ``indexers`` (comma-separated IDs) narrows the
+    query to the user-chosen subset; ``profile_id`` enforces the admin's per-profile
+    allowlist. The two intersect — a user can only ever search within what the admin
+    allows the profile."""
     if not q.strip():
         return JSONResponse({"results": []})
 
@@ -6856,11 +6944,12 @@ async def search(q: str, limit: int = 30) -> JSONResponse:
     # indexer, so a single hung/broken one would blow our client timeout and discard
     # ALL results — including the good ones. Per-indexer, a failing one only loses its
     # own results (bounded by its own short timeout) and we still return the rest.
-    indexers = await _list_configured_indexers()
+    configured = await _list_configured_indexers()
 
-    if not indexers:
+    if configured is None:
         # Couldn't enumerate (Jackett auth/list failure) — fall back to the aggregate
-        # endpoint so search still works, just without per-indexer isolation.
+        # endpoint so search still works, just without per-indexer isolation (and
+        # without per-indexer filtering — best effort; the picker just won't apply).
         try:
             async with httpx.AsyncClient(timeout=20.0) as c:
                 r = await c.get(
@@ -6873,6 +6962,19 @@ async def search(q: str, limit: int = 30) -> JSONResponse:
         await _record_indexer_health(data.get("Indexers", []))
         return JSONResponse({"results": _shape_search_results(data.get("Results", []), limit)})
 
+    # Profile allowlist (admin-enforced) ∩ user selection (UI-chosen subset).
+    allowed = _profile_allowed_indexers(lib, profile_id or "")
+    if allowed is not None:
+        configured = [ix for ix in configured if ix["id"] in allowed]
+    if indexers is not None:
+        sel = {s.strip() for s in indexers.split(",") if s.strip()}
+        configured = [ix for ix in configured if ix["id"] in sel]
+    if not configured:
+        # Profile blocks every indexer, or the selection is empty/disjoint — nothing
+        # to query, so don't fall through to the aggregate (which queries them all).
+        return JSONResponse({"results": []})
+
+    indexers = configured
     PER_INDEXER_TIMEOUT = 12.0
 
     async def _query_one(ix: dict) -> tuple:
@@ -6908,6 +7010,20 @@ async def search(q: str, limit: int = 30) -> JSONResponse:
         raise HTTPException(502, "All indexers failed to respond. Check Jackett / your VPN.")
 
     return JSONResponse({"results": _shape_search_results(items, limit)})
+
+
+@app.get("/api/search/indexers")
+async def search_indexers(profile_id: str = "") -> JSONResponse:
+    """Indexers this profile may search, each with caps-derived content types, for the
+    search **Sources** picker. Honors the per-profile allowlist (admin Profile PINs
+    tab); an unrestricted profile sees every configured indexer."""
+    full = await _configured_indexers_full()
+    if full is None:
+        return JSONResponse({"indexers": []})
+    allowed = _profile_allowed_indexers(await get_library(), profile_id)
+    if allowed is not None:
+        full = [ix for ix in full if ix["id"] in allowed]
+    return JSONResponse({"indexers": full})
 
 
 @app.post("/api/stream/prepare")
@@ -8788,6 +8904,15 @@ async def admin_list_available_indexers(request: Request) -> JSONResponse:
         raise HTTPException(502, f"Could not reach Jackett: {e}")
 
 
+@app.get("/api/admin/indexers/catalog")
+async def admin_indexer_catalog(request: Request) -> JSONResponse:
+    """Configured indexers with caps-derived content types, for the per-profile
+    allowlist editor on the Profile PINs tab."""
+    _require_admin(request)
+    full = await _configured_indexers_full()
+    return JSONResponse({"indexers": full or []})
+
+
 @app.get("/api/admin/indexers/{indexer_id}/config")
 async def admin_get_indexer_config(indexer_id: str, request: Request) -> JSONResponse:
     _require_admin(request)
@@ -9203,6 +9328,24 @@ async def set_profile_elevated(profile_id: str, request: Request, req: ProfileEl
         profile.pop("elevated", None)
     await put_library(lib)
     return JSONResponse({"ok": True, "elevated": req.elevated})
+
+
+@app.post("/api/profiles/{profile_id}/set-indexers")
+async def set_profile_indexers(profile_id: str, request: Request, req: ProfileIndexersReq) -> JSONResponse:
+    """Restrict which Jackett indexers a profile may search (admin only). An empty
+    list clears the restriction (profile may search every configured indexer)."""
+    _require_admin(request)
+    lib = await get_library()
+    profile = next((p for p in lib["profiles"] if p["id"] == profile_id), None)
+    if not profile:
+        raise HTTPException(404, "Profile not found.")
+    cleaned = [str(x).strip() for x in (req.allowed or []) if str(x).strip()]
+    if cleaned:
+        profile["allowed_indexers"] = cleaned
+    else:
+        profile.pop("allowed_indexers", None)
+    await put_library(lib)
+    return JSONResponse({"ok": True, "allowed_indexers": cleaned})
 
 
 @app.post("/api/profiles/{profile_id}/verify-pin")

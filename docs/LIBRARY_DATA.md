@@ -90,6 +90,7 @@ The only persistent server-side state. Lives at the project root. Accessed via `
   "auto_skip_credits": true,            // optional; default false
   "resume_mode": "auto|prompt|off",     // default "auto"
   "subtitles_on": true,                 // optional; per-profile override of settings.subtitles.on_by_default. absent/null = inherit; true/false = force
+  "allowed_indexers": ["idx_a","idx_b"],// optional; Jackett indexer IDs this profile may search. Absent/empty = unrestricted (all configured indexers). Admin-set via Profile PINs tab; enforced by /api/search
   "series_subtitle_prefs": {            // optional; remembered subtitle pick per series (this profile)
     "Series Title S01": { "off": false, "lang": "eng", "ai": false, "name": "...", "updated_at": "..." }
   }
