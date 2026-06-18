@@ -713,6 +713,11 @@ class AppState:
     # any in-flight playback of it first — because the in-place replace (os.replace)
     # fails on Windows while anything holds the file open (WinError 5).
     compressing_paths: set = field(default_factory=set)
+    # Item ids flagged "on-demand stream only": on-device browser playback uses the
+    # just-in-time pipeline and NO permanent HLS bundle is ever built (saves disk).
+    # Seeded at lifespan from library.json (item["ondemand_only"]) and rebuilt on
+    # toggle. Does NOT affect VLC (TV) playback — that reads the source directly.
+    ondemand_only_items: set = field(default_factory=set)
     # Idle-gated automatic background validation (separate from the admin scan so
     # they never collide). Walks files whose persisted `validation` verdict is
     # missing/stale, one at a time, ONLY while the box is idle — and persists each
@@ -5333,6 +5338,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         state.subtitle_upgrade_late = _subs0["upgrade_late_subs"]
         state.subtitle_single_option = _subs0["single_option"]
         state.vpn_block_ui = _vpn_killswitch_cfg(_lib0)["block_ui"]
+        _rebuild_ondemand_only_items(_lib0)
         state.preferred_adapter = _network_cfg(_lib0)["preferred_adapter"]
     except Exception:
         state.vlc_night_mode = False
@@ -5631,6 +5637,12 @@ class CompressEstimateReq(BaseModel):
 class HlsTrimReq(BaseModel):
     heights: list[int] = []                     # ABR down-rung heights to KEEP (original is always kept)
     dry_run: bool = False                       # True ⇒ only report bytes that WOULD be freed
+    scope: Optional[str] = None                 # None/""/"all" ⇒ every bundle; else a library item id
+
+
+class OndemandOnlyReq(BaseModel):
+    item_id: str
+    enabled: bool                               # True ⇒ on-device playback uses JIT only; no permanent bundle
 
 
 class AutoMaintReq(BaseModel):
@@ -10323,8 +10335,71 @@ async def admin_hls_trim(request: Request, body: HlsTrimReq) -> JSONResponse:
     anything — it powers the UI estimate."""
     _require_admin(request)
     keep = {int(h) for h in body.heights if int(h) in HLS_LADDER_HEIGHTS}
-    res = await _hls_trim_bundles(keep, dry_run=bool(body.dry_run))
+    scope = (body.scope or "all").strip() or "all"
+    res = await _hls_trim_bundles(keep, dry_run=bool(body.dry_run), scope=scope)
     return JSONResponse({"ok": True, **res})
+
+
+@app.get("/api/admin/ondemand-only")
+async def admin_get_ondemand_only(request: Request) -> JSONResponse:
+    """List every library item with its on-demand-only flag (for the Storage tab)."""
+    _require_admin(request)
+    lib = await get_library()
+    items = [{
+        "id": it.get("id", ""),
+        "title": it.get("title", ""),
+        "ondemand_only": bool(it.get("ondemand_only")),
+        "file_count": sum(1 for f in it.get("files", [])
+                          if Path(f.get("path", "")).suffix.lower() in VIDEO_EXTS),
+    } for it in lib.get("items", [])]
+    return JSONResponse({"items": items, "hls_available": HLS_AVAILABLE})
+
+
+@app.post("/api/admin/ondemand-only")
+async def admin_set_ondemand_only(request: Request, body: OndemandOnlyReq) -> JSONResponse:
+    """Flag (or unflag) a show as **on-demand stream only**: on-device browser
+    playback uses the just-in-time pipeline and NO permanent HLS bundle is built,
+    so it costs ~no disk. Enabling also cancels any in-flight prep for the item and
+    purges its existing bundles to reclaim space now. VLC (TV) playback is
+    unaffected — it reads the source file directly."""
+    _require_admin(request)
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it.get("id") == body.item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    item["ondemand_only"] = bool(body.enabled)
+    await put_library(lib)
+    _rebuild_ondemand_only_items(lib)
+
+    bundles = bytes_freed = cancelled = 0
+    if body.enabled:
+        # Stop any in-flight / queued prep for this item's files.
+        for j in list(_offline_jobs.values()):
+            if (j.get("item_id") == body.item_id
+                    and j.get("status") in ("pending", "processing", "paused")):
+                proc = j.get("_proc")
+                if proc is not None and proc.returncode is None:
+                    try:
+                        proc.terminate()
+                    except Exception:
+                        pass
+                j["status"] = "cancelled"
+                cancelled += 1
+        # Purge existing permanent bundles for the item to reclaim space immediately.
+        inv = await _build_offline_cache_inventory(force=True)
+        it_inv = next((x for x in inv["items"] if x["item_id"] == body.item_id), None)
+        if it_inv:
+            for f in it_inv["files"]:
+                if _offline_cache_path_active(f["cache_key"]):
+                    continue
+                freed = await asyncio.to_thread(_delete_cache_artifacts, f["cache_key"])
+                if freed > 0:
+                    bundles += 1
+                    bytes_freed += freed
+            _invalidate_offline_cache_inventory()
+    return JSONResponse({"ok": True, "ondemand_only": bool(body.enabled),
+                         "bundles_purged": bundles, "bytes_freed": bytes_freed,
+                         "jobs_cancelled": cancelled})
 
 
 @app.get("/api/admin/cache-autopurge")
@@ -12469,6 +12544,13 @@ async def _run_offline_job(job_id: str) -> None:
         # ETAs reflect real ffmpeg throughput, not queue wait time.
         job["started_at"] = time.time()
         src = Path(job["src"])
+        # On-demand-only backstop: if this file's item was flagged while the job was
+        # queued, don't build a permanent bundle (the creation gates normally catch
+        # this; this covers any job that slipped through).
+        if job.get("item_id") and job["item_id"] in state.ondemand_only_items:
+            job["status"] = "cancelled"
+            job["progress"] = 0.0
+            return
         # Compression playback lock — never read a source that's being rewritten in
         # place (it would race the os.replace and could read a half-written file).
         # Park as pending and re-check shortly; the compressor releases the lock the
@@ -13064,6 +13146,8 @@ async def _enqueue_library_prep() -> int:
     lib = await get_library()
     queued = 0
     for item in lib.get("items", []):
+        if item.get("ondemand_only"):
+            continue   # on-demand-only shows never get a permanent bundle
         prep_cfg = _prep_cfg(item)
         for f in item.get("files", []):
             p = Path(f.get("path", ""))
@@ -13167,6 +13251,8 @@ def _start_admin_prep_job(src: Path, item_id: str) -> Optional[str]:
     Returns the job id, or None if the bundle is already cached or ffmpeg is
     unavailable. Mirrors `_start_interactive_prep_job` but tags the job
     `queue:"admin"` so the admin Stop control (and only it) can halt the batch."""
+    if item_id and item_id in state.ondemand_only_items:
+        return None   # on-demand-only items never get a permanent bundle
     out_dir = OFFLINE_CACHE / _offline_cache_key(src)
     if (out_dir / "master.m3u8").exists():
         return None
@@ -13935,13 +14021,19 @@ def _file_compression_status() -> dict:
     return fc
 
 
-def _compress_lock_key(path: str) -> str:
-    """Normalised path key for the compression playback-lock set — case- and
-    separator-insensitive so Windows path variants of the same file collide."""
+def _norm_path(path: str) -> str:
+    """Canonical path key — case- and separator-insensitive so Windows path
+    variants of the same file collide. Used for the compression playback lock
+    and for matching a bundle's source against a library item's files."""
     try:
         return os.path.normcase(os.path.normpath(os.path.abspath(str(path))))
     except Exception:
         return os.path.normcase(str(path))
+
+
+def _compress_lock_key(path: str) -> str:
+    """Normalised path key for the compression playback-lock set."""
+    return _norm_path(path)
 
 
 def _is_compressing(path: str) -> bool:
@@ -14774,6 +14866,18 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
             "saved_tracks":      saved_tracks,
         })
 
+    # On-demand-only item: never build a permanent bundle. Return not-ready with no
+    # job so the client falls straight through to the JIT on-demand pipeline (which
+    # leaves nothing permanent on disk). VLC playback is unaffected (separate path).
+    if item.get("ondemand_only"):
+        return JSONResponse({
+            "ready":             False,
+            "needs_processing":  False,
+            "ondemand_only":     True,
+            "subs":              sidecar_subs,
+            "saved_tracks":      saved_tracks,
+        })
+
     # Coalesce: if a job for this exact source is already running, return its id.
     existing = next(
         (j for j in _offline_jobs.values()
@@ -14850,16 +14954,29 @@ async def list_file_subs(item_id: str, file_path: str = "") -> JSONResponse:
     return JSONResponse({"subs": subs})
 
 
+def _rebuild_ondemand_only_items(lib: dict) -> None:
+    """Refresh state.ondemand_only_items from the library's item flags."""
+    state.ondemand_only_items = {
+        it.get("id", "") for it in lib.get("items", []) if it.get("ondemand_only")
+    }
+
+
 async def _maybe_start_prep_job(src: Path, item_id: str = "") -> dict:
     """Per-file: return current prep state, starting an HLS job if none exists.
 
     Returns one of:
       {status:"cached"}                              — bundle already on disk
+      {status:"ondemand_only"}                       — item is on-demand-only; no bundle built
       {status:"processing", job_id, progress, operation}
       {status:"error", error}                        — ffmpeg unavailable / macOS
     """
     if not HLS_AVAILABLE:
         return {"status": "error", "error": HLS_UNAVAILABLE_MSG}
+    # On-demand-only items never get a permanent bundle — playback uses the JIT
+    # pipeline instead. This is the single chokepoint every prep path funnels
+    # through (auto-prep, play-prep, the JIT background prep, prep-all).
+    if item_id and item_id in state.ondemand_only_items:
+        return {"status": "ondemand_only"}
     OFFLINE_CACHE.mkdir(exist_ok=True)
     out_dir = OFFLINE_CACHE / _offline_cache_key(src)
     if (out_dir / "master.m3u8").exists():
@@ -15322,6 +15439,46 @@ def _od_wipe_segments(d: Path) -> None:
         pass
 
 
+def _od_text_subs(info: dict) -> list[dict]:
+    """The source's text (non-image) subtitle streams — the ones we can serve as
+    WebVTT alongside an on-demand session, same set the bundle extracts."""
+    return [s for s in (info.get("subtitles") or []) if not s.get("image_based")]
+
+
+def _od_subs_meta(info: dict) -> list[dict]:
+    """Build the on-demand `subtitles` list (UI index → sub_<i>.vtt), mirroring the
+    bundle's meta.json subtitles[] so the client attaches them identically."""
+    return [{
+        "idx":      i,
+        "file":     f"sub_{i}.vtt",
+        "language": s.get("language") or "und",
+        "title":    s.get("title") or "",
+        "label":    _track_label(s, f"Subtitles {i+1}"),
+    } for i, s in enumerate(_od_text_subs(info))]
+
+
+async def _od_extract_sub(src: str, src_sub_idx: int, out: Path) -> None:
+    """Extract one embedded text subtitle stream from the source to WebVTT (lazy —
+    on first fetch). Below-normal priority; best-effort. Embedded text-sub
+    extraction is fast (no video decode)."""
+    ffmpeg = analyzer.ffmpeg_bin()
+    if not ffmpeg:
+        return
+    args = [ffmpeg, "-hide_banner", "-v", "error", "-y",
+            "-i", src, "-map", f"0:s:{src_sub_idx}",
+            "-c:s", "webvtt", "-f", "webvtt", str(out)]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL, **_FFMPEG_SUBPROCESS_KW)
+        await proc.wait()
+    except Exception:
+        pass
+
+
+_OD_SUB_RE = re.compile(r"^sub_(\d+)\.vtt$")
+
+
 def _od_build_ffmpeg_args(
     ffmpeg: str, src: Path, audio_idx: int, has_audio: bool,
     start_seg: int, use_nvenc: bool,
@@ -15531,6 +15688,10 @@ async def stream_ondemand(item_id: str, req: OnDemandReq) -> JSONResponse:
     else:
         aidx = -1   # no audio in source
 
+    # Source stream indices of the text subtitles, in UI order — so a sub_<i>.vtt
+    # fetch can extract the right embedded stream on demand.
+    sub_idxs = [s["idx"] for s in _od_text_subs(info)]
+
     key = _od_session_key(src, aidx)
     session = _od_sessions.get(key)
     if session is None:
@@ -15546,6 +15707,7 @@ async def stream_ondemand(item_id: str, req: OnDemandReq) -> JSONResponse:
             "proc":        None,
             "last_access": time.time(),
             "lock":        asyncio.Lock(),
+            "sub_idxs":    sub_idxs,
         }
         session["dir"].mkdir(parents=True, exist_ok=True)
         _od_sessions[key] = session
@@ -15553,6 +15715,7 @@ async def stream_ondemand(item_id: str, req: OnDemandReq) -> JSONResponse:
                      key, src.name, aidx, duration)
     else:
         session["last_access"] = time.time()
+        session["sub_idxs"] = sub_idxs   # keep fresh across re-attach
 
     # Kick off the full bundle prep in the background (bulk queue — low priority,
     # honors the global pause) so a SUBSEQUENT play uses the rich multi-audio/ABR
@@ -15570,7 +15733,7 @@ async def stream_ondemand(item_id: str, req: OnDemandReq) -> JSONResponse:
         "master_url":        f"/api/library/ondemand/{key}/master.m3u8",
         "duration_sec":      duration,
         "audios":            audios_meta,
-        "subtitles":         [],
+        "subtitles":         _od_subs_meta(info),   # embedded text subs, served as sub_<i>.vtt
         "subs":              sidecar_subs,
         "saved_tracks":      saved,
         "default_audio_idx": aidx,
@@ -15622,6 +15785,22 @@ async def ondemand_file(session_key: str, filename: str):
     if filename == "media.m3u8":
         return Response(content=_od_media_playlist(session["duration"]),
                         media_type="application/vnd.apple.mpegurl")
+
+    # Embedded text subtitle, extracted from the source on first fetch (lazy) and
+    # cached in the session dir — so on-demand playback has the same in-MKV subs
+    # the full bundle would. The reaper wipes these with the session dir.
+    sm = _OD_SUB_RE.match(filename)
+    if sm:
+        i = int(sm.group(1))
+        sub_idxs = session.get("sub_idxs") or []
+        if i >= len(sub_idxs):
+            raise HTTPException(404, "No such subtitle.")
+        out = session["dir"] / f"sub_{i}.vtt"
+        if not out.exists():
+            await _od_extract_sub(session["src"], sub_idxs[i], out)
+        if not out.exists():
+            raise HTTPException(404, "Subtitle could not be extracted.")
+        return FileResponse(str(out), media_type="text/vtt")
 
     m = _OD_SEG_RE.match(filename)
     if not m:
@@ -16120,16 +16299,20 @@ def _offline_cache_path_active(cache_key: str) -> bool:
                for j in _offline_jobs.values())
 
 
-def _trim_one_bundle(bdir: Path, keep: set[int], dry_run: bool) -> int:
+def _trim_one_bundle(bdir: Path, keep: set[int], dry_run: bool,
+                     allowed_srcs: Optional[set[str]] = None) -> int:
     """Drop every down-rung whose height ∉ `keep` from one HLS bundle dir (the
     original rendition, idx 0, is always kept). Deletes the rung's playlist + init
     + segments, rewrites master.m3u8 (dropping its #EXT-X-STREAM-INF + URI pair),
     and updates meta.json. Returns the bytes freed (or that WOULD be freed on a
-    dry run). Sync — call via asyncio.to_thread."""
+    dry run). When `allowed_srcs` is given (a scoped run), the bundle is skipped
+    unless its meta.json `src` is in that set. Sync — call via asyncio.to_thread."""
     meta_path = bdir / "meta.json"
     try:
         meta = json.loads(meta_path.read_text("utf-8"))
     except Exception:
+        return 0
+    if allowed_srcs is not None and _norm_path(meta.get("src", "")) not in allowed_srcs:
         return 0
     videos = meta.get("videos") or []
     drop_names = {v.get("name") for v in videos
@@ -16191,9 +16374,18 @@ def _trim_one_bundle(bdir: Path, keep: set[int], dry_run: bool) -> int:
     return freed
 
 
-async def _hls_trim_bundles(keep: set[int], *, dry_run: bool) -> dict:
-    """Trim every existing bundle down to the original + the `keep` heights. Skips
-    bundles with an active prep job. Returns {bundles, bytes_freed, dry_run}."""
+async def _hls_trim_bundles(keep: set[int], *, dry_run: bool, scope: str = "all") -> dict:
+    """Trim existing bundles down to the original + the `keep` heights. `scope`
+    None/""/"all" ⇒ every bundle; else a library item id, restricting the trim to
+    that item's files (matched by the bundle's meta.json `src`). Skips bundles with
+    an active prep job. Returns {bundles, bytes_freed, dry_run}."""
+    allowed_srcs: Optional[set[str]] = None
+    if scope not in ("", "all", None):
+        lib = await get_library()
+        item = next((it for it in lib.get("items", []) if it.get("id") == scope), None)
+        # An unknown item id ⇒ empty allow-set ⇒ trims nothing (rather than all).
+        allowed_srcs = {_norm_path(f.get("path", ""))
+                        for f in (item.get("files", []) if item else [])}
     bundles = 0
     freed = 0
     if OFFLINE_CACHE.exists():
@@ -16202,7 +16394,7 @@ async def _hls_trim_bundles(keep: set[int], *, dry_run: bool) -> dict:
                 continue
             if _offline_cache_path_active(p.name):
                 continue
-            b = await asyncio.to_thread(_trim_one_bundle, p, keep, dry_run)
+            b = await asyncio.to_thread(_trim_one_bundle, p, keep, dry_run, allowed_srcs)
             if b > 0:
                 bundles += 1
                 freed += b

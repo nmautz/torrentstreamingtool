@@ -157,6 +157,7 @@ PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "so
   "prep": { /* stream-prep schedule; see below */ },
   "progress": { /* per-profile; see below */ },
   "admin_only": false,                  // optional; hides from non-elevated profiles
+  "ondemand_only": false,               // optional; on-device playback uses JIT only — no permanent HLS bundle is built (Storage tab). VLC unaffected
   "default_visible_profiles": [],       // optional; if non-empty, only these profile IDs see item by default
   "hidden_by_profiles": [],            // optional; profile IDs that personally hid this item
   "skip_data": { /* per-file; see below */ },

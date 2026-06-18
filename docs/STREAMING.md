@@ -760,6 +760,13 @@ wins (on-demand is a supplement, never a replacement).
   *subsequent* play uses the rich ABR/multi-audio bundle. JIT only bridges the gap
   for the current session. (Both can run at once — the below-normal priority on both
   keeps the box usable; see [GOTCHAS.md](GOTCHAS.md).)
+- **On-demand-only shows skip the permanent bundle entirely.** When an item is
+  flagged `ondemand_only` (admin Storage tab → `state.ondemand_only_items`),
+  `_maybe_start_prep_job` returns `{status:"ondemand_only"}` without building, so the
+  background full prep above is a no-op and `/offline-prepare` returns
+  `{ready:false, ondemand_only:true}` — every on-device play stays on JIT and nothing
+  permanent is written. VLC (TV) playback is unaffected (it never uses HLS). See
+  [ADMIN.md § Storage & Compression](ADMIN.md).
 
 ### Client (`static/index.html`)
 
@@ -778,10 +785,16 @@ wins (on-demand is a supplement, never a replacement).
   Audio: `lpSetAudio` in OD mode persists the pick (`_lpSaveLocalTracks`) and
   re-enters `_lpLoadIndex` at the current time; `stream-ondemand` picks up the saved
   `audio_idx` (or the background full prep may have finished, promoting playback to
-  bundle mode). Subtitles use the **existing** sidecar `<track>` machinery
-  (`prep.subs` from `_list_sidecar_subs`) unchanged. The **Clip** row is hidden in OD
-  mode — clipping needs the bundle (`409` otherwise), so it returns once the file is
-  fully prepped.
+  bundle mode). Subtitles: **on-demand now carries the source's embedded text subs
+  too**, not just on-disk sidecars — `stream-ondemand` returns a `subtitles[]` list
+  (`_od_subs_meta`, the same `sub_<i>.vtt` shape the bundle uses) and the file endpoint
+  extracts each embedded stream to WebVTT **lazily on first fetch** (`_od_extract_sub`,
+  cached in the session dir, reaped with it). The client attaches them with the
+  **identical** `<track>` machinery as the bundle (`prep.subtitles` + `prep.subs` from
+  `_list_sidecar_subs`) — `subBase` resolves to `/api/library/ondemand/<key>/sub_<i>.vtt`.
+  So a show played via JIT (un-prepped fallback **or** an *on-demand-only* item) keeps its
+  in-MKV subtitles. The **Clip** row is hidden in OD mode — clipping needs the bundle
+  (`409` otherwise), so it returns once the file is fully prepped.
 
 > **Not on macOS.** Like all HLS prep, on-demand is disabled when `HLS_AVAILABLE` is
 > false (the TCC block). The endpoints `503` and the dashboard never reaches the OD

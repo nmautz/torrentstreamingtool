@@ -529,6 +529,13 @@
       <div class="px-5 py-4 space-y-3">
         <div class="text-[11px] font-bold text-gray-300 uppercase tracking-widest">Drop HLS Resolutions</div>
         <p class="text-[11px] text-gray-500">Remove extra quality rungs from <strong>already-prepped</strong> bundles to reclaim space now, without re-encoding. The source-resolution rung is always kept; pick which down-rungs to keep.</p>
+        <div class="space-y-1.5 min-w-0">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Scope</label>
+          <select id="hlsTrimItem"
+            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none">
+            <option value="">Whole library</option>
+          </select>
+        </div>
         <div id="hlsTrimBoxes" class="flex flex-wrap gap-3 text-[11px] text-gray-400">
           <label class="flex items-center gap-1.5 opacity-60"><input type="checkbox" checked disabled class="accent-indigo-500"> Source (always)</label>
         </div>
@@ -543,6 +550,16 @@
           </button>
         </div>
         <div id="hlsTrimStatus" class="text-[11px] text-gray-500"></div>
+      </div>
+
+      <!-- Section D: on-demand stream only -->
+      <div class="px-5 py-4 border-t border-gray-800 space-y-3">
+        <div class="text-[11px] font-bold text-gray-300 uppercase tracking-widest">On-Demand Stream Only</div>
+        <p class="text-[11px] text-gray-500">Mark a show so on-device (browser) playback always uses the <strong>just-in-time</strong> stream — segments are transcoded as you watch and discarded after, so <strong>no permanent file is ever stored</strong>. Enabling one deletes its existing on-device bundles to reclaim space now. <strong>Playing on the TV (VLC) is unaffected.</strong></p>
+        <div id="ooUnavail" class="hidden text-xs text-amber-300 bg-amber-950/30 px-3 py-2">
+          On-device streaming isn't available on this host (macOS), so this setting has no effect here.
+        </div>
+        <div id="ooList" class="space-y-1.5 text-[11px] text-gray-400">Loading…</div>
       </div>
     </div>
   </div>
@@ -2866,18 +2883,21 @@ async function _fetchCompression(){
 function startCompressionPolling(){ stopCompressionPolling(); _fcTimer = setInterval(_fetchCompression, 2000); }
 function stopCompressionPolling(){ if(_fcTimer){ clearInterval(_fcTimer); _fcTimer = null; } }
 
-async function _loadCompressionItems(){
+async function _loadStorageItems(){
   if(_fcItemsLoaded) return;
   try{
     const r = await fetch("/api/admin/library", {headers: authHeader()});
     if(!r.ok) return;
     const {items} = await r.json();
-    const sel = document.getElementById("fcItem");
-    if(!sel) return;
-    const cur = sel.value;
-    sel.innerHTML = `<option value="">Whole library</option>`
+    const opts = `<option value="">Whole library</option>`
       + (items || []).map(it=>`<option value="${escHtml(it.id)}">${escHtml(it.title)}</option>`).join("");
-    sel.value = cur;
+    ["fcItem","hlsTrimItem"].forEach(id=>{
+      const sel = document.getElementById(id);
+      if(!sel) return;
+      const cur = sel.value;
+      sel.innerHTML = opts;
+      sel.value = cur;
+    });
     _fcItemsLoaded = true;
   }catch(_){}
 }
@@ -2895,9 +2915,62 @@ async function loadStorageCompression(){
   }catch(_){}
   _fcPickLevel(_fcLevel);
   _fcCodecChanged();
-  _loadCompressionItems();
+  _loadStorageItems();
+  loadOndemandOnly();
   const running = await _fetchCompression();
   if(running) startCompressionPolling();
+}
+
+function _renderOndemandOnly(d){
+  const list = document.getElementById("ooList");
+  const unavail = document.getElementById("ooUnavail");
+  if(!list) return;
+  if(unavail) unavail.classList.toggle("hidden", d.hls_available !== false);
+  const items = (d && d.items) || [];
+  if(!items.length){ list.innerHTML = `<div class="text-gray-600">No library items yet.</div>`; return; }
+  list.innerHTML = items.map(it=>{
+    const on = !!it.ondemand_only;
+    return `<div class="flex items-center justify-between gap-3 border border-gray-800 bg-gray-950/40 px-3 py-2">
+      <div class="min-w-0">
+        <div class="text-gray-300 font-bold break-all">${escHtml(it.title || "(untitled)")}</div>
+        <div class="text-[10px] text-gray-600">${it.file_count} file${it.file_count===1?'':'s'}${on?' · on-demand only — no permanent files':''}</div>
+      </div>
+      <button onclick="toggleOndemandOnly('${escHtml(it.id)}', ${on?'false':'true'}, this)"
+        class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-1.5 border transition-colors ${on
+          ? 'bg-indigo-600 border-indigo-500 text-white'
+          : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white'}">
+        ${on ? 'On-Demand Only' : 'Off'}
+      </button>
+    </div>`;
+  }).join("");
+}
+
+async function loadOndemandOnly(){
+  try{
+    const r = await fetch("/api/admin/ondemand-only", {headers: authHeader()});
+    if(!r.ok) return;
+    _renderOndemandOnly(await r.json());
+  }catch(_){}
+}
+
+async function toggleOndemandOnly(itemId, enabled, btn){
+  if(enabled && !confirm("Make this show on-demand stream only?\n\nIts existing on-device bundles will be deleted to free space, and no permanent files will be built going forward. On-device playback uses the just-in-time stream instead. Playing on the TV (VLC) is unaffected.\n\nProceed?")) return;
+  await withInflight("ondemand_only_"+itemId, btn, async ()=>{
+    try{
+      const r = await fetch("/api/admin/ondemand-only",{
+        method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+        body: JSON.stringify({item_id: itemId, enabled}),
+      });
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok){ showToast(`Failed: ${d.detail || r.status}`, true); return; }
+      if(enabled && d.bytes_freed){
+        showToast(`On-demand only — freed ${_fmtBytes(d.bytes_freed)} from ${d.bundles_purged} bundle(s).`);
+      } else {
+        showToast(enabled ? "On-demand only enabled." : "On-demand only disabled.");
+      }
+      loadOndemandOnly();
+    }catch(_){ showToast("Failed.", true); }
+  });
 }
 
 async function saveHlsLadder(btn){
@@ -2989,7 +3062,7 @@ async function estimateHlsTrim(){
     try{
       const r = await fetch("/api/admin/hls-trim",{
         method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
-        body: JSON.stringify({heights: keep, dry_run: true}),
+        body: JSON.stringify({heights: keep, dry_run: true, scope: document.getElementById("hlsTrimItem").value || "all"}),
       });
       const d = await r.json().catch(()=>({}));
       if(!r.ok){ box.textContent = `Estimate failed: ${d.detail || r.status}`; return; }
@@ -3010,7 +3083,7 @@ async function runHlsTrim(){
     try{
       const r = await fetch("/api/admin/hls-trim",{
         method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
-        body: JSON.stringify({heights: keep, dry_run: false}),
+        body: JSON.stringify({heights: keep, dry_run: false, scope: document.getElementById("hlsTrimItem").value || "all"}),
       });
       const d = await r.json().catch(()=>({}));
       if(!r.ok){ showToast(`Trim failed: ${d.detail || r.status}`, true); box.textContent = ""; return; }

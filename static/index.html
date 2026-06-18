@@ -7925,7 +7925,9 @@ async function _lpLoadIndex(seekTo) {
       lp.mode         = "ondemand";
       lp.odKey        = _odKeyFromUrl(od.master_url);
       prep.audios     = od.audios || [];
-      prep.subtitles  = [];                   // on-demand has no in-bundle subs
+      // On-demand now serves the source's embedded text subtitles as sub_<i>.vtt
+      // (extracted lazily), same as the full bundle — attach them as <track>s.
+      prep.subtitles  = od.subtitles || [];
       prep.subs       = od.subs || prep.subs || [];
       prep.saved_tracks = od.saved_tracks || prep.saved_tracks || {};
     } catch (err) {
