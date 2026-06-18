@@ -6874,6 +6874,52 @@ _TORZNAB_TOP_TYPES = {
 # Friendly, stable display order for content-type chips.
 _CONTENT_TYPE_ORDER = ["movies", "tv", "anime", "music", "books", "games", "apps", "xxx", "other"]
 
+# Reverse of _TORZNAB_TOP_TYPES: a friendly content-type label → its Torznab
+# top-level category bucket, so the search UI's category picker can translate a
+# user's content-type selection into a Jackett ``Category[]`` filter. ``anime``
+# has no distinct Torznab bucket (it lives inside Movies/TV and is name-matched),
+# so it isn't separately filterable — the category picker omits it.
+_CONTENT_TYPE_TO_TORZNAB = {
+    "games": "1000", "movies": "2000", "music": "3000", "apps": "4000",
+    "tv": "5000", "xxx": "6000", "books": "7000", "other": "8000",
+}
+
+
+def _torznab_top_bucket(cid: str) -> str:
+    """The Torznab top-level bucket id (e.g. ``2040`` → ``2000``) for a category id,
+    or the id unchanged if it isn't numeric."""
+    return f"{(int(cid) // 1000) * 1000}" if cid.isdigit() else cid
+
+
+def _resolve_search_categories(admin_raw: str, user_categories: Optional[str]):
+    """Resolve the effective Torznab ``Category[]`` filter for a search.
+
+    Combines the **admin** ``INDEXER_CATEGORIES`` override (a base restriction —
+    explicit category ids; ``"0"``/blank means unrestricted) with the **user's**
+    per-search content-type selection from the category picker. Returns:
+
+    - ``None`` ⇒ no category filter (query everything the indexer carries),
+    - ``[]``   ⇒ an explicit empty selection (the caller should return no results),
+    - ``[ids…]`` ⇒ the category-id list to pass to Jackett.
+
+    The two narrow each other: when the admin pins specific (sub)categories, the
+    user's content-type selection keeps only those whose top-level bucket the user
+    left selected, so the user can never broaden past the admin's restriction.
+    """
+    admin = {c.strip() for c in admin_raw.replace(",", " ").split()
+             if c.strip() and c.strip() != "0"}
+    user = None
+    if user_categories is not None:
+        user = {cid for lbl in user_categories.split(",")
+                if (cid := _CONTENT_TYPE_TO_TORZNAB.get(lbl.strip().lower()))}
+    if admin:
+        eff = {a for a in admin if _torznab_top_bucket(a) in user} if user is not None else admin
+    else:
+        eff = user
+    if eff is None:
+        return None
+    return sorted(eff)
+
 
 def _indexer_content_types(caps: list) -> list:
     """Derive friendly content-type tags (movies, tv, anime, xxx, music, …) from a
@@ -6960,20 +7006,30 @@ def _shape_search_results(items: list, limit: int) -> list:
 @app.get("/api/search")
 async def search(q: str, limit: int = 30,
                  indexers: Optional[str] = None,
+                 categories: Optional[str] = None,
                  profile_id: Optional[str] = None) -> JSONResponse:
     """Search configured indexers. ``indexers`` (comma-separated IDs) narrows the
-    query to the user-chosen subset; ``profile_id`` enforces the admin's per-profile
-    allowlist. The two intersect — a user can only ever search within what the admin
-    allows the profile."""
+    query to the user-chosen subset; ``categories`` (comma-separated content-type
+    labels — movies/tv/music/…) narrows it to those Torznab category buckets so
+    deselected types (e.g. ``xxx``) are never returned by any indexer; ``profile_id``
+    enforces the admin's per-profile allowlist. All three intersect — a user can only
+    ever search within what the admin allows the profile, and within the admin's
+    ``INDEXER_CATEGORIES`` base restriction."""
     if not q.strip():
         return JSONResponse({"results": []})
 
     lib = await get_library()
     cats_override = lib.get("settings", {}).get("admin_overrides", {}).get("indexer_categories")
     cats = (cats_override if cats_override is not None else settings.indexer_categories).strip()
+    # Admin base restriction ∩ the user's category-picker selection → Category[] filter.
+    cat_filter = _resolve_search_categories(cats, categories)
+    if cat_filter == []:
+        # Explicit empty selection (user unticked every category, or it's disjoint
+        # from the admin restriction) — nothing to search, don't query everything.
+        return JSONResponse({"results": []})
     params: dict = {"apikey": settings.indexer_api_key, "Query": q}
-    if cats and cats != "0":
-        params["Category[]"] = cats
+    if cat_filter:
+        params["Category[]"] = cat_filter
 
     # Query each configured indexer *independently and concurrently* rather than via
     # Jackett's aggregate /indexers/all/results. The aggregate waits for the slowest
