@@ -508,8 +508,22 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "5.16.1"
+UI_VERSION = "5.44.1"
 _lib_lock: asyncio.Lock  # initialised in lifespan
+
+# Retains references to fire-and-forget background tasks so the event loop's weak
+# reference doesn't let them be garbage-collected mid-flight. Each task discards
+# itself on completion.
+_bg_tasks: set = set()
+
+
+def _spawn_bg(coro) -> "asyncio.Task":
+    """Schedule a fire-and-forget coroutine, keeping a strong reference until it
+    finishes (otherwise asyncio may GC the task while it's still running)."""
+    t = asyncio.create_task(coro)
+    _bg_tasks.add(t)
+    t.add_done_callback(_bg_tasks.discard)
+    return t
 
 # Cap how many series fingerprint at once. Each series pipeline parks blocking
 # ffmpeg/fpcalc decodes (now on the analyzer's own thread pool) AND spins up a
@@ -10620,13 +10634,40 @@ async def admin_get_ondemand_only(request: Request) -> JSONResponse:
     return JSONResponse({"items": items, "hls_available": HLS_AVAILABLE})
 
 
+async def _purge_ondemand_bundles(item_id: str) -> None:
+    """Background reclamation for a freshly on-demand-only item: walk the cache
+    and delete the item's permanent HLS bundles. Runs detached from the request
+    so the (heavy, GIL-contending) forced inventory walk + deletes never stall
+    the event loop for other users — the flag is already live by the time this
+    starts, so playback behaviour is correct regardless of when space is freed."""
+    try:
+        inv = await _build_offline_cache_inventory(force=True)
+        it_inv = next((x for x in inv["items"] if x["item_id"] == item_id), None)
+        if not it_inv:
+            return
+        for f in it_inv["files"]:
+            if _offline_cache_path_active(f["cache_key"]):
+                continue
+            await asyncio.to_thread(_delete_cache_artifacts, f["cache_key"])
+        _invalidate_offline_cache_inventory()
+    except Exception:
+        log.exception("ondemand-only background bundle purge failed for %s", item_id)
+
+
 @app.post("/api/admin/ondemand-only")
 async def admin_set_ondemand_only(request: Request, body: OndemandOnlyReq) -> JSONResponse:
     """Flag (or unflag) a show as **on-demand stream only**: on-device browser
     playback uses the just-in-time pipeline and NO permanent HLS bundle is built,
     so it costs ~no disk. Enabling also cancels any in-flight prep for the item and
-    purges its existing bundles to reclaim space now. VLC (TV) playback is
-    unaffected — it reads the source file directly."""
+    purges its existing bundles to reclaim space. VLC (TV) playback is unaffected
+    — it reads the source file directly.
+
+    The flag flip + job cancel are fast and happen inline so the toggle takes
+    effect immediately. The bundle purge requires a forced full-cache inventory
+    walk (heavy on a large `.offline_cache/`) and is run in a DETACHED background
+    task — doing it inline made the request hold the event loop long enough that
+    other users couldn't load the page or act on it. Space is reclaimed shortly
+    after the response returns."""
     _require_admin(request)
     lib = await get_library()
     item = next((it for it in lib["items"] if it.get("id") == body.item_id), None)
@@ -10636,9 +10677,10 @@ async def admin_set_ondemand_only(request: Request, body: OndemandOnlyReq) -> JS
     await put_library(lib)
     _rebuild_ondemand_only_items(lib)
 
-    bundles = bytes_freed = cancelled = 0
+    cancelled = 0
+    purging = False
     if body.enabled:
-        # Stop any in-flight / queued prep for this item's files.
+        # Stop any in-flight / queued prep for this item's files (fast).
         for j in list(_offline_jobs.values()):
             if (j.get("item_id") == body.item_id
                     and j.get("status") in ("pending", "processing", "paused")):
@@ -10650,21 +10692,12 @@ async def admin_set_ondemand_only(request: Request, body: OndemandOnlyReq) -> JS
                         pass
                 j["status"] = "cancelled"
                 cancelled += 1
-        # Purge existing permanent bundles for the item to reclaim space immediately.
-        inv = await _build_offline_cache_inventory(force=True)
-        it_inv = next((x for x in inv["items"] if x["item_id"] == body.item_id), None)
-        if it_inv:
-            for f in it_inv["files"]:
-                if _offline_cache_path_active(f["cache_key"]):
-                    continue
-                freed = await asyncio.to_thread(_delete_cache_artifacts, f["cache_key"])
-                if freed > 0:
-                    bundles += 1
-                    bytes_freed += freed
-            _invalidate_offline_cache_inventory()
+        # Reclaim existing permanent bundles in the background so the request
+        # returns immediately and the loop stays free for everyone else.
+        _spawn_bg(_purge_ondemand_bundles(body.item_id))
+        purging = True
     return JSONResponse({"ok": True, "ondemand_only": bool(body.enabled),
-                         "bundles_purged": bundles, "bytes_freed": bytes_freed,
-                         "jobs_cancelled": cancelled})
+                         "purging": purging, "jobs_cancelled": cancelled})
 
 
 @app.get("/api/admin/cache-autopurge")

@@ -2995,8 +2995,8 @@ async function toggleOndemandOnly(itemId, enabled, btn){
       });
       const d = await r.json().catch(()=>({}));
       if(!r.ok){ showToast(`Failed: ${d.detail || r.status}`, true); return; }
-      if(enabled && d.bytes_freed){
-        showToast(`On-demand only — freed ${_fmtBytes(d.bytes_freed)} from ${d.bundles_purged} bundle(s).`);
+      if(enabled && d.purging){
+        showToast("On-demand only enabled — reclaiming disk space in the background.");
       } else {
         showToast(enabled ? "On-demand only enabled." : "On-demand only disabled.");
       }
