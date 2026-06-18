@@ -6918,11 +6918,13 @@ function renderSourceList(){
     const chips=(ix.content_types||[]).map(t=>
       `<span class="text-[9px] font-bold uppercase tracking-wide px-1.5 py-0.5 ${_SRC_TYPE_STYLE[t]||_SRC_TYPE_STYLE.other}">${_SRC_TYPE_LABELS[t]||t}</span>`
     ).join("");
-    return `<label class="flex items-center gap-3 px-3 py-2.5 cursor-pointer hover:bg-gray-800/60 transition-colors">
-      <input type="checkbox" ${on?"checked":""} onchange="toggleSource('${escHtml(ix.id)}',this.checked)"
-        class="w-4 h-4 accent-indigo-500 flex-shrink-0">
-      <span class="text-sm text-gray-200 font-medium truncate flex-1 min-w-0">${escHtml(ix.name)}</span>
-      <span class="flex gap-1 flex-wrap justify-end flex-shrink-0">${chips||'<span class="text-[9px] text-gray-700 uppercase">—</span>'}</span>
+    return `<label class="flex flex-col sm:flex-row sm:items-center gap-1.5 sm:gap-3 px-3 py-2.5 cursor-pointer hover:bg-gray-800/60 transition-colors">
+      <span class="flex items-center gap-3 min-w-0 sm:flex-1">
+        <input type="checkbox" ${on?"checked":""} onchange="toggleSource('${escHtml(ix.id)}',this.checked)"
+          class="w-4 h-4 accent-indigo-500 flex-shrink-0">
+        <span class="text-sm text-gray-200 font-medium truncate min-w-0">${escHtml(ix.name)}</span>
+      </span>
+      <span class="flex gap-1 flex-wrap sm:justify-end sm:flex-shrink-0 pl-7 sm:pl-0">${chips||'<span class="text-[9px] text-gray-700 uppercase">—</span>'}</span>
     </label>`;
   }).join("");
 }
@@ -10167,6 +10169,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.42.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.42.1</div>
 </body>
 </html>
