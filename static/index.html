@@ -1816,6 +1816,8 @@
         <span id="streamInfo" class="text-[11px] text-gray-600 truncate"></span>
         <span id="vlcTimeDisplay" class="hidden text-[11px] font-mono text-gray-500 flex-shrink-0"></span>
         <span id="speedInfo" class="text-[11px] text-gray-700 font-mono flex-shrink-0"></span>
+        <!-- Who started the active playback — progress is attributed to them. -->
+        <span id="ownerBadge" class="hidden items-center gap-1 text-[11px] font-bold text-gray-400 uppercase tracking-wide flex-shrink-0 max-w-[40%]"></span>
       </div>
     </div>
     <div id="statusBadge" class="hidden text-[10px] font-black px-2 py-0.5 border flex-shrink-0 uppercase tracking-wide"></div>
@@ -1970,7 +1972,11 @@
   <div class="flex-shrink-0 flex items-center gap-3 px-4 py-2 border-b border-gray-800 min-h-[48px]">
     <div class="flex-1 min-w-0">
       <div id="fcTitle" class="text-sm font-bold text-gray-100 leading-snug line-clamp-2"></div>
-      <div id="fcStatus" class="text-xs text-indigo-500 mt-0.5"></div>
+      <div class="flex items-center gap-2 mt-0.5 flex-wrap">
+        <div id="fcStatus" class="text-xs text-indigo-500"></div>
+        <!-- Who started this playback — their profile owns the progress. -->
+        <span id="fcOwner" class="hidden items-center gap-1 text-[11px] font-bold text-gray-300 uppercase tracking-wide"></span>
+      </div>
     </div>
     <div id="fcTime" class="text-base font-mono font-bold text-gray-400 tabular-nums flex-shrink-0 text-right"></div>
   </div>
@@ -3071,6 +3077,27 @@ const BADGE={buffering:"bg-yellow-900/50 text-yellow-400 border-yellow-800",
 const BAR_COLOR={buffering:"bg-yellow-500",playing:"bg-green-500",error:"bg-red-500",idle:"bg-indigo-500"};
 const DOT_COLOR={buffering:"bg-yellow-500 blink",playing:"bg-green-500",error:"bg-red-500",idle:"bg-gray-700"};
 
+// Paint the "started by" chip in the footer + fullscreen overlay. The active
+// playback is owned by whoever pressed Play; progress is always saved to that
+// profile no matter who drives the shared VLC controls afterward, so we surface
+// it on every client. Hidden when nothing library-backed is playing.
+function renderPlaybackOwner(s){
+  const show = !!(s.is_library_playback && s.library_profile_id);
+  const name = s.library_profile_name || "Unknown";
+  const isMe = profile.id && s.library_profile_id === profile.id;
+  const dotBg = avatarBg(s.library_profile_color || "indigo");
+  const label = isMe ? `${name} · you` : name;
+  const tip = `Playback started by ${name} — progress saves to ${isMe ? "your" : "their"} profile`;
+  const inner = `<span class="w-2 h-2 ${dotBg} inline-block flex-shrink-0"></span><span class="truncate">${escHtml(label)}</span>`;
+  for(const id of ["ownerBadge","fcOwner"]){
+    const el=document.getElementById(id);
+    if(!el) continue;
+    el.classList.toggle("hidden",!show);
+    el.classList.toggle("flex",show);
+    if(show){ el.title=tip; el.innerHTML=inner; }
+  }
+}
+
 function renderPlayer(s){
   const np=document.getElementById("nowPlaying"),si=document.getElementById("streamInfo");
   const sp=document.getElementById("speedInfo"),bar=document.getElementById("progressBar");
@@ -3181,6 +3208,7 @@ function renderPlayer(s){
     }
   }
 
+  renderPlaybackOwner(s);
   sp.textContent=(s.dl_speed_bps>0&&s.stream_status!=="idle")?`▼ ${fmtSpeed(s.dl_speed_bps)}  ▲ ${fmtSpeed(s.ul_speed_bps)}`:"";
   if(s.stream_status in BADGE){
     const bufLabel = s.is_library_playback ? "Loading…" : "Buffering…";
@@ -4946,6 +4974,11 @@ function _optimisticBuffering(label, itemId){
   app.vlc_time     = 0;
   app.vlc_duration = 0;
   app.is_library_playback = true;
+  // We're the one starting it — own the session immediately so the "started by"
+  // chip reads "you" before the server's state event confirms it.
+  app.library_profile_id    = profile.id;
+  app.library_profile_name  = profile.name;
+  app.library_profile_color = profile.color;
   renderPlayer(app);
   hideAlert();
   _fcDismissed = false;
@@ -10169,6 +10202,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.42.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.43.0</div>
 </body>
 </html>

@@ -59,7 +59,8 @@
 | `progress`, `downloaded_mb`, `total_mb`, `dl_speed_bps`, `ul_speed_bps` | Live torrent stats from qBit |
 | `stream_task` | The asyncio.Task running `stream_pipeline` — cancel on stop/replay |
 | `library_play_task` | The asyncio.Task running the VLC handoff for the active library play / prev / next. Cancelled by `/api/stop` and by any subsequent Play / prev / next so slow VLC roundtrips can't race a newer action |
-| `library_item_id`, `library_profile_id` | Non-None when active playback is a library item — prevents auto-delete on stop |
+| `library_item_id`, `library_profile_id` | Non-None when active playback is a library item — prevents auto-delete on stop. `library_profile_id` is the **owner**: the profile that pressed Play, and the only profile progress/watched/resume is ever written to (the shared VLC controls carry no profile, so a second viewer driving them can't reattribute the session). Set via `_set_playback_owner` |
+| `library_profile_name`, `library_profile_color` | Snapshot of the owner profile's name + color, captured by `_set_playback_owner` so `state_snapshot` can expose "who's watching" to SSE clients without a library lookup. Cleared (with `library_profile_id`) on stop/background |
 | `library_item_file_count`, `library_playlist`, `library_current_file` | Multi-episode playlist state |
 | `downloading_count` | Driving the navbar download badge |
 | `play_when_ready_*` | "Auto-play when this item (or file) finishes downloading" |

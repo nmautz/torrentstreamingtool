@@ -627,6 +627,12 @@ class AppState:
     library_play_task: Optional[asyncio.Task] = None  # in-flight VLC handoff for a library play / prev / next
     library_item_id: Optional[str] = None
     library_profile_id: Optional[str] = None
+    # Identity of the profile that *started* the current playback, snapshotted so
+    # SSE clients can show "who's watching" without a library lookup. Progress is
+    # always attributed to library_profile_id regardless of who drives the shared
+    # VLC controls afterward — these just make the owner visible. Cleared on stop.
+    library_profile_name: str = ""
+    library_profile_color: str = ""
     library_item_file_count: int = 0                     # total files in the playing item
     library_playlist: list = field(default_factory=list)  # ordered file paths
     library_current_file: Optional[str] = None            # path VLC is playing now
@@ -859,6 +865,12 @@ def state_snapshot() -> dict:
         "library_item_file_count": state.library_item_file_count,
         "is_library_playback": state.library_item_id is not None,
         "library_item_id": state.library_item_id,
+        # Who started the active playback. Progress is always attributed to this
+        # profile no matter who drives the shared VLC controls — the UI shows it
+        # so other viewers know whose session/progress they're affecting.
+        "library_profile_id": state.library_profile_id,
+        "library_profile_name": state.library_profile_name,
+        "library_profile_color": state.library_profile_color,
         "play_when_ready_item_id": state.play_when_ready_item_id,
         "play_when_ready_file_path": state.play_when_ready_file_path,
         "skip_offer": state.skip_offer,
@@ -2353,6 +2365,26 @@ def _canonical_item_path(vlc_path: str, item: dict) -> str:
         except Exception:
             continue
     return vlc_path
+
+
+async def _set_playback_owner(profile_id: Optional[str], lib: Optional[dict] = None) -> None:
+    """Pin the active playback to a profile and snapshot its name/color onto state.
+
+    Single source of truth for *who started* the current VLC playback. Whoever
+    presses Play owns the session; everyone else can drive the shared controls
+    (pause/seek/next) but progress always lands on this profile. Pass profile_id
+    ``None`` to clear (stop / background). ``lib`` is reused if the caller already
+    holds a library snapshot, else fetched."""
+    state.library_profile_id = profile_id or None
+    if not profile_id:
+        state.library_profile_name = ""
+        state.library_profile_color = ""
+        return
+    if lib is None:
+        lib = await get_library()
+    prof = next((p for p in lib.get("profiles", []) if p.get("id") == profile_id), None)
+    state.library_profile_name = (prof or {}).get("name", "") or ""
+    state.library_profile_color = (prof or {}).get("color", "") or ""
 
 
 def find_resume_hint(item: dict, profile_id: str) -> Optional[dict]:
@@ -3980,7 +4012,7 @@ async def _auto_play_item(item: dict, profile_id: str, file_path: str = "") -> N
         state.current_subtitle_track = -1
         state.active_hash = item.get("torrent_hash") or None
         state.library_item_id = item["id"]
-        state.library_profile_id = profile_id
+        await _set_playback_owner(profile_id)
         state.library_item_file_count = len(item.get("files", []))
         state.library_playlist = playlist
         state.library_current_file = playlist[0]
@@ -4021,6 +4053,8 @@ async def _play_background_video() -> bool:
     state.stream_status = "idle"
     state.library_item_id = None
     state.library_profile_id = None
+    state.library_profile_name = ""
+    state.library_profile_color = ""
     state.library_item_file_count = 0
     state.library_playlist = []
     state.library_current_file = None
@@ -6615,6 +6649,8 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     state.active_hash = item.get("torrent_hash") or None
     state.library_item_id = item_id
     state.library_profile_id = req.profile_id
+    state.library_profile_name = (prof_obj or {}).get("name", "") or ""
+    state.library_profile_color = (prof_obj or {}).get("color", "") or ""
     state.library_item_file_count = len(item.get("files", []))
     state.library_playlist = playlist
     state.library_current_file = playlist[0]
@@ -7222,6 +7258,8 @@ async def stream_now(req: StreamReq) -> JSONResponse:
     state.active_file = None
     state.library_item_id = None
     state.library_profile_id = None
+    state.library_profile_name = ""
+    state.library_profile_color = ""
     state.library_item_file_count = 0
     state.library_playlist = []
     state.library_current_file = None
@@ -7835,6 +7873,8 @@ async def youtube_play(req: YouTubeReq) -> JSONResponse:
     state.active_file = None
     state.library_item_id = None
     state.library_profile_id = None
+    state.library_profile_name = ""
+    state.library_profile_color = ""
     state.library_item_file_count = 0
     state.library_playlist = []
     state.library_current_file = None
@@ -8024,6 +8064,8 @@ async def stop() -> JSONResponse:
     state.vlc_duration = 0
     state.library_item_id = None
     state.library_profile_id = None
+    state.library_profile_name = ""
+    state.library_profile_color = ""
     state.library_item_file_count = 0
     state.library_playlist = []
     state.library_current_file = None
