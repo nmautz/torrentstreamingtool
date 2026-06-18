@@ -486,6 +486,25 @@ Two ways to populate the cache:
 >    `readyState < 3`) the `#lpPreparing` overlay shows "Reconnecting…", cleared
 >    by `playing`. Retry state is reset in `_lpDestroyHls` (so every load /
 >    stop / episode change starts clean).
+> 4. **Hung-request stall watchdog** (`_lpStallWatch`, `_lpKickLoader`). Pieces
+>    1–3 all hinge on hls.js firing a **fatal `NETWORK_ERROR`** — but a connection
+>    that drops *mid-fetch* (the classic tunnel) doesn't fail the in-flight
+>    fragment XHR, it **hangs** it over the dead socket. No fatal error fires, the
+>    reconnect loop never engages, and hls.js sits on the dead request until its
+>    45 s `fragLoadingTimeOut` — so playback keeps "buffering" long after the link
+>    is back (a stop+restart cured it instantly because that built a fresh request
+>    on a live socket). The watchdog polls every 3 s and, once playback has
+>    actually started (`lp.everPlayed`, armed on the first `playing`), aborts the
+>    hung fragment (`hls.stopLoad()` + `startLoad(-1)`; Safari reloads at position)
+>    and re-requests from the current position once the playhead has been starved
+>    (`readyState < 3`, no forward progress) past a threshold — **9 s in bundle
+>    mode** (segments load near-instantly, so a multi-second stall is a dead
+>    request) but **35 s in on-demand mode**, above the server's 30 s
+>    `OD_SEG_WAIT_TIMEOUT` so a legitimately-progressing JIT cold seek (which
+>    either delivers the segment or returns a 504 hls.js retries itself) is never
+>    kicked. The global `online` event also kicks immediately via
+>    `_lpNetOnline → _lpKickIfStalled` when playback is starved (tunnel exit the
+>    OS *does* notice). Watchdog state resets in `_lpDestroyHls`.
    - **Safari** (iOS + macOS): set `<video>.src = master_url` directly.
      Safari plays HLS natively, exposing `AudioTrackList` for audio
      switching. Wait for `loadedmetadata` → populate dropdowns. (Subtitles

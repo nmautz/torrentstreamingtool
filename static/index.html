@@ -2686,6 +2686,10 @@ let lp = {
   // loop is running (playback keeps draining the buffer meanwhile). See
   // _lpNetLost / _lpNetRetryNow / _lpNetReset.
   netDown: false,
+  // Set true on the first `playing` event of a load; arms the stall watchdog so
+  // initial buffering / a first-segment cold encode isn't mistaken for a stall.
+  // Reset by _lpDestroyHls (every load / stop / episode change). See _lpStallWatch.
+  everPlayed: false,
 };
 // Subtitle upgrade poller — re-checks for late-downloaded real subs while an
 // auto-applied AI sub is showing. setInterval handle; cleared on stop.
@@ -7805,6 +7809,8 @@ function _lpDestroyHls() {
     try { lp.hls.destroy(); } catch (_) {}
     lp.hls = null;
   }
+  lp.everPlayed = false;
+  _lpStallSince = 0; _lpStallLastT = 0;
   _lpNetReset();
 }
 
@@ -7860,9 +7866,87 @@ function _lpNetRetryNow() {
 // Wired into the global `online` listener — retry immediately, skipping
 // whatever backoff delay is pending.
 function _lpNetOnline() {
-  if (!lp.netDown || !lp.itemId) return;
-  if (_lpNetRetryTimer) { clearTimeout(_lpNetRetryTimer); _lpNetRetryTimer = null; }
-  _lpNetRetryNow();
+  // A fatal NETWORK_ERROR already engaged the reconnect loop → short-circuit it.
+  if (lp.netDown && lp.itemId) {
+    if (_lpNetRetryTimer) { clearTimeout(_lpNetRetryTimer); _lpNetRetryTimer = null; }
+    _lpNetRetryNow();
+    return;
+  }
+  // No fatal error fired, but the radio just came back — if playback is starved
+  // it's almost certainly stuck on a fragment XHR hung over the now-dead socket
+  // (a tunnel/Wi-Fi↔LTE drop hangs the request instead of failing it, so hls.js
+  // waits out its 45 s fragLoadingTimeOut before retrying). Abort + refetch now.
+  _lpKickIfStalled();
+}
+
+// Abort a fragment request that's hung over a silently-dropped connection and
+// re-request from the current position. This is the recovery path the fatal-
+// NETWORK_ERROR reconnect loop never covers: a tunnel kills the in-flight XHR's
+// TCP connection without erroring it, so hls.js just sits on the dead request
+// (until the long `fragLoadingTimeOut`) and keeps "buffering" even after the
+// connection is back — exactly the symptom that a stop+restart cures instantly.
+function _lpKickLoader() {
+  if (lp.hls) {
+    // stopLoad() aborts the in-flight (hung) fetch; startLoad(-1) resumes from
+    // the current position. A live FRAG_LOADED then clears any reconnect state.
+    try { lp.hls.stopLoad(); lp.hls.startLoad(-1); } catch (_) {}
+  } else {
+    // Safari native HLS: reload the still-set src, seeking back to the death
+    // position via the resume machinery (load() resets currentTime to 0).
+    const v = document.getElementById("lpVideo");
+    if (!v) return;
+    const t = v.currentTime || 0;
+    if (t > 2) { lp.resumeSec = t; lp.resumeApplied = false; }
+    try { v.load(); v.play().catch(() => {}); } catch (_) {}
+  }
+}
+
+// Only kick if we're actually starved for data (so an online-event during
+// healthy playback is a no-op). readyState < HAVE_FUTURE_DATA(3) means the
+// playhead can't advance from buffer.
+function _lpKickIfStalled() {
+  if (!lp.itemId) return;
+  const v = document.getElementById("lpVideo");
+  if (!v || v.paused || v.readyState >= 3 || _lpScrub) return;
+  _lpKickLoader();
+}
+
+// Stall watchdog. The `online` kick above only fires if the OS notices the
+// outage (mobile tunnels often keep reporting `online` with no usable data), so
+// we also poll: if the playhead has been starved with no forward progress for
+// longer than a mode-dependent threshold, the in-flight fragment request is
+// hung — abort + refetch. Bundle segments load in well under a second on a live
+// link, so a multi-second stall there is reliably a dead request; on-demand
+// segments are transcoded just-in-time (a cold seek legitimately waits ~tens of
+// seconds), so its threshold is more patient to avoid kicking a progressing
+// encode. Armed only after playback has actually started (so the initial
+// buffering / first-segment encode is never mistaken for a stall).
+let _lpStallLastT = 0;
+let _lpStallSince = 0;
+function _lpStallWatch() {
+  const v = document.getElementById("lpVideo");
+  if (!v || !lp.itemId || v.paused || !lp.everPlayed || _lpScrub) {
+    _lpStallSince = 0; _lpStallLastT = v ? (v.currentTime || 0) : 0;
+    return;
+  }
+  const t = v.currentTime || 0;
+  const now = Date.now();
+  if (t > _lpStallLastT + 0.25) {          // playhead advanced → not stalled
+    _lpStallLastT = t; _lpStallSince = 0;
+    return;
+  }
+  if (v.readyState >= 3) { _lpStallSince = 0; return; }  // buffered, just paused-ish
+  if (!_lpStallSince) { _lpStallSince = now; return; }
+  // On-demand holds a segment request open up to OD_SEG_WAIT_TIMEOUT (30 s) while
+  // ffmpeg transcodes a cold seek — and a real timeout returns 504, which hls.js
+  // retries on its own. So only kick OD past that window (a truly dead request
+  // never returns at all and would otherwise hang to the 45 s fragLoadingTimeOut).
+  // Bundle segments load near-instantly, so a multi-second stall is a dead request.
+  const threshold = lp.mode === "ondemand" ? 35000 : 9000;
+  if (now - _lpStallSince >= threshold) {
+    _lpKickLoader();
+    _lpStallSince = now;                   // re-arm; don't spam every tick
+  }
 }
 
 async function _lpLoadIndex(seekTo) {
@@ -9041,6 +9125,10 @@ function _lpFlushProgress(useBeacon) {
 
 function _lpAttachVideoEvents() {
   const v = document.getElementById("lpVideo");
+  // Poll for a hung-fragment stall (silently-dropped-then-recovered connection
+  // that never fires a fatal NETWORK_ERROR). No-ops unless the on-device player
+  // is active and starved for data. See _lpStallWatch.
+  setInterval(_lpStallWatch, 3000);
   v.addEventListener("loadedmetadata", () => {
     lp.duration = v.duration || 0;
     if (!lp.resumeApplied && lp.resumeSec > 0 && lp.resumeSec < (v.duration||0) - 5) {
@@ -9087,6 +9175,7 @@ function _lpAttachVideoEvents() {
     // Safari-native recovery success lands here (hls.js recovery is detected
     // on FRAG_LOADED instead — buffered playback also fires `playing`).
     if (!lp.hls && lp.netDown) _lpNetReset();
+    lp.everPlayed = true; _lpStallSince = 0;   // arm + clear the stall watchdog
     document.getElementById("localPlayer").classList.remove("lp-buffering");
     _lpCtlSync(); _lpCtlShow();
     _lpHidePreparing();
@@ -9794,6 +9883,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.36.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.36.1</div>
 </body>
 </html>
