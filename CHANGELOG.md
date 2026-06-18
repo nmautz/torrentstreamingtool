@@ -1,5 +1,8 @@
 # Changelog
 
+## [5.38.0] — 2026-06-17
+- **"Use My Computer" pause durations are now 30 Min, 2 Hours, and Until Disabled** (previously 60 Sec / 2 Min / Until I Stop) — longer presets better match actually reclaiming the desktop for a while. The countdown label now renders an `h:mm:ss` form once over an hour remains (was always `m:ss`). **UI:** [static/index.html](static/index.html) (`wcButtons`, `renderWindowControl`).
+
 ## [5.37.0] — 2026-06-17
 - **The episode page now opens on the season you actually left off in, and scrolls the season bar so that season is centred (visible) instead of off-screen.** Two related fixes for shows with many seasons, especially on mobile: **(1)** When nothing is currently playing, `pickDefaultSeason` now lands on the season of the **most-recently-watched** episode (latest `progress.updated_at`) rather than the *first season with any unwatched episode*. An early episode left unwatched on purpose — skipped, or saved for later — no longer drags the picker back to an earlier season. The currently-playing-file rule still wins when something is live, and first-unwatched/first-available remain as fallbacks. **(2)** `renderEpSeasonTabs` now horizontally centres the active season tab in the strip (`_scrollActiveSeasonIntoView`, via `requestAnimationFrame` so layout is settled on first open) — with a dozen seasons the one the viewer is on was otherwise scrolled off-screen and hard to find on a phone. Only the strip's own `scrollLeft` is touched, never the page. **UI:** [static/index.html](static/index.html) (`pickDefaultSeason`, `renderEpSeasonTabs`, `_scrollActiveSeasonIntoView`). **Docs:** [docs/FRONTEND.md](docs/FRONTEND.md).
 

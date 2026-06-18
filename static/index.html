@@ -869,12 +869,12 @@
           <div class="text-[11px] text-gray-500 mt-0.5">Pause the background video and stop VLC from taking over the screen or minimizing your windows, so you can use the computer normally.</div>
         </div>
         <div id="wcButtons" class="grid grid-cols-3 gap-2">
-          <button onclick="pauseWindowControl(60)"
-            class="bg-gray-700 hover:bg-indigo-700 text-gray-100 text-xs font-bold uppercase tracking-wide py-2.5 transition-colors">60 Sec</button>
-          <button onclick="pauseWindowControl(120)"
-            class="bg-gray-700 hover:bg-indigo-700 text-gray-100 text-xs font-bold uppercase tracking-wide py-2.5 transition-colors">2 Min</button>
+          <button onclick="pauseWindowControl(1800)"
+            class="bg-gray-700 hover:bg-indigo-700 text-gray-100 text-xs font-bold uppercase tracking-wide py-2.5 transition-colors">30 Min</button>
+          <button onclick="pauseWindowControl(7200)"
+            class="bg-gray-700 hover:bg-indigo-700 text-gray-100 text-xs font-bold uppercase tracking-wide py-2.5 transition-colors">2 Hours</button>
           <button onclick="pauseWindowControl(0)"
-            class="bg-gray-700 hover:bg-indigo-700 text-gray-100 text-xs font-bold uppercase tracking-wide py-2.5 transition-colors">Until I Stop</button>
+            class="bg-gray-700 hover:bg-indigo-700 text-gray-100 text-xs font-bold uppercase tracking-wide py-2.5 transition-colors">Until Disabled</button>
         </div>
         <div id="wcResume" class="hidden mt-1">
           <div class="flex items-center justify-between gap-3 bg-indigo-950/60 border border-indigo-800 px-3 py-2.5">
@@ -3748,8 +3748,11 @@ function renderWindowControl(){
       renderWindowControl();
       return;
     }
-    const m = Math.floor(rem/60), s = rem%60;
-    label.textContent = `Paused — resumes in ${m}:${String(s).padStart(2,"0")}`;
+    const h = Math.floor(rem/3600), m = Math.floor((rem%3600)/60), s = rem%60;
+    const t = h > 0
+      ? `${h}:${String(m).padStart(2,"0")}:${String(s).padStart(2,"0")}`
+      : `${m}:${String(s).padStart(2,"0")}`;
+    label.textContent = `Paused — resumes in ${t}`;
   };
   draw();
   // Tick the countdown locally each second between SSE state events.
@@ -9914,6 +9917,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.37.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.38.0</div>
 </body>
 </html>
