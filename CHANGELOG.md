@@ -1,5 +1,8 @@
 # Changelog
 
+## [5.38.1] — 2026-06-17
+- **The "Open Jackett" admin link now points at the server's primary adapter address — the same IP shown in the Network Adapter menu — instead of whatever hostname the admin happened to connect on.** When the indexer URL is loopback (`http://localhost:9117`), `_jackett_dashboard_url` now swaps in `active_ip` from `_network_status` (the admin-selected primary adapter, with the same offline-fallback resolution), keeping Jackett's scheme + port; it falls back to `request.url.hostname` only if no primary address resolves. The function is now `async` (it reads the library to resolve the adapter) and its three callers (`/api/admin/indexers/health`, `/api/admin/flaresolverr`, indexer test) `await` it. **Backend:** [main.py](main.py) (`_jackett_dashboard_url`).
+
 ## [5.38.0] — 2026-06-17
 - **"Use My Computer" pause durations are now 30 Min, 2 Hours, and Until Disabled** (previously 60 Sec / 2 Min / Until I Stop) — longer presets better match actually reclaiming the desktop for a while. The countdown label now renders an `h:mm:ss` form once over an hour remains (was always `m:ss`). **UI:** [static/index.html](static/index.html) (`wcButtons`, `renderWindowControl`).
 

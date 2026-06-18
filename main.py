@@ -8835,21 +8835,28 @@ async def admin_delete_indexer(indexer_id: str, request: Request) -> JSONRespons
         raise HTTPException(502, f"Could not reach Jackett: {e}")
 
 
-def _jackett_dashboard_url(request: Request) -> str:
+async def _jackett_dashboard_url(request: Request) -> str:
     """The Jackett web-UI dashboard URL for the admin to log in and tweak indexers.
 
     ``settings.indexer_url`` is server-internal (``http://localhost:9117``) — useless
     as a link target, since "localhost" resolves to the admin's *own* browser machine,
-    not the server. So when Jackett is on a loopback address we swap in the hostname
-    the admin actually connected on (``request.url.hostname``), keeping Jackett's own
-    scheme + port. A non-loopback indexer URL (admin pointed at a remote Jackett) is
-    used as-is."""
+    not the server. So when Jackett is on a loopback address we swap in the server's
+    **primary adapter address** — the same IP the admin sees in the Network Adapter
+    menu (so the link matches what's advertised), keeping Jackett's own scheme + port.
+    If that address can't be resolved we fall back to the hostname the admin actually
+    connected on (``request.url.hostname``). A non-loopback indexer URL (admin pointed
+    at a remote Jackett) is used as-is."""
     base = settings.indexer_url.rstrip("/")
     try:
         parts = urlparse(base)
         host = (parts.hostname or "").lower()
         if host in ("localhost", "127.0.0.1", "::1", "0.0.0.0"):
-            req_host = request.url.hostname or host
+            primary_ip = ""
+            try:
+                primary_ip = _network_status(await get_library())["active_ip"] or ""
+            except Exception:
+                primary_ip = ""
+            req_host = primary_ip or request.url.hostname or host
             port = f":{parts.port}" if parts.port else ""
             base = f"{parts.scheme or 'http'}://{req_host}{port}"
     except Exception:
@@ -8869,7 +8876,7 @@ async def admin_indexer_health(request: Request) -> JSONResponse:
         "failing": state.indexers_failing,
         "checked_at": state.indexer_health_checked_at or None,
         "indexers": state.indexer_health,
-        "jackett_url": _jackett_dashboard_url(request),
+        "jackett_url": await _jackett_dashboard_url(request),
     })
 
 
@@ -8954,7 +8961,7 @@ async def admin_flaresolverr(request: Request) -> JSONResponse:
         "v1_url":      base + "/v1",     # the actual solve endpoint
         "installable": sysname in ("Windows", "Linux"),
         "platform":    sysname,
-        "jackett_url": _jackett_dashboard_url(request),
+        "jackett_url": await _jackett_dashboard_url(request),
         "job": ({"status": job["status"], "progress": round(job.get("progress", 0.0), 3),
                  "error": job.get("error")} if job else None),
     })
@@ -9048,7 +9055,7 @@ async def admin_test_all_indexers(request: Request) -> JSONResponse:
         "total": state.indexers_total,
         "failing": state.indexers_failing,
         "indexers": health,
-        "jackett_url": _jackett_dashboard_url(request),
+        "jackett_url": await _jackett_dashboard_url(request),
     })
 
 
