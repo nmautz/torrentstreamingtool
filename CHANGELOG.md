@@ -1,5 +1,8 @@
 # Changelog
 
+## [5.41.0] — 2026-06-17
+- **New device-local setting to disable the locked progress bar.** Settings → This Device gains a **Locked Progress Bar** toggle. It's **on by default** (the seek bar keeps its hold-to-unlock accidental-click guard). Turning it off makes the bar permanently unlocked on that device — a single tap seeks, no hold gesture. The preference is stored in this browser's `localStorage` (`streamlink_seeklock`), never the server/profile, and applies live. **UI:** [static/index.html](static/index.html) — new `_seekLockEnabled` state honoured by `lockSeekBar`, `toggleSeekLock`, `psSeekLock` checkbox. **Docs:** [docs/FRONTEND.md](docs/FRONTEND.md).
+
 ## [5.40.0] — 2026-06-17
 - **Search now has a per-user "Sources" picker, and admins can restrict which indexers a profile may search.** Two related additions:
   - **User search source picker.** A collapsible **Sources** control under the search box lists the indexers this profile is allowed to search, each tagged with the content types it carries (Movies / TV / Anime / Music / Books / Games / XXX / …, derived from the indexer's Torznab `caps`). Tick a subset to narrow the search; the choice is remembered per profile in `localStorage`. The picker only appears when there are 2+ sources to choose between. `doSearch` passes the chosen subset as `&indexers=` and the active `&profile_id=`.
