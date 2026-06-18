@@ -183,7 +183,7 @@ Both the footer bar (`#seekBarWrapper`) and the fullscreen-controls bar share th
 Replaces the legacy `#episodeModal` (Milestone 12). `openEpisodePicker(itemId, title)` opens it; under the hood it now reveals a full-screen view. Key DOM:
 
 - `#epHero` — backdrop + poster + show title + meta line + 3–4-line overview. Backdrop uses TMDb `/w1280<backdrop_path>`; poster uses `/w342<poster_path>`. Painted by `renderEpHero`.
-- `#epSeasonTabs` — one button per detected season (hidden when 0 or 1 season). `epSwitchSeason(s)` updates `epCurrentSeason` and re-renders.
+- `#epSeasonTabs` — one button per detected season (hidden when 0 or 1 season). `epSwitchSeason(s)` updates `epCurrentSeason` and re-renders. `renderEpSeasonTabs` calls `_scrollActiveSeasonIntoView` (via `requestAnimationFrame`) to horizontally centre the active tab in the strip — so on a many-season show the season the viewer is on is on-screen, not scrolled off (only the strip's `scrollLeft` is touched, never the page).
 - `#epList` — scrollable episode list. Each card is a 16:9 still (TMDb `/w300<still_path>` or "S01·E02" placeholder), headline `S01·E02 · Episode Title`, 2-line overview, watch-progress bar overlaid on the still, plus inline Watched / Offline / Download buttons. Tapping the still calls `epPlayFrom(idx)`.
 
 It also serves **downloading** series (opened from the card's ☰ Episodes button) — `/files` returns in-flight per-episode `dl_pct`/`complete`/`mode`, and the per-season scheduling bar manages what downloads — and **single-file movies / one-episode series** in **movie mode** (see `renderEpList` above; `epIsMovie` + `_epApplyMovieChrome` + `_epMoviePanel`).
@@ -193,7 +193,7 @@ It also serves **downloading** series (opened from the card's ☰ Episodes butto
 State additions:
 - `epMetadata` — cached TMDb payload for the open item (or `null`).
 - `epMetaImgBase` — TMDb image base URL returned by the metadata endpoint.
-- `epCurrentSeason` — visible season number, set by `pickDefaultSeason()` to the season containing the currently-playing file → first season with unwatched episodes → first available.
+- `epCurrentSeason` — visible season number, set by `pickDefaultSeason()`: season of the currently-playing file → season of the **most-recently-watched** episode (latest `progress.updated_at`) → first season with unwatched episodes → first available. Landing on last-watched (not first-unwatched) means an early episode skipped/saved on purpose doesn't pull the picker back to an earlier season.
 - `epSeasonList` — sorted positive seasons present in `epFiles`.
 - `epIsMovie` — single-file item flag; switches the page to the movie panel + chrome.
 

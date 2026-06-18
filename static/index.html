@@ -5345,7 +5345,17 @@ function pickDefaultSeason(){
     const f=epFiles.find(x=>x.path===app.library_current_file);
     if(f && f.season) return +f.season;
   }
-  // 2) first season with an unwatched episode
+  // 2) season of the most-recently-watched episode (latest progress.updated_at).
+  //    We land where the viewer actually left off — NOT the first unwatched
+  //    episode: an early episode left unwatched on purpose (skipped, or being
+  //    saved for later) shouldn't drag the picker back to an earlier season.
+  let latestFile=null, latestT=-Infinity;
+  for(const f of epFiles){
+    const t=Date.parse(f.progress?.updated_at||"");
+    if(!isNaN(t) && t>latestT){ latestT=t; latestFile=f; }
+  }
+  if(latestFile && latestFile.season) return +latestFile.season;
+  // 3) first season with an unwatched episode
   for(const s of epSeasonList){
     const any=epFiles.some(f=>(+f.season||0)===s && !f.progress?.completed);
     if(any) return s;
@@ -5436,6 +5446,22 @@ function renderEpSeasonTabs(){
     }
     return `<button class="${cls}" onclick="epSwitchSeason(${s})">${label}</button>`;
   }).join("");
+  // Centre the active season in the horizontal strip. With many seasons the
+  // active one (e.g. the viewer's mid-series spot) is otherwise off-screen,
+  // especially on mobile. rAF so layout is settled when the page first opens.
+  requestAnimationFrame(_scrollActiveSeasonIntoView);
+}
+
+// Horizontally scroll the season strip so the active tab is centred (or at
+// least on screen). Only touches the strip's own scrollLeft — never the page.
+function _scrollActiveSeasonIntoView(){
+  const tabs=document.getElementById("epSeasonTabs");
+  if(!tabs || tabs.classList.contains("hidden")) return;
+  const active=tabs.querySelector(".ep-season-tab.active");
+  if(!active) return;
+  const target=active.offsetLeft-(tabs.clientWidth-active.offsetWidth)/2;
+  const max=tabs.scrollWidth-tabs.clientWidth;
+  tabs.scrollLeft=Math.max(0, Math.min(target, max));
 }
 
 function epSwitchSeason(s){
@@ -9888,6 +9914,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.36.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.37.0</div>
 </body>
 </html>
