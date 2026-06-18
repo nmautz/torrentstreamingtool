@@ -4543,7 +4543,12 @@ function renderLibrary(items){
         if (item.skip_status === "failed") {
           skipBadge = `<span class="text-[10px] px-1.5 py-0.5 bg-amber-950 text-amber-300 border border-amber-800" title="Audio fingerprinting could not produce skip points for the file(s) in this item. Ask an admin if this should be working.">⚠ Intro/credits skip not available</span>`;
         } else if (item.skip_status === "partial") {
-          skipBadge = `<span class="text-[10px] px-1.5 py-0.5 bg-amber-950/60 text-amber-200/80 border border-amber-900" title="Smart Skip is unavailable for some files in this item.">⚠ Skip partial</span>`;
+          // Not a warning: many episodes legitimately have no intro and/or no
+          // end credits, so "no skip points" is often expected, not a fault.
+          // Neutral info chip + a count so it's clear how many are affected.
+          const n = item.skip_affected || 0, tot = item.skip_total || 0;
+          const epWord = n === 1 ? "episode" : "episodes";
+          skipBadge = `<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 border border-gray-700" title="No intro/credits skip points on ${n} of ${tot} ${epWord}. This is usually normal — plenty of episodes have no intro or no end-credits sequence to skip.">ⓘ No skip on ${n}/${tot}</span>`;
         }
       }
 
@@ -9883,6 +9888,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.36.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.36.2</div>
 </body>
 </html>

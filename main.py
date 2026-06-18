@@ -4306,23 +4306,30 @@ def _find_file_meta(item: dict, file_path: str) -> Optional[dict]:
     return skip_data.get(file_path)
 
 
-def _item_skip_status(item: dict) -> str:
+def _item_skip_summary(item: dict) -> dict:
     """Summarize the Smart Skip availability of every file in this item.
 
-    Drives the user-facing "Skip unavailable" chip in the library list and the
-    admin Smart Skip tab's quick filter. Values:
-      `none`        — no files (status surface not applicable)
-      `pending`     — at least one file has no skip_data entry yet (analysis
-                      hasn't run, or item still downloading)
-      `failed`      — every analyzed file is marked failed (no intro AND no
-                      credits AND analysis.source == "failed")
-      `partial`     — some files succeeded, others failed
-      `ok`          — every file produced usable intro/credits (or has been
-                      manually edited)
+    Drives the user-facing skip-availability chip in the library list and the
+    admin Smart Skip tab's quick filter. Returns a dict with:
+      `status` — one of:
+        `none`        — no files (status surface not applicable)
+        `pending`     — at least one file has no skip_data entry yet (analysis
+                        hasn't run, or item still downloading)
+        `failed`      — every analyzed file is marked failed (no intro AND no
+                        credits AND analysis.source == "failed")
+        `partial`     — some files succeeded, others failed/not yet analyzed
+        `ok`          — every file produced usable intro/credits (or has been
+                        manually edited)
+      `affected` — count of files without usable skip points (failed + pending)
+      `total`    — count of analyzable files
+
+    Note `affected` is informational, not an error count: many episodes simply
+    have no intro or no credits, which is normal — the chip wording reflects
+    that.
     """
     files = _analyzable_files(item)   # skipped (not-downloaded) files aren't analyzed
     if not files:
-        return "none"
+        return {"status": "none", "affected": 0, "total": 0}
     skip_data = item.get("skip_data", {}) or {}
     ok = 0
     fail = 0
@@ -4338,17 +4345,27 @@ def _item_skip_status(item: dict) -> str:
             fail += 1
         else:
             ok += 1
+    total = len(files)
+    affected = fail + pending
     if pending and not fail and not ok:
-        return "pending"
-    if fail and not ok:
-        return "failed"
-    if fail and ok:
-        return "partial"
-    if pending:
+        status = "pending"
+    elif fail and not ok:
+        status = "failed"
+    elif fail and ok:
+        status = "partial"
+    elif pending:
         # Some succeeded, some not yet analyzed — surface as partial so the UI
         # still hints that not everything is covered.
-        return "partial"
-    return "ok"
+        status = "partial"
+    else:
+        status = "ok"
+    return {"status": status, "affected": affected, "total": total}
+
+
+def _item_skip_status(item: dict) -> str:
+    """Back-compat string accessor over `_item_skip_summary` — returns just the
+    status. See that function for the value catalog."""
+    return _item_skip_summary(item)["status"]
 
 
 async def _set_analysis_status(series_key: str, **patch) -> None:
@@ -5855,7 +5872,7 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
             "resume": resume,
             "first_file": first_file,
             "hidden": _item_hidden_for_profile(it, profile_id),
-            "skip_status": _item_skip_status(it),
+            **{f"skip_{k}": v for k, v in _item_skip_summary(it).items()},  # skip_status, skip_affected, skip_total
             "download_mode": _download_cfg(it)["mode"],   # now | idle — drives the card's Pause/Resume control
             "download_partial": any(m == "skip" for m in _download_cfg(it)["files"].values()),  # some files deselected → "Partial" badge
         })

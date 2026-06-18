@@ -172,11 +172,16 @@ Admin:
 emits one `_log_analyzer_event` per failure into `state.analyzer_log` (200-deep
 in-memory ring buffer). Three downstream consumers read this:
 
-1. **User-facing chip** — `/api/library` now returns a per-item `skip_status`
-   summary (`"ok"` / `"partial"` / `"failed"` / `"pending"` / `"none"`).
-   `static/index.html` renders an amber "⚠ Intro/credits skip not available"
-   chip next to the title when `skip_status == "failed"`, and a softer
-   "Skip partial" chip when only some files in a multi-file item failed.
+1. **User-facing chip** — `/api/library` returns a per-item skip summary
+   (`_item_skip_summary`): `skip_status` (`"ok"` / `"partial"` / `"failed"` /
+   `"pending"` / `"none"`) plus `skip_affected` (files with no usable skip
+   points) and `skip_total` (analyzable files). `static/index.html` renders an
+   amber "⚠ Intro/credits skip not available" chip when `skip_status ==
+   "failed"`, and a **neutral grey** info pill `ⓘ No skip on {affected}/{total}`
+   when `skip_status == "partial"` (some files in a multi-file item have no skip
+   points). The partial pill is deliberately not styled as a warning: many
+   episodes simply have no intro or no end-credits sequence, which is normal —
+   the count tells the user how many are affected without implying a fault.
 2. **Admin editor** — `/api/admin/library/{id}/skip-data` now carries
    `error_code` and `error` per file. The Smart Skip tab's editor shows a
    red error block above the time inputs so the admin can see exactly why
