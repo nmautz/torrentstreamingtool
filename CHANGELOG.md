@@ -1,5 +1,8 @@
 # Changelog
 
+## [5.39.0] — 2026-06-17
+- **Every notice banner is now dismissible (the host-performance banner was already collapsible).** The dashboard's **server-attention banner** (missing env keys, in-flight update, degraded indexers) and the admin panel's **indexer-health banner** each gained a `×` dismiss button. Dismissal is keyed to the *current* notice — dismissing "Server needs admin attention: OpenAI Key" hides only that, and the banner re-appears on its own if the condition changes to a different one (e.g. an update starts, or indexer health flips degraded↔healthy). The host-performance banner keeps its existing chevron collapse/expand. **UI:** [static/index.html](static/index.html) (`renderServerAttention`, new `dismissServerAttention`/`serverAttentionDismissedKey`), [static/admin.html](static/admin.html) (`_renderIndexerHealth`, new `dismissIndexerHealthBanner`/`_indexerHealthDismissedKey`).
+
 ## [5.38.1] — 2026-06-17
 - **The "Open Jackett" admin link now points at the server's primary adapter address — the same IP shown in the Network Adapter menu — instead of whatever hostname the admin happened to connect on.** When the indexer URL is loopback (`http://localhost:9117`), `_jackett_dashboard_url` now swaps in `active_ip` from `_network_status` (the admin-selected primary adapter, with the same offline-fallback resolution), keeping Jackett's scheme + port; it falls back to `request.url.hostname` only if no primary address resolves. The function is now `async` (it reads the library to resolve the adapter) and its three callers (`/api/admin/indexers/health`, `/api/admin/flaresolverr`, indexer test) `await` it. **Backend:** [main.py](main.py) (`_jackett_dashboard_url`).
 

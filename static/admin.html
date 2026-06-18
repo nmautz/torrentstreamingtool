@@ -234,7 +234,12 @@
           Test All
         </button>
       </div>
-      <div id="indexerHealthBanner" class="hidden px-5 py-3 border-b border-gray-800"></div>
+      <div id="indexerHealthBanner" class="hidden px-5 py-3 border-b border-gray-800 flex items-center justify-between gap-3">
+        <span id="indexerHealthBannerMsg" class="min-w-0 flex-1"></span>
+        <button id="indexerHealthBannerDismiss" type="button" onclick="dismissIndexerHealthBanner()"
+          aria-label="Dismiss" title="Dismiss"
+          class="flex-shrink-0 p-1 leading-none text-base opacity-70 hover:opacity-100 transition-opacity">×</button>
+      </div>
       <div id="indexerHealthList" class="divide-y divide-gray-800">
         <div class="px-5 py-8 text-center text-gray-600 text-sm">Loading health…</div>
       </div>
@@ -4407,19 +4412,37 @@ async function deleteIndexer(id, name){
 }
 
 // ── Indexer health ─────────────────────────────────────────────────────────────
+// Dismissal is keyed by state ("degraded" / "healthy"): dismissing hides only
+// that exact notice; the banner re-appears if health flips to the other state.
+let _indexerHealthDismissedKey = null;
+function dismissIndexerHealthBanner(){
+  const banner = document.getElementById("indexerHealthBanner");
+  if(!banner) return;
+  _indexerHealthDismissedKey = banner.dataset.noticeKey || null;
+  banner.classList.add("hidden");
+}
 function _renderIndexerHealth(d){
   const link = document.getElementById("jackettLink");
   if(link && d.jackett_url) link.href = d.jackett_url;
 
   const banner = document.getElementById("indexerHealthBanner");
-  if(banner){
+  const bannerMsg = document.getElementById("indexerHealthBannerMsg");
+  if(banner && bannerMsg){
+    const base = "px-5 py-3 border-b border-gray-800 text-xs flex items-center justify-between gap-3";
+    let key = "", cls = "", text = "";
     if(d.degraded){
-      banner.className = "px-5 py-3 border-b border-gray-800 bg-amber-950/50 text-amber-300 text-xs";
-      banner.textContent = `${d.failing} of ${d.total} indexers are failing. Search still works from the healthy ones — fix or remove the failing indexers in Jackett.`;
-      banner.classList.remove("hidden");
+      key = "degraded";
+      cls = `${base} bg-amber-950/50 text-amber-300`;
+      text = `${d.failing} of ${d.total} indexers are failing. Search still works from the healthy ones — fix or remove the failing indexers in Jackett.`;
     } else if(d.total && !d.failing){
-      banner.className = "px-5 py-3 border-b border-gray-800 bg-emerald-950/40 text-emerald-300 text-xs";
-      banner.textContent = `All ${d.total} indexers responding.`;
+      key = "healthy";
+      cls = `${base} bg-emerald-950/40 text-emerald-300`;
+      text = `All ${d.total} indexers responding.`;
+    }
+    banner.dataset.noticeKey = key;
+    if(key && _indexerHealthDismissedKey !== key){
+      banner.className = cls;
+      bannerMsg.textContent = text;
       banner.classList.remove("hidden");
     } else {
       banner.classList.add("hidden");

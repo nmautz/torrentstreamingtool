@@ -233,7 +233,7 @@
        Click-through is set by ID so it survives the className rewrites in
        renderServerAttention() / renderPerfBanner(). */
     #serverAttentionBanner, #perfBanner { pointer-events: none; }
-    #serverAttentionLink { pointer-events: auto; }
+    #serverAttentionLink, #serverAttentionDismiss { pointer-events: auto; }
     /* Host-performance banner collapse/expand. Collapsed = a small chevron tab
        only (transparent strip, click-through except the chevron), so it never
        covers the navbar / prep pill. The chevron itself keeps its tone colour so
@@ -1490,6 +1490,9 @@
     class="flex-shrink-0 text-[11px] font-bold uppercase tracking-wide px-3 py-1.5 border border-amber-700 hover:bg-amber-900 transition-colors">
     Admin Panel
   </a>
+  <button id="serverAttentionDismiss" type="button" onclick="dismissServerAttention()"
+    aria-label="Dismiss" title="Dismiss"
+    class="flex-shrink-0 -my-1.5 -mr-1 p-1.5 leading-none text-base opacity-70 hover:opacity-100 transition-opacity">×</button>
 </div>
 
 <!-- ── Host performance banner ──────────────────────────────────────────────── -->
@@ -2836,6 +2839,18 @@ function hideAlert(){
 // who happens to be looking) that something needs admin attention. The
 // features themselves stay enabled to the extent possible; the admin fills
 // the missing key from the Updates tab.
+// Dismissal is keyed by the active notice (e.g. "update:applying",
+// "missing:OpenAI Key", "degraded"): dismissing hides only that exact notice,
+// and the banner re-appears on its own if the condition changes to a different
+// one. null = nothing dismissed.
+let serverAttentionDismissedKey = null;
+function dismissServerAttention(){
+  const el = document.getElementById("serverAttentionBanner");
+  if(!el) return;
+  serverAttentionDismissedKey = el.dataset.noticeKey || null;
+  el.classList.add("hidden");
+  renderFcNotice();
+}
 function renderServerAttention(d){
   const el = document.getElementById("serverAttentionBanner");
   const msg = document.getElementById("serverAttentionMsg");
@@ -2846,47 +2861,54 @@ function renderServerAttention(d){
   const phase = d.updater_phase || "idle";
   const updaterMsg = d.updater_message || "";
 
-  // Updater priority — surface while an update is in flight so the user knows
-  // why the page is about to lurch. Idle "up to date" never shows.
+  // Resolve the single active notice (or null) in priority order.
+  const base = "sticky top-0 z-[70] border-b text-xs sm:text-sm px-3 py-2 flex items-center justify-between gap-3";
+  let notice = null;
   const UPDATE_PHASES = new Set(["applying","setup","refreshing-service","reinstalling-service","rebooting","restarting"]);
   if(UPDATE_PHASES.has(phase)){
+    // Updater — surface while an update is in flight so the user knows why the
+    // page is about to lurch. Idle "up to date" never shows.
     const tone = (phase === "rebooting")
       ? "bg-red-950/70 border-red-700 text-red-200"
       : "bg-indigo-950/70 border-indigo-700 text-indigo-200";
-    el.className = `sticky top-0 z-[70] ${tone} border-b text-xs sm:text-sm px-3 py-2 flex items-center justify-between gap-3`;
     const friendly = updaterMsg || phase;
     const verb = (phase === "rebooting") ? "Rebooting server" : "Updating server";
-    msg.textContent = `${verb}… ${friendly}`;
-    el.classList.remove("hidden");
-    renderFcNotice();
-    return;
-  }
-
-  // Required env keys missing — banner everyone sees.
-  if(requiredMissing.length){
+    notice = { key: `update:${phase}`, className: `${base} ${tone}`, text: `${verb}… ${friendly}` };
+  } else if(requiredMissing.length){
+    // Required env keys missing — banner everyone sees.
     const labels = requiredMissing.map(k => k.label).join(", ");
-    el.className = "sticky top-0 z-[70] bg-amber-950/70 border-b border-amber-800 text-amber-200 text-xs sm:text-sm px-3 py-2 flex items-center justify-between gap-3";
-    msg.textContent = `Server needs admin attention: ${labels} not configured.`;
-    el.classList.remove("hidden");
+    notice = { key: `missing:${labels}`,
+      className: `${base} bg-amber-950/70 border-amber-800 text-amber-200`,
+      text: `Server needs admin attention: ${labels} not configured.` };
+  } else if(d.indexers_degraded){
+    // Some indexers are failing while others still work. Search stays usable, so
+    // this is an amber heads-up rather than a hard error. Deliberately non-specific
+    // — we never name which indexers are down (the admin tab has the detail).
+    notice = { key: "degraded",
+      className: `${base} bg-amber-950/70 border-amber-800 text-amber-200`,
+      text: "Some search sources aren't responding — results may be incomplete." };
+  }
+
+  // Nothing to show (this also covers optional-only missing keys, which we don't
+  // surface here since we can't tell if the viewer is an admin).
+  if(!notice){
+    el.dataset.noticeKey = "";
+    el.classList.add("hidden");
     renderFcNotice();
     return;
   }
 
-  // Some indexers are failing while others still work. Search stays usable, so
-  // this is an amber heads-up rather than a hard error. Deliberately non-specific
-  // — we never name which indexers are down (the admin tab has the detail).
-  if(d.indexers_degraded){
-    el.className = "sticky top-0 z-[70] bg-amber-950/70 border-b border-amber-800 text-amber-200 text-xs sm:text-sm px-3 py-2 flex items-center justify-between gap-3";
-    msg.textContent = "Some search sources aren't responding — results may be incomplete.";
-    el.classList.remove("hidden");
+  el.dataset.noticeKey = notice.key;
+  // Keep it hidden only if the user dismissed this exact notice; a changed
+  // condition gets a fresh key and re-appears.
+  if(serverAttentionDismissedKey === notice.key){
+    el.classList.add("hidden");
     renderFcNotice();
     return;
   }
-
-  // Optional env keys still missing — show a quieter hint, but only to admins
-  // who can act on it. The non-admin UI hides this case entirely.
-  // We don't know if the viewer is an admin here, so we just hide the banner.
-  el.classList.add("hidden");
+  el.className = notice.className;
+  msg.textContent = notice.text;
+  el.classList.remove("hidden");
   renderFcNotice();
 }
 
@@ -9917,6 +9939,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.38.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.39.0</div>
 </body>
 </html>
