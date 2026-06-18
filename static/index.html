@@ -8174,6 +8174,55 @@ function _lpStallWatch() {
   }
 }
 
+// True iOS device — iPhone/iPad/iPod, including iPadOS, which reports a Mac-like
+// UA but is distinguishable by touch points. Memoized. Desktop Safari / macOS are
+// deliberately excluded (they have classic MSE and honor the full buffer target).
+let _isIosCache = null;
+function _isIOSDevice() {
+  if (_isIosCache !== null) return _isIosCache;
+  const ua = navigator.userAgent || "";
+  _isIosCache = /iP(hone|ad|od)/.test(ua) ||
+                (navigator.platform === "MacIntel" && (navigator.maxTouchPoints || 0) > 1);
+  return _isIosCache;
+}
+
+// Seconds of media buffered ahead of the playhead in the range that contains it.
+function _lpFwdBuffer(v) {
+  try {
+    const b = v.buffered, t = v.currentTime || 0;
+    for (let i = 0; i < b.length; i++) {
+      if (b.start(i) <= t + 0.5 && t <= b.end(i)) return b.end(i) - t;
+    }
+  } catch (_) {}
+  return 0;
+}
+
+// AVPlayer preroll — iOS only. On iOS, hls.js can only use ManagedMediaSource
+// (classic MSE doesn't exist there), and the OS owns its fetch cadence: once ~30 s
+// is buffered it fires `endstreaming`, which hls.js answers with `pauseBuffering()`
+// (stops the fragment loaders). The buffer then sawtooths between ~15–30 s no
+// matter how high `maxBufferLength` is, so an iPhone on a fast link prerolls far
+// less than every other platform (where the full 180 s target is honored). The
+// `streaming = false` signal is only a hint, though — appending past it is allowed
+// — so we override the instance's `pauseBuffering` to IGNORE the OS stop until the
+// forward buffer reaches a larger iOS target, then honor it (which bounds memory).
+// Net effect: iOS prerolls ~IOS_PREROLL_TARGET_SECS ahead instead of ~30 s, with
+// hls.js's own QuotaExceededError backoff as the safety valve under real memory
+// pressure. In hls.js 1.5 `pauseBuffering`/`resumeBuffering` are wired ONLY to the
+// MMS endstreaming/startstreaming hooks — nothing internal calls them — so this
+// override is fully self-contained. See GOTCHAS.md § ManagedMediaSource.
+const IOS_PREROLL_TARGET_SECS = 120;
+function _lpInstallIosPreroll(hls, video) {
+  if (!_isIOSDevice() || !hls || typeof hls.pauseBuffering !== "function") return;
+  const origPause = hls.pauseBuffering.bind(hls);
+  hls.pauseBuffering = function () {
+    // MMS hit its ~30 s comfort point. Keep prerolling until we've banked the
+    // bigger iOS target; only then let the OS actually pause the loaders.
+    if (_lpFwdBuffer(video) < IOS_PREROLL_TARGET_SECS) return;
+    return origPause();
+  };
+}
+
 async function _lpLoadIndex(seekTo) {
   const filePath = lp.playlist[lp.pi];
   if (!filePath) { lpStop(); return; }
@@ -8320,7 +8369,9 @@ async function _lpLoadIndex(seekTo) {
       maxBufferLength: 180,
       maxMaxBufferLength: 600,
       maxBufferSize: 240 * 1000 * 1000,
-      backBufferLength: 90,
+      // Trim the back-buffer on iOS so the larger forward preroll we force below
+      // (_lpInstallIosPreroll) doesn't blow the phone's retained-memory budget.
+      backBufferLength: _isIOSDevice() ? 30 : 90,
       // Safari 17.1+ exposes ManagedMediaSource even on macOS where classic
       // MediaSource is fully available, and hls.js prefers MMS by default.
       // Under MMS the *OS* owns the fetch cadence (startstreaming/endstreaming)
@@ -8338,6 +8389,9 @@ async function _lpLoadIndex(seekTo) {
       fragLoadingTimeOut: 45000,
     });
     lp.hls = hls;
+    // iOS prerolls only ~30 s under ManagedMediaSource; force a larger forward
+    // buffer there (no-op on every other platform).
+    _lpInstallIosPreroll(hls, v);
     hls.on(window.Hls.Events.MANIFEST_PARSED, () => {
       if (lp.filePath !== filePath) return;
       // hls.js exposes renditions in the same order as the master playlist —
@@ -10113,6 +10167,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.41.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.42.0</div>
 </body>
 </html>

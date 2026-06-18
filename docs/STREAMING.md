@@ -466,8 +466,13 @@ Two ways to populate the cache:
 >    `preferManagedMediaSource: false` is required for this to actually work on
 >    macOS Safari — otherwise hls.js prefers Safari 17.1+'s ManagedMediaSource,
 >    whose OS-owned fetch cadence caps the forward buffer at ~30 s. **On iPhone
->    the ~30 s cap remains** (MMS is the only MSE iOS has, so hls.js falls back
->    to it there); outages on iOS fall through to the reconnect loop sooner.
+>    MMS is the only MSE** (so hls.js falls back to it there regardless of the
+>    flag), but the ~30 s cap is pushed back to **~120 s** by the iOS preroll
+>    override (`_lpInstallIosPreroll`, v5.42.0): it overrides the hls.js
+>    instance's `pauseBuffering` on true iOS devices so the MMS `endstreaming`
+>    stop is ignored until the forward buffer reaches `IOS_PREROLL_TARGET_SECS`
+>    (`backBufferLength` is trimmed to 30 s on iOS to offset the memory). Outages
+>    beyond the banked buffer still fall through to the reconnect loop.
 >    See [GOTCHAS.md](GOTCHAS.md) § ManagedMediaSource.
 > 2. **Indefinite reconnect loop** (`_lpNetLost` / `_lpNetRetryNow` /
 >    `_lpNetReset`, state in `lp.netDown`). A **fatal hls.js `NETWORK_ERROR`
