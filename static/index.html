@@ -7526,7 +7526,10 @@ function resumeLibraryItemWithChooser(itemId) {
   const item = (window._libCache || []).find(it => it.id === itemId);
   const resume = item && item.resume;
   const hasProgress = resume && resume.pct > 3 && !resume.all_completed;
-  const resumeFile = hasProgress ? (resume.file_path || "") : "";
+  // Always carry the backend's resume hint as the starting file — it's the next
+  // un-completed episode (e.g. the one *after* a finished episode, at pct 0), or
+  // the first file when everything's watched. Only seek into it mid-episode.
+  const resumeFile = (resume && resume.file_path) || "";
   const seekTo     = hasProgress ? (resume.position_sec || 0) : 0;
   const label      = (item && item.title) || "";
   pcCtx = { itemId, files: resumeFile ? [resumeFile] : [], seekTo, label, _continueMode: true };
@@ -7577,10 +7580,13 @@ function pcChoose(target) {
     // Dismiss the server-side offer (VLC stays put; user is watching on device).
     if (ctx._isResume) fetch("/api/resume-now", {method:"DELETE"}).catch(()=>{});
     if (ctx._continueMode && !ctx.files.length) {
-      // "Play All" with no resume file: pull file list from cache.
-      const item = (window._libCache || []).find(it => it.id === ctx.itemId);
-      const allFiles = item && item.files ? item.files.map(f => f.path).filter(Boolean) : [];
-      return lpPlay(ctx.itemId, allFiles, 0, ctx.label);
+      // "Play All" with no resume hint: fetch the item's ordered file list from
+      // the server and start at the first episode. (_libCache only carries
+      // `first_file`, not the full `files` array, so we can't read it locally.)
+      return fetch(`/api/library/${ctx.itemId}/files?profile_id=${encodeURIComponent(profile.id || "")}`)
+        .then(r => r.ok ? r.json() : { files: [] })
+        .then(d => lpPlay(ctx.itemId, (d.files || []).map(f => f.path).filter(Boolean), 0, ctx.label))
+        .catch(() => showAlert("Nothing to play.", "warn"));
     }
     return lpPlay(ctx.itemId, ctx.files, ctx.seekTo, ctx.label);
   }
@@ -10202,6 +10208,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.43.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.43.1</div>
 </body>
 </html>
