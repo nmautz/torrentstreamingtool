@@ -225,15 +225,18 @@
     body.fc-open #perfBanner,
     body.fc-open #globalToast { display:none !important; }
     /* These notice banners float at z-70 — above the on-device player (z-50) and
-       its Stop / To TV control bar. They are purely informational, so they must
-       never intercept a tap meant for the player underneath (on mobile the
-       host-busy banner would otherwise completely block those buttons). Make the
-       whole banner click-through; only the Admin Panel link re-enables pointer
-       events. (#globalToast already sets pointer-events:none on its container.)
-       Click-through is set by ID so it survives the className rewrites in
+       its Stop / To TV control bar. Now that they are dismissable (serverAttention)
+       or collapsable (perfBanner), a shown/expanded banner should BLOCK clicks so an
+       accidental tap can't fall through to a UI button underneath it. The user has a
+       way out (dismiss × or the collapse chevron), so it's safe to capture taps.
+       The collapsed perf banner is just a transparent chevron tab, so it stays
+       click-through except for the chevron itself (see #perfBannerToggle below).
+       (#globalToast keeps pointer-events:none on its container — it auto-dismisses.)
+       Pointer-events are set by ID so they survive the className rewrites in
        renderServerAttention() / renderPerfBanner(). */
-    #serverAttentionBanner, #perfBanner { pointer-events: none; }
-    #serverAttentionLink, #serverAttentionDismiss { pointer-events: auto; }
+    #serverAttentionBanner { pointer-events: auto; }
+    #perfBanner { pointer-events: none; }
+    #perfBanner:not(.perf-collapsed) { pointer-events: auto; }
     /* Host-performance banner collapse/expand. Collapsed = a small chevron tab
        only (transparent strip, click-through except the chevron), so it never
        covers the navbar / prep pill. The chevron itself keeps its tone colour so
@@ -10208,6 +10211,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.43.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.43.2</div>
 </body>
 </html>
