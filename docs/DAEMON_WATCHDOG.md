@@ -24,8 +24,9 @@ Two related but distinct pieces:
     - Port 443 → `https_proxy:app` (a thin reverse proxy that forwards every request to `127.0.0.1:80`); only registered when `cert.pem` + `key.pem` exist
     - Single process means one `AppState` regardless of port/hostname — see [GOTCHAS.md](GOTCHAS.md#https-port-443-is-a-reverse-proxy-not-a-second-fastapi-instance)
     - `log_config={"version":1,"disable_existing_loggers":False}` suppresses uvicorn's default `dictConfig` (which adds `StreamHandler`s pointing at `sys.stderr`/`stdout` — both `None` in a Task Scheduler service)
-9. Restart loop logic: **any** return from `asyncio.run()` triggers a 5 s back-off and retry; only `KeyboardInterrupt`/`SystemExit` breaks the loop. **Fast-death detection**: 5 consecutive returns in under 15 s each → give up (prevents tight crash loops eating CPU)
-10. On any exit path the wrapper closes the zeroconf instance
+9. **Single-instance guard** (top of every supervise iteration): calls `run.dashboard_already_serving(80)` and, if another StreamLink is already serving on :80, logs and **breaks** (clean exit) instead of binding. Windows can't share a listening socket, so a duplicate wrapper — `/SC ONLOGON` firing on a fresh logon while the prior process lives, a manual `run.py`, a double `schtasks /Run` — would otherwise crash-loop on `WinError 10048` and take the service down until reboot. Because it runs at the loop top it also settles the two-wrappers-started-together race (the loser sees the winner next pass). A legitimate self-restart (our server died, port now free) passes through. See [GOTCHAS.md](GOTCHAS.md#windows-two-instances-fighting-for-80443-single-instance-guard)
+10. Restart loop logic: **any** return from `asyncio.run()` triggers a 5 s back-off and retry; only `KeyboardInterrupt`/`SystemExit` breaks the loop. **Fast-death detection**: 5 consecutive returns in under 15 s each → give up (prevents tight crash loops eating CPU)
+11. On any exit path the wrapper closes the zeroconf instance
 
 The wrapper does **not** explicitly launch VLC / qBit / Jackett at boot — the watchdog detects them as down on its first tick and starts them itself. This matches the interactive `run.py` flow once you account for the watchdog also running there.
 

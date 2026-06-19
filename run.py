@@ -133,6 +133,36 @@ def http_ok(url: str, timeout: float = 4.0) -> bool:
         return False
 
 
+def dashboard_already_serving(port: int = 80, host: str = "127.0.0.1") -> bool:
+    """Single-instance guard: True if a StreamLink dashboard is ALREADY up on `port`.
+
+    Windows can't share a listening socket — if a second launcher (the ONLOGON
+    scheduled task firing on a fresh logon while the prior session's process is
+    still alive, a manual `run.py` alongside the service, or a double
+    `schtasks /Run`) tries to bind a port a live instance already holds, the
+    loser gets WSAEADDRINUSE (WinError 10048) and the supervisor crash-loops
+    forever, taking the whole service down until a reboot. A newcomer must
+    instead detect the running instance and yield.
+
+    We don't merely check "is the port open" — something foreign (IIS, Skype)
+    could hold :80. We confirm it's *our* app by hitting /api/version (public,
+    unauthenticated). If the port is held but doesn't answer as us, we still
+    yield (we can't bind it either way), just for a different reason.
+    """
+    if not port_open(port, host):
+        return False
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://{host}:{port}/api/version", timeout=2.0) as resp:
+            data = json.loads(resp.read().decode("utf-8", "replace"))
+        return isinstance(data, dict) and "version" in data
+    except Exception:
+        # Port occupied but not answering as our app (foreign service, or our
+        # own instance still starting / wedged). Either way the newcomer can't
+        # bind, so treat it as occupied and yield rather than crash-loop.
+        return True
+
+
 def extract_port(url: str, default: int) -> int:
     m = re.search(r":(\d+)", url)
     return int(m.group(1)) if m else default
@@ -1025,6 +1055,15 @@ def main():
 
     info("Press Ctrl+C to stop")
     print()
+
+    # ── Single-instance guard ────────────────────────────────────────────
+    # Refuse to launch a second dashboard while one is already serving on PORT:
+    # Windows can't share the listening socket, so the loser would crash-loop
+    # on WinError 10048. Yield cleanly instead (don't touch the running one).
+    if dashboard_already_serving(PORT):
+        warn(f"StreamLink is already serving on port {PORT} — not starting a second instance.")
+        info("If you meant to restart it, stop the existing one first (or reboot).")
+        return
 
     # ── Windows: open firewall for port 80, 443, and mDNS ────────────────
     if SYSTEM == "Windows":
