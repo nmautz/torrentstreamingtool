@@ -1,6 +1,12 @@
 # iOS Client App — Plan for v6.0.0
 
-> **Status:** planning + architecture de-risk. No app/server code written yet.
+> **Status:** **M1 landed** (`6.0.0-preview.1.0.0`) — the Capacitor app shell,
+> first-run Connect screen, and the native `LocalMediaServer` (Gate 1b code)
+> exist in [`ios-app/`](../ios-app/). What's left on M1 is the **on-device run**:
+> open `ios-app/ios/App` in Xcode, set a signing team, build to an iPhone, and
+> confirm (a) online parity with the host and (b) the Gate 1b self-test plays the
+> bundled sample from `127.0.0.1` (Connect screen → "Localhost HLS self-test").
+> Earlier milestones (M2–M5) remain as planned below.
 > This is the implementation plan for the **6.0.0** major release (a new
 > top-level capability: a native client app). Pieces ship incrementally; the
 > version badge in `static/index.html` + `CHANGELOG.md` get bumped as each lands,
@@ -307,7 +313,10 @@ flowchart LR
 > video + audio + `sub_0.vtt`) served from a small Python static server (HLS MIME +
 > `Range`) played on a real iPhone via both native `master.m3u8` and a
 > `<video>`+`<track>` page (audio, subtitle toggle, scrub all worked). **1b**
-> (on-device `NWListener` localhost + ATS) is folded into **M1** as the gating task.
+> (on-device `NWListener` localhost + ATS) is folded into **M1** as the gating task —
+> the native server ([`LocalMediaServer.swift`](../ios-app/ios/App/App/LocalMediaServer.swift))
+> + a bundled sample + a one-tap self-test ([`localtest.html`](../ios-app/www/localtest.html))
+> are **written and type-checked**; the on-device pass is the remaining M1 step.
 
 ### Core flows
 

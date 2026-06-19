@@ -790,6 +790,48 @@ For subtitle *timing* accuracy `_run_whisper` passes `-dtw <preset>` (Dynamic Ti
 
 The player's orientation lock (`#lpRotBtn` → `.lp-lock-landscape`) needs a CSS fallback because iPhone Safari has no `screen.orientation.lock()`: in a portrait viewport the whole `#localPlayer` is sized to the swapped viewport dimensions and `rotate(90deg)`-ed (the native lock and the CSS rule can't fight — when the native lock holds, the `(orientation:portrait)` media query never matches). Traps: **(1)** the `transform` makes `#localPlayer` the containing block for `position:fixed` descendants — every child of the player must stay `position:absolute` (they all are today; a `fixed` child would silently anchor to the rotated box on lock and to the viewport otherwise). **(2)** Browser hit-testing follows the transform, but any **manual screen-coordinate math** does not: the seek bar renders vertically while rotated, so `_lpSeekPosFromEvent` swaps to `clientY`/`r.height` when `_lpRotated()` is true — any new drag/scrub interaction inside the player must do the same.
 
+## iOS client app (Capacitor)
+
+See [IOS_APP_PLAN.md](IOS_APP_PLAN.md). The app lives in `ios-app/` (separate
+Node/Xcode project; exempt from the repo's Windows-first rule — but its *server*
+endpoints, added in later milestones, are not).
+
+### `LocalMediaServer` binds loopback-only — by design, and to dodge the privacy prompt
+The `NWListener` sets `params.requiredInterfaceType = .loopback`, so the media
+server is reachable only from the device itself (nothing on the LAN). A bonus:
+loopback listeners do **not** trigger the iOS 14+ Local Network privacy prompt,
+so no `NSLocalNetworkUsageDescription` is needed. If you ever widen it to the LAN,
+you must add that key and handle the prompt.
+
+### Native iOS HLS requires byte-`Range` — a 200-only static server silently fails
+iOS plays HLS via `<video>.src` (not hls.js). For fmp4 (`.m4s`) segments the
+native player issues `Range` requests; a server that ignores `Range` and always
+returns `200` makes playback stall or error with no useful console message.
+`LocalMediaServer` answers `206 Partial Content` with `Content-Range` (and
+`416` for unsatisfiable ranges). Mirror `_HLS_MIME` exactly — the wrong MIME on
+`master.m3u8` (`application/vnd.apple.mpegurl`) also makes the native player
+refuse the stream.
+
+### ATS cleartext is opened for `127.0.0.1`/`localhost` ONLY — the host stays HTTPS
+`Info.plist` excepts only loopback for insecure HTTP loads. The remote host is
+reached over HTTPS; for a self-signed host cert, install the host's **CA profile**
+on the device (Settings → VPN & Device Management, then enable full trust under
+Certificate Trust Settings). Do **not** flip `NSAllowsArbitraryLoads` on to "make
+it work" — that defeats the point and isn't needed once the CA is trusted.
+
+### The Capacitor bridge survives navigating the WebView to the remote host
+The shell (`www/index.html`) navigates the WKWebView to `https://<host>` and the
+existing dashboard loads there. Capacitor injects its bridge at the WebView level,
+so `window.Capacitor` + native plugins remain available on the remote origin —
+that's what lets the dashboard's (future) B5 glue call `LocalMediaServer`.
+`server.allowNavigation: ["*"]` in `capacitor.config.json` is required, or
+Capacitor opens the host in Safari instead of in-app.
+
+### `www/` is the source; `ios/App/App/public/` is generated — don't edit public/
+`npx cap copy ios` copies `www/` into the app bundle's `public/` dir (gitignored).
+Edit `www/`, then re-copy and rebuild. A fresh clone has no `public/` until you run
+`npx cap copy ios` (or `cap sync`).
+
 ## See also
 
 - [BACKEND.md](BACKEND.md) — invariants enforced by `main.py`

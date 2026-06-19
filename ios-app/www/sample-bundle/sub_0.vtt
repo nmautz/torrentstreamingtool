@@ -1,0 +1,10 @@
+WEBVTT
+
+00:00:00.000 --> 00:00:04.000
+StreamLink localhost HLS test
+
+00:00:04.000 --> 00:00:08.000
+NWListener serving fmp4 over Range
+
+00:00:08.000 --> 00:00:12.000
+Gate 1b — on-device localhost playback

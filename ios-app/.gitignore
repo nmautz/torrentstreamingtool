@@ -1,0 +1,11 @@
+# Node / Capacitor CLI
+node_modules/
+.DS_Store
+*.log
+
+# Capacitor copies www/ into ios/App/App/public on `cap copy` — that's a build
+# artifact (also ignored by ios/.gitignore). The source of truth is www/.
+
+# SPM / Xcode user state
+.swiftpm/
+*.xcuserstate

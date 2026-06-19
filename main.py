@@ -508,7 +508,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "5.44.1"
+UI_VERSION = "6.0.0-preview.1.0.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 # Retains references to fire-and-forget background tasks so the event loop's weak

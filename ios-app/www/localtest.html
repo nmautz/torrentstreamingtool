@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<!--
+  Gate 1b — on-device localhost HLS proof.
+
+  Drives the native LocalMediaServer (NWListener) plugin: starts it over the
+  bundled `sample-bundle/` HLS dir, points a native <video> at
+  http://127.0.0.1:<port>/master.m3u8, and lets you confirm playback, audio,
+  subtitle toggle and scrubbing on a real device. This is the M1 gating test;
+  it requires the ATS exception for 127.0.0.1 (see Info.plist).
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <title>StreamLink — Localhost HLS test</title>
+  <style>
+    :root { --bg:#0b0b0d; --panel:#141417; --line:#2a2a30; --fg:#f2f2f4; --muted:#8a8a92; --accent:#3a7afe; --ok:#3ec46d; --danger:#e0533d; }
+    * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+    body { margin:0; background:var(--bg); color:var(--fg); font-family:-apple-system,"Segoe UI",Roboto,sans-serif;
+           padding:max(env(safe-area-inset-top),20px) 18px max(env(safe-area-inset-bottom),20px); }
+    h1 { font-size:20px; font-weight:800; letter-spacing:.02em; margin:0 0 4px; text-transform:uppercase; }
+    .sub { color:var(--muted); font-size:13px; margin:0 0 18px; }
+    video { width:100%; background:#000; border:1px solid var(--line); display:block; }
+    button { -webkit-appearance:none; border:0; border-radius:0; font-size:14px; font-weight:800;
+             letter-spacing:.06em; text-transform:uppercase; padding:14px; margin-top:12px; width:100%;
+             color:#fff; background:var(--accent); }
+    button.ghost { background:transparent; color:var(--muted); border:1px solid var(--line); }
+    button:active { opacity:.8; }
+    pre { background:var(--panel); border:1px solid var(--line); color:var(--muted); font-size:12px;
+          padding:12px; margin-top:16px; white-space:pre-wrap; word-break:break-all; min-height:60px; }
+    .row { display:flex; gap:10px; }
+    .row button { flex:1; }
+    .ok { color:var(--ok); } .bad { color:var(--danger); }
+    a { color:var(--accent); font-size:13px; }
+  </style>
+</head>
+<body>
+  <h1>Localhost HLS test</h1>
+  <p class="sub">Gate 1b · NWListener serving the bundled fmp4 sample over Range.</p>
+
+  <video id="v" controls playsinline></video>
+
+  <div class="row">
+    <button id="startBtn">Start &amp; play</button>
+    <button id="stopBtn" class="ghost">Stop server</button>
+  </div>
+  <button id="backBtn" class="ghost">&larr; Back to connect</button>
+
+  <pre id="log">Idle. Tap “Start &amp; play”.</pre>
+
+  <script>
+    "use strict";
+    const $ = (id) => document.getElementById(id);
+    const v = $("v"), logEl = $("log");
+    let lines = [];
+    function log(msg, cls) {
+      const t = new Date().toLocaleTimeString();
+      lines.push(`[${t}] ${msg}`);
+      logEl.innerHTML = lines.slice(-12).join("\n");
+      if (cls) logEl.className = cls;
+    }
+    let _lms = null;
+    function plugin() {
+      if (_lms) return _lms;
+      const C = window.Capacitor;
+      if (!C) throw new Error("Capacitor bridge not available — are you running inside the app?");
+      // Prefer the modern proxy; fall back to the auto-registered Plugins map.
+      _lms = (typeof C.registerPlugin === "function")
+        ? C.registerPlugin("LocalMediaServer")
+        : (C.Plugins && C.Plugins.LocalMediaServer);
+      if (!_lms) throw new Error("LocalMediaServer plugin not registered.");
+      return _lms;
+    }
+
+    $("startBtn").addEventListener("click", async () => {
+      try {
+        log("Starting LocalMediaServer over bundled sample-bundle/ …");
+        const { url } = await plugin().start({ bundledPath: "sample-bundle" });
+        log("Server up at " + url, "ok");
+        const master = url.replace(/\/+$/, "") + "/master.m3u8";
+        log("Loading " + master);
+        v.src = master;
+        await v.play().catch(() => {});
+        log("Native <video> playing. Check audio + subtitle toggle + scrub.", "ok");
+      } catch (e) {
+        log("ERROR: " + (e && e.message ? e.message : e), "bad");
+      }
+    });
+
+    $("stopBtn").addEventListener("click", async () => {
+      try { v.pause(); v.removeAttribute("src"); v.load(); await plugin().stop(); log("Server stopped."); }
+      catch (e) { log("ERROR: " + (e && e.message ? e.message : e), "bad"); }
+    });
+
+    $("backBtn").addEventListener("click", () => { window.location.href = "index.html?setup=1"; });
+
+    v.addEventListener("error", () => {
+      const err = v.error; log("video error: code " + (err && err.code), "bad");
+    });
+  </script>
+</body>
+</html>
