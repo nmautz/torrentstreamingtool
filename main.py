@@ -45,6 +45,12 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 import analyzer
 import stt
 import updater
+import winaccept_patch
+
+# Harden the Windows Proactor accept loop before uvicorn starts serving: a
+# client that vanishes mid-handshake must not close the listening socket and
+# kill the whole server. No-op off Windows. See winaccept_patch.py.
+winaccept_patch.apply()
 
 
 # ── Logging ─────────────────────────────────────────────────────────────────
@@ -508,7 +514,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "5.44.1"
+UI_VERSION = "5.44.2"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 # Retains references to fire-and-forget background tasks so the event loop's weak
