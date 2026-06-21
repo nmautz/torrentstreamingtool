@@ -1332,6 +1332,10 @@
           </button>
         </div>
         <p id="epMetaLine" class="text-[10px] sm:text-xs text-gray-400 uppercase tracking-widest mt-1"></p>
+        <div class="mt-1.5">
+          <button id="epOndemandBtn" onclick="toggleEpOndemandOnly(this)"
+            class="hidden text-[10px] font-bold uppercase tracking-wide px-2.5 py-1 border transition-colors items-center gap-1.5"></button>
+        </div>
         <p id="epOverview" class="text-xs sm:text-sm text-gray-300 mt-2 line-clamp-3 sm:line-clamp-4"></p>
       </div>
     </div>
@@ -2723,6 +2727,9 @@ let epSeasonList = [];     // sorted seasons present in epFiles (positive ints o
 let epWatchedExpanded = new Set(); // season keys whose watched-episode section is expanded
 let epHasTorrent = false;  // item has a qBit torrent → download-scheduling controls apply
 let epDownloadMode = "now"; // item-level download mode (now | idle) from /files
+let epOndemandOnly = false;   // item flagged on-demand stream only (no permanent HLS bundle)
+let epOndemandLocked = false; // admin-locked → this UI can't change epOndemandOnly
+let epHlsAvailable = true;    // HLS prep/JIT available (false on macOS → hide the toggle)
 let epIsMovie = false;     // single-file item → movie-info panel instead of an episode list
 // Stream file picker state
 let streamPrepData = null;   // {hash, files, magnet, title} from /stream/prepare
@@ -5431,6 +5438,9 @@ async function openEpisodePicker(itemId, title){
   epFiles=d.files||[];
   epHasTorrent=!!d.has_torrent;
   epDownloadMode=d.download_mode||"now";
+  epOndemandOnly=!!d.ondemand_only;
+  epOndemandLocked=!!d.ondemand_only_locked;
+  epHlsAvailable=d.hls_available!==false;
   epFiles.forEach(f=>{ if(!f.progress?.completed) epChecked.add(f.path); });
 
   if(metaR.status==="fulfilled" && metaR.value.ok){
@@ -5533,6 +5543,8 @@ function setEpHeroPlaceholder(title){
   poster.classList.add("hidden"); poster.removeAttribute("src");
   document.getElementById("epPosterFallback").classList.remove("hidden");
   document.getElementById("epRenameBtn").classList.add("hidden");
+  const ob=document.getElementById("epOndemandBtn");
+  if(ob) ob.classList.add("hidden");
 }
 
 function renderEpHero(fallbackTitle){
@@ -5552,6 +5564,7 @@ function renderEpHero(fallbackTitle){
   // Reveal the rename control now the page has loaded — lets the user correct a
   // wrong auto-matched show (the metadata is fetched from the series name).
   document.getElementById("epRenameBtn").classList.remove("hidden");
+  _renderEpOndemandBtn();
 
   const bits=[];
   const yr = (m?.first_air_date || m?.release_date || "").slice(0,4);
@@ -5634,6 +5647,52 @@ async function renameSeries(){
     showAlert("Rename failed.","error");
   }finally{
     btn.disabled=false;
+  }
+}
+
+// On-Demand Stream Only toggle (episode page). When ON, on-device playback streams
+// just-in-time and no permanent HLS bundle is kept — saves disk. VLC/TV unaffected.
+// Hidden where HLS isn't available (macOS). When the admin has locked the item the
+// button still shows the current state but is disabled (a lock glyph + tooltip).
+function _renderEpOndemandBtn(){
+  const b=document.getElementById("epOndemandBtn");
+  if(!b) return;
+  if(!epHlsAvailable){ b.classList.add("hidden"); return; }
+  const on=epOndemandOnly, locked=epOndemandLocked;
+  b.disabled=locked;
+  b.className="text-[10px] font-bold uppercase tracking-wide px-2.5 py-1 border transition-colors inline-flex items-center gap-1.5 "
+    +(locked ? "cursor-not-allowed opacity-70 " : "")
+    +(on ? "bg-indigo-600 border-indigo-500 text-white"
+         : "bg-gray-800 border-gray-700 text-gray-400 "+(locked?"":"hover:text-white"));
+  b.title=locked
+    ? "On-Demand Only is locked by the administrator"
+    : (on ? "On-demand only — no permanent files kept. Click to turn off."
+          : "Turn on to stream this on-demand only (saves disk; no permanent files).");
+  const lock=locked
+    ? `<svg class="w-3 h-3" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 15v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2zm10-10V7a4 4 0 00-8 0v4h8z"/></svg>`
+    : "";
+  b.innerHTML=lock+`<span>On-Demand Only: ${on?"On":"Off"}</span>`;
+}
+
+async function toggleEpOndemandOnly(btn){
+  if(epOndemandLocked) return;            // disabled; admin-locked
+  const itemId=epItemId;
+  const next=!epOndemandOnly;
+  if(next && !confirm("Make this show on-demand stream only?\n\nIts on-device bundles will be deleted to free space, and no permanent files will be kept. On-device playback uses the just-in-time stream instead. Playing on the TV is unaffected.\n\nProceed?")) return;
+  btn.disabled=true;
+  try{
+    const r=await fetch(`/api/library/${itemId}/ondemand-only`,{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({enabled:next}),
+    });
+    const d=await r.json().catch(()=>({}));
+    if(epItemId!==itemId) return;         // navigated away mid-request
+    if(!r.ok){ showAlert(d.detail||"Could not change setting.","error"); btn.disabled=false; return; }
+    epOndemandOnly=next;
+    _renderEpOndemandBtn();
+    showAlert(next?(d.purging?"On-demand only enabled — freeing disk space.":"On-demand only enabled."):"On-demand only disabled.","success");
+  }catch(_){
+    if(epItemId===itemId){ showAlert("Could not change setting.","error"); btn.disabled=false; }
   }
 }
 
@@ -10391,6 +10450,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.45.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.46.0</div>
 </body>
 </html>

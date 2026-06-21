@@ -785,7 +785,8 @@ wins (on-demand is a supplement, never a replacement).
   for the current session. (Both can run at once — the below-normal priority on both
   keeps the box usable; see [GOTCHAS.md](GOTCHAS.md).)
 - **On-demand-only shows skip the permanent bundle entirely.** When an item is
-  flagged `ondemand_only` (admin Storage tab → `state.ondemand_only_items`),
+  flagged `ondemand_only` (admin Storage tab **or** the dashboard episode-page
+  toggle, unless admin-locked via `ondemand_only_locked` → `state.ondemand_only_items`),
   `_maybe_start_prep_job` returns `{status:"ondemand_only"}` without building, so the
   background full prep above is a no-op and `/offline-prepare` returns
   `{ready:false, ondemand_only:true}` — every on-device play stays on JIT and nothing

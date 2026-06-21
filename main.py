@@ -5716,6 +5716,15 @@ class OndemandOnlyReq(BaseModel):
     enabled: bool                               # True ⇒ on-device playback uses JIT only; no permanent bundle
 
 
+class OndemandOnlyLockReq(BaseModel):
+    item_id: str
+    locked: bool                                # True ⇒ non-admin dashboard users can't change the on-demand-only flag
+
+
+class OndemandOnlyUserReq(BaseModel):
+    enabled: bool                               # user-facing toggle (item id is in the path); honours the admin lock
+
+
 class AutoMaintReq(BaseModel):
     # `validate` is the wire/JSON key (UI sends {fingerprint, validate}); the Python
     # attribute is renamed via alias so it doesn't shadow pydantic BaseModel.validate.
@@ -6042,6 +6051,9 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
         "download_mode": cfg["mode"],
         "idle_open": state.download_idle_open,
         "idle_configured": state.download_idle_configured,
+        "ondemand_only": bool(item.get("ondemand_only")),          # user can toggle unless locked
+        "ondemand_only_locked": bool(item.get("ondemand_only_locked")),  # admin-locked → toggle disabled
+        "hls_available": HLS_AVAILABLE,                  # JIT/prep unavailable on macOS → hide the toggle
     })
 
 
@@ -10696,6 +10708,7 @@ async def admin_get_ondemand_only(request: Request) -> JSONResponse:
         "id": it.get("id", ""),
         "title": it.get("title", ""),
         "ondemand_only": bool(it.get("ondemand_only")),
+        "ondemand_only_locked": bool(it.get("ondemand_only_locked")),
         "file_count": sum(1 for f in it.get("files", [])
                           if Path(f.get("path", "")).suffix.lower() in VIDEO_EXTS),
     } for it in lib.get("items", [])]
@@ -10722,35 +10735,32 @@ async def _purge_ondemand_bundles(item_id: str) -> None:
         log.exception("ondemand-only background bundle purge failed for %s", item_id)
 
 
-@app.post("/api/admin/ondemand-only")
-async def admin_set_ondemand_only(request: Request, body: OndemandOnlyReq) -> JSONResponse:
-    """Flag (or unflag) a show as **on-demand stream only**: on-device browser
-    playback uses the just-in-time pipeline and NO permanent HLS bundle is built,
-    so it costs ~no disk. Enabling also cancels any in-flight prep for the item and
-    purges its existing bundles to reclaim space. VLC (TV) playback is unaffected
-    — it reads the source file directly.
+async def _apply_ondemand_only(item_id: str, enabled: bool) -> dict:
+    """Core on-demand-only mutation shared by the admin and user endpoints: flip
+    `item["ondemand_only"]`, persist, rebuild `state.ondemand_only_items`, and —
+    when enabling — cancel any in-flight prep for the item (fast, inline) and purge
+    its existing permanent bundles to reclaim space.
 
     The flag flip + job cancel are fast and happen inline so the toggle takes
     effect immediately. The bundle purge requires a forced full-cache inventory
     walk (heavy on a large `.offline_cache/`) and is run in a DETACHED background
     task — doing it inline made the request hold the event loop long enough that
     other users couldn't load the page or act on it. Space is reclaimed shortly
-    after the response returns."""
-    _require_admin(request)
+    after the response returns. Raises HTTPException(404) if the item is gone."""
     lib = await get_library()
-    item = next((it for it in lib["items"] if it.get("id") == body.item_id), None)
+    item = next((it for it in lib["items"] if it.get("id") == item_id), None)
     if not item:
         raise HTTPException(404, "Item not found.")
-    item["ondemand_only"] = bool(body.enabled)
+    item["ondemand_only"] = bool(enabled)
     await put_library(lib)
     _rebuild_ondemand_only_items(lib)
 
     cancelled = 0
     purging = False
-    if body.enabled:
+    if enabled:
         # Stop any in-flight / queued prep for this item's files (fast).
         for j in list(_offline_jobs.values()):
-            if (j.get("item_id") == body.item_id
+            if (j.get("item_id") == item_id
                     and j.get("status") in ("pending", "processing", "paused")):
                 proc = j.get("_proc")
                 if proc is not None and proc.returncode is None:
@@ -10762,10 +10772,52 @@ async def admin_set_ondemand_only(request: Request, body: OndemandOnlyReq) -> JS
                 cancelled += 1
         # Reclaim existing permanent bundles in the background so the request
         # returns immediately and the loop stays free for everyone else.
-        _spawn_bg(_purge_ondemand_bundles(body.item_id))
+        _spawn_bg(_purge_ondemand_bundles(item_id))
         purging = True
-    return JSONResponse({"ok": True, "ondemand_only": bool(body.enabled),
-                         "purging": purging, "jobs_cancelled": cancelled})
+    return {"ok": True, "ondemand_only": bool(enabled),
+            "purging": purging, "jobs_cancelled": cancelled}
+
+
+@app.post("/api/admin/ondemand-only")
+async def admin_set_ondemand_only(request: Request, body: OndemandOnlyReq) -> JSONResponse:
+    """Flag (or unflag) a show as **on-demand stream only**: on-device browser
+    playback uses the just-in-time pipeline and NO permanent HLS bundle is built,
+    so it costs ~no disk. Enabling also cancels any in-flight prep for the item and
+    purges its existing bundles to reclaim space. VLC (TV) playback is unaffected
+    — it reads the source file directly. Admin can always change the flag, even when
+    it's locked against non-admin dashboard users."""
+    _require_admin(request)
+    return JSONResponse(await _apply_ondemand_only(body.item_id, body.enabled))
+
+
+@app.post("/api/admin/ondemand-only-lock")
+async def admin_set_ondemand_only_lock(request: Request, body: OndemandOnlyLockReq) -> JSONResponse:
+    """Lock (or unlock) an item's on-demand-only flag so **non-admin dashboard users
+    can't change it** from the episode page. Admin keeps full control either way.
+    Persisted as `item["ondemand_only_locked"]`."""
+    _require_admin(request)
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it.get("id") == body.item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    item["ondemand_only_locked"] = bool(body.locked)
+    await put_library(lib)
+    return JSONResponse({"ok": True, "ondemand_only_locked": bool(body.locked)})
+
+
+@app.post("/api/library/{item_id}/ondemand-only")
+async def set_ondemand_only(item_id: str, body: OndemandOnlyUserReq,
+                            request: Request) -> JSONResponse:
+    """User-facing on-demand-only toggle (the dashboard episode page). Same effect as
+    the admin endpoint, but **refuses (HTTP 403) when the item is admin-locked**
+    (`item["ondemand_only_locked"]`) and the requester isn't an admin."""
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it.get("id") == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    if item.get("ondemand_only_locked") and not _check_admin(request):
+        raise HTTPException(403, "This setting is locked by the administrator.")
+    return JSONResponse(await _apply_ondemand_only(item_id, body.enabled))
 
 
 @app.get("/api/admin/cache-autopurge")

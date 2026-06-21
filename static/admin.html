@@ -2962,17 +2962,27 @@ function _renderOndemandOnly(d){
   if(!items.length){ list.innerHTML = `<div class="text-gray-600">No library items yet.</div>`; return; }
   list.innerHTML = items.map(it=>{
     const on = !!it.ondemand_only;
+    const locked = !!it.ondemand_only_locked;
     return `<div class="flex items-center justify-between gap-3 border border-gray-800 bg-gray-950/40 px-3 py-2">
       <div class="min-w-0">
         <div class="text-gray-300 font-bold break-all">${escHtml(it.title || "(untitled)")}</div>
-        <div class="text-[10px] text-gray-600">${it.file_count} file${it.file_count===1?'':'s'}${on?' · on-demand only — no permanent files':''}</div>
+        <div class="text-[10px] text-gray-600">${it.file_count} file${it.file_count===1?'':'s'}${on?' · on-demand only — no permanent files':''}${locked?' · locked for users':''}</div>
       </div>
-      <button onclick="toggleOndemandOnly('${escHtml(it.id)}', ${on?'false':'true'}, this)"
-        class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-1.5 border transition-colors ${on
-          ? 'bg-indigo-600 border-indigo-500 text-white'
-          : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white'}">
-        ${on ? 'On-Demand Only' : 'Off'}
-      </button>
+      <div class="flex-shrink-0 flex items-center gap-2">
+        <button onclick="toggleOndemandLock('${escHtml(it.id)}', ${locked?'false':'true'}, this)"
+          title="${locked?'Unlock — let dashboard users change this':'Lock — stop dashboard users changing this'}"
+          class="text-xs font-bold uppercase tracking-wide px-3 py-1.5 border transition-colors ${locked
+            ? 'bg-amber-600 border-amber-500 text-white'
+            : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white'}">
+          ${locked ? '🔒 Locked' : 'Unlocked'}
+        </button>
+        <button onclick="toggleOndemandOnly('${escHtml(it.id)}', ${on?'false':'true'}, this)"
+          class="text-xs font-bold uppercase tracking-wide px-3 py-1.5 border transition-colors ${on
+            ? 'bg-indigo-600 border-indigo-500 text-white'
+            : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white'}">
+          ${on ? 'On-Demand Only' : 'Off'}
+        </button>
+      </div>
     </div>`;
   }).join("");
 }
@@ -3000,6 +3010,21 @@ async function toggleOndemandOnly(itemId, enabled, btn){
       } else {
         showToast(enabled ? "On-demand only enabled." : "On-demand only disabled.");
       }
+      loadOndemandOnly();
+    }catch(_){ showToast("Failed.", true); }
+  });
+}
+
+async function toggleOndemandLock(itemId, locked, btn){
+  await withInflight("ondemand_lock_"+itemId, btn, async ()=>{
+    try{
+      const r = await fetch("/api/admin/ondemand-only-lock",{
+        method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+        body: JSON.stringify({item_id: itemId, locked}),
+      });
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok){ showToast(`Failed: ${d.detail || r.status}`, true); return; }
+      showToast(locked ? "Locked — users can't change this." : "Unlocked — users can change this.");
       loadOndemandOnly();
     }catch(_){ showToast("Failed.", true); }
   });
