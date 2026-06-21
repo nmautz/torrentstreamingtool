@@ -106,6 +106,7 @@ Up to 6 profiles. No passwords. Optional 4-digit PIN per profile.
 | POST | `/api/library/{id}/download-zip` | `{file_paths[]}` → streamed ZIP (uses `os.pipe` + thread; ZIP_STORED — no compression) |
 | GET | `/api/library/{id}/metadata?refresh=0\|1` | Cached TMDb show metadata (auto-fetches on first call when an API key is configured). Always returns `{enabled, img_base, metadata}`. `enabled=false` when no TMDb key is set — UI falls back to filename parsing |
 | POST | `/api/library/{id}/metadata/refresh` | Admin-only. `{tmdb_id?, kind?}` — force a re-fetch; optional `{tmdb_id, kind:"tv"\|"movie"}` overrides the auto-match for items that grabbed the wrong show |
+| POST | `/api/library/{id}/rename` | `{name}` — rename the series (or, for a movie/one-off, the item's title). The name drives the TMDb query, so this re-binds artwork/episode info to the right show (fixes a badly-named download that auto-matched the wrong series). A series rename updates **every** entry in the group (`item.series`) and re-keys each profile's `series_subtitle_prefs[<series>]`; each entry's cached `metadata` is dropped so it re-matches on next fetch. Returns `{ok, series, metadata, img_base}` — `metadata` is the requested item's freshly-fetched cache (null with no TMDb key) |
 
 ### Download scheduling
 

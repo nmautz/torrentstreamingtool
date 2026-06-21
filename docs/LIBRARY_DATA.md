@@ -341,6 +341,8 @@ Written by `vlc_progress_tracker` every 15 s, always under **`state.library_prof
 
 Populated by `_fetch_item_metadata` ([main.py](../main.py)) on first hit of `GET /api/library/{id}/metadata`, then served from cache. Per-id `asyncio.Lock` coalesces concurrent first-loads. Force refresh via `POST /api/library/{id}/metadata/refresh` (admin); the same endpoint accepts an optional `{tmdb_id, kind}` to manually bind the item to a TMDb entry when auto-match picks the wrong show.
 
+The query the auto-match runs is built from `item.series` (or `item.title` for one-offs) by `_search_terms_for_item`, so a badly-named download (e.g. "AOT") can match the wrong show. `POST /api/library/{id}/rename` ([main.py](../main.py)) fixes this: it renames the series across the whole group (or the title for a movie/one-off), **drops the cached `metadata` on every renamed entry**, and re-fetches the requested item immediately — the next access of the siblings re-matches lazily. It also re-keys each profile's `series_subtitle_prefs[<series>]` so a remembered subtitle pick survives the rename. Surfaced in the UI by the pencil button on the episode page hero (`renameSeries()`).
+
 When no TMDb API key is configured (env or admin override), the endpoint returns `{enabled: false}` and the frontend gracefully falls back to filename parsing.
 
 ## Migration ([main.py:77](../main.py#L77))

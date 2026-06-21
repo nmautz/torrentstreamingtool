@@ -5765,6 +5765,10 @@ class MetadataRefreshReq(BaseModel):
     kind: Optional[str] = None        # "tv" | "movie"
 
 
+class RenameReq(BaseModel):
+    name: str                         # new series name (or movie title for one-offs)
+
+
 class ProfilePinReq(BaseModel):
     pin: str          # 4 digits to set, "" to clear
     current_pin: str = ""  # required when changing an existing PIN without admin token
@@ -6083,6 +6087,64 @@ async def refresh_item_metadata(item_id: str, request: Request,
     if not data:
         raise HTTPException(404, "No TMDb match found for this item.")
     return JSONResponse({"ok": True, "metadata": data, "img_base": TMDB_IMG_BASE})
+
+
+@app.post("/api/library/{item_id}/rename")
+async def rename_library_item(item_id: str, req: RenameReq) -> JSONResponse:
+    """Rename a series (or a movie/one-off's title). The name is what drives the
+    TMDb metadata query (`_search_terms_for_item`), so changing it here re-binds
+    the artwork/episode info to the right show — e.g. fixing an "AOT" download
+    that auto-matched the wrong series. For a series item the whole group is
+    renamed (the library grouping key is `item.series`); cached metadata is
+    dropped so the next fetch re-matches against the new name."""
+    new_name = (req.name or "").strip()
+    if not new_name:
+        raise HTTPException(400, "Name cannot be empty.")
+
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+
+    old_series = (item.get("series") or "").strip()
+    if old_series:
+        if new_name == old_series:
+            raise HTTPException(400, "That's already the series name.")
+        # Rename every entry in the group so the library grouping AND the TMDb
+        # query both move together. Drop each one's cached metadata so it
+        # re-matches against the new name on next access.
+        for it in lib["items"]:
+            if (it.get("series") or "").strip() == old_series:
+                it["series"] = new_name
+                it.pop("metadata", None)
+        # Series subtitle prefs are keyed by the series string — re-key them so a
+        # remembered subtitle choice survives the rename.
+        for prof in lib.get("profiles", []):
+            prefs = prof.get("series_subtitle_prefs")
+            if isinstance(prefs, dict) and old_series in prefs:
+                prefs[new_name] = prefs.pop(old_series)
+    else:
+        # Movie / one-off: no series group, so rename this item's own title
+        # (which is what its metadata query falls back to).
+        if new_name == (item.get("title") or "").strip():
+            raise HTTPException(400, "That's already the title.")
+        item["title"] = new_name
+        item.pop("metadata", None)
+
+    await put_library(lib)
+
+    # Re-fetch this item's metadata now so the response carries the corrected
+    # art/overview (best effort — no TMDb key just returns null and the UI falls
+    # back to the filename, exactly as before).
+    data = None
+    if await _tmdb_effective_key():
+        data = await _fetch_item_metadata(item_id, force=True)
+    return JSONResponse({
+        "ok": True,
+        "series": new_name if old_series else "",
+        "metadata": data,
+        "img_base": TMDB_IMG_BASE,
+    })
 
 
 @app.post("/api/library/download")

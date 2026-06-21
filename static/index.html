@@ -1321,7 +1321,16 @@
         </svg>
       </div>
       <div class="min-w-0 flex-1 flex flex-col justify-end">
-        <h1 id="epTitle" class="text-lg sm:text-2xl font-black uppercase tracking-wide leading-tight"></h1>
+        <div class="flex items-start gap-2 min-w-0">
+          <h1 id="epTitle" class="text-lg sm:text-2xl font-black uppercase tracking-wide leading-tight min-w-0"></h1>
+          <button id="epRenameBtn" onclick="renameSeries()" title="Rename — fixes wrong artwork / episode info"
+            class="hidden flex-shrink-0 mt-1 p-1 text-gray-500 hover:text-white hover:bg-white/10 transition-colors">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+            </svg>
+          </button>
+        </div>
         <p id="epMetaLine" class="text-[10px] sm:text-xs text-gray-400 uppercase tracking-widest mt-1"></p>
         <p id="epOverview" class="text-xs sm:text-sm text-gray-300 mt-2 line-clamp-3 sm:line-clamp-4"></p>
       </div>
@@ -5523,6 +5532,7 @@ function setEpHeroPlaceholder(title){
   const poster=document.getElementById("epPoster");
   poster.classList.add("hidden"); poster.removeAttribute("src");
   document.getElementById("epPosterFallback").classList.remove("hidden");
+  document.getElementById("epRenameBtn").classList.add("hidden");
 }
 
 function renderEpHero(fallbackTitle){
@@ -5539,6 +5549,9 @@ function renderEpHero(fallbackTitle){
   titleEl.textContent = show;
   headerEl.textContent = show;
   overviewEl.textContent = m?.overview || "";
+  // Reveal the rename control now the page has loaded — lets the user correct a
+  // wrong auto-matched show (the metadata is fetched from the series name).
+  document.getElementById("epRenameBtn").classList.remove("hidden");
 
   const bits=[];
   const yr = (m?.first_air_date || m?.release_date || "").slice(0,4);
@@ -5572,6 +5585,55 @@ function renderEpHero(fallbackTitle){
     backdrop.style.backgroundImage = "";
     poster.classList.add("hidden"); poster.removeAttribute("src");
     posterFb.classList.remove("hidden");
+  }
+}
+
+// Rename the open item's series (or a movie's title). The name is what drives
+// the TMDb metadata match, so this is also the fix for a wrong auto-matched show
+// (e.g. an "AOT" download that pulled "AOTU"). The server renames the whole
+// series group + re-fetches artwork; we repaint the hero with the result.
+async function renameSeries(){
+  const itemId=epItemId;
+  const item=(window._libCache||[]).find(it=>it&&it.id===itemId);
+  const isSeries=!!(item&&(item.series||"").trim());
+  const current=isSeries
+      ? item.series.trim()
+      : ((item&&item.title)||document.getElementById("epTitle").textContent||"").trim();
+  const next=prompt(
+    (isSeries?"Rename series":"Rename title")+" — used to fetch artwork & episode info:",
+    current);
+  if(next===null) return;                 // cancelled
+  const name=next.trim();
+  if(!name){ showAlert("Name can't be empty.","warn"); return; }
+  if(name===current) return;              // unchanged
+
+  const btn=document.getElementById("epRenameBtn");
+  btn.disabled=true;
+  setEpHeroPlaceholder(name);             // show the new name while metadata reloads
+  try{
+    const r=await fetch(`/api/library/${itemId}/rename`,{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({name}),
+    });
+    const d=await r.json().catch(()=>({}));
+    if(epItemId!==itemId) return;         // user navigated away mid-request
+    if(!r.ok){
+      showAlert(d.detail||"Rename failed.","error");
+      renderEpHero(current);
+      return;
+    }
+    epMetadata=d.metadata||null;
+    if(d.img_base) epMetaImgBase=d.img_base;
+    renderEpHero(name);
+    renderEpSeasonTabs();
+    renderEpList();
+    loadLibrary();                        // refresh the library grouping label
+    showAlert(d.metadata?"Renamed — artwork updated.":"Renamed.","success");
+  }catch(_){
+    if(epItemId===itemId) renderEpHero(current);
+    showAlert("Rename failed.","error");
+  }finally{
+    btn.disabled=false;
   }
 }
 
@@ -10329,6 +10391,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.44.5</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">5.45.0</div>
 </body>
 </html>
