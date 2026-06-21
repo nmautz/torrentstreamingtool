@@ -50,6 +50,23 @@ for _stream in (sys.stdout, sys.stderr):
 #     during the initial interactive setup
 AUTOUPDATE = os.environ.get("STREAMLINK_AUTOUPDATE", "").strip() == "1"
 
+# Whether this run is being driven by the graphical first-install wizard
+# (install.bat → installer.py). The wizard launches setup.py with no usable
+# stdin, so ask()/ask_bool() already fall back to their defaults; on top of
+# that the wizard:
+#   - pre-seeds each .env value via SL_<KEY> env vars (read in gather_config)
+#   - always (re)writes .env + qBittorrent.ini so the chosen values take
+#     effect even when a stale .env exists (never silently "reuse")
+#   - toggles the two optional installs via STREAMLINK_INSTALL_STT /
+#     STREAMLINK_INSTALL_SERVICE ("0" = skip, anything else = default)
+# See docs/INSTALLER.md.
+WIZARD = os.environ.get("STREAMLINK_WIZARD", "").strip() == "1"
+
+
+def _env_skip(name: str) -> bool:
+    """True when an optional-install env toggle is explicitly disabled ("0")."""
+    return os.environ.get(name, "").strip() == "0"
+
 # ── Color output (disabled on non-TTY) ────────────────────────────────────
 _TTY = hasattr(sys.stdout, "isatty") and sys.stdout.isatty()
 def _c(n): return f"\033[{n}m" if _TTY else ""
@@ -578,6 +595,12 @@ def install_stt_deps(tools: dict) -> dict:
     if tools.get("whisper") and tools.get("whisper_model"):
         return tools
 
+    # Graphical wizard left the "AI auto-subtitles" box unchecked → skip.
+    if _env_skip("STREAMLINK_INSTALL_STT"):
+        header("Auto-Subtitle Dependencies (whisper.cpp + model)")
+        note("Skipped (disabled in the installer). Enable later by re-running setup.")
+        return tools
+
     header("Auto-Subtitle Dependencies (whisper.cpp + model)")
     note("Used to transcribe audio into subtitles when a file has none. Optional.")
     missing = []
@@ -1096,6 +1119,10 @@ def offer_service_install() -> bool:
     note("Register StreamLink as a system service so it starts automatically on")
     note("boot/login. The service runs the watchdog — which starts VLC, Jackett,")
     note("and the dashboard, and starts qBittorrent only once Mullvad VPN connects.")
+    # Graphical wizard left the "start on boot" box unchecked → skip.
+    if _env_skip("STREAMLINK_INSTALL_SERVICE"):
+        note("Skipped (disabled in the installer). Install later with: python3 run.py --install")
+        return False
     default = SYSTEM == "Windows"
     if not ask_bool("Install StreamLink as a system service now?", default=default):
         note("Skipped. Install later with: python3 run.py --install")
@@ -1242,14 +1269,17 @@ def gather_config(existing: dict | None = None) -> dict:
 
     cfg: dict[str, str] = {}
 
-    # Plain field: default to the stored value, falling back to the factory default.
+    # Plain field: default to the stored value, falling back to the factory
+    # default. The graphical wizard pre-seeds choices via SL_<KEY> env vars,
+    # which take priority over the stored value (and win automatically since
+    # the wizard runs setup.py with no stdin → ask() returns the default).
     def ask_field(label, key, factory=""):
-        return ask(label, prev.get(key, factory))
+        return ask(label, os.environ.get("SL_" + key) or prev.get(key, factory))
 
     # Secret field: same defaulting, but never echo the stored value to the
     # terminal — show a masked placeholder so re-running setup can't leak it.
     def ask_secret(label, key, factory=""):
-        cur = prev.get(key, factory)
+        cur = os.environ.get("SL_" + key) or prev.get(key, factory)
         if key in prev:
             shown = "•••••• (Enter = keep)" if cur else "(currently blank)"
         else:
@@ -1586,6 +1616,13 @@ def main():
             reuse_env = True
             header("Existing .env detected")
             note(f"Found {ENV} — reusing in auto-update mode (no prompts).")
+        elif WIZARD:
+            # The graphical installer is authoritative: apply the choices it
+            # seeded via SL_* env vars and rewrite .env + qBittorrent.ini,
+            # rather than silently keeping a stale .env.
+            reuse_env = False
+            header("Existing .env detected")
+            note(f"Found {ENV} — applying installer choices (rewriting config).")
         else:
             header("Existing .env detected")
             note(f"Found {ENV}")

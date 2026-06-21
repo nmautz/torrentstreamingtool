@@ -40,6 +40,7 @@ Each entry is a short hook so future Claude instances can jump straight to the r
 | [docs/FRONTEND.md](docs/FRONTEND.md) | Working on `static/index.html` or `static/admin.html`. HTML section map, JS function list, SSE handlers, render functions, init flow. |
 | [docs/API.md](docs/API.md) | Adding/modifying an endpoint, or building a new UI feature that calls one. Every route with method, path, request shape, notes. SSE event catalog. |
 | [docs/LIBRARY_DATA.md](docs/LIBRARY_DATA.md) | Touching `library.json` schema (profiles, items, progress, skip_data, settings). Includes the migration logic. |
+| [docs/INSTALLER.md](docs/INSTALLER.md) | Changing the one-click graphical installer — `install.bat` (Python bootstrap + elevation) and `installer.py` (the Tkinter wizard). How it drives `setup.py` non-interactively via the `STREAMLINK_WIZARD` / `SL_*` / `STREAMLINK_INSTALL_*` env seam. |
 | [docs/SETUP.md](docs/SETUP.md) | Changing `setup.py` — venv, deps install, qBit ini, SSL cert, service registration. |
 | [docs/RUNTIME.md](docs/RUNTIME.md) | Changing `run.py` — venv relaunch, service launchers, LAN/SSID detection, mDNS, firewall, dashboard launch (HTTP + HTTPS). |
 | [docs/DAEMON_WATCHDOG.md](docs/DAEMON_WATCHDOG.md) | Working on `daemon.py` (system service install) or `watchdog.py` (crash supervisor + VPN-gated qBit). |
@@ -56,6 +57,7 @@ Each entry is a short hook so future Claude instances can jump straight to the r
 ## Quick commands
 
 ```bash
+install.bat               # Windows: one-click graphical first install (Python bootstrap + wizard → setup.py). See docs/INSTALLER.md
 python3 setup.py          # first-time configuration (or re-run to refresh)
 python3 run.py            # launch all services + dashboard
 make setup / make run     # shortcuts

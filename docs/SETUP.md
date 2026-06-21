@@ -70,6 +70,26 @@ Lets the non-elevated StreamLink watchdog recover a hung Jackett **without a reb
 - When not admin, applies both in a single elevated `cmd /c … & …` (one UAC prompt). If elevation is declined, it prints the exact `sc sdset` / `sc failure` commands to run manually in an elevated PowerShell.
 - No-op if Jackett runs as a tray/user process (the watchdog can kill+relaunch that directly). See [GOTCHAS.md](GOTCHAS.md#controlling-the-localsystem-jackett-service-needs-admin).
 
+## Non-interactive "wizard" mode (graphical installer)
+
+The graphical first-install wizard ([docs/INSTALLER.md](INSTALLER.md)) drives this
+same `setup.py` without a terminal. It runs setup with `stdin` closed — so every
+`ask()`/`ask_bool()` already returns its default — and steers the result with env
+vars:
+
+- `STREAMLINK_WIZARD=1` (`WIZARD` flag) — when an existing `.env` is found, forces
+  `reuse_env=False` so the wizard's choices are written and `qBittorrent.ini` is
+  regenerated, instead of the normal "reuse existing `.env`?" path.
+- `SL_<ENV_KEY>` — pre-seeds each config value. `gather_config()`'s `ask_field` /
+  `ask_secret` prefer `os.environ.get("SL_"+key)` over the stored/factory default
+  (empty values fall back, so blanks use the factory default).
+- `STREAMLINK_INSTALL_STT=0` / `STREAMLINK_INSTALL_SERVICE=0` — checked via
+  `_env_skip()`; `"0"` skips the whisper.cpp download / the boot-service install
+  respectively. Any other value leaves the default behaviour unchanged.
+
+This is distinct from `STREAMLINK_AUTOUPDATE=1` (`AUTOUPDATE`), which instead
+*reuses* the existing `.env` and skips OS-level installs.
+
 ## Interactive configuration ([setup.py:930](../setup.py#L930))
 
 `gather_config(existing)` prompts for the user-facing `.env` keys (Jackett URL/API key/password/categories, qBit URL/user/password/download path, VLC URL/password, buffer thresholds, admin password).

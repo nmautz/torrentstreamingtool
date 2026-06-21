@@ -6,7 +6,17 @@ Local dashboard for searching, buffering, and instantly streaming P2P media thro
 
 ---
 
-## TL;DR
+## Easiest: the one-click installer (recommended)
+
+**Just double-click `install.bat`.** No terminal, and you don't even need Python first.
+
+It asks for administrator access (click **Yes**), installs Python if it's missing, then opens a small **graphical wizard**: pick your download folder and admin password (or keep the defaults), tick whether you want AI auto-subtitles and start-on-boot, and click **Install**. After it installs everything, the wizard **walks you through each step that needs you** — connecting **Mullvad VPN**, enabling the **qBittorrent Web UI** (it shows the exact port/username/password to match), clearing **VLC's** first-run dialog so remote control works, and adding a **Jackett** search source + API key — each on its own page with the links, steps, an "Open app" button, and (for Jackett) a box to paste the key. **Every page has a live Test button** that starts the service and shows a green ✓ / red ✗ so you know it's actually working before you move on. Then it offers to launch StreamLink. You never touch a terminal.
+
+> Power users / Linux / macOS, or if you'd rather see the terminal flow, keep reading.
+
+---
+
+## TL;DR (terminal)
 
 ```powershell
 python setup.py     # one-time: installs & configures everything it can
@@ -45,6 +55,8 @@ Then do the **manual** things `setup.py` cannot do for you (below): **pick/confi
 ---
 
 ## 0 — Prerequisite: Python
+
+> Using the one-click `install.bat` above? **Skip this section** — the installer installs Python (all-users) for you if it's missing.
 
 Install **Python 3.9 or newer** from [python.org](https://www.python.org/downloads/) (or `winget install Python.Python.3.12`).
 
