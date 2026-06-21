@@ -407,8 +407,8 @@ class Wizard(tk.Tk):
         tk.Frame(inner, bg=LINE, height=1).pack(fill="x", pady=(16, 12))
         self._check(inner, "Install AI auto-subtitles (whisper.cpp, ~180 MB download)",
                     self.var_stt)
-        self._check(inner, "Start StreamLink automatically on boot (recommended)",
-                    self.var_service)
+        self._check(inner, "Install as a service so it starts automatically on login "
+                           "(recommended)", self.var_service)
 
         adv_toggle = tk.Frame(inner, bg=PANEL)
         adv_toggle.pack(fill="x", pady=(14, 0))
@@ -803,11 +803,44 @@ class Wizard(tk.Tk):
             ))
         self._finish_msg.pack(anchor="w", pady=(12, 16))
 
-        self._check(inner, "Launch StreamLink now", self.var_launch)
+        self._launch_cb = self._check(inner, "Launch StreamLink now", self.var_launch)
 
         nav = tk.Frame(p, bg=BG)
         nav.pack(fill="x", pady=(16, 0))
         self._button(nav, "Finish", self._finish).pack(side="right")
+
+    def _update_finish(self) -> None:
+        """Tailor the Finish page to whether StreamLink was installed as a service.
+
+        When the boot service is installed, `daemon.install()` already started it
+        during setup (it's serving the dashboard now), so a separate "Launch now"
+        would just hit the single-instance guard — hide it, and point out the
+        auto-login requirement for surviving a full reboot.
+        """
+        if self.var_service.get():
+            self.var_launch.set(False)
+            self._launch_cb.pack_forget()
+            self._finish_msg.configure(text=(
+                "StreamLink is installed as a system service — it started during "
+                "setup and will start automatically every time you log in.\n\n"
+                "Open the dashboard:\n"
+                "   •  http://localhost           (this PC)\n"
+                "   •  http://<this-pc-ip>         (phones/TVs on your network)\n"
+                "Admin panel:  https://localhost/admin\n\n"
+                "Tip: to have it come back after a full reboot (not just login), turn "
+                "on Windows auto-login — see README.md → “Unattended restarts”."))
+        else:
+            self.var_launch.set(True)
+            self._launch_cb.pack(fill="x", pady=2)
+            self._finish_msg.configure(text=(
+                "StreamLink is installed and configured. You chose not to start it on "
+                "boot, so launch it yourself with “Launch StreamLink now” (or run "
+                "`python run.py`), or install the service later with "
+                "`python run.py --install`.\n\n"
+                "Open the dashboard once it's running:\n"
+                "   •  http://localhost           (this PC)\n"
+                "   •  http://<this-pc-ip>         (phones/TVs on your network)\n"
+                "Admin panel:  https://localhost/admin"))
 
     # ── install orchestration ─────────────────────────────────────────────
     def _start_install(self) -> None:
@@ -902,6 +935,7 @@ class Wizard(tk.Tk):
     def _after_install(self) -> None:
         if getattr(self, "_install_ok", False):
             self._refresh_match_values()
+            self._update_finish()
             self._show("mullvad", "Step 2 — Connect your VPN")
         else:
             self._finish_title.configure(text="Setup didn't finish cleanly", fg=ERR_RED)
