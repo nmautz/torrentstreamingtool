@@ -195,6 +195,25 @@ _MAX_FAST_DEATHS  = 5      # give up after this many consecutive fast deaths
 consecutive_fast = 0
 try:
     while True:
+        # Single-instance guard. Windows can't share a listening socket, so if
+        # another StreamLink is already serving on :80 (the ONLOGON task firing
+        # on a fresh logon while the prior process lives, a manual run.py, a
+        # double schtasks /Run) this wrapper would crash-loop forever on
+        # WinError 10048 and take the service down until a reboot. Detect the
+        # live instance and exit cleanly instead of thrashing. Runs at the top
+        # of every iteration, so it also resolves the rarer race where two
+        # wrappers start together: the loser sees the winner on the next pass
+        # and exits before hitting _MAX_FAST_DEATHS. A genuine self-restart
+        # (our own server crashed, port now free) sails through unaffected.
+        try:
+            from run import dashboard_already_serving
+            if dashboard_already_serving(80):
+                log.info("Another StreamLink instance is already serving on :80 — "
+                         "service wrapper exiting to avoid a port fight.")
+                break
+        except Exception as exc:
+            log.error("Single-instance check failed (continuing anyway): %s", exc)
+
         log.info("Starting uvicorn servers")
         t0 = time.monotonic()
         try:
