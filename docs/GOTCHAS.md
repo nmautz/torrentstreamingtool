@@ -835,6 +835,34 @@ that's what lets the dashboard's (future) B5 glue call `LocalMediaServer`.
 `server.allowNavigation: ["*"]` in `capacitor.config.json` is required, or
 Capacitor opens the host in Safari instead of in-app.
 
+### A new native Swift file must be added to the Xcode project — `cap sync` won't do it
+The generated `App.xcodeproj` is a classic file-reference project (`objectVersion 60`,
+no `PBXFileSystemSynchronizedRootGroup`), so a `.swift` file dropped into
+`ios/App/App/` is **not compiled** until it's listed in `project.pbxproj` (a
+`PBXBuildFile`, a `PBXFileReference`, the `App` `PBXGroup` children, and the
+`PBXSourcesBuildPhase` files list). `npx cap copy`/`cap sync` only touches web
+assets + the `public` folder — it never adds native sources. **Symptom:** the app
+builds with no error but the plugin call rejects with `"<Name>" plugin is not
+implemented on ios`. Easiest correct way to add one: open the project in Xcode and
+drag the file into the **App** group with "Add to target: App" ticked. (We did it
+by hand in `project.pbxproj` for `LocalMediaServer.swift`.)
+
+### App-local native plugins are NOT auto-discovered — register them in a `CAPBridgeViewController` subclass
+Capacitor 8 does **not** scan the Obj-C runtime for `CAPBridgedPlugin` classes.
+`CapacitorBridge.registerPlugins()` only loads the class names in
+`capacitor.config.json`'s `packageClassList`, which `cap sync` generates **from
+installed Capacitor npm packages only**. A plugin written as a plain Swift class in
+the app target is never in that list, so it's compiled but never registered —
+the JS call rejects with `"<Name>" plugin is not implemented on ios` (same message
+as a missing file, so it's easy to misdiagnose). Fix: subclass
+`CAPBridgeViewController`, override `capacitorDidLoad()`, and call
+`bridge?.registerPluginInstance(MyPlugin())` (see `MainViewController.swift`); point
+the storyboard's root view controller at the subclass (`customClass` +
+`customModule="App"` + `customModuleProvider="target"`). `registerPluginInstance`
+is on `CAPBridgeProtocol` and works regardless of `autoRegisterPlugins`. The
+alternative — making the plugin a local Swift Package added to `CapApp-SPM` — is
+heavier; manual registration is the right call for a couple of app-local plugins.
+
 ### A no-bundler web page needs `capacitor.js` — the injected bridge has no `registerPlugin`/`Plugins`
 The native runtime injects `native-bridge.js` (it provides `nativePromise`/`toNative`
 on `window.Capacitor`), but it does **not** create `Capacitor.registerPlugin` or the
