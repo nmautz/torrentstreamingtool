@@ -9,3 +9,6 @@ node_modules/
 # SPM / Xcode user state
 .swiftpm/
 *.xcuserstate
+
+# build-ipa.sh output (unsigned, re-signed by the sideloader)
+*.ipa
