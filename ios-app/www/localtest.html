@@ -33,6 +33,11 @@
     .ok { color:var(--ok); } .bad { color:var(--danger); }
     a { color:var(--accent); font-size:13px; }
   </style>
+  <!-- Capacitor web runtime: creates window.Capacitor.registerPlugin + the
+       Plugins proxy, which route to the injected native bridge. Without this,
+       no-bundler pages have no way to reach native plugins. Vendored from
+       node_modules/@capacitor/core/dist/capacitor.js (keep version-matched). -->
+  <script src="capacitor.js"></script>
 </head>
 <body>
   <h1>Localhost HLS test</h1>

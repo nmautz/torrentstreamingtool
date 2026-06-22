@@ -835,6 +835,20 @@ that's what lets the dashboard's (future) B5 glue call `LocalMediaServer`.
 `server.allowNavigation: ["*"]` in `capacitor.config.json` is required, or
 Capacitor opens the host in Safari instead of in-app.
 
+### A no-bundler web page needs `capacitor.js` — the injected bridge has no `registerPlugin`/`Plugins`
+The native runtime injects `native-bridge.js` (it provides `nativePromise`/`toNative`
+on `window.Capacitor`), but it does **not** create `Capacitor.registerPlugin` or the
+`Capacitor.Plugins` proxy — those live in `@capacitor/core` and are meant to be
+bundled into the web app. Our `www/` has no bundler, so it vendors
+`node_modules/@capacitor/core/dist/capacitor.js` and loads it with a `<script>` in
+`<head>`. That IIFE reads the existing `window.Capacitor` (the bridge) and adds
+`registerPlugin` + the `Plugins` proxy, which route calls back to the native bridge.
+**Symptom when it's missing:** `LocalMediaServer plugin not registered` /
+`Capacitor.registerPlugin is not a function`, even though the native plugin built
+fine. Keep the vendored copy version-matched with `@capacitor/core` (re-copy on
+upgrade). The future host-side B5 glue must ensure the same runtime is present on
+the dashboard page before calling native plugins.
+
 ### `www/` is the source; `ios/App/App/public/` is generated — don't edit public/
 `npx cap copy ios` copies `www/` into the app bundle's `public/` dir (gitignored).
 Edit `www/`, then re-copy and rebuild. A fresh clone has no `public/` until you run

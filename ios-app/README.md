@@ -15,6 +15,10 @@ ios-app/
   www/                      Bundled web shell (the ONLY bundled web asset):
     index.html              First-run "Connect" screen → navigates to the host
     localtest.html          Gate 1b on-device localhost-HLS self-test
+    capacitor.js            Vendored @capacitor/core runtime (registerPlugin +
+                            Plugins proxy); a no-bundler page needs this to reach
+                            native plugins. Re-copy from node_modules on upgrade:
+                            cp node_modules/@capacitor/core/dist/capacitor.js www/
     sample-bundle/          A tiny fmp4 HLS bundle the self-test serves
   capacitor.config.json     appId, webDir, allowNavigation
   ios/App/                  Generated Xcode project (open this in Xcode)

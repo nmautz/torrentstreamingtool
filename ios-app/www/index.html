@@ -84,6 +84,9 @@
     @keyframes pulse { 0%,100%{opacity:.3} 50%{opacity:1} }
     .target { font-size:14px; color:var(--fg); word-break:break-all; margin-bottom:4px; }
   </style>
+  <!-- Capacitor web runtime (registerPlugin + Plugins proxy → native bridge).
+       Vendored from node_modules/@capacitor/core/dist/capacitor.js. -->
+  <script src="capacitor.js"></script>
 </head>
 <body>
   <!-- ── Connecting interstitial (shown when a saved server exists) ── -->
