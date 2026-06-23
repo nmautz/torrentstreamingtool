@@ -22,6 +22,7 @@ class MainViewController: CAPBridgeViewController {
     override open func capacitorDidLoad() {
         bridge?.registerPluginInstance(LocalMediaServer())
         bridge?.registerPluginInstance(BundleDownloader())
+        bridge?.registerPluginInstance(OfflineStore())
         injectCapacitorRuntime()
     }
 

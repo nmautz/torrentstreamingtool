@@ -132,12 +132,15 @@
     // device reconnects, the dashboard's sync glue drains it to the host.
     let _nowPlaying = null;            // the item currently in the player
     let _lastSaveAt = 0;
+    let _suppressSave = false;         // true until a pending resume-seek has landed
 
     function offlineStore() { try { return plugin("OfflineStore"); } catch (_) { return null; } }
 
     async function saveOfflineProgress() {
       const v = $("v"), item = _nowPlaying, os = offlineStore();
       if (!os || !item || !item.itemId || !item.filePath) return;
+      // Don't overwrite the saved position with the pre-seek t≈0 while a resume is pending.
+      if (_suppressSave) return;
       const pos = v.currentTime || 0, dur = v.duration || 0;
       if (!(dur > 0) || pos < 5) return;   // server ignores near-zero writes
       try {
@@ -165,8 +168,10 @@
         const m = item.meta || {};
         const num = (m.season && m.episode) ? `S${pad2(m.season)}E${pad2(m.episode)} · ` : "";
         $("nowTitle").textContent = (m.series ? m.series + " — " : "") + num + (m.episode_name || item.name || "");
-        v.src = base + "master.m3u8";
-        // Offline resume: seek to the saved offline position once metadata loads.
+
+        // Resolve the saved offline resume position BEFORE assigning v.src — setting
+        // src starts loading immediately, so the seek listeners must already be
+        // attached or a fast load fires loadedmetadata before we get here.
         let resumeTo = 0;
         const os = offlineStore();
         if (os && item.itemId && item.filePath) {
@@ -175,12 +180,27 @@
             if (p && p.found && !p.completed && (p.positionSec || 0) > 5) resumeTo = p.positionSec;
           } catch (_) {}
         }
+
+        // Seek once the player knows the duration. iOS native HLS may not honor a
+        // seek at the first loadedmetadata, so retry across the early ready events
+        // and clear the suppression flag only after the seek lands.
+        _suppressSave = resumeTo > 0;
         if (resumeTo > 0) {
-          v.addEventListener("loadedmetadata", function once() {
-            v.removeEventListener("loadedmetadata", once);
-            try { v.currentTime = resumeTo; } catch (_) {}
-          });
+          const seekOnce = () => {
+            if (!_suppressSave) return;                 // already sought
+            if (!(isFinite(v.duration) && v.duration > 0)) return;
+            try { v.currentTime = Math.min(resumeTo, v.duration - 1); } catch (_) {}
+            _suppressSave = false;
+            v.removeEventListener("loadedmetadata", seekOnce);
+            v.removeEventListener("durationchange", seekOnce);
+            v.removeEventListener("canplay", seekOnce);
+          };
+          v.addEventListener("loadedmetadata", seekOnce);
+          v.addEventListener("durationchange", seekOnce);
+          v.addEventListener("canplay", seekOnce);
         }
+
+        v.src = base + "master.m3u8";
         $("playerWrap").classList.add("show");
         await v.play().catch(() => {});
       } catch (e) { showErr(e); }
@@ -188,6 +208,7 @@
 
     async function closePlayer() {
       const v = $("v");
+      _suppressSave = false;          // pending resume (if any) is moot now — allow the final save
       await saveOfflineProgress();
       try { v.pause(); v.removeAttribute("src"); v.load(); } catch (_) {}
       $("playerWrap").classList.remove("show");
@@ -345,6 +366,7 @@
     _vid.addEventListener("pause", saveOfflineProgress);
     _vid.addEventListener("seeked", saveOfflineProgress);
     _vid.addEventListener("ended", () => {
+      _suppressSave = false;   // reached the end — the resume seek is irrelevant now
       // Force a completed write (position == duration ⇒ pct > 0.92).
       if (_nowPlaying) { try { _vid.currentTime = _vid.duration || _vid.currentTime; } catch (_) {} }
       saveOfflineProgress();

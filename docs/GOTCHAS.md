@@ -862,6 +862,11 @@ the storyboard's root view controller at the subclass (`customClass` +
 is on `CAPBridgeProtocol` and works regardless of `autoRegisterPlugins`. The
 alternative — making the plugin a local Swift Package added to `CapApp-SPM` — is
 heavier; manual registration is the right call for a couple of app-local plugins.
+**Every new app-local plugin must be added to that `capacitorDidLoad()` list** — it's
+easy to add the `.swift` file + pbxproj refs and forget the registration, in which
+case the plugin compiles but the JS helper that wraps it silently no-ops. This bit
+M3's `OfflineStore` (added to the project but not registered → offline progress
+never saved/resumed/synced, with no error surfaced) — fixed in `preview.3.1.2`.
 
 ### A no-bundler web page needs `capacitor.js` — the injected bridge has no `registerPlugin`/`Plugins`
 The native runtime injects `native-bridge.js` (it provides `nativePromise`/`toNative`
