@@ -899,14 +899,43 @@ exception **and** the mixed-content guarantee break.
 
 ### Bundle downloads are durable, but only *completed files* survive a kill — partials resume
 `BundleDownloader` writes each finished file straight into the final
-`StreamLinkBundles/<sha>/` dir (background `URLSession`), then flips `complete` in
-`index.json` only once **all** files landed. A kill mid-download leaves a partial
-`<sha>/` dir; `getLocal()` reports `complete:false` (so the player won't try to
-serve it), and re-calling `download()` **resumes** by skipping files already on
-disk at their manifest size. So "resumable" means *file-granular*, not
-*byte-granular within a file* — an interrupted single large segment re-downloads
-from scratch. The dir is marked `isExcludedFromBackup` and lives in Application
-Support (not Caches), so iOS won't evict it under storage pressure.
+`StreamLinkBundles/<sha>/` dir, then flips `complete` in `index.json` only once
+**all** files landed. A kill mid-download leaves a partial `<sha>/` dir;
+`getLocal()` reports `complete:false` (so the player won't try to serve it), and
+re-calling `download()` **resumes** by skipping files already on disk at their
+manifest size. So "resumable" means *file-granular*, not *byte-granular within a
+file* — an interrupted single large segment re-downloads from scratch. The dir is
+marked `isExcludedFromBackup` and lives in Application Support (not Caches), so iOS
+won't evict it under storage pressure.
+
+### Use a *foreground* URLSession for bundle downloads — a background session deferred all progress to next launch
+`BundleDownloader` first used `URLSessionConfiguration.background(withIdentifier:)`
+for resilience. On-device that was **broken UX**: `nsurlsessiond` batched the
+`didWriteData` / `didFinishDownloadingTo` delegate callbacks and didn't deliver
+them until the **next app launch** — so the download UI sat at 0% the whole time
+and the bundle only "appeared" complete after a restart (the relaunched session
+redelivered the events, which moved the files + wrote the index then). The fix is
+a plain `URLSessionConfiguration.default` (foreground) session, which delivers
+progress + completion live. To survive a brief backgrounding we hold a
+`UIApplication.beginBackgroundTask` assertion while any download is in flight
+(`beginBgTaskIfNeeded`/`endBgTaskIfIdle`). Trade-off: a long download won't
+continue if the app is suspended for minutes — acceptable for LAN-speed bundles,
+and far better than invisible progress. Don't "restore" the background session
+without solving the live-delivery problem.
+
+### The remote dashboard CANNOT load offline — `downloads.html` is the offline entry point
+The whole dashboard UI (`static/index.html`) is **served by the host**. The shell
+navigates the WKWebView to `https://<host>/`, so with no connection (Airplane Mode
+/ host down) the WebView can't load the page at all — it hangs on "connecting to
+server" and *none* of the in-page offline glue runs. So offline playback can't live
+only in the dashboard. The app bundles a self-contained **`www/downloads.html`**
+that lists `BundleDownloader.list()` and plays a bundle via `LocalMediaServer`
+(native HLS) with zero network. `www/index.html` **probes host reachability**
+(`hostReachable`: a `no-cors` fetch of `/api/version` with a 2.5 s `AbortController`
+timeout) on launch and routes to `downloads.html` when the host is unreachable.
+The dashboard's own `_lpLoadIndex` offline swap still helps *online* (play a local
+copy instead of re-streaming), but it is **not** the offline path — it's only
+reachable when the dashboard loaded, i.e. when online.
 
 ### `www/` is the source; `ios/App/App/public/` is generated — don't edit public/
 `npx cap copy ios` copies `www/` into the app bundle's `public/` dir (gitignored).

@@ -37,6 +37,7 @@
 //
 
 import Foundation
+import UIKit
 import Capacitor
 
 // MARK: - Plugin
@@ -134,7 +135,7 @@ public class BundleDownloader: CAPPlugin, CAPBridgedPlugin {
 
 struct BundleFile { let name: String; let size: Int64 }
 
-// MARK: - Download manager (process-wide singleton owning the background session)
+// MARK: - Download manager (process-wide singleton owning the URLSession + delegate)
 
 final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     static let shared = BundleDownloadManager()
@@ -142,18 +143,20 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     /// Called for "bundleProgress" / "bundleComplete" / "bundleError".
     var onEvent: ((String, [String: Any]) -> Void)?
 
-    /// System completion handler from handleEventsForBackgroundURLSession; invoked
-    /// once the session drains so iOS can snapshot the UI / suspend cleanly.
-    var backgroundCompletionHandler: (() -> Void)?
-
-    private let bgIdentifier = "com.streamlink.bundledownloader"
+    // A *foreground* (default) session. A background-identifier session was tried
+    // first but its delegate callbacks (didWriteData / didFinishDownloadingTo) were
+    // batched by `nsurlsessiond` and not delivered until the next app launch — so
+    // the UI sat at 0% and the bundle only "appeared" downloaded after a restart.
+    // A default session delivers progress + completion live. To survive a brief
+    // backgrounding we hold a UIApplication background-task assertion while any
+    // download is in flight (see beginBgTaskIfNeeded / endBgTaskIfIdle).
     private lazy var session: URLSession = {
-        let cfg = URLSessionConfiguration.background(withIdentifier: bgIdentifier)
-        cfg.isDiscretionary = false
-        cfg.sessionSendsLaunchEvents = true
+        let cfg = URLSessionConfiguration.default
         cfg.allowsCellularAccess = true
+        cfg.waitsForConnectivity = true
         return URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
     }()
+    private var bgTask: UIBackgroundTaskIdentifier = .invalid
 
     private let queue = DispatchQueue(label: "com.streamlink.bundledownloader.state")
     private let fm = FileManager.default
@@ -254,6 +257,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
 
             job.pending = Set(toFetch.map { $0.name })
             jobs[cacheKey] = job
+            beginBgTaskIfNeeded()
             for f in toFetch { enqueue(sha: cacheKey, file: f, job: job) }
             result = StartResult(dir: dir.path, alreadyComplete: false)
         }
@@ -342,6 +346,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
 
     private func cancelLocked(sha: String) {
         jobs[sha] = nil
+        endBgTaskIfIdle()
         session.getAllTasks { tasks in
             for t in tasks where (t.taskDescription?.hasPrefix(sha + "\u{0000}") ?? false) { t.cancel() }
         }
@@ -363,6 +368,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         var idx = readIndex()
         if var entry = idx[sha] { entry["complete"] = true; idx[sha] = entry; writeIndex(idx) }
         jobs[sha] = nil
+        endBgTaskIfIdle()
         emit("bundleComplete", ["sha": sha, "itemId": job.itemId, "filePath": job.filePath, "dir": bundleDir(sha).path])
     }
 
@@ -380,11 +386,29 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
 
     private func emitError(sha: String, job: Job, message: String) {
         jobs[sha] = nil
+        endBgTaskIfIdle()
         emit("bundleError", ["sha": sha, "itemId": job.itemId, "filePath": job.filePath, "message": message])
     }
 
     private func emit(_ name: String, _ payload: [String: Any]) {
         DispatchQueue.main.async { [weak self] in self?.onEvent?(name, payload) }
+    }
+
+    // Keep the app alive briefly if it's backgrounded mid-download (a default
+    // session is suspended with the app otherwise). Held while any job is active.
+    private func beginBgTaskIfNeeded() {
+        guard bgTask == .invalid else { return }
+        DispatchQueue.main.async {
+            self.bgTask = UIApplication.shared.beginBackgroundTask(withName: "StreamLinkBundleDownload") {
+                // Expiration: end the assertion (downloads will pause until foreground).
+                if self.bgTask != .invalid { UIApplication.shared.endBackgroundTask(self.bgTask); self.bgTask = .invalid }
+            }
+        }
+    }
+    private func endBgTaskIfIdle() {
+        guard jobs.isEmpty, bgTask != .invalid else { return }
+        let id = bgTask; bgTask = .invalid
+        DispatchQueue.main.async { UIApplication.shared.endBackgroundTask(id) }
     }
 
     private func decode(taskDescription: String?) -> (sha: String, file: String)? {
@@ -448,13 +472,6 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             guard let job = self.jobs[sha] else { return }
             self.emitError(sha: sha, job: job, message: error.localizedDescription)
             self.cancelLocked(sha: sha)
-        }
-    }
-
-    func urlSessionDidFinishEvents(forBackgroundURLSession session: URLSession) {
-        DispatchQueue.main.async { [weak self] in
-            self?.backgroundCompletionHandler?()
-            self?.backgroundCompletionHandler = nil
         }
     }
 }

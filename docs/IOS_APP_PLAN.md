@@ -1,15 +1,19 @@
 # iOS Client App — Plan for v6.0.0
 
-> **Status:** **M2 code landed** (`6.0.0-preview.2.0.0`) — offline download +
-> fully-offline playback. The host **A1** `bundle-manifest` endpoint
-> ([main.py](../main.py)) is implemented and unit-/integration-tested; the native
-> **`BundleDownloader`** ([`BundleDownloader.swift`](../ios-app/ios/App/App/BundleDownloader.swift),
-> background URLSession) and the web glue ([`static/index.html`](../static/index.html):
-> per-row Download button + the `master_url` swap to `LocalMediaServer` in
-> `_lpLoadIndex`) are written and JS-syntax-checked. What's left on M2 is the
-> **on-device run**: open `ios-app/ios/App` in Xcode, build to an iPhone, download
-> a multi-episode item, enter Airplane Mode, and confirm 2 episodes play with
-> tracks/subs/skip and survive an app kill + relaunch.
+> **Status:** **M2 landed** (`6.0.0-preview.2.1.0`) — offline download +
+> fully-offline playback, with the first round of on-device bugs fixed. The host
+> **A1** `bundle-manifest` endpoint ([main.py](../main.py)) is implemented and
+> unit-/integration-tested. The native **`BundleDownloader`**
+> ([`BundleDownloader.swift`](../ios-app/ios/App/App/BundleDownloader.swift)) uses a
+> **foreground** URLSession (a background session deferred all progress to next
+> launch — see [GOTCHAS.md](GOTCHAS.md)). Because the remote dashboard can't load
+> offline, the offline entry point is the bundled
+> [`www/downloads.html`](../ios-app/www/downloads.html) (lists downloads, plays via
+> `LocalMediaServer`); the shell probes host reachability and routes there when
+> offline. The dashboard's `_lpLoadIndex` `master_url` swap remains the *online*
+> convenience. What's left on M2 is continued **on-device verification**: download
+> a multi-episode item, enter Airplane Mode, confirm episodes play with tracks/subs
+> and survive an app kill + relaunch.
 >
 > **M1 landed** (`6.0.0-preview.1.0.0`) — Capacitor shell, first-run Connect
 > screen, native `LocalMediaServer` (Gate 1b). Its remaining gate is the same

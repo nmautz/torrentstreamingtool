@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<!--
+  StreamLink iOS — offline Downloads library + player  (M2 · 6.0.0-preview.2.x.x)
+
+  This is the OFFLINE entry point. The dashboard (static/index.html) is served by
+  the host, so it can't load when the host is unreachable (Airplane Mode); this
+  page is bundled into the app and works with no network. It lists the bundles
+  downloaded by `BundleDownloader` and plays a selected one from the loopback
+  `LocalMediaServer` (native HLS — audio + subtitle tracks appear in the player's
+  fullscreen menu). `www/index.html` routes here automatically when the saved
+  host can't be reached, and there's a manual "Downloads" link from the Connect
+  screen.
+-->
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1, user-scalable=no" />
+  <title>StreamLink — Downloads</title>
+  <style>
+    :root { --bg:#0b0b0d; --panel:#141417; --line:#2a2a30; --fg:#f2f2f4; --muted:#8a8a92; --accent:#3a7afe; --ok:#3ec46d; --danger:#e0533d; }
+    * { box-sizing:border-box; -webkit-tap-highlight-color:transparent; }
+    html,body { margin:0; height:100%; }
+    body { background:var(--bg); color:var(--fg); font-family:-apple-system,"Segoe UI",Roboto,sans-serif;
+           padding:max(env(safe-area-inset-top),18px) 16px max(env(safe-area-inset-bottom),18px); }
+    header { display:flex; align-items:baseline; justify-content:space-between; gap:10px; margin-bottom:4px; }
+    h1 { font-size:22px; font-weight:800; letter-spacing:.02em; margin:0; text-transform:uppercase; }
+    .used { color:var(--muted); font-size:12px; }
+    .sub { color:var(--muted); font-size:13px; margin:0 0 16px; }
+    .bar { display:flex; gap:10px; margin-bottom:16px; }
+    button { -webkit-appearance:none; border:0; border-radius:0; font-size:13px; font-weight:800;
+             letter-spacing:.05em; text-transform:uppercase; padding:12px 14px; color:#fff; background:var(--accent); }
+    button.ghost { background:transparent; color:var(--muted); border:1px solid var(--line); }
+    button:active { opacity:.8; }
+    ul { list-style:none; margin:0; padding:0; }
+    li { border:1px solid var(--line); background:var(--panel); padding:14px; margin-bottom:10px; display:flex; align-items:center; gap:12px; }
+    .meta { flex:1 1 auto; min-width:0; }
+    .name { font-size:15px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .size { color:var(--muted); font-size:12px; margin-top:2px; }
+    .play { flex:0 0 auto; background:var(--accent); padding:11px 16px; }
+    .del  { flex:0 0 auto; background:transparent; color:var(--muted); border:1px solid var(--line); padding:11px 12px; }
+    .empty { color:var(--muted); font-size:14px; text-align:center; padding:40px 10px; line-height:1.5; }
+    #playerWrap { position:fixed; inset:0; background:#000; display:none; flex-direction:column; z-index:50; }
+    #playerWrap.show { display:flex; }
+    #playerWrap video { flex:1 1 auto; width:100%; background:#000; }
+    #playerBar { display:flex; gap:10px; padding:12px max(env(safe-area-inset-left),12px) max(env(safe-area-inset-bottom),12px); background:#0b0b0d; }
+    #playerBar button { flex:1; }
+    .nowTitle { color:var(--fg); font-size:13px; padding:max(env(safe-area-inset-top),10px) 12px 8px; background:#0b0b0d; word-break:break-all; }
+    pre { color:var(--danger); font-size:12px; white-space:pre-wrap; }
+  </style>
+  <script src="capacitor.js"></script>
+</head>
+<body>
+  <header>
+    <h1>Downloads</h1>
+    <span class="used" id="used"></span>
+  </header>
+  <p class="sub">Saved on this device — playable with no connection.</p>
+
+  <div class="bar">
+    <button id="connectBtn">Connect to server</button>
+    <button class="ghost" id="refreshBtn">Refresh</button>
+  </div>
+
+  <ul id="list"></ul>
+  <div class="empty" id="empty" style="display:none">
+    No downloads yet.<br />Connect to your server, open a show, and tap
+    <strong>Download</strong> on an episode to save it here for offline viewing.
+  </div>
+  <pre id="err"></pre>
+
+  <!-- Fullscreen-ish native player -->
+  <div id="playerWrap">
+    <div class="nowTitle" id="nowTitle"></div>
+    <video id="v" controls playsinline></video>
+    <div id="playerBar">
+      <button class="ghost" id="closePlayer">Close</button>
+    </div>
+  </div>
+
+  <script>
+    "use strict";
+    const $ = (id) => document.getElementById(id);
+    const KEY_URL = "streamlink_server_url";
+
+    function plugin(name) {
+      const C = window.Capacitor;
+      if (!C) throw new Error("Not running inside the app.");
+      const p = (typeof C.registerPlugin === "function") ? C.registerPlugin(name)
+                                                         : (C.Plugins && C.Plugins[name]);
+      if (!p) throw new Error(name + " plugin unavailable.");
+      return p;
+    }
+    function fmtBytes(b) {
+      b = Number(b) || 0;
+      if (b < 1024) return b + " B";
+      const u = ["KB","MB","GB","TB"]; let i = -1;
+      do { b /= 1024; i++; } while (b >= 1024 && i < u.length - 1);
+      return b.toFixed(b < 10 ? 1 : 0) + " " + u[i];
+    }
+    function showErr(e) { $("err").textContent = e ? ("⚠ " + (e.message || e)) : ""; }
+
+    let _serverActive = false;
+    async function stopServer() {
+      if (!_serverActive) return;
+      try { await plugin("LocalMediaServer").stop(); } catch (_) {}
+      _serverActive = false;
+    }
+
+    async function play(item) {
+      showErr("");
+      try {
+        const lms = plugin("LocalMediaServer");
+        await stopServer();
+        const { url } = await lms.start({ path: item.dir });
+        _serverActive = true;
+        const base = url.replace(/\/+$/, "") + "/";
+        const v = $("v");
+        $("nowTitle").textContent = item.name || "";
+        v.src = base + "master.m3u8";
+        $("playerWrap").classList.add("show");
+        await v.play().catch(() => {});
+      } catch (e) { showErr(e); }
+    }
+
+    async function closePlayer() {
+      const v = $("v");
+      try { v.pause(); v.removeAttribute("src"); v.load(); } catch (_) {}
+      $("playerWrap").classList.remove("show");
+      await stopServer();
+    }
+
+    async function removeItem(item) {
+      if (!window.confirm("Remove “" + (item.name || "this download") + "” from the device?")) return;
+      try { await plugin("BundleDownloader").remove({ sha: item.sha }); } catch (e) { showErr(e); }
+      refresh();
+    }
+
+    async function refresh() {
+      showErr("");
+      const list = $("list");
+      list.innerHTML = "";
+      let items = [], used = 0;
+      try {
+        const dl = plugin("BundleDownloader");
+        const res = await dl.list();
+        items = (res.items || []).filter((i) => i.complete);
+        try { used = (await dl.bytesUsed()).bytes; } catch (_) {}
+      } catch (e) { showErr(e); }
+      $("used").textContent = used ? fmtBytes(used) + " used" : "";
+      $("empty").style.display = items.length ? "none" : "block";
+      for (const item of items) {
+        const li = document.createElement("li");
+        const meta = document.createElement("div"); meta.className = "meta";
+        const nm = document.createElement("div"); nm.className = "name"; nm.textContent = item.name || item.sha;
+        const sz = document.createElement("div"); sz.className = "size"; sz.textContent = fmtBytes(item.bytesTotal || item.bytesDone || 0);
+        meta.appendChild(nm); meta.appendChild(sz);
+        const playBtn = document.createElement("button"); playBtn.className = "play"; playBtn.textContent = "Play";
+        playBtn.addEventListener("click", () => play(item));
+        const delBtn = document.createElement("button"); delBtn.className = "del"; delBtn.textContent = "✕";
+        delBtn.addEventListener("click", () => removeItem(item));
+        li.appendChild(meta); li.appendChild(playBtn); li.appendChild(delBtn);
+        list.appendChild(li);
+      }
+    }
+
+    $("refreshBtn").addEventListener("click", refresh);
+    $("closePlayer").addEventListener("click", closePlayer);
+    $("connectBtn").addEventListener("click", () => {
+      // Back to the connect screen, which re-probes the saved host.
+      window.location.replace("index.html");
+    });
+
+    // Reflect the saved host in the Connect button label if present.
+    const saved = localStorage.getItem(KEY_URL);
+    if (saved) $("connectBtn").textContent = "Connect";
+
+    refresh();
+  </script>
+</body>
+</html>

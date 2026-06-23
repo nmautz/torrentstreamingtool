@@ -1140,16 +1140,28 @@ Capacitor native-platform check (`isApp`), so it's inert in a plain browser.
    `/offline-job/{id}` until the host bundle is built, then retries the manifest.
 2. The manifest's flat `files[]` (name + size) + `cache_key` + `bundle_url` are
    handed to the native **`BundleDownloader`** ([BundleDownloader.swift](../ios-app/ios/App/App/BundleDownloader.swift)),
-   which fetches every file over a **background `URLSession`** into
-   `Application Support/StreamLinkBundles/<sha>/` (non-evictable,
-   `isExcludedFromBackup`), keyed by the cache sha so a re-download of an unchanged
-   source is a no-op. Files are written into the final dir as they complete, so a
-   partial download **resumes** by skipping files already on disk at their expected
-   size, and completed bundles are **durable across an app kill**. Progress +
-   completion are pushed to JS via `bundleProgress` / `bundleComplete` events.
+   which fetches every file over a foreground `URLSession` (held alive across a
+   brief backgrounding by a `UIApplication` background-task assertion — a
+   *background* session deferred all progress to the next launch, see
+   [GOTCHAS.md](GOTCHAS.md)) into `Application Support/StreamLinkBundles/<sha>/`
+   (non-evictable, `isExcludedFromBackup`), keyed by the cache sha so a re-download
+   of an unchanged source is a no-op. Files are written into the final dir as they
+   complete, so a partial download **resumes** by skipping files already on disk at
+   their expected size, and completed bundles are **durable across an app kill**.
+   Progress + completion are pushed to JS via `bundleProgress` / `bundleComplete`
+   events.
 
-**Playback.** `_lpLoadIndex` checks `BundleDownloader.getLocal({itemId, filePath})`
-first; if a **complete** local copy exists it starts the M1 **`LocalMediaServer`**
+**Offline entry point.** The dashboard (`static/index.html`) is served *by the
+host*, so it can't load with no connection — the offline UI can't live there. The
+app bundles **`ios-app/www/downloads.html`**: a self-contained library that lists
+`BundleDownloader.list()` and plays a bundle via `LocalMediaServer` (native HLS)
+with zero network. The connect shell (`www/index.html`) probes host reachability on
+launch and routes there when offline. The dashboard path below is the *online*
+convenience (play a downloaded copy instead of re-streaming).
+
+**Playback (online, on the dashboard).** `_lpLoadIndex` checks
+`BundleDownloader.getLocal({itemId, filePath})` first; if a **complete** local copy
+exists it starts the M1 **`LocalMediaServer`**
 (`NWListener`, loopback) over the bundle dir, reads `meta.json` straight from the
 bundle for `audios`/`subtitles`, and sets `master_url` to
 `http://127.0.0.1:<port>/master.m3u8` — synthesizing the same shape

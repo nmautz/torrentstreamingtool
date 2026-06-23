@@ -1,20 +1,23 @@
 <!DOCTYPE html>
 <!--
-  StreamLink iOS — first-run / connect shell  (M1 · 6.0.0-preview.1.x.x)
+  StreamLink iOS — first-run / connect shell  (M2 · 6.0.0-preview.2.x.x)
 
-  This is the ONLY web asset bundled into the Capacitor app. Its single job is
-  to capture the host server address (+ an optional pairing token, reserved for
-  M5) and then navigate the WKWebView to that host, where the existing dashboard
+  Captures the host server address (+ an optional pairing token, reserved for M5)
+  and navigates the WKWebView to that host, where the existing dashboard
   (static/index.html) loads exactly as it does in a desktop browser.
 
-  The Capacitor native bridge (window.Capacitor + native plugins such as
-  LocalMediaServer) is injected at the WebView level, so it remains available on
-  the remote host page after this navigation — that is what lets the dashboard's
-  B5 glue (later milestones) call the offline plugins.
+  M2 offline routing: on launch with a saved host we PROBE its reachability
+  (hostReachable) before navigating. Reachable ⇒ go to the dashboard as before.
+  Unreachable (Airplane Mode / host down) ⇒ route to `downloads.html`, the bundled
+  offline library that plays downloaded bundles via LocalMediaServer with no
+  network. The remote dashboard can't load offline (it's served by the host), so
+  this local page is the offline entry point. A "View downloads (offline)" button
+  is always available too.
 
-  Returning here to change servers: the host-side glue navigates to
-  `capacitor://localhost/?setup=1` (wired in a later milestone). For now the
-  interstitial below also offers a "Change server" escape before redirecting.
+  The Capacitor native bridge (window.Capacitor + native plugins such as
+  LocalMediaServer / BundleDownloader) is injected at the WebView level, so it
+  remains available on the remote host page after navigation — that is what lets
+  the dashboard's B5 glue call the offline plugins.
 -->
 <html lang="en">
 <head>
@@ -94,6 +97,7 @@
     <div class="dot"></div>
     <div class="brand">Connecting to</div>
     <div class="target" id="connectTarget"></div>
+    <button class="ghost" id="downloadsBtn2" style="max-width:260px">View downloads (offline)</button>
     <button class="ghost" id="changeBtn" style="max-width:260px">Change server</button>
   </div>
 
@@ -120,10 +124,11 @@
     <div class="err" id="err"></div>
 
     <button id="connect">Connect</button>
+    <button class="ghost" id="downloadsBtn">View downloads (offline)</button>
 
     <div class="spacer"></div>
     <div class="foot">
-      StreamLink iOS &middot; v6.0.0-preview.1.0.0<br/>
+      StreamLink iOS &middot; v6.0.0-preview.2.1.0<br/>
       <a href="localtest.html" style="color:#8a8a92">Localhost HLS self-test (Gate 1b)</a>
     </div>
   </div>
@@ -173,15 +178,36 @@
       window.location.replace(url);
     }
 
-    function connectInterstitial(url) {
+    function goToDownloads() { window.location.replace("downloads.html"); }
+
+    // Is the saved host actually reachable? A no-cors probe with a short timeout:
+    // any resolution (even an opaque response) means reachable; a throw/timeout
+    // means we're offline (or the host is down) and should fall back to the
+    // bundled Downloads library instead of hanging on a dead remote navigation.
+    async function hostReachable(url) {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort(), 2500);
+      try {
+        await fetch(url + "/api/version", { mode: "no-cors", cache: "no-store", signal: ctrl.signal });
+        return true;
+      } catch (_) {
+        return false;
+      } finally { clearTimeout(t); }
+    }
+
+    async function connectInterstitial(url) {
       formEl.style.display = "none";
       $("connectTarget").textContent = url;
       connEl.classList.add("show");
-      // Brief, cancellable delay so the user can bail out to "Change server".
-      redirectTimer = setTimeout(() => goToHost(url), 900);
+      // Probe before navigating — an offline launch routes to Downloads.
+      const ok = await hostReachable(url);
+      if (ok) goToHost(url);
+      else goToDownloads();
     }
 
     $("changeBtn").addEventListener("click", showForm);
+    $("downloadsBtn").addEventListener("click", goToDownloads);
+    $("downloadsBtn2").addEventListener("click", goToDownloads);
 
     $("connect").addEventListener("click", () => {
       const url = normalizeUrl($("server").value);

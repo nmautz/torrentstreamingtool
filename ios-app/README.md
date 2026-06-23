@@ -5,10 +5,12 @@ decisions, and the milestone roadmap live in
 [../docs/IOS_APP_PLAN.md](../docs/IOS_APP_PLAN.md). This file is just how to
 build and run it.
 
-> **Status:** M2 (`6.0.0-preview.2.0.0`) — offline **download + playback**: a
-> per-row Download button copies a show's HLS bundle to the device (native
-> `BundleDownloader`, background URLSession) and the player serves it offline from
-> `LocalMediaServer`. Builds on M1 (app shell, online parity, `LocalMediaServer` /
+> **Status:** M2 (`6.0.0-preview.2.1.0`) — offline **download + playback**: a
+> per-row Download button (in the dashboard) copies a show's HLS bundle to the
+> device (native `BundleDownloader`, foreground URLSession), and the bundled
+> **Downloads** screen (`www/downloads.html`) plays it offline via
+> `LocalMediaServer` — the connect shell routes there automatically when the host
+> is unreachable. Builds on M1 (app shell, online parity, `LocalMediaServer` /
 > Gate 1b). Offline progress + sync + conflict resolution arrive in M3–M5.
 
 ## What's here
@@ -16,7 +18,10 @@ build and run it.
 ```
 ios-app/
   www/                      Bundled web shell (the ONLY bundled web asset):
-    index.html              First-run "Connect" screen → navigates to the host
+    index.html              First-run "Connect" screen; probes host reachability →
+                            navigates to the host, or to downloads.html when offline
+    downloads.html          Offline library: lists downloaded bundles + plays them
+                            via LocalMediaServer (works with no network)
     localtest.html          Gate 1b on-device localhost-HLS self-test
     capacitor.js            Vendored @capacitor/core runtime (registerPlugin +
                             Plugins proxy); a no-bundler page needs this to reach
