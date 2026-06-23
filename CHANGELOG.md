@@ -1,5 +1,11 @@
 # Changelog
 
+## [6.0.0-preview.2.1.2] — 2026-06-22
+- **iOS: fixed "start() requires `path`" when playing from the offline Downloads screen.** `BundleDownloader.list()` wasn't returning each bundle's on-disk `dir`, so the offline player called `LocalMediaServer.start({ path: undefined })` and the native server rejected it. `list()` now includes `dir` (matching `getLocal()`), so Play works offline. ([ios-app/ios/App/App/BundleDownloader.swift](ios-app/ios/App/App/BundleDownloader.swift)) — *native change: requires a full `./build-ipa.sh` rebuild.*
+
+## [6.0.0-preview.2.1.1] — 2026-06-22
+- **iOS: the connect screen can no longer get stuck on "Connecting to…" with no way out.** The reachability probe now uses a hard timeout that **always** resolves within ~2.2 s (a stuck WKWebView TLS handshake could ignore `AbortController`), so an offline launch reliably falls through to the bundled **Downloads** screen instead of hanging. The connecting screen shows a clear status ("Checking connection…" → "Can't reach server — opening downloads…") and a prominent **View offline downloads** button that's tappable the whole time; the Change-server screen keeps its own offline button. ([ios-app/www/index.html](ios-app/www/index.html)) — *Note: web changes only reach the app via `npx cap sync`/`cap copy`; rebuild with `./build-ipa.sh` (no `--fast`/`--no-sync`) for them to take effect.*
+
 ## [6.0.0-preview.2.1.0] — 2026-06-22
 - **iOS M2 fixes: downloads now show live progress, and downloaded shows actually play offline.** Two on-device bugs from `preview.2.0.0`:
   - **Download froze at 0% until an app restart.** `BundleDownloader` used a *background* `URLSession`, whose delegate callbacks (`didWriteData`/`didFinishDownloadingTo`) were batched by `nsurlsessiond` and not delivered until the next launch — so the UI sat at 0% and the bundle only "appeared" saved after a restart. Switched to a **foreground (default) `URLSession`** that reports progress + completion live, held alive across a brief backgrounding by a `UIApplication` background-task assertion. ([ios-app/ios/App/App/BundleDownloader.swift](ios-app/ios/App/App/BundleDownloader.swift))

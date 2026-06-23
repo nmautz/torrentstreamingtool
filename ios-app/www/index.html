@@ -86,6 +86,7 @@
     }
     @keyframes pulse { 0%,100%{opacity:.3} 50%{opacity:1} }
     .target { font-size:14px; color:var(--fg); word-break:break-all; margin-bottom:4px; }
+    .cstatus { font-size:12px; color:var(--muted); min-height:16px; margin-bottom:8px; }
   </style>
   <!-- Capacitor web runtime (registerPlugin + Plugins proxy → native bridge).
        Vendored from node_modules/@capacitor/core/dist/capacitor.js. -->
@@ -97,8 +98,9 @@
     <div class="dot"></div>
     <div class="brand">Connecting to</div>
     <div class="target" id="connectTarget"></div>
-    <button class="ghost" id="downloadsBtn2" style="max-width:260px">View downloads (offline)</button>
-    <button class="ghost" id="changeBtn" style="max-width:260px">Change server</button>
+    <div class="cstatus" id="connectStatus"></div>
+    <button id="downloadsBtn2" style="max-width:280px">View offline downloads</button>
+    <button class="ghost" id="changeBtn" style="max-width:280px">Change server</button>
   </div>
 
   <!-- ── First-run / change-server form ── -->
@@ -128,7 +130,7 @@
 
     <div class="spacer"></div>
     <div class="foot">
-      StreamLink iOS &middot; v6.0.0-preview.2.1.0<br/>
+      StreamLink iOS &middot; v6.0.0-preview.2.1.2<br/>
       <a href="localtest.html" style="color:#8a8a92">Localhost HLS self-test (Gate 1b)</a>
     </div>
   </div>
@@ -180,29 +182,33 @@
 
     function goToDownloads() { window.location.replace("downloads.html"); }
 
-    // Is the saved host actually reachable? A no-cors probe with a short timeout:
-    // any resolution (even an opaque response) means reachable; a throw/timeout
-    // means we're offline (or the host is down) and should fall back to the
-    // bundled Downloads library instead of hanging on a dead remote navigation.
-    async function hostReachable(url) {
-      const ctrl = new AbortController();
-      const t = setTimeout(() => ctrl.abort(), 2500);
-      try {
-        await fetch(url + "/api/version", { mode: "no-cors", cache: "no-store", signal: ctrl.signal });
-        return true;
-      } catch (_) {
-        return false;
-      } finally { clearTimeout(t); }
+    // Is the saved host actually reachable? A no-cors probe that ALWAYS resolves
+    // within the timeout: a hard setTimeout wins the race even if the fetch never
+    // settles (a stuck TLS handshake in WKWebView may ignore AbortController), so
+    // we can never hang on the connecting screen. Any fetch success (even an
+    // opaque response) ⇒ reachable; timeout/throw ⇒ offline (or host down).
+    function hostReachable(url) {
+      return new Promise((resolve) => {
+        let done = false;
+        const finish = (v) => { if (!done) { done = true; resolve(v); } };
+        setTimeout(() => finish(false), 2200);
+        fetch(url + "/api/version", { mode: "no-cors", cache: "no-store" })
+          .then(() => finish(true))
+          .catch(() => finish(false));
+      });
     }
 
     async function connectInterstitial(url) {
       formEl.style.display = "none";
       $("connectTarget").textContent = url;
+      $("connectStatus").textContent = "Checking connection…";
       connEl.classList.add("show");
-      // Probe before navigating — an offline launch routes to Downloads.
+      // Probe before navigating — an offline launch routes to Downloads. The
+      // "View offline downloads" button is tappable the whole time.
       const ok = await hostReachable(url);
-      if (ok) goToHost(url);
-      else goToDownloads();
+      if (ok) { goToHost(url); return; }
+      $("connectStatus").textContent = "Can’t reach server — opening downloads…";
+      setTimeout(goToDownloads, 800);
     }
 
     $("changeBtn").addEventListener("click", showForm);

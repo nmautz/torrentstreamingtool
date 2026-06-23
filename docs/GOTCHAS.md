@@ -942,6 +942,19 @@ reachable when the dashboard loaded, i.e. when online.
 Edit `www/`, then re-copy and rebuild. A fresh clone has no `public/` until you run
 `npx cap copy ios` (or `cap sync`).
 
+### After editing `www/` OR a `.swift` file you MUST do a full rebuild — stale builds look like "my change didn't ship"
+This has bitten twice. Two separate copy steps gate what actually runs on device:
+1. **Web (`www/`) changes** only reach the app via `npx cap copy`/`cap sync`. The
+   `public/` dir is what's bundled — if it's stale, the app shows the OLD UI (e.g.
+   a missing offline button, an old connect screen that hangs). `build-ipa.sh`
+   runs `cap sync` **by default**, but `--fast` / `--no-sync` SKIP it.
+2. **Native (`.swift`) changes** (e.g. the `BundleDownloader` foreground-session
+   fix) require recompiling — only `xcodebuild` includes them. **Re-signing an
+   existing `.ipa` ships none of this.**
+So to make any change take effect: `./build-ipa.sh` **with no `--fast`/`--no-sync`**,
+then re-sign + reinstall. Symptom of skipping it: the device behaves like the code
+was never changed. Quick check: `grep <your-new-symbol> ios/App/App/public/index.html`.
+
 ## See also
 
 - [BACKEND.md](BACKEND.md) — invariants enforced by `main.py`

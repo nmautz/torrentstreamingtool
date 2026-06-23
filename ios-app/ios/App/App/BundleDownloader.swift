@@ -302,6 +302,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
                 }
                 return [
                     "sha": sha,
+                    "dir": dir.path,        // the offline player passes this to LocalMediaServer.start
                     "itemId": entry["itemId"] as? String ?? "",
                     "filePath": entry["filePath"] as? String ?? "",
                     "name": entry["name"] as? String ?? "",
