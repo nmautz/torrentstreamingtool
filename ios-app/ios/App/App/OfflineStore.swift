@@ -225,6 +225,12 @@ final class OfflineProgressStore {
             rec["durationSec"] = (durationSec * 10).rounded() / 10
             rec["completed"] = nowCompleted || prevCompleted
             rec["clientUpdatedAt"] = Self.isoNow()
+            // `dirty` (NOT a timestamp comparison) is the source of truth for
+            // "needs pushing": a local watch always sets it, markSynced clears it.
+            // Comparing the device clock (clientUpdatedAt) against the server clock
+            // (baseSyncedAt) was unreliable — any skew made a fresh offline watch
+            // look already-synced, so it was never pushed.
+            rec["dirty"] = true
             if rec["baseSyncedAt"] == nil { rec["baseSyncedAt"] = NSNull() }
             if let s = subtitleSel { rec["subtitleSel"] = s }
             if let a = localAudioIdx { rec["localAudioIdx"] = a }
@@ -257,11 +263,9 @@ final class OfflineProgressStore {
 
     /// Adopt the server's progress as the local baseline for a downloaded file so
     /// **offline resume reflects history accrued online**. Skips the write when the
-    /// device holds *newer, unsynced* offline progress for this file (a pending
-    /// edit whose clientUpdatedAt is past both its own baseSyncedAt and the server
-    /// timestamp) — that would clobber something not yet pushed. Otherwise it writes
-    /// a settled record (clientUpdatedAt == baseSyncedAt == serverUpdatedAt), so it
-    /// is never re-pushed by pending().
+    /// device holds **unsynced** offline progress (`dirty`) for this file — that
+    /// would clobber something not yet pushed (the pending push will reconcile it).
+    /// Otherwise it writes a settled (`dirty:false`) record so pending() ignores it.
     func seedProgress(profileId: String?, itemId: String, filePath: String,
                       positionSec: Double, durationSec: Double, completed: Bool,
                       serverUpdatedAt: String) {
@@ -270,19 +274,8 @@ final class OfflineProgressStore {
             let pid = (profileId?.isEmpty == false ? profileId! : activeProfileLocked(obj))
             var records = (obj["records"] as? [String: Any]) ?? [:]
             let k = key(pid, itemId, filePath)
-            let serverDate = Self.parse(serverUpdatedAt)
-            if let existing = records[k] as? [String: Any] {
-                let cu = (existing["clientUpdatedAt"] as? String).flatMap(Self.parse)
-                let bs = (existing["baseSyncedAt"] as? String).flatMap(Self.parse)
-                let hasUnsynced = (cu != nil) && (bs == nil || (cu! > bs!))
-                if hasUnsynced {
-                    // Local edits pending. Only let the server win if it's strictly newer.
-                    if let sd = serverDate, let c = cu, sd > c {
-                        // server newer — fall through to overwrite
-                    } else {
-                        return
-                    }
-                }
+            if let existing = records[k] as? [String: Any], (existing["dirty"] as? Bool) == true {
+                return   // unsynced local progress — don't overwrite; the push handles it
             }
             let stamp = serverUpdatedAt.isEmpty ? Self.isoNow() : serverUpdatedAt
             records[k] = [
@@ -291,16 +284,19 @@ final class OfflineProgressStore {
                 "durationSec": (durationSec * 10).rounded() / 10,
                 "completed": completed,
                 "clientUpdatedAt": stamp,
-                "baseSyncedAt": stamp,   // settled — pending() will not re-push it
+                "baseSyncedAt": stamp,   // server watermark for conflict detection
+                "dirty": false,          // settled — pending() will not re-push it
             ]
             obj["records"] = records
             write(obj)
         }
     }
 
-    /// Events not yet confirmed by the server: never synced, OR watched again
-    /// since the last sync (clientUpdatedAt > baseSyncedAt). Filters out trivial
-    /// (< 5 s, not completed) positions — the server ignores those anyway.
+    /// Events the device still needs to push: `dirty` (a local watch since the last
+    /// sync). Uses an explicit flag, NOT a device-vs-server clock comparison (which
+    /// broke under clock skew). Legacy records without `dirty` fall back to the old
+    /// timestamp heuristic. Trivial (< 5 s, not completed) positions are skipped —
+    /// the server ignores those anyway.
     func pending() -> [[String: Any]] {
         queue.sync {
             let records = (read()["records"] as? [String: Any]) ?? [:]
@@ -310,11 +306,16 @@ final class OfflineProgressStore {
                 let pos = (rec["positionSec"] as? Double) ?? Double((rec["positionSec"] as? Int) ?? 0)
                 let completed = (rec["completed"] as? Bool) ?? false
                 if pos < 5 && !completed { continue }
-                let client = rec["clientUpdatedAt"] as? String
-                let base = rec["baseSyncedAt"] as? String   // nil/NSNull ⇒ never synced
-                if let b = base, let c = client,
-                   let bd = Self.parse(b), let cd = Self.parse(c), cd <= bd {
-                    continue   // already synced and not re-watched
+                if let dirty = rec["dirty"] as? Bool {
+                    if !dirty { continue }            // explicitly settled
+                } else {
+                    // Legacy record (pre-`dirty`): fall back to the timestamp heuristic.
+                    let base = rec["baseSyncedAt"] as? String
+                    let client = rec["clientUpdatedAt"] as? String
+                    if let b = base, let c = client,
+                       let bd = Self.parse(b), let cd = Self.parse(c), cd <= bd {
+                        continue
+                    }
                 }
                 out.append(eventDict(rec))
             }
@@ -334,6 +335,7 @@ final class OfflineProgressStore {
                 let k = key(pid, itemId, filePath)
                 guard var rec = records[k] as? [String: Any] else { continue }
                 rec["baseSyncedAt"] = (a["serverUpdatedAt"] as? String) ?? Self.isoNow()
+                rec["dirty"] = false   // acknowledged by the server — stop re-pushing
                 records[k] = rec
             }
             obj["records"] = records
