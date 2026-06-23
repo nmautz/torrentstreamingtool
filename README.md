@@ -307,6 +307,8 @@ The same `python3 setup.py` / `python3 run.py` flow works, with these difference
 
 A native **iOS client** is being built toward the 6.0.0 release — primarily for reliable *offline* downloads/playback, with the full online dashboard available in-app. It does **not** replace this host: it connects to your running StreamLink server. The app is a separate Capacitor/Xcode project under [`ios-app/`](ios-app/) — see [ios-app/README.md](ios-app/README.md) to build and run it on an iPhone, and [docs/IOS_APP_PLAN.md](docs/IOS_APP_PLAN.md) for the roadmap. (To connect over HTTPS you'll install the host's CA on the device — same cert as [§ Trusting the HTTPS certificate](#--trusting-the-https-certificate-optional).)
 
+**Now in the app (M2, `6.0.0-preview.2.0.0`):** each episode row has a **Download** button — tap it to copy the show to the phone, then play it with no host connection (Airplane Mode), full audio/subtitles/skip-intro. This is the host-side feature too: it reuses the existing **Stream-to-Device** HLS bundles, so nothing new to configure on the server. Online streaming and the dashboard are unchanged.
+
 ## More documentation
 
 Deeper reference docs live in [`docs/`](docs/): architecture, backend/frontend maps, the full API, the admin panel, Smart Skip, AI subtitles, streaming, and gotchas. Start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

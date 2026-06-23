@@ -874,8 +874,39 @@ bundled into the web app. Our `www/` has no bundler, so it vendors
 **Symptom when it's missing:** `LocalMediaServer plugin not registered` /
 `Capacitor.registerPlugin is not a function`, even though the native plugin built
 fine. Keep the vendored copy version-matched with `@capacitor/core` (re-copy on
-upgrade). The future host-side B5 glue must ensure the same runtime is present on
-the dashboard page before calling native plugins.
+upgrade). **The remote dashboard (`static/index.html`) is served by the host and
+can't load `capacitor.js` itself**, so M2 instead injects the vendored core
+runtime into every page from the native side: `MainViewController.injectCapacitorRuntime()`
+adds it as a `WKUserScript` at `.atDocumentStart`. Without it, the dashboard's
+`isApp` detection is false and all offline glue is silently inert.
+
+### Offline glue on the dashboard must be gated on `isApp` — never assume the bridge
+`static/index.html` is BOTH the browser dashboard and the in-app UI. Every M2
+addition (Download button, `master_url` swap, progress hooks) is gated behind
+`const isApp = !!(window.Capacitor && Capacitor.isNativePlatform?.() && both plugins)`,
+so a plain browser is byte-for-byte unaffected. `_appDlBtnHTML()` returns `""`
+and `_appLocalBundle()` returns null off-app. Don't call a native plugin without
+the `isApp` guard — `Capacitor` may be undefined (browser) or the plugin missing.
+
+### HTTPS dashboard playing from `http://127.0.0.1` is NOT mixed-content blocked — loopback is a secure context
+The dashboard is loaded over HTTPS but offline playback points `<video>.src` at
+`http://127.0.0.1:<port>/master.m3u8` (the loopback `LocalMediaServer`). WebKit
+treats `127.0.0.1`/`localhost` as a **potentially-trustworthy/secure** origin, so
+this is *not* blocked as mixed content (unlike a plain-LAN `http://` subresource,
+which would be). This is why the M1 ATS exception is scoped to loopback only and
+the host stays HTTPS. If you ever move the media server off loopback, both the ATS
+exception **and** the mixed-content guarantee break.
+
+### Bundle downloads are durable, but only *completed files* survive a kill — partials resume
+`BundleDownloader` writes each finished file straight into the final
+`StreamLinkBundles/<sha>/` dir (background `URLSession`), then flips `complete` in
+`index.json` only once **all** files landed. A kill mid-download leaves a partial
+`<sha>/` dir; `getLocal()` reports `complete:false` (so the player won't try to
+serve it), and re-calling `download()` **resumes** by skipping files already on
+disk at their manifest size. So "resumable" means *file-granular*, not
+*byte-granular within a file* — an interrupted single large segment re-downloads
+from scratch. The dir is marked `isExcludedFromBackup` and lives in Application
+Support (not Caches), so iOS won't evict it under storage pressure.
 
 ### `www/` is the source; `ios/App/App/public/` is generated — don't edit public/
 `npx cap copy ios` copies `www/` into the app bundle's `public/` dir (gitignored).

@@ -5923,6 +5923,7 @@ function _epCardHtml(f){
               </button>`
             : ""}
           ${notDownloaded?"":offlineBtn}
+          ${notDownloaded?"":_appDlBtnHTML(epItemId, f.path, f.name)}
           ${notDownloaded?"":`<a href="/api/library/${escHtml(epItemId)}/download?file_path=${encodeURIComponent(f.path)}" download="${escHtml(f.name)}"
             class="w-9 h-9 flex items-center justify-center text-gray-600 hover:text-indigo-300 hover:bg-indigo-950/40 transition-colors"
             title="Download to device">
@@ -7681,6 +7682,217 @@ async function saveProgress(itemId, filePath, posSec, durSec) {
   } catch (_) { /* swallow — next tick will retry */ }
 }
 
+// ── iOS app: offline bundle download + localhost playback (Capacitor, M2) ────
+//
+// Everything here is INERT in a plain browser: `isApp` is false unless we're
+// running inside the native Capacitor shell with both native plugins present,
+// so the dashboard UI is byte-for-byte unchanged on desktop/mobile web. See
+// docs/IOS_APP_PLAN.md (M2) and docs/STREAMING.md "Offline download".
+//
+// Flow: a per-row Download button (app only) calls GET /bundle-manifest, fetches
+// every file of the .offline_cache/<sha>/ HLS bundle to the device via the native
+// BundleDownloader, and on playback `_lpLoadIndex` plays the downloaded bundle
+// from the native LocalMediaServer (http://127.0.0.1:<port>/) — fully offline.
+const _cap = (() => {
+  const C = window.Capacitor;
+  if (!C || !(C.isNativePlatform && C.isNativePlatform())) return null;
+  const get = (name) => (typeof C.registerPlugin === "function")
+    ? C.registerPlugin(name) : (C.Plugins && C.Plugins[name]);
+  const lms = get("LocalMediaServer"), dl = get("BundleDownloader");
+  if (!lms || !dl) return null;
+  return { lms, dl };
+})();
+const isApp = !!_cap;
+
+// offKey(itemId,filePath) → { complete?, downloading?, prepping?, fraction?, sha?, dir?, bytesTotal?, bytesDone? }
+const offlineBundles = new Map();
+
+// Pairing token (M5). The dashboard runs on the host origin and can't read the
+// shell's localStorage, so this is a no-op until M5 wires Bearer auth end-to-end.
+function _appPairingToken() { return ""; }
+
+// Native getLocal is authoritative across page loads (the map may be unpopulated
+// right after a navigation); used by the player to decide offline playback.
+async function _appLocalBundle(itemId, filePath) {
+  if (!isApp) return null;
+  try { return await _cap.dl.getLocal({ itemId, filePath }); } catch (_) { return null; }
+}
+
+// Start the native localhost server over a downloaded bundle dir and synthesize
+// the same shape /offline-prepare returns, reading meta.json straight from the
+// bundle so no host round-trip is needed (works in Airplane Mode).
+async function _appStartLocalPlayback(local) {
+  const { url } = await _cap.lms.start({ path: local.dir });
+  const base = url.replace(/\/+$/, "") + "/";
+  let meta = {};
+  try { meta = await (await fetch(base + "meta.json")).json(); } catch (_) {}
+  lp._localBase = base;
+  return {
+    ready: true,
+    master_url:   base + "master.m3u8",
+    duration_sec: meta.duration_sec || 0,
+    audios:       meta.audios || [],
+    subtitles:    meta.subtitles || [],   // embedded sub_*.vtt renditions live in the bundle
+    subs:         [],                     // sidecar subs aren't bundled (online-only)
+    saved_tracks: {},                     // local resume/track sync arrives in M3
+  };
+}
+
+// Resolve a downloadable bundle manifest, building the host bundle first (and
+// polling the prep job) when it isn't prepped yet.
+async function _appFetchManifest(itemId, filePath) {
+  const u = `/api/library/${itemId}/bundle-manifest?file_path=${encodeURIComponent(filePath)}`;
+  let r = await fetch(u);
+  if (r.status === 409) {
+    const info = await r.json().catch(() => ({}));
+    if (info.ondemand_only) throw new Error("This title is on-demand only — it can’t be downloaded.");
+    await _appPrepBundle(itemId, filePath);
+    r = await fetch(u);
+  }
+  if (!r.ok) {
+    const e = await r.json().catch(() => ({ detail: "Manifest unavailable." }));
+    throw new Error(e.detail || e.reason || "Manifest unavailable.");
+  }
+  return r.json();
+}
+
+// POST /offline-prepare then poll /offline-job until the host bundle is built.
+async function _appPrepBundle(itemId, filePath) {
+  const r = await fetch(`/api/library/${itemId}/offline-prepare`, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file_path: filePath, profile_id: profile.id || "" }),
+  });
+  if (!r.ok) throw new Error("Could not start host-side prep.");
+  const prep = await r.json();
+  if (prep.ready) return;
+  if (prep.ondemand_only) throw new Error("This title is on-demand only — it can’t be downloaded.");
+  if (!prep.job_id) throw new Error("Host is not preparing this file.");
+  const key = offKey(itemId, filePath);
+  for (let i = 0; i < 5400; i++) {            // ~3h ceiling at 2s/poll
+    await new Promise((res) => setTimeout(res, 2000));
+    const jr = await fetch(`/api/library/offline-job/${prep.job_id}`);
+    if (!jr.ok) throw new Error("Prep job lost.");
+    const j = await jr.json();
+    const e = offlineBundles.get(key) || {};
+    e.downloading = true; e.prepping = true; e.fraction = (j.progress || 0) * 0.5;
+    offlineBundles.set(key, e);
+    _appThrottledEpRefresh(itemId);
+    if (j.status === "done") return;
+    if (j.status === "error") throw new Error(j.error || "Host prep failed.");
+  }
+  throw new Error("Prep timed out.");
+}
+
+// Download / remove an offline bundle (per-row button). Toggles to remove when
+// already downloaded.
+async function appDownloadBundle(itemId, filePath, name, btn) {
+  if (!isApp) return;
+  const key = offKey(itemId, filePath);
+  const cur = offlineBundles.get(key);
+  if (cur && cur.complete) {
+    if (!window.confirm("Remove this offline download from the device?")) return;
+    try { await _cap.dl.remove({ itemId, filePath }); } catch (_) {}
+    offlineBundles.delete(key);
+    if (epItemId === itemId) renderEpList();
+    return;
+  }
+  if (cur && cur.downloading) return;
+  offlineBundles.set(key, { downloading: true, prepping: true, fraction: 0 });
+  if (epItemId === itemId) renderEpList();
+  try {
+    const manifest = await _appFetchManifest(itemId, filePath);
+    const origin = window.location.origin;
+    const files = (manifest.files || []).map((f) => ({ name: f.name, size: f.size }));
+    await _cap.dl.download({
+      itemId, filePath, cacheKey: manifest.cache_key, name,
+      baseUrl: origin + manifest.bundle_url, files, token: _appPairingToken(),
+    });
+    const e = offlineBundles.get(key) || {};
+    e.downloading = true; e.prepping = false; e.bytesTotal = manifest.total_bytes;
+    offlineBundles.set(key, e);
+  } catch (err) {
+    offlineBundles.delete(key);
+    showAlert(err.message || "Download failed.", "error");
+  }
+  if (epItemId === itemId) renderEpList();
+}
+
+let _appEpRefreshAt = 0;
+function _appThrottledEpRefresh(itemId) {
+  if (epItemId !== itemId) return;
+  const now = Date.now();
+  if (now - _appEpRefreshAt < 500) return;
+  _appEpRefreshAt = now;
+  try { renderEpList(); } catch (_) {}
+}
+
+// Per-row Download button HTML (app only; "" in a browser).
+function _appDlBtnHTML(itemId, filePath, name) {
+  if (!isApp || !hlsAvailable) return "";   // no HLS host ⇒ no bundle to download
+  const st = offlineBundles.get(offKey(itemId, filePath));
+  const _id = escHtml(JSON.stringify(itemId));
+  const _p  = escHtml(JSON.stringify(filePath));
+  const _n  = escHtml(JSON.stringify(name));
+  if (st && st.complete) {
+    return `<button onclick="appDownloadBundle(${_id},${_p},${_n},this)"
+      class="w-9 h-9 flex items-center justify-center text-sky-400 hover:text-red-400 hover:bg-red-950/30 transition-colors"
+      title="Saved offline on this device — tap to remove">
+      <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M5 18h14v2H5zM12 16l5-6h-3V4h-4v6H7z"/></svg>
+    </button>`;
+  }
+  if (st && st.downloading) {
+    const pct = Math.round((st.fraction || 0) * 100);
+    return `<div class="h-9 px-1.5 flex items-center gap-1 text-[11px] font-bold text-sky-300"
+        title="${st.prepping ? 'Preparing on host…' : 'Downloading to device…'}">
+      <svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+        <path stroke-linecap="round" d="M12 3a9 9 0 1 0 9 9"/></svg>${pct}%</div>`;
+  }
+  return `<button onclick="appDownloadBundle(${_id},${_p},${_n},this)"
+    class="w-9 h-9 flex items-center justify-center text-gray-600 hover:text-sky-400 hover:bg-sky-950/30 transition-colors"
+    title="Download for offline (on this device)">
+    <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-1m-4-7l-4 4m0 0l-4-4m4 4V3"/></svg>
+  </button>`;
+}
+
+// Hydrate the map from the device's existing downloads + subscribe to progress.
+async function _appInitOfflineBundles() {
+  if (!isApp) return;
+  try {
+    _cap.dl.addListener("bundleProgress", (ev) => {
+      const key = offKey(ev.itemId, ev.filePath);
+      const e = offlineBundles.get(key) || {};
+      e.downloading = true; e.prepping = false;
+      // Manifest+prep occupied 0–50%; the file transfer fills 50–100%.
+      e.fraction = 0.5 + 0.5 * (ev.fraction || 0);
+      e.bytesTotal = ev.bytesTotal; e.bytesDone = ev.bytesDone;
+      offlineBundles.set(key, e);
+      _appThrottledEpRefresh(ev.itemId);
+    });
+    _cap.dl.addListener("bundleComplete", (ev) => {
+      offlineBundles.set(offKey(ev.itemId, ev.filePath),
+        { complete: true, sha: ev.sha, dir: ev.dir });
+      if (epItemId === ev.itemId) renderEpList();
+      showAlert("Saved offline: " + (ev.filePath.split(/[\\/]/).pop() || ""), "ok");
+    });
+    _cap.dl.addListener("bundleError", (ev) => {
+      offlineBundles.delete(offKey(ev.itemId, ev.filePath));
+      if (epItemId === ev.itemId) renderEpList();
+      showAlert("Download failed: " + (ev.message || ""), "error");
+    });
+    const { items } = await _cap.dl.list();
+    for (const it of (items || [])) {
+      const downloading = !it.complete && (it.bytesDone || 0) > 0;
+      offlineBundles.set(offKey(it.itemId, it.filePath), {
+        complete: !!it.complete, sha: it.sha, dir: it.dir,
+        bytesTotal: it.bytesTotal, bytesDone: it.bytesDone, downloading,
+        fraction: it.bytesTotal ? 0.5 + 0.5 * (it.bytesDone / it.bytesTotal) : 0,
+      });
+    }
+    if (epItemId) renderEpList();
+  } catch (_) {}
+}
+
 // --- Per-file "Prep for Streaming" -------------------------------------------
 // Kicks off /offline-prepare for a single file so the cached MP4 is on disk by
 // the time the user taps Play. Updates per-file state in `prepFileState` so the
@@ -8523,21 +8735,39 @@ async function _lpLoadIndex(seekTo) {
   document.getElementById("lpTitle").textContent = lp.name;
 
   let prep;
-  _lpShowPreparing("Preparing for streaming…");
-  try {
-    const r = await fetch(`/api/library/${lp.itemId}/offline-prepare`, {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file_path: filePath, profile_id: profile.id || "" }),
-    });
-    if (!r.ok) {
-      const e = await r.json().catch(() => ({ detail: "Prepare failed." }));
-      throw new Error(e.detail || "Prepare failed.");
+  lp._localBase = null;
+
+  // iOS app: if this file is fully downloaded on the device, play it straight
+  // from the native localhost server — no host round-trip, works in Airplane
+  // Mode. Falls through to the normal online prepare on any failure.
+  if (isApp) {
+    try {
+      const local = await _appLocalBundle(lp.itemId, filePath);
+      if (local && local.complete && local.dir) {
+        _lpShowPreparing("Loading offline copy…");
+        prep = await _appStartLocalPlayback(local);
+        if (lp.filePath !== filePath) return;   // raced with a stop/advance
+      }
+    } catch (_) { prep = undefined; }
+  }
+
+  if (!prep) {
+    _lpShowPreparing("Preparing for streaming…");
+    try {
+      const r = await fetch(`/api/library/${lp.itemId}/offline-prepare`, {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file_path: filePath, profile_id: profile.id || "" }),
+      });
+      if (!r.ok) {
+        const e = await r.json().catch(() => ({ detail: "Prepare failed." }));
+        throw new Error(e.detail || "Prepare failed.");
+      }
+      prep = await r.json();
+    } catch (err) {
+      _lpHidePreparing();
+      showAlert(err.message || "Could not prepare this file for streaming.", "error");
+      lpStop(); return;
     }
-    prep = await r.json();
-  } catch (err) {
-    _lpHidePreparing();
-    showAlert(err.message || "Could not prepare this file for streaming.", "error");
-    lpStop(); return;
   }
 
   let masterUrl = prep.master_url;
@@ -9495,6 +9725,8 @@ async function lpStop() {
     try { navigator.sendBeacon(`/api/library/ondemand/${lp.odKey}/close`); } catch (_) {}
   }
   lp.mode = "bundle"; lp.odKey = null;
+  // iOS app: tear down the localhost bundle server if one was serving an offline copy.
+  if (isApp && lp._localBase) { try { _cap.lms.stop(); } catch (_) {} lp._localBase = null; }
   await lpUnloadCurrent();
   _lpStopSubUpgradePoll();
   lp.subAutoApplied = false;
@@ -10386,6 +10618,9 @@ document.addEventListener("DOMContentLoaded",async()=>{
   evictLegacyServiceWorker();
   _lpAttachVideoEvents();
   _renderOnlineBadge();
+  // iOS app: subscribe to BundleDownloader events + hydrate the offline-download
+  // state from the device. No-op in a plain browser (isApp === false).
+  _appInitOfflineBundles();
   // Start polling for any in-flight prep jobs so the indicator is correct
   // even when the page is reloaded mid-job (state is purely in-memory otherwise).
   startGlobalPrepPoller();
@@ -10450,6 +10685,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.1.0.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.2.0.0</div>
 </body>
 </html>

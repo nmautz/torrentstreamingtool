@@ -5,8 +5,11 @@ decisions, and the milestone roadmap live in
 [../docs/IOS_APP_PLAN.md](../docs/IOS_APP_PLAN.md). This file is just how to
 build and run it.
 
-> **Status:** M1 (`6.0.0-preview.1.0.0`) — app shell + online parity + the native
-> `LocalMediaServer` (Gate 1b). Offline download/playback/sync arrive in M2–M5.
+> **Status:** M2 (`6.0.0-preview.2.0.0`) — offline **download + playback**: a
+> per-row Download button copies a show's HLS bundle to the device (native
+> `BundleDownloader`, background URLSession) and the player serves it offline from
+> `LocalMediaServer`. Builds on M1 (app shell, online parity, `LocalMediaServer` /
+> Gate 1b). Offline progress + sync + conflict resolution arrive in M3–M5.
 
 ## What's here
 
@@ -23,6 +26,9 @@ ios-app/
   capacitor.config.json     appId, webDir, allowNavigation
   ios/App/                  Generated Xcode project (open this in Xcode)
     App/App/LocalMediaServer.swift   NWListener static HLS server (MIME + Range)
+    App/App/BundleDownloader.swift   Background-URLSession offline bundle download
+    App/App/MainViewController.swift Registers the plugins + injects @capacitor/core
+                                     into the remote dashboard so it can reach them
     App/App/Info.plist               ATS: cleartext only for 127.0.0.1/localhost
 ```
 

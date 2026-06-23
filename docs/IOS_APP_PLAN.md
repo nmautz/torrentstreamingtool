@@ -1,12 +1,20 @@
 # iOS Client App — Plan for v6.0.0
 
-> **Status:** **M1 landed** (`6.0.0-preview.1.0.0`) — the Capacitor app shell,
-> first-run Connect screen, and the native `LocalMediaServer` (Gate 1b code)
-> exist in [`ios-app/`](../ios-app/). What's left on M1 is the **on-device run**:
-> open `ios-app/ios/App` in Xcode, set a signing team, build to an iPhone, and
-> confirm (a) online parity with the host and (b) the Gate 1b self-test plays the
-> bundled sample from `127.0.0.1` (Connect screen → "Localhost HLS self-test").
-> Earlier milestones (M2–M5) remain as planned below.
+> **Status:** **M2 code landed** (`6.0.0-preview.2.0.0`) — offline download +
+> fully-offline playback. The host **A1** `bundle-manifest` endpoint
+> ([main.py](../main.py)) is implemented and unit-/integration-tested; the native
+> **`BundleDownloader`** ([`BundleDownloader.swift`](../ios-app/ios/App/App/BundleDownloader.swift),
+> background URLSession) and the web glue ([`static/index.html`](../static/index.html):
+> per-row Download button + the `master_url` swap to `LocalMediaServer` in
+> `_lpLoadIndex`) are written and JS-syntax-checked. What's left on M2 is the
+> **on-device run**: open `ios-app/ios/App` in Xcode, build to an iPhone, download
+> a multi-episode item, enter Airplane Mode, and confirm 2 episodes play with
+> tracks/subs/skip and survive an app kill + relaunch.
+>
+> **M1 landed** (`6.0.0-preview.1.0.0`) — Capacitor shell, first-run Connect
+> screen, native `LocalMediaServer` (Gate 1b). Its remaining gate is the same
+> on-device pass (online parity + the "Localhost HLS self-test").
+> Later milestones (M3–M5) remain as planned below.
 > This is the implementation plan for the **6.0.0** major release (a new
 > top-level capability: a native client app). Pieces ship incrementally; the
 > version badge in `static/index.html` + `CHANGELOG.md` get bumped as each lands,

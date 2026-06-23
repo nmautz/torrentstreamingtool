@@ -1124,6 +1124,48 @@ the "legacy" orphan kind until purged.
 
 ---
 
+## Offline download to the iOS app (true offline, not streaming)
+
+Everything above **streams** a bundle from the host (the player swaps `master_url`
+to a host URL). The native iOS client (see [IOS_APP_PLAN.md](IOS_APP_PLAN.md), M2)
+adds **download-to-device**: the same `.offline_cache/<sha>/` bundle is copied to
+the phone and played from a loopback server with **no host connection** (Airplane
+Mode). The browser dashboard is untouched — all the glue below is gated behind a
+Capacitor native-platform check (`isApp`), so it's inert in a plain browser.
+
+**Download.** A per-row **Download** button (`appDownloadBundle` in
+[static/index.html](../static/index.html), app-only via `_appDlBtnHTML`):
+1. `GET /api/library/{id}/bundle-manifest?file_path=…` (plan A1). On **409
+   not_ready** the app POSTs the normal `/offline-prepare`, polls
+   `/offline-job/{id}` until the host bundle is built, then retries the manifest.
+2. The manifest's flat `files[]` (name + size) + `cache_key` + `bundle_url` are
+   handed to the native **`BundleDownloader`** ([BundleDownloader.swift](../ios-app/ios/App/App/BundleDownloader.swift)),
+   which fetches every file over a **background `URLSession`** into
+   `Application Support/StreamLinkBundles/<sha>/` (non-evictable,
+   `isExcludedFromBackup`), keyed by the cache sha so a re-download of an unchanged
+   source is a no-op. Files are written into the final dir as they complete, so a
+   partial download **resumes** by skipping files already on disk at their expected
+   size, and completed bundles are **durable across an app kill**. Progress +
+   completion are pushed to JS via `bundleProgress` / `bundleComplete` events.
+
+**Playback.** `_lpLoadIndex` checks `BundleDownloader.getLocal({itemId, filePath})`
+first; if a **complete** local copy exists it starts the M1 **`LocalMediaServer`**
+(`NWListener`, loopback) over the bundle dir, reads `meta.json` straight from the
+bundle for `audios`/`subtitles`, and sets `master_url` to
+`http://127.0.0.1:<port>/master.m3u8` — synthesizing the same shape
+`/offline-prepare` returns, with **no network call**. Everything downstream
+(tracks, embedded `sub_*.vtt` renditions, skip-intro, the custom controls) is
+unchanged. `lpStop` tears the loopback server down. On any failure it falls
+through to the normal online prepare path.
+
+**Scope (M2).** Offline **playback** of the bundle; embedded text subtitles (the
+`sub_*.vtt` renditions inside the bundle) work offline, but host-side **sidecar**
+subs (served via `/subtitle?path=`, source-file-dependent) are online-only.
+Offline **progress / watch-history sync** is **M3** — for now an offline play
+simply can't reach `/progress`, and the failed POST is swallowed.
+
+---
+
 ## See also
 
 - [FRONTEND.md](FRONTEND.md) — JS function reference for `lp*` / `pc*` / `prep*`

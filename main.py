@@ -514,7 +514,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "6.0.0-preview.1.0.0"
+UI_VERSION = "6.0.0-preview.2.0.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 # Retains references to fire-and-forget background tasks so the event loop's weak
@@ -15771,6 +15771,93 @@ async def offline_cache_bundle_file(cache_key: str, filename: str) -> FileRespon
         raise HTTPException(404, "Cached file not found.")
     media = _HLS_MIME.get(p.suffix.lower(), "application/octet-stream")
     return FileResponse(str(p), media_type=media, filename=p.name)
+
+
+def _enumerate_bundle_files(out_dir: Path) -> tuple[list[dict], int]:
+    """Flat list of the downloadable files in a built HLS bundle + total bytes.
+
+    Every file the iOS BundleDownloader must fetch to serve the bundle offline
+    lives directly in `out_dir` (master.m3u8, variant playlists, init_*.mp4,
+    seg_*.m4s, embedded sub_*.vtt renditions, meta.json) — a self-contained HLS
+    bundle, so a flat one-level listing is exhaustive. Names are validated with
+    `_BUNDLE_FILE_RE` (the same guard the per-file server uses) so the client can
+    fetch each via /api/library/offline-cache/<key>/<name> without traversal risk.
+    """
+    files: list[dict] = []
+    total = 0
+    for entry in sorted(out_dir.iterdir()):
+        if not entry.is_file():
+            continue
+        if not _BUNDLE_FILE_RE.match(entry.name):
+            continue
+        try:
+            size = entry.stat().st_size
+        except OSError:
+            continue
+        files.append({"name": entry.name, "size": size})
+        total += size
+    return files, total
+
+
+@app.get("/api/library/{item_id}/bundle-manifest")
+async def bundle_manifest(item_id: str, file_path: str = "") -> JSONResponse:
+    """Enumerate a built HLS bundle for the iOS offline downloader (plan A1).
+
+    Returns a flat `files` list (relative names + byte sizes) plus `total_bytes`
+    and the playback metadata (`duration_sec`, `audios`, `subtitles`, sidecar
+    `subs`) so the BundleDownloader can enqueue every file deterministically and
+    report real progress instead of crawling playlists. Each file is fetched via
+    the existing, traversal-guarded /api/library/offline-cache/<key>/<name>.
+
+    Only *fully-prepped* bundles are downloadable. If the bundle isn't built yet
+    the endpoint returns **409 not_ready** (with `ondemand_only` when the item
+    never builds one); the app then triggers a normal POST /offline-prepare and
+    polls /offline-job/{id} before retrying. JIT on-demand stays online-only.
+    """
+    if not HLS_AVAILABLE:
+        raise HTTPException(503, HLS_UNAVAILABLE_MSG)
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    target = next((f for f in item.get("files", []) if f["path"] == file_path), None)
+    if not target:
+        raise HTTPException(404, "File not found in this item.")
+    src = Path(target["path"])
+    if not src.exists():
+        raise HTTPException(404, "File not on disk.")
+
+    key = _offline_cache_key(src)
+    out_dir = OFFLINE_CACHE / key
+    if not (out_dir / "master.m3u8").exists():
+        return JSONResponse(
+            {
+                "ready": False,
+                "reason": "not_ready",
+                "ondemand_only": bool(item.get("ondemand_only")),
+            },
+            status_code=409,
+        )
+
+    meta = _read_meta(out_dir)
+    files, total = await asyncio.to_thread(_enumerate_bundle_files, out_dir)
+    sidecar_subs = await asyncio.to_thread(_list_sidecar_subs, src, item_id)
+    return JSONResponse({
+        "ready":              True,
+        "cache_key":          key,
+        "item_id":            item_id,
+        "file_path":          file_path,
+        "name":               target.get("name", src.name),
+        "bundle_url":         f"/api/library/offline-cache/{key}/",
+        "files":              files,
+        "file_count":         len(files),
+        "total_bytes":        total,
+        "duration_sec":       meta.get("duration_sec", 0),
+        "audios":             meta.get("audios", []),
+        "subtitles":          meta.get("subtitles", []),
+        "skipped_image_subs": meta.get("skipped_image_subs", []),
+        "subs":               sidecar_subs,
+    })
 
 
 # ── On-demand (just-in-time) HLS streaming ──────────────────────────────────
