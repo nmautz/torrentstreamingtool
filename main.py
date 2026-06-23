@@ -609,6 +609,25 @@ def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
 
+def _parse_iso_dt(s: Optional[str]) -> Optional[datetime]:
+    """Tolerant ISO-8601 → aware datetime (UTC). Accepts a trailing 'Z' and
+    naive strings (assumed UTC). Returns None if unparseable. Used by the iOS
+    progress-sync conflict logic to compare server `updated_at` against the
+    device's `base_synced_at` / `client_updated_at` watermarks."""
+    if not s:
+        return None
+    try:
+        t = s.strip()
+        if t.endswith("Z"):
+            t = t[:-1] + "+00:00"
+        dt = datetime.fromisoformat(t)
+        if dt.tzinfo is None:
+            dt = dt.replace(tzinfo=timezone.utc)
+        return dt
+    except Exception:
+        return None
+
+
 # ── Global State ──────────────────────────────────────────────────────────────
 
 @dataclass
@@ -6794,6 +6813,167 @@ async def update_progress(item_id: str, req: ProgressReq) -> JSONResponse:
     }
     await put_library(lib)
     return JSONResponse({"ok": True})
+
+
+# ── Batch progress sync (iOS offline → server, plan A2) ──────────────────────
+#
+# The plain `update_progress` above is last-write-wins with no conflict detection
+# — fine for the online dashboard where there's only ever one writer at a time.
+# The iOS app, by contrast, accumulates watch progress *offline* (in its native
+# OfflineStore) and flushes a whole batch when it reconnects. Between the device's
+# last sync and now, the same episode may also have advanced elsewhere (e.g. the
+# TV via the dashboard). So this endpoint does real per-event conflict detection
+# using a per-file `base_synced_at` watermark the device carries:
+#
+#   • No server entry, OR server.updated_at <= base_synced_at  → server hasn't
+#     moved since the device last synced this file → APPLY the device event.
+#   • server.updated_at > base_synced_at (both advanced):
+#       - positions agree within AUTO_RESOLVE_WINDOW, OR either side completed →
+#         AUTO-RESOLVE (newest client/server timestamp wins; `completed` is
+#         monotonic — never un-completed).
+#       - otherwise → CONFLICT: write nothing, return {server, client} so the app
+#         can ask the user (M4 resolution UI) and POST /sync/resolve.
+#
+# Every file the device can treat as settled (device won, server won, or a no-op
+# acknowledgement) is returned in `applied` with the `server_updated_at` the
+# device then records as that file's new `base_synced_at`. Only `conflicts` are
+# left for the user. See docs/LIBRARY_DATA.md "base_synced_at watermark" and
+# docs/API.md "POST /api/library/sync/progress".
+
+SYNC_AUTO_RESOLVE_WINDOW = 60.0   # seconds; positions this close auto-merge
+
+
+class SyncProgressEvent(BaseModel):
+    item_id: str
+    file_path: str
+    position_sec: float
+    duration_sec: float
+    client_updated_at: str                       # when watched on the device (ISO)
+    base_synced_at: Optional[str] = None         # device's last sync of THIS file (ISO)
+    subtitle_sel: Optional[dict] = None          # preserved track picks (optional)
+    local_audio_idx: Optional[int] = None
+    local_subtitle_idx: Optional[int] = None
+
+
+class SyncProgressReq(BaseModel):
+    profile_id: str
+    events: list[SyncProgressEvent]
+
+
+@app.post("/api/library/sync/progress")
+async def sync_progress(req: SyncProgressReq) -> JSONResponse:
+    """Batch offline-progress sync with conflict detection (plan A2)."""
+    applied: list[dict] = []
+    conflicts: list[dict] = []
+    now = _now_iso()
+    _TRACK_KEYS = ("audio_track", "subtitle_track", "local_audio_idx", "local_subtitle_idx")
+
+    async with _lib_lock:
+        lib = _load_lib_raw()
+        items_by_id = {it["id"]: it for it in lib.get("items", [])}
+
+        for ev in req.events:
+            item = items_by_id.get(ev.item_id)
+            if not item:
+                # The library no longer has this item (deleted host-side). Tell the
+                # device it's settled so it stops resending — nothing to apply.
+                applied.append({"item_id": ev.item_id, "file_path": ev.file_path,
+                                "server_updated_at": now, "skipped": "item_not_found"})
+                continue
+
+            prof_prog = item.setdefault("progress", {}).setdefault(req.profile_id, {})
+            file_progress = prof_prog.setdefault("file_progress", {})
+            existing = file_progress.get(ev.file_path)
+
+            dur = ev.duration_sec
+            pct = ev.position_sec / dur if dur else 0
+            ev_completed = pct > 0.92
+
+            def _apply() -> None:
+                prev = existing or {}
+                merged = {
+                    "position_sec": round(ev.position_sec, 1),
+                    "duration_sec": round(ev.duration_sec, 1),
+                    # `completed` is monotonic — a fresh device position must never
+                    # un-complete an episode the server already marked done.
+                    "completed": ev_completed or bool(prev.get("completed")),
+                    "updated_at": now,
+                    # Preserve sibling track picks unless the event carries new ones.
+                    **{k: v for k, v in prev.items() if k in _TRACK_KEYS},
+                }
+                if ev.local_audio_idx is not None:
+                    merged["local_audio_idx"] = ev.local_audio_idx
+                if ev.local_subtitle_idx is not None:
+                    merged["local_subtitle_idx"] = ev.local_subtitle_idx
+                if ev.subtitle_sel is not None:
+                    norm = _norm_sub_sel(ev.subtitle_sel)
+                    if norm:
+                        merged["subtitle_sel"] = norm
+                    elif prev.get("subtitle_sel") is not None:
+                        merged["subtitle_sel"] = prev["subtitle_sel"]
+                elif prev.get("subtitle_sel") is not None:
+                    merged["subtitle_sel"] = prev["subtitle_sel"]
+                file_progress[ev.file_path] = merged
+                prof_prog["last_file"] = ev.file_path
+                applied.append({"item_id": ev.item_id, "file_path": ev.file_path,
+                                "server_updated_at": now})
+
+            # No server entry → trivially apply.
+            if not existing:
+                _apply()
+                continue
+
+            server_dt = _parse_iso_dt(existing.get("updated_at"))
+            base_dt = _parse_iso_dt(ev.base_synced_at)
+
+            # Server unchanged since the device last synced this file → apply.
+            if server_dt is None or base_dt is None or server_dt <= base_dt:
+                _apply()
+                continue
+
+            # Both sides advanced — try to auto-resolve.
+            server_pos = float(existing.get("position_sec", 0) or 0)
+            server_completed = bool(existing.get("completed"))
+            close = abs(server_pos - ev.position_sec) <= SYNC_AUTO_RESOLVE_WINDOW
+
+            if close or ev_completed or server_completed:
+                client_dt = _parse_iso_dt(ev.client_updated_at)
+                device_newer = bool(client_dt and client_dt > server_dt)
+                if device_newer:
+                    _apply()                       # newest wins; _apply keeps completed monotonic
+                elif ev_completed and not server_completed:
+                    existing["completed"] = True   # server newer but device finished it
+                    existing["updated_at"] = now
+                    applied.append({"item_id": ev.item_id, "file_path": ev.file_path,
+                                    "server_updated_at": now})
+                else:
+                    # Server wins, nothing to change — acknowledge so the device
+                    # advances its watermark and stops resending.
+                    applied.append({"item_id": ev.item_id, "file_path": ev.file_path,
+                                    "server_updated_at": existing.get("updated_at") or now})
+                continue
+
+            # Genuine divergence — write nothing, surface for user resolution (M4).
+            conflicts.append({
+                "item_id": ev.item_id,
+                "file_path": ev.file_path,
+                "server": {
+                    "position_sec": server_pos,
+                    "duration_sec": float(existing.get("duration_sec", 0) or 0),
+                    "completed": server_completed,
+                    "updated_at": existing.get("updated_at"),
+                },
+                "client": {
+                    "position_sec": round(ev.position_sec, 1),
+                    "duration_sec": round(ev.duration_sec, 1),
+                    "completed": ev_completed,
+                    "client_updated_at": ev.client_updated_at,
+                },
+            })
+
+        _save_lib_raw(lib)
+
+    return JSONResponse({"applied": applied, "conflicts": conflicts, "server_updated_at": now})
 
 
 class LocalTracksReq(BaseModel):

@@ -1,24 +1,30 @@
 # iOS Client App — Plan for v6.0.0
 
-> **Status:** **M2 landed** (`6.0.0-preview.2.1.0`) — offline download +
-> fully-offline playback, with the first round of on-device bugs fixed. The host
-> **A1** `bundle-manifest` endpoint ([main.py](../main.py)) is implemented and
-> unit-/integration-tested. The native **`BundleDownloader`**
-> ([`BundleDownloader.swift`](../ios-app/ios/App/App/BundleDownloader.swift)) uses a
-> **foreground** URLSession (a background session deferred all progress to next
-> launch — see [GOTCHAS.md](GOTCHAS.md)). Because the remote dashboard can't load
-> offline, the offline entry point is the bundled
-> [`www/downloads.html`](../ios-app/www/downloads.html) (lists downloads, plays via
-> `LocalMediaServer`); the shell probes host reachability and routes there when
-> offline. The dashboard's `_lpLoadIndex` `master_url` swap remains the *online*
-> convenience. What's left on M2 is continued **on-device verification**: download
-> a multi-episode item, enter Airplane Mode, confirm episodes play with tracks/subs
-> and survive an app kill + relaunch.
+> **Status:** **M3 landed (code)** (`6.0.0-preview.3.0.0`) — offline progress +
+> auto-sync. The host **A2** endpoint **`POST /api/library/sync/progress`**
+> ([main.py](../main.py)) does batch sync with real conflict detection via a
+> per-file `base_synced_at` watermark (apply / auto-resolve / conflict), verified
+> against the full conflict matrix. The native **`OfflineStore`**
+> ([`OfflineStore.swift`](../ios-app/ios/App/App/OfflineStore.swift)) is a durable,
+> file-backed progress log; the offline [`www/downloads.html`](../ios-app/www/downloads.html)
+> player captures progress + resumes offline; the dashboard pushes the active
+> profile (`setProfile`) and drains the store (`_appFlushOfflineProgress`) on
+> profile-select and the `online` event. **Conflict-resolution UI is M4** — A2
+> already returns conflicts; M3 just leaves them pending. Remaining on M3 is
+> **on-device verification**: watch offline, reconnect, confirm history lands on the
+> server and an auto-resolvable case merges silently.
+>
+> **M2 landed** (`6.0.0-preview.2.1.0`) — offline download + fully-offline playback.
+> Host **A1** `bundle-manifest`; native **`BundleDownloader`** (foreground URLSession
+> — a background session deferred all progress to next launch, see
+> [GOTCHAS.md](GOTCHAS.md)); offline entry point [`www/downloads.html`](../ios-app/www/downloads.html)
+> (the remote dashboard can't load offline). The dashboard's `_lpLoadIndex`
+> `master_url` swap remains the *online* convenience.
 >
 > **M1 landed** (`6.0.0-preview.1.0.0`) — Capacitor shell, first-run Connect
 > screen, native `LocalMediaServer` (Gate 1b). Its remaining gate is the same
 > on-device pass (online parity + the "Localhost HLS self-test").
-> Later milestones (M3–M5) remain as planned below.
+> Later milestones (M4–M5) remain as planned below.
 > This is the implementation plan for the **6.0.0** major release (a new
 > top-level capability: a native client app). Pieces ship incrementally; the
 > version badge in `static/index.html` + `CHANGELOG.md` get bumped as each lands,

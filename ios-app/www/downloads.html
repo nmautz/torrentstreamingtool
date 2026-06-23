@@ -106,6 +106,32 @@
       _serverActive = false;
     }
 
+    // ── Offline progress (M3) ──────────────────────────────────────────────
+    // The host dashboard can't load offline, so watch progress captured here is
+    // the only offline history. We write it to the native OfflineStore; when the
+    // device reconnects, the dashboard's sync glue drains it to the host.
+    let _nowPlaying = null;            // the item currently in the player
+    let _lastSaveAt = 0;
+
+    function offlineStore() { try { return plugin("OfflineStore"); } catch (_) { return null; } }
+
+    async function saveOfflineProgress() {
+      const v = $("v"), item = _nowPlaying, os = offlineStore();
+      if (!os || !item || !item.itemId || !item.filePath) return;
+      const pos = v.currentTime || 0, dur = v.duration || 0;
+      if (!(dur > 0) || pos < 5) return;   // server ignores near-zero writes
+      try {
+        await os.saveProgress({ itemId: item.itemId, filePath: item.filePath,
+                                positionSec: pos, durationSec: dur });
+      } catch (_) {}
+    }
+    function throttledSave() {
+      const now = Date.now();
+      if (now - _lastSaveAt < 5000) return;
+      _lastSaveAt = now;
+      saveOfflineProgress();
+    }
+
     async function play(item) {
       showErr("");
       try {
@@ -113,10 +139,26 @@
         await stopServer();
         const { url } = await lms.start({ path: item.dir });
         _serverActive = true;
+        _nowPlaying = item;
         const base = url.replace(/\/+$/, "") + "/";
         const v = $("v");
         $("nowTitle").textContent = item.name || "";
         v.src = base + "master.m3u8";
+        // Offline resume: seek to the saved offline position once metadata loads.
+        let resumeTo = 0;
+        const os = offlineStore();
+        if (os && item.itemId && item.filePath) {
+          try {
+            const p = await os.getProgress({ itemId: item.itemId, filePath: item.filePath });
+            if (p && p.found && !p.completed && (p.positionSec || 0) > 5) resumeTo = p.positionSec;
+          } catch (_) {}
+        }
+        if (resumeTo > 0) {
+          v.addEventListener("loadedmetadata", function once() {
+            v.removeEventListener("loadedmetadata", once);
+            try { v.currentTime = resumeTo; } catch (_) {}
+          });
+        }
         $("playerWrap").classList.add("show");
         await v.play().catch(() => {});
       } catch (e) { showErr(e); }
@@ -124,8 +166,10 @@
 
     async function closePlayer() {
       const v = $("v");
+      await saveOfflineProgress();
       try { v.pause(); v.removeAttribute("src"); v.load(); } catch (_) {}
       $("playerWrap").classList.remove("show");
+      _nowPlaying = null;
       await stopServer();
     }
 
@@ -162,6 +206,21 @@
         list.appendChild(li);
       }
     }
+
+    // Capture offline progress on the same events the dashboard player uses.
+    const _vid = $("v");
+    _vid.addEventListener("timeupdate", throttledSave);
+    _vid.addEventListener("pause", saveOfflineProgress);
+    _vid.addEventListener("seeked", saveOfflineProgress);
+    _vid.addEventListener("ended", () => {
+      // Force a completed write (position == duration ⇒ pct > 0.92).
+      if (_nowPlaying) { try { _vid.currentTime = _vid.duration || _vid.currentTime; } catch (_) {} }
+      saveOfflineProgress();
+    });
+    window.addEventListener("pagehide", saveOfflineProgress);
+    document.addEventListener("visibilitychange", () => {
+      if (document.visibilityState === "hidden") saveOfflineProgress();
+    });
 
     $("refreshBtn").addEventListener("click", refresh);
     $("closePlayer").addEventListener("click", closePlayer);

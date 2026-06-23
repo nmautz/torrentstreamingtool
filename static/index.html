@@ -4134,6 +4134,10 @@ function _doSelectProfile(p){
   applyMaxVolumeToSliders();
   loadSearchIndexers();
   if(activeTab==="library") loadLibrary();
+  // M3: tell the native store whose history to record, then flush anything the
+  // offline player accumulated for this profile.
+  _appSyncSetProfile();
+  _appFlushOfflineProgress();
 }
 
 function applyMaxVolumeToSliders(){
@@ -7679,7 +7683,74 @@ async function saveProgress(itemId, filePath, posSec, durSec) {
       body: JSON.stringify({ profile_id: profile.id, file_path: filePath,
                              position_sec: posSec, duration_sec: durSec }),
     });
-  } catch (_) { /* swallow — next tick will retry */ }
+  } catch (_) {
+    // Offline inside the app: stash to the native OfflineStore so it syncs back
+    // on reconnect (M3). No-op in a plain browser or when the plugin is absent.
+    if (isApp && _cap.os) {
+      try {
+        await _cap.os.saveProgress({ itemId, filePath,
+          positionSec: posSec, durationSec: durSec, profileId: profile.id });
+      } catch (_) {}
+    }
+  }
+}
+
+// ── M3 offline-progress sync (app only) ──────────────────────────────────────
+// Push the active profile to the native store so the offline player (downloads.html)
+// records history under the right profile, then drain any pending offline progress
+// to the host. Both no-op in a plain browser / when OfflineStore is unavailable.
+function _appSyncSetProfile() {
+  if (!(isApp && _cap.os) || !profile.id) return;
+  try { _cap.os.setProfile({ profileId: profile.id, profileName: profile.name || "" }); } catch (_) {}
+}
+
+let _appSyncing = false;
+async function _appFlushOfflineProgress() {
+  if (!(isApp && _cap.os) || !profile.id || _appSyncing) return;
+  _appSyncing = true;
+  try {
+    const { events } = await _cap.os.pending();
+    if (!events || !events.length) return;
+    // Group by profile so each batch carries one profile_id (the endpoint's shape).
+    const byProfile = new Map();
+    for (const e of events) {
+      const pid = e.profileId || profile.id;
+      if (!byProfile.has(pid)) byProfile.set(pid, []);
+      byProfile.get(pid).push(e);
+    }
+    for (const [pid, evs] of byProfile) {
+      const r = await fetch("/api/library/sync/progress", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile_id: pid, events: evs.map((e) => ({
+          item_id: e.itemId, file_path: e.filePath,
+          position_sec: e.positionSec, duration_sec: e.durationSec,
+          client_updated_at: e.clientUpdatedAt, base_synced_at: e.baseSyncedAt || null,
+          subtitle_sel: e.subtitleSel || null,
+          local_audio_idx: (e.localAudioIdx ?? null),
+          local_subtitle_idx: (e.localSubtitleIdx ?? null),
+        })) }),
+      });
+      if (!r.ok) continue;
+      const res = await r.json();
+      if (res.applied && res.applied.length) {
+        try { await _cap.os.markSynced({ applied: res.applied.map((a) => ({
+          itemId: a.item_id, filePath: a.file_path,
+          serverUpdatedAt: a.server_updated_at, profileId: pid,
+        })) }); } catch (_) {}
+      }
+      // Conflicts are surfaced by the M4 resolution UI; M3 just leaves them
+      // pending (they keep re-reporting until resolved).
+      if (res.conflicts && res.conflicts.length) {
+        console.info(`[sync] ${res.conflicts.length} progress conflict(s) deferred to resolution UI.`);
+      }
+    }
+    // A flush may have advanced the library on the server — refresh the view.
+    try { if (activeTab === "library") await loadLibrary(); } catch (_) {}
+  } catch (_) {
+    /* still offline / host hiccup — try again on the next online event */
+  } finally {
+    _appSyncing = false;
+  }
 }
 
 // ── iOS app: offline bundle download + localhost playback (Capacitor, M2) ────
@@ -7700,7 +7771,10 @@ const _cap = (() => {
     ? C.registerPlugin(name) : (C.Plugins && C.Plugins[name]);
   const lms = get("LocalMediaServer"), dl = get("BundleDownloader");
   if (!lms || !dl) return null;
-  return { lms, dl };
+  // OfflineStore (M3) is best-effort — an older shell without it still works
+  // online; offline progress sync just stays disabled.
+  let os = null; try { os = get("OfflineStore"); } catch (_) {}
+  return { lms, dl, os };
 })();
 const isApp = !!_cap;
 
@@ -10621,6 +10695,9 @@ document.addEventListener("DOMContentLoaded",async()=>{
   // iOS app: subscribe to BundleDownloader events + hydrate the offline-download
   // state from the device. No-op in a plain browser (isApp === false).
   _appInitOfflineBundles();
+  // M3: when the browser regains connectivity, drain any offline progress the
+  // native store accumulated while we were away. No-op in a plain browser.
+  if (isApp) window.addEventListener("online", () => _appFlushOfflineProgress());
   // Start polling for any in-flight prep jobs so the indicator is correct
   // even when the page is reloaded mid-job (state is purely in-memory otherwise).
   startGlobalPrepPoller();
@@ -10676,7 +10753,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
       const p=JSON.parse(saved);
       const profiles=await fetchProfiles();
       const found=profiles.find(x=>x.id===p.id);
-      if(found){ profile=found; renderNavProfile(); applyMaxVolumeToSliders(); loadSearchIndexers(); connectSSE(); return; }
+      if(found){ profile=found; renderNavProfile(); applyMaxVolumeToSliders(); loadSearchIndexers(); _appSyncSetProfile(); _appFlushOfflineProgress(); connectSSE(); return; }
     } catch(_){}
   }
   await fetchProfiles();
@@ -10685,6 +10762,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.2.1.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.3.0.0</div>
 </body>
 </html>

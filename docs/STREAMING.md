@@ -1173,8 +1173,25 @@ through to the normal online prepare path.
 **Scope (M2).** Offline **playback** of the bundle; embedded text subtitles (the
 `sub_*.vtt` renditions inside the bundle) work offline, but host-side **sidecar**
 subs (served via `/subtitle?path=`, source-file-dependent) are online-only.
-Offline **progress / watch-history sync** is **M3** — for now an offline play
-simply can't reach `/progress`, and the failed POST is swallowed.
+
+**Offline progress + auto-sync (M3).** The offline `downloads.html` player now
+captures watch progress (the same `timeupdate`/`pause`/`seeked`/`ended`/`pagehide`
+events the dashboard uses) into the native **`OfflineStore`**
+([OfflineStore.swift](../ios-app/ios/App/App/OfflineStore.swift)) — a durable,
+file-backed log keyed by `(profileId, itemId, filePath)` (Application Support,
+backup-excluded), the only place offline history can live (the host dashboard can't
+load offline). Playback also **resumes from the saved offline position**. The active
+profile is pushed to the store by the dashboard (`OfflineStore.setProfile`) while
+online so the offline player records under the right profile. When the device
+reconnects, the dashboard drains the store: `_appFlushOfflineProgress` reads
+`OfflineStore.pending()` (events where `clientUpdatedAt > baseSyncedAt`) and POSTs
+them to **`/api/library/sync/progress`** (plan A2 — conflict detection via the
+`base_synced_at` watermark; see [API.md](API.md) / [LIBRARY_DATA.md](LIBRARY_DATA.md)),
+then `OfflineStore.markSynced()` records each applied file's new watermark. It fires
+on profile-select and the window `online` event; the dashboard's own
+`saveProgress` also falls back to the store when an online POST fails. Conflicts are
+returned but the **resolution UI is M4** — until then they stay pending. All of this
+is `isApp`-gated, so the browser dashboard is unaffected.
 
 ---
 
