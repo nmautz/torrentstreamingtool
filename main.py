@@ -7018,6 +7018,103 @@ async def sync_pull(req: SyncPullReq) -> JSONResponse:
     return JSONResponse({"progress": out})
 
 
+class SyncResolution(BaseModel):
+    item_id: str
+    file_path: str
+    choice: str                                  # "client" (keep device) | "server" (keep host)
+    # Device values, written when choice == "client" (mirrors a SyncProgressEvent):
+    position_sec: Optional[float] = None
+    duration_sec: Optional[float] = None
+    client_updated_at: Optional[str] = None
+    subtitle_sel: Optional[dict] = None
+    local_audio_idx: Optional[int] = None
+    local_subtitle_idx: Optional[int] = None
+
+
+class SyncResolveReq(BaseModel):
+    profile_id: str
+    resolutions: list[SyncResolution]
+
+
+@app.post("/api/library/sync/resolve")
+async def sync_resolve(req: SyncResolveReq) -> JSONResponse:
+    """Write the user-chosen winner for conflicts /sync/progress reported (plan A3).
+
+    `/sync/progress` returns genuine divergences in `conflicts` and writes nothing;
+    the device surfaces a "mine vs server" UI (M4) and posts the user's choice here.
+    `choice == "client"` writes the device values (bumping `updated_at`); `choice ==
+    "server"` leaves the host untouched (the device adopts the returned server values
+    as its new baseline). Either way the response carries the authoritative `server`
+    values + `server_updated_at` the device records as the file's new watermark."""
+    resolved: list[dict] = []
+    now = _now_iso()
+    _TRACK_KEYS = ("audio_track", "subtitle_track", "local_audio_idx", "local_subtitle_idx")
+
+    async with _lib_lock:
+        lib = _load_lib_raw()
+        items_by_id = {it["id"]: it for it in lib.get("items", [])}
+
+        for rz in req.resolutions:
+            item = items_by_id.get(rz.item_id)
+            if not item:
+                resolved.append({"item_id": rz.item_id, "file_path": rz.file_path,
+                                 "choice": rz.choice, "server_updated_at": now,
+                                 "skipped": "item_not_found"})
+                continue
+
+            prof_prog = item.setdefault("progress", {}).setdefault(req.profile_id, {})
+            file_progress = prof_prog.setdefault("file_progress", {})
+            existing = file_progress.get(rz.file_path) or {}
+
+            if rz.choice == "client":
+                pos = float(rz.position_sec or 0)
+                dur = float(rz.duration_sec or 0)
+                pct = pos / dur if dur else 0
+                merged = {
+                    "position_sec": round(pos, 1),
+                    "duration_sec": round(dur, 1),
+                    # `completed` stays monotonic even when the user keeps the device side.
+                    "completed": (pct > 0.92) or bool(existing.get("completed")),
+                    "updated_at": now,
+                    **{k: v for k, v in existing.items() if k in _TRACK_KEYS},
+                }
+                if rz.local_audio_idx is not None:
+                    merged["local_audio_idx"] = rz.local_audio_idx
+                if rz.local_subtitle_idx is not None:
+                    merged["local_subtitle_idx"] = rz.local_subtitle_idx
+                if rz.subtitle_sel is not None:
+                    norm = _norm_sub_sel(rz.subtitle_sel)
+                    if norm:
+                        merged["subtitle_sel"] = norm
+                    elif existing.get("subtitle_sel") is not None:
+                        merged["subtitle_sel"] = existing["subtitle_sel"]
+                elif existing.get("subtitle_sel") is not None:
+                    merged["subtitle_sel"] = existing["subtitle_sel"]
+                file_progress[rz.file_path] = merged
+                prof_prog["last_file"] = rz.file_path
+                server_updated_at = now
+                server_view = merged
+            else:
+                # "server" (or unknown choice → keep host, the safe default). No write;
+                # the device adopts these values + watermark as its settled baseline.
+                server_updated_at = existing.get("updated_at") or now
+                server_view = existing
+
+            resolved.append({
+                "item_id": rz.item_id, "file_path": rz.file_path,
+                "choice": rz.choice, "server_updated_at": server_updated_at,
+                "server": {
+                    "position_sec": float(server_view.get("position_sec", 0) or 0),
+                    "duration_sec": float(server_view.get("duration_sec", 0) or 0),
+                    "completed": bool(server_view.get("completed")),
+                },
+            })
+
+        _save_lib_raw(lib)
+
+    return JSONResponse({"resolved": resolved})
+
+
 class LocalTracksReq(BaseModel):
     profile_id: str
     file_path: str

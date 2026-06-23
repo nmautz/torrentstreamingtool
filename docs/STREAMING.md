@@ -1189,9 +1189,21 @@ them to **`/api/library/sync/progress`** (plan A2 — conflict detection via the
 `base_synced_at` watermark; see [API.md](API.md) / [LIBRARY_DATA.md](LIBRARY_DATA.md)),
 then `OfflineStore.markSynced()` records each applied file's new watermark. It fires
 on profile-select and the window `online` event; the dashboard's own
-`saveProgress` also falls back to the store when an online POST fails. Conflicts are
-returned but the **resolution UI is M4** — until then they stay pending. All of this
+`saveProgress` also falls back to the store when an online POST fails. All of this
 is `isApp`-gated, so the browser dashboard is unaffected.
+
+**Conflict resolution (M4).** When `/sync/progress` returns genuine divergences in
+`conflicts` (the same file advanced both offline *and* elsewhere, positions too far
+apart to auto-merge), `_appFlushOfflineProgress` collects them and opens the
+`#syncConflictModal` "keep mine / keep server" UI (`_appShowConflicts` →
+`_appRenderConflicts`; titles enriched from each download's persisted `meta`). On
+**Apply**, `_appApplyConflictResolutions` POSTs the choices to
+**`POST /api/library/sync/resolve`** (plan A3): a "keep mine" win writes the device
+values server-side and the device just advances its watermark via
+`OfflineStore.markSynced`; a "keep server" win writes nothing host-side and the device
+adopts the server's values with a **forced** `OfflineStore.seedProgress` (`force:true`
+overrides the unsynced-record guard). Until resolved, conflicts stay pending and
+re-report on the next flush.
 
 **Bidirectional seeding (so offline resume reflects online history).** Push alone
 would mean an episode watched partway *online* resumes at 0 offline. So sync is

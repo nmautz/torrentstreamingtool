@@ -1,6 +1,21 @@
 # iOS Client App — Plan for v6.0.0
 
-> **Status:** **M3 landed (code)** (`6.0.0-preview.3.0.0`) — offline progress +
+> **Status:** **M4 landed (code)** (`6.0.0-preview.4.0.0`) — sync-conflict
+> resolution. The host **A3** endpoint **`POST /api/library/sync/resolve`**
+> ([main.py](../main.py)) writes the user-chosen winner for a divergence A2
+> reported: `choice:"client"` writes the device values (reusing the A2 merge shape,
+> `completed` monotonic, track keys preserved, bumps `updated_at`); `choice:"server"`
+> writes nothing; either way it returns the authoritative `server` values +
+> `server_updated_at`. The dashboard's `_appFlushOfflineProgress`
+> ([static/index.html](../static/index.html)) collects A2's `conflicts` and opens the
+> `#syncConflictModal` "keep mine / keep server" UI; on Apply it POSTs `/sync/resolve`
+> and settles the `OfflineStore` record (a "mine" win advances the watermark via
+> `markSynced`; a "server" win adopts the server values via a **forced**
+> `seedProgress`, new `force` flag overriding the unsynced-record guard). Remaining
+> on M4 is **on-device verification**: deliberately diverge a file (offline + TV),
+> confirm the conflict UI appears and the chosen winner is written and re-synced.
+>
+> **M3 landed (code)** (`6.0.0-preview.3.0.0`) — offline progress +
 > auto-sync. The host **A2** endpoint **`POST /api/library/sync/progress`**
 > ([main.py](../main.py)) does batch sync with real conflict detection via a
 > per-file `base_synced_at` watermark (apply / auto-resolve / conflict), verified
@@ -9,8 +24,7 @@
 > file-backed progress log; the offline [`www/downloads.html`](../ios-app/www/downloads.html)
 > player captures progress + resumes offline; the dashboard pushes the active
 > profile (`setProfile`) and drains the store (`_appFlushOfflineProgress`) on
-> profile-select and the `online` event. **Conflict-resolution UI is M4** — A2
-> already returns conflicts; M3 just leaves them pending.
+> profile-select and the `online` event. **Conflict resolution is M4 (above).**
 >
 > **M3.1** (`6.0.0-preview.3.1.0`) closed three gaps: sync is now **bidirectional**
 > (**`POST /api/library/sync/pull`** + `OfflineStore.seedProgress` seed the server's

@@ -29,7 +29,8 @@
 //                                                                  durationSec, completed,
 //                                                                  clientUpdatedAt, baseSyncedAt }
 //    seedProgress({ itemId, filePath, positionSec, durationSec,
-//                   completed, serverUpdatedAt, profileId? })  -> {}   // server→device baseline
+//                   completed, serverUpdatedAt, profileId?, force? }) -> {}  // server→device baseline
+//                                                                  // force: M4 "server wins" overwrite of a dirty record
 //    pending()                                               -> { events:[ <event> ] }
 //    markSynced({ applied:[ { itemId, filePath, serverUpdatedAt, profileId? } ] }) -> {}
 //    all()                                                   -> { events:[ <event> ] }
@@ -115,7 +116,10 @@ public class OfflineStore: CAPPlugin, CAPBridgedPlugin {
             positionSec: call.getDouble("positionSec") ?? 0,
             durationSec: call.getDouble("durationSec") ?? 0,
             completed: call.getBool("completed") ?? false,
-            serverUpdatedAt: call.getString("serverUpdatedAt") ?? "")
+            serverUpdatedAt: call.getString("serverUpdatedAt") ?? "",
+            // M4: a "server wins" conflict resolution must overwrite the device's
+            // own unsynced (dirty) record; the normal seed must not.
+            force: call.getBool("force") ?? false)
         call.resolve()
     }
 
@@ -268,13 +272,15 @@ final class OfflineProgressStore {
     /// Otherwise it writes a settled (`dirty:false`) record so pending() ignores it.
     func seedProgress(profileId: String?, itemId: String, filePath: String,
                       positionSec: Double, durationSec: Double, completed: Bool,
-                      serverUpdatedAt: String) {
+                      serverUpdatedAt: String, force: Bool = false) {
         queue.sync {
             var obj = read()
             let pid = (profileId?.isEmpty == false ? profileId! : activeProfileLocked(obj))
             var records = (obj["records"] as? [String: Any]) ?? [:]
             let k = key(pid, itemId, filePath)
-            if let existing = records[k] as? [String: Any], (existing["dirty"] as? Bool) == true {
+            // `force` (M4 "server wins") overrides the dirty guard — the user has
+            // chosen the server's value, so the unsynced device record is discarded.
+            if !force, let existing = records[k] as? [String: Any], (existing["dirty"] as? Bool) == true {
                 return   // unsynced local progress — don't overwrite; the push handles it
             }
             let stamp = serverUpdatedAt.isEmpty ? Self.isoNow() : serverUpdatedAt
