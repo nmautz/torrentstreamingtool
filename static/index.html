@@ -984,6 +984,17 @@
           class="w-5 h-5 accent-emerald-500 cursor-pointer flex-shrink-0"/>
       </label>
 
+      <!-- App-only: offline-sync diagnostics. Hidden in the plain browser; shown
+           by initAppUi() when running inside the Capacitor shell. -->
+      <div id="psOfflineSyncRow" class="hidden bg-gray-800/60 px-4 py-3">
+        <div class="text-sm font-bold text-gray-200 uppercase tracking-wide">Offline Sync</div>
+        <div class="text-[11px] text-gray-500 mt-0.5">Push watch progress recorded offline to the server now, and show exactly what happened (for troubleshooting).</div>
+        <button onclick="_appSyncDebug()"
+          class="mt-2 w-full bg-indigo-600 hover:bg-indigo-500 py-2.5 text-xs font-bold uppercase tracking-wide transition-colors text-white">
+          Sync Now &amp; Show Status
+        </button>
+      </div>
+
       <p id="psStatus" class="text-[10px] text-gray-600 uppercase tracking-widest pt-1">Manual skip button is always available.</p>
     </div>
     <div class="px-4 pb-4 safe-bottom flex-shrink-0 border-t border-gray-800">
@@ -2401,6 +2412,23 @@
       <button id="scApplyBtn" onclick="_appApplyConflictResolutions()"
         class="flex-1 bg-indigo-600 hover:bg-indigo-500 py-3 text-sm font-bold uppercase tracking-wide transition-colors text-white">
         Apply
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Offline-sync diagnostics modal (iOS app only) ───────────────────────── -->
+<div id="syncDebugModal"
+  class="hidden fixed inset-0 z-[60] bg-black/70 flex items-end sm:items-center justify-center sm:px-4">
+  <div class="bg-gray-900 w-full sm:max-w-md border-t-[3px] border-indigo-500 flex flex-col max-h-[88vh]">
+    <div class="px-5 pt-5 pb-3 border-b border-gray-800">
+      <h2 class="text-lg font-black uppercase tracking-wide">Offline Sync Status</h2>
+    </div>
+    <pre id="sdBody" class="px-5 py-3 overflow-auto text-[11px] leading-relaxed text-gray-300 whitespace-pre-wrap break-words"></pre>
+    <div class="px-5 pb-5 pt-2 border-t border-gray-800">
+      <button onclick="document.getElementById('syncDebugModal').classList.add('hidden')"
+        class="w-full bg-gray-800 hover:bg-gray-700 py-3 text-sm font-bold uppercase tracking-wide transition-colors">
+        Close
       </button>
     </div>
   </div>
@@ -7955,6 +7983,99 @@ async function _appApplyConflictResolutions() {
   try { if (activeTab === "library") await loadLibrary(); } catch (_) {}
 }
 
+// ── Offline-sync diagnostics (app only) ──────────────────────────────────────
+// A one-tap end-to-end probe of the device→server push, surfaced because every
+// step of the normal flush swallows its errors. Reports: environment, the native
+// store's active profile + records (position/dirty/watermark), what `pending()`
+// would push, and the live result of POSTing it to /sync/progress (HTTP status +
+// applied/conflicts or the thrown error). Runs the SAME path as the auto-flush.
+async function _appSyncDebug() {
+  const out = [];
+  const show = () => {
+    const el = document.getElementById("sdBody");
+    if (el) el.textContent = out.join("\n");
+    const m = document.getElementById("syncDebugModal");
+    if (m) m.classList.remove("hidden");
+  };
+  out.push(`isApp=${isApp}  OfflineStore=${!!(_cap && _cap.os)}  BundleDownloader=${!!(_cap && _cap.dl)}`);
+  out.push(`dashboard profile=${profile && profile.id ? `${profile.id} (${profile.name || ""})` : "(none selected)"}`);
+  if (!(isApp && _cap.os)) { out.push("\n⚠ Not in the app, or OfflineStore plugin missing — cannot sync."); return show(); }
+  if (!profile.id) { out.push("\n⚠ No profile selected on the dashboard — pick a profile first."); return show(); }
+
+  try {
+    const np = await _cap.os.getProfile();
+    out.push(`native store active profile=${np && np.profileId ? np.profileId : "(none)"}`);
+  } catch (e) { out.push(`getProfile() threw: ${e && e.message || e}`); }
+
+  // Every stored record — so we can see whether the offline watch was saved at all.
+  try {
+    const { events } = await _cap.os.all();
+    out.push(`\nstored records: ${events ? events.length : 0}`);
+    for (const e of (events || [])) {
+      out.push(`• ${e.itemId} | ${e.filePath}`);
+      out.push(`    pos=${Math.round(e.positionSec || 0)}s dur=${Math.round(e.durationSec || 0)}s `
+             + `completed=${!!e.completed} dirty=${e.dirty !== false} `
+             + `base=${e.baseSyncedAt || "null"} profile=${e.profileId || "(active)"}`);
+    }
+  } catch (e) { out.push(`all() threw: ${e && e.message || e}`); }
+
+  // What pending() would actually push.
+  let pendingEvents = [];
+  try {
+    const { events } = await _cap.os.pending();
+    pendingEvents = events || [];
+    out.push(`\npending (to push): ${pendingEvents.length}`);
+    if (!pendingEvents.length) out.push("  → nothing dirty / all positions <5s. Server will not change.");
+  } catch (e) { out.push(`pending() threw: ${e && e.message || e}`); }
+
+  if (!pendingEvents.length) return show();
+
+  // POST exactly like the auto-flush, but report the outcome.
+  const byProfile = new Map();
+  for (const e of pendingEvents) {
+    const pid = e.profileId || profile.id;
+    if (!byProfile.has(pid)) byProfile.set(pid, []);
+    byProfile.get(pid).push(e);
+  }
+  for (const [pid, evs] of byProfile) {
+    out.push(`\nPOST /api/library/sync/progress  profile=${pid}  events=${evs.length}`);
+    try {
+      const r = await fetch("/api/library/sync/progress", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ profile_id: pid, events: evs.map((e) => ({
+          item_id: e.itemId, file_path: e.filePath,
+          position_sec: e.positionSec, duration_sec: e.durationSec,
+          client_updated_at: e.clientUpdatedAt, base_synced_at: e.baseSyncedAt || null,
+          subtitle_sel: e.subtitleSel || null,
+          local_audio_idx: (e.localAudioIdx ?? null),
+          local_subtitle_idx: (e.localSubtitleIdx ?? null),
+        })) }),
+      });
+      out.push(`  HTTP ${r.status} ${r.statusText}`);
+      if (!r.ok) { out.push(`  body: ${(await r.text()).slice(0, 300)}`); continue; }
+      const res = await r.json();
+      out.push(`  applied=${(res.applied || []).length}  conflicts=${(res.conflicts || []).length}`);
+      for (const a of (res.applied || [])) out.push(`    ✓ applied ${a.file_path}${a.skipped ? " ("+a.skipped+")" : ""}`);
+      for (const c of (res.conflicts || [])) out.push(`    ⚠ conflict ${c.file_path}: server=${Math.round((c.server||{}).position_sec||0)}s vs mine=${Math.round((c.client||{}).position_sec||0)}s`);
+      if (res.applied && res.applied.length) {
+        try { await _cap.os.markSynced({ applied: res.applied.map((a) => ({
+          itemId: a.item_id, filePath: a.file_path, serverUpdatedAt: a.server_updated_at, profileId: pid,
+        })) }); out.push("  (watermarks updated locally)"); } catch (e) { out.push(`  markSynced threw: ${e && e.message || e}`); }
+      }
+      if (res.conflicts && res.conflicts.length) {
+        const list = res.conflicts.map((c) => ({ profileId: pid, conflict: c, event: evs.find((e) => e.itemId === c.item_id && e.filePath === c.file_path) || null }));
+        out.push("  → opening conflict resolution UI…");
+        show();
+        return _appShowConflicts(list);
+      }
+    } catch (e) {
+      out.push(`  ✗ fetch threw: ${e && e.message || e}`);
+      out.push("  (this usually means the host is unreachable from the app, or a TLS/cert issue)");
+    }
+  }
+  show();
+}
+
 // ── iOS app: offline bundle download + localhost playback (Capacitor, M2) ────
 //
 // Everything here is INERT in a plain browser: `isApp` is false unless we're
@@ -10917,6 +11038,8 @@ document.addEventListener("DOMContentLoaded",async()=>{
   // M3: when the browser regains connectivity, drain any offline progress the
   // native store accumulated while we were away. No-op in a plain browser.
   if (isApp) window.addEventListener("online", () => _appFlushOfflineProgress());
+  // App-only: reveal the offline-sync diagnostics row in profile settings.
+  if (isApp) { const r = document.getElementById("psOfflineSyncRow"); if (r) r.classList.remove("hidden"); }
   // Start polling for any in-flight prep jobs so the indicator is correct
   // even when the page is reloaded mid-job (state is purely in-memory otherwise).
   startGlobalPrepPoller();
@@ -10981,6 +11104,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.4.0.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.4.1.0</div>
 </body>
 </html>

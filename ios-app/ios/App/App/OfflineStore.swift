@@ -376,6 +376,8 @@ final class OfflineProgressStore {
             "completed": rec["completed"] ?? false,
             "clientUpdatedAt": rec["clientUpdatedAt"] ?? "",
             "baseSyncedAt": rec["baseSyncedAt"] ?? NSNull(),
+            // Surfaced for the on-device sync diagnostic; the flush ignores it.
+            "dirty": rec["dirty"] ?? true,
         ]
         if let s = rec["subtitleSel"] { e["subtitleSel"] = s }
         if let a = rec["localAudioIdx"] { e["localAudioIdx"] = a }
