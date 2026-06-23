@@ -7708,49 +7708,85 @@ let _appSyncing = false;
 async function _appFlushOfflineProgress() {
   if (!(isApp && _cap.os) || !profile.id || _appSyncing) return;
   _appSyncing = true;
+  let advancedServer = false;
   try {
     const { events } = await _cap.os.pending();
-    if (!events || !events.length) return;
-    // Group by profile so each batch carries one profile_id (the endpoint's shape).
-    const byProfile = new Map();
-    for (const e of events) {
-      const pid = e.profileId || profile.id;
-      if (!byProfile.has(pid)) byProfile.set(pid, []);
-      byProfile.get(pid).push(e);
-    }
-    for (const [pid, evs] of byProfile) {
-      const r = await fetch("/api/library/sync/progress", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ profile_id: pid, events: evs.map((e) => ({
-          item_id: e.itemId, file_path: e.filePath,
-          position_sec: e.positionSec, duration_sec: e.durationSec,
-          client_updated_at: e.clientUpdatedAt, base_synced_at: e.baseSyncedAt || null,
-          subtitle_sel: e.subtitleSel || null,
-          local_audio_idx: (e.localAudioIdx ?? null),
-          local_subtitle_idx: (e.localSubtitleIdx ?? null),
-        })) }),
-      });
-      if (!r.ok) continue;
-      const res = await r.json();
-      if (res.applied && res.applied.length) {
-        try { await _cap.os.markSynced({ applied: res.applied.map((a) => ({
-          itemId: a.item_id, filePath: a.file_path,
-          serverUpdatedAt: a.server_updated_at, profileId: pid,
-        })) }); } catch (_) {}
+    if (events && events.length) {
+      // Group by profile so each batch carries one profile_id (the endpoint's shape).
+      const byProfile = new Map();
+      for (const e of events) {
+        const pid = e.profileId || profile.id;
+        if (!byProfile.has(pid)) byProfile.set(pid, []);
+        byProfile.get(pid).push(e);
       }
-      // Conflicts are surfaced by the M4 resolution UI; M3 just leaves them
-      // pending (they keep re-reporting until resolved).
-      if (res.conflicts && res.conflicts.length) {
-        console.info(`[sync] ${res.conflicts.length} progress conflict(s) deferred to resolution UI.`);
+      for (const [pid, evs] of byProfile) {
+        const r = await fetch("/api/library/sync/progress", {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ profile_id: pid, events: evs.map((e) => ({
+            item_id: e.itemId, file_path: e.filePath,
+            position_sec: e.positionSec, duration_sec: e.durationSec,
+            client_updated_at: e.clientUpdatedAt, base_synced_at: e.baseSyncedAt || null,
+            subtitle_sel: e.subtitleSel || null,
+            local_audio_idx: (e.localAudioIdx ?? null),
+            local_subtitle_idx: (e.localSubtitleIdx ?? null),
+          })) }),
+        });
+        if (!r.ok) continue;
+        const res = await r.json();
+        if (res.applied && res.applied.length) {
+          advancedServer = true;
+          try { await _cap.os.markSynced({ applied: res.applied.map((a) => ({
+            itemId: a.item_id, filePath: a.file_path,
+            serverUpdatedAt: a.server_updated_at, profileId: pid,
+          })) }); } catch (_) {}
+        }
+        // Conflicts are surfaced by the M4 resolution UI; M3 just leaves them
+        // pending (they keep re-reporting until resolved).
+        if (res.conflicts && res.conflicts.length) {
+          console.info(`[sync] ${res.conflicts.length} progress conflict(s) deferred to resolution UI.`);
+        }
       }
     }
-    // A flush may have advanced the library on the server — refresh the view.
-    try { if (activeTab === "library") await loadLibrary(); } catch (_) {}
   } catch (_) {
     /* still offline / host hiccup — try again on the next online event */
   } finally {
     _appSyncing = false;
   }
+  // After pushing local progress, pull the server's current state as the offline
+  // baseline so offline resume reflects watch history from online / other devices.
+  await _appSeedFromServer();
+  // A flush may have advanced the library on the server — refresh the view.
+  if (advancedServer) { try { if (activeTab === "library") await loadLibrary(); } catch (_) {} }
+}
+
+// Server→device: seed OfflineStore with the server's progress for every download
+// so a fully-offline resume starts where online viewing left off. Companion to
+// the flush above; `seedProgress` won't clobber unsynced offline progress.
+async function _appSeedFromServer() {
+  if (!(isApp && _cap.os) || !profile.id) return;
+  try {
+    const { items } = await _cap.dl.list();
+    const files = (items || [])
+      .filter((it) => it.complete)
+      .map((it) => ({ item_id: it.itemId, file_path: it.filePath }));
+    if (!files.length) return;
+    const r = await fetch("/api/library/sync/pull", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ profile_id: profile.id, files }),
+    });
+    if (!r.ok) return;
+    const { progress } = await r.json();
+    for (const p of (progress || [])) {
+      try {
+        await _cap.os.seedProgress({
+          itemId: p.item_id, filePath: p.file_path,
+          positionSec: p.position_sec || 0, durationSec: p.duration_sec || 0,
+          completed: !!p.completed, serverUpdatedAt: p.updated_at || "",
+          profileId: profile.id,
+        });
+      } catch (_) {}
+    }
+  } catch (_) { /* offline / host hiccup — retry next online event */ }
 }
 
 // ── iOS app: offline bundle download + localhost playback (Capacitor, M2) ────
@@ -7815,7 +7851,8 @@ async function _appStartLocalPlayback(local) {
 // Resolve a downloadable bundle manifest, building the host bundle first (and
 // polling the prep job) when it isn't prepped yet.
 async function _appFetchManifest(itemId, filePath) {
-  const u = `/api/library/${itemId}/bundle-manifest?file_path=${encodeURIComponent(filePath)}`;
+  const u = `/api/library/${itemId}/bundle-manifest?file_path=${encodeURIComponent(filePath)}`
+          + (profile.id ? `&profile_id=${encodeURIComponent(profile.id)}` : "");
   let r = await fetch(u);
   if (r.status === 409) {
     const info = await r.json().catch(() => ({}));
@@ -7880,7 +7917,23 @@ async function appDownloadBundle(itemId, filePath, name, btn) {
     await _cap.dl.download({
       itemId, filePath, cacheKey: manifest.cache_key, name,
       baseUrl: origin + manifest.bundle_url, files, token: _appPairingToken(),
+      // Series/episode metadata + inlined poster for the offline Downloads picker.
+      meta: manifest.meta || null,
     });
+    // Seed the offline store with current server progress so offline resume
+    // reflects watch history accrued online (M3).
+    if (_cap.os && manifest.progress) {
+      try {
+        await _cap.os.seedProgress({
+          itemId, filePath,
+          positionSec: manifest.progress.position_sec || 0,
+          durationSec: manifest.progress.duration_sec || 0,
+          completed: !!manifest.progress.completed,
+          serverUpdatedAt: manifest.progress.updated_at || "",
+          profileId: profile.id,
+        });
+      } catch (_) {}
+    }
     const e = offlineBundles.get(key) || {};
     e.downloading = true; e.prepping = false; e.bytesTotal = manifest.total_bytes;
     offlineBundles.set(key, e);
@@ -10762,6 +10815,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.3.0.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.3.1.0</div>
 </body>
 </html>

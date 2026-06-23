@@ -28,6 +28,8 @@
 //    getProgress({ itemId, filePath, profileId? })           -> { found, positionSec,
 //                                                                  durationSec, completed,
 //                                                                  clientUpdatedAt, baseSyncedAt }
+//    seedProgress({ itemId, filePath, positionSec, durationSec,
+//                   completed, serverUpdatedAt, profileId? })  -> {}   // server→device baseline
 //    pending()                                               -> { events:[ <event> ] }
 //    markSynced({ applied:[ { itemId, filePath, serverUpdatedAt, profileId? } ] }) -> {}
 //    all()                                                   -> { events:[ <event> ] }
@@ -50,6 +52,7 @@ public class OfflineStore: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "getProfile",   returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "saveProgress", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "getProgress",  returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "seedProgress", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "pending",      returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "markSynced",   returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "all",          returnType: CAPPluginReturnPromise),
@@ -99,6 +102,21 @@ public class OfflineStore: CAPPlugin, CAPBridgedPlugin {
         }
         call.resolve(store.getProgress(profileId: call.getString("profileId"),
                                        itemId: itemId, filePath: filePath))
+    }
+
+    @objc func seedProgress(_ call: CAPPluginCall) {
+        guard let itemId = call.getString("itemId"), !itemId.isEmpty,
+              let filePath = call.getString("filePath"), !filePath.isEmpty else {
+            call.reject("seedProgress() requires itemId, filePath."); return
+        }
+        store.seedProgress(
+            profileId: call.getString("profileId"),
+            itemId: itemId, filePath: filePath,
+            positionSec: call.getDouble("positionSec") ?? 0,
+            durationSec: call.getDouble("durationSec") ?? 0,
+            completed: call.getBool("completed") ?? false,
+            serverUpdatedAt: call.getString("serverUpdatedAt") ?? "")
+        call.resolve()
     }
 
     @objc func pending(_ call: CAPPluginCall) {
@@ -234,6 +252,49 @@ final class OfflineProgressStore {
                 "clientUpdatedAt": rec["clientUpdatedAt"] ?? "",
                 "baseSyncedAt": rec["baseSyncedAt"] ?? NSNull(),
             ]
+        }
+    }
+
+    /// Adopt the server's progress as the local baseline for a downloaded file so
+    /// **offline resume reflects history accrued online**. Skips the write when the
+    /// device holds *newer, unsynced* offline progress for this file (a pending
+    /// edit whose clientUpdatedAt is past both its own baseSyncedAt and the server
+    /// timestamp) — that would clobber something not yet pushed. Otherwise it writes
+    /// a settled record (clientUpdatedAt == baseSyncedAt == serverUpdatedAt), so it
+    /// is never re-pushed by pending().
+    func seedProgress(profileId: String?, itemId: String, filePath: String,
+                      positionSec: Double, durationSec: Double, completed: Bool,
+                      serverUpdatedAt: String) {
+        queue.sync {
+            var obj = read()
+            let pid = (profileId?.isEmpty == false ? profileId! : activeProfileLocked(obj))
+            var records = (obj["records"] as? [String: Any]) ?? [:]
+            let k = key(pid, itemId, filePath)
+            let serverDate = Self.parse(serverUpdatedAt)
+            if let existing = records[k] as? [String: Any] {
+                let cu = (existing["clientUpdatedAt"] as? String).flatMap(Self.parse)
+                let bs = (existing["baseSyncedAt"] as? String).flatMap(Self.parse)
+                let hasUnsynced = (cu != nil) && (bs == nil || (cu! > bs!))
+                if hasUnsynced {
+                    // Local edits pending. Only let the server win if it's strictly newer.
+                    if let sd = serverDate, let c = cu, sd > c {
+                        // server newer — fall through to overwrite
+                    } else {
+                        return
+                    }
+                }
+            }
+            let stamp = serverUpdatedAt.isEmpty ? Self.isoNow() : serverUpdatedAt
+            records[k] = [
+                "profileId": pid, "itemId": itemId, "filePath": filePath,
+                "positionSec": (positionSec * 10).rounded() / 10,
+                "durationSec": (durationSec * 10).rounded() / 10,
+                "completed": completed,
+                "clientUpdatedAt": stamp,
+                "baseSyncedAt": stamp,   // settled — pending() will not re-push it
+            ]
+            obj["records"] = records
+            write(obj)
         }
     }
 

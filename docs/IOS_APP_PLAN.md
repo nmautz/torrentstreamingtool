@@ -10,9 +10,19 @@
 > player captures progress + resumes offline; the dashboard pushes the active
 > profile (`setProfile`) and drains the store (`_appFlushOfflineProgress`) on
 > profile-select and the `online` event. **Conflict-resolution UI is M4** — A2
-> already returns conflicts; M3 just leaves them pending. Remaining on M3 is
-> **on-device verification**: watch offline, reconnect, confirm history lands on the
-> server and an auto-resolvable case merges silently.
+> already returns conflicts; M3 just leaves them pending.
+>
+> **M3.1** (`6.0.0-preview.3.1.0`) closed three gaps: sync is now **bidirectional**
+> (**`POST /api/library/sync/pull`** + `OfflineStore.seedProgress` seed the server's
+> progress as the offline baseline, at download time and on every reconnect, so
+> offline resume reflects online history); the flush was hardened so it always
+> reaches the seed step and only refreshes the library when the server advanced; and
+> the bundle now carries **series/episode metadata + an inlined poster** (`meta` on
+> the bundle-manifest, persisted by `BundleDownloader`) so the offline
+> [`downloads.html`](../ios-app/www/downloads.html) picker **groups by series** with
+> poster, episode names, overview and per-episode watch-progress bars. Remaining on
+> M3 is **on-device verification**: watch offline, reconnect, confirm history lands
+> on the server and an auto-resolvable case merges silently.
 >
 > **M2 landed** (`6.0.0-preview.2.1.0`) — offline download + fully-offline playback.
 > Host **A1** `bundle-manifest`; native **`BundleDownloader`** (foreground URLSession

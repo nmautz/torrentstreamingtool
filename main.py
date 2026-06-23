@@ -6976,6 +6976,48 @@ async def sync_progress(req: SyncProgressReq) -> JSONResponse:
     return JSONResponse({"applied": applied, "conflicts": conflicts, "server_updated_at": now})
 
 
+class SyncPullFile(BaseModel):
+    item_id: str
+    file_path: str
+
+
+class SyncPullReq(BaseModel):
+    profile_id: str
+    files: list[SyncPullFile]
+
+
+@app.post("/api/library/sync/pull")
+async def sync_pull(req: SyncPullReq) -> JSONResponse:
+    """Server→device progress baseline (M3 companion to /sync/progress).
+
+    Given the device's downloaded files, return the requesting profile's current
+    server progress for each (`position_sec`/`duration_sec`/`completed`/`updated_at`)
+    so the app can seed its OfflineStore baseline — making **offline resume reflect
+    watch history accrued online** (and on other devices). Read-only; the device's
+    `seedProgress` only adopts a baseline when it wouldn't clobber unsynced local
+    offline progress."""
+    lib = await get_library()
+    items_by_id = {it["id"]: it for it in lib.get("items", [])}
+    out: list[dict] = []
+    for f in req.files:
+        item = items_by_id.get(f.item_id)
+        if not item:
+            continue
+        fp = (item.get("progress", {}).get(req.profile_id, {})
+                  .get("file_progress", {}).get(f.file_path))
+        if not fp:
+            continue
+        out.append({
+            "item_id":      f.item_id,
+            "file_path":    f.file_path,
+            "position_sec": fp.get("position_sec", 0),
+            "duration_sec": fp.get("duration_sec", 0),
+            "completed":    bool(fp.get("completed")),
+            "updated_at":   fp.get("updated_at") or "",
+        })
+    return JSONResponse({"progress": out})
+
+
 class LocalTracksReq(BaseModel):
     profile_id: str
     file_path: str
@@ -15979,8 +16021,63 @@ def _enumerate_bundle_files(out_dir: Path) -> tuple[list[dict], int]:
     return files, total
 
 
+async def _tmdb_image_data_url(path: str, size: str = "w342") -> str:
+    """Fetch a TMDb image and return it as a `data:` URL so the iOS offline
+    Downloads picker can show a poster with no network (the bundle carries it).
+    Best-effort: returns "" on any failure or when no path/key. Only called at
+    download time (manifest fetch), not persisted to library.json."""
+    if not path:
+        return ""
+    try:
+        url = f"{TMDB_IMG_BASE}/{size}{path}"
+        async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as c:
+            r = await c.get(url)
+        if r.status_code == 200 and r.content:
+            ct = r.headers.get("content-type", "image/jpeg").split(";")[0].strip() or "image/jpeg"
+            return f"data:{ct};base64,{base64.b64encode(r.content).decode('ascii')}"
+    except Exception:
+        pass
+    return ""
+
+
+async def _bundle_meta_for_file(item: dict, file_entry: dict, tmdb: Optional[dict],
+                                include_poster: bool = True) -> dict:
+    """Build the per-file series/episode metadata block carried by the bundle so
+    the offline iOS Downloads picker can group and label downloads (and show a
+    poster) without the host. Episode name/overview are resolved from the cached
+    TMDb metadata; the poster is inlined as a data URL (see _tmdb_image_data_url)."""
+    series = (item.get("series") or item.get("title") or "").strip()
+    season = int(file_entry.get("season") or 0)
+    episode = int(file_entry.get("episode") or 0)
+    tmdb = tmdb or {}
+    ep_name = ""
+    ep_overview = ""
+    still_path = ""
+    if season and episode:
+        s = (tmdb.get("seasons") or {}).get(str(season)) or {}
+        for ep in s.get("episodes", []) or []:
+            if int(ep.get("episode") or 0) == episode:
+                ep_name = ep.get("name") or ""
+                ep_overview = ep.get("overview") or ""
+                still_path = ep.get("still_path") or ""
+                break
+    poster_path = tmdb.get("poster_path") or ""
+    return {
+        "series":        series,
+        "title":         tmdb.get("title") or series,
+        "season":        season,
+        "episode":       episode,
+        "episode_name":  ep_name,
+        "overview":      ep_overview or tmdb.get("overview") or "",
+        "tmdb_kind":     tmdb.get("tmdb_kind") or ("tv" if season else ""),
+        "poster_path":   poster_path,
+        "img_base":      TMDB_IMG_BASE,
+        "poster_data_url": (await _tmdb_image_data_url(poster_path) if (include_poster and poster_path) else ""),
+    }
+
+
 @app.get("/api/library/{item_id}/bundle-manifest")
-async def bundle_manifest(item_id: str, file_path: str = "") -> JSONResponse:
+async def bundle_manifest(item_id: str, file_path: str = "", profile_id: str = "") -> JSONResponse:
     """Enumerate a built HLS bundle for the iOS offline downloader (plan A1).
 
     Returns a flat `files` list (relative names + byte sizes) plus `total_bytes`
@@ -16022,6 +16119,29 @@ async def bundle_manifest(item_id: str, file_path: str = "") -> JSONResponse:
     meta = _read_meta(out_dir)
     files, total = await asyncio.to_thread(_enumerate_bundle_files, out_dir)
     sidecar_subs = await asyncio.to_thread(_list_sidecar_subs, src, item_id)
+
+    # Series/episode metadata + poster so the offline Downloads picker can group
+    # and label this download without the host (M3). Fetch+cache TMDb data if it
+    # isn't cached yet (one-time per item; best-effort if no key).
+    tmdb = item.get("metadata") or {}
+    if not tmdb and await _tmdb_effective_key():
+        tmdb = await _fetch_item_metadata(item_id) or {}
+    bundle_meta = await _bundle_meta_for_file(item, target, tmdb)
+
+    # The requesting profile's current server progress for this file, so the app
+    # can seed its OfflineStore baseline (offline resume reflects online history).
+    prog = None
+    if profile_id:
+        fp = (item.get("progress", {}).get(profile_id, {})
+                  .get("file_progress", {}).get(file_path))
+        if fp:
+            prog = {
+                "position_sec": fp.get("position_sec", 0),
+                "duration_sec": fp.get("duration_sec", 0),
+                "completed":    bool(fp.get("completed")),
+                "updated_at":   fp.get("updated_at") or "",
+            }
+
     return JSONResponse({
         "ready":              True,
         "cache_key":          key,
@@ -16037,6 +16157,8 @@ async def bundle_manifest(item_id: str, file_path: str = "") -> JSONResponse:
         "subtitles":          meta.get("subtitles", []),
         "skipped_image_subs": meta.get("skipped_image_subs", []),
         "subs":               sidecar_subs,
+        "meta":               bundle_meta,
+        "progress":           prog,
     })
 
 

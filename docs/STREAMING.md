@@ -1193,6 +1193,23 @@ on profile-select and the window `online` event; the dashboard's own
 returned but the **resolution UI is M4** — until then they stay pending. All of this
 is `isApp`-gated, so the browser dashboard is unaffected.
 
+**Bidirectional seeding (so offline resume reflects online history).** Push alone
+would mean an episode watched partway *online* resumes at 0 offline. So sync is
+two-way: **`POST /api/library/sync/pull`** returns the profile's current server
+progress for the device's downloads, and `OfflineStore.seedProgress` adopts it as
+the local baseline (settled — never re-pushed; never clobbers an unsynced offline
+edit). The dashboard seeds at **download time** (the bundle-manifest returns the
+file's `progress`) and again on every reconnect (`_appSeedFromServer`, run right
+after `_appFlushOfflineProgress`).
+
+**Offline picker metadata.** The bundle-manifest also returns a `meta` block —
+series/title, season·episode, episode name, overview, and the **poster inlined as a
+`data:` URL** (`_tmdb_image_data_url`, so it renders with no network). `BundleDownloader`
+persists `meta` in its index and exposes it via `list()`/`getLocal()`; the offline
+`downloads.html` **groups downloads by series** with poster + episode list (S·E +
+name) + overview + per-episode **watch-progress bars** ("Watched" / "Resume …") read
+from `OfflineStore`.
+
 ---
 
 ## See also

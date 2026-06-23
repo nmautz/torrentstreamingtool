@@ -23,10 +23,13 @@
 //  identifier must be owned by exactly one long-lived delegate.
 //
 //  JS surface (Capacitor plugin "BundleDownloader"):
-//    download({ itemId, filePath, cacheKey, name?, baseUrl, files:[{name,size}], token? })
+//    download({ itemId, filePath, cacheKey, name?, baseUrl, files:[{name,size}], token?, meta? })
 //                                   -> { sha, dir, alreadyComplete }
-//    getLocal({ itemId, filePath }) -> { found, complete, sha?, dir?, bytesDone, bytesTotal, fileCount }
-//    list()                         -> { items:[{ sha, itemId, filePath, name, complete, bytesTotal, bytesDone, fileCount }] }
+//    getLocal({ itemId, filePath }) -> { found, complete, sha?, dir?, bytesDone, bytesTotal, fileCount, meta? }
+//    list()                         -> { items:[{ sha, itemId, filePath, name, complete, bytesTotal, bytesDone, fileCount, meta? }] }
+//  `meta` (optional) = { series, title, season, episode, episode_name, overview,
+//    tmdb_kind, poster_path, img_base, poster_data_url } — series/episode info +
+//    inlined poster so the offline Downloads picker can group/label with no host.
 //    remove({ sha? , itemId?, filePath? }) -> {}
 //    cancel({ sha })                -> {}
 //    bytesUsed()                    -> { bytes }
@@ -86,11 +89,14 @@ public class BundleDownloader: CAPPlugin, CAPBridgedPlugin {
         }
         guard !files.isEmpty else { call.reject("download() requires a non-empty files list."); return }
 
+        // Optional series/episode metadata (+ inlined poster) for the offline picker.
+        let meta = call.getObject("meta")?.reduce(into: [String: Any]()) { $0[$1.key] = $1.value }
+
         do {
             let res = try BundleDownloadManager.shared.startDownload(
                 itemId: itemId, filePath: filePath, cacheKey: cacheKey,
                 name: call.getString("name") ?? filePath,
-                baseUrl: baseUrl, files: files, token: call.getString("token"))
+                baseUrl: baseUrl, files: files, token: call.getString("token"), meta: meta)
             call.resolve(["sha": cacheKey, "dir": res.dir, "alreadyComplete": res.alreadyComplete])
         } catch {
             call.reject("Could not start download: \(error.localizedDescription)")
@@ -215,7 +221,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
 
     func startDownload(itemId: String, filePath: String, cacheKey: String,
                        name: String, baseUrl: String, files: [BundleFile],
-                       token: String?) throws -> StartResult {
+                       token: String?, meta: [String: Any]? = nil) throws -> StartResult {
         var result: StartResult!
         var thrown: Error?
         queue.sync {
@@ -226,13 +232,16 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             } catch { thrown = error; return }
 
             // Record (or refresh) the index entry up front so getLocal/list see it
-            // even mid-download.
+            // even mid-download. Preserve any prior `meta` if this call omits it.
             var idx = readIndex()
-            idx[cacheKey] = [
+            var entry: [String: Any] = [
                 "itemId": itemId, "filePath": filePath, "name": name,
                 "baseUrl": baseUrl, "complete": false,
                 "files": files.map { ["name": $0.name, "size": $0.size] },
             ]
+            if let m = meta { entry["meta"] = m }
+            else if let prev = idx[cacheKey]?["meta"] { entry["meta"] = prev }
+            idx[cacheKey] = entry
             writeIndex(idx)
 
             // Which files are already fully on disk (resume / no-op re-download)?
@@ -283,8 +292,10 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
                 done += sz
             }
             let complete = (entry["complete"] as? Bool) ?? false
-            return ["found": true, "complete": complete, "sha": sha, "dir": dir.path,
+            var res: [String: Any] = ["found": true, "complete": complete, "sha": sha, "dir": dir.path,
                     "bytesDone": done, "bytesTotal": total, "fileCount": files.count]
+            if let m = entry["meta"] { res["meta"] = m }
+            return res
         }
     }
 
@@ -300,7 +311,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
                     guard let n = f["name"] as? String else { continue }
                     done += (try? dir.appendingPathComponent(n).resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { Int64($0) } ?? 0
                 }
-                return [
+                var row: [String: Any] = [
                     "sha": sha,
                     "dir": dir.path,        // the offline player passes this to LocalMediaServer.start
                     "itemId": entry["itemId"] as? String ?? "",
@@ -309,6 +320,8 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
                     "complete": (entry["complete"] as? Bool) ?? false,
                     "bytesTotal": total, "bytesDone": done, "fileCount": files.count,
                 ]
+                if let m = entry["meta"] { row["meta"] = m }
+                return row
             }
         }
     }

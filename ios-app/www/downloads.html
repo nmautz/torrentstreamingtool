@@ -32,13 +32,33 @@
     button.ghost { background:transparent; color:var(--muted); border:1px solid var(--line); }
     button:active { opacity:.8; }
     ul { list-style:none; margin:0; padding:0; }
-    li { border:1px solid var(--line); background:var(--panel); padding:14px; margin-bottom:10px; display:flex; align-items:center; gap:12px; }
-    .meta { flex:1 1 auto; min-width:0; }
-    .name { font-size:15px; font-weight:700; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-    .size { color:var(--muted); font-size:12px; margin-top:2px; }
     .play { flex:0 0 auto; background:var(--accent); padding:11px 16px; }
     .del  { flex:0 0 auto; background:transparent; color:var(--muted); border:1px solid var(--line); padding:11px 12px; }
     .empty { color:var(--muted); font-size:14px; text-align:center; padding:40px 10px; line-height:1.5; }
+
+    /* Series / movie cards (metadata-rich offline picker) */
+    .card { border:1px solid var(--line); background:var(--panel); margin-bottom:14px; }
+    .chead { display:flex; gap:12px; padding:12px; }
+    .poster { flex:0 0 auto; width:60px; height:90px; background:#202028; object-fit:cover; }
+    .poster.fb { display:flex; align-items:center; justify-content:center; color:var(--muted); font-size:22px; font-weight:800; }
+    .chead .info { flex:1 1 auto; min-width:0; }
+    .ctitle { font-size:16px; font-weight:800; line-height:1.2; }
+    .cmeta { color:var(--muted); font-size:12px; margin-top:3px; }
+    .coverview { color:var(--muted); font-size:12px; margin-top:6px; line-height:1.4;
+                 display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden; }
+    .eps { border-top:1px solid var(--line); }
+    .ep { display:flex; align-items:center; gap:10px; padding:11px 12px; border-bottom:1px solid var(--line); }
+    .ep:last-child { border-bottom:0; }
+    .ep .info { flex:1 1 auto; min-width:0; }
+    .ep .line { font-size:14px; font-weight:600; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+    .ep .num { color:var(--accent); font-family:ui-monospace,Menlo,monospace; font-size:12px; font-weight:700; margin-right:6px; }
+    .ep .size { color:var(--muted); font-size:11px; margin-top:2px; }
+    .prog { height:3px; background:#26262c; margin-top:6px; }
+    .prog > i { display:block; height:100%; background:var(--accent); }
+    .prog.done > i { background:var(--ok); }
+    .watched { color:var(--ok); }
+    .pbtn { flex:0 0 auto; background:var(--accent); padding:9px 14px; }
+    .dbtn { flex:0 0 auto; background:transparent; color:var(--muted); border:1px solid var(--line); padding:9px 11px; }
     #playerWrap { position:fixed; inset:0; background:#000; display:none; flex-direction:column; z-index:50; }
     #playerWrap.show { display:flex; }
     #playerWrap video { flex:1 1 auto; width:100%; background:#000; }
@@ -142,7 +162,9 @@
         _nowPlaying = item;
         const base = url.replace(/\/+$/, "") + "/";
         const v = $("v");
-        $("nowTitle").textContent = item.name || "";
+        const m = item.meta || {};
+        const num = (m.season && m.episode) ? `S${pad2(m.season)}E${pad2(m.episode)} · ` : "";
+        $("nowTitle").textContent = (m.series ? m.series + " — " : "") + num + (m.episode_name || item.name || "");
         v.src = base + "master.m3u8";
         // Offline resume: seek to the saved offline position once metadata loads.
         let resumeTo = 0;
@@ -171,12 +193,77 @@
       $("playerWrap").classList.remove("show");
       _nowPlaying = null;
       await stopServer();
+      refresh();   // reflect the just-watched progress in the list
     }
 
     async function removeItem(item) {
       if (!window.confirm("Remove “" + (item.name || "this download") + "” from the device?")) return;
       try { await plugin("BundleDownloader").remove({ sha: item.sha }); } catch (e) { showErr(e); }
       refresh();
+    }
+
+    const pad2 = (n) => String(n).padStart(2, "0");
+
+    // Watch-progress map keyed "itemId filePath" → { positionSec, durationSec, completed }
+    async function progressMap() {
+      const os = offlineStore();
+      if (!os) return new Map();
+      const m = new Map();
+      try {
+        const { events } = await os.all();
+        for (const e of (events || [])) m.set(e.itemId + " " + e.filePath, e);
+      } catch (_) {}
+      return m;
+    }
+
+    function posterEl(meta) {
+      const url = meta && meta.poster_data_url;
+      if (url) { const img = document.createElement("img"); img.className = "poster"; img.src = url; return img; }
+      const fb = document.createElement("div"); fb.className = "poster fb";
+      fb.textContent = ((meta && (meta.series || meta.title)) || "?").trim().charAt(0).toUpperCase() || "?";
+      return fb;
+    }
+
+    // A small progress bar + label from a saved-progress record (or null).
+    function progressBits(p) {
+      const wrap = document.createElement("div");
+      if (!p || !(p.durationSec > 0)) return wrap;
+      const pct = Math.min(100, Math.max(0, (p.positionSec / p.durationSec) * 100));
+      const bar = document.createElement("div");
+      bar.className = "prog" + (p.completed ? " done" : "");
+      const fill = document.createElement("i"); fill.style.width = (p.completed ? 100 : pct) + "%";
+      bar.appendChild(fill); wrap.appendChild(bar);
+      return wrap;
+    }
+
+    function episodeRow(item, p) {
+      const meta = item.meta || {};
+      const row = document.createElement("div"); row.className = "ep";
+      const info = document.createElement("div"); info.className = "info";
+      const line = document.createElement("div"); line.className = "line";
+      const num = (meta.season && meta.episode) ? `S${pad2(meta.season)}·E${pad2(meta.episode)}`
+                : (meta.episode ? `E${pad2(meta.episode)}` : "");
+      if (num) { const s = document.createElement("span"); s.className = "num"; s.textContent = num; line.appendChild(s); }
+      const nameTxt = meta.episode_name || item.name || item.sha;
+      line.appendChild(document.createTextNode(nameTxt));
+      const sz = document.createElement("div"); sz.className = "size";
+      sz.textContent = fmtBytes(item.bytesTotal || item.bytesDone || 0)
+                     + (p && p.completed ? " · " : (p && p.durationSec > 0 ? " · " : ""));
+      if (p && p.completed) { const w = document.createElement("span"); w.className = "watched"; w.textContent = "Watched"; sz.appendChild(w); }
+      else if (p && p.durationSec > 0 && p.positionSec > 5) sz.appendChild(document.createTextNode("Resume " + fmtTime(p.positionSec)));
+      info.appendChild(line); info.appendChild(sz); info.appendChild(progressBits(p));
+      const playBtn = document.createElement("button"); playBtn.className = "pbtn"; playBtn.textContent = "Play";
+      playBtn.addEventListener("click", () => play(item));
+      const delBtn = document.createElement("button"); delBtn.className = "dbtn"; delBtn.textContent = "✕";
+      delBtn.addEventListener("click", () => removeItem(item));
+      row.appendChild(info); row.appendChild(playBtn); row.appendChild(delBtn);
+      return row;
+    }
+
+    function fmtTime(sec) {
+      sec = Math.floor(sec || 0);
+      const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+      return (h ? h + ":" + pad2(m) : m) + ":" + pad2(s);
     }
 
     async function refresh() {
@@ -192,18 +279,63 @@
       } catch (e) { showErr(e); }
       $("used").textContent = used ? fmtBytes(used) + " used" : "";
       $("empty").style.display = items.length ? "none" : "block";
+
+      const prog = await progressMap();
+
+      // Group by series (meta.series), preserving discovery order. Items with no
+      // metadata fall back to their own name as a one-off group.
+      const groups = new Map();   // key → { meta, items:[] }
       for (const item of items) {
-        const li = document.createElement("li");
-        const meta = document.createElement("div"); meta.className = "meta";
-        const nm = document.createElement("div"); nm.className = "name"; nm.textContent = item.name || item.sha;
-        const sz = document.createElement("div"); sz.className = "size"; sz.textContent = fmtBytes(item.bytesTotal || item.bytesDone || 0);
-        meta.appendChild(nm); meta.appendChild(sz);
-        const playBtn = document.createElement("button"); playBtn.className = "play"; playBtn.textContent = "Play";
-        playBtn.addEventListener("click", () => play(item));
-        const delBtn = document.createElement("button"); delBtn.className = "del"; delBtn.textContent = "✕";
-        delBtn.addEventListener("click", () => removeItem(item));
-        li.appendChild(meta); li.appendChild(playBtn); li.appendChild(delBtn);
-        list.appendChild(li);
+        const meta = item.meta || {};
+        const key = (meta.series || meta.title || item.name || item.sha).trim().toLowerCase();
+        if (!groups.has(key)) groups.set(key, { meta, items: [] });
+        groups.get(key).items.push(item);
+      }
+
+      for (const { meta, items: eps } of groups.values()) {
+        // Sort episodes by season then episode (one-offs keep insertion order).
+        eps.sort((a, b) => {
+          const am = a.meta || {}, bm = b.meta || {};
+          return ((am.season || 0) - (bm.season || 0)) || ((am.episode || 0) - (bm.episode || 0));
+        });
+        const card = document.createElement("div"); card.className = "card";
+        const head = document.createElement("div"); head.className = "chead";
+        head.appendChild(posterEl(meta));
+        const info = document.createElement("div"); info.className = "info";
+        const title = document.createElement("div"); title.className = "ctitle";
+        title.textContent = meta.series || meta.title || eps[0].name || "Download";
+        info.appendChild(title);
+        const isSeries = eps.length > 1 || (meta.season && meta.episode);
+        const cmeta = document.createElement("div"); cmeta.className = "cmeta";
+        cmeta.textContent = isSeries
+          ? `${eps.length} episode${eps.length === 1 ? "" : "s"} · ${fmtBytes(eps.reduce((t, e) => t + (e.bytesTotal || 0), 0))}`
+          : fmtBytes(eps[0].bytesTotal || eps[0].bytesDone || 0);
+        info.appendChild(cmeta);
+        if (meta.overview) { const ov = document.createElement("div"); ov.className = "coverview"; ov.textContent = meta.overview; info.appendChild(ov); }
+        head.appendChild(info);
+
+        if (isSeries) {
+          // Series: header is informational; episodes listed below with their own controls.
+          card.appendChild(head);
+          const epsWrap = document.createElement("div"); epsWrap.className = "eps";
+          for (const ep of eps) epsWrap.appendChild(episodeRow(ep, prog.get(ep.itemId + " " + ep.filePath)));
+          card.appendChild(epsWrap);
+        } else {
+          // Single movie / one-off: play + delete live in the header, progress under the meta.
+          const only = eps[0], p = prog.get(only.itemId + " " + only.filePath);
+          if (p && p.completed) { const w = document.createElement("span"); w.className = "watched"; w.textContent = " · Watched"; cmeta.appendChild(w); }
+          else if (p && p.durationSec > 0 && p.positionSec > 5) cmeta.appendChild(document.createTextNode(" · Resume " + fmtTime(p.positionSec)));
+          info.appendChild(progressBits(p));
+          const playBtn = document.createElement("button"); playBtn.className = "pbtn"; playBtn.textContent = "Play";
+          playBtn.addEventListener("click", () => play(only));
+          const delBtn = document.createElement("button"); delBtn.className = "dbtn"; delBtn.textContent = "✕";
+          delBtn.addEventListener("click", () => removeItem(only));
+          const btns = document.createElement("div"); btns.style.cssText = "display:flex;flex-direction:column;gap:8px;justify-content:center";
+          btns.appendChild(playBtn); btns.appendChild(delBtn);
+          head.appendChild(btns);
+          card.appendChild(head);
+        }
+        list.appendChild(card);
       }
     }
 
