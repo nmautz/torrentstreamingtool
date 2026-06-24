@@ -7,6 +7,13 @@
   <meta name="mobile-web-app-capable" content="yes" />
   <title>StreamLink</title>
   <meta name="theme-color" content="#4f46e5" />
+  <script>
+    /* Mark the document when running inside the Capacitor (iOS app) shell, BEFORE
+       first paint, so the height-locked shell can use stable `vh` instead of `dvh`
+       (see the `.is-app` CSS rule). The Capacitor runtime is injected at
+       document-start, so window.Capacitor is already present here. */
+    try { if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) document.documentElement.classList.add("is-app"); } catch (e) {}
+  </script>
   <script src="https://cdn.tailwindcss.com"></script>
   <script>tailwind.config = { darkMode: 'class' }</script>
   <style>
@@ -28,6 +35,16 @@
       touch-action: manipulation;  /* no accidental double-tap zoom; pinch still works */
     }
     body { height: 100vh; height: 100dvh; } /* track the real visual viewport */
+    /* ── WKWebView (iOS app) viewport-corruption fix ───────────────────────────
+       In the Capacitor shell the dynamic viewport unit `dvh` is a liability, not a
+       help: WKWebView shrinks the dynamic viewport when the soft keyboard appears
+       (search box, profile name, episode field…) and frequently DOES NOT restore
+       it on dismiss, so the height-locked shell stays sized wrong — the layout
+       visibly breaks and buttons in the clipped region go dead until the app is
+       relaunched. The app has no collapsing URL bar (the only reason `dvh` exists),
+       so the large-viewport `vh` is both correct AND stable here. Browsers keep
+       `dvh` (they DO collapse a URL bar). Scoped to `.is-app`, set before paint. */
+    html.is-app, html.is-app body { height: 100vh; }
     /* Scrollable regions trap their own momentum: flicking past the end of a
        list/modal must never move whatever sits behind it, and overscrolling a
        horizontal strip (season tabs) must never trigger back/forward swipe. */
@@ -54,8 +71,10 @@
        from the player's fullscreen button → video.webkitEnterFullscreen();
        this swipe affordance is the lighter, chrome-minimizing variant.) */
     @media (pointer: coarse) {
-      html:has(#localPlayer.lp-active:not(.lp-tiny)) { overflow-y: auto; }
-      html:has(#localPlayer.lp-active:not(.lp-tiny)) body {
+      /* Browser only — the app has no URL bar to collapse (see `.is-app` above),
+         so growing <body> past the viewport there would just add a stray scroll. */
+      html:not(.is-app):has(#localPlayer.lp-active:not(.lp-tiny)) { overflow-y: auto; }
+      html:not(.is-app):has(#localPlayer.lp-active:not(.lp-tiny)) body {
         height: calc(100vh + 45vh);
         height: calc(100dvh + 45vh);
       }
@@ -11162,6 +11181,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.5.0.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.5.0.2</div>
 </body>
 </html>

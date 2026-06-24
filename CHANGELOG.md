@@ -1,5 +1,8 @@
 # Changelog
 
+## [6.0.0-preview.5.0.2] — 2026-06-24
+- **iOS: fixed the dashboard layout intermittently breaking during use (misaligned/overlapping/clipped, buttons dead until app relaunch) — a WKWebView `dvh` viewport bug dating back to M2.** The height-locked app shell (`html,body{overflow:hidden}` + `body{height:100dvh}`) tracks the **dynamic** viewport so a mobile browser's collapsing URL bar doesn't clip it. But inside the Capacitor WebView there is no URL bar, and WKWebView **shrinks the dynamic viewport when the soft keyboard appears** (search box, profile name, episode field…) and frequently **fails to restore it on dismiss** — leaving the locked shell sized wrong until a relaunch. Fix: mark the document `is-app` **before first paint** (an inline `window.Capacitor.isNativePlatform()` check; the runtime is injected at document-start) and, scoped to `.is-app`, pin the shell to the **stable large-viewport `vh`** instead of `dvh` — correct *and* stable in the app since there's no chrome to collapse. The browser keeps `dvh` (byte-for-byte unchanged), and the browser-only "swipe to hide the URL bar" body-growth hack is now excluded in-app (`html:not(.is-app)`). ([static/index.html](static/index.html)) *Web change: requires a `./build-ipa.sh` rebuild.*
+
 ## [6.0.0-preview.5.0.1] — 2026-06-23
 - **iOS: the always-on `☰ App` menu now hides during on-device playback** so it no longer floats over the local player. Pure CSS — `body:has(#localPlayer.lp-active:not(.lp-tiny)) #appNav { display:none }` ([static/index.html](static/index.html)) — so it auto-tracks the player lifecycle (reappears on close) and stays visible in tiny picture-in-picture mode. *Web change: requires a `./build-ipa.sh` rebuild.*
 

@@ -835,6 +835,24 @@ that's what lets the dashboard's (future) B5 glue call `LocalMediaServer`.
 `server.allowNavigation: ["*"]` in `capacitor.config.json` is required, or
 Capacitor opens the host in Safari instead of in-app.
 
+### `100dvh` corrupts the height-locked shell in WKWebView — use `vh` in the app
+The dashboard locks its shell to the viewport (`html,body{overflow:hidden}` +
+`body{height:100dvh}`) so the document never scrolls (only `<main>`/overlays do).
+`dvh` (dynamic viewport) is right **in a browser** — it shrinks with the collapsing
+URL bar so the shell isn't clipped. **In the Capacitor WebView it's a trap:** there
+is no URL bar, but WKWebView still shrinks the dynamic viewport when the **soft
+keyboard** appears (any text input — search, profile name, episode field) and
+**often fails to restore it on dismiss**, so the locked shell stays sized wrong —
+the layout visibly breaks (misaligned/overlapping/clipped) and buttons in the
+shifted region go dead **until the app is relaunched**. This looked like a random
+"renders incorrectly during use" bug and dated all the way back to M2. Fix: mark the
+document `is-app` **before first paint** (inline `Capacitor.isNativePlatform()`
+check — the runtime is injected at document-start) and pin `html.is-app, html.is-app
+body { height: 100vh }`. The **large**-viewport `vh` ignores the keyboard, so it's
+both correct and stable in the app (no chrome to collapse). Browsers keep `dvh`.
+Same reasoning excludes the app from the browser-only "swipe to hide the URL bar"
+body-growth hack (`html:not(.is-app):has(#localPlayer.lp-active…)`).
+
 ### Cross-origin data between the shell and the host dashboard must go through a native plugin — NOT `localStorage`
 The connect shell (`capacitor://localhost/index.html`) and the host dashboard
 (`https://<host>`) are **different web origins**, so `localStorage` written by one is
