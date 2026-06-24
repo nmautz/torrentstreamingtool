@@ -1,7 +1,7 @@
 # iOS Client App — Plan for v6.0.0
 
 > **Status:** **M4 landed (code)** (`6.0.0-preview.4.0.0`) — sync-conflict
-> resolution. The host **A3** endpoint **`POST /api/library/sync/resolve`**
+> resolution. The host **A3** endpoint **`POST /api/sync/resolve`**
 > ([main.py](../main.py)) writes the user-chosen winner for a divergence A2
 > reported: `choice:"client"` writes the device values (reusing the A2 merge shape,
 > `completed` monotonic, track keys preserved, bumps `updated_at`); `choice:"server"`
@@ -16,7 +16,7 @@
 > confirm the conflict UI appears and the chosen winner is written and re-synced.
 >
 > **M3 landed (code)** (`6.0.0-preview.3.0.0`) — offline progress +
-> auto-sync. The host **A2** endpoint **`POST /api/library/sync/progress`**
+> auto-sync. The host **A2** endpoint **`POST /api/sync/progress`**
 > ([main.py](../main.py)) does batch sync with real conflict detection via a
 > per-file `base_synced_at` watermark (apply / auto-resolve / conflict), verified
 > against the full conflict matrix. The native **`OfflineStore`**
@@ -27,7 +27,7 @@
 > profile-select and the `online` event. **Conflict resolution is M4 (above).**
 >
 > **M3.1** (`6.0.0-preview.3.1.0`) closed three gaps: sync is now **bidirectional**
-> (**`POST /api/library/sync/pull`** + `OfflineStore.seedProgress` seed the server's
+> (**`POST /api/sync/pull`** + `OfflineStore.seedProgress` seed the server's
 > progress as the offline baseline, at download time and on every reconnect, so
 > offline resume reflects online history); the flush was hardened so it always
 > reaches the seed step and only refreshes the library when the server advanced; and
@@ -224,7 +224,7 @@ Today progress is written one file at a time, last-write-wins, **no conflict
 detection** — `update_progress` ([main.py:6692-6716](../main.py#L6692-L6716)),
 schema in [LIBRARY_DATA.md](LIBRARY_DATA.md) "Progress (per profile)".
 
-Add `POST /api/library/sync/progress`:
+Add `POST /api/sync/progress`:
 ```jsonc
 {
   "profile_id": "...",
@@ -271,7 +271,7 @@ flowchart TD
 ```
 
 **A3. Conflict-resolve apply** (small).
-`POST /api/library/sync/resolve` (or a `force` flag on A2) writes the user-chosen
+`POST /api/sync/resolve` (or a `force` flag on A2) writes the user-chosen
 winner for a previously-reported conflict, bumping `updated_at`.
 
 **A4. Device-pairing token** (light, needed for remote use).

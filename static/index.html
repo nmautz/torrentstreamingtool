@@ -7772,7 +7772,7 @@ async function _appFlushOfflineProgress() {
         byProfile.get(pid).push(e);
       }
       for (const [pid, evs] of byProfile) {
-        const r = await fetch("/api/library/sync/progress", {
+        const r = await fetch("/api/sync/progress", {
           method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ profile_id: pid, events: evs.map((e) => ({
             item_id: e.itemId, file_path: e.filePath,
@@ -7824,7 +7824,7 @@ async function _appSeedFromServer() {
       .filter((it) => it.complete)
       .map((it) => ({ item_id: it.itemId, file_path: it.filePath }));
     if (!files.length) return;
-    const r = await fetch("/api/library/sync/pull", {
+    const r = await fetch("/api/sync/pull", {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ profile_id: profile.id, files }),
     });
@@ -7947,7 +7947,7 @@ async function _appApplyConflictResolutions() {
   }
   try {
     for (const [pid, resolutions] of byProfile) {
-      const r = await fetch("/api/library/sync/resolve", {
+      const r = await fetch("/api/sync/resolve", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ profile_id: pid, resolutions }),
       });
@@ -8038,9 +8038,9 @@ async function _appSyncDebug() {
     byProfile.get(pid).push(e);
   }
   for (const [pid, evs] of byProfile) {
-    out.push(`\nPOST /api/library/sync/progress  profile=${pid}  events=${evs.length}`);
+    out.push(`\nPOST /api/sync/progress  profile=${pid}  events=${evs.length}`);
     try {
-      const r = await fetch("/api/library/sync/progress", {
+      const r = await fetch("/api/sync/progress", {
         method: "POST", headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ profile_id: pid, events: evs.map((e) => ({
           item_id: e.itemId, file_path: e.filePath,
@@ -11104,6 +11104,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.4.1.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.4.1.1</div>
 </body>
 </html>

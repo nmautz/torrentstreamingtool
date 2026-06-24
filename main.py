@@ -6838,7 +6838,13 @@ async def update_progress(item_id: str, req: ProgressReq) -> JSONResponse:
 # acknowledgement) is returned in `applied` with the `server_updated_at` the
 # device then records as that file's new `base_synced_at`. Only `conflicts` are
 # left for the user. See docs/LIBRARY_DATA.md "base_synced_at watermark" and
-# docs/API.md "POST /api/library/sync/progress".
+# docs/API.md "POST /api/sync/progress".
+#
+# ⚠ PATH: these sync routes live at /api/sync/* — NOT /api/library/sync/* — on
+# purpose. `/api/library/{item_id}/progress` (update_progress, registered earlier)
+# would otherwise shadow `/api/library/sync/progress`, matching it with
+# item_id="sync" and 422-ing on the missing top-level `file_path`. Keeping them
+# outside the /api/library/{item_id} namespace makes that collision impossible.
 
 SYNC_AUTO_RESOLVE_WINDOW = 60.0   # seconds; positions this close auto-merge
 
@@ -6860,7 +6866,7 @@ class SyncProgressReq(BaseModel):
     events: list[SyncProgressEvent]
 
 
-@app.post("/api/library/sync/progress")
+@app.post("/api/sync/progress")
 async def sync_progress(req: SyncProgressReq) -> JSONResponse:
     """Batch offline-progress sync with conflict detection (plan A2)."""
     applied: list[dict] = []
@@ -6986,7 +6992,7 @@ class SyncPullReq(BaseModel):
     files: list[SyncPullFile]
 
 
-@app.post("/api/library/sync/pull")
+@app.post("/api/sync/pull")
 async def sync_pull(req: SyncPullReq) -> JSONResponse:
     """Server→device progress baseline (M3 companion to /sync/progress).
 
@@ -7036,7 +7042,7 @@ class SyncResolveReq(BaseModel):
     resolutions: list[SyncResolution]
 
 
-@app.post("/api/library/sync/resolve")
+@app.post("/api/sync/resolve")
 async def sync_resolve(req: SyncResolveReq) -> JSONResponse:
     """Write the user-chosen winner for conflicts /sync/progress reported (plan A3).
 

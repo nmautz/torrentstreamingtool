@@ -1185,7 +1185,7 @@ profile is pushed to the store by the dashboard (`OfflineStore.setProfile`) whil
 online so the offline player records under the right profile. When the device
 reconnects, the dashboard drains the store: `_appFlushOfflineProgress` reads
 `OfflineStore.pending()` (events where `clientUpdatedAt > baseSyncedAt`) and POSTs
-them to **`/api/library/sync/progress`** (plan A2 — conflict detection via the
+them to **`/api/sync/progress`** (plan A2 — conflict detection via the
 `base_synced_at` watermark; see [API.md](API.md) / [LIBRARY_DATA.md](LIBRARY_DATA.md)),
 then `OfflineStore.markSynced()` records each applied file's new watermark. It fires
 on profile-select and the window `online` event; the dashboard's own
@@ -1198,7 +1198,7 @@ apart to auto-merge), `_appFlushOfflineProgress` collects them and opens the
 `#syncConflictModal` "keep mine / keep server" UI (`_appShowConflicts` →
 `_appRenderConflicts`; titles enriched from each download's persisted `meta`). On
 **Apply**, `_appApplyConflictResolutions` POSTs the choices to
-**`POST /api/library/sync/resolve`** (plan A3): a "keep mine" win writes the device
+**`POST /api/sync/resolve`** (plan A3): a "keep mine" win writes the device
 values server-side and the device just advances its watermark via
 `OfflineStore.markSynced`; a "keep server" win writes nothing host-side and the device
 adopts the server's values with a **forced** `OfflineStore.seedProgress` (`force:true`
@@ -1207,7 +1207,7 @@ re-report on the next flush.
 
 **Bidirectional seeding (so offline resume reflects online history).** Push alone
 would mean an episode watched partway *online* resumes at 0 offline. So sync is
-two-way: **`POST /api/library/sync/pull`** returns the profile's current server
+two-way: **`POST /api/sync/pull`** returns the profile's current server
 progress for the device's downloads, and `OfflineStore.seedProgress` adopts it as
 the local baseline (settled — never re-pushed; never clobbers an unsynced offline
 edit). The dashboard seeds at **download time** (the bundle-manifest returns the

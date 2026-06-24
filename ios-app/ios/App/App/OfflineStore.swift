@@ -7,7 +7,7 @@
 //  here during playback (the host dashboard can't load with no network, so this
 //  is the only place offline history can live); the dashboard's B5 sync glue
 //  (static/index.html), which DOES run on the host once reconnected, drains it to
-//  POST /api/library/sync/progress and records each file's new `base_synced_at`
+//  POST /api/sync/progress and records each file's new `base_synced_at`
 //  watermark via markSynced().
 //
 //  Why native (not localStorage): downloads.html (file:// bundle) and the host
