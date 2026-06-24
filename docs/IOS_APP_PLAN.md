@@ -476,6 +476,33 @@ sequenceDiagram
 
 ---
 
+## Milestone: Live Activities (`6.0.0-preview.6.0.0`)
+Background downloads + lock-screen/Dynamic Island UI, and a Dynamic Island TV remote.
+
+- **New target** `StreamLinkLiveActivities` (widget extension, `app-extension`,
+  bundle `com.streamlink.client.LiveActivities`, deployment **iOS 17**), embedded
+  in the App via an "Embed Foundation Extensions" copy phase. Shares the **App
+  Group** `group.com.streamlink.client` with the App; App `Info.plist` sets
+  `NSSupportsLiveActivities`. Both targets/entitlements added by hand in
+  `project.pbxproj` (`cap sync` never touches targets — see GOTCHAS).
+- **Shared sources** (membership in App + extension): `Shared/LiveActivityAttributes.swift`
+  (`DownloadActivityAttributes`, `TVRemoteAttributes`), `Shared/AppGroupConfig.swift`
+  (host URL / token / VLC-vs-YouTube in the App Group), `Shared/TVRemoteIntents.swift`
+  (`LiveActivityIntent`s that POST control commands — run in the app process).
+- **Downloads (Feature 1):** `BundleDownloader` now uses a **background URLSession**
+  + `AppDelegate.handleEventsForBackgroundURLSession` → genuine background
+  completion. `DownloadLiveActivity` shows aggregate progress; widget UI in
+  `StreamLinkLiveActivities/DownloadActivityWidget.swift`.
+- **TV remote (Feature 2):** `TVRemote` Capacitor plugin (registered in
+  `MainViewController.capacitorDidLoad()`) starts/updates/stops the activity; the
+  dashboard's `_tvRemoteSync()` (isApp-gated, in `static/index.html`) drives it
+  when the fullscreen controls are open over an active TV session. Widget UI +
+  buttons in `StreamLinkLiveActivities/TVRemoteWidget.swift`.
+- **Build/sign:** `.appex` builds with the App scheme (target dependency); one-time
+  Xcode pass to confirm automatic signing provisions the App Group for both targets.
+
+---
+
 ## Out of scope (this release)
 - Android (deferred — design is portable).
 - Offline of JIT on-demand / `ondemand_only` items (online-only by nature).

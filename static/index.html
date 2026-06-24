@@ -3709,6 +3709,7 @@ function openFullscreenControls(){
   fc.classList.remove("hidden");
   document.body.classList.add("fc-open"); // hide top banners/toast, use #fcNotice
   renderFcNotice();
+  if(typeof _tvRemoteSync==="function") _tvRemoteSync(); // iOS app: start the Dynamic Island remote
 }
 
 function closeFullscreenControls(){
@@ -3716,6 +3717,7 @@ function closeFullscreenControls(){
   document.body.classList.remove("fc-open"); // restore the normal top banners/toast
   renderFcNotice();
   _fcDismissed = true;
+  if(typeof _tvRemoteSync==="function") _tvRemoteSync(); // iOS app: tear down the remote
 }
 
 // ── Smart Skip ─────────────────────────────────────────────────────────────
@@ -8182,7 +8184,10 @@ const _cap = (() => {
   // OfflineStore (M3) is best-effort — an older shell without it still works
   // online; offline progress sync just stays disabled.
   let os = null; try { os = get("OfflineStore"); } catch (_) {}
-  return { lms, dl, os };
+  // TVRemote (Live Activities) is best-effort too — an older shell without it
+  // just won't surface the Dynamic Island remote.
+  let tv = null; try { tv = get("TVRemote"); } catch (_) {}
+  return { lms, dl, os, tv };
 })();
 const isApp = !!_cap;
 
@@ -8200,6 +8205,52 @@ function _appAuthHeaders() { return _pairToken ? { "Authorization": "Bearer " + 
 async function _appInitPairToken() {
   if (!(isApp && _cap.os)) return;
   try { const r = await _cap.os.getPairingToken(); _pairToken = (r && r.token) || ""; } catch (_) {}
+}
+
+// ── iOS app: TV remote Live Activity (Dynamic Island) ───────────────────────
+// When something is playing on the TV (host VLC or YouTube kiosk) AND the
+// fullscreen controls are open, surface a Live Activity with pause + volume
+// buttons. It's *started* while the dashboard is foreground; iOS then shows it
+// in the Dynamic Island / lock screen once the app is minimized. The buttons are
+// wired natively (TVRemoteWidget → TVRemoteIntents) to POST the same control
+// endpoints the dashboard uses. INERT outside the app (isApp / _cap.tv guard).
+let _tvRemoteActive = false;
+function _tvSessionActive() {
+  // A TV session = YouTube kiosk, or host VLC actively streaming/playing.
+  // (Offline in-app local playback leaves the host idle, so it won't match.)
+  return !!(app.youtube_active || app.stream_status === "playing" || app.stream_status === "buffering");
+}
+function _fcIsOpen() {
+  const fc = document.getElementById("fullscreenControls");
+  return !!(fc && !fc.classList.contains("hidden"));
+}
+async function _tvRemoteSync() {
+  if (!(isApp && _cap.tv)) return;
+  const shouldShow = _tvSessionActive() && _fcIsOpen();
+  try {
+    if (shouldShow) {
+      const isYouTube = !!app.youtube_active;
+      const common = {
+        title: app.active_title || (isYouTube ? "YouTube" : "Now Playing"),
+        isYouTube,
+        volume: parseInt(app.vlc_volume, 10) || 100,
+        // The dashboard is served by the host, so its own origin IS the host.
+        serverUrl: location.origin,
+        token: _appPairingToken() || "",
+      };
+      if (!_tvRemoteActive) {
+        // paused defaults false; the native side flips it optimistically on tap
+        // and we intentionally never overwrite it from update() below.
+        await _cap.tv.start(Object.assign({ paused: false }, common));
+        _tvRemoteActive = true;
+      } else {
+        await _cap.tv.update(common);
+      }
+    } else if (_tvRemoteActive) {
+      await _cap.tv.stop();
+      _tvRemoteActive = false;
+    }
+  } catch (_) {}
 }
 
 // Native getLocal is authoritative across page loads (the map may be unpopulated
@@ -11234,6 +11285,7 @@ function connectSSE(){
     renderPerfBanner(d);
     if(typeof d.vlc_night_mode==="boolean") renderNightMode();
     if(typeof d.window_mgmt_paused==="boolean") renderWindowControl();
+    _tvRemoteSync();  // iOS app: keep the Dynamic Island TV remote in sync (inert on web)
   });
   es.addEventListener("vpn_status",e=>{
     _noteSSEMsg();
@@ -11446,6 +11498,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.5.3.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.6.0.0</div>
 </body>
 </html>

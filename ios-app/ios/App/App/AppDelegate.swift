@@ -46,4 +46,17 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
         return ApplicationDelegateProxy.shared.application(application, continue: userActivity, restorationHandler: restorationHandler)
     }
 
+    // The bundle downloader uses a *background* URLSession so downloads keep
+    // running (and complete) while the app is suspended. When the system finishes
+    // those transfers it relaunches us into the background and calls this; we hand
+    // the completion handler to the download manager, which invokes it once the
+    // session has flushed its delegate events. Without this the session won't
+    // deliver its final callbacks and the OS will eventually kill the transfers.
+    func application(_ application: UIApplication,
+                     handleEventsForBackgroundURLSession identifier: String,
+                     completionHandler: @escaping () -> Void) {
+        BundleDownloadManager.shared.handleBackgroundEvents(identifier: identifier,
+                                                            completionHandler: completionHandler)
+    }
+
 }

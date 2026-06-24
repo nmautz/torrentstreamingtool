@@ -153,20 +153,29 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     /// Called for "bundleProgress" / "bundleComplete" / "bundleError".
     var onEvent: ((String, [String: Any]) -> Void)?
 
-    // A *foreground* (default) session. A background-identifier session was tried
-    // first but its delegate callbacks (didWriteData / didFinishDownloadingTo) were
-    // batched by `nsurlsessiond` and not delivered until the next app launch — so
-    // the UI sat at 0% and the bundle only "appeared" downloaded after a restart.
-    // A default session delivers progress + completion live. To survive a brief
-    // backgrounding we hold a UIApplication background-task assertion while any
-    // download is in flight (see beginBgTaskIfNeeded / endBgTaskIfIdle).
+    // A *background* URLSession so downloads keep running — and complete — while
+    // the app is suspended (the whole point of "downloads work when minimized").
+    // History: a foreground default session delivered smooth live progress but
+    // died ~30s after backgrounding; an early background attempt appeared to sit
+    // at 0% until relaunch because the AppDelegate
+    // `handleEventsForBackgroundURLSession` hook was missing, so the session never
+    // flushed its delegate events. With that hook in place (see AppDelegate +
+    // handleBackgroundEvents below) the background session delivers per-file
+    // completions on wake. While the app is foreground, didWriteData fires live so
+    // in-app progress stays smooth; while suspended, byte progress is coarse
+    // (batched) but per-file completion still advances the Live Activity.
+    private static let bgSessionIdentifier = "com.streamlink.bundledownloader"
     private lazy var session: URLSession = {
-        let cfg = URLSessionConfiguration.default
+        let cfg = URLSessionConfiguration.background(withIdentifier: BundleDownloadManager.bgSessionIdentifier)
         cfg.allowsCellularAccess = true
-        cfg.waitsForConnectivity = true
+        cfg.isDiscretionary = false
+        cfg.sessionSendsLaunchEvents = true
         return URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
     }()
     private var bgTask: UIBackgroundTaskIdentifier = .invalid
+    // Completion handler the OS hands us when it relaunches the app to deliver
+    // finished background transfers; invoked once the session flushes its events.
+    private var bgEventsCompletion: (() -> Void)?
 
     private let queue = DispatchQueue(label: "com.streamlink.bundledownloader.state")
     private let fm = FileManager.default
@@ -398,6 +407,15 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         jobs[sha] = nil
         endBgTaskIfIdle()
         emit("bundleComplete", ["sha": sha, "itemId": job.itemId, "filePath": job.filePath, "dir": bundleDir(sha).path])
+        // End the Live Activity (terminal frame) when the last job finishes, else
+        // keep it showing the remaining downloads.
+        if jobs.isEmpty {
+            DownloadLiveActivity.shared.end(title: job.name, finished: true, failed: false,
+                                            filesDone: job.files.count, fileCount: job.files.count,
+                                            bytesTotal: job.totalBytes)
+        } else {
+            updateLiveActivity(force: true)
+        }
     }
 
     private func emitProgress(sha: String, job: Job) {
@@ -410,12 +428,20 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             "bytesDone": confirmed + live, "bytesTotal": job.totalBytes,
             "fraction": frac, "filesDone": job.doneBytes.count, "fileCount": job.files.count,
         ])
+        updateLiveActivity(force: false)
     }
 
     private func emitError(sha: String, job: Job, message: String) {
         jobs[sha] = nil
         endBgTaskIfIdle()
         emit("bundleError", ["sha": sha, "itemId": job.itemId, "filePath": job.filePath, "message": message])
+        if jobs.isEmpty {
+            DownloadLiveActivity.shared.end(title: job.name, finished: false, failed: true,
+                                            filesDone: job.doneBytes.count, fileCount: job.files.count,
+                                            bytesTotal: job.totalBytes)
+        } else {
+            updateLiveActivity(force: true)
+        }
     }
 
     private func emit(_ name: String, _ payload: [String: Any]) {
@@ -437,6 +463,48 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         guard jobs.isEmpty, bgTask != .invalid else { return }
         let id = bgTask; bgTask = .invalid
         DispatchQueue.main.async { UIApplication.shared.endBackgroundTask(id) }
+    }
+
+    // Called from AppDelegate.application(_:handleEventsForBackgroundURLSession:)
+    // when the OS relaunches us to deliver finished background transfers. Force
+    // our lazy session to exist (so it re-attaches to the running tasks) and stash
+    // the handler; we fire it from urlSessionDidFinishEvents once events flush.
+    func handleBackgroundEvents(identifier: String, completionHandler: @escaping () -> Void) {
+        guard identifier == BundleDownloadManager.bgSessionIdentifier else { completionHandler(); return }
+        queue.async {
+            self.bgEventsCompletion = completionHandler
+            _ = self.session   // ensure the session is recreated and reconnected
+        }
+    }
+
+    func urlSessionDidFinishEvents(forBackgroundSession session: URLSession) {
+        queue.async {
+            let handler = self.bgEventsCompletion
+            self.bgEventsCompletion = nil
+            DispatchQueue.main.async { handler?() }
+        }
+    }
+
+    // MARK: Live Activity (download progress)
+
+    // Build an aggregate snapshot across all in-flight jobs and push it to the
+    // download Live Activity. `force` bypasses the throttle (per-file completion).
+    private func updateLiveActivity(force: Bool) {
+        guard !jobs.isEmpty else { return }
+        var done: Int64 = 0, total: Int64 = 0, filesDone = 0, fileCount = 0
+        var soleName = ""
+        for (_, j) in jobs {
+            done += j.doneBytes.values.reduce(0, +) + j.liveBytes.values.reduce(0, +)
+            total += j.totalBytes
+            filesDone += j.doneBytes.count
+            fileCount += j.files.count
+            soleName = j.name
+        }
+        let title = jobs.count == 1 ? soleName : "\(jobs.count) downloads"
+        let frac = total > 0 ? min(1.0, Double(done) / Double(total)) : 0
+        DownloadLiveActivity.shared.sync(title: title, bytesDone: done, bytesTotal: total,
+                                         fraction: frac, filesDone: filesDone,
+                                         fileCount: fileCount, force: force)
     }
 
     private func decode(taskDescription: String?) -> (sha: String, file: String)? {

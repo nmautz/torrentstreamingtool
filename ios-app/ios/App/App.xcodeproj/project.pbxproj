@@ -19,6 +19,18 @@
 		504EC30F1FED79650016851F /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 504EC30E1FED79650016851F /* Assets.xcassets */; };
 		504EC3121FED79650016851F /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 504EC3101FED79650016851F /* LaunchScreen.storyboard */; };
 		50B271D11FEDC1A000F3C39B /* public in Resources */ = {isa = PBXBuildFile; fileRef = 50B271D01FEDC1A000F3C39B /* public */; };
+		ABCD000000000000000000B1 /* LiveActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCD000000000000000000A1 /* LiveActivityAttributes.swift */; };
+		ABCD000000000000000000B2 /* AppGroupConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCD000000000000000000A2 /* AppGroupConfig.swift */; };
+		ABCD000000000000000000B3 /* TVRemoteIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCD000000000000000000A3 /* TVRemoteIntents.swift */; };
+		ABCD000000000000000000B4 /* DownloadLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCD000000000000000000A4 /* DownloadLiveActivity.swift */; };
+		ABCD000000000000000000B5 /* TVRemote.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCD000000000000000000A5 /* TVRemote.swift */; };
+		ABCD000000000000000000C1 /* LiveActivityAttributes.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCD000000000000000000A1 /* LiveActivityAttributes.swift */; };
+		ABCD000000000000000000C2 /* AppGroupConfig.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCD000000000000000000A2 /* AppGroupConfig.swift */; };
+		ABCD000000000000000000C3 /* TVRemoteIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCD000000000000000000A3 /* TVRemoteIntents.swift */; };
+		ABCD000000000000000000C4 /* LiveActivitiesBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCD000000000000000000A7 /* LiveActivitiesBundle.swift */; };
+		ABCD000000000000000000C5 /* DownloadActivityWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCD000000000000000000A8 /* DownloadActivityWidget.swift */; };
+		ABCD000000000000000000C6 /* TVRemoteWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCD000000000000000000A9 /* TVRemoteWidget.swift */; };
+		ABCD000000000000000000D1 /* StreamLinkLiveActivities.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = ABCD000000000000000000AC /* StreamLinkLiveActivities.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
 /* Begin PBXFileReference section */
@@ -36,6 +48,18 @@
 		504EC3131FED79650016851F /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		50B271D01FEDC1A000F3C39B /* public */ = {isa = PBXFileReference; lastKnownFileType = folder; path = public; sourceTree = "<group>"; };
 		958DCC722DB07C7200EA8C5F /* debug.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = debug.xcconfig; path = ../debug.xcconfig; sourceTree = SOURCE_ROOT; };
+		ABCD000000000000000000A1 /* LiveActivityAttributes.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivityAttributes.swift; sourceTree = "<group>"; };
+		ABCD000000000000000000A2 /* AppGroupConfig.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppGroupConfig.swift; sourceTree = "<group>"; };
+		ABCD000000000000000000A3 /* TVRemoteIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVRemoteIntents.swift; sourceTree = "<group>"; };
+		ABCD000000000000000000A4 /* DownloadLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadLiveActivity.swift; sourceTree = "<group>"; };
+		ABCD000000000000000000A5 /* TVRemote.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVRemote.swift; sourceTree = "<group>"; };
+		ABCD000000000000000000A6 /* App.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = App.entitlements; sourceTree = "<group>"; };
+		ABCD000000000000000000A7 /* LiveActivitiesBundle.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = LiveActivitiesBundle.swift; sourceTree = "<group>"; };
+		ABCD000000000000000000A8 /* DownloadActivityWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DownloadActivityWidget.swift; sourceTree = "<group>"; };
+		ABCD000000000000000000A9 /* TVRemoteWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = TVRemoteWidget.swift; sourceTree = "<group>"; };
+		ABCD000000000000000000AA /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
+		ABCD000000000000000000AB /* StreamLinkLiveActivities.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = StreamLinkLiveActivities.entitlements; sourceTree = "<group>"; };
+		ABCD000000000000000000AC /* StreamLinkLiveActivities.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = StreamLinkLiveActivities.appex; sourceTree = BUILT_PRODUCTS_DIR; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -47,7 +71,46 @@
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
+		ABCD000000000000000000FA /* Frameworks */ = {
+			isa = PBXFrameworksBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
 /* End PBXFrameworksBuildPhase section */
+
+/* Begin PBXCopyFilesBuildPhase section */
+		ABCD000000000000000000F7 /* Embed Foundation Extensions */ = {
+			isa = PBXCopyFilesBuildPhase;
+			buildActionMask = 2147483647;
+			dstPath = "";
+			dstSubfolderSpec = 13;
+			files = (
+				ABCD000000000000000000D1 /* StreamLinkLiveActivities.appex in Embed Foundation Extensions */,
+			);
+			name = "Embed Foundation Extensions";
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+/* End PBXCopyFilesBuildPhase section */
+
+/* Begin PBXTargetDependency section */
+		ABCD000000000000000000F8 /* PBXTargetDependency */ = {
+			isa = PBXTargetDependency;
+			target = ABCD000000000000000000F1 /* StreamLinkLiveActivities */;
+			targetProxy = ABCD000000000000000000F9 /* PBXContainerItemProxy */;
+		};
+/* End PBXTargetDependency section */
+
+/* Begin PBXContainerItemProxy section */
+		ABCD000000000000000000F9 /* PBXContainerItemProxy */ = {
+			isa = PBXContainerItemProxy;
+			containerPortal = 504EC2FC1FED79650016851F /* Project object */;
+			proxyType = 1;
+			remoteGlobalIDString = ABCD000000000000000000F1;
+			remoteInfo = StreamLinkLiveActivities;
+		};
+/* End PBXContainerItemProxy section */
 
 /* Begin PBXGroup section */
 		504EC2FB1FED79650016851F = {
@@ -55,6 +118,8 @@
 			children = (
 				958DCC722DB07C7200EA8C5F /* debug.xcconfig */,
 				504EC3061FED79650016851F /* App */,
+				ABCD000000000000000000E1 /* Shared */,
+				ABCD000000000000000000E2 /* StreamLinkLiveActivities */,
 				504EC3051FED79650016851F /* Products */,
 			);
 			sourceTree = "<group>";
@@ -63,6 +128,7 @@
 			isa = PBXGroup;
 			children = (
 				504EC3041FED79650016851F /* App.app */,
+				ABCD000000000000000000AC /* StreamLinkLiveActivities.appex */,
 			);
 			name = Products;
 			sourceTree = "<group>";
@@ -76,6 +142,9 @@
 				AB1000001000000000000005 /* BundleDownloader.swift */,
 				AB1000001000000000000007 /* OfflineStore.swift */,
 				AB1000001000000000000003 /* MainViewController.swift */,
+				ABCD000000000000000000A4 /* DownloadLiveActivity.swift */,
+				ABCD000000000000000000A5 /* TVRemote.swift */,
+				ABCD000000000000000000A6 /* App.entitlements */,
 				504EC30B1FED79650016851F /* Main.storyboard */,
 				504EC30E1FED79650016851F /* Assets.xcassets */,
 				504EC3101FED79650016851F /* LaunchScreen.storyboard */,
@@ -84,6 +153,28 @@
 				50B271D01FEDC1A000F3C39B /* public */,
 			);
 			path = App;
+			sourceTree = "<group>";
+		};
+		ABCD000000000000000000E1 /* Shared */ = {
+			isa = PBXGroup;
+			children = (
+				ABCD000000000000000000A1 /* LiveActivityAttributes.swift */,
+				ABCD000000000000000000A2 /* AppGroupConfig.swift */,
+				ABCD000000000000000000A3 /* TVRemoteIntents.swift */,
+			);
+			path = Shared;
+			sourceTree = "<group>";
+		};
+		ABCD000000000000000000E2 /* StreamLinkLiveActivities */ = {
+			isa = PBXGroup;
+			children = (
+				ABCD000000000000000000A7 /* LiveActivitiesBundle.swift */,
+				ABCD000000000000000000A8 /* DownloadActivityWidget.swift */,
+				ABCD000000000000000000A9 /* TVRemoteWidget.swift */,
+				ABCD000000000000000000AA /* Info.plist */,
+				ABCD000000000000000000AB /* StreamLinkLiveActivities.entitlements */,
+			);
+			path = StreamLinkLiveActivities;
 			sourceTree = "<group>";
 		};
 /* End PBXGroup section */
@@ -96,10 +187,12 @@
 				504EC3001FED79650016851F /* Sources */,
 				504EC3011FED79650016851F /* Frameworks */,
 				504EC3021FED79650016851F /* Resources */,
+				ABCD000000000000000000F7 /* Embed Foundation Extensions */,
 			);
 			buildRules = (
 			);
 			dependencies = (
+				ABCD000000000000000000F8 /* PBXTargetDependency */,
 			);
 			name = App;
 			packageProductDependencies = (
@@ -108,6 +201,22 @@
 			productName = App;
 			productReference = 504EC3041FED79650016851F /* App.app */;
 			productType = "com.apple.product-type.application";
+		};
+		ABCD000000000000000000F1 /* StreamLinkLiveActivities */ = {
+			isa = PBXNativeTarget;
+			buildConfigurationList = ABCD000000000000000000F4 /* Build configuration list for PBXNativeTarget "StreamLinkLiveActivities" */;
+			buildPhases = (
+				ABCD000000000000000000F2 /* Sources */,
+				ABCD000000000000000000FA /* Frameworks */,
+			);
+			buildRules = (
+			);
+			dependencies = (
+			);
+			name = StreamLinkLiveActivities;
+			productName = StreamLinkLiveActivities;
+			productReference = ABCD000000000000000000AC /* StreamLinkLiveActivities.appex */;
+			productType = "com.apple.product-type.app-extension";
 		};
 /* End PBXNativeTarget section */
 
@@ -121,6 +230,10 @@
 					504EC3031FED79650016851F = {
 						CreatedOnToolsVersion = 9.2;
 						LastSwiftMigration = 1100;
+						ProvisioningStyle = Automatic;
+					};
+					ABCD000000000000000000F1 = {
+						CreatedOnToolsVersion = 15.0;
 						ProvisioningStyle = Automatic;
 					};
 				};
@@ -142,6 +255,7 @@
 			projectRoot = "";
 			targets = (
 				504EC3031FED79650016851F /* App */,
+				ABCD000000000000000000F1 /* StreamLinkLiveActivities */,
 			);
 		};
 /* End PBXProject section */
@@ -172,6 +286,24 @@
 				AB1000001000000000000006 /* BundleDownloader.swift in Sources */,
 				AB1000001000000000000008 /* OfflineStore.swift in Sources */,
 				AB1000001000000000000004 /* MainViewController.swift in Sources */,
+				ABCD000000000000000000B1 /* LiveActivityAttributes.swift in Sources */,
+				ABCD000000000000000000B2 /* AppGroupConfig.swift in Sources */,
+				ABCD000000000000000000B3 /* TVRemoteIntents.swift in Sources */,
+				ABCD000000000000000000B4 /* DownloadLiveActivity.swift in Sources */,
+				ABCD000000000000000000B5 /* TVRemote.swift in Sources */,
+			);
+			runOnlyForDeploymentPostprocessing = 0;
+		};
+		ABCD000000000000000000F2 /* Sources */ = {
+			isa = PBXSourcesBuildPhase;
+			buildActionMask = 2147483647;
+			files = (
+				ABCD000000000000000000C4 /* LiveActivitiesBundle.swift in Sources */,
+				ABCD000000000000000000C5 /* DownloadActivityWidget.swift in Sources */,
+				ABCD000000000000000000C6 /* TVRemoteWidget.swift in Sources */,
+				ABCD000000000000000000C1 /* LiveActivityAttributes.swift in Sources */,
+				ABCD000000000000000000C2 /* AppGroupConfig.swift in Sources */,
+				ABCD000000000000000000C3 /* TVRemoteIntents.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -311,6 +443,7 @@
 			baseConfigurationReference = 958DCC722DB07C7200EA8C5F /* debug.xcconfig */;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = App/App.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 29829Y7Z67;
@@ -334,6 +467,7 @@
 			isa = XCBuildConfiguration;
 			buildSettings = {
 				ASSETCATALOG_COMPILER_APPICON_NAME = AppIcon;
+				CODE_SIGN_ENTITLEMENTS = App/App.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				CURRENT_PROJECT_VERSION = 1;
 				DEVELOPMENT_TEAM = 29829Y7Z67;
@@ -347,6 +481,65 @@
 				PRODUCT_BUNDLE_IDENTIFIER = com.streamlink.client;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SWIFT_ACTIVE_COMPILATION_CONDITIONS = "";
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Release;
+		};
+		ABCD000000000000000000F5 /* Debug */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CODE_SIGN_ENTITLEMENTS = StreamLinkLiveActivities/StreamLinkLiveActivities.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 29829Y7Z67;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = StreamLinkLiveActivities/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "StreamLink Live Activities";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.streamlink.client.LiveActivities;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_ACTIVE_COMPILATION_CONDITIONS = DEBUG;
+				SWIFT_EMIT_LOC_STRINGS = YES;
+				SWIFT_VERSION = 5.0;
+				TARGETED_DEVICE_FAMILY = "1,2";
+			};
+			name = Debug;
+		};
+		ABCD000000000000000000F6 /* Release */ = {
+			isa = XCBuildConfiguration;
+			buildSettings = {
+				CLANG_ANALYZER_NONNULL = YES;
+				CLANG_CXX_LANGUAGE_STANDARD = "gnu++20";
+				CODE_SIGN_ENTITLEMENTS = StreamLinkLiveActivities/StreamLinkLiveActivities.entitlements;
+				CODE_SIGN_STYLE = Automatic;
+				CURRENT_PROJECT_VERSION = 1;
+				DEVELOPMENT_TEAM = 29829Y7Z67;
+				GENERATE_INFOPLIST_FILE = YES;
+				INFOPLIST_FILE = StreamLinkLiveActivities/Info.plist;
+				INFOPLIST_KEY_CFBundleDisplayName = "StreamLink Live Activities";
+				INFOPLIST_KEY_NSHumanReadableCopyright = "";
+				IPHONEOS_DEPLOYMENT_TARGET = 17.0;
+				LD_RUNPATH_SEARCH_PATHS = (
+					"$(inherited)",
+					"@executable_path/Frameworks",
+					"@executable_path/../../Frameworks",
+				);
+				MARKETING_VERSION = 1.0;
+				PRODUCT_BUNDLE_IDENTIFIER = com.streamlink.client.LiveActivities;
+				PRODUCT_NAME = "$(TARGET_NAME)";
+				SKIP_INSTALL = YES;
+				SWIFT_EMIT_LOC_STRINGS = YES;
 				SWIFT_VERSION = 5.0;
 				TARGETED_DEVICE_FAMILY = "1,2";
 			};
@@ -369,6 +562,15 @@
 			buildConfigurations = (
 				504EC3171FED79650016851F /* Debug */,
 				504EC3181FED79650016851F /* Release */,
+			);
+			defaultConfigurationIsVisible = 0;
+			defaultConfigurationName = Release;
+		};
+		ABCD000000000000000000F4 /* Build configuration list for PBXNativeTarget "StreamLinkLiveActivities" */ = {
+			isa = XCConfigurationList;
+			buildConfigurations = (
+				ABCD000000000000000000F5 /* Debug */,
+				ABCD000000000000000000F6 /* Release */,
 			);
 			defaultConfigurationIsVisible = 0;
 			defaultConfigurationName = Release;

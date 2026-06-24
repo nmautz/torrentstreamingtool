@@ -23,6 +23,7 @@ class MainViewController: CAPBridgeViewController {
         bridge?.registerPluginInstance(LocalMediaServer())
         bridge?.registerPluginInstance(BundleDownloader())
         bridge?.registerPluginInstance(OfflineStore())
+        bridge?.registerPluginInstance(TVRemote())
         injectCapacitorRuntime()
     }
 

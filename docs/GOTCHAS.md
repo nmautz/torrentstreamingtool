@@ -980,20 +980,55 @@ file* — an interrupted single large segment re-downloads from scratch. The dir
 marked `isExcludedFromBackup` and lives in Application Support (not Caches), so iOS
 won't evict it under storage pressure.
 
-### Use a *foreground* URLSession for bundle downloads — a background session deferred all progress to next launch
-`BundleDownloader` first used `URLSessionConfiguration.background(withIdentifier:)`
-for resilience. On-device that was **broken UX**: `nsurlsessiond` batched the
-`didWriteData` / `didFinishDownloadingTo` delegate callbacks and didn't deliver
-them until the **next app launch** — so the download UI sat at 0% the whole time
-and the bundle only "appeared" complete after a restart (the relaunched session
-redelivered the events, which moved the files + wrote the index then). The fix is
-a plain `URLSessionConfiguration.default` (foreground) session, which delivers
-progress + completion live. To survive a brief backgrounding we hold a
-`UIApplication.beginBackgroundTask` assertion while any download is in flight
-(`beginBgTaskIfNeeded`/`endBgTaskIfIdle`). Trade-off: a long download won't
-continue if the app is suspended for minutes — acceptable for LAN-speed bundles,
-and far better than invisible progress. Don't "restore" the background session
-without solving the live-delivery problem.
+### Background URLSession needs the AppDelegate `handleEventsForBackgroundURLSession` hook — without it, progress "deferred to next launch"
+`BundleDownloader` uses `URLSessionConfiguration.background(withIdentifier:)` so
+downloads continue and complete while the app is suspended (the "downloads work
+when minimized" requirement, `preview.6.0.0`). An **earlier** background attempt
+looked broken — the UI sat at 0% and the bundle only "appeared" complete after a
+restart — because the app never implemented
+`application(_:handleEventsForBackgroundURLSession:completionHandler:)`. Without
+that hook the OS has nowhere to deliver the finished-transfer events while the app
+is away, so `nsurlsessiond` holds them until the next *cold* launch (which then
+redelivers them, moving the files + writing the index — hence "complete after
+restart"). The fix is **not** to abandon the background session but to add the
+hook: `AppDelegate` stashes the system completion handler on
+`BundleDownloadManager`, which fires it from `urlSessionDidFinishEvents(forBackgroundSession:)`
+once events flush. Behaviour now: foreground → `didWriteData` fires live (smooth
+progress); suspended → byte progress is coarse/batched but **per-file completion
+still advances** and transfers genuinely finish. One subtlety: the in-memory
+`jobs` map is lost on a headless background relaunch, so a file that finishes then
+is **moved to disk** (the move in `didFinishDownloadingTo` runs before the
+`jobs[sha]` lookup) but its `index.json` `complete` flag + Live Activity update are
+skipped until the next foreground open, where the resume scan finalizes it. Data
+is never lost; finalization is just deferred. The old `beginBackgroundTask`
+assertion is kept as a harmless foreground tail. Don't switch back to a foreground
+`default` session — it dies ~30 s after backgrounding.
+
+### Live Activities need a separate Widget Extension target + App Group — and `LiveActivityIntent.perform()` runs in the *app* process
+The download-progress and TV-remote Live Activities (`preview.6.0.0`) live in a
+new **`StreamLinkLiveActivities`** widget-extension target (`product-type
+app-extension`, bundle `com.streamlink.client.LiveActivities`, deployment iOS 17,
+embedded via an "Embed Foundation Extensions" copy-files phase on the App target).
+Both the App and the extension carry the **App Group** `group.com.streamlink.client`
+in their `.entitlements`, and the main app's `Info.plist` has
+`NSSupportsLiveActivities = true`. The shared sources
+(`Shared/LiveActivityAttributes.swift`, `AppGroupConfig.swift`,
+`TVRemoteIntents.swift`) have **membership in both targets**. Gotchas:
+- The interactive Dynamic-Island buttons are `LiveActivityIntent`s whose
+  `perform()` runs in the **app's** process (the system briefly spins it up even
+  when suspended), which is *why* they can POST to the host control endpoints.
+  They read the host URL + token + VLC-vs-YouTube flag from the App Group
+  (`AppGroupConfig`), written by the `TVRemote` plugin on start/update — there is
+  no other way to get that config into the intent.
+- All ActivityKit code is availability-gated (`@available(iOS 16.1/17)`); the
+  extension's min deployment is 17 so its `WidgetBundle` doesn't need `if
+  #available`. iOS <17 devices simply never start an activity.
+- The `.appex` is built automatically when the **App** scheme builds (it's a
+  target dependency), so `build-ipa.sh -scheme App` covers it — no script change.
+- Distribution caveat: the unsigned-IPA + sideloader path must re-sign **with App
+  Groups enabled** (AltStore/Sideloadly rewrite the group id consistently across
+  app + extension, so the shared suite still resolves). With automatic signing in
+  Xcode, confirm the App Group capability provisions for both targets once.
 
 ### The remote dashboard CANNOT load offline — `downloads.html` is the offline entry point
 The whole dashboard UI (`static/index.html`) is **served by the host**. The shell
