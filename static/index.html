@@ -7773,7 +7773,7 @@ async function _appFlushOfflineProgress() {
       }
       for (const [pid, evs] of byProfile) {
         const r = await fetch("/api/sync/progress", {
-          method: "POST", headers: { "Content-Type": "application/json" },
+          method: "POST", headers: { "Content-Type": "application/json", ..._appAuthHeaders() },
           body: JSON.stringify({ profile_id: pid, events: evs.map((e) => ({
             item_id: e.itemId, file_path: e.filePath,
             position_sec: e.positionSec, duration_sec: e.durationSec,
@@ -7825,7 +7825,7 @@ async function _appSeedFromServer() {
       .map((it) => ({ item_id: it.itemId, file_path: it.filePath }));
     if (!files.length) return;
     const r = await fetch("/api/sync/pull", {
-      method: "POST", headers: { "Content-Type": "application/json" },
+      method: "POST", headers: { "Content-Type": "application/json", ..._appAuthHeaders() },
       body: JSON.stringify({ profile_id: profile.id, files }),
     });
     if (!r.ok) return;
@@ -7948,7 +7948,7 @@ async function _appApplyConflictResolutions() {
   try {
     for (const [pid, resolutions] of byProfile) {
       const r = await fetch("/api/sync/resolve", {
-        method: "POST", headers: { "Content-Type": "application/json" },
+        method: "POST", headers: { "Content-Type": "application/json", ..._appAuthHeaders() },
         body: JSON.stringify({ profile_id: pid, resolutions }),
       });
       if (!r.ok) continue;
@@ -8105,8 +8105,17 @@ const isApp = !!_cap;
 const offlineBundles = new Map();
 
 // Pairing token (M5). The dashboard runs on the host origin and can't read the
-// shell's localStorage, so this is a no-op until M5 wires Bearer auth end-to-end.
-function _appPairingToken() { return ""; }
+// shell's localStorage, so the token is stored natively (OfflineStore) by the
+// connect shell and read back here at startup. `_appAuthHeaders()` adds the
+// Bearer header to every device-facing request (sync, bundle-manifest); the host
+// only enforces it when REQUIRE_DEVICE_AUTH is on, so this is harmless otherwise.
+let _pairToken = "";
+function _appPairingToken() { return _pairToken; }
+function _appAuthHeaders() { return _pairToken ? { "Authorization": "Bearer " + _pairToken } : {}; }
+async function _appInitPairToken() {
+  if (!(isApp && _cap.os)) return;
+  try { const r = await _cap.os.getPairingToken(); _pairToken = (r && r.token) || ""; } catch (_) {}
+}
 
 // Native getLocal is authoritative across page loads (the map may be unpopulated
 // right after a navigation); used by the player to decide offline playback.
@@ -8140,12 +8149,13 @@ async function _appStartLocalPlayback(local) {
 async function _appFetchManifest(itemId, filePath) {
   const u = `/api/library/${itemId}/bundle-manifest?file_path=${encodeURIComponent(filePath)}`
           + (profile.id ? `&profile_id=${encodeURIComponent(profile.id)}` : "");
-  let r = await fetch(u);
+  let r = await fetch(u, { headers: _appAuthHeaders() });
+  if (r.status === 401) throw new Error("This device isn’t paired with the host — re-pair from Settings.");
   if (r.status === 409) {
     const info = await r.json().catch(() => ({}));
     if (info.ondemand_only) throw new Error("This title is on-demand only — it can’t be downloaded.");
     await _appPrepBundle(itemId, filePath);
-    r = await fetch(u);
+    r = await fetch(u, { headers: _appAuthHeaders() });
   }
   if (!r.ok) {
     const e = await r.json().catch(() => ({ detail: "Manifest unavailable." }));
@@ -8157,7 +8167,7 @@ async function _appFetchManifest(itemId, filePath) {
 // POST /offline-prepare then poll /offline-job until the host bundle is built.
 async function _appPrepBundle(itemId, filePath) {
   const r = await fetch(`/api/library/${itemId}/offline-prepare`, {
-    method: "POST", headers: { "Content-Type": "application/json" },
+    method: "POST", headers: { "Content-Type": "application/json", ..._appAuthHeaders() },
     body: JSON.stringify({ file_path: filePath, profile_id: profile.id || "" }),
   });
   if (!r.ok) throw new Error("Could not start host-side prep.");
@@ -8305,6 +8315,47 @@ async function _appInitOfflineBundles() {
     }
     if (epItemId) renderEpList();
   } catch (_) {}
+}
+
+// ── iOS app: in-app navigation (M5) ──────────────────────────────────────────
+// The dashboard is served by the host, so once we navigate here there's no
+// browser chrome to get back to the app shell. This injects a small always-on
+// menu (app only) so the user can ALWAYS reach Downloads and the Settings /
+// change-server / re-pair screen, online or off. Local pages live on the
+// capacitor:// origin; full-page navigation crosses back to them.
+const _APP_LOCAL_ORIGIN = "capacitor://localhost";
+function _appGoSettings() { window.location.href = _APP_LOCAL_ORIGIN + "/index.html?setup=1"; }
+function _appGoDownloads() { window.location.href = _APP_LOCAL_ORIGIN + "/downloads.html"; }
+
+function _appInitNav() {
+  if (!isApp || document.getElementById("appNav")) return;
+  const wrap = document.createElement("div");
+  wrap.id = "appNav";
+  wrap.style.cssText = "position:fixed;left:8px;bottom:8px;z-index:9998;font-size:11px;"
+    + "font-weight:700;letter-spacing:.05em;text-transform:uppercase;";
+  const menu = document.createElement("div");
+  menu.style.cssText = "display:none;flex-direction:column;margin-bottom:6px;"
+    + "background:#141417;border:1px solid #2a2a30;min-width:150px;";
+  const mk = (label, fn) => {
+    const b = document.createElement("button");
+    b.textContent = label;
+    b.style.cssText = "all:unset;cursor:pointer;color:#f2f2f4;padding:11px 13px;"
+      + "border-bottom:1px solid #2a2a30;text-transform:uppercase;letter-spacing:.05em;font-weight:700;";
+    b.addEventListener("click", () => { menu.style.display = "none"; fn(); });
+    return b;
+  };
+  menu.appendChild(mk("Downloads", _appGoDownloads));
+  menu.appendChild(mk("Change Server / Re-pair", _appGoSettings));
+  menu.lastChild.style.borderBottom = "0";
+  const toggle = document.createElement("button");
+  toggle.textContent = "☰ App";
+  toggle.style.cssText = "all:unset;cursor:pointer;color:#cbd5e1;background:#141417cc;"
+    + "border:1px solid #2a2a30;padding:8px 11px;text-transform:uppercase;letter-spacing:.06em;font-weight:800;";
+  toggle.addEventListener("click", () => {
+    menu.style.display = (menu.style.display === "none" ? "flex" : "none");
+  });
+  wrap.appendChild(menu); wrap.appendChild(toggle);
+  document.body.appendChild(wrap);
 }
 
 // --- Per-file "Prep for Streaming" -------------------------------------------
@@ -11032,8 +11083,11 @@ document.addEventListener("DOMContentLoaded",async()=>{
   evictLegacyServiceWorker();
   _lpAttachVideoEvents();
   _renderOnlineBadge();
-  // iOS app: subscribe to BundleDownloader events + hydrate the offline-download
-  // state from the device. No-op in a plain browser (isApp === false).
+  // iOS app: load the pairing token (M5) before any device-facing fetch, add the
+  // always-on app nav (Downloads / Change server), subscribe to BundleDownloader
+  // events + hydrate the offline-download state. All no-ops in a plain browser.
+  await _appInitPairToken();
+  _appInitNav();
   _appInitOfflineBundles();
   // M3: when the browser regains connectivity, drain any offline progress the
   // native store accumulated while we were away. No-op in a plain browser.
@@ -11104,6 +11158,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.4.1.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.5.0.0</div>
 </body>
 </html>

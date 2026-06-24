@@ -309,6 +309,8 @@ A native **iOS client** is being built toward the 6.0.0 release — primarily fo
 
 **Now in the app (M2, `6.0.0-preview.2.0.0`):** each episode row has a **Download** button — tap it to copy the show to the phone, then play it with no host connection (Airplane Mode), full audio/subtitles/skip-intro. This is the host-side feature too: it reuses the existing **Stream-to-Device** HLS bundles, so nothing new to configure on the server. Online streaming and the dashboard are unchanged.
 
+**Device pairing for remote use (M5, `6.0.0-preview.5.0.0`):** the app can now authenticate to the host so it's safe to expose beyond your LAN. On the app's Connect screen, enter your host's **`ADMIN_PASSWORD`** once to *pair* the device (it stores a long-lived token). An always-on `☰ App` menu in the app gives one-tap access to **Downloads** and **Change Server / Re-pair**. Pairing is **optional and off by default** — on your home network nothing changes. To *require* it (reject unpaired callers on the sync + download-manifest endpoints), set **`REQUIRE_DEVICE_AUTH=true`** in `.env` and restart; the browser dashboard and online playback are unaffected either way. Manage paired devices from the admin panel's API (`/api/admin/devices`).
+
 ## More documentation
 
 Deeper reference docs live in [`docs/`](docs/): architecture, backend/frontend maps, the full API, the admin panel, Smart Skip, AI subtitles, streaming, and gotchas. Start with [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).

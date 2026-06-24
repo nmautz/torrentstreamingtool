@@ -117,11 +117,12 @@
            placeholder="https://192.168.1.20:8000" />
     <div class="hint">If you omit <code>https://</code> it is added automatically.</div>
 
-    <label for="token">Pairing token <span style="opacity:.6">(optional)</span></label>
-    <input id="token" type="text" autocapitalize="off" autocorrect="off"
-           spellcheck="false" placeholder="Leave blank for LAN use" />
-    <div class="hint">Reserved for remote use (added in a later release). Leave
-      blank on your home network.</div>
+    <label for="pw">Host password <span style="opacity:.6">(optional)</span></label>
+    <input id="pw" type="password" autocapitalize="off" autocorrect="off"
+           spellcheck="false" placeholder="Pair for secure remote access" />
+    <div class="hint">For remote use, enter your host&rsquo;s <code>ADMIN_PASSWORD</code>
+      once to pair this device. Not needed on your home network — leave blank.
+      <span id="pairState"></span></div>
 
     <div class="err" id="err"></div>
 
@@ -130,7 +131,7 @@
 
     <div class="spacer"></div>
     <div class="foot">
-      StreamLink iOS &middot; v6.0.0-preview.3.1.3<br/>
+      StreamLink iOS &middot; v6.0.0-preview.5.0.0<br/>
       <a href="localtest.html" style="color:#8a8a92">Localhost HLS self-test (Gate 1b)</a>
     </div>
   </div>
@@ -143,6 +144,42 @@
     const $ = (id) => document.getElementById(id);
     const formEl = $("form"), connEl = $("connecting");
     let redirectTimer = null;
+
+    // Native plugin accessor (Capacitor). The pairing token must be stored
+    // natively (OfflineStore) so the host-origin dashboard can read it back —
+    // localStorage is per-origin and not shared across the shell/host boundary.
+    function plugin(name) {
+      const C = window.Capacitor;
+      if (!C) return null;
+      try {
+        return (typeof C.registerPlugin === "function") ? C.registerPlugin(name)
+             : (C.Plugins && C.Plugins[name]) || null;
+      } catch (_) { return null; }
+    }
+    async function storeToken(token) {
+      try { localStorage.setItem(KEY_TOKEN, token || ""); } catch (_) {}
+      const os = plugin("OfflineStore");
+      if (os) { try { await os.setPairingToken({ token: token || "" }); } catch (_) {} }
+    }
+    function authHeaders() {
+      const t = (localStorage.getItem(KEY_TOKEN) || "").trim();
+      return t ? { "Authorization": "Bearer " + t } : {};
+    }
+
+    // Pair this device with the host using its admin password (M5 / plan A4).
+    // Returns the issued token, or throws with a user-facing message.
+    async function pairWithHost(url, password) {
+      const r = await fetch(url + "/api/pair", {
+        method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ admin_password: password, label: "iOS app" }),
+      });
+      if (r.status === 401) throw new Error("That host password was rejected.");
+      if (r.status === 503) throw new Error("This host has no admin password set, so it can’t pair.");
+      if (!r.ok) throw new Error("Pairing failed (HTTP " + r.status + ").");
+      const j = await r.json().catch(() => ({}));
+      if (!j.token) throw new Error("Pairing returned no token.");
+      return j.token;
+    }
 
     // Normalise a user-typed address into an absolute origin URL.
     // - prepends https:// when no scheme is present
@@ -171,7 +208,11 @@
       formEl.style.display = "flex";
       // Pre-fill with whatever was last saved so a re-connect is one tap.
       $("server").value = localStorage.getItem(KEY_URL) || "";
-      $("token").value  = localStorage.getItem(KEY_TOKEN) || "";
+      $("pw").value = "";
+      const paired = (localStorage.getItem(KEY_TOKEN) || "").trim();
+      $("pairState").textContent = paired
+        ? " This device is already paired — leave blank to keep it."
+        : "";
     }
 
     function goToHost(url) {
@@ -215,16 +256,30 @@
     $("downloadsBtn").addEventListener("click", goToDownloads);
     $("downloadsBtn2").addEventListener("click", goToDownloads);
 
-    $("connect").addEventListener("click", () => {
+    $("connect").addEventListener("click", async () => {
       const url = normalizeUrl($("server").value);
       if (!url) { showError("That doesn't look like a valid address. Example: https://192.168.1.20:8000"); return; }
       localStorage.setItem(KEY_URL, url);
-      const tok = $("token").value.trim();
-      if (tok) localStorage.setItem(KEY_TOKEN, tok); else localStorage.removeItem(KEY_TOKEN);
+      const pw = $("pw").value.trim();
+      if (pw) {
+        // Pair before navigating so the dashboard has a token to authenticate with.
+        const btn = $("connect"); const label = btn.textContent;
+        btn.disabled = true; btn.textContent = "Pairing…"; $("err").classList.remove("show");
+        try {
+          const token = await pairWithHost(url, pw);
+          await storeToken(token);
+        } catch (e) {
+          btn.disabled = false; btn.textContent = label;
+          showError(e.message || "Pairing failed.");
+          return;
+        }
+        btn.disabled = false; btn.textContent = label;
+      }
       goToHost(url);
     });
 
-    $("server").addEventListener("keydown", (e) => { if (e.key === "Enter") $("connect").click(); });
+    $("server").addEventListener("keydown", (e) => { if (e.key === "Enter") $("pw").focus(); });
+    $("pw").addEventListener("keydown", (e) => { if (e.key === "Enter") $("connect").click(); });
 
     // ── Entry point ──
     (function init() {

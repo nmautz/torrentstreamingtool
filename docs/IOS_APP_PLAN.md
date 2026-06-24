@@ -1,6 +1,31 @@
 # iOS Client App — Plan for v6.0.0
 
-> **Status:** **M4 landed (code)** (`6.0.0-preview.4.0.0`) — sync-conflict
+> **Status:** **M5 landed (code)** (`6.0.0-preview.5.0.0`) — device pairing/auth +
+> in-app navigation + downloads management. **A4** is implemented: **`POST /api/pair`**
+> ([main.py](../main.py)) issues a long-lived bearer token (admin password = pairing
+> secret), persisted to host-local `device_tokens.json` so paired devices survive a
+> restart; **`GET /api/pair/status`** and **`DELETE /api/pair`** (self-revoke) round it
+> out, with admin **`/api/admin/devices`** list/revoke. `_require_device_auth` gates
+> the device-facing endpoints (`/api/sync/progress|pull|resolve`,
+> `/api/library/{id}/bundle-manifest`) on a valid device-or-admin token **only when
+> the new `REQUIRE_DEVICE_AUTH` setting is on** — it defaults **off**, so LAN/browser
+> use and online HLS playback are completely unaffected (no-regression). The native
+> `OfflineStore` stores the token (`set/getPairingToken`) because the connect shell
+> (`capacitor://`) and host dashboard (`https://`) can't share `localStorage`; the
+> shell's Connect screen pairs with the host password; the dashboard reads the token
+> back and sends `Authorization: Bearer` on every device-facing fetch, and shows an
+> always-on `☰ App` menu (Downloads / Change Server / Re-pair). Downloads management
+> (`list`/`remove`/`bytesUsed`) already shipped in `BundleDownloader` + `downloads.html`.
+> **Known gap (intentional):** the *shared* online-playback surfaces
+> (`/api/library/offline-cache/*`, `/offline-prepare`, `/api/library`) are **left
+> open** even under `REQUIRE_DEVICE_AUTH` — gating them would break the browser
+> dashboard and online HLS playback (those fetches, incl. hls.js segment GETs, carry
+> no token). Full dashboard auth for hostile-network exposure is a larger change
+> (the dashboard itself would need to authenticate) and is deferred past 6.0.0.
+> Remaining on M5 is **on-device verification**: pair over a real remote link, confirm
+> unpaired callers are rejected, and the in-app nav reaches settings/downloads.
+>
+> **M4 landed (code)** (`6.0.0-preview.4.0.0`) — sync-conflict
 > resolution. The host **A3** endpoint **`POST /api/sync/resolve`**
 > ([main.py](../main.py)) writes the user-chosen winner for a divergence A2
 > reported: `choice:"client"` writes the device values (reusing the A2 merge shape,
@@ -347,7 +372,7 @@ flowchart LR
 | **M2** `6.0.0-preview.2.x.x` — Offline download + playback | **The core feature.** Download an episode/season; play it fully offline (Airplane Mode) with audio, subtitles, ABR, skip-intro. | **A1** bundle-manifest endpoint. | **B3** `BundleDownloader` (bg, resumable) → **B2** `LocalMediaServer` → **B5** Download button + `master_url` swap in `_lpLoadIndex`. | Download a multi-episode item online → Airplane Mode → play 2 episodes with working tracks/subs/skip; files survive app kill + relaunch. |
 | **M3** `6.0.0-preview.3.x.x` — Offline progress + auto-sync | Offline watch history is kept and **flows back to the server** on reconnect (auto-resolvable cases only). Resume works offline. | **A2** `sync/progress` (apply + auto-resolve path). | **B4** `OfflineStore` (local progress log, offline resume) + connectivity-watcher flush; route `saveProgress`/`_lpFlushProgress` to it when offline. | Watch offline, reconnect → history appears on the server; device-only and close-position cases merge silently; `completed` never regresses. |
 | **M4** `6.0.0-preview.4.x.x` — Conflict resolution | When the same episode advanced both offline **and** elsewhere (e.g. the TV), the app asks the user which to keep. | **A3** `sync/resolve` + surface conflicts from A2. | Conflict-resolution UI (mine vs server) wired to the sync flush. | A deliberately-divergent case (offline + TV) surfaces a conflict and the chosen winner is written and re-synced. |
-| **M5** `6.0.0-preview.5.x.x` — Auth/pairing + downloads mgmt + hardening | Safe remote use over the internet; manage/delete downloads and see storage used. | **A4** `POST /pair` + Bearer-token enforcement on sync/manifest (ideally `/offline-prepare`, `/files`, `/api/library`). | Pairing/login screen; Downloads management screen (`list`/`delete`/`bytesUsed`). | Endpoints reject unpaired callers; downloads are listable/removable; end-to-end cycle passes over a real remote connection. |
+| **M5** `6.0.0-preview.5.x.x` — Auth/pairing + downloads mgmt + hardening ✅ *(code)* | Safe remote use over the internet; manage/delete downloads and see storage used; always-on in-app nav to settings/downloads. | **A4** `POST /api/pair` (+ `/pair/status`, `DELETE /pair`, admin `/admin/devices`) + `REQUIRE_DEVICE_AUTH`-gated Bearer enforcement on `sync/*` + `bundle-manifest`. Shared online-playback surfaces left open (see status note). | Connect-screen pairing (host password); native token store (`OfflineStore.set/getPairingToken`); dashboard Bearer headers + `☰ App` nav; downloads mgmt (`list`/`remove`/`bytesUsed`) in `downloads.html`. | Unpaired callers rejected when enforcement is on; downloads are listable/removable; settings + downloads reachable in-app online/offline. |
 | **🚀 Release** `6.0.0` | All of the above, integrated and verified. | — | — | Full [Verification](#verification) end-to-end cycle green; docs updated; suffix dropped to `6.0.0`. |
 
 > **De-risk gates (not features):** **1a** (Mac LAN static-server) is ✅ **PASSED

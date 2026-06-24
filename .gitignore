@@ -22,6 +22,9 @@ Downloads/
 # User library database (profiles + watch history)
 library.json
 
+# iOS client app pairing tokens (M5) — secrets, host-local
+device_tokens.json
+
 # Runtime scratch: countdown text VLC reads for the on-TV skip popup
 .vlc_marquee.txt
 

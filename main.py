@@ -233,6 +233,13 @@ class Settings(BaseSettings):
     admin_password: str = ""   # if empty, admin panel is disabled
     jackett_password: str = ""  # Jackett UI login password for indexer management
 
+    # iOS client app (M5) device pairing. When True, the device-facing sync +
+    # bundle-manifest endpoints require a valid pairing token (issued by
+    # POST /api/pair against admin_password) OR a valid admin session token.
+    # Default False → fully LAN-trust, backward compatible: the browser dashboard
+    # and online HLS playback are unaffected. Turn on only for remote use.
+    require_device_auth: bool = False
+
     # OpenSubtitles legacy REST API (rest.opensubtitles.org) needs no key, only a
     # User-Agent. "TemporaryUserAgent" is OpenSubtitles' documented testing UA.
     opensubtitles_user_agent: str = "TemporaryUserAgent"
@@ -794,6 +801,32 @@ qbit: Optional[httpx.AsyncClient] = None
 vlc_client: Optional[httpx.AsyncClient] = None   # persistent keep-alive client for VLC (see _vlc_http)
 _admin_sessions: dict[str, float] = {}   # token → expiry Unix timestamp
 
+# ── iOS app device-pairing tokens (M5, plan A4) ────────────────────────────────
+# Long-lived bearer tokens issued to paired client apps (POST /api/pair). Unlike
+# _admin_sessions these are persisted to disk so a paired device survives a host
+# restart. Map: token → {"created_at": iso, "label": str, "last_seen": iso}.
+DEVICE_TOKENS_FILE = Path(__file__).parent / "device_tokens.json"
+_device_tokens: dict[str, dict] = {}
+
+
+def _load_device_tokens() -> None:
+    global _device_tokens
+    try:
+        if DEVICE_TOKENS_FILE.exists():
+            data = json.loads(DEVICE_TOKENS_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, dict):
+                _device_tokens = {k: v for k, v in data.items() if isinstance(v, dict)}
+    except Exception as e:  # corrupt file shouldn't break startup
+        log.warning("Could not load device tokens: %s", e)
+        _device_tokens = {}
+
+
+def _save_device_tokens() -> None:
+    try:
+        DEVICE_TOKENS_FILE.write_text(json.dumps(_device_tokens, indent=2), encoding="utf-8")
+    except Exception as e:
+        log.warning("Could not persist device tokens: %s", e)
+
 # ── Jackett Session ───────────────────────────────────────────────────────────
 _jackett_cookie: str = ""
 _jackett_cookie_expiry: float = 0.0
@@ -983,6 +1016,42 @@ def _check_admin(request: Request) -> bool:
 def _require_admin(request: Request) -> None:
     if not _check_admin(request):
         raise HTTPException(401, "Admin authentication required.")
+
+
+def _request_bearer(request: Request) -> Optional[str]:
+    """Pull a bearer token from Authorization / X-Device-Token / ?device_token."""
+    auth = request.headers.get("authorization", "")
+    if auth.lower().startswith("bearer "):
+        tok = auth[7:].strip()
+        if tok:
+            return tok
+    tok = request.headers.get("x-device-token", "").strip()
+    if tok:
+        return tok
+    tok = request.query_params.get("device_token", "").strip()
+    return tok or None
+
+
+def _check_device_token(request: Request) -> bool:
+    """True if the request carries a recognised paired-device token (M5)."""
+    tok = _request_bearer(request)
+    if not tok or tok not in _device_tokens:
+        return False
+    # Best-effort last-seen bookkeeping (not persisted on every hit to avoid I/O).
+    _device_tokens[tok]["last_seen"] = _now_iso()
+    return True
+
+
+def _require_device_auth(request: Request) -> None:
+    """Gate the device-facing endpoints (sync, bundle-manifest) when pairing is
+    enforced. A valid admin session also passes (admin is a superset). When
+    `require_device_auth` is off this is a no-op, so LAN / browser use is
+    completely unaffected (the no-regression invariant)."""
+    if not settings.require_device_auth:
+        return
+    if _check_device_token(request) or _check_admin(request):
+        return
+    raise HTTPException(401, "Device pairing required — pair this app with the host first.")
 
 
 def _pin_hash(pin: str) -> str:
@@ -5409,6 +5478,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     _lib_lock = asyncio.Lock()
     _jackett_cookie_lock = asyncio.Lock()
     _analysis_gate = asyncio.Semaphore(ANALYSIS_CONCURRENCY)
+    _load_device_tokens()   # M5: restore paired-device bearer tokens
     qbit = httpx.AsyncClient(timeout=10.0)
     _vlc_http()   # build the persistent keep-alive VLC client up front
     await qbit_login()
@@ -6867,8 +6937,9 @@ class SyncProgressReq(BaseModel):
 
 
 @app.post("/api/sync/progress")
-async def sync_progress(req: SyncProgressReq) -> JSONResponse:
+async def sync_progress(req: SyncProgressReq, request: Request) -> JSONResponse:
     """Batch offline-progress sync with conflict detection (plan A2)."""
+    _require_device_auth(request)
     applied: list[dict] = []
     conflicts: list[dict] = []
     now = _now_iso()
@@ -6993,7 +7064,7 @@ class SyncPullReq(BaseModel):
 
 
 @app.post("/api/sync/pull")
-async def sync_pull(req: SyncPullReq) -> JSONResponse:
+async def sync_pull(req: SyncPullReq, request: Request) -> JSONResponse:
     """Server→device progress baseline (M3 companion to /sync/progress).
 
     Given the device's downloaded files, return the requesting profile's current
@@ -7002,6 +7073,7 @@ async def sync_pull(req: SyncPullReq) -> JSONResponse:
     watch history accrued online** (and on other devices). Read-only; the device's
     `seedProgress` only adopts a baseline when it wouldn't clobber unsynced local
     offline progress."""
+    _require_device_auth(request)
     lib = await get_library()
     items_by_id = {it["id"]: it for it in lib.get("items", [])}
     out: list[dict] = []
@@ -7043,7 +7115,7 @@ class SyncResolveReq(BaseModel):
 
 
 @app.post("/api/sync/resolve")
-async def sync_resolve(req: SyncResolveReq) -> JSONResponse:
+async def sync_resolve(req: SyncResolveReq, request: Request) -> JSONResponse:
     """Write the user-chosen winner for conflicts /sync/progress reported (plan A3).
 
     `/sync/progress` returns genuine divergences in `conflicts` and writes nothing;
@@ -7052,6 +7124,7 @@ async def sync_resolve(req: SyncResolveReq) -> JSONResponse:
     "server"` leaves the host untouched (the device adopts the returned server values
     as its new baseline). Either way the response carries the authoritative `server`
     values + `server_updated_at` the device records as the file's new watermark."""
+    _require_device_auth(request)
     resolved: list[dict] = []
     now = _now_iso()
     _TRACK_KEYS = ("audio_track", "subtitle_track", "local_audio_idx", "local_subtitle_idx")
@@ -9387,6 +9460,77 @@ async def admin_logout(request: Request) -> JSONResponse:
     token = auth[7:].strip() if auth.lower().startswith("bearer ") else ""
     _admin_sessions.pop(token, None)
     return JSONResponse({"ok": True})
+
+
+# ── Routes: iOS app device pairing (M5, plan A4) ──────────────────────────────
+
+class PairReq(BaseModel):
+    admin_password: str
+    label: str = ""
+
+
+@app.get("/api/pair/status")
+async def pair_status(request: Request) -> JSONResponse:
+    """Let the client app discover whether pairing is required and whether its
+    stored token is still valid (so it can show the pairing screen when needed)."""
+    return JSONResponse({
+        "required":         bool(settings.require_device_auth),
+        "admin_configured": bool(settings.admin_password),
+        "paired":           _check_device_token(request),
+    })
+
+
+@app.post("/api/pair")
+async def pair_device(req: PairReq) -> JSONResponse:
+    """Issue a long-lived device token for the iOS client (plan A4).
+
+    The host's admin password is the pairing secret. The returned token is sent
+    as `Authorization: Bearer <token>` on the device-facing endpoints (sync,
+    bundle-manifest) and is enforced only when REQUIRE_DEVICE_AUTH is on."""
+    if not settings.admin_password:
+        raise HTTPException(503, "Pairing is unavailable — set ADMIN_PASSWORD on the host.")
+    if req.admin_password != settings.admin_password:
+        raise HTTPException(401, "Incorrect host password.")
+    token = secrets.token_hex(32)
+    _device_tokens[token] = {
+        "created_at": _now_iso(),
+        "last_seen":  _now_iso(),
+        "label":      (req.label or "iOS device").strip()[:64],
+    }
+    _save_device_tokens()
+    return JSONResponse({"ok": True, "token": token})
+
+
+@app.delete("/api/pair")
+async def unpair_device(request: Request) -> JSONResponse:
+    """Revoke the calling device's own pairing token (used by the app on sign-out)."""
+    tok = _request_bearer(request)
+    if tok and _device_tokens.pop(tok, None) is not None:
+        _save_device_tokens()
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/admin/devices")
+async def admin_list_devices(request: Request) -> JSONResponse:
+    """Admin view of paired devices (token prefix only, never the full secret)."""
+    _require_admin(request)
+    return JSONResponse({"devices": [
+        {"id": tok[:8], "label": meta.get("label", ""),
+         "created_at": meta.get("created_at", ""), "last_seen": meta.get("last_seen", "")}
+        for tok, meta in _device_tokens.items()
+    ]})
+
+
+@app.delete("/api/admin/devices/{token_prefix}")
+async def admin_revoke_device(token_prefix: str, request: Request) -> JSONResponse:
+    """Admin revoke of a paired device by the 8-char id from /api/admin/devices."""
+    _require_admin(request)
+    victims = [t for t in _device_tokens if t[:8] == token_prefix]
+    for t in victims:
+        _device_tokens.pop(t, None)
+    if victims:
+        _save_device_tokens()
+    return JSONResponse({"ok": True, "revoked": len(victims)})
 
 
 @app.get("/api/admin/indexers")
@@ -16180,7 +16324,7 @@ async def _bundle_meta_for_file(item: dict, file_entry: dict, tmdb: Optional[dic
 
 
 @app.get("/api/library/{item_id}/bundle-manifest")
-async def bundle_manifest(item_id: str, file_path: str = "", profile_id: str = "") -> JSONResponse:
+async def bundle_manifest(item_id: str, request: Request, file_path: str = "", profile_id: str = "") -> JSONResponse:
     """Enumerate a built HLS bundle for the iOS offline downloader (plan A1).
 
     Returns a flat `files` list (relative names + byte sizes) plus `total_bytes`
@@ -16194,6 +16338,7 @@ async def bundle_manifest(item_id: str, file_path: str = "", profile_id: str = "
     never builds one); the app then triggers a normal POST /offline-prepare and
     polls /offline-job/{id} before retrying. JIT on-demand stays online-only.
     """
+    _require_device_auth(request)
     if not HLS_AVAILABLE:
         raise HTTPException(503, HLS_UNAVAILABLE_MSG)
     lib = await get_library()

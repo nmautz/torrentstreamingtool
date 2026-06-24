@@ -78,6 +78,7 @@
 
   <div class="bar">
     <button id="connectBtn">Connect to server</button>
+    <button class="ghost" id="settingsBtn">Settings</button>
     <button class="ghost" id="refreshBtn">Refresh</button>
   </div>
 
@@ -381,6 +382,11 @@
     $("connectBtn").addEventListener("click", () => {
       // Back to the connect screen, which re-probes the saved host.
       window.location.replace("index.html");
+    });
+    // Settings: force the connect form (change server / re-pair) instead of an
+    // auto-reconnect, so the user can edit the address or pair while offline.
+    $("settingsBtn").addEventListener("click", () => {
+      window.location.replace("index.html?setup=1");
     });
 
     // Reflect the saved host in the Connect button label if present.

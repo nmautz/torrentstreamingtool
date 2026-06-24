@@ -835,6 +835,25 @@ that's what lets the dashboard's (future) B5 glue call `LocalMediaServer`.
 `server.allowNavigation: ["*"]` in `capacitor.config.json` is required, or
 Capacitor opens the host in Safari instead of in-app.
 
+### Cross-origin data between the shell and the host dashboard must go through a native plugin — NOT `localStorage`
+The connect shell (`capacitor://localhost/index.html`) and the host dashboard
+(`https://<host>`) are **different web origins**, so `localStorage` written by one is
+invisible to the other. This bit M5's pairing token: the shell pairs and gets a
+token, but the dashboard (which actually makes the device-facing fetches) can't read
+it from `localStorage`. Fix: store such shared state **natively** —
+`OfflineStore.set/getPairingToken` persists it in the app sandbox, readable from
+both origins (same reason the offline progress log is native). The shell writes the
+token after pairing; the dashboard reads it at startup into `_pairToken` and sends
+`Authorization: Bearer …`.
+
+### In-app navigation back to the shell pages is a full cross-origin navigation to `capacitor://localhost`
+Once the WebView is on the host dashboard there's no browser chrome, so the M5 `☰ App`
+menu (and `downloads.html`'s buttons) navigate with `window.location.href =
+"capacitor://localhost/index.html?setup=1"` (or `/downloads.html`). That's a real
+page load across origins — allowed only because `server.allowNavigation: ["*"]` and
+`limitsNavigationsToAppBoundDomains:false` are set. The local origin is always
+`capacitor://localhost` (the `iosScheme` + default hostname); don't assume `file://`.
+
 ### A new native Swift file must be added to the Xcode project — `cap sync` won't do it
 The generated `App.xcodeproj` is a classic file-reference project (`objectVersion 60`,
 no `PBXFileSystemSynchronizedRootGroup`), so a `.swift` file dropped into

@@ -190,6 +190,26 @@ Per-file `status` values: `ready_native` (fast-path Safari MP4, no work needed),
 
 See [STREAMING.md](STREAMING.md) for the full client/server flow.
 
+## Device pairing (iOS app, M5)
+
+Lets the native client authenticate for **remote** use. Enforcement is gated by the
+`REQUIRE_DEVICE_AUTH` setting (default **off** — LAN/browser use and online HLS
+playback are unaffected). When **on**, `/api/sync/progress`, `/api/sync/pull`,
+`/api/sync/resolve` and `/api/library/{id}/bundle-manifest` require a valid **device
+token** (`Authorization: Bearer …`, also accepted as `X-Device-Token` or
+`?device_token=`) **or** a valid admin session token; unpaired callers get **401**.
+Shared online-playback surfaces (`offline-cache/*`, `offline-prepare`, `/api/library`)
+are intentionally left open so the browser dashboard keeps working — see
+[IOS_APP_PLAN.md](IOS_APP_PLAN.md).
+
+| Method | Path | Notes |
+|--------|------|-------|
+| POST | `/api/pair` | Body `{admin_password, label?}`. Pairs a device: the host's `ADMIN_PASSWORD` is the secret. Returns `{ok:true, token}` — a long-lived bearer token persisted to host-local `device_tokens.json` (survives restart). **503** if the host has no admin password; **401** on a wrong password |
+| GET | `/api/pair/status` | `{required (REQUIRE_DEVICE_AUTH), admin_configured, paired (this request's token is recognised)}`. Lets the app decide whether to show the pairing screen |
+| DELETE | `/api/pair` | Revokes the **calling** device's own token (read from the Bearer header). Used on app sign-out. Always `{ok:true}` |
+| GET | `/api/admin/devices` | **Admin.** Lists paired devices: `{devices:[{id (8-char token prefix), label, created_at, last_seen}]}` — never the full token |
+| DELETE | `/api/admin/devices/{id}` | **Admin.** Revokes a paired device by its 8-char `id`. `{ok:true, revoked}` |
+
 ## Clip (save & share the last N seconds)
 
 Cuts a short, standalone, share-ready MP4 from the **original source** ending at
