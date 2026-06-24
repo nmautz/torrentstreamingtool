@@ -134,6 +134,20 @@
     .ep-prog-fill { height:100%; background:#22c55e; }
     .safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }
     .safe-top    { padding-top:    env(safe-area-inset-top,    0px); }
+    /* ── iOS app: safe-area fallback ───────────────────────────────────────────
+       In the Capacitor WKWebView env(safe-area-inset-top) can resolve to ~0 on the
+       navigated host dashboard even though the status bar / Dynamic Island overlaps
+       the web content (contentInset is "never", so the web view owns the full
+       viewport-fit=cover viewport). When env() under-reports, the status bar covers
+       our `.safe-top` chrome — the fullscreen remote header ("Close / Now Playing /
+       Night") and the top app bar. Force a minimum that clears the Island; `max()`
+       keeps the exact env() value whenever WebKit does report one. Scoped to
+       PORTRAIT only: in landscape the top inset is legitimately 0 and a forced band
+       would push the whole UI down. Same idea for the bottom home-indicator inset. */
+    @media (orientation: portrait) {
+      html.is-app .safe-top    { padding-top:    max(env(safe-area-inset-top,    0px), 59px); }
+      html.is-app .safe-bottom { padding-bottom: max(env(safe-area-inset-bottom, 0px), 34px); }
+    }
     /* Library card action row — keep every primary button the same height and on
        a single line (no 2-line "☰ / Episodes" wrap) so the row reads as a clean
        Metro strip; the icon cluster follows immediately (no ml-auto gap). */
@@ -11182,6 +11196,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.5.0.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.5.0.4</div>
 </body>
 </html>

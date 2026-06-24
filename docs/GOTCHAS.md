@@ -868,6 +868,21 @@ recompute on rotation — are the only inset source. Also set the WebView
 (`#030712`) so any momentary reflow gap is dark, never white. Rule of thumb: pick
 **one** inset owner — native `contentInset` *or* CSS `env()`, never both.
 
+### …but `env(safe-area-inset-top)` still under-reports in WKWebView — floor it to clear the Island (portrait only)
+Having made CSS `env()` the sole inset owner (above), don't assume it always returns
+the truth: on the navigated host dashboard the Capacitor WKWebView frequently
+resolves `env(safe-area-inset-top)` to **~0**, so `.safe-top` chrome (the fullscreen
+remote header, the top app bar) gets no padding and the status bar / Dynamic Island
+**overlaps** it. The launcher shell already worked around this with `max(env(...),
+24px)`. The dashboard does the same but device-correctly: `html.is-app .safe-top {
+padding-top: max(env(safe-area-inset-top), 59px) }` (and a `34px` floor for
+`.safe-bottom`'s home indicator) — a real env() value still wins, a missing one
+falls back to a value that clears the Island. **Scope the floor to `@media
+(orientation: portrait)`**: in landscape the top inset is legitimately 0, so an
+unconditional 59px band would shove the whole UI down — a regression. Trade-off:
+on a non-Island phone where env() *does* report (e.g. 47px), `max()` over-pads by
+~12px; a small dark band beats the status bar covering the controls.
+
 ### Cross-origin data between the shell and the host dashboard must go through a native plugin — NOT `localStorage`
 The connect shell (`capacitor://localhost/index.html`) and the host dashboard
 (`https://<host>`) are **different web origins**, so `localStorage` written by one is
