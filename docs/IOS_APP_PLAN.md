@@ -14,8 +14,13 @@
 > (`capacitor://`) and host dashboard (`https://`) can't share `localStorage`; the
 > shell's Connect screen pairs with the host password; the dashboard reads the token
 > back and sends `Authorization: Bearer` on every device-facing fetch, and shows an
-> always-on `☰ App` menu (Downloads / Change Server / Re-pair). Downloads management
-> (`list`/`remove`/`bytesUsed`) already shipped in `BundleDownloader` + `downloads.html`.
+> always-on `☰ App` menu (Dashboard / Downloads / Change Server / Re-pair). Downloads
+> management (`list`/`remove`/`bytesUsed`) already shipped in `BundleDownloader` +
+> `downloads.html`. The **Dashboard** entry (`6.0.0-preview.5.3.0`) opens a host-page
+> overlay — live server-connection status (from SSE `app._connected`), ongoing
+> downloads with live % (from the `offlineBundles` map), and storage grouped by
+> series/movie (`_cap.dl.list()`) — refreshing on a 1 s tick while open. It lives on
+> the host page so the SSE link stays connected, unlike the offline `downloads.html`.
 > **Known gap (intentional):** the *shared* online-playback surfaces
 > (`/api/library/offline-cache/*`, `/offline-prepare`, `/api/library`) are **left
 > open** even under `REQUIRE_DEVICE_AUTH` — gating them would break the browser

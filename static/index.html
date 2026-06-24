@@ -8290,7 +8290,7 @@ async function appDownloadBundle(itemId, filePath, name, btn) {
     return;
   }
   if (cur && cur.downloading) return;
-  offlineBundles.set(key, { downloading: true, prepping: true, fraction: 0 });
+  offlineBundles.set(key, { downloading: true, prepping: true, fraction: 0, name });
   _appRefreshDlBtn(itemId, filePath);
   try {
     const manifest = await _appFetchManifest(itemId, filePath);
@@ -8321,6 +8321,7 @@ async function appDownloadBundle(itemId, filePath, name, btn) {
     }
     const e = offlineBundles.get(key) || {};
     e.downloading = true; e.prepping = false; e.bytesTotal = manifest.total_bytes;
+    if (manifest.meta) e.meta = manifest.meta;
     offlineBundles.set(key, e);
   } catch (err) {
     offlineBundles.delete(key);
@@ -8349,7 +8350,7 @@ async function appDownloadAllBundles(itemId, title){
     if (f.complete === false) continue;   // not on the host's disk yet
     const st = offlineBundles.get(offKey(itemId, f.path));
     if (st && (st.complete || st.downloading || st.queued)) continue;
-    offlineBundles.set(offKey(itemId, f.path), { queued:true, fraction:0 });
+    offlineBundles.set(offKey(itemId, f.path), { queued:true, fraction:0, name:f.name });
     toStart.push(f);
   }
   if (!toStart.length){ showAlert("All episodes are already saved or downloading.","info"); return; }
@@ -8444,6 +8445,7 @@ async function _appInitOfflineBundles() {
         complete: !!it.complete, sha: it.sha, dir: it.dir,
         bytesTotal: it.bytesTotal, bytesDone: it.bytesDone, downloading,
         fraction: it.bytesTotal ? 0.5 + 0.5 * (it.bytesDone / it.bytesTotal) : 0,
+        name: it.name, meta: it.meta,
       });
     }
     if (epItemId) renderEpList();
@@ -8477,6 +8479,7 @@ function _appInitNav() {
     b.addEventListener("click", () => { menu.style.display = "none"; fn(); });
     return b;
   };
+  menu.appendChild(mk("Dashboard", _appOpenDashboard));
   menu.appendChild(mk("Downloads", _appGoDownloads));
   menu.appendChild(mk("Change Server / Re-pair", _appGoSettings));
   menu.lastChild.style.borderBottom = "0";
@@ -8489,6 +8492,158 @@ function _appInitNav() {
   });
   wrap.appendChild(menu); wrap.appendChild(toggle);
   document.body.appendChild(wrap);
+}
+
+// ── iOS app: in-app Dashboard (status / downloads / storage) ─────────────────
+// A full overlay (app only) that lives ON the host page, so the live SSE
+// connection stays up the whole time it's open — unlike downloads.html, which is
+// the offline (local-origin) page with no server link. Shows three things the
+// user asked to see at a glance:
+//   1. Server connection status (live, from the SSE `app._connected` flag).
+//   2. Ongoing offline downloads with live % (from the `offlineBundles` map that
+//      the native BundleDownloader progress events keep current).
+//   3. Local storage used on the device, grouped by series / movie.
+// While open it re-renders on a 1 s tick so the download bars and the connection
+// dot stay live; the tick is torn down on close so it costs nothing when hidden.
+let _appDashTimer = null;
+
+function _appOpenDashboard() {
+  if (!isApp) return;
+  let ov = document.getElementById("appDash");
+  if (!ov) { ov = _appBuildDashboard(); document.body.appendChild(ov); }
+  ov.style.display = "flex";
+  _appRenderDashboard();
+  if (_appDashTimer) clearInterval(_appDashTimer);
+  _appDashTimer = setInterval(_appRenderDashboard, 1000);
+}
+function _appCloseDashboard() {
+  const ov = document.getElementById("appDash");
+  if (ov) ov.style.display = "none";
+  if (_appDashTimer) { clearInterval(_appDashTimer); _appDashTimer = null; }
+}
+
+function _appBuildDashboard() {
+  const ov = document.createElement("div");
+  ov.id = "appDash";
+  ov.style.cssText = "position:fixed;inset:0;z-index:10000;display:none;flex-direction:column;"
+    + "background:#0b0b0d;color:#f2f2f4;font-family:-apple-system,'Segoe UI',Roboto,sans-serif;"
+    + "padding:max(env(safe-area-inset-top),16px) 16px max(env(safe-area-inset-bottom),16px);overflow-y:auto;";
+  ov.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
+      <div style="font-size:20px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;">Dashboard</div>
+      <button id="appDashClose" style="all:unset;cursor:pointer;color:#8a8a92;border:1px solid #2a2a30;
+        padding:8px 14px;font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;">Close</button>
+    </div>
+
+    <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;margin:4px 0 8px;">Server</div>
+    <div style="border:1px solid #2a2a30;background:#141417;padding:13px 14px;margin-bottom:18px;">
+      <div style="display:flex;align-items:center;gap:9px;">
+        <span id="appDashDot" style="width:10px;height:10px;background:#8a8a92;display:inline-block;"></span>
+        <span id="appDashConn" style="font-size:14px;font-weight:700;">Checking…</span>
+      </div>
+      <div id="appDashHost" style="font-size:12px;color:#8a8a92;margin-top:7px;word-break:break-all;"></div>
+    </div>
+
+    <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;margin:4px 0 8px;">Ongoing downloads</div>
+    <div id="appDashDownloads" style="margin-bottom:18px;"></div>
+
+    <div style="display:flex;align-items:baseline;justify-content:space-between;margin:4px 0 8px;">
+      <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;">Storage on this device</div>
+      <div id="appDashTotal" style="font-size:12px;color:#8a8a92;"></div>
+    </div>
+    <div id="appDashStorage" style="margin-bottom:8px;"></div>
+  `;
+  ov.querySelector("#appDashClose").addEventListener("click", _appCloseDashboard);
+  return ov;
+}
+
+// Render the live state into the dashboard overlay. Cheap enough to call every
+// second: one native list() read + DOM rebuild of two small lists.
+async function _appRenderDashboard() {
+  const ov = document.getElementById("appDash");
+  if (!ov || ov.style.display === "none") return;
+
+  // 1. Connection status — driven by the SSE link the host page keeps open.
+  const online = navigator.onLine && app._connected !== false;
+  const dot  = ov.querySelector("#appDashDot");
+  const conn = ov.querySelector("#appDashConn");
+  dot.style.background = online ? "#3ec46d" : "#e0533d";
+  conn.textContent = online ? "Connected — live" : (navigator.onLine ? "Reconnecting…" : "Offline");
+  conn.style.color = online ? "#3ec46d" : "#e0a23d";
+  ov.querySelector("#appDashHost").textContent = (localStorage.getItem("streamlink_server_url") || window.location.origin);
+
+  // Pull the authoritative on-device index for names, sizes and completion.
+  let items = [];
+  try { items = (await _cap.dl.list()).items || []; } catch (_) {}
+  const byKey = new Map();
+  for (const it of items) byKey.set(offKey(it.itemId, it.filePath), it);
+
+  // 2. Ongoing downloads — anything in the offline map that isn't finished. The
+  //    map carries the live fraction (host prep 0–50 %, transfer 50–100 %).
+  const dlWrap = ov.querySelector("#appDashDownloads");
+  const active = [];
+  for (const [key, st] of offlineBundles) {
+    if (!st || st.complete) continue;
+    if (!(st.downloading || st.queued || st.prepping)) continue;
+    const it = byKey.get(key);
+    const meta = st.meta || (it && it.meta) || {};
+    const label = (meta.series ? meta.series + " — " : "")
+      + (meta.season && meta.episode ? `S${String(meta.season).padStart(2,"0")}E${String(meta.episode).padStart(2,"0")} ` : "")
+      + (meta.episode_name || st.name || (it && it.name) || key.split("|").slice(1).join("|") || "Download");
+    active.push({ label, st });
+  }
+  if (!active.length) {
+    dlWrap.innerHTML = `<div style="color:#8a8a92;font-size:13px;border:1px solid #2a2a30;background:#141417;padding:13px 14px;">No downloads in progress.</div>`;
+  } else {
+    dlWrap.innerHTML = active.map(({ label, st }) => {
+      const pct = Math.round((st.fraction || 0) * 100);
+      const sub = (st.queued && !st.downloading) ? "Queued"
+        : st.prepping ? "Preparing on host…"
+        : (st.bytesTotal ? `${fmtSize(st.bytesDone || 0)} / ${fmtSize(st.bytesTotal)}` : "Downloading…");
+      return `<div style="border:1px solid #2a2a30;background:#141417;padding:11px 13px;margin-bottom:8px;">
+        <div style="display:flex;justify-content:space-between;gap:10px;font-size:13px;font-weight:700;">
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(label)}</span>
+          <span style="color:#3a7afe;flex:0 0 auto;">${pct}%</span>
+        </div>
+        <div style="font-size:11px;color:#8a8a92;margin-top:3px;">${escHtml(sub)}</div>
+        <div style="height:3px;background:#26262c;margin-top:7px;"><i style="display:block;height:100%;background:#3a7afe;width:${pct}%;"></i></div>
+      </div>`;
+    }).join("");
+  }
+
+  // 3. Storage used, grouped by series / movie (completed bundles only).
+  const groups = new Map();   // key → { title, bytes, count }
+  let total = 0;
+  for (const it of items) {
+    if (!it.complete) continue;
+    const bytes = it.bytesTotal || it.bytesDone || 0;
+    total += bytes;
+    const meta = it.meta || {};
+    const gkey = (meta.series || meta.title || it.name || it.sha).trim().toLowerCase();
+    const g = groups.get(gkey) || { title: meta.series || meta.title || it.name || "Download", bytes: 0, count: 0 };
+    g.bytes += bytes; g.count += 1;
+    groups.set(gkey, g);
+  }
+  ov.querySelector("#appDashTotal").textContent = total ? fmtSize(total) + " used" : "";
+  const stWrap = ov.querySelector("#appDashStorage");
+  const rows = [...groups.values()].sort((a, b) => b.bytes - a.bytes);
+  if (!rows.length) {
+    stWrap.innerHTML = `<div style="color:#8a8a92;font-size:13px;border:1px solid #2a2a30;background:#141417;padding:13px 14px;">Nothing downloaded yet.</div>`;
+  } else {
+    const max = rows[0].bytes || 1;
+    stWrap.innerHTML = rows.map((g) => {
+      const w = Math.max(2, Math.round((g.bytes / max) * 100));
+      const sub = g.count > 1 ? `${g.count} episodes` : "1 item";
+      return `<div style="border:1px solid #2a2a30;background:#141417;padding:11px 13px;margin-bottom:8px;">
+        <div style="display:flex;justify-content:space-between;gap:10px;font-size:13px;font-weight:700;">
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(g.title)}</span>
+          <span style="color:#8a8a92;flex:0 0 auto;">${fmtSize(g.bytes)}</span>
+        </div>
+        <div style="font-size:11px;color:#8a8a92;margin-top:3px;">${sub}</div>
+        <div style="height:3px;background:#26262c;margin-top:7px;"><i style="display:block;height:100%;background:#3ec46d;width:${w}%;"></i></div>
+      </div>`;
+    }).join("");
+  }
 }
 
 // --- Per-file "Prep for Streaming" -------------------------------------------
@@ -11291,6 +11446,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.5.2.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.5.3.0</div>
 </body>
 </html>
