@@ -4,7 +4,8 @@
   "webDir": "www",
   "ios": {
     "scheme": "StreamLink",
-    "contentInset": "always",
+    "contentInset": "never",
+    "backgroundColor": "#030712",
     "limitsNavigationsToAppBoundDomains": false
   },
   "server": {

@@ -30,6 +30,7 @@
     html, body {
       height: 100%;
       overflow: hidden;
+      background: #030712;          /* gray-950 — kill any white flash during a rotation reflow */
       max-width: 100vw;
       overscroll-behavior: none;   /* no pull-to-refresh / rubber-band chaining */
       touch-action: manipulation;  /* no accidental double-tap zoom; pinch still works */
@@ -11181,6 +11182,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.5.0.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.5.0.3</div>
 </body>
 </html>

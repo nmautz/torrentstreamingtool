@@ -853,6 +853,21 @@ both correct and stable in the app (no chrome to collapse). Browsers keep `dvh`.
 Same reasoning excludes the app from the browser-only "swipe to hide the URL bar"
 body-growth hack (`html:not(.is-app):has(#localPlayer.lp-active…)`).
 
+### Don't double up safe-area insets — `contentInset:"never"` when the CSS already uses `env(safe-area-inset-*)`
+The dashboard pads itself with `.safe-top`/`.safe-bottom` (`env(safe-area-inset-*)`),
+so the page already handles the notch/home-indicator. Capacitor's
+`ios.contentInset: "always"` *also* insets the WebView's scroll view — applying the
+top inset **twice**, and worse, Capacitor's `scrollView.contentInset` **goes stale on
+orientation change**: rotate to landscape and back and the (white) scroll-view
+background is exposed above the content while the whole UI sits shifted down, until
+the app is relaunched. Fix: **`contentInset: "never"`** in `capacitor.config.json`
+(both the root and the synced `ios/App/App/` copy) so the web content owns the full
+`viewport-fit=cover` viewport and the CSS `env()` insets — which WebKit *does*
+recompute on rotation — are the only inset source. Also set the WebView
+`ios.backgroundColor` and the `html`/`body` background to the app's dark
+(`#030712`) so any momentary reflow gap is dark, never white. Rule of thumb: pick
+**one** inset owner — native `contentInset` *or* CSS `env()`, never both.
+
 ### Cross-origin data between the shell and the host dashboard must go through a native plugin — NOT `localStorage`
 The connect shell (`capacitor://localhost/index.html`) and the host dashboard
 (`https://<host>`) are **different web origins**, so `localStorage` written by one is
