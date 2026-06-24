@@ -1405,6 +1405,11 @@
       class="text-[11px] px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 uppercase tracking-wide transition-colors">
       Clear
     </button>
+    <button id="epSeasonSelBtn" onclick="epToggleSeasonSelection()"
+      title="Select or clear every episode in the current season"
+      class="hidden text-[11px] px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 uppercase tracking-wide transition-colors">
+      ± Season
+    </button>
     <button onclick="epSelectUnwatched()"
       class="text-[11px] px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 uppercase tracking-wide transition-colors">
       Unwatched
@@ -5789,6 +5794,9 @@ async function toggleEpOndemandOnly(btn){
 
 function renderEpSeasonTabs(){
   const tabs=document.getElementById("epSeasonTabs");
+  // The "± Season" bulk chip only makes sense when the item is split into seasons.
+  const seasonSel=document.getElementById("epSeasonSelBtn");
+  if(seasonSel) seasonSel.classList.toggle("hidden", !epSeasonList.length);
   if(!epSeasonList.length){
     tabs.classList.add("hidden");
     tabs.innerHTML="";
@@ -6015,7 +6023,7 @@ function _epCardHtml(f){
             : ""}
           ${notDownloaded?"":offlineBtn}
           ${notDownloaded?"":_appDlBtnHTML(epItemId, f.path, f.name)}
-          ${notDownloaded?"":`<a href="/api/library/${escHtml(epItemId)}/download?file_path=${encodeURIComponent(f.path)}" download="${escHtml(f.name)}"
+          ${(notDownloaded||isApp)?"":`<a href="/api/library/${escHtml(epItemId)}/download?file_path=${encodeURIComponent(f.path)}" download="${escHtml(f.name)}"
             class="w-9 h-9 flex items-center justify-center text-gray-600 hover:text-indigo-300 hover:bg-indigo-950/40 transition-colors"
             title="Download to device">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -6379,6 +6387,17 @@ function epSelectAll(v){
   epFiles.forEach(f=>{ if(v) epChecked.add(f.path); else epChecked.delete(f.path); });
   document.querySelectorAll(".ep-check").forEach(cb=>{ cb.checked=v; }); updateEpCount();
 }
+// Select/unselect every episode in the currently-visible season at once. Toggles:
+// if all of the season's files are already checked, it clears them; otherwise it
+// selects them. Only the visible season is touched — other seasons keep their state.
+function epToggleSeasonSelection(){
+  const files=_visibleSeasonFiles();
+  if(!files.length) return;
+  const allOn=files.every(f=>epChecked.has(f.path));
+  files.forEach(f=>{ if(allOn) epChecked.delete(f.path); else epChecked.add(f.path); });
+  document.querySelectorAll(".ep-check").forEach(cb=>{ cb.checked=epChecked.has(cb.dataset.path); });
+  updateEpCount();
+}
 function epSelectUnwatched(){
   epChecked=new Set();
   epFiles.forEach(f=>{ if(!f.progress?.completed) epChecked.add(f.path); });
@@ -6481,10 +6500,26 @@ async function _triggerZipDownload(itemId, filePaths, label){
   }
 }
 
-function epDownloadSelected(){
+async function epDownloadSelected(){
   if(!epChecked.size){ showAlert("Select at least one episode.","warn"); return; }
   if(!epItemId) return;
   const paths=[...epChecked];
+  // In the app, mass download saves each selected episode as an offline bundle on
+  // the device (same path as the per-row app download button), not a host ZIP.
+  if(isApp){
+    if(!hlsAvailable){ showAlert("Offline download needs HLS prep on the host.","warn"); return; }
+    let started=0;
+    for(const p of paths){
+      const f=epFiles.find(fi=>fi.path===p);
+      if(!f) continue;
+      const st=offlineBundles.get(offKey(epItemId, f.path));
+      if(st && (st.complete||st.downloading)) continue;   // already saved/in-flight
+      await appDownloadBundle(epItemId, f.path, f.name);
+      started++;
+    }
+    if(!started) showAlert("Selected episodes are already saved offline.","info");
+    return;
+  }
   if(paths.length===1){
     const f=epFiles.find(fi=>fi.path===paths[0]);
     if(f){
@@ -11196,6 +11231,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.5.0.4</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.5.1.0</div>
 </body>
 </html>

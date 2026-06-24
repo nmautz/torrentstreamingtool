@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.0.0-preview.5.1.0] — 2026-06-24
+- **iOS: episode download UX cleanup + season-scoped bulk select.** Three changes, all `isApp`-gated so the browser dashboard is unaffected:
+  - **In the app, the per-row "Download to device" (web/host) button is now hidden** — only the app's offline-bundle download button shows. Previously both rendered with the same icon, which was confusing. The web download link still shows in the plain browser. ([static/index.html](static/index.html))
+  - **Bulk "Download (N)" now saves offline bundles on the device when in the app** (the same path as the per-row app download button), instead of triggering a host ZIP download. It skips episodes already saved/in-flight, and requires HLS prep on the host. The browser keeps the single-file/ZIP behaviour. ([static/index.html](static/index.html))
+  - **New "± Season" bulk chip** selects or clears every episode in the currently-visible season at once (a toggle — clears if all are already selected). Shown only for season-split items; other seasons keep their selection. ([static/index.html](static/index.html))
+  - *Web change: requires a `./build-ipa.sh` rebuild for the app; reload the dashboard for the browser.*
+
 ## [6.0.0-preview.5.0.4] — 2026-06-24
 - **iOS: fixed the status bar / Dynamic Island overlapping the top of the fullscreen remote (the "Close / Now Playing / Night" header) and the top app bar.** Although 5.0.3 made the CSS `env(safe-area-inset-*)` insets the single source of truth, in the Capacitor WKWebView `env(safe-area-inset-top)` resolves to ~0 on the navigated host dashboard, so `.safe-top` chrome got no top padding and the status bar covered it. Added an `.is-app`-scoped fallback — `padding-top: max(env(safe-area-inset-top), 59px)` (and a matching `34px` home-indicator floor for `.safe-bottom`) — so a real env() value still wins when WebKit reports one, but a missing inset no longer leaves the chrome under the Island. **Scoped to `@media (orientation: portrait)`** so landscape (where the top inset is legitimately 0) isn't pushed down by a forced band. ([static/index.html](static/index.html)) *Host-served web change: reload the dashboard — no native rebuild needed.*
 
