@@ -4916,26 +4916,32 @@ function renderLibrary(items){
         }
       }
 
-      // Download button — single file uses direct link; multi-file uses ZIP endpoint
+      // Download button — in the app it saves an offline bundle on the device; in a
+      // browser it pulls the file(s) over HTTP (single = direct link, multi = ZIP).
       if(isReady){
+        // App download needs a host that can build HLS bundles; without it, fall
+        // back to the web download path (mirrors `_appDlBtnHTML` returning "").
+        const useApp = isApp && hlsAvailable;
+        const dlIcon = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+            </svg>`;
+        const dlCls = "text-gray-500 hover:text-indigo-300 p-2.5 hover:bg-indigo-950/40 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0";
         if(isMulti){
-          iconBtns+=`<button onclick="epDownloadAll('${item.id}',${escHtml(JSON.stringify(item.title))})"
-            class="text-gray-500 hover:text-indigo-300 p-2.5 hover:bg-indigo-950/40 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0"
-            title="Download all to device (ZIP)">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
-            </svg>
-          </button>`;
+          iconBtns+= useApp
+            ? `<button onclick="appDownloadAllBundles('${item.id}',${escHtml(JSON.stringify(item.title))})"
+                class="${dlCls}" title="Save all episodes offline on this device">${dlIcon}</button>`
+            : `<button onclick="epDownloadAll('${item.id}',${escHtml(JSON.stringify(item.title))})"
+                class="${dlCls}" title="Download all to device (ZIP)">${dlIcon}</button>`;
         } else {
-          iconBtns+=`<a href="/api/library/${item.id}/download" download
-            class="text-gray-500 hover:text-indigo-300 p-2.5 hover:bg-indigo-950/40 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0"
-            title="Download to device">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
-            </svg>
-          </a>`;
+          const sf = item.first_file || null;
+          if(useApp && sf && sf.path){
+            iconBtns+=`<button onclick="appDownloadBundle(${escHtml(JSON.stringify(item.id))},${escHtml(JSON.stringify(sf.path))},${escHtml(JSON.stringify(sf.name||item.title||''))},this)"
+              class="${dlCls}" title="Save offline on this device">${dlIcon}</button>`;
+          } else {
+            iconBtns+=`<a href="/api/library/${item.id}/download" download
+              class="${dlCls}" title="Download to device">${dlIcon}</a>`;
+          }
         }
       }
 
@@ -6022,7 +6028,7 @@ function _epCardHtml(f){
               </button>`
             : ""}
           ${notDownloaded?"":offlineBtn}
-          ${notDownloaded?"":_appDlBtnHTML(epItemId, f.path, f.name)}
+          ${(notDownloaded||!isApp)?"":`<span class="ep-appdl-slot" data-path="${escHtml(f.path)}">${_appDlBtnHTML(epItemId, f.path, f.name)}</span>`}
           ${(notDownloaded||isApp)?"":`<a href="/api/library/${escHtml(epItemId)}/download?file_path=${encodeURIComponent(f.path)}" download="${escHtml(f.name)}"
             class="w-9 h-9 flex items-center justify-center text-gray-600 hover:text-indigo-300 hover:bg-indigo-950/40 transition-colors"
             title="Download to device">
@@ -6508,16 +6514,22 @@ async function epDownloadSelected(){
   // the device (same path as the per-row app download button), not a host ZIP.
   if(isApp){
     if(!hlsAvailable){ showAlert("Offline download needs HLS prep on the host.","warn"); return; }
-    let started=0;
+    // Mark every selected episode as "queued" up front and paint its spinner
+    // immediately (targeted, no list rebuild) so the user sees instant feedback —
+    // appDownloadBundle's per-file manifest fetch otherwise delayed the icon by a
+    // few seconds. Then start the actual downloads sequentially.
+    const toStart=[];
     for(const p of paths){
       const f=epFiles.find(fi=>fi.path===p);
       if(!f) continue;
       const st=offlineBundles.get(offKey(epItemId, f.path));
-      if(st && (st.complete||st.downloading)) continue;   // already saved/in-flight
-      await appDownloadBundle(epItemId, f.path, f.name);
-      started++;
+      if(st && (st.complete||st.downloading||st.queued)) continue;   // already saved/in-flight/queued
+      offlineBundles.set(offKey(epItemId, f.path), { queued:true, fraction:0 });
+      _appRefreshDlBtn(epItemId, f.path);
+      toStart.push(f);
     }
-    if(!started) showAlert("Selected episodes are already saved offline.","info");
+    if(!toStart.length){ showAlert("Selected episodes are already saved or downloading.","info"); return; }
+    for(const f of toStart) await appDownloadBundle(epItemId, f.path, f.name);
     return;
   }
   if(paths.length===1){
@@ -8257,7 +8269,7 @@ async function _appPrepBundle(itemId, filePath) {
     const e = offlineBundles.get(key) || {};
     e.downloading = true; e.prepping = true; e.fraction = (j.progress || 0) * 0.5;
     offlineBundles.set(key, e);
-    _appThrottledEpRefresh(itemId);
+    _appRefreshDlBtn(itemId, filePath);
     if (j.status === "done") return;
     if (j.status === "error") throw new Error(j.error || "Host prep failed.");
   }
@@ -8274,12 +8286,12 @@ async function appDownloadBundle(itemId, filePath, name, btn) {
     if (!window.confirm("Remove this offline download from the device?")) return;
     try { await _cap.dl.remove({ itemId, filePath }); } catch (_) {}
     offlineBundles.delete(key);
-    if (epItemId === itemId) renderEpList();
+    _appRefreshDlBtn(itemId, filePath);
     return;
   }
   if (cur && cur.downloading) return;
   offlineBundles.set(key, { downloading: true, prepping: true, fraction: 0 });
-  if (epItemId === itemId) renderEpList();
+  _appRefreshDlBtn(itemId, filePath);
   try {
     const manifest = await _appFetchManifest(itemId, filePath);
     const origin = window.location.origin;
@@ -8311,16 +8323,35 @@ async function appDownloadBundle(itemId, filePath, name, btn) {
     offlineBundles.delete(key);
     showAlert(err.message || "Download failed.", "error");
   }
-  if (epItemId === itemId) renderEpList();
+  _appRefreshDlBtn(itemId, filePath);
 }
 
-let _appEpRefreshAt = 0;
-function _appThrottledEpRefresh(itemId) {
-  if (epItemId !== itemId) return;
-  const now = Date.now();
-  if (now - _appEpRefreshAt < 500) return;
-  _appEpRefreshAt = now;
-  try { renderEpList(); } catch (_) {}
+// Library-card "Download all" for a multi-file item, in the app: save every
+// on-disk episode as an offline bundle on this device (the app equivalent of the
+// browser's ZIP "Download all to device"). Fetches the file list if needed.
+async function appDownloadAllBundles(itemId, title){
+  if (!isApp) return;
+  if (!hlsAvailable){ showAlert("Offline download needs HLS prep on the host.","warn"); return; }
+  let files = downloadFilesData.get(itemId);
+  if (!files){
+    try {
+      const pid = profile.id ? `?profile_id=${encodeURIComponent(profile.id)}` : "";
+      const r = await fetch(`/api/library/${itemId}/files${pid}`, { headers: _appAuthHeaders() });
+      if (r.ok){ files = (await r.json()).files; downloadFilesData.set(itemId, files); }
+    } catch (_) {}
+  }
+  if (!files || !files.length){ showAlert("No files to download.","warn"); return; }
+  const toStart = [];
+  for (const f of files){
+    if (f.complete === false) continue;   // not on the host's disk yet
+    const st = offlineBundles.get(offKey(itemId, f.path));
+    if (st && (st.complete || st.downloading || st.queued)) continue;
+    offlineBundles.set(offKey(itemId, f.path), { queued:true, fraction:0 });
+    toStart.push(f);
+  }
+  if (!toStart.length){ showAlert("All episodes are already saved or downloading.","info"); return; }
+  showAlert(`Saving ${toStart.length} episode${toStart.length>1?"s":""} offline…`, "ok");
+  for (const f of toStart) await appDownloadBundle(itemId, f.path, f.name);
 }
 
 // Per-row Download button HTML (app only; "" in a browser).
@@ -8337,12 +8368,16 @@ function _appDlBtnHTML(itemId, filePath, name) {
       <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24"><path d="M5 18h14v2H5zM12 16l5-6h-3V4h-4v6H7z"/></svg>
     </button>`;
   }
-  if (st && st.downloading) {
+  if (st && (st.downloading || st.queued)) {
+    // Actively transferring (post-prep) ⇒ show a live %. While queued or prepping
+    // on the host there's no transfer % yet, so just the spinner.
+    const active = st.downloading && !st.prepping;
     const pct = Math.round((st.fraction || 0) * 100);
-    return `<div class="h-9 px-1.5 flex items-center gap-1 text-[11px] font-bold text-sky-300"
-        title="${st.prepping ? 'Preparing on host…' : 'Downloading to device…'}">
+    const title = (st.queued && !st.downloading) ? 'Queued…'
+                : st.prepping ? 'Preparing on host…' : 'Downloading to device…';
+    return `<div class="h-9 px-1.5 flex items-center gap-1 text-[11px] font-bold text-sky-300" title="${title}">
       <svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-        <path stroke-linecap="round" d="M12 3a9 9 0 1 0 9 9"/></svg>${pct}%</div>`;
+        <path stroke-linecap="round" d="M12 3a9 9 0 1 0 9 9"/></svg>${active ? `<span class="ep-dl-pct">${pct}%</span>` : ""}</div>`;
   }
   return `<button onclick="appDownloadBundle(${_id},${_p},${_n},this)"
     class="w-9 h-9 flex items-center justify-center text-gray-600 hover:text-sky-400 hover:bg-sky-950/30 transition-colors"
@@ -8350,6 +8385,28 @@ function _appDlBtnHTML(itemId, filePath, name) {
     <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
       <path stroke-linecap="round" stroke-linejoin="round" d="M4 16v1a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3v-1m-4-7l-4 4m0 0l-4-4m4 4V3"/></svg>
   </button>`;
+}
+
+// Escape a value for use inside an attribute-value CSS selector.
+function _cssAttr(v){ return (window.CSS && CSS.escape) ? CSS.escape(v) : String(v).replace(/["\\]/g, "\\$&"); }
+
+// Update ONLY one episode's offline-download button in place — never the whole
+// list. A full renderEpList() rebuilds every <img> still, which made the episode
+// thumbnails flash on every progress tick. While actively transferring we touch
+// just the `%` text so the spinner animation isn't restarted either; structural
+// changes (queued→prepping→downloading→saved/error) rebuild the small slot only.
+function _appRefreshDlBtn(itemId, filePath){
+  if (epItemId !== itemId) return;
+  const slot = document.querySelector(`.ep-appdl-slot[data-path="${_cssAttr(filePath)}"]`);
+  if (!slot) return;
+  const st = offlineBundles.get(offKey(itemId, filePath));
+  const pctEl = slot.querySelector(".ep-dl-pct");
+  if (pctEl && st && st.downloading && !st.prepping) {
+    pctEl.textContent = Math.round((st.fraction || 0) * 100) + "%";
+    return;
+  }
+  const f = epFiles.find(fi => fi.path === filePath);
+  slot.innerHTML = _appDlBtnHTML(itemId, filePath, f ? f.name : (filePath.split(/[\\/]/).pop() || ""));
 }
 
 // Hydrate the map from the device's existing downloads + subscribe to progress.
@@ -8364,17 +8421,17 @@ async function _appInitOfflineBundles() {
       e.fraction = 0.5 + 0.5 * (ev.fraction || 0);
       e.bytesTotal = ev.bytesTotal; e.bytesDone = ev.bytesDone;
       offlineBundles.set(key, e);
-      _appThrottledEpRefresh(ev.itemId);
+      _appRefreshDlBtn(ev.itemId, ev.filePath);
     });
     _cap.dl.addListener("bundleComplete", (ev) => {
       offlineBundles.set(offKey(ev.itemId, ev.filePath),
         { complete: true, sha: ev.sha, dir: ev.dir });
-      if (epItemId === ev.itemId) renderEpList();
+      _appRefreshDlBtn(ev.itemId, ev.filePath);
       showAlert("Saved offline: " + (ev.filePath.split(/[\\/]/).pop() || ""), "ok");
     });
     _cap.dl.addListener("bundleError", (ev) => {
       offlineBundles.delete(offKey(ev.itemId, ev.filePath));
-      if (epItemId === ev.itemId) renderEpList();
+      _appRefreshDlBtn(ev.itemId, ev.filePath);
       showAlert("Download failed: " + (ev.message || ""), "error");
     });
     const { items } = await _cap.dl.list();
@@ -11231,6 +11288,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.5.1.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.5.2.0</div>
 </body>
 </html>

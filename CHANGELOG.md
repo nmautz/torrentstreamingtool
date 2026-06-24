@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.0.0-preview.5.2.0] — 2026-06-24
+- **iOS: instant download feedback, no more thumbnail flashing, and app-native download on the library card.** Builds on 5.1.0's bulk app download:
+  - **Bulk "Download (N)" now paints every selected episode's spinner instantly.** Previously each episode only showed an in-progress icon after `appDownloadBundle`'s per-file manifest fetch resolved (a few seconds' lag). Selected episodes are now pre-marked **`queued`** and their per-row button is repainted up front, before any network call. New `queued` state in `_appDlBtnHTML`. ([static/index.html](static/index.html))
+  - **Episode thumbnails no longer flash during downloads.** Progress events used to call full `renderEpList()` (throttled), which rebuilt every `<img>` still on each tick → visible flashing. Replaced with a **targeted `_appRefreshDlBtn(itemId, filePath)`** that updates only the one episode's download button slot (`.ep-appdl-slot`); while actively transferring it touches just the `%` text so even the spinner animation isn't restarted. `appDownloadBundle`, the host-prep poll, and the `bundleProgress`/`bundleComplete`/`bundleError` listeners all use it now; the old `_appThrottledEpRefresh` full-list refresh is gone. ([static/index.html](static/index.html))
+  - **The library/series card download button now uses the app download in the app** (web ZIP/direct-link in a browser, unchanged). Single-file cards save the one file as an offline bundle (`appDownloadBundle`); multi-file cards save **all** on-disk episodes as bundles via new `appDownloadAllBundles()`. Falls back to the web path when the host can't build HLS bundles. ([static/index.html](static/index.html))
+  - *Web change: requires a `./build-ipa.sh` rebuild for the app; reload the dashboard for the browser.*
+
 ## [6.0.0-preview.5.1.0] — 2026-06-24
 - **iOS: episode download UX cleanup + season-scoped bulk select.** Three changes, all `isApp`-gated so the browser dashboard is unaffected:
   - **In the app, the per-row "Download to device" (web/host) button is now hidden** — only the app's offline-bundle download button shows. Previously both rendered with the same icon, which was confusing. The web download link still shows in the plain browser. ([static/index.html](static/index.html))
