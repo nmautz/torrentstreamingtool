@@ -631,6 +631,10 @@
     body:has(#profilePicker:not(.hidden)) #skipOffer,
     body:has(#profilePicker:not(.hidden)) #resumeOffer,
     body:has(#profilePicker:not(.hidden)) #localPlayer { display: none !important; }
+
+    /* iOS app (M5): hide the always-on ☰ App menu during on-device playback so it
+       doesn't float over the player. Tiny (picture-in-picture) mode keeps it. */
+    body:has(#localPlayer.lp-active:not(.lp-tiny)) #appNav { display: none !important; }
   </style>
 </head>
 <body class="dark bg-gray-950 text-gray-100 flex flex-col">
@@ -11158,6 +11162,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.5.0.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.5.0.1</div>
 </body>
 </html>
