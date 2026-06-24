@@ -23,8 +23,11 @@
 //  identifier must be owned by exactly one long-lived delegate.
 //
 //  JS surface (Capacitor plugin "BundleDownloader"):
-//    download({ itemId, filePath, cacheKey, name?, baseUrl, files:[{name,size}], token?, meta? })
+//    download({ itemId, filePath, cacheKey, name?, baseUrl, files:[{name,size}], token?, masterContent?, meta? })
 //                                   -> { sha, dir, alreadyComplete }
+//    `masterContent` (optional) = the host's master.m3u8 trimmed to the highest
+//    video rung; written to disk verbatim so the dropped ABR down-rungs (absent
+//    from `files`) are never fetched or referenced.
 //    getLocal({ itemId, filePath }) -> { found, complete, sha?, dir?, bytesDone, bytesTotal, fileCount, meta? }
 //    list()                         -> { items:[{ sha, itemId, filePath, name, complete, bytesTotal, bytesDone, fileCount, meta? }] }
 //  `meta` (optional) = { series, title, season, episode, episode_name, overview,
@@ -96,7 +99,8 @@ public class BundleDownloader: CAPPlugin, CAPBridgedPlugin {
             let res = try BundleDownloadManager.shared.startDownload(
                 itemId: itemId, filePath: filePath, cacheKey: cacheKey,
                 name: call.getString("name") ?? filePath,
-                baseUrl: baseUrl, files: files, token: call.getString("token"), meta: meta)
+                baseUrl: baseUrl, files: files, token: call.getString("token"),
+                masterContent: call.getString("masterContent"), meta: meta)
             call.resolve(["sha": cacheKey, "dir": res.dir, "alreadyComplete": res.alreadyComplete])
         } catch {
             call.reject("Could not start download: \(error.localizedDescription)")
@@ -221,7 +225,8 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
 
     func startDownload(itemId: String, filePath: String, cacheKey: String,
                        name: String, baseUrl: String, files: [BundleFile],
-                       token: String?, meta: [String: Any]? = nil) throws -> StartResult {
+                       token: String?, masterContent: String? = nil,
+                       meta: [String: Any]? = nil) throws -> StartResult {
         var result: StartResult!
         var thrown: Error?
         queue.sync {
@@ -230,6 +235,15 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
                 try fm.createDirectory(at: dir, withIntermediateDirectories: true)
                 excludeFromBackup(root)
             } catch { thrown = error; return }
+
+            // The host trims master.m3u8 to the highest video rung only (dropping the
+            // ABR down-rungs from `files`) and ships the rewritten playlist inline so
+            // we never fetch — nor reference — a dropped rung. Write it to disk before
+            // the resume scan below, where its `files` entry (carrying the trimmed
+            // byte size) is then seen as already-complete and skipped.
+            if let mc = masterContent, let data = mc.data(using: .utf8) {
+                try? data.write(to: dir.appendingPathComponent("master.m3u8"), options: .atomic)
+            }
 
             // Record (or refresh) the index entry up front so getLocal/list see it
             // even mid-download. Preserve any prior `meta` if this call omits it.

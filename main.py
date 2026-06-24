@@ -16268,6 +16268,71 @@ def _enumerate_bundle_files(out_dir: Path) -> tuple[list[dict], int]:
     return files, total
 
 
+def _bundle_highest_only(out_dir: Path, files: list[dict],
+                         meta: dict) -> tuple[list[dict], int, Optional[str]]:
+    """Filter an enumerated bundle down to the HIGHEST (source) video rung for the
+    iOS offline downloader — the device should not waste storage on the 720p/480p
+    ABR down-rungs it will never select when playing a single downloaded file.
+
+    Drops every non-original rung's playlist + init + segments from `files`, and
+    rewrites master.m3u8 *in memory* to reference only the kept (idx 0) rung — the
+    same master rewrite `_trim_one_bundle` does on disk, but non-destructive (the
+    shared on-disk bundle still serves all rungs for streaming clients). The trimmed
+    master is returned inline so the app writes it verbatim instead of fetching the
+    full one; the master entry in `files` keeps its (new, smaller) byte size so the
+    downloader's resume check treats the written file as complete.
+
+    Returns (filtered_files, total_bytes, trimmed_master_text). master_text is None
+    when there's nothing to drop (≤1 rung) — caller leaves the bundle untouched.
+    """
+    videos = meta.get("videos") or []
+    drop_names = {v.get("name") for v in videos
+                  if v.get("idx", 0) != 0 and v.get("name")}
+    if not drop_names:
+        return files, sum(f["size"] for f in files), None
+
+    # Rewrite master.m3u8: drop each #EXT-X-STREAM-INF whose following URI names a
+    # dropped rung (audio #EXT-X-MEDIA lines are left untouched). Mirrors the
+    # rewrite in _trim_one_bundle so the kept rung's playlist URI stays intact.
+    drop_uris = {f"{n}.m3u8" for n in drop_names}
+    try:
+        lines = (out_dir / "master.m3u8").read_text("utf-8").splitlines()
+    except OSError:
+        return files, sum(f["size"] for f in files), None
+    kept_lines: list[str] = []
+    i = 0
+    while i < len(lines):
+        line = lines[i]
+        if line.startswith("#EXT-X-STREAM-INF"):
+            uri = lines[i + 1].strip() if i + 1 < len(lines) else ""
+            if uri in drop_uris:
+                i += 2
+                continue
+            kept_lines.append(line)
+            if i + 1 < len(lines):
+                kept_lines.append(lines[i + 1])
+            i += 2
+            continue
+        kept_lines.append(line)
+        i += 1
+    master_text = "\n".join(kept_lines) + "\n"
+    master_bytes = len(master_text.encode("utf-8"))
+
+    def _is_dropped(name: str) -> bool:
+        for n in drop_names:
+            if name in (f"{n}.m3u8", f"init_{n}.mp4") or name.startswith(f"seg_{n}_"):
+                return True
+        return False
+
+    out: list[dict] = []
+    for f in files:
+        nm = f["name"]
+        if _is_dropped(nm):
+            continue
+        out.append({"name": nm, "size": master_bytes} if nm == "master.m3u8" else f)
+    return out, sum(f["size"] for f in out), master_text
+
+
 async def _tmdb_image_data_url(path: str, size: str = "w342") -> str:
     """Fetch a TMDb image and return it as a `data:` URL so the iOS offline
     Downloads picker can show a poster with no network (the bundle carries it).
@@ -16366,6 +16431,10 @@ async def bundle_manifest(item_id: str, request: Request, file_path: str = "", p
 
     meta = _read_meta(out_dir)
     files, total = await asyncio.to_thread(_enumerate_bundle_files, out_dir)
+    # Download only the highest (source) video rung — drop the ABR down-rungs the
+    # device never picks, with an inline-rewritten master that references just it.
+    files, total, master_text = await asyncio.to_thread(
+        _bundle_highest_only, out_dir, files, meta)
     sidecar_subs = await asyncio.to_thread(_list_sidecar_subs, src, item_id)
 
     # Series/episode metadata + poster so the offline Downloads picker can group
@@ -16400,6 +16469,7 @@ async def bundle_manifest(item_id: str, request: Request, file_path: str = "", p
         "files":              files,
         "file_count":         len(files),
         "total_bytes":        total,
+        "master_m3u8":        master_text,   # inline trimmed master (highest rung only); None ⇒ fetch as-is
         "duration_sec":       meta.get("duration_sec", 0),
         "audios":             meta.get("audios", []),
         "subtitles":          meta.get("subtitles", []),

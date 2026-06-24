@@ -8299,6 +8299,9 @@ async function appDownloadBundle(itemId, filePath, name, btn) {
     await _cap.dl.download({
       itemId, filePath, cacheKey: manifest.cache_key, name,
       baseUrl: origin + manifest.bundle_url, files, token: _appPairingToken(),
+      // Trimmed master.m3u8 (highest rung only) written verbatim by the native side
+      // so we never fetch — nor reference — the dropped ABR down-rungs.
+      masterContent: manifest.master_m3u8 || null,
       // Series/episode metadata + inlined poster for the offline Downloads picker.
       meta: manifest.meta || null,
     });
@@ -11288,6 +11291,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.5.2.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.5.2.1</div>
 </body>
 </html>
