@@ -180,6 +180,16 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     private let queue = DispatchQueue(label: "com.streamlink.bundledownloader.state")
     private let fm = FileManager.default
 
+    // Transport errors that mean "the network blipped" rather than "this file is
+    // permanently unfetchable" — we retry these instead of dropping the bundle.
+    private static let maxFileRetries = 8
+    private static let transientURLErrorCodes: Set<Int> = [
+        NSURLErrorTimedOut, NSURLErrorCannotConnectToHost, NSURLErrorNetworkConnectionLost,
+        NSURLErrorNotConnectedToInternet, NSURLErrorDNSLookupFailed, NSURLErrorCannotFindHost,
+        NSURLErrorResourceUnavailable, NSURLErrorInternationalRoamingOff, NSURLErrorDataNotAllowed,
+        NSURLErrorSecureConnectionFailed, NSURLErrorRequestBodyStreamExhausted,
+    ]
+
     // Active downloads keyed by cache sha.
     private final class Job {
         let itemId: String, filePath: String, name: String, baseUrl: String, token: String?
@@ -187,6 +197,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         var doneBytes: [String: Int64] = [:]   // fileName -> bytes confirmed on disk
         var liveBytes: [String: Int64] = [:]    // fileName -> bytes written by an in-flight task
         var pending: Set<String> = []           // file names still downloading
+        var attempts: [String: Int] = [:]       // fileName -> transient-error retry count
         init(itemId: String, filePath: String, name: String, baseUrl: String, token: String?, files: [BundleFile]) {
             self.itemId = itemId; self.filePath = filePath; self.name = name
             self.baseUrl = baseUrl; self.token = token; self.files = files
@@ -451,6 +462,29 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         task.resume()
     }
 
+    // One file's download failed. If the failure looks like a brief network/proxy
+    // blip (`transient`) and we're under the retry cap, re-enqueue it with a
+    // backoff instead of dropping the whole bundle — on a background URLSession the
+    // fresh task waits for connectivity, so it resumes when the link returns. Only
+    // a persistent or non-transient failure surfaces an error + cancels. This is
+    // what stops "lose connection briefly → the whole download gets stuck/dropped".
+    // Assumes `queue` and `job === jobs[sha]`.
+    private func retryOrFail(sha: String, fileName: String, job: Job, message: String, transient: Bool) {
+        let n = (job.attempts[fileName] ?? 0) + 1
+        if transient, n <= Self.maxFileRetries, let f = job.files.first(where: { $0.name == fileName }) {
+            job.attempts[fileName] = n
+            job.liveBytes[fileName] = nil               // this attempt's bytes are gone
+            let delay = Double(min(n * 3, 30))          // linear backoff, capped at 30 s
+            queue.asyncAfter(deadline: .now() + delay) {
+                guard self.jobs[sha] != nil else { return }   // cancelled meanwhile
+                self.enqueue(sha: sha, file: f, job: job)
+            }
+            return
+        }
+        emitError(sha: sha, job: job, message: message)
+        cancelLocked(sha: sha)
+    }
+
     private func markComplete(_ sha: String, job: Job) {
         var idx = readIndex()
         if var entry = idx[sha] { entry["complete"] = true; idx[sha] = entry; writeIndex(idx) }
@@ -585,20 +619,24 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         let dest = dir.appendingPathComponent(fileName)
         // Verify HTTP success; a 4xx/5xx still "finishes downloading" (the error body).
         let http = downloadTask.response as? HTTPURLResponse
-        let ok = (http?.statusCode ?? 0) >= 200 && (http?.statusCode ?? 0) < 300
+        let code = http?.statusCode ?? 0
+        let ok = code >= 200 && code < 300
         var moveError: String?
+        var errTransient = false
         if ok {
             try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
             try? fm.removeItem(at: dest)
             do { try fm.moveItem(at: location, to: dest) } catch { moveError = error.localizedDescription }
         } else {
-            moveError = "HTTP \(http?.statusCode ?? -1) for \(fileName)"
+            moveError = "HTTP \(code) for \(fileName)"
+            // A flaky tunnel/proxy can return 5xx/429/408 mid-blip — retry those
+            // like a network error rather than dropping the bundle.
+            errTransient = (code == 408 || code == 429 || (500...599).contains(code))
         }
         queue.async {
             guard let job = self.jobs[sha] else { return }
             if let err = moveError {
-                self.emitError(sha: sha, job: job, message: err)
-                self.cancelLocked(sha: sha)
+                self.retryOrFail(sha: sha, fileName: fileName, job: job, message: err, transient: errTransient)
                 return
             }
             let size = (try? dest.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { Int64($0) } ?? 0
@@ -623,14 +661,17 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
 
     func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
         guard let error = error else { return }   // success handled in didFinishDownloadingTo
-        guard let (sha, _) = decode(taskDescription: task.taskDescription) else { return }
+        guard let (sha, fileName) = decode(taskDescription: task.taskDescription) else { return }
         // A deliberate cancel (remove/cancel) drops the job first — don't surface it.
         let nsErr = error as NSError
         if nsErr.code == NSURLErrorCancelled { return }
         queue.async {
             guard let job = self.jobs[sha] else { return }
-            self.emitError(sha: sha, job: job, message: error.localizedDescription)
-            self.cancelLocked(sha: sha)
+            // A brief connectivity loss mid-transfer must NOT drop the whole bundle.
+            let isTransient = nsErr.domain == NSURLErrorDomain
+                && Self.transientURLErrorCodes.contains(nsErr.code)
+            self.retryOrFail(sha: sha, fileName: fileName, job: job,
+                             message: error.localizedDescription, transient: isTransient)
         }
     }
 }

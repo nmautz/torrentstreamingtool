@@ -8287,19 +8287,38 @@ async function _appStartLocalPlayback(local) {
   };
 }
 
+// fetch with an AbortController timeout. A brief connectivity loss can leave a
+// WKWebView fetch hanging indefinitely (it doesn't always reject), which would
+// wedge the bulk-download pipeline — every episode queued behind the hung lane
+// sits at "Queued…" forever. A timeout converts the hang into a retryable error.
+async function _appFetchT(url, opts, ms) {
+  const ctrl = new AbortController();
+  const id = setTimeout(() => ctrl.abort(), ms || 15000);
+  try { return await fetch(url, { ...(opts || {}), signal: ctrl.signal }); }
+  finally { clearTimeout(id); }
+}
+
+// True for "the network blipped" errors (abort/timeout or a fetch-level network
+// failure) — retryable — as opposed to a real HTTP/server error (a resolved
+// response we threw on), which isn't.
+function _appIsNetErr(err) {
+  const n = err && err.name, m = (err && err.message) || "";
+  return n === "AbortError" || n === "TypeError" || /failed to fetch|load failed|network/i.test(m);
+}
+
 // Resolve a downloadable bundle manifest, building the host bundle first (and
 // polling the prep job) when it isn't prepped yet.
 async function _appFetchManifest(itemId, filePath, quality) {
   const u = `/api/library/${itemId}/bundle-manifest?file_path=${encodeURIComponent(filePath)}`
           + (profile.id ? `&profile_id=${encodeURIComponent(profile.id)}` : "")
           + (quality ? `&quality=${encodeURIComponent(quality)}` : "");
-  let r = await fetch(u, { headers: _appAuthHeaders() });
+  let r = await _appFetchT(u, { headers: _appAuthHeaders() }, 20000);
   if (r.status === 401) throw new Error("This device isn’t paired with the host — re-pair from Settings.");
   if (r.status === 409) {
     const info = await r.json().catch(() => ({}));
     if (info.ondemand_only) throw new Error("This title is on-demand only — it can’t be downloaded.");
     await _appPrepBundle(itemId, filePath);
-    r = await fetch(u, { headers: _appAuthHeaders() });
+    r = await _appFetchT(u, { headers: _appAuthHeaders() }, 20000);
   }
   if (!r.ok) {
     const e = await r.json().catch(() => ({ detail: "Manifest unavailable." }));
@@ -8310,10 +8329,10 @@ async function _appFetchManifest(itemId, filePath, quality) {
 
 // POST /offline-prepare then poll /offline-job until the host bundle is built.
 async function _appPrepBundle(itemId, filePath) {
-  const r = await fetch(`/api/library/${itemId}/offline-prepare`, {
+  const r = await _appFetchT(`/api/library/${itemId}/offline-prepare`, {
     method: "POST", headers: { "Content-Type": "application/json", ..._appAuthHeaders() },
     body: JSON.stringify({ file_path: filePath, profile_id: profile.id || "" }),
-  });
+  }, 20000);
   if (!r.ok) throw new Error("Could not start host-side prep.");
   const prep = await r.json();
   if (prep.ready) return;
@@ -8322,9 +8341,15 @@ async function _appPrepBundle(itemId, filePath) {
   const key = offKey(itemId, filePath);
   for (let i = 0; i < 5400; i++) {            // ~3h ceiling at 2s/poll
     await new Promise((res) => setTimeout(res, 2000));
-    const jr = await fetch(`/api/library/offline-job/${prep.job_id}`);
-    if (!jr.ok) throw new Error("Prep job lost.");
-    const j = await jr.json();
+    let j;
+    try {
+      const jr = await _appFetchT(`/api/library/offline-job/${prep.job_id}`, {}, 12000);
+      if (!jr.ok) throw new Error("Prep job lost.");
+      j = await jr.json();
+    } catch (err) {
+      if (_appIsNetErr(err)) continue;   // transient blip — host prep is still running, keep polling
+      throw err;
+    }
     const e = offlineBundles.get(key) || {};
     e.downloading = true; e.prepping = true; e.fraction = (j.progress || 0) * 0.5;
     offlineBundles.set(key, e);
@@ -8425,52 +8450,75 @@ async function appDownloadBundle(itemId, filePath, name, btn, quality) {
   if (cur && cur.downloading) return;
   offlineBundles.set(key, { downloading: true, prepping: true, fraction: 0, name });
   _appRefreshDlBtn(itemId, filePath);
-  try {
-    // Fetch the manifest (builds the host bundle first if needed). The default
-    // (no quality) keeps the highest/source rung; if the bundle has multiple rungs
-    // and no quality was pre-chosen, ask the user and re-fetch for their pick.
-    let manifest = await _appFetchManifest(itemId, filePath, quality);
-    if (quality === undefined && (manifest.videos || []).length > 1) {
-      const chosen = await _appChooseQuality(manifest.videos, name);
-      if (chosen === null) {                  // cancelled — abort this download
-        offlineBundles.delete(key);
-        _appRefreshDlBtn(itemId, filePath);
-        return;
+  // The quality is chosen at most once (per-row chooser); reused across retries so
+  // a connectivity blip mid-fetch doesn't re-prompt. Bulk callers pass it already.
+  let effQuality = quality;
+  // Retry the (network-dependent) manifest/prep/handoff on a brief outage instead
+  // of dropping the episode — a hung fetch already can't wedge the lane (timeouts
+  // above), and absorbing the blip here keeps the bulk pipeline from stranding
+  // everything queued behind it. Only a persistent failure surfaces an error.
+  const MAX_ATTEMPTS = 8;
+  for (let attempt = 1; ; attempt++) {
+    try {
+      // Fetch the manifest (builds the host bundle first if needed). The default
+      // (no quality) keeps the highest/source rung; if the bundle has multiple
+      // rungs and no quality was pre-chosen, ask the user and re-fetch for the pick.
+      let manifest = await _appFetchManifest(itemId, filePath, effQuality);
+      if (effQuality === undefined && (manifest.videos || []).length > 1) {
+        const chosen = await _appChooseQuality(manifest.videos, name);
+        if (chosen === null) {                  // cancelled — abort this download
+          offlineBundles.delete(key);
+          _appRefreshDlBtn(itemId, filePath);
+          return;
+        }
+        effQuality = chosen;
+        if (chosen !== "original") manifest = await _appFetchManifest(itemId, filePath, chosen);
       }
-      if (chosen !== "original") manifest = await _appFetchManifest(itemId, filePath, chosen);
+      const origin = window.location.origin;
+      const files = (manifest.files || []).map((f) => ({ name: f.name, size: f.size }));
+      await _cap.dl.download({
+        itemId, filePath, cacheKey: manifest.cache_key, name,
+        baseUrl: origin + manifest.bundle_url, files, token: _appPairingToken(),
+        // Trimmed master.m3u8 (the chosen rung only) written verbatim by the native
+        // side so we never fetch — nor reference — the dropped ABR rungs.
+        masterContent: manifest.master_m3u8 || null,
+        // Series/episode metadata + inlined poster for the offline Downloads picker.
+        meta: manifest.meta || null,
+      });
+      // Seed the offline store with current server progress so offline resume
+      // reflects watch history accrued online (M3).
+      if (_cap.os && manifest.progress) {
+        try {
+          await _cap.os.seedProgress({
+            itemId, filePath,
+            positionSec: manifest.progress.position_sec || 0,
+            durationSec: manifest.progress.duration_sec || 0,
+            completed: !!manifest.progress.completed,
+            serverUpdatedAt: manifest.progress.updated_at || "",
+            profileId: profile.id,
+          });
+        } catch (_) {}
+      }
+      const e = offlineBundles.get(key) || {};
+      e.downloading = true; e.prepping = false; e.waiting = false; e.bytesTotal = manifest.total_bytes;
+      if (manifest.meta) e.meta = manifest.meta;
+      offlineBundles.set(key, e);
+      break;   // handed off to the native downloader — done
+    } catch (err) {
+      if (_appIsNetErr(err) && attempt < MAX_ATTEMPTS) {
+        // Brief outage: keep the episode marked in-flight ("Waiting for
+        // connection…") and back off, rather than deleting it.
+        const e = offlineBundles.get(key) || {};
+        e.downloading = true; e.prepping = true; e.waiting = true; e.name = name;
+        offlineBundles.set(key, e);
+        _appRefreshDlBtn(itemId, filePath);
+        await new Promise((res) => setTimeout(res, Math.min(2000 * attempt, 10000)));
+        continue;
+      }
+      offlineBundles.delete(key);
+      showAlert(err.message || "Download failed.", "error");
+      break;
     }
-    const origin = window.location.origin;
-    const files = (manifest.files || []).map((f) => ({ name: f.name, size: f.size }));
-    await _cap.dl.download({
-      itemId, filePath, cacheKey: manifest.cache_key, name,
-      baseUrl: origin + manifest.bundle_url, files, token: _appPairingToken(),
-      // Trimmed master.m3u8 (the chosen rung only) written verbatim by the native
-      // side so we never fetch — nor reference — the dropped ABR rungs.
-      masterContent: manifest.master_m3u8 || null,
-      // Series/episode metadata + inlined poster for the offline Downloads picker.
-      meta: manifest.meta || null,
-    });
-    // Seed the offline store with current server progress so offline resume
-    // reflects watch history accrued online (M3).
-    if (_cap.os && manifest.progress) {
-      try {
-        await _cap.os.seedProgress({
-          itemId, filePath,
-          positionSec: manifest.progress.position_sec || 0,
-          durationSec: manifest.progress.duration_sec || 0,
-          completed: !!manifest.progress.completed,
-          serverUpdatedAt: manifest.progress.updated_at || "",
-          profileId: profile.id,
-        });
-      } catch (_) {}
-    }
-    const e = offlineBundles.get(key) || {};
-    e.downloading = true; e.prepping = false; e.bytesTotal = manifest.total_bytes;
-    if (manifest.meta) e.meta = manifest.meta;
-    offlineBundles.set(key, e);
-  } catch (err) {
-    offlineBundles.delete(key);
-    showAlert(err.message || "Download failed.", "error");
   }
   _appRefreshDlBtn(itemId, filePath);
 }
@@ -8528,7 +8576,8 @@ function _appDlBtnHTML(itemId, filePath, name) {
     // on the host there's no transfer % yet, so just the spinner.
     const active = st.downloading && !st.prepping;
     const pct = Math.round((st.fraction || 0) * 100);
-    const title = (st.queued && !st.downloading) ? 'Queued…'
+    const title = st.waiting ? 'Waiting for connection…'
+                : (st.queued && !st.downloading) ? 'Queued…'
                 : st.prepping ? 'Preparing on host…' : 'Downloading to device…';
     return `<div class="h-9 px-1.5 flex items-center gap-1 text-[11px] font-bold text-sky-300" title="${title}">
       <svg class="w-4 h-4 animate-spin" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
@@ -8571,7 +8620,7 @@ async function _appInitOfflineBundles() {
     _cap.dl.addListener("bundleProgress", (ev) => {
       const key = offKey(ev.itemId, ev.filePath);
       const e = offlineBundles.get(key) || {};
-      e.downloading = true; e.prepping = false;
+      e.downloading = true; e.prepping = false; e.waiting = false;   // bytes flowing ⇒ connected
       // Manifest+prep occupied 0–50%; the file transfer fills 50–100%.
       e.fraction = 0.5 + 0.5 * (ev.fraction || 0);
       e.bytesTotal = ev.bytesTotal; e.bytesDone = ev.bytesDone;
@@ -8748,7 +8797,8 @@ async function _appRenderDashboard() {
   } else {
     dlWrap.innerHTML = active.map(({ label, st }) => {
       const pct = Math.round((st.fraction || 0) * 100);
-      const sub = (st.queued && !st.downloading) ? "Queued"
+      const sub = st.waiting ? "Waiting for connection…"
+        : (st.queued && !st.downloading) ? "Queued"
         : st.prepping ? "Preparing on host…"
         : (st.bytesTotal ? `${fmtSize(st.bytesDone || 0)} / ${fmtSize(st.bytesTotal)}` : "Downloading…");
       return `<div style="border:1px solid #2a2a30;background:#141417;padding:11px 13px;margin-bottom:8px;">
@@ -11598,6 +11648,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.6.1.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.6.1.3</div>
 </body>
 </html>

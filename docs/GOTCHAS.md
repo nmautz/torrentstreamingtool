@@ -1016,6 +1016,30 @@ assertion is kept as a harmless foreground tail. Don't switch back to a foregrou
 > `complete` flag was — and it now self-heals on the next Downloads refresh. **If
 > you add any new download finalization path, make it disk-truth, not job-state.**
 
+### A brief connectivity loss must retry, never drop — on both the JS and native sides
+A bulk download is a long, network-fragile operation; "lose Wi-Fi for two seconds"
+must **not** wedge the queue or discard episodes (`preview.6.1.3` fix). Two
+independent layers each had a way to fail hard, so both are hardened:
+- **JS orchestration (online-only, runs before native takes over).** The
+  per-episode `bundle-manifest` + `offline-prepare` poll `fetch`es had no timeout —
+  a WKWebView request caught mid-blip can **hang indefinitely** (it doesn't always
+  reject), and since bulk downloads now pipeline through `_appRunPooled`, one hung
+  lane strands every episode queued behind it at "Queued…". Always wrap these
+  fetches in `_appFetchT` (AbortController timeout) so a hang becomes a *retryable
+  error*, classify it with `_appIsNetErr` (abort/timeout/`TypeError` = transient;
+  a thrown-on HTTP error = permanent), and retry the manifest/handoff with backoff
+  in `appDownloadBundle` — keeping the episode marked in-flight ("Waiting for
+  connection…"), **never deleting it on a network error.**
+- **Native transfer (`BundleDownloader`).** The `URLSession` delegate must not
+  cancel the whole bundle on a transport error or a flaky-tunnel 5xx/429. Route
+  every per-file failure through `retryOrFail`, which re-enqueues transient ones
+  with a capped backoff. Crucially this works *because* the session is a
+  **background** `URLSession`: a freshly-created task **waits for connectivity** and
+  the OS starts it when the link returns — so a re-enqueue during an outage is the
+  resume mechanism, no manual reachability polling needed. (Foreground/`default`
+  sessions don't get this, another reason not to switch back — see the background
+  URLSession gotcha above.)
+
 ### Live Activities need a separate Widget Extension target + App Group — and `LiveActivityIntent.perform()` runs in the *app* process
 The download-progress and TV-remote Live Activities (`preview.6.0.0`) live in a
 new **`StreamLinkLiveActivities`** widget-extension target (`product-type
