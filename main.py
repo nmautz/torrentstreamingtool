@@ -11231,6 +11231,13 @@ async def _apply_ondemand_only(item_id: str, enabled: bool) -> dict:
         for j in list(_offline_jobs.values()):
             if (j.get("item_id") == item_id
                     and j.get("status") in ("pending", "processing", "paused")):
+                # Flag the kill as intentional BEFORE terminating so _run_offline_job
+                # treats the resulting non-zero exit as a clean cancel — without it a
+                # full-GPU encode would retry on the transparent path (restarting,
+                # ignoring the toggle) and a regular encode would surface a spurious
+                # "ffmpeg failed" error. Also read by `is_stopped` so an in-flight
+                # validate/repair phase bails too.
+                j["_ondemand_cancelled"] = True
                 proc = j.get("_proc")
                 if proc is not None and proc.returncode is None:
                     try:
@@ -13344,7 +13351,9 @@ async def _prep_validate_repair(job: dict, src: Path) -> str:
     if not ffmpeg:
         return "skipped"
     set_proc   = lambda p: job.__setitem__("_proc", p)
-    is_stopped = lambda: bool(job.get("_paused_kill")) or state.prep_paused
+    is_stopped = lambda: (bool(job.get("_paused_kill"))
+                          or bool(job.get("_ondemand_cancelled"))
+                          or state.prep_paused)
     try:
         ok, detail = await _validate_one_file(
             ffmpeg, str(src), True, set_proc=set_proc, is_stopped=is_stopped)
@@ -13507,6 +13516,17 @@ async def _run_offline_job(job_id: str) -> None:
                 if not info.get("video"):
                     job["status"] = "error"; job["error"] = "No video stream after repair."
                     return
+
+        # On-demand-only flipped during the (interruptible) validate/repair phase?
+        # The terminate from _apply_ondemand_only already fired, so don't fall
+        # through and start a fresh encode that nothing would stop. (Also covers a
+        # job whose item was flagged after the start-of-job backstop ran.)
+        if job.get("_ondemand_cancelled") or (
+                job.get("item_id") and job["item_id"] in state.ondemand_only_items):
+            job.pop("_ondemand_cancelled", None)
+            job["status"] = "cancelled"
+            job["progress"] = 0.0
+            return
 
         # Clean any leftover .part dir from a previous crashed run. Offloaded to a
         # thread so a large stale bundle's recursive unlink can't stall the event
@@ -13725,6 +13745,17 @@ async def _run_offline_job(job_id: str) -> None:
                     job["progress"] = 0.0
                     await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
                     hls_log.info("job %s CANCELLED (admin hard-stop)", job_id)
+                    return
+                # Did the item get flagged on-demand-only mid-encode? The terminate
+                # came from _apply_ondemand_only, so the non-zero rc is intentional —
+                # mark cancelled and drop the partial bundle. Must precede the
+                # `full_gpu` retry below so a GPU encode doesn't restart on the
+                # transparent path (which is what made the toggle look unresponsive).
+                if job.pop("_ondemand_cancelled", False):
+                    job["status"] = "cancelled"
+                    job["progress"] = 0.0
+                    await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
+                    hls_log.info("job %s CANCELLED (flagged on-demand-only)", job_id)
                     return
                 # All-GPU attempt failed or stalled. The cuda decode→scale_cuda→
                 # nvenc chain can be unsupported for this source/driver (non-zero

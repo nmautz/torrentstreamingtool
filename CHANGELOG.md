@@ -1,5 +1,12 @@
 # Changelog
 
+## [6.0.0-preview.6.1.6] — 2026-06-25
+- **Marking a show "on-demand stream only" now cancels prep that's already encoding, not just queued work.** Flipping the flag terminated the in-flight ffmpeg encode but didn't tell the prep worker the kill was intentional, so the worker ignored the toggle during ongoing processing: a full-GPU encode treated the terminate as a GPU failure and **restarted on the transparent CPU path** (the encode just kept going), while a regular encode surfaced a spurious `ffmpeg failed` error instead of a clean cancel. Fixed in [main.py](main.py) by setting an intentional-kill flag (`_ondemand_cancelled`) before terminating — mirroring the existing admin force-prep / pause-kill machinery:
+  - `_apply_ondemand_only` sets the flag on every matching job before `proc.terminate()`.
+  - `_run_offline_job` treats the resulting non-zero exit as a clean cancel (drops the partial bundle, marks `cancelled`, no retry/error) **before** the full-GPU retry branch.
+  - The flag also feeds `is_stopped`, so an in-flight validate/repair phase bails, and a new guard before the encode loop catches a flag-flip that lands during validation so it never falls through into a fresh, unstoppable encode.
+  - *Server-side change: restart the server. No dashboard reload or native rebuild needed.*
+
 ## [6.0.0-preview.6.1.5] — 2026-06-25
 - **Stream-to-device: playing an un-prepped file no longer gets stuck "Reconnecting…" once the background prep finishes.** When you play a file that isn't fully prepped, playback runs over a short-lived **on-demand (JIT)** session while the full bundle builds in the background. The player buffers far ahead and — while paused or fully buffered — could go longer than the server's 90 s idle window without fetching a segment, so the reaper tore the session (and its segment dir) down mid-watch. The next fetch then `410`'d and the generic reconnect loop just retried the **dead** session URL forever ("stuck reconnecting"), never noticing the now-ready full bundle. Two fixes in [static/index.html](static/index.html):
   - **Keepalive.** While on-demand playback is active, a lightweight ping (`_lpOdKeepAlive`, throttled ~30 s, driven by the existing stall-watch tick) touches the session so its `last_access` stays fresh even when no segments are being fetched — the reaper no longer deletes a session that's still being watched.

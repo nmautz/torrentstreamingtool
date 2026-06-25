@@ -804,6 +804,18 @@ wins (on-demand is a supplement, never a replacement).
   `{ready:false, ondemand_only:true}` — every on-device play stays on JIT and nothing
   permanent is written. VLC (TV) playback is unaffected (it never uses HLS). See
   [ADMIN.md § Storage & Compression](ADMIN.md).
+- **Flagging an item on-demand-only cancels prep that's already in flight, not just
+  queued work.** `_apply_ondemand_only` sets `job["_ondemand_cancelled"] = True` on
+  every matching job **before** `proc.terminate()` — mirroring the `_admin_stopped` /
+  `_paused_kill` pattern (see [GOTCHAS.md](GOTCHAS.md)). Without that flag the worker
+  read the terminate's non-zero exit as a real failure: a full-GPU encode **restarted
+  on the transparent path** (the encode just kept running, ignoring the toggle) and a
+  regular encode surfaced a spurious `ffmpeg failed`. `_run_offline_job` now treats the
+  flag as a clean cancel (drop the partial `.part`, mark `cancelled`, no retry) ahead of
+  the full-GPU retry branch; the flag also feeds `is_stopped` so an in-flight
+  validate/repair phase bails, and a guard before the encode loop catches a flip that
+  lands during validation. Existing permanent bundles are still reclaimed by the
+  detached `_purge_ondemand_bundles`.
 
 ### Client (`static/index.html`)
 
