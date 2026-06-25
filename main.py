@@ -5863,6 +5863,11 @@ class HlsTrimReq(BaseModel):
     scope: Optional[str] = None                 # None/""/"all" ⇒ every bundle; else a library item id
 
 
+class HlsResyncReq(BaseModel):
+    dry_run: bool = False                       # True ⇒ only count bundles that LOOK misaligned
+    scope: Optional[str] = None                 # None/""/"all" ⇒ every bundle; else a library item id
+
+
 class OndemandOnlyReq(BaseModel):
     item_id: str
     enabled: bool                               # True ⇒ on-device playback uses JIT only; no permanent bundle
@@ -11476,6 +11481,20 @@ async def admin_hls_trim(request: Request, body: HlsTrimReq) -> JSONResponse:
     return JSONResponse({"ok": True, **res})
 
 
+@app.post("/api/admin/hls-resync")
+async def admin_hls_resync(request: Request, body: HlsResyncReq) -> JSONResponse:
+    """Detect HLS bundles whose audio is misaligned with video (the audio rendition's
+    total duration diverges from the video rendition's) and, unless `dry_run`, purge +
+    re-prep each from source so it rebuilds with the audio-sync fix. `dry_run` only
+    counts the flagged bundles — it powers the UI estimate."""
+    _require_admin(request)
+    if not HLS_AVAILABLE:
+        raise HTTPException(503, HLS_UNAVAILABLE_MSG)
+    scope = (body.scope or "all").strip() or "all"
+    res = await _hls_resync_bundles(dry_run=bool(body.dry_run), scope=scope)
+    return JSONResponse({"ok": True, **res})
+
+
 @app.get("/api/admin/ondemand-only")
 async def admin_get_ondemand_only(request: Request) -> JSONResponse:
     """List every library item with its on-demand-only flag (for the Storage tab)."""
@@ -13673,6 +13692,14 @@ def _build_hls_ffmpeg_args(
         args += ["-hwaccel", "cuda"]
 
     args += [
+        # Regenerate presentation timestamps on the input. Some sources carry
+        # broken / missing / non-monotonic PTS (or a per-stream start_time skew
+        # between video and audio); left alone they desync the re-encoded audio
+        # from the stream-copied video, since the two land in SEPARATE HLS
+        # renditions that the player aligns purely by media timestamps. +genpts
+        # gives every stream a clean monotonic clock to anchor to. See the audio
+        # `aresample=async=1` filter below — together they keep A/V in sync.
+        "-fflags", "+genpts",
         # Larger input buffers coalesce disk reads; without these the Windows
         # storage stack can dominate kernel time during a fast encode.
         "-thread_queue_size", "1024",
@@ -13744,8 +13771,22 @@ def _build_hls_ffmpeg_args(
     # Audio: every track to AAC stereo, regardless of source. Safari iOS only
     # plays AAC/MP3/AC3/EAC3 reliably and won't decode FLAC/Opus/DTS in MP4 —
     # uniform AAC across renditions is the only safe lowest common denominator.
+    #
+    # A/V SYNC: every audio output gets `aresample=async=1`, the canonical ffmpeg
+    # resync filter. It stretches/squeezes the resampled audio and pads gaps with
+    # silence so the re-encoded audio tracks the (stream-copied) video clock —
+    # correcting the timestamp drift / gaps that otherwise leave audio misaligned
+    # in the bundle (audio and video are separate HLS renditions sharing one
+    # timeline, so any per-stream skew shows up as desync). Applied PER output
+    # audio stream (`-filter:a:{i}`) because there's one AAC rendition per source
+    # track. Deliberately NO `first_pts=0`: forcing the audio start to 0 against a
+    # copied video whose first PTS isn't 0 would INTRODUCE a constant offset. If a
+    # constant offset ever persists on a specific source, the next lever is
+    # `-copyts -start_at_zero` (or transcoding the original rung) — see GOTCHAS.md.
     if audios:
         args += ["-c:a", "aac", "-b:a", "160k", "-ac", "2"]
+        for i in range(len(audios)):
+            args += [f"-filter:a:{i}", "aresample=async=1:min_hard_comp=0.100000"]
 
     args += [
         "-f", "hls",
@@ -18183,6 +18224,141 @@ async def _hls_trim_bundles(keep: set[int], *, dry_run: bool, scope: str = "all"
     if not dry_run and freed > 0:
         _invalidate_offline_cache_inventory()
     return {"bundles": bundles, "bytes_freed": freed, "dry_run": dry_run}
+
+
+# Audio-sync repair. Bundles built before the `aresample=async=1` / `+genpts` fix
+# can have audio misaligned with video. We can't reach back into a finished bundle
+# to measure A/V offset without re-decoding, but a misaligned bundle of this class
+# (drift / dropped-or-padded samples) leaves a measurable fingerprint: the AUDIO
+# rendition's total playlist duration diverges from the VIDEO rendition's. We flag
+# those and re-prep them from source (now with the fix applied).
+HLS_SYNC_FLAG_SECS = 1.0   # flag when |audio_total − video_total| exceeds max(this, 1% of duration)
+
+
+def _sum_extinf(playlist: Path) -> Optional[float]:
+    """Sum the `#EXTINF:<sec>,` durations in an HLS media playlist. Returns None
+    if the file is missing/unreadable or carries no EXTINF lines (an incomplete
+    or non-media playlist we shouldn't judge). Sync — call via to_thread."""
+    try:
+        text = playlist.read_text("utf-8")
+    except Exception:
+        return None
+    total = 0.0
+    found = False
+    for line in text.splitlines():
+        if line.startswith("#EXTINF:"):
+            try:
+                total += float(line[len("#EXTINF:"):].split(",", 1)[0])
+                found = True
+            except (ValueError, IndexError):
+                return None
+    return total if found else None
+
+
+def _bundle_audio_sync_delta(bdir: Path, allowed_srcs: Optional[set[str]] = None) -> Optional[float]:
+    """Measure a bundle's worst audio-vs-video duration divergence (seconds).
+
+    Reads meta.json for the video rendition playlist + each audio rendition
+    playlist, sums their `#EXTINF` durations, and returns max_i |audio_i − video|.
+    Returns None (⇒ skip, don't flag) when the bundle is unreadable, incomplete,
+    or (with `allowed_srcs` given) its source isn't in scope. Sync — to_thread."""
+    try:
+        meta = json.loads((bdir / "meta.json").read_text("utf-8"))
+    except Exception:
+        return None
+    if allowed_srcs is not None and _norm_path(meta.get("src", "")) not in allowed_srcs:
+        return None
+    videos = meta.get("videos") or []
+    audios = meta.get("audios") or []
+    if not videos or not audios:
+        return None   # nothing to compare (e.g. a silent source) — never flag
+    vname = (videos[0].get("name") or "video")
+    vdur = _sum_extinf(bdir / f"{vname}.m3u8")
+    if vdur is None or vdur <= 0:
+        return None
+    worst = 0.0
+    for a in audios:
+        adur = _sum_extinf(bdir / (a.get("playlist") or f"audio_{a.get('idx', 0)}.m3u8"))
+        if adur is None:
+            continue
+        worst = max(worst, abs(adur - vdur))
+    return worst
+
+
+def _bundle_sync_flagged(delta: Optional[float], duration_sec: float) -> bool:
+    """Threshold check shared by the dry-run count and the repair pass: flag when
+    the divergence exceeds the larger of HLS_SYNC_FLAG_SECS and 1% of duration."""
+    if delta is None:
+        return False
+    return delta > max(HLS_SYNC_FLAG_SECS, 0.01 * max(0.0, duration_sec))
+
+
+async def _hls_resync_bundles(*, dry_run: bool, scope: str = "all") -> dict:
+    """Scan existing bundles for audio/video duration divergence and, unless
+    `dry_run`, purge + re-prep each flagged one from source (rebuilding with the
+    `aresample=async=1` fix). `scope` None/""/"all" ⇒ every bundle; else a library
+    item id restricting to that item's files (by meta.json `src`). Skips bundles
+    with an active prep job. Returns {bundles, repaired, dry_run}."""
+    lib = await get_library()
+    allowed_srcs: Optional[set[str]] = None
+    if scope not in ("", "all", None):
+        item = next((it for it in lib.get("items", []) if it.get("id") == scope), None)
+        # Unknown item id ⇒ empty allow-set ⇒ matches nothing (rather than all).
+        allowed_srcs = {_norm_path(f.get("path", ""))
+                        for f in (item.get("files", []) if item else [])}
+    # Map a source path → owning library item id so a repair re-prep carries the
+    # right item_id (drives on-demand-only gating + skip/STT hooks).
+    src_to_item: dict[str, str] = {}
+    for it in lib.get("items", []):
+        for f in it.get("files", []):
+            src_to_item[_norm_path(f.get("path", ""))] = it.get("id", "")
+
+    roots = _bundle_cache_dirs_sync(lib)
+    roots.add(OFFLINE_CACHE)
+    flagged = 0
+    repaired = 0
+    for root in roots:
+        if not root.exists():
+            continue
+        for p in sorted(root.iterdir()):
+            if not (p.is_dir() and _CACHE_KEY_RE.match(p.name)):
+                continue
+            if _offline_cache_path_active(p.name):
+                continue
+            delta = await asyncio.to_thread(_bundle_audio_sync_delta, p, allowed_srcs)
+            if delta is None:
+                await asyncio.sleep(0)
+                continue
+            try:
+                meta = json.loads((p / "meta.json").read_text("utf-8"))
+            except Exception:
+                await asyncio.sleep(0)
+                continue
+            if not _bundle_sync_flagged(delta, float(meta.get("duration_sec") or 0.0)):
+                await asyncio.sleep(0)
+                continue
+            flagged += 1
+            if dry_run:
+                await asyncio.sleep(0)
+                continue
+            src = meta.get("src", "")
+            src_path = Path(src)
+            if not src or not await asyncio.to_thread(src_path.exists):
+                hls_log.warning("hls-resync: bundle %s flagged (delta=%.2fs) but source "
+                                "missing (%s) — skipping repair", p.name, delta, src)
+                await asyncio.sleep(0)
+                continue
+            # Purge the bad bundle, then re-queue a normal prep — it rebuilds with
+            # the audio-sync fix at the usual bulk concurrency/pause semantics.
+            await asyncio.to_thread(_delete_cache_artifacts, p.name, str(root))
+            _invalidate_bundle_index()
+            await _maybe_start_prep_job(src_path, src_to_item.get(_norm_path(src), ""))
+            repaired += 1
+            hls_log.info("hls-resync: re-prepping %s (audio/video delta=%.2fs)", src, delta)
+            await asyncio.sleep(0)
+    if not dry_run and repaired > 0:
+        _invalidate_offline_cache_inventory()
+    return {"bundles": flagged, "repaired": repaired, "dry_run": dry_run}
 
 
 @app.get("/api/admin/offline-cache")

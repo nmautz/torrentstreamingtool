@@ -281,6 +281,20 @@ Key decisions:
   re-encoded at 160 kbps. Multi-channel preservation is not implemented;
   for 5.1 playback on TV, use VLC's path which reads the source MKV
   directly.
+- **Audio is timestamp-locked to the video clock** (`+genpts` on the input,
+  `aresample=async=1` on each audio output). The original video rung is
+  stream-*copied* while audio is *re-encoded*, and the two are **separate HLS
+  renditions sharing one timeline** — so a source with a per-stream `start_time`
+  skew, broken/missing PTS, or audio gaps would desync the re-encoded audio from
+  the copied video (intermittent, source-dependent). `-fflags +genpts` gives
+  every stream a clean monotonic clock; the per-output `-filter:a:{i}
+  aresample=async=1:min_hard_comp=0.100000` stretches/squeezes the audio and pads
+  gaps with silence so it tracks the video. **No `first_pts=0`** — anchoring audio
+  at 0 against a copied video whose first PTS isn't 0 would *introduce* a constant
+  offset. The **Detect & Repair Audio Sync** admin tool (below) rebuilds older
+  (pre-fix) bundles. If a *constant* offset ever persists on a specific source,
+  the next lever is `-copyts -start_at_zero` (or transcoding the original rung) —
+  see [GOTCHAS.md](GOTCHAS.md).
 - **Text subs become standalone WebVTT sidecars** (`sub_<i>.vtt`), *not*
   in-manifest renditions — ffmpeg's HLS muxer can't package more than one
   WebVTT track. subrip / ass / ssa are transparently converted; ASS styling
@@ -358,6 +372,28 @@ Changing the default is **forward-only** and intentionally does **not** bump
 and rewrites `meta.json videos[]`. Bundles with an active prep job are skipped; a
 `dry_run` sums the bytes that *would* be freed for the UI estimate. See
 [ADMIN.md § Storage & Compression](ADMIN.md).
+
+## Repairing audio-misaligned bundles
+
+Bundles built **before** the audio-sync fix (`+genpts` + `aresample=async=1`, see
+the audio bullet under *Key decisions* above) can have audio drifted out of sync
+with video. The admin **Detect & Repair Audio Sync** tool (`_hls_resync_bundles` →
+`_bundle_audio_sync_delta`, `POST /api/admin/hls-resync`) finds and repairs them:
+
+- **Detection** sums each bundle's `#EXTINF` durations for the **video** rendition
+  (`video.m3u8`) and every **audio** rendition (`audio_<i>.m3u8`) — a plain playlist
+  parse, no ffprobe — and flags the bundle when the worst `|audio − video|`
+  divergence exceeds `max(HLS_SYNC_FLAG_SECS=1.0s, 1% of duration)`. This is the
+  fingerprint of the **drift / gap** class (the fix's target). A pure *constant
+  offset* leaves both totals equal and is **not** detectable this way — that's the
+  known blind spot noted in [GOTCHAS.md](GOTCHAS.md).
+- **Repair** (non-`dry_run`) purges each flagged bundle (`_delete_cache_artifacts`
+  + `_invalidate_bundle_index`) and re-queues a normal prep via
+  `_maybe_start_prep_job(src, item_id)`, so it rebuilds from source **with** the
+  fix. Re-preps run at the usual bulk concurrency / pause semantics (background, not
+  blocking). Bundles with an active prep job, or whose source is gone, are skipped.
+- `scope` restricts to one library item (by `meta.json src`); `dry_run` only counts
+  the flagged bundles for the UI estimate. See [ADMIN.md § Storage & Compression](ADMIN.md).
 
 ## Source-file compression
 

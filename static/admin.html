@@ -622,6 +622,30 @@
         <div id="hlsTrimStatus" class="text-[11px] text-gray-500"></div>
       </div>
 
+      <!-- Section C2: detect & repair audio sync -->
+      <div class="px-5 py-4 border-t border-gray-800 space-y-3">
+        <div class="text-[11px] font-bold text-gray-300 uppercase tracking-widest">Detect &amp; Repair Audio Sync</div>
+        <p class="text-[11px] text-gray-500">Scans <strong>already-prepped</strong> bundles for audio that drifted out of sync with the video (the audio and video tracks ending up at different lengths). Flagged bundles are <strong>re-prepped from source</strong> with the timing fix applied — that re-encodes them, so it runs in the background like a normal prep.</p>
+        <div class="space-y-1.5 min-w-0">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Scope</label>
+          <select id="hlsResyncItem"
+            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none">
+            <option value="">Whole library</option>
+          </select>
+        </div>
+        <div class="flex items-center gap-2 flex-wrap">
+          <button id="hlsResyncEstBtn" onclick="estimateHlsResync()"
+            class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-300 hover:text-white disabled:opacity-50">
+            Scan
+          </button>
+          <button id="hlsResyncBtn" onclick="runHlsResync()"
+            class="bg-amber-700 hover:bg-amber-600 px-4 py-2 text-xs font-black uppercase tracking-wide transition-colors disabled:opacity-50">
+            Repair Now
+          </button>
+        </div>
+        <div id="hlsResyncStatus" class="text-[11px] text-gray-500"></div>
+      </div>
+
       <!-- Section D: on-demand stream only -->
       <div class="px-5 py-4 border-t border-gray-800 space-y-3">
         <div class="text-[11px] font-bold text-gray-300 uppercase tracking-widest">On-Demand Stream Only</div>
@@ -3018,7 +3042,7 @@ async function _loadStorageItems(){
     const {items} = await r.json();
     const opts = `<option value="">Whole library</option>`
       + (items || []).map(it=>`<option value="${escHtml(it.id)}">${escHtml(it.title)}</option>`).join("");
-    ["fcItem","hlsTrimItem"].forEach(id=>{
+    ["fcItem","hlsTrimItem","hlsResyncItem"].forEach(id=>{
       const sel = document.getElementById(id);
       if(!sel) return;
       const cur = sel.value;
@@ -3242,6 +3266,46 @@ async function runHlsTrim(){
       box.innerHTML = `Freed <span class="text-emerald-400 font-bold">${_fmtBytes(d.bytes_freed)}</span> from ${d.bundles} bundle(s).`;
       showToast(`Trimmed ${d.bundles} bundle(s), freed ${_fmtBytes(d.bytes_freed)}.`);
     }catch(_){ showToast("Trim failed.", true); box.textContent = ""; }
+  });
+}
+
+async function estimateHlsResync(){
+  const btn = document.getElementById("hlsResyncEstBtn");
+  const box = document.getElementById("hlsResyncStatus");
+  await withInflight("hls_resync_est", btn, async ()=>{
+    box.textContent = "Scanning…";
+    try{
+      const r = await fetch("/api/admin/hls-resync",{
+        method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+        body: JSON.stringify({dry_run: true, scope: document.getElementById("hlsResyncItem").value || "all"}),
+      });
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok){ box.textContent = `Scan failed: ${d.detail || r.status}`; return; }
+      box.innerHTML = d.bundles
+        ? `<span class="text-amber-400 font-bold">${d.bundles}</span> bundle(s) look misaligned. Repair Now re-preps them from source.`
+        : "No misaligned bundles found.";
+    }catch(_){ box.textContent = "Scan failed."; }
+  });
+}
+
+async function runHlsResync(){
+  const btn = document.getElementById("hlsResyncBtn");
+  if(!confirm("Re-prep every misaligned on-device bundle?\n\nEach flagged bundle is deleted and rebuilt from source with the audio-sync fix. Rebuilding re-encodes the file, so this runs in the background like normal prep.\n\nProceed?")) return;
+  await withInflight("hls_resync", btn, async ()=>{
+    const box = document.getElementById("hlsResyncStatus");
+    box.textContent = "Scanning & repairing…";
+    try{
+      const r = await fetch("/api/admin/hls-resync",{
+        method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+        body: JSON.stringify({dry_run: false, scope: document.getElementById("hlsResyncItem").value || "all"}),
+      });
+      const d = await r.json().catch(()=>({}));
+      if(!r.ok){ showToast(`Repair failed: ${d.detail || r.status}`, true); box.textContent = ""; return; }
+      box.innerHTML = d.repaired
+        ? `Re-prepping <span class="text-emerald-400 font-bold">${d.repaired}</span> bundle(s) in the background.`
+        : "Nothing to repair — no misaligned bundles found.";
+      showToast(d.repaired ? `Re-prepping ${d.repaired} bundle(s).` : "No misaligned bundles found.");
+    }catch(_){ showToast("Repair failed.", true); box.textContent = ""; }
   });
 }
 

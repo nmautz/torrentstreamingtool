@@ -1,5 +1,10 @@
 # Changelog
 
+## [7.2.0] — 2026-06-25
+- **HLS audio-sync fix + repair tool for already-prepped shows.** Some preps produced a bundle whose audio drifted out of sync with the video. Root cause: the original video rung is stream-**copied** while every audio track is **re-encoded** to AAC, and the two land in separate HLS renditions sharing one timeline — so any per-stream timestamp skew, missing/broken PTS, or audio gap in the source desynced the re-encoded audio from the copied video (intermittent, source-dependent). Two-part fix ([main.py](main.py), [static/admin.html](static/admin.html)):
+  - **Preventive (new preps).** The prep ffmpeg now regenerates input timestamps (`-fflags +genpts`) and locks each audio output to the video clock with the canonical resync filter (`-filter:a:i aresample=async=1`), padding gaps with silence and correcting drift. Audio-only cost; applies on the NVENC and libx264 paths alike.
+  - **Detect & repair (existing bundles).** New admin **Storage & Compression → Detect & Repair Audio Sync** tool (`POST /api/admin/hls-resync`). It scans prepped bundles for an audio-vs-video playlist-duration divergence (the fingerprint of the drift/gap class), and on Repair Now purges + re-preps each flagged bundle from source so it rebuilds with the fix. Scoped to the whole library or one item; Scan is a dry-run count. Re-preps run in the background at normal bulk concurrency/pause semantics.
+
 ## [7.1.1] — 2026-06-25
 - **iOS app: four on-device UI fixes.**
   - **Top UI no longer drifts down.** The Capacitor WKWebView reports `env(safe-area-inset-top)` unreliably — normally ~0, but it *over-reports* after the soft keyboard (search box, profile/episode fields) and never restores, so `max(env, 59px)` intermittently pushed the top app bar and the non-fullscreen player header down and left them stuck until relaunch (same family as the known `dvh` keyboard bug). In the app the `.safe-top`/`.safe-bottom` insets are now **pinned to constants** (59px / 34px, portrait) instead of the corruptible live `env()` — visually identical in the steady state, but no longer driftable. ([static/index.html](static/index.html))
