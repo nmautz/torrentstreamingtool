@@ -291,10 +291,22 @@ Key decisions:
   aresample=async=1:min_hard_comp=0.100000` stretches/squeezes the audio and pads
   gaps with silence so it tracks the video. **No `first_pts=0`** — anchoring audio
   at 0 against a copied video whose first PTS isn't 0 would *introduce* a constant
-  offset. The **Detect & Repair Audio Sync** admin tool (below) rebuilds older
-  (pre-fix) bundles. If a *constant* offset ever persists on a specific source,
-  the next lever is `-copyts -start_at_zero` (or transcoding the original rung) —
-  see [GOTCHAS.md](GOTCHAS.md).
+  offset. This handles the **drift / gap** class.
+- **Constant-offset guard: re-encode the original rung when the source has a video
+  edit list.** `aresample` fixes drift but **not** a fixed offset. The dominant
+  real-world cause of a fixed offset is a video **edit list** in the source (common
+  in `-ss` stream-copies, web-DL, and many MP4 muxers — and the container still
+  reports `start_time=0`, so it's invisible to a start-time check): stream-copying
+  the video mishandles the edit list while the re-encoded audio is normalized to
+  zero, so audio ends up a steady amount early/late (VLC plays the source fine —
+  this is purely a prep artifact). `_source_has_editlist(src)` detects it by
+  comparing the first video pts with the edit list applied vs. `-ignore_editlist 1`;
+  when they differ by more than `EDITLIST_REENCODE_SECS` (0.05s), `_run_offline_job`
+  sets `copy_original = False` (via `_build_hls_ffmpeg_args(force_reencode_original=…)`)
+  so the original rung is **re-encoded** — applying the edit list to the frames and
+  keeping A/V aligned. Costs a full encode of the original rung for those files only
+  (probed only when we'd otherwise copy); clean sources still stream-copy. The
+  repair tool below forces this on every bundle it rebuilds.
 - **Text subs become standalone WebVTT sidecars** (`sub_<i>.vtt`), *not*
   in-manifest renditions — ffmpeg's HLS muxer can't package more than one
   WebVTT track. subrip / ass / ssa are transparently converted; ASS styling
@@ -380,18 +392,28 @@ the audio bullet under *Key decisions* above) can have audio drifted out of sync
 with video. The admin **Detect & Repair Audio Sync** tool (`_hls_resync_bundles` →
 `_bundle_audio_sync_delta`, `POST /api/admin/hls-resync`) finds and repairs them:
 
-- **Detection** sums each bundle's `#EXTINF` durations for the **video** rendition
-  (`video.m3u8`) and every **audio** rendition (`audio_<i>.m3u8`) — a plain playlist
-  parse, no ffprobe — and flags the bundle when the worst `|audio − video|`
-  divergence exceeds `max(HLS_SYNC_FLAG_SECS=1.0s, 1% of duration)`. This is the
-  fingerprint of the **drift / gap** class (the fix's target). A pure *constant
-  offset* leaves both totals equal and is **not** detectable this way — that's the
-  known blind spot noted in [GOTCHAS.md](GOTCHAS.md).
+- **Detection — two complementary checks, flag on EITHER:**
+  - **Drift** (`_bundle_audio_sync_delta`) sums each bundle's `#EXTINF` durations
+    for the **video** rendition vs every **audio** rendition — a plain playlist
+    parse, no decode — and flags when the worst `|audio − video|` divergence exceeds
+    `max(HLS_SYNC_FLAG_SECS=1.0s, 1% of duration)`.
+  - **Constant offset** (`_bundle_introduced_av_offset`) ffprobes the bundle's
+    audio-vs-video first presentation timestamp (`_probe_rendition_first_pts`, which
+    reads each rendition playlist + its fmp4 EXT-X-MAP init) **and the source's
+    intended offset** (`_source_av_offset`), and flags when prep *introduced* a
+    shift of more than `AV_OFFSET_FLAG_SECS=0.12s`. Diffing against the source —
+    rather than assuming the bundle's offset should be zero — is what stops a source
+    with genuinely delayed audio from being a false positive. This catches the
+    fixed early/late offset the duration check is structurally blind to (both
+    renditions are the same length, just shifted). Needs the source on disk (also
+    needed to repair); if it's gone, only the drift check applies.
 - **Repair** (non-`dry_run`) purges each flagged bundle (`_delete_cache_artifacts`
-  + `_invalidate_bundle_index`) and re-queues a normal prep via
-  `_maybe_start_prep_job(src, item_id)`, so it rebuilds from source **with** the
-  fix. Re-preps run at the usual bulk concurrency / pause semantics (background, not
-  blocking). Bundles with an active prep job, or whose source is gone, are skipped.
+  + `_invalidate_bundle_index`) and re-queues a prep via `_maybe_start_prep_job(src,
+  item_id, force_reencode_video=True)` — the **force_reencode** re-encodes the
+  original rung so the rebuild routes both streams through one timestamp
+  normalization and can't carry the offset forward. Re-preps run at the usual bulk
+  concurrency / pause semantics (background, not blocking). Bundles with an active
+  prep job, or whose source is gone, are skipped.
 - `scope` restricts to one library item (by `meta.json src`); `dry_run` only counts
   the flagged bundles for the UI estimate. See [ADMIN.md § Storage & Compression](ADMIN.md).
 

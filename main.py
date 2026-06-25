@@ -13121,6 +13121,58 @@ def _track_label(track: dict, fallback: str) -> str:
     return title or base or fallback
 
 
+# Edit-list threshold (seconds). An MP4/MOV edit list shifts presentation in a way
+# the player (and VLC) honor, but STREAM-COPYING the video into HLS mishandles it
+# while the re-encoded audio is normalized to zero — baking a constant A/V offset
+# into the bundle (audio a steady amount early/late). RE-ENCODING the original rung
+# applies the edit list to the frames and removes the offset. This is the dominant
+# real-world cause (common in `-ss` copies / web-DL / many MP4 muxers).
+EDITLIST_REENCODE_SECS = 0.05
+
+
+def _probe_first_pts(path: str, stream: str, *, ignore_editlist: bool = False) -> Optional[float]:
+    """First presentation timestamp (seconds) of one stream of a media file or HLS
+    playlist, via ffprobe. `stream` is a stream specifier (e.g. "v:0", "a:0").
+    `ignore_editlist` disables MP4 edit-list application. None on any failure.
+    Sync — call via to_thread."""
+    binp = _ffprobe_bin()
+    if not binp:
+        return None
+    cmd = [binp, "-v", "error", "-of", "json"]
+    if ignore_editlist:
+        cmd += ["-ignore_editlist", "1"]
+    cmd += ["-select_streams", stream, "-read_intervals", "%+#1",
+            "-show_entries", "packet=pts_time", path]
+    try:
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        pkts = (json.loads(r.stdout or "{}").get("packets") or [])
+        return float(pkts[0]["pts_time"]) if pkts else None
+    except Exception:
+        return None
+
+
+def _source_av_offset(path: str) -> Optional[float]:
+    """The source's intended audio-vs-video presentation offset (seconds), as the
+    player/VLC sees it: first audio pts − first video pts (edit lists honored).
+    None if either can't be probed. Sync — call via to_thread.
+
+    Used as the REFERENCE a faithful bundle must reproduce — so a source with
+    genuinely delayed audio isn't mistaken for a prep-induced desync."""
+    v = _probe_first_pts(path, "v:0")
+    a = _probe_first_pts(path, "a:0")
+    return (a - v) if v is not None and a is not None else None
+
+
+def _source_has_editlist(path: str) -> bool:
+    """True when the source's video stream carries a non-trivial edit list — i.e.
+    its first video pts WITH the edit list applied differs from the raw pts. That's
+    exactly the case where stream-copying the video bakes a constant A/V offset into
+    the bundle (see EDITLIST_REENCODE_SECS). Sync — call via to_thread."""
+    honored = _probe_first_pts(path, "v:0")
+    raw     = _probe_first_pts(path, "v:0", ignore_editlist=True)
+    return honored is not None and raw is not None and abs(honored - raw) > EDITLIST_REENCODE_SECS
+
+
 def _ffprobe_full(path: str) -> dict:
     """Enumerate every stream + container metadata.
 
@@ -13619,6 +13671,7 @@ def _build_hls_ffmpeg_args(
     use_nvenc: bool,
     full_gpu: bool = False,
     ladder_heights: Optional[list[int]] = None,
+    force_reencode_original: bool = False,
 ) -> tuple[list[str], list[dict], list[dict], list[dict]]:
     """Construct the full ffmpeg invocation that emits one HLS bundle.
 
@@ -13645,7 +13698,12 @@ def _build_hls_ffmpeg_args(
     # Original can stream-copy when already browser-safe H.264; down-rungs must
     # always re-encode (they're scaled). Decoupled from use_nvenc so the source
     # rung stays a cheap remux even when the GPU encoder is present.
-    copy_original = _video_can_copy(info.get("video"))
+    # `force_reencode_original` overrides the copy to fix A/V sync: re-encoding the
+    # original rung routes BOTH video and audio through the same timestamp
+    # normalization, so a source with a video edit list can't bake a constant
+    # audio offset into the bundle (which a stream-copy would). See
+    # _run_offline_job / _source_has_editlist.
+    copy_original = _video_can_copy(info.get("video")) and not force_reencode_original
 
     # Exactly one audio rendition should be marked DEFAULT in the master
     # playlist. Honor the source's disposition.default if any; otherwise the
@@ -14069,6 +14127,26 @@ async def _run_offline_job(job_id: str) -> None:
             use_nvenc = await _has_nvenc()
             down_encoder = "h264_nvenc" if use_nvenc else "libx264"
             copy_original = _video_can_copy(info.get("video"))
+            # A/V SYNC GUARD. Stream-copying the original video rung while
+            # re-encoding audio bakes a CONSTANT offset into the bundle when the
+            # source has a video EDIT LIST: copy mishandles the edit list while the
+            # re-encoded audio is normalized to zero, so audio ends up a steady
+            # amount early/late even though VLC plays the source fine (which the
+            # duration-based resync detector can't see). Re-encoding the original
+            # rung applies the edit list to the frames and removes the offset.
+            # Engaged when (a) the source has an edit list, or (b) a repair re-prep
+            # explicitly requests it (a bundle we measured as misaligned). Only
+            # probed/forced when we'd otherwise copy — a re-encode already normalizes.
+            force_reencode = bool(job.get("_force_reencode_video"))
+            if copy_original and not force_reencode:
+                if await asyncio.to_thread(_source_has_editlist, str(src)):
+                    force_reencode = True
+                    hls_log.info("job %s: source has a video edit list — re-encoding "
+                                 "original rung to avoid a baked-in A/V offset", job_id)
+            elif copy_original and force_reencode:
+                hls_log.info("job %s: re-encoding original rung to correct A/V sync "
+                             "(repair re-prep)", job_id)
+            copy_original = copy_original and not force_reencode
             # All-GPU pipeline (decode→scale_cuda→nvenc resident in VRAM), chosen
             # only when:
             #   • the build has scale_cuda (_has_cuda_scale), and
@@ -14093,6 +14171,7 @@ async def _run_offline_job(job_id: str) -> None:
                 args, kept_audios, kept_subs, kept_videos = _build_hls_ffmpeg_args(
                     ffmpeg, src, info, use_nvenc, full_gpu=full_gpu,
                     ladder_heights=ladder_heights,
+                    force_reencode_original=force_reencode,
                 )
                 # Record encoder for admin/UI display. The original rung may copy
                 # while the ABR down-rungs (if any) still transcode, so reflect both.
@@ -16425,8 +16504,13 @@ def _rebuild_ondemand_only_items(lib: dict) -> None:
     }
 
 
-async def _maybe_start_prep_job(src: Path, item_id: str = "") -> dict:
+async def _maybe_start_prep_job(src: Path, item_id: str = "",
+                                force_reencode_video: bool = False) -> dict:
     """Per-file: return current prep state, starting an HLS job if none exists.
+
+    `force_reencode_video` re-encodes the original video rung instead of
+    stream-copying it (used by the audio-sync repair so the re-prep can't carry
+    the same constant offset forward — see _run_offline_job's A/V sync guard).
 
     Returns one of:
       {status:"cached"}                              — bundle already on disk
@@ -16464,6 +16548,8 @@ async def _maybe_start_prep_job(src: Path, item_id: str = "") -> dict:
         "item_id": item_id,
         # Bulk / per-item / auto-prep — honors the global pause gate.
         "queue": "bulk",
+        # Repair flag: re-encode the original rung to fix a baked-in A/V offset.
+        "_force_reencode_video": bool(force_reencode_video),
     }
     asyncio.create_task(_run_offline_job(job_id))
     return {"status": "processing", "job_id": job_id, "progress": 0.0, "operation": "hls"}
@@ -18226,13 +18312,22 @@ async def _hls_trim_bundles(keep: set[int], *, dry_run: bool, scope: str = "all"
     return {"bundles": bundles, "bytes_freed": freed, "dry_run": dry_run}
 
 
-# Audio-sync repair. Bundles built before the `aresample=async=1` / `+genpts` fix
-# can have audio misaligned with video. We can't reach back into a finished bundle
-# to measure A/V offset without re-decoding, but a misaligned bundle of this class
-# (drift / dropped-or-padded samples) leaves a measurable fingerprint: the AUDIO
-# rendition's total playlist duration diverges from the VIDEO rendition's. We flag
-# those and re-prep them from source (now with the fix applied).
-HLS_SYNC_FLAG_SECS = 1.0   # flag when |audio_total − video_total| exceeds max(this, 1% of duration)
+# Audio-sync repair. Bundles built before the A/V-sync fixes can have audio
+# misaligned with video. Two independent failure modes, two detectors:
+#   1. DRIFT / GAP — audio gradually slips or has dropped/padded samples. The
+#      audio rendition's total playlist duration diverges from the video's.
+#      Cheap to detect (sum the playlist #EXTINF lines — no decode).
+#   2. CONSTANT OFFSET — audio is a fixed amount early/late for the whole file
+#      (the edit-list / stream-copy artifact). Both renditions are the SAME length,
+#      so detector #1 is blind to it. We ffprobe the bundle's audio-vs-video first
+#      presentation timestamp AND the source's intended offset, and flag the
+#      DIFFERENCE — what prep introduced. Diffing against the source is what keeps a
+#      genuinely-delayed-audio source from being mistaken for a desync.
+# A bundle flagged by EITHER is purged and re-prepped from source with
+# `_force_reencode_video=True` so the rebuild re-encodes the original rung (applying
+# any edit list to the frames) and can't carry the offset forward.
+HLS_SYNC_FLAG_SECS  = 1.0    # drift: flag when |audio_total − video_total| > max(this, 1% of duration)
+AV_OFFSET_FLAG_SECS = 0.12   # offset: flag when the prep-INTRODUCED A/V offset exceeds this
 
 
 def _sum_extinf(playlist: Path) -> Optional[float]:
@@ -18285,20 +18380,78 @@ def _bundle_audio_sync_delta(bdir: Path, allowed_srcs: Optional[set[str]] = None
     return worst
 
 
+def _probe_rendition_first_pts(playlist: Path) -> Optional[float]:
+    """First presentation timestamp (seconds) of an HLS rendition playlist, via
+    ffprobe. ffprobe reads the playlist (and its fmp4 EXT-X-MAP init) and reports
+    the first packet's pts_time. Returns None if ffprobe is missing or the probe
+    fails. Sync — call via to_thread."""
+    binp = _ffprobe_bin()
+    if not binp or not playlist.exists():
+        return None
+    try:
+        r = subprocess.run(
+            [binp, "-v", "error", "-of", "json",
+             "-read_intervals", "%+#1",          # only the first packet
+             "-show_entries", "packet=pts_time",
+             str(playlist)],
+            capture_output=True, text=True, timeout=20,
+        )
+        pkts = (json.loads(r.stdout or "{}").get("packets") or [])
+        if not pkts:
+            return None
+        return float(pkts[0].get("pts_time"))
+    except Exception:
+        return None
+
+
+def _bundle_introduced_av_offset(bdir: Path) -> Optional[float]:
+    """Measure the A/V offset the PREP introduced into a bundle (seconds).
+
+    Compares the bundle's audio-vs-video offset (first-pts of the default audio
+    rendition − first-pts of the video rendition) against the SOURCE's intended
+    offset (`_source_av_offset`). A faithful bundle reproduces the source, so the
+    difference is what prep added — the constant offset the duration check
+    (`_bundle_audio_sync_delta`) is structurally blind to. Returns None when it
+    can't be measured (ffprobe missing, source gone, renditions absent), so a
+    genuinely delayed-audio source is NOT mistaken for a desync. Sync — to_thread."""
+    try:
+        meta = json.loads((bdir / "meta.json").read_text("utf-8"))
+    except Exception:
+        return None
+    videos = meta.get("videos") or []
+    audios = meta.get("audios") or []
+    src = meta.get("src", "")
+    if not videos or not audios or not src:
+        return None
+    src_off = _source_av_offset(src)   # needs the source on disk (also needed to repair)
+    if src_off is None:
+        return None
+    vname = (videos[0].get("name") or "video")
+    a = next((x for x in audios if x.get("default")), audios[0])   # default audio, else first
+    vpts = _probe_rendition_first_pts(bdir / f"{vname}.m3u8")
+    apts = _probe_rendition_first_pts(bdir / (a.get("playlist") or f"audio_{a.get('idx', 0)}.m3u8"))
+    if vpts is None or apts is None:
+        return None
+    return (apts - vpts) - src_off
+
+
 def _bundle_sync_flagged(delta: Optional[float], duration_sec: float) -> bool:
-    """Threshold check shared by the dry-run count and the repair pass: flag when
-    the divergence exceeds the larger of HLS_SYNC_FLAG_SECS and 1% of duration."""
+    """Drift check (detector #1): flag when the audio/video duration divergence
+    exceeds the larger of HLS_SYNC_FLAG_SECS and 1% of duration."""
     if delta is None:
         return False
     return delta > max(HLS_SYNC_FLAG_SECS, 0.01 * max(0.0, duration_sec))
 
 
 async def _hls_resync_bundles(*, dry_run: bool, scope: str = "all") -> dict:
-    """Scan existing bundles for audio/video duration divergence and, unless
-    `dry_run`, purge + re-prep each flagged one from source (rebuilding with the
-    `aresample=async=1` fix). `scope` None/""/"all" ⇒ every bundle; else a library
-    item id restricting to that item's files (by meta.json `src`). Skips bundles
-    with an active prep job. Returns {bundles, repaired, dry_run}."""
+    """Scan existing bundles for audio misalignment — duration DRIFT
+    (`_bundle_audio_sync_delta`) OR a prep-introduced constant OFFSET
+    (`_bundle_introduced_av_offset`, ffprobe vs the source)
+    — and, unless `dry_run`, purge + re-prep each flagged one from source forcing an
+    original-rung re-encode so the offset can't survive. `scope` None/""/"all" ⇒
+    every bundle; else a library item id restricting to that item's files (by
+    meta.json `src`). Skips bundles with an active prep job. Returns
+    {bundles, repaired, dry_run}."""
     lib = await get_library()
     allowed_srcs: Optional[set[str]] = None
     if scope not in ("", "all", None):
@@ -18325,36 +18478,50 @@ async def _hls_resync_bundles(*, dry_run: bool, scope: str = "all") -> dict:
                 continue
             if _offline_cache_path_active(p.name):
                 continue
-            delta = await asyncio.to_thread(_bundle_audio_sync_delta, p, allowed_srcs)
-            if delta is None:
-                await asyncio.sleep(0)
-                continue
+            # Scope gate first (cheap): skip bundles whose source isn't in scope
+            # before spending an ffprobe on them.
             try:
                 meta = json.loads((p / "meta.json").read_text("utf-8"))
             except Exception:
                 await asyncio.sleep(0)
                 continue
-            if not _bundle_sync_flagged(delta, float(meta.get("duration_sec") or 0.0)):
+            src = meta.get("src", "")
+            if allowed_srcs is not None and _norm_path(src) not in allowed_srcs:
                 await asyncio.sleep(0)
                 continue
+            # Detector #1: duration drift (cheap, no decode).
+            delta = await asyncio.to_thread(_bundle_audio_sync_delta, p)
+            drift = _bundle_sync_flagged(delta, float(meta.get("duration_sec") or 0.0))
+            # Detector #2: prep-introduced constant offset (ffprobe the bundle's
+            # renditions vs the source's intended A/V offset).
+            offset = await asyncio.to_thread(_bundle_introduced_av_offset, p)
+            off_flag = offset is not None and abs(offset) > AV_OFFSET_FLAG_SECS
+            if not (drift or off_flag):
+                await asyncio.sleep(0)
+                continue
+            reason = (f"drift={delta:.2f}s" if drift else "") + \
+                     (" " if drift and off_flag else "") + \
+                     (f"offset={offset:+.2f}s" if off_flag else "")
             flagged += 1
             if dry_run:
+                hls_log.info("hls-resync: bundle %s would repair (%s)", p.name, reason)
                 await asyncio.sleep(0)
                 continue
-            src = meta.get("src", "")
             src_path = Path(src)
             if not src or not await asyncio.to_thread(src_path.exists):
-                hls_log.warning("hls-resync: bundle %s flagged (delta=%.2fs) but source "
-                                "missing (%s) — skipping repair", p.name, delta, src)
+                hls_log.warning("hls-resync: bundle %s flagged (%s) but source "
+                                "missing (%s) — skipping repair", p.name, reason, src)
                 await asyncio.sleep(0)
                 continue
-            # Purge the bad bundle, then re-queue a normal prep — it rebuilds with
-            # the audio-sync fix at the usual bulk concurrency/pause semantics.
+            # Purge the bad bundle, then re-queue a prep that RE-ENCODES the original
+            # rung (force_reencode_video) so the rebuilt bundle can't carry the same
+            # offset. Runs at the usual bulk concurrency/pause semantics.
             await asyncio.to_thread(_delete_cache_artifacts, p.name, str(root))
             _invalidate_bundle_index()
-            await _maybe_start_prep_job(src_path, src_to_item.get(_norm_path(src), ""))
+            await _maybe_start_prep_job(src_path, src_to_item.get(_norm_path(src), ""),
+                                        force_reencode_video=True)
             repaired += 1
-            hls_log.info("hls-resync: re-prepping %s (audio/video delta=%.2fs)", src, delta)
+            hls_log.info("hls-resync: re-prepping %s (%s)", src, reason)
             await asyncio.sleep(0)
     if not dry_run and repaired > 0:
         _invalidate_offline_cache_inventory()
