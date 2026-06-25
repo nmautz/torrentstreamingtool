@@ -9485,6 +9485,7 @@ function _lpDestroyHls() {
   }
   lp.everPlayed = false;
   _lpStallSince = 0; _lpStallLastT = 0;
+  _lpOdKeepAliveAt = 0;   // touch any new OD session promptly on the next tick
   _lpNetReset();
 }
 
@@ -9524,6 +9525,16 @@ function _lpNetRetryNow() {
     // re-enters _lpNetLost with a longer delay.
     try { lp.hls.startLoad(-1); } catch (_) {}
   } else {
+    // Safari native HLS can't expose the HTTP status of the failed load, so a
+    // reaped on-demand session (410) looks like any other drop. The cheap
+    // src-reload below recovers a transient blip; if it keeps failing (backoff
+    // has grown past the first couple of attempts) the session is likely gone —
+    // escalate to a full re-prepare, which switches to the now-ready bundle or
+    // a fresh OD session. See _lpReloadOnDemand.
+    if (lp.mode === "ondemand" && _lpNetRetryDelay >= 8000) {
+      _lpReloadOnDemand("safari-retry");
+      return;
+    }
     // Safari native HLS: reload the (still-set) src and seek back to where
     // playback died via the existing resume machinery. Success fires
     // `playing` (→ reset); failure fires `error` (→ _lpNetLost again).
@@ -9575,6 +9586,62 @@ function _lpKickLoader() {
   }
 }
 
+// --- On-demand session recovery & keepalive -----------------------------
+// On-demand playback streams from a short-lived server session that the reaper
+// tears down after OD_SESSION_IDLE_SECS (90 s) without a segment fetch. The
+// player deliberately buffers far ahead (up to maxBufferLength), and while
+// paused or fully-buffered it can legitimately go that long without fetching —
+// so the session (and its segment dir) can be reaped out from under live
+// playback. The next fetch then 410s and the generic reconnect loop would just
+// retry the DEAD session URL forever ("stuck reconnecting"). Two pieces avoid
+// that: a keepalive ping keeps the session warm, and a 410 triggers a full
+// re-prepare instead of a dead-session retry — which also seamlessly promotes
+// playback to the now-ready full bundle if the background prep finished.
+
+let _lpOdKeepAliveAt = 0;       // last keepalive ping (ms), throttle gate
+let _lpReloading = false;       // guards _lpReloadOnDemand against re-entry
+
+// Touch the OD session so its last_access stays fresh even when we're not
+// fetching segments (paused / fully buffered). Called from the 3 s stall-watch
+// tick; self-throttled to ~30 s. No-op outside on-demand mode.
+function _lpOdKeepAlive() {
+  if (lp.mode !== "ondemand" || !lp.odKey || !lp.itemId) return;
+  const now = Date.now();
+  if (now - _lpOdKeepAliveAt < 30000) return;
+  _lpOdKeepAliveAt = now;
+  // master.m3u8 is a tiny static response; GETting it refreshes last_access.
+  fetch(`/api/library/ondemand/${lp.odKey}/master.m3u8`, { cache: "no-store" })
+    .catch(() => {});
+}
+
+// The OD session is gone (reaped / expired → 410). Re-run the prepare flow at
+// the current playhead: if the background full prep has since finished this
+// switches to the rich bundle; otherwise it spins up a FRESH on-demand session
+// and resumes. Either way it escapes the dead-session retry loop. Guarded so a
+// burst of 410s (every queued fragment) only triggers one reload.
+function _lpReloadOnDemand(reason) {
+  if (_lpReloading || !lp.itemId) return;
+  _lpReloading = true;
+  const v = document.getElementById("lpVideo");
+  const at = (v && v.currentTime) || lp.resumeSec || 0;
+  console.warn("[lp] on-demand session lost (" + (reason || "") + ") — re-preparing at " + at.toFixed(1) + "s");
+  _lpNetReset();                       // drop any dead-session retry that was pending
+  _lpShowPreparing("Reconnecting…");
+  // _lpLoadIndex rebuilds the player from scratch (new hls.js / src), so the
+  // stale session is fully abandoned. Re-arm the guard once it settles.
+  Promise.resolve()
+    .then(() => _lpLoadIndex(at))
+    .catch(() => {})
+    .finally(() => { _lpReloading = false; });
+}
+
+// True when an hls.js error reflects a vanished OD session — the server 410s
+// every request (segment, media playlist, key) once the session is reaped.
+function _lpIsOdSessionGone(data) {
+  if (lp.mode !== "ondemand") return false;
+  return !!(data && data.response && data.response.code === 410);
+}
+
 // Only kick if we're actually starved for data (so an online-event during
 // healthy playback is a no-op). readyState < HAVE_FUTURE_DATA(3) means the
 // playhead can't advance from buffer.
@@ -9598,6 +9665,9 @@ function _lpKickIfStalled() {
 let _lpStallLastT = 0;
 let _lpStallSince = 0;
 function _lpStallWatch() {
+  // Keep the on-demand session warm even while paused / fully buffered (the
+  // branches below early-return), so the reaper doesn't delete it mid-watch.
+  _lpOdKeepAlive();
   const v = document.getElementById("lpVideo");
   if (!v || !lp.itemId || v.paused || !lp.everPlayed || _lpScrub) {
     _lpStallSince = 0; _lpStallLastT = v ? (v.currentTime || 0) : 0;
@@ -9887,6 +9957,14 @@ async function _lpLoadIndex(seekTo) {
       // marks recovery. A real 404 (bad bundle) also lands here, but hls.js
       // only goes fatal after its own retries, and our loop backs off to a
       // slow poll — harmless, and the console.error above still diagnoses it.
+      // A 410 in on-demand mode is not a transient network drop — the server
+      // reaped the session. Retrying the same dead URL never recovers, so
+      // re-prepare instead (switches to the full bundle if it's ready now, else
+      // a fresh OD session). See _lpReloadOnDemand.
+      if (_lpIsOdSessionGone(data)) {
+        _lpReloadOnDemand(data.details || "410");
+        return;
+      }
       if (data.type === window.Hls.ErrorTypes.NETWORK_ERROR) {
         _lpNetLost();
         return;
@@ -11650,6 +11728,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.6.1.4</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.6.1.5</div>
 </body>
 </html>

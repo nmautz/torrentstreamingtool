@@ -776,9 +776,21 @@ wins (on-demand is a supplement, never a replacement).
   alignment, so it stays a full-prep-only win.
 - **Lifecycle.** `_od_reaper` (a `lifespan` task) terminates ffmpeg + `rmtree`s the
   dir for sessions idle past `OD_SESSION_IDLE_SECS` (90 s) and caps the live count at
-  `OD_MAX_SESSIONS`. Active playback refreshes `last_access` on every segment fetch,
-  so a watching session is never reaped mid-stream. `POST …/close` (a sendBeacon on
-  stop/unload) tears a session down promptly; the reaper is the backstop.
+  `OD_MAX_SESSIONS`. Active playback refreshes `last_access` on every segment fetch.
+  `POST …/close` (a sendBeacon on stop/unload) tears a session down promptly; the
+  reaper is the backstop.
+
+  > **Reaping vs. a deliberately deep client buffer.** "Active playback refreshes
+  > `last_access`" is necessary but **not sufficient** — the player buffers far ahead
+  > (`maxBufferLength`, up to 180 s) and while **paused or fully buffered** can go
+  > longer than the 90 s idle window without fetching a segment, so the reaper *could*
+  > delete a session that's still being watched. The next fetch then `410`s. The
+  > client guards both ends (see [§ Client — session keepalive & 410 recovery]
+  > (#client-staticindexhtml)): a **keepalive ping** (`_lpOdKeepAlive`, ~30 s) keeps
+  > `last_access` fresh while not fetching, and a `410` triggers a **re-prepare at the
+  > current position** (`_lpReloadOnDemand`) that promotes to the now-ready full bundle
+  > or starts a fresh OD session — never the dead-session retry loop. So a reaped
+  > session is recoverable, not a wedge.
 - **Background full prep.** `stream-ondemand` also fires `_maybe_start_prep_job`
   (**bulk** queue — low priority, honors the global pause / idle-kill) so a
   *subsequent* play uses the rich ABR/multi-audio bundle. JIT only bridges the gap
@@ -820,6 +832,23 @@ wins (on-demand is a supplement, never a replacement).
   So a show played via JIT (un-prepped fallback **or** an *on-demand-only* item) keeps its
   in-MKV subtitles. The **Clip** row is hidden in OD mode — clipping needs the bundle
   (`409` otherwise), so it returns once the file is fully prepped.
+- **Session keepalive & 410 recovery.** The OD session is short-lived (the reaper
+  deletes it `OD_SESSION_IDLE_SECS` after the last fetch), but the player buffers far
+  ahead and — paused / fully buffered — can out-wait that window, so the session can be
+  reaped mid-watch. Two client pieces keep that from wedging playback:
+  - `_lpOdKeepAlive()` (called from the 3 s `_lpStallWatch` tick, self-throttled to
+    ~30 s) GETs the session's `master.m3u8` while `lp.mode==="ondemand"`, refreshing the
+    server's `last_access` even when no segments are being fetched.
+  - When a fetch still 410s (a reap won the race, or the tab was backgrounded with
+    throttled timers), `_lpReloadOnDemand(reason)` re-runs `_lpLoadIndex` at the current
+    playhead instead of the dead-session retry loop. That re-POSTs `/offline-prepare`: if
+    the background full prep finished it **switches to the rich bundle**; otherwise it
+    creates a fresh OD session (same deterministic `_od_session_key`) and resumes. The
+    hls.js path detects the 410 directly (`_lpIsOdSessionGone` → `data.response.code===410`);
+    the Safari-native path (no HTTP status on the `<video>` `error`) escalates to the same
+    reload once the reconnect backoff has grown past a couple of failed attempts. A
+    re-entry guard (`_lpReloading`) collapses the burst of 410s from every queued fragment
+    into a single reload.
 
 > **Not on macOS.** Like all HLS prep, on-demand is disabled when `HLS_AVAILABLE` is
 > false (the TCC block). The endpoints `503` and the dashboard never reaches the OD
