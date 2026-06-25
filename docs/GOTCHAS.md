@@ -995,14 +995,26 @@ hook: `AppDelegate` stashes the system completion handler on
 `BundleDownloadManager`, which fires it from `urlSessionDidFinishEvents(forBackgroundSession:)`
 once events flush. Behaviour now: foreground → `didWriteData` fires live (smooth
 progress); suspended → byte progress is coarse/batched but **per-file completion
-still advances** and transfers genuinely finish. One subtlety: the in-memory
-`jobs` map is lost on a headless background relaunch, so a file that finishes then
-is **moved to disk** (the move in `didFinishDownloadingTo` runs before the
-`jobs[sha]` lookup) but its `index.json` `complete` flag + Live Activity update are
-skipped until the next foreground open, where the resume scan finalizes it. Data
-is never lost; finalization is just deferred. The old `beginBackgroundTask`
+still advances** and transfers genuinely finish. The old `beginBackgroundTask`
 assertion is kept as a harmless foreground tail. Don't switch back to a foreground
 `default` session — it dies ~30 s after backgrounding.
+
+> **Completion must be reconciled from disk, not from the in-memory `Job`.** The
+> `jobs` map is lost on a headless background relaunch, so a file that finishes
+> then is **moved to disk** (the move in `didFinishDownloadingTo` runs before the
+> `jobs[sha]` lookup) but `markComplete` is **skipped** — the `guard let job =
+> self.jobs[sha]` bails. For a long time this left `index.json` `complete:false`
+> forever (there was no "resume scan" that finalized it, despite an earlier claim
+> here), and since `downloads.html` lists **only** `complete` bundles, a bulk
+> download whose tail finished while suspended **silently vanished from Downloads
+> even though every segment was on disk** (`preview.6.1.1` fix). The cure is to
+> never trust the in-memory job for finalization: `reconcileIndexLocked()` flips a
+> bundle `complete` whenever **all** its expected files are present at their
+> expected size, and it runs whenever the index is read for display (`list()` /
+> `getLocal()`) and after the background session flushes (`urlSessionDidFinishEvents`,
+> which also emits the deferred `bundleComplete`). Data was never lost; only the
+> `complete` flag was — and it now self-heals on the next Downloads refresh. **If
+> you add any new download finalization path, make it disk-truth, not job-state.**
 
 ### Live Activities need a separate Widget Extension target + App Group — and `LiveActivityIntent.perform()` runs in the *app* process
 The download-progress and TV-remote Live Activities (`preview.6.0.0`) live in a

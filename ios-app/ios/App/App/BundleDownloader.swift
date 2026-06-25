@@ -228,6 +228,54 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         }
     }
 
+    // Read a `files[]` entry's expected byte size across the shapes the JSON
+    // bridge / JSONSerialization can hand back (Int / Double / NSNumber). `0`
+    // means "unknown" — treated as "any bytes on disk = present", matching the
+    // resume scan in startDownload.
+    private func expectedSize(_ f: [String: Any]) -> Int64 {
+        (f["size"] as? Int).map { Int64($0) }
+            ?? (f["size"] as? Double).map { Int64($0) }
+            ?? (f["size"] as? NSNumber).map { $0.int64Value }
+            ?? 0
+    }
+
+    // Self-heal completion from disk. A bundle whose every expected file is
+    // present at its expected size IS complete — even if the in-memory `Job`
+    // that would have called markComplete was gone when the last file landed.
+    // That happens routinely during a BULK download: the app is backgrounded for
+    // a long time, the background URLSession keeps finishing files, and iOS
+    // relaunches the app headless to deliver those events with `jobs` empty — so
+    // `didFinishDownloadingTo` moves the file to disk but bails before
+    // markComplete, leaving `complete:false` in index.json forever. downloads.html
+    // filters on `complete`, so a fully-downloaded episode never appears in
+    // Downloads. This pass (run whenever the index is read for display, and after
+    // background events flush) repairs those entries. Returns the set of shas it
+    // newly flipped to complete. Assumes `queue`.
+    @discardableResult
+    private func reconcileIndexLocked() -> [String] {
+        var idx = readIndex()
+        var healed: [String] = []
+        for (sha, entry) in Array(idx) {       // snapshot — we mutate `idx` in the loop
+            if (entry["complete"] as? Bool) == true { continue }
+            let files = (entry["files"] as? [[String: Any]]) ?? []
+            if files.isEmpty { continue }
+            let dir = bundleDir(sha)
+            var allPresent = true
+            for f in files {
+                guard let n = f["name"] as? String else { allPresent = false; break }
+                let want = expectedSize(f)
+                let onDisk = (try? dir.appendingPathComponent(n).resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { Int64($0) } ?? -1
+                if onDisk < 0 || (want > 0 && onDisk != want) { allPresent = false; break }
+            }
+            if allPresent {
+                var e = entry; e["complete"] = true; idx[sha] = e
+                healed.append(sha)
+            }
+        }
+        if !healed.isEmpty { writeIndex(idx) }
+        return healed
+    }
+
     // MARK: public API (called from the plugin, hops onto `queue`)
 
     struct StartResult { let dir: String; let alreadyComplete: Bool }
@@ -299,6 +347,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
 
     func getLocal(itemId: String, filePath: String) -> [String: Any] {
         queue.sync {
+            reconcileIndexLocked()
             let idx = readIndex()
             guard let (sha, entry) = idx.first(where: {
                 ($0.value["itemId"] as? String) == itemId && ($0.value["filePath"] as? String) == filePath
@@ -324,6 +373,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
 
     func list() -> [[String: Any]] {
         queue.sync {
+            reconcileIndexLocked()
             let idx = readIndex()
             return idx.map { sha, entry -> [String: Any] in
                 let files = (entry["files"] as? [[String: Any]]) ?? []
@@ -479,6 +529,19 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
 
     func urlSessionDidFinishEvents(forBackgroundSession session: URLSession) {
         queue.async {
+            // Files that finished while the app was suspended/killed were moved to
+            // disk, but their in-memory `Job` was gone so markComplete never ran.
+            // Now that the batch has flushed, repair index.json from disk and tell
+            // any live listener about the bundles that just became complete.
+            for sha in self.reconcileIndexLocked() {
+                let entry = self.readIndex()[sha] ?? [:]
+                self.emit("bundleComplete", [
+                    "sha": sha,
+                    "itemId": entry["itemId"] as? String ?? "",
+                    "filePath": entry["filePath"] as? String ?? "",
+                    "dir": self.bundleDir(sha).path,
+                ])
+            }
             let handler = self.bgEventsCompletion
             self.bgEventsCompletion = nil
             DispatchQueue.main.async { handler?() }
