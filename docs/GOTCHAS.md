@@ -214,15 +214,22 @@ qBittorrent 5.x renamed the WebUI endpoints `pause`→`stop` and `resume`→`sta
 `POST /api/library/{id}/move` relocates a series via `qbit_set_location`
 (`/api/v2/torrents/setLocation`), which keeps the torrent seeding from the new path
 — don't `shutil.move` a torrent-backed file yourself (you'd break the piece map and
-halt seeding; that's only for non-torrent uploads). Two things to remember: (1) qBit's
-data move is **asynchronous** for large torrents, so the file may still be at the old
-path for a bit after the call returns — `move_library_item` rewrites `item.files[*].path`
-to the destination **immediately** and lets the download scheduler / validator reconcile
-once qBit finishes; a transient "missing" verdict during the move is expected. (2) qBit
-moves only its own content, not our co-located `.streamlink_cache/` sidecar — the endpoint
-moves that itself (`_move_series_files_sync`), keyed off the file's name+size (computed via
-`_offline_cache_key_for` from the library metadata, so it works even while the media is
-mid-move). The key is move-stable, so the bundle stays valid at the new location.
+halt seeding; that's only for non-torrent uploads).
+
+**qBit's content move is ASYNCHRONOUS — never commit the library paths until the files
+verifiably exist at the destination.** The v7.0.0 first cut rewrote `item.files[*].path`
+*immediately* (and by string arithmetic), so for a large pack — especially cross-drive on
+Windows — the library pointed at files qBit hadn't finished moving and the whole series read
+as **missing** in Cleanup / on the TV / on-device (the v7.0.1 bug report). The endpoint now:
+(1) fires `setLocation` and returns `status:"moving"` right away; (2) a background task
+`_settle_series_move` polls `qbit_files(h)` + the current `save_path`, rebuilds the new paths
+with **`build_file_list`** (qBit's authoritative layout — *not* `old_path.relative_to(old_save)`,
+which could flatten the folder if the save paths didn't match), and **only `_commit_item_move`
+once `all(Path(f).exists())`**. Until then the library is left untouched. Don't "optimise" this
+back to an immediate path rewrite. (3) The co-located `.streamlink_cache/<key>` sidecar is moved
+in `_commit_item_move` (qBit doesn't know about it), keyed by name+size (`_offline_cache_key_for`)
+which the move preserves. Recovery for an item stuck missing: re-run the move to the same dest —
+the settle reads qBit's real location and repairs the paths.
 
 ### "Ready" is gated on per-file completion, NOT qBit torrent state, when files are skipped/idle
 

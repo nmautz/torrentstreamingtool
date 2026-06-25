@@ -521,7 +521,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "7.0.0"
+UI_VERSION = "7.0.1"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 # Retains references to fire-and-forget background tasks so the event loop's weak
@@ -6279,54 +6279,155 @@ async def rename_library_item(item_id: str, req: RenameReq) -> JSONResponse:
     })
 
 
-def _move_series_files_sync(plan: list[dict]) -> list[dict]:
-    """Carry out the on-disk part of a series move (run in a worker thread).
+# How long the background settle waits for qBittorrent to physically relocate a
+# torrent's content before giving up, and how often it re-checks.
+MOVE_SETTLE_TIMEOUT = 1800   # 30 min — large cross-disk moves can be slow
+MOVE_SETTLE_POLL    = 4      # seconds between disk-existence checks
+# In-memory status of in-flight / recent series moves, keyed by the primary item
+# id. Surfaced via GET /api/library/{id}/move-status so the UI can show progress.
+_move_status: "dict[str, dict]" = {}
 
-    `plan` is a list of {old_path, new_path, key, is_torrent} per file. For
-    non-torrent files we move the media ourselves; for torrent files qBit has
-    already been asked to relocate the content, so we only move our co-located
-    `.streamlink_cache/<key>` sidecar (qBit doesn't know about it). Returns the
-    same list annotated with `moved_file` / `moved_cache` / `error`."""
-    out: list[dict] = []
-    for f in plan:
-        old_path = Path(f["old_path"])
-        new_path = Path(f["new_path"])
-        rec = dict(f, moved_file=False, moved_cache=False, error="")
+
+def _move_caches_sync(old_files: list[dict], new_files: list[dict]) -> None:
+    """Move each file's co-located `.streamlink_cache/<key>` bundle from its old
+    parent to its new parent (qBit relocates the media but not our sidecar). Keyed
+    by name+size, which the move preserves, so the key — and the bundle — stay
+    valid. Best-effort; a missing bundle is simply skipped. Run in a thread."""
+    old_by_name = {Path(o["path"]).name: o for o in old_files}
+    for nf in new_files:
+        of = old_by_name.get(Path(nf["path"]).name)
+        if not of:
+            continue
+        old_parent = Path(of["path"]).parent
+        new_parent = Path(nf["path"]).parent
+        if old_parent == new_parent:
+            continue
+        key = _offline_cache_key_for(nf.get("name", "") or Path(nf["path"]).name,
+                                     int(nf.get("size_bytes", 0) or 0))
+        old_cache = old_parent / OFFLINE_CACHE_DIRNAME / key
+        new_cache = new_parent / OFFLINE_CACHE_DIRNAME / key
         try:
-            new_path.parent.mkdir(parents=True, exist_ok=True)
-            if not f["is_torrent"]:
-                # We own the move for uploaded/non-torrent files.
-                if old_path.exists() and old_path != new_path:
-                    shutil.move(str(old_path), str(new_path))
-                rec["moved_file"] = True
-            # Move the co-located HLS bundle alongside (key is move-stable).
-            key = f["key"]
-            if key:
-                old_cache = old_path.parent / OFFLINE_CACHE_DIRNAME / key
-                new_cache = new_path.parent / OFFLINE_CACHE_DIRNAME / key
-                if old_cache.exists() and old_cache != new_cache and not new_cache.exists():
-                    new_cache.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.move(str(old_cache), str(new_cache))
-                    rec["moved_cache"] = True
-        except Exception as exc:
-            rec["error"] = str(exc)
-        out.append(rec)
+            if old_cache.exists() and not new_cache.exists():
+                new_cache.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(old_cache), str(new_cache))
+        except Exception:
+            pass
+
+
+def _move_nontorrent_files_sync(old_files: list[dict], dest: str) -> list[dict]:
+    """Physically move uploaded/non-torrent files into `dest` (flat) and return the
+    rebuilt file dicts. Run in a thread."""
+    dest_p = Path(dest)
+    out: list[dict] = []
+    for o in old_files:
+        old = Path(o["path"])
+        new = dest_p / old.name
+        try:
+            if old.exists() and old != new:
+                new.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(old), str(new))
+        except Exception:
+            pass
+        season, episode = parse_season_episode(old.name)
+        out.append({"name": old.name, "path": str(new),
+                    "size_bytes": int(o.get("size", 0) or 0),
+                    "season": season, "episode": episode})
     return out
+
+
+async def _commit_item_move(item_id: str, old_files: list[dict],
+                            new_files: list[dict]) -> None:
+    """Move the co-located caches, then rewrite one item's stored file paths to the
+    settled `new_files` (carrying over each file's `validation` verdict by name)."""
+    await asyncio.to_thread(_move_caches_sync, old_files, new_files)
+    lib = await get_library()
+    it = next((x for x in lib["items"] if x["id"] == item_id), None)
+    if not it:
+        return
+    old_by_name = {f.get("name") or Path(f.get("path", "")).name: f
+                   for f in it.get("files", [])}
+    merged: list[dict] = []
+    for nf in new_files:
+        prev = old_by_name.get(nf["name"])
+        if prev and isinstance(prev.get("validation"), dict):
+            nf = dict(nf, validation=prev["validation"])
+        merged.append(nf)
+    it["files"] = merged
+    await put_library(lib)
+
+
+async def _settle_series_move(primary_id: str, snapshot: list[dict], dest: str) -> None:
+    """Background completion of a series move. For each torrent item, poll qBit's
+    real file list + save path and **only** commit the library paths once the files
+    actually exist at the destination — so the library never points at files qBit
+    hasn't finished moving. Non-torrent items are moved here directly."""
+    dest_p = Path(dest)
+    deadline = time.monotonic() + MOVE_SETTLE_TIMEOUT
+    pending = [s for s in snapshot if not s.get("skip")]
+    status = _move_status.setdefault(primary_id, {})
+    status.update({"dest": dest, "total": len(pending), "settled": 0,
+                   "status": "moving", "started_at": time.time()})
+    while pending and time.monotonic() < deadline:
+        still: list[dict] = []
+        for s in pending:
+            try:
+                done = await _try_settle_item(s, dest_p)
+            except Exception as exc:
+                hls_log.warning("move-settle %s: %s", s.get("id"), exc)
+                done = False
+            if not done:
+                still.append(s)
+        status["settled"] = status["total"] - len(still)
+        pending = still
+        if pending:
+            await asyncio.sleep(MOVE_SETTLE_POLL)
+    _invalidate_offline_cache_inventory()
+    _invalidate_cleanup_inventory()
+    await _rebuild_bundle_index()
+    await broadcast("library_update", {"item_id": primary_id})
+    status["status"] = "done" if not pending else "timeout"
+    status["pending"] = len(pending)
+    status["finished_at"] = time.time()
+    if pending:
+        hls_log.warning("series move %s: %d item(s) did not settle within %ds",
+                        primary_id, len(pending), MOVE_SETTLE_TIMEOUT)
+
+
+async def _try_settle_item(s: dict, dest: Path) -> bool:
+    """Return True once item `s` is committed at its new location, else False
+    (still moving / not yet confirmed)."""
+    h = s.get("hash") or ""
+    if h:
+        info = await qbit_info(h)
+        qfiles = await qbit_files(h)
+        cur_save = (info or {}).get("save_path") or str(dest)
+        new_files = build_file_list(qfiles, cur_save)
+        if not new_files:
+            return False
+        # Only commit once every file physically exists at the new location —
+        # qBit's content move is async, so the paths must be verified, not assumed.
+        if not all(Path(f["path"]).exists() for f in new_files):
+            return False
+        await _commit_item_move(s["id"], s["old_files"], new_files)
+        return True
+    # Non-torrent: we own the move; do it now and commit.
+    new_files = await asyncio.to_thread(_move_nontorrent_files_sync, s["old_files"], str(dest))
+    await _commit_item_move(s["id"], s["old_files"], new_files)
+    return True
 
 
 @app.post("/api/library/{item_id}/move")
 async def move_library_item(item_id: str, req: MoveReq, request: Request) -> JSONResponse:
     """Admin: relocate a whole series (or a movie/one-off) to a new directory.
 
-    Torrent-backed items are moved via qBittorrent's `setLocation` so they keep
-    seeding from the new path; non-torrent files are moved directly. Each file's
-    co-located `.streamlink_cache/<key>` bundle rides along (the key is
-    move-stable), so on-device playback keeps working with no re-encode. The
-    library's stored paths are rewritten to the destination.
-
-    Note: qBit's content move is asynchronous for large torrents — paths are
-    updated immediately and the download scheduler / validator reconcile once the
-    move finishes."""
+    Torrent-backed items are moved via qBittorrent's `setLocation` (they keep
+    seeding from the new path); non-torrent files are moved directly. The library's
+    stored paths are **not** rewritten until the files physically exist at the
+    destination — qBit's content move is asynchronous, so the actual relocation +
+    path commit happen in a background task (`_settle_series_move`), and the
+    co-located `.streamlink_cache/<key>` bundle rides along (move-stable key, no
+    re-encode). Returns immediately with `status:"moving"`; poll
+    `GET /api/library/{id}/move-status` for completion."""
     _require_admin(request)
     dest_dir = (req.dest_dir or "").strip()
     if not dest_dir:
@@ -6343,61 +6444,47 @@ async def move_library_item(item_id: str, req: MoveReq, request: Request) -> JSO
     group = [it for it in lib["items"]
              if (series and (it.get("series") or "").strip() == series) or it["id"] == item_id]
 
-    plan: list[dict] = []          # per-file disk move plan
-    path_updates: list[tuple[dict, str, str]] = []   # (file_dict, old_path, new_path)
+    # Snapshot each item's current files (paths/names/sizes) BEFORE qBit starts the
+    # move, then kick off setLocation for torrent-backed items. Nothing in the
+    # library is rewritten here — that waits for disk confirmation in the background.
+    snapshot: list[dict] = []
     qbit_errors: list[str] = []
     for it in group:
         h = (it.get("torrent_hash") or "").lower()
-        is_torrent = bool(h)
-        old_save: Optional[Path] = None
-        if is_torrent:
-            info = await qbit_info(h)
-            if info is not None:
-                old_save = Path(info.get("save_path", settings.qbit_download_path))
+        old_files = [{"path": f.get("path", ""),
+                      "name": f.get("name") or Path(f.get("path", "")).name,
+                      "size": int(f.get("size_bytes", 0) or 0)}
+                     for f in it.get("files", [])]
+        entry = {"id": it["id"], "hash": h, "old_files": old_files}
+        if h:
             ok = await qbit_set_location(h, str(dest))
             if not ok:
                 qbit_errors.append(it.get("title", "") or h)
-                continue   # leave this item untouched — don't desync the library
-        for f in it.get("files", []):
-            old_path = Path(f.get("path", ""))
-            # Preserve the torrent's internal layout under the new root when we can
-            # work out the old save path; otherwise fall back to a flat move.
-            new_path = dest / old_path.name
-            if is_torrent and old_save is not None:
-                try:
-                    new_path = dest / old_path.relative_to(old_save)
-                except ValueError:
-                    new_path = dest / old_path.name
-            key = _offline_cache_key_for(f.get("name", "") or old_path.name,
-                                         int(f.get("size_bytes", 0) or 0))
-            plan.append({"old_path": str(old_path), "new_path": str(new_path),
-                         "key": key, "is_torrent": is_torrent})
-            path_updates.append((f, str(old_path), str(new_path)))
+                entry["skip"] = True
+        snapshot.append(entry)
 
-    if not plan and qbit_errors:
+    if all(s.get("skip") for s in snapshot):
         raise HTTPException(502, f"qBittorrent could not relocate: {', '.join(qbit_errors)}")
 
-    results = await asyncio.to_thread(_move_series_files_sync, plan)
-    file_errors = [r["error"] for r in results if r.get("error")]
-
-    # Rewrite stored paths to the destination (qBit-managed content lands there
-    # asynchronously; non-torrent moves are already done above).
-    for f, _old, new_path in path_updates:
-        f["path"] = new_path
-    await put_library(lib)
-    _invalidate_offline_cache_inventory()
-    _invalidate_cleanup_inventory()
-    await _rebuild_bundle_index()
-    await broadcast("library_update", {"item_id": item_id})
+    asyncio.create_task(_settle_series_move(item_id, snapshot, str(dest)))
 
     return JSONResponse({
         "ok": True,
+        "status": "moving",
         "dest_dir": str(dest),
-        "items_moved": len(group),
-        "files_moved": len(plan),
+        "items_moved": len([s for s in snapshot if not s.get("skip")]),
         "qbit_errors": qbit_errors,
-        "file_errors": file_errors,
     })
+
+
+@app.get("/api/library/{item_id}/move-status")
+async def move_library_status(item_id: str, request: Request) -> JSONResponse:
+    """Progress of an in-flight / recent series move (see `move_library_item`)."""
+    _require_admin(request)
+    st = _move_status.get(item_id)
+    if not st:
+        return JSONResponse({"status": "none"})
+    return JSONResponse(st)
 
 
 @app.post("/api/library/download")

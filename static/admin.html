@@ -4933,14 +4933,40 @@ async function submitMove(btn){
       return;
     }
     closeMoveModal();
-    const warns = [];
-    if((d.qbit_errors||[]).length) warns.push(`${d.qbit_errors.length} torrent(s) not relocated`);
-    if((d.file_errors||[]).length) warns.push(`${d.file_errors.length} file error(s)`);
-    showToast(warns.length
-      ? `Moved with issues: ${warns.join(", ")}.`
-      : `Moved ${d.files_moved} file(s) to ${d.dest_dir}.`, warns.length>0);
+    if((d.qbit_errors||[]).length){
+      showToast(`Started, but ${d.qbit_errors.length} torrent(s) couldn't be relocated by qBittorrent.`, true);
+    } else {
+      showToast(`Move started — relocating ${d.items_moved} item(s) to ${d.dest_dir}. The library updates when qBittorrent finishes copying.`);
+    }
+    pollMoveStatus(moveTarget && moveTarget.id);
     loadContentList();
   });
+}
+
+// Poll the background settle so the operator gets a clear "done" (or timeout)
+// signal — qBittorrent's content move is asynchronous and can take a while.
+async function pollMoveStatus(itemId){
+  if(!itemId) return;
+  for(let i=0;i<450;i++){          // up to ~30 min at 4s
+    await new Promise(r=>setTimeout(r,4000));
+    let st;
+    try{
+      const r = await fetch(`/api/library/${itemId}/move-status`, {headers: authHeader()});
+      if(!r.ok) return;
+      st = await r.json();
+    }catch(_){ return; }
+    if(st.status === "done"){
+      showToast(`Move complete — ${st.settled}/${st.total} item(s) relocated.`);
+      loadContentList();
+      return;
+    }
+    if(st.status === "timeout"){
+      showToast(`Move incomplete — ${st.pending} item(s) didn't finish moving in qBittorrent. Check the torrent in qBittorrent, then retry.`, true);
+      loadContentList();
+      return;
+    }
+    if(st.status === "none") return;
+  }
 }
 
 // ── Offline Cache ─────────────────────────────────────────────────────────────

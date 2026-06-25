@@ -1,5 +1,13 @@
 # Changelog
 
+## [7.0.1] — 2026-06-25
+- **Fix: moving a series no longer leaves its files showing as "missing."** The v7.0.0 move rewrote the library's stored paths **immediately** and computed them by string arithmetic — but qBittorrent's `setLocation` content move is **asynchronous** (it can take a while for a large pack, especially across drives on Windows). So the library pointed at the destination before qBit had actually put the files there, and the whole series read as missing in Cleanup, on the TV, and on-device. Rewritten in [main.py](main.py):
+  - The move endpoint now kicks off `setLocation` and returns immediately (`status:"moving"`); a background task (`_settle_series_move`) polls qBittorrent's **real** file list + save path and **only commits the new library paths once every file physically exists at the destination** — derived via `build_file_list` (qBit's authoritative layout), never string math. Until then the library is left untouched, so a move-in-progress never desyncs.
+  - The co-located `.streamlink_cache/<key>` bundle is moved alongside each file (keyed by name+size, which the move preserves).
+  - New `GET /api/library/{id}/move-status` + the admin modal polls it, so you get a clear **"Move complete"** / **"didn't finish — check qBittorrent"** result instead of a silent broken state.
+  - **Recovery for an item already stuck "missing" from v7.0.0:** once qBittorrent has finished moving the content, re-run **Move** to the *same* destination — the settle reads qBit's current location, verifies the files, and repairs the library paths (and pulls the cache into place).
+  - *Server + host-served web change: restart the server and reload the dashboard.*
+
 ## [7.0.0] — 2026-06-25
 - **Offline (HLS) cache now lives *beside the media*, and a series can be moved.** Two linked changes plus a cleanup fix:
   - **Co-located cache.** Every prepped file's HLS bundle used to sit in a central `.offline_cache/<key>/` at the repo root, keyed by `sha256(version | absolute_path | mtime | size)` — so *any* path change orphaned the whole cache. Bundles now live in a hidden `.streamlink_cache/<key>/` **next to each source file**, and the key is **path- and mtime-independent** (`version | filename | size`), so a bundle stays valid wherever its file goes (even a cross-device move). New helpers `_offline_cache_dir` / `_offline_cache_key_for`, a `_bundle_index` key→dir resolver behind the unchanged `/api/library/offline-cache/<key>/…` serving route, and the inventory / auto-purge / HLS-trim / per-item delete all rewalk the co-located roots (+ the legacy central one for stragglers). See [main.py](main.py), [docs/STREAMING.md](docs/STREAMING.md), [docs/LIBRARY_DATA.md](docs/LIBRARY_DATA.md).
