@@ -16373,23 +16373,47 @@ def _bundle_select_rung(out_dir: Path, files: list[dict], meta: dict,
     return out, sum(f["size"] for f in out), master_text
 
 
+# Memoized poster data URLs, keyed "<size><path>". A bulk download fetches the
+# bundle-manifest for every episode of a series, and each one inlines the SAME
+# series poster — without this cache that was one TMDb round-trip (up to a 12 s
+# timeout) per episode, the dominant cost that left later episodes sitting at
+# "Queued…" for 20-30 s. Posters are immutable for a given path, so the cache
+# never needs invalidation; only successful fetches are stored (a transient
+# failure can retry). The lock both serializes the network fetch and dedups
+# concurrent identical requests (the first caches, the rest hit it).
+_TMDB_IMG_DATA_URL_CACHE: dict[str, str] = {}
+_TMDB_IMG_DATA_URL_LOCK = asyncio.Lock()
+
+
 async def _tmdb_image_data_url(path: str, size: str = "w342") -> str:
     """Fetch a TMDb image and return it as a `data:` URL so the iOS offline
     Downloads picker can show a poster with no network (the bundle carries it).
-    Best-effort: returns "" on any failure or when no path/key. Only called at
-    download time (manifest fetch), not persisted to library.json."""
+    Best-effort: returns "" on any failure or when no path/key. Cached by
+    path+size so a bulk per-episode manifest fetch downloads it once. Only called
+    at download time (manifest fetch), not persisted to library.json."""
     if not path:
         return ""
-    try:
-        url = f"{TMDB_IMG_BASE}/{size}{path}"
-        async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as c:
-            r = await c.get(url)
-        if r.status_code == 200 and r.content:
-            ct = r.headers.get("content-type", "image/jpeg").split(";")[0].strip() or "image/jpeg"
-            return f"data:{ct};base64,{base64.b64encode(r.content).decode('ascii')}"
-    except Exception:
-        pass
-    return ""
+    ck = f"{size}{path}"
+    cached = _TMDB_IMG_DATA_URL_CACHE.get(ck)
+    if cached is not None:
+        return cached
+    async with _TMDB_IMG_DATA_URL_LOCK:
+        # Re-check under the lock: a concurrent caller may have just filled it.
+        cached = _TMDB_IMG_DATA_URL_CACHE.get(ck)
+        if cached is not None:
+            return cached
+        try:
+            url = f"{TMDB_IMG_BASE}/{size}{path}"
+            async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as c:
+                r = await c.get(url)
+            if r.status_code == 200 and r.content:
+                ct = r.headers.get("content-type", "image/jpeg").split(";")[0].strip() or "image/jpeg"
+                data_url = f"data:{ct};base64,{base64.b64encode(r.content).decode('ascii')}"
+                _TMDB_IMG_DATA_URL_CACHE[ck] = data_url
+                return data_url
+        except Exception:
+            pass
+        return ""
 
 
 async def _bundle_meta_for_file(item: dict, file_entry: dict, tmdb: Optional[dict],

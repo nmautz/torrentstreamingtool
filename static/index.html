@@ -6538,7 +6538,7 @@ async function epDownloadSelected(){
       for(const f of toStart){ offlineBundles.delete(offKey(epItemId, f.path)); _appRefreshDlBtn(epItemId, f.path); }
       return;
     }
-    for(const f of toStart) await appDownloadBundle(epItemId, f.path, f.name, null, q);
+    await _appRunPooled(toStart, 3, (f) => appDownloadBundle(epItemId, f.path, f.name, null, q));
     return;
   }
   if(paths.length===1){
@@ -8388,6 +8388,24 @@ async function _appBatchQuality(itemId, firstPath, label) {
   return _appChooseQuality(vids, label);
 }
 
+// Run `worker(item)` over `items` with at most `limit` in flight. Bulk download
+// used to `await appDownloadBundle` strictly serially, so each episode's host
+// round-trip (manifest build + prep check) stacked up and later episodes sat at
+// "Queued…" for many seconds before their turn. Pipelining a few at a time
+// overlaps those round-trips; the native background URLSession already runs the
+// actual transfers concurrently, and host-side HLS prep is still serialized
+// server-side, so a small limit is plenty and never floods the host.
+async function _appRunPooled(items, limit, worker){
+  let i = 0;
+  const lanes = [];
+  for (let k = 0; k < Math.min(limit, items.length); k++){
+    lanes.push((async () => {
+      while (i < items.length){ const idx = i++; await worker(items[idx], idx); }
+    })());
+  }
+  await Promise.all(lanes);
+}
+
 // Download / remove an offline bundle (per-row button). Toggles to remove when
 // already downloaded. `quality` (optional): when given ("original" | a height),
 // download that rung without prompting — bulk callers pass it so the chooser is
@@ -8488,7 +8506,7 @@ async function appDownloadAllBundles(itemId, title){
     return;
   }
   showAlert(`Saving ${toStart.length} episode${toStart.length>1?"s":""} offline…`, "ok");
-  for (const f of toStart) await appDownloadBundle(itemId, f.path, f.name, null, q);
+  await _appRunPooled(toStart, 3, (f) => appDownloadBundle(itemId, f.path, f.name, null, q));
 }
 
 // Per-row Download button HTML (app only; "" in a browser).
@@ -11580,6 +11598,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.6.1.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.6.1.2</div>
 </body>
 </html>
