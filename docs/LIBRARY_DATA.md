@@ -249,6 +249,8 @@ Prep** ignores `never` by design (it's an explicit "prep everything" override).
   "size_bytes": 1329062039,
   "season": 1,
   "episode": 1,
+  "compressed": true,                    // optional; set true when this file was re-encoded IN PLACE by the compression tool — see below
+  "compressed_at": "2026-06-25T18:00:00Z", // optional; when the in-place re-encode replaced the original
   "validation": {                        // optional; written by the file validator
     "status": "ok",                      //   ok | damaged | missing
     "error":  "",                        //   ffmpeg/ffprobe tail when damaged
@@ -259,6 +261,17 @@ Prep** ignores `never` by design (it's an explicit "prep everything" override).
 ```
 
 Season/episode are extracted by `parse_season_episode()` ([main.py:807](../main.py#L807)) — matches `S01E03`, `s2e5`, `1x03`. Returns `(0, 0)` if no match.
+
+`compressed` marks a file the Storage & Compression tool re-encoded **in place**. Because the new
+bytes no longer match the torrent's pieces, the file is **no longer torrent-backed** even though the
+item keeps its `torrent_hash` (the marker is **per-file** — one torrent can hold several files, only
+some compressed — so we never clear the item-level hash). Helpers `_file_is_compressed(f)` /
+`_item_has_compressed(item)` ([main.py](../main.py)) read it, and every qBit-dependent path honours it:
+`/files` reports a compressed file complete from disk (qBit's view is stale/damaged); the download
+scheduler forces it to priority 0 and never re-fetches it; and recheck, Cleanup recover, and
+delete-to-free-space **refuse** compressed files (re-downloading would overwrite the smaller result,
+which can't be recovered). The marker survives the download monitor's `build_file_list` rebuild. See
+[GOTCHAS.md](GOTCHAS.md) and [API.md](API.md).
 
 `validation` is the persisted verdict from the source-file validator (the manual admin scan **and** the idle `background_maintenance_loop` auto-validator both write it). It lets the validator skip already-checked files, drives the Activity tab's "never-validated" backlog count, and makes auto-validation **resume after a restart**. A file is re-validated only when its `sig` (mtime:size) changes — i.e. it was re-downloaded, repaired, or re-encoded — or, for a `missing` verdict, once the file exists again. See [BACKEND.md](BACKEND.md) and [ADMIN.md § Automatic Maintenance](ADMIN.md).
 

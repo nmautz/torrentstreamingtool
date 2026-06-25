@@ -521,7 +521,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "7.0.1"
+UI_VERSION = "7.1.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 # Retains references to fire-and-forget background tasks so the event loop's weak
@@ -2395,6 +2395,23 @@ def _effective_file_mode(cfg: dict, path: str) -> str:
     return fm if fm in _FILE_MODES else cfg["mode"]
 
 
+def _file_is_compressed(f: dict) -> bool:
+    """True if this file entry was re-encoded in place by the compression tool.
+
+    A compressed file's bytes no longer match the torrent's pieces: it can't seed and
+    a qBit recheck would mark it damaged. So it is effectively NO LONGER torrent-backed
+    even though the item still carries a torrent_hash (one torrent can hold several
+    files, only some compressed — the marker is per-file, never per-item). Disk is the
+    authority for these files; qBit progress must be ignored and re-download blocked."""
+    return bool(f.get("compressed"))
+
+
+def _item_has_compressed(item: dict) -> bool:
+    """True if any file in the item was compressed in place. Gates torrent-wide
+    destructive ops (recheck/recover) that would damage/overwrite the compressed bytes."""
+    return any(_file_is_compressed(f) for f in item.get("files", []))
+
+
 # Per-file STREAM-PREP schedule — the sibling of the download schedule above, but
 # governing HLS stream-prep (the .offline_cache bundles) instead of the qBit
 # download. Stored as:
@@ -2453,12 +2470,17 @@ def _all_nonskip_complete(item: dict, qfiles: list, save_path: str) -> bool:
     its kept files are done, and an idle-deferred file still has to finish first — so
     audio fingerprinting only ever runs on the complete set the user asked for."""
     cfg = _download_cfg(item)
+    compressed_paths = {f.get("path", "") for f in item.get("files", []) if _file_is_compressed(f)}
     saw = False
     for i, qf in enumerate(qfiles):
         full = str(Path(save_path) / qf.get("name", ""))
         if _effective_file_mode(cfg, full) == "skip":
             continue
         saw = True
+        # Compressed files: disk is authoritative (qBit sees them as damaged). They're
+        # complete by definition, so don't let a stale qBit progress block "ready".
+        if full in compressed_paths:
+            continue
         if qf.get("progress", 0.0) < 0.999:
             return False
     return saw
@@ -3396,12 +3418,18 @@ async def _reconcile_item_downloads(item: dict, idle_open: bool) -> bool:
     if not info or not qfiles:
         return False
     sp = info.get("save_path", settings.qbit_download_path)
+    # Compressed-in-place files are no longer torrent-backed — force them to priority 0
+    # so qBit can never re-fetch and overwrite the smaller re-encoded bytes.
+    compressed_paths = {f.get("path", "") for f in item.get("files", []) if _file_is_compressed(f)}
     by_priority: dict[int, list[int]] = {}
     any_active = False
     for i, qf in enumerate(qfiles):
         idx = qf.get("index", i)
         full = str(Path(sp) / qf.get("name", ""))
-        want = _file_mode_to_priority(_effective_file_mode(cfg, full), idle_open)
+        if full in compressed_paths:
+            want = 0
+        else:
+            want = _file_mode_to_priority(_effective_file_mode(cfg, full), idle_open)
         if want > 0:
             any_active = True
         if qf.get("priority", 1) != want:
@@ -3439,8 +3467,10 @@ async def _apply_item_schedule(item: dict, lib: dict) -> bool:
         if info and qfiles:
             sp = info.get("save_path", settings.qbit_download_path)
             cfg = _download_cfg(item)
+            compressed_paths = {f.get("path", "") for f in item.get("files", []) if _file_is_compressed(f)}
             pending = any(
-                _effective_file_mode(cfg, str(Path(sp) / qf.get("name", ""))) != "skip"
+                str(Path(sp) / qf.get("name", "")) not in compressed_paths
+                and _effective_file_mode(cfg, str(Path(sp) / qf.get("name", ""))) != "skip"
                 and qf.get("progress", 0.0) < 0.999
                 for qf in qfiles
             )
@@ -4344,6 +4374,12 @@ async def library_download_monitor() -> None:
                 save_path = info.get("save_path", settings.qbit_download_path)
                 new_files = build_file_list(qfiles, save_path)
                 if new_files:
+                    # Carry forward the per-file "compressed" marker — build_file_list
+                    # rebuilds from qBit, which has no knowledge of an in-place re-encode.
+                    prev_compressed = {f.get("path", "") for f in item.get("files", []) if _file_is_compressed(f)}
+                    for nf in new_files:
+                        if nf.get("path") in prev_compressed:
+                            nf["compressed"] = True
                     item["files"] = new_files
                     item["size_bytes"] = sum(f["size_bytes"] for f in new_files)
 
@@ -6067,6 +6103,7 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
             **{f"skip_{k}": v for k, v in _item_skip_summary(it).items()},  # skip_status, skip_affected, skip_total
             "download_mode": _download_cfg(it)["mode"],   # now | idle — drives the card's Pause/Resume control
             "download_partial": any(m == "skip" for m in _download_cfg(it)["files"].values()),  # some files deselected → "Partial" badge
+            "compressed": _item_has_compressed(it),       # any file re-encoded in place → "Compressed" badge (local-only)
         })
     items.sort(key=lambda x: (
         x["series"] or "\xff" + x["title"],
@@ -6128,13 +6165,18 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
         else:
             progress = None
         mode = _effective_file_mode(cfg, path)
+        compressed = _file_is_compressed(f)
         # Live qBit progress drives completeness for active files. Fall back to a
         # basename match if the full-path key didn't line up (save-path drift).
         # Skipped files are special-cased below (disk truth, not qBit's stale view).
         qp = qmap.get(path)
         if qp is None:
             qp = qbase.get(Path(path).name)
-        if mode == "skip":
+        if compressed:
+            # Compressed-in-place file: its bytes no longer match the torrent pieces,
+            # so qBit's view is stale/damaged. Disk is authoritative — it's complete.
+            dl_pct, complete = 100.0, True
+        elif mode == "skip":
             # Skipped files: trust the disk, not qBit. qBit keeps a file's progress at
             # 1.0 after we delete it out from under it (until a recheck), so a freed
             # file would otherwise masquerade as complete. Grounding "complete" in
@@ -6163,6 +6205,7 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
             "prep_mode": _effective_prep_mode(prep_cfg, path),  # now | idle | never (stream-prep schedule)
             "dl_pct": dl_pct,                           # download % (None if unknown)
             "complete": complete,                       # file fully downloaded → playable
+            "compressed": compressed,                   # re-encoded in place → local-only, not torrent-backed
         })
     return JSONResponse({
         "files": out,
@@ -6693,7 +6736,11 @@ async def delete_item_files(item_id: str, req: DeleteFilesReq) -> JSONResponse:
     Each file is marked "skip" (so qBit drops it to priority 0 and never refetches),
     its bytes are removed from disk, and its cached HLS bundle is purged. The file's
     metadata stays in the item, so the episode picker shows it as "not downloaded"
-    with a Download button to grab it again later."""
+    with a Download button to grab it again later.
+
+    EXCEPTION: a compressed-in-place file is no longer torrent-backed and CANNOT be
+    re-downloaded — deleting it here would lose it permanently. Such paths are refused
+    and returned in `blocked`; remove the whole item if you really want them gone."""
     if not req.file_paths:
         raise HTTPException(400, "file_paths required.")
     lib = await get_library()
@@ -6703,7 +6750,11 @@ async def delete_item_files(item_id: str, req: DeleteFilesReq) -> JSONResponse:
 
     # Map paths → declared sizes so we can report how much space was freed.
     sizes = {f.get("path", ""): f.get("size_bytes", 0) for f in item.get("files", [])}
-    targets = [p for p in req.file_paths if p in sizes]
+    # Refuse compressed files: this endpoint promises re-downloadability, which a
+    # re-encoded file can't honour. Report them back instead of silently dropping them.
+    compressed_paths = {f.get("path", "") for f in item.get("files", []) if _file_is_compressed(f)}
+    blocked = [p for p in req.file_paths if p in compressed_paths]
+    targets = [p for p in req.file_paths if p in sizes and p not in compressed_paths]
 
     # 1) Mark skip + reconcile FIRST, so qBit drops these files to priority 0 and
     #    stops writing to them before we remove the bytes (no recreate-mid-delete).
@@ -6742,7 +6793,12 @@ async def delete_item_files(item_id: str, req: DeleteFilesReq) -> JSONResponse:
 
     await put_library(lib)
     await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "downloading")})
-    return JSONResponse({"ok": True, "deleted": deleted, "freed_bytes": freed})
+    return JSONResponse({
+        "ok": True, "deleted": deleted, "freed_bytes": freed,
+        # Compressed files we refused to delete (not re-downloadable). The UI surfaces
+        # this so the user knows why nothing happened for those rows.
+        "blocked": [Path(p).name for p in blocked],
+    })
 
 
 @app.post("/api/library/{item_id}/prep-schedule")
@@ -6803,6 +6859,12 @@ async def recheck_files(item_id: str, req: RecheckReq) -> JSONResponse:
     h = item.get("torrent_hash")
     if not h:
         raise HTTPException(400, "This item has no torrent to recheck (uploaded content).")
+    # qBit rechecks whole torrents, so a recheck would mark every compressed-in-place
+    # file in this item as damaged and re-fetch over it. Refuse rather than destroy.
+    if _item_has_compressed(item):
+        raise HTTPException(409, "This item has compressed files that are no longer "
+                                 "torrent-backed — rechecking would mark them damaged "
+                                 "and re-download over them.")
 
     sel = set(req.file_paths)
 
@@ -15614,6 +15676,19 @@ async def _run_file_compression(scope: str, crf: int, codec: str,
             if state.file_compression_stop and status != "compressed":
                 fc["stopped"] = True
                 break
+            # Persist the per-file "compressed" marker so every qBit-dependent feature
+            # treats this file as a local (no-longer-torrent-backed) file: progress is
+            # read from disk, re-download is blocked, and recheck/recover/delete refuse
+            # it. Only torrent-backed files need the marker — an uploaded file already
+            # has no hash. Re-fetch under the lock so we don't clobber concurrent edits.
+            if status == "compressed" and torrent:
+                lib2 = await get_library()
+                for it in lib2.get("items", []):
+                    for ff in it.get("files", []):
+                        if ff.get("path") == path:
+                            ff["compressed"] = True
+                            ff["compressed_at"] = _now_iso()
+                await put_library(lib2)
             fc["results"].append({
                 "path": path, "name": name, "item_title": title, "torrent": torrent,
                 "status": status, "detail": detail, "before": before, "after": after,
@@ -18467,6 +18542,12 @@ async def admin_cleanup_recover_torrent(torrent_hash: str, request: Request) -> 
         raise HTTPException(409, "That torrent is currently in use.")
     if await qbit_info(h) is None:
         raise HTTPException(404, "Torrent not found in qBittorrent.")
+    # If this torrent backs an item with compressed-in-place files, recheck + resume
+    # would re-fetch over them. Refuse rather than destroy the re-encoded bytes.
+    if any((it.get("torrent_hash") or "").lower() == h and _item_has_compressed(it)
+           for it in lib["items"]):
+        raise HTTPException(409, "This torrent has compressed files that are no longer "
+                                 "torrent-backed — recovering would re-download over them.")
     await qbit_recheck(h)
     await qbit_resume(h)
     _invalidate_cleanup_inventory()
@@ -18518,6 +18599,10 @@ async def admin_cleanup_recover_item(item_id: str, request: Request) -> JSONResp
     h = (item.get("torrent_hash") or "").lower()
     if not h or await qbit_info(h) is None:
         raise HTTPException(404, "No qBittorrent torrent backs this item — delete it instead.")
+    # Recover = recheck + resume, which would re-fetch over any compressed-in-place file.
+    if _item_has_compressed(item):
+        raise HTTPException(409, "This item has compressed files that are no longer "
+                                 "torrent-backed — recovering would re-download over them.")
     await qbit_recheck(h)
     await qbit_resume(h)
     item["status"] = "downloading"

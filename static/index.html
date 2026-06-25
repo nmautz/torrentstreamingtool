@@ -4818,6 +4818,13 @@ function renderLibrary(items){
         ? `<span class="text-[10px] px-1.5 py-0.5 bg-orange-950 text-orange-300 border border-orange-900" title="Some files in this torrent were skipped — not everything is downloaded.">⊘ Partial</span>`
         : "";
 
+      // Compressed badge: at least one file was re-encoded in place to save space and
+      // is no longer torrent-backed (won't seed, can't re-download). See the episode
+      // picker for per-file detail; recheck/recover/delete-to-free-space are blocked.
+      const compressedBadge = item.compressed
+        ? `<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 border border-gray-700" title="A file here was compressed to save space — no longer torrent-backed (won't seed, can't re-download).">⤓ Compressed</span>`
+        : "";
+
       // Buttons — multi-episode vs single. Primary actions go in `buttons`;
       // icon-only buttons (download / prep / hide / delete) collect in `iconBtns`
       // so they render as one right-aligned cluster that wraps together on mobile
@@ -5024,6 +5031,7 @@ function renderLibrary(items){
             <span class="text-sm font-medium text-gray-200 truncate ${tileOpen?'hover:text-white':''}">${epPrefix}${escHtml(item.title)}</span>
             ${statusBadge}
             ${partialBadge}
+            ${compressedBadge}
             ${skipBadge}
           </div>
           <div class="text-[11px] text-gray-600 mt-0.5">${escHtml(meta)}</div>
@@ -5923,6 +5931,11 @@ function _epCardHtml(f){
       : f.mode==="idle"
       ? `<span class="text-[10px] text-sky-400 font-bold uppercase tracking-widest" title="Deferred to the idle/night window.">🌙 Idle — deferred</span>`
       : `<span class="text-[10px] text-sky-400 font-bold uppercase tracking-widest" title="Downloading now…">⬇ ${epDlPct!=null?epDlPct.toFixed(0)+'%':'Downloading…'}</span>`;
+  // Re-encoded in place to save space → no longer torrent-backed: won't seed, can't be
+  // re-downloaded, and recheck/recover/delete-to-free-space refuse it (server-enforced).
+  const compressedBadge = f.compressed
+    ? `<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 border border-gray-700 uppercase tracking-widest font-bold" title="Re-encoded to save space — no longer torrent-backed (won't seed, can't re-download).">⤓ Compressed</span>`
+    : "";
 
   const prepState = prepFileState.get(offKey(epItemId,f.path));
   const isReady    = prepState === "ready";
@@ -5994,6 +6007,7 @@ function _epCardHtml(f){
               ${playingBadge}
               ${watchedBadge}
               ${notDlBadge}
+              ${compressedBadge}
               ${(isReady&&!notDownloaded)?'<span class="text-[10px] text-emerald-500 font-bold uppercase tracking-widest">● Stream Ready</span>':''}
             </div>
             ${subOverview}
@@ -6151,6 +6165,7 @@ function _epMoviePanel(f){
   const isComplete=prog?.completed;
   const inProgress=prog&&!isComplete&&pct>2;
   const notDownloaded=f.complete===false;
+  const compressed=!!f.compressed;
   const epDlPct=(typeof f.dl_pct==="number")?f.dl_pct:null;
   const _id=escHtml(JSON.stringify(epItemId));
   const _p =escHtml(JSON.stringify(f.path));
@@ -6175,6 +6190,9 @@ function _epMoviePanel(f){
     statusHtml = `<span class="text-[11px] text-green-500 font-bold uppercase tracking-widest">✓ Watched</span>`;
   } else if(inProgress){
     statusHtml = `<span class="text-[11px] text-yellow-500 font-bold uppercase tracking-widest">${pct}% watched</span>`;
+  }
+  if(compressed){
+    statusHtml += ` <span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 border border-gray-700 uppercase tracking-widest font-bold align-middle" title="Re-encoded to save space — no longer torrent-backed (won't seed, can't re-download).">⤓ Compressed</span>`;
   }
 
   const progressBar = (inProgress||isComplete)
@@ -6218,12 +6236,22 @@ function _epMoviePanel(f){
         </button>`);
       }
     }
-    // Delete to free space (only meaningful when the file is on disk).
-    actions.push(`<button onclick="epDeleteFiles([${_p}],this)"
-      class="bg-gray-800 hover:bg-red-900/60 text-gray-400 hover:text-red-300 border border-gray-700 py-3 px-4 text-sm font-bold uppercase tracking-wide transition-colors min-h-[44px] flex items-center justify-center gap-1.5">
-      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
-      Delete (free space)
-    </button>`);
+    // Delete to free space (only meaningful when the file is on disk). Disabled for a
+    // compressed file: it's no longer torrent-backed, so deletion would be permanent
+    // (the server refuses it). "Remove" the whole item to delete it on purpose.
+    if(compressed){
+      actions.push(`<button disabled
+        class="bg-gray-900 text-gray-600 border border-gray-800 py-3 px-4 text-sm font-bold uppercase tracking-wide min-h-[44px] flex items-center justify-center gap-1.5 opacity-70 cursor-not-allowed"
+        title="Compressed file — no longer torrent-backed, so it can't be re-downloaded. Remove the whole item to delete it permanently.">
+        🚫 Can't free (compressed)
+      </button>`);
+    } else {
+      actions.push(`<button onclick="epDeleteFiles([${_p}],this)"
+        class="bg-gray-800 hover:bg-red-900/60 text-gray-400 hover:text-red-300 border border-gray-700 py-3 px-4 text-sm font-bold uppercase tracking-wide transition-colors min-h-[44px] flex items-center justify-center gap-1.5">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/></svg>
+        Delete (free space)
+      </button>`);
+    }
   }
 
   // Download scheduling for an item still fetching (Now / Idle), like the episode bar.
@@ -6596,7 +6624,15 @@ async function epDeleteFiles(paths, btn){
       if(!r.ok){ const e=await r.json().catch(()=>({detail:"Delete failed."})); showAlert(e.detail||"Delete failed.","error"); return; }
       const d=await r.json().catch(()=>({}));
       const freed = d.freed_bytes ? ` — freed ${_fmtBytes(d.freed_bytes)}` : "";
-      showAlert(`Deleted ${d.deleted||n} file${(d.deleted||n)>1?"s":""}${freed}.`,"success");
+      // Compressed files are refused by the server (not re-downloadable). Tell the user.
+      if(d.blocked && d.blocked.length){
+        showAlert(`${d.blocked.length} compressed file(s) skipped — they're no longer torrent-backed and can't be re-downloaded. Remove the whole item to delete them.`,"warn");
+      }
+      if(d.deleted){
+        showAlert(`Deleted ${d.deleted} file${d.deleted>1?"s":""}${freed}.`,"success");
+      } else if(!(d.blocked && d.blocked.length)){
+        showAlert("Nothing to delete.","warn");
+      }
       await refreshEpFiles();
       loadLibrary();   // card meta / badges update too
     }catch(_){ showAlert("Delete failed.","error"); }
@@ -11728,6 +11764,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.0.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.1.0</div>
 </body>
 </html>
