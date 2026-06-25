@@ -1130,6 +1130,16 @@ async def qbit_info(h: str) -> Optional[dict]:
     return None
 
 
+async def qbit_info_all() -> Optional[list]:
+    """Every torrent qBit currently tracks (no `hashes` filter ⇒ the full list).
+    Returns None when qBit is unreachable (so callers can show an offline state),
+    and [] for a reachable-but-empty client."""
+    r = await qreq("GET", "/api/v2/torrents/info")
+    if r and r.status_code == 200:
+        return r.json()
+    return None
+
+
 async def qbit_files(h: str) -> list:
     r = await qreq("GET", f"/api/v2/torrents/files?hash={h}")
     return r.json() if (r and r.status_code == 200) else []
@@ -17718,6 +17728,373 @@ async def admin_offline_cache_delete_for_item(item_id: str, request: Request) ->
             bytes_freed += freed
     _invalidate_offline_cache_inventory()
     return JSONResponse({"deleted_count": deleted, "bytes_freed": bytes_freed})
+
+
+# ── Admin: qBittorrent + download-folder cleanup ────────────────────────────
+#
+# qBittorrent, the library, and the download folder drift out of sync over time:
+# a crashed stream-now leaves an orphan torrent behind; a user deletes a file on
+# disk so qBit flips to `missingFiles`; a buggy add drops stray files no torrent
+# owns; a library item points at files that are gone. None of that was visible to
+# the operator (the File Validator only decodes *existing* library sources; the
+# Offline Cache tab only manages `.offline_cache/`). These endpoints cross-
+# reference the three sources into four problem categories, each with a guided
+# Recover (where possible) and a confirm-gated Delete.
+#
+# Mirrors the offline-cache inventory discipline above: a cached snapshot built
+# off the event loop (the stray-file disk walk can block), served instantly,
+# invalidated on every mutation.
+
+_BROKEN_TORRENT_STATES = {"error", "missingFiles"}
+
+_cleanup_inv_snapshot: "dict | None" = None
+_cleanup_inv_lock = asyncio.Lock()
+
+
+def _invalidate_cleanup_inventory() -> None:
+    """Drop the cached cleanup snapshot so the next read rebuilds from disk +
+    qBit. Called after any cleanup mutation (recover / adopt / delete)."""
+    global _cleanup_inv_snapshot
+    _cleanup_inv_snapshot = None
+
+
+def _cleanup_in_use_hashes(lib: dict) -> set[str]:
+    """Torrent hashes cleanup must NEVER touch destructively: the live stream /
+    prepare torrent, and any torrent backing a still-downloading library item."""
+    in_use: set[str] = set()
+    for h in (state.active_hash, state.prepare_hash):
+        if h:
+            in_use.add(h.lower())
+    for it in lib.get("items", []):
+        if it.get("status") == "downloading" and it.get("torrent_hash"):
+            in_use.add(it["torrent_hash"].lower())
+    return in_use
+
+
+def _cleanup_inventory_sync(lib: dict, torrents: list[dict], in_use: set[str],
+                            download_path: str) -> dict:
+    """Cross-reference qBit torrents + the library + the download folder into the
+    four cleanup categories. Synchronous (runs in a worker thread) because the
+    stray-file walk + per-path existence checks block."""
+    items = lib.get("items", [])
+    lib_hashes: dict[str, dict] = {}
+    owned: set[str] = set()                 # normalised on-disk paths something owns
+    for it in items:
+        h = (it.get("torrent_hash") or "").lower()
+        if h:
+            lib_hashes[h] = it
+        for f in it.get("files", []):
+            p = f.get("path", "")
+            if p:
+                owned.add(_norm_path(p))
+
+    broken: list[dict] = []
+    orphans: list[dict] = []
+    for t in torrents:
+        h = (t.get("hash") or "").lower()
+        cpath = t.get("content_path") or ""
+        spath = t.get("save_path") or ""
+        name  = t.get("name", "") or h
+        if cpath:
+            owned.add(_norm_path(cpath))
+        if spath and name:
+            owned.add(_norm_path(str(Path(spath) / name)))
+        tstate = t.get("state", "")
+        linked = lib_hashes.get(h) or {}
+        row = {
+            "hash": h,
+            "name": name,
+            "state": tstate,
+            "size_bytes": t.get("size", 0) or 0,
+            "progress": float(t.get("progress", 0) or 0),
+            "save_path": spath,
+            "content_path": cpath,
+            "added_on": t.get("added_on", 0) or 0,
+            "in_use": h in in_use,
+            "item_id": linked.get("id", ""),
+            "item_title": linked.get("title", ""),
+        }
+        content_missing = bool(cpath) and not Path(cpath).exists()
+        if tstate in _BROKEN_TORRENT_STATES or content_missing:
+            row["reason"] = ("qBittorrent reports an error / missing files"
+                             if tstate in _BROKEN_TORRENT_STATES
+                             else "content path no longer exists on disk")
+            broken.append(row)
+        elif h not in lib_hashes and h not in in_use:
+            orphans.append(row)
+
+    # Category C: library items (not actively downloading) with a non-skip file
+    # absent on disk. Recoverable only when a qBit torrent still backs them.
+    qbit_hashes = {(t.get("hash") or "").lower() for t in torrents}
+    missing_items: list[dict] = []
+    for it in items:
+        if it.get("status") == "downloading":
+            continue
+        sched = (it.get("download") or {}).get("files", {})
+        gone: list[dict] = []
+        for f in it.get("files", []):
+            p = f.get("path", "")
+            if not p or sched.get(p) == "skip":
+                continue
+            if not Path(p).exists():
+                gone.append({"name": f.get("name", "") or Path(p).name,
+                             "path": p, "size_bytes": f.get("size_bytes", 0) or 0})
+        if gone:
+            h = (it.get("torrent_hash") or "").lower()
+            missing_items.append({
+                "item_id":       it["id"],
+                "title":         it.get("title", ""),
+                "missing":       gone,
+                "missing_count": len(gone),
+                "has_torrent":   bool(h and h in qbit_hashes),
+            })
+
+    # Category D: top-level entries in the download folder owned by no torrent or
+    # library file. Delete-only. A trailing `.!qB` (qBit's incomplete-file marker)
+    # is stripped before the ownership test so an in-progress download isn't stray.
+    stray: list[dict] = []
+    dl = Path(download_path)
+    try:
+        children = list(dl.iterdir()) if dl.is_dir() else []
+    except OSError:
+        children = []
+    for child in children:
+        raw = str(child)
+        if raw.endswith(".!qB"):
+            raw = raw[:-4]
+        n = _norm_path(raw)
+        if any(o == n or o.startswith(n + os.sep) or n.startswith(o + os.sep)
+               for o in owned):
+            continue
+        try:
+            is_dir = child.is_dir()
+            sz = _dir_size_bytes(child) if is_dir else child.stat().st_size
+            mtime = child.stat().st_mtime
+        except OSError:
+            continue
+        stray.append({"path": str(child), "name": child.name,
+                      "is_dir": is_dir, "bytes": sz, "mtime": mtime})
+
+    broken.sort(key=lambda x: x["name"].lower())
+    orphans.sort(key=lambda x: x["size_bytes"], reverse=True)
+    stray.sort(key=lambda x: x["bytes"], reverse=True)
+    return {
+        "download_path":   str(dl),
+        "broken_torrents": broken,
+        "orphan_torrents": orphans,
+        "missing_items":   missing_items,
+        "stray_files":     stray,
+        "totals": {
+            "broken":        len(broken),
+            "orphans":       len(orphans),
+            "missing_items": len(missing_items),
+            "stray":         len(stray),
+            "stray_bytes":   sum(s["bytes"] for s in stray),
+        },
+    }
+
+
+async def _build_cleanup_inventory(*, force: bool = False) -> dict:
+    """Return the cleanup inventory, serving a cached snapshot unless `force`.
+    Loads the library + the qBit torrent list, then offloads the disk walk to a
+    worker thread (same discipline as `_build_offline_cache_inventory`). Stamps
+    `generated_at` + `qbit_ok` (false ⇒ qBit unreachable, so the UI shows an
+    offline chip instead of treating every library torrent as broken/orphan)."""
+    global _cleanup_inv_snapshot
+    if not force and _cleanup_inv_snapshot is not None:
+        return _cleanup_inv_snapshot
+    async with _cleanup_inv_lock:
+        if not force and _cleanup_inv_snapshot is not None:
+            return _cleanup_inv_snapshot
+        lib = await get_library()
+        torrents = await qbit_info_all()
+        qbit_ok = torrents is not None
+        in_use = _cleanup_in_use_hashes(lib)
+        data = await asyncio.to_thread(
+            _cleanup_inventory_sync, lib, torrents or [], in_use,
+            settings.qbit_download_path,
+        )
+        data["generated_at"] = time.time()
+        data["qbit_ok"] = qbit_ok
+        _cleanup_inv_snapshot = data
+        return data
+
+
+async def _adopt_torrent_to_library(h: str) -> Optional[str]:
+    """Build a library item from an existing (orphan) qBit torrent — no new magnet
+    needed, the torrent is already in qBit. Returns the new item id, or None if the
+    torrent is gone or has no video files. A complete torrent becomes `ready`; an
+    incomplete one becomes `downloading` so `library_download_monitor` tracks it."""
+    info = await qbit_info(h)
+    if info is None:
+        return None
+    qfiles = await qbit_files(h)
+    save_path = info.get("save_path", settings.qbit_download_path)
+    files = build_file_list(qfiles, save_path)
+    if not files:
+        return None
+    complete = float(info.get("progress", 0) or 0) >= 0.999
+    lib = await get_library()
+    item = {
+        "id":         str(uuid.uuid4()),
+        "title":      info.get("name", "") or files[0]["name"],
+        "series":     "",
+        "season":     files[0].get("season", 0),
+        "episode":    files[0].get("episode", 0),
+        "files":      files,
+        "size_bytes": info.get("size", 0) or sum(f.get("size_bytes", 0) for f in files),
+        "added_at":   _now_iso(),
+        "status":     "ready" if complete else "downloading",
+        "torrent_hash": h,
+        "progress":   {},
+        "download":   {"mode": "now", "files": {}},
+    }
+    lib["items"].append(item)
+    await put_library(lib)
+    return item["id"]
+
+
+@app.get("/api/admin/cleanup")
+async def admin_cleanup_list(request: Request) -> JSONResponse:
+    """Inventory: broken/orphan torrents, library items with missing files, and
+    stray download-folder entries. Serves a cached snapshot; `?refresh=1` forces a
+    fresh qBit query + disk walk."""
+    _require_admin(request)
+    refresh = request.query_params.get("refresh") in ("1", "true", "yes")
+    return JSONResponse(await _build_cleanup_inventory(force=refresh))
+
+
+@app.post("/api/admin/cleanup/torrent/{torrent_hash}/recover")
+async def admin_cleanup_recover_torrent(torrent_hash: str, request: Request) -> JSONResponse:
+    """Re-verify a broken torrent and resume it so qBit re-fetches any missing
+    pieces (recheck + resume). 409 if the torrent is currently in use."""
+    _require_admin(request)
+    h = torrent_hash.lower()
+    lib = await get_library()
+    if h in _cleanup_in_use_hashes(lib):
+        raise HTTPException(409, "That torrent is currently in use.")
+    if await qbit_info(h) is None:
+        raise HTTPException(404, "Torrent not found in qBittorrent.")
+    await qbit_recheck(h)
+    await qbit_resume(h)
+    _invalidate_cleanup_inventory()
+    return JSONResponse({"ok": True})
+
+
+@app.delete("/api/admin/cleanup/torrent/{torrent_hash}")
+async def admin_cleanup_delete_torrent(torrent_hash: str, request: Request,
+                                       delete_files: bool = True) -> JSONResponse:
+    """Remove a broken/orphan torrent from qBit (+files by default). If it backs a
+    library item, drop that item too. 409 if the torrent is currently in use."""
+    _require_admin(request)
+    h = torrent_hash.lower()
+    lib = await get_library()
+    if h in _cleanup_in_use_hashes(lib):
+        raise HTTPException(409, "That torrent is currently in use.")
+    await qbit_delete(h, delete_files=delete_files)
+    before = len(lib["items"])
+    lib["items"] = [it for it in lib["items"]
+                    if (it.get("torrent_hash") or "").lower() != h]
+    dropped = before - len(lib["items"])
+    if dropped:
+        await put_library(lib)
+    _invalidate_cleanup_inventory()
+    return JSONResponse({"ok": True, "items_removed": dropped})
+
+
+@app.post("/api/admin/cleanup/orphan/{torrent_hash}/adopt")
+async def admin_cleanup_adopt_orphan(torrent_hash: str, request: Request) -> JSONResponse:
+    """Create a library item from an orphan qBit torrent so it's no longer stray."""
+    _require_admin(request)
+    item_id = await _adopt_torrent_to_library(torrent_hash.lower())
+    if not item_id:
+        raise HTTPException(404, "Torrent not found in qBittorrent, or it has no video files.")
+    _invalidate_cleanup_inventory()
+    return JSONResponse({"ok": True, "item_id": item_id})
+
+
+@app.post("/api/admin/cleanup/item/{item_id}/recover")
+async def admin_cleanup_recover_item(item_id: str, request: Request) -> JSONResponse:
+    """Re-download a library item's missing files: recheck + resume its torrent and
+    flip it back to `downloading` so the monitor + scheduler manage it again. 404
+    when no qBit torrent backs the item (nothing to recover — delete it instead)."""
+    _require_admin(request)
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    h = (item.get("torrent_hash") or "").lower()
+    if not h or await qbit_info(h) is None:
+        raise HTTPException(404, "No qBittorrent torrent backs this item — delete it instead.")
+    await qbit_recheck(h)
+    await qbit_resume(h)
+    item["status"] = "downloading"
+    await _apply_item_schedule(item, lib)   # reconcile file priorities/pause state
+    await put_library(lib)
+    _invalidate_cleanup_inventory()
+    return JSONResponse({"ok": True})
+
+
+@app.delete("/api/admin/cleanup/item/{item_id}")
+async def admin_cleanup_delete_item(item_id: str, request: Request,
+                                    delete_files: bool = True) -> JSONResponse:
+    """Remove a library item (and its torrent + files by default)."""
+    _require_admin(request)
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    h = item.get("torrent_hash")
+    if h:
+        await qbit_delete(h, delete_files=delete_files)
+    lib["items"] = [it for it in lib["items"] if it["id"] != item_id]
+    await put_library(lib)
+    _invalidate_cleanup_inventory()
+    return JSONResponse({"ok": True})
+
+
+@app.delete("/api/admin/cleanup/stray")
+async def admin_cleanup_delete_stray(request: Request, path: str = "") -> JSONResponse:
+    """Delete one stray file/dir. Path-guarded: it must resolve strictly inside the
+    qBit download folder (no traversal), and must not be owned by a live torrent."""
+    _require_admin(request)
+    if not path:
+        raise HTTPException(400, "Missing path.")
+    dl_root = Path(settings.qbit_download_path).resolve()
+    try:
+        target = Path(path).resolve()
+    except OSError:
+        raise HTTPException(400, "Invalid path.")
+    if target == dl_root:
+        raise HTTPException(400, "Refusing to delete the download folder itself.")
+    try:
+        target.relative_to(dl_root)
+    except ValueError:
+        raise HTTPException(400, "Path is outside the download folder.")
+    if not target.exists():
+        raise HTTPException(404, "Path not found.")
+    # Refuse if a current torrent owns this path (only stray clutter is deletable).
+    torrents = await qbit_info_all() or []
+    n = _norm_path(str(target))
+    for t in torrents:
+        for owned in (t.get("content_path") or "",
+                      str(Path(t.get("save_path") or "") / (t.get("name") or ""))):
+            if not owned:
+                continue
+            o = _norm_path(owned)
+            if o == n or o.startswith(n + os.sep) or n.startswith(o + os.sep):
+                raise HTTPException(409, "A current torrent owns this path.")
+    bytes_freed = await asyncio.to_thread(_dir_size_bytes, target) if target.is_dir() else 0
+    try:
+        if target.is_dir():
+            shutil.rmtree(target, ignore_errors=True)
+        else:
+            bytes_freed = target.stat().st_size
+            target.unlink()
+    except OSError as exc:
+        raise HTTPException(500, f"Could not delete: {exc}")
+    _invalidate_cleanup_inventory()
+    return JSONResponse({"deleted": True, "bytes_freed": bytes_freed})
 
 
 @app.get("/api/library/{item_id}/subtitle")

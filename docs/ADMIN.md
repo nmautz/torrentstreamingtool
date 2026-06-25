@@ -146,6 +146,34 @@ Endpoints:
 - `GET /api/admin/cache-autopurge` → `{enabled, max_gb, last}` (`last` = `{at, deleted, bytes_freed, total_bytes_before}` or `null`)
 - `POST /api/admin/cache-autopurge` → `{enabled, max_gb}`; `max_gb` clamped 1–10000
 
+### Cleanup (qBittorrent + download folder)
+
+A dedicated tab that **cross-references three sources** — qBittorrent's torrent list, the library, and the download folder on disk — and surfaces the ways they drift apart, each with a guided **Recover** (where possible) and a **confirm-gated Delete**. Distinct from the **File Validator** (decodes *existing* library source files) and **Offline Cache** (manages `.offline_cache/` HLS bundles only): this is the only view of broken/orphan **torrents** and download-folder **clutter**.
+
+Backed by `_build_cleanup_inventory` ([main.py](../main.py)), which reuses the Offline Cache tab's snapshot discipline: it loads the library + `qbit_info_all()`, runs the (blocking) stray-file disk walk in `_cleanup_inventory_sync` via `asyncio.to_thread`, and caches the result (`_cleanup_inv_snapshot`, guarded by `_cleanup_inv_lock`). `GET /api/admin/cleanup` serves the snapshot instantly with an **"As of …"** line; the **Refresh** button calls `?refresh=1`. Every mutation calls `_invalidate_cleanup_inventory()`. When qBittorrent is unreachable the payload carries `qbit_ok:false` (UI shows a **qBittorrent offline** chip) rather than mislabelling every library torrent as broken/orphan.
+
+Four category cards:
+
+| Category | Detected when | Recover | Delete |
+|----------|---------------|---------|--------|
+| **Broken torrents** | qBit `state ∈ {error, missingFiles}`, or the torrent's `content_path` no longer exists on disk | `qbit_recheck` + `qbit_resume` (re-verify, re-fetch missing pieces) | remove the torrent (+files), and drop a library item it backs |
+| **Orphan torrents** | a qBit torrent whose hash no library item references (and not the live stream) | **Adopt** — `_adopt_torrent_to_library` builds a library item from the torrent (no new magnet needed) | remove the torrent (+files) |
+| **Library items — missing files** | item `status ≠ downloading` with a non-`skip` file absent on disk | when a torrent still backs it: recheck + resume + flip to `downloading` + `_apply_item_schedule`; otherwise none | reuse the library-item delete (item + torrent + files) |
+| **Stray files** | a top-level entry under the download folder owned by no torrent (`content_path` / `save_path`+name) and no library file path | — (delete-only) | `unlink` / `rmtree` the single path |
+
+**In-use protection.** `_cleanup_in_use_hashes(lib)` collects the live stream/prepare torrent (`state.active_hash`, `state.prepare_hash`) and every `status=="downloading"` item's torrent. Those are excluded from the orphan list, flagged **In use** on a broken row, and their recover/delete endpoints return **409**. Stray-file deletion is **path-guarded**: the target must resolve strictly inside `settings.qbit_download_path` (no traversal, never the folder itself) and must not be owned by a current torrent (a trailing `.!qB` incomplete marker is stripped before the ownership test so an in-progress download is never seen as stray).
+
+Endpoints (all `_require_admin`):
+- `GET /api/admin/cleanup` → `{generated_at, qbit_ok, download_path, broken_torrents:[…], orphan_torrents:[…], missing_items:[…], stray_files:[…], totals}`; `?refresh=1` forces a fresh qBit query + disk walk.
+- `POST /api/admin/cleanup/torrent/{hash}/recover` → recheck + resume (409 if in use, 404 if gone).
+- `DELETE /api/admin/cleanup/torrent/{hash}?delete_files=` → `qbit_delete` + drop a linked library item (409 if in use).
+- `POST /api/admin/cleanup/orphan/{hash}/adopt` → `{ok, item_id}` (404 if gone / no video files).
+- `POST /api/admin/cleanup/item/{id}/recover` → recheck + resume + status → `downloading` (404 if no backing torrent — delete instead).
+- `DELETE /api/admin/cleanup/item/{id}?delete_files=` → remove the library item (+torrent +files).
+- `DELETE /api/admin/cleanup/stray?path=…` → `{deleted, bytes_freed}` (400 traversal/outside, 404 missing, 409 owned by a torrent).
+
+There is **no one-click bulk purge** — every action is per-row and confirm-gated by design.
+
 ### 5. Background Video
 
 Single-file uploader for an idle background video that plays on the TV in VLC whenever nothing else is. Stored at `.background/<filename>` (the directory is wiped on every upload so only one file ever exists). Settings live under `library.json → settings.background_video` and survive restarts.

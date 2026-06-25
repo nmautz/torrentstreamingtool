@@ -116,6 +116,10 @@
       class="tab-inactive px-4 sm:px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors whitespace-nowrap flex-shrink-0">
       Storage
     </button>
+    <button onclick="switchTab('cleanup')" id="tab-cleanup"
+      class="tab-inactive px-4 sm:px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors whitespace-nowrap flex-shrink-0">
+      Cleanup
+    </button>
     <button onclick="switchTab('background')" id="tab-background"
       class="tab-inactive px-4 sm:px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors whitespace-nowrap flex-shrink-0">
       Background
@@ -431,6 +435,67 @@
         </button>
       </div>
       <div id="offOrphanList" class="divide-y divide-gray-800"></div>
+    </div>
+  </div>
+
+  <!-- ── Cleanup Tab (qBittorrent + download folder) ──────────────────────────── -->
+  <div id="panelCleanup" class="hidden flex-1 overflow-y-auto p-3 sm:p-5 max-w-3xl mx-auto w-full space-y-4">
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-sm font-black uppercase tracking-wide">Cleanup</h2>
+          <p class="text-xs text-gray-500 mt-0.5">Reconciles qBittorrent, the library, and the download folder (<code class="font-mono text-gray-400" id="cleanDir">…</code>). Recover or delete broken/orphan torrents, library items whose files vanished, and stray files no torrent owns.</p>
+        </div>
+        <button id="cleanRefreshBtn" onclick="loadCleanup(true)"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 hover:text-white text-gray-400 transition-colors disabled:opacity-50">
+          Refresh
+        </button>
+      </div>
+      <div class="px-5 py-3 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div id="cleanGeneratedAt" class="text-[10px] text-gray-600">&nbsp;</div>
+        <span id="cleanQbitChip" class="hidden text-[10px] font-bold uppercase tracking-widest px-2 py-1 bg-red-950 text-red-300">qBittorrent offline</span>
+      </div>
+      <div id="cleanSummary" class="px-5 py-4 text-sm text-gray-500">Loading…</div>
+    </div>
+
+    <!-- Broken torrents -->
+    <div id="cleanBrokenCard" class="hidden bg-gray-900 border border-red-900/60">
+      <div class="px-5 py-4 border-b border-red-900/60">
+        <h3 class="text-sm font-black uppercase tracking-wide text-red-300">Broken Torrents</h3>
+        <p class="text-xs text-red-200/70 mt-0.5">qBittorrent reports an error or missing files. <b>Recover</b> re-checks and re-downloads; <b>Delete</b> removes the torrent (and any library item it backs).</p>
+      </div>
+      <div id="cleanBrokenList" class="divide-y divide-gray-800"></div>
+    </div>
+
+    <!-- Orphan torrents -->
+    <div id="cleanOrphanCard" class="hidden bg-gray-900 border border-amber-900/60">
+      <div class="px-5 py-4 border-b border-amber-900/60">
+        <h3 class="text-sm font-black uppercase tracking-wide text-amber-300">Orphan Torrents</h3>
+        <p class="text-xs text-amber-200/70 mt-0.5">In qBittorrent but not in your library (leftover stream-now or a manual add). <b>Adopt</b> keeps it as a library item; <b>Delete</b> removes it.</p>
+      </div>
+      <div id="cleanOrphanList" class="divide-y divide-gray-800"></div>
+    </div>
+
+    <!-- Library items with missing files -->
+    <div id="cleanMissingCard" class="hidden bg-gray-900 border border-amber-900/60">
+      <div class="px-5 py-4 border-b border-amber-900/60">
+        <h3 class="text-sm font-black uppercase tracking-wide text-amber-300">Library Items — Missing Files</h3>
+        <p class="text-xs text-amber-200/70 mt-0.5">Marked ready but files are gone from disk. <b>Re-download</b> when a torrent still backs them; otherwise <b>Delete</b> the entry.</p>
+      </div>
+      <div id="cleanMissingList" class="divide-y divide-gray-800"></div>
+    </div>
+
+    <!-- Stray files on disk -->
+    <div id="cleanStrayCard" class="hidden bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800">
+        <h3 class="text-sm font-black uppercase tracking-wide">Stray Files</h3>
+        <p class="text-xs text-gray-500 mt-0.5">In the download folder but owned by no torrent or library item. Delete-only — there's nothing to recover.</p>
+      </div>
+      <div id="cleanStrayList" class="divide-y divide-gray-800"></div>
+    </div>
+
+    <div id="cleanAllClear" class="hidden bg-gray-900 border border-gray-800 px-5 py-8 text-center text-emerald-300 text-sm font-bold">
+      Nothing to clean up — qBittorrent, the library, and the download folder are in sync.
     </div>
   </div>
 
@@ -1643,7 +1708,7 @@ async function loadOfflineEncoder(){
 // ── Tabs ──────────────────────────────────────────────────────────────────────
 function switchTab(tab){
   activeTab = tab;
-  ["activity","indexers","content","profiles","skip","offline","storage","background","system","updates"].forEach(t=>{
+  ["activity","indexers","content","profiles","skip","offline","storage","cleanup","background","system","updates"].forEach(t=>{
     document.getElementById(`tab-${t}`).className =
       t===tab ? "tab-active px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors"
                : "tab-inactive px-5 py-3.5 text-xs font-bold uppercase tracking-widest transition-colors";
@@ -1659,6 +1724,7 @@ function switchTab(tab){
   if(tab==="offline")    loadOfflineCache();
   if(tab==="storage")    loadStorageCompression();
   else                   stopCompressionPolling();
+  if(tab==="cleanup")    loadCleanup();
   if(tab==="background") loadBackgroundVideo();
   if(tab==="system")   { loadNetwork(); loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadAutoMaint(); loadPrepValidate(); loadVpnKillswitch(); loadForcePrep(); loadFileValidation(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
   else                 { stopSysHealthPolling(); stopForcePrepPolling(); stopFileValidationPolling(); stopFileRepairPolling(); }
@@ -5110,6 +5176,171 @@ async function purgeOfflineOrphans(btn){
     showToast(`Purge failed (HTTP ${r.status}).`, true);
     btn.disabled = false;
   }
+}
+
+// ── Cleanup (qBittorrent + download folder) ─────────────────────────────────────
+let _cleanData = null;
+
+const _CLEAN_STATE_TONE = {
+  error:        "bg-red-950 text-red-300",
+  missingFiles: "bg-red-950 text-red-300",
+};
+function _cleanStateBadge(s){
+  const cls = _CLEAN_STATE_TONE[s] || "bg-gray-800 text-gray-400";
+  return `<span class="text-[10px] font-bold uppercase tracking-widest px-1.5 py-0.5 ${cls}">${escHtml(s||"—")}</span>`;
+}
+
+async function loadCleanup(force){
+  const sum = document.getElementById("cleanSummary");
+  const btn = document.getElementById("cleanRefreshBtn");
+  sum.textContent = force ? "Re-checking qBittorrent + disk…" : "Loading…";
+  if(btn){ btn.disabled = true; _markLoading(btn, true); }
+  let r;
+  try{
+    r = await fetch(`/api/admin/cleanup${force ? "?refresh=1" : ""}`, {headers: authHeader()});
+  }catch(_){
+    sum.innerHTML = `<span class="text-red-400">Network error — could not load.</span>`;
+    return;
+  }finally{
+    if(btn){ btn.disabled = false; _markLoading(btn, false); }
+  }
+  if(!r.ok){
+    sum.innerHTML = `<span class="text-red-400">Failed to load (HTTP ${r.status}).</span>`;
+    return;
+  }
+  const d = await r.json();
+  _cleanData = d;
+  document.getElementById("cleanDir").textContent = d.download_path || "—";
+  document.getElementById("cleanGeneratedAt").textContent =
+    d.generated_at ? `As of ${_fmtAgo(d.generated_at)} · Refresh to re-check` : " ";
+  document.getElementById("cleanQbitChip").classList.toggle("hidden", d.qbit_ok !== false);
+
+  const t = d.totals || {};
+  sum.innerHTML = `${t.broken||0} broken · ${t.orphans||0} orphan torrents · ${t.missing_items||0} items missing files · ${t.stray||0} stray files${t.stray_bytes?` (${_fmtBytes(t.stray_bytes)})`:""}`;
+
+  // Broken torrents
+  _renderCleanCard("cleanBrokenCard", "cleanBrokenList", d.broken_torrents, (b,i)=>`
+    <div class="flex items-start justify-between px-5 py-3 gap-3">
+      <div class="min-w-0">
+        <div class="flex items-center gap-2 flex-wrap">${_cleanStateBadge(b.state)}
+          <span class="text-sm font-bold text-gray-200 truncate">${escHtml(b.name)}</span></div>
+        <div class="text-[11px] text-gray-500 mt-0.5">${escHtml(b.reason||"")} · ${_fmtBytes(b.size_bytes)}${b.item_title?` · Library: ${escHtml(b.item_title)}`:""}</div>
+      </div>
+      <div class="flex items-center gap-2 flex-shrink-0">
+        <button onclick="cbRecover(${i},this)" class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-emerald-800 bg-emerald-950 text-emerald-300 hover:bg-emerald-900 transition-colors">Recover</button>
+        ${b.in_use
+          ? `<span class="text-[10px] font-bold uppercase tracking-widest px-2 py-1.5 bg-gray-800 text-gray-500">In use</span>`
+          : `<button onclick="cbDelete(${i},this)" class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-red-800 bg-red-950 text-red-300 hover:bg-red-900 transition-colors">Delete</button>`}
+      </div>
+    </div>`);
+
+  // Orphan torrents
+  _renderCleanCard("cleanOrphanCard", "cleanOrphanList", d.orphan_torrents, (o,i)=>`
+    <div class="flex items-start justify-between px-5 py-3 gap-3">
+      <div class="min-w-0">
+        <div class="text-sm font-bold text-gray-200 truncate">${escHtml(o.name)}</div>
+        <div class="text-[11px] text-gray-500 mt-0.5">${escHtml(o.state||"")} · ${_fmtBytes(o.size_bytes)} · ${Math.round((o.progress||0)*100)}% complete</div>
+      </div>
+      <div class="flex items-center gap-2 flex-shrink-0">
+        <button onclick="coAdopt(${i},this)" class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-indigo-700 bg-indigo-900/40 text-indigo-300 hover:bg-indigo-900 transition-colors">Adopt</button>
+        <button onclick="coDelete(${i},this)" class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-red-800 bg-red-950 text-red-300 hover:bg-red-900 transition-colors">Delete</button>
+      </div>
+    </div>`);
+
+  // Library items with missing files
+  _renderCleanCard("cleanMissingCard", "cleanMissingList", d.missing_items, (m,i)=>`
+    <div class="flex items-start justify-between px-5 py-3 gap-3">
+      <div class="min-w-0">
+        <div class="text-sm font-bold text-gray-200 truncate">${escHtml(m.title)}</div>
+        <div class="text-[11px] text-gray-500 mt-0.5">${m.missing_count} file${m.missing_count!==1?"s":""} missing: ${escHtml(m.missing.map(f=>f.name).slice(0,3).join(", "))}${m.missing.length>3?" …":""}</div>
+      </div>
+      <div class="flex items-center gap-2 flex-shrink-0">
+        ${m.has_torrent
+          ? `<button onclick="cmRecover(${i},this)" class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-emerald-800 bg-emerald-950 text-emerald-300 hover:bg-emerald-900 transition-colors">Re-download</button>`
+          : `<span class="text-[10px] font-bold uppercase tracking-widest px-2 py-1.5 bg-gray-800 text-gray-500">No torrent</span>`}
+        <button onclick="cmDelete(${i},this)" class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-red-800 bg-red-950 text-red-300 hover:bg-red-900 transition-colors">Delete</button>
+      </div>
+    </div>`);
+
+  // Stray files
+  _renderCleanCard("cleanStrayCard", "cleanStrayList", d.stray_files, (s,i)=>`
+    <div class="flex items-center justify-between px-5 py-3 gap-3">
+      <div class="min-w-0">
+        <div class="flex items-center gap-2">
+          <span class="text-[10px] font-bold uppercase tracking-widest px-1.5 py-0.5 ${s.is_dir?"bg-blue-950 text-blue-300":"bg-gray-800 text-gray-400"}">${s.is_dir?"Folder":"File"}</span>
+          <code class="text-xs font-mono text-gray-400 truncate">${escHtml(s.name)}</code>
+        </div>
+        <div class="text-[10px] text-gray-600 mt-0.5">${_fmtBytes(s.bytes)} · modified ${new Date(s.mtime*1000).toLocaleString()}</div>
+      </div>
+      <button onclick="csDelete(${i},this)" class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border border-red-800 bg-red-950 text-red-300 hover:bg-red-900 transition-colors">Delete</button>
+    </div>`);
+
+  const empty = !(d.broken_torrents.length || d.orphan_torrents.length || d.missing_items.length || d.stray_files.length);
+  document.getElementById("cleanAllClear").classList.toggle("hidden", !empty || d.qbit_ok === false);
+}
+
+function _renderCleanCard(cardId, listId, rows, rowFn){
+  const card = document.getElementById(cardId);
+  const list = document.getElementById(listId);
+  if(!rows || !rows.length){ card.classList.add("hidden"); list.innerHTML = ""; return; }
+  card.classList.remove("hidden");
+  list.innerHTML = rows.map(rowFn).join("");
+}
+
+async function _cleanAct(btn, url, method, okMsg){
+  if(btn){ btn.disabled = true; _markLoading(btn, true); }
+  let r;
+  try{
+    r = await fetch(url, {method, headers: authHeader()});
+  }catch(_){
+    if(btn){ btn.disabled = false; _markLoading(btn, false); }
+    showToast("Network error.", true); return;
+  }
+  if(btn) _markLoading(btn, false);
+  if(r.ok){
+    showToast(okMsg);
+    loadCleanup(true);
+  } else {
+    let msg = `HTTP ${r.status}`;
+    try{ const e = await r.json(); if(e.detail) msg = e.detail; }catch(_){}
+    showToast(`Failed: ${msg}`, true);
+    if(btn) btn.disabled = false;
+  }
+}
+
+function cbRecover(i, btn){
+  const b = _cleanData.broken_torrents[i]; if(!b) return;
+  if(!confirm(`Re-check and re-download "${b.name}"? qBittorrent will re-fetch any missing pieces.`)) return;
+  _cleanAct(btn, `/api/admin/cleanup/torrent/${b.hash}/recover`, "POST", "Recovery started.");
+}
+function cbDelete(i, btn){
+  const b = _cleanData.broken_torrents[i]; if(!b) return;
+  if(!confirm(`Delete torrent "${b.name}" and its files from disk${b.item_title?" (and its library item)":""}? This cannot be undone.`)) return;
+  _cleanAct(btn, `/api/admin/cleanup/torrent/${b.hash}`, "DELETE", "Torrent deleted.");
+}
+function coAdopt(i, btn){
+  const o = _cleanData.orphan_torrents[i]; if(!o) return;
+  _cleanAct(btn, `/api/admin/cleanup/orphan/${o.hash}/adopt`, "POST", "Adopted into library.");
+}
+function coDelete(i, btn){
+  const o = _cleanData.orphan_torrents[i]; if(!o) return;
+  if(!confirm(`Delete orphan torrent "${o.name}" and its files from disk? This cannot be undone.`)) return;
+  _cleanAct(btn, `/api/admin/cleanup/torrent/${o.hash}`, "DELETE", "Torrent deleted.");
+}
+function cmRecover(i, btn){
+  const m = _cleanData.missing_items[i]; if(!m) return;
+  if(!confirm(`Re-download the missing files for "${m.title}"?`)) return;
+  _cleanAct(btn, `/api/admin/cleanup/item/${m.item_id}/recover`, "POST", "Re-download started.");
+}
+function cmDelete(i, btn){
+  const m = _cleanData.missing_items[i]; if(!m) return;
+  if(!confirm(`Delete library item "${m.title}" (and its torrent + any remaining files)? This cannot be undone.`)) return;
+  _cleanAct(btn, `/api/admin/cleanup/item/${m.item_id}`, "DELETE", "Library item deleted.");
+}
+function csDelete(i, btn){
+  const s = _cleanData.stray_files[i]; if(!s) return;
+  if(!confirm(`Delete ${s.is_dir?"folder":"file"} "${s.path}" from disk? This cannot be undone.`)) return;
+  _cleanAct(btn, `/api/admin/cleanup/stray?path=${encodeURIComponent(s.path)}`, "DELETE", "Deleted.");
 }
 
 // ── Profile PINs ──────────────────────────────────────────────────────────────

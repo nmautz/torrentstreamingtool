@@ -221,6 +221,13 @@ A skipped file (priority 0) and an idle-deferred file (priority 0 while the wind
 
 `POST /api/library/{id}/delete-files` (the "delete to free space, keep re-downloadable" action) marks files `skip` and `unlink`s their bytes, but qBittorrent's per-file `progress` stays at the cached `1.0` until a full recheck. So `get_item_files`, which derives `complete`/`dl_pct` from that qBit progress, would keep reporting a just-deleted file as complete and playable. The fix: for a file whose effective `mode == "skip"`, completeness is grounded in **`Path(path).exists()`** — `complete = qp>=0.999 and exists`, else `(0.0, False)`. Only skip-mode files are stat-ed (the only ones that can be stale this way), keeping the hot path cheap. Don't move the disk check ahead of the mode test for every file, and don't drop it — without it a freed file masquerades as on-disk and the "⊘ Not downloaded → ⬇ Download" UI never appears.
 
+### Admin Cleanup must never touch an in-use torrent or escape the download folder
+
+The Cleanup tab (`/api/admin/cleanup*`, see [ADMIN.md § Cleanup](ADMIN.md)) deletes torrents, files, and library items, so two guards are load-bearing:
+- **In-use protection.** `_cleanup_in_use_hashes(lib)` is the single source of truth for "don't touch": the live stream/prepare torrent (`state.active_hash`, `state.prepare_hash`) and every `status=="downloading"` item's torrent. Those are excluded from the orphan list, flagged **In use** on a broken row, and their recover/delete endpoints return **409**. If you add another way a torrent can be "live" (a new pipeline, a new active-hash field), add it here or Cleanup can delete a torrent out from under a running playback/download.
+- **Stray-file path guard.** `DELETE /api/admin/cleanup/stray` resolves the target and requires `target.relative_to(settings.qbit_download_path)` (rejects traversal, the folder itself, anything outside) **and** refuses a path a current torrent owns. A trailing `.!qB` (qBit's incomplete-file marker) is stripped before the ownership test in `_cleanup_inventory_sync` — otherwise an actively-downloading single file looks unowned and would be offered as stray. Never relax these to string-prefix-only checks; use `Path.resolve()` containment (Windows path/case variants bite).
+- **qBit unreachable ⇒ `qbit_ok:false`, not "everything is broken".** `qbit_info_all()` returns `None` (vs `[]`) on failure so the inventory flags the offline state instead of classifying every library torrent as broken/orphan.
+
 ## VPN
 
 ### Two enforcement points

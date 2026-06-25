@@ -1,5 +1,14 @@
 # Changelog
 
+## [6.1.0] — 2026-06-25
+- **New admin "Cleanup" tab — reconcile qBittorrent, the library, and the download folder.** Over time these three drift out of sync (a crashed stream-now leaves an orphan torrent; a deleted file flips qBit to `missingFiles`; a buggy add drops stray files; a library item points at files that are gone), and nothing surfaced it. The new tab ([static/admin.html](static/admin.html)) cross-references all three into four problem categories, each with a guided **Recover** (where possible) and a confirm-gated **Delete**:
+  - **Broken torrents** (qBit `error`/`missingFiles`, or content path gone) → recheck + resume, or delete (torrent + any library item it backs).
+  - **Orphan torrents** (in qBit, not in the library) → **Adopt** into the library, or delete.
+  - **Library items missing files** → re-download when a torrent still backs them, else delete the entry.
+  - **Stray files** in the download folder owned by no torrent or library item → delete-only.
+  - Backed by `GET /api/admin/cleanup` (cached snapshot built off the event loop, `?refresh=1` to re-walk) + per-row recover/adopt/delete endpoints in [main.py](main.py). The live stream/prepare torrent and any downloading item's torrent are flagged **In use** and protected (409 on delete); stray-file deletion is path-guarded to the download folder. See [docs/ADMIN.md](docs/ADMIN.md), [docs/API.md](docs/API.md), [docs/GOTCHAS.md](docs/GOTCHAS.md).
+  - *Server + host-served web change: restart the server and reload the dashboard. No native rebuild needed.*
+
 ## [6.0.0-preview.6.1.6] — 2026-06-25
 - **Marking a show "on-demand stream only" now cancels prep that's already encoding, not just queued work.** Flipping the flag terminated the in-flight ffmpeg encode but didn't tell the prep worker the kill was intentional, so the worker ignored the toggle during ongoing processing: a full-GPU encode treated the terminate as a GPU failure and **restarted on the transparent CPU path** (the encode just kept going), while a regular encode surfaced a spurious `ffmpeg failed` error instead of a clean cancel. Fixed in [main.py](main.py) by setting an intentional-kill flag (`_ondemand_cancelled`) before terminating — mirroring the existing admin force-prep / pause-kill machinery:
   - `_apply_ondemand_only` sets the flag on every matching job before `proc.terminate()`.
