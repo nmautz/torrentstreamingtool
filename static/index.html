@@ -11582,8 +11582,10 @@ document.addEventListener("DOMContentLoaded",async()=>{
   // M3: when the browser regains connectivity, drain any offline progress the
   // native store accumulated while we were away. No-op in a plain browser.
   if (isApp) window.addEventListener("online", () => _appFlushOfflineProgress());
-  // App-only: reveal the offline-sync diagnostics row in profile settings.
-  if (isApp) { const r = document.getElementById("psOfflineSyncRow"); if (r) r.classList.remove("hidden"); }
+  // App-only: offline-sync diagnostics row. Currently hidden from the UI —
+  // re-enable by un-commenting the reveal below if we need it again. The row
+  // markup, _appSyncDebug(), and the syncDebugModal are all left in place.
+  // if (isApp) { const r = document.getElementById("psOfflineSyncRow"); if (r) r.classList.remove("hidden"); }
   // Start polling for any in-flight prep jobs so the indicator is correct
   // even when the page is reloaded mid-job (state is purely in-memory otherwise).
   startGlobalPrepPoller();
@@ -11648,6 +11650,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.6.1.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.6.1.4</div>
 </body>
 </html>
