@@ -16268,26 +16268,66 @@ def _enumerate_bundle_files(out_dir: Path) -> tuple[list[dict], int]:
     return files, total
 
 
-def _bundle_highest_only(out_dir: Path, files: list[dict],
-                         meta: dict) -> tuple[list[dict], int, Optional[str]]:
-    """Filter an enumerated bundle down to the HIGHEST (source) video rung for the
-    iOS offline downloader — the device should not waste storage on the 720p/480p
-    ABR down-rungs it will never select when playing a single downloaded file.
+def _bundle_rung_name(name: str, video_name: str) -> bool:
+    """True when bundle file `name` belongs to the video rung `video_name`
+    (its playlist, fmp4 init, or a segment)."""
+    return (name in (f"{video_name}.m3u8", f"init_{video_name}.mp4")
+            or name.startswith(f"seg_{video_name}_"))
 
-    Drops every non-original rung's playlist + init + segments from `files`, and
-    rewrites master.m3u8 *in memory* to reference only the kept (idx 0) rung — the
-    same master rewrite `_trim_one_bundle` does on disk, but non-destructive (the
-    shared on-disk bundle still serves all rungs for streaming clients). The trimmed
+
+def _bundle_rung_info(files: list[dict], meta: dict) -> list[dict]:
+    """The bundle's video ladder annotated with the **download** byte size of
+    each rung — what the device transfers if that quality is chosen: the rung's
+    own video files plus the shared audio/subtitle/playlist/meta files (which
+    every rung carries). Powers the app's per-download quality chooser so it can
+    show "1080p (Source) — 1.4 GB / 720p — 600 MB / …".
+    """
+    videos = meta.get("videos") or []
+    names = {v.get("name") for v in videos if v.get("name")}
+
+    def _rung_of(fname: str) -> Optional[str]:
+        for n in names:
+            if _bundle_rung_name(fname, n):
+                return n
+        return None
+
+    per: dict[str, int] = {}
+    shared = 0
+    for f in files:
+        rn = _rung_of(f["name"])
+        if rn is None:
+            shared += f["size"]
+        else:
+            per[rn] = per.get(rn, 0) + f["size"]
+    return [{**v, "bytes": shared + per.get(v.get("name"), 0)} for v in videos]
+
+
+def _bundle_select_rung(out_dir: Path, files: list[dict], meta: dict,
+                        keep_name: Optional[str] = None
+                        ) -> tuple[list[dict], int, Optional[str]]:
+    """Filter an enumerated bundle down to a SINGLE video rung for the iOS offline
+    downloader — the device plays a downloaded file at one quality, so shipping the
+    other ABR rungs just wastes storage. `keep_name` is the rung to keep (its
+    `videos[].name`); None keeps the HIGHEST (source, idx 0) rung — the default.
+
+    Drops every other rung's playlist + init + segments from `files`, and rewrites
+    master.m3u8 *in memory* to reference only the kept rung — the same master
+    rewrite `_trim_one_bundle` does on disk, but non-destructive (the shared
+    on-disk bundle still serves all rungs for streaming clients). The trimmed
     master is returned inline so the app writes it verbatim instead of fetching the
     full one; the master entry in `files` keeps its (new, smaller) byte size so the
     downloader's resume check treats the written file as complete.
 
     Returns (filtered_files, total_bytes, trimmed_master_text). master_text is None
-    when there's nothing to drop (≤1 rung) — caller leaves the bundle untouched.
+    when there's nothing to drop (≤1 rung, or the requested rung doesn't exist) —
+    caller leaves the bundle untouched.
     """
     videos = meta.get("videos") or []
+    if keep_name is None:
+        keep_name = next((v.get("name") for v in videos
+                          if v.get("idx", 0) == 0 and v.get("name")), None)
     drop_names = {v.get("name") for v in videos
-                  if v.get("idx", 0) != 0 and v.get("name")}
+                  if v.get("name") and v.get("name") != keep_name}
     if not drop_names:
         return files, sum(f["size"] for f in files), None
 
@@ -16389,7 +16429,7 @@ async def _bundle_meta_for_file(item: dict, file_entry: dict, tmdb: Optional[dic
 
 
 @app.get("/api/library/{item_id}/bundle-manifest")
-async def bundle_manifest(item_id: str, request: Request, file_path: str = "", profile_id: str = "") -> JSONResponse:
+async def bundle_manifest(item_id: str, request: Request, file_path: str = "", profile_id: str = "", quality: str = "") -> JSONResponse:
     """Enumerate a built HLS bundle for the iOS offline downloader (plan A1).
 
     Returns a flat `files` list (relative names + byte sizes) plus `total_bytes`
@@ -16431,10 +16471,26 @@ async def bundle_manifest(item_id: str, request: Request, file_path: str = "", p
 
     meta = _read_meta(out_dir)
     files, total = await asyncio.to_thread(_enumerate_bundle_files, out_dir)
-    # Download only the highest (source) video rung — drop the ABR down-rungs the
-    # device never picks, with an inline-rewritten master that references just it.
+    # The full ABR ladder annotated with per-rung download sizes, so the app's
+    # download-quality chooser can list only the qualities that actually exist.
+    videos_full = _bundle_rung_info(files, meta)
+    # Download a single video rung — drop the others the device never picks for a
+    # downloaded file. Defaults to the highest (source) rung; the app may request a
+    # specific one via ?quality=<height> (or "original"). Falls back to highest when
+    # the requested height isn't in this bundle.
+    keep_name: Optional[str] = None
+    q = (quality or "").strip().lower()
+    if q and q not in ("original", "highest", "source", "0"):
+        try:
+            qh = int(q.rstrip("p"))
+            match = next((v for v in videos_full
+                          if int(v.get("height") or 0) == qh), None)
+            if match:
+                keep_name = match.get("name")
+        except ValueError:
+            pass
     files, total, master_text = await asyncio.to_thread(
-        _bundle_highest_only, out_dir, files, meta)
+        _bundle_select_rung, out_dir, files, meta, keep_name)
     sidecar_subs = await asyncio.to_thread(_list_sidecar_subs, src, item_id)
 
     # Series/episode metadata + poster so the offline Downloads picker can group
@@ -16469,7 +16525,8 @@ async def bundle_manifest(item_id: str, request: Request, file_path: str = "", p
         "files":              files,
         "file_count":         len(files),
         "total_bytes":        total,
-        "master_m3u8":        master_text,   # inline trimmed master (highest rung only); None ⇒ fetch as-is
+        "master_m3u8":        master_text,   # inline trimmed master (chosen rung only); None ⇒ fetch as-is
+        "videos":             videos_full,    # full ABR ladder w/ per-rung download bytes (chooser)
         "duration_sec":       meta.get("duration_sec", 0),
         "audios":             meta.get("audios", []),
         "subtitles":          meta.get("subtitles", []),

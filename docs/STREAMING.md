@@ -1151,16 +1151,27 @@ Capacitor native-platform check (`isApp`), so it's inert in a plain browser.
    Progress + completion are pushed to JS via `bundleProgress` / `bundleComplete`
    events.
 
-> **Highest-rung-only downloads.** `files[]` is filtered server-side
-> (`_bundle_highest_only` in `main.py`) to the **original (idx 0, source-resolution)
-> video rung** — the 720p/480p ABR down-rungs are dropped, since a single downloaded
-> file is always played at its top rung and the extra renditions just waste device
-> storage. The manifest's **`master_m3u8`** carries a non-destructive in-memory
-> rewrite of `master.m3u8` referencing only the kept rung (the shared on-disk bundle
-> is untouched and still serves all rungs to streaming clients); `BundleDownloader`
-> writes it verbatim from the `masterContent` param **before** its resume scan, so the
-> dropped rungs are never fetched or referenced by the offline player. (`master_m3u8`
-> is `null` for a ≤1-rung bundle ⇒ master is fetched as-is.)
+> **Single-rung downloads + the quality chooser.** A downloaded file is always
+> played at one resolution, so `files[]` is filtered server-side
+> (`_bundle_select_rung` in `main.py`) to **one** video rung; the others' playlist +
+> init + segments are dropped. The default is the **original (idx 0, source)** rung,
+> but the manifest also returns the **full ladder** as `videos[]` (`[{idx, name,
+> height, label, bytes}]`, `bytes` = the *download* size if that rung is chosen — its
+> own video files plus the shared audio/sub/playlist/meta) via `_bundle_rung_info`,
+> and accepts **`?quality=<height>|original`** to ship a specific rung. The app uses
+> this for a **Download Quality** chooser (`_appChooseQuality`): on a download, if
+> `videos[].length > 1` it lists each rung with its size and re-fetches the manifest
+> for the pick. A **bulk** download (card *Download all* → `appDownloadAllBundles`,
+> or multi-select *Download (N)* → `epDownloadSelected`) asks **once** via
+> `_appBatchQuality` (which probes the first file's ladder) and passes the chosen
+> `quality` to every per-file `appDownloadBundle` so the prompt isn't repeated; a
+> ≤1-rung bundle skips the prompt entirely. The manifest's **`master_m3u8`** carries a
+> non-destructive in-memory rewrite of `master.m3u8` referencing only the kept rung
+> (the shared on-disk bundle is untouched and still serves all rungs to streaming
+> clients); `BundleDownloader` writes it verbatim from the `masterContent` param
+> **before** its resume scan, so the dropped rungs are never fetched or referenced by
+> the offline player. (`master_m3u8` is `null` for a ≤1-rung bundle ⇒ master is
+> fetched as-is.)
 
 **Offline entry point.** The dashboard (`static/index.html`) is served *by the
 host*, so it can't load with no connection — the offline UI can't live there. The

@@ -6531,7 +6531,14 @@ async function epDownloadSelected(){
       toStart.push(f);
     }
     if(!toStart.length){ showAlert("Selected episodes are already saved or downloading.","info"); return; }
-    for(const f of toStart) await appDownloadBundle(epItemId, f.path, f.name);
+    // Ask which quality once for the whole batch, then apply it to every episode.
+    const q=await _appBatchQuality(epItemId, toStart[0].path,
+      document.getElementById("epTitle")?.textContent||"");
+    if(q===null){   // cancelled — clear the queued markers we painted above
+      for(const f of toStart){ offlineBundles.delete(offKey(epItemId, f.path)); _appRefreshDlBtn(epItemId, f.path); }
+      return;
+    }
+    for(const f of toStart) await appDownloadBundle(epItemId, f.path, f.name, null, q);
     return;
   }
   if(paths.length===1){
@@ -8282,9 +8289,10 @@ async function _appStartLocalPlayback(local) {
 
 // Resolve a downloadable bundle manifest, building the host bundle first (and
 // polling the prep job) when it isn't prepped yet.
-async function _appFetchManifest(itemId, filePath) {
+async function _appFetchManifest(itemId, filePath, quality) {
   const u = `/api/library/${itemId}/bundle-manifest?file_path=${encodeURIComponent(filePath)}`
-          + (profile.id ? `&profile_id=${encodeURIComponent(profile.id)}` : "");
+          + (profile.id ? `&profile_id=${encodeURIComponent(profile.id)}` : "")
+          + (quality ? `&quality=${encodeURIComponent(quality)}` : "");
   let r = await fetch(u, { headers: _appAuthHeaders() });
   if (r.status === 401) throw new Error("This device isn’t paired with the host — re-pair from Settings.");
   if (r.status === 409) {
@@ -8327,9 +8335,65 @@ async function _appPrepBundle(itemId, filePath) {
   throw new Error("Prep timed out.");
 }
 
+// Ask which quality to download. `videos` is the manifest's full ABR ladder
+// (`[{idx,height,label,bytes}]`, master order: idx 0 = source, then down-rungs).
+// Resolves to a value for the `quality` manifest param — "original" for the
+// source rung, the height (e.g. 720) for a down-rung — or null if cancelled.
+// Caller should skip this entirely when the ladder has ≤1 rung.
+function _appChooseQuality(videos, label) {
+  return new Promise((resolve) => {
+    const ov = document.createElement("div");
+    ov.style.cssText = "position:fixed;inset:0;z-index:10002;display:flex;align-items:center;"
+      + "justify-content:center;background:rgba(0,0,0,.72);"
+      + "font-family:-apple-system,'Segoe UI',Roboto,sans-serif;padding:18px;";
+    const card = document.createElement("div");
+    card.style.cssText = "background:#141417;border:1px solid #2a2a30;color:#f2f2f4;"
+      + "width:100%;max-width:380px;max-height:90vh;overflow-y:auto;";
+    let done = false;
+    const finish = (v) => { if (done) return; done = true; ov.remove(); resolve(v); };
+    const rows = videos.map((v) => {
+      const q = (v.idx === 0) ? "original" : v.height;
+      const size = v.bytes ? `<span style="color:#8a8a92;font-weight:600;font-size:12px;">${fmtSize(v.bytes)}</span>` : "";
+      return `<button data-q="${q}" style="all:unset;cursor:pointer;display:flex;align-items:center;
+        justify-content:space-between;gap:12px;padding:14px 16px;border-bottom:1px solid #2a2a30;">
+        <span style="font-weight:700;letter-spacing:.03em;">${escHtml(v.label || (v.height + "p"))}</span>${size}</button>`;
+    }).join("");
+    card.innerHTML = `
+      <div style="padding:15px 16px 4px;font-size:18px;font-weight:800;letter-spacing:.03em;
+        text-transform:uppercase;">Download Quality</div>
+      <div style="padding:0 16px 12px;font-size:12px;color:#8a8a92;word-break:break-word;">${escHtml(label || "")}</div>
+      <div id="aqRows">${rows}</div>
+      <button id="aqCancel" style="all:unset;cursor:pointer;display:block;text-align:center;width:100%;
+        padding:14px 16px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;color:#8a8a92;">Cancel</button>`;
+    card.querySelector("#aqRows").querySelectorAll("button").forEach((b) => {
+      b.addEventListener("click", () => finish(b.getAttribute("data-q")));
+    });
+    card.querySelector("#aqCancel").addEventListener("click", () => finish(null));
+    ov.addEventListener("click", (e) => { if (e.target === ov) finish(null); });
+    ov.appendChild(card);
+    document.body.appendChild(ov);
+  });
+}
+
+// Pick the download quality ONCE for a batch (Download-all / multi-select): probe
+// the first file's ladder (building its host bundle if needed) to learn which
+// qualities exist, then ask the user a single time. Returns "original" | a height
+// to apply to every file, or null if the user cancelled the whole batch. Falls
+// back to "original" when the ladder is single-rung or can't be probed.
+async function _appBatchQuality(itemId, firstPath, label) {
+  let m;
+  try { m = await _appFetchManifest(itemId, firstPath); } catch (_) { return "original"; }
+  const vids = m.videos || [];
+  if (vids.length <= 1) return "original";
+  return _appChooseQuality(vids, label);
+}
+
 // Download / remove an offline bundle (per-row button). Toggles to remove when
-// already downloaded.
-async function appDownloadBundle(itemId, filePath, name, btn) {
+// already downloaded. `quality` (optional): when given ("original" | a height),
+// download that rung without prompting — bulk callers pass it so the chooser is
+// shown once for the batch, not per file. When omitted, a multi-rung bundle
+// prompts the user via `_appChooseQuality`.
+async function appDownloadBundle(itemId, filePath, name, btn, quality) {
   if (!isApp) return;
   const key = offKey(itemId, filePath);
   const cur = offlineBundles.get(key);
@@ -8344,14 +8408,26 @@ async function appDownloadBundle(itemId, filePath, name, btn) {
   offlineBundles.set(key, { downloading: true, prepping: true, fraction: 0, name });
   _appRefreshDlBtn(itemId, filePath);
   try {
-    const manifest = await _appFetchManifest(itemId, filePath);
+    // Fetch the manifest (builds the host bundle first if needed). The default
+    // (no quality) keeps the highest/source rung; if the bundle has multiple rungs
+    // and no quality was pre-chosen, ask the user and re-fetch for their pick.
+    let manifest = await _appFetchManifest(itemId, filePath, quality);
+    if (quality === undefined && (manifest.videos || []).length > 1) {
+      const chosen = await _appChooseQuality(manifest.videos, name);
+      if (chosen === null) {                  // cancelled — abort this download
+        offlineBundles.delete(key);
+        _appRefreshDlBtn(itemId, filePath);
+        return;
+      }
+      if (chosen !== "original") manifest = await _appFetchManifest(itemId, filePath, chosen);
+    }
     const origin = window.location.origin;
     const files = (manifest.files || []).map((f) => ({ name: f.name, size: f.size }));
     await _cap.dl.download({
       itemId, filePath, cacheKey: manifest.cache_key, name,
       baseUrl: origin + manifest.bundle_url, files, token: _appPairingToken(),
-      // Trimmed master.m3u8 (highest rung only) written verbatim by the native side
-      // so we never fetch — nor reference — the dropped ABR down-rungs.
+      // Trimmed master.m3u8 (the chosen rung only) written verbatim by the native
+      // side so we never fetch — nor reference — the dropped ABR rungs.
       masterContent: manifest.master_m3u8 || null,
       // Series/episode metadata + inlined poster for the offline Downloads picker.
       meta: manifest.meta || null,
@@ -8405,8 +8481,14 @@ async function appDownloadAllBundles(itemId, title){
     toStart.push(f);
   }
   if (!toStart.length){ showAlert("All episodes are already saved or downloading.","info"); return; }
+  // Ask which quality once for the whole batch, then apply it to every episode.
+  const q = await _appBatchQuality(itemId, toStart[0].path, title);
+  if (q === null){   // cancelled — clear the queued markers we painted above
+    for (const f of toStart){ offlineBundles.delete(offKey(itemId, f.path)); _appRefreshDlBtn(itemId, f.path); }
+    return;
+  }
   showAlert(`Saving ${toStart.length} episode${toStart.length>1?"s":""} offline…`, "ok");
-  for (const f of toStart) await appDownloadBundle(itemId, f.path, f.name);
+  for (const f of toStart) await appDownloadBundle(itemId, f.path, f.name, null, q);
 }
 
 // Per-row Download button HTML (app only; "" in a browser).
@@ -11498,6 +11580,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.6.0.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">6.0.0-preview.6.1.0</div>
 </body>
 </html>
