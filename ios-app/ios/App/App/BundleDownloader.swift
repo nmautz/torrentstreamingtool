@@ -59,6 +59,8 @@ public class BundleDownloader: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "remove",    returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "cancel",    returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "bytesUsed", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "holdBackground",    returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "releaseBackground", returnType: CAPPluginReturnPromise),
     ]
 
     public override func load() {
@@ -138,6 +140,20 @@ public class BundleDownloader: CAPPlugin, CAPBridgedPlugin {
 
     @objc func bytesUsed(_ call: CAPPluginCall) {
         call.resolve(["bytes": BundleDownloadManager.shared.bytesUsed()])
+    }
+
+    // The dashboard orchestrates downloads in JS (host-prep poll + pool driver)
+    // BEFORE handing each file to the durable background URLSession. JS can't take
+    // a UIApplication background assertion itself, so it brackets that window with
+    // these so a brief background mid-prep doesn't immediately suspend the page and
+    // stall the pool. Ref-counted: concurrent pool lanes hold/release independently.
+    @objc func holdBackground(_ call: CAPPluginCall) {
+        BundleDownloadManager.shared.holdOrchestrationBackground()
+        call.resolve()
+    }
+    @objc func releaseBackground(_ call: CAPPluginCall) {
+        BundleDownloadManager.shared.releaseOrchestrationBackground()
+        call.resolve()
     }
 }
 
@@ -547,6 +563,31 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         guard jobs.isEmpty, bgTask != .invalid else { return }
         let id = bgTask; bgTask = .invalid
         DispatchQueue.main.async { UIApplication.shared.endBackgroundTask(id) }
+    }
+
+    // A SEPARATE assertion held by the JS download orchestration (manifest fetch +
+    // host-prep poll + handoff), independent of the job-keyed bgTask above so the
+    // two lifecycles never clobber each other. Ref-counted because several pool
+    // lanes can be orchestrating at once. Main-thread state (UIApplication APIs).
+    private var orchTask: UIBackgroundTaskIdentifier = .invalid
+    private var orchCount = 0
+    func holdOrchestrationBackground() {
+        DispatchQueue.main.async {
+            self.orchCount += 1
+            guard self.orchTask == .invalid else { return }
+            self.orchTask = UIApplication.shared.beginBackgroundTask(withName: "StreamLinkDownloadPrep") {
+                if self.orchTask != .invalid { UIApplication.shared.endBackgroundTask(self.orchTask); self.orchTask = .invalid }
+                self.orchCount = 0
+            }
+        }
+    }
+    func releaseOrchestrationBackground() {
+        DispatchQueue.main.async {
+            if self.orchCount > 0 { self.orchCount -= 1 }
+            guard self.orchCount == 0, self.orchTask != .invalid else { return }
+            let id = self.orchTask; self.orchTask = .invalid
+            UIApplication.shared.endBackgroundTask(id)
+        }
     }
 
     // Called from AppDelegate.application(_:handleEventsForBackgroundURLSession:)

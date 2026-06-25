@@ -1059,6 +1059,32 @@ so a plain browser is byte-for-byte unaffected. `_appDlBtnHTML()` returns `""`
 and `_appLocalBundle()` returns null off-app. Don't call a native plugin without
 the `isApp` guard — `Capacitor` may be undefined (browser) or the plugin missing.
 
+### In-app "tabs" must be overlays on the host page — never full-page navigations — or in-flight downloads die
+The dashboard (`static/index.html`, served by the host) is the page that
+*orchestrates* every download: `_appPrepBundle` polls the host's `/offline-job`
+while it builds the HLS bundle, and `_appRunPooled` drives the multi-episode pool,
+all in this page's JS, **before** each file is handed to the durable background
+`URLSession`. A full-page navigation away (the old `_appGoDownloads` /
+`_appGoSettings` → `capacitor://localhost/...`) **tears this page down**, killing
+the SSE link AND every in-flight pool lane / prep-poll — so any series episode not
+yet handed to the native downloader is lost. The in-app **Downloads** and **Change
+Server** menu items therefore open **overlays on the live host page**
+(`_appOpenDashboard`, `_appOpenChangeServer`), not navigations. The ONLY legitimate
+disconnect is connecting to a *different* server (inside the Change Server overlay).
+`downloads.html` / `index.html` stay as the **offline** entry points (host
+unreachable) — those are separate local-origin pages by necessity.
+
+### Keep-alive during prep is a ~30s bridge, not a long-running guarantee — `holdBackground`/`releaseBackground`
+JS can't take a `UIApplication` background assertion, so `BundleDownloader` exposes
+ref-counted `holdBackground()`/`releaseBackground()` (a *separate* assertion from
+the job-keyed `bgTask`), and the JS orchestration brackets its prep/handoff window
+with them. This only buys the ~30s iOS grants a background task — enough to survive
+a brief background mid-prep. It does NOT keep the page alive through a long
+host-side prep while minimized; for that the JS pool **self-resumes on foreground**
+(suspended `setTimeout`s fire late but still fire, and the host prep `job_id` stays
+valid up to its 3h ceiling). The durable path is the background `URLSession`: once a
+file is handed off, it transfers to completion while suspended regardless.
+
 ### HTTPS dashboard playing from `http://127.0.0.1` is NOT mixed-content blocked — loopback is a secure context
 The dashboard is loaded over HTTPS but offline playback points `<video>.src` at
 `http://127.0.0.1:<port>/master.m3u8` (the loopback `LocalMediaServer`). WebKit

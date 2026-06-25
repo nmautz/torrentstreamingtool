@@ -8480,6 +8480,15 @@ async function _appRunPooled(items, limit, worker){
   await Promise.all(lanes);
 }
 
+// Hold/release a native UIApplication background assertion around the JS download
+// ORCHESTRATION (manifest fetch + host-prep poll + handoff) so a brief background
+// mid-prep doesn't immediately suspend this page and stall the pool. Ref-counted
+// natively, so overlapping pool lanes hold independently. No-op outside the app.
+// (Once a file is handed to the native downloader, its own background URLSession +
+// assertion take over and complete the transfer even while suspended.)
+function _appHoldBg() { if (isApp && _cap.dl && _cap.dl.holdBackground) { try { _cap.dl.holdBackground(); } catch (_) {} } }
+function _appReleaseBg() { if (isApp && _cap.dl && _cap.dl.releaseBackground) { try { _cap.dl.releaseBackground(); } catch (_) {} } }
+
 // Download / remove an offline bundle (per-row button). Toggles to remove when
 // already downloaded. `quality` (optional): when given ("original" | a height),
 // download that rung without prompting — bulk callers pass it so the chooser is
@@ -8507,6 +8516,8 @@ async function appDownloadBundle(itemId, filePath, name, btn, quality) {
   // above), and absorbing the blip here keeps the bulk pipeline from stranding
   // everything queued behind it. Only a persistent failure surfaces an error.
   const MAX_ATTEMPTS = 8;
+  _appHoldBg();   // keep the page alive through the prep/handoff window
+  try {
   for (let attempt = 1; ; attempt++) {
     try {
       // Fetch the manifest (builds the host bundle first if needed). The default
@@ -8569,6 +8580,9 @@ async function appDownloadBundle(itemId, filePath, name, btn, quality) {
       break;
     }
   }
+  } finally {
+    _appReleaseBg();   // native transfer (if handed off) holds its own assertion now
+  }
   _appRefreshDlBtn(itemId, filePath);
 }
 
@@ -8596,14 +8610,20 @@ async function appDownloadAllBundles(itemId, title){
     toStart.push(f);
   }
   if (!toStart.length){ showAlert("All episodes are already saved or downloading.","info"); return; }
-  // Ask which quality once for the whole batch, then apply it to every episode.
-  const q = await _appBatchQuality(itemId, toStart[0].path, title);
-  if (q === null){   // cancelled — clear the queued markers we painted above
-    for (const f of toStart){ offlineBundles.delete(offKey(itemId, f.path)); _appRefreshDlBtn(itemId, f.path); }
-    return;
-  }
-  showAlert(`Saving ${toStart.length} episode${toStart.length>1?"s":""} offline…`, "ok");
-  await _appRunPooled(toStart, 3, (f) => appDownloadBundle(itemId, f.path, f.name, null, q));
+  // Hold a background assertion across the WHOLE batch (quality probe + pool
+  // scheduling gaps), on top of each episode's own hold, so a brief background
+  // can't suspend the page between episodes. Ref-counted natively.
+  _appHoldBg();
+  try {
+    // Ask which quality once for the whole batch, then apply it to every episode.
+    const q = await _appBatchQuality(itemId, toStart[0].path, title);
+    if (q === null){   // cancelled — clear the queued markers we painted above
+      for (const f of toStart){ offlineBundles.delete(offKey(itemId, f.path)); _appRefreshDlBtn(itemId, f.path); }
+      return;
+    }
+    showAlert(`Saving ${toStart.length} episode${toStart.length>1?"s":""} offline…`, "ok");
+    await _appRunPooled(toStart, 3, (f) => appDownloadBundle(itemId, f.path, f.name, null, q));
+  } finally { _appReleaseBg(); }
 }
 
 // Per-row Download button HTML (app only; "" in a browser).
@@ -8728,9 +8748,12 @@ function _appInitNav() {
     b.addEventListener("click", () => { menu.style.display = "none"; fn(); });
     return b;
   };
-  menu.appendChild(mk("Dashboard", _appOpenDashboard));
-  menu.appendChild(mk("Downloads", _appGoDownloads));
-  menu.appendChild(mk("Change Server / Re-pair", _appGoSettings));
+  // Open as overlays ON this live host page — never full-page navigations — so the
+  // SSE link and in-flight download orchestration are not torn down. (Only an
+  // actual switch to a different server, inside the Change Server overlay,
+  // navigates away.) `_appGoDownloads`/`_appGoSettings` remain for the offline pages.
+  menu.appendChild(mk("Downloads", _appOpenDashboard));
+  menu.appendChild(mk("Change Server / Re-pair", _appOpenChangeServer));
   menu.lastChild.style.borderBottom = "0";
   const toggle = document.createElement("button");
   toggle.textContent = "☰ App";
@@ -8779,7 +8802,7 @@ function _appBuildDashboard() {
     + "padding:max(env(safe-area-inset-top),16px) 16px max(env(safe-area-inset-bottom),16px);overflow-y:auto;";
   ov.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:14px;">
-      <div style="font-size:20px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;">Dashboard</div>
+      <div style="font-size:20px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;">Downloads</div>
       <button id="appDashClose" style="all:unset;cursor:pointer;color:#8a8a92;border:1px solid #2a2a30;
         padding:8px 14px;font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;">Close</button>
     </div>
@@ -8797,7 +8820,7 @@ function _appBuildDashboard() {
     <div id="appDashDownloads" style="margin-bottom:18px;"></div>
 
     <div style="display:flex;align-items:baseline;justify-content:space-between;margin:4px 0 8px;">
-      <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;">Storage on this device</div>
+      <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;">Downloaded on this device</div>
       <div id="appDashTotal" style="font-size:12px;color:#8a8a92;"></div>
     </div>
     <div id="appDashStorage" style="margin-bottom:8px;"></div>
@@ -8861,8 +8884,10 @@ async function _appRenderDashboard() {
     }).join("");
   }
 
-  // 3. Storage used, grouped by series / movie (completed bundles only).
-  const groups = new Map();   // key → { title, bytes, count }
+  // 3. Downloaded bundles, grouped by series / movie (completed only) — each
+  //    episode playable (LocalMediaServer, via the normal dashboard player) and
+  //    removable, mirroring the offline downloads.html picker but online.
+  const groups = new Map();   // gkey → { title, meta, eps:[item], bytes }
   let total = 0;
   for (const it of items) {
     if (!it.complete) continue;
@@ -8870,8 +8895,8 @@ async function _appRenderDashboard() {
     total += bytes;
     const meta = it.meta || {};
     const gkey = (meta.series || meta.title || it.name || it.sha).trim().toLowerCase();
-    const g = groups.get(gkey) || { title: meta.series || meta.title || it.name || "Download", bytes: 0, count: 0 };
-    g.bytes += bytes; g.count += 1;
+    const g = groups.get(gkey) || { title: meta.series || meta.title || it.name || "Download", meta, eps: [], bytes: 0 };
+    g.eps.push(it); g.bytes += bytes;
     groups.set(gkey, g);
   }
   ov.querySelector("#appDashTotal").textContent = total ? fmtSize(total) + " used" : "";
@@ -8880,20 +8905,153 @@ async function _appRenderDashboard() {
   if (!rows.length) {
     stWrap.innerHTML = `<div style="color:#8a8a92;font-size:13px;border:1px solid #2a2a30;background:#141417;padding:13px 14px;">Nothing downloaded yet.</div>`;
   } else {
-    const max = rows[0].bytes || 1;
+    const pad2 = (n) => String(n).padStart(2, "0");
     stWrap.innerHTML = rows.map((g) => {
-      const w = Math.max(2, Math.round((g.bytes / max) * 100));
-      const sub = g.count > 1 ? `${g.count} episodes` : "1 item";
-      return `<div style="border:1px solid #2a2a30;background:#141417;padding:11px 13px;margin-bottom:8px;">
-        <div style="display:flex;justify-content:space-between;gap:10px;font-size:13px;font-weight:700;">
-          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(g.title)}</span>
-          <span style="color:#8a8a92;flex:0 0 auto;">${fmtSize(g.bytes)}</span>
+      g.eps.sort((a, b) => {
+        const am = a.meta || {}, bm = b.meta || {};
+        return ((am.season || 0) - (bm.season || 0)) || ((am.episode || 0) - (bm.episode || 0));
+      });
+      const poster = (g.meta && g.meta.poster_data_url)
+        ? `<img src="${escHtml(g.meta.poster_data_url)}" style="flex:0 0 auto;width:46px;height:69px;object-fit:cover;background:#202028;">`
+        : `<div style="flex:0 0 auto;width:46px;height:69px;background:#202028;display:flex;align-items:center;justify-content:center;color:#8a8a92;font-size:18px;font-weight:800;">${escHtml((g.title[0] || "?").toUpperCase())}</div>`;
+      const isSeries = g.eps.length > 1 || (g.meta && g.meta.season && g.meta.episode);
+      const eps = g.eps.map((ep) => {
+        const m = ep.meta || {};
+        const num = (m.season && m.episode) ? `S${pad2(m.season)}·E${pad2(m.episode)} ` : (m.episode ? `E${pad2(m.episode)} ` : "");
+        const nm = m.episode_name || ep.name || ep.sha;
+        const _id = escHtml(JSON.stringify(ep.itemId)), _p = escHtml(JSON.stringify(ep.filePath));
+        return `<div style="display:flex;align-items:center;gap:9px;padding:9px 11px;border-top:1px solid #2a2a30;">
+          <div style="flex:1 1 auto;min-width:0;">
+            <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
+              ${num ? `<span style="color:#3a7afe;font-family:ui-monospace,Menlo,monospace;font-size:11px;font-weight:700;">${escHtml(num)}</span>` : ""}${escHtml(nm)}</div>
+            <div style="font-size:11px;color:#8a8a92;margin-top:2px;">${fmtSize(ep.bytesTotal || ep.bytesDone || 0)}</div>
+          </div>
+          <button onclick="_appPlayDownloaded(${_id},${_p})" style="all:unset;cursor:pointer;background:#3a7afe;color:#fff;
+            padding:8px 13px;font-size:12px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;">Play</button>
+          <button onclick="_appRemoveDownloaded(${_id},${_p})" style="all:unset;cursor:pointer;color:#8a8a92;border:1px solid #2a2a30;
+            padding:8px 11px;font-size:12px;font-weight:700;">✕</button>
+        </div>`;
+      }).join("");
+      return `<div style="border:1px solid #2a2a30;background:#141417;margin-bottom:12px;">
+        <div style="display:flex;gap:11px;padding:11px;">
+          ${poster}
+          <div style="flex:1 1 auto;min-width:0;">
+            <div style="font-size:15px;font-weight:800;line-height:1.2;">${escHtml(g.title)}</div>
+            <div style="font-size:12px;color:#8a8a92;margin-top:3px;">${isSeries ? `${g.eps.length} episode${g.eps.length === 1 ? "" : "s"} · ` : ""}${fmtSize(g.bytes)}</div>
+          </div>
         </div>
-        <div style="font-size:11px;color:#8a8a92;margin-top:3px;">${sub}</div>
-        <div style="height:3px;background:#26262c;margin-top:7px;"><i style="display:block;height:100%;background:#3ec46d;width:${w}%;"></i></div>
+        ${eps}
       </div>`;
     }).join("");
   }
+}
+
+// Play a downloaded bundle from the Downloads overlay: hand off to the normal
+// dashboard player (which detects the on-device bundle and serves it from the
+// native LocalMediaServer), then close the overlay so the player is visible.
+async function _appPlayDownloaded(itemId, filePath) {
+  _appCloseDashboard();
+  try { await lpPlay(itemId, [filePath]); } catch (_) {}
+}
+
+// Remove a downloaded bundle from the Downloads overlay and re-render in place.
+async function _appRemoveDownloaded(itemId, filePath) {
+  if (!isApp || !_cap.dl) return;
+  if (!window.confirm("Remove this offline download from the device?")) return;
+  try { await _cap.dl.remove({ itemId, filePath }); } catch (_) {}
+  offlineBundles.delete(offKey(itemId, filePath));
+  _appRefreshDlBtn(itemId, filePath);
+  _appRenderDashboard();
+}
+
+// ── iOS app: Change Server / Re-pair overlay ─────────────────────────────────
+// An overlay ON the live host page (app only) so opening it NEVER disconnects —
+// unlike the old menu item that navigated straight to the shell setup page and
+// killed the SSE link + in-flight downloads. Re-pairing the CURRENT host is a
+// same-origin POST and keeps the connection up. Only "Connect to a different
+// server" actually navigates (the legitimate disconnect the user asked for) — and
+// it hands off to the shell setup page, which already owns the connect + pair +
+// persist flow (the shell origin owns the saved-server localStorage).
+function _appOpenChangeServer() {
+  if (!isApp) return;
+  let ov = document.getElementById("appSrv");
+  if (ov) { ov.remove(); }
+  ov = document.createElement("div");
+  ov.id = "appSrv";
+  ov.style.cssText = "position:fixed;inset:0;z-index:10001;display:flex;flex-direction:column;"
+    + "background:#0b0b0d;color:#f2f2f4;font-family:-apple-system,'Segoe UI',Roboto,sans-serif;"
+    + "padding:max(env(safe-area-inset-top),16px) 18px max(env(safe-area-inset-bottom),16px);overflow-y:auto;";
+  const host = localStorage.getItem("streamlink_server_url") || window.location.origin;
+  const paired = !!_appPairingToken();
+  ov.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <div style="font-size:20px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;">Server</div>
+      <button id="appSrvClose" style="all:unset;cursor:pointer;color:#8a8a92;border:1px solid #2a2a30;
+        padding:8px 14px;font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;">Cancel</button>
+    </div>
+    <div style="border:1px solid #2a2a30;background:#141417;padding:13px 14px;margin-bottom:18px;">
+      <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;">Connected to</div>
+      <div style="font-size:14px;margin-top:5px;word-break:break-all;">${escHtml(host)}</div>
+      <div style="font-size:12px;color:#8a8a92;margin-top:6px;">${paired ? "This device is paired." : "Not paired — re-pair below for secure remote access."}</div>
+    </div>
+
+    <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;margin:2px 0 8px;">Re-pair this device</div>
+    <div style="border:1px solid #2a2a30;background:#141417;padding:13px 14px;margin-bottom:18px;">
+      <div style="font-size:12px;color:#8a8a92;margin-bottom:9px;line-height:1.45;">Refresh this device's pairing with the current host without disconnecting. Enter the host's admin password.</div>
+      <input id="appSrvPw" type="password" autocapitalize="off" autocorrect="off" spellcheck="false"
+        placeholder="Host admin password" style="width:100%;background:#0b0b0d;border:1px solid #2a2a30;color:#f2f2f4;
+        font-size:16px;padding:13px 12px;border-radius:0;outline:none;-webkit-appearance:none;" />
+      <div id="appSrvMsg" style="font-size:12px;margin-top:9px;min-height:14px;"></div>
+      <button id="appSrvPair" style="all:unset;cursor:pointer;display:block;text-align:center;width:100%;margin-top:6px;
+        background:#3a7afe;color:#fff;padding:14px;font-size:14px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;">Re-pair</button>
+    </div>
+
+    <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;margin:2px 0 8px;">Different server</div>
+    <button id="appSrvChange" style="all:unset;cursor:pointer;display:block;text-align:center;width:100%;
+      background:transparent;color:#e0a23d;border:1px solid #2a2a30;padding:14px;font-size:14px;font-weight:800;
+      letter-spacing:.06em;text-transform:uppercase;">Connect to a different server</button>
+    <div style="font-size:12px;color:#8a8a92;margin-top:8px;line-height:1.45;">Switching servers disconnects this session and stops any in-progress downloads from the current host.</div>
+  `;
+  document.body.appendChild(ov);
+  const close = () => ov.remove();
+  ov.querySelector("#appSrvClose").addEventListener("click", close);
+  ov.querySelector("#appSrvChange").addEventListener("click", () => {
+    if (!window.confirm("Disconnect from this server and choose a different one?")) return;
+    _appGoSettings();   // hand off to the shell setup page (the only real disconnect)
+  });
+  ov.querySelector("#appSrvPair").addEventListener("click", async () => {
+    const msg = ov.querySelector("#appSrvMsg");
+    const pw = ov.querySelector("#appSrvPw").value.trim();
+    if (!pw) { msg.style.color = "#e0a23d"; msg.textContent = "Enter the host admin password."; return; }
+    const btn = ov.querySelector("#appSrvPair"); btn.style.opacity = ".6"; btn.style.pointerEvents = "none";
+    msg.style.color = "#8a8a92"; msg.textContent = "Pairing…";
+    try {
+      const token = await _appPairCurrentHost(pw);
+      _pairToken = token;
+      if (_cap.os) { try { await _cap.os.setPairingToken({ token }); } catch (_) {} }
+      msg.style.color = "#3ec46d"; msg.textContent = "Paired. This device is now authorized.";
+      setTimeout(close, 900);
+    } catch (e) {
+      msg.style.color = "#e0533d"; msg.textContent = e.message || "Pairing failed.";
+      btn.style.opacity = "1"; btn.style.pointerEvents = "auto";
+    }
+  });
+}
+
+// Pair this device with the CURRENT host (same origin — no CORS) using its admin
+// password. Returns the issued token or throws a user-facing message. Mirrors the
+// shell's pairWithHost (www/index.html) but against window.location.origin.
+async function _appPairCurrentHost(password) {
+  const r = await fetch("/api/pair", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ admin_password: password, label: "iOS app" }),
+  });
+  if (r.status === 401) throw new Error("That host password was rejected.");
+  if (r.status === 503) throw new Error("This host has no admin password set, so it can’t pair.");
+  if (!r.ok) throw new Error("Pairing failed (HTTP " + r.status + ").");
+  const j = await r.json().catch(() => ({}));
+  if (!j.token) throw new Error("Pairing returned no token.");
+  return j.token;
 }
 
 // --- Per-file "Prep for Streaming" -------------------------------------------
@@ -11777,6 +11935,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.2.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.3.0</div>
 </body>
 </html>
