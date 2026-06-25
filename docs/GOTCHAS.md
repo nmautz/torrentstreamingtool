@@ -939,20 +939,40 @@ recompute on rotation — are the only inset source. Also set the WebView
 (`#030712`) so any momentary reflow gap is dark, never white. Rule of thumb: pick
 **one** inset owner — native `contentInset` *or* CSS `env()`, never both.
 
-### …but `env(safe-area-inset-top)` still under-reports in WKWebView — floor it to clear the Island (portrait only)
-Having made CSS `env()` the sole inset owner (above), don't assume it always returns
-the truth: on the navigated host dashboard the Capacitor WKWebView frequently
-resolves `env(safe-area-inset-top)` to **~0**, so `.safe-top` chrome (the fullscreen
-remote header, the top app bar) gets no padding and the status bar / Dynamic Island
-**overlaps** it. The launcher shell already worked around this with `max(env(...),
-24px)`. The dashboard does the same but device-correctly: `html.is-app .safe-top {
-padding-top: max(env(safe-area-inset-top), 59px) }` (and a `34px` floor for
-`.safe-bottom`'s home indicator) — a real env() value still wins, a missing one
-falls back to a value that clears the Island. **Scope the floor to `@media
-(orientation: portrait)`**: in landscape the top inset is legitimately 0, so an
-unconditional 59px band would shove the whole UI down — a regression. Trade-off:
-on a non-Island phone where env() *does* report (e.g. 47px), `max()` over-pads by
-~12px; a small dark band beats the status bar covering the controls.
+### …and `env(safe-area-inset-top)` is unreliable in WKWebView — in the app, PIN the inset to a constant, don't use live `env()` (portrait only)
+Having made CSS `env()` the sole inset owner (above), don't trust it inside the app —
+it's corruptible in **both** directions on the navigated host dashboard:
+- It frequently resolves `env(safe-area-inset-top)` to **~0**, so `.safe-top` chrome
+  (the fullscreen remote header, the top app bar) gets no padding and the status bar /
+  Dynamic Island **overlaps** it. (This is why a floor existed at all.)
+- After the **soft keyboard** (search box, profile/episode fields) it often
+  *over-reports* on dismiss and never restores — same family as the `dvh` keyboard
+  bug — so the old `max(env(...), 59px)` jumped *above* 59 and pushed the top chrome
+  (top app bar, **non-fullscreen player header**) visibly **down**, stuck until
+  relaunch. This presented as "the top UI drifts down after I use search."
+
+Because env() under-reports to ~0 in the steady state, the 59px floor was already the
+only thing showing — so the fix is to drop the live env() term entirely in the app and
+**pin a constant**: `html.is-app .safe-top { padding-top: 59px }` (and `34px` for
+`.safe-bottom`). Visually identical in normal use, but the corruptible dynamic value
+can no longer drift it. **Scope to `@media (orientation: portrait)`**: in landscape
+the top inset is legitimately 0, so an unconditional band would shove the UI down.
+Trade-off: 59pt is the Dynamic-Island inset (the largest current top inset); notch
+phones (~47pt) sit comfortably under it — a small dark band beats either the status
+bar covering the controls or the intermittent drift. (Browsers are untouched — they
+keep `.safe-top { padding-top: env(safe-area-inset-top) }`.)
+
+### In the app, lock the viewport (`maximum-scale=1, user-scalable=no`) — injected natively, not in the page
+iOS auto-zooms the WebView whenever an input with `font-size < 16px` gains focus (the
+PIN pad, the search box, profile/episode fields). The host dashboard's `<meta
+viewport>` pins `initial-scale=1` but **not** `maximum-scale`, so the focus zoom-in
+**sticks** with no working zoom-out — users were double-tapping to escape. WKWebView
+(unlike mobile Safari since iOS 10) **honors `user-scalable=no`**, so the fix is to
+force a locked viewport. Do it **natively** in `MainViewController.injectViewportLock()`
+(a `WKUserScript` at `.atDocumentEnd` for every navigation that rewrites the viewport
+meta to `maximum-scale=1.0, user-scalable=no, viewport-fit=cover`) — *not* in the page
+markup, so it also covers the **remote-served** dashboard, and only inside the app so
+browser users keep pinch-to-zoom. Same injection pattern as `injectCapacitorRuntime()`.
 
 ### Cross-origin data between the shell and the host dashboard must go through a native plugin — NOT `localStorage`
 The connect shell (`capacitor://localhost/index.html`) and the host dashboard
@@ -1136,6 +1156,28 @@ in their `.entitlements`, and the main app's `Info.plist` has
   Groups enabled** (AltStore/Sideloadly rewrite the group id consistently across
   app + extension, so the shared suite still resolves). With automatic signing in
   Xcode, confirm the App Group capability provisions for both targets once.
+
+### Live Activities outlive the app process — reconcile against `Activity.activities`, never trust an in-memory handle
+ActivityKit activities persist on the lock screen / Dynamic Island **across app
+relaunches** (and headless background launches). The `TVRemote` plugin originally kept
+its activity in a single in-memory `_activity` handle, which is `nil` after any
+relaunch — so `stop()` couldn't end the on-screen activity (it lingered stale after
+playback ended) and the next `start()` requested a **fresh** one, leaving the previous
+orphan live: "the Dynamic Island goes stale and stacks up." Fix: treat
+`Activity<TVRemoteAttributes>.activities` (the live system list) as the source of
+truth, not the cached handle —
+- the `activity` getter falls back to `.activities.first` when `_activity` is nil, so a
+  relaunch-orphaned activity is re-adopted instead of leaked;
+- `start()` adopts the existing one (and ends any extras) rather than stacking a
+  duplicate;
+- `stop()` ends **all** live activities, not just the tracked one;
+- the plugin's `load()` ends every stray on **cold launch** — nothing is playing yet,
+  so any leftover is from a session that ended while the app was backgrounded/killed
+  (the dashboard's `stop()` never reached it). The dashboard re-starts one via
+  `_tvRemoteSync()` if a session is genuinely active.
+
+Rule of thumb for any future ActivityKit usage: an in-memory `Activity` reference is a
+convenience cache, never the authority — always be able to recover from `.activities`.
 
 ### The remote dashboard CANNOT load offline — `downloads.html` is the offline entry point
 The whole dashboard UI (`static/index.html`) is **served by the host**. The shell

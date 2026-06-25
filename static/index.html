@@ -134,19 +134,28 @@
     .ep-prog-fill { height:100%; background:#22c55e; }
     .safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }
     .safe-top    { padding-top:    env(safe-area-inset-top,    0px); }
-    /* ── iOS app: safe-area fallback ───────────────────────────────────────────
-       In the Capacitor WKWebView env(safe-area-inset-top) can resolve to ~0 on the
-       navigated host dashboard even though the status bar / Dynamic Island overlaps
-       the web content (contentInset is "never", so the web view owns the full
-       viewport-fit=cover viewport). When env() under-reports, the status bar covers
-       our `.safe-top` chrome — the fullscreen remote header ("Close / Now Playing /
-       Night") and the top app bar. Force a minimum that clears the Island; `max()`
-       keeps the exact env() value whenever WebKit does report one. Scoped to
-       PORTRAIT only: in landscape the top inset is legitimately 0 and a forced band
-       would push the whole UI down. Same idea for the bottom home-indicator inset. */
+    /* ── iOS app: safe-area inset — PINNED to a constant, do NOT use live env() ──
+       In the Capacitor WKWebView env(safe-area-inset-top) is unreliable on the
+       navigated host dashboard (contentInset is "never", so the web view owns the
+       full viewport-fit=cover viewport). Two failure modes, same family as the
+       `dvh` keyboard bug above:
+         • Normally it UNDER-reports to ~0, so the status bar / Dynamic Island
+           would cover our `.safe-top` chrome (top app bar, non-fullscreen player
+           header, fullscreen remote header) — which is why a floor existed.
+         • After the soft keyboard (the search box, profile/episode fields…) it
+           often OVER-reports on dismiss and never restores, so `max(env, 59)`
+           jumped above 59 and pushed the top chrome visibly DOWN — intermittently,
+           "after using search" — and stuck there until relaunch.
+       Since env() under-reports to ~0 in the steady state, the 59/34 floors were
+       already the only thing showing; pinning them as constants changes nothing
+       visually but removes the corruptible dynamic term, killing the shift. 59pt
+       clears the Dynamic Island (the largest current top inset; notch devices are
+       smaller and sit comfortably under it); 34pt clears the home indicator.
+       Scoped to PORTRAIT only: in landscape the top inset is legitimately 0 and a
+       forced band would push the whole UI down. */
     @media (orientation: portrait) {
-      html.is-app .safe-top    { padding-top:    max(env(safe-area-inset-top,    0px), 59px); }
-      html.is-app .safe-bottom { padding-bottom: max(env(safe-area-inset-bottom, 0px), 34px); }
+      html.is-app .safe-top    { padding-top:    59px; }
+      html.is-app .safe-bottom { padding-bottom: 34px; }
     }
     /* Library card action row — keep every primary button the same height and on
        a single line (no 2-line "☰ / Episodes" wrap) so the row reads as a clean
@@ -4248,7 +4257,11 @@ function openPinPrompt(){
   document.getElementById("pinPromptError").classList.add("hidden");
   updatePinDots();
   document.getElementById("pinPromptModal").classList.remove("hidden");
-  setTimeout(()=>document.getElementById("pinPromptInput").focus(),50);
+  // In the iOS app the modal has its own on-screen numpad (pinDigit/pinBackspace
+  // write straight to the hidden input), so focusing the input would only pop the
+  // native numeric keyboard over our pad. Only focus in a real browser, where the
+  // hardware/soft keyboard is the actual input method.
+  if(!isApp) setTimeout(()=>document.getElementById("pinPromptInput").focus(),50);
 }
 function closePinPrompt(){
   document.getElementById("pinPromptModal").classList.add("hidden");
@@ -11764,6 +11777,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.1.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.1.1</div>
 </body>
 </html>

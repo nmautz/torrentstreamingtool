@@ -25,6 +25,34 @@ class MainViewController: CAPBridgeViewController {
         bridge?.registerPluginInstance(OfflineStore())
         bridge?.registerPluginInstance(TVRemote())
         injectCapacitorRuntime()
+        injectViewportLock()
+    }
+
+    // Lock the viewport so the WebView never zooms. iOS auto-zooms when an input
+    // with font-size < 16px gets focus (the PIN pad, the search box, the profile/
+    // episode fields…), and because the host dashboard's viewport doesn't pin
+    // `maximum-scale`, the zoom-in sticks with no reliable way to zoom back out —
+    // users were double-tapping to escape. WKWebView (unlike mobile Safari) honors
+    // `user-scalable=no`, so forcing it kills both the focus auto-zoom and pinch
+    // zoom. Injected natively (not in the page markup) so it applies to the
+    // remote-served dashboard too, and only inside the app — browser users keep
+    // pinch-to-zoom. Runs at document-end and on every navigation; re-asserts after
+    // load in case the page (re)writes its own viewport meta.
+    private func injectViewportLock() {
+        guard let ucc = bridge?.webView?.configuration.userContentController else { return }
+        let js = """
+        (function(){
+          function lock(){
+            var c='width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover';
+            var m=document.querySelector('meta[name=viewport]');
+            if(!m){ m=document.createElement('meta'); m.setAttribute('name','viewport'); (document.head||document.documentElement).appendChild(m); }
+            if(m.getAttribute('content')!==c) m.setAttribute('content',c);
+          }
+          lock();
+          document.addEventListener('DOMContentLoaded', lock);
+        })();
+        """
+        ucc.addUserScript(WKUserScript(source: js, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
     }
 
     // The native bridge (native-bridge.js) is injected into every page including
