@@ -444,7 +444,7 @@
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
         <div class="min-w-0">
           <h2 class="text-sm font-black uppercase tracking-wide">Cleanup</h2>
-          <p class="text-xs text-gray-500 mt-0.5">Reconciles qBittorrent, the library, and the download folder (<code class="font-mono text-gray-400" id="cleanDir">…</code>). Recover or delete broken/orphan torrents, library items whose files vanished, and stray files no torrent owns.</p>
+          <p class="text-xs text-gray-500 mt-0.5">Reconciles qBittorrent, the library, and every configured download/library folder (<code class="font-mono text-gray-400" id="cleanDir">…</code>). Recover or delete broken/orphan torrents, library items whose files vanished, and stray files no torrent owns. StreamLink's own cache folders are never flagged.</p>
         </div>
         <button id="cleanRefreshBtn" onclick="loadCleanup(true)"
           class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 hover:text-white text-gray-400 transition-colors disabled:opacity-50">
@@ -1526,6 +1526,35 @@
       <button onclick="submitPin(this)"
         class="flex-1 bg-indigo-600 hover:bg-indigo-500 py-4 text-sm font-black uppercase tracking-wide transition-colors">
         Save
+      </button>
+    </div>
+  </div>
+</div>
+
+<!-- Move series files to a new location -->
+<div id="moveModal" class="hidden fixed inset-0 z-50 bg-black/60 flex items-end sm:items-center justify-center sm:px-4">
+  <div class="bg-gray-900 w-full sm:max-w-md border-t-[3px] border-indigo-600">
+    <div class="px-5 pt-5 pb-4 border-b border-gray-800">
+      <h2 class="text-lg font-black uppercase tracking-wide">Move Files</h2>
+      <p class="text-xs text-gray-500 mt-0.5" id="moveModalSub">Relocate this series to a new folder.</p>
+    </div>
+    <div class="px-5 py-4 space-y-3">
+      <div id="movePathChips" class="flex flex-wrap gap-2"></div>
+      <input id="moveDestInput" type="text" placeholder="/path/to/destination/folder"
+        class="w-full bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500
+               px-3 py-3 text-sm font-mono focus:outline-none transition-colors"
+        onkeydown="if(event.key==='Enter') submitMove(document.getElementById('moveSubmitBtn'))"/>
+      <p class="text-[11px] text-gray-600">Torrent-backed items keep seeding from the new path (qBittorrent moves the data). The on-device cache rides along — no re-encoding.</p>
+      <div id="moveError" class="hidden text-red-400 text-xs font-bold uppercase tracking-wide"></div>
+    </div>
+    <div class="px-4 pb-4 flex gap-2">
+      <button onclick="closeMoveModal()"
+        class="flex-1 bg-gray-800 hover:bg-gray-700 py-4 text-sm font-bold uppercase tracking-wide transition-colors">
+        Cancel
+      </button>
+      <button id="moveSubmitBtn" onclick="submitMove(this)"
+        class="flex-1 bg-indigo-600 hover:bg-indigo-500 py-4 text-sm font-black uppercase tracking-wide transition-colors">
+        Move
       </button>
     </div>
   </div>
@@ -4819,13 +4848,19 @@ async function loadContentList(){
           · ${escHtml(it.size_human)} · <span class="uppercase">${escHtml(it.status)}</span>
         </div>
       </div>
-      <button onclick="toggleLock('${escHtml(it.id)}',${!it.admin_only},this)"
-        class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
-               ${it.admin_only
-                 ? 'bg-red-950 border-red-800 text-red-400 hover:bg-red-900'
-                 : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white'}">
-        ${it.admin_only ? '🔒 Admin Only' : 'Unlocked'}
-      </button>
+      <div class="flex-shrink-0 flex gap-2">
+        <button onclick="openMoveModal('${escHtml(it.id)}', ${JSON.stringify(it.series || it.title).replace(/"/g,'&quot;')})"
+          class="text-xs font-bold uppercase tracking-wide px-3 py-2 border bg-gray-800 border-gray-700 text-gray-400 hover:text-white transition-colors">
+          📁 Move
+        </button>
+        <button onclick="toggleLock('${escHtml(it.id)}',${!it.admin_only},this)"
+          class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+                 ${it.admin_only
+                   ? 'bg-red-950 border-red-800 text-red-400 hover:bg-red-900'
+                   : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white'}">
+          ${it.admin_only ? '🔒 Admin Only' : 'Unlocked'}
+        </button>
+      </div>
     </div>`).join("");
 }
 
@@ -4842,6 +4877,70 @@ async function toggleLock(itemId, newValue, btn){
   } else {
     showToast("Failed to update.", true);
   }
+}
+
+// ── Move series files ─────────────────────────────────────────────────────────
+let moveTarget = null;   // { id, label }
+
+async function openMoveModal(itemId, label){
+  moveTarget = { id: itemId, label: label || "" };
+  document.getElementById("moveModalSub").textContent =
+    `Relocate “${label || 'this item'}” to a new folder.`;
+  document.getElementById("moveDestInput").value = "";
+  document.getElementById("moveError").classList.add("hidden");
+  // Offer the configured library paths as one-tap destinations.
+  const chips = document.getElementById("movePathChips");
+  chips.innerHTML = "";
+  try{
+    const r = await fetch("/api/settings/library-paths", {headers: authHeader()});
+    if(r.ok){
+      const {paths} = await r.json();
+      chips.innerHTML = (paths || []).map(p=>`
+        <button type="button" onclick="document.getElementById('moveDestInput').value=${JSON.stringify(p.path).replace(/"/g,'&quot;')}"
+          class="text-[11px] font-mono px-2 py-1 border border-gray-700 bg-gray-800 text-gray-400 hover:text-white transition-colors">
+          ${escHtml(p.label || p.path)}
+        </button>`).join("");
+    }
+  }catch(e){}
+  document.getElementById("moveModal").classList.remove("hidden");
+  setTimeout(()=>document.getElementById("moveDestInput").focus(), 50);
+}
+
+function closeMoveModal(){
+  moveTarget = null;
+  document.getElementById("moveModal").classList.add("hidden");
+}
+
+async function submitMove(btn){
+  if(!moveTarget) return;
+  const dest = document.getElementById("moveDestInput").value.trim();
+  const errEl = document.getElementById("moveError");
+  errEl.classList.add("hidden");
+  if(!dest){
+    errEl.textContent = "Enter a destination folder.";
+    errEl.classList.remove("hidden");
+    return;
+  }
+  await withInflight("move_series", btn, async () => {
+    const r = await fetch(`/api/library/${moveTarget.id}/move`,{
+      method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
+      body: JSON.stringify({dest_dir: dest}),
+    });
+    const d = await r.json().catch(()=>({}));
+    if(!r.ok){
+      errEl.textContent = d.detail || "Move failed.";
+      errEl.classList.remove("hidden");
+      return;
+    }
+    closeMoveModal();
+    const warns = [];
+    if((d.qbit_errors||[]).length) warns.push(`${d.qbit_errors.length} torrent(s) not relocated`);
+    if((d.file_errors||[]).length) warns.push(`${d.file_errors.length} file error(s)`);
+    showToast(warns.length
+      ? `Moved with issues: ${warns.join(", ")}.`
+      : `Moved ${d.files_moved} file(s) to ${d.dest_dir}.`, warns.length>0);
+    loadContentList();
+  });
 }
 
 // ── Offline Cache ─────────────────────────────────────────────────────────────
@@ -5210,7 +5309,9 @@ async function loadCleanup(force){
   }
   const d = await r.json();
   _cleanData = d;
-  document.getElementById("cleanDir").textContent = d.download_path || "—";
+  document.getElementById("cleanDir").textContent =
+    (d.download_paths && d.download_paths.length) ? d.download_paths.join("  ·  ")
+    : (d.download_path || "—");
   document.getElementById("cleanGeneratedAt").textContent =
     d.generated_at ? `As of ${_fmtAgo(d.generated_at)} · Refresh to re-check` : " ";
   document.getElementById("cleanQbitChip").classList.toggle("hidden", d.qbit_ok !== false);

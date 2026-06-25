@@ -521,7 +521,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "6.0.0-preview.6.0.0"
+UI_VERSION = "7.0.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 # Retains references to fire-and-forget background tasks so the event loop's weak
@@ -1155,6 +1155,15 @@ async def qbit_recheck(h: str) -> None:
     against the .torrent hashes). qBit re-fetches any piece that fails. Operates on
     whole torrents — there is no per-file recheck in the qBit API."""
     await qreq("POST", "/api/v2/torrents/recheck", data={"hashes": h})
+
+
+async def qbit_set_location(h: str, location: str) -> bool:
+    """Relocate a torrent's content to `location` and keep seeding from there.
+    qBit physically moves the existing data and re-points its save path. Returns
+    True on a 2xx. (qBit returns 409 if the path can't be created/written.)"""
+    r = await qreq("POST", "/api/v2/torrents/setLocation",
+                   data={"hashes": h, "location": location})
+    return bool(r is not None and 200 <= r.status_code < 300)
 
 
 async def qbit_pause(h: str) -> None:
@@ -3629,12 +3638,13 @@ async def cache_autopurge_loop() -> None:
                     for o in inv["orphans"]:
                         if _offline_cache_path_active(o["cache_key"]):
                             continue
-                        b = await asyncio.to_thread(_delete_cache_artifacts, o["cache_key"])
+                        b = await asyncio.to_thread(_delete_cache_artifacts, o["cache_key"], o.get("root"))
                         if b > 0:
                             deleted += 1
                             freed += b
                     if deleted:
                         _invalidate_offline_cache_inventory()
+                        _invalidate_bundle_index()
                         state.cache_autopurge_last = {
                             "at":                 time.time(),
                             "deleted":            deleted,
@@ -5528,6 +5538,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # at "No active stream" until someone presses Stop.
     await _sync_state_from_vlc()
 
+    # Health-check + repair the offline-cache layout: pre-v8 installs kept every
+    # HLS bundle in a central .offline_cache/; v8 stores each beside its media so
+    # it travels with the series. Relocate any old bundles (no re-encode) BEFORE
+    # the prep loops spawn, so a bundle that's merely being moved is never seen as
+    # "missing" and re-queued. Also builds the bundle serving index.
+    await _migrate_offline_cache_layout()
+
     guard       = asyncio.create_task(vpn_guard())
     broadcaster = asyncio.create_task(stat_broadcaster())
     dl_monitor  = asyncio.create_task(library_download_monitor())
@@ -5875,6 +5892,10 @@ class MetadataRefreshReq(BaseModel):
 
 class RenameReq(BaseModel):
     name: str                         # new series name (or movie title for one-offs)
+
+
+class MoveReq(BaseModel):
+    dest_dir: str                     # destination directory for the series' files
 
 
 class ProfilePinReq(BaseModel):
@@ -6258,6 +6279,127 @@ async def rename_library_item(item_id: str, req: RenameReq) -> JSONResponse:
     })
 
 
+def _move_series_files_sync(plan: list[dict]) -> list[dict]:
+    """Carry out the on-disk part of a series move (run in a worker thread).
+
+    `plan` is a list of {old_path, new_path, key, is_torrent} per file. For
+    non-torrent files we move the media ourselves; for torrent files qBit has
+    already been asked to relocate the content, so we only move our co-located
+    `.streamlink_cache/<key>` sidecar (qBit doesn't know about it). Returns the
+    same list annotated with `moved_file` / `moved_cache` / `error`."""
+    out: list[dict] = []
+    for f in plan:
+        old_path = Path(f["old_path"])
+        new_path = Path(f["new_path"])
+        rec = dict(f, moved_file=False, moved_cache=False, error="")
+        try:
+            new_path.parent.mkdir(parents=True, exist_ok=True)
+            if not f["is_torrent"]:
+                # We own the move for uploaded/non-torrent files.
+                if old_path.exists() and old_path != new_path:
+                    shutil.move(str(old_path), str(new_path))
+                rec["moved_file"] = True
+            # Move the co-located HLS bundle alongside (key is move-stable).
+            key = f["key"]
+            if key:
+                old_cache = old_path.parent / OFFLINE_CACHE_DIRNAME / key
+                new_cache = new_path.parent / OFFLINE_CACHE_DIRNAME / key
+                if old_cache.exists() and old_cache != new_cache and not new_cache.exists():
+                    new_cache.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.move(str(old_cache), str(new_cache))
+                    rec["moved_cache"] = True
+        except Exception as exc:
+            rec["error"] = str(exc)
+        out.append(rec)
+    return out
+
+
+@app.post("/api/library/{item_id}/move")
+async def move_library_item(item_id: str, req: MoveReq, request: Request) -> JSONResponse:
+    """Admin: relocate a whole series (or a movie/one-off) to a new directory.
+
+    Torrent-backed items are moved via qBittorrent's `setLocation` so they keep
+    seeding from the new path; non-torrent files are moved directly. Each file's
+    co-located `.streamlink_cache/<key>` bundle rides along (the key is
+    move-stable), so on-device playback keeps working with no re-encode. The
+    library's stored paths are rewritten to the destination.
+
+    Note: qBit's content move is asynchronous for large torrents — paths are
+    updated immediately and the download scheduler / validator reconcile once the
+    move finishes."""
+    _require_admin(request)
+    dest_dir = (req.dest_dir or "").strip()
+    if not dest_dir:
+        raise HTTPException(400, "Destination directory cannot be empty.")
+    dest = Path(dest_dir)
+    if not dest.is_dir():
+        raise HTTPException(400, f"Destination is not an existing directory: {dest_dir}")
+
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    series = (item.get("series") or "").strip()
+    group = [it for it in lib["items"]
+             if (series and (it.get("series") or "").strip() == series) or it["id"] == item_id]
+
+    plan: list[dict] = []          # per-file disk move plan
+    path_updates: list[tuple[dict, str, str]] = []   # (file_dict, old_path, new_path)
+    qbit_errors: list[str] = []
+    for it in group:
+        h = (it.get("torrent_hash") or "").lower()
+        is_torrent = bool(h)
+        old_save: Optional[Path] = None
+        if is_torrent:
+            info = await qbit_info(h)
+            if info is not None:
+                old_save = Path(info.get("save_path", settings.qbit_download_path))
+            ok = await qbit_set_location(h, str(dest))
+            if not ok:
+                qbit_errors.append(it.get("title", "") or h)
+                continue   # leave this item untouched — don't desync the library
+        for f in it.get("files", []):
+            old_path = Path(f.get("path", ""))
+            # Preserve the torrent's internal layout under the new root when we can
+            # work out the old save path; otherwise fall back to a flat move.
+            new_path = dest / old_path.name
+            if is_torrent and old_save is not None:
+                try:
+                    new_path = dest / old_path.relative_to(old_save)
+                except ValueError:
+                    new_path = dest / old_path.name
+            key = _offline_cache_key_for(f.get("name", "") or old_path.name,
+                                         int(f.get("size_bytes", 0) or 0))
+            plan.append({"old_path": str(old_path), "new_path": str(new_path),
+                         "key": key, "is_torrent": is_torrent})
+            path_updates.append((f, str(old_path), str(new_path)))
+
+    if not plan and qbit_errors:
+        raise HTTPException(502, f"qBittorrent could not relocate: {', '.join(qbit_errors)}")
+
+    results = await asyncio.to_thread(_move_series_files_sync, plan)
+    file_errors = [r["error"] for r in results if r.get("error")]
+
+    # Rewrite stored paths to the destination (qBit-managed content lands there
+    # asynchronously; non-torrent moves are already done above).
+    for f, _old, new_path in path_updates:
+        f["path"] = new_path
+    await put_library(lib)
+    _invalidate_offline_cache_inventory()
+    _invalidate_cleanup_inventory()
+    await _rebuild_bundle_index()
+    await broadcast("library_update", {"item_id": item_id})
+
+    return JSONResponse({
+        "ok": True,
+        "dest_dir": str(dest),
+        "items_moved": len(group),
+        "files_moved": len(plan),
+        "qbit_errors": qbit_errors,
+        "file_errors": file_errors,
+    })
+
+
 @app.post("/api/library/download")
 async def library_download(req: DownloadReq) -> JSONResponse:
     if not state.vpn_secure:
@@ -6489,6 +6631,14 @@ async def delete_item_files(item_id: str, req: DeleteFilesReq) -> JSONResponse:
     deleted = 0
     for p in targets:
         src = Path(p)
+        # Resolve the co-located bundle dir BEFORE unlinking — its key derives from
+        # the file's name+size, which we can't read once the file is gone.
+        bundle_dir: Optional[Path] = None
+        try:
+            if src.exists():
+                bundle_dir = _offline_cache_dir(src)
+        except OSError:
+            pass
         try:
             existed = src.exists()
             await asyncio.to_thread(src.unlink, missing_ok=True)
@@ -6498,9 +6648,8 @@ async def delete_item_files(item_id: str, req: DeleteFilesReq) -> JSONResponse:
         except OSError:
             pass
         try:
-            out_dir = OFFLINE_CACHE / _offline_cache_key(src)
-            if out_dir.exists():
-                await asyncio.to_thread(shutil.rmtree, out_dir, ignore_errors=True)
+            if bundle_dir and bundle_dir.exists():
+                await asyncio.to_thread(shutil.rmtree, bundle_dir, ignore_errors=True)
         except OSError:
             pass
 
@@ -6613,7 +6762,7 @@ async def recheck_files(item_id: str, req: RecheckReq) -> JSONResponse:
             src = Path(path)
             try:
                 if src.exists():
-                    out_dir = OFFLINE_CACHE / _offline_cache_key(src)
+                    out_dir = _offline_cache_dir(src)
                     if out_dir.exists():
                         await asyncio.to_thread(shutil.rmtree, out_dir, ignore_errors=True)
                         purged += 1
@@ -11208,8 +11357,9 @@ async def _purge_ondemand_bundles(item_id: str) -> None:
         for f in it_inv["files"]:
             if _offline_cache_path_active(f["cache_key"]):
                 continue
-            await asyncio.to_thread(_delete_cache_artifacts, f["cache_key"])
+            await asyncio.to_thread(_delete_cache_artifacts, f["cache_key"], f.get("root"))
         _invalidate_offline_cache_inventory()
+        _invalidate_bundle_index()
     except Exception:
         log.exception("ondemand-only background bundle purge failed for %s", item_id)
 
@@ -12414,7 +12564,14 @@ async def admin_set_background_enabled(request: Request, req: BackgroundEnabledR
 # stays for backwards compatibility; the user-facing UX is stream-to-device.
 # See docs/STREAMING.md for the full design.
 
+# Legacy central cache root. As of v8 each file's HLS bundle lives *beside the
+# media* in `<file_dir>/.streamlink_cache/<key>/` (so it travels with the series
+# on a move). This central dir is kept only so the startup migration
+# (`_migrate_offline_cache_layout`) can find and relocate pre-v8 bundles, and so
+# the cache inventory still surfaces any stragglers as orphans to purge.
 OFFLINE_CACHE = Path(__file__).parent / ".offline_cache"
+# Per-media-file bundle directory name. Lives inside each source file's folder.
+OFFLINE_CACHE_DIRNAME = ".streamlink_cache"
 # Bump this when offline-output requirements change (codec rules, ffmpeg args,
 # cache layout) so previously-cached bundles built by older logic get rebuilt
 # on next request. v3-hls switched single-MP4 output to per-source HLS bundles;
@@ -12425,8 +12582,13 @@ OFFLINE_CACHE = Path(__file__).parent / ".offline_cache"
 # the bundle on Windows (backslash playlist paths otherwise misdirect it → the
 # player 404s init_video.mp4 and stalls with fragLoadError); v7-hls-abr emits
 # multiple video variants (Original + 720p + 480p, capped at source height) so
-# the player can offer Auto/manual quality switching.
-OFFLINE_CACHE_VERSION = "v7-hls-abr"
+# the player can offer Auto/manual quality switching; v8-colocated stores each
+# bundle beside its source file and keys it path/mtime-independently (name|size)
+# so a series move (even cross-device) never invalidates the cache.
+OFFLINE_CACHE_VERSION = "v8-colocated"
+# The pre-v8 key formula, kept ONLY so the startup migration can locate old
+# central bundles by their original `<version>|<abs_path>|<mtime>|<size>` hash.
+_LEGACY_OFFLINE_CACHE_VERSION = "v7-hls-abr"
 
 # Stream-to-device (HLS prep) is unavailable on macOS hosts. ffmpeg/ffprobe run
 # as children of the (non-GUI) server process, and macOS TCC blocks them from
@@ -13110,9 +13272,176 @@ async def _sub_to_vtt(path: Path) -> str:
 
 
 def _offline_cache_key(src: Path) -> str:
+    """Path- and mtime-independent bundle key: `version | filename | size`.
+
+    Dropping the absolute path and mtime makes the key stable across a move (even
+    a cross-device one, where mtime can change), so a bundle co-located with its
+    source file stays valid wherever the file goes. Two files can't share a name
+    inside one directory, and identical name+size in *different* directories land
+    in different `.streamlink_cache/` dirs, so there's no collision. mtime is safe
+    to omit because every in-place rewrite path (repair / compress) already purges
+    the bundle explicitly — we never relied on mtime to notice a rewrite.
+    """
     st = src.stat()
-    raw = f"{OFFLINE_CACHE_VERSION}|{src}|{int(st.st_mtime)}|{st.st_size}"
+    return _offline_cache_key_for(src.name, st.st_size)
+
+
+def _offline_cache_key_for(name: str, size: int) -> str:
+    """The bundle key from a filename + byte size alone — lets the move operation
+    derive a file's key from its library metadata without touching disk (the file
+    may be mid-move by qBittorrent)."""
+    raw = f"{OFFLINE_CACHE_VERSION}|{name}|{size}"
     return hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+
+def _offline_cache_dir(src: Path) -> Path:
+    """Where this source file's HLS bundle lives: a hidden cache folder beside the
+    media file. The single source of truth for bundle location."""
+    src = Path(src)
+    return src.parent / OFFLINE_CACHE_DIRNAME / _offline_cache_key(src)
+
+
+def _offline_cache_key_legacy(src: Path) -> str:
+    """Reproduce the pre-v8 central-cache key (`version | abs_path | mtime | size`).
+    Used ONLY by `_migrate_offline_cache_layout` to find old central bundles."""
+    st = src.stat()
+    raw = f"{_LEGACY_OFFLINE_CACHE_VERSION}|{src}|{int(st.st_mtime)}|{st.st_size}"
+    return hashlib.sha256(raw.encode()).hexdigest()[:24]
+
+
+# ── Bundle serving index ─────────────────────────────────────────────────────
+# Bundles now live beside the media (`<file_dir>/.streamlink_cache/<key>/`), so
+# the serving endpoint can no longer locate a bundle from its `<key>` alone the
+# way `OFFLINE_CACHE / key` used to. `_bundle_index` maps key → bundle dir; it's
+# the O(1) lookup on the segment hot path. Discovery is by *directory name* (the
+# subdir name IS the key) so we never have to stat the source file to rebuild it.
+_bundle_index: "dict[str, Path]" = {}
+_bundle_index_built = False
+
+
+def _invalidate_bundle_index() -> None:
+    """Force the next lookup to rediscover (call after move / migrate / delete)."""
+    global _bundle_index_built
+    _bundle_index_built = False
+
+
+def _bundle_index_register(key: str, bundle_dir: Path) -> None:
+    """Point a freshly-built/located bundle's key at its dir without a full rescan."""
+    if key and _CACHE_KEY_RE.match(key):
+        _bundle_index[key] = Path(bundle_dir)
+
+
+def _bundle_cache_dirs_sync(lib: dict) -> set[Path]:
+    """Every `.streamlink_cache` dir that could hold a bundle: one per distinct
+    parent directory of a library file. Cheap — just library-path arithmetic."""
+    dirs: set[Path] = set()
+    for it in lib.get("items", []):
+        for f in it.get("files", []):
+            p = f.get("path", "")
+            if p:
+                dirs.add(Path(p).parent / OFFLINE_CACHE_DIRNAME)
+    return dirs
+
+
+def _rebuild_bundle_index_sync(lib: dict) -> dict[str, Path]:
+    """Walk every co-located `.streamlink_cache/` (plus the legacy central
+    OFFLINE_CACHE for un-migrated stragglers) and map each `<key>` subdir → path.
+    Synchronous; call via asyncio.to_thread."""
+    idx: dict[str, Path] = {}
+    roots = _bundle_cache_dirs_sync(lib)
+    if OFFLINE_CACHE.exists():
+        roots.add(OFFLINE_CACHE)
+    for root in roots:
+        try:
+            children = list(root.iterdir()) if root.is_dir() else []
+        except OSError:
+            continue
+        for sub in children:
+            if sub.is_dir() and _CACHE_KEY_RE.match(sub.name):
+                idx[sub.name] = sub
+    return idx
+
+
+async def _rebuild_bundle_index() -> None:
+    global _bundle_index, _bundle_index_built
+    lib = await get_library()
+    idx = await asyncio.to_thread(_rebuild_bundle_index_sync, lib)
+    _bundle_index = idx
+    _bundle_index_built = True
+
+
+async def _resolve_bundle_dir(key: str) -> Optional[Path]:
+    """Locate a bundle dir by key, rebuilding the index once on a cold miss."""
+    d = _bundle_index.get(key)
+    if d is not None and d.is_dir():
+        return d
+    if not _bundle_index_built or d is not None:
+        # Either never built, or a stale entry points at a vanished dir — rescan.
+        await _rebuild_bundle_index()
+        d = _bundle_index.get(key)
+    return d if (d is not None and d.is_dir()) else None
+
+
+def _migrate_offline_cache_layout_sync(items: list[dict]) -> tuple[int, int, int]:
+    """Relocate pre-v8 central `.offline_cache/<legacy_key>/` bundles to their
+    new home beside the media (`<file_dir>/.streamlink_cache/<new_key>/`).
+
+    Returns (moved, skipped, failed). Pure file moves — **no re-encode**, so
+    already-processed content is never rebuilt. Idempotent: a bundle already
+    co-located is skipped, so a re-run only finishes leftovers. Best-effort per
+    file; one failure never aborts the rest. Synchronous — call via to_thread."""
+    moved = skipped = failed = 0
+    if not OFFLINE_CACHE.exists():
+        return (0, 0, 0)
+    for it in items:
+        for fmeta in it.get("files", []):
+            p = fmeta.get("path", "")
+            if not p:
+                continue
+            src = Path(p)
+            try:
+                if not src.exists():
+                    continue
+                legacy_key = _offline_cache_key_legacy(src)
+            except OSError:
+                continue
+            old_dir = OFFLINE_CACHE / legacy_key
+            # Only migrate *complete* bundles — a partial would just rebuild anyway.
+            if not (old_dir / "master.m3u8").exists():
+                continue
+            new_dir = _offline_cache_dir(src)
+            if new_dir.exists():
+                skipped += 1
+                continue
+            try:
+                new_dir.parent.mkdir(parents=True, exist_ok=True)
+                shutil.move(str(old_dir), str(new_dir))
+                moved += 1
+            except Exception:
+                failed += 1
+    return (moved, skipped, failed)
+
+
+async def _migrate_offline_cache_layout() -> None:
+    """Startup health-check: bring an older (centrally-cached) install up to the
+    v8 co-located layout without reprocessing anything. Runs BEFORE the background
+    tasks spawn, so nothing observes a half-migrated state and queues a rebuild for
+    a bundle that's merely being relocated. Rebuilds the serving index afterward."""
+    if not OFFLINE_CACHE.exists():
+        await _rebuild_bundle_index()
+        return
+    try:
+        lib = await get_library()
+        moved, skipped, failed = await asyncio.to_thread(
+            _migrate_offline_cache_layout_sync, lib.get("items", []))
+        if moved or failed:
+            hls_log.info(
+                "offline-cache migration: relocated %d bundle(s) beside their media "
+                "(%d already co-located, %d failed)", moved, skipped, failed)
+    except Exception as exc:
+        hls_log.warning("offline-cache migration skipped: %s", exc)
+    finally:
+        await _rebuild_bundle_index()
 
 
 def _build_hls_ffmpeg_args(
@@ -13388,8 +13717,9 @@ async def _prep_validate_repair(job: dict, src: Path) -> str:
 
 async def _run_offline_job(job_id: str) -> None:
     """Build an HLS bundle for one source file. The output is a directory
-    keyed by `_offline_cache_key(src)` under OFFLINE_CACHE containing the
-    master playlist, per-rendition playlists, segments, and meta.json.
+    keyed by `_offline_cache_key(src)` inside the source file's co-located
+    `.streamlink_cache/` (see `_offline_cache_dir`), containing the master
+    playlist, per-rendition playlists, segments, and meta.json.
     """
     job = _offline_jobs.get(job_id)
     if not job:
@@ -13507,11 +13837,11 @@ async def _run_offline_job(job_id: str) -> None:
         if prep_validate_mode == "before":
             res = await _prep_validate_repair(job, src)
             if res == "repaired":
-                # The repair rewrote the file, so its cache key (path|mtime|size)
-                # changed. out_dir/tmp_dir were keyed off the OLD source, leaving
-                # the bundle we'd build orphaned — re-point them at the healed
-                # file's key, and short-circuit if that bundle already exists.
-                new_out = OFFLINE_CACHE / _offline_cache_key(src)
+                # The repair rewrote the file, so its cache key (name|size) changed.
+                # out_dir/tmp_dir were keyed off the OLD source, leaving the bundle
+                # we'd build orphaned — re-point them at the healed file's key, and
+                # short-circuit if that bundle already exists.
+                new_out = _offline_cache_dir(src)
                 if new_out != out_dir:
                     out_dir   = new_out
                     job["out"] = str(out_dir)
@@ -13863,6 +14193,9 @@ async def _run_offline_job(job_id: str) -> None:
             if out_dir.exists():
                 await asyncio.to_thread(shutil.rmtree, out_dir, ignore_errors=True)
             tmp_dir.rename(out_dir)
+            # The bundle now lives beside the source — make the serving index aware
+            # of it so the player can fetch segments by key without a rescan.
+            _bundle_index_register(out_dir.name, out_dir)
 
             job["progress"] = 1.0
             job["status"]   = "done"
@@ -14133,7 +14466,7 @@ def _start_interactive_prep_job(src: Path, item_id: str) -> Optional[str]:
     by `_pause_prep` / `_activity_kick`, and they preempt any in-flight bulk encode
     so play-driven prep takes the slot immediately. Mirrors the queue-jumping
     branch of `offline_prepare` without an HTTP request."""
-    out_dir = OFFLINE_CACHE / _offline_cache_key(src)
+    out_dir = _offline_cache_dir(src)
     if (out_dir / "master.m3u8").exists():
         return None
     existing = next(
@@ -14181,7 +14514,7 @@ def _start_admin_prep_job(src: Path, item_id: str) -> Optional[str]:
     `queue:"admin"` so the admin Stop control (and only it) can halt the batch."""
     if item_id and item_id in state.ondemand_only_items:
         return None   # on-demand-only items never get a permanent bundle
-    out_dir = OFFLINE_CACHE / _offline_cache_key(src)
+    out_dir = _offline_cache_dir(src)
     if (out_dir / "master.m3u8").exists():
         return None
     existing = next(
@@ -14748,7 +15081,7 @@ async def _repair_one_file(ffmpeg: str, path: str, reencode: bool, *,
     try:
         if not src.exists():
             return "failed", "File is no longer on disk."
-        old_key = _offline_cache_key(src)        # stash BEFORE we change mtime/size
+        old_bundle = _offline_cache_dir(src)     # stash BEFORE we change name/size
     except OSError as e:
         return "failed", f"Cannot access file: {e}"
 
@@ -14829,10 +15162,10 @@ async def _repair_one_file(ffmpeg: str, path: str, reencode: bool, *,
             _safe_unlink(tmp)
             return "failed", f"Could not replace the original file: {e}"
         try:
-            old_dir = OFFLINE_CACHE / old_key
-            if old_dir.exists():
-                await asyncio.to_thread(shutil.rmtree, old_dir, ignore_errors=True)
+            if old_bundle.exists():
+                await asyncio.to_thread(shutil.rmtree, old_bundle, ignore_errors=True)
             _invalidate_offline_cache_inventory()
+            _invalidate_bundle_index()
         except Exception:
             pass
         return "repaired", method
@@ -15050,7 +15383,7 @@ async def _compress_one_file_inner(ffmpeg: str, path: str, *, crf: int, codec: s
         if not src.exists():
             return "failed", "File is no longer on disk.", 0, 0
         before = src.stat().st_size
-        old_key = _offline_cache_key(src)        # stash BEFORE we change mtime/size
+        old_bundle = _offline_cache_dir(src)     # stash BEFORE we change name/size
     except OSError as e:
         return "failed", f"Cannot access file: {e}", 0, 0
 
@@ -15149,10 +15482,10 @@ async def _compress_one_file_inner(ffmpeg: str, path: str, *, crf: int, codec: s
         _safe_unlink(tmp)
         return "failed", f"Could not replace the original file: {replace_err}", before, before
     try:
-        old_dir = OFFLINE_CACHE / old_key
-        if old_dir.exists():
-            await asyncio.to_thread(shutil.rmtree, old_dir, ignore_errors=True)
+        if old_bundle.exists():
+            await asyncio.to_thread(shutil.rmtree, old_bundle, ignore_errors=True)
         _invalidate_offline_cache_inventory()
+        _invalidate_bundle_index()
     except Exception:
         pass
     return "compressed", (f"{codec.upper()} CRF {crf}"), before, after
@@ -15246,7 +15579,7 @@ async def _compress_estimate(scope: str, level: str, codec: str) -> dict:
         counted += 1
         # current HLS bundle for this source (freed immediately on replace)
         try:
-            cur_hls += await asyncio.to_thread(_dir_size_bytes, OFFLINE_CACHE / _offline_cache_key(src))
+            cur_hls += await asyncio.to_thread(_dir_size_bytes, _offline_cache_dir(src))
         except Exception:
             pass
         if dur <= 0 or src_h <= 0:
@@ -15278,7 +15611,6 @@ async def _play_prep_chain(item_id: str, files: list[str]) -> None:
     keeps running — only further enqueues stop)."""
     if not HLS_AVAILABLE or not analyzer.ffmpeg_bin():
         return
-    OFFLINE_CACHE.mkdir(exist_ok=True)
     # Honor the per-file "never" prep opt-out — even on the play-driven warm-prep of
     # the upcoming playlist (the file being watched still streams via the on-demand
     # path; "never" only suppresses building a cached bundle ahead of time).
@@ -15294,7 +15626,7 @@ async def _play_prep_chain(item_id: str, files: list[str]) -> None:
                 continue
         except OSError:
             continue
-        out_dir = OFFLINE_CACHE / _offline_cache_key(p)
+        out_dir = _offline_cache_dir(p)
         if (out_dir / "master.m3u8").exists():
             continue
         job_id = _start_interactive_prep_job(p, item_id)
@@ -15775,11 +16107,12 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
     sidecar_subs = await asyncio.to_thread(_list_sidecar_subs, src, item_id)
     saved_tracks = (_saved_local_tracks(lib, item, req.profile_id, req.file_path)
                     if req.profile_id else {})
-    OFFLINE_CACHE.mkdir(exist_ok=True)
-    key = _offline_cache_key(src)
-    out_dir = OFFLINE_CACHE / key
+    out_dir = _offline_cache_dir(src)
+    key = out_dir.name
+    out_dir.parent.mkdir(parents=True, exist_ok=True)
 
     if (out_dir / "master.m3u8").exists():
+        _bundle_index_register(key, out_dir)
         meta = _read_meta(out_dir)
         return JSONResponse({
             "ready":             True,
@@ -15905,9 +16238,9 @@ async def _maybe_start_prep_job(src: Path, item_id: str = "") -> dict:
     # through (auto-prep, play-prep, the JIT background prep, prep-all).
     if item_id and item_id in state.ondemand_only_items:
         return {"status": "ondemand_only"}
-    OFFLINE_CACHE.mkdir(exist_ok=True)
-    out_dir = OFFLINE_CACHE / _offline_cache_key(src)
+    out_dir = _offline_cache_dir(src)
     if (out_dir / "master.m3u8").exists():
+        _bundle_index_register(out_dir.name, out_dir)
         return {"status": "cached"}
     existing = next(
         (j for j in _offline_jobs.values()
@@ -15939,7 +16272,7 @@ def _peek_prep_state(src: Path) -> dict:
     Used by /prep-status polling. Includes finished+errored jobs so the UI can
     show a final result for a few seconds before the bundle is consulted.
     """
-    out_dir = OFFLINE_CACHE / _offline_cache_key(src)
+    out_dir = _offline_cache_dir(src)
     if (out_dir / "master.m3u8").exists():
         return {"status": "cached"}
     # Pick the most recent matching job — done/error states still surface here
@@ -16269,6 +16602,9 @@ _HLS_MIME = {
 async def offline_cache_bundle_file(cache_key: str, filename: str) -> FileResponse:
     """Serve one file from an HLS bundle directory.
 
+    Bundles live beside the media (`<file_dir>/.streamlink_cache/<key>/`), so the
+    dir is resolved from the key via `_bundle_index` (rebuilt on a cold miss).
+
     Strict regex validation on both segments prevents path traversal: even
     though FastAPI doesn't pass slashes through `{filename}` by default, ".."
     or absolute filenames would still resolve outside the cache root via
@@ -16276,7 +16612,10 @@ async def offline_cache_bundle_file(cache_key: str, filename: str) -> FileRespon
     """
     if not _CACHE_KEY_RE.match(cache_key) or not _BUNDLE_FILE_RE.match(filename):
         raise HTTPException(400, "Invalid path.")
-    p = OFFLINE_CACHE / cache_key / filename
+    bundle_dir = await _resolve_bundle_dir(cache_key)
+    if bundle_dir is None:
+        raise HTTPException(404, "Cached file not found.")
+    p = bundle_dir / filename
     if not p.exists() or not p.is_file():
         raise HTTPException(404, "Cached file not found.")
     media = _HLS_MIME.get(p.suffix.lower(), "application/octet-stream")
@@ -16522,8 +16861,8 @@ async def bundle_manifest(item_id: str, request: Request, file_path: str = "", p
     if not src.exists():
         raise HTTPException(404, "File not on disk.")
 
-    key = _offline_cache_key(src)
-    out_dir = OFFLINE_CACHE / key
+    out_dir = _offline_cache_dir(src)
+    key = out_dir.name
     if not (out_dir / "master.m3u8").exists():
         return JSONResponse(
             {
@@ -16533,6 +16872,8 @@ async def bundle_manifest(item_id: str, request: Request, file_path: str = "", p
             },
             status_code=409,
         )
+    # Register so the app's subsequent segment fetches resolve by key without a rescan.
+    _bundle_index_register(key, out_dir)
 
     meta = _read_meta(out_dir)
     files, total = await asyncio.to_thread(_enumerate_bundle_files, out_dir)
@@ -17229,7 +17570,7 @@ async def make_clip(item_id: str, req: ClipReq) -> JSONResponse:
 
     # Prepped-only: require the HLS bundle to exist (matches the product gate and
     # guarantees the source is readable + probed).
-    if not (OFFLINE_CACHE / _offline_cache_key(src) / "master.m3u8").exists():
+    if not (_offline_cache_dir(src) / "master.m3u8").exists():
         raise HTTPException(409, "Prep this episode for streaming first, then you can clip it.")
 
     dur = max(1.0, min(float(CLIP_MAX_SECONDS), float(req.duration_sec or 30.0)))
@@ -17329,7 +17670,8 @@ async def _build_offline_cache_inventory(*, force: bool = False) -> dict:
 
 
 def _offline_cache_inventory_sync(lib: dict, jobs: list[dict]) -> dict:
-    """Walk OFFLINE_CACHE + the library + the job snapshot and return the admin payload.
+    """Walk every co-located `.streamlink_cache/` (+ the legacy central
+    OFFLINE_CACHE) + the library + the job snapshot and return the admin payload.
 
     Each per-file entry has a `status` of:
       cached         — `<sha>/master.m3u8` exists, ready for HLS playback
@@ -17340,45 +17682,55 @@ def _offline_cache_inventory_sync(lib: dict, jobs: list[dict]) -> dict:
                        (process crashed mid-encode, or the job entry was evicted)
     Only entries with one of those states are included; "no work has ever started
     for this file" is just absent.
+
+    Bundles live beside the media now, so a cache/orphan entry carries the `root`
+    (its containing `.streamlink_cache` dir) — that's what `_delete_cache_artifacts`
+    needs to actually remove it.
     """
-    if not OFFLINE_CACHE.exists():
-        return {"total_bytes": 0, "cache_dir": str(OFFLINE_CACHE),
-                "items": [], "orphans": []}
-    # 1) Inventory the cache directory: distinguish completed bundles (`<sha>/`)
-    #    from in-flight staging dirs (`<sha>.part/`). Both count toward total
-    #    bytes. We also include any leftover top-level `.mp4` files from
-    #    pre-v3-hls caches in the "orphan" pool so the operator can clear them.
+    # 1) Inventory every cache root: distinguish completed bundles (`<sha>/`) from
+    #    in-flight staging dirs (`<sha>.part/`). Both count toward total bytes. We
+    #    also include any leftover top-level `.mp4` files from pre-v3-hls central
+    #    caches in the "orphan" pool so the operator can clear them.
+    roots = _bundle_cache_dirs_sync(lib)
+    if OFFLINE_CACHE.exists():
+        roots.add(OFFLINE_CACHE)
     PART_SUFFIX = ".part"
-    cached_dirs:  dict[str, dict] = {}   # cache_key → {bytes, mtime}
-    partial_dirs: dict[str, dict] = {}   # cache_key → {bytes, mtime}
+    cached_dirs:  dict[str, dict] = {}   # cache_key → {bytes, mtime, root}
+    partial_dirs: dict[str, dict] = {}   # cache_key → {bytes, mtime, root}
     legacy_files: list[dict] = []        # pre-v3-hls leftovers (.mp4 / .part.mp4)
     total_bytes = 0
-    for p in OFFLINE_CACHE.iterdir():
+    for root in roots:
         try:
-            st = p.stat()
+            children = list(root.iterdir()) if root.is_dir() else []
         except OSError:
             continue
-        if p.is_dir() and _CACHE_KEY_RE.match(p.name):
-            sz = _dir_size_bytes(p)
-            cached_dirs[p.name] = {"bytes": sz, "mtime": st.st_mtime}
-            total_bytes += sz
-        elif p.is_dir() and p.name.endswith(PART_SUFFIX):
-            key = p.name[: -len(PART_SUFFIX)]
-            if _CACHE_KEY_RE.match(key):
+        for p in children:
+            try:
+                st = p.stat()
+            except OSError:
+                continue
+            if p.is_dir() and _CACHE_KEY_RE.match(p.name):
                 sz = _dir_size_bytes(p)
-                partial_dirs[key] = {"bytes": sz, "mtime": st.st_mtime}
+                cached_dirs[p.name] = {"bytes": sz, "mtime": st.st_mtime, "root": str(root)}
                 total_bytes += sz
-        elif p.is_file() and p.suffix == ".mp4":
-            # Pre-v3-hls single-MP4 cache. Always orphan now — surface it so
-            # the operator can purge with one click.
-            legacy_files.append({
-                "cache_key": p.stem.removesuffix(".part"),
-                "name":      p.name,
-                "kind":      "legacy",
-                "bytes":     st.st_size,
-                "mtime":     st.st_mtime,
-            })
-            total_bytes += st.st_size
+            elif p.is_dir() and p.name.endswith(PART_SUFFIX):
+                key = p.name[: -len(PART_SUFFIX)]
+                if _CACHE_KEY_RE.match(key):
+                    sz = _dir_size_bytes(p)
+                    partial_dirs[key] = {"bytes": sz, "mtime": st.st_mtime, "root": str(root)}
+                    total_bytes += sz
+            elif p.is_file() and p.suffix == ".mp4":
+                # Pre-v3-hls single-MP4 cache. Always orphan now — surface it so
+                # the operator can purge with one click.
+                legacy_files.append({
+                    "cache_key": p.stem.removesuffix(".part"),
+                    "name":      p.name,
+                    "kind":      "legacy",
+                    "bytes":     st.st_size,
+                    "mtime":     st.st_mtime,
+                    "root":      str(root),
+                })
+                total_bytes += st.st_size
     # 2) Index jobs by their output cache key. Keep only the most recent job per
     #    key so a series of failed retries collapses to one row.
     jobs_by_key: dict[str, dict] = {}
@@ -17417,6 +17769,8 @@ def _offline_cache_inventory_sync(lib: dict, jobs: list[dict]) -> dict:
                 "file_path": f.get("path", ""),
                 "name":      f.get("name", "") or src.name,
                 "cache_key": key,
+                "root":      (cached or partial or {}).get(
+                                 "root", str(src.parent / OFFLINE_CACHE_DIRNAME)),
                 "bytes":     0,
             }
             if cached:
@@ -17490,44 +17844,56 @@ def _offline_cache_inventory_sync(lib: dict, jobs: list[dict]) -> dict:
     orphans: list[dict] = []
     for k, v in cached_dirs.items():
         if k not in matched_keys:
-            orphans.append({"cache_key": k, "kind": "cached",
+            orphans.append({"cache_key": k, "kind": "cached", "root": v["root"],
                             "bytes": v["bytes"], "mtime": v["mtime"]})
     for k, v in partial_dirs.items():
         if k not in matched_keys:
-            orphans.append({"cache_key": k, "kind": "partial",
+            orphans.append({"cache_key": k, "kind": "partial", "root": v["root"],
                             "bytes": v["bytes"], "mtime": v["mtime"]})
     orphans.extend(legacy_files)
     orphans.sort(key=lambda x: x["bytes"], reverse=True)
     return {
         "total_bytes": total_bytes,
         "cache_dir":   str(OFFLINE_CACHE),
+        "colocated":   True,
         "items":       items_out,
         "orphans":     orphans,
     }
 
 
-def _delete_cache_artifacts(cache_key: str) -> int:
+def _delete_cache_artifacts(cache_key: str, root: Optional[str] = None) -> int:
     """Remove `<key>/` and `<key>.part/` bundle directories, plus any legacy
     pre-v3-hls `.mp4` files keyed by `cache_key`, AND any terminal job entries
     targeting this cache key. Returns total bytes freed on disk. The caller is
     responsible for the active-job 409 check.
+
+    Bundles now live beside the media, so `root` is the containing
+    `.streamlink_cache` dir (from the inventory entry). The legacy central
+    OFFLINE_CACHE is always checked too, so old central bundles still purge.
     """
     bytes_freed = 0
-    for name in (cache_key, f"{cache_key}.part"):
-        d = OFFLINE_CACHE / name
-        if d.exists() and d.is_dir():
-            bytes_freed += _dir_size_bytes(d)
-            shutil.rmtree(d, ignore_errors=True)
-    # Legacy single-MP4 cache from v2 — orphaned by the v3 cache-key rebase,
-    # but still on disk until purged.
-    for fname in (f"{cache_key}.mp4", f"{cache_key}.part.mp4"):
-        p = OFFLINE_CACHE / fname
-        try:
-            sz = p.stat().st_size
-            p.unlink()
-            bytes_freed += sz
-        except OSError:
-            pass
+    roots: list[Path] = [OFFLINE_CACHE]
+    if root:
+        rp = Path(root)
+        if rp not in roots:
+            roots.insert(0, rp)
+    for r in roots:
+        for name in (cache_key, f"{cache_key}.part"):
+            d = r / name
+            if d.exists() and d.is_dir():
+                bytes_freed += _dir_size_bytes(d)
+                shutil.rmtree(d, ignore_errors=True)
+        # Legacy single-MP4 cache from v2 — orphaned by the v3 cache-key rebase,
+        # but still on disk until purged.
+        for fname in (f"{cache_key}.mp4", f"{cache_key}.part.mp4"):
+            p = r / fname
+            try:
+                sz = p.stat().st_size
+                p.unlink()
+                bytes_freed += sz
+            except OSError:
+                pass
+    _bundle_index.pop(cache_key, None)
     # Drop terminal job entries for this key so the UI doesn't keep showing the
     # stale error after the operator has cleaned it up.
     for jid, j in list(_offline_jobs.items()):
@@ -17635,8 +18001,14 @@ async def _hls_trim_bundles(keep: set[int], *, dry_run: bool, scope: str = "all"
                         for f in (item.get("files", []) if item else [])}
     bundles = 0
     freed = 0
-    if OFFLINE_CACHE.exists():
-        for p in sorted(OFFLINE_CACHE.iterdir()):
+    # Bundles live beside the media now (+ legacy central stragglers).
+    _lib_for_roots = await get_library()
+    roots = _bundle_cache_dirs_sync(_lib_for_roots)
+    roots.add(OFFLINE_CACHE)
+    for root in roots:
+        if not root.exists():
+            continue
+        for p in sorted(root.iterdir()):
             if not (p.is_dir() and _CACHE_KEY_RE.match(p.name)):
                 continue
             if _offline_cache_path_active(p.name):
@@ -17676,11 +18048,12 @@ async def admin_offline_cache_purge_orphans(request: Request) -> JSONResponse:
     for o in inv["orphans"]:
         if _offline_cache_path_active(o["cache_key"]):
             continue
-        freed = await asyncio.to_thread(_delete_cache_artifacts, o["cache_key"])
+        freed = await asyncio.to_thread(_delete_cache_artifacts, o["cache_key"], o.get("root"))
         if freed > 0:
             deleted += 1
             bytes_freed += freed
     _invalidate_offline_cache_inventory()
+    _invalidate_bundle_index()
     return JSONResponse({"deleted_count": deleted, "bytes_freed": bytes_freed})
 
 
@@ -17694,15 +18067,24 @@ async def admin_offline_cache_delete_one(cache_key: str, request: Request) -> JS
         raise HTTPException(400, "Invalid cache key.")
     if _offline_cache_path_active(cache_key):
         raise HTTPException(409, "An active prep job is writing this bundle.")
-    out_dir   = OFFLINE_CACHE / cache_key
-    part_dir  = OFFLINE_CACHE / f"{cache_key}.part"
-    legacy_a  = OFFLINE_CACHE / f"{cache_key}.mp4"
-    legacy_b  = OFFLINE_CACHE / f"{cache_key}.part.mp4"
-    if not (out_dir.exists() or part_dir.exists() or legacy_a.exists() or legacy_b.exists()
-            or any(Path(j.get("out", "")).name == cache_key for j in _offline_jobs.values())):
+    # Bundles live beside the media — find which `.streamlink_cache` root (or the
+    # legacy central one) actually holds this key before deleting.
+    lib = await get_library()
+    roots = _bundle_cache_dirs_sync(lib)
+    roots.add(OFFLINE_CACHE)
+    found_root: Optional[Path] = None
+    for r in roots:
+        if any((r / n).exists() for n in
+               (cache_key, f"{cache_key}.part", f"{cache_key}.mp4", f"{cache_key}.part.mp4")):
+            found_root = r
+            break
+    has_job = any(Path(j.get("out", "")).name == cache_key for j in _offline_jobs.values())
+    if found_root is None and not has_job:
         raise HTTPException(404, "Nothing on disk and no job for that cache key.")
-    bytes_freed = await asyncio.to_thread(_delete_cache_artifacts, cache_key)
+    bytes_freed = await asyncio.to_thread(
+        _delete_cache_artifacts, cache_key, str(found_root) if found_root else None)
     _invalidate_offline_cache_inventory()
+    _invalidate_bundle_index()
     return JSONResponse({"deleted": True, "bytes_freed": bytes_freed})
 
 
@@ -17722,11 +18104,12 @@ async def admin_offline_cache_delete_for_item(item_id: str, request: Request) ->
     for f in item["files"]:
         if _offline_cache_path_active(f["cache_key"]):
             continue
-        freed = await asyncio.to_thread(_delete_cache_artifacts, f["cache_key"])
+        freed = await asyncio.to_thread(_delete_cache_artifacts, f["cache_key"], f.get("root"))
         if freed > 0 or f.get("status") == "error":
             deleted += 1
             bytes_freed += freed
     _invalidate_offline_cache_inventory()
+    _invalidate_bundle_index()
     return JSONResponse({"deleted_count": deleted, "bytes_freed": bytes_freed})
 
 
@@ -17771,11 +18154,15 @@ def _cleanup_in_use_hashes(lib: dict) -> set[str]:
     return in_use
 
 
+# Directory names StreamLink owns inside media folders — never "stray" in cleanup.
+_STREAMLINK_RESERVED_DIRS = {OFFLINE_CACHE_DIRNAME, ".offline_cache", ".ondemand_cache"}
+
+
 def _cleanup_inventory_sync(lib: dict, torrents: list[dict], in_use: set[str],
-                            download_path: str) -> dict:
-    """Cross-reference qBit torrents + the library + the download folder into the
-    four cleanup categories. Synchronous (runs in a worker thread) because the
-    stray-file walk + per-path existence checks block."""
+                            download_paths: list[str]) -> dict:
+    """Cross-reference qBit torrents + the library + EVERY configured download/
+    library folder into the four cleanup categories. Synchronous (runs in a worker
+    thread) because the stray-file walk + per-path existence checks block."""
     items = lib.get("items", [])
     lib_hashes: dict[str, dict] = {}
     owned: set[str] = set()                 # normalised on-disk paths something owns
@@ -17849,37 +18236,54 @@ def _cleanup_inventory_sync(lib: dict, torrents: list[dict], in_use: set[str],
                 "has_torrent":   bool(h and h in qbit_hashes),
             })
 
-    # Category D: top-level entries in the download folder owned by no torrent or
-    # library file. Delete-only. A trailing `.!qB` (qBit's incomplete-file marker)
-    # is stripped before the ownership test so an in-progress download isn't stray.
+    # Category D: top-level entries in ANY configured download/library folder owned
+    # by no torrent or library file. Delete-only. A trailing `.!qB` (qBit's
+    # incomplete-file marker) is stripped before the ownership test so an in-progress
+    # download isn't stray. StreamLink's own dirs (the co-located `.streamlink_cache`
+    # bundles, the central caches) are never stray, and a configured root nested in
+    # another isn't flagged when its parent is scanned.
+    dl_dirs = [Path(p) for p in download_paths if (p or "").strip()]
+    dl_norms = {_norm_path(str(d)) for d in dl_dirs}
     stray: list[dict] = []
-    dl = Path(download_path)
-    try:
-        children = list(dl.iterdir()) if dl.is_dir() else []
-    except OSError:
-        children = []
-    for child in children:
-        raw = str(child)
-        if raw.endswith(".!qB"):
-            raw = raw[:-4]
-        n = _norm_path(raw)
-        if any(o == n or o.startswith(n + os.sep) or n.startswith(o + os.sep)
-               for o in owned):
-            continue
+    seen_children: set[str] = set()
+    for dl in dl_dirs:
         try:
-            is_dir = child.is_dir()
-            sz = _dir_size_bytes(child) if is_dir else child.stat().st_size
-            mtime = child.stat().st_mtime
+            children = list(dl.iterdir()) if dl.is_dir() else []
         except OSError:
-            continue
-        stray.append({"path": str(child), "name": child.name,
-                      "is_dir": is_dir, "bytes": sz, "mtime": mtime})
+            children = []
+        for child in children:
+            if child.name in _STREAMLINK_RESERVED_DIRS:
+                continue
+            cp = str(child)
+            if cp in seen_children:
+                continue
+            seen_children.add(cp)
+            raw = cp
+            if raw.endswith(".!qB"):
+                raw = raw[:-4]
+            n = _norm_path(raw)
+            # A configured root that's itself a child here (nested library paths) is
+            # never stray — it's scanned in its own right.
+            if n in dl_norms:
+                continue
+            if any(o == n or o.startswith(n + os.sep) or n.startswith(o + os.sep)
+                   for o in owned):
+                continue
+            try:
+                is_dir = child.is_dir()
+                sz = _dir_size_bytes(child) if is_dir else child.stat().st_size
+                mtime = child.stat().st_mtime
+            except OSError:
+                continue
+            stray.append({"path": str(child), "name": child.name,
+                          "is_dir": is_dir, "bytes": sz, "mtime": mtime})
 
     broken.sort(key=lambda x: x["name"].lower())
     orphans.sort(key=lambda x: x["size_bytes"], reverse=True)
     stray.sort(key=lambda x: x["bytes"], reverse=True)
     return {
-        "download_path":   str(dl),
+        "download_path":   str(dl_dirs[0]) if dl_dirs else "",
+        "download_paths":  [str(d) for d in dl_dirs],
         "broken_torrents": broken,
         "orphan_torrents": orphans,
         "missing_items":   missing_items,
@@ -17910,9 +18314,10 @@ async def _build_cleanup_inventory(*, force: bool = False) -> dict:
         torrents = await qbit_info_all()
         qbit_ok = torrents is not None
         in_use = _cleanup_in_use_hashes(lib)
+        all_paths = [info["path"] for info in await _all_library_paths()]
         data = await asyncio.to_thread(
             _cleanup_inventory_sync, lib, torrents or [], in_use,
-            settings.qbit_download_path,
+            all_paths,
         )
         data["generated_at"] = time.time()
         data["qbit_ok"] = qbit_ok
@@ -18055,22 +18460,32 @@ async def admin_cleanup_delete_item(item_id: str, request: Request,
 
 @app.delete("/api/admin/cleanup/stray")
 async def admin_cleanup_delete_stray(request: Request, path: str = "") -> JSONResponse:
-    """Delete one stray file/dir. Path-guarded: it must resolve strictly inside the
-    qBit download folder (no traversal), and must not be owned by a live torrent."""
+    """Delete one stray file/dir. Path-guarded: it must resolve strictly inside one
+    of the configured download/library folders (no traversal), can't be a configured
+    root itself, and must not be owned by a live torrent."""
     _require_admin(request)
     if not path:
         raise HTTPException(400, "Missing path.")
-    dl_root = Path(settings.qbit_download_path).resolve()
+    roots: list[Path] = []
+    for info in await _all_library_paths():
+        try:
+            roots.append(Path(info["path"]).resolve())
+        except OSError:
+            continue
     try:
         target = Path(path).resolve()
     except OSError:
         raise HTTPException(400, "Invalid path.")
-    if target == dl_root:
-        raise HTTPException(400, "Refusing to delete the download folder itself.")
-    try:
-        target.relative_to(dl_root)
-    except ValueError:
-        raise HTTPException(400, "Path is outside the download folder.")
+    if target in roots:
+        raise HTTPException(400, "Refusing to delete a configured library folder itself.")
+    def _within(t: Path, root: Path) -> bool:
+        try:
+            t.relative_to(root)
+            return True
+        except ValueError:
+            return False
+    if not any(_within(target, r) for r in roots):
+        raise HTTPException(400, "Path is outside the configured download/library folders.")
     if not target.exists():
         raise HTTPException(404, "Path not found.")
     # Refuse if a current torrent owns this path (only stray clutter is deletable).

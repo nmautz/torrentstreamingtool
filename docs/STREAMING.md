@@ -53,13 +53,52 @@ For player-style UI changes that don't touch streaming logic, see
 
 ---
 
+## Where bundles live (co-located, v8+)
+
+As of **v8 (`OFFLINE_CACHE_VERSION = "v8-colocated"`)** each prepped file's HLS
+bundle lives **beside its source file**, in a hidden
+`<file_dir>/.streamlink_cache/<key>/` — *not* in the old central
+`.offline_cache/` at the repo root. The single source of truth for the location
+is `_offline_cache_dir(src)` in `main.py`; everything else routes through it.
+
+- **Key is path- and mtime-independent:** `_offline_cache_key(src) =
+  sha256("v8-colocated | <filename> | <size>")[:24]` (see `_offline_cache_key_for`
+  for the from-metadata variant the move op uses). Dropping the absolute path and
+  mtime makes the key **move-stable** — a bundle stays valid wherever the file goes,
+  including a cross-device move where mtime changes. Two files can't share a name in
+  one dir, and identical name+size in *different* dirs land in different
+  `.streamlink_cache/` dirs, so there's no collision. mtime is safe to omit because
+  the in-place rewrite paths (repair / compress) already purge the bundle explicitly.
+- **Serving uses a key→dir index.** The route `/api/library/offline-cache/<key>/<file>`
+  can't do `OFFLINE_CACHE / key` anymore, so `_bundle_index` (`dict[key, Path]`) maps
+  each key to its dir. It's discovered by *directory name* (`_rebuild_bundle_index_sync`
+  walks every library file's parent `.streamlink_cache/` + the legacy central dir — no
+  source stat needed), registered on prep-completion / cached-hit
+  (`_bundle_index_register`), and invalidated on move / migrate / delete
+  (`_invalidate_bundle_index`). A cold miss rebuilds once then 404s.
+- **Startup migration (`_migrate_offline_cache_layout`).** Pre-v8 installs kept bundles
+  centrally. On boot — **before** the prep loops spawn, so nothing half-migrated gets
+  re-queued — each old `.offline_cache/<legacy_key>/` (legacy key =
+  `sha256("v7-hls-abr | <abs_path> | <mtime> | <size>")`, via `_offline_cache_key_legacy`)
+  is **moved** to its co-located home with a plain directory move. **No re-encode**,
+  idempotent, best-effort per file. Stale central bundles (source changed/removed) aren't
+  matched and are left for the orphan purge.
+- **Moving a series carries the cache.** `POST /api/library/{id}/move` (admin) relocates a
+  series; because the key is move-stable, the co-located bundle is just moved alongside the
+  media (`_move_series_files_sync`). See [ADMIN.md](ADMIN.md) / [API.md](API.md).
+- The legacy `OFFLINE_CACHE` (`.offline_cache/`) constant still exists only so the migration
+  and the inventory can find/relocate pre-v8 stragglers. The `.ondemand_cache/` (transient
+  JIT) stays central at the repo root.
+
 ## Output format
 
-Every prepped source produces a directory `<sha>/` under `.offline_cache/`
-with the following layout:
+Every prepped source produces a directory `<key>/` inside its file's
+`.streamlink_cache/` with the following layout (the on-disk parent is
+`<file_dir>/.streamlink_cache/`; pre-v8 this was `.offline_cache/` at the repo
+root):
 
 ```
-.offline_cache/
+<file_dir>/.streamlink_cache/
   <sha24>/
     master.m3u8           ← top-level playlist (video variants + alternate audio)
     video.m3u8            ← original (source-resolution) video rendition
@@ -107,11 +146,13 @@ audio/subtitle dropdowns — it never re-probes the bundle. The **quality** menu
 is instead built from hls.js `levels` (the master-playlist parse), so it never
 depends on `videos[]` ordering; `videos[]` is informational (admin/API).
 
-Cache key (`_offline_cache_key`) is
-`sha256(OFFLINE_CACHE_VERSION | path | mtime | size)[:24]`. Re-encoding the
-source invalidates the bundle. `OFFLINE_CACHE_VERSION = "v7-hls-abr"`; bumping it
-forces every bundle to be rebuilt on next prep (old `<sha>/` dirs become
-orphans, listed in Admin → Offline Cache for one-click purge).
+Cache key (`_offline_cache_key`) is `sha256(OFFLINE_CACHE_VERSION | filename |
+size)[:24]` (v8+, path/mtime-independent — see *Where bundles live* above).
+Re-encoding the source changes its size, so the key changes and the old bundle
+is purged (repair/compress do this explicitly). `OFFLINE_CACHE_VERSION =
+"v8-colocated"`; bumping it forces every bundle to be rebuilt on next prep (old
+`<key>/` dirs become orphans, listed in Admin → Offline Cache for one-click
+purge).
 
 > **Not available on macOS hosts.** When the server runs on macOS, ffmpeg /
 > ffprobe (children of the non-GUI Python process) are blocked by TCC from

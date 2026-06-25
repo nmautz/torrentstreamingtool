@@ -96,9 +96,11 @@ If `JACKETT_PASSWORD` is set in `.env`, `_jackett_admin()` ([main.py:200](../mai
 
 ### 2. Content Lock ([static/admin.html:142](../static/admin.html#L142))
 
-Lists all library items with an "Admin only" toggle. Calls `POST /api/library/{id}/admin-lock {admin_only}`. When `admin_only=true`:
+Lists all library items, each with an **Admin only** toggle and a **📁 Move** action. The toggle calls `POST /api/library/{id}/admin-lock {admin_only}`. When `admin_only=true`:
 - `GET /api/library` excludes the item unless the requester is admin OR the requesting `profile_id` has `elevated=true`
 - Other endpoints (`/files`, `/play`, `/download`, etc.) currently do not check `admin_only`; the gate is at list-time only
+
+**Move (relocate a series' files).** The **📁 Move** button opens a modal (`openMoveModal` → `submitMove`) that calls `POST /api/library/{id}/move {dest_dir}` (admin-gated). The modal pre-populates one-tap destination chips from `GET /api/settings/library-paths` (plus free-text entry). The endpoint relocates the **whole series group** (or the lone movie/one-off): torrent-backed items move via qBittorrent's `setLocation` (`qbit_set_location`) so they **keep seeding** from the new path, non-torrent files move directly, and each file's **co-located** `.streamlink_cache/<key>` HLS bundle rides along (the key is move-stable, so on-device playback keeps working with no re-prep — see [STREAMING.md](STREAMING.md)). Stored `item.files[*].path` are rewritten to the destination and the bundle index is rebuilt. The response surfaces `qbit_errors`/`file_errors` so a partial failure is visible. qBit's content move is **asynchronous** for large torrents — paths update immediately and the download scheduler / validator reconcile once the move lands (see [GOTCHAS.md](GOTCHAS.md)).
 
 To grant a profile elevated access without making them an admin, use the Profile PINs tab.
 
@@ -114,7 +116,7 @@ Admin SSE: `ensureAdminSSE()` opens `/api/events?admin_token=…` so the progres
 
 ### 4. Offline Cache ([static/admin.html#panelOffline](../static/admin.html))
 
-Inventory + cleanup for `.offline_cache/<sha>.mp4` (the remuxed/transcoded outputs produced by `/prep-all` and Save Offline). The directory has no automatic eviction, so this tab is the only built-in way to reclaim space.
+Inventory + cleanup for the HLS prep bundles produced by `/prep-all` and Save Offline. **As of v8 each bundle lives beside its media** (`<file_dir>/.streamlink_cache/<key>/`), not in the old central `.offline_cache/` — see [STREAMING.md § Where bundles live](STREAMING.md). The inventory walks every library file's `.streamlink_cache/` (+ the legacy central dir for un-migrated stragglers); each entry carries a `root` (its containing cache dir) so deletes hit the right place. Bundles have no automatic eviction, so this tab is the only built-in way to reclaim space.
 
 Each per-file entry carries one of five statuses, surfaced as a coloured badge in the UI:
 
@@ -159,18 +161,20 @@ Four category cards:
 | **Broken torrents** | qBit `state ∈ {error, missingFiles}`, or the torrent's `content_path` no longer exists on disk | `qbit_recheck` + `qbit_resume` (re-verify, re-fetch missing pieces) | remove the torrent (+files), and drop a library item it backs |
 | **Orphan torrents** | a qBit torrent whose hash no library item references (and not the live stream) | **Adopt** — `_adopt_torrent_to_library` builds a library item from the torrent (no new magnet needed) | remove the torrent (+files) |
 | **Library items — missing files** | item `status ≠ downloading` with a non-`skip` file absent on disk | when a torrent still backs it: recheck + resume + flip to `downloading` + `_apply_item_schedule`; otherwise none | reuse the library-item delete (item + torrent + files) |
-| **Stray files** | a top-level entry under the download folder owned by no torrent (`content_path` / `save_path`+name) and no library file path | — (delete-only) | `unlink` / `rmtree` the single path |
+| **Stray files** | a top-level entry under **any** configured download/library folder owned by no torrent (`content_path` / `save_path`+name) and no library file path | — (delete-only) | `unlink` / `rmtree` the single path |
+
+**Multiple download paths.** The stray-file scan walks **every** configured root from `_all_library_paths()` (`settings.qbit_download_path` + `library_path_2/3/4` + UI-added `settings.library_paths`), not just the primary download folder — so clutter in a secondary library drive is reconciled too. The response carries `download_paths[]` (the UI lists them all). Two guards keep it safe: StreamLink's own dirs (`.streamlink_cache`, `.offline_cache`, `.ondemand_cache` — `_STREAMLINK_RESERVED_DIRS`) are **never** flagged stray (important now that the HLS cache lives *inside* media folders), and a configured root nested inside another configured root isn't flagged when the parent is scanned.
 
 **In-use protection.** `_cleanup_in_use_hashes(lib)` collects the live stream/prepare torrent (`state.active_hash`, `state.prepare_hash`) and every `status=="downloading"` item's torrent. Those are excluded from the orphan list, flagged **In use** on a broken row, and their recover/delete endpoints return **409**. Stray-file deletion is **path-guarded**: the target must resolve strictly inside `settings.qbit_download_path` (no traversal, never the folder itself) and must not be owned by a current torrent (a trailing `.!qB` incomplete marker is stripped before the ownership test so an in-progress download is never seen as stray).
 
 Endpoints (all `_require_admin`):
-- `GET /api/admin/cleanup` → `{generated_at, qbit_ok, download_path, broken_torrents:[…], orphan_torrents:[…], missing_items:[…], stray_files:[…], totals}`; `?refresh=1` forces a fresh qBit query + disk walk.
+- `GET /api/admin/cleanup` → `{generated_at, qbit_ok, download_path, download_paths[], broken_torrents:[…], orphan_torrents:[…], missing_items:[…], stray_files:[…], totals}`; `?refresh=1` forces a fresh qBit query + disk walk.
 - `POST /api/admin/cleanup/torrent/{hash}/recover` → recheck + resume (409 if in use, 404 if gone).
 - `DELETE /api/admin/cleanup/torrent/{hash}?delete_files=` → `qbit_delete` + drop a linked library item (409 if in use).
 - `POST /api/admin/cleanup/orphan/{hash}/adopt` → `{ok, item_id}` (404 if gone / no video files).
 - `POST /api/admin/cleanup/item/{id}/recover` → recheck + resume + status → `downloading` (404 if no backing torrent — delete instead).
 - `DELETE /api/admin/cleanup/item/{id}?delete_files=` → remove the library item (+torrent +files).
-- `DELETE /api/admin/cleanup/stray?path=…` → `{deleted, bytes_freed}` (400 traversal/outside, 404 missing, 409 owned by a torrent).
+- `DELETE /api/admin/cleanup/stray?path=…` → `{deleted, bytes_freed}` (400 traversal/outside **any** configured root or a root itself, 404 missing, 409 owned by a torrent).
 
 There is **no one-click bulk purge** — every action is per-row and confirm-gated by design.
 

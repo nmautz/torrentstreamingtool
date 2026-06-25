@@ -238,12 +238,14 @@ active segment. Missing/legacy items read as `{files: {}}` (everything defaults 
 "never" file still works via the on-demand (JIT) streaming path. Admin **Force Stream
 Prep** ignores `never` by design (it's an explicit "prep everything" override).
 
+**Moving a series** (`POST /api/library/{id}/move`, admin). Each file's `path` is rewritten to the new directory; for torrent-backed items the data is relocated via qBittorrent `setLocation` (seeding continues from the new path), and each file's co-located HLS bundle (`<file_dir>/.streamlink_cache/<key>/`) rides along. The cache key is path/mtime-independent (`version | filename | size`), so the move never invalidates a bundle. See [STREAMING.md](STREAMING.md) and [ADMIN.md § Content Lock](ADMIN.md).
+
 ### File
 
 ```jsonc
 {
   "name": "The.Boys.S01E01.mkv",
-  "path": "/abs/path/to/file.mkv",       // canonical for matching against VLC playlist
+  "path": "/abs/path/to/file.mkv",       // canonical for matching against VLC playlist; rewritten by a series move
   "size_bytes": 1329062039,
   "season": 1,
   "episode": 1,

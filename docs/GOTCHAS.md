@@ -209,6 +209,21 @@ For any item with `download.mode=="idle"` or per-file overrides, `download_sched
 
 qBittorrent 5.x renamed the WebUI endpoints `pause`→`stop` and `resume`→`start` (old verbs kept as deprecated aliases). `qbit_pause`/`qbit_resume` POST the 4.x verb and fall back to `/stop`·`/start` on a 404 — keep that fallback (Windows is the primary target and may run either major version). `_reconcile_item_downloads` only pauses/resumes torrents in **download-phase** states (`downloading`/`stalledDL`/`metaDL`/…), never a finished/seeding one.
 
+### Moving a series uses `setLocation` (keep seeding) — and the content move is ASYNC
+
+`POST /api/library/{id}/move` relocates a series via `qbit_set_location`
+(`/api/v2/torrents/setLocation`), which keeps the torrent seeding from the new path
+— don't `shutil.move` a torrent-backed file yourself (you'd break the piece map and
+halt seeding; that's only for non-torrent uploads). Two things to remember: (1) qBit's
+data move is **asynchronous** for large torrents, so the file may still be at the old
+path for a bit after the call returns — `move_library_item` rewrites `item.files[*].path`
+to the destination **immediately** and lets the download scheduler / validator reconcile
+once qBit finishes; a transient "missing" verdict during the move is expected. (2) qBit
+moves only its own content, not our co-located `.streamlink_cache/` sidecar — the endpoint
+moves that itself (`_move_series_files_sync`), keyed off the file's name+size (computed via
+`_offline_cache_key_for` from the library metadata, so it works even while the media is
+mid-move). The key is move-stable, so the bundle stays valid at the new location.
+
 ### "Ready" is gated on per-file completion, NOT qBit torrent state, when files are skipped/idle
 
 A skipped file (priority 0) and an idle-deferred file (priority 0 while the window is shut) are both *not-wanted* as far as qBittorrent is concerned, so qBit reports the torrent **complete** (`uploading`/`stalledUP`) the moment the *wanted* files finish — even though the skipped files will never arrive and the idle files haven't fetched yet. The old monitor flipped the item to `ready` on that state, which (a) made a partial selection look fully downloaded, (b) ran audio fingerprinting against a missing set, and (c) abandoned idle-deferred files (a `ready` item is excluded from the scheduler). The monitor now flips `ready` only when **`_all_nonskip_complete`** is true — every non-skip file ≥ 99.9% downloaded — so ready + fingerprint always wait for the complete kept set. Don't revert this to a bare `qstate in (uploading, …)` check. Skipped files are also filtered out of analysis (`_analyzable_files`) and the `_item_skip_status` chip so they don't show as perpetually "pending"/"failed".
@@ -359,6 +374,44 @@ Failures inside the parallel `gather(..., return_exceptions=True)` are silently 
 
 ## Stream to Device (HLS)
 
+### Bundles live BESIDE the media now (v8) — resolve via `_offline_cache_dir`, never `OFFLINE_CACHE / key`
+
+As of `OFFLINE_CACHE_VERSION = "v8-colocated"` each bundle lives in
+`<file_dir>/.streamlink_cache/<key>/`, not the central `.offline_cache/`. Three
+consequences that bite if you forget them:
+
+1. **Never compose `OFFLINE_CACHE / key` again.** Use `_offline_cache_dir(src)` to
+   build/look-up a bundle path, and `_resolve_bundle_dir(key)` (the `_bundle_index`)
+   to serve one by key — the serving route only has the key, and the dir could be in
+   any media folder. The index is discovered by *directory name* and refreshed on
+   prep-done / cached-hit / move / migrate / delete; if you add a new path that
+   creates or deletes a bundle, call `_bundle_index_register` / `_invalidate_bundle_index`.
+2. **The key dropped path AND mtime — it's now `version | filename | size`.** That's
+   deliberate: it makes the bundle **move-stable** (a series move, even cross-device,
+   keeps the key valid). Don't "add mtime back for correctness" — the in-place rewrite
+   paths (repair / compress) already purge the bundle explicitly, so mtime was
+   redundant, and re-adding it would break the move feature. Two same-name+size files
+   can only collide inside one directory, which the filesystem forbids.
+3. **Migration is one-time, at startup, BEFORE the prep loops spawn.**
+   `_migrate_offline_cache_layout` (awaited in `lifespan` before
+   `asyncio.create_task(auto_prep_loop())` etc.) moves pre-v8 central bundles to their
+   co-located home with a plain directory move — **no re-encode**. Running it after the
+   loops are up would let auto-prep see a "missing" bundle and rebuild it. Keep it
+   ordered before the task spawns. It uses `_offline_cache_key_legacy` to find the old
+   central dirs; stale ones (source changed/removed) aren't matched and are left for the
+   orphan purge — never silently rebuilt.
+
+### Cleanup must ignore `.streamlink_cache` — co-located bundles are inside media folders
+
+Now that each bundle sits in `<media_dir>/.streamlink_cache/`, the admin Cleanup
+tab's stray-file scan would see those dirs as "owned by no torrent" and offer to
+**delete** them. `_cleanup_inventory_sync` skips `_STREAMLINK_RESERVED_DIRS`
+(`.streamlink_cache` / `.offline_cache` / `.ondemand_cache`) for exactly this reason,
+and the scan now walks **every** configured root (`_all_library_paths()`), not just
+`qbit_download_path` — with a guard that a configured root nested in another isn't
+flagged when the parent is scanned. If you add another StreamLink-managed dir inside
+media folders, add it to the reserved set or cleanup will offer to nuke it.
+
 ### Output is an HLS bundle directory — not a single MP4 anymore
 
 The cache layout switched in Milestone 16. Each prepped source produces `.offline_cache/<sha>/` with `master.m3u8`, per-rendition playlists, fmp4 segments, and `meta.json`. The pre-v3 single-MP4 cache (`<sha>.mp4`) is dead code on disk — surfaced as `kind: "legacy"` orphans in Admin → Offline Cache for purge. Don't reintroduce code that assumes "a prepped file is one MP4" — every endpoint, admin tool, and cleanup path now walks the directory.
@@ -416,7 +469,7 @@ Since `v7-hls-abr`, `_build_hls_ffmpeg_args` emits multiple video variants (Orig
 
 ### Configurable ABR ladder is forward-only — don't bump `OFFLINE_CACHE_VERSION`
 
-The admin-selected down-rung set (`settings.admin_overrides.hls_ladder` → `_hls_ladder_heights` → `_hls_video_variants(info, heights)` → `_build_hls_ffmpeg_args(ladder_heights=…)`) only shapes **new** preps. It deliberately does **not** feed `_offline_cache_key` / `OFFLINE_CACHE_VERSION` — folding it in would invalidate every existing bundle the moment an admin changes the default, forcing a full library re-encode for a setting that's supposed to be cheap. Existing bundles keep their rungs; the **Drop HLS Resolutions** tool slims them without re-encoding. So a bundle on disk can have a *different* rung set than the current default — that's expected, not a bug. The cache key still keys on path|mtime|size, so re-encoding a source (repair / compression) is what rebuilds the bundle.
+The admin-selected down-rung set (`settings.admin_overrides.hls_ladder` → `_hls_ladder_heights` → `_hls_video_variants(info, heights)` → `_build_hls_ffmpeg_args(ladder_heights=…)`) only shapes **new** preps. It deliberately does **not** feed `_offline_cache_key` / `OFFLINE_CACHE_VERSION` — folding it in would invalidate every existing bundle the moment an admin changes the default, forcing a full library re-encode for a setting that's supposed to be cheap. Existing bundles keep their rungs; the **Drop HLS Resolutions** tool slims them without re-encoding. So a bundle on disk can have a *different* rung set than the current default — that's expected, not a bug. The cache key keys on filename|size (v8), so re-encoding a source (repair / compression) changes its size → new key → the bundle rebuilds.
 
 ### Trimming a bundle: rewrite `master.m3u8` as STREAM-INF/URI **pairs**, keep the audio `#EXT-X-MEDIA` lines
 
@@ -424,7 +477,7 @@ The admin-selected down-rung set (`settings.admin_overrides.hls_ladder` → `_hl
 
 ### Source compression / repair rewrite the file in place — torrent seeding stops, and only replace when *smaller* and clean
 
-`_compress_one_file` (and the repair re-encode) `os.replace` the source with a re-encoded copy, so a **torrent-backed** file stops matching its pieces and seeding halts — same caveat as repair, surfaced per-row in the UI. Two guards that must stay: (a) the candidate is deep-decoded (`_ffmpeg_decode_scan`) and the original is replaced **only if it decodes clean** — a re-encode that introduced corruption must never overwrite a good source; (b) compression additionally replaces **only if the result is smaller** (`after < before`) — an already-efficient source can re-encode *larger*, in which case it's reported `skipped` and left untouched. On replace, purge the stale HLS bundle keyed on the **old** path|mtime|size (stash the key *before* the replace, like repair) or it orphans. Audio is `-c:a copy` (same container ⇒ always muxable) — don't switch to re-encoding audio without re-checking container compatibility.
+`_compress_one_file` (and the repair re-encode) `os.replace` the source with a re-encoded copy, so a **torrent-backed** file stops matching its pieces and seeding halts — same caveat as repair, surfaced per-row in the UI. Two guards that must stay: (a) the candidate is deep-decoded (`_ffmpeg_decode_scan`) and the original is replaced **only if it decodes clean** — a re-encode that introduced corruption must never overwrite a good source; (b) compression additionally replaces **only if the result is smaller** (`after < before`) — an already-efficient source can re-encode *larger*, in which case it's reported `skipped` and left untouched. On replace, purge the stale HLS bundle for the **old** file (stash `_offline_cache_dir(src)` *before* the replace, like repair, since the size — and thus the key — changes) or it orphans. Audio is `-c:a copy` (same container ⇒ always muxable) — don't switch to re-encoding audio without re-checking container compatibility.
 
 ### Compressing a file in place needs a playback LOCK — Windows `os.replace` fails while anyone holds it open
 
@@ -448,7 +501,7 @@ The global pause (`state.prep_paused`, set by `/api/offline-prep/pause`) gates o
 
 `settings.prep_validate` (admin *Validate & Repair on Prep*) folds the File Validator into bulk prep via `_prep_validate_repair` inside `_run_offline_job`. Three traps:
 
-1. **A `before`-prep repair rewrites the source, so its `_offline_cache_key` (path|mtime|size) changes.** The job's `out`/`tmp_dir` were computed by the `/offline-prepare` endpoint from the **old** source, so if you encoded into them the bundle would be immediately stale (the next playback computes the new key and re-preps). `_run_offline_job` therefore **re-points `out_dir`/`tmp_dir` at `OFFLINE_CACHE / _offline_cache_key(src)` after a successful before-repair** (and re-runs the "bundle already exists" short-circuit + re-probes the healed file). If you move the before-hook, keep that re-point — or every healed file double-preps.
+1. **A `before`-prep repair rewrites the source, so its `_offline_cache_key` (filename|size) changes** (the re-encode changes the size). The job's `out`/`tmp_dir` were computed by the `/offline-prepare` endpoint from the **old** source, so if you encoded into them the bundle would be immediately stale (the next playback computes the new key and re-preps). `_run_offline_job` therefore **re-points `out_dir`/`tmp_dir` at `_offline_cache_dir(src)` after a successful before-repair** (and re-runs the "bundle already exists" short-circuit + re-probes the healed file). If you move the before-hook, keep that re-point — or every healed file double-preps.
 2. **An `after`-prep repair purges the bundle that was just built.** `_repair_one_file` deletes the stale HLS dir keyed on the *old* source, which is exactly the one this job produced. That's intentional (the bundle encoded a damaged source), and the file re-preps from the healed source next idle cycle — but don't "optimise" the after-hook expecting the just-built bundle to survive.
 3. **The scan/repair ffmpeg must be the prep job's `_proc`, not the admin validator's.** `_prep_validate_repair` binds `set_proc`/`is_stopped` to `job["_proc"]` / `job["_paused_kill"]` (not `state.file_validation_proc` / `file_repair_proc`), so it (a) is terminated by the existing `_pause_prep(kill=True)` / activity-kick loops for free, and (b) never cross-wires with a concurrently-running **manual** admin validate/repair run (which still owns the `state.file_*` slots). This is why `_validate_one_file`/`_repair_one_file` take the callables as params rather than hardcoding the state fields.
 
