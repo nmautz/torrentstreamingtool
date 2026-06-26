@@ -398,20 +398,27 @@ with video. The admin **Detect & Repair Audio Sync** tool (`_hls_resync_bundles`
     parse, no decode — and flags when the worst `|audio − video|` divergence exceeds
     `max(HLS_SYNC_FLAG_SECS=1.0s, 1% of duration)`.
   - **Constant offset** (`_bundle_introduced_av_offset`) ffprobes the bundle's
-    audio-vs-video first presentation timestamp (`_probe_rendition_first_pts`, which
-    reads each rendition playlist + its fmp4 EXT-X-MAP init) **and the source's
-    intended offset** (`_source_av_offset`), and flags when prep *introduced* a
-    shift of more than `AV_OFFSET_FLAG_SECS=0.12s`. Diffing against the source —
-    rather than assuming the bundle's offset should be zero — is what stops a source
-    with genuinely delayed audio from being a false positive. This catches the
+    audio-vs-video first-pts **gap** `apts − vpts` (`_probe_rendition_first_pts`
+    reads each rendition playlist + its fmp4 EXT-X-MAP init) and flags it directly:
+    `AV_OFFSET_FLAG_SECS=0.12s` for an unpadded bundle, the looser
+    `AV_OFFSET_PAD_FLAG_SECS=0.35s` when meta `audio_padded_to_zero` is set (tolerates
+    the encoder frame-reorder residual that re-prep can't remove). This catches the
     fixed early/late offset the duration check is structurally blind to (both
-    renditions are the same length, just shifted). Needs the source on disk (also
-    needed to repair); if it's gone, only the drift check applies.
+    renditions are the same length, just shifted). **It flags the raw gap rather than
+    diffing against the source's intended offset:** `av_probe.py` showed the bundle
+    player (Safari / iOS AVPlayer / hls.js on separate fmp4 renditions) ignores a
+    cross-rendition `baseMediaDecodeTime` gap and anchors each rendition to playback
+    start — so a *faithfully reproduced* source delay (e.g. EMBER BDRips' +1.0s audio)
+    is itself the desync, even though single-program on-demand + VLC honor it. The
+    fix is to collapse the gap, not preserve it. No source needed for detection (only
+    for repair).
 - **Repair** (non-`dry_run`) purges each flagged bundle (`_delete_cache_artifacts`
   + `_invalidate_bundle_index`) and re-queues a prep via `_maybe_start_prep_job(src,
   item_id, force_reencode_video=True)` — the **force_reencode** re-encodes the
-  original rung so the rebuild routes both streams through one timestamp
-  normalization and can't carry the offset forward. Re-preps run at the usual bulk
+  original rung (so both streams route through one timestamp normalization) AND
+  silence-pads the audio to the video's zero (`first_pts=0` → `audio_padded_to_zero`),
+  collapsing the cross-rendition gap to ≈0 while preserving any real delay as leading
+  silence so it can't carry the offset forward. Re-preps run at the usual bulk
   concurrency / pause semantics (background, not blocking). Bundles with an active
   prep job, or whose source is gone, are skipped.
 - `scope` restricts to one library item (by `meta.json src`); `dry_run` only counts

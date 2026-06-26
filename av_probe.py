@@ -125,6 +125,7 @@ def main() -> int:
     print(f"bundle : {bundle}")
 
     vname, a_playlist = "video", "audio_0.m3u8"
+    meta: dict = {}
     mj = bundle / "meta.json"
     if mj.is_file():
         try:
@@ -139,30 +140,42 @@ def main() -> int:
         except Exception:
             pass
 
+    padded = bool(meta.get("audio_padded_to_zero"))
     bv = rendition_first_pts(bundle / f"{vname}.m3u8")
     ba = rendition_first_pts(bundle / a_playlist)
     print("BUNDLE first-PTS (separate fmp4 renditions):")
     print(f"  video rendition {vname}.m3u8 = {bv}")
     print(f"  audio rendition {a_playlist} = {ba}")
-    bundle_off = (ba - bv) if (bv is not None and ba is not None) else None
-    if bundle_off is not None:
-        print(f"  >> bundle A/V offset = {bundle_off:+.4f} s")
+    print(f"  meta audio_padded_to_zero    = {padded}")
+    bundle_gap = (ba - bv) if (bv is not None and ba is not None) else None
+    if bundle_gap is not None:
+        print(f"  >> bundle A/V gap = {bundle_gap:+.4f} s  (audio first-PTS minus video)")
     print()
 
-    if src_off is not None and bundle_off is not None:
-        introduced = bundle_off - src_off
+    # The naive bundle player (Safari / iOS AVPlayer / hls.js on SEPARATE fmp4
+    # renditions) ignores the cross-rendition baseMediaDecodeTime gap and anchors
+    # each rendition to playback start — so the RAW bundle gap (not its diff vs the
+    # source) is what the user hears as desync. The fix silence-pads the audio to
+    # the video's zero, collapsing the gap to ≈0 while keeping the source's delay as
+    # real leading silence. So: a CORRECT (fixed/padded) bundle has gap ≈ 0; an
+    # unfixed one reproduces ~the source's audio-start delay and plays early.
+    if bundle_gap is not None:
+        thresh = 0.35 if padded else 0.12   # AV_OFFSET_PAD_FLAG_SECS / AV_OFFSET_FLAG_SECS
         print("=" * 60)
-        print(f"PREP-INTRODUCED OFFSET = {introduced:+.4f} s")
-        print(f"  (bundle {bundle_off:+.4f} − source {src_off:+.4f})")
-        print(f"  flag threshold AV_OFFSET_FLAG_SECS = 0.12 s")
-        if abs(introduced) > 0.12:
-            sign = "EARLY" if introduced < 0 else "LATE"
-            print(f"  >> CONFIRMS BUG: prep shifted audio ~{abs(introduced):.2f}s {sign}.")
+        print(f"BUNDLE A/V GAP (what a naive HLS player desyncs by) = {bundle_gap:+.4f} s")
+        if src_off is not None:
+            print(f"  (source's intrinsic A/V offset was {src_off:+.4f} s; the fix bakes "
+                  f"that as silence so the gap should collapse to ≈0)")
+        print(f"  flag threshold ({'padded' if padded else 'unpadded'}) = {thresh} s")
+        if abs(bundle_gap) > thresh:
+            sign = "EARLY" if bundle_gap > 0 else "LATE"
+            print(f"  >> DESYNC: audio plays ~{abs(bundle_gap):.2f}s {sign} on a naive "
+                  f"player. {'Padding did NOT take — re-prep.' if padded else 'Re-prep to silence-pad (first_pts=0).'}")
         else:
-            print("  >> within tolerance — prep did NOT introduce a meaningful offset.")
+            print("  >> OK — bundle audio is aligned with video at playback start.")
         print("=" * 60)
     else:
-        print("Could not compute introduced offset (a probe returned None above).")
+        print("Could not compute bundle gap (a probe returned None above).")
     return 0
 
 
