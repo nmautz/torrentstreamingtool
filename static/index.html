@@ -151,11 +151,21 @@
        visually but removes the corruptible dynamic term, killing the shift. 59pt
        clears the Dynamic Island (the largest current top inset; notch devices are
        smaller and sit comfortably under it); 34pt clears the home indicator.
-       Scoped to PORTRAIT only: in landscape the top inset is legitimately 0 and a
-       forced band would push the whole UI down. */
+       Both orientations are PINNED to constants — the original fix only pinned
+       portrait and left landscape on the live env(), but env() over-reports in
+       landscape too (reproduced on-device after on-device playback + rotating
+       between landscape/portrait and fullscreen/non-fullscreen): the corrupted
+       inset stuck and pushed the whole UI down. In landscape the legitimate top
+       inset is 0 (status bar hidden, Island sits on the side) and the home
+       indicator is a thin bottom band (~21pt), so pin those exact values and
+       drop the corruptible dynamic term entirely. */
     @media (orientation: portrait) {
       html.is-app .safe-top    { padding-top:    59px; }
       html.is-app .safe-bottom { padding-bottom: 34px; }
+    }
+    @media (orientation: landscape) {
+      html.is-app .safe-top    { padding-top:    0px; }
+      html.is-app .safe-bottom { padding-bottom: 21px; }
     }
     /* Library card action row — keep every primary button the same height and on
        a single line (no 2-line "☰ / Episodes" wrap) so the row reads as a clean
@@ -11935,6 +11945,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.3.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.3.2</div>
 </body>
 </html>

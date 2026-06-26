@@ -947,7 +947,7 @@ recompute on rotation — are the only inset source. Also set the WebView
 (`#030712`) so any momentary reflow gap is dark, never white. Rule of thumb: pick
 **one** inset owner — native `contentInset` *or* CSS `env()`, never both.
 
-### …and `env(safe-area-inset-top)` is unreliable in WKWebView — in the app, PIN the inset to a constant, don't use live `env()` (portrait only)
+### …and `env(safe-area-inset-top)` is unreliable in WKWebView — in the app, PIN the inset to a constant, don't use live `env()` (both orientations)
 Having made CSS `env()` the sole inset owner (above), don't trust it inside the app —
 it's corruptible in **both** directions on the navigated host dashboard:
 - It frequently resolves `env(safe-area-inset-top)` to **~0**, so `.safe-top` chrome
@@ -963,8 +963,14 @@ Because env() under-reports to ~0 in the steady state, the 59px floor was alread
 only thing showing — so the fix is to drop the live env() term entirely in the app and
 **pin a constant**: `html.is-app .safe-top { padding-top: 59px }` (and `34px` for
 `.safe-bottom`). Visually identical in normal use, but the corruptible dynamic value
-can no longer drift it. **Scope to `@media (orientation: portrait)`**: in landscape
-the top inset is legitimately 0, so an unconditional band would shove the UI down.
+can no longer drift it. **Pin per orientation, but pin both** — the first cut scoped
+the pin to `@media (orientation: portrait)` only and left landscape on the live
+`env()`; landscape over-reports the same way (reproduced on-device after **on-device
+playback + rotating** between landscape/portrait and fullscreen/non-fullscreen — the
+corrupted landscape inset stuck and shoved the top chrome down). So pin landscape too:
+`@media (orientation: landscape) { html.is-app .safe-top { padding-top: 0px }`
+(legitimate landscape top inset — Island sits on the side) `.safe-bottom { padding-bottom: 21px } }`
+(home-indicator band). Portrait stays `59px`/`34px`.
 Trade-off: 59pt is the Dynamic-Island inset (the largest current top inset); notch
 phones (~47pt) sit comfortably under it — a small dark band beats either the status
 bar covering the controls or the intermittent drift. (Browsers are untouched — they
