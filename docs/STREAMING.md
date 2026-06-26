@@ -698,12 +698,29 @@ Two ways to populate the cache:
 ### 3. Skip-intro / credits
 
 `lpEvaluateSkipOffer(t)` runs on every `timeupdate` and mirrors the backend
-`_maybe_emit_skip_offer`:
+`_maybe_emit_skip_offer` — **including its per-profile auto-skip**. The current
+profile's `auto_skip_intro` / `auto_skip_credits` toggles are read live via
+`_lpAutoSkipPrefs()` (the freshly-fetched `allProfiles` entry, falling back to
+the stored `profile`; `saveAutoSkip` also writes the new values straight into
+both caches so a mid-session toggle takes effect on the next tick without a
+re-fetch). Behaviour per window:
 
-- Intro window: `start - 2 ≤ t < end - 2`. Show "Skip Intro" button.
-- Credits window: `t ≥ credits_start - 1`. Show "Skip Credits" / "End"
-  depending on whether there's a next file.
-- Dismissed offers add `<filePath>#intro` / `#credits` to `lp.skipDoneFor`.
+- **Auto-skip OFF (manual, unchanged):**
+  - Intro window: `start - 2 ≤ t < end - 2`. Show "Skip Intro" button.
+  - Credits window: `t ≥ credits_start - 1`. Show "Skip Credits" / "End"
+    depending on whether there's a next file.
+- **Auto-skip ON (countdown then auto-fire, mirrors the VLC marquee):** once
+  `t` enters `[skip_point − lead, skip_point)` the tile counts down (intro lead
+  `LP_SKIP_LEAD_INTRO = 5`, credits lead `LP_SKIP_LEAD_CREDITS = 10` — the same
+  leads as VLC's `SKIP_COUNTDOWN_*_SEC`) showing e.g. "Skipping Intro in 3" /
+  "Next Episode in 7" / "Ending in 7", and at `t ≥ skip_point` calls
+  `lpAcceptSkipOffer()` automatically (intro → seek to `end + 1`; credits →
+  `_lpAdvanceOrEnd`). The countdown is `timeupdate`-driven, so it freezes while
+  paused and tracks seeks, and the user can still tap the tile to skip early or
+  **Hide** to cancel. Intro auto-skip only engages while there's still >1 s of
+  intro left to skip (matching VLC).
+- Dismissed offers add `<filePath>#intro` / `#credits` to `lp.skipDoneFor`
+  (suppresses both the manual button and the auto countdown for that file).
 
 The offer (`#lpSkipOffer`) renders only when the player is in full overlay
 (`.lp-active`) — hidden by CSS in tiny mode. The same CSS rule hides

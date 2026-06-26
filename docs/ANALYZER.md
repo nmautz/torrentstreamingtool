@@ -223,7 +223,7 @@ left untouched even on a forced admin re-run).
 
 `renderSkipOffer(offer)` displays a fixed-position amber tile at the bottom of the viewport (above the player footer / fullscreen controls). Renders whenever `state.skip_offer` is non-null. The label is "Skip intro" or "Skip credits" depending on `offer.type`. `triggerSkip()` POSTs `/api/skip-now`; `dismissSkip()` DELETEs.
 
-Per-profile `auto_skip_intro` / `auto_skip_credits` toggles live in the profile-settings modal (gear icon next to the navbar avatar).
+Per-profile `auto_skip_intro` / `auto_skip_credits` toggles live in the profile-settings modal (gear icon next to the navbar avatar). They drive **both** playback paths: the VLC/TV countdown (above) and the on-device HLS player (`lpEvaluateSkipOffer` → countdown then auto-skip; see [STREAMING.md § Skip-intro / credits](STREAMING.md)).
 
 ## See also
 

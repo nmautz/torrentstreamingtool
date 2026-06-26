@@ -4517,6 +4517,13 @@ async function saveAutoSkip(){
     method:"POST", headers:{"Content-Type":"application/json"},
     body: JSON.stringify({auto_skip_intro: intro, auto_skip_credits: credits}),
   }).catch(()=>null);
+  if(r && r.ok){
+    // Reflect into the local profile cache so the live on-device player's
+    // auto-skip (_lpAutoSkipPrefs) honours the change without a re-fetch.
+    if(profile){ profile.auto_skip_intro=intro; profile.auto_skip_credits=credits; }
+    const f = Array.isArray(allProfiles) ? allProfiles.find(p=>p.id===profile.id) : null;
+    if(f){ f.auto_skip_intro=intro; f.auto_skip_credits=credits; }
+  }
   const s = document.getElementById("psStatus");
   if(s){
     s.textContent = r && r.ok ? "Saved." : "Save failed.";
@@ -10991,24 +10998,64 @@ async function lpStop() {
   lp.itemId = null; lp.filePath = null; lp.playlist = []; lp.pi = 0;
 }
 
-// Skip-intro / skip-credits offer logic — mirrors backend _maybe_emit_skip_offer.
+// Lead seconds for the auto-skip countdown — mirror the VLC marquee leads
+// (SKIP_COUNTDOWN_INTRO_SEC / SKIP_COUNTDOWN_CREDITS_SEC in main.py).
+const LP_SKIP_LEAD_INTRO = 5;
+const LP_SKIP_LEAD_CREDITS = 10;
+
+// Resolve the current profile's auto-skip toggles. Prefer the freshly-fetched
+// allProfiles entry (the profile-settings modal can update it mid-session),
+// falling back to the stored `profile` object.
+function _lpAutoSkipPrefs() {
+  let me = profile;
+  if (Array.isArray(allProfiles) && allProfiles.length) {
+    const f = allProfiles.find(p => p.id === profile.id);
+    if (f) me = f;
+  }
+  return { intro: !!(me && me.auto_skip_intro), credits: !!(me && me.auto_skip_credits) };
+}
+
+// Skip-intro / skip-credits offer logic — mirrors backend _maybe_emit_skip_offer
+// + _maybe_emit_skip_offer's auto-skip countdown. When the profile has auto-skip
+// enabled for a window, the tile counts down over the lead seconds before the
+// skip point and fires automatically when playback reaches it (the user can still
+// tap Skip to act early, or Hide to cancel). When auto-skip is off, it's the
+// manual button only, exactly as before.
 function lpEvaluateSkipOffer(t) {
   if (!lp.skipData) return;
   const intro = lp.skipData.intro;
   const creditsStart = lp.skipData.credits_start;
   const fileKey = lp.filePath;
+  const prefs = _lpAutoSkipPrefs();
+  const hasNext = lp.pi < lp.playlist.length - 1;
   // Intro window
-  if (intro && intro.start != null && intro.end != null) {
-    if (t >= intro.start - 2 && t < intro.end - 2 && !lp.skipDoneFor.has(fileKey + "#intro")) {
+  if (intro && intro.start != null && intro.end != null
+      && !lp.skipDoneFor.has(fileKey + "#intro")) {
+    // Auto-skip only while there's still intro left to skip (>1 s), matching VLC.
+    if (prefs.intro && (intro.end - t) > 1) {
+      if (t >= intro.start - LP_SKIP_LEAD_INTRO) {
+        lp.skipOfferType = "intro"; lp.skipOfferEnd = intro.end;
+        if (t >= intro.start) { lpAcceptSkipOffer(); return; }
+        const n = Math.min(LP_SKIP_LEAD_INTRO, Math.max(1, Math.ceil(intro.start - t)));
+        _lpShowSkipOffer("Skipping Intro in " + n); return;
+      }
+    } else if (t >= intro.start - 2 && t < intro.end - 2) {
       lp.skipOfferType = "intro"; lp.skipOfferEnd = intro.end;
       _lpShowSkipOffer("Skip Intro"); return;
     }
   }
   // Credits window
-  if (creditsStart != null) {
-    if (t >= creditsStart - 1 && !lp.skipDoneFor.has(fileKey + "#credits")) {
+  if (creditsStart != null && !lp.skipDoneFor.has(fileKey + "#credits")) {
+    if (prefs.credits) {
+      if (t >= creditsStart - LP_SKIP_LEAD_CREDITS) {
+        lp.skipOfferType = "credits"; lp.skipOfferEnd = 0;
+        if (t >= creditsStart) { lpAcceptSkipOffer(); return; }
+        const n = Math.min(LP_SKIP_LEAD_CREDITS, Math.max(1, Math.ceil(creditsStart - t)));
+        _lpShowSkipOffer((hasNext ? "Next Episode in " : "Ending in ") + n); return;
+      }
+    } else if (t >= creditsStart - 1) {
       lp.skipOfferType = "credits"; lp.skipOfferEnd = 0;
-      _lpShowSkipOffer(lp.pi < lp.playlist.length - 1 ? "Skip Credits" : "End"); return;
+      _lpShowSkipOffer(hasNext ? "Skip Credits" : "End"); return;
     }
   }
   _lpHideSkipOffer();
@@ -11945,6 +11992,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.3.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.4.0</div>
 </body>
 </html>
