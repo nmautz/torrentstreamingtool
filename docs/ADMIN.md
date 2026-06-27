@@ -55,7 +55,7 @@ Both run **only while the host is idle** (`_machine_in_use(300)` — deliberatel
 
 #### Indexer Health
 
-A card above the configured-indexers list that surfaces **resilience to a partly-broken Jackett**. Jackett's aggregate `/indexers/all/results` endpoint returns results from the indexers that *did* respond and flags the ones that errored, so a single broken indexer never sinks a search — `_record_indexer_health` (called from `/api/search`) records the per-indexer status and raises a **non-specific** `indexers_degraded` flag when some fail while others succeed. The flag drives a quiet amber banner on the **user** dashboard ("Some search sources aren't responding — results may be incomplete.") that deliberately **never names which** indexers are down; the names + failure reasons live only here, for the admin.
+A card above the configured-indexers list that surfaces **resilience to a partly-broken Jackett**. Jackett's aggregate `/indexers/all/results` endpoint returns results from the indexers that *did* respond and flags the ones that errored, so a single broken indexer never sinks a search — `_record_indexer_health` (called from `/api/search`) records the per-indexer status and raises a **non-specific** `indexers_degraded` flag when some fail while others succeed. As of 7.4.1 this flag no longer surfaces a banner on the **user** dashboard (it was noise — search stays usable when only some indexers fail); the flag still flows on the `state` SSE and drives the admin-only `#indexerHealthBanner` here, where the names + failure reasons live. The all-indexers-failing case is still a hard error to the user (502 → toast).
 
 The card shows:
 - A degraded/all-OK summary banner (`X of Y indexers are failing` / `All Y indexers responding`).

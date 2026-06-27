@@ -275,35 +275,16 @@
        control tiles below, since users rely on muscle memory for those) and has
        pointer-events:none so it can never block a control. */
     body.fc-open #serverAttentionBanner,
-    body.fc-open #perfBanner,
     body.fc-open #globalToast { display:none !important; }
-    /* These notice banners float at z-70 — above the on-device player (z-50) and
-       its Stop / To TV control bar. Now that they are dismissable (serverAttention)
-       or collapsable (perfBanner), a shown/expanded banner should BLOCK clicks so an
-       accidental tap can't fall through to a UI button underneath it. The user has a
-       way out (dismiss × or the collapse chevron), so it's safe to capture taps.
-       The collapsed perf banner is just a transparent chevron tab, so it stays
-       click-through except for the chevron itself (see #perfBannerToggle below).
+    /* The server-attention banner floats at z-70 — above the on-device player
+       (z-50) and its Stop / To TV control bar. It's dismissable, so a shown banner
+       should BLOCK clicks so an accidental tap can't fall through to a UI button
+       underneath it. The user has a way out (dismiss × or the 5s auto-hide), so
+       it's safe to capture taps.
        (#globalToast keeps pointer-events:none on its container — it auto-dismisses.)
        Pointer-events are set by ID so they survive the className rewrites in
-       renderServerAttention() / renderPerfBanner(). */
+       renderServerAttention(). */
     #serverAttentionBanner { pointer-events: auto; }
-    #perfBanner { pointer-events: none; }
-    #perfBanner:not(.perf-collapsed) { pointer-events: auto; }
-    /* Host-performance banner collapse/expand. Collapsed = a small chevron tab
-       only (transparent strip, click-through except the chevron), so it never
-       covers the navbar / prep pill. The chevron itself keeps its tone colour so
-       it stays visible. Expanded = the full message; chevron flips to point up. */
-    #perfBannerToggle { pointer-events: auto; cursor: pointer; }
-    #perfBannerChevron { transition: transform .2s ease; }
-    #perfBanner:not(.perf-collapsed) #perfBannerChevron { transform: rotate(180deg); }
-    #perfBanner.perf-collapsed {
-      background: transparent !important; border-color: transparent !important;
-      padding-top: 0; padding-bottom: 0; justify-content: flex-end;
-    }
-    #perfBanner.perf-collapsed > #perfBannerDot,
-    #perfBanner.perf-collapsed > #perfBannerMsg { display: none; }
-    #perfBanner.perf-collapsed > #perfBannerToggle { margin: 0; padding: .35rem .5rem; }
     /* Global prep pill collapse/expand. Collapsed = just the pulsing dot + chevron
        (everything below the header hidden, the title text hidden), so the pill
        shrinks to a small tab in the corner. Chevron flips up when expanded. */
@@ -1593,25 +1574,8 @@
     class="flex-shrink-0 -my-1.5 -mr-1 p-1.5 leading-none text-base opacity-70 hover:opacity-100 transition-opacity">×</button>
 </div>
 
-<!-- ── Host performance banner ──────────────────────────────────────────────── -->
-<!-- Shown while the host is degraded/overloaded (e.g. catching up on background
-     prep after you arrive). Auto-clears the moment resources return to normal. -->
-<!-- Starts collapsed (just the chevron tab) so it never blocks the navbar / prep
-     pill underneath. Click the chevron to expand the full message; click again to
-     re-collapse. Collapse state lives in perfBannerExpanded; see renderPerfBanner. -->
-<div id="perfBanner"
-  class="hidden perf-collapsed sticky top-0 z-[70] border-b text-xs sm:text-sm px-3 py-2 flex items-center gap-2 leading-tight">
-  <span id="perfBannerDot" class="w-2 h-2 flex-shrink-0"></span>
-  <div id="perfBannerMsg" class="min-w-0 flex-1"></div>
-  <button id="perfBannerToggle" type="button" onclick="togglePerfBanner()"
-    aria-label="Toggle host status detail"
-    class="flex-shrink-0 -my-1.5 -mr-1 p-1.5 flex items-center justify-center">
-    <svg id="perfBannerChevron" width="14" height="14" viewBox="0 0 24 24" fill="none"
-      stroke="currentColor" stroke-width="3" stroke-linecap="square">
-      <polyline points="6 9 12 15 18 9"></polyline>
-    </svg>
-  </button>
-</div>
+<!-- Host-performance banner removed: CPU/GPU/RAM/network busy/overloaded states
+     are transient background-work noise and are no longer surfaced to the user. -->
 
 <!-- ── Navbar ─────────────────────────────────────────────────────────────── -->
 <!-- Mobile portrait: wraps to two rows. Row 1 = logo + status + profile + settings; Row 2 = three full-width tabs.
@@ -3043,6 +3007,7 @@ function hideAlert(){
 // and the banner re-appears on its own if the condition changes to a different
 // one. null = nothing dismissed.
 let serverAttentionDismissedKey = null;
+let serverAttentionTimer = null;
 function dismissServerAttention(){
   const el = document.getElementById("serverAttentionBanner");
   if(!el) return;
@@ -3079,14 +3044,10 @@ function renderServerAttention(d){
     notice = { key: `missing:${labels}`,
       className: `${base} bg-amber-950/70 border-amber-800 text-amber-200`,
       text: `Server needs admin attention: ${labels} not configured.` };
-  } else if(d.indexers_degraded){
-    // Some indexers are failing while others still work. Search stays usable, so
-    // this is an amber heads-up rather than a hard error. Deliberately non-specific
-    // — we never name which indexers are down (the admin tab has the detail).
-    notice = { key: "degraded",
-      className: `${base} bg-amber-950/70 border-amber-800 text-amber-200`,
-      text: "Some search sources aren't responding — results may be incomplete." };
   }
+  // Note: "some search sources degraded" (d.indexers_degraded) is intentionally
+  // NOT surfaced — search stays usable, so it's noise. All-indexers-failing is a
+  // hard error reported separately via the toast.
 
   // Nothing to show (this also covers optional-only missing keys, which we don't
   // surface here since we can't tell if the viewer is an admin).
@@ -3097,9 +3058,10 @@ function renderServerAttention(d){
     return;
   }
 
+  const prevKey = el.dataset.noticeKey || "";
   el.dataset.noticeKey = notice.key;
-  // Keep it hidden only if the user dismissed this exact notice; a changed
-  // condition gets a fresh key and re-appears.
+  // Keep it hidden only if the user dismissed this exact notice (or it already
+  // auto-hid); a changed condition gets a fresh key and re-appears.
   if(serverAttentionDismissedKey === notice.key){
     el.classList.add("hidden");
     renderFcNotice();
@@ -3109,46 +3071,22 @@ function renderServerAttention(d){
   msg.textContent = notice.text;
   el.classList.remove("hidden");
   renderFcNotice();
+  // This banner needs a click to clear, so auto-hide it after 5s (treated as a
+  // dismiss so the same condition won't pop it straight back). Only (re)arm on a
+  // genuine notice change — re-renders of the same notice mustn't keep it alive.
+  if(notice.key !== prevKey){
+    clearTimeout(serverAttentionTimer);
+    serverAttentionTimer = setTimeout(()=>{
+      serverAttentionDismissedKey = notice.key;
+      el.classList.add("hidden");
+      renderFcNotice();
+    }, 5000);
+  }
 }
 
-// Host-performance banner. Shows while the box is degraded/overloaded — typically
-// when a user arrives mid-prep and the host is shedding/finishing background work.
-// Auto-clears the instant resources return to "ok". Driven by the SSE state's
-// `sys_status.overall` (set by system_monitor_loop).
-// Collapsed by default so the banner is just a chevron tab and never blocks the
-// navbar / prep pill. The user clicks the chevron to reveal the full message.
-let perfBannerExpanded=false;
-function togglePerfBanner(){
-  perfBannerExpanded=!perfBannerExpanded;
-  const el=document.getElementById("perfBanner");
-  if(el) el.classList.toggle("perf-collapsed", !perfBannerExpanded);
-  renderFcNotice();
-}
-function renderPerfBanner(d){
-  const el=document.getElementById("perfBanner");
-  if(!el) return;
-  const s=d.sys_status||{};
-  const overall=s.overall;
-  if(overall!=="degraded" && overall!=="overloaded"){ el.classList.add("hidden"); renderFcNotice(); return; }
-  const msg=document.getElementById("perfBannerMsg");
-  const dot=document.getElementById("perfBannerDot");
-  // Name what's hot so it's not a mystery ("CPU, GPU…").
-  const hot=[];
-  if(s.cpu&&s.cpu.status!=="ok") hot.push("CPU");
-  if(s.gpu&&s.gpu.status!=="ok") hot.push("GPU");
-  if(s.ram&&s.ram.status!=="ok") hot.push("RAM");
-  if(s.net&&s.net.status!=="ok") hot.push("network");
-  const over=overall==="overloaded";
-  // Rewriting className drops perf-collapsed, so re-apply it from current state.
-  el.className=`${perfBannerExpanded?'':'perf-collapsed '}sticky top-0 z-[70] border-b text-xs sm:text-sm px-3 py-2 flex items-center gap-2 leading-tight ${over?'bg-red-950/70 border-red-800 text-red-200':'bg-amber-950/70 border-amber-800 text-amber-200'}`;
-  dot.className=`w-2 h-2 flex-shrink-0 ${over?'bg-red-500 blink':'bg-amber-500'}`;
-  const what=hot.length?` (${hot.join(", ")})`:"";
-  msg.textContent=over
-    ? `Host is overloaded${what} — finishing background work. Performance may be reduced for a moment.`
-    : `Host is busy${what} — catching up on background work. Performance may be briefly reduced.`;
-  el.classList.remove("hidden");
-  renderFcNotice();
-}
+// Host-performance banner removed. CPU/GPU/RAM/network busy/overloaded states
+// (SSE `sys_status.overall`) are transient background-work noise, so we no longer
+// surface them to the user. The data still flows on `state` for the admin panel.
 
 // ── Server notices over the fullscreen controls ─────────────────────────────
 // While the fullscreen VLC controls are open, the normal top banners/toast are
@@ -3173,18 +3111,13 @@ function renderFcNotice(){
   strip.textContent="";
   if(!inFC){ strip.classList.add("hidden"); return; }
 
-  // Collect active notices in priority order: reboot/update first, then host
-  // performance/network, then the latest error/warning toast.
+  // Collect active notices in priority order: reboot/update first, then the
+  // latest error/warning toast.
   const items=[];
   const ban=document.getElementById("serverAttentionBanner");
   if(ban && !ban.classList.contains("hidden")){
     const m=document.getElementById("serverAttentionMsg");
     items.push({msg:(m?m.textContent:"")||"", tone:_fcNoticeTone(ban.className)});
-  }
-  const perf=document.getElementById("perfBanner");
-  if(perf && !perf.classList.contains("hidden")){
-    const m=document.getElementById("perfBannerMsg");
-    items.push({msg:(m?m.textContent:"")||"", tone:_fcNoticeTone(perf.className)});
   }
   const toast=document.getElementById("globalToast");
   if(toast && !toast.classList.contains("hidden")){
@@ -11774,7 +11707,6 @@ function connectSSE(){
     renderVpn(d.vpn_secure,d.vpn_status,app.vpn_block_ui); renderPlayer(app);
     updateDlBadge(d.downloading_count||0);
     renderServerAttention(d);
-    renderPerfBanner(d);
     if(typeof d.vlc_night_mode==="boolean") renderNightMode();
     if(typeof d.window_mgmt_paused==="boolean") renderWindowControl();
     _tvRemoteSync();  // iOS app: keep the Dynamic Island TV remote in sync (inert on web)
@@ -11992,6 +11924,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.4.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.4.1</div>
 </body>
 </html>
