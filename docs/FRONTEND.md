@@ -211,6 +211,8 @@ State additions:
 
 Per-episode ▶: `epPlayFrom(globalIndex)` slices `epFiles` from the tapped index forward (using the original full-list index, *not* the per-season filtered index), respects resume position on the first file, plays as a playlist. This means "press play on episode 3" plays 3 → 4 → 5 …, not just 3.
 
+**Shuffle Play.** The bottom action bar's **Shuffle** button (`#epShuffleBtn`, hidden in movie mode via `_epApplyMovieChrome`) → `epShuffle()` opens `#shuffleScopeModal`, which asks **Unwatched only** vs **All episodes** (live counts; the unwatched option is `disabled` when nothing's unwatched). `startShuffle(scope)` builds the pool from `epFiles` (filtering `!progress.completed` for unwatched), Fisher–Yates shuffles the paths (`_shuffleInPlace`), and plays via `playLibraryWithChooser(itemId, paths, 0, label, /*shuffle*/true)` — always from the top (seek 0; shuffle is a fresh run, not a resume). The `shuffle` flag threads through `pcCtx` → `playLibraryFiles` → the `/play` body so the server records the random order (TV Next/Prev follow it); the on-device path shuffles for free since the shuffled `paths` become `lp.playlist` verbatim (multi-file lists are kept as-is).
+
 `closeEpisodeModal()` is kept as a back-compat alias for `closeEpisodePage()` so existing callers (refreshEpFiles, mark-watched, keyboard Escape handler) continue to work without changes.
 
 #### TMDb metadata
@@ -226,7 +228,7 @@ Admin sets the key under **Admin → Indexers → TMDb Metadata** (`POST /api/ad
 
 All Play surfaces (`epPlay`, `epPlayFrom`, `continueLibraryItem`, the
 `lib-restart-btn` listener, the per-card "📱 On Device" button) route through
-`playLibraryWithChooser(itemId, files, seekTo, label)`. When the host is
+`playLibraryWithChooser(itemId, files, seekTo, label, shuffle?)`. When the host is
 reachable it opens `#playChooserModal` — "On TV (VLC)" vs "On This Device".
 There is no offline-only fallback path; if `navigator.onLine === false` the
 function shows a toast and bails.

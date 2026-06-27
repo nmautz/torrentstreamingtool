@@ -681,6 +681,12 @@ class AppState:
     library_profile_color: str = ""
     library_item_file_count: int = 0                     # total files in the playing item
     library_playlist: list = field(default_factory=list)  # ordered file paths
+    # Shuffle Play: the full temp random order of file paths for the active item.
+    # Empty when not shuffling. When set, next/prev (and the credit "skip to next"
+    # auto-advance) navigate this order instead of the item's natural file order —
+    # and unlike library_playlist (which is the remaining VLC tail and shrinks on
+    # advance), this keeps the *whole* order so prev can walk back through history.
+    library_shuffle_order: list = field(default_factory=list)
     library_current_file: Optional[str] = None            # path VLC is playing now
     downloading_count: int = 0                            # active library downloads
     play_when_ready_item_id: Optional[str] = None        # auto-play this item on download complete
@@ -934,6 +940,9 @@ def state_snapshot() -> dict:
         "library_current_index": cur_idx,
         "library_current_file": current,
         "library_playlist": list(playlist),
+        # True while Shuffle Play is active (random episode order). Lets the UI
+        # surface a "shuffle" badge; next/prev already follow the random order.
+        "library_shuffle": bool(state.library_shuffle_order),
         "library_item_file_count": state.library_item_file_count,
         "is_library_playback": state.library_item_id is not None,
         "library_item_id": state.library_item_id,
@@ -4173,6 +4182,7 @@ async def _auto_play_item(item: dict, profile_id: str, file_path: str = "") -> N
         await _set_playback_owner(profile_id)
         state.library_item_file_count = len(item.get("files", []))
         state.library_playlist = playlist
+        state.library_shuffle_order = []   # auto-play is always natural order
         state.library_current_file = playlist[0]
 
         await broadcast("stream_status", {"status": "playing", "message": f"Auto-playing: {first.name}"})
@@ -4215,6 +4225,7 @@ async def _play_background_video() -> bool:
     state.library_profile_color = ""
     state.library_item_file_count = 0
     state.library_playlist = []
+    state.library_shuffle_order = []
     state.library_current_file = None
     state.active_title = None
     state.active_file = None
@@ -4487,10 +4498,21 @@ def _skip_settings_for_profile(lib: dict, profile_id: str) -> dict:
     }
 
 
+def _nav_order(item: dict) -> list[str]:
+    """The path order that defines next/prev for the active playback.
+
+    Shuffle Play overrides natural file order: while `library_shuffle_order` is
+    set, "next" / "prev" (and the credit auto-advance) follow the random order.
+    Otherwise it's the item's natural season/episode-sorted file list.
+    """
+    if state.library_shuffle_order:
+        return list(state.library_shuffle_order)
+    return [f.get("path", "") for f in item.get("files", [])]
+
+
 def _next_file_in_item(item: dict, current_path: str) -> Optional[str]:
-    """Return the next file path in this item after current_path, or None."""
-    files = item.get("files", [])
-    paths = [f.get("path", "") for f in files]
+    """Return the next file path after current_path (shuffle-aware), or None."""
+    paths = _nav_order(item)
     try:
         idx = paths.index(current_path)
     except ValueError:
@@ -5147,7 +5169,7 @@ async def vlc_next_file(current_file: str, item: dict) -> None:
     next_path = _next_file_in_item(item, current_file)
     if not next_path or not Path(next_path).exists():
         return
-    all_paths = [f.get("path", "") for f in item.get("files", [])]
+    all_paths = _nav_order(item)
     try:
         idx = all_paths.index(next_path)
         new_tail = all_paths[idx:]
@@ -5773,6 +5795,8 @@ class LibraryPlayReq(BaseModel):
     profile_id: str
     files: list[str] = []         # ordered list of absolute paths to play as a playlist
     seek_first_to: Optional[float] = None  # seek into the first file (seconds)
+    shuffle: bool = False         # Shuffle Play: `files` is a temp random order — record
+                                  # it so next/prev navigate the shuffle, not natural order
 
 
 class MarkWatchedReq(BaseModel):
@@ -7149,6 +7173,9 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     state.library_profile_color = (prof_obj or {}).get("color", "") or ""
     state.library_item_file_count = len(item.get("files", []))
     state.library_playlist = playlist
+    # Shuffle Play: remember the full random order (the filtered, on-disk playlist)
+    # so next/prev walk it. Any normal play clears it back to natural order.
+    state.library_shuffle_order = list(playlist) if req.shuffle else []
     state.library_current_file = playlist[0]
     state.skip_offer = None
     state.skip_offer_file = None
@@ -8123,6 +8150,7 @@ async def stream_now(req: StreamReq) -> JSONResponse:
     state.library_profile_color = ""
     state.library_item_file_count = 0
     state.library_playlist = []
+    state.library_shuffle_order = []
     state.library_current_file = None
     state.resume_offer = None
 
@@ -8738,6 +8766,7 @@ async def youtube_play(req: YouTubeReq) -> JSONResponse:
     state.library_profile_color = ""
     state.library_item_file_count = 0
     state.library_playlist = []
+    state.library_shuffle_order = []
     state.library_current_file = None
     state.youtube_active = True
     state.youtube_video_id = video_id
@@ -8929,6 +8958,7 @@ async def stop() -> JSONResponse:
     state.library_profile_color = ""
     state.library_item_file_count = 0
     state.library_playlist = []
+    state.library_shuffle_order = []
     state.library_current_file = None
     state.progress = 0.0
     state.downloaded_mb = 0.0
@@ -9163,25 +9193,34 @@ async def _vlc_relaunch_playlist(playlist: list[str], target_name: str) -> None:
 
 @app.post("/api/vlc/prev")
 async def vlc_prev() -> JSONResponse:
-    """Jump to the previous episode in series order, regardless of how playback was started."""
+    """Jump to the previous episode (shuffle order when shuffling, else series order)."""
     current = state.library_current_file
     if not current:
         raise HTTPException(400, "No active playback.")
 
-    # Try the active playlist first, then fall back to the item's full file list
     prev_file: Optional[str] = None
     new_tail: list[str] = []
 
-    idx = _find_in_paths(current, state.library_playlist)
-    if idx > 0:
-        prev_file = state.library_playlist[idx - 1]
-        new_tail  = state.library_playlist[idx - 1:]
+    if state.library_shuffle_order:
+        # Shuffle Play: step back through the temp random order. new_tail keeps the
+        # whole forward run so VLC auto-advance continues the shuffle from here.
+        order = state.library_shuffle_order
+        oi = _find_in_paths(current, order)
+        if oi > 0:
+            prev_file = order[oi - 1]
+            new_tail  = order[oi - 1:]
     else:
-        all_paths = await _item_all_paths()
-        item_idx  = _find_in_paths(current, all_paths)
-        if item_idx > 0:
-            prev_file = all_paths[item_idx - 1]
-            new_tail  = all_paths[item_idx - 1:]
+        # Try the active playlist first, then fall back to the item's full file list
+        idx = _find_in_paths(current, state.library_playlist)
+        if idx > 0:
+            prev_file = state.library_playlist[idx - 1]
+            new_tail  = state.library_playlist[idx - 1:]
+        else:
+            all_paths = await _item_all_paths()
+            item_idx  = _find_in_paths(current, all_paths)
+            if item_idx > 0:
+                prev_file = all_paths[item_idx - 1]
+                new_tail  = all_paths[item_idx - 1:]
 
     if not prev_file:
         raise HTTPException(400, "Already at first episode.")
@@ -9211,25 +9250,33 @@ async def vlc_prev() -> JSONResponse:
 
 @app.post("/api/vlc/next")
 async def vlc_next() -> JSONResponse:
-    """Jump to the next episode in series order, regardless of how playback was started."""
+    """Jump to the next episode (shuffle order when shuffling, else series order)."""
     current = state.library_current_file
     if not current:
         raise HTTPException(400, "No active playback.")
 
-    # Try the active playlist first, then fall back to the item's full file list
     next_file: Optional[str] = None
     new_tail: list[str] = []
 
-    idx = _find_in_paths(current, state.library_playlist)
-    if 0 <= idx < len(state.library_playlist) - 1:
-        next_file = state.library_playlist[idx + 1]
-        new_tail  = state.library_playlist[idx + 1:]
+    if state.library_shuffle_order:
+        # Shuffle Play: step forward through the temp random order.
+        order = state.library_shuffle_order
+        oi = _find_in_paths(current, order)
+        if 0 <= oi < len(order) - 1:
+            next_file = order[oi + 1]
+            new_tail  = order[oi + 1:]
     else:
-        all_paths = await _item_all_paths()
-        item_idx  = _find_in_paths(current, all_paths)
-        if 0 <= item_idx < len(all_paths) - 1:
-            next_file = all_paths[item_idx + 1]
-            new_tail  = all_paths[item_idx + 1:]
+        # Try the active playlist first, then fall back to the item's full file list
+        idx = _find_in_paths(current, state.library_playlist)
+        if 0 <= idx < len(state.library_playlist) - 1:
+            next_file = state.library_playlist[idx + 1]
+            new_tail  = state.library_playlist[idx + 1:]
+        else:
+            all_paths = await _item_all_paths()
+            item_idx  = _find_in_paths(current, all_paths)
+            if 0 <= item_idx < len(all_paths) - 1:
+                next_file = all_paths[item_idx + 1]
+                new_tail  = all_paths[item_idx + 1:]
 
     if not next_file:
         raise HTTPException(400, "Already at last episode.")

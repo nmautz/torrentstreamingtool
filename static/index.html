@@ -1456,6 +1456,15 @@
         </svg>
         <span class="hidden sm:inline">Download</span><span>(<span id="epSelectedCount">0</span>)</span>
       </button>
+      <button id="epShuffleBtn" onclick="epShuffle()"
+        title="Shuffle Play — random episodes in a random order (Next/Prev follow it)"
+        class="flex-1 bg-gray-800 hover:bg-purple-900/60 text-gray-400 hover:text-purple-300 py-3 text-xs sm:text-sm font-bold uppercase tracking-wide transition-colors min-h-[44px] flex items-center justify-center gap-1.5">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M4 4h3.5l9 16H20m0 0l-3-3m3 3l-3 3M4 20h3.5l2.5-4.444M20 4h-3.5l-2.5 4.444"/>
+        </svg>
+        <span class="hidden sm:inline">Shuffle</span>
+      </button>
       <button id="epPlaySelBtn" onclick="epPlay()"
         class="flex-[1.4] bg-indigo-600 hover:bg-indigo-500 py-3 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors min-h-[44px]">
         ▶︎ Play
@@ -1468,6 +1477,39 @@
     </div>
   </div>
   </div><!-- /#epRightPane -->
+</div>
+
+<!-- ── Shuffle Scope Modal ─────────────────────────────────────────────────── -->
+<!-- Asks whether Shuffle Play should draw from unwatched episodes only or all. -->
+<div id="shuffleScopeModal"
+  class="hidden fixed inset-0 z-[55] bg-black/60
+         flex items-end sm:items-center justify-center sm:px-4 sm:py-6">
+  <div class="bg-gray-900 w-full sm:max-w-md flex flex-col fade-in border-t-[3px] border-purple-600">
+    <div class="px-5 pt-5 pb-3 border-b border-gray-800 flex items-start justify-between gap-3">
+      <div class="min-w-0">
+        <h2 class="text-lg font-black uppercase tracking-wide">Shuffle Play</h2>
+        <p class="text-xs text-gray-500 mt-0.5">Plays random episodes in a random order. Next / Prev follow it.</p>
+      </div>
+      <button onclick="closeShuffleScope()"
+        class="text-gray-500 hover:text-white transition-colors flex-shrink-0 p-1">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+    <div class="p-4 flex flex-col gap-2.5">
+      <button id="shufUnwatchedBtn" onclick="startShuffle('unwatched')"
+        class="w-full text-left px-4 py-3 bg-gray-800 hover:bg-purple-900/60 border border-gray-700 hover:border-purple-600 transition-colors disabled:opacity-40 disabled:hover:bg-gray-800 disabled:hover:border-gray-700 disabled:cursor-not-allowed">
+        <div class="text-sm font-bold uppercase tracking-wide">Unwatched only</div>
+        <div class="text-[11px] text-gray-400 mt-0.5"><span id="shufUnwatchedCount">0</span> episode(s) not yet finished</div>
+      </button>
+      <button id="shufAllBtn" onclick="startShuffle('all')"
+        class="w-full text-left px-4 py-3 bg-gray-800 hover:bg-purple-900/60 border border-gray-700 hover:border-purple-600 transition-colors">
+        <div class="text-sm font-bold uppercase tracking-wide">All episodes</div>
+        <div class="text-[11px] text-gray-400 mt-0.5"><span id="shufAllCount">0</span> episode(s) in this series</div>
+      </button>
+    </div>
+  </div>
 </div>
 
 <!-- ── Stream File Picker Modal ────────────────────────────────────────────── -->
@@ -5054,14 +5096,14 @@ async function continueLibraryItem(itemId, label){
 }
 
 // Play a specific ordered list of files with optional seek on first
-async function playLibraryFiles(itemId,files,seekTo,label){
+async function playLibraryFiles(itemId,files,seekTo,label,shuffle){
   if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
   if(!app._connected){
     showAlert("Reconnecting — try again in a moment.","warn"); return;
   }
   await withInflight(`play_${itemId}`, null, async () => {
     _optimisticBuffering(label || _libraryLabel(itemId), itemId);
-    const body={profile_id:profile.id,files,seek_first_to:seekTo||null};
+    const body={profile_id:profile.id,files,seek_first_to:seekTo||null,shuffle:!!shuffle};
     const r=await fetch(`/api/library/${itemId}/play`,{
       method:"POST", headers:{"Content-Type":"application/json"},
       body:JSON.stringify(body),
@@ -5574,8 +5616,10 @@ function _epApplyMovieChrome(isMovie){
   const chips=document.getElementById("epBulkChips");
   const dlBtn=document.getElementById("epDownloadSelBtn");
   const playBtn=document.getElementById("epPlaySelBtn");
+  const shufBtn=document.getElementById("epShuffleBtn");
   if(chips) chips.classList.toggle("hidden", isMovie);
   if(dlBtn) dlBtn.classList.toggle("hidden", isMovie);
+  if(shufBtn) shufBtn.classList.toggle("hidden", isMovie);  // shuffle is meaningless for a 1-file item
   if(playBtn){
     playBtn.classList.toggle("hidden", isMovie);
   }
@@ -6684,6 +6728,47 @@ async function epPlay(){
   const label=firstFile?(epLabel(firstFile)+" — "+firstFile.name):"";
   closeEpisodeModal();
   await playLibraryWithChooser(itemId, ordered, seekTo, label);
+}
+
+// ── Shuffle Play ────────────────────────────────────────────────────────────
+// Random episode order for the open series; Next/Prev (TV) and on-device both
+// follow the temp order. Asks the viewer whether to draw from unwatched or all.
+function epShuffle(){
+  if(!epItemId) return;
+  const all=epFiles.map(f=>f.path).filter(Boolean);
+  if(all.length<2){ showAlert("Need at least two episodes to shuffle.","warn"); return; }
+  const unwatched=epFiles.filter(f=>!f.progress?.completed).length;
+  document.getElementById("shufAllCount").textContent=all.length;
+  document.getElementById("shufUnwatchedCount").textContent=unwatched;
+  // Fewer than two unwatched → nothing to shuffle there; only "All" makes sense.
+  document.getElementById("shufUnwatchedBtn").disabled = unwatched < 2;
+  document.getElementById("shuffleScopeModal").classList.remove("hidden");
+}
+function closeShuffleScope(){
+  document.getElementById("shuffleScopeModal").classList.add("hidden");
+}
+// Fisher–Yates in place.
+function _shuffleInPlace(a){
+  for(let i=a.length-1;i>0;i--){ const j=Math.floor(Math.random()*(i+1)); [a[i],a[j]]=[a[j],a[i]]; }
+  return a;
+}
+async function startShuffle(scope){
+  closeShuffleScope();
+  if(!epItemId) return;
+  const itemId=epItemId; // capture before closeEpisodeModal resets it to null
+  let pool=(scope==="unwatched")
+    ? epFiles.filter(f=>!f.progress?.completed)
+    : epFiles.slice();
+  let paths=pool.map(f=>f.path).filter(Boolean);
+  if(!paths.length){ showAlert("Nothing to shuffle.","warn"); return; }
+  _shuffleInPlace(paths);
+  const firstFile=epFiles.find(f=>f.path===paths[0]);
+  const label=firstFile?("Shuffle · "+firstFile.name):"Shuffle";
+  closeEpisodeModal();
+  // Always start the first shuffled episode from the top (seek 0) — shuffle is a
+  // fresh random run, not a resume. shuffle=true records the order server-side
+  // so TV Next/Prev navigate it instead of natural episode order.
+  await playLibraryWithChooser(itemId, paths, 0, label, true);
 }
 
 // Play from a specific episode (by index in epFiles), continuing sequentially
@@ -9108,12 +9193,12 @@ function resumeLibraryItemWithChooser(itemId) {
 
 // Entry point used by Play buttons. Shows the chooser modal when both VLC and
 // local-device playback are reachable; falls through to VLC otherwise.
-async function playLibraryWithChooser(itemId, files, seekTo, label) {
+async function playLibraryWithChooser(itemId, files, seekTo, label, shuffle) {
   if (!navigator.onLine) {
     showAlert("Disconnected — playback needs the host to be reachable.", "error");
     return;
   }
-  pcCtx = { itemId, files, seekTo, label };
+  pcCtx = { itemId, files, seekTo, label, shuffle: !!shuffle };
   // macOS host: no device option — go straight to VLC instead of a 1-item modal.
   if (!hlsAvailable) return pcChoose("vlc");
   document.getElementById("pcSubtitle").textContent = label || "";
@@ -9139,7 +9224,7 @@ function pcChoose(target) {
       // Multi-file resume on VLC: let the backend pick up from the resume hint.
       return continueLibraryItem(ctx.itemId, ctx.label);
     }
-    return playLibraryFiles(ctx.itemId, ctx.files, ctx.seekTo, ctx.label);
+    return playLibraryFiles(ctx.itemId, ctx.files, ctx.seekTo, ctx.label, ctx.shuffle);
   }
   if (target === "local") {
     // Dismiss the server-side offer (VLC stays put; user is watching on device).
@@ -11924,6 +12009,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.4.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.5.0</div>
 </body>
 </html>
