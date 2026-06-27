@@ -508,6 +508,20 @@
         <p class="text-xs text-gray-500 mt-0.5">Reclaim disk space. Choose which quality rungs on-device streaming generates, compress source files in place, or drop extra rungs from already-prepped bundles.</p>
       </div>
 
+      <!-- Section 0: storage by series -->
+      <div class="px-5 py-4 border-b border-gray-800 space-y-3">
+        <div class="flex items-center justify-between gap-3">
+          <div class="text-[11px] font-bold text-gray-300 uppercase tracking-widest">Storage By Series</div>
+          <button id="sbRefreshBtn" onclick="loadStorageBreakdown(this)"
+            class="text-[10px] font-bold uppercase tracking-wide px-2.5 py-1.5 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">
+            Refresh
+          </button>
+        </div>
+        <p class="text-[11px] text-gray-500">How much disk each show uses — source media plus its on-device bundles and sidecar subtitles. Click a row to see which episodes (and which part — source, bundle, or subs) take the space.</p>
+        <div id="sbSummary" class="text-[11px] text-gray-500"></div>
+        <div id="sbList" class="space-y-1.5 text-[11px] text-gray-400">Loading…</div>
+      </div>
+
       <!-- Section A: default HLS resolutions -->
       <div class="px-5 py-4 border-b border-gray-800 space-y-3">
         <div class="text-[11px] font-bold text-gray-300 uppercase tracking-widest">Default On-Device Resolutions</div>
@@ -3067,9 +3081,80 @@ async function loadStorageCompression(){
   _fcPickLevel(_fcLevel);
   _fcCodecChanged();
   _loadStorageItems();
+  loadStorageBreakdown();
   loadOndemandOnly();
   const running = await _fetchCompression();
   if(running) startCompressionPolling();
+}
+
+// ── Storage by series ───────────────────────────────────────────────────────────
+let _sbData = null;            // last breakdown payload
+const _sbOpen = new Set();     // expanded item ids (persist across re-renders)
+
+async function loadStorageBreakdown(btn){
+  const list = document.getElementById("sbList");
+  await withInflight("storage_breakdown", btn, async ()=>{
+    try{
+      const r = await fetch("/api/admin/storage-breakdown", {headers: authHeader()});
+      if(!r.ok){ if(list) list.innerHTML = `<div class="text-amber-400">Failed to load (${r.status}).</div>`; return; }
+      _sbData = await r.json();
+      _renderStorageBreakdown();
+    }catch(_){ if(list) list.innerHTML = `<div class="text-amber-400">Failed to load.</div>`; }
+  });
+}
+
+function _sbBreakdownLine(src, bundle, extra){
+  const parts = [`${_fmtBytes(src)} source`];
+  if(bundle) parts.push(`${_fmtBytes(bundle)} bundle`);
+  if(extra)  parts.push(`${_fmtBytes(extra)} subs`);
+  return parts.join(" · ");
+}
+
+function _renderStorageBreakdown(){
+  const list = document.getElementById("sbList");
+  const sum  = document.getElementById("sbSummary");
+  if(!list || !_sbData) return;
+  const items = _sbData.items || [];
+  if(sum){
+    const bits = [`Total ${_fmtBytes(_sbData.total_bytes||0)} across ${items.length} show${items.length===1?'':'s'}`];
+    if(_sbData.orphan_bytes) bits.push(`+ ${_fmtBytes(_sbData.orphan_bytes)} orphaned bundles (see Cleanup)`);
+    sum.textContent = bits.join(" ");
+  }
+  if(!items.length){ list.innerHTML = `<div class="text-gray-600">No library items yet.</div>`; return; }
+  const max = items[0].total_bytes || 1;
+  list.innerHTML = items.map(it=>{
+    const open = _sbOpen.has(it.id);
+    const pct  = Math.max(2, Math.round((it.total_bytes / max) * 100));
+    const files = open ? `<div class="mt-1.5 space-y-1 border-l border-gray-800 pl-3">${
+      (it.files||[]).map(f=>`
+        <div class="flex items-baseline justify-between gap-3">
+          <span class="text-gray-400 break-all min-w-0">${escHtml(f.name||"")}</span>
+          <span class="flex-shrink-0 text-right">
+            <span class="font-mono text-gray-300">${_fmtBytes(f.total_bytes)}</span>
+            <span class="block text-[10px] text-gray-600">${escHtml(_sbBreakdownLine(f.source_bytes, f.bundle_bytes, f.extra_bytes))}</span>
+          </span>
+        </div>`).join("")
+    }</div>` : "";
+    return `<div class="border border-gray-800 bg-gray-950/40 px-3 py-2">
+      <div class="flex items-center gap-3 cursor-pointer select-none" onclick="_sbToggle('${escHtml(it.id)}')">
+        <span class="text-gray-600 w-3 flex-shrink-0">${open?'▾':'▸'}</span>
+        <div class="min-w-0 flex-1">
+          <div class="flex items-baseline justify-between gap-3">
+            <span class="text-gray-200 font-bold break-all min-w-0">${escHtml(it.title||"(untitled)")}</span>
+            <span class="flex-shrink-0 font-mono text-gray-200">${_fmtBytes(it.total_bytes)}</span>
+          </div>
+          <div class="mt-1 h-1 bg-gray-800 overflow-hidden"><div class="h-1 bg-indigo-500" style="width:${pct}%"></div></div>
+          <div class="mt-1 text-[10px] text-gray-600">${it.file_count} file${it.file_count===1?'':'s'} · ${escHtml(_sbBreakdownLine(it.source_bytes, it.bundle_bytes, it.extra_bytes))}</div>
+        </div>
+      </div>
+      ${files}
+    </div>`;
+  }).join("");
+}
+
+function _sbToggle(id){
+  if(_sbOpen.has(id)) _sbOpen.delete(id); else _sbOpen.add(id);
+  _renderStorageBreakdown();
 }
 
 function _renderOndemandOnly(d){

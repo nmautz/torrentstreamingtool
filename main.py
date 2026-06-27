@@ -11558,6 +11558,33 @@ async def admin_get_ondemand_only(request: Request) -> JSONResponse:
     return JSONResponse({"items": items, "hls_available": HLS_AVAILABLE})
 
 
+@app.get("/api/admin/storage-breakdown")
+async def admin_storage_breakdown(request: Request) -> JSONResponse:
+    """Per-series storage breakdown for the Storage tab: every library item with its
+    total bytes on disk, plus a per-file drill-in (source media + HLS bundle +
+    sidecars) so the admin can see exactly what's consuming space.
+
+    Bundle bytes come from the offline-cache inventory (its recursive bundle walk is
+    cached / offloaded already); the source + sidecar stats run in a worker thread
+    so a large library never stalls the event loop. `orphan_bytes` is bundle space
+    no longer attached to any library file (purge it from the Cleanup tab)."""
+    _require_admin(request)
+    lib = await get_library()
+    inv = await _build_offline_cache_inventory()
+    bundle_by_path: dict[str, int] = {}
+    for it in inv.get("items", []):
+        for f in it.get("files", []):
+            fp = f.get("file_path", "")
+            if fp:
+                bundle_by_path[fp] = bundle_by_path.get(fp, 0) + int(f.get("bytes", 0) or 0)
+    orphan_bytes = sum(int(o.get("bytes", 0) or 0) for o in inv.get("orphans", []))
+    data = await asyncio.to_thread(_storage_breakdown_sync, lib, bundle_by_path)
+    data["orphan_bytes"]   = orphan_bytes
+    data["bundles_stale_at"] = inv.get("generated_at", 0)
+    data["generated_at"]   = time.time()
+    return JSONResponse(data)
+
+
 async def _purge_ondemand_bundles(item_id: str) -> None:
     """Background reclamation for a freshly on-demand-only item: walk the cache
     and delete the item's permanent HLS bundles. Runs detached from the request
@@ -18212,6 +18239,102 @@ def _offline_cache_inventory_sync(lib: dict, jobs: list[dict]) -> dict:
         "colocated":   True,
         "items":       items_out,
         "orphans":     orphans,
+    }
+
+
+def _storage_breakdown_sync(lib: dict, bundle_by_path: dict[str, int]) -> dict:
+    """Per-series storage breakdown for the admin Storage tab. Walks every library
+    item and, for each video file, sums three components:
+
+      source  — the source media file's actual bytes on disk (falls back to the
+                stored `size_bytes` when the file can't be stat'd, e.g. mid-move)
+      bundle  — its HLS / on-device bundle bytes, passed in as `bundle_by_path`
+                (already computed by the offline-cache inventory walk, so we don't
+                re-walk every bundle here)
+      extras  — same-stem sidecar files in the source directory (subtitles, .nfo,
+                AI subs, posters) — small individually but counted for an honest
+                total
+
+    Returns `items` sorted by total bytes descending, each carrying its own
+    per-file breakdown so the UI can drill into a series without a second request.
+    Source/extra stats are one `stat()` per file plus one `iterdir()` per distinct
+    directory — cheap next to the recursive bundle walk the inventory already did,
+    but still offloaded to a worker thread by the caller because a large library is
+    a lot of stats.
+    """
+    # One directory listing per parent dir, reused across that dir's files so a
+    # season folder isn't re-listed once per episode.
+    dir_cache: dict[Path, list[Path]] = {}
+
+    def _siblings(d: Path) -> list[Path]:
+        if d not in dir_cache:
+            try:
+                dir_cache[d] = [p for p in d.iterdir() if p.is_file()]
+            except OSError:
+                dir_cache[d] = []
+        return dir_cache[d]
+
+    items_out: list[dict] = []
+    g_src = g_bundle = g_extra = 0
+    for it in lib.get("items", []):
+        files_out: list[dict] = []
+        i_src = i_bundle = i_extra = 0
+        for f in it.get("files", []):
+            p = f.get("path", "")
+            src = Path(p)
+            if src.suffix.lower() not in VIDEO_EXTS:
+                continue
+            try:
+                sbytes = src.stat().st_size
+            except OSError:
+                sbytes = int(f.get("size_bytes", 0) or 0)
+            bbytes = int(bundle_by_path.get(p, 0) or 0)
+            # Same-stem sidecars: `<stem>.srt`, `<stem>.eng.srt`, `<stem>.nfo`,
+            # `<stem>-poster.jpg`, etc. Match the video's stem but exclude the
+            # video file itself and any other video.
+            ebytes = 0
+            stem = src.stem
+            for sib in _siblings(src.parent):
+                if (sib.name != src.name
+                        and sib.suffix.lower() not in VIDEO_EXTS
+                        and (sib.stem == stem
+                             or sib.name.startswith(stem + ".")
+                             or sib.name.startswith(stem + "-"))):
+                    try:
+                        ebytes += sib.stat().st_size
+                    except OSError:
+                        pass
+            total = sbytes + bbytes + ebytes
+            files_out.append({
+                "name":         f.get("name", "") or src.name,
+                "path":         p,
+                "source_bytes": sbytes,
+                "bundle_bytes": bbytes,
+                "extra_bytes":  ebytes,
+                "total_bytes":  total,
+            })
+            i_src += sbytes; i_bundle += bbytes; i_extra += ebytes
+        if not files_out:
+            continue
+        files_out.sort(key=lambda x: x["total_bytes"], reverse=True)
+        items_out.append({
+            "id":           it.get("id", ""),
+            "title":        it.get("title", ""),
+            "file_count":   len(files_out),
+            "source_bytes": i_src,
+            "bundle_bytes": i_bundle,
+            "extra_bytes":  i_extra,
+            "total_bytes":  i_src + i_bundle + i_extra,
+            "files":        files_out,
+        })
+        g_src += i_src; g_bundle += i_bundle; g_extra += i_extra
+    items_out.sort(key=lambda x: x["total_bytes"], reverse=True)
+    return {
+        "items":        items_out,
+        "source_bytes": g_src,
+        "bundle_bytes": g_bundle,
+        "extra_bytes":  g_extra,
+        "total_bytes":  g_src + g_bundle + g_extra,
     }
 
 
