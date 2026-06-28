@@ -97,7 +97,7 @@ The only persistent server-side state. Lives at the project root. Accessed via `
 }
 ```
 
-PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "soft" — anyone with filesystem access can read the JSON. It's a UI gate, not a security boundary. Profiles with a PIN are hidden from the normal profile picker; users select them via the "Log in with PIN" button.
+PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "soft" — anyone with filesystem access can read the JSON. It's a UI gate, not a security boundary. All profiles (PIN-protected or not) are shown in the profile picker; selecting a PIN-protected one prompts for that profile's PIN (verified via `POST /api/profiles/{id}/verify-pin`) before logging in.
 
 `settings.max_volume`: VLC is uncapped (0–200, where 200 % is overdrive). Capping it system-wide stops anyone from accidentally blowing the speakers. Lives under `settings` because it applies to the physical playback host, not to individual viewers. Enforced server-side in `_global_max_volume`.
 

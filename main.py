@@ -10386,33 +10386,31 @@ async def verify_profile_pin(profile_id: str, req: ProfilePinReq) -> JSONRespons
 class PinLoginReq(BaseModel):
     pin: str
 
-@app.post("/api/profiles/login-with-pin")
-async def login_with_pin(req: PinLoginReq) -> JSONResponse:
-    """Find all profiles whose PIN matches. Returns matched profile objects (same shape as /api/profiles).
-    403 if no profiles match."""
+@app.post("/api/profiles/{profile_id}/verify-pin")
+async def verify_profile_pin(profile_id: str, req: PinLoginReq) -> JSONResponse:
+    """Verify the PIN for a single profile (the one the user picked in the lock screen).
+    Returns the full profile object (same shape as /api/profiles) on success, 403 otherwise."""
     pin = req.pin.strip()
     if not pin or len(pin) != 6 or not pin.isdigit():
         raise HTTPException(400, "PIN must be exactly 6 digits.")
-    h = _pin_hash(pin)
     lib = await get_library()
-    matched = [
-        {
-            "id": p["id"],
-            "name": p["name"],
-            "color": p.get("color", "indigo"),
-            "has_pin": True,
-            "elevated": bool(p.get("elevated", False)),
-            "auto_skip_intro":   bool(p.get("auto_skip_intro", False)),
-            "auto_skip_credits": bool(p.get("auto_skip_credits", False)),
-            "resume_mode":       p.get("resume_mode", "auto"),
-            "subtitles_on":      p.get("subtitles_on"),
-        }
-        for p in lib["profiles"]
-        if p.get("pin_hash") == h
-    ]
-    if not matched:
+    profile = next((p for p in lib["profiles"] if p["id"] == profile_id), None)
+    if not profile:
+        raise HTTPException(404, "Profile not found.")
+    if not profile.get("pin_hash") or profile["pin_hash"] != _pin_hash(pin):
         raise HTTPException(403, "Incorrect PIN.")
-    return JSONResponse({"profiles": matched})
+    return JSONResponse({"profile": {
+        "id": profile["id"],
+        "name": profile["name"],
+        "color": profile.get("color", "indigo"),
+        "has_pin": True,
+        "elevated": bool(profile.get("elevated", False)),
+        "auto_skip_intro":   bool(profile.get("auto_skip_intro", False)),
+        "auto_skip_credits": bool(profile.get("auto_skip_credits", False)),
+        "resume_mode":       profile.get("resume_mode", "auto"),
+        "subtitles_on":      profile.get("subtitles_on"),
+        "allowed_indexers":  list(profile.get("allowed_indexers", [])),
+    }})
 
 
 # ── Routes: Smart Skip ────────────────────────────────────────────────────────

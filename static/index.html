@@ -657,7 +657,7 @@
     #localPlayer.lp-tiny #lpPreparing { display: none !important; }
     /* While the profile picker is up (lock screen), hide every piece of
        playback chrome that would otherwise float on top of its bottom row of
-       login buttons (Log in with PIN / Manage profiles / Admin). The picker
+       login buttons (Manage profiles / Admin). The picker
        itself is z-40 and opaque, but the footer is also z-40 and later in the
        DOM, and skip/resume offers + the local-device player are z-50+ — so
        without this rule they bleed through over the buttons on mobile. */
@@ -1055,14 +1055,6 @@
   </div>
   <div id="profileGrid" class="flex flex-wrap justify-center gap-3 max-w-lg"></div>
   <div class="flex flex-col items-center gap-3">
-    <button id="loginWithPinBtn" onclick="openPinPrompt()"
-      class="hidden text-xs text-gray-500 hover:text-indigo-400 uppercase tracking-wider transition-colors border border-gray-800 hover:border-indigo-700 px-4 py-2">
-      Log in with PIN
-    </button>
-    <button id="pinPickerBackBtn" onclick="closePinPicker()"
-      class="hidden text-xs text-gray-700 hover:text-gray-400 uppercase tracking-wider transition-colors">
-      ← Back
-    </button>
     <div class="flex items-center gap-4">
       <button id="manageProfilesBtn" onclick="openProfileModal()"
         class="text-xs text-gray-700 hover:text-gray-400 uppercase tracking-wider transition-colors">
@@ -4156,66 +4148,46 @@ async function fetchProfiles(){
   allProfiles=(await r.json()).profiles||[];
   return allProfiles;
 }
-let _pinMatchedProfiles=null; // null=normal, array=profiles matched by PIN (already verified)
 function renderProfileGrid(){
+  // Show every profile. PIN-protected ones display a small lock and prompt for
+  // that profile's PIN when picked; PIN-less ones log straight in.
   const grid=document.getElementById("profileGrid"); grid.innerHTML="";
-  const hasPinProfiles=allProfiles.some(p=>p.has_pin);
-  if(_pinMatchedProfiles!==null){
-    // PIN already verified — let user pick from the matching profiles, no re-entry needed
-    _pinMatchedProfiles.forEach(p=>{
-      const bg=avatarBg(p.color);
-      const card=document.createElement("button");
-      card.className="profile-card flex flex-col items-center gap-2 p-3 hover:bg-gray-800/60 transition-colors";
-      card.innerHTML=`
+  allProfiles.forEach(p=>{
+    const bg=avatarBg(p.color);
+    const card=document.createElement("button");
+    card.className="profile-card flex flex-col items-center gap-2 p-3 hover:bg-gray-800/60 transition-colors";
+    card.innerHTML=`
+      <div class="relative">
         <div class="profile-avatar w-20 h-20 ${bg} flex items-center justify-center text-3xl font-black text-white select-none">
           ${escHtml(p.name.charAt(0).toUpperCase())}
         </div>
-        <span class="text-sm font-bold text-gray-300 uppercase tracking-wide">${escHtml(p.name)}</span>`;
-      card.onclick=()=>_doSelectProfile(p);
-      grid.appendChild(card);
-    });
-    document.getElementById("profilePickerSub").textContent="Choose your profile";
-    document.getElementById("loginWithPinBtn").classList.add("hidden");
-    document.getElementById("pinPickerBackBtn").classList.remove("hidden");
-    document.getElementById("manageProfilesBtn").classList.add("hidden");
-  } else {
-    // Normal mode — hide PIN-protected profiles entirely
-    allProfiles.filter(p=>!p.has_pin).forEach(p=>{
-      const bg=avatarBg(p.color);
-      const card=document.createElement("button");
-      card.className="profile-card flex flex-col items-center gap-2 p-3 hover:bg-gray-800/60 transition-colors";
-      card.innerHTML=`
-        <div class="profile-avatar w-20 h-20 ${bg} flex items-center justify-center text-3xl font-black text-white select-none">
-          ${escHtml(p.name.charAt(0).toUpperCase())}
-        </div>
-        <span class="text-sm font-bold text-gray-300 uppercase tracking-wide">${escHtml(p.name)}</span>`;
-      card.onclick=()=>selectProfile(p);
-      grid.appendChild(card);
-    });
-    const add=document.createElement("button");
-    add.className="profile-card flex flex-col items-center gap-2 p-3 hover:bg-gray-800/60 transition-colors";
-    add.innerHTML=`
-      <div class="profile-avatar w-20 h-20 border-2 border-dashed border-gray-700 flex items-center justify-center text-3xl text-gray-600 select-none">+</div>
-      <span class="text-sm text-gray-600 uppercase tracking-wide">Add Profile</span>`;
-    add.onclick=()=>openProfileModal();
-    grid.appendChild(add);
-    document.getElementById("profilePickerSub").textContent="Who's watching";
-    document.getElementById("loginWithPinBtn").classList.toggle("hidden",!hasPinProfiles);
-    document.getElementById("pinPickerBackBtn").classList.add("hidden");
-    document.getElementById("manageProfilesBtn").classList.remove("hidden");
-  }
+        ${p.has_pin?`<div class="absolute -bottom-1 -right-1 w-6 h-6 bg-gray-900 border border-gray-700 flex items-center justify-center text-xs select-none">🔒</div>`:''}
+      </div>
+      <span class="text-sm font-bold text-gray-300 uppercase tracking-wide">${escHtml(p.name)}</span>`;
+    card.onclick=()=>selectProfile(p);
+    grid.appendChild(card);
+  });
+  const add=document.createElement("button");
+  add.className="profile-card flex flex-col items-center gap-2 p-3 hover:bg-gray-800/60 transition-colors";
+  add.innerHTML=`
+    <div class="profile-avatar w-20 h-20 border-2 border-dashed border-gray-700 flex items-center justify-center text-3xl text-gray-600 select-none">+</div>
+    <span class="text-sm text-gray-600 uppercase tracking-wide">Add Profile</span>`;
+  add.onclick=()=>openProfileModal();
+  grid.appendChild(add);
+  document.getElementById("profilePickerSub").textContent="Who's watching";
 }
-function closePinPicker(){ _pinMatchedProfiles=null; renderProfileGrid(); }
 async function showProfilePicker(){
   await fetchProfiles(); renderProfileGrid();
   document.getElementById("profilePicker").classList.remove("hidden");
 }
+let _pendingPinProfile=null; // profile awaiting PIN entry in the lock-screen prompt
 function selectProfile(p){
+  if(p.has_pin){ openPinPrompt(p); return; }
   _doSelectProfile(p);
 }
 function _doSelectProfile(p){
   profile=p; localStorage.setItem("streamlink_profile",JSON.stringify(p));
-  _pinMatchedProfiles=null;
+  _pendingPinProfile=null;
   document.getElementById("profilePicker").classList.add("hidden");
   document.getElementById("pinPromptModal").classList.add("hidden");
   renderNavProfile();
@@ -4236,8 +4208,10 @@ function applyMaxVolumeToSliders(){
   if(fvs) fvs.max = m;
 }
 
-function openPinPrompt(){
-  document.getElementById("pinPromptSub").textContent="Enter your 6-digit PIN";
+function openPinPrompt(p){
+  _pendingPinProfile=p||null;
+  document.getElementById("pinPromptSub").textContent=
+    _pendingPinProfile?`Enter ${_pendingPinProfile.name}'s 6-digit PIN`:"Enter your 6-digit PIN";
   document.getElementById("pinPromptInput").value="";
   document.getElementById("pinPromptError").classList.add("hidden");
   updatePinDots();
@@ -4249,6 +4223,7 @@ function openPinPrompt(){
   if(!isApp) setTimeout(()=>document.getElementById("pinPromptInput").focus(),50);
 }
 function closePinPrompt(){
+  _pendingPinProfile=null;
   document.getElementById("pinPromptModal").classList.add("hidden");
 }
 function pinDigit(d){
@@ -4271,20 +4246,15 @@ async function submitPinPrompt(){
   const errEl=document.getElementById("pinPromptError");
   errEl.classList.add("hidden");
   if(pin.length!==6){ errEl.textContent="Enter all 6 digits."; errEl.classList.remove("hidden"); return; }
-  const r=await fetch("/api/profiles/login-with-pin",{
+  if(!_pendingPinProfile){ closePinPrompt(); return; }
+  const r=await fetch(`/api/profiles/${encodeURIComponent(_pendingPinProfile.id)}/verify-pin`,{
     method:"POST", headers:{"Content-Type":"application/json"},
     body:JSON.stringify({pin}),
   });
   if(r.ok){
-    const {profiles}=await r.json();
+    const {profile:matched}=await r.json();
     closePinPrompt();
-    if(profiles.length===1){
-      _doSelectProfile(profiles[0]);
-    } else {
-      // Multiple profiles share this PIN — let user choose
-      _pinMatchedProfiles=profiles;
-      renderProfileGrid();
-    }
+    _doSelectProfile(matched);
   } else {
     errEl.textContent="Incorrect PIN. Try again.";
     errEl.classList.remove("hidden");
@@ -12009,6 +11979,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.6.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.7.0</div>
 </body>
 </html>
