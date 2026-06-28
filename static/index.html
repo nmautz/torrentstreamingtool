@@ -4186,6 +4186,7 @@ function selectProfile(p){
   _doSelectProfile(p);
 }
 function _doSelectProfile(p){
+  if(!p||!p.id) return;  // never persist an undefined profile (would corrupt localStorage)
   profile=p; localStorage.setItem("streamlink_profile",JSON.stringify(p));
   _pendingPinProfile=null;
   document.getElementById("profilePicker").classList.add("hidden");
@@ -4253,6 +4254,11 @@ async function submitPinPrompt(){
   });
   if(r.ok){
     const {profile:matched}=await r.json();
+    if(!matched||!matched.id){
+      errEl.textContent="Login failed. Try again.";
+      errEl.classList.remove("hidden");
+      return;
+    }
     closePinPrompt();
     _doSelectProfile(matched);
   } else {
@@ -12235,6 +12241,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.8.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.8.1</div>
 </body>
 </html>

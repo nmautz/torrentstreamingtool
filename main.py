@@ -10369,20 +10369,6 @@ async def set_profile_indexers(profile_id: str, request: Request, req: ProfileIn
     return JSONResponse({"ok": True, "allowed_indexers": cleaned})
 
 
-@app.post("/api/profiles/{profile_id}/verify-pin")
-async def verify_profile_pin(profile_id: str, req: ProfilePinReq) -> JSONResponse:
-    lib = await get_library()
-    profile = next((p for p in lib["profiles"] if p["id"] == profile_id), None)
-    if not profile:
-        raise HTTPException(404, "Profile not found.")
-    stored = profile.get("pin_hash", "")
-    if not stored:
-        return JSONResponse({"ok": True})   # no PIN set — always pass
-    if _pin_hash(req.pin.strip()) != stored:
-        raise HTTPException(403, "Incorrect PIN.")
-    return JSONResponse({"ok": True})
-
-
 class PinLoginReq(BaseModel):
     pin: str
 
