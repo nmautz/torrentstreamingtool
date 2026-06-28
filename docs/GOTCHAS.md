@@ -1184,6 +1184,39 @@ independent layers each had a way to fail hard, so both are hardened:
   sessions don't get this, another reason not to switch back — see the background
   URLSession gotcha above.)
 
+### …and a *queued* download must survive hours offline + an app kill — persist the intent, don't rely on page/job memory (`7.8.0`)
+The connectivity hardening above keeps a download alive through a *brief* blip, but
+it left two holes for a **long** outage (tunnel for hours, Airplane Mode overnight,
+app force-quit): (1) the JS retry cap (`MAX_ATTEMPTS`, ~80 s of backoff) eventually
+gave up and **deleted** the episode, and (2) the entire pre-handoff queue lived only
+in the page's in-memory `offlineBundles` map + the native job's in-memory state, so
+an app kill lost everything not already mid-transfer. The fix is to make the user's
+**intent durable, separate from any in-memory driver**:
+- **Native `queue.json`** (in `BundleDownloader`, beside `index.json`): `enqueue`/
+  `dequeue`/`queueList`. The dashboard calls `enqueue` the instant Download is
+  tapped — *before any network* — so the wish outlives the page and the process. An
+  entry is cleared only on full completion (`bundleComplete`), cancel, or a
+  *permanent* failure. `index.json` still tracks bundles already handed to the
+  session; `queue.json` is the wishlist that re-creates that hand-off if it was lost.
+- **JS resumer `_appResumeDownloadQueue()`** drains `queueList()` and re-drives every
+  still-wanted, not-complete entry through the normal `appDownloadBundle`
+  orchestration (idempotent — the native resume scan skips files already on disk). It
+  runs on **launch** (`_appInitOfflineBundles`) and on every **`online`** event, so a
+  season queued before a long outage finishes whenever the link returns. Guard it
+  with an in-flight flag so launch + `online` firing together don't double-start.
+- **Native transient retries now never give up.** `retryOrFail` dropped its
+  `maxFileRetries` cap for *transient* errors — a handed-off file keeps retrying with
+  capped backoff indefinitely (the background session waits for connectivity), so a
+  multi-hour outage can't exhaust it. Only a *non-transient* error (bad URL/404/move
+  failure) still fails fast. Consequently a `bundleError` event is now **terminal** —
+  the JS handler treats it as permanent (clears the intent + toasts), instead of
+  assuming the native side might still recover.
+- **Footgun:** `appDownloadBundle`'s "already in flight ⇒ no-op" guard must exempt a
+  `waiting` entry (`cur.downloading && !cur.waiting`), or the resumer can never
+  re-drive a download stranded by an outage (a `waiting` entry carries
+  `downloading:true`). And `remove()` must clear the `queue.json` entry too, or the
+  resumer resurrects a download the user just deleted.
+
 ### Live Activities need a separate Widget Extension target + App Group — and `LiveActivityIntent.perform()` runs in the *app* process
 The download-progress and TV-remote Live Activities (`preview.6.0.0`) live in a
 new **`StreamLinkLiveActivities`** widget-extension target (`product-type

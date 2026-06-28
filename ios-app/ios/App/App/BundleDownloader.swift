@@ -60,6 +60,9 @@ public class BundleDownloader: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "remove",    returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "cancel",    returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "bytesUsed", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "enqueue",   returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "dequeue",   returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "queueList", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "holdBackground",    returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "releaseBackground", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "openExternal",      returnType: CAPPluginReturnPromise),
@@ -144,6 +147,35 @@ public class BundleDownloader: CAPPlugin, CAPBridgedPlugin {
         call.resolve(["bytes": BundleDownloadManager.shared.bytesUsed()])
     }
 
+    // Durable download queue (the user's *intent*, persisted before the JS
+    // orchestration even fetches the manifest) so a download survives an app kill
+    // AND a multi-hour connectivity loss: the dashboard re-drives every queued
+    // entry on launch + on `online`, and the entry only clears once the bundle is
+    // fully on disk. See `enqueue`/`dequeue`/`queueList` on the manager.
+    @objc func enqueue(_ call: CAPPluginCall) {
+        guard let itemId = call.getString("itemId"), !itemId.isEmpty,
+              let filePath = call.getString("filePath"), !filePath.isEmpty else {
+            call.reject("enqueue() requires itemId, filePath."); return
+        }
+        BundleDownloadManager.shared.enqueue(
+            itemId: itemId, filePath: filePath,
+            name: call.getString("name") ?? filePath,
+            quality: call.getString("quality"),
+            profileId: call.getString("profileId"))
+        call.resolve()
+    }
+    @objc func dequeue(_ call: CAPPluginCall) {
+        guard let itemId = call.getString("itemId"),
+              let filePath = call.getString("filePath") else {
+            call.reject("dequeue() requires itemId, filePath."); return
+        }
+        BundleDownloadManager.shared.dequeue(itemId: itemId, filePath: filePath)
+        call.resolve()
+    }
+    @objc func queueList(_ call: CAPPluginCall) {
+        call.resolve(["items": BundleDownloadManager.shared.queueList()])
+    }
+
     // The dashboard orchestrates downloads in JS (host-prep poll + pool driver)
     // BEFORE handing each file to the durable background URLSession. JS can't take
     // a UIApplication background assertion itself, so it brackets that window with
@@ -220,8 +252,8 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     private let fm = FileManager.default
 
     // Transport errors that mean "the network blipped" rather than "this file is
-    // permanently unfetchable" — we retry these instead of dropping the bundle.
-    private static let maxFileRetries = 8
+    // permanently unfetchable" — we retry these (indefinitely) instead of dropping
+    // the bundle. See retryOrFail.
     private static let transientURLErrorCodes: Set<Int> = [
         NSURLErrorTimedOut, NSURLErrorCannotConnectToHost, NSURLErrorNetworkConnectionLost,
         NSURLErrorNotConnectedToInternet, NSURLErrorDNSLookupFailed, NSURLErrorCannotFindHost,
@@ -258,6 +290,12 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     }
     private func bundleDir(_ sha: String) -> URL { root.appendingPathComponent(sha, isDirectory: true) }
     private var indexURL: URL { root.appendingPathComponent("index.json") }
+    // The durable download *queue* (intent), separate from `index.json` (which
+    // tracks bundles already handed to the URLSession). An entry lives here from
+    // the moment the user taps Download until the bundle is fully on disk, so a
+    // download survives an app kill / multi-hour outage and the dashboard can
+    // re-drive it on launch + reconnect.
+    private var queueURL: URL { root.appendingPathComponent("queue.json") }
 
     private func excludeFromBackup(_ url: URL) {
         var u = url
@@ -276,6 +314,55 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         if let data = try? JSONSerialization.data(withJSONObject: idx, options: []) {
             try? data.write(to: indexURL, options: .atomic)
         }
+    }
+
+    // MARK: download-queue persistence (intent — survives kill + long outage)
+
+    private func queueKey(_ itemId: String, _ filePath: String) -> String {
+        return itemId + "\u{0000}" + filePath
+    }
+    private func readQueue() -> [String: [String: Any]] {
+        guard let data = try? Data(contentsOf: queueURL),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: [String: Any]] else { return [:] }
+        return obj
+    }
+    private func writeQueue(_ q: [String: [String: Any]]) {
+        if let data = try? JSONSerialization.data(withJSONObject: q, options: []) {
+            try? data.write(to: queueURL, options: .atomic)
+        }
+    }
+
+    /// Record the user's intent to download a file. Idempotent — re-enqueuing an
+    /// already-queued file just refreshes its fields. The dashboard calls this the
+    /// instant the user taps Download, BEFORE any network, so the wish is durable.
+    func enqueue(itemId: String, filePath: String, name: String, quality: String?, profileId: String?) {
+        queue.sync {
+            _ = root   // ensure the dir + backup-exclusion exist
+            var q = readQueue()
+            var e = q[queueKey(itemId, filePath)] ?? [:]
+            e["itemId"] = itemId; e["filePath"] = filePath; e["name"] = name
+            if let qa = quality { e["quality"] = qa }
+            if let p = profileId { e["profileId"] = p }
+            if e["addedAt"] == nil { e["addedAt"] = ISO8601DateFormatter().string(from: Date()) }
+            q[queueKey(itemId, filePath)] = e
+            writeQueue(q)
+        }
+    }
+    /// Clear a file's queued intent — called once the bundle is fully downloaded
+    /// (or the user cancels). After this the file is no longer auto-resumed.
+    func dequeue(itemId: String, filePath: String) {
+        queue.sync {
+            var q = readQueue()
+            q[queueKey(itemId, filePath)] = nil
+            writeQueue(q)
+        }
+    }
+    /// Every still-wanted download. The dashboard drains this on launch and on the
+    /// `online` event, re-driving each entry that isn't already complete on disk —
+    /// so a queue built before a connectivity drop resumes when the link returns,
+    /// even hours later or across an app relaunch.
+    func queueList() -> [[String: Any]] {
+        queue.sync { Array(readQueue().values) }
     }
 
     // Read a `files[]` entry's expected byte size across the shapes the JSON
@@ -453,7 +540,14 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         queue.sync {
             cancelLocked(sha: sha)
             try? fm.removeItem(at: bundleDir(sha))
-            var idx = readIndex(); idx[sha] = nil; writeIndex(idx)
+            var idx = readIndex()
+            // Drop the durable queue intent too, so a removed download is never
+            // resurrected by the launch / reconnect resumer.
+            if let entry = idx[sha],
+               let itemId = entry["itemId"] as? String, let filePath = entry["filePath"] as? String {
+                var q = readQueue(); q[queueKey(itemId, filePath)] = nil; writeQueue(q)
+            }
+            idx[sha] = nil; writeIndex(idx)
         }
     }
     func remove(itemId: String, filePath: String) {
@@ -501,16 +595,18 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         task.resume()
     }
 
-    // One file's download failed. If the failure looks like a brief network/proxy
-    // blip (`transient`) and we're under the retry cap, re-enqueue it with a
-    // backoff instead of dropping the whole bundle — on a background URLSession the
-    // fresh task waits for connectivity, so it resumes when the link returns. Only
-    // a persistent or non-transient failure surfaces an error + cancels. This is
-    // what stops "lose connection briefly → the whole download gets stuck/dropped".
-    // Assumes `queue` and `job === jobs[sha]`.
+    // One file's download failed. A **transient** failure (network/proxy blip)
+    // never drops the bundle: we re-enqueue the file with a capped backoff and keep
+    // doing so **indefinitely**, because the user explicitly asked for this download
+    // and the intent is persisted in the durable queue — losing connection for
+    // hours must not abandon it. On a background URLSession the fresh task waits for
+    // connectivity, so it resumes the moment the link returns; the linear backoff
+    // (capped at 30 s) just paces the retries while offline. Only a **non-transient**
+    // failure (bad URL, 404, on-disk move error) surfaces an error + cancels — those
+    // never fix themselves. Assumes `queue` and `job === jobs[sha]`.
     private func retryOrFail(sha: String, fileName: String, job: Job, message: String, transient: Bool) {
-        let n = (job.attempts[fileName] ?? 0) + 1
-        if transient, n <= Self.maxFileRetries, let f = job.files.first(where: { $0.name == fileName }) {
+        if transient, let f = job.files.first(where: { $0.name == fileName }) {
+            let n = (job.attempts[fileName] ?? 0) + 1
             job.attempts[fileName] = n
             job.liveBytes[fileName] = nil               // this attempt's bytes are gone
             let delay = Double(min(n * 3, 30))          // linear backoff, capped at 30 s

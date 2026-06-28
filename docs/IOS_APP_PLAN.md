@@ -1,5 +1,25 @@
 # iOS Client App — Plan for v6.0.0
 
+> **Durable downloads + bulk management (`7.8.0`, code).** Post-6.0.0 hardening of
+> the offline-download pipeline against **long** outages and an app kill, plus
+> Downloads-screen bulk actions. The download *intent* is now persisted natively the
+> instant Download is tapped — a durable **`queue.json`** in `BundleDownloader`
+> (`enqueue`/`dequeue`/`queueList`), separate from `index.json` (which tracks bundles
+> already handed to the `URLSession`). The dashboard re-drives every still-wanted
+> entry via **`_appResumeDownloadQueue()`** on launch and on every `online` event, so
+> a season queued before a multi-hour tunnel/Airplane stretch finishes whenever the
+> link returns — even across a relaunch. Native transient retries (`retryOrFail`) lost
+> their cap: a handed-off file retries indefinitely while the background session waits
+> for connectivity, so only a *permanent* error (`bundleError`) is terminal. The in-app
+> **Downloads overlay** (`_appRenderDashboard`) gained a Select mode (per-episode
+> checkboxes, series-level **All**, **Select all**, **Remove (N)**), a per-series
+> **Remove all**, a per-row **✕** to stop an in-flight download, and a **Resume all**
+> shortcut when something is stalled waiting on the network. No new Swift files / no
+> pbxproj or `capacitorDidLoad` change — only methods added to the existing
+> `BundleDownloader` plugin. **On-device verification pending** (queue a season →
+> Airplane Mode for hours → relaunch → all complete on reconnect; bulk remove /
+> series-remove). See [GOTCHAS.md](GOTCHAS.md) (durable-queue footguns).
+>
 > **Status:** **M5 landed (code)** (`6.0.0-preview.5.0.0`) — device pairing/auth +
 > in-app navigation + downloads management. **A4** is implemented: **`POST /api/pair`**
 > ([main.py](../main.py)) issues a long-lived bearer token (admin password = pairing

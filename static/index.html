@@ -8494,6 +8494,26 @@ async function _appRunPooled(items, limit, worker){
 function _appHoldBg() { if (isApp && _cap.dl && _cap.dl.holdBackground) { try { _cap.dl.holdBackground(); } catch (_) {} } }
 function _appReleaseBg() { if (isApp && _cap.dl && _cap.dl.releaseBackground) { try { _cap.dl.releaseBackground(); } catch (_) {} } }
 
+// Persist / clear the user's *intent* to download a file in the native durable
+// queue (queue.json). Recorded the instant Download is tapped — BEFORE any
+// network — so the download survives an app kill and a multi-hour connectivity
+// loss; `_appResumeDownloadQueue` re-drives every still-queued entry on launch and
+// on `online`. Cleared only once the bundle is fully on disk (or the user cancels/
+// removes it). Best-effort + method-guarded so an older shell without the queue
+// API still downloads (just without cross-session persistence). No-op in a browser.
+function _appQueuePersist(itemId, filePath, name, quality) {
+  if (!isApp || !_cap.dl || !_cap.dl.enqueue) return;
+  try {
+    _cap.dl.enqueue({ itemId, filePath, name: name || "",
+      quality: (quality === undefined || quality === null) ? "" : String(quality),
+      profileId: profile.id || "" });
+  } catch (_) {}
+}
+function _appQueueClear(itemId, filePath) {
+  if (!isApp || !_cap.dl || !_cap.dl.dequeue) return;
+  try { _cap.dl.dequeue({ itemId, filePath }); } catch (_) {}
+}
+
 // Download / remove an offline bundle (per-row button). Toggles to remove when
 // already downloaded. `quality` (optional): when given ("original" | a height),
 // download that rung without prompting — bulk callers pass it so the chooser is
@@ -8506,13 +8526,20 @@ async function appDownloadBundle(itemId, filePath, name, btn, quality) {
   if (cur && cur.complete) {
     if (!window.confirm("Remove this offline download from the device?")) return;
     try { await _cap.dl.remove({ itemId, filePath }); } catch (_) {}
+    _appQueueClear(itemId, filePath);
     offlineBundles.delete(key);
     _appRefreshDlBtn(itemId, filePath);
     return;
   }
-  if (cur && cur.downloading) return;
+  // Already actively in flight ⇒ no-op. A `waiting` entry (stranded by an outage)
+  // is NOT active — the resumer is allowed to re-drive it, so don't bail on those.
+  if (cur && cur.downloading && !cur.waiting) return;
   offlineBundles.set(key, { downloading: true, prepping: true, fraction: 0, name });
   _appRefreshDlBtn(itemId, filePath);
+  // Record the intent durably up front (before any network) so this download
+  // survives an app kill / long outage; cleared on completion, cancel, or a
+  // permanent failure. Re-persisted once the quality is resolved (below).
+  _appQueuePersist(itemId, filePath, name, quality);
   // The quality is chosen at most once (per-row chooser); reused across retries so
   // a connectivity blip mid-fetch doesn't re-prompt. Bulk callers pass it already.
   let effQuality = quality;
@@ -8533,10 +8560,12 @@ async function appDownloadBundle(itemId, filePath, name, btn, quality) {
         const chosen = await _appChooseQuality(manifest.videos, name);
         if (chosen === null) {                  // cancelled — abort this download
           offlineBundles.delete(key);
+          _appQueueClear(itemId, filePath);     // drop the durable intent too
           _appRefreshDlBtn(itemId, filePath);
           return;
         }
         effQuality = chosen;
+        _appQueuePersist(itemId, filePath, name, chosen);   // persist the chosen rung
         if (chosen !== "original") manifest = await _appFetchManifest(itemId, filePath, chosen);
       }
       const origin = window.location.origin;
@@ -8570,17 +8599,27 @@ async function appDownloadBundle(itemId, filePath, name, btn, quality) {
       offlineBundles.set(key, e);
       break;   // handed off to the native downloader — done
     } catch (err) {
-      if (_appIsNetErr(err) && attempt < MAX_ATTEMPTS) {
-        // Brief outage: keep the episode marked in-flight ("Waiting for
-        // connection…") and back off, rather than deleting it.
+      if (_appIsNetErr(err)) {
+        // Outage during the host round-trip (manifest / prep / handoff). The intent
+        // is already persisted in the durable queue, so we never drop the episode:
+        // mark it "Waiting for connection…" and stop driving it here — the launch /
+        // `online` resumer (`_appResumeDownloadQueue`) picks it back up when the link
+        // returns, even hours later. A few in-call retries first absorb a brief blip
+        // so the common case finishes without waiting on the resumer.
         const e = offlineBundles.get(key) || {};
         e.downloading = true; e.prepping = true; e.waiting = true; e.name = name;
         offlineBundles.set(key, e);
         _appRefreshDlBtn(itemId, filePath);
-        await new Promise((res) => setTimeout(res, Math.min(2000 * attempt, 10000)));
-        continue;
+        if (attempt < MAX_ATTEMPTS) {
+          await new Promise((res) => setTimeout(res, Math.min(2000 * attempt, 10000)));
+          continue;
+        }
+        break;   // leave queued + "waiting"; the resumer owns it now
       }
+      // Permanent failure (bad title, on-demand only, auth) — give up and clear the
+      // durable intent so it isn't retried forever.
       offlineBundles.delete(key);
+      _appQueueClear(itemId, filePath);
       showAlert(err.message || "Download failed.", "error");
       break;
     }
@@ -8704,11 +8743,15 @@ async function _appInitOfflineBundles() {
     _cap.dl.addListener("bundleComplete", (ev) => {
       offlineBundles.set(offKey(ev.itemId, ev.filePath),
         { complete: true, sha: ev.sha, dir: ev.dir });
+      _appQueueClear(ev.itemId, ev.filePath);   // fully on disk — drop the durable intent
       _appRefreshDlBtn(ev.itemId, ev.filePath);
       showAlert("Saved offline: " + (ev.filePath.split(/[\\/]/).pop() || ""), "ok");
     });
     _cap.dl.addListener("bundleError", (ev) => {
+      // The native side now retries transient (network) failures indefinitely, so a
+      // bundleError is a PERMANENT failure — give up and clear the durable intent.
       offlineBundles.delete(offKey(ev.itemId, ev.filePath));
+      _appQueueClear(ev.itemId, ev.filePath);
       _appRefreshDlBtn(ev.itemId, ev.filePath);
       showAlert("Download failed: " + (ev.message || ""), "error");
     });
@@ -8723,7 +8766,45 @@ async function _appInitOfflineBundles() {
       });
     }
     if (epItemId) renderEpList();
+    // Re-drive any download still wanted from a previous session (queued before an
+    // app kill, or stranded "waiting" by a connectivity loss). Runs once on launch;
+    // the `online` event triggers it again whenever the link returns.
+    _appResumeDownloadQueue();
   } catch (_) {}
+}
+
+// Drain the native durable download queue: for every still-wanted file that isn't
+// already complete or actively in flight, re-run the normal download orchestration
+// (idempotent — the native resume scan skips files already on disk). This is what
+// makes "queue a season, lose connection for hours, come back" actually finish:
+// the intent persisted in queue.json outlives the page/app, and this re-drives it
+// on launch and on every `online` event. Guarded so concurrent calls (launch +
+// online firing together) don't double-start the same file.
+let _appResumeInFlight = false;
+async function _appResumeDownloadQueue() {
+  if (!isApp || !_cap.dl || !_cap.dl.queueList) return;
+  if (_appResumeInFlight) return;
+  _appResumeInFlight = true;
+  try {
+    let entries = [];
+    try { entries = (await _cap.dl.queueList()).items || []; } catch (_) { return; }
+    const toStart = [];
+    for (const e of entries) {
+      if (!e || !e.itemId || !e.filePath) continue;
+      const st = offlineBundles.get(offKey(e.itemId, e.filePath));
+      // Skip anything already done, or already being driven this session (an active
+      // transfer, a live pool lane, or a host round-trip in progress).
+      if (st && (st.complete || (st.downloading && !st.waiting) || (st.queued && !st.waiting))) continue;
+      toStart.push(e);
+    }
+    if (!toStart.length) return;
+    _appHoldBg();
+    try {
+      await _appRunPooled(toStart, 3, (e) =>
+        appDownloadBundle(e.itemId, e.filePath, e.name || "", null,
+          (e.quality === "" || e.quality == null) ? "original" : e.quality));
+    } finally { _appReleaseBg(); }
+  } finally { _appResumeInFlight = false; }
 }
 
 // ── iOS app: in-app navigation (M5) ──────────────────────────────────────────
@@ -8783,6 +8864,10 @@ function _appInitNav() {
 // While open it re-renders on a 1 s tick so the download bars and the connection
 // dot stay live; the tick is torn down on close so it costs nothing when hidden.
 let _appDashTimer = null;
+// Bulk-management state for the Downloaded list: a multi-select mode and the set
+// of selected offKeys. Module-level so it survives the 1 s re-render tick.
+let _appDashSelectMode = false;
+const _appDashSel = new Set();
 
 function _appOpenDashboard() {
   if (!isApp) return;
@@ -8797,6 +8882,7 @@ function _appCloseDashboard() {
   const ov = document.getElementById("appDash");
   if (ov) ov.style.display = "none";
   if (_appDashTimer) { clearInterval(_appDashTimer); _appDashTimer = null; }
+  _appDashSelectMode = false; _appDashSel.clear();
 }
 
 function _appBuildDashboard() {
@@ -8821,16 +8907,38 @@ function _appBuildDashboard() {
       <div id="appDashHost" style="font-size:12px;color:#8a8a92;margin-top:7px;word-break:break-all;"></div>
     </div>
 
-    <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;margin:4px 0 8px;">Ongoing downloads</div>
+    <div style="display:flex;align-items:center;justify-content:space-between;margin:4px 0 8px;">
+      <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;">Ongoing downloads</div>
+      <button id="appDashResume" style="all:unset;cursor:pointer;display:none;color:#3a7afe;border:1px solid #2a4a7e;
+        padding:5px 11px;font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;">Resume all</button>
+    </div>
     <div id="appDashDownloads" style="margin-bottom:18px;"></div>
 
-    <div style="display:flex;align-items:baseline;justify-content:space-between;margin:4px 0 8px;">
+    <div style="display:flex;align-items:center;justify-content:space-between;margin:4px 0 8px;gap:10px;">
       <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;">Downloaded on this device</div>
-      <div id="appDashTotal" style="font-size:12px;color:#8a8a92;"></div>
+      <div style="display:flex;align-items:center;gap:10px;flex:0 0 auto;">
+        <div id="appDashTotal" style="font-size:12px;color:#8a8a92;"></div>
+        <button id="appDashSelect" style="all:unset;cursor:pointer;color:#cbd5e1;border:1px solid #2a2a30;
+          padding:5px 11px;font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;">Select</button>
+      </div>
     </div>
     <div id="appDashStorage" style="margin-bottom:8px;"></div>
+    <div id="appDashBar" style="display:none;position:sticky;bottom:0;gap:9px;padding:11px 0;
+      background:linear-gradient(transparent,#0b0b0d 22%);align-items:center;">
+      <button id="appDashSelAll" style="all:unset;cursor:pointer;color:#cbd5e1;border:1px solid #2a2a30;
+        padding:9px 13px;font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;">All</button>
+      <button id="appDashRemoveSel" style="all:unset;cursor:pointer;color:#fff;background:#c0392b;
+        padding:9px 15px;font-size:12px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;flex:1 1 auto;text-align:center;">Remove</button>
+      <button id="appDashSelCancel" style="all:unset;cursor:pointer;color:#8a8a92;border:1px solid #2a2a30;
+        padding:9px 13px;font-size:12px;font-weight:700;letter-spacing:.04em;text-transform:uppercase;">Done</button>
+    </div>
   `;
   ov.querySelector("#appDashClose").addEventListener("click", _appCloseDashboard);
+  ov.querySelector("#appDashResume").addEventListener("click", () => _appResumeDownloadQueue());
+  ov.querySelector("#appDashSelect").addEventListener("click", () => _appDashSetSelect(true));
+  ov.querySelector("#appDashSelCancel").addEventListener("click", () => _appDashSetSelect(false));
+  ov.querySelector("#appDashSelAll").addEventListener("click", _appDashSelectAll);
+  ov.querySelector("#appDashRemoveSel").addEventListener("click", _appRemoveSelected);
   return ov;
 }
 
@@ -8859,29 +8967,36 @@ async function _appRenderDashboard() {
   //    map carries the live fraction (host prep 0–50 %, transfer 50–100 %).
   const dlWrap = ov.querySelector("#appDashDownloads");
   const active = [];
+  let nWaiting = 0;
   for (const [key, st] of offlineBundles) {
     if (!st || st.complete) continue;
     if (!(st.downloading || st.queued || st.prepping)) continue;
+    if (st.waiting) nWaiting++;
     const it = byKey.get(key);
     const meta = st.meta || (it && it.meta) || {};
     const label = (meta.series ? meta.series + " — " : "")
       + (meta.season && meta.episode ? `S${String(meta.season).padStart(2,"0")}E${String(meta.episode).padStart(2,"0")} ` : "")
       + (meta.episode_name || st.name || (it && it.name) || key.split("|").slice(1).join("|") || "Download");
-    active.push({ label, st });
+    active.push({ key, label, st, itemId: (it && it.itemId), filePath: (it && it.filePath) });
   }
+  // "Resume all" only when something is actually stalled waiting on the network.
+  ov.querySelector("#appDashResume").style.display = nWaiting ? "inline-block" : "none";
   if (!active.length) {
     dlWrap.innerHTML = `<div style="color:#8a8a92;font-size:13px;border:1px solid #2a2a30;background:#141417;padding:13px 14px;">No downloads in progress.</div>`;
   } else {
-    dlWrap.innerHTML = active.map(({ label, st }) => {
+    dlWrap.innerHTML = active.map(({ key, label, st }) => {
       const pct = Math.round((st.fraction || 0) * 100);
       const sub = st.waiting ? "Waiting for connection…"
         : (st.queued && !st.downloading) ? "Queued"
         : st.prepping ? "Preparing on host…"
         : (st.bytesTotal ? `${fmtSize(st.bytesDone || 0)} / ${fmtSize(st.bytesTotal)}` : "Downloading…");
+      const _k = escHtml(JSON.stringify(key));
       return `<div style="border:1px solid #2a2a30;background:#141417;padding:11px 13px;margin-bottom:8px;">
-        <div style="display:flex;justify-content:space-between;gap:10px;font-size:13px;font-weight:700;">
-          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(label)}</span>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:13px;font-weight:700;">
+          <span style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap;flex:1 1 auto;min-width:0;">${escHtml(label)}</span>
           <span style="color:#3a7afe;flex:0 0 auto;">${pct}%</span>
+          <button onclick="_appCancelDownload(${_k})" title="Stop this download" style="all:unset;cursor:pointer;flex:0 0 auto;
+            color:#8a8a92;border:1px solid #2a2a30;padding:3px 9px;font-size:12px;font-weight:700;">✕</button>
         </div>
         <div style="font-size:11px;color:#8a8a92;margin-top:3px;">${escHtml(sub)}</div>
         <div style="height:3px;background:#26262c;margin-top:7px;"><i style="display:block;height:100%;background:#3a7afe;width:${pct}%;"></i></div>
@@ -8907,6 +9022,22 @@ async function _appRenderDashboard() {
   ov.querySelector("#appDashTotal").textContent = total ? fmtSize(total) + " used" : "";
   const stWrap = ov.querySelector("#appDashStorage");
   const rows = [...groups.values()].sort((a, b) => b.bytes - a.bytes);
+
+  // Wire up the bulk-management chrome: the Select toggle only matters when there's
+  // something downloaded; the action bar + selection count reflect the live set.
+  const sel = _appDashSelectMode;
+  const selBtn = ov.querySelector("#appDashSelect");
+  const bar = ov.querySelector("#appDashBar");
+  selBtn.style.display = rows.length ? "inline-block" : "none";
+  selBtn.textContent = sel ? "Cancel" : "Select";
+  bar.style.display = sel ? "flex" : "none";
+  // Drop any selected key that's no longer downloaded (removed since last tick).
+  for (const k of [..._appDashSel]) if (!byKey.get(k) || !byKey.get(k).complete) _appDashSel.delete(k);
+  const nSel = _appDashSel.size;
+  const removeBtn = ov.querySelector("#appDashRemoveSel");
+  removeBtn.textContent = nSel ? `Remove (${nSel})` : "Remove";
+  removeBtn.style.opacity = nSel ? "1" : ".5";
+
   if (!rows.length) {
     stWrap.innerHTML = `<div style="color:#8a8a92;font-size:13px;border:1px solid #2a2a30;background:#141417;padding:13px 14px;">Nothing downloaded yet.</div>`;
   } else {
@@ -8920,30 +9051,51 @@ async function _appRenderDashboard() {
         ? `<img src="${escHtml(g.meta.poster_data_url)}" style="flex:0 0 auto;width:46px;height:69px;object-fit:cover;background:#202028;">`
         : `<div style="flex:0 0 auto;width:46px;height:69px;background:#202028;display:flex;align-items:center;justify-content:center;color:#8a8a92;font-size:18px;font-weight:800;">${escHtml((g.title[0] || "?").toUpperCase())}</div>`;
       const isSeries = g.eps.length > 1 || (g.meta && g.meta.season && g.meta.episode);
+      const _gk = escHtml(JSON.stringify(g.eps.map((ep) => offKey(ep.itemId, ep.filePath))));
       const eps = g.eps.map((ep) => {
         const m = ep.meta || {};
         const num = (m.season && m.episode) ? `S${pad2(m.season)}·E${pad2(m.episode)} ` : (m.episode ? `E${pad2(m.episode)} ` : "");
         const nm = m.episode_name || ep.name || ep.sha;
         const _id = escHtml(JSON.stringify(ep.itemId)), _p = escHtml(JSON.stringify(ep.filePath));
-        return `<div style="display:flex;align-items:center;gap:9px;padding:9px 11px;border-top:1px solid #2a2a30;">
+        const key = offKey(ep.itemId, ep.filePath);
+        const _k = escHtml(JSON.stringify(key));
+        // In select mode the whole row toggles a checkbox; otherwise it's Play + ✕.
+        const checked = _appDashSel.has(key);
+        const box = `<span style="flex:0 0 auto;width:20px;height:20px;border:2px solid ${checked ? "#3a7afe" : "#4a4a52"};
+          background:${checked ? "#3a7afe" : "transparent"};display:flex;align-items:center;justify-content:center;
+          color:#fff;font-size:13px;font-weight:800;">${checked ? "✓" : ""}</span>`;
+        const actions = sel
+          ? box
+          : `<button onclick="_appPlayDownloaded(${_id},${_p})" style="all:unset;cursor:pointer;background:#3a7afe;color:#fff;
+              padding:8px 13px;font-size:12px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;">Play</button>
+             <button onclick="_appRemoveDownloaded(${_id},${_p})" style="all:unset;cursor:pointer;color:#8a8a92;border:1px solid #2a2a30;
+              padding:8px 11px;font-size:12px;font-weight:700;">✕</button>`;
+        const rowClick = sel ? ` onclick="_appDashToggleItem(${_k})"` : "";
+        return `<div${rowClick} style="display:flex;align-items:center;gap:9px;padding:9px 11px;border-top:1px solid #2a2a30;${sel ? "cursor:pointer;" : ""}">
           <div style="flex:1 1 auto;min-width:0;">
             <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
               ${num ? `<span style="color:#3a7afe;font-family:ui-monospace,Menlo,monospace;font-size:11px;font-weight:700;">${escHtml(num)}</span>` : ""}${escHtml(nm)}</div>
             <div style="font-size:11px;color:#8a8a92;margin-top:2px;">${fmtSize(ep.bytesTotal || ep.bytesDone || 0)}</div>
           </div>
-          <button onclick="_appPlayDownloaded(${_id},${_p})" style="all:unset;cursor:pointer;background:#3a7afe;color:#fff;
-            padding:8px 13px;font-size:12px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;">Play</button>
-          <button onclick="_appRemoveDownloaded(${_id},${_p})" style="all:unset;cursor:pointer;color:#8a8a92;border:1px solid #2a2a30;
-            padding:8px 11px;font-size:12px;font-weight:700;">✕</button>
+          ${actions}
         </div>`;
       }).join("");
+      // Per-series header gets a "Remove all" shortcut (normal mode) and a
+      // "Select all in series" toggle (select mode) — quick bulk without ticking
+      // each episode.
+      const headBtn = sel
+        ? `<button onclick="_appDashToggleSeries(${_gk})" style="all:unset;cursor:pointer;flex:0 0 auto;color:#3a7afe;
+            border:1px solid #2a4a7e;padding:6px 11px;font-size:11px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;">All</button>`
+        : `<button onclick="_appRemoveSeries(${_gk},${escHtml(JSON.stringify(g.title))})" title="Remove every episode of this title"
+            style="all:unset;cursor:pointer;flex:0 0 auto;color:#8a8a92;border:1px solid #2a2a30;padding:6px 11px;font-size:11px;font-weight:700;">Remove all</button>`;
       return `<div style="border:1px solid #2a2a30;background:#141417;margin-bottom:12px;">
-        <div style="display:flex;gap:11px;padding:11px;">
+        <div style="display:flex;gap:11px;padding:11px;align-items:flex-start;">
           ${poster}
           <div style="flex:1 1 auto;min-width:0;">
             <div style="font-size:15px;font-weight:800;line-height:1.2;">${escHtml(g.title)}</div>
             <div style="font-size:12px;color:#8a8a92;margin-top:3px;">${isSeries ? `${g.eps.length} episode${g.eps.length === 1 ? "" : "s"} · ` : ""}${fmtSize(g.bytes)}</div>
           </div>
+          ${headBtn}
         </div>
         ${eps}
       </div>`;
@@ -8963,9 +9115,102 @@ async function _appPlayDownloaded(itemId, filePath) {
 async function _appRemoveDownloaded(itemId, filePath) {
   if (!isApp || !_cap.dl) return;
   if (!window.confirm("Remove this offline download from the device?")) return;
+  await _appRemoveOne(itemId, filePath);
+  _appRenderDashboard();
+}
+
+// ── iOS app: Downloads overlay — bulk actions ────────────────────────────────
+// Remove a single download from BOTH the native store and the durable queue (so a
+// removed item isn't resurrected by the resumer) and update the in-memory map +
+// per-row button. Shared by the per-row ✕ and every bulk path below.
+async function _appRemoveOne(itemId, filePath) {
+  if (!isApp || !_cap.dl) return;
   try { await _cap.dl.remove({ itemId, filePath }); } catch (_) {}
-  offlineBundles.delete(offKey(itemId, filePath));
+  _appQueueClear(itemId, filePath);
+  const key = offKey(itemId, filePath);
+  offlineBundles.delete(key);
+  _appDashSel.delete(key);
   _appRefreshDlBtn(itemId, filePath);
+}
+
+// Enter / leave multi-select mode (clears the selection on the way out).
+function _appDashSetSelect(on) {
+  _appDashSelectMode = !!on;
+  if (!on) _appDashSel.clear();
+  _appRenderDashboard();
+}
+// Toggle one episode's membership in the selection.
+function _appDashToggleItem(key) {
+  if (_appDashSel.has(key)) _appDashSel.delete(key); else _appDashSel.add(key);
+  _appRenderDashboard();
+}
+// Toggle a whole series: if every episode is already selected, deselect them;
+// otherwise select them all. `keys` is the series' list of offKeys.
+function _appDashToggleSeries(keys) {
+  const all = keys.every((k) => _appDashSel.has(k));
+  for (const k of keys) { if (all) _appDashSel.delete(k); else _appDashSel.add(k); }
+  _appRenderDashboard();
+}
+// Select every downloaded episode on the device.
+async function _appDashSelectAll() {
+  let items = [];
+  try { items = (await _cap.dl.list()).items || []; } catch (_) {}
+  const done = items.filter((it) => it.complete);
+  const all = done.length && done.every((it) => _appDashSel.has(offKey(it.itemId, it.filePath)));
+  _appDashSel.clear();
+  if (!all) for (const it of done) _appDashSel.add(offKey(it.itemId, it.filePath));
+  _appRenderDashboard();
+}
+
+// Delete every selected download. `offKey` packs itemId|filePath, so resolve each
+// back to a real (itemId, filePath) via the native list rather than parsing the
+// key (a Windows path contains no `|`, but be safe and use the authoritative list).
+async function _appRemoveSelected() {
+  if (!isApp || !_cap.dl || !_appDashSel.size) return;
+  const n = _appDashSel.size;
+  if (!window.confirm(`Remove ${n} download${n > 1 ? "s" : ""} from this device?`)) return;
+  let items = [];
+  try { items = (await _cap.dl.list()).items || []; } catch (_) {}
+  const targets = items.filter((it) => _appDashSel.has(offKey(it.itemId, it.filePath)));
+  for (const it of targets) await _appRemoveOne(it.itemId, it.filePath);
+  _appDashSel.clear();
+  _appDashSelectMode = false;
+  _appRenderDashboard();
+}
+
+// Remove every episode of one series at once (the per-series "Remove all" button).
+async function _appRemoveSeries(keys, title) {
+  if (!isApp || !_cap.dl || !keys || !keys.length) return;
+  if (!window.confirm(`Remove all ${keys.length} download${keys.length > 1 ? "s" : ""} of “${title}”?`)) return;
+  let items = [];
+  try { items = (await _cap.dl.list()).items || []; } catch (_) {}
+  const want = new Set(keys);
+  const targets = items.filter((it) => want.has(offKey(it.itemId, it.filePath)));
+  for (const it of targets) await _appRemoveOne(it.itemId, it.filePath);
+  _appRenderDashboard();
+}
+
+// Stop an in-flight / queued / waiting download (the ✕ on an ongoing row). Cancels
+// the native transfer, clears the durable intent so the resumer won't restart it,
+// and removes any partial bytes already on disk.
+async function _appCancelDownload(key) {
+  if (!isApp || !_cap.dl) return;
+  const it = (offlineBundles.get(key) || {});
+  // Resolve to itemId/filePath via the native list (the map entry may be a
+  // pre-handoff "queued"/"waiting" stub without them).
+  let itemId, filePath;
+  try {
+    const items = (await _cap.dl.list()).items || [];
+    const hit = items.find((x) => offKey(x.itemId, x.filePath) === key);
+    if (hit) { itemId = hit.itemId; filePath = hit.filePath; }
+  } catch (_) {}
+  if (!itemId) {
+    // No native bundle yet (intent only). Split the offKey: itemId|filePath.
+    const i = key.indexOf("|");
+    if (i >= 0) { itemId = key.slice(0, i); filePath = key.slice(i + 1); }
+  }
+  if (itemId) await _appRemoveOne(itemId, filePath);
+  else { offlineBundles.delete(key); }
   _appRenderDashboard();
 }
 
@@ -11921,7 +12166,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
   _appInitOfflineBundles();
   // M3: when the browser regains connectivity, drain any offline progress the
   // native store accumulated while we were away. No-op in a plain browser.
-  if (isApp) window.addEventListener("online", () => _appFlushOfflineProgress());
+  if (isApp) window.addEventListener("online", () => { _appFlushOfflineProgress(); _appResumeDownloadQueue(); });
   // App-only: offline-sync diagnostics row. Currently hidden from the UI —
   // re-enable by un-commenting the reveal below if we need it again. The row
   // markup, _appSyncDebug(), and the syncDebugModal are all left in place.
@@ -11990,6 +12235,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.7.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.8.0</div>
 </body>
 </html>
