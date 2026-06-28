@@ -999,6 +999,32 @@ both origins (same reason the offline progress log is native). The shell writes 
 token after pairing; the dashboard reads it at startup into `_pairToken` and sends
 `Authorization: Bearer …`.
 
+### The app WKWebView has no visible JS console — surface uncaught errors on-screen
+A bug that only reproduces inside the Capacitor shell is effectively undebuggable by
+report alone: WKWebView shows no console, so a thrown exception just blanks a feature
+(the "Library tab doesn't open in the app, but does on the web" report was a silent
+throw/rejection with no on-device feedback). Two standing mitigations (both app-only,
+browsers keep devtools + the clean UI): (1) `installAppErrorSurface()` registers global
+`error` + `unhandledrejection` handlers that paint a tappable red banner and exposes
+`window.__appShowError(msg)` for explicit `catch` blocks; (2) fire-and-forget async UI
+loaders (e.g. `loadLibrary`) must `catch` and render their failure **inline** (with the
+error text) rather than leaving a blank pane — a blank tab reads as "doesn't work" with
+no clue, an inline error is self-diagnosing. To get the full stack with line numbers,
+attach **Safari → Develop → [device] → the StreamLink WebView → Console** (no rebuild
+needed). When chasing an app-only bug, reach for these before guessing.
+
+### Self-heal a corrupt `streamlink_profile` in `localStorage`, don't just swallow the parse error
+The profile-restore on load reads `localStorage["streamlink_profile"]` and `JSON.parse`s
+it. A historical server bug (pre-7.8.1) persisted the literal string `"undefined"`, which
+throws on every parse and forced the profile picker forever ("login not remembered").
+The restore now explicitly clears `"undefined"`/`"null"`/empty/unparseable values (so a
+later successful login re-seeds cleanly) and surfaces *why* a restore was skipped
+(corrupt value / id not on server / `GET /api/profiles` failed) via `__appShowError` —
+because in the app each of those silently drops to the picker and is indistinguishable
+from "WKWebView dropped my storage" without the signal. Note the app's WKWebView storage
+is a **separate** store from any desktop browser, so a value corrupted before a fix lingers
+in the app until it logs in once post-fix (or is cleared).
+
 ### In the app, file delivery (`navigator.share`/download) is dead — open the host URL in Safari instead
 The dashboard runs in the WebView over a **plain-http host origin**, which is not a
 **secure context**. So `navigator.share` (and `navigator.canShare`) — the Web Share

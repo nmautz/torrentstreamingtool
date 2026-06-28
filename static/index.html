@@ -2760,6 +2760,44 @@
   }).catch(()=>{});
 })();
 
+// ── In-app error surface ─────────────────────────────────────────────────────
+// The iOS Capacitor shell is a WKWebView with NO visible JS console, so an
+// uncaught exception or a rejected promise silently breaks a feature with zero
+// feedback — e.g. a throw while loading the Library tab just leaves it blank,
+// which is exactly the "Library doesn't open/load in the app" report. Surface
+// such errors as a tappable banner so they're diagnosable on-device, and expose
+// `window.__appShowError` so explicit catch blocks (loadLibrary) can report too.
+// App-only: browsers have devtools and keep the clean UI untouched.
+(function installAppErrorSurface(){
+  var inApp=false;
+  try { inApp = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()); } catch(_){}
+  if(!inApp) return;
+  function show(msg){
+    var b=document.getElementById("__appErr");
+    if(!b){
+      b=document.createElement("div");
+      b.id="__appErr";
+      b.style.cssText="position:fixed;left:0;right:0;bottom:0;z-index:2147483647;"
+        +"background:#7f1d1d;color:#fff;font:600 12px/1.45 -apple-system,'Segoe UI',sans-serif;"
+        +"padding:10px 14px max(env(safe-area-inset-bottom),10px);white-space:pre-wrap;"
+        +"word-break:break-word;max-height:45vh;overflow:auto;";
+      b.addEventListener("click",function(){ b.remove(); });
+      (document.body||document.documentElement).appendChild(b);
+    }
+    b.textContent="⚠ "+msg+"\n(tap to dismiss)";
+  }
+  window.__appShowError=show;
+  window.addEventListener("error",function(e){
+    var m=(e&&e.message)||"script error";
+    if(e&&e.filename) m+="  @ "+String(e.filename).split("/").pop()+":"+e.lineno+":"+e.colno;
+    show(m);
+  });
+  window.addEventListener("unhandledrejection",function(e){
+    var r=e&&e.reason;
+    show("Unhandled rejection: "+((r&&(r.stack||r.message))||String(r)));
+  });
+})();
+
 // ── Constants ──────────────────────────────────────────────────────────────
 const PROFILE_COLORS = {
   indigo: { bg:"bg-indigo-600", ring:"ring-indigo-400" },
@@ -4608,6 +4646,7 @@ async function loadLibrary(btn){
       fetch(`/api/library${pid}`),
       loadDiskSpace(),
     ]);
+    if(!libRes.ok) throw new Error(`GET /api/library ${libRes.status}`);
     const items=(await libRes.json()).items||[];
     // Cache the latest library list so continueLibraryItem() can consult resume hints
     // before deciding whether to show the local-vs-VLC chooser.
@@ -4617,6 +4656,17 @@ async function loadLibrary(btn){
     for(const itemId of expandedDownloads){
       await showDownloadFiles(itemId);
     }
+  } catch(err){
+    // Never leave the tab silently blank — show the failure inline (and, in the
+    // app where there's no console, in the global error banner). Many callers
+    // invoke loadLibrary fire-and-forget, so swallow here after surfacing.
+    const el=document.getElementById("libraryContent");
+    if(el) el.innerHTML=`<div class="flex flex-col items-center justify-center py-16 text-center gap-2">
+      <p class="text-red-400 font-medium">Couldn't load the library.</p>
+      <p class="text-xs text-red-500/80 break-all max-w-md">${escHtml(String(err&&err.message||err))}</p>
+      <button onclick="loadLibrary()" class="mt-2 text-xs uppercase tracking-wide font-bold text-indigo-400 border border-indigo-800 px-3 py-1.5">Retry</button>
+    </div>`;
+    if(window.__appShowError) window.__appShowError("loadLibrary: "+((err&&err.stack)||String(err)));
   } finally {
     _markLoading(btn, false);
   }
@@ -12226,14 +12276,31 @@ document.addEventListener("DOMContentLoaded",async()=>{
   }).catch(()=>{});
 
   // Restore profile from localStorage
-  const saved=localStorage.getItem("streamlink_profile");
+  let saved=localStorage.getItem("streamlink_profile");
+  // Self-heal corrupt values (a pre-7.8.1 bug persisted the string "undefined",
+  // which throws on JSON.parse every load and forced the picker — see CHANGELOG
+  // 7.8.1). Clear them so a successful login can re-seed cleanly.
+  if(saved==="undefined"||saved==="null"||saved===""){ try{ localStorage.removeItem("streamlink_profile"); }catch(_){} saved=null; }
   if(saved){
-    try{
-      const p=JSON.parse(saved);
-      const profiles=await fetchProfiles();
-      const found=profiles.find(x=>x.id===p.id);
-      if(found){ profile=found; renderNavProfile(); applyMaxVolumeToSliders(); loadSearchIndexers(); _appSyncSetProfile(); _appFlushOfflineProgress(); connectSSE(); return; }
-    } catch(_){}
+    let p=null;
+    try{ p=JSON.parse(saved); }
+    catch(e){
+      try{ localStorage.removeItem("streamlink_profile"); }catch(_){}
+      if(window.__appShowError) window.__appShowError("Saved profile was corrupt and has been cleared: "+saved);
+    }
+    if(p && p.id){
+      try{
+        const profiles=await fetchProfiles();
+        const found=profiles.find(x=>x.id===p.id);
+        if(found){ profile=found; renderNavProfile(); applyMaxVolumeToSliders(); loadSearchIndexers(); _appSyncSetProfile(); _appFlushOfflineProgress(); connectSSE(); return; }
+        // Saved profile no longer exists on the server (deleted/renamed id).
+        if(window.__appShowError) window.__appShowError("Saved profile id "+p.id+" not found among "+profiles.length+" server profiles.");
+      } catch(e){
+        // The profiles fetch failed right after launch — surface it rather than
+        // silently dropping to the picker (which reads as "login not remembered").
+        if(window.__appShowError) window.__appShowError("Couldn't restore login (GET /api/profiles failed): "+((e&&e.message)||e));
+      }
+    }
   }
   await fetchProfiles();
   renderProfileGrid();
@@ -12241,6 +12308,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.8.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.8.2</div>
 </body>
 </html>
