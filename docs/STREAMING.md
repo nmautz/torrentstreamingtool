@@ -1018,9 +1018,18 @@ quieter **Clip last…** custom-length button (`_clipPromptSeconds`):
 
 **Shared client core.** `_doClip(itemId, filePath, endSec, seconds, audioIdx,
 btn)` POSTs `/api/library/{id}/clip`, then `_shareOrDownload(url, filename)`
-fetches the result and hands it to the OS **share sheet** when the platform can
-share files (`navigator.canShare({files})` — iOS/Android), else triggers a
-download (desktop), with a `window.open` last resort.
+delivers the result:
+
+- **iOS app (Capacitor):** opens the clip's host URL in **Safari** via the native
+  `BundleDownloader.openExternal({url})` method, where iOS previews the MP4 with a
+  native Save-to-Files/Photos + Share sheet. This is required because the dashboard
+  runs in the WebView over a plain-http host origin (not a secure context), so
+  `navigator.share`'s file API is unavailable and `<a download>` / `window.open`
+  are no-ops inside the WebView. The clip URL's random token is the capability, so
+  no pairing header is needed. See [GOTCHAS.md](GOTCHAS.md).
+- **Web/desktop:** hands the file to the OS **share sheet** when the platform can
+  share files (`navigator.canShare({files})` — iOS/Android Safari/Chrome), else
+  triggers a download (desktop), with a `window.open` last resort.
 
 **Server.** `POST /api/library/{id}/clip` re-encodes `[end_sec-duration,
 end_sec]` of the **original source** (not the HLS segments — best quality +

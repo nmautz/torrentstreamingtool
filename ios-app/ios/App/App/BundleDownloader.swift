@@ -36,6 +36,7 @@
 //    remove({ sha? , itemId?, filePath? }) -> {}
 //    cancel({ sha })                -> {}
 //    bytesUsed()                    -> { bytes }
+//    openExternal({ url })          -> {}   // open a host URL in Safari (Clip share)
 //
 //  Events: "bundleProgress" { sha, itemId, filePath, bytesDone, bytesTotal, fraction, filesDone, fileCount }
 //          "bundleComplete" { sha, itemId, filePath, dir }
@@ -61,6 +62,7 @@ public class BundleDownloader: CAPPlugin, CAPBridgedPlugin {
         CAPPluginMethod(name: "bytesUsed", returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "holdBackground",    returnType: CAPPluginReturnPromise),
         CAPPluginMethod(name: "releaseBackground", returnType: CAPPluginReturnPromise),
+        CAPPluginMethod(name: "openExternal",      returnType: CAPPluginReturnPromise),
     ]
 
     public override func load() {
@@ -154,6 +156,27 @@ public class BundleDownloader: CAPPlugin, CAPBridgedPlugin {
     @objc func releaseBackground(_ call: CAPPluginCall) {
         BundleDownloadManager.shared.releaseOrchestrationBackground()
         call.resolve()
+    }
+
+    // Hand a host URL to the system browser (Safari). Used by the Clip feature:
+    // the dashboard runs in this WKWebView over a plain-http host origin, which is
+    // NOT a secure context, so navigator.share (Web Share file API) is unavailable
+    // and <a download> / window.open are no-ops in the WebView — the clip MP4 can't
+    // be delivered in-app. Opening the clip's host URL in Safari instead lets iOS
+    // preview the MP4 with a native Save-to-Files/Photos + Share sheet. The clip URL
+    // carries its own random capability token, so no pairing header is needed.
+    @objc func openExternal(_ call: CAPPluginCall) {
+        guard let urlStr = call.getString("url"), !urlStr.isEmpty,
+              let url = URL(string: urlStr) else {
+            call.reject("openExternal() requires a valid `url`.")
+            return
+        }
+        DispatchQueue.main.async {
+            UIApplication.shared.open(url, options: [:]) { ok in
+                if ok { call.resolve() }
+                else { call.reject("Could not open the URL in the system browser.") }
+            }
+        }
     }
 }
 

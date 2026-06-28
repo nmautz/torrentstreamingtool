@@ -9289,6 +9289,17 @@ async function handoffToDevice(btn, allowOnDemand = false) {
 // Fetch the finished clip and offer it via the native share sheet when the
 // platform supports sharing files (iOS/Android), else fall back to a download.
 async function _shareOrDownload(url, filename) {
+  // iOS app: the dashboard runs in the Capacitor WebView over a plain-http host
+  // origin (not a secure context), so navigator.share's file API is unavailable
+  // and <a download> / window.open are no-ops in the WebView — none of the paths
+  // below can deliver the clip. Hand the clip's host URL to Safari instead, which
+  // previews the MP4 with a native Save-to-Files/Photos + Share sheet. The clip
+  // URL carries its own random capability token, so it needs no pairing header.
+  if (isApp && _cap && _cap.dl && _cap.dl.openExternal) {
+    const abs = /^https?:/i.test(url) ? url : (location.origin + url);
+    try { await _cap.dl.openExternal({ url: abs }); return; }
+    catch (_) { /* fall through to the web paths below */ }
+  }
   try {
     const resp = await fetch(url);
     if (!resp.ok) throw new Error("fetch failed");
@@ -11979,6 +11990,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.7.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.7.1</div>
 </body>
 </html>

@@ -999,6 +999,19 @@ both origins (same reason the offline progress log is native). The shell writes 
 token after pairing; the dashboard reads it at startup into `_pairToken` and sends
 `Authorization: Bearer …`.
 
+### In the app, file delivery (`navigator.share`/download) is dead — open the host URL in Safari instead
+The dashboard runs in the WebView over a **plain-http host origin**, which is not a
+**secure context**. So `navigator.share` (and `navigator.canShare`) — the Web Share
+**file** API — is **undefined**, `<a download>` is **ignored** by WKWebView, and
+`window.open(url)` for a same-origin host URL just navigates in-WebView (no save/share
+sheet). The Clip feature hit all three. Fix: when `isApp`, `_shareOrDownload` hands the
+clip's **host URL** to **Safari** via the native `BundleDownloader.openExternal({url})`
+(`UIApplication.shared.open`), where iOS previews the MP4 with a native
+Save-to-Files/Photos + Share sheet. Works because the clip URL's random 16-hex token is
+the capability (`GET /api/library/clip/{token}/{filename}` has no `_require_device_auth`),
+so Safari needs no `Authorization` header. Any future "save/share a host file from the
+app" should reuse `openExternal`, not the Web Share / download paths.
+
 ### In-app navigation back to the shell pages is a full cross-origin navigation to `capacitor://localhost`
 Once the WebView is on the host dashboard there's no browser chrome, so the M5 `☰ App`
 menu (and `downloads.html`'s buttons) navigate with `window.location.href =
