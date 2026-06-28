@@ -17015,9 +17015,19 @@ def _enumerate_bundle_files(out_dir: Path) -> tuple[list[dict], int]:
 
 def _bundle_rung_name(name: str, video_name: str) -> bool:
     """True when bundle file `name` belongs to the video rung `video_name`
-    (its playlist, fmp4 init, or a segment)."""
-    return (name in (f"{video_name}.m3u8", f"init_{video_name}.mp4")
-            or name.startswith(f"seg_{video_name}_"))
+    (its playlist, fmp4 init, or a segment).
+
+    The segment test is anchored to the numeric counter (`seg_<name>_<NNNNN>.m4s`),
+    NOT a plain `startswith` prefix: the source rung is named `video` and the
+    down-rungs `video_720` / `video_480`, so `"seg_video_720_00001.m4s"
+    .startswith("seg_video_")` is True — the `video` rung would wrongly claim the
+    720p rung's segments. That mis-attribution made a **reduced-quality download
+    drop the very segments it kept** (the source rung in `drop_names` swallowed the
+    kept down-rung's `seg_video_720_*`), so the bundle's playlist referenced
+    segments that were never downloaded → 404 on the first fragment → unplayable."""
+    if name in (f"{video_name}.m3u8", f"init_{video_name}.mp4"):
+        return True
+    return re.fullmatch(rf"seg_{re.escape(video_name)}_\d+\.m4s", name) is not None
 
 
 def _bundle_rung_info(files: list[dict], meta: dict) -> list[dict]:
@@ -17103,11 +17113,11 @@ def _bundle_select_rung(out_dir: Path, files: list[dict], meta: dict,
     master_text = "\n".join(kept_lines) + "\n"
     master_bytes = len(master_text.encode("utf-8"))
 
+    # Reuse the rung membership test so the segment match is anchored to the numeric
+    # counter — a plain `startswith("seg_video_")` would let the dropped source rung
+    # swallow the kept down-rung's `seg_video_720_*` segments (see _bundle_rung_name).
     def _is_dropped(name: str) -> bool:
-        for n in drop_names:
-            if name in (f"{n}.m3u8", f"init_{n}.mp4") or name.startswith(f"seg_{n}_"):
-                return True
-        return False
+        return any(_bundle_rung_name(name, n) for n in drop_names)
 
     out: list[dict] = []
     for f in files:
