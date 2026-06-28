@@ -16,9 +16,14 @@
 //  work without the network and a partial download resumes by skipping files
 //  already on disk at their expected size.
 //
-//  A *background* URLSession keeps downloads running while the app is suspended;
-//  completed files are durable across an app kill (M2 "survive relaunch"). The
-//  session + delegate live in a process-wide singleton (`BundleDownloadManager`)
+//  Transfers ride a HYBRID of two URLSessions sharing one delegate: a fast,
+//  in-process *default* session while the app is foreground (iOS throttles
+//  background-session traffic even in front, so a pure-background downloader lags
+//  far behind in-process AVPlayer/WKWebView streaming), and a *background* session
+//  while the app is suspended so downloads keep running and complete across a kill
+//  (M2 "survive relaunch"). In-flight tasks migrate between the two on each
+//  foreground/background transition (cancel + re-enqueue; segments are small). The
+//  sessions + delegate live in a process-wide singleton (`BundleDownloadManager`)
 //  independent of the Capacitor plugin's lifecycle, because a background session
 //  identifier must be owned by exactly one long-lived delegate.
 //
@@ -224,17 +229,65 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     /// Called for "bundleProgress" / "bundleComplete" / "bundleError".
     var onEvent: ((String, [String: Any]) -> Void)?
 
-    // A *background* URLSession so downloads keep running — and complete — while
-    // the app is suspended (the whole point of "downloads work when minimized").
-    // History: a foreground default session delivered smooth live progress but
-    // died ~30s after backgrounding; an early background attempt appeared to sit
-    // at 0% until relaunch because the AppDelegate
-    // `handleEventsForBackgroundURLSession` hook was missing, so the session never
-    // flushed its delegate events. With that hook in place (see AppDelegate +
-    // handleBackgroundEvents below) the background session delivers per-file
-    // completions on wake. While the app is foreground, didWriteData fires live so
-    // in-app progress stays smooth; while suspended, byte progress is coarse
-    // (batched) but per-file completion still advances the Live Activity.
+    override init() {
+        super.init()
+        // Watch app foreground/background so transfers ride the fast in-process
+        // session while active and the background session while suspended. The
+        // singleton is created at launch (the plugin's load() touches `.shared`),
+        // so these are registered before any download starts.
+        let nc = NotificationCenter.default
+        nc.addObserver(self, selector: #selector(appDidBecomeActive),
+                       name: UIApplication.didBecomeActiveNotification, object: nil)
+        nc.addObserver(self, selector: #selector(appDidEnterBackground),
+                       name: UIApplication.didEnterBackgroundNotification, object: nil)
+    }
+
+    @objc private func appDidBecomeActive() {
+        queue.async {
+            self.appActive = true
+            guard !self.jobs.isEmpty else { return }
+            // Pull any still-running suspended-mode transfers back onto the fast
+            // session so an open app always downloads at full speed.
+            self.migrateTasks(from: self.session, to: self.fgSession)
+        }
+    }
+    @objc private func appDidEnterBackground() {
+        queue.async {
+            self.appActive = false
+            guard !self.jobs.isEmpty else { return }
+            // Hand in-flight foreground transfers to the background session so they
+            // keep running while suspended. The job-keyed bgTask assertion (held for
+            // the whole download) keeps us alive long enough to re-enqueue.
+            self.migrateTasks(from: self.fgSession, to: self.session)
+        }
+    }
+
+    // HYBRID SESSIONS — speed while active, durability while suspended.
+    //
+    // iOS runs a *background* URLSession's transfers out-of-process (`nsurlsessiond`)
+    // at background QoS and rate-limits them even in the foreground with
+    // `isDiscretionary = false`. That's the whole reason "HLS streams load fast but
+    // downloads lag": AVPlayer/WKWebView fetch in-process at full link speed, while a
+    // pure-background downloader crawls. But a background session is also the only
+    // thing that keeps transfers running — and completing — while the app is
+    // suspended (the preview.6.0.0 background-download feature).
+    //
+    // So we run BOTH and route each task by app state (`appActive`):
+    //   • app foreground → `fgSession` (a default session, in-process, full speed)
+    //   • app suspended  → `session`   (the background session, survives suspend)
+    // On the foreground/background transition we MIGRATE every in-flight transfer
+    // between the two (`migrateTasks`): cancel on the source session, re-enqueue on
+    // the destination. HLS segments are small 6 s fmp4 chunks, so a cancelled task
+    // just restarts from scratch on the other session — no resume-data dance.
+    //
+    // History: a foreground default session delivered smooth live progress but died
+    // ~30s after backgrounding; an early *pure*-background attempt appeared to sit at
+    // 0% until relaunch because the AppDelegate `handleEventsForBackgroundURLSession`
+    // hook was missing, so the session never flushed its delegate events. With that
+    // hook in place (see AppDelegate + handleBackgroundEvents below) the background
+    // session delivers per-file completions on wake. Both sessions share `self` as
+    // delegate; the delegate methods key off `taskDescription` (sha + file) and so
+    // handle tasks from either session identically.
     private static let bgSessionIdentifier = "com.streamlink.bundledownloader"
     private lazy var session: URLSession = {
         let cfg = URLSessionConfiguration.background(withIdentifier: BundleDownloadManager.bgSessionIdentifier)
@@ -243,6 +296,20 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         cfg.sessionSendsLaunchEvents = true
         return URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
     }()
+    // The fast, in-process default session used whenever the app is foreground.
+    // `waitsForConnectivity` lets a task queued during a brief blip wait for the link
+    // instead of erroring (our retry loop still covers mid-transfer drops).
+    private lazy var fgSession: URLSession = {
+        let cfg = URLSessionConfiguration.default
+        cfg.allowsCellularAccess = true
+        cfg.waitsForConnectivity = true
+        cfg.timeoutIntervalForResource = 7 * 24 * 60 * 60
+        return URLSession(configuration: cfg, delegate: self, delegateQueue: nil)
+    }()
+    // True while the app is in the foreground. Only read/written on `queue` (the
+    // lifecycle notifications hop onto it), so `enqueue` can pick a session safely.
+    // Defaults true: downloads are only ever kicked off from foreground JS.
+    private var appActive = true
     private var bgTask: UIBackgroundTaskIdentifier = .invalid
     // Completion handler the OS hands us when it relaunches the app to deliver
     // finished background transfers; invoked once the session flushes its events.
@@ -578,21 +645,53 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
     private func cancelLocked(sha: String) {
         jobs[sha] = nil
         endBgTaskIfIdle()
-        session.getAllTasks { tasks in
-            for t in tasks where (t.taskDescription?.hasPrefix(sha + "\u{0000}") ?? false) { t.cancel() }
+        // A file's task can be on either session (depending on app state when it was
+        // enqueued / last migrated), so sweep both.
+        let cancelMatching: (URLSession) -> Void = { s in
+            s.getAllTasks { tasks in
+                for t in tasks where (t.taskDescription?.hasPrefix(sha + "\u{0000}") ?? false) { t.cancel() }
+            }
         }
+        cancelMatching(session)
+        cancelMatching(fgSession)
     }
 
-    private func enqueue(sha: String, file: BundleFile, job: Job) {
+    private func enqueue(sha: String, file: BundleFile, job: Job, session sess: URLSession? = nil) {
         let urlStr = job.baseUrl + file.name
         guard let url = URL(string: urlStr) else {
             emitError(sha: sha, job: job, message: "Bad file URL: \(urlStr)"); return
         }
         var req = URLRequest(url: url)
         if let tok = job.token, !tok.isEmpty { req.setValue("Bearer \(tok)", forHTTPHeaderField: "Authorization") }
-        let task = session.downloadTask(with: req)
+        // Foreground ⇒ fast in-process default session; suspended ⇒ background
+        // session that survives suspend. A migration passes the destination explicitly.
+        let chosen = sess ?? (appActive ? fgSession : session)
+        let task = chosen.downloadTask(with: req)
         task.taskDescription = sha + "\u{0000}" + file.name
         task.resume()
+    }
+
+    // Move every in-flight transfer for the active jobs from one session to the
+    // other on a foreground/background transition. Cancel on the source (the cancel
+    // is swallowed by didCompleteWithError's NSURLErrorCancelled guard, so it never
+    // surfaces an error or triggers a retry) and re-enqueue the same file on the
+    // destination. Only files still pending are moved; segments are small so the
+    // restart-from-scratch is cheap. Assumes it's invoked on `queue`.
+    private func migrateTasks(from src: URLSession, to dst: URLSession) {
+        src.getAllTasks { tasks in
+            guard !tasks.isEmpty else { return }
+            self.queue.async {
+                for t in tasks {
+                    guard t.state == .running || t.state == .suspended else { continue }
+                    guard let (sha, file) = self.decode(taskDescription: t.taskDescription),
+                          let job = self.jobs[sha], job.pending.contains(file),
+                          let f = job.files.first(where: { $0.name == file }) else { continue }
+                    t.cancel()
+                    job.liveBytes[file] = nil   // this attempt's bytes are gone; the new task re-counts
+                    self.enqueue(sha: sha, file: f, job: job, session: dst)
+                }
+            }
+        }
     }
 
     // One file's download failed. A **transient** failure (network/proxy blip)

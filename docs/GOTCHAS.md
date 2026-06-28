@@ -883,6 +883,24 @@ See [IOS_APP_PLAN.md](IOS_APP_PLAN.md). The app lives in `ios-app/` (separate
 Node/Xcode project; exempt from the repo's Windows-first rule — but its *server*
 endpoints, added in later milestones, are not).
 
+### A pure *background* `URLSession` throttles downloads — run a hybrid (fast while foreground)
+iOS runs a background `URLSession`'s transfers **out-of-process (`nsurlsessiond`)
+at background QoS and rate-limits them even in the foreground**, with
+`isDiscretionary = false` set. So a downloader built only on a background session
+crawls — while HLS playback of the *same* segments streams instantly, because
+AVPlayer/WKWebView fetch in-process at full link speed. That asymmetry is exactly
+the "streams load fast but downloads lag" report (fixed v7.9.0). `BundleDownloader`
+now keeps **two sessions sharing one delegate**: a `URLSessionConfiguration.default`
+(`fgSession`) used while the app is foreground, and the background session used
+while suspended (so downloads still complete minimized / across a kill). `enqueue`
+routes by an `appActive` flag; on each `didBecomeActive` / `didEnterBackground`,
+`migrateTasks` moves in-flight tasks between the two by **cancel + re-enqueue** —
+HLS segments are small 6 s fmp4 chunks, so restart-from-scratch is cheap and avoids
+the brittle resume-data path. The delegate methods key off `taskDescription`
+(`sha\0file`), so they handle tasks from either session identically; `cancelLocked`
+must sweep **both** sessions. Don't "simplify" back to a single background session —
+that reintroduces the lag.
+
 ### `LocalMediaServer` binds loopback-only — by design, and to dodge the privacy prompt
 The `NWListener` sets `params.requiredInterfaceType = .loopback`, so the media
 server is reachable only from the device itself (nothing on the LAN). A bonus:

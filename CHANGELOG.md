@@ -1,5 +1,8 @@
 # Changelog
 
+## [7.9.0] — 2026-06-28
+- **iOS app: offline downloads are now much faster while the app is open.** Fixes the "HLS streams load instantly but file downloads lag" report. Root cause: every bundle file was transferred by a single *background* `URLSession`, and iOS runs background-session traffic out-of-process at background QoS and rate-limits it even in the foreground (with `isDiscretionary = false`) — whereas HLS playback fetches the very same segments in-process through AVPlayer/WKWebView at full link speed. The downloader now runs a **hybrid of two sessions sharing one delegate**: a fast in-process *default* session while the app is foreground, and the *background* session while it's suspended (so the preview.6.0.0 "downloads complete while minimized / across a kill" behavior is fully preserved). In-flight transfers **migrate between the two on each foreground/background transition** (cancel + re-enqueue — HLS segments are small 6 s fmp4 chunks, so a restart-from-scratch is cheap and needs no resume-data). Net effect: an open app downloads at full speed, a locked/suspended app keeps finishing. ([ios-app/ios/App/App/BundleDownloader.swift](ios-app/ios/App/App/BundleDownloader.swift)). On-device verification pending. See [docs/GOTCHAS.md](docs/GOTCHAS.md), [docs/IOS_APP_PLAN.md](docs/IOS_APP_PLAN.md).
+
 ## [7.8.3] — 2026-06-28
 - **Search no longer fires automatically while typing — it waits for the Search button (or Enter).** Removed the 600 ms debounced auto-search that triggered on every input once the query reached 3 characters, so a search now only runs when the user explicitly presses the Search button or hits Enter. This avoids stray indexer queries on partial input ([static/index.html](static/index.html)).
 
