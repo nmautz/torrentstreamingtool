@@ -12244,11 +12244,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   const input=document.getElementById("searchInput"),btn=document.getElementById("searchBtn");
   btn.addEventListener("click",()=>doSearch(input.value));
   input.addEventListener("keydown",e=>{if(e.key==="Enter") doSearch(input.value);});
-  let dbt;
-  input.addEventListener("input",()=>{
-    clearTimeout(dbt);
-    if(input.value.length>=3) dbt=setTimeout(()=>doSearch(input.value),600);
-  });
   document.getElementById("dlEpisode").addEventListener("keydown",e=>{if(e.key==="Enter") submitDownload();});
   document.getElementById("dlSeries").addEventListener("keydown",e=>{if(e.key==="Enter") document.getElementById("dlEpisode").focus();});
   document.getElementById("profileNameInput").addEventListener("keydown",e=>{if(e.key==="Enter") submitProfile();});
@@ -12315,6 +12310,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.8.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.8.3</div>
 </body>
 </html>

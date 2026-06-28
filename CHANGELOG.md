@@ -1,5 +1,8 @@
 # Changelog
 
+## [7.8.3] — 2026-06-28
+- **Search no longer fires automatically while typing — it waits for the Search button (or Enter).** Removed the 600 ms debounced auto-search that triggered on every input once the query reached 3 characters, so a search now only runs when the user explicitly presses the Search button or hits Enter. This avoids stray indexer queries on partial input ([static/index.html](static/index.html)).
+
 ## [7.8.2] — 2026-06-28
 - **iOS app: the Library tab no longer fails silently, errors are now visible on-device, and a corrupt saved login self-heals.** Diagnostics + graceful degradation for the "Library tab doesn't open/load in the app, and login isn't remembered" report (the 7.8.1 server fix is in place and the website works, so this is app-specific and was previously invisible — a WKWebView has no on-screen console) ([static/index.html](static/index.html)):
   - **In-app error surface (Dev mode only).** A global `error` / `unhandledrejection` handler (app-only — `window.__appShowError`) shows uncaught exceptions and rejected promises as a tappable red banner, so a throw that would otherwise blank a tab is diagnosable without a Mac/Web Inspector. Gated on **Dev mode** (Settings → This Device, `streamlink_devmode`, read live) so normal users never see raw errors; browsers are untouched (they keep devtools + the clean UI).
