@@ -1006,7 +1006,10 @@ report alone: WKWebView shows no console, so a thrown exception just blanks a fe
 throw/rejection with no on-device feedback). Two standing mitigations (both app-only,
 browsers keep devtools + the clean UI): (1) `installAppErrorSurface()` registers global
 `error` + `unhandledrejection` handlers that paint a tappable red banner and exposes
-`window.__appShowError(msg)` for explicit `catch` blocks; (2) fire-and-forget async UI
+`window.__appShowError(msg)` for explicit `catch` blocks — gated on **Dev mode**
+(`streamlink_devmode`, read live inside the handler so toggling is instant and there's no
+dependency on the `devMode` global being initialised yet), so normal users never see raw
+errors; (2) fire-and-forget async UI
 loaders (e.g. `loadLibrary`) must `catch` and render their failure **inline** (with the
 error text) rather than leaving a blank pane — a blank tab reads as "doesn't work" with
 no clue, an inline error is self-diagnosing. To get the full stack with line numbers,

@@ -2773,6 +2773,12 @@
   try { inApp = !!(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()); } catch(_){}
   if(!inApp) return;
   function show(msg){
+    // Diagnostics only — show the banner only when the user has turned on Dev
+    // mode (Settings → This Device). Read live from localStorage so toggling it
+    // takes effect immediately and we never depend on the `devMode` global being
+    // initialised yet (an error can fire before that line runs).
+    var dev=false; try { dev = localStorage.getItem("streamlink_devmode")==="1"; } catch(_){}
+    if(!dev){ var old=document.getElementById("__appErr"); if(old) old.remove(); return; }
     var b=document.getElementById("__appErr");
     if(!b){
       b=document.createElement("div");
@@ -4661,9 +4667,10 @@ async function loadLibrary(btn){
     // app where there's no console, in the global error banner). Many callers
     // invoke loadLibrary fire-and-forget, so swallow here after surfacing.
     const el=document.getElementById("libraryContent");
+    let _dev=false; try{ _dev = localStorage.getItem("streamlink_devmode")==="1"; }catch(_){}
     if(el) el.innerHTML=`<div class="flex flex-col items-center justify-center py-16 text-center gap-2">
       <p class="text-red-400 font-medium">Couldn't load the library.</p>
-      <p class="text-xs text-red-500/80 break-all max-w-md">${escHtml(String(err&&err.message||err))}</p>
+      ${_dev?`<p class="text-xs text-red-500/80 break-all max-w-md">${escHtml(String(err&&err.message||err))}</p>`:""}
       <button onclick="loadLibrary()" class="mt-2 text-xs uppercase tracking-wide font-bold text-indigo-400 border border-indigo-800 px-3 py-1.5">Retry</button>
     </div>`;
     if(window.__appShowError) window.__appShowError("loadLibrary: "+((err&&err.stack)||String(err)));
