@@ -1504,6 +1504,41 @@
   </div>
 </div>
 
+<!-- ── Resume-on-Shuffle Modal ─────────────────────────────────────────────── -->
+<!-- Shown when Resume / Play All is tapped on a show whose last session was on
+     Shuffle Play. Continue → fresh random run over the same scope; Normal → the
+     natural-order resume. See resumeLibraryItemWithChooser. -->
+<div id="shuffleResumeModal"
+  class="hidden fixed inset-0 z-[55] bg-black/60
+         flex items-end sm:items-center justify-center sm:px-4 sm:py-6">
+  <div class="bg-gray-900 w-full sm:max-w-md flex flex-col fade-in border-t-[3px] border-purple-600">
+    <div class="px-5 pt-5 pb-3 border-b border-gray-800 flex items-start justify-between gap-3">
+      <div class="min-w-0">
+        <h2 class="text-lg font-black uppercase tracking-wide">Resume on shuffle?</h2>
+        <p class="text-xs text-gray-500 mt-0.5">You were shuffling this last time. Keep going random, or play in order?</p>
+      </div>
+      <button onclick="_closeShuffleResume()"
+        class="text-gray-500 hover:text-white transition-colors flex-shrink-0 p-1">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+    <div class="p-4 flex flex-col gap-2.5">
+      <button onclick="shuffleResumeContinue()"
+        class="w-full text-left px-4 py-3 bg-gray-800 hover:bg-purple-900/60 border border-gray-700 hover:border-purple-600 transition-colors">
+        <div class="text-sm font-bold uppercase tracking-wide">Continue shuffle</div>
+        <div class="text-[11px] text-gray-400 mt-0.5">Fresh random order over the same episodes</div>
+      </button>
+      <button onclick="shuffleResumeNormal()"
+        class="w-full text-left px-4 py-3 bg-gray-800 hover:bg-indigo-900/60 border border-gray-700 hover:border-indigo-600 transition-colors">
+        <div class="text-sm font-bold uppercase tracking-wide">Normal order</div>
+        <div class="text-[11px] text-gray-400 mt-0.5">Resume in season / episode order</div>
+      </button>
+    </div>
+  </div>
+</div>
+
 <!-- ── Stream File Picker Modal ────────────────────────────────────────────── -->
 <div id="streamPickerModal"
   class="hidden fixed inset-0 z-50 bg-black/60
@@ -2061,19 +2096,18 @@
       <div class="flex-1 text-center pointer-events-none">
         <span class="text-[11px] uppercase tracking-widest text-gray-600 font-bold">Now Playing</span>
       </div>
-      <!-- Night mode (dynamic-range compression) — subtle moon toggle. Doubles
-           as the balancing element opposite the Close button so the title stays
-           centered. JS (renderNightMode) recolors it when active. -->
-      <button onclick="toggleNightMode(this)" id="fcNightBtn"
-        title="Night mode — even out loud and quiet sounds"
-        class="h-full px-5 flex items-center gap-2 text-gray-600 hover:text-indigo-300
+      <!-- More — houses Night mode, Clip, and (while shuffling) Exit Shuffle so the
+           main tile grid stays uncluttered. Doubles as the balancing element
+           opposite the Close button so the title stays centered. -->
+      <button onclick="fcToggleMore()" id="fcMoreBtn"
+        title="More controls"
+        class="h-full px-5 flex items-center gap-2 text-gray-500 hover:text-white
                hover:bg-gray-800 active:bg-gray-700 transition-colors text-xs font-bold
                uppercase tracking-wide flex-shrink-0">
-        <svg id="fcNightIcon" class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
+        <svg class="w-4 h-4" fill="currentColor" viewBox="0 0 24 24">
+          <circle cx="5" cy="12" r="2"/><circle cx="12" cy="12" r="2"/><circle cx="19" cy="12" r="2"/>
         </svg>
-        Night
+        More
       </button>
     </div>
   </div>
@@ -2253,30 +2287,6 @@
       </div>
     </div>
 
-    <!-- Row D2: Clip — save & share the last N seconds of TV playback. Library
-         playback only (toggled by JS); the 30s tile is prominent, the custom
-         length is a quieter sibling. Disabled until the file is stream-prepped.
-         See fcClip / fcClipCustom / _doClip. -->
-    <div id="fcClipRow" class="hidden flex-1 border-b border-gray-800 min-h-0">
-      <button id="fcClip30Btn" onpointerdown="_holdStart(this, (b)=>fcClip(30,b), event)"
-        onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
-        title="Hold to save & share the last 30 seconds"
-        class="hold-btn fc-tile flex flex-[2.2] border-r border-gray-800 bg-fuchsia-950/20
-               hover:bg-fuchsia-950/50 active:bg-fuchsia-950/70 text-fuchsia-300 transition-colors">
-        <svg class="w-7 h-7 mb-1" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
-          <circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>
-          <path stroke-linecap="round" d="M20 4L8.12 15.88M14.47 14.48L20 20M8.12 8.12L12 12"/>
-        </svg>
-        <span class="text-sm font-black uppercase tracking-wide">Clip Last 30s</span>
-      </button>
-      <button id="fcClipCustomBtn" onpointerdown="_holdStart(this, fcClipCustom, event)"
-        onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
-        title="Hold to save & share a custom-length clip"
-        class="hold-btn fc-tile flex flex-1 text-gray-500 hover:text-fuchsia-300 transition-colors">
-        <span class="text-[11px] font-bold uppercase tracking-wide">Clip last…</span>
-      </button>
-    </div>
-
     <!-- Row E: Stop (hold to confirm) + Save (streaming torrent only, toggled by JS) -->
     <div class="flex flex-1 min-h-0">
       <button onpointerdown="_holdStart(this, (b)=>{stopStream(b);closeFullscreenControls();}, event)"
@@ -2324,6 +2334,84 @@
 
   <!-- Safe bottom — respects home indicator on iOS -->
   <div class="safe-bottom flex-shrink-0"></div>
+
+  <!-- More panel — overlay sheet within the fullscreen controls (toggled by
+       fcToggleMore). Holds the less-frequent controls so the main grid stays
+       roomy: Night mode, Clip, and Exit Shuffle (the last shown only while
+       Shuffle Play is active). -->
+  <div id="fcMorePanel" class="hidden absolute inset-0 z-10 bg-gray-950 flex flex-col">
+    <div class="safe-top flex-shrink-0">
+      <div class="flex items-center h-12 border-b border-gray-800">
+        <button onclick="fcCloseMore()"
+          class="h-full px-5 flex items-center gap-2 text-gray-500 hover:text-white
+                 hover:bg-gray-800 active:bg-gray-700 transition-colors text-xs font-bold
+                 uppercase tracking-wide flex-shrink-0">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+          </svg>
+          Back
+        </button>
+        <div class="flex-1 text-center pointer-events-none">
+          <span class="text-[11px] uppercase tracking-widest text-gray-600 font-bold">More</span>
+        </div>
+        <div class="px-5 w-[88px]"></div><!-- balance the Back button -->
+      </div>
+    </div>
+
+    <div class="flex-1 flex flex-col min-h-0">
+      <!-- Night mode (dynamic-range compression). JS (renderNightMode) recolors
+           #fcNightBtn / #fcNightIcon when active — ids preserved. -->
+      <button onclick="toggleNightMode(this)" id="fcNightBtn"
+        title="Night mode — even out loud and quiet sounds"
+        class="fc-tile flex flex-1 border-b border-gray-800 hover:bg-gray-800/60
+               active:bg-gray-700/80 text-gray-600 transition-colors">
+        <svg id="fcNightIcon" class="w-7 h-7 mb-1" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+            d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z"/>
+        </svg>
+        <span class="text-sm font-black uppercase tracking-wide">Night Mode</span>
+      </button>
+
+      <!-- Exit Shuffle — back to natural episode order without interrupting the
+           current episode. Shown only while shuffling (renderPlayer toggles it). -->
+      <button id="fcExitShuffleBtn" onclick="fcExitShuffle(this)"
+        title="Stop shuffling — play the rest in order"
+        class="hidden fc-tile flex-1 border-b border-gray-800 bg-purple-950/20
+               hover:bg-purple-950/50 active:bg-purple-950/70 text-purple-300 transition-colors">
+        <svg class="w-7 h-7 mb-1" fill="none" stroke="currentColor" stroke-width="1.6" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M4 7h4l8 10h4M4 17h4l3-3.75M16 7h4m0 0l-2.5-2.5M20 7l-2.5 2.5"/>
+        </svg>
+        <span class="text-sm font-black uppercase tracking-wide">Exit Shuffle</span>
+      </button>
+
+      <!-- Clip — save & share the last N seconds. Library playback only (toggled
+           by JS via #fcClipRow); disabled until the file is stream-prepped. -->
+      <div id="fcClipRow" class="hidden flex-1 border-b border-gray-800 min-h-0">
+        <button id="fcClip30Btn" onpointerdown="_holdStart(this, (b)=>fcClip(30,b), event)"
+          onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
+          title="Hold to save & share the last 30 seconds"
+          class="hold-btn fc-tile flex flex-[2.2] border-r border-gray-800 bg-fuchsia-950/20
+                 hover:bg-fuchsia-950/50 active:bg-fuchsia-950/70 text-fuchsia-300 transition-colors">
+          <svg class="w-7 h-7 mb-1" fill="none" stroke="currentColor" stroke-width="1.8" viewBox="0 0 24 24">
+            <circle cx="6" cy="6" r="3"/><circle cx="6" cy="18" r="3"/>
+            <path stroke-linecap="round" d="M20 4L8.12 15.88M14.47 14.48L20 20M8.12 8.12L12 12"/>
+          </svg>
+          <span class="text-sm font-black uppercase tracking-wide">Clip Last 30s</span>
+        </button>
+        <button id="fcClipCustomBtn" onpointerdown="_holdStart(this, fcClipCustom, event)"
+          onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
+          title="Hold to save & share a custom-length clip"
+          class="hold-btn fc-tile flex flex-1 text-gray-500 hover:text-fuchsia-300 transition-colors">
+          <span class="text-[11px] font-bold uppercase tracking-wide">Clip last…</span>
+        </button>
+      </div>
+
+      <!-- Filler so the tiles sit at the top when only one or two are present. -->
+      <div class="flex-[2] min-h-0"></div>
+    </div>
+
+    <div class="safe-bottom flex-shrink-0"></div>
+  </div>
 
 </div>
 
@@ -2709,6 +2797,19 @@
         Clip last…
       </button>
     </div>
+    <!-- Exit Shuffle — back to natural episode order. Shown only while this device
+         is playing a shuffled queue (lp.shuffle). Current episode keeps playing;
+         only the upcoming order changes. See lpExitShuffle. -->
+    <div id="lpExitShuffleRow" class="hidden">
+      <button onclick="lpExitShuffle(this)" title="Stop shuffling — play the rest in order"
+        class="w-full flex items-center justify-center gap-2 bg-purple-800 hover:bg-purple-700
+               text-white text-xs font-black uppercase tracking-wide px-3 py-2 transition-colors">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.6" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" d="M4 7h4l8 10h4M4 17h4l3-3.75M16 7h4m0 0l-2.5-2.5M20 7l-2.5 2.5"/>
+        </svg>
+        Exit Shuffle
+      </button>
+    </div>
   </div>
   <!-- Tiny-only chrome: huge fullscreen button + close button. -->
   <button class="lp-tiny-only lp-tiny-fs" onclick="lpMaximize()" title="Fullscreen">
@@ -2897,6 +2998,8 @@ let lp = {
   itemId: null, filePath: null, name: "",
   duration: 0,
   playlist: [], pi: 0,    // ordered file paths within the active item, current index
+  shuffle: false,         // device Shuffle Play: playlist is a random order (not natural)
+  shuffleScope: "",       // "all" | "unwatched" — pool the random order was drawn from
   // Skip-offer logic (mirrors backend _maybe_emit_skip_offer)
   skipData: null,         // {intro:{start,end}, credits_start} for current file
   skipOfferType: null,    // "intro"|"credits"|null
@@ -3432,6 +3535,15 @@ function renderPlayer(s){
     });
   }
 
+  // Exit-Shuffle tile (in the fullscreen More sheet) — only while VLC Shuffle Play
+  // is active. library_shuffle is true whenever state.library_shuffle_order is set.
+  const fcExitShuf=document.getElementById("fcExitShuffleBtn");
+  if(fcExitShuf){
+    const shuffling=isPlaying&&s.is_library_playback&&!!s.library_shuffle;
+    fcExitShuf.classList.toggle("hidden",!shuffling);
+    fcExitShuf.classList.toggle("flex",shuffling);
+  }
+
   // Prev / Next episode buttons (footer) — show whenever library item has multiple files
   const prevBtn=document.getElementById("prevEpBtn");
   const nextBtn=document.getElementById("nextEpBtn");
@@ -3743,11 +3855,40 @@ function openFullscreenControls(){
 }
 
 function closeFullscreenControls(){
+  fcCloseMore();   // never leave the More sheet open behind a closed overlay
   document.getElementById("fullscreenControls").classList.add("hidden");
   document.body.classList.remove("fc-open"); // restore the normal top banners/toast
   renderFcNotice();
   _fcDismissed = true;
   if(typeof _tvRemoteSync==="function") _tvRemoteSync(); // iOS app: tear down the remote
+}
+
+// ── Fullscreen "More" sheet (Night / Clip / Exit Shuffle) ───────────────────
+function fcToggleMore(){
+  const p=document.getElementById("fcMorePanel");
+  if(!p) return;
+  p.classList.toggle("hidden");
+}
+function fcCloseMore(){
+  const p=document.getElementById("fcMorePanel");
+  if(p) p.classList.add("hidden");
+}
+// Leave Shuffle Play (TV) — current episode keeps playing; only the upcoming
+// queue flips to natural order. The SSE state event clears app.library_shuffle,
+// which hides the tile. See POST /api/library/unshuffle.
+async function fcExitShuffle(btn){
+  if(btn) btn.disabled=true;
+  try{
+    const r=await fetch("/api/library/unshuffle",{method:"POST"});
+    if(!r.ok){
+      const e=await r.json().catch(()=>({}));
+      showAlert(e.detail||"Couldn't leave shuffle.","error");
+    } else {
+      showAlert("Shuffle off — back to episode order.","info");
+      fcCloseMore();
+    }
+  }catch(_){ showAlert("Couldn't leave shuffle.","error"); }
+  finally{ if(btn) btn.disabled=false; }
 }
 
 // ── Smart Skip ─────────────────────────────────────────────────────────────
@@ -5129,14 +5270,16 @@ async function continueLibraryItem(itemId, label){
 }
 
 // Play a specific ordered list of files with optional seek on first
-async function playLibraryFiles(itemId,files,seekTo,label,shuffle){
+async function playLibraryFiles(itemId,files,seekTo,label,shuffle,shuffleScope){
   if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
   if(!app._connected){
     showAlert("Reconnecting — try again in a moment.","warn"); return;
   }
   await withInflight(`play_${itemId}`, null, async () => {
     _optimisticBuffering(label || _libraryLabel(itemId), itemId);
-    const body={profile_id:profile.id,files,seek_first_to:seekTo||null,shuffle:!!shuffle};
+    // shuffle_scope persists the pool so a later Resume can re-shuffle it; the
+    // /play endpoint records (or clears) the shuffle preference server-side.
+    const body={profile_id:profile.id,files,seek_first_to:seekTo||null,shuffle:!!shuffle,shuffle_scope:shuffleScope||""};
     const r=await fetch(`/api/library/${itemId}/play`,{
       method:"POST", headers:{"Content-Type":"application/json"},
       body:JSON.stringify(body),
@@ -5147,6 +5290,19 @@ async function playLibraryFiles(itemId,files,seekTo,label,shuffle){
       _revertOptimistic();
     }
   });
+}
+
+// Remember whether this item's playback (for the active profile) is Shuffle Play,
+// so Resume / Play All can offer to keep shuffling after a stop. The VLC play path
+// persists this server-side via the /play body; the on-device player and the
+// "leave shuffle" controls have no /play round-trip, so they call this. Fire-and-
+// forget — never blocks playback.
+function setShufflePref(itemId, shuffle, scope){
+  if(!itemId || !profile.id) return;
+  fetch(`/api/library/${itemId}/shuffle-pref`,{
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({profile_id:profile.id, shuffle:!!shuffle, scope:scope||""}),
+  }).catch(()=>{});
 }
 
 // Look up the cached library item title so the optimistic UI shows the right name
@@ -6800,8 +6956,9 @@ async function startShuffle(scope){
   closeEpisodeModal();
   // Always start the first shuffled episode from the top (seek 0) — shuffle is a
   // fresh random run, not a resume. shuffle=true records the order server-side
-  // so TV Next/Prev navigate it instead of natural episode order.
-  await playLibraryWithChooser(itemId, paths, 0, label, true);
+  // so TV Next/Prev navigate it instead of natural episode order. `scope` is
+  // persisted so a later Resume can offer to re-shuffle the same pool.
+  await playLibraryWithChooser(itemId, paths, 0, label, true, scope);
 }
 
 // Play from a specific episode (by index in epFiles), continuing sequentially
@@ -9462,6 +9619,22 @@ function resumeLibraryItemWithChooser(itemId) {
   }
   const item = (window._libCache || []).find(it => it.id === itemId);
   const resume = item && item.resume;
+  // The last session for this show was Shuffle Play → ask before resuming whether
+  // to keep shuffling (fresh random run) or fall back to natural order. The pref
+  // (and its scope) come from the resume hint; clearing happens on any normal play.
+  if (resume && resume.shuffle) {
+    _shuffleResumeCtx = { itemId, scope: resume.shuffle_scope || "all", label: (item && item.title) || "" };
+    document.getElementById("shuffleResumeModal").classList.remove("hidden");
+    return;
+  }
+  _resumeNormal(itemId);
+}
+
+// The normal (natural-order) Resume / Play All path. Split out of
+// resumeLibraryItemWithChooser so the shuffle prompt can defer to it.
+function _resumeNormal(itemId) {
+  const item = (window._libCache || []).find(it => it.id === itemId);
+  const resume = item && item.resume;
   const hasProgress = resume && resume.pct > 3 && !resume.all_completed;
   // Always carry the backend's resume hint as the starting file — it's the next
   // un-completed episode (e.g. the one *after* a finished episode, at pct 0), or
@@ -9478,14 +9651,55 @@ function resumeLibraryItemWithChooser(itemId) {
   document.getElementById("playChooserModal").classList.remove("hidden");
 }
 
+// --- "Resume on shuffle?" prompt ---------------------------------------------
+let _shuffleResumeCtx = null;
+
+function _closeShuffleResume() {
+  document.getElementById("shuffleResumeModal").classList.add("hidden");
+  _shuffleResumeCtx = null;
+}
+// User chose "Normal Order" — fall back to the natural-order resume.
+function shuffleResumeNormal() {
+  const ctx = _shuffleResumeCtx; _closeShuffleResume();
+  if (ctx) _resumeNormal(ctx.itemId);
+}
+// User chose "Continue Shuffle" — start a fresh random run over the same scope.
+function shuffleResumeContinue() {
+  const ctx = _shuffleResumeCtx; _closeShuffleResume();
+  if (ctx) startShuffleForItem(ctx.itemId, ctx.scope, ctx.label);
+}
+
+// Shuffle a whole item straight from the library row (no episode picker loaded).
+// Mirrors startShuffle() but fetches the file list itself. Used by "continue
+// shuffle" on Resume; routes through the normal play chooser (VLC vs device).
+async function startShuffleForItem(itemId, scope, label) {
+  if (!profile.id) { showAlert("Select a profile first.", "warn"); return; }
+  let files = [];
+  try {
+    const r = await fetch(`/api/library/${itemId}/files?profile_id=${encodeURIComponent(profile.id || "")}`);
+    if (r.ok) files = (await r.json()).files || [];
+  } catch (_) {}
+  if (!files.length) { showAlert("Nothing to shuffle.", "warn"); return; }
+  let pool = files;
+  if (scope === "unwatched") {
+    const unwatched = files.filter(f => !f.progress?.completed);
+    pool = unwatched.length >= 2 ? unwatched : files;   // nothing left unwatched → shuffle all
+  }
+  let paths = pool.map(f => f.path).filter(Boolean);
+  if (paths.length < 2) paths = files.map(f => f.path).filter(Boolean);
+  if (!paths.length) { showAlert("Nothing to shuffle.", "warn"); return; }
+  _shuffleInPlace(paths);
+  await playLibraryWithChooser(itemId, paths, 0, "Shuffle · " + (label || ""), true, scope);
+}
+
 // Entry point used by Play buttons. Shows the chooser modal when both VLC and
 // local-device playback are reachable; falls through to VLC otherwise.
-async function playLibraryWithChooser(itemId, files, seekTo, label, shuffle) {
+async function playLibraryWithChooser(itemId, files, seekTo, label, shuffle, shuffleScope) {
   if (!navigator.onLine) {
     showAlert("Disconnected — playback needs the host to be reachable.", "error");
     return;
   }
-  pcCtx = { itemId, files, seekTo, label, shuffle: !!shuffle };
+  pcCtx = { itemId, files, seekTo, label, shuffle: !!shuffle, shuffleScope: shuffleScope || "" };
   // macOS host: no device option — go straight to VLC instead of a 1-item modal.
   if (!hlsAvailable) return pcChoose("vlc");
   document.getElementById("pcSubtitle").textContent = label || "";
@@ -9511,7 +9725,7 @@ function pcChoose(target) {
       // Multi-file resume on VLC: let the backend pick up from the resume hint.
       return continueLibraryItem(ctx.itemId, ctx.label);
     }
-    return playLibraryFiles(ctx.itemId, ctx.files, ctx.seekTo, ctx.label, ctx.shuffle);
+    return playLibraryFiles(ctx.itemId, ctx.files, ctx.seekTo, ctx.label, ctx.shuffle, ctx.shuffleScope);
   }
   if (target === "local") {
     // Dismiss the server-side offer (VLC stays put; user is watching on device).
@@ -9525,7 +9739,7 @@ function pcChoose(target) {
         .then(d => lpPlay(ctx.itemId, (d.files || []).map(f => f.path).filter(Boolean), 0, ctx.label))
         .catch(() => showAlert("Nothing to play.", "warn"));
     }
-    return lpPlay(ctx.itemId, ctx.files, ctx.seekTo, ctx.label);
+    return lpPlay(ctx.itemId, ctx.files, ctx.seekTo, ctx.label, ctx.shuffle, ctx.shuffleScope);
   }
 }
 function closePlayChooser() {
@@ -9958,7 +10172,7 @@ function _ensureHlsLib() {
   return _hlsLibPromise;
 }
 
-async function lpPlay(itemId, files, seekTo, label) {
+async function lpPlay(itemId, files, seekTo, label, shuffle, shuffleScope) {
   if (!hlsAvailable) { showAlert("Stream-to-device isn’t available on this host.", "warn"); return; }
   if (!Array.isArray(files) || !files.length) {
     showAlert("Nothing to play.", "warn"); return;
@@ -9986,6 +10200,11 @@ async function lpPlay(itemId, files, seekTo, label) {
     } catch (_) {}
   }
   lp.itemId = itemId; lp.playlist = playlist; lp.pi = startIdx;
+  // Device shuffle lives only in this client's `lp.playlist` order — there's no
+  // server shuffle state for on-device playback. Record the preference so Resume
+  // can offer to keep shuffling, and so the gear menu shows "Exit Shuffle".
+  lp.shuffle = !!shuffle; lp.shuffleScope = shuffleScope || "";
+  setShufflePref(itemId, lp.shuffle, lp.shuffleScope);
   lp.skipDoneFor = new Set();
   lp.maximized = true;
   const c = document.getElementById("localPlayer");
@@ -10974,7 +11193,43 @@ function _lpOptsOpen() {
 // While open, the overlay never auto-hides.
 function lpToggleOpts() {
   document.getElementById("localPlayer").classList.toggle("lp-opts");
+  _lpRenderExitShuffle();
   _lpCtlShow();
+}
+
+// Show the gear-menu "Exit Shuffle" row only while this device is playing a
+// shuffled queue. Device shuffle is purely lp.playlist's order (no server state).
+function _lpRenderExitShuffle() {
+  const row = document.getElementById("lpExitShuffleRow");
+  if (row) row.classList.toggle("hidden", !lp.shuffle);
+}
+
+// Leave Shuffle Play on this device: re-order the *upcoming* portion of the queue
+// into natural episode order while the current file keeps playing untouched.
+async function lpExitShuffle(btn) {
+  if (!lp.itemId || !lp.shuffle) return;
+  if (btn) btn.disabled = true;
+  try {
+    let natural = [];
+    try {
+      const r = await fetch(`/api/library/${lp.itemId}/files?profile_id=${encodeURIComponent(profile.id || "")}`);
+      if (r.ok) natural = ((await r.json()).files || []).map(f => f.path).filter(Boolean);
+    } catch (_) {}
+    const cur = lp.playlist[lp.pi];
+    const idx = natural.indexOf(cur);
+    if (natural.length && idx >= 0) {
+      lp.playlist = natural;
+      lp.pi = idx;
+    }
+    lp.shuffle = false; lp.shuffleScope = "";
+    setShufflePref(lp.itemId, false, "");
+    _lpRenderExitShuffle();
+    _lpRenderNavButtons();
+    _lpWarmNextEp();
+    showAlert("Shuffle off — back to episode order.", "info");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 function _lpCtlShow() {
@@ -12319,6 +12574,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.9.6</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.10.0</div>
 </body>
 </html>

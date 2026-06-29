@@ -126,7 +126,7 @@ VLC's volume slider is debounced — `oninput="updateVolumeDisplay"` updates lab
 
 ### Night mode (VLC dynamic-range compression)
 
-A global on/off toggle reachable from **two** controls: the subtle moon button in the fullscreen-overlay header (`#fcNightBtn`, opposite the Close button) and a checkbox in the **Global** section of profile settings (`#psNightMode`). Both call `toggleNightMode(el)`, which flips `app.vlc_night_mode` optimistically, `renderNightMode()`s the controls, then `POST`s `/api/settings/night-mode` with `{night_mode}`.
+A global on/off toggle reachable from **two** controls: the moon tile inside the fullscreen **More** sheet (`#fcNightBtn`, in `#fcMorePanel` — relocated there in 7.10.0 from the header, which now holds the **More** button) and a checkbox in the **Global** section of profile settings (`#psNightMode`). Both call `toggleNightMode(el)`, which flips `app.vlc_night_mode` optimistically, `renderNightMode()`s the controls, then `POST`s `/api/settings/night-mode` with `{night_mode}`.
 
 The **intensity picker** (`#psNightModePreset`, Light/Medium/Max) is **settings-menu only** — deliberately not in the fullscreen UI. `setNightModePreset(preset)` POSTs `{preset}` only (so it never clobbers the on/off state) and persists independently of the toggle, so the chosen intensity is remembered the next time night mode is switched on. `NIGHT_PRESET_DESC` drives the one-line blurb under the picker.
 
@@ -211,7 +211,11 @@ State additions:
 
 Per-episode ▶: `epPlayFrom(globalIndex)` slices `epFiles` from the tapped index forward (using the original full-list index, *not* the per-season filtered index), respects resume position on the first file, plays as a playlist. This means "press play on episode 3" plays 3 → 4 → 5 …, not just 3.
 
-**Shuffle Play.** The bottom action bar's **Shuffle** button (`#epShuffleBtn`, hidden in movie mode via `_epApplyMovieChrome`) → `epShuffle()` opens `#shuffleScopeModal`, which asks **Unwatched only** vs **All episodes** (live counts; the unwatched option is `disabled` when nothing's unwatched). `startShuffle(scope)` builds the pool from `epFiles` (filtering `!progress.completed` for unwatched), Fisher–Yates shuffles the paths (`_shuffleInPlace`), and plays via `playLibraryWithChooser(itemId, paths, 0, label, /*shuffle*/true)` — always from the top (seek 0; shuffle is a fresh run, not a resume). The `shuffle` flag threads through `pcCtx` → `playLibraryFiles` → the `/play` body so the server records the random order (TV Next/Prev follow it); the on-device path shuffles for free since the shuffled `paths` become `lp.playlist` verbatim (multi-file lists are kept as-is).
+**Shuffle Play.** The bottom action bar's **Shuffle** button (`#epShuffleBtn`, hidden in movie mode via `_epApplyMovieChrome`) → `epShuffle()` opens `#shuffleScopeModal`, which asks **Unwatched only** vs **All episodes** (live counts; the unwatched option is `disabled` when nothing's unwatched). `startShuffle(scope)` builds the pool from `epFiles` (filtering `!progress.completed` for unwatched), Fisher–Yates shuffles the paths (`_shuffleInPlace`), and plays via `playLibraryWithChooser(itemId, paths, 0, label, /*shuffle*/true)` — always from the top (seek 0; shuffle is a fresh run, not a resume). The `shuffle` flag **and `scope`** thread through `pcCtx` → `playLibraryFiles`/`lpPlay` so the server records the random order (TV Next/Prev follow it); the on-device path shuffles for free since the shuffled `paths` become `lp.playlist` verbatim (multi-file lists are kept as-is), with `lp.shuffle` flagging the session.
+
+**Shuffle persists across a stop (the *preference*, not the order).** The live shuffle order is ephemeral (cleared on stop), but whether a play was Shuffle Play — and its `scope` — is recorded per (item, profile) in `library.json` and surfaced on the resume hint (`resume.shuffle` / `resume.shuffle_scope`). The VLC `/play` path persists it inline (`shuffle_scope` in the body); the device path and the leave-shuffle controls call `setShufflePref(itemId, shuffle, scope)` → `POST /api/library/{id}/shuffle-pref` (the device has no `/play` round-trip). When **Resume / Play All** (`resumeLibraryItemWithChooser`) is tapped on a show whose last session was shuffled, `#shuffleResumeModal` asks **Continue shuffle** (`startShuffleForItem` — fetches `/files`, rebuilds the pool by scope, `_shuffleInPlace`, re-routes through the chooser) vs **Normal order** (`_resumeNormal`, the original natural-order resume). Any normal play clears the flag.
+
+**Leave Shuffle mid-playback** (no rebuffer — only the upcoming queue flips to natural order). *TV:* the fullscreen header's new **More** button (`#fcMoreBtn` → `fcToggleMore()`) opens the `#fcMorePanel` sheet that now houses **Night mode** (relocated `#fcNightBtn`), **Clip** (relocated `#fcClipRow`), and **Exit Shuffle** (`#fcExitShuffleBtn`, shown by `renderPlayer` only while `s.library_shuffle`) → `fcExitShuffle()` → `POST /api/library/unshuffle`. *Device:* an **Exit Shuffle** row (`#lpExitShuffleRow`) in the gear menu, shown by `_lpRenderExitShuffle()` (in `lpToggleOpts`) only when `lp.shuffle` → `lpExitShuffle()` reorders the tail of `lp.playlist` client-side and `setShufflePref(false)`.
 
 `closeEpisodeModal()` is kept as a back-compat alias for `closeEpisodePage()` so existing callers (refreshEpFiles, mark-watched, keyboard Escape handler) continue to work without changes.
 
@@ -453,7 +457,7 @@ audioIdx, btn)` POSTs `/api/library/{id}/clip`, then `_shareOrDownload(url,
 filename)` fetches the result and offers it via the OS share sheet
 (`navigator.canShare({files})` — iOS/Android) or a download (desktop).
 
-- **Fullscreen (TV):** `#fcClipRow` (Row D2). `fcClip(seconds, btn)` reads the
+- **Fullscreen (TV):** `#fcClipRow` (relocated into the **More** sheet `#fcMorePanel` in 7.10.0; was Row D2 in the main grid). `fcClip(seconds, btn)` reads the
   freshest position from a live `GET /api/vlc/tracks` and clips audio track 0.
   `renderPlayer` shows the row under the same `canHandoff` gate and greys the
   tiles until the file is prepped (`_handoffReadyState(s)===false`).

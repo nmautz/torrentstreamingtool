@@ -2567,6 +2567,11 @@ def find_resume_hint(item: dict, profile_id: str) -> Optional[dict]:
             "position_sec": pos,
             "duration_sec": dur,
             "pct": round(pos / dur * 100, 1) if dur else 0,
+            # Whether this item's last play (for this profile) was Shuffle Play, so
+            # Resume can offer to keep shuffling. Ephemeral playback state is gone by
+            # now; this preference is what survives the stop. See set_shuffle_pref.
+            "shuffle": bool(prof.get("shuffle")),
+            "shuffle_scope": prof.get("shuffle_scope", "") or "",
         }
 
     paths = [f.get("path", "") for f in files]
@@ -2603,6 +2608,8 @@ def find_resume_hint(item: dict, profile_id: str) -> Optional[dict]:
         "duration_sec": 0,
         "pct": 100,
         "all_completed": True,
+        "shuffle": bool(prof.get("shuffle")),
+        "shuffle_scope": prof.get("shuffle_scope", "") or "",
     }
 
 
@@ -2627,6 +2634,30 @@ async def _save_track_pref(
                 fp["audio_track"] = audio
             if subtitle is not None:
                 fp["subtitle_track"] = subtitle
+            await asyncio.to_thread(_save_lib_raw, lib)
+    except Exception:
+        pass
+
+
+async def _set_shuffle_pref(item_id: str, profile_id: str, shuffle: bool, scope: str = "") -> None:
+    """Remember whether this item's playback (for a profile) is Shuffle Play.
+
+    Shuffle's live order (state.library_shuffle_order / the device's lp.playlist)
+    is ephemeral — gone on stop. This per-(item,profile) flag is what survives, so
+    Resume / Play All can offer to keep shuffling. `scope` is the last-used pool
+    ("all" | "unwatched"), reused verbatim when the user opts to continue. Surfaced
+    on the resume hint by find_resume_hint."""
+    if not item_id or not profile_id:
+        return
+    try:
+        async with _lib_lock:
+            lib = await asyncio.to_thread(_load_lib_raw)
+            item = next((it for it in lib["items"] if it["id"] == item_id), None)
+            if not item:
+                return
+            prof = item.setdefault("progress", {}).setdefault(profile_id, {})
+            prof["shuffle"] = bool(shuffle)
+            prof["shuffle_scope"] = scope or "" if shuffle else ""
             await asyncio.to_thread(_save_lib_raw, lib)
     except Exception:
         pass
@@ -5843,6 +5874,8 @@ class LibraryPlayReq(BaseModel):
     seek_first_to: Optional[float] = None  # seek into the first file (seconds)
     shuffle: bool = False         # Shuffle Play: `files` is a temp random order — record
                                   # it so next/prev navigate the shuffle, not natural order
+    shuffle_scope: str = ""       # last-used pool ("all" | "unwatched"), persisted so a
+                                  # later Resume can re-shuffle the same scope
 
 
 class MarkWatchedReq(BaseModel):
@@ -7233,6 +7266,11 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     # Shuffle Play: remember the full random order (the filtered, on-disk playlist)
     # so next/prev walk it. Any normal play clears it back to natural order.
     state.library_shuffle_order = list(playlist) if req.shuffle else []
+    # Persist the shuffle preference (or clear it on a normal play) so Resume can
+    # offer to keep shuffling after a stop. Fire-and-forget — doesn't gate playback.
+    asyncio.create_task(_set_shuffle_pref(
+        item_id, req.profile_id, req.shuffle, req.shuffle_scope,
+    ))
     state.library_current_file = playlist[0]
     state.skip_offer = None
     state.skip_offer_file = None
@@ -7253,6 +7291,23 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
         {"ok": True, "playlist_count": len(playlist), "seek_to": seek_sec},
         status_code=202,
     )
+
+
+class ShufflePrefReq(BaseModel):
+    profile_id: str
+    shuffle: bool = False
+    scope: str = ""               # "all" | "unwatched" | ""
+
+
+@app.post("/api/library/{item_id}/shuffle-pref")
+async def set_shuffle_pref(item_id: str, req: ShufflePrefReq) -> JSONResponse:
+    """Record whether this item's playback is Shuffle Play (and its scope).
+
+    The VLC play path persists this inline (LibraryPlayReq.shuffle_scope); the
+    on-device player and the in-player "leave shuffle" control have no /play
+    round-trip, so they call this directly to keep Resume's offer accurate."""
+    await _set_shuffle_pref(item_id, req.profile_id, req.shuffle, req.scope)
+    return JSONResponse({"ok": True})
 
 
 @app.post("/api/library/{item_id}/progress")
@@ -9204,6 +9259,46 @@ def _find_in_paths(current: str, paths: list[str]) -> int:
     return -1
 
 
+async def _vlc_replace_upcoming(upcoming: list[str]) -> bool:
+    """Swap VLC's *upcoming* queue without touching the current item — no rebuffer.
+
+    Used to leave Shuffle Play mid-episode: the playing file keeps going while the
+    queue behind it is rewritten from the random tail to natural order. `pl_empty`
+    can't do this (it drops the current item too — see vlc_clear_playlist), so we
+    delete only the leaves that come *after* the current one, then enqueue the new
+    tail. Returns False if VLC's playlist couldn't be read/edited so the caller can
+    fall back to a (briefly rebuffering) relaunch."""
+    try:
+        r = await _vlc_http().get("/requests/playlist.json", timeout=3.0)
+        if r.status_code != 200:
+            return False
+        leaves: list[dict] = []   # ordered leaf nodes ({id, uri, current})
+
+        def _walk(node: dict) -> None:
+            children = node.get("children")
+            if children:
+                for c in children:
+                    _walk(c)
+            elif node.get("uri") is not None:
+                leaves.append(node)
+
+        _walk(r.json())
+        cur_idx = next((i for i, n in enumerate(leaves) if n.get("current") == "current"), -1)
+        if cur_idx < 0:
+            return False
+        # Drop every entry after the current one (the stale shuffle tail).
+        for n in leaves[cur_idx + 1:]:
+            nid = n.get("id")
+            if nid is not None:
+                await vlc("pl_delete", id=str(nid))
+        # Enqueue the natural-order tail behind the still-playing current file.
+        for p in upcoming:
+            await vlc("in_enqueue", input=vlc_file_uri(Path(p)))
+        return True
+    except Exception:
+        return False
+
+
 async def _vlc_relaunch_playlist(playlist: list[str], target_name: str) -> None:
     """Background VLC handoff used by prev/next so slow VLC roundtrips don't block the response.
 
@@ -9368,6 +9463,56 @@ async def vlc_next() -> JSONResponse:
 
     state.library_play_task = asyncio.create_task(_vlc_relaunch_playlist(new_tail, Path(next_file).name))
     return JSONResponse({"ok": True}, status_code=202)
+
+
+@app.post("/api/library/unshuffle")
+async def library_unshuffle() -> JSONResponse:
+    """Leave Shuffle Play mid-episode → back to natural order, no interruption.
+
+    The currently-playing file keeps going; only the *upcoming* queue flips from
+    the random tail to sequential. Clears the persisted shuffle pref too so a later
+    Resume won't offer to keep shuffling."""
+    if not state.library_shuffle_order:
+        raise HTTPException(400, "Not shuffling.")
+    current = state.library_current_file
+    if not current:
+        raise HTTPException(400, "No active playback.")
+
+    natural = await _item_all_paths()
+    idx = _find_in_paths(current, natural)
+    new_tail = natural[idx:] if idx >= 0 else [current]
+
+    state.library_shuffle_order = []
+    state.library_playlist = new_tail
+
+    # Rewrite VLC's queue behind the playing file. If the in-place edit fails for
+    # any reason, relaunch the natural tail reseeked to the live position so order
+    # is correct even at the cost of a brief rebuffer.
+    ok = await _vlc_replace_upcoming(new_tail[1:])
+    if not ok:
+        vs = await vlc_status()
+        try:
+            pos = int(float((vs or {}).get("time", 0) or 0))
+        except (TypeError, ValueError):
+            pos = 0
+        prior = state.library_play_task
+        if prior and not prior.done():
+            prior.cancel()
+        state.library_play_task = asyncio.create_task(
+            _vlc_relaunch_playlist(new_tail, Path(current).name))
+        if pos > 5:
+            async def _reseek() -> None:
+                await asyncio.sleep(0.5)
+                if await _vlc_wait_until_ready(Path(current).resolve(), timeout=10.0):
+                    await vlc("seek", val=str(pos))
+            asyncio.create_task(_reseek())
+
+    if state.library_item_id and state.library_profile_id:
+        asyncio.create_task(_set_shuffle_pref(
+            state.library_item_id, state.library_profile_id, False, "",
+        ))
+    await broadcast("state", state_snapshot())
+    return JSONResponse({"ok": True})
 
 
 def _parse_track_streams(vs: Optional[dict]) -> tuple[list[dict], list[dict]]:
