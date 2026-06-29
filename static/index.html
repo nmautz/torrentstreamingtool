@@ -8820,10 +8820,19 @@ async function _appInitOfflineBundles() {
     });
     const { items } = await _cap.dl.list();
     for (const it of (items || [])) {
-      const downloading = !it.complete && (it.bytesDone || 0) > 0;
+      // A partial bundle reconstructed from disk at launch is NOT actively
+      // transferring: the page (and native `jobs`) that drove it died with the
+      // previous app session, and iOS cancels background-URLSession tasks on app
+      // termination. Mark it `waiting` (not bare `downloading`) so the launch /
+      // `online` resumer re-drives it — its "skip if active this session" guard,
+      // and appDownloadBundle's in-flight no-op guard, both exempt `waiting`.
+      // Without this the row shows "downloading" with nothing behind it and the
+      // resumer skips it ⇒ stuck-in-ongoing-forever after every restart.
+      const partial = !it.complete && (it.bytesDone || 0) > 0;
       offlineBundles.set(offKey(it.itemId, it.filePath), {
         complete: !!it.complete, sha: it.sha, dir: it.dir,
-        bytesTotal: it.bytesTotal, bytesDone: it.bytesDone, downloading,
+        bytesTotal: it.bytesTotal, bytesDone: it.bytesDone,
+        downloading: partial, waiting: partial,
         fraction: it.bytesTotal ? 0.5 + 0.5 * (it.bytesDone / it.bytesTotal) : 0,
         name: it.name, meta: it.meta,
       });
@@ -12310,6 +12319,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.9.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.9.3</div>
 </body>
 </html>

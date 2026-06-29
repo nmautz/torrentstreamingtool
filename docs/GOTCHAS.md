@@ -1271,6 +1271,16 @@ an app kill lost everything not already mid-transfer. The fix is to make the use
   re-drive a download stranded by an outage (a `waiting` entry carries
   `downloading:true`). And `remove()` must clear the `queue.json` entry too, or the
   resumer resurrects a download the user just deleted.
+- **Footgun (7.9.3):** at launch, `_appInitOfflineBundles()` rebuilds `offlineBundles`
+  from the native `list()` (bytes on disk). A *partial* bundle (incomplete,
+  `bytesDone > 0`) must be marked **`waiting: true`**, not bare `downloading: true` —
+  because after an app restart **nothing is actually transferring**: the page + native
+  `jobs` died with the previous session, and **iOS cancels background-`URLSession`
+  tasks on app termination**. Marking it bare `downloading` makes the resumer's
+  "already being driven this session" guard (`st.downloading && !st.waiting`) skip it,
+  so it shows "downloading" in the ongoing list forever with nothing behind it. `waiting`
+  is the correct "stranded — re-drive me" state and the resumer/in-flight guards both
+  exempt it; the persisted `queue.json` intent makes the re-drive idempotent.
 
 ### Live Activities need a separate Widget Extension target + App Group — and `LiveActivityIntent.perform()` runs in the *app* process
 The download-progress and TV-remote Live Activities (`preview.6.0.0`) live in a
