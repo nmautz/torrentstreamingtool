@@ -5411,6 +5411,42 @@ async def stream_pipeline(
 
 # ── Library Download Pipeline (keep file, no auto-delete) ─────────────────────
 
+async def _recover_interrupted_downloads() -> None:
+    """Re-drive download pipelines orphaned by an app restart.
+
+    `library_download` persists the magnet + add params in item['pending_download']
+    and spawns library_download_pipeline as a detached task. If the process
+    restarts before that task records the torrent_hash, the item is left
+    status='downloading' with no hash: library_download_monitor skips hash-less
+    items and nothing re-adds the magnet, so it sits in the ongoing list forever
+    (the "queued downloads stuck after restart" bug). On startup, find those
+    orphans — anything still carrying a pending_download — and respawn the
+    pipeline. Idempotent: re-adding a magnet qBit already has is a no-op, and
+    pending_download is cleared the moment a hash is recorded."""
+    try:
+        lib = await get_library()
+    except Exception:
+        return
+    recovered = 0
+    for it in lib.get("items", []):
+        if it.get("status") != "downloading":
+            continue
+        pend = it.get("pending_download") or {}
+        magnet = pend.get("magnet", "")
+        if not magnet:
+            continue   # no params to replay (legacy item or already started) — leave to the monitor
+        asyncio.create_task(library_download_pipeline(
+            it["id"], magnet,
+            pend.get("save_path", "") or settings.qbit_download_path,
+            torrent_hash=it.get("torrent_hash") or pend.get("torrent_hash", ""),
+            selected_file_indices=pend.get("selected_file_indices") or None,
+            download_mode=_download_cfg(it)["mode"],
+        ))
+        recovered += 1
+    if recovered:
+        print(f"[download] re-driving {recovered} interrupted download(s) after restart")
+
+
 async def library_download_pipeline(
     item_id: str,
     magnet: str,
@@ -5430,6 +5466,7 @@ async def library_download_pipeline(
                 for it in lib["items"]:
                     if it["id"] == item_id:
                         it["status"] = "error"
+                        it.pop("pending_download", None)   # add failed — don't retry on restart
                         break
                 await put_library(lib)
                 await broadcast("library_update", {"item_id": item_id, "status": "error"})
@@ -5439,6 +5476,9 @@ async def library_download_pipeline(
         for it in lib["items"]:
             if it["id"] == item_id:
                 it["torrent_hash"] = h
+                # Hash recorded → the monitor can manage this item from qBit even if
+                # metadata is still pending, so it's no longer an orphan to recover.
+                it.pop("pending_download", None)
                 break
         await put_library(lib)
 
@@ -5602,6 +5642,12 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # the prep loops spawn, so a bundle that's merely being moved is never seen as
     # "missing" and re-queued. Also builds the bundle serving index.
     await _migrate_offline_cache_layout()
+
+    # Re-drive any download whose pipeline was interrupted by the restart (added
+    # via library_download but no torrent_hash recorded yet) so it doesn't sit
+    # orphaned in the ongoing list. Must run before the monitor so the hash lands
+    # quickly; the monitor then takes over from qBit.
+    await _recover_interrupted_downloads()
 
     guard       = asyncio.create_task(vpn_guard())
     broadcaster = asyncio.create_task(stat_broadcaster())
@@ -6580,6 +6626,17 @@ async def library_download(req: DownloadReq) -> JSONResponse:
         "hidden_by_profiles": [],
         "download": {"mode": req.download_mode if req.download_mode in ("now", "idle") else "now",
                      "files": {}},
+        # Persist everything the pipeline needs so an interrupted add (app restart
+        # before the torrent_hash is recorded) can be re-driven on startup instead
+        # of leaving an orphaned, hash-less item stuck forever in the ongoing list.
+        # Cleared by the pipeline the moment the hash is persisted. See
+        # _recover_interrupted_downloads.
+        "pending_download": {
+            "magnet": req.magnet,
+            "save_path": req.save_path.strip(),
+            "torrent_hash": req.torrent_hash,
+            "selected_file_indices": req.selected_file_indices or [],
+        },
     }
     lib["items"].append(item)
     await put_library(lib)

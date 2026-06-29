@@ -154,6 +154,7 @@ PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "so
   "added_at": "2026-05-13T01:58:59+00:00",
   "status": "downloading|ready|error",
   "torrent_hash": "abc123...",          // empty for uploaded items
+  "pending_download": { /* optional; restart-recovery params, see below */ },
   "download": { /* download schedule; see below */ },
   "prep": { /* stream-prep schedule; see below */ },
   "progress": { /* per-profile; see below */ },
@@ -166,6 +167,25 @@ PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "so
   "metadata": { /* optional; TMDb cache — see below */ }
 }
 ```
+
+### `pending_download` (restart-recovery params)
+
+```jsonc
+"pending_download": {
+  "magnet": "magnet:?xt=...",      // the source magnet, so the add can be replayed
+  "save_path": "",                 // optional override; "" ⇒ settings.qbit_download_path
+  "torrent_hash": "",              // pre-added hash from /api/library/prepare, if any
+  "selected_file_indices": []      // file-index subset; [] ⇒ all files
+}
+```
+
+Written by `library_download` the instant a download item is created (`status="downloading"`),
+**cleared by `library_download_pipeline` the moment it records `torrent_hash`** (or on a failed
+add). Its only purpose is restart recovery: an item created but whose pipeline hadn't yet recorded
+a hash would otherwise be a permanent orphan (the monitor skips hash-less items and the magnet
+lived only in the now-dead task). On startup `_recover_interrupted_downloads` re-drives the pipeline
+for any `downloading` item still carrying a `pending_download.magnet`. Normal, fully-added items
+**do not** carry this field. See [BACKEND.md](BACKEND.md) and [GOTCHAS.md](GOTCHAS.md).
 
 ### `download` (download schedule)
 
