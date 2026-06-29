@@ -5279,7 +5279,10 @@ async function playLibraryFiles(itemId,files,seekTo,label,shuffle,shuffleScope){
     _optimisticBuffering(label || _libraryLabel(itemId), itemId);
     // shuffle_scope persists the pool so a later Resume can re-shuffle it; the
     // /play endpoint records (or clears) the shuffle preference server-side.
-    const body={profile_id:profile.id,files,seek_first_to:seekTo||null,shuffle:!!shuffle,shuffle_scope:shuffleScope||""};
+    // Preserve an explicit seekTo of 0 ("start from the top, do NOT resume") — a
+    // plain `seekTo||null` would collapse 0 to null, making the server fall back to
+    // the resume hint and seek a freshly-shuffled first file partway in.
+    const body={profile_id:profile.id,files,seek_first_to:(seekTo==null?null:seekTo),shuffle:!!shuffle,shuffle_scope:shuffleScope||""};
     const r=await fetch(`/api/library/${itemId}/play`,{
       method:"POST", headers:{"Content-Type":"application/json"},
       body:JSON.stringify(body),
@@ -12574,6 +12577,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.10.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.10.1</div>
 </body>
 </html>

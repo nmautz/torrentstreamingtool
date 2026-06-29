@@ -7237,7 +7237,12 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     seek_sec = req.seek_first_to
     if seek_sec is None:
         hint = find_resume_hint(item, req.profile_id)
-        if hint and hint.get("position_sec", 0) > 5 and not hint.get("all_completed"):
+        # Only apply the hint's position when it actually refers to the file we're
+        # about to start (playlist[0]). For a Shuffle Play (or any explicit file
+        # list) the first file is not the last-watched one, so its resume position
+        # is meaningless here — applying it would seek the wrong file partway in.
+        if (hint and hint.get("file_path") == playlist[0]
+                and hint.get("position_sec", 0) > 5 and not hint.get("all_completed")):
             seek_sec = hint["position_sec"]
     prof_obj = next((p for p in lib.get("profiles", []) if p["id"] == req.profile_id), {})
     resume_mode = prof_obj.get("resume_mode", "auto")
