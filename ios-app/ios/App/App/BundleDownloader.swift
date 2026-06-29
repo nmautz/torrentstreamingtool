@@ -248,7 +248,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             guard !self.jobs.isEmpty else { return }
             // Pull any still-running suspended-mode transfers back onto the fast
             // session so an open app always downloads at full speed.
-            self.migrateTasks(from: self.session, to: self.fgSession)
+            self.migrateTasks(to: self.fgSession)
         }
     }
     @objc private func appDidEnterBackground() {
@@ -258,7 +258,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             // Hand in-flight foreground transfers to the background session so they
             // keep running while suspended. The job-keyed bgTask assertion (held for
             // the whole download) keeps us alive long enough to re-enqueue.
-            self.migrateTasks(from: self.fgSession, to: self.session)
+            self.migrateTasks(to: self.session)
         }
     }
 
@@ -336,6 +336,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         var liveBytes: [String: Int64] = [:]    // fileName -> bytes written by an in-flight task
         var pending: Set<String> = []           // file names still downloading
         var attempts: [String: Int] = [:]       // fileName -> transient-error retry count
+        var tasks: [String: URLSessionDownloadTask] = [:]  // fileName -> live task (for synchronous fg/bg migration)
         init(itemId: String, filePath: String, name: String, baseUrl: String, token: String?, files: [BundleFile]) {
             self.itemId = itemId; self.filePath = filePath; self.name = name
             self.baseUrl = baseUrl; self.token = token; self.files = files
@@ -668,28 +669,35 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         let chosen = sess ?? (appActive ? fgSession : session)
         let task = chosen.downloadTask(with: req)
         task.taskDescription = sha + "\u{0000}" + file.name
+        // Keep a reference so migrateTasks can hand this file to the other session
+        // synchronously on a fg/bg transition (no async getAllTasks round-trip).
+        job.tasks[file.name] = task
         task.resume()
     }
 
-    // Move every in-flight transfer for the active jobs from one session to the
-    // other on a foreground/background transition. Cancel on the source (the cancel
-    // is swallowed by didCompleteWithError's NSURLErrorCancelled guard, so it never
-    // surfaces an error or triggers a retry) and re-enqueue the same file on the
-    // destination. Only files still pending are moved; segments are small so the
-    // restart-from-scratch is cheap. Assumes it's invoked on `queue`.
-    private func migrateTasks(from src: URLSession, to dst: URLSession) {
-        src.getAllTasks { tasks in
-            guard !tasks.isEmpty else { return }
-            self.queue.async {
-                for t in tasks {
-                    guard t.state == .running || t.state == .suspended else { continue }
-                    guard let (sha, file) = self.decode(taskDescription: t.taskDescription),
-                          let job = self.jobs[sha], job.pending.contains(file),
-                          let f = job.files.first(where: { $0.name == file }) else { continue }
-                    t.cancel()
-                    job.liveBytes[file] = nil   // this attempt's bytes are gone; the new task re-counts
-                    self.enqueue(sha: sha, file: f, job: job, session: dst)
-                }
+    // Move every in-flight transfer for the active jobs onto `dst` on a
+    // foreground/background transition. This MUST finish inside the brief post-
+    // background execution window, so it does NO async getAllTasks round-trip to
+    // `nsurlsessiond` (that round-trip not completing in time was the cause of the
+    // "downloads stall when backgrounded, recover only on restart" bug): it drives
+    // our own per-file task refs synchronously on `queue` instead. Cancel the old
+    // task (swallowed by didCompleteWithError's NSURLErrorCancelled guard, so it
+    // never surfaces an error or triggers a retry) and re-enqueue the same file on
+    // the destination — `enqueue` overwrites `job.tasks[file]` with the new task.
+    // Only files with a live task that are still pending are moved; files in retry
+    // backoff (no live task) are skipped, since their timer re-enqueues onto the
+    // correct session itself (appActive is already flipped before migrate runs) —
+    // moving them here too would race the backoff into a duplicate task. Segments
+    // are small, so restart-from-scratch on the destination is cheap. Assumes `queue`.
+    private func migrateTasks(to dst: URLSession) {
+        for (sha, job) in jobs {
+            // Snapshot — enqueue() mutates job.tasks while we iterate.
+            for (file, task) in Array(job.tasks) {
+                guard job.pending.contains(file),
+                      let f = job.files.first(where: { $0.name == file }) else { continue }
+                task.cancel()
+                job.liveBytes[file] = nil   // this attempt's bytes are gone; the new task re-counts
+                enqueue(sha: sha, file: f, job: job, session: dst)
             }
         }
     }
@@ -708,6 +716,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             let n = (job.attempts[fileName] ?? 0) + 1
             job.attempts[fileName] = n
             job.liveBytes[fileName] = nil               // this attempt's bytes are gone
+            job.tasks[fileName] = nil                   // no live task during backoff — migrate must skip it
             let delay = Double(min(n * 3, 30))          // linear backoff, capped at 30 s
             queue.asyncAfter(deadline: .now() + delay) {
                 guard self.jobs[sha] != nil else { return }   // cancelled meanwhile
@@ -901,6 +910,7 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
             let size = (try? dest.resourceValues(forKeys: [.fileSizeKey]).fileSize).flatMap { Int64($0) } ?? 0
             job.doneBytes[fileName] = size
             job.liveBytes[fileName] = nil
+            job.tasks[fileName] = nil   // this file's task is finished — don't migrate a dead ref
             job.pending.remove(fileName)
             self.emitProgress(sha: sha, job: job)
             if job.pending.isEmpty { self.markComplete(sha, job: job) }

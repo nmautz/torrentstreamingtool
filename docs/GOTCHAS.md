@@ -909,6 +909,22 @@ the brittle resume-data path. The delegate methods key off `taskDescription`
 must sweep **both** sessions. Don't "simplify" back to a single background session —
 that reintroduces the lag.
 
+**The hand-off MUST be synchronous — never `getAllTasks` (v7.9.4).** The
+`didEnterBackground` migration has to finish inside iOS's brief post-background
+execution window: an in-process default-session task freezes the instant the app
+suspends, so any file still on `fgSession` when the window closes is stranded with
+nothing on the background session → downloads "stall when backgrounded and only
+recover on a full app restart" (the restart re-drives the durable queue). The
+original `migrateTasks` used `URLSession.getAllTasks` — an **async round-trip to
+`nsurlsessiond`** plus another queue hop — and routinely didn't complete in time.
+It now drives the manager's **own per-file `job.tasks[name]` references**
+(`URLSessionDownloadTask`) synchronously on the state `queue`, with no daemon
+round-trip, so the cancel + re-enqueue onto the destination session is deterministic
+within the window. Keep `job.tasks` accurate: set it in `enqueue` (after `resume()`),
+and clear the entry on file completion AND when a file enters retry backoff (so a
+backoff file with no live task is skipped by migrate and re-routed by its own timer
+instead — re-enqueuing it in migrate would race the backoff into a duplicate task).
+
 ### `LocalMediaServer` binds loopback-only — by design, and to dodge the privacy prompt
 The `NWListener` sets `params.requiredInterfaceType = .loopback`, so the media
 server is reachable only from the device itself (nothing on the LAN). A bonus:
