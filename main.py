@@ -2615,7 +2615,7 @@ async def _save_track_pref(
     """Persist audio/subtitle track preference for a file into library.json."""
     try:
         async with _lib_lock:
-            lib = _load_lib_raw()
+            lib = await asyncio.to_thread(_load_lib_raw)
             item = next((it for it in lib["items"] if it["id"] == item_id), None)
             if not item:
                 return
@@ -2627,7 +2627,7 @@ async def _save_track_pref(
                 fp["audio_track"] = audio
             if subtitle is not None:
                 fp["subtitle_track"] = subtitle
-            _save_lib_raw(lib)
+            await asyncio.to_thread(_save_lib_raw, lib)
     except Exception:
         pass
 
@@ -2675,13 +2675,13 @@ async def _save_series_sub_sel(profile_id: str, series: str, sel: Optional[dict]
         return
     try:
         async with _lib_lock:
-            lib = _load_lib_raw()
+            lib = await asyncio.to_thread(_load_lib_raw)
             prof = next((p for p in lib.get("profiles", []) if p.get("id") == profile_id), None)
             if not prof:
                 return
             prefs = prof.setdefault("series_subtitle_prefs", {})
             prefs[series] = {**sel, "updated_at": _now_iso()}
-            _save_lib_raw(lib)
+            await asyncio.to_thread(_save_lib_raw, lib)
     except Exception:
         pass
 
@@ -7343,7 +7343,7 @@ async def sync_progress(req: SyncProgressReq, request: Request) -> JSONResponse:
     _TRACK_KEYS = ("audio_track", "subtitle_track", "local_audio_idx", "local_subtitle_idx")
 
     async with _lib_lock:
-        lib = _load_lib_raw()
+        lib = await asyncio.to_thread(_load_lib_raw)
         items_by_id = {it["id"]: it for it in lib.get("items", [])}
 
         for ev in req.events:
@@ -7445,7 +7445,7 @@ async def sync_progress(req: SyncProgressReq, request: Request) -> JSONResponse:
                 },
             })
 
-        _save_lib_raw(lib)
+        await asyncio.to_thread(_save_lib_raw, lib)
 
     return JSONResponse({"applied": applied, "conflicts": conflicts, "server_updated_at": now})
 
@@ -7527,7 +7527,7 @@ async def sync_resolve(req: SyncResolveReq, request: Request) -> JSONResponse:
     _TRACK_KEYS = ("audio_track", "subtitle_track", "local_audio_idx", "local_subtitle_idx")
 
     async with _lib_lock:
-        lib = _load_lib_raw()
+        lib = await asyncio.to_thread(_load_lib_raw)
         items_by_id = {it["id"]: it for it in lib.get("items", [])}
 
         for rz in req.resolutions:
@@ -7586,7 +7586,7 @@ async def sync_resolve(req: SyncResolveReq, request: Request) -> JSONResponse:
                 },
             })
 
-        _save_lib_raw(lib)
+        await asyncio.to_thread(_save_lib_raw, lib)
 
     return JSONResponse({"resolved": resolved})
 
@@ -7614,7 +7614,7 @@ async def set_local_tracks(item_id: str, req: LocalTracksReq) -> JSONResponse:
     """
     series = ""
     async with _lib_lock:
-        lib = _load_lib_raw()
+        lib = await asyncio.to_thread(_load_lib_raw)
         item = next((it for it in lib["items"] if it["id"] == item_id), None)
         if not item:
             raise HTTPException(404, "Item not found.")
@@ -7631,7 +7631,7 @@ async def set_local_tracks(item_id: str, req: LocalTracksReq) -> JSONResponse:
             norm = _norm_sub_sel(req.subtitle_sel)
             if norm:
                 fp["subtitle_sel"] = norm
-        _save_lib_raw(lib)
+        await asyncio.to_thread(_save_lib_raw, lib)
     # Remember this kind of subtitle for the rest of the series (separate lock).
     if req.subtitle_sel is not None and series:
         await _save_series_sub_sel(req.profile_id, series, req.subtitle_sel)
