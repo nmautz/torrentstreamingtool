@@ -4927,9 +4927,24 @@ def _arm_credit_skip_watch(
 ) -> None:
     """Schedule `file_path` to be marked watched after a grace period when the
     viewer skips away from it to the next episode, from any position. Only one
-    timer is armed at a time — a newer skip supersedes an older pending one."""
+    timer is armed at a time — a newer skip supersedes an older pending one.
+
+    Supersession semantics: if a watch is already pending for a *different* file
+    when a new skip arrives, the viewer has skipped forward again without ever
+    returning to that earlier episode. Their intent is unambiguous — they're
+    done with it — so we mark it watched immediately rather than letting its
+    grace timer get silently cancelled (which would lose the watch entirely if
+    they keep skipping faster than the grace period). The new file then begins
+    its own grace period as usual."""
     if not (item_id and profile_id and file_path) or dur_sec <= 0:
         return
+    prior = state.pending_watch
+    if prior and prior.get("file_path") != file_path:
+        # Skipped past the prior episode without returning — finish it now.
+        asyncio.create_task(_mark_file_watched_internal(
+            prior["item_id"], prior["profile_id"],
+            prior["file_path"], prior.get("duration_sec", 0) or 0,
+        ))
     _cancel_pending_watch()
     state.pending_watch = {
         "item_id": item_id, "profile_id": profile_id,
