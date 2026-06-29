@@ -13566,19 +13566,94 @@ def _srt_to_vtt(srt: str) -> str:
     return "WEBVTT\n\n" + body
 
 
+# A bare ASS vector-drawing token: a path command (m/n/l/b/s/p/c) or a coordinate.
+_ASS_DRAW_TOKEN_RE = re.compile(r"^(?:[mnlbspc]|-?\d+(?:\.\d+)?)$", re.I)
+_NUM_TOKEN_RE      = re.compile(r"^-?\d+(?:\.\d+)?$")
+_HTML_TAG_RE       = re.compile(r"<[^>]+>")
+_ASS_OVERRIDE_RE   = re.compile(r"\{[^}]*\}")
+
+
+def _is_ass_drawing(text: str) -> bool:
+    """True when a cue body is an ASS vector drawing (`\\p` mode) that ffmpeg
+    leaked into the WebVTT as a giant `m -222 -409.5 l -220.5 …` text blob.
+    Such a cue is only drawing commands + coordinate numbers (≥6 numbers), so it
+    can never be a real subtitle line — drop it."""
+    toks = _HTML_TAG_RE.sub("", text).split()
+    if len(toks) < 6:
+        return False
+    nums = 0
+    for t in toks:
+        if not _ASS_DRAW_TOKEN_RE.match(t):
+            return False
+        if _NUM_TOKEN_RE.match(t):
+            nums += 1
+    return nums >= 6
+
+
+def _clean_webvtt(text: str) -> str:
+    """Sanitise WebVTT produced by ffmpeg's ASS/SSA→WebVTT conversion.
+
+    Heavily-typeset fansub ASS (the common case for anime releases) survives that
+    conversion badly: ffmpeg emits every overlapping Dialogue layer as a separate
+    *identical* cue (so each line renders doubled/tripled on screen), dumps `\\p`
+    vector drawings as raw coordinate-blob cues, and leaks ASS escapes like `\\h`
+    (hard space) verbatim. This collapses all of that:
+
+    - **drops** ASS drawing-blob cues (`_is_ass_drawing`),
+    - **de-duplicates** cues with the same timing *and* text (the doubled lines),
+    - converts leaked `\\h`→space and `\\N`/`\\n`→newline, strips stray `{…}`
+      override blocks.
+
+    Idempotent — re-running on already-clean WebVTT is a no-op, so it's safe to
+    apply both at generation time and as an in-place heal when serving older
+    bundles built before this fix. Header / NOTE / STYLE / REGION blocks pass
+    through untouched.
+    """
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    blocks = text.split("\n\n")
+    if not blocks:
+        return text
+    out: list[str] = [blocks[0].rstrip()]          # WEBVTT header (+ metadata)
+    seen: set[tuple[str, str]] = set()
+    for blk in blocks[1:]:
+        lines = blk.split("\n")
+        ts_i = next((i for i, ln in enumerate(lines) if "-->" in ln), -1)
+        if ts_i < 0:
+            if blk.strip():
+                out.append(blk.rstrip())           # NOTE / STYLE / REGION
+            continue
+        body = "\n".join(lines[ts_i + 1:])
+        if _is_ass_drawing(body):
+            continue
+        body = _ASS_OVERRIDE_RE.sub("", body)
+        body = body.replace("\\h", " ").replace("\\N", "\n").replace("\\n", "\n")
+        if not body.strip():
+            continue
+        ts_parts = lines[ts_i].split()
+        ts_key = (ts_parts[0] + "-->" + ts_parts[2]) if len(ts_parts) >= 3 else lines[ts_i]
+        key = (ts_key, body.strip())
+        if key in seen:
+            continue
+        seen.add(key)
+        out.append("\n".join(lines[:ts_i + 1] + [body]).rstrip())
+    return "\n\n".join(out) + "\n"
+
+
 async def _sub_to_vtt(path: Path) -> str:
     """Read a sidecar subtitle file and return WebVTT text the browser can render.
 
     `.vtt` passes through and `.srt` is converted inline (both instant); `.ass`,
     `.ssa` and text `.sub` are converted via ffmpeg on demand — this is the
     "prep" for a non-WebVTT sub. Raises on conversion failure so the endpoint can
-    surface it. Styling (ASS karaoke/positioning) is lost in the WebVTT downgrade.
+    surface it. Styling (ASS karaoke/positioning) is lost in the WebVTT downgrade;
+    `_clean_webvtt` then strips the artefacts that downgrade leaves behind
+    (duplicate cues, leaked `\\p` drawings / `\\h` escapes).
     """
     ext = path.suffix.lower()
     if ext == ".vtt":
-        return path.read_text(encoding="utf-8", errors="replace")
+        return _clean_webvtt(path.read_text(encoding="utf-8", errors="replace"))
     if ext == ".srt":
-        return _srt_to_vtt(path.read_text(encoding="utf-8", errors="replace"))
+        return _clean_webvtt(_srt_to_vtt(path.read_text(encoding="utf-8", errors="replace")))
     ffmpeg = analyzer.ffmpeg_bin()
     if not ffmpeg:
         raise RuntimeError("ffmpeg unavailable for subtitle conversion")
@@ -13591,7 +13666,7 @@ async def _sub_to_vtt(path: Path) -> str:
     if proc.returncode != 0 or not stdout.strip():
         tail = stderr.decode("utf-8", "replace")[-200:].strip()
         raise RuntimeError(tail or "ffmpeg subtitle conversion failed")
-    return stdout.decode("utf-8", "replace")
+    return _clean_webvtt(stdout.decode("utf-8", "replace"))
 
 
 def _offline_cache_key(src: Path) -> str:
@@ -14526,6 +14601,20 @@ async def _run_offline_job(job_id: str) -> None:
                 job["error"]  = f"ffmpeg failed: {err[-500:] or 'unknown error'}"
                 await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
                 return
+
+            # Sanitise each emitted sub_<i>.vtt: ffmpeg's ASS→WebVTT conversion
+            # of typeset fansub tracks leaves duplicate cues, `\p` drawing blobs,
+            # and leaked `\h` escapes that render as doubled/garbled subtitles.
+            # `_clean_webvtt` collapses them so the bundle is born clean (the
+            # serve route applies the same heal to pre-existing bundles).
+            for vtt in sorted(tmp_dir.glob("sub_*.vtt")):
+                try:
+                    raw = await asyncio.to_thread(vtt.read_text, encoding="utf-8", errors="replace")
+                    cleaned = _clean_webvtt(raw)
+                    if cleaned != raw:
+                        await asyncio.to_thread(vtt.write_text, cleaned, encoding="utf-8")
+                except OSError:
+                    pass
 
             # Write meta.json with everything the UI needs to build dropdowns
             # without re-probing the bundle. Held next to the manifest so a
@@ -17041,6 +17130,23 @@ async def offline_cache_bundle_file(cache_key: str, filename: str) -> FileRespon
     if not p.exists() or not p.is_file():
         raise HTTPException(404, "Cached file not found.")
     media = _HLS_MIME.get(p.suffix.lower(), "application/octet-stream")
+    if p.suffix.lower() == ".vtt":
+        # Heal bundles built before the WebVTT sanitiser: ffmpeg's ASS→WebVTT
+        # conversion left duplicate cues / `\p` drawing blobs / `\h` escapes in
+        # the sidecar, which the player rendered as doubled, garbled subtitles.
+        # `_clean_webvtt` is idempotent, so a freshly-prepped (already-clean)
+        # bundle just round-trips. Rewrite in place (best-effort, atomic) so the
+        # heal also reaches the iOS download path, which fetches via this route.
+        raw = await asyncio.to_thread(p.read_text, encoding="utf-8", errors="replace")
+        cleaned = _clean_webvtt(raw)
+        if cleaned != raw:
+            try:
+                tmp = p.with_suffix(p.suffix + ".tmp")
+                await asyncio.to_thread(tmp.write_text, cleaned, encoding="utf-8")
+                await asyncio.to_thread(os.replace, str(tmp), str(p))
+            except OSError:
+                pass
+        return Response(content=cleaned, media_type=media)
     return FileResponse(str(p), media_type=media, filename=p.name)
 
 

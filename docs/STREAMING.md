@@ -314,6 +314,15 @@ Key decisions:
   [GOTCHAS.md](GOTCHAS.md) for the libass.js deferral. Image-based subs
   (`hdmv_pgs_subtitle`, `dvd_subtitle`, `dvb_subtitle`, `vobsub`) are filtered
   out by `_ffprobe_full` and noted in `meta.json:skipped_image_subs`.
+  > **Each generated `sub_<i>.vtt` is run through `_clean_webvtt()`** before the
+  > bundle finalizes. ffmpeg's ASS→WebVTT conversion of heavily-typeset fansub
+  > tracks emits each overlapping Dialogue *layer* as a separate **identical**
+  > cue (lines render doubled on screen), dumps `\p` vector **drawings** as raw
+  > coordinate-blob cues, and leaks ASS escapes like `\h`. The sanitiser drops
+  > drawing-blob cues, de-duplicates same-timing-same-text cues, and fixes the
+  > escapes; it's **idempotent**, so the same heal is applied in-place when
+  > serving `.vtt` from an older bundle (`offline_cache_bundle_file`) and inside
+  > `_sub_to_vtt` for on-demand sidecar conversion. See [GOTCHAS.md](GOTCHAS.md).
 - **No usable text sub ⇒ AI generation.** After a successful HLS encode,
   `_run_offline_job` calls `_ensure_stt_for`: if the source has no usable text
   subtitle (none, image-only, or — per the admin default-language setting — none
