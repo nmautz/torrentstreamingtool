@@ -194,25 +194,37 @@
       #epRightPane { flex:1 1 0%; min-width:0; }
       #epBulkChips { padding-top:.3rem; padding-bottom:.3rem; }
       #episodePage .ep-season-tab { padding-top:.45rem; padding-bottom:.45rem; }
-      /* ── Footer → name + fullscreen button only ──────────────────────────────
+      /* ── Footer → name + fullscreen button on one line ───────────────────────
          In phone landscape the full transport bar is redundant with the overlay
          (one tap on the fullscreen button away), so the footer collapses to just
-         the show name and that button. Hide the seek bar, the Audio/Subs row, the
-         PLAYING status badge, and every controls-row button except fullscreen.
-         The status row (name/time) is left intact. */
+         the show name and that button — and `_applyPhoneLandLayout()` moves the
+         button up into the title row (#playerStatusRow) to share its line and save
+         a row. Hide the seek bar, the Audio/Subs row, the PLAYING status badge, and
+         the now-empty transport row. The button is compact (overrides flex-[2])
+         and sits above the title on overlap (z-index) so it always stays tappable. */
       footer.fixed button { padding-top:.4rem !important; padding-bottom:.4rem !important; }
       #seekBarWrapper { display:none !important; }
       #trackControls  { display:none !important; }
       #statusBadge    { display:none !important; }
-      #playerControlsRow > button { display:none !important; }
-      #playerControlsRow > #fullscreenBtn { display:flex !important; }
+      #playerControlsRow { display:none !important; }
+      #playerStatusRow > #fullscreenBtn {
+        display:flex !important; flex:0 0 auto !important;
+        padding:.25rem .6rem !important; position:relative; z-index:10;
+      }
       /* ── Fullscreen overlay: transport-only, rows fill the height ─────────────
-         Volume (Row C) + Audio/Subs (Row D) are relocated into the "More" sheet by
-         _fcSyncMoreRows(); the remaining seek bar + transport rows (A play/seek,
-         B ep-nav, E stop/device) keep their default flex-1 so they grow to fill
-         the grid — no dead space at the bottom. overflow-y:auto is a safety net
-         only (the three rows fit without it). */
+         Audio/Subs (Row D) is relocated into the "More" sheet by
+         _applyPhoneLandLayout(); the remaining seek bar + transport rows (A
+         play/seek, B ep-nav, E stop/device) keep their default flex-1 so they grow
+         to fill the grid — no dead space at the bottom. overflow-y:auto is a safety
+         net only (the rows fit without it). */
       #fcTileGrid { overflow-y:auto; }
+      /* Volume stays reachable without the More sheet: the ep-nav line hosts the
+         inline +/- buttons (.fc-land-vol), and when ep-nav is shown (multi-file)
+         the standalone slider row (#fcVolRow) is dropped to save the row. For
+         single-file playback ep-nav is hidden, so #fcVolRow stays visible (there's
+         room) and the inline buttons stay hidden along with their ep-nav parent. */
+      #fcEpNav > .fc-land-vol { display:flex !important; }
+      #fcEpNav:not(.hidden) ~ #fcVolRow { display:none !important; }
     }
     button, select { touch-action: manipulation; user-select: none; -webkit-user-select: none; }
     /* Fullscreen controls overlay: no text selection / tap highlight on any
@@ -1972,8 +1984,8 @@
       </div>
     </div>
   </div>
-  <!-- Status row — title + badge -->
-  <div class="max-w-screen-2xl mx-auto px-3 pt-1.5 pb-1 flex items-center gap-2">
+  <!-- Status row — title + badge (phone landscape also hosts the fullscreen btn) -->
+  <div id="playerStatusRow" class="max-w-screen-2xl mx-auto px-3 pt-1.5 pb-1 flex items-center gap-2">
     <div id="playerDot" class="w-2 h-2 bg-gray-700 flex-shrink-0"></div>
     <div class="flex-1 min-w-0">
       <div id="nowPlaying" class="text-sm font-bold text-gray-500 truncate uppercase tracking-wide">No active stream</div>
@@ -2236,9 +2248,24 @@
         </svg>
         <span class="text-xs font-bold">Prev</span>
       </button>
+      <!-- Inline volume −/+ (phone landscape only, shown via .fc-land-vol). Lets the
+           ep-nav line double as the volume line so no separate volume row is needed;
+           no slider — just the step buttons. Hidden (and irrelevant) on larger screens. -->
+      <button class="fc-tile fc-land-vol hidden flex-1 border-r border-gray-800
+               hover:bg-gray-800/60 active:bg-gray-700/80 text-gray-400 transition-colors"
+        onpointerdown="_fcVolDown(-5,this,event)" onpointerup="_fcVolUp(-5,this)" onpointerleave="_fcVolUp(-5,this)" onpointercancel="_fcVolUp(-5,this)">
+        <span class="text-3xl font-thin" style="line-height:1">−</span>
+        <span class="text-[10px] text-gray-600">Vol</span>
+      </button>
       <div class="flex items-center justify-center px-3 flex-shrink-0 pointer-events-none">
         <span id="fcEpCounter" class="text-xs font-mono text-gray-600 tabular-nums text-center"></span>
       </div>
+      <button class="fc-tile fc-land-vol hidden flex-1 border-r border-gray-800
+               hover:bg-gray-800/60 active:bg-gray-700/80 text-gray-400 transition-colors"
+        onpointerdown="_fcVolDown(5,this,event)" onpointerup="_fcVolUp(5,this)" onpointerleave="_fcVolUp(5,this)" onpointercancel="_fcVolUp(5,this)">
+        <span class="text-3xl font-thin" style="line-height:1">+</span>
+        <span class="text-[10px] text-gray-600">Vol</span>
+      </button>
       <button id="fcNextBtn"
         onpointerdown="_holdStart(this, vlcNext, event)"
         onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
@@ -2375,10 +2402,10 @@
     </div>
 
     <div id="fcMoreBody" class="flex-1 flex flex-col min-h-0">
-      <!-- In phone landscape the Volume row (#fcVolRow) and Audio/Subs row
-           (#fcTrackRow) are RELOCATED here from the main tile grid by
-           _fcSyncMoreRows() — they're inserted above Night Mode. (They live in
-           the main grid in portrait/large layouts.) -->
+      <!-- In phone landscape the Audio/Subs row (#fcTrackRow) is RELOCATED here
+           from the main tile grid by _applyPhoneLandLayout(), inserted above Night
+           Mode. (Volume stays on the main grid via the ep-nav inline buttons; this
+           row lives in the main grid in portrait/large layouts.) -->
       <!-- Night mode (dynamic-range compression). JS (renderNightMode) recolors
            #fcNightBtn / #fcNightIcon when active — ids preserved. -->
       <button onclick="toggleNightMode(this)" id="fcNightBtn"
@@ -3884,38 +3911,46 @@ function _fcVolUp(delta, btn){
   _volHoldActive = false;
 }
 
-// ── Phone-landscape control relocation ──────────────────────────────────────
+// ── Phone-landscape layout ──────────────────────────────────────────────────
 // A phone held sideways (~320-430px tall) can't fit the full control stack
-// without scrolling. There we keep the transport rows on the main grid and move
-// the Volume (#fcVolRow) and Audio/Subs (#fcTrackRow) rows into the "More" sheet.
-// We relocate the REAL DOM nodes (not duplicates) so the single populate/sync
-// path (loadTracks for the selects, the volume handlers) keeps working as-is.
-// In portrait / on larger screens the rows are restored to their original
-// C → D grid slots (before the Stop row). The scope matches the short-landscape
-// media query, so tablets (≈744px+ tall) are unaffected.
+// without scrolling, so two DOM nodes are physically relocated there (the rest
+// of the landscape strip is pure CSS in the short-landscape media query). We move
+// the REAL nodes — not duplicates — so the single populate/sync paths (loadTracks
+// for the selects, the title/time updaters) keep working as-is:
+//   1. Audio/Subs row (#fcTrackRow) → the fullscreen "More" sheet (above Night
+//      Mode). Volume stays on the main grid via the inline ep-nav +/- buttons
+//      (.fc-land-vol) / the standalone #fcVolRow — handled in CSS.
+//   2. Footer fullscreen button (#fullscreenBtn) → the footer title row
+//      (#playerStatusRow) so it shares that line and the transport row collapses.
+// Both are restored to their original spots in portrait / on larger screens. The
+// matchMedia scope matches the CSS, so tablets (≈744px+ tall) are unaffected.
 const _fcPhoneLand = window.matchMedia("(orientation:landscape) and (max-height:500px)");
-function _fcSyncMoreRows(){
-  const grid    = document.getElementById("fcTileGrid");
-  const moreBody= document.getElementById("fcMoreBody");
-  const volRow  = document.getElementById("fcVolRow");
-  const trackRow= document.getElementById("fcTrackRow");
-  const stopRow = document.getElementById("fcStopRow");
-  const nightBtn= document.getElementById("fcNightBtn");
-  if(!grid||!moreBody||!volRow||!trackRow||!stopRow) return;
+function _applyPhoneLandLayout(){
+  const grid     = document.getElementById("fcTileGrid");
+  const moreBody = document.getElementById("fcMoreBody");
+  const trackRow = document.getElementById("fcTrackRow");
+  const stopRow  = document.getElementById("fcStopRow");
+  const nightBtn = document.getElementById("fcNightBtn");
+  const statusRow= document.getElementById("playerStatusRow");
+  const ctrlRow  = document.getElementById("playerControlsRow");
+  const fsBtn    = document.getElementById("fullscreenBtn");
+  const saveBtn  = document.getElementById("saveStreamBtn");
   if(_fcPhoneLand.matches){
-    // Into the More sheet, above Night Mode, keeping Volume → Audio/Subs order.
-    if(volRow.parentElement!==moreBody)   moreBody.insertBefore(volRow, nightBtn);
-    if(trackRow.parentElement!==moreBody) moreBody.insertBefore(trackRow, nightBtn);
+    if(trackRow && moreBody && trackRow.parentElement!==moreBody)
+      moreBody.insertBefore(trackRow, nightBtn);
+    if(fsBtn && statusRow && fsBtn.parentElement!==statusRow)
+      statusRow.appendChild(fsBtn);   // sits at the right, vertically centered
   } else {
-    // Back to the main grid in their original slots (just before the Stop row).
-    if(volRow.parentElement!==grid)   grid.insertBefore(volRow, stopRow);
-    if(trackRow.parentElement!==grid) grid.insertBefore(trackRow, stopRow);
+    if(trackRow && grid && stopRow && trackRow.parentElement!==grid)
+      grid.insertBefore(trackRow, stopRow);   // original Row D slot
+    if(fsBtn && ctrlRow && fsBtn.parentElement!==ctrlRow)
+      ctrlRow.insertBefore(fsBtn, saveBtn);    // original slot, before Save
   }
 }
-_fcPhoneLand.addEventListener("change", _fcSyncMoreRows);
+_fcPhoneLand.addEventListener("change", _applyPhoneLandLayout);
 
 function openFullscreenControls(){
-  _fcSyncMoreRows();   // place Volume/Audio-Subs per orientation before showing
+  _applyPhoneLandLayout();   // place relocated controls per orientation before showing
   const fc=document.getElementById("fullscreenControls");
   // Populate title and current state immediately
   setFcTitle(app.active_title||"", app.library_current_file||"");
@@ -12652,6 +12687,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
   evictLegacyServiceWorker();
   _lpAttachVideoEvents();
   _renderOnlineBadge();
+  _applyPhoneLandLayout();   // position the footer fullscreen btn for the current orientation
   // iOS app: load the pairing token (M5) before any device-facing fetch, add the
   // always-on app nav (Downloads / Change server), subscribe to BundleDownloader
   // events + hydrate the offline-download state. All no-ops in a plain browser.
@@ -12750,6 +12786,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.13.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.13.1</div>
 </body>
 </html>
