@@ -198,11 +198,18 @@
       footer.fixed button { padding-top:.4rem !important; padding-bottom:.4rem !important; }
       footer.fixed select { padding-top:.25rem !important; padding-bottom:.25rem !important; }
       #seekBarWrapper { height:24px !important; }
-      /* Fullscreen player controls: the up-to-6 stacked tile rows can't share a
-         short landscape viewport with flex-1 — they get crushed below their
-         content height and overlap into an unreadable pile. Give each row its
-         natural (min-)height and let the grid scroll instead. */
-      #fcTileGrid { overflow-y:auto; }
+      /* Transport-only strip (phone landscape). The footer's Audio/Subs row is the
+         tallest non-transport block; drop it so the seek bar + transport tiles take
+         minimal height and the library behind stays browsable. Track switching is
+         still reachable by rotating to portrait. */
+      #trackControls { display:none !important; }
+      /* Fullscreen player controls: all five stacked rows can't share a ~320-430px
+         landscape viewport without scrolling. Per the transport-only design, the
+         seek bar + transport rows (A play/seek, B ep-nav, E stop/device) stay on
+         the main grid; the Volume (Row C) and Audio/Subs (Row D) rows are moved
+         into the "More" sheet by _fcSyncMoreRows() (single DOM node, not a copy).
+         They're moved back to the grid in portrait/large layouts. */
+      #fcTileGrid { overflow-y:auto; }   /* safety net on very short devices */
       #fcTileGrid > div { flex:0 0 auto !important; }
       #fcTileGrid .fc-tile { min-height:46px; }
     }
@@ -2245,7 +2252,7 @@
     </div>
 
     <!-- Row C: Volume − / label+slider / + -->
-    <div class="flex flex-1 border-b border-gray-800 min-h-0">
+    <div id="fcVolRow" class="flex flex-1 border-b border-gray-800 min-h-0">
       <button onpointerdown="_fcVolDown(-5,this,event)" onpointerup="_fcVolUp(-5,this)" onpointerleave="_fcVolUp(-5,this)" onpointercancel="_fcVolUp(-5,this)"
         class="fc-tile flex flex-1 border-r border-gray-800
                hover:bg-gray-800/60 active:bg-gray-700/80 text-gray-400 transition-colors">
@@ -2269,7 +2276,7 @@
     </div>
 
     <!-- Row D: Track selectors — audio + subtitle -->
-    <div class="flex flex-1 border-b border-gray-800 min-h-0">
+    <div id="fcTrackRow" class="flex flex-1 border-b border-gray-800 min-h-0">
       <div class="fc-tile flex flex-1 border-r border-gray-800 gap-1.5 px-3 sm:px-4">
         <span class="text-[11px] text-gray-600 flex-shrink-0 uppercase tracking-wide font-bold">Audio</span>
         <select id="fcAudioSelect" onchange="setAudioTrack(this.value, this)"
@@ -2296,7 +2303,7 @@
     </div>
 
     <!-- Row E: Stop (hold to confirm) + Save (streaming torrent only, toggled by JS) -->
-    <div class="flex flex-1 min-h-0">
+    <div id="fcStopRow" class="flex flex-1 min-h-0">
       <button onpointerdown="_holdStart(this, (b)=>{stopStream(b);closeFullscreenControls();}, event)"
         onpointerup="_holdCancel(this)" onpointerleave="_holdCancel(this)" onpointercancel="_holdCancel(this)"
         title="Hold to stop"
@@ -2366,7 +2373,11 @@
       </div>
     </div>
 
-    <div class="flex-1 flex flex-col min-h-0">
+    <div id="fcMoreBody" class="flex-1 flex flex-col min-h-0">
+      <!-- In phone landscape the Volume row (#fcVolRow) and Audio/Subs row
+           (#fcTrackRow) are RELOCATED here from the main tile grid by
+           _fcSyncMoreRows() — they're inserted above Night Mode. (They live in
+           the main grid in portrait/large layouts.) -->
       <!-- Night mode (dynamic-range compression). JS (renderNightMode) recolors
            #fcNightBtn / #fcNightIcon when active — ids preserved. -->
       <button onclick="toggleNightMode(this)" id="fcNightBtn"
@@ -3872,7 +3883,38 @@ function _fcVolUp(delta, btn){
   _volHoldActive = false;
 }
 
+// ── Phone-landscape control relocation ──────────────────────────────────────
+// A phone held sideways (~320-430px tall) can't fit the full control stack
+// without scrolling. There we keep the transport rows on the main grid and move
+// the Volume (#fcVolRow) and Audio/Subs (#fcTrackRow) rows into the "More" sheet.
+// We relocate the REAL DOM nodes (not duplicates) so the single populate/sync
+// path (loadTracks for the selects, the volume handlers) keeps working as-is.
+// In portrait / on larger screens the rows are restored to their original
+// C → D grid slots (before the Stop row). The scope matches the short-landscape
+// media query, so tablets (≈744px+ tall) are unaffected.
+const _fcPhoneLand = window.matchMedia("(orientation:landscape) and (max-height:500px)");
+function _fcSyncMoreRows(){
+  const grid    = document.getElementById("fcTileGrid");
+  const moreBody= document.getElementById("fcMoreBody");
+  const volRow  = document.getElementById("fcVolRow");
+  const trackRow= document.getElementById("fcTrackRow");
+  const stopRow = document.getElementById("fcStopRow");
+  const nightBtn= document.getElementById("fcNightBtn");
+  if(!grid||!moreBody||!volRow||!trackRow||!stopRow) return;
+  if(_fcPhoneLand.matches){
+    // Into the More sheet, above Night Mode, keeping Volume → Audio/Subs order.
+    if(volRow.parentElement!==moreBody)   moreBody.insertBefore(volRow, nightBtn);
+    if(trackRow.parentElement!==moreBody) moreBody.insertBefore(trackRow, nightBtn);
+  } else {
+    // Back to the main grid in their original slots (just before the Stop row).
+    if(volRow.parentElement!==grid)   grid.insertBefore(volRow, stopRow);
+    if(trackRow.parentElement!==grid) grid.insertBefore(trackRow, stopRow);
+  }
+}
+_fcPhoneLand.addEventListener("change", _fcSyncMoreRows);
+
 function openFullscreenControls(){
+  _fcSyncMoreRows();   // place Volume/Audio-Subs per orientation before showing
   const fc=document.getElementById("fullscreenControls");
   // Populate title and current state immediately
   setFcTitle(app.active_title||"", app.library_current_file||"");
@@ -12707,6 +12749,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.12.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.13.0</div>
 </body>
 </html>
