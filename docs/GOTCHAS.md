@@ -14,6 +14,13 @@ VLC's `audio_track` / `subtitle_track` commands accept **elementary stream IDs**
 
 See `get_tracks()` ([main.py:2799](../main.py#L2799)) — `es_id = int(key.split()[-1])`.
 
+### VLC track *labels* must include the title (`Description`), and the sub menu must match the device
+
+Two ways the VLC subtitle menu silently diverged from the on-device menu — both fixed, keep them fixed:
+
+1. **Label the track by its title, not just its language.** VLC's `status.json` exposes the container track title (an MKV's `title` tag — e.g. "Full Subtitles" vs "Signs/Songs") in the per-stream **`Description`** field, but *only* when the track actually carries one (untitled tracks have no `Description` key at all). The old `_parse_track_streams` ignored it and labelled by `Language` alone, so two English subs both rendered as bare "English" — while the on-device player (which labels from ffprobe titles via `_track_label`) showed the real names. `_vlc_es_label(lang, title, codec, fallback)` now builds `"<Language> (<title>)"` exactly like `_track_label`, reading `Description` as the title. Keep the two label builders in sync.
+2. **Load every sidecar even when subs default OFF.** The on-device menu lists *all* discovered subs (bundle + `_list_sidecar_subs`) regardless of the on/off default; VLC only loaded sidecars (`_load_all_local_subs`) on the subs-*on* / saved-pick branches, so with the admin/profile default off the VLC menu showed **only embedded tracks** and was missing the `Subs/`-folder, downloaded, and AI sidecars (the "device has 4 sub options, VLC has 2" report). `_apply_subtitle_policy` now loads all sidecars in the subs-off branch too, then forces the selection to `-1` (`addsubtitle` auto-enables the last one added). Costs a few `addsubtitle` round-trips per play even when subs stay off — accepted for menu parity.
+
 ### VLC 3.x has no current-track in status
 
 `status.xml` / `status.json` don't include `<audiotrack>` or `<subtitletrack>` in VLC 3.x. We track it ourselves in `state.current_audio_track` / `state.current_subtitle_track`, reset to `-1` on every new `in_play`. The `POST /api/vlc/track/*` endpoints update this state.

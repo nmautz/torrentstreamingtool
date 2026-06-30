@@ -521,7 +521,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "7.1.0"
+UI_VERSION = "7.10.5"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 # Retains references to fire-and-forget background tasks so the event loop's weak
@@ -2801,13 +2801,20 @@ async def _apply_subtitle_policy(lib: dict, profile_id: str, file_path: str,
     # below only if we deliberately land on an AI track.
     state.sub_auto_ai_path = ""
 
+    pref = _canon_lang(subs["default_language"]) if subs["default_language"] else ""
+    video = Path(file_path)
+
     if not subs_on:
+        # Subtitles default off — but still load every sidecar so they show up as
+        # selectable tracks in the menu (the on-device player lists all discovered
+        # subs regardless of the on/off default; VLC was hiding sidecars entirely
+        # when off, so the menus disagreed — see docs/GOTCHAS.md). Force the
+        # selection off afterwards (addsubtitle auto-enables the last one added).
+        if video.exists():
+            await _load_all_local_subs(video)
         state.current_subtitle_track = -1
         await vlc("subtitle_track", val="-1")
         return
-
-    pref = _canon_lang(subs["default_language"]) if subs["default_language"] else ""
-    video = Path(file_path)
 
     # (a) Load every local sidecar (Subs/ folders included) + embedded tracks,
     #     then pick the preferred language. Tracks come embedded-first, so a
@@ -9544,13 +9551,32 @@ async def library_unshuffle() -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+def _vlc_es_label(lang: str, title: str, codec: str, fallback: str) -> str:
+    """Label a VLC ES track to match the on-device player's `_track_label`:
+    '<Language> (<title>)' when both are present, else whichever exists.
+
+    VLC exposes the container track *title* (e.g. an MKV's "Signs/Songs" vs
+    "Full Subtitles") in the status `Description` field — only when the track
+    actually carries a title; untitled tracks have no `Description`. Without it
+    two same-language subs were indistinguishable (both rendered as just
+    'English'), unlike the on-device menu which shows the real titles. Keep this
+    in sync with `_track_label` (the HLS/meta.json path)."""
+    lang  = (lang  or "").strip()
+    title = (title or "").strip()
+    if lang and title:
+        return f"{lang} ({title})"
+    return title or lang or codec or fallback
+
+
 def _parse_track_streams(vs: Optional[dict]) -> tuple[list[dict], list[dict]]:
     """Parse a VLC status payload into (audio, subtitle) track lists.
 
-    Each entry is {id, label, language, codec}. `id` is the ES (elementary
-    stream) ID — the N in each 'Stream N' key, the same value VLC's
+    Each entry is {id, label, language, codec, title}. `id` is the ES
+    (elementary stream) ID — the N in each 'Stream N' key, the same value VLC's
     audio_track / subtitle_track commands take (a sequential counter would
-    silently fail). Shared by the /api/vlc/tracks endpoint and the playback
+    silently fail). `title` is VLC's `Description` (the container track title),
+    folded into `label` so same-language tracks are distinguishable — matching
+    the on-device menu. Shared by the /api/vlc/tracks endpoint and the playback
     subtitle-default policy (`_apply_track_prefs`), so they agree on ES IDs.
     """
     audio: list[dict] = []
@@ -9573,13 +9599,19 @@ def _parse_track_streams(vs: Optional[dict]) -> tuple[list[dict], list[dict]]:
         typ   = s.get("Type", "")
         lang  = s.get("Language", s.get("language", ""))
         codec = s.get("Codec", s.get("codec", ""))
+        # VLC reports the container track title (MKV title tag) here, only when
+        # the track actually has one. Folded into the label so two same-language
+        # tracks aren't both shown as bare 'English' (see _vlc_es_label).
+        title = (s.get("Description") or "").strip()
         if typ == "Audio":
-            audio.append({"id": es_id, "label": lang or codec or f"Track {audio_n}",
-                          "language": lang, "codec": codec})
+            audio.append({"id": es_id,
+                          "label": _vlc_es_label(lang, title, codec, f"Track {audio_n}"),
+                          "language": lang, "codec": codec, "title": title})
             audio_n += 1
         elif typ == "Subtitle":
-            subtitle.append({"id": es_id, "label": lang or codec or f"Track {sub_n}",
-                             "language": lang, "codec": codec})
+            subtitle.append({"id": es_id,
+                             "label": _vlc_es_label(lang, title, codec, f"Track {sub_n}"),
+                             "language": lang, "codec": codec, "title": title})
             sub_n += 1
     return audio, subtitle
 
