@@ -2032,6 +2032,23 @@ function _fmtMtime(ts){
   try { return new Date(ts*1000).toLocaleString(); } catch(_) { return "—"; }
 }
 
+// One download row, shared by the current-run list and the (collapsed) prior-logs list.
+function _logRow(f){
+  const name = f.name;
+  const url  = `/api/admin/logs/${encodeURIComponent(name)}?admin_token=${encodeURIComponent(adminToken)}`;
+  return `
+    <div class="px-5 py-3 flex items-center justify-between gap-3">
+      <div class="min-w-0 flex-1">
+        <div class="text-sm font-mono text-gray-200 truncate">${name}</div>
+        <div class="text-[11px] text-gray-600 mt-0.5">${_fmtBytes(f.bytes)} · ${_fmtMtime(f.mtime)}</div>
+      </div>
+      <a href="${url}" download="${name}"
+         class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 text-gray-300 hover:bg-gray-700 transition-colors">
+        Download
+      </a>
+    </div>`;
+}
+
 async function loadLogs(){
   const list = document.getElementById("logsList");
   if(!list) return;
@@ -2043,36 +2060,63 @@ async function loadLogs(){
       return;
     }
     const d = await r.json();
-    const files = d.files || [];
+    const files   = d.files || [];
+    // Prior-run archives (logs_old_*.zip) collapse into a single expandable line
+    // and a dedicated bundle button; current-run logs stay as plain rows.
+    const current = files.filter(f => !f.prior);
+    const prior   = files.filter(f =>  f.prior);
+
+    document.getElementById("logsBundleBtn").disabled = current.length === 0;
+
     if(!files.length){
       list.innerHTML = `<div class="px-5 py-6 text-center text-gray-600 text-sm">No log files yet.</div>`;
-      document.getElementById("logsBundleBtn").disabled = true;
       return;
     }
-    document.getElementById("logsBundleBtn").disabled = false;
-    list.innerHTML = files.map(f => {
-      const name = f.name;
-      const url  = `/api/admin/logs/${encodeURIComponent(name)}?admin_token=${encodeURIComponent(adminToken)}`;
-      return `
-        <div class="px-5 py-3 flex items-center justify-between gap-3">
-          <div class="min-w-0 flex-1">
-            <div class="text-sm font-mono text-gray-200 truncate">${name}</div>
-            <div class="text-[11px] text-gray-600 mt-0.5">${_fmtBytes(f.bytes)} · ${_fmtMtime(f.mtime)}</div>
+
+    const currentHtml = current.length
+      ? current.map(_logRow).join("")
+      : `<div class="px-5 py-4 text-center text-gray-600 text-sm">No active log files.</div>`;
+
+    let priorHtml = "";
+    if(prior.length){
+      const totalBytes = prior.reduce((s, f) => s + (f.bytes || 0), 0);
+      const plural = prior.length === 1 ? "archive" : "archives";
+      priorHtml = `
+        <div class="border-t border-gray-800">
+          <div class="px-5 py-3 flex items-center justify-between gap-3 bg-gray-950">
+            <button onclick="togglePriorLogs()" class="min-w-0 flex-1 text-left flex items-center gap-2 group">
+              <span id="priorChevron" class="text-gray-500 text-xs transition-transform">▶</span>
+              <span class="min-w-0">
+                <span class="text-sm font-bold text-gray-300 group-hover:text-gray-100">Prior Logs</span>
+                <span class="block text-[11px] text-gray-600 mt-0.5">${prior.length} ${plural} · ${_fmtBytes(totalBytes)} · archived automatically on server update</span>
+              </span>
+            </button>
+            <button onclick="downloadPriorLogsBundle()"
+              class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 text-gray-300 hover:bg-gray-700 transition-colors">
+              Download All Prior Logs
+            </button>
           </div>
-          <a href="${url}" download="${name}"
-             class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border border-gray-700 bg-gray-800 text-gray-300 hover:bg-gray-700 transition-colors">
-            Download
-          </a>
+          <div id="priorLogsList" class="hidden divide-y divide-gray-800">
+            ${prior.map(_logRow).join("")}
+          </div>
         </div>`;
-    }).join("");
+    }
+
+    list.innerHTML = currentHtml + priorHtml;
   }catch(_){
     list.innerHTML = `<div class="px-5 py-6 text-center text-red-400 text-sm">Failed to load logs.</div>`;
   }
 }
 
-function downloadLogsBundle(){
-  if(!adminToken){ showToast("Not authenticated.", true); return; }
-  const url = `/api/admin/logs/_bundle?admin_token=${encodeURIComponent(adminToken)}`;
+function togglePriorLogs(){
+  const list = document.getElementById("priorLogsList");
+  const chevron = document.getElementById("priorChevron");
+  if(!list) return;
+  const open = list.classList.toggle("hidden") === false;
+  if(chevron) chevron.textContent = open ? "▼" : "▶";
+}
+
+function _downloadViaAnchor(url){
   // Trigger a real browser download via a hidden <a>; using location.href would
   // navigate away from /admin if the response somehow rendered inline.
   const a = document.createElement("a");
@@ -2081,7 +2125,18 @@ function downloadLogsBundle(){
   document.body.appendChild(a);
   a.click();
   a.remove();
+}
+
+function downloadLogsBundle(){
+  if(!adminToken){ showToast("Not authenticated.", true); return; }
+  _downloadViaAnchor(`/api/admin/logs/_bundle?admin_token=${encodeURIComponent(adminToken)}`);
   showToast("Preparing logs bundle…");
+}
+
+function downloadPriorLogsBundle(){
+  if(!adminToken){ showToast("Not authenticated.", true); return; }
+  _downloadViaAnchor(`/api/admin/logs/_prior-bundle?admin_token=${encodeURIComponent(adminToken)}`);
+  showToast("Preparing prior logs bundle…");
 }
 
 async function clearLogs(){
