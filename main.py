@@ -687,6 +687,10 @@ class AppState:
     # and unlike library_playlist (which is the remaining VLC tail and shrinks on
     # advance), this keeps the *whole* order so prev can walk back through history.
     library_shuffle_order: list = field(default_factory=list)
+    # Pool the live shuffle order was drawn from ("all" | "unwatched"). Travels
+    # alongside library_shuffle_order so a VLC→device handoff can carry it (and
+    # keep the persisted Resume-on-shuffle scope intact). Empty when not shuffling.
+    library_shuffle_scope: str = ""
     library_current_file: Optional[str] = None            # path VLC is playing now
     downloading_count: int = 0                            # active library downloads
     play_when_ready_item_id: Optional[str] = None        # auto-play this item on download complete
@@ -943,6 +947,10 @@ def state_snapshot() -> dict:
         # True while Shuffle Play is active (random episode order). Lets the UI
         # surface a "shuffle" badge; next/prev already follow the random order.
         "library_shuffle": bool(state.library_shuffle_order),
+        # Scope of the live shuffle ("all" | "unwatched"), masked to "" when not
+        # shuffling so a stale value can never leak. Lets a VLC→device handoff carry
+        # the scope so the device's persisted Resume-on-shuffle pref stays accurate.
+        "library_shuffle_scope": state.library_shuffle_scope if state.library_shuffle_order else "",
         "library_item_file_count": state.library_item_file_count,
         "is_library_playback": state.library_item_id is not None,
         "library_item_id": state.library_item_id,
@@ -7286,6 +7294,7 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     # Shuffle Play: remember the full random order (the filtered, on-disk playlist)
     # so next/prev walk it. Any normal play clears it back to natural order.
     state.library_shuffle_order = list(playlist) if req.shuffle else []
+    state.library_shuffle_scope = (req.shuffle_scope or "") if req.shuffle else ""
     # Persist the shuffle preference (or clear it on a normal play) so Resume can
     # offer to keep shuffling after a stop. Fire-and-forget — doesn't gate playback.
     asyncio.create_task(_set_shuffle_pref(

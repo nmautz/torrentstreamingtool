@@ -800,11 +800,25 @@ browser, time-synced:
 2. Slices the remaining-playlist tail from `app.library_playlist` starting at
    `app.library_current_file`, so on-device auto-advance continues the series.
 3. Fires `POST /api/stop` (202; VLC teardown is backgrounded) **and** calls
-   `lpPlay(itemId, tail, capturedTime, label)`. Because stop returns immediately,
-   the device's prep/transcode overlaps the TV teardown. The resume seek is
-   pinned to `capturedTime` (applied on `loadedmetadata`), so the device lands on
-   the same frame no matter how long prep takes — VLC is stopped, so the position
-   doesn't drift while the device prepares.
+   `lpPlay(itemId, tail, capturedTime, label, app.library_shuffle, app.library_shuffle_scope)`.
+   Because stop returns immediately, the device's prep/transcode overlaps the TV
+   teardown. The resume seek is pinned to `capturedTime` (applied on
+   `loadedmetadata`), so the device lands on the same frame no matter how long prep
+   takes — VLC is stopped, so the position doesn't drift while the device prepares.
+
+**Shuffle carries across the handoff (both directions).** The `tail` is already
+the shuffled remaining order (VLC's `library_playlist` stays shuffled during a
+shuffle session — `vlc_next`/`prev` slice it from `library_shuffle_order`), so the
+*order* survives regardless. What the handoff also threads through is the **shuffle
+flag + scope**: TV→device passes `app.library_shuffle` / `app.library_shuffle_scope`
+(the latter published in `state_snapshot`, masked to `""` when not shuffling) so the
+device sets `lp.shuffle`, shows **Exit Shuffle**, walks its random order on
+Next/Prev, and records the persisted pref with the right scope; device→TV
+(`lpHandoffToVlc`) passes `lp.shuffle` / `lp.shuffleScope` into `playLibraryFiles`'s
+`/play` body so the server re-establishes `state.library_shuffle_order`. Without
+this the destination treated the handoff as a normal play and snapped Next/Prev back
+to natural order. `lpPlay` also skips its single-file→full-series expansion when
+`shuffle` is set, so a 1-file shuffled tail isn't padded with un-shuffled episodes.
 
 Needs `app.is_library_playback && app.library_item_id` (both published in
 `state_snapshot()`); the footer **Device** button and fullscreen **To Device**

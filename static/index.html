@@ -9810,7 +9810,11 @@ async function handoffToDevice(btn, allowOnDemand = false) {
     if (fc && !fc.classList.contains("hidden")) closeFullscreenControls();
     // Stop the TV (202 — VLC teardown runs in the background) and pick up here.
     fetch("/api/stop", { method: "POST" }).catch(() => {});
-    await lpPlay(itemId, files, seekTo, label);
+    // Carry Shuffle Play across the handoff: `files` is already the shuffled tail
+    // (library_playlist stays shuffled during a shuffle session), so passing the
+    // flag + scope keeps the device's Exit-Shuffle control and the persisted
+    // Resume-on-shuffle pref intact instead of silently dropping to natural order.
+    await lpPlay(itemId, files, seekTo, label, !!app.library_shuffle, app.library_shuffle_scope || "");
   });
 }
 
@@ -10139,7 +10143,11 @@ async function lpHandoffToVlc(btn) {
     }
     // lpStop flushes the current position to the server, then start VLC there.
     await lpStop();
-    await playLibraryFiles(itemId, files, seekTo, label);
+    // Carry Shuffle Play across the handoff: `files` is the device's shuffled tail,
+    // so passing the flag + scope records it as state.library_shuffle_order on the
+    // server (TV Next/Prev follow the random order, Exit Shuffle shows) instead of
+    // VLC treating it as a normal play and snapping Next/Prev back to natural order.
+    await playLibraryFiles(itemId, files, seekTo, label, lp.shuffle, lp.shuffleScope || "");
   });
 }
 
@@ -10192,7 +10200,10 @@ async function lpPlay(itemId, files, seekTo, label, shuffle, shuffleScope) {
   // episodes / "Play All" / handoff tail) are intentional queues, kept verbatim.
   // Best-effort: on any failure we fall back to the single passed file.
   let playlist = files.slice(), startIdx = 0;
-  if (playlist.length === 1) {
+  // Don't expand a single shuffled file into the item's natural-order tail — that
+  // would append episodes the user never shuffled in. A 1-file shuffle tail is the
+  // last of the random run; keep it as-is.
+  if (playlist.length === 1 && !shuffle) {
     try {
       const r = await fetch(`/api/library/${itemId}/files?profile_id=${encodeURIComponent(profile.id || "")}`);
       if (r.ok) {
@@ -12577,6 +12588,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.10.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.10.3</div>
 </body>
 </html>
