@@ -10521,7 +10521,7 @@ async function _lpLoadIndex(seekTo) {
   lp.filePath = filePath;
   lp.name = filePath.split(/[/\\]/).pop();
   lp.skipData = null;
-  lp.skipOfferType = null; lp.skipOfferEnd = 0;
+  _lpHideSkipOffer(); lp.skipOfferEnd = 0;
   lp.resumeApplied = false; lp.resumeSec = seekTo || 0;
   lp.audios = []; lp.subtitles = []; lp.sidecarSubs = []; lp.subTracks = []; lp._sttBusy = false;
   // Push the throttle window forward so the first `timeupdate` after this load
@@ -11656,7 +11656,9 @@ function _lpAutoSkipPrefs() {
 // tap Skip to act early, or Hide to cancel). When auto-skip is off, it's the
 // manual button only, exactly as before.
 function lpEvaluateSkipOffer(t) {
-  if (!lp.skipData) return;
+  // No skip points (yet) for this file — clear any leftover tile from a prior
+  // file rather than returning with it still on screen.
+  if (!lp.skipData) { _lpHideSkipOffer(); return; }
   const intro = lp.skipData.intro;
   const creditsStart = lp.skipData.credits_start;
   const fileKey = lp.filePath;
@@ -11700,10 +11702,12 @@ function _lpShowSkipOffer(label) {
   document.getElementById("lpSkipOffer").classList.remove("hidden");
 }
 function _lpHideSkipOffer() {
-  if (lp.skipOfferType) {
-    lp.skipOfferType = null;
-    document.getElementById("lpSkipOffer").classList.add("hidden");
-  }
+  // Unconditional: the DOM tile and lp.skipOfferType can fall out of sync (e.g.
+  // an episode auto-advance nulls skipOfferType inside _lpLoadIndex before the
+  // trailing hide runs), so guarding on skipOfferType could leave a stale tile
+  // ("Next Episode in N") frozen on the next episode. Always clear both.
+  lp.skipOfferType = null;
+  document.getElementById("lpSkipOffer").classList.add("hidden");
 }
 function lpAcceptSkipOffer() {
   const v = document.getElementById("lpVideo");
@@ -12640,6 +12644,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.10.5</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.10.6</div>
 </body>
 </html>
