@@ -194,24 +194,25 @@
       #epRightPane { flex:1 1 0%; min-width:0; }
       #epBulkChips { padding-top:.3rem; padding-bottom:.3rem; }
       #episodePage .ep-season-tab { padding-top:.45rem; padding-bottom:.45rem; }
-      /* Player footer — trim row heights so the library stays browsable */
+      /* ── Footer → name + fullscreen button only ──────────────────────────────
+         In phone landscape the full transport bar is redundant with the overlay
+         (one tap on the fullscreen button away), so the footer collapses to just
+         the show name and that button. Hide the seek bar, the Audio/Subs row, the
+         PLAYING status badge, and every controls-row button except fullscreen.
+         The status row (name/time) is left intact. */
       footer.fixed button { padding-top:.4rem !important; padding-bottom:.4rem !important; }
-      footer.fixed select { padding-top:.25rem !important; padding-bottom:.25rem !important; }
-      #seekBarWrapper { height:24px !important; }
-      /* Transport-only strip (phone landscape). The footer's Audio/Subs row is the
-         tallest non-transport block; drop it so the seek bar + transport tiles take
-         minimal height and the library behind stays browsable. Track switching is
-         still reachable by rotating to portrait. */
-      #trackControls { display:none !important; }
-      /* Fullscreen player controls: all five stacked rows can't share a ~320-430px
-         landscape viewport without scrolling. Per the transport-only design, the
-         seek bar + transport rows (A play/seek, B ep-nav, E stop/device) stay on
-         the main grid; the Volume (Row C) and Audio/Subs (Row D) rows are moved
-         into the "More" sheet by _fcSyncMoreRows() (single DOM node, not a copy).
-         They're moved back to the grid in portrait/large layouts. */
-      #fcTileGrid { overflow-y:auto; }   /* safety net on very short devices */
-      #fcTileGrid > div { flex:0 0 auto !important; }
-      #fcTileGrid .fc-tile { min-height:46px; }
+      #seekBarWrapper { display:none !important; }
+      #trackControls  { display:none !important; }
+      #statusBadge    { display:none !important; }
+      #playerControlsRow > button { display:none !important; }
+      #playerControlsRow > #fullscreenBtn { display:flex !important; }
+      /* ── Fullscreen overlay: transport-only, rows fill the height ─────────────
+         Volume (Row C) + Audio/Subs (Row D) are relocated into the "More" sheet by
+         _fcSyncMoreRows(); the remaining seek bar + transport rows (A play/seek,
+         B ep-nav, E stop/device) keep their default flex-1 so they grow to fill
+         the grid — no dead space at the bottom. overflow-y:auto is a safety net
+         only (the three rows fit without it). */
+      #fcTileGrid { overflow-y:auto; }
     }
     button, select { touch-action: manipulation; user-select: none; -webkit-user-select: none; }
     /* Fullscreen controls overlay: no text selection / tap highlight on any
@@ -1987,7 +1988,7 @@
     <div id="statusBadge" class="hidden text-[10px] font-black px-2 py-0.5 border flex-shrink-0 uppercase tracking-wide"></div>
   </div>
   <!-- Controls row — Metro tiles with dividers -->
-  <div class="max-w-screen-2xl mx-auto px-0 pb-1 flex items-stretch">
+  <div id="playerControlsRow" class="max-w-screen-2xl mx-auto px-0 pb-1 flex items-stretch">
     <button onclick="vlcSeek(-30, this)" title="−30s"
       class="hidden sm:flex flex-col items-center justify-center flex-1 py-2.5 border-r border-gray-800
              text-gray-600 hover:text-gray-300 hover:bg-gray-900 active:bg-gray-800 transition-colors">
