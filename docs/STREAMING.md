@@ -656,6 +656,17 @@ Two ways to populate the cache:
      `/subtitle` endpoint converts SRT/ASS/SSA → WebVTT **on demand** — and
      `_lpIndicateSubLoading` flashes a "Loading subtitles…" hint until that
      fetch lands (or errors).
+   - **Suspend-drop recovery (iOS).** When the WKWebView is suspended (app
+     backgrounded / another app opened) while a `<track>` is *showing*, iOS
+     WebKit discards that track's parsed cues; re-setting `mode="showing"` never
+     re-fetches, so the active subtitle silently goes blank (other tracks, not
+     yet shown at suspend time, still load fine on selection). `_lpSubTrackBroken`
+     detects the terminal-but-empty state (`readyState` LOADED with no cues, or
+     ERROR) and `_lpRecreateSubTrack` removes + re-appends the `<track>` to force
+     a fresh fetch. `_lpRecoverActiveSub` runs it for the active track on
+     `visibilitychange`→visible; `lpSetSubtitle` runs it when the user re-selects
+     a dropped track. Healthy tracks (cues present) are never recreated, so
+     nothing flickers. See [GOTCHAS.md](GOTCHAS.md).
    - Each switch POSTs to `/api/library/{id}/local-tracks` with the new
      pick so it persists across sessions. The pick travels as a resolvable
      **descriptor** `subtitle_sel` (`{off, lang, ai, name}`), saved per-file

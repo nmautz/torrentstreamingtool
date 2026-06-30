@@ -11101,6 +11101,51 @@ function _lpApplySubIdx(idx) {
   });
 }
 
+// iOS WebKit drops an out-of-band <track>'s parsed cues when the WKWebView is
+// suspended (the app is backgrounded / another app is opened) while a track is
+// showing: the element ends up "loaded" (readyState 2) with zero cues — or
+// errored (3) — and re-setting mode="showing" never re-fetches it, so the
+// active subtitle silently renders nothing. (Tracks that weren't showing when
+// the suspend happened are untouched — WebKit fetches them fresh on first
+// selection, which is why switching to a different/AI track recovers but the
+// already-showing one doesn't, and why a full stop+resume — which rebuilds
+// every <track> — always works.) Detect that terminal-but-empty state…
+function _lpSubTrackBroken(tr) {
+  if (!tr || !tr.el) return false;
+  const tt = tr.el.track;
+  if (tr.el.readyState === 3) return true;                         // ERROR (load failed)
+  if (tr.el.readyState === 2 && !(tt && tt.cues && tt.cues.length > 0)) return true; // LOADED but no cues
+  return false;                                                     // NONE/LOADING: just not done yet
+}
+
+// …and recover by recreating the <track> in place so WebKit re-fetches the VTT.
+// Mutates the lp.subTracks entry to point at the fresh element; caller re-shows.
+function _lpRecreateSubTrack(tr) {
+  const old = tr.el;
+  const t = document.createElement("track");
+  t.kind = old.kind || "subtitles";
+  t.src = old.src;                       // resolved URL — same bundle/sidecar source
+  t.srclang = old.srclang || "und";
+  t.label = old.label || "";
+  const v = document.getElementById("lpVideo");
+  try { old.remove(); } catch (_) {}
+  v.appendChild(t);
+  tr.el = t;
+}
+
+// On return to the foreground, re-fetch the active subtitle track if the suspend
+// dropped its cues. Only the currently-selected track, and only when it actually
+// looks broken, so healthy tracks never flicker.
+function _lpRecoverActiveSub() {
+  if (!lp.itemId) return;
+  const key = String(lp.pendingSubtitleIdx);
+  if (key === "-1" || key === "undefined" || key === "null") return;   // subs off
+  const tr = (lp.subTracks || []).find(t => t.key === key);
+  if (!tr || !_lpSubTrackBroken(tr)) return;
+  _lpRecreateSubTrack(tr);
+  _lpApplySubIdx(key);
+}
+
 // Extract the on-demand session key from a master_url like
 // /api/library/ondemand/<key>/master.m3u8.
 function _odKeyFromUrl(url) {
@@ -11127,6 +11172,10 @@ function lpSetAudio(idx) {
 function lpSetSubtitle(idx) {
   lp.pendingSubtitleIdx = idx;
   lp.subAutoApplied = false;          // a deliberate pick — never auto-upgrade it
+  // Recover a track whose cues a background-suspend dropped: re-selecting it
+  // would otherwise just re-show the empty element (no re-fetch).
+  const _tr = (lp.subTracks || []).find(t => t.key === String(idx));
+  if (_tr && _lpSubTrackBroken(_tr)) _lpRecreateSubTrack(_tr);
   _lpApplySubIdx(idx);
   _lpIndicateSubLoading(idx);
   _lpSaveLocalTracks();
@@ -11868,8 +11917,11 @@ function _lpAttachVideoEvents() {
     _lpNetLost();
   });
   // Tab backgrounded / phone screen locked → flush via fetch (still alive).
+  // Back to foreground → repair a subtitle track whose cues iOS dropped while
+  // the WKWebView was suspended (delay lets any self-heal settle first).
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") _lpFlushProgress(false);
+    else setTimeout(_lpRecoverActiveSub, 400);
   });
   // Tab/window close, browser back, BFCache eviction → use sendBeacon since
   // any in-flight fetch is liable to be cancelled mid-request.
@@ -12588,6 +12640,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.10.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.10.4</div>
 </body>
 </html>
