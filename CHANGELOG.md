@@ -1,5 +1,8 @@
 # Changelog
 
+## [7.10.7] — 2026-06-30
+- **Prev/Next episode buttons in on-device playback are now wider and easier to tap.** The header nav buttons (`#lpPrevEpBtn` / `#lpNextEpBtn`) went from `px-3` to `px-6` and now centre their glyph, giving a larger touch target ([static/index.html](static/index.html)).
+
 ## [7.10.6] — 2026-06-30
 - **On-device skip tile ("Skip Credits" / "Next Episode in N") no longer stays frozen on screen after an episode change.** Fix for "the skip credits button does not disappear." `_lpHideSkipOffer()` only hid the DOM tile when `lp.skipOfferType` was still set, but the auto-skip-to-next path nulls `skipOfferType` inside `_lpLoadIndex` (when loading the new episode) *before* the trailing hide runs — so the guard skipped the hide and the stale "Next Episode in 1" tile was left painted over the freshly-loaded episode, with `lpEvaluateSkipOffer` early-returning while the new file's `skipData` was still loading. `_lpHideSkipOffer` is now unconditional (always clears both the state var and the DOM tile), `_lpLoadIndex` routes through it, and `lpEvaluateSkipOffer` clears any leftover tile when a file has no skip data yet ([static/index.html](static/index.html)).
 
