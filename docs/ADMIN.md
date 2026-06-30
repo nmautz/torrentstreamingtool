@@ -240,7 +240,7 @@ See [RUNTIME.md § LAN detection](RUNTIME.md) and [GOTCHAS.md](GOTCHAS.md).
 Chooses how far the Mullvad kill switch reaches when the VPN drops. A single toggle, persisted under `library.json → settings.vpn_killswitch` (`block_ui`, default `true`), mirrored into `state.vpn_block_ui` and surfaced in the `state` + `vpn_status` SSE events so every dashboard reacts live.
 
 - **Block UI** (`block_ui: true`, the historical behaviour) — a VPN drop locks the whole dashboard behind the full-screen "VPN DISCONNECTED" overlay until the VPN returns.
-- **qBit Only** (`block_ui: false`) — only qBittorrent is killed; the overlay is suppressed (the VPN pill still turns red) so a viewer can keep using the dashboard, e.g. to watch already-prepped on-device content.
+- **qBit Only** (`block_ui: false`) — only qBittorrent is killed; the overlay is suppressed (the VPN pill still turns red) so a viewer can keep using the dashboard, e.g. to watch already-prepped on-device content. In this mode the controls that *do* need qBittorrent are greyed out + click-blocked with an explanatory tooltip (`applyVpnGate` / `body.vpn-down` / `.vpn-gated`; see [FRONTEND.md](FRONTEND.md)) rather than failing silently: Search, the Save/Play buttons on results, "Recheck hashes", and the in-progress download badge ("⚠ VPN down — paused").
 
 **qBittorrent is killed on a VPN drop regardless of this setting** — that invariant is enforced unconditionally by `vpn_guard` (in-process) and `watchdog.py` (process level), and the P2P stream/download endpoints stay 403'd in both modes. `block_ui` governs the UI lockout only. See [GOTCHAS.md § VPN](GOTCHAS.md#vpn) and [DAEMON_WATCHDOG.md](DAEMON_WATCHDOG.md).
 

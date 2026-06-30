@@ -1,5 +1,8 @@
 # Changelog
 
+## [7.11.0] — 2026-06-30
+- **VPN-down state now greys out the features that need it, instead of failing silently.** When the kill-switch overlay is turned off (`block_ui=false`), the dashboard previously kept looking fully functional after a VPN drop even though qBittorrent had been terminated server-side — Search, the Save/Play buttons on results, and "Recheck hashes" all just 403'd when clicked. They are now greyed and click-blocked the instant the VPN drops (`body.vpn-down` + `.vpn-gated` CSS, an `applyVpnGate()` title swap, and a capture-phase click guard that surfaces an explanatory alert), with a hover tooltip explaining why. In-progress download rows swap their "↓ Downloading" badge for a red **⚠ VPN down — paused** badge (with a tooltip) so it's clear nothing is moving until the VPN reconnects. The greying is driven purely off the `body.vpn-down` class so it also covers controls rendered after the drop. The `/api/library/{id}/recheck` endpoint now also returns a clear 403 when the VPN is down (qBittorrent is stopped) instead of an opaque qBit failure ([static/index.html](static/index.html), [main.py](main.py)). See [docs/GOTCHAS.md](docs/GOTCHAS.md).
+
 ## [7.10.7] — 2026-06-30
 - **Prev/Next episode buttons in on-device playback are now wider and easier to tap.** The header nav buttons (`#lpPrevEpBtn` / `#lpNextEpBtn`) went from `px-3` to `px-6` and now centre their glyph, giving a larger touch target ([static/index.html](static/index.html)).
 

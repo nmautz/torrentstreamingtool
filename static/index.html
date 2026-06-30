@@ -351,6 +351,14 @@
       animation: ctrl-spin 0.7s linear infinite; pointer-events: none; z-index: 5;
     }
     .ctrl-loading-form { opacity: 0.55; cursor: not-allowed !important; }
+    /* ── VPN-down gating ─────────────────────────────────────────────────────
+       When the VPN drops, qBittorrent is killed server-side, so every control
+       that needs it (search, Save/Play results, hash recheck) is greyed and
+       click-blocked. The greying is pure CSS off `body.vpn-down` so it also
+       covers controls rendered *after* the drop; applyVpnGate() adds the
+       explanatory title and the capture-phase click guard surfaces an alert.
+       pointer-events stay ON so the title tooltip shows and the guard fires. */
+    body.vpn-down .vpn-gated { opacity: 0.4 !important; cursor: not-allowed !important; }
     /* ── Local player (Handoff to Device) ───────────────────────────────────
        Single <video> element. The container has two visual modes toggled via
        a `.lp-tiny` class: full-screen overlay (default) and a tiny floating
@@ -1733,10 +1741,10 @@
         <div class="flex gap-0">
           <input id="searchInput" type="search" autocomplete="off"
             placeholder="Search for movies, shows…"
-            class="flex-1 bg-gray-900 border-0 border-b-2 border-gray-700 focus:border-indigo-500
+            class="vpn-gated flex-1 bg-gray-900 border-0 border-b-2 border-gray-700 focus:border-indigo-500
                    px-4 py-4 text-base placeholder-gray-700 focus:outline-none transition-colors" />
           <button id="searchBtn"
-            class="bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 px-6 py-4
+            class="vpn-gated bg-indigo-600 hover:bg-indigo-500 active:bg-indigo-700 px-6 py-4
                    text-sm font-black uppercase tracking-wide transition-colors
                    disabled:opacity-40 disabled:cursor-not-allowed whitespace-nowrap">Search</button>
         </div>
@@ -3339,6 +3347,41 @@ function renderVpn(secure,statusText,blockUi){
     overlay.classList.toggle("hidden",!blockUi);
     if(statusText) detail.textContent=statusText;
   }
+  applyVpnGate(secure);
+}
+
+// ── VPN feature gating ───────────────────────────────────────────────────────
+// When the VPN is down, qBittorrent is killed server-side, so any control that
+// needs it (search, Save/Play results, hash recheck) is greyed + click-blocked.
+// `body.vpn-down` drives the CSS greying (covers controls rendered after the
+// drop too); here we just keep that class in sync and swap each gated control's
+// `title` so a hover explains why it's disabled. Click-blocking is handled once,
+// at the document level, by the capture-phase guard installed in init.
+const VPN_GATE_MSG = "VPN disconnected — reconnect Mullvad to use this.";
+function applyVpnGate(secure){
+  if(secure===undefined) secure = !(typeof app!=="undefined" && app.vpn_secure===false);
+  const down = !secure;
+  document.body.classList.toggle("vpn-down", down);
+  document.querySelectorAll(".vpn-gated").forEach(el=>{
+    if(down){
+      if(el.dataset.vpnPrevTitle===undefined) el.dataset.vpnPrevTitle = el.getAttribute("title")||"";
+      el.setAttribute("title", VPN_GATE_MSG);
+    } else if(el.dataset.vpnPrevTitle!==undefined){
+      if(el.dataset.vpnPrevTitle) el.setAttribute("title", el.dataset.vpnPrevTitle);
+      else el.removeAttribute("title");
+      delete el.dataset.vpnPrevTitle;
+    }
+  });
+}
+// Authoritative guard for keyboard/programmatic action paths (the capture click
+// guard covers pointer clicks; the server also 403s). Returns true + alerts when
+// the action must be blocked because the VPN is down.
+function vpnBlocked(){
+  if(typeof app!=="undefined" && app.vpn_secure===false){
+    showAlert("VPN disconnected — reconnect Mullvad VPN first.","error");
+    return true;
+  }
+  return false;
 }
 
 // ── Player footer ──────────────────────────────────────────────────────────
@@ -4961,7 +5004,11 @@ function renderLibrary(items){
       // Downloading badge: an idle-only item that the scheduler is currently holding
       // (idle window closed) reads "Idle — waiting"; otherwise the live "Downloading".
       let dlBadge;
-      if(item.download_mode==="idle"){
+      if(!app.vpn_secure){
+        // VPN down ⇒ qBittorrent was terminated server-side, so nothing is
+        // actually downloading regardless of the scheduled mode. Say so plainly.
+        dlBadge=`<span class="text-[10px] px-1.5 py-0.5 bg-red-900/50 text-red-400 border border-red-800" title="VPN disconnected — qBittorrent was stopped, so this download is paused until the VPN reconnects.">⚠ VPN down — paused</span>`;
+      } else if(item.download_mode==="idle"){
         dlBadge=app.download_idle_open
           ?`<span class="text-[10px] px-1.5 py-0.5 bg-yellow-900/50 text-yellow-400 border border-yellow-800 blink">↓ Idle download</span>`
           :`<span class="text-[10px] px-1.5 py-0.5 bg-sky-950 text-sky-300 border border-sky-800" title="Will download during the idle/night window">⏸ Idle — waiting</span>`;
@@ -6328,6 +6375,7 @@ async function epSchedPrep(mode, btn){
 // force-recheck). Any file that was complete but comes back damaged has its cached
 // HLS bundle purged so it re-preps from the repaired source.
 async function epRecheckSelected(btn){
+  if(vpnBlocked()) return;   // recheck drives qBittorrent, which is stopped while the VPN is down
   const paths=[...epChecked];
   if(!paths.length){ showAlert("Select the episodes you want to verify first.","warn"); return; }
   if(!confirm(`Recheck ${paths.length} file hash(es)?\n\nThis runs a full piece-by-piece verify of the torrent in qBittorrent. Damaged files are re-fetched and their stream-prep cache is invalidated.`)) return;
@@ -6568,7 +6616,7 @@ function renderEpList(){
     // Recheck button.
     rows += `<div class="flex items-center gap-1.5 flex-wrap">
       <button onclick="epRecheckSelected(this)" title="Force a piece-hash verify of the checked episodes; damaged files are re-fetched and their stream-prep cache is invalidated"
-        class="text-[11px] font-bold uppercase tracking-wide px-2 py-1 bg-gray-800 hover:bg-amber-900/50 text-amber-300 hover:text-amber-200 transition-colors flex items-center gap-1">
+        class="vpn-gated text-[11px] font-bold uppercase tracking-wide px-2 py-1 bg-gray-800 hover:bg-amber-900/50 text-amber-300 hover:text-amber-200 transition-colors flex items-center gap-1">
         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 4v5h.582m15.356 2A8.001 8.001 0 004.582 9m0 0H9m11 11v-5h-.581m0 0a8.003 8.003 0 01-15.357-2m15.357 2H15"/></svg>
         Recheck hashes (<span id="epRecheckCount">${epChecked.size}</span>)
       </button>
@@ -6597,6 +6645,7 @@ function renderEpList(){
 
   el.innerHTML=html;
   updateEpCount();
+  applyVpnGate();   // title the recheck button if it rendered while VPN is down
 }
 
 function epToggleWatchedSection(seasonKey){
@@ -7673,6 +7722,7 @@ function _selectedCategoriesParam(){
 // ── Search ─────────────────────────────────────────────────────────────────
 async function doSearch(q){
   q=q.trim(); if(!q) return;
+  if(vpnBlocked()) return;   // qBit is down; downloading/streaming a result would 403 anyway
   const btn=document.getElementById("searchBtn");
   const grid=document.getElementById("resultsGrid");
   const wrap=document.getElementById("resultsWrap"),empty=document.getElementById("emptyState");
@@ -7715,7 +7765,7 @@ async function doSearch(q){
           ${item.tracker?`<span class="text-gray-700">·</span><span class="text-[11px] text-gray-700 truncate max-w-[120px]">${escHtml(item.tracker)}</span>`:""}
         </div>
         <div class="flex gap-2">
-          <button class="dl-btn flex-1 flex items-center justify-center gap-1.5
+          <button class="dl-btn vpn-gated flex-1 flex items-center justify-center gap-1.5
                          bg-gray-800 hover:bg-gray-700 border border-gray-700
                          text-gray-300 hover:text-white text-sm font-black uppercase tracking-wide
                          py-3 transition-all active:scale-95"
@@ -7725,7 +7775,7 @@ async function doSearch(q){
                 d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
             </svg>Save
           </button>
-          <button class="play-btn flex-1 flex items-center justify-center gap-1.5
+          <button class="play-btn vpn-gated flex-1 flex items-center justify-center gap-1.5
                          bg-indigo-600 hover:bg-indigo-500 text-white
                          text-sm font-black uppercase tracking-wide py-3 transition-all active:scale-95
                          disabled:opacity-40 disabled:cursor-not-allowed"
@@ -7742,6 +7792,7 @@ async function doSearch(q){
       grid.appendChild(card);
     });
     wrap.classList.remove("hidden");
+    applyVpnGate();   // title the freshly-rendered Save/Play buttons if VPN is down
   } catch(err){
     showAlert(err.message,"error"); empty.classList.remove("hidden");
   } finally {
@@ -12424,6 +12475,9 @@ function connectSSE(){
     const d=JSON.parse(e.data); app.vpn_secure=d.secure; app.vpn_status=d.status;
     if(typeof d.block_ui === "boolean") app.vpn_block_ui=d.block_ui;
     renderVpn(d.secure,d.status,app.vpn_block_ui);
+    // Re-render the library so any in-progress download swaps its badge to/from
+    // "⚠ VPN down — paused" without waiting for the next library_update.
+    if(window._libCache) renderLibrary(window._libCache);
     if(!d.secure) showAlert("VPN disconnected — qBittorrent has been terminated.","error");
   });
   es.addEventListener("stream_status",e=>{
@@ -12574,6 +12628,15 @@ document.addEventListener("DOMContentLoaded",async()=>{
   // Pre-fetch default download path so modal opens instantly
   ensureDefaultSavePath();
 
+  // VPN feature gate: block clicks on any `.vpn-gated` control while the VPN is
+  // down, in the capture phase so the element's own onclick/listener never runs.
+  // Greying + tooltips are handled by applyVpnGate / CSS; this is the click stop.
+  document.addEventListener("click",e=>{
+    if(!document.body.classList.contains("vpn-down")) return;
+    const g=e.target.closest && e.target.closest(".vpn-gated");
+    if(g){ e.preventDefault(); e.stopPropagation(); showAlert("VPN disconnected — reconnect Mullvad VPN first.","error"); }
+  },true);
+
   // Search wiring
   const input=document.getElementById("searchInput"),btn=document.getElementById("searchBtn");
   btn.addEventListener("click",()=>doSearch(input.value));
@@ -12644,6 +12707,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.10.7</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.11.0</div>
 </body>
 </html>

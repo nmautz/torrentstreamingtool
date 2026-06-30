@@ -6999,6 +6999,8 @@ async def recheck_files(item_id: str, req: RecheckReq) -> JSONResponse:
 
     qBit rechecks whole torrents, not individual files, so the recheck covers the
     torrent; `file_paths` only narrows which files we report on + invalidate."""
+    if not state.vpn_secure:
+        raise HTTPException(403, "VPN not connected — qBittorrent is stopped, so hash recheck is unavailable.")
     if not req.file_paths:
         raise HTTPException(400, "file_paths required.")
     lib = await get_library()

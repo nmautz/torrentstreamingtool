@@ -294,6 +294,13 @@ Both guards return `vpn=False` if `mullvad` is not in PATH. Cannot-verify = unsa
 
 `settings.vpn_killswitch.block_ui` (admin toggle, default `true`) decides whether a VPN drop locks the whole dashboard behind the full-screen overlay (`true`) or only the qBit kill happens with the rest of the UI left usable (`false`). **It does not gate the qBit kill or the P2P endpoint 403s** — those are unconditional in both `vpn_guard` and `watchdog.py`. If you ever wire `block_ui` into the kill path you've reintroduced a leak: a VPN drop must always terminate qBittorrent regardless of this setting. The overlay is purely a frontend concern driven by `state.vpn_block_ui` (mirrored from the setting, broadcast in the `state` + `vpn_status` SSE events).
 
+### VPN-down feature greying must NOT use `pointer-events:none`, and the click guard runs in the CAPTURE phase
+
+When the VPN drops in `block_ui:false` mode, the dashboard greys the controls that need qBittorrent (Search, result Save/Play, Recheck) via `body.vpn-down .vpn-gated { opacity:.4 }` and blocks them. Two non-obvious constraints:
+
+1. **Don't grey with `pointer-events:none`.** That would kill the hover `title` tooltip (the whole point — telling the user *why* it's disabled) and stop the click guard from ever seeing the event. Greying is opacity/cursor only; pointer-events stay on.
+2. **The click guard is a `document`-level listener registered with `capture=true`.** Capture fires on `document` before the event reaches the target, so `e.stopPropagation()` there prevents the gated element's own inline `onclick`/`addEventListener` handlers from running at all. A bubble-phase guard would fire *after* the target's handlers (too late). Don't "simplify" it to a bubble listener or to setting `disabled` on each button (native `disabled` also suppresses the title tooltip and isn't reachable for dynamically-rendered result rows). Keyboard/programmatic paths that don't go through a pointer click (Enter in the search box, `epRecheckSelected`) call `vpnBlocked()` directly. The server still 403s (`/api/stream*`, `/api/library/download|prepare`, and now `/api/library/{id}/recheck`) — the greying is UX, not the security boundary. See [FRONTEND.md](FRONTEND.md), [ADMIN.md § VPN Kill Switch](ADMIN.md).
+
 ## Jackett
 
 ### `Category[]=0` returns no results
