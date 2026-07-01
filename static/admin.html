@@ -32,6 +32,25 @@
       animation: ctrl-spin 0.7s linear infinite; pointer-events: none; z-index: 5;
     }
     .ctrl-loading-form { opacity: 0.55; cursor: not-allowed !important; }
+    /* ── Help tips ───────────────────────────────────────────────────────────
+       `.help-tip` is a small square "?" chip whose `data-tip` text renders in
+       the single shared #tipPop popover (hover / keyboard focus / tap). Any
+       other element may also carry data-tip for a hover-only tip. Settings
+       loaders rewrite data-tip so tips describe the CURRENT configuration. */
+    .help-tip{
+      display:inline-flex; align-items:center; justify-content:center;
+      width:15px; height:15px; margin-left:6px; flex-shrink:0;
+      font-size:10px; font-weight:900; line-height:1; vertical-align:1px;
+      color:#818cf8; border:1px solid #3730a3; background:#111827;
+      cursor:help; user-select:none; -webkit-user-select:none;
+    }
+    .help-tip:hover, .help-tip.tip-open{ color:#fff; border-color:#6366f1; background:#312e81; }
+    #tipPop{
+      position:fixed; z-index:80; max-width:290px; display:none;
+      background:#030712; border:1px solid #374151; border-top:3px solid #4f46e5;
+      padding:10px 12px; font-size:11px; line-height:1.55; color:#d1d5db;
+      pointer-events:none; white-space:normal; box-shadow:0 8px 24px rgba(0,0,0,0.6);
+    }
   </style>
 </head>
 <body class="dark bg-gray-950 text-gray-100 min-h-screen flex flex-col">
@@ -145,7 +164,7 @@
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
         <div>
-          <h2 class="text-sm font-black uppercase tracking-wide">Background Activity</h2>
+          <h2 class="text-sm font-black uppercase tracking-wide">Background Activity<span class="help-tip" tabindex="0" data-tip="Badges: emerald 'Survives restart' means the job's state lives outside this process (downloads persist in qBittorrent); amber 'Lost on restart' means progress is in memory only and a restart discards it. Hover a badge to see what re-queues on its own.">?</span></h2>
           <p class="text-xs text-gray-500 mt-0.5">Everything the server is doing right now — and why. Auto-refreshes every 4 s while this tab is open.</p>
         </div>
         <button onclick="loadActivity(this)"
@@ -166,7 +185,7 @@
     <!-- Outstanding / idle backlog -->
     <div id="activityOutstandingCard" class="hidden bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800">
-        <h2 class="text-sm font-black uppercase tracking-wide">Outstanding Work</h2>
+        <h2 class="text-sm font-black uppercase tracking-wide">Outstanding Work<span class="help-tip" tabindex="0" data-tip="A row here means content is waiting on a trigger — idle time, a toggle that is off, or a manual button — not that anything is stuck. Each row says which gate applies.">?</span></h2>
         <p class="text-xs text-gray-500 mt-0.5">Not running right now — what's left to do, and why it isn't happening. Idle workers drain these automatically while the box is idle.</p>
       </div>
       <div id="activityOutstanding" class="divide-y divide-gray-800"></div>
@@ -184,7 +203,7 @@
     <!-- Categories override -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800">
-        <h2 class="text-sm font-black uppercase tracking-wide">Search Categories</h2>
+        <h2 class="text-sm font-black uppercase tracking-wide">Search Categories<span class="help-tip" tabindex="0" data-tip="Common Torznab IDs: 2000 = Movies, 3000 = Music, 5000 = TV, 8000 = Other. 0 disables filtering (search everything). Applies to every profile's searches the moment you save.">?</span></h2>
         <p class="text-xs text-gray-500 mt-0.5">Override the Jackett category filter (comma-separated IDs, or 0 for all). Restart not required.</p>
       </div>
       <div class="px-5 py-4 flex gap-3 items-end">
@@ -204,7 +223,7 @@
     <!-- TMDb metadata -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800">
-        <h2 class="text-sm font-black uppercase tracking-wide">TMDb Metadata</h2>
+        <h2 class="text-sm font-black uppercase tracking-wide">TMDb Metadata<span class="help-tip" tabindex="0" data-tip="A key saved here is an admin override — it beats any TMDB_API_KEY in .env and needs no restart. Save the field empty to clear the override and fall back to .env. The source tag next to the field shows which one is active.">?</span></h2>
         <p class="text-xs text-gray-500 mt-0.5">
           Free <a href="https://www.themoviedb.org/settings/api" target="_blank" rel="noopener" class="text-indigo-400 hover:text-indigo-300 underline">TMDb v3 API key</a>
           for show / episode titles, descriptions, and stills in the episode picker. Leave blank to disable (the UI falls back to filename parsing).
@@ -230,10 +249,10 @@
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
         <div class="min-w-0">
-          <h2 class="text-sm font-black uppercase tracking-wide">Indexer Health</h2>
+          <h2 class="text-sm font-black uppercase tracking-wide">Indexer Health<span class="help-tip" tabindex="0" data-tip="Statuses come from the last user search and from the Test buttons. A failing indexer never breaks search — its results are just missing. Users only see an error when every indexer fails at once.">?</span></h2>
           <p class="text-xs text-gray-500 mt-0.5">Whether each indexer is responding. Search keeps working as long as at least one is healthy.</p>
         </div>
-        <button onclick="testAllIndexers(this)"
+        <button onclick="testAllIndexers(this)" data-tip="Probes every configured indexer through Jackett right now — slow or Cloudflare-protected ones can take ~10 s each."
           class="text-xs text-indigo-400 hover:text-indigo-300 uppercase tracking-wide font-bold transition-colors border border-indigo-800 hover:border-indigo-600 px-3 py-1.5 flex-shrink-0">
           Test All
         </button>
@@ -263,6 +282,7 @@
           <h2 class="text-sm font-black uppercase tracking-wide flex items-center gap-2">
             FlareSolverr
             <span id="fsBadge" class="text-[10px] font-black uppercase tracking-widest px-1.5 py-0.5 bg-gray-800 text-gray-400">…</span>
+            <span class="help-tip" tabindex="0" data-tip="StreamLink can't configure Jackett for you (Jackett has no API for this) — after installing, open Jackett, click the cog (Configure Jackett), paste the FlareSolverr API URL shown below, and Save. Most indexers don't need it.">?</span>
           </h2>
           <p class="text-xs text-gray-500 mt-0.5">Optional proxy that solves Cloudflare / DDoS-Guard browser challenges for indexers that need it. Install it here, then point Jackett at its API URL by hand.</p>
         </div>
@@ -304,7 +324,7 @@
   <div id="panelContent" class="hidden flex-1 overflow-y-auto p-3 sm:p-5 max-w-2xl mx-auto w-full">
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800">
-        <h2 class="text-sm font-black uppercase tracking-wide">Content Lock</h2>
+        <h2 class="text-sm font-black uppercase tracking-wide">Content Lock<span class="help-tip" tabindex="0" data-tip="Locked items disappear from the library list for regular profiles, but stay visible to admins and to profiles marked Allowed under Profile PINs → Restricted Content. Move relocates a whole series' files (torrents keep seeding from the new spot).">?</span></h2>
         <p class="text-xs text-gray-500 mt-0.5">Admin-only items are hidden from all regular profiles.</p>
       </div>
       <div id="contentList" class="divide-y divide-gray-800">
@@ -318,7 +338,7 @@
     <div class="bg-gray-900 border border-gray-800 mb-5">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
         <div class="min-w-0">
-          <h2 class="text-sm font-black uppercase tracking-wide">Smart Skip</h2>
+          <h2 class="text-sm font-black uppercase tracking-wide">Smart Skip<span class="help-tip" tabindex="0" data-tip="Intros and credits are found by matching audio fingerprints across a series' episodes, so single files and 1-episode series can't be analyzed. Manual edits are tagged 'manual' and survive future analyzer runs.">?</span></h2>
           <p class="text-xs text-gray-500 mt-0.5">Audio-fingerprint intro/credits detection. Edit times manually or re-run analysis per series.</p>
         </div>
         <span id="skipAnalyzerStatus" class="text-[10px] font-bold uppercase tracking-widest px-2 py-1 border flex-shrink-0">…</span>
@@ -363,7 +383,7 @@
   <div id="panelProfiles" class="hidden flex-1 overflow-y-auto p-3 sm:p-5 max-w-2xl mx-auto w-full">
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800">
-        <h2 class="text-sm font-black uppercase tracking-wide">Profile PINs</h2>
+        <h2 class="text-sm font-black uppercase tracking-wide">Profile PINs<span class="help-tip" tabindex="0" data-tip="PINs only gate the profile picker — profiles aren't accounts. Restricted Content lets a profile see admin-locked items without being an admin; Search Sources caps which indexers its searches may use.">?</span></h2>
         <p class="text-xs text-gray-500 mt-0.5">All profiles show in the picker; a 6-digit PIN prompts for entry when that profile is selected.</p>
       </div>
       <div id="profilePinList" class="divide-y divide-gray-800">
@@ -377,7 +397,7 @@
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
         <div class="min-w-0">
-          <h2 class="text-sm font-black uppercase tracking-wide">Offline Cache</h2>
+          <h2 class="text-sm font-black uppercase tracking-wide">Offline Cache<span class="help-tip" tabindex="0" data-tip="Badges: Cached = ready for on-device play · Processing = encoding now · Queued = waiting for a slot · Error = last prep failed (details inline) · Partial = leftover from an interrupted encode, safe to delete. Nothing is evicted automatically unless Auto-Purge below is on.">?</span></h2>
           <p class="text-xs text-gray-500 mt-0.5">Preprocessed MP4s stored in <code class="font-mono text-gray-400" id="offCacheDir">.offline_cache/</code>. Source files that have been re-encoded or removed leave their entries as orphans.</p>
         </div>
         <button id="offRefreshBtn" onclick="loadOfflineCache(true)"
@@ -401,7 +421,7 @@
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
         <div class="min-w-0">
-          <h3 class="text-sm font-black uppercase tracking-wide">Auto-Purge Orphans</h3>
+          <h3 class="text-sm font-black uppercase tracking-wide">Auto-Purge Orphans<span class="help-tip" tabindex="0" id="apurgeTip" data-tip="Checked every 5 minutes. Only orphan bundles — ones no library file maps to any more — are ever deleted; bundles backing current items and in-flight prep jobs are always safe.">?</span></h3>
           <p class="text-xs text-gray-500 mt-0.5">When the cache grows past the size below, orphan files are deleted automatically. Bundles for current library items are never touched.</p>
         </div>
         <label class="flex-shrink-0 inline-flex items-center cursor-pointer">
@@ -412,7 +432,7 @@
       <div class="px-5 py-4 flex items-end justify-between gap-3 flex-wrap">
         <div>
           <label class="block text-[10px] font-bold text-gray-500 uppercase tracking-widest mb-1.5">Purge When Cache Reaches (GB)</label>
-          <input id="apMaxGb" type="number" min="1" max="10000" step="1" value="50"
+          <input id="apMaxGb" type="number" min="1" max="10000" step="1" value="50" oninput="_updateApurgeTip()"
             class="w-28 bg-gray-950 border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:outline-none focus:border-indigo-500"/>
         </div>
         <button onclick="saveCacheAutopurge(this)"
@@ -443,7 +463,7 @@
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
         <div class="min-w-0">
-          <h2 class="text-sm font-black uppercase tracking-wide">Cleanup</h2>
+          <h2 class="text-sm font-black uppercase tracking-wide">Cleanup<span class="help-tip" tabindex="0" data-tip="Every action here is per-row and confirm-gated — there is deliberately no bulk purge. Anything a live stream or active download is using is flagged In Use and refuses to delete.">?</span></h2>
           <p class="text-xs text-gray-500 mt-0.5">Reconciles qBittorrent, the library, and every configured download/library folder (<code class="font-mono text-gray-400" id="cleanDir">…</code>). Recover or delete broken/orphan torrents, library items whose files vanished, and stray files no torrent owns. StreamLink's own cache folders are never flagged.</p>
         </div>
         <button id="cleanRefreshBtn" onclick="loadCleanup(true)"
@@ -524,7 +544,7 @@
 
       <!-- Section A: default HLS resolutions -->
       <div class="px-5 py-4 border-b border-gray-800 space-y-3">
-        <div class="text-[11px] font-bold text-gray-300 uppercase tracking-widest">Default On-Device Resolutions</div>
+        <div class="text-[11px] font-bold text-gray-300 uppercase tracking-widest">Default On-Device Resolutions<span class="help-tip" tabindex="0" data-tip="The player switches rungs automatically as bandwidth changes. Every extra rung adds encode time and disk; on a strong home network the source rung alone is usually enough — extra rungs mostly help phones on cellular or weak Wi-Fi.">?</span></div>
         <p class="text-[11px] text-gray-500">Which adaptive-quality down-rungs new stream preps build. The <strong>source resolution</strong> is always included. Fewer rungs = smaller bundles, but fewer quality options for the player to drop to on a weak connection. <strong>Affects future preps only</strong> — use <em>Drop HLS Resolutions</em> below to shrink existing bundles.</p>
         <div id="hlsLadderBoxes" class="flex flex-wrap gap-3 text-[11px] text-gray-400">
           <label class="flex items-center gap-1.5 opacity-60"><input type="checkbox" checked disabled class="accent-indigo-500"> Source (always)</label>
@@ -662,7 +682,7 @@
 
       <!-- Section D: on-demand stream only -->
       <div class="px-5 py-4 border-t border-gray-800 space-y-3">
-        <div class="text-[11px] font-bold text-gray-300 uppercase tracking-widest">On-Demand Stream Only</div>
+        <div class="text-[11px] font-bold text-gray-300 uppercase tracking-widest">On-Demand Stream Only<span class="help-tip" tabindex="0" data-tip="Just-in-time segments are encoded per viewing and thrown away — zero permanent disk use, but seeking is slower and every concurrent viewer costs encode CPU. Best for shows watched rarely on a box that's short on disk.">?</span></div>
         <p class="text-[11px] text-gray-500">Mark a show so on-device (browser) playback always uses the <strong>just-in-time</strong> stream — segments are transcoded as you watch and discarded after, so <strong>no permanent file is ever stored</strong>. Enabling one deletes its existing on-device bundles to reclaim space now. <strong>Playing on the TV (VLC) is unaffected.</strong></p>
         <div id="ooUnavail" class="hidden text-xs text-amber-300 bg-amber-950/30 px-3 py-2">
           On-device streaming isn't available on this host (macOS), so this setting has no effect here.
@@ -741,7 +761,7 @@
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
         <div class="min-w-0">
-          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">System Health</h2>
+          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">System Health<span class="help-tip" tabindex="0" data-tip="Each component reads ok / degraded / overloaded; the badge shows the worst one. Network flags packet loss only after it persists under real traffic, so a fast download's ramp-up doesn't count as overload. The same status drives the user dashboard's 'host busy' banner.">?</span></h2>
           <p class="text-xs text-gray-500 mt-0.5">Live host load. Background prep/transcoding runs below normal priority and is stopped the moment a viewer is active.</p>
         </div>
         <span id="sysOverallBadge" class="flex-shrink-0 text-[10px] font-bold uppercase tracking-wide px-2 py-1 border border-gray-700 text-gray-500">—</span>
@@ -819,7 +839,7 @@
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
         <div class="min-w-0">
-          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Scheduled Restart</h2>
+          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Scheduled Restart<span class="help-tip" tabindex="0" id="srTip" data-tip="Reboots the whole host machine daily at the set time, once idle. In-flight stream prep also defers it — HLS prep can't checkpoint, so a mid-encode reboot would discard the work.">?</span></h2>
           <p class="text-xs text-gray-500 mt-0.5">Reboots the host daily at a set time — but only when idle. If the box was used in the last <span id="srIdleEcho">15</span> min at the scheduled time, it waits and re-checks every <span id="srIdleEcho2">15</span> min until idle, then reboots.</p>
         </div>
         <button id="srEnabledBtn" onclick="toggleScheduledReboot()"
@@ -873,7 +893,7 @@
     <!-- Automatic stream prep -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800">
-        <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Automatic Stream Prep</h2>
+        <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Automatic Stream Prep<span class="help-tip" tabindex="0" id="autoPrepTip" data-tip="This mode also doubles as the idle-download window: items set to 'Download at idle only' can only download while this window is open (Always = always open, When Idle = while idle, Never = never opens).">?</span></h2>
         <p class="text-xs text-gray-500 mt-0.5">Controls when un-prepped library files are automatically prepared for on-device streaming. Each bundle is roughly 1.7× the source size. (Playing on the TV and the Force button below prep regardless of this setting.)</p>
       </div>
 
@@ -901,13 +921,13 @@
       <div id="apIdleFields" class="hidden px-5 py-4 border-b border-gray-800 grid grid-cols-1 sm:grid-cols-2 gap-4">
         <div class="space-y-1.5">
           <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Idle Time (min)</label>
-          <input id="apIdle" type="number" min="1" max="720" value="30"
+          <input id="apIdle" type="number" min="1" max="720" value="30" oninput="_updateAutoPrepTip()"
             class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none"/>
           <p class="text-[10px] text-gray-600">No usage (playback, stream, download, or site activity) for this long ⇒ start prepping.</p>
         </div>
         <div class="space-y-1.5">
           <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">When Activity Returns</label>
-          <select id="apOnActivity"
+          <select id="apOnActivity" onchange="_updateAutoPrepTip()"
             class="w-full bg-black border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-indigo-500 outline-none">
             <option value="hard">Stop immediately (discard in-flight file)</option>
             <option value="soft">Finish the current file, then hold</option>
@@ -933,7 +953,7 @@
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 flex items-center justify-between gap-3">
         <div class="min-w-0">
-          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Auto-Prep on Play</h2>
+          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Auto-Prep on Play<span class="help-tip" tabindex="0" data-tip="These preps queue as 'interactive': they ignore the global pause gate, run even while the box is busy, and preempt any bulk encode — the series being watched always wins. Starting a different series cancels the previous chain.">?</span></h2>
           <p class="text-xs text-gray-500 mt-0.5">When a video is played on the TV, immediately prep that episode for on-device streaming, then the rest of the playlist one episode at a time. If the episode is resumed with under 5 minutes left, the next one is prepped instead. Runs no matter the Automatic Stream Prep setting above or whether the box is in use.</p>
         </div>
         <button id="ppEnabledBtn" onclick="togglePlayPrep()"
@@ -954,7 +974,7 @@
       <!-- Auto-fingerprint -->
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
         <div class="min-w-0">
-          <h3 class="text-xs font-black uppercase tracking-wide text-gray-200">Auto-Fingerprint (Smart Skip)</h3>
+          <h3 class="text-xs font-black uppercase tracking-wide text-gray-200">Auto-Fingerprint (Smart Skip)<span class="help-tip" tabindex="0" data-tip="Runs one series at a time and bails the instant the box is used. A series that failed analysis stays failed rather than retrying in a loop — re-run it manually from the Smart Skip tab.">?</span></h3>
           <p class="text-[11px] text-gray-500 mt-0.5">Analyze any series that's never been fingerprinted for intro/credits skip, one at a time.</p>
           <p id="amFpBacklog" class="text-[11px] text-indigo-400 mt-1 font-mono"></p>
         </div>
@@ -965,7 +985,7 @@
       <!-- Auto-validate -->
       <div class="px-5 py-4 flex items-center justify-between gap-3">
         <div class="min-w-0">
-          <h3 class="text-xs font-black uppercase tracking-wide text-gray-200">Auto-Validate Files</h3>
+          <h3 class="text-xs font-black uppercase tracking-wide text-gray-200">Auto-Validate Files<span class="help-tip" tabindex="0" data-tip="Verdicts are saved into the library, so finished files are never re-checked and the pass resumes after a restart. A manual File Validator scan takes priority over it; both drain the same backlog.">?</span></h3>
           <p class="text-[11px] text-gray-500 mt-0.5">Deep-decode source files that have never been validated, to surface corruption. Each verdict is remembered, so this resumes after a restart instead of starting over.</p>
           <p id="amValBacklog" class="text-[11px] text-indigo-400 mt-1 font-mono"></p>
         </div>
@@ -1003,11 +1023,13 @@
         <div id="fpStatus" class="text-[11px] text-gray-500 min-w-0">Not running.</div>
         <div class="flex items-center gap-2 flex-shrink-0">
           <button id="fpStopSoftBtn" onclick="stopForcePrep(false)"
+            data-tip="Lets the file that's encoding right now finish, then stops the run. Nothing is wasted."
             class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-amber-800 bg-amber-950/40 text-amber-300 hover:bg-amber-900 transition-colors disabled:opacity-40"
             disabled>
             Stop (finish file)
           </button>
           <button id="fpStopHardBtn" onclick="stopForcePrep(true)"
+            data-tip="Kills the in-flight encode immediately — that file re-preps from scratch next time (HLS prep can't checkpoint)."
             class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-red-800 bg-red-950/40 text-red-300 hover:bg-red-900 transition-colors disabled:opacity-40"
             disabled>
             Stop Now
@@ -1024,14 +1046,17 @@
       </div>
       <div class="px-5 py-4 flex flex-wrap items-center gap-2">
         <button id="pvOffBtn" onclick="setPrepValidate('off')"
+          data-tip="Bulk prep never validates. You can still scan and repair manually with the File Validator below."
           class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">
           Don't Validate
         </button>
         <button id="pvBeforeBtn" onclick="setPrepValidate('before')"
+          data-tip="Deep-validate each source right before its bulk-prep encode and repair it if damaged — the bundle is always built from a healthy file, at the cost of validation time ahead of every encode."
           class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">
           Repair Before Prep
         </button>
         <button id="pvAfterBtn" onclick="setPrepValidate('after')"
+          data-tip="Build the bundle first, then validate the source. Bundles arrive sooner, but a file found damaged is only repaired and re-prepped on the next cycle — its first bundle may come from the damaged source."
           class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">
           Repair After Prep
         </button>
@@ -1041,7 +1066,7 @@
     <!-- File validator -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800">
-        <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">File Validator</h2>
+        <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">File Validator<span class="help-tip" tabindex="0" data-tip="Verdicts persist per file, so Automatic Maintenance skips anything already validated here. Repair rewrites the file in place — a torrent-backed file stops seeding afterwards; for those, re-downloading is usually the better fix.">?</span></h2>
         <p class="text-xs text-gray-500 mt-0.5">Decode your source files with ffmpeg to find ones that are <strong>damaged or corrupt</strong>. This is separate from the torrent recheck — it catches a bad source even when the download was perfect. <strong>Deep</strong> reads each file end to end (slow, catches mid-file corruption); <strong>Quick</strong> only checks that the file opens.</p>
       </div>
 
@@ -1112,7 +1137,7 @@
     <!-- Network adapter -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800">
-        <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Network Adapter</h2>
+        <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Network Adapter<span class="help-tip" tabindex="0" data-tip="The pick is stored by adapter name, so a DHCP address change doesn't break it. It also decides what remote.local (mDNS) and the printed launcher URL point at. If the adapter goes offline, the server falls back to the route-table pick and says so below.">?</span></h2>
         <p class="text-xs text-gray-500 mt-0.5">Pick which network adapter the server treats as its primary address. The dashboard stays reachable on <strong>every</strong> adapter, but connecting on any other one just redirects to the primary. If the chosen adapter goes offline, the server falls back to another and logs it.</p>
       </div>
       <div class="px-5 py-4 space-y-3">
@@ -1160,7 +1185,7 @@
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
         <div class="min-w-0">
-          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Seeding &amp; Bandwidth</h2>
+          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Seeding &amp; Bandwidth<span class="help-tip" tabindex="0" data-tip="These are qBittorrent's own global settings — qBit stores them itself, so they survive restarts and also apply to torrents added outside StreamLink.">?</span></h2>
           <p class="text-xs text-gray-500 mt-0.5">Global qBittorrent limits — apply to every torrent. Stop seeding once a share ratio is reached (files stay on disk), and cap up/down speeds so torrents don't saturate the connection.</p>
         </div>
         <span id="qbOffline" class="hidden flex-shrink-0 text-[10px] font-bold uppercase tracking-wide px-2 py-1 border border-amber-700 bg-amber-950/40 text-amber-300">qBit offline</span>
@@ -1169,7 +1194,7 @@
       <div class="px-5 py-4 border-b border-gray-800 space-y-4">
         <div class="flex items-center justify-between gap-3">
           <div class="min-w-0">
-            <div class="text-sm font-bold text-gray-200">Stop Seeding at Ratio</div>
+            <div class="text-sm font-bold text-gray-200">Stop Seeding at Ratio<span class="help-tip" tabindex="0" id="qbRatioTip" data-tip="When the ratio is hit the torrent is paused, not deleted — files stay on disk, only uploading stops. StreamLink never auto-resumes a ratio-paused torrent.">?</span></div>
             <div class="text-[11px] text-gray-600 mt-0.5">e.g. a 1.0 ratio stops a 10 GB show after it has uploaded 10 GB.</div>
           </div>
           <button id="qbRatioBtn" onclick="toggleQbRatio()"
@@ -1180,7 +1205,7 @@
         </div>
         <div class="space-y-1.5 max-w-[12rem]">
           <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Share Ratio</label>
-          <input id="qbRatio" type="number" min="0" max="9998" step="0.1" value="1.0"
+          <input id="qbRatio" type="number" min="0" max="9998" step="0.1" value="1.0" oninput="_renderQbRatio()"
             class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none"/>
           <p class="text-[10px] text-gray-600">Uploaded ÷ downloaded. Ignored while the toggle is off.</p>
         </div>
@@ -1218,8 +1243,8 @@
       </div>
 
       <div class="px-5 py-4 border-b border-gray-800 space-y-1.5 max-w-md">
-        <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Default Subtitle Language</label>
-        <select id="subLang"
+        <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Default Subtitle Language<span class="help-tip" tabindex="0" id="subLangTip" data-tip="Drives track selection, the online search, and AI generation.">?</span></label>
+        <select id="subLang" onchange="_updateSubLangTip()"
           class="w-full bg-black border border-gray-700 px-3 py-2 text-sm text-gray-200 focus:border-indigo-500 outline-none">
           <option value="">Any (no preferred language)</option>
         </select>
@@ -1336,7 +1361,7 @@
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
         <div class="min-w-0">
-          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Auto Update</h2>
+          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Auto Update<span class="help-tip" tabindex="0" id="auTip" data-tip="Applying an update reboots the host, so anything on the Activity tab marked Lost On Restart is discarded — check there first if work is in flight.">?</span></h2>
           <p class="text-xs text-gray-500 mt-0.5">Periodically pulls the chosen branch from GitHub. When a new commit lands, it runs setup.py (non-interactive), regenerates the supervisor wrapper script (no UAC — just a file write), then reboots the host for a clean restart on the new code. Auto-apply waits until the host is idle so a routine update can't interrupt a stream.</p>
         </div>
         <button id="auEnabledBtn" onclick="toggleAutoupdate()"
@@ -1441,6 +1466,7 @@
             Switch Branch
           </button>
           <button id="auResetBtn" onclick="resetHardNow()"
+            data-tip="Discards any local edits and uncommitted changes in the install folder and re-syncs to the branch tip — the recovery path when an update fails on a dirty checkout. Your library, settings, and media are untouched."
             class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-red-800 bg-red-950 text-red-300 hover:bg-red-900 transition-colors disabled:opacity-50">
             Reset Hard
           </button>
@@ -1761,11 +1787,11 @@ async function loadOfflineEncoder(){
     if(d.nvenc_available){
       el.textContent = "GPU: NVENC";
       el.className = "text-[10px] font-bold uppercase tracking-widest px-2 py-1 border border-emerald-700 text-emerald-400 bg-emerald-950/40";
-      el.title = "Offline transcodes will run on the NVIDIA GPU (h264_nvenc).";
+      el.dataset.tip = "Stream prep, compression, and repair encodes run on the NVIDIA GPU (h264_nvenc) — much faster and lighter on the CPU than software encoding.";
     } else {
       el.textContent = "CPU: libx264";
       el.className = "text-[10px] font-bold uppercase tracking-widest px-2 py-1 border border-amber-800 text-amber-400 bg-amber-950/40";
-      el.title = "No NVENC-capable GPU detected. Offline transcodes will use libx264 on the CPU.";
+      el.dataset.tip = "No NVENC-capable GPU detected — stream prep and compression encode with libx264 on the CPU. Expect slower preps; the idle-gated prep modes matter more on this host.";
     }
   }catch(_){
     el.classList.add("hidden");
@@ -1816,6 +1842,75 @@ function _fmtElapsed(sec){
   return Math.floor(sec/3600)+"h "+Math.floor((sec%3600)/60)+"m";
 }
 function _esc(s){ return (s==null?"":String(s)).replace(/[&<>"]/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c])); }
+
+// ── Help-tip popover ──────────────────────────────────────────────────────────
+// One shared popover serves every [data-tip] element. Hover / keyboard focus
+// shows it transiently; tapping a `.help-tip` chip pins it (tap again or tap
+// elsewhere to dismiss) so tips work on touch screens too. Settings loaders
+// call setTip() to rewrite a tip from the currently-saved configuration.
+let _tipEl = null, _tipPinned = false;
+
+function setTip(id, text){
+  const el = document.getElementById(id);
+  if(!el) return;
+  el.dataset.tip = text || "";
+  if(_tipEl === el) _tipShow(el);   // live-refresh an open tip
+}
+
+function _tipShow(el){
+  const text = el.dataset.tip || "";
+  if(!text) return;
+  let pop = document.getElementById("tipPop");
+  if(!pop){ pop = document.createElement("div"); pop.id = "tipPop"; document.body.appendChild(pop); }
+  pop.textContent = text;
+  pop.style.display = "block";
+  const r = el.getBoundingClientRect(), pw = pop.offsetWidth, ph = pop.offsetHeight;
+  const x = Math.min(Math.max(8, r.left + r.width/2 - pw/2), Math.max(8, window.innerWidth - pw - 8));
+  let y = r.top - ph - 8;
+  if(y < 8) y = r.bottom + 8;       // no room above → flip below
+  pop.style.left = `${Math.round(x)}px`;
+  pop.style.top  = `${Math.round(y)}px`;
+  if(_tipEl && _tipEl !== el) _tipEl.classList.remove("tip-open");
+  el.classList.add("tip-open");
+  _tipEl = el;
+}
+
+function _tipHide(){
+  if(_tipEl) _tipEl.classList.remove("tip-open");
+  _tipEl = null; _tipPinned = false;
+  const pop = document.getElementById("tipPop");
+  if(pop) pop.style.display = "none";
+}
+
+document.addEventListener("mouseover", e=>{
+  const t = e.target.closest("[data-tip]");
+  if(t && t !== _tipEl){ _tipPinned = false; _tipShow(t); }
+});
+document.addEventListener("mouseout", e=>{
+  const t = e.target.closest("[data-tip]");
+  if(t && t === _tipEl && !_tipPinned) _tipHide();
+});
+document.addEventListener("focusin", e=>{
+  const t = e.target.closest("[data-tip]");
+  if(t){ _tipPinned = false; _tipShow(t); }
+});
+document.addEventListener("focusout", e=>{
+  if(_tipEl && !_tipPinned) _tipHide();
+});
+// Chips pin on tap/click (and swallow the click so a chip inside a <label>
+// can't toggle its checkbox); a click anywhere else dismisses.
+document.addEventListener("click", e=>{
+  const chip = e.target.closest(".help-tip");
+  if(chip){
+    e.preventDefault(); e.stopPropagation();
+    if(_tipEl === chip && _tipPinned) _tipHide();
+    else { _tipShow(chip); _tipPinned = true; }
+    return;
+  }
+  if(_tipEl) _tipHide();
+}, true);
+document.addEventListener("scroll", ()=>{ if(_tipEl) _tipHide(); }, true);
+window.addEventListener("resize",  ()=>{ if(_tipEl) _tipHide(); });
 
 function startActivityPolling(){
   stopActivityPolling();
@@ -2203,6 +2298,10 @@ async function loadScheduledReboot(){
     } else {
       status.textContent = "Scheduled restart is off.";
     }
+    const tzName = tzSel.options[tzSel.selectedIndex]?.textContent || "system time";
+    setTip("srTip", d.enabled
+      ? `Currently ON: reboots the whole host daily at ${d.time || "00:00"} (${tzName}) once it has been idle ${d.idle_minutes ?? 15} min. In-flight stream prep also defers it — HLS prep can't checkpoint, so a mid-encode reboot would discard the work.`
+      : "Currently OFF: the host only reboots via the Reboot Machine card or by hand. Enable and Save to arm the daily idle-gated reboot; in-flight stream prep defers it so encodes aren't discarded.");
   }catch(_){}
 }
 
@@ -2252,6 +2351,23 @@ function _renderAutoPrepMode(){
   });
   // Idle-only sub-fields show only in idle mode.
   document.getElementById("apIdleFields").classList.toggle("hidden", _apMode !== "idle");
+  _updateAutoPrepTip();
+}
+
+// Contextual help: describe what the selected mode actually does — including
+// its side role as the idle-download window — using the current field values.
+function _updateAutoPrepTip(){
+  const idleMin = parseInt(document.getElementById("apIdle")?.value, 10) || 30;
+  const soft = document.getElementById("apOnActivity")?.value === "soft";
+  let t;
+  if(_apMode === "always"){
+    t = "Currently Always: preps whenever anything is un-prepped, even while the box is in use (encodes run at below-normal priority). The idle-download window is always open, so 'Download at idle only' items can download any time.";
+  } else if(_apMode === "idle"){
+    t = `Currently When Idle: prep starts after ${idleMin} min with no playback, stream, download, or site activity, and ${soft ? "finishes the current file before holding" : "stops the instant someone uses the box (the in-flight file is discarded and re-preps later)"}. 'Download at idle only' items share this idle window.`;
+  } else {
+    t = "Currently Never: nothing preps automatically, and the idle-download window never opens — items set to 'Download at idle only' won't start until this changes. Playing on the TV and Force Prep below still prep.";
+  }
+  setTip("autoPrepTip", t);
 }
 
 function setAutoPrepMode(mode){
@@ -2489,9 +2605,11 @@ function _renderVpnKs(){
   if(_vpnKsBlockUi){
     btn.textContent = "Block UI";
     btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-emerald-950 border-emerald-700 text-emerald-300 hover:bg-emerald-900 disabled:opacity-50";
+    btn.dataset.tip = "Currently Block UI: a VPN drop locks every dashboard behind the full-screen VPN DISCONNECTED overlay until the VPN returns. Click to switch to qBit Only.";
   } else {
     btn.textContent = "qBit Only";
     btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50";
+    btn.dataset.tip = "Currently qBit Only: a VPN drop still kills qBittorrent, but dashboards keep working (torrent-dependent controls grey out) so viewers can watch already-prepped content. Click to switch to Block UI.";
   }
 }
 
@@ -3463,6 +3581,10 @@ function _renderQbRatio(){
     btn.textContent = "Disabled";
     btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white";
   }
+  const ratio = parseFloat(document.getElementById("qbRatio")?.value) || 0;
+  setTip("qbRatioTip", _qbRatioOn
+    ? `Currently ON at ratio ${ratio}: every torrent pauses seeding once it has uploaded ${ratio}× what it downloaded. Files stay on disk, and StreamLink never auto-resumes a ratio-paused torrent.`
+    : "Currently OFF: torrents seed indefinitely. When enabled, a torrent pauses (files kept, only uploading stops) once uploaded ÷ downloaded reaches the ratio; StreamLink never auto-resumes it.");
 }
 
 // bytes/s → MiB/s for the input box: trim to at most 3 decimals, drop trailing zeros.
@@ -3641,12 +3763,32 @@ async function loadSubs(){
       }
     }
     if(langSel) langSel.value = d.default_language || "";
+    _updateSubLangTip();
     const status = document.getElementById("subStatus");
     if(status){
       const langTxt = d.default_language ? d.default_language.toUpperCase() : "Any language";
       status.textContent = `${langTxt} · subs ${_subOnDefault ? "on" : "off"} by default · auto-search ${_subAutoSearch ? "on" : "off"}.`;
     }
   }catch(_){}
+}
+
+// Contextual help for the language picker — the whisper translate-to-English
+// limitation only matters for some choices, so spell out what the current
+// selection means for AI generation.
+function _updateSubLangTip(){
+  const sel = document.getElementById("subLang");
+  if(!sel) return;
+  const code = sel.value;
+  const name = sel.options[sel.selectedIndex]?.textContent || code;
+  let t;
+  if(!code){
+    t = "Currently no preferred language: the first usable embedded track wins, online search has no target to look for, and AI subs transcribe whatever language is spoken.";
+  } else if(code === "eng"){
+    t = "Currently English: track selection and online search prefer English, and AI generation can translate foreign-language audio into English subs (whisper's only translation target).";
+  } else {
+    t = `Currently ${name}: track selection and online search prefer ${name}. Heads-up — AI generation can only translate into English, so for ${name} it falls back to transcribing the spoken language instead.`;
+  }
+  setTip("subLangTip", t);
 }
 
 function toggleSubOnDefault(){ _subOnDefault = !_subOnDefault; _renderSubToggles(); }
@@ -3990,6 +4132,12 @@ async function loadAutoupdate(){
 
     const msg = d.message
       || (cfg.last_error ? `Last error: ${cfg.last_error}` : "Idle.");
+    const _ivh = cfg.interval_hours || 6;
+    setTip("auTip", cfg.enabled
+      ? `Currently ON: checks '${cfg.branch || "main"}' every ${_ivh} h. ${cfg.auto_apply !== false
+          ? "New commits apply automatically once the host is idle; applying reboots the host, discarding anything marked Lost On Restart on the Activity tab."
+          : "New commits only show a banner — nothing applies until you click Apply Now. Check the Activity tab for Lost On Restart work before applying."}`
+      : "Currently OFF: no automatic update checks run. Check Now / Apply Now still work manually; applying reboots the host, discarding anything marked Lost On Restart on the Activity tab.");
     document.getElementById("auStatusMsg").textContent = msg;
     document.getElementById("auSummary").textContent =
       `v${d.ui_version || ""} · ${_auDevMode ? "all branches (dev)" : (d.allowed_branches?.join(" / ") || "main / beta / alpha")}`;
@@ -5282,6 +5430,7 @@ async function loadCacheAutopurge(){
   const d = await r.json();
   document.getElementById("apEnabled").checked = !!d.enabled;
   document.getElementById("apMaxGb").value = d.max_gb;
+  _updateApurgeTip();
   const lastEl = document.getElementById("apLast");
   if(d.last && d.last.deleted){
     lastEl.classList.remove("hidden");
@@ -5313,7 +5462,17 @@ async function saveCacheAutopurge(btn){
   if(!r.ok){ showToast(`Save failed (HTTP ${r.status}).`); return; }
   const d = await r.json();
   document.getElementById("apMaxGb").value = d.max_gb;
+  _updateApurgeTip();
   showToast(enabled ? `Auto-purge on — orphans cleared above ${d.max_gb} GB.` : "Auto-purge off.");
+}
+
+// Contextual help for the Auto-Purge card: reflect the toggle + size cap.
+function _updateApurgeTip(){
+  const on = !!document.getElementById("apEnabled")?.checked;
+  const gb = parseFloat(document.getElementById("apMaxGb")?.value) || 50;
+  setTip("apurgeTip", on
+    ? `Currently ON: every 5 minutes the total cache size is checked; at or above ${gb} GB, all orphan bundles are purged — the same set Purge All Orphans clears. Bundles backing current library items and active prep jobs are never touched.`
+    : "Currently OFF: orphan bundles only go away when you purge them manually. Enable to auto-purge orphans whenever the cache reaches the size cap (checked every 5 minutes); bundles for current library items are never touched.");
 }
 
 // Status → {label, classes for the badge}. Used for both per-file and per-item summaries.
@@ -5714,6 +5873,9 @@ async function loadProfilePins(){
           <div class="text-[11px] text-gray-600 mt-0.5">Allow this profile to see admin-only library items</div>
         </div>
         <button onclick="toggleElevated('${escHtml(p.id)}',${!p.elevated},this)"
+          data-tip="${p.elevated
+            ? 'Currently allowed: this profile sees admin-locked (Content Lock) items in the library without being an admin. Click to block.'
+            : 'Currently blocked: admin-locked (Content Lock) items are hidden from this profile. Click to allow.'}"
           class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
                  ${p.elevated
                    ? 'bg-indigo-900 border-indigo-700 text-indigo-300 hover:bg-indigo-800'
@@ -5727,6 +5889,9 @@ async function loadProfilePins(){
           <div class="text-[11px] text-gray-600 mt-0.5">${(p.allowed_indexers&&p.allowed_indexers.length)?`Limited to ${p.allowed_indexers.length} indexer${p.allowed_indexers.length===1?'':'s'}`:'All indexers allowed'}</div>
         </div>
         <button onclick="openSrcAllow('${escHtml(p.id)}','${escHtml(p.name)}')"
+          data-tip="${(p.allowed_indexers&&p.allowed_indexers.length)
+            ? `Currently limited to ${p.allowed_indexers.length} indexer${p.allowed_indexers.length===1?'':'s'} — enforced server-side at search time, so this profile can never search the others. Click to change.`
+            : 'Currently unrestricted: this profile may search every configured indexer. Click to limit it to a subset.'}"
           class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
                  ${(p.allowed_indexers&&p.allowed_indexers.length)
                    ? 'bg-indigo-900 border-indigo-700 text-indigo-300 hover:bg-indigo-800'

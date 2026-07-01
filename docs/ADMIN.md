@@ -19,6 +19,12 @@ Browsers will show a warning until `ca.pem` is added to the system trust store. 
 - Linux: `sudo cp ca.pem /usr/local/share/ca-certificates/streamlink-ca.crt && sudo update-ca-certificates`
 - Windows: `Import-Certificate -FilePath ca.pem -CertStoreLocation Cert:\\LocalMachine\\Root`
 
+## Help tips (7.16.0)
+
+Flat Metro-styled `?` chips (`.help-tip`) sit next to headings/controls on every tab; each element's `data-tip` attribute renders in a single shared popover (`#tipPop`, created lazily, `z-80`, viewport-clamped, flips below near the top edge). Hover or keyboard focus shows a tip transiently; **tapping a chip pins it** (tap again / tap elsewhere dismisses) so tips work on touch, where `title` attributes never showed. Any element may also carry `data-tip` for a hover-only tip (e.g. Test All, the Force-Prep Stop pair, the Validate-on-Prep mode buttons, Reset Hard, the encoder badge).
+
+The important tips are **contextual**: settings loaders rewrite them from the currently-saved config via `setTip(id, text)` (which live-refreshes an open popover) — `loadScheduledReboot` → `#srTip` (exact time/tz/idle window), `_updateAutoPrepTip` → `#autoPrepTip` (selected mode + live idle-minutes + soft/hard stop + the idle-download-window side effect), `_renderVpnKs` (button tip per mode), `_renderQbRatio` → `#qbRatioTip`, `_updateApurgeTip` → `#apurgeTip`, `_updateSubLangTip` → `#subLangTip` (whisper translate-to-English caveat for non-English picks), `loadAutoupdate` → `#auTip`, and the per-profile Restricted Content / Search Sources buttons in `loadProfilePins`. When adding a new setting, prefer a contextual `setTip` in its loader over a static description of every mode.
+
 ## Tabs
 
 ### 0. Activity (default landing tab)

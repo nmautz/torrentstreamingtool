@@ -486,6 +486,8 @@ On `DOMContentLoaded`:
 
 Password-protected at `/admin`. Token stored in `sessionStorage.admin_token` and sent via `Authorization: Bearer …`. The dashboard auto-redirects HTTP → HTTPS for `/admin*` ([main.py:1772](../main.py#L1772)).
 
+**Help tips (7.16.0).** Metro-flat `?` chips (`.help-tip`) plus a single shared popover (`#tipPop`) render any element's `data-tip` text on hover / keyboard focus / tap-to-pin (touch-friendly, unlike `title`). Settings loaders rewrite the key tips from the currently-saved config via `setTip(id, text)` so they describe the admin's actual setup. See [ADMIN.md § Help tips](ADMIN.md) for the full list of contextual hooks; prefer a contextual `setTip` in a loader over a static multi-mode description when adding settings.
+
 ### Tabs
 
 1. **Indexers** ([line 95](../static/admin.html#L95)) — `INDEXER_CATEGORIES` override; list of configured Jackett indexers with delete; "Add indexer" modal that lists available indexers from Jackett and renders the config form for each.
