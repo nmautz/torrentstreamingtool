@@ -235,17 +235,20 @@
     }
     .fc-tile { flex-direction:column; align-items:center; justify-content:center; }
     /* ── Scrub-bar accidental-click guard ─────────────────────────────────────
-       The seek bar defaults to LOCKED: the track is greyed out and a centred
-       "HOLD TO UNLOCK" badge sits over it. A 0.5s press-and-hold unlocks it
-       (handled in JS); it re-locks 5s after the last interaction. While locked,
-       taps/clicks never seek and the scrub tooltip is suppressed. */
-    .seekBar:not(.unlocked) .seekTrack { opacity:.4; filter:grayscale(1); }
+       The seek bar defaults to LOCKED: a centred "HOLD TO UNLOCK" badge sits
+       over it. A 0.5s press-and-hold unlocks it (handled in JS); it re-locks
+       5s after the last interaction. While locked, taps/clicks never seek and
+       the scrub tooltip is suppressed. The track keeps its colour (only
+       slightly dimmed) so playback progress stays readable at a glance — the
+       badge, not a greyed-out track, is the lock indicator — and the badge
+       background is translucent so the progress line shows through it. */
+    .seekBar:not(.unlocked) .seekTrack { opacity:.75; }
     .seekBar.unlocked .seekLockBadge { display:none; }
     .seekLockBadge {
       position:absolute; top:50%; left:50%; transform:translate(-50%,-50%);
       display:flex; align-items:center; gap:5px; z-index:1; pointer-events:none;
       font-size:9px; font-weight:900; letter-spacing:.14em; text-transform:uppercase;
-      color:#9ca3af; background:#0b1220; border:1px solid #374151;
+      color:#9ca3af; background:rgba(11,18,32,.65); border:1px solid #374151;
       padding:3px 8px; white-space:nowrap;
     }
     .seekLockIcon { width:11px; height:11px; flex-shrink:0; }
@@ -12901,6 +12904,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.16.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.16.2</div>
 </body>
 </html>
