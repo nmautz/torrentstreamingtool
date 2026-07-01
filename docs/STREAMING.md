@@ -324,7 +324,12 @@ Key decisions:
   > karaoke/positioning/fonts survive. The flattened `sub_<i>.vtt` is kept as the
   > **universal fallback** — used for old bundles (no `ass_file`), on-demand/JIT
   > playback (no bundle dir), and any libass failure. Re-prep an existing item to
-  > gain styling (`OFFLINE_CACHE_VERSION` isn't bumped). See [GOTCHAS.md](GOTCHAS.md).
+  > gain styling (`OFFLINE_CACHE_VERSION` isn't bumped). The **iOS app** renders
+  > styled subs on both surfaces: the online in-app dashboard reuses this same
+  > path, and the **offline downloads player** (`ios-app/www/downloads.html`) has a
+  > parallel implementation with the octopus assets vendored into `ios-app/www/`
+  > (the `.ass`/`font_*` files download with the bundle and are served by the
+  > native `LocalMediaServer`). See [GOTCHAS.md](GOTCHAS.md).
   > **Each generated `sub_<i>.vtt` is run through `_clean_webvtt()`** before the
   > bundle finalizes. ffmpeg's ASS→WebVTT conversion of heavily-typeset fansub
   > tracks emits each overlapping Dialogue *layer* as a separate **identical**

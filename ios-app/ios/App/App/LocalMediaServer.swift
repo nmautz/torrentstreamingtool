@@ -116,6 +116,16 @@ final class HLSStaticServer {
         "vtt":  "text/vtt",
         "json": "application/json",
         "ts":   "video/mp2t",
+        // Styled-subtitle assets (libass overlay): raw ASS + embedded fonts.
+        // MIME is advisory (SubtitlesOctopus fetches these as text / ArrayBuffer)
+        // but mirror `_HLS_MIME` so they're not served as octet-stream.
+        "ass":   "text/plain; charset=utf-8",
+        "ssa":   "text/plain; charset=utf-8",
+        "ttf":   "font/ttf",
+        "otf":   "font/otf",
+        "ttc":   "font/collection",
+        "woff":  "font/woff",
+        "woff2": "font/woff2",
     ]
 
     init(root: URL) {

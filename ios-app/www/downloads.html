@@ -92,9 +92,14 @@
   <!-- Fullscreen-ish native player -->
   <div id="playerWrap">
     <div class="nowTitle" id="nowTitle"></div>
-    <video id="v" controls playsinline></video>
+    <!-- crossorigin: the media + sidecar VTT/ASS come from the loopback
+         LocalMediaServer (a different origin than this capacitor:// page). The
+         server sends `Access-Control-Allow-Origin: *`; without crossorigin the
+         browser blocks the out-of-band <track> text fetch. -->
+    <video id="v" controls playsinline crossorigin="anonymous"></video>
     <div id="playerBar">
       <button class="ghost" id="closePlayer">Close</button>
+      <select id="subSelect" class="ghost" style="display:none" aria-label="Subtitles"></select>
     </div>
   </div>
 
@@ -119,6 +124,122 @@
       return b.toFixed(b < 10 ? 1 : 0) + " " + u[i];
     }
     function showErr(e) { $("err").textContent = e ? ("⚠ " + (e.message || e)) : ""; }
+
+    // ── Offline subtitles ──────────────────────────────────────────────────
+    // Bundle subs live beside the media in the LocalMediaServer dir. Plain subs
+    // (SRT/VTT) render as native <track> children; styled ASS/SSA subs render
+    // with the libass-wasm (SubtitlesOctopus) overlay from the raw sub_<i>.ass +
+    // the bundle's extracted fonts — mirrors the host dashboard's on-device
+    // player (static/index.html). See docs/STREAMING.md / GOTCHAS.md.
+    let _octopus = null, _octopusSub = null;
+    let _subBase = null, _subs = [], _fonts = [], _subTracks = [];
+    let _libassPromise = null;
+
+    // Lazy-load SubtitlesOctopus (~3 MB, bundled in the app) — only the first
+    // time a styled sub is actually selected. Assets are relative to this page.
+    function _ensureLibass() {
+      if (window.SubtitlesOctopus) return Promise.resolve(window.SubtitlesOctopus);
+      if (_libassPromise) return _libassPromise;
+      _libassPromise = new Promise((resolve, reject) => {
+        const sc = document.createElement("script");
+        sc.src = "subtitles-octopus.js"; sc.async = true;
+        sc.onload  = () => window.SubtitlesOctopus
+          ? resolve(window.SubtitlesOctopus) : reject(new Error("SubtitlesOctopus missing"));
+        sc.onerror = () => { _libassPromise = null; reject(new Error("libass load failed")); };
+        document.head.appendChild(sc);
+      });
+      return _libassPromise;
+    }
+
+    function _teardownOctopus() {
+      _octopusSub = null;
+      if (_octopus) { try { _octopus.dispose(); } catch (_) {} _octopus = null; }
+    }
+
+    // Drop the overlay, remove every <track>, reset the picker. Called on play
+    // (fresh bundle) and closePlayer.
+    function _teardownOfflineSubs() {
+      _teardownOctopus();
+      (_subTracks || []).forEach((tr) => { try { tr.el.remove(); } catch (_) {} });
+      _subTracks = []; _subs = []; _fonts = []; _subBase = null;
+      const sel = $("subSelect");
+      if (sel) { sel.innerHTML = ""; sel.style.display = "none"; }
+    }
+
+    // Fetch the bundle's meta.json and build the subtitle picker. A <track> is
+    // created for EVERY bundle sub (styled ones keep their flattened VTT as a
+    // fallback, exactly like the host player); styled subs additionally offer
+    // the libass overlay. Best-effort — no meta / no subs just hides the picker.
+    async function _setupOfflineSubs(base) {
+      _teardownOfflineSubs();
+      _subBase = base;
+      let meta = {};
+      try { meta = await (await fetch(base + "meta.json")).json(); } catch (_) {}
+      _subs = meta.subtitles || [];
+      _fonts = meta.fonts || [];
+      const sel = $("subSelect"), v = $("v");
+      if (!_subs.length) return;
+      const off = document.createElement("option");
+      off.value = "-1"; off.textContent = "Subtitles: Off";
+      sel.appendChild(off);
+      _subs.forEach((s, i) => {
+        const o = document.createElement("option");
+        o.value = String(i);
+        o.textContent = (s.label || ("Subtitles " + (i + 1))) + (s.styled ? " ✦" : "");
+        sel.appendChild(o);
+        const t = document.createElement("track");
+        t.kind = "subtitles";
+        t.src = base + (s.file || ("sub_" + i + ".vtt"));   // flattened VTT (fallback for styled)
+        t.srclang = s.language || "und";
+        t.label = s.label || ("Subtitles " + (i + 1));
+        v.appendChild(t);
+        _subTracks.push({ el: t, key: String(i) });
+      });
+      sel.value = "-1";
+      sel.style.display = "";
+    }
+
+    // Show a plain <track> for `key`, or the libass overlay for a styled sub.
+    function _applyOfflineSub(key) {
+      key = String(key);
+      const s = (/^\d+$/.test(key)) ? _subs[Number(key)] : null;
+      if (s && s.styled && s.ass_file) {
+        (_subTracks || []).forEach((tr) => { try { tr.el.track.mode = "disabled"; } catch (_) {} });
+        _applyStyledOfflineSub(s, key);
+        return;
+      }
+      _teardownOctopus();
+      (_subTracks || []).forEach((tr) => {
+        try { tr.el.track.mode = (tr.key === key) ? "showing" : "disabled"; } catch (_) {}
+      });
+    }
+
+    async function _applyStyledOfflineSub(s, key) {
+      const v = $("v");
+      const subUrl = _subBase + s.ass_file;
+      if (_octopus && _octopusSub === subUrl) return;
+      _teardownOctopus();
+      _octopusSub = subUrl;
+      const showVttFallback = () => {                      // libass failed → flattened VTT
+        _octopusSub = null;
+        (_subTracks || []).forEach((tr) => {
+          try { tr.el.track.mode = (tr.key === key) ? "showing" : "disabled"; } catch (_) {}
+        });
+      };
+      let SO;
+      try { SO = await _ensureLibass(); }
+      catch (_) { showVttFallback(); return; }
+      if (_octopusSub !== subUrl) return;                  // raced with a newer pick / close
+      const fonts = (_fonts || []).map((f) => _subBase + f);
+      try {
+        _octopus = new SO({
+          video: v, subUrl, fonts,
+          fallbackFont: "libass-fallback-font.ttf",
+          workerUrl: "subtitles-octopus-worker.js",
+          onError: () => {},
+        });
+      } catch (_) { _octopus = null; showVttFallback(); }
+    }
 
     let _serverActive = false;
     async function stopServer() {
@@ -202,6 +323,7 @@
         }
 
         v.src = base + "master.m3u8";
+        _setupOfflineSubs(base).catch(() => {});   // build the sub picker (non-blocking)
         $("playerWrap").classList.add("show");
         await v.play().catch(() => {});
       } catch (e) { showErr(e); }
@@ -211,6 +333,7 @@
       const v = $("v");
       _suppressSave = false;          // pending resume (if any) is moot now — allow the final save
       await saveOfflineProgress();
+      _teardownOfflineSubs();         // drop the libass overlay + <track>s before the src changes
       try { v.pause(); v.removeAttribute("src"); v.load(); } catch (_) {}
       $("playerWrap").classList.remove("show");
       _nowPlaying = null;
@@ -379,6 +502,7 @@
 
     $("refreshBtn").addEventListener("click", refresh);
     $("closePlayer").addEventListener("click", closePlayer);
+    $("subSelect").addEventListener("change", (e) => _applyOfflineSub(e.target.value));
     $("connectBtn").addEventListener("click", () => {
       // Back to the connect screen, which re-probes the saved host.
       window.location.replace("index.html");

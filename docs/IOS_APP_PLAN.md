@@ -1,5 +1,14 @@
 # iOS Client App — Plan for v6.0.0
 
+> **Styled ASS subtitles in the app (`7.15.0`, code).** The 7.14.0 libass-wasm
+> (SubtitlesOctopus) styled-subtitle overlay now works on **both** iOS surfaces:
+> the online in-app dashboard reuses the host player as-is, and the **offline
+> downloads player** (`ios-app/www/downloads.html`) got a parallel implementation
+> with the octopus assets vendored into `ios-app/www/` + a `LocalMediaServer.swift`
+> MIME update. Inline only (not iOS native fullscreen). Requires a `./build-ipa.sh`
+> rebuild; on-device verification pending. See [STREAMING.md](STREAMING.md) /
+> [GOTCHAS.md](GOTCHAS.md).
+>
 > **Durable downloads + bulk management (`7.8.0`, code).** Post-6.0.0 hardening of
 > the offline-download pipeline against **long** outages and an app kill, plus
 > Downloads-screen bulk actions. The download *intent* is now persisted natively the
