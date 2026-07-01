@@ -592,7 +592,15 @@ def _load_lib_raw() -> dict:
 
 
 def _save_lib_raw(data: dict) -> None:
-    LIBRARY_FILE.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    # Atomic write (temp file + os.replace, same directory ⇒ same volume, so
+    # the replace is atomic on Windows/NTFS and POSIX alike). library.json is
+    # rewritten every ~15 s during playback; a plain write_text truncated it
+    # first, so a crash / service restart / power cut mid-write left corrupt
+    # JSON — and _load_lib_raw's fallback then started an EMPTY library,
+    # losing every profile, watch position, and subtitle pick.
+    tmp = LIBRARY_FILE.with_name(LIBRARY_FILE.name + ".tmp")
+    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
+    os.replace(tmp, LIBRARY_FILE)
 
 
 async def get_library() -> dict:
@@ -2741,8 +2749,17 @@ async def _save_series_sub_sel(profile_id: str, series: str, sel: Optional[dict]
 
 
 def _series_of_item(item: dict) -> str:
-    """The series grouping key for an item ("" for movies / one-offs)."""
-    return (item.get("series") or "").strip()
+    """The subtitle-memory grouping key for an item: the series name when it
+    belongs to one, else a stable per-item key ("item:<id>"). The fallback is
+    what carries a subtitle pick from one episode to the next inside a
+    multi-file item that was never tagged with a series (season packs, and the
+    default ""-series from the download/upload flows) — with a bare ""
+    key the per-series save silently no-oped and picks never crossed
+    episodes for those items."""
+    s = (item.get("series") or "").strip()
+    if s:
+        return s
+    return f"item:{item.get('id')}" if item.get("id") else ""
 
 
 async def _load_all_local_subs(video: Path) -> list[dict]:
@@ -5341,6 +5358,20 @@ async def vlc_progress_tracker() -> None:
                     prefs = _skip_settings_for_profile(lib_q, state.library_profile_id)
                     await _maybe_emit_skip_offer(item_q, cur_file, meta, prefs, pos_sec, dur_sec)
 
+            # Apply saved track prefs when VLC advances to a new episode. This
+            # runs on the 2 s cadence — it used to sit under the 15 s progress
+            # throttle below, which left an auto-advanced episode subtitle-less
+            # for up to ~17 s (and permanently, if the viewer stopped first).
+            # The applied-file guard keeps it from re-sending mid-file so the
+            # user can still override tracks during playback (see GOTCHAS.md).
+            cur_now = state.library_current_file
+            if (cur_now and cur_now != state.track_pref_applied_file and
+                    state.library_item_id and state.library_profile_id):
+                state.track_pref_applied_file = cur_now
+                asyncio.create_task(_apply_track_prefs(
+                    state.library_item_id, state.library_profile_id, cur_now, delay=2.0,
+                ))
+
             now = asyncio.get_event_loop().time()
             if now - last_progress_save < 15:
                 continue
@@ -5349,14 +5380,6 @@ async def vlc_progress_tracker() -> None:
             current_file = state.library_current_file
             if not current_file:
                 continue
-
-            # Apply saved track prefs when VLC advances to a new episode
-            if (current_file != state.track_pref_applied_file and
-                    state.library_item_id and state.library_profile_id):
-                state.track_pref_applied_file = current_file
-                asyncio.create_task(_apply_track_prefs(
-                    state.library_item_id, state.library_profile_id, current_file, delay=2.0,
-                ))
 
             lib = await get_library()
             item = next((it for it in lib["items"] if it["id"] == state.library_item_id), None)

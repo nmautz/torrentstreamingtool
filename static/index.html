@@ -10970,6 +10970,16 @@ async function _lpLoadIndex(seekTo) {
     lp.subTracks.push({ el: t, key: `sidecar:${i}` });
   });
 
+  // The browser runs its own automatic text-track selection when media data
+  // loads and can silently reset the mode="showing" we set back at
+  // MANIFEST_PARSED / loadedmetadata — the dropdown then names the right sub
+  // but nothing renders until the user toggles away and back. Re-assert the
+  // pick after that pass has run (idempotent; pendingSubtitleIdx already
+  // reflects any user change made in between). See GOTCHAS.md.
+  const reassertSub = () => { if (lp.filePath === filePath) _lpApplySubIdx(lp.pendingSubtitleIdx); };
+  v.addEventListener("loadeddata", reassertSub, { once: true });
+  v.addEventListener("playing", reassertSub, { once: true });
+
   try { await v.play(); } catch (_) { /* iOS may block autoplay until user gesture */ }
   _lpCtlSync(); _lpCtlTick(); _lpCtlShow();   // fresh custom-controls state for the new file
   _lpStartSubUpgradePoll();   // watch for late-downloaded real subs to upgrade off AI
@@ -11390,6 +11400,41 @@ function _lpRecoverActiveSub() {
   if (!tr || !_lpSubTrackBroken(tr)) return;
   _lpRecreateSubTrack(tr);
   _lpApplySubIdx(key);
+}
+
+// Locking the phone (or a long background stint) can kill the media DECODER
+// while the page is suspended: on return, the element still reports "playing"
+// and currentTime keeps advancing — so <track> cues and the libass overlay
+// render normally — but video is black/frozen and audio silent, and no error
+// ever fires. Detect it empirically after the foreground return settles: if
+// the clock advanced while ZERO new video frames decoded, the pipeline is
+// dead. hls.js → recoverMediaError() rebuilds the MediaSource in place;
+// Safari-native → _lpNetLost()'s reload-at-position machinery.
+function _lpDecodedFrames(v) {
+  try {
+    if (v.getVideoPlaybackQuality) return v.getVideoPlaybackQuality().totalVideoFrames;
+  } catch (_) {}
+  return (typeof v.webkitDecodedFrameCount === "number") ? v.webkitDecodedFrameCount : null;
+}
+function _lpRecoverMediaPipeline() {
+  const v = document.getElementById("lpVideo");
+  if (!v || !lp.itemId || !lp.filePath || v.paused || v.ended) return;
+  if (lp.netDown) return;                    // network recovery already owns this
+  const f0 = _lpDecodedFrames(v);
+  if (f0 == null) return;                    // no frame counter on this browser
+  const t0 = v.currentTime;
+  setTimeout(() => {
+    if (!lp.itemId || v.paused || v.ended || lp.netDown) return;
+    if (document.visibilityState === "hidden") return;
+    if (!(v.currentTime > t0 + 0.4)) return; // clock stalled → buffering/net path owns it
+    if (_lpDecodedFrames(v) !== f0) return;  // frames flowing → healthy
+    if (lp.hls) {
+      try { lp.hls.recoverMediaError(); } catch (_) { _lpNetLost(); return; }
+      v.play().catch(() => {});
+    } else {
+      _lpNetLost();                          // native path: reload src + resume at position
+    }
+  }, 1500);
 }
 
 // Extract the on-demand session key from a master_url like
@@ -12169,10 +12214,15 @@ function _lpAttachVideoEvents() {
   });
   // Tab backgrounded / phone screen locked → flush via fetch (still alive).
   // Back to foreground → repair a subtitle track whose cues iOS dropped while
-  // the WKWebView was suspended (delay lets any self-heal settle first).
+  // the WKWebView was suspended (delay lets any self-heal settle first), and
+  // probe for a dead media decoder (subs render but video/audio don't — see
+  // _lpRecoverMediaPipeline).
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") _lpFlushProgress(false);
-    else setTimeout(_lpRecoverActiveSub, 400);
+    else {
+      setTimeout(_lpRecoverActiveSub, 400);
+      setTimeout(_lpRecoverMediaPipeline, 600);
+    }
   });
   // Tab/window close, browser back, BFCache eviction → use sendBeacon since
   // any in-flight fetch is liable to be cancelled mid-request.
@@ -12904,6 +12954,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.16.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.16.4</div>
 </body>
 </html>
