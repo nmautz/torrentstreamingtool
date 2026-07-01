@@ -4492,6 +4492,12 @@ async function showProfilePicker(){
 }
 let _pendingPinProfile=null; // profile awaiting PIN entry in the lock-screen prompt
 function selectProfile(p){
+  // Re-selecting the profile you're already logged into shouldn't re-prompt for
+  // the PIN — you've already authenticated this session. Just dismiss the picker.
+  if(p&&p.id&&profile.id&&p.id===profile.id){
+    document.getElementById("profilePicker").classList.add("hidden");
+    return;
+  }
   if(p.has_pin){ openPinPrompt(p); return; }
   _doSelectProfile(p);
 }
@@ -12895,6 +12901,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.15.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.15.1</div>
 </body>
 </html>
