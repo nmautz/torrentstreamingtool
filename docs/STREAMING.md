@@ -309,11 +309,22 @@ Key decisions:
   repair tool below forces this on every bundle it rebuilds.
 - **Text subs become standalone WebVTT sidecars** (`sub_<i>.vtt`), *not*
   in-manifest renditions — ffmpeg's HLS muxer can't package more than one
-  WebVTT track. subrip / ass / ssa are transparently converted; ASS styling
-  (karaoke, positioning, custom fonts) is **lost** — see
-  [GOTCHAS.md](GOTCHAS.md) for the libass.js deferral. Image-based subs
+  WebVTT track. subrip / ass / ssa are transparently converted. Image-based subs
   (`hdmv_pgs_subtitle`, `dvd_subtitle`, `dvb_subtitle`, `vobsub`) are filtered
   out by `_ffprobe_full` and noted in `meta.json:skipped_image_subs`.
+  > **Styled ASS/SSA subs also get a raw sidecar + fonts (libass path).** For a
+  > sub whose codec is `ass`/`ssa` (`meta.subtitles[i].styled`), `_run_offline_job`
+  > additionally emits the **raw** `sub_<i>.ass` (stream-copied, styling intact,
+  > referenced by `meta.subtitles[i].ass_file`) and extracts the source's embedded
+  > fonts as flat `font_<n>.<ext>` files listed in `meta.json:fonts`
+  > (`_extract_bundle_fonts`, a separate best-effort ffmpeg `-dump_attachment`
+  > pass). In **bundle mode** the on-device player renders that raw ASS with
+  > **libass-wasm (SubtitlesOctopus)** on a canvas overlay (`_lpApplyStyledSub`,
+  > vendored `static/vendor/subtitles-octopus*` + `libass-fallback-font.ttf`), so
+  > karaoke/positioning/fonts survive. The flattened `sub_<i>.vtt` is kept as the
+  > **universal fallback** — used for old bundles (no `ass_file`), on-demand/JIT
+  > playback (no bundle dir), and any libass failure. Re-prep an existing item to
+  > gain styling (`OFFLINE_CACHE_VERSION` isn't bumped). See [GOTCHAS.md](GOTCHAS.md).
   > **Each generated `sub_<i>.vtt` is run through `_clean_webvtt()`** before the
   > bundle finalizes. ffmpeg's ASS→WebVTT conversion of heavily-typeset fansub
   > tracks emits each overlapping Dialogue *layer* as a separate **identical**

@@ -3067,9 +3067,13 @@ let lp = {
   // HLS bundle state — set by _lpLoadIndex from /offline-prepare's meta.json
   hls: null,              // active hls.js instance, null on Safari native
   audios: [],             // [{idx,label,language,default}] from meta.json
-  subtitles: [],          // [{idx,file,label,language}] from meta.json (bundle .vtt sidecars)
+  subtitles: [],          // [{idx,file,label,language,styled,ass_file}] from meta.json (bundle .vtt sidecars)
   sidecarSubs: [],        // [{name,lang,url}] on-disk subs served via /subtitle
   subTracks: [],          // [{el,key}] every <track> we created, in dropdown order
+  subBase: null,          // bundle base URL (styled subs load sub_<i>.ass + fonts from here)
+  fonts: [],              // embedded font filenames for styled ASS subs (libass-wasm)
+  octopus: null,          // active SubtitlesOctopus (libass) overlay instance, null when off
+  _octopusSub: null,      // subUrl the current overlay is rendering (race guard)
   pendingAudioIdx: 0,     // applied on MANIFEST_PARSED / loadedmetadata
   pendingSubtitleIdx: -1, // -1 = off, integer = bundle idx, "sidecar:N" = on-disk sidecar idx
   // True when the active subtitle was AUTO-applied AI (not a deliberate pick) —
@@ -10312,6 +10316,28 @@ function _ensureHlsLib() {
   return _hlsLibPromise;
 }
 
+// --- libass-wasm (SubtitlesOctopus) lazy loader. ~3 MB (JS worker + WASM) —
+// only fetched the first time a STYLED ASS subtitle is actually selected, so
+// the common case (no styled subs / subs off) never pays for it. Promise cached
+// like hls.js. The worker + wasm are fetched by the library itself from the
+// paths passed to `new SubtitlesOctopus({workerUrl})`.
+let _libassLibPromise = null;
+function _ensureLibassLib() {
+  if (window.SubtitlesOctopus) return Promise.resolve(window.SubtitlesOctopus);
+  if (_libassLibPromise) return _libassLibPromise;
+  _libassLibPromise = new Promise((resolve, reject) => {
+    const s = document.createElement("script");
+    s.src = "/vendor/subtitles-octopus.js";
+    s.async = true;
+    s.onload  = () => window.SubtitlesOctopus
+      ? resolve(window.SubtitlesOctopus)
+      : reject(new Error("SubtitlesOctopus global missing"));
+    s.onerror = () => { _libassLibPromise = null; reject(new Error("Failed to load libass-wasm")); };
+    document.head.appendChild(s);
+  });
+  return _libassLibPromise;
+}
+
 async function lpPlay(itemId, files, seekTo, label, shuffle, shuffleScope) {
   if (!hlsAvailable) { showAlert("Stream-to-device isn’t available on this host.", "warn"); return; }
   if (!Array.isArray(files) || !files.length) {
@@ -10653,6 +10679,7 @@ async function _lpLoadIndex(seekTo) {
   _lpHideSkipOffer(); lp.skipOfferEnd = 0;
   lp.resumeApplied = false; lp.resumeSec = seekTo || 0;
   lp.audios = []; lp.subtitles = []; lp.sidecarSubs = []; lp.subTracks = []; lp._sttBusy = false;
+  lp.fonts = []; lp.subBase = null; _lpTeardownOctopus();   // drop prior file's styled-sub overlay
   // Push the throttle window forward so the first `timeupdate` after this load
   // doesn't fire saveProgress before the resume seek has landed (otherwise we'd
   // overwrite the server's watched state with t≈0).
@@ -10763,6 +10790,10 @@ async function _lpLoadIndex(seekTo) {
   lp.audios     = prep.audios || [];
   lp.subtitles  = prep.subtitles || [];
   lp.sidecarSubs = prep.subs || [];
+  // Embedded fonts for styled ASS subs (libass-wasm overlay). Bundle mode only;
+  // on-demand has no bundle dir so it never sets these (styled subs fall back to
+  // the VTT <track> there). See _lpApplyStyledSub / STREAMING.md.
+  lp.fonts      = (lp.mode === "bundle") ? (prep.fonts || []) : [];
 
   // Default selections: saved per-file picks (sent back by /offline-prepare
   // when profile_id is provided), otherwise the rendition flagged `default`
@@ -10912,6 +10943,7 @@ async function _lpLoadIndex(seekTo) {
   // works identically on the hls.js (Chrome/FF/Edge) and Safari-native paths.
   lp.subTracks = [];
   const subBase = masterUrl.substring(0, masterUrl.lastIndexOf("/") + 1);
+  lp.subBase = subBase;   // bundle base URL — libass loads sub_<i>.ass + fonts from here
   (lp.subtitles || []).forEach((s, i) => {
     const t = document.createElement("track");
     t.kind = "subtitles";
@@ -11219,15 +11251,91 @@ function _lpApplyAudioIdx(idx) {
 }
 
 function _lpApplySubIdx(idx) {
-  // All subtitles are <track> children now (bundle + on-disk sidecars), so a
-  // single mode toggle keyed by the dropdown value covers both the hls.js and
+  // Most subtitles are <track> children (bundle .vtt + on-disk sidecars), so a
+  // single mode toggle keyed by the dropdown value covers the hls.js and
   // Safari-native paths. `idx` is "-1" (off), a bundle index ("0".."N-1"), or
   // "sidecar:N"; only the track whose key matches is set to "showing".
+  //
+  // EXCEPTION — a styled ASS bundle sub: render it with the libass-wasm overlay
+  // (full karaoke/positioning/fonts) instead of its flattened VTT. When the
+  // overlay is up, every <track> stays disabled so the VTT doesn't double-draw.
   const key = String(idx);
+  const styled = _lpStyledSubFor(key);
+  if (styled) {
+    (lp.subTracks || []).forEach((tr) => {
+      try { tr.el.track.mode = "disabled"; } catch (_) {}
+    });
+    _lpApplyStyledSub(styled);          // async; falls back to VTT on failure
+    return;
+  }
+  // Non-styled pick (or off / sidecar): drop any overlay, use the <track>.
+  _lpTeardownOctopus();
   (lp.subTracks || []).forEach((tr) => {
     try { tr.el.track.mode = (tr.key === key) ? "showing" : "disabled"; }
     catch (_) {}
   });
+}
+
+// The bundle sub descriptor for `key` IFF it's a styled ASS sub we can render
+// with libass: bundle mode only (on-demand/iOS have no bundle dir → VTT), a
+// numeric bundle index (not "-1"/"sidecar:N"), and the meta carries `ass_file`.
+function _lpStyledSubFor(key) {
+  if (lp.mode !== "bundle" || !lp.subBase) return null;
+  if (!/^\d+$/.test(key)) return null;
+  const s = (lp.subtitles || [])[Number(key)];
+  return (s && s.styled && s.ass_file) ? s : null;
+}
+
+// Spin up (or reuse) the SubtitlesOctopus overlay for a styled sub. The library
+// creates its own <canvas> over #lpVideo (a descendant of #localPlayer, which is
+// what goes OS-fullscreen — so the overlay shows in fullscreen too). Guarded by
+// lp._octopusSub so a rapid sub-switch / stop can't leave a stale instance, and
+// falls back to the VTT <track> if libass fails to load or construct.
+async function _lpApplyStyledSub(s) {
+  const v = document.getElementById("lpVideo");
+  if (!v) return;
+  const subUrl = lp.subBase + s.ass_file;
+  if (lp.octopus && lp._octopusSub === subUrl) return;   // already showing this one
+  _lpTeardownOctopus();
+  lp._octopusSub = subUrl;                                // record intent (race guard)
+  const fallbackToVtt = () => {
+    // libass unavailable/failed → show the flattened VTT for this same sub so
+    // the user still gets (unstyled) subtitles rather than nothing.
+    lp._octopusSub = null;
+    const key = String(lp.pendingSubtitleIdx);
+    (lp.subTracks || []).forEach((tr) => {
+      try { tr.el.track.mode = (tr.key === key) ? "showing" : "disabled"; } catch (_) {}
+    });
+  };
+  let SO;
+  try { SO = await _ensureLibassLib(); }
+  catch (_) { fallbackToVtt(); return; }
+  if (lp._octopusSub !== subUrl) return;                  // raced with a newer pick/stop
+  const fonts = (lp.fonts || []).map(f => lp.subBase + f);
+  try {
+    lp.octopus = new SO({
+      video: v,
+      subUrl,
+      fonts,
+      fallbackFont: "/vendor/libass-fallback-font.ttf",
+      workerUrl: "/vendor/subtitles-octopus-worker.js",
+      // Best-effort: a render error shouldn't blow up playback. The user can
+      // re-pick the track (→ VTT fallback path) if styling never appears.
+      onError: () => {},
+    });
+  } catch (_) {
+    lp.octopus = null;
+    fallbackToVtt();
+  }
+}
+
+// Dispose the libass overlay + its canvas. Safe to call when none is up.
+function _lpTeardownOctopus() {
+  lp._octopusSub = null;
+  if (lp.octopus) {
+    try { lp.octopus.dispose(); } catch (_) {}
+    lp.octopus = null;
+  }
 }
 
 // iOS WebKit drops an out-of-band <track>'s parsed cues when the WKWebView is
@@ -11727,6 +11835,7 @@ function lpMinimize() {
 async function lpUnloadCurrent() {
   const v = document.getElementById("lpVideo");
   try { v.pause(); } catch (_) {}
+  _lpTeardownOctopus();   // drop any styled-sub libass overlay before the src changes
   _lpDestroyHls();
   v.removeAttribute("src");
   v.load();
@@ -12786,6 +12895,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.13.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.14.0</div>
 </body>
 </html>

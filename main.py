@@ -521,7 +521,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "7.10.5"
+UI_VERSION = "7.14.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 # Retains references to fire-and-forget background tasks so the event loop's weak
@@ -13374,6 +13374,18 @@ _HLS_PROFILE_BAD = {"high 10", "high 4:2:2", "high 4:4:4 predictive"}
 _TEXT_SUB_CODECS  = {"subrip", "srt", "ass", "ssa", "webvtt", "mov_text", "text"}
 _IMAGE_SUB_CODECS = {"hdmv_pgs_subtitle", "pgssub", "dvd_subtitle", "dvdsub",
                      "dvb_subtitle", "vobsub", "xsub"}
+# ASS/SSA carry styling (karaoke, positioning, fonts, animation) that the
+# `-c:s webvtt` downgrade throws away. For these we ALSO emit the raw subtitle
+# (sub_<i>.ass) + extract embedded fonts so the browser player can render them
+# faithfully with libass-wasm (SubtitlesOctopus). See GOTCHAS.md / STREAMING.md.
+_STYLED_SUB_CODECS = {"ass", "ssa"}
+# Attachment streams that are fonts an ASS renderer needs. Matched by extension
+# first (most reliable), then MIME as a fallback — muxers set these inconsistently.
+_FONT_ATTACH_EXTS  = {".ttf", ".otf", ".ttc", ".woff", ".woff2"}
+_FONT_ATTACH_MIMES = {"font/ttf", "font/otf", "font/sfnt", "font/collection",
+                      "application/font-sfnt", "application/x-truetype-font",
+                      "application/x-font-ttf", "application/x-font-otf",
+                      "application/vnd.ms-opentype"}
 
 # ffmpeg ≥ 4.3 is required for reliable multi-rendition HLS with var_stream_map
 # (subtitle groups and the agroup/sgroup tagging system are flaky on older builds).
@@ -13549,10 +13561,14 @@ def _ffprobe_full(path: str) -> dict:
         duration_sec, container,
         video: {codec, profile, pix_fmt, width, height} | None,
         audios:    [{idx, codec, language, title, channels, default}],
-        subtitles: [{idx, codec, language, title, default, image_based}],
+        subtitles: [{idx, codec, language, title, default, image_based, styled}],
+        attachments: [{filename, mimetype, codec}],
       }
     `idx` is the index within the stream's own type — what ffmpeg `-map`
-    accepts as `0:a:<idx>` / `0:s:<idx>`.
+    accepts as `0:a:<idx>` / `0:s:<idx>`. `styled` marks ASS/SSA subs (they
+    carry karaoke/positioning/font styling worth preserving via libass); the
+    `attachments` list enumerates embedded fonts those styled subs depend on —
+    see `_extract_bundle_fonts` / GOTCHAS.md.
     """
     binp = _ffprobe_bin()
     if not binp:
@@ -13573,6 +13589,7 @@ def _ffprobe_full(path: str) -> dict:
         "video":        None,
         "audios":       [],
         "subtitles":    [],
+        "attachments":  [],
     }
     audio_i = sub_i = 0
     for s in data.get("streams") or []:
@@ -13606,8 +13623,15 @@ def _ffprobe_full(path: str) -> dict:
                 "title":       tags.get("title", ""),
                 "default":     bool(disp.get("default")),
                 "image_based": codec in _IMAGE_SUB_CODECS,
+                "styled":      codec in _STYLED_SUB_CODECS,
             })
             sub_i += 1
+        elif kind == "attachment":
+            out["attachments"].append({
+                "filename": tags.get("filename", ""),
+                "mimetype": (tags.get("mimetype", "") or "").lower(),
+                "codec":    (s.get("codec_name", "") or "").lower(),
+            })
     return out
 
 
@@ -14385,8 +14409,73 @@ def _build_hls_ffmpeg_args(
             "-f", "webvtt",
             f"sub_{i}.vtt",   # bare name — lands in ffmpeg's cwd (the bundle dir)
         ]
+        # Styled ASS/SSA: ALSO emit the raw subtitle (stream-copied, styling
+        # intact) so the browser player can render it via libass-wasm. The VTT
+        # above is kept as the universal fallback (players/hosts without libass,
+        # and old bundles). Fonts are extracted separately — see
+        # `_extract_bundle_fonts`. `sub_<i>.ass` index matches `sub_<i>.vtt`.
+        if s.get("styled"):
+            args += [
+                "-map", f"0:s:{s['idx']}",
+                "-c:s", "copy",
+                "-f", "ass",
+                f"sub_{i}.ass",
+            ]
 
     return args, audios, subs, videos
+
+
+def _extract_bundle_fonts(src: Path, bundle_dir: Path, info: dict) -> list[str]:
+    """Dump the source's embedded font attachments into `bundle_dir` as flat
+    `font_<n>.<ext>` files, returning the relative filenames written.
+
+    Styled ASS/SSA rendering (libass-wasm) needs the fansub's own fonts. They're
+    written FLAT (not in a `fonts/` subdir) because `offline_cache_bundle_file`
+    serves a single path segment — a subdir couldn't be fetched, and the iOS
+    `_enumerate_bundle_files` listing is one level deep too.
+
+    Best-effort: any failure yields []. NOTE ffmpeg's `-dump_attachment` writes
+    the files but then exits NON-ZERO ("At least one output file must be
+    specified"), so success is gated on the file existing, not the return code.
+    Non-font attachments (cover art, etc.) are skipped. Windows-first: ffmpeg is
+    the already-bundled binary — no mkvtoolnix/`mkvextract` dependency.
+    """
+    ffmpeg = analyzer.ffmpeg_bin()
+    atts = info.get("attachments") or []
+    if not ffmpeg or not atts:
+        return []
+    cmd = [ffmpeg, "-y"]
+    planned: list[str] = []
+    # The `t:<n>` specifier indexes attachment streams in order — the same order
+    # `_ffprobe_full` enumerated them, so `n` here is the attachment index.
+    for n, a in enumerate(atts):
+        fn   = a.get("filename", "") or ""
+        ext  = Path(fn).suffix.lower()
+        mime = (a.get("mimetype", "") or "").lower()
+        if ext not in _FONT_ATTACH_EXTS and mime not in _FONT_ATTACH_MIMES:
+            continue
+        if ext not in _FONT_ATTACH_EXTS:
+            ext = ".ttf"
+        out_name = f"font_{n}{ext}"
+        cmd += [f"-dump_attachment:t:{n}", out_name]
+        planned.append(out_name)
+    if not planned:
+        return []
+    cmd += ["-i", str(src)]
+    try:
+        subprocess.run(cmd, cwd=str(bundle_dir), capture_output=True,
+                       timeout=60, **_FFMPEG_SUBPROCESS_KW)
+    except Exception:
+        pass
+    written: list[str] = []
+    for out_name in planned:
+        p = bundle_dir / out_name
+        try:
+            if p.is_file() and p.stat().st_size > 0:
+                written.append(out_name)
+        except OSError:
+            pass
+    return written
 
 
 async def _prep_validate_repair(job: dict, src: Path) -> str:
@@ -14881,6 +14970,17 @@ async def _run_offline_job(job_id: str) -> None:
                 except OSError:
                     pass
 
+            # Extract embedded fonts for styled ASS/SSA subs so the browser
+            # player can render them faithfully with libass-wasm. Only worth the
+            # extra ffmpeg pass when a styled sub was actually kept; a source
+            # with no font attachments just yields []. Best-effort — never fails
+            # the prep. Runs after the .part encode, before the atomic swap, so
+            # the fonts land in the same staging dir as everything else.
+            bundle_fonts: list[str] = []
+            if any(s.get("styled") for s in kept_subs):
+                bundle_fonts = await asyncio.to_thread(
+                    _extract_bundle_fonts, src, tmp_dir, info)
+
             # Write meta.json with everything the UI needs to build dropdowns
             # without re-probing the bundle. Held next to the manifest so a
             # straight directory move keeps them in sync.
@@ -14931,6 +15031,11 @@ async def _run_offline_job(job_id: str) -> None:
                         "language": s.get("language") or "und",
                         "title":    s.get("title") or "",
                         "label":    _track_label(s, f"Subtitles {i+1}"),
+                        # Styled ASS/SSA: raw sidecar for the libass-wasm overlay.
+                        # Absent ⇒ the player uses the VTT <track> (old bundles /
+                        # non-styled subs). See STREAMING.md / GOTCHAS.md.
+                        **({"styled": True, "ass_file": f"sub_{i}.ass"}
+                           if s.get("styled") else {}),
                     }
                     for i, s in enumerate(kept_subs)
                 ],
@@ -14938,6 +15043,10 @@ async def _run_offline_job(job_id: str) -> None:
                     {"codec": s["codec"], "language": s.get("language") or "und"}
                     for s in (info.get("subtitles") or []) if s.get("image_based")
                 ],
+                # Embedded fonts (flat filenames in the bundle) the styled subs
+                # depend on; [] when there are no styled subs / no font
+                # attachments. The player feeds these to libass-wasm.
+                "fonts": bundle_fonts,
             }
             (tmp_dir / "meta.json").write_text(json.dumps(meta, indent=2))
 
@@ -16892,6 +17001,9 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
             "audios":            meta.get("audios", []),
             "subtitles":         meta.get("subtitles", []),
             "skipped_image_subs": meta.get("skipped_image_subs", []),
+            # Embedded fonts for styled ASS subs (libass-wasm). Empty for
+            # non-styled / old bundles → the player uses the VTT <track>.
+            "fonts":             meta.get("fonts", []),
             "subs":              sidecar_subs,
             "saved_tracks":      saved_tracks,
         })
@@ -17371,6 +17483,16 @@ _HLS_MIME = {
     ".mp4":  "video/mp4",
     ".vtt":  "text/vtt",
     ".json": "application/json",
+    # Styled-subtitle assets (libass-wasm): raw ASS + embedded fonts. Fetched by
+    # SubtitlesOctopus in the browser; MIME is advisory for these (it fetches as
+    # text / ArrayBuffer) but set them correctly anyway.
+    ".ass":   "text/plain; charset=utf-8",
+    ".ssa":   "text/plain; charset=utf-8",
+    ".ttf":   "font/ttf",
+    ".otf":   "font/otf",
+    ".ttc":   "font/collection",
+    ".woff":  "font/woff",
+    ".woff2": "font/woff2",
 }
 
 
@@ -17740,6 +17862,7 @@ async def bundle_manifest(item_id: str, request: Request, file_path: str = "", p
         "audios":             meta.get("audios", []),
         "subtitles":          meta.get("subtitles", []),
         "skipped_image_subs": meta.get("skipped_image_subs", []),
+        "fonts":              meta.get("fonts", []),
         "subs":               sidecar_subs,
         "meta":               bundle_meta,
         "progress":           prog,

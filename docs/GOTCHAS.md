@@ -666,9 +666,16 @@ Two parallel persistence systems live in `file_progress`:
 
 The two are intentionally independent — a user who switches audio to Japanese in VLC on TV might still want English on their phone (different speakers / different room). `update_progress` and `mark_watched` both preserve **all four** keys across writes. Don't merge them into a single field thinking "they mean the same thing" — they don't.
 
-### ASS/SSA styling is lost in HLS conversion
+### Styled ASS/SSA subtitles: libass overlay in bundle mode, VTT everywhere else
 
-ffmpeg's `-c:s webvtt` strips karaoke effects, positioning tags, custom fonts, and animations from ASS/SSA source subtitles down to plain WebVTT. Acceptable for the vast majority of content; jarring for anime fansubs. The deferred fix (Milestone 16.10) is to ship libass.js + a WebAssembly font renderer (~200 KB JS) and render styled subs onto a canvas overlay. Not implemented until someone actually complains. Don't go halfway by piping unstyled ASS into the bundle — players treat it as broken WebVTT.
+ffmpeg's `-c:s webvtt` strips karaoke, positioning, custom fonts, and animations from ASS/SSA down to plain WebVTT — jarring for anime fansubs. **Milestone 16.10 (implemented):** for a **styled** sub (codec `ass`/`ssa`) the prep pipeline now ALSO emits the raw `sub_<i>.ass` (stream-copied) next to the flattened `sub_<i>.vtt`, and extracts the source's embedded fonts as flat `font_<n>.<ext>`. The browser/on-device player renders the raw ASS with **libass-wasm (SubtitlesOctopus)** on a `<canvas>` overlay (`_lpApplyStyledSub` / `_ensureLibassLib`, vendored under `static/vendor/subtitles-octopus*`). Footguns:
+
+- **The VTT stays the universal fallback — never drop it.** Old bundles (no `ass_file`), on-demand/JIT mode (no bundle dir), and any libass load/construct failure all fall back to the flattened VTT `<track>`. `_lpApplySubIdx` only takes the overlay path when `_lpStyledSubFor(key)` returns truthy (bundle mode + numeric key + `meta.subtitles[i].styled && ass_file`). Don't pipe unstyled ASS into a `<track>` — players render it as broken WebVTT.
+- **Fonts must be FLAT files, not a `fonts/` subdir.** `offline_cache_bundle_file` serves a single path segment (`{filename}` captures no slashes) and `_enumerate_bundle_files` (iOS) lists one level deep — a subdir font can't be fetched. Hence `font_<n>.<ext>` in the bundle root; `_BUNDLE_FILE_RE` already allows those names.
+- **`-dump_attachment` exits NON-ZERO after writing.** `_extract_bundle_fonts` gates success on the output file existing, not ffmpeg's return code. It's a separate ffmpeg pass (only run when a styled sub was kept) — no mkvtoolnix dependency (Windows-first: reuse the bundled ffmpeg).
+- **Old bundles need a re-prep to gain styling** — `OFFLINE_CACHE_VERSION` is intentionally NOT bumped (a bump would force-re-prep every file); existing bundles just keep using VTT until re-prepped.
+- **Overlay teardown is load-bearing.** The libass instance is disposed in `lpUnloadCurrent`, on file change, and whenever the sub selection moves off a styled track (`_lpTeardownOctopus`, guarded by `lp._octopusSub`). Leaking it leaves a stale canvas over the next file.
+- **iOS native fullscreen shows no overlay.** OS fullscreen targets `#localPlayer` (a container), so the canvas — a descendant — renders in fullscreen on desktop/Android. But iPhone Safari falls back to `video.webkitEnterFullscreen()` (native player), which only shows in-manifest tracks, so the libass overlay disappears in iOS native fullscreen. Non-fullscreen iOS playback still shows it. The Capacitor offline player is a later milestone.
 
 ### iOS drops a showing `<track>`'s cues when the WKWebView is suspended — re-showing won't re-fetch, recreate the element
 
