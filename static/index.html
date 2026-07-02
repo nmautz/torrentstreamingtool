@@ -3077,6 +3077,7 @@ let lp = {
   fonts: [],              // embedded font filenames for styled ASS subs (libass-wasm)
   octopus: null,          // active SubtitlesOctopus (libass) overlay instance, null when off
   _octopusSub: null,      // subUrl the overlay is rendering OR building (dedup guard; see _lpOctopusSeq)
+  _octopusBlobUrls: null, // blob: font URLs created for a device-copy overlay (revoked on teardown)
   pendingAudioIdx: 0,     // applied on MANIFEST_PARSED / loadedmetadata
   pendingSubtitleIdx: -1, // -1 = off, integer = bundle idx, "sidecar:N" = on-disk sidecar idx
   // True when the active subtitle was AUTO-applied AI (not a deliberate pick) —
@@ -8750,6 +8751,11 @@ async function _appStartLocalPlayback(local) {
     duration_sec: meta.duration_sec || 0,
     audios:       meta.audios || [],
     subtitles:    meta.subtitles || [],   // embedded sub_*.vtt renditions live in the bundle
+    // Embedded fonts for styled ASS subs — the raw sub_<i>.ass + font_<n> files
+    // download with the bundle (not rung-specific), so the libass overlay works
+    // on the device copy too. Omitting this list silently stripped fansub
+    // typefaces from local playback (overlay fell back to the fallback font).
+    fonts:        meta.fonts || [],
     subs:         [],                     // sidecar subs aren't bundled (online-only)
     saved_tracks: {},                     // merged in by _lpLoadIndex from /saved-tracks when online
   };
@@ -11517,18 +11523,38 @@ async function _lpApplyStyledSub(s) {
   try { SO = await _ensureLibassLib(); }
   catch (_) { fallbackToVtt(); return; }
   if (attempt !== _lpOctopusSeq) return;   // raced with a newer pick/stop
-  const fonts = (lp.fonts || []).map(f => lp.subBase + f);
+  const opts = {
+    video: v,
+    subUrl,
+    fonts: (lp.fonts || []).map(f => lp.subBase + f),
+    fallbackFont: "/vendor/libass-fallback-font.ttf",
+    workerUrl: "/vendor/subtitles-octopus-worker.js",
+    // Worker death (it disposes itself right after this callback): drop our
+    // handle and show the flattened VTT instead of silently losing subs.
+    onError: () => { if (attempt === _lpOctopusSeq) { lp.octopus = null; fallbackToVtt(); } },
+  };
+  // Device-copy playback (iOS app): the ass + fonts live on the loopback
+  // LocalMediaServer, but the octopus WORKER (a host-origin script) fetches
+  // them itself with sync XHR — a cross-origin worker fetch WKWebView won't
+  // reliably allow. The page's own loopback fetches provably work (meta.json /
+  // master.m3u8 load that way), so prefetch here and hand the worker inline
+  // content + same-origin blob: URLs instead. See GOTCHAS.md.
+  if (lp.source === "device") {
+    try {
+      const [subContent, fontBlobs] = await Promise.all([
+        fetch(subUrl).then(r => { if (!r.ok) throw new Error(); return r.text(); }),
+        Promise.all(opts.fonts.map(u =>
+          fetch(u).then(r => { if (!r.ok) throw new Error(); return r.blob(); }))),
+      ]);
+      if (attempt !== _lpOctopusSeq) return;   // raced during the prefetch
+      opts.subContent = subContent;
+      opts.subUrl = undefined;
+      opts.fonts = fontBlobs.map(b => URL.createObjectURL(b));
+      lp._octopusBlobUrls = opts.fonts;        // revoked by _lpTeardownOctopus
+    } catch (_) { fallbackToVtt(); return; }   // LMS unreadable → flattened VTT
+  }
   try {
-    lp.octopus = new SO({
-      video: v,
-      subUrl,
-      fonts,
-      fallbackFont: "/vendor/libass-fallback-font.ttf",
-      workerUrl: "/vendor/subtitles-octopus-worker.js",
-      // Worker death (it disposes itself right after this callback): drop our
-      // handle and show the flattened VTT instead of silently losing subs.
-      onError: () => { if (attempt === _lpOctopusSeq) { lp.octopus = null; fallbackToVtt(); } },
-    });
+    lp.octopus = new SO(opts);
     _lpOctopusNudge();   // size + paint now if the video is already dimensioned
   } catch (_) {
     lp.octopus = null;
@@ -11562,6 +11588,10 @@ function _lpTeardownOctopus() {
     try { lp.octopus.dispose(); } catch (_) {}
     lp.octopus = null;
   }
+  // Release blob: font URLs from a device-copy overlay (the worker has already
+  // loaded them into its FS by the time any teardown runs).
+  (lp._octopusBlobUrls || []).forEach((u) => { try { URL.revokeObjectURL(u); } catch (_) {} });
+  lp._octopusBlobUrls = null;
   document.querySelectorAll("#localPlayer .libassjs-canvas-parent")
     .forEach((n) => { try { n.remove(); } catch (_) {} });
 }
@@ -13206,6 +13236,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.17.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.17.1</div>
 </body>
 </html>

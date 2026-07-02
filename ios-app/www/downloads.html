@@ -133,6 +133,7 @@
     // player (static/index.html). See docs/STREAMING.md / GOTCHAS.md.
     let _octopus = null, _octopusSub = null;
     let _octopusSeq = 0;   // attempt token — see _applyStyledOfflineSub
+    let _octopusBlobUrls = null;   // blob: font URLs for the live overlay (revoked on teardown)
     let _subBase = null, _subs = [], _fonts = [], _subTracks = [];
     let _libassPromise = null;
 
@@ -156,6 +157,9 @@
       _octopusSeq++;       // invalidate any in-flight _applyStyledOfflineSub attempt
       _octopusSub = null;
       if (_octopus) { try { _octopus.dispose(); } catch (_) {} _octopus = null; }
+      // Release blob: font URLs (the worker loaded them into its FS at init).
+      (_octopusBlobUrls || []).forEach((u) => { try { URL.revokeObjectURL(u); } catch (_) {} });
+      _octopusBlobUrls = null;
       // Sweep stray overlay canvases — a leaked one renders ghost ASS forever.
       document.querySelectorAll("#playerWrap .libassjs-canvas-parent")
         .forEach((n) => { try { n.remove(); } catch (_) {} });
@@ -245,10 +249,27 @@
       try { SO = await _ensureLibass(); }
       catch (_) { showVttFallback(); return; }
       if (attempt !== _octopusSeq) return;                 // raced with a newer pick / close
-      const fonts = (_fonts || []).map((f) => _subBase + f);
+      // The ass + fonts live on the loopback LocalMediaServer, but the octopus
+      // WORKER (a capacitor-origin script) fetches them itself with sync XHR —
+      // a cross-origin worker fetch WKWebView won't reliably allow. This page's
+      // own loopback fetches provably work (meta.json above), so prefetch here
+      // and hand the worker inline content + same-origin blob: URLs instead.
+      // Mirrors the host player's _lpApplyStyledSub; see docs/GOTCHAS.md.
+      let subContent, fontUrls;
+      try {
+        const fontBlobs = await Promise.all([
+          fetch(subUrl).then((r) => { if (!r.ok) throw new Error(); return r.text(); }),
+          ...(_fonts || []).map((f) =>
+            fetch(_subBase + f).then((r) => { if (!r.ok) throw new Error(); return r.blob(); })),
+        ]);
+        if (attempt !== _octopusSeq) return;               // raced during the prefetch
+        subContent = fontBlobs.shift();
+        fontUrls = fontBlobs.map((b) => URL.createObjectURL(b));
+        _octopusBlobUrls = fontUrls;                       // revoked by _teardownOctopus
+      } catch (_) { showVttFallback(); return; }           // LMS unreadable → flattened VTT
       try {
         _octopus = new SO({
-          video: v, subUrl, fonts,
+          video: v, subContent, fonts: fontUrls,
           fallbackFont: "libass-fallback-font.ttf",
           workerUrl: "subtitles-octopus-worker.js",
           // Worker death (it disposes itself right after this): fall back to the

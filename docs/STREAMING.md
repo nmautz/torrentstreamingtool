@@ -335,7 +335,13 @@ Key decisions:
   > instance; a resize "nudge" on the video's `resize`/`loadeddata`/`playing`
   > events un-sticks an overlay constructed before `videoWidth` was known; and a
   > `TextTrackList` `change` enforcer keeps every VTT `<track>` disabled while
-  > the overlay is up. See [GOTCHAS.md](GOTCHAS.md).
+  > the overlay is up. **Loopback bundles (7.17.1, both players):** when the
+  > ass/fonts live on the loopback `LocalMediaServer` (a downloaded copy), the
+  > page prefetches them on the main thread and passes octopus `subContent` +
+  > `blob:` font URLs — the worker's own sync-XHR fetch of a loopback URL is a
+  > cross-origin worker request WKWebView doesn't reliably allow (its failure =
+  > silent VTT fallback). Host-bundle playback keeps plain URLs.
+  > See [GOTCHAS.md](GOTCHAS.md).
   > **Each generated `sub_<i>.vtt` is run through `_clean_webvtt()`** before the
   > bundle finalizes. ffmpeg's ASS→WebVTT conversion of heavily-typeset fansub
   > tracks emits each overlapping Dialogue *layer* as a separate **identical**
