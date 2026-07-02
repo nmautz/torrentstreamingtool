@@ -7805,6 +7805,26 @@ async def set_local_tracks(item_id: str, req: LocalTracksReq) -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+@app.get("/api/library/{item_id}/saved-tracks")
+async def get_saved_tracks(item_id: str, file_path: str = "", profile_id: str = "") -> JSONResponse:
+    """Lightweight read of the persisted track picks for one file — the same
+    `saved_tracks` shape /offline-prepare returns.
+
+    Exists for the iOS app's on-device bundle playback, which never calls
+    /offline-prepare (the stream is served by the phone's loopback server) but
+    should still restore the remembered audio/subtitle picks while online.
+    Deliberately no HLS_AVAILABLE gate or on-disk file check: track prefs live
+    in library.json and are meaningful even when the host can't prep."""
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    return JSONResponse({
+        "saved_tracks": _saved_local_tracks(lib, item, profile_id, file_path)
+                        if profile_id else {},
+    })
+
+
 @app.post("/api/library/{item_id}/mark-watched")
 async def mark_watched(item_id: str, req: MarkWatchedReq) -> JSONResponse:
     """Mark or unmark episodes as watched for a profile."""

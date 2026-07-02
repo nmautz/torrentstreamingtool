@@ -654,12 +654,28 @@ Two ways to populate the cache:
 5. Track switching:
    - **Quality** (ABR, hls.js only): `_lpRenderTrackRows` builds the **Res**
      dropdown from `lp.hls.levels` (sorted high→low) as `Auto` + each
-     resolution; `lpSetQuality(idx)` sets `lp.hls.currentLevel` (`-1` = Auto/ABR,
+     resolution; `lpSetQuality(val)` sets `lp.hls.currentLevel` (`-1` = Auto/ABR,
      a level index pins that rung — a brief rebuffer on switch is expected).
      Quality is **session-only** — not persisted via `/local-tracks`, since the
      right rung is connection-dependent and Auto is the sensible default. Safari
      native HLS auto-adapts among the variants but exposes no reliable manual
      level API, so its Res row stays hidden (auto-only).
+     **iOS app, device-copy playback**: the downloaded master is trimmed to ONE
+     rung, so `hls.levels` can't drive the menu. It's built from the bundle's
+     own `meta.json` ladder instead: `"<label> — On device"` (value `dev`,
+     selected) + every other rung as `"<label> — Server"` (`srv:<height>`;
+     hls.js engine only) + `"Auto — Server"` (`srv:auto`, the only server
+     option on Safari-native / old bundles without `videos[]`). A `srv:*` pick
+     sets a **per-file, session-only** override (`lp._srvOverride`) and
+     re-enters `_lpLoadIndex` at the current position — the server master then
+     loads normally and, for a numeric pick, the level is pinned **by height**
+     in `MANIFEST_PARSED` (level indices don't survive the source switch; a
+     ladder changed since the download simply stays Auto). While overridden,
+     the server-side menu carries a `"— On device"` option to switch back. The
+     override is dropped whenever a different file loads, so each episode in
+     back-to-back playback defaults to its own device copy; if the server
+     switch fails (host unreachable) `_lpFallBackToLocal` clears the override
+     and reloads the downloaded copy instead of stopping.
    - **Audio** (in-manifest): hls.js path sets `hls.audioTrack = idx`; Safari
      native sets `video.audioTracks[i].enabled = (i===idx)`.
    - **Subtitles** (`<track>` children): `_lpLoadIndex` appends one `<track>`
@@ -1416,10 +1432,28 @@ exists it starts the M1 **`LocalMediaServer`**
 (`NWListener`, loopback) over the bundle dir, reads `meta.json` straight from the
 bundle for `audios`/`subtitles`, and sets `master_url` to
 `http://127.0.0.1:<port>/master.m3u8` — synthesizing the same shape
-`/offline-prepare` returns, with **no network call**. Everything downstream
-(tracks, embedded `sub_*.vtt` renditions, skip-intro, the custom controls) is
-unchanged. `lpStop` tears the loopback server down. On any failure it falls
-through to the normal online prepare path.
+`/offline-prepare` returns, with **no host round-trip for the stream itself**.
+Everything downstream (tracks, embedded `sub_*.vtt` renditions, skip-intro, the
+custom controls) is unchanged, so a mixed playlist (Ep A not downloaded → Ep B
+downloaded → Ep C not downloaded) routes per-file — A/C stream from the host, B
+plays from the phone — in the same player UI. On any failure it falls through to
+the normal online prepare path. Extras around the local path (7.17.0):
+- **Remembered track picks**: the local path fires a parallel best-effort
+  `GET /saved-tracks` (skipped offline via `navigator.onLine`) so audio/subtitle
+  restore matches a server stream ([API.md](API.md)).
+- **Downloaded-rung identity**: `_appStartLocalPlayback` also fetches the local
+  `master.m3u8` and `_appIdentifyLocalRung` matches its single variant URI
+  against the `meta.json` ladder (fallback: `RESOLUTION=` height) — this drives
+  the device/server **quality menu** (see step 5 above) and the Dev-Mode HUD's
+  `source` row (`on-device bundle · 127.0.0.1:<port> · 480p` vs
+  `server · <host> · bundle|ondemand`).
+- **Warm-next**: `_lpWarmNextEp` skips the host-side prep kick entirely when the
+  next episode is already downloaded (it plays instantly from the device, even
+  on a no-HLS macOS host).
+- **LMS lifecycle**: the loopback server is stopped eagerly when an episode
+  advance (or a server-quality switch) moves playback local→server, and `lpStop`
+  keys its teardown on `lp._lmsActive` — not `lp._localBase`, which each load
+  nulls — so it can't be left running.
 
 **Scope (M2).** Offline **playback** of the bundle; embedded text subtitles (the
 `sub_*.vtt` renditions inside the bundle) work offline, but host-side **sidecar**

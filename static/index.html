@@ -3091,6 +3091,18 @@ let lp = {
   // initial buffering / a first-segment cold encode isn't mistaken for a stall.
   // Reset by _lpDestroyHls (every load / stop / episode change). See _lpStallWatch.
   everPlayed: false,
+  // ── iOS app: on-device bundle playback (see _appStartLocalPlayback) ──────
+  source: "server",   // "device" (native LocalMediaServer over a downloaded bundle) | "server"
+  _localBase: null,   // loopback base URL ("http://127.0.0.1:<port>/") while playing the device copy
+  _lmsActive: false,  // LocalMediaServer started this lp session — survives a local→server
+                      // episode advance (unlike _localBase) so lpStop can still tear it down
+  _localRung: null,   // {height,label,name} — the ONE video rung the device bundle carries
+                      // (the downloaded master.m3u8 is trimmed to it; see GOTCHAS.md)
+  _localLadder: [],   // full ABR ladder from the device bundle's meta.json videos[] —
+                      // the quality menu's server options come from here, not hls.levels
+  _srvOverride: null, // {key:offKey(itemId,filePath), sel:"auto"|<height>, localRung} —
+                      // per-file "stream from server instead of the device copy";
+                      // session-only, cleared whenever a different file loads
 };
 // Subtitle upgrade poller — re-checks for late-downloaded real subs while an
 // auto-applied AI sub is showing. setInterval handle; cleared on stop.
@@ -8686,6 +8698,33 @@ async function _appLocalBundle(itemId, filePath) {
   try { return await _cap.dl.getLocal({ itemId, filePath }); } catch (_) { return null; }
 }
 
+// Which video rung does a downloaded bundle carry? The device master.m3u8 is
+// trimmed to ONE rung at download time, so read its first #EXT-X-STREAM-INF
+// variant URI (e.g. "video_480.m3u8") and match it against meta.json's full
+// `videos` ladder by rung name. Old bundles without `videos[]` fall back to the
+// STREAM-INF RESOLUTION height. Returns {height,label,name} or null.
+function _appIdentifyLocalRung(masterText, meta) {
+  try {
+    const lines = String(masterText || "").split(/\r?\n/);
+    for (let i = 0; i < lines.length; i++) {
+      if (!lines[i].startsWith("#EXT-X-STREAM-INF")) continue;
+      let uri = "";
+      for (let j = i + 1; j < lines.length; j++) {
+        const t = lines[j].trim();
+        if (t && !t.startsWith("#")) { uri = t; break; }
+      }
+      const name = uri.replace(/\.m3u8$/i, "");
+      const vids = (meta && meta.videos) || [];
+      const hit = vids.find(v => v.name === name);
+      if (hit) return { height: hit.height || 0, label: hit.label || ((hit.height || 0) + "p"), name };
+      const rm = /RESOLUTION=\d+x(\d+)/.exec(lines[i]);
+      if (rm) { const h = Number(rm[1]); return { height: h, label: h + "p", name }; }
+      return name ? { height: 0, label: "Downloaded", name } : null;
+    }
+  } catch (_) {}
+  return null;
+}
+
 // Start the native localhost server over a downloaded bundle dir and synthesize
 // the same shape /offline-prepare returns, reading meta.json straight from the
 // bundle so no host round-trip is needed (works in Airplane Mode).
@@ -8694,16 +8733,41 @@ async function _appStartLocalPlayback(local) {
   const base = url.replace(/\/+$/, "") + "/";
   let meta = {};
   try { meta = await (await fetch(base + "meta.json")).json(); } catch (_) {}
-  lp._localBase = base;
+  // Identify the downloaded rung + surface the full ladder so the quality menu
+  // can offer the other rungs as server streams (the trimmed local master gives
+  // hls.js only one level, so it can't drive the menu — see GOTCHAS.md).
+  let masterText = "";
+  try { masterText = await (await fetch(base + "master.m3u8")).text(); } catch (_) {}
+  // LMS is running from here on — flag it immediately (not via the caller, which
+  // may have raced with an episode advance) so lpStop always tears it down.
+  lp._lmsActive = true;
   return {
+    local_base:   base,
+    local_rung:   _appIdentifyLocalRung(masterText, meta),
+    local_ladder: (meta && meta.videos) || [],
     ready: true,
     master_url:   base + "master.m3u8",
     duration_sec: meta.duration_sec || 0,
     audios:       meta.audios || [],
     subtitles:    meta.subtitles || [],   // embedded sub_*.vtt renditions live in the bundle
     subs:         [],                     // sidecar subs aren't bundled (online-only)
-    saved_tracks: {},                     // local resume/track sync arrives in M3
+    saved_tracks: {},                     // merged in by _lpLoadIndex from /saved-tracks when online
   };
+}
+
+// Remembered audio/subtitle picks for a file (same shape /offline-prepare's
+// `saved_tracks` has). Local-bundle playback never calls /offline-prepare, so
+// it fetches this tiny endpoint instead — best-effort and online-only, so
+// Airplane-Mode playback starts without waiting on a timeout.
+async function _appFetchSavedTracks(itemId, filePath) {
+  if (!navigator.onLine || !profile.id) return {};
+  try {
+    const u = `/api/library/${itemId}/saved-tracks?file_path=${encodeURIComponent(filePath)}`
+            + `&profile_id=${encodeURIComponent(profile.id)}`;
+    const r = await _appFetchT(u, { headers: _appAuthHeaders() }, 4000);
+    if (!r.ok) return {};
+    return (await r.json()).saved_tracks || {};
+  } catch (_) { return {}; }
 }
 
 // fetch with an AbortController timeout. A brief connectivity loss can leave a
@@ -10679,6 +10743,19 @@ function _lpInstallIosPreroll(hls, video) {
   };
 }
 
+// A server prepare/stream failed while the user had explicitly switched a
+// DOWNLOADED episode to a server quality: rather than tearing playback down,
+// drop the override and re-enter the load so it takes the device copy instead.
+// Bounded: the re-entry has no override, so it can't come back here — if the
+// device copy also fails, the load falls through to the normal alert+stop.
+function _lpFallBackToLocal(filePath, seekTo) {
+  if (!(isApp && lp._srvOverride && lp._srvOverride.key === offKey(lp.itemId, filePath))) return false;
+  lp._srvOverride = null;
+  showAlert("Server unreachable — playing the downloaded copy.", "info");
+  _lpLoadIndex(seekTo);
+  return true;
+}
+
 async function _lpLoadIndex(seekTo) {
   const filePath = lp.playlist[lp.pi];
   if (!filePath) { lpStop(); return; }
@@ -10698,17 +10775,36 @@ async function _lpLoadIndex(seekTo) {
 
   let prep;
   lp._localBase = null;
+  lp.source = "server"; lp._localRung = null; lp._localLadder = [];
+  // The "stream from server instead" quality pick is per-episode: a different
+  // file loading drops it, so every episode defaults back to its device copy.
+  if (lp._srvOverride && lp._srvOverride.key !== offKey(lp.itemId, filePath)) {
+    lp._srvOverride = null;
+  }
 
   // iOS app: if this file is fully downloaded on the device, play it straight
   // from the native localhost server — no host round-trip, works in Airplane
-  // Mode. Falls through to the normal online prepare on any failure.
-  if (isApp) {
+  // Mode. Falls through to the normal online prepare on any failure. Skipped
+  // while a server-quality override is active for this file (user explicitly
+  // picked a rung the device copy doesn't have).
+  if (isApp && !lp._srvOverride) {
     try {
       const local = await _appLocalBundle(lp.itemId, filePath);
+      if (lp.filePath !== filePath) return;     // raced with a stop/advance
       if (local && local.complete && local.dir) {
         _lpShowPreparing("Loading offline copy…");
+        // Remembered track picks live on the host; fetch them alongside the
+        // LMS spin-up so online local playback restores audio/subs exactly
+        // like a server stream (offline: resolves {} immediately).
+        const savedP = _appFetchSavedTracks(lp.itemId, filePath);
         prep = await _appStartLocalPlayback(local);
         if (lp.filePath !== filePath) return;   // raced with a stop/advance
+        prep.saved_tracks = await savedP;
+        if (lp.filePath !== filePath) return;
+        lp.source = "device";
+        lp._localBase   = prep.local_base;
+        lp._localRung   = prep.local_rung;
+        lp._localLadder = prep.local_ladder;
       }
     } catch (_) { prep = undefined; }
   }
@@ -10726,6 +10822,7 @@ async function _lpLoadIndex(seekTo) {
       }
       prep = await r.json();
     } catch (err) {
+      if (_lpFallBackToLocal(filePath, seekTo)) return;
       _lpHidePreparing();
       showAlert(err.message || "Could not prepare this file for streaming.", "error");
       lpStop(); return;
@@ -10764,6 +10861,7 @@ async function _lpLoadIndex(seekTo) {
       prep.subs       = od.subs || prep.subs || [];
       prep.saved_tracks = od.saved_tracks || prep.saved_tracks || {};
     } catch (err) {
+      if (_lpFallBackToLocal(filePath, seekTo)) return;
       _lpHidePreparing();
       showAlert(err.message || "Could not start stream.", "error");
       lpStop(); return;
@@ -10829,6 +10927,15 @@ async function _lpLoadIndex(seekTo) {
   while (v.firstChild) v.removeChild(v.firstChild);
   v.removeAttribute("src");
 
+  // Local→server transition (episode advance / quality override): the previous
+  // episode's LocalMediaServer is no longer referenced now that the <video> is
+  // detached — stop it eagerly instead of leaving it running until lpStop.
+  // (When THIS load is local, lms.start above already re-pointed the server.)
+  if (isApp && lp._lmsActive && lp.source !== "device") {
+    try { _cap.lms.stop(); } catch (_) {}
+    lp._lmsActive = false;
+  }
+
   await _ensureHlsLib().catch(() => { /* fall through to Safari native */ });
 
   if (window.Hls && window.Hls.isSupported()) {
@@ -10877,6 +10984,15 @@ async function _lpLoadIndex(seekTo) {
       // which is the order we built meta.json from, so indices align 1:1.
       _lpApplyAudioIdx(lp.pendingAudioIdx);
       _lpApplySubIdx(lp.pendingSubtitleIdx);
+      // A "stream from server at <h>p" pick made while playing the device copy:
+      // pin the matching level by HEIGHT (level indices didn't exist before this
+      // manifest parsed). No match (admin changed the ladder since the download
+      // was made) → leave hls.js in Auto.
+      const ovr = lp._srvOverride;
+      if (ovr && ovr.key === offKey(lp.itemId, filePath) && typeof ovr.sel === "number") {
+        const li = (hls.levels || []).findIndex(l => (l.height || 0) === ovr.sel);
+        if (li >= 0) { try { hls.currentLevel = li; } catch (_) {} }
+      }
       _lpRenderTrackRows();
     });
     hls.on(window.Hls.Events.ERROR, (_evt, data) => {
@@ -11011,14 +11127,48 @@ function _lpRenderTrackRows() {
   });
   subSel.value = String(lp.pendingSubtitleIdx ?? -1);
 
-  // Quality (ABR) — hls.js path only. Levels come straight from hls.js's
+  // Quality (ABR). Server playback: levels come straight from hls.js's
   // master-playlist parse, so we never depend on meta.json ordering. Safari
   // native HLS auto-adapts among the variants but exposes no reliable manual
   // level API, so its row stays hidden (auto-only) — see GOTCHAS.md.
+  // Device-copy playback (iOS app): the downloaded master is trimmed to ONE
+  // rung, so hls.levels can't drive the menu — build it from the bundle's
+  // meta.json ladder instead, offering the other rungs as SERVER streams
+  // (values "srv:<height>" / "srv:auto"; "dev" = the on-device copy).
   const qSel = document.getElementById("lpQualitySelect");
   const levels = (lp.hls && lp.hls.levels) ? lp.hls.levels : [];
   const qN = levels.length;
-  if (qN > 1) {
+  const ovr = (lp._srvOverride && lp.itemId && lp.filePath
+               && lp._srvOverride.key === offKey(lp.itemId, lp.filePath)) ? lp._srvOverride : null;
+  let qShow = false;
+  const rungLabel = (r) => r ? escHtml(r.label || ((r.height || 0) + "p")) : "Downloaded";
+  if (lp.source === "device") {
+    // Playing the downloaded copy. Per-rung server options need hls.js on the
+    // reload for pinning; Safari-native gets Auto — Server only.
+    const opts = [`<option value="dev">${rungLabel(lp._localRung)} — On device</option>`];
+    if (lp.hls) {
+      const myName = lp._localRung && lp._localRung.name;
+      (lp._localLadder || [])
+        .filter(v => v.name !== myName && (v.height || 0) > 0)
+        .forEach(v => opts.push(`<option value="srv:${v.height}">${escHtml(v.label || v.height + "p")} — Server</option>`));
+    }
+    opts.push(`<option value="srv:auto">Auto — Server</option>`);
+    qSel.innerHTML = opts.join("");
+    qSel.value = "dev";
+    qShow = true;
+  } else if (ovr) {
+    // Streaming from the server while a device copy of this file exists (the
+    // user overrode) — normal Auto+levels, plus the way back to the device copy.
+    // Rendered even with ≤1 level (on-demand) so switch-back stays reachable.
+    const rungs = levels
+      .map((l, i) => ({ i, h: l.height || 0 }))
+      .sort((a, b) => b.h - a.h);  // highest resolution first
+    qSel.innerHTML = `<option value="-1">Auto</option>` +
+      rungs.map(r => `<option value="${r.i}">${r.h ? r.h + "p" : "Level " + (r.i + 1)}</option>`).join("") +
+      `<option value="dev">${rungLabel(ovr.localRung)} — On device</option>`;
+    qSel.value = String(lp.hls && !lp.hls.autoLevelEnabled ? lp.hls.currentLevel : -1);
+    qShow = true;
+  } else if (qN > 1) {
     const rungs = levels
       .map((l, i) => ({ i, h: l.height || 0 }))
       .sort((a, b) => b.h - a.h);  // highest resolution first
@@ -11026,6 +11176,7 @@ function _lpRenderTrackRows() {
       rungs.map(r => `<option value="${r.i}">${r.h ? r.h + "p" : "Level " + (r.i + 1)}</option>`).join("");
     // hls.js boots in ABR/auto mode (currentLevel -1); quality is session-only.
     qSel.value = String(lp.hls.autoLevelEnabled ? -1 : lp.hls.currentLevel);
+    qShow = true;
   }
 
   const audN = (lp.audios || []).length;
@@ -11049,7 +11200,7 @@ function _lpRenderTrackRows() {
   // Hide the (empty) Off-only select when there are no real tracks but keep the
   // row so the AI button shows.
   document.getElementById("lpSubSelect").classList.toggle("hidden", subN === 0);
-  document.getElementById("lpQualityRow").classList.toggle("hidden", qN <= 1);
+  document.getElementById("lpQualityRow").classList.toggle("hidden", !qShow);
   document.getElementById("lpAudioRow").classList.toggle("hidden", audN <= 1);
   document.getElementById("lpSubRow").classList.toggle("hidden", subN === 0 && !canGen);
   // The track row's visibility is owned by the gear toggle (.lp-opts on
@@ -11241,12 +11392,32 @@ async function _lpSubUpgradePoll() {
   showAlert("Switched to downloaded " + (lang ? lang + " " : "") + "subtitles", "success");
 }
 
-function lpSetQuality(idx) {
-  // hls.js only. -1 = Auto (ABR); a level index pins that rendition (a brief
-  // rebuffer on switch is expected for a manual pick). Safari native HLS has no
-  // reliable manual API, so its row is never shown.
+function lpSetQuality(val) {
+  // Numeric values: hls.js only. -1 = Auto (ABR); a level index pins that
+  // rendition (a brief rebuffer on switch is expected for a manual pick).
+  // Safari native HLS has no reliable manual API, so plain-level rows never
+  // show there. iOS-app source switching ("dev" / "srv:*") is a full reload at
+  // the current position — same pattern as lpSetAudio's on-demand path — and
+  // is session-only (per-episode; never persisted via /local-tracks).
+  const s = String(val);
+  if (s === "dev" || s.startsWith("srv:")) {
+    if (!lp.itemId || !lp.filePath) return;
+    const v = document.getElementById("lpVideo");
+    if (s === "dev") {
+      lp._srvOverride = null;                 // back to the downloaded copy
+    } else {
+      const raw = s.slice(4);                 // "auto" | "<height>"
+      lp._srvOverride = {
+        key: offKey(lp.itemId, lp.filePath),
+        sel: raw === "auto" ? "auto" : Number(raw),
+        localRung: lp._localRung,             // labels the switch-back option
+      };
+    }
+    _lpLoadIndex(v.currentTime || 0);
+    return;
+  }
   if (!lp.hls) return;
-  try { lp.hls.currentLevel = Number(idx); } catch (_) {}
+  try { lp.hls.currentLevel = Number(s); } catch (_) {}
 }
 
 function _lpApplyAudioIdx(idx) {
@@ -11876,6 +12047,15 @@ function _lpDevHudTick() {
   const rows = [];
   rows.push(["engine", (lp.hls ? "hls.js" : "native") + " · " + lp.mode
                        + (lp.netDown ? " · RECONNECTING" : "")]);
+  // Where the HLS stream is coming from: the on-device bundle (iOS app, served
+  // by the native loopback LocalMediaServer) or the host.
+  if (lp.source === "device" && lp._localBase) {
+    let host = ""; try { host = new URL(lp._localBase).host; } catch (_) {}
+    rows.push(["source", "on-device bundle · " + (host || "loopback")
+               + (lp._localRung && lp._localRung.height ? " · " + lp._localRung.height + "p" : "")]);
+  } else {
+    rows.push(["source", "server · " + location.host + " · " + lp.mode]);
+  }
   if (lp.hls) {
     const h = lp.hls;
     const lv = (h.levels || [])[h.currentLevel];
@@ -11945,8 +12125,12 @@ async function lpStop() {
     try { navigator.sendBeacon(`/api/library/ondemand/${lp.odKey}/close`); } catch (_) {}
   }
   lp.mode = "bundle"; lp.odKey = null;
-  // iOS app: tear down the localhost bundle server if one was serving an offline copy.
-  if (isApp && lp._localBase) { try { _cap.lms.stop(); } catch (_) {} lp._localBase = null; }
+  // iOS app: tear down the localhost bundle server if one was started this
+  // session. Keyed on _lmsActive, NOT _localBase — a local→server episode
+  // advance nulls _localBase but can leave the server running.
+  if (isApp && lp._lmsActive) { try { _cap.lms.stop(); } catch (_) {} }
+  lp._lmsActive = false; lp._localBase = null;
+  lp.source = "server"; lp._localRung = null; lp._localLadder = []; lp._srvOverride = null;
   await lpUnloadCurrent();
   _lpStopSubUpgradePoll();
   lp.subAutoApplied = false;
@@ -12114,16 +12298,29 @@ function _lpRenderNavButtons() {
 // gate and preempts bulk work, since the user is actively watching the series.
 // Fire-and-forget; updates prepFileState + the nav dot as it progresses.
 function _lpWarmNextEp() {
-  if (!hlsAvailable) return;
   const itemId = lp.itemId;
   const nextPath = lp.playlist[lp.pi + 1];
   if (!itemId || !nextPath) return;
   const k = offKey(itemId, nextPath);
   const cur = prepFileState.get(k);
   if (cur === "ready" || cur === "prepping") return;   // already done / in flight
-  prepFileState.set(k, "prepping");
-  _lpRenderNavButtons();
   (async () => {
+    // iOS app: a fully-downloaded next episode plays instantly from the device
+    // bundle — no host prep needed (and it works even when the host can't prep,
+    // e.g. a no-HLS macOS host, which is why this runs before the gate below).
+    if (isApp) {
+      const local = await _appLocalBundle(itemId, nextPath);
+      if (prepFileState.get(k) === "ready" || prepFileState.get(k) === "prepping") return;
+      if (local && local.complete && local.dir) {
+        prepFileState.set(k, "ready");
+        _lpRenderNavButtons();
+        if (epItemId === itemId) { try { renderEpList(); } catch (_) {} }
+        return;
+      }
+    }
+    if (!hlsAvailable) return;
+    prepFileState.set(k, "prepping");
+    _lpRenderNavButtons();
     try {
       const r = await fetch(`/api/library/${itemId}/offline-prepare`, {
         method: "POST", headers: { "Content-Type": "application/json" },
@@ -13009,6 +13206,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.16.5</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.17.0</div>
 </body>
 </html>

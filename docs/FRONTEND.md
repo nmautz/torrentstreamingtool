@@ -256,8 +256,14 @@ the engine branch.
 three `#lpTrackRow` selectors: **Res** (quality), **Aud**, **Sub** — each row
 hidden when it has ≤1 option. Quality is hls.js-only: the Res dropdown is built
 from `lp.hls.levels` (sorted high→low) as `Auto` + each resolution, and
-`lpSetQuality(idx)` sets `lp.hls.currentLevel` (`-1` = Auto/ABR; session-only,
-not persisted). Safari's Res row stays hidden (no manual-level API). `lpSetAudio`
+`lpSetQuality(val)` sets `lp.hls.currentLevel` (`-1` = Auto/ABR; session-only,
+not persisted). Safari's Res row stays hidden (no manual-level API). **iOS app,
+device-copy playback** (`lp.source === "device"`): the Res dropdown is built from
+the downloaded bundle's `meta.json` ladder instead — `"— On device"` (value
+`dev`) + the other rungs as `"— Server"` (`srv:<height>` / `srv:auto`); those
+values make `lpSetQuality` switch the *source* (a per-file `lp._srvOverride` +
+full `_lpLoadIndex` reload at position). While overridden, the server menu adds
+the `dev` switch-back option. See [STREAMING.md](STREAMING.md). `lpSetAudio`
 / `lpSetSubtitle` persist their picks via `/api/library/{id}/local-tracks`.
 
 Subtitle `<track>` elements are wired from the bundle's `subtitles[]` (each a
@@ -331,7 +337,9 @@ that episode is prepped. `_lpRenderNavButtons` (called from `_lpLoadIndex`)
 shows/hides each button for the current `lp.pi` and paints a square dot from
 `prepFileState` — green = ready, amber = prepping, gray = not prepped.
 `_lpWarmNextEp` (also from `_lpLoadIndex`) fires an interactive `/offline-prepare`
-for the next episode so auto-advance / a Next hold resumes instantly. See
+for the next episode so auto-advance / a Next hold resumes instantly — unless
+(iOS app) that episode is already downloaded to the device, in which case it just
+marks the row "ready" with no host prep. See
 [STREAMING.md § Auto-advance](STREAMING.md).
 
 `saveProgress(itemId, filePath, posSec, durSec)` is called every 15 s by
@@ -377,6 +385,9 @@ monospace overlay top-left under the header, repainted at 1 Hz by
 `_lpDevHudTick` (interval started by `_lpDevHudStart` in `lpPlay`, cleared by
 `_lpDevHudStop` in `lpStop`; toggling mid-playback applies live). Rows: engine +
 mode (hls.js/native · bundle/ondemand, `RECONNECTING` while `lp.netDown`),
+**stream source** (`on-device bundle · 127.0.0.1:<port> · 480p` when the iOS app
+plays a downloaded copy via the loopback `LocalMediaServer`, else
+`server · <host> · bundle|ondemand`),
 active quality rung (`lp.hls.levels[currentLevel]` height + bitrate, auto vs.
 pinned), the hls.js `bandwidthEstimate`, the decoded `videoWidth×videoHeight`,
 the last segment's transfer stats (`_lpDevNoteFrag`, recorded from `FRAG_LOADED`
