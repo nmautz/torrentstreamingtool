@@ -132,6 +132,7 @@
     // the bundle's extracted fonts — mirrors the host dashboard's on-device
     // player (static/index.html). See docs/STREAMING.md / GOTCHAS.md.
     let _octopus = null, _octopusSub = null;
+    let _octopusSeq = 0;   // attempt token — see _applyStyledOfflineSub
     let _subBase = null, _subs = [], _fonts = [], _subTracks = [];
     let _libassPromise = null;
 
@@ -152,8 +153,12 @@
     }
 
     function _teardownOctopus() {
+      _octopusSeq++;       // invalidate any in-flight _applyStyledOfflineSub attempt
       _octopusSub = null;
       if (_octopus) { try { _octopus.dispose(); } catch (_) {} _octopus = null; }
+      // Sweep stray overlay canvases — a leaked one renders ghost ASS forever.
+      document.querySelectorAll("#playerWrap .libassjs-canvas-parent")
+        .forEach((n) => { try { n.remove(); } catch (_) {} });
     }
 
     // Drop the overlay, remove every <track>, reset the picker. Called on play
@@ -214,14 +219,24 @@
       });
     }
 
+    // Token race guard (mirrors the host player's _lpApplyStyledSub): while the
+    // first pick is still awaiting the ~3 MB libass load, a toggle dance
+    // (ass → off → ass) re-enters here with the SAME subUrl and _octopus still
+    // null — a URL-based guard let every attempt construct its own instance,
+    // each overwriting _octopus and leaking the previous one (canvas + worker
+    // kept rendering ASS under whatever track was shown next). _octopusSeq is
+    // bumped by every apply and teardown; only the newest attempt may construct
+    // or touch <track> modes.
     async function _applyStyledOfflineSub(s, key) {
       const v = $("v");
       const subUrl = _subBase + s.ass_file;
-      if (_octopus && _octopusSub === subUrl) return;
+      if (_octopusSub === subUrl) return;   // already showing OR mid-build
       _teardownOctopus();
       _octopusSub = subUrl;
+      const attempt = ++_octopusSeq;
       const showVttFallback = () => {                      // libass failed → flattened VTT
-        _octopusSub = null;
+        if (attempt !== _octopusSeq) return;               // superseded — don't double-draw
+        _teardownOctopus();
         (_subTracks || []).forEach((tr) => {
           try { tr.el.track.mode = (tr.key === key) ? "showing" : "disabled"; } catch (_) {}
         });
@@ -229,16 +244,30 @@
       let SO;
       try { SO = await _ensureLibass(); }
       catch (_) { showVttFallback(); return; }
-      if (_octopusSub !== subUrl) return;                  // raced with a newer pick / close
+      if (attempt !== _octopusSeq) return;                 // raced with a newer pick / close
       const fonts = (_fonts || []).map((f) => _subBase + f);
       try {
         _octopus = new SO({
           video: v, subUrl, fonts,
           fallbackFont: "libass-fallback-font.ttf",
           workerUrl: "subtitles-octopus-worker.js",
-          onError: () => {},
+          // Worker death (it disposes itself right after this): fall back to the
+          // flattened VTT instead of silently losing subs.
+          onError: () => { if (attempt === _octopusSeq) { _octopus = null; showVttFallback(); } },
         });
+        _octopusNudge();   // size + paint now if the video is already dimensioned
       } catch (_) { _octopus = null; showVttFallback(); }
+    }
+
+    // Re-size (→ re-paint) the live overlay. The vendored lib only re-checks the
+    // video's intrinsic dimensions on ONE loadedmetadata and on layout resizes;
+    // an overlay constructed while videoWidth is still 0 (native HLS exposes
+    // dimensions a beat late) keeps a hidden 0×0 canvas forever. The <video>
+    // fires `resize` when intrinsic dimensions change — nudge from there (plus
+    // loadeddata/playing backstops, wired in the listener block below).
+    function _octopusNudge() {
+      if (!_octopus) return;
+      try { _octopus.resizeWithTimeout(); } catch (_) {}
     }
 
     let _serverActive = false;
@@ -498,6 +527,20 @@
     window.addEventListener("pagehide", saveOfflineProgress);
     document.addEventListener("visibilitychange", () => {
       if (document.visibilityState === "hidden") saveOfflineProgress();
+    });
+    // Keep the libass overlay sized (`resize` = intrinsic-dimension change, the
+    // case the vendored lib misses) and keep every <track> disabled while the
+    // overlay is up or building — iOS's native player UI / automatic track
+    // selection can flip one to "showing" and double-draw the flattened VTT
+    // under the styled overlay. No-ops when no overlay is involved.
+    _vid.addEventListener("resize",     _octopusNudge);
+    _vid.addEventListener("loadeddata", _octopusNudge);
+    _vid.addEventListener("playing",    _octopusNudge);
+    _vid.textTracks.addEventListener("change", () => {
+      if (!_octopus && !_octopusSub) return;
+      for (const tt of _vid.textTracks) {
+        if (tt.mode !== "disabled") { try { tt.mode = "disabled"; } catch (_) {} }
+      }
     });
 
     $("refreshBtn").addEventListener("click", refresh);

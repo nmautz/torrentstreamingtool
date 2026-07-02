@@ -329,7 +329,13 @@ Key decisions:
   > path, and the **offline downloads player** (`ios-app/www/downloads.html`) has a
   > parallel implementation with the octopus assets vendored into `ios-app/www/`
   > (the `.ass`/`font_*` files download with the bundle and are served by the
-  > native `LocalMediaServer`). See [GOTCHAS.md](GOTCHAS.md).
+  > native `LocalMediaServer`). Reliability plumbing (7.16.5, both players): the
+  > overlay apply is guarded by an attempt *token* (`_lpOctopusSeq`) so
+  > concurrent applies for the same sub can't each construct-and-leak an
+  > instance; a resize "nudge" on the video's `resize`/`loadeddata`/`playing`
+  > events un-sticks an overlay constructed before `videoWidth` was known; and a
+  > `TextTrackList` `change` enforcer keeps every VTT `<track>` disabled while
+  > the overlay is up. See [GOTCHAS.md](GOTCHAS.md).
   > **Each generated `sub_<i>.vtt` is run through `_clean_webvtt()`** before the
   > bundle finalizes. ffmpeg's ASS→WebVTT conversion of heavily-typeset fansub
   > tracks emits each overlapping Dialogue *layer* as a separate **identical**

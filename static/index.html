@@ -3076,7 +3076,7 @@ let lp = {
   subBase: null,          // bundle base URL (styled subs load sub_<i>.ass + fonts from here)
   fonts: [],              // embedded font filenames for styled ASS subs (libass-wasm)
   octopus: null,          // active SubtitlesOctopus (libass) overlay instance, null when off
-  _octopusSub: null,      // subUrl the current overlay is rendering (race guard)
+  _octopusSub: null,      // subUrl the overlay is rendering OR building (dedup guard; see _lpOctopusSeq)
   pendingAudioIdx: 0,     // applied on MANIFEST_PARSED / loadedmetadata
   pendingSubtitleIdx: -1, // -1 = off, integer = bundle idx, "sidecar:N" = on-disk sidecar idx
   // True when the active subtitle was AUTO-applied AI (not a deliberate pick) —
@@ -11307,20 +11307,36 @@ function _lpStyledSubFor(key) {
 
 // Spin up (or reuse) the SubtitlesOctopus overlay for a styled sub. The library
 // creates its own <canvas> over #lpVideo (a descendant of #localPlayer, which is
-// what goes OS-fullscreen — so the overlay shows in fullscreen too). Guarded by
-// lp._octopusSub so a rapid sub-switch / stop can't leave a stale instance, and
-// falls back to the VTT <track> if libass fails to load or construct.
+// what goes OS-fullscreen — so the overlay shows in fullscreen too). Falls back
+// to the VTT <track> if libass fails to load, construct, or later crashes.
+//
+// RACE GUARD — token, not URL. At playback start this runs up to 3× for the
+// same sub (MANIFEST_PARSED/loadedmetadata + the loadeddata/playing re-asserts)
+// while the first call is still awaiting the ~3 MB lib download; every call
+// sees lp.octopus === null and the same subUrl, so a URL-based guard let each
+// one construct its own instance. Each overwrote lp.octopus and the earlier
+// ones LEAKED — canvas + worker kept rendering ASS forever, which is how the
+// "ASS overlay and VTT track both drawn at once" bug happened after switching
+// tracks (teardown could only dispose the last instance). _lpOctopusSeq is
+// bumped by every apply and every teardown, so only the newest attempt may
+// construct or touch <track> modes; superseded ones return without side
+// effects.
+let _lpOctopusSeq = 0;
 async function _lpApplyStyledSub(s) {
   const v = document.getElementById("lpVideo");
   if (!v) return;
   const subUrl = lp.subBase + s.ass_file;
-  if (lp.octopus && lp._octopusSub === subUrl) return;   // already showing this one
+  if (lp._octopusSub === subUrl) return;   // already showing OR mid-build for this one
   _lpTeardownOctopus();
-  lp._octopusSub = subUrl;                                // record intent (race guard)
+  lp._octopusSub = subUrl;                 // record intent (re-asserts no-op on this)
+  const attempt = ++_lpOctopusSeq;
   const fallbackToVtt = () => {
     // libass unavailable/failed → show the flattened VTT for this same sub so
-    // the user still gets (unstyled) subtitles rather than nothing.
-    lp._octopusSub = null;
+    // the user still gets (unstyled) subtitles rather than nothing. Never fire
+    // for a superseded attempt — a late failure landing after a newer overlay
+    // came up would double-draw the VTT under it.
+    if (attempt !== _lpOctopusSeq) return;
+    _lpTeardownOctopus();                  // clears intent; bumps seq (we're done)
     const key = String(lp.pendingSubtitleIdx);
     (lp.subTracks || []).forEach((tr) => {
       try { tr.el.track.mode = (tr.key === key) ? "showing" : "disabled"; } catch (_) {}
@@ -11329,7 +11345,7 @@ async function _lpApplyStyledSub(s) {
   let SO;
   try { SO = await _ensureLibassLib(); }
   catch (_) { fallbackToVtt(); return; }
-  if (lp._octopusSub !== subUrl) return;                  // raced with a newer pick/stop
+  if (attempt !== _lpOctopusSeq) return;   // raced with a newer pick/stop
   const fonts = (lp.fonts || []).map(f => lp.subBase + f);
   try {
     lp.octopus = new SO({
@@ -11338,23 +11354,45 @@ async function _lpApplyStyledSub(s) {
       fonts,
       fallbackFont: "/vendor/libass-fallback-font.ttf",
       workerUrl: "/vendor/subtitles-octopus-worker.js",
-      // Best-effort: a render error shouldn't blow up playback. The user can
-      // re-pick the track (→ VTT fallback path) if styling never appears.
-      onError: () => {},
+      // Worker death (it disposes itself right after this callback): drop our
+      // handle and show the flattened VTT instead of silently losing subs.
+      onError: () => { if (attempt === _lpOctopusSeq) { lp.octopus = null; fallbackToVtt(); } },
     });
+    _lpOctopusNudge();   // size + paint now if the video is already dimensioned
   } catch (_) {
     lp.octopus = null;
     fallbackToVtt();
   }
 }
 
+// Re-size (and thereby re-paint) the live libass overlay. The vendored lib
+// sizes its canvas from the video's intrinsic dimensions but only re-checks
+// them on ONE loadedmetadata and on layout resizes — when the overlay is
+// constructed in the window where loadedmetadata has already fired but
+// videoWidth is still 0 (hls.js/ManagedMediaSource exposes dimensions a beat
+// later, esp. iOS), the canvas stays display:none 0×0 forever and the default
+// ASS sub silently never renders until the user toggles the track. The <video>
+// fires `resize` when its intrinsic dimensions change, which the lib doesn't
+// listen for — _lpAttachVideoEvents nudges from there (plus loadeddata /
+// playing as backstops). No-op when sized correctly or no overlay is up.
+function _lpOctopusNudge() {
+  if (!lp.octopus) return;
+  try { lp.octopus.resizeWithTimeout(); } catch (_) {}
+}
+
 // Dispose the libass overlay + its canvas. Safe to call when none is up.
+// Bumps the seq so any in-flight _lpApplyStyledSub attempt is invalidated, and
+// sweeps stray overlay canvases (nothing should leak now, but a leaked canvas
+// renders ghost ASS forever — cheap insurance).
 function _lpTeardownOctopus() {
+  _lpOctopusSeq++;
   lp._octopusSub = null;
   if (lp.octopus) {
     try { lp.octopus.dispose(); } catch (_) {}
     lp.octopus = null;
   }
+  document.querySelectorAll("#localPlayer .libassjs-canvas-parent")
+    .forEach((n) => { try { n.remove(); } catch (_) {} });
 }
 
 // iOS WebKit drops an out-of-band <track>'s parsed cues when the WKWebView is
@@ -12167,6 +12205,23 @@ function _lpAttachVideoEvents() {
       saveProgress(lp.itemId, lp.filePath, t, v.duration);
     }
   });
+  // Keep the libass styled-sub overlay sized: `resize` fires when the video's
+  // INTRINSIC dimensions change (the case the vendored lib misses — see
+  // _lpOctopusNudge), loadeddata/playing are cheap backstops. No-ops otherwise.
+  v.addEventListener("resize",     _lpOctopusNudge);
+  v.addEventListener("loadeddata", _lpOctopusNudge);
+  v.addEventListener("playing",    _lpOctopusNudge);
+  // While the libass overlay is up (or being built) every <track> must stay
+  // disabled — but the browser's automatic track selection and iOS's native
+  // player UI can flip one back to "showing" at any time, double-drawing the
+  // flattened VTT under the styled overlay. Enforce on every TextTrackList
+  // change; converges because we only touch tracks that aren't disabled.
+  v.textTracks.addEventListener("change", () => {
+    if (!lp.octopus && !lp._octopusSub) return;
+    for (const tt of v.textTracks) {
+      if (tt.mode !== "disabled") { try { tt.mode = "disabled"; } catch (_) {} }
+    }
+  });
   // Custom control overlay sync (see "Custom player controls" section).
   v.addEventListener("play",  () => { _lpCtlSync(); _lpCtlShow(); });
   v.addEventListener("pause", () => { _lpCtlSync(); _lpCtlShow(); _lpFlushProgress(false); });
@@ -12954,6 +13009,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.16.4</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.16.5</div>
 </body>
 </html>
