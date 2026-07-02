@@ -174,9 +174,12 @@ purge).
 # Source video is mapped ONCE PER LADDER RUNG (here: original + 720p + 480p).
 ffmpeg -y -progress pipe:1 -nostats \
   # `-hwaccel cuda` is inserted here (before -i) ONLY on the NVENC path when
-  # something actually decodes — routes decode through NVDEC so the CPU isn't
-  # the bottleneck. Transparent form (no -hwaccel_output_format): frames
-  # auto-download for the CPU scale and unsupported codecs fall back to SW.
+  # something actually decodes AND the NVDEC probe (`_gpu_can_hwdecode`, the
+  # `hw_decode` flag) confirms this GPU can decode the source codec — routes
+  # decode through NVDEC so the CPU isn't the bottleneck. It does NOT reliably
+  # fall back for codecs whose hwaccel init hard-fails (AV1 on a Pascal card),
+  # so an un-decodable source CPU-decodes here; NVENC still encodes. See
+  # docs/GOTCHAS.md "`-hwaccel cuda` does NOT gracefully fall back".
   -thread_queue_size 1024 -rtbufsize 64M -i /abs/path/src.mkv \
   -map 0:v:0 -map 0:v:0 -map 0:v:0 -map 0:a:0 -map 0:a:1 \
   # v:0 = original (copy when browser-safe H.264, even with NVENC present):

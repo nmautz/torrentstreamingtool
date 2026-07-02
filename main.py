@@ -13459,14 +13459,71 @@ def _source_nvdec_safe(info: dict) -> bool:
     return codec in _NVDEC_SAFE_CODECS and pix in _NVDEC_SAFE_PIXFMTS
 
 
-async def _decode_hwaccel_args() -> list[str]:
-    """GPU decode prefix (`-hwaccel cuda`) for the validator/repair ffmpeg when
-    NVENC is present, else `[]`. Uses the TRANSPARENT `-hwaccel cuda` form — it
-    keeps a per-frame CPU fallback, so an odd source still decodes (unlike the
-    all-GPU `-hwaccel_output_format cuda` path, which hard-fails). Goes BEFORE
-    `-i`. NOTE: hardware decode can surface decode errors slightly differently
-    from software — fine for the bulk scan (see docs/GOTCHAS.md)."""
-    return ["-hwaccel", "cuda"] if await _has_nvenc() else []
+# Lazy-probed per source codec (+ pixfmt): can THIS box's NVDEC actually
+# hardware-decode it? ffmpeg's transparent `-hwaccel cuda` is *documented* to
+# fall back to software for codecs NVDEC can't handle, but in practice the
+# hwaccel *initialisation* for an unsupported codec HARD-fails the whole ffmpeg
+# rather than falling back — e.g. AV1 on a Pascal GTX 1060:
+#   "Your platform doesn't support hardware accelerated AV1 decoding"
+#   "Failed setup for format cuda: hwaccel initialisation returned error"  → rc≠0
+# So before adding `-hwaccel cuda` we VERIFY NVDEC can decode the source, probing
+# once per codec by hardware-decoding a single frame of a real sample. Keyed by
+# codec+pixfmt because support varies by bit depth (e.g. HEVC Main vs Main12);
+# when the codec is unknown we key by the sample path instead.
+_hwdec_probe: dict[str, bool] = {}
+
+
+async def _gpu_can_hwdecode(sample: Path, codec: str = "", pix_fmt: str = "") -> bool:
+    """True if NVDEC on this box can hardware-decode `sample`. Probes once per
+    codec+pixfmt (or per path when codec is unknown) by hardware-decoding one
+    frame with the transparent `-hwaccel cuda`; rc≠0 ⇒ NVDEC can't handle it, so
+    the caller should CPU-decode (NVENC still encodes). Trivially False without
+    NVENC (no NVIDIA GPU). Cached for the process."""
+    codec = (codec or "").lower()
+    key = f"{codec}:{(pix_fmt or '').lower()}" if codec else f"@{sample}"
+    if key in _hwdec_probe:
+        return _hwdec_probe[key]
+    if not await _has_nvenc():
+        _hwdec_probe[key] = False
+        return False
+    ffmpeg = analyzer.ffmpeg_bin()
+    ok = False
+    if ffmpeg:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                ffmpeg, "-hide_banner", "-loglevel", "error",
+                "-hwaccel", "cuda", "-i", str(sample),
+                "-map", "0:v:0", "-frames:v", "1", "-f", "null", "-",
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL, **_FFMPEG_SUBPROCESS_KW)
+            rc = await proc.wait()
+            ok = (rc == 0)
+        except Exception:
+            ok = False
+    _hwdec_probe[key] = ok
+    if not ok:
+        print(f"[offline] NVDEC can't hardware-decode {codec or sample.name} on "
+              f"this GPU — CPU-decoding it (NVENC still encodes).")
+    return ok
+
+
+async def _decode_hwaccel_args(sample: Optional[Path] = None,
+                               info: Optional[dict] = None) -> list[str]:
+    """GPU decode prefix (`-hwaccel cuda`) for the validator/repair/compress
+    ffmpeg when NVENC is present, else `[]`. Goes BEFORE `-i`. Uses the
+    TRANSPARENT `-hwaccel cuda` form (per-frame CPU fallback for codecs that
+    negotiate one), but that fallback does NOT cover codecs whose hwaccel init
+    hard-fails (e.g. AV1 on older cards) — so when a `sample` is given we first
+    probe NVDEC (`_gpu_can_hwdecode`) and return `[]` if the GPU can't decode it,
+    letting the caller CPU-decode instead of hard-failing. `info` (from
+    `_ffprobe_full`) supplies codec/pixfmt for a cross-file probe cache."""
+    if not await _has_nvenc():
+        return []
+    if sample is not None:
+        v = (info or {}).get("video") or {}
+        if not await _gpu_can_hwdecode(sample, v.get("codec", ""), v.get("pix_fmt", "")):
+            return []
+    return ["-hwaccel", "cuda"]
 
 # HLS prep target — H.264 yuv420p video, AAC stereo audio, WebVTT subtitles.
 #   • Video that's already H.264 yuv420p with a browser-safe profile is stream-copied
@@ -14245,6 +14302,7 @@ def _build_hls_ffmpeg_args(
     full_gpu: bool = False,
     ladder_heights: Optional[list[int]] = None,
     force_reencode_original: bool = False,
+    hw_decode: bool = True,
 ) -> tuple[list[str], list[dict], list[dict], list[dict]]:
     """Construct the full ffmpeg invocation that emits one HLS bundle.
 
@@ -14309,9 +14367,12 @@ def _build_hls_ffmpeg_args(
     #     don't starve it. A stall watchdog + retry in _run_offline_job still
     #     guards against any residual hang.
     #   else (transparent) → `-hwaccel cuda` only: NVDEC decodes, frames
-    #     auto-download to system memory for the CPU `scale` filter, and ffmpeg
-    #     silently falls back to software decode for any codec NVDEC can't
-    #     handle — so it can never hard-fail (or hang) a copy+encode ladder.
+    #     auto-download to system memory for the CPU `scale` filter. ffmpeg's
+    #     transparent path falls back to software for codecs that negotiate one,
+    #     but NOT for codecs whose hwaccel init hard-fails (e.g. AV1 on a Pascal
+    #     card) — so this is only added when `hw_decode` (the caller's per-source
+    #     NVDEC probe, `_gpu_can_hwdecode`) confirms the GPU can decode it. When
+    #     it can't we CPU-decode here; NVENC still encodes.
     #
     # Only added when something actually decodes (a pure stream-copy rung has
     # no decode to accelerate).
@@ -14319,7 +14380,7 @@ def _build_hls_ffmpeg_args(
     if full_gpu and needs_decode:
         args += ["-hwaccel", "cuda", "-hwaccel_output_format", "cuda",
                  "-extra_hw_frames", "8"]
-    elif use_nvenc and needs_decode:
+    elif use_nvenc and needs_decode and hw_decode:
         args += ["-hwaccel", "cuda"]
 
     args += [
@@ -14820,11 +14881,18 @@ async def _run_offline_job(job_id: str) -> None:
             # original + CPU-scaled down-rungs). Pinning frames to VRAM has no
             # software fallback, so a stall/failure auto-retries on the
             # transparent path below (full_gpu=False) — never regressing a file.
+            # Can NVDEC hardware-decode this source on THIS box? Gates every GPU
+            # decode path below. AV1 on an older card (or any codec NVDEC can't
+            # handle) probes False → we CPU-decode instead of hard-failing.
+            _v = info.get("video") or {}
+            hw_decode = use_nvenc and await _gpu_can_hwdecode(
+                src, _v.get("codec", ""), _v.get("pix_fmt", ""))
             full_gpu = (
                 use_nvenc
                 and not copy_original
                 and await _has_cuda_scale()
                 and _source_nvdec_safe(info)
+                and hw_decode
             )
 
             while True:
@@ -14832,6 +14900,7 @@ async def _run_offline_job(job_id: str) -> None:
                     ffmpeg, src, info, use_nvenc, full_gpu=full_gpu,
                     ladder_heights=ladder_heights,
                     force_reencode_original=force_reencode,
+                    hw_decode=hw_decode,
                 )
                 # Record encoder for admin/UI display. The original rung may copy
                 # while the ABR down-rungs (if any) still transcode, so reflect both.
@@ -15649,7 +15718,7 @@ async def _ffmpeg_decode_scan(ffmpeg: str, path: str, set_proc, is_stopped) -> t
     Decodes on the GPU when NVENC is present (`_decode_hwaccel_args`)."""
     args = [
         ffmpeg, "-hide_banner", "-v", "error", "-xerror",
-        *(await _decode_hwaccel_args()),
+        *(await _decode_hwaccel_args(sample=Path(path))),
         "-i", path, "-map", "0:v?", "-map", "0:a?",
         "-f", "null", "-",
     ]
@@ -16070,9 +16139,10 @@ async def _repair_one_file(ffmpeg: str, path: str, reencode: bool, *,
     if reencode:
         tmp_reenc = src.with_name(src.stem + ".repair-reenc" + suffix)
         # GPU the heavy re-encode when NVENC is present (decode on the GPU too,
-        # transparent `-hwaccel cuda` with a CPU fallback). NVENC uses p-presets
-        # + `-cq` rather than libx264's veryfast/crf, so swap the whole video leg.
-        hw = await _decode_hwaccel_args()
+        # transparent `-hwaccel cuda`, gated on an NVDEC probe so AV1/odd sources
+        # CPU-decode instead of hard-failing). NVENC uses p-presets + `-cq` rather
+        # than libx264's veryfast/crf, so swap the whole video leg.
+        hw = await _decode_hwaccel_args(sample=src)
         if hw:
             venc = ["-c:v", "h264_nvenc", "-preset", "p4", "-cq", "23"]
         else:
@@ -16370,7 +16440,9 @@ async def _compress_one_file_inner(ffmpeg: str, path: str, *, crf: int, codec: s
 
     # GPU-accelerate decode (and encode) when NVENC is present; CPU fallback uses
     # libx264/libx265. NVENC uses p-presets + `-cq`; libx26x uses `-preset/-crf`.
-    hw = await _decode_hwaccel_args()
+    # Decode hwaccel is gated on an NVDEC probe so AV1/odd sources CPU-decode
+    # instead of hard-failing.
+    hw = await _decode_hwaccel_args(sample=src, info=info)
     if hw:
         venc = ["-c:v", ("hevc_nvenc" if codec == "hevc" else "h264_nvenc"),
                 "-preset", "p4", "-cq", str(crf)]
@@ -18101,7 +18173,7 @@ _OD_SUB_RE = re.compile(r"^sub_(\d+)\.vtt$")
 
 def _od_build_ffmpeg_args(
     ffmpeg: str, src: Path, audio_idx: int, has_audio: bool,
-    start_seg: int, use_nvenc: bool,
+    start_seg: int, use_nvenc: bool, hw_decode: bool = True,
 ) -> list[str]:
     """JIT ffmpeg command: transcode from segment `start_seg` forward, emitting
     mpegts HLS segments named seg_<start_seg>.ts, seg_<start_seg+1>.ts, … . All
@@ -18109,10 +18181,14 @@ def _od_build_ffmpeg_args(
     Windows-safe rule as the bundle path)."""
     start_sec = start_seg * OD_SEGMENT_SECS
     args = [ffmpeg, "-y", "-hide_banner", "-loglevel", "error"]
-    if use_nvenc:
-        # Transparent NVDEC tier (no -hwaccel_output_format): NVDEC decodes when
-        # it can and silently falls back to software for codecs it can't — so it
-        # never hard-fails, mirroring the full-prep transparent path.
+    if use_nvenc and hw_decode:
+        # Transparent NVDEC tier (no -hwaccel_output_format): NVDEC decodes the
+        # source on the GPU. Only added when the caller's `_gpu_can_hwdecode`
+        # probe confirms this box's NVDEC can decode the source codec — ffmpeg's
+        # transparent path does NOT gracefully fall back when hwaccel init itself
+        # hard-fails (e.g. AV1 on a Pascal card), so an unverified codec would
+        # abort the encode. When it can't hw-decode we CPU-decode below; NVENC
+        # still encodes.
         args += ["-hwaccel", "cuda"]
     # `-ss` BEFORE `-i` is a fast keyframe seek that resets output PTS to 0, so
     # `-force_key_frames` (which reads output time t) places keyframes at exact
@@ -18185,13 +18261,20 @@ async def _od_start_encode(session: dict, start_seg: int) -> None:
     if not ffmpeg:
         raise HTTPException(503, "ffmpeg is not available.")
     use_nvenc = await _has_nvenc()
+    # Gate GPU decode on an NVDEC capability probe — AV1 (and other codecs this
+    # box's NVDEC can't decode) would otherwise hard-fail `-hwaccel cuda` instead
+    # of falling back, tearing down every session. When it can't, CPU-decode +
+    # NVENC-encode.
+    v = session.get("video") or {}
+    hw_decode = use_nvenc and await _gpu_can_hwdecode(
+        Path(session["src"]), v.get("codec", ""), v.get("pix_fmt", ""))
     args = _od_build_ffmpeg_args(
         ffmpeg, Path(session["src"]), session["audio_idx"],
-        session["has_audio"], start_seg, use_nvenc,
+        session["has_audio"], start_seg, use_nvenc, hw_decode,
     )
     cmd = _ffmpeg_nice_prefix() + args
-    hls_log.info("ondemand %s START seg=%d nvenc=%s cmd: %s",
-                 session["key"], start_seg, use_nvenc,
+    hls_log.info("ondemand %s START seg=%d nvenc=%s hwdec=%s cmd: %s",
+                 session["key"], start_seg, use_nvenc, hw_decode,
                  " ".join(shlex.quote(a) for a in cmd))
     proc = await asyncio.create_subprocess_exec(
         *cmd, cwd=str(session["dir"]),
@@ -18328,6 +18411,7 @@ async def stream_ondemand(item_id: str, req: OnDemandReq) -> JSONResponse:
             "last_access": time.time(),
             "lock":        asyncio.Lock(),
             "sub_idxs":    sub_idxs,
+            "video":       info.get("video") or {},   # codec/pix_fmt for NVDEC probe
         }
         session["dir"].mkdir(parents=True, exist_ok=True)
         _od_sessions[key] = session
