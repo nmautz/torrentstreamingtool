@@ -1470,35 +1470,32 @@ player UI works with no host. The pieces:
   offline launch / corrupt cache only; new player features belong in
   static/index.html where offline mode inherits them).
 
-The dashboard path below also runs while ONLINE as the play-a-downloaded-copy
-convenience (no re-streaming).
+**Device-copy playback is OFFLINE-only (changed in 8.0.1).** The on-device bundle
+plays from the loopback `LocalMediaServer` **only when it can be loaded same-origin**
+— i.e. offline, where the dashboard itself is served from that loopback. **Online**
+the dashboard is a remote host page, so the device copy would be a *cross-origin*
+loopback load, which WKWebView stalls indefinitely (a downloaded episode "never
+loads while connected"; a fetch probe can't detect it — CORS `*` lets `fetch()`
+succeed while the media pipeline hangs). So online, `_lpLoadIndex` **streams the
+episode from the server** instead — same-origin to the page, the proven path. The
+device branch is gated on `_appOffline || !hlsAvailable` (the `!hlsAvailable`
+exception covers a no-HLS macOS host, where the device copy is the only option).
+See [GOTCHAS.md § On-device (loopback) playback is SAME-ORIGIN only](GOTCHAS.md).
 
-**Playback (online, on the dashboard).** `_lpLoadIndex` checks
-`BundleDownloader.getLocal({itemId, filePath})` first; if a **complete** local copy
-exists it starts the M1 **`LocalMediaServer`**
-(`NWListener`, loopback) over the bundle dir, reads `meta.json` straight from the
-bundle for `audios`/`subtitles`, and sets `master_url` to
-`http://127.0.0.1:<port>/master.m3u8` — synthesizing the same shape
-`/offline-prepare` returns, with **no host round-trip for the stream itself**.
-Everything downstream (tracks, embedded `sub_*.vtt` renditions, skip-intro, the
-custom controls) is unchanged, so a mixed playlist (Ep A not downloaded → Ep B
-downloaded → Ep C not downloaded) routes per-file — A/C stream from the host, B
-plays from the phone — in the same player UI. On any failure it falls through to
-the normal online prepare path.
+**Playback (offline, or no-HLS host).** When the device branch is taken,
+`_lpLoadIndex` checks `BundleDownloader.getLocal({itemId, filePath})`; if a
+**complete** local copy exists, `_appStartLocalPlayback` serves it same-origin
+(offline: the player-mode LMS's `/StreamLinkBundles/<sha>/`; no-HLS host: a fresh
+`LocalMediaServer` over the bundle dir), reads `meta.json` for `audios`/`subtitles`,
+and sets `master_url` accordingly — synthesizing the same shape `/offline-prepare`
+returns, with **no host round-trip for the stream itself**. Everything downstream
+(tracks, embedded `sub_*.vtt` renditions, skip-intro, the custom controls) is
+unchanged. On any failure it falls through to the normal prepare path. **Online,
+a mixed playlist is not split** anymore — every episode streams from the host in
+one player UI (before 8.0.1, downloaded episodes were meant to play from the phone
+mid-playlist, but that cross-origin load never worked while connected).
 
-> **The loopback must be probed, not assumed reachable (8.0.1).** Online, the host
-> dashboard runs over HTTPS while the device copy is served over the `http://`
-> loopback; some WKWebView builds block that cross-scheme subresource, and the
-> failure is silent (a fatal hls.js `NETWORK_ERROR` is retried forever as if it
-> were a tunnel drop) — so the download "never loads while connected" even though
-> it plays instantly offline. `_appStartLocalPlayback` therefore fetches
-> `master.m3u8` **first as a reachability probe** (4 s timeout) and, when online,
-> abandons the device copy on failure — stopping the just-started
-> `LocalMediaServer` and throwing so `_lpLoadIndex` streams the episode from the
-> server instead (reachable, since we're online). Offline it proceeds regardless
-> (same-origin loopback, no server to fall back to). See [GOTCHAS.md](GOTCHAS.md).
-
-Extras around the local path (7.17.0):
+Extras around the local path (7.17.0; offline / no-HLS-host only since 8.0.1):
 - **Remembered track picks**: the local path fires a parallel best-effort
   `GET /saved-tracks` (skipped offline via `navigator.onLine`) so audio/subtitle
   restore matches a server stream ([API.md](API.md)).

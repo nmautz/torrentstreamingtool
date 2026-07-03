@@ -1269,25 +1269,35 @@ host-side prep while minimized; for that the JS pool **self-resumes on foregroun
 valid up to its 3h ceiling). The durable path is the background `URLSession`: once a
 file is handed off, it transfers to completion while suspended regardless.
 
-### HTTPS dashboard → `http://127.0.0.1` loopback: secure-context in theory, blocked on some WKWebView builds in practice — probe it
-The dashboard is loaded over HTTPS but **online** device-copy playback points the
-player at `http://127.0.0.1:<port>/master.m3u8` (the loopback `LocalMediaServer`).
-Per spec WebKit treats `127.0.0.1`/`localhost` as a **potentially-trustworthy/secure**
-origin, so this *should* not be blocked as mixed content (unlike a plain-LAN
-`http://` subresource, which always is). **In practice some WKWebView builds still
-block the cross-scheme loopback subresource**, and when they do the failure is
-invisible: the loopback playlist/segment fetch just fails, and a fatal hls.js
-`NETWORK_ERROR` is (intentionally, for tunnels) retried forever rather than
-surfaced — so playback "never loads while connected" even though the offline copy
-plays instantly (offline the page itself is served from the same http loopback
-origin, so there is no scheme mismatch). **Never assume the loopback is reachable
-from the HTTPS page — probe it.** `_appStartLocalPlayback` fetches `master.m3u8`
-first as a reachability probe (4 s timeout) and, when online, abandons the device
-copy on failure so `_lpLoadIndex` falls back to streaming from the server (which is
-reachable — we're online). The M1 ATS exception (scoped to loopback only) governs
-plain `http` loads, **not** this cross-scheme mixed-content case, so it doesn't
-help here. If you move the media server off loopback, both the ATS exception and
-any remaining secure-context leniency break.
+### On-device (loopback) playback is SAME-ORIGIN only — it works offline but stalls from a remote (connected) host page
+The on-device bundle is served from the native `http://127.0.0.1:<port>` loopback
+`LocalMediaServer`, and the player is pointed at
+`http://127.0.0.1:<port>/master.m3u8`. Whether that plays hinges entirely on
+whether it's a **same-origin** load:
+- **Offline** the dashboard *itself* is served from that same loopback (player-mode
+  LMS — snapshot at `/`, bundles mounted at `/StreamLinkBundles/<sha>/`), so the
+  media is **same-origin** → plays instantly.
+- **Online** the dashboard is a **remote host page** (`http://<host>` / `https://<host>`),
+  so the device copy would be a **cross-origin** loopback load. **WKWebView stalls
+  that media pipeline indefinitely** — and misleadingly, a plain `fetch()` to the
+  loopback from the same page *succeeds* (the LMS sends `Access-Control-Allow-Origin: *`),
+  so a fetch-based reachability probe can't detect it. The stall then surfaces as a
+  fatal hls.js `NETWORK_ERROR`, which the player treats as a recoverable tunnel drop
+  and **retries forever** — so a downloaded episode "never loads while connected."
+
+**So device-copy playback is used ONLY when offline** (or when the host genuinely
+can't stream at all — a no-HLS macOS host, where it's the only option). `_lpLoadIndex`
+gates the device branch on `_appOffline || !hlsAvailable`; **online it streams from
+the server**, which loads from the page's *own* origin (same-origin) and is the
+proven path. This is why the 7.17.0 "play the downloaded copy while online"
+convenience was removed in 8.0.1 — it never actually worked in WKWebView. Don't try
+to re-enable online loopback playback with a fetch probe or a CORS tweak; the block
+is on the cross-origin *media* pipeline, not on fetch. The only way to play a device
+copy online would be to serve the page itself from the loopback (as offline mode
+does), which defeats the live dashboard.
+
+(The M1 ATS exception, scoped to loopback, only governs plain `http` cleartext loads
+— it's unrelated to this same-vs-cross-origin media behavior.)
 
 ### Bundle downloads are durable, but only *completed files* survive a kill — partials resume
 `BundleDownloader` writes each finished file straight into the final

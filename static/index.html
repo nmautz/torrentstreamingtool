@@ -8791,34 +8791,13 @@ async function _appStartLocalPlayback(local) {
     // the server belongs to the page, not to playback.
     lp._lmsActive = true;
   }
-  // Fetch master.m3u8 first — it doubles as a loopback REACHABILITY PROBE. When
-  // ONLINE the host page is HTTPS but this bundle is served over the http://
-  // loopback LocalMediaServer; some WKWebView builds block that cross-scheme
-  // subresource, so the playlist never loads and the player would sit
-  // "buffering" forever (a fatal hls.js NETWORK_ERROR is treated as a
-  // recoverable tunnel drop and retried indefinitely — the "never loads while
-  // connected" report). If the probe fails while online, abort so _lpLoadIndex
-  // falls back to streaming from the server (reachable — we're online). Offline
-  // there IS no server to fall back to, so proceed regardless of the result.
-  let masterText = "";
-  try {
-    const mr = _appOffline ? await fetch(base + "master.m3u8")
-                           : await _appFetchT(base + "master.m3u8", {}, 4000);
-    if (!mr.ok) throw new Error("master " + mr.status);
-    masterText = await mr.text();
-    if (!masterText.trim()) throw new Error("empty master playlist");
-  } catch (e) {
-    if (!_appOffline) {
-      try { _cap.lms.stop(); } catch (_) {}
-      lp._lmsActive = false;
-      throw e;   // → _lpLoadIndex: prep=undefined → server /offline-prepare
-    }
-  }
   let meta = {};
   try { meta = await (await fetch(base + "meta.json")).json(); } catch (_) {}
   // Identify the downloaded rung + surface the full ladder so the quality menu
   // can offer the other rungs as server streams (the trimmed local master gives
   // hls.js only one level, so it can't drive the menu — see GOTCHAS.md).
+  let masterText = "";
+  try { masterText = await (await fetch(base + "master.m3u8")).text(); } catch (_) {}
   return {
     local_base:   base,
     local_rung:   _appIdentifyLocalRung(masterText, meta),
@@ -11023,7 +11002,21 @@ async function _lpLoadIndex(seekTo) {
   // Mode. Falls through to the normal online prepare on any failure. Skipped
   // while a server-quality override is active for this file (user explicitly
   // picked a rung the device copy doesn't have).
-  if (isApp && !lp._srvOverride) {
+  //
+  // WHY OFFLINE-ONLY (8.0.1): the on-device bundle is served from the native
+  // http://127.0.0.1:<port> loopback LocalMediaServer. OFFLINE the whole
+  // dashboard is served from that same loopback, so the media is a *same-origin*
+  // load and plays instantly. ONLINE the dashboard is a REMOTE host page, so the
+  // device copy would be a *cross-origin* loopback load — WKWebView stalls that
+  // media pipeline indefinitely (a plain fetch() with CORS:* still succeeds,
+  // which is why it isn't obvious), so a downloaded episode "never loads while
+  // connected." Streaming the same episode from the server instead loads from
+  // the page's OWN origin (same-origin) and is the proven, reliable path, so
+  // online we deliberately skip the device copy. The lone exception is a host
+  // that can't stream at all (no-HLS macOS host, `hlsAvailable` false): there the
+  // device copy is the only option, cross-origin or not.
+  const _preferDeviceCopy = _appOffline || !hlsAvailable;
+  if (isApp && !lp._srvOverride && _preferDeviceCopy) {
     try {
       const local = await _appLocalBundle(lp.itemId, filePath);
       if (lp.filePath !== filePath) return;     // raced with a stop/advance
