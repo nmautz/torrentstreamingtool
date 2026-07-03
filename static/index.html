@@ -8963,6 +8963,23 @@ const _appOfflineHost = (() => {
   if (!_appOffline) return "";
   try { return new URLSearchParams(location.search).get("host") || ""; } catch (_) { return ""; }
 })();
+// Online play-time handoff (`&live=1`): the loopback cached player was opened
+// while the host is REACHABLE (not a true offline session) to play a downloaded
+// episode from a same-origin bundle — see _appTryLocalHandoff. It reuses the
+// whole `_appOffline` same-origin infrastructure, but differs in two ways: it
+// auto-plays a target episode on boot, and it returns to the live host dashboard
+// (rather than the pinned Downloads overlay) when playback stops. `_appLiveTarget`
+// carries the episode + resume position the host handed off.
+const _appLocalLive = (() => {
+  try { return _appOffline && new URLSearchParams(location.search).get("live") === "1"; } catch (_) { return false; }
+})();
+const _appLiveTarget = (() => {
+  if (!_appLocalLive) return { item: "", file: "", seek: 0 };
+  try {
+    const p = new URLSearchParams(location.search);
+    return { item: p.get("item") || "", file: p.get("file") || "", seek: parseInt(p.get("seek") || "0", 10) || 0 };
+  } catch (_) { return { item: "", file: "", seek: 0 }; }
+})();
 // Sentinel bundle key the player snapshot is stored under in BundleDownloader —
 // it must never surface in any downloads UI or the durable-queue resumer.
 const _APP_PLAYER_KEY = "__player__";
@@ -9034,6 +9051,43 @@ async function _tvRemoteSync() {
 async function _appLocalBundle(itemId, filePath) {
   if (!isApp) return null;
   try { return await _cap.dl.getLocal({ itemId, filePath }); } catch (_) { return null; }
+}
+
+// ── iOS app: online play-time handoff to the same-origin cached player ────────
+// ALWAYS prefer the on-device bundle when a downloaded copy exists — even online.
+// The catch (8.0.1): while online the dashboard runs on the REMOTE host origin,
+// so the loopback LocalMediaServer bundle is a cross-origin (and, on an HTTPS
+// host, mixed-content) media load that iOS native HLS stalls indefinitely. The
+// only reliable way to play the device copy is to make page + media SAME-ORIGIN,
+// which means booting the cached-player snapshot from the loopback and playing
+// the bundle there. This function does exactly that: verify the episode AND the
+// player snapshot are fully downloaded, start LMS in player mode, and navigate to
+// the snapshot's index.html in `&live=1` mode with the episode to auto-play + the
+// live host to return to on stop. Returns true when it navigated away (caller
+// must stop), false to fall back to normal server streaming. Online + isApp only.
+async function _appTryLocalHandoff(itemId, filePath, seekTo) {
+  if (!(isApp && _cap.dl && _cap.lms) || _appOffline || !navigator.onLine) return false;
+  try {
+    // The episode must be fully on-device…
+    const local = await _cap.dl.getLocal({ itemId, filePath });
+    if (!(local && local.complete && local.dir)) return false;
+    // …and so must the player snapshot (it serves the same-origin page). Without
+    // it there's nothing to load over the loopback, so stream from the host.
+    const snap = await _cap.dl.getLocal({ itemId: _APP_PLAYER_KEY, filePath: _APP_PLAYER_KEY });
+    if (!(snap && snap.complete && snap.dir)) return false;
+    // Push the active profile natively so the loopback page (empty localStorage)
+    // restores it, mirroring the offline boot path.
+    try { if (_cap.os && profile.id) await _cap.os.setProfile({ profileId: profile.id, profileName: profile.name || "" }); } catch (_) {}
+    const started = await _cap.lms.start({ playerRoot: snap.dir });
+    const base = String((started && started.url) || "").replace(/\/+$/, "");
+    if (!base) return false;
+    const q = new URLSearchParams({
+      offline: "1", live: "1", host: location.origin,
+      item: itemId, file: filePath, seek: String(Math.max(0, Math.floor(seekTo || 0))),
+    });
+    window.location.replace(base + "/index.html?" + q.toString());
+    return true;
+  } catch (_) { return false; }
 }
 
 // Which video rung does a downloaded bundle carry? The device master.m3u8 is
@@ -9676,7 +9730,39 @@ async function _appOfflineBoot() {
   // offline-gated) and open the overlay that IS the offline UI.
   await _appInitOfflineBundles();
   _appOpenDashboard();
-  _appOfflineReconnectInit();
+  // Online play-time handoff (`&live=1`): auto-start the episode the host handed
+  // off, straight from its same-origin on-device bundle. lpPlay expands it to the
+  // series' other DOWNLOADED episodes for Prev/Next, and lpStop returns to the
+  // live host dashboard. The auto-reconnect probe is deliberately NOT started
+  // here — the host is already reachable, so probing would bounce us back before
+  // playback even begins; return-to-host is driven by lpStop instead.
+  if (_appLocalLive && _appLiveTarget.item && _appLiveTarget.file) {
+    try { await lpPlay(_appLiveTarget.item, [_appLiveTarget.file], _appLiveTarget.seek); }
+    catch (_) { _appLiveReturnHost(); }
+  } else {
+    _appOfflineReconnectInit();
+  }
+}
+
+// Online play-time handoff: return to the live host dashboard when local playback
+// stops. A no-op outside `&live=1`. The host we came from should still be reachable,
+// but the network can drop mid-session — so PROBE first (the same always-resolves
+// no-cors trick the shell uses) and only navigate when it answers; the host boot
+// then flushes the progress this session captured to OfflineStore back to the server
+// (M3 sync). If the host has since gone away, degrade in place to a normal offline
+// session (start the reconnect probe, keep the Downloads overlay) rather than
+// navigating to a dead page.
+async function _appLiveReturnHost() {
+  if (!(_appLocalLive && _appOfflineHost)) return false;
+  const ok = await new Promise((resolve) => {
+    let done = false; const finish = (v) => { if (!done) { done = true; resolve(v); } };
+    setTimeout(() => finish(false), 2500);
+    fetch(_appOfflineHost + "/api/version", { mode: "no-cors", cache: "no-store" })
+      .then(() => finish(true)).catch(() => finish(false));
+  });
+  if (ok) { window.location.replace(_appOfflineHost); return true; }
+  _appOfflineReconnectInit();   // host vanished — become a plain offline session
+  return false;
 }
 
 // Reconnect probe: same always-resolves no-cors trick the shell uses. Auto-probe
@@ -9684,8 +9770,10 @@ async function _appOfflineBoot() {
 // under an offline viewing session would be hostile); the overlay's Reconnect
 // button probes on demand. On success the page navigates back to the real host.
 let _appOfflineProbing = false;
+let _appReconnectInited = false;   // guard: live-return can call this after boot too
 function _appOfflineReconnectInit() {
-  if (!_appOfflineHost) return;
+  if (!_appOfflineHost || _appReconnectInited) return;
+  _appReconnectInited = true;
   setInterval(() => { if (!lp.itemId) _appOfflineTryReconnect(false); }, 15000);
   window.addEventListener("online", () => { if (!lp.itemId) _appOfflineTryReconnect(false); });
 }
@@ -11222,6 +11310,15 @@ async function lpPlay(itemId, files, seekTo, label, shuffle, shuffleScope) {
   }
   if (!navigator.onLine && !_appOffline) {
     showAlert("Disconnected — streaming needs the host to be reachable.", "error"); return;
+  }
+  // Online play-time handoff: if this single-file play is fully downloaded, hand
+  // off to the same-origin cached player so it plays from the on-device bundle
+  // instead of streaming from the host (the loopback copy can only load
+  // same-origin — see _appTryLocalHandoff). Single, non-shuffle plays only for
+  // v1 (per-episode Play / Resume / "On Device"); multi-file queues and shuffle
+  // runs keep their explicit order and stream. On any miss it falls through here.
+  if (isApp && !_appOffline && navigator.onLine && files.length === 1 && !shuffle) {
+    if (await _appTryLocalHandoff(itemId, files[0], seekTo)) return;   // navigated away
   }
   await lpUnloadCurrent();
   // A single-file play (per-episode Play, resume, "On Device" on one file) still
@@ -13143,7 +13240,12 @@ async function lpStop() {
   // episode's watched position, so the next Resume restarts it from the top.
   // The `ended` path (_lpAdvanceOrEnd) records the completed state separately.
   if (lp.itemId && lp.filePath && d > 0 && t >= 5) {
-    saveProgress(lp.itemId, lp.filePath, t, d);
+    // In an online play-time handoff we're about to navigate back to the host,
+    // which reads OfflineStore to sync — so AWAIT the write here, otherwise
+    // location.replace can cut off the fire-and-forget native call and the
+    // server never learns this session's final position.
+    if (_appLocalLive) { await saveProgress(lp.itemId, lp.filePath, t, d); }
+    else saveProgress(lp.itemId, lp.filePath, t, d);
   }
   // Tear down any on-demand session promptly (the server-side reaper is the
   // backstop if this beacon never lands). sendBeacon survives an unload.
@@ -13170,6 +13272,9 @@ async function lpStop() {
   _lpHidePreparing();
   _lpDevHudStop();
   lp.itemId = null; lp.filePath = null; lp.playlist = []; lp.pi = 0;
+  // Online play-time handoff: playback is done, so leave the loopback cached
+  // player and return to the live host dashboard (no-op in a normal session).
+  _appLiveReturnHost();
 }
 
 // Lead seconds for the auto-skip countdown — mirror the VLC marquee leads
@@ -14263,6 +14368,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.5.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.6.0</div>
 </body>
 </html>

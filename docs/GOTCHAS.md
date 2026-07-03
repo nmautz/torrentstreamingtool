@@ -1322,16 +1322,29 @@ whether it's a **same-origin** load:
   fatal hls.js `NETWORK_ERROR`, which the player treats as a recoverable tunnel drop
   and **retries forever** — so a downloaded episode "never loads while connected."
 
-**So device-copy playback is used ONLY when offline** (or when the host genuinely
-can't stream at all — a no-HLS macOS host, where it's the only option). `_lpLoadIndex`
-gates the device branch on `_appOffline || !hlsAvailable`; **online it streams from
-the server**, which loads from the page's *own* origin (same-origin) and is the
-proven path. This is why the 7.17.0 "play the downloaded copy while online"
-convenience was removed in 8.0.1 — it never actually worked in WKWebView. Don't try
-to re-enable online loopback playback with a fetch probe or a CORS tweak; the block
-is on the cross-origin *media* pipeline, not on fetch. The only way to play a device
-copy online would be to serve the page itself from the loopback (as offline mode
-does), which defeats the live dashboard.
+**So the device copy is only ever loaded when page and media share an origin.**
+`_lpLoadIndex`'s device branch (gated `_appOffline || !hlsAvailable`) runs when the
+page is already the loopback: offline, or a no-HLS macOS host. **Never re-enable
+online loopback playback with a fetch probe or a CORS tweak** — the block is on the
+cross-origin (and, HTTPS host, mixed-content) *media* pipeline, not on `fetch`, so
+neither can fix it. This is why the 7.17.0 "play the downloaded copy while online"
+convenience was reverted to offline-only in 8.0.1: it never actually worked in
+WKWebView.
+
+**The reliable way to prefer the device copy online is the play-time handoff
+(8.6.0):** don't try to load the loopback bundle into the remote host page — instead
+move the *page* to the loopback first. `lpPlay` → `_appTryLocalHandoff` starts the
+player-mode LMS over the `__player__` snapshot and `location.replace`s to it with
+`?offline=1&live=1&host=<origin>&item=&file=&seek=`; on that same-origin snapshot page
+the bundle plays exactly like offline, and `lpStop` → `_appLiveReturnHost()` returns
+to the live host dashboard (which flushes `OfflineStore` progress to the server). So
+"serve the page from the loopback" isn't a dead end — it's the mechanism, just scoped
+to a single downloaded-episode playback session instead of the whole app. **Gotcha
+for the handoff itself:** the `live=1` page runs the device *snapshot* of
+static/index.html, so the auto-play/return-to-host code only exists there after the
+snapshot has refreshed (driven by the version-badge bump via `/api/player-manifest`) —
+an app connected to an upgraded host that hasn't re-snapshotted yet degrades safely
+(old snapshot boots Downloads-only, doesn't auto-play), it doesn't break.
 
 (The M1 ATS exception, scoped to loopback, only governs plain `http` cleartext loads
 — it's unrelated to this same-vs-cross-origin media behavior.)

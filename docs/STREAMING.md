@@ -1470,16 +1470,35 @@ player UI works with no host. The pieces:
   offline launch / corrupt cache only; new player features belong in
   static/index.html where offline mode inherits them).
 
-**Device-copy playback is OFFLINE-only (changed in 8.0.1).** The on-device bundle
-plays from the loopback `LocalMediaServer` **only when it can be loaded same-origin**
-— i.e. offline, where the dashboard itself is served from that loopback. **Online**
-the dashboard is a remote host page, so the device copy would be a *cross-origin*
-loopback load, which WKWebView stalls indefinitely (a downloaded episode "never
-loads while connected"; a fetch probe can't detect it — CORS `*` lets `fetch()`
-succeed while the media pipeline hangs). So online, `_lpLoadIndex` **streams the
-episode from the server** instead — same-origin to the page, the proven path. The
-device branch is gated on `_appOffline || !hlsAvailable` (the `!hlsAvailable`
-exception covers a no-HLS macOS host, where the device copy is the only option).
+**Device-copy playback is always SAME-ORIGIN.** The on-device bundle plays from the
+loopback `LocalMediaServer` **only when it can be loaded same-origin** — because
+**online the dashboard is a remote host page**, so a device copy loaded directly
+would be a *cross-origin* (and, on an HTTPS host, mixed-content) loopback load, which
+WKWebView stalls indefinitely (a downloaded episode "never loads while connected"; a
+fetch probe can't detect it — CORS `*` lets `fetch()` succeed while the media pipeline
+hangs). Two paths keep page and media same-origin:
+
+- **Offline** — the whole dashboard is already served from the loopback player-mode
+  LMS, so `_lpLoadIndex`'s device branch (gated `_appOffline || !hlsAvailable`) loads
+  the bundle directly. `!hlsAvailable` also covers a no-HLS macOS host.
+- **Online play-time handoff (8.6.0)** — to still prefer the downloaded copy while
+  connected, `lpPlay` (host side) calls **`_appTryLocalHandoff(itemId, filePath,
+  seekTo)`**: if the episode **and** the player snapshot (`__player__`) are both fully
+  downloaded, it starts the LMS in player mode over the snapshot and
+  `location.replace`s to that loopback page with `?offline=1&live=1&host=<origin>&
+  item=&file=&seek=`. On that page `_appLocalLive` is set; `_appOfflineBoot` **auto-
+  plays** the handed-off episode (Prev/Next spans the series' other *downloaded*
+  episodes), and on `lpStop` **`_appLiveReturnHost()`** navigates back to the live
+  host dashboard (which flushes the session's `OfflineStore` progress to the server
+  via M3 sync — see below). The auto-reconnect probe is skipped in `live` mode
+  (the host is already reachable; probing would bounce back before playback starts).
+  Only **single-file, non-shuffle** plays hand off (per-episode Play / Resume / "On
+  Device"); multi-file "Play All" and Shuffle keep their explicit order and stream.
+  Any miss (episode or snapshot not fully downloaded, no plugin) falls through to
+  normal server streaming. This supersedes the 8.0.1 "offline-only" restriction — the
+  intent of 7.17.0 ("prefer the device copy") is now delivered reliably via the
+  same-origin snapshot instead of a cross-origin load that never worked.
+
 See [GOTCHAS.md § On-device (loopback) playback is SAME-ORIGIN only](GOTCHAS.md).
 
 **Playback (offline, or no-HLS host).** When the device branch is taken,
@@ -1490,12 +1509,14 @@ See [GOTCHAS.md § On-device (loopback) playback is SAME-ORIGIN only](GOTCHAS.md
 and sets `master_url` accordingly — synthesizing the same shape `/offline-prepare`
 returns, with **no host round-trip for the stream itself**. Everything downstream
 (tracks, embedded `sub_*.vtt` renditions, skip-intro, the custom controls) is
-unchanged. On any failure it falls through to the normal prepare path. **Online,
-a mixed playlist is not split** anymore — every episode streams from the host in
-one player UI (before 8.0.1, downloaded episodes were meant to play from the phone
-mid-playlist, but that cross-origin load never worked while connected).
+unchanged. On any failure it falls through to the normal prepare path. Online, this
+device branch is reached inside the **`live=1` handoff page** (same-origin snapshot),
+never on the remote host page directly — so a mid-playlist mix still isn't split on
+the host page; instead the whole "play a downloaded episode" gesture is redirected
+to the snapshot up front (see the handoff above).
 
-Extras around the local path (7.17.0; offline / no-HLS-host only since 8.0.1):
+Extras around the local path (7.17.0; runs whenever the device branch is taken —
+offline, no-HLS host, or the `live=1` online handoff):
 - **Remembered track picks**: the local path fires a parallel best-effort
   `GET /saved-tracks` (skipped offline via `navigator.onLine`) so audio/subtitle
   restore matches a server stream ([API.md](API.md)).
