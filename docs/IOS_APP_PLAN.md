@@ -1,5 +1,25 @@
 # iOS Client App — Plan for v6.0.0
 
+> **Settings screen + auto-managed downloads (`8.3.0`).** The ☰ App menu gained a
+> **Settings** overlay (`_appOpenAppSettings()` in `static/index.html` — an overlay
+> ON the live host page, same pattern as Downloads/Change Server, so it never
+> disconnects). One feature so far, off by default: **auto-manage downloads while
+> watching a series**. When on and an episode is playing in the app while the
+> server is reachable, each episode load (`_lpLoadIndex` → `_appAutoManage`, 4 s
+> delayed so the previous episode's completion write lands, then
+> `_appAutoManageRun`) re-fetches `/api/library/{id}/files` progress and:
+> (1) removes this series' **completed** device downloads via `_appRemoveOne` —
+> excluding the playing file and the keep-ahead window, other series untouched;
+> (2) ensures the **next N playlist episodes** (default 3, configurable 1–10) are
+> downloaded, driving missing ones through `appDownloadBundle` (2-lane
+> `_appRunPooled`, fire-and-forget so a long host prep can't wedge later passes;
+> the in-flight guard + `queued` marks make overlapping passes idempotent) at a
+> configured quality (`original`/1080/720/480 — the bundle-manifest falls back to
+> the best available rung, so it never prompts mid-playback). Prefs persist in
+> host-origin localStorage: `streamlink_app_automanage`, `streamlink_app_ahead`,
+> `streamlink_app_autoq`. Online-only (`_appOffline`/`navigator.onLine`/
+> `app._connected` gated) and `isApp`-gated; host-served, no app rebuild.
+>
 > **Styled ASS subtitles in the app (`7.15.0`, code).** The 7.14.0 libass-wasm
 > (SubtitlesOctopus) styled-subtitle overlay now works on **both** iOS surfaces:
 > the online in-app dashboard reuses the host player as-is, and the **offline

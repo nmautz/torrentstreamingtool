@@ -9704,6 +9704,7 @@ function _appInitNav() {
   // actual switch to a different server, inside the Change Server overlay,
   // navigates away.) `_appGoDownloads`/`_appGoSettings` remain for the offline pages.
   menu.appendChild(mk("Downloads", _appOpenDashboard));
+  menu.appendChild(mk("Settings", _appOpenAppSettings));
   menu.appendChild(mk("Change Server / Re-pair", _appOpenChangeServer));
   menu.lastChild.style.borderBottom = "0";
   const toggle = document.createElement("button");
@@ -10248,6 +10249,171 @@ async function _appPairCurrentHost(password) {
   const j = await r.json().catch(() => ({}));
   if (!j.token) throw new Error("Pairing returned no token.");
   return j.token;
+}
+
+// ── iOS app: Settings overlay + auto-managed downloads ───────────────────────
+// App-level preferences, persisted per-server in this origin's localStorage (the
+// feature only acts while connected to this host, so host-origin storage is the
+// right scope). Auto-manage = while an episode of a series plays IN THE APP and
+// the server is reachable: (1) delete this series' watched (finished) downloads
+// from the device, and (2) keep the next N episodes downloaded ahead of the one
+// playing. Other series' downloads are never touched.
+const _APP_AUTOMG_KEY = "streamlink_app_automanage";  // "1" = on
+const _APP_AHEAD_KEY  = "streamlink_app_ahead";       // episodes to keep ahead
+const _APP_AUTOQ_KEY  = "streamlink_app_autoq";       // "original" | height
+
+function _appAutoPrefs() {
+  let on = false, ahead = 3, q = "original";
+  try {
+    on = localStorage.getItem(_APP_AUTOMG_KEY) === "1";
+    const n = parseInt(localStorage.getItem(_APP_AHEAD_KEY) || "3", 10);
+    if (Number.isFinite(n)) ahead = Math.max(1, Math.min(10, n));
+    q = localStorage.getItem(_APP_AUTOQ_KEY) || "original";
+  } catch (_) {}
+  return { on, ahead, q };
+}
+
+function _appOpenAppSettings() {
+  if (!isApp) return;
+  let ov = document.getElementById("appSet");
+  if (ov) ov.remove();
+  ov = document.createElement("div");
+  ov.id = "appSet";
+  ov.style.cssText = "position:fixed;inset:0;z-index:10001;display:flex;flex-direction:column;"
+    + "background:#0b0b0d;color:#f2f2f4;font-family:-apple-system,'Segoe UI',Roboto,sans-serif;"
+    + "padding:max(env(safe-area-inset-top),16px) 18px max(env(safe-area-inset-bottom),16px);overflow-y:auto;";
+  const p = _appAutoPrefs();
+  const selStyle = "width:100%;background:#0b0b0d;border:1px solid #2a2a30;color:#f2f2f4;"
+    + "font-size:16px;padding:12px;border-radius:0;outline:none;-webkit-appearance:none;appearance:none;";
+  const aheadOpts = [1,2,3,4,5,6,8,10].map((n) =>
+    `<option value="${n}" ${n === p.ahead ? "selected" : ""}>${n} episode${n > 1 ? "s" : ""}</option>`).join("");
+  const qOpts = [["original","Original quality"],["1080","1080p"],["720","720p"],["480","480p"]].map(([v,l]) =>
+    `<option value="${v}" ${v === p.q ? "selected" : ""}>${l}</option>`).join("");
+  ov.innerHTML = `
+    <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
+      <div style="font-size:20px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;">Settings</div>
+      <button id="appSetClose" style="all:unset;cursor:pointer;color:#8a8a92;border:1px solid #2a2a30;
+        padding:8px 14px;font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;">Close</button>
+    </div>
+
+    <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;margin:2px 0 8px;">Auto-manage downloads</div>
+    <div style="border:1px solid #2a2a30;background:#141417;padding:13px 14px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <div style="font-size:14px;font-weight:700;">While watching a series</div>
+        <button id="appSetAutoTgl" style="all:unset;cursor:pointer;min-width:52px;text-align:center;padding:8px 12px;
+          font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;"></button>
+      </div>
+      <div style="font-size:12px;color:#8a8a92;margin-top:8px;line-height:1.45;">
+        While connected to the server and watching an episode in the app, finished
+        (fully watched) episodes of that series are removed from this device, and the
+        next episodes are downloaded ahead of the one playing. Other shows' downloads
+        are never touched.
+      </div>
+      <div id="appSetAutoOpts" style="margin-top:13px;">
+        <div style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#8a8a92;margin-bottom:6px;">Keep downloaded ahead</div>
+        <select id="appSetAhead" style="${selStyle}">${aheadOpts}</select>
+        <div style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#8a8a92;margin:12px 0 6px;">Auto-download quality</div>
+        <select id="appSetAutoQ" style="${selStyle}">${qOpts}</select>
+        <div style="font-size:12px;color:#8a8a92;margin-top:7px;line-height:1.45;">If an episode doesn't have the chosen quality, the best available is downloaded.</div>
+      </div>
+    </div>
+  `;
+  document.body.appendChild(ov);
+  const paintTgl = () => {
+    const on = _appAutoPrefs().on;
+    const t = ov.querySelector("#appSetAutoTgl");
+    t.textContent = on ? "On" : "Off";
+    t.style.background = on ? "#3a7afe" : "transparent";
+    t.style.color = on ? "#fff" : "#8a8a92";
+    t.style.border = on ? "1px solid #3a7afe" : "1px solid #2a2a30";
+    ov.querySelector("#appSetAutoOpts").style.opacity = on ? "1" : ".45";
+  };
+  paintTgl();
+  ov.querySelector("#appSetClose").addEventListener("click", () => ov.remove());
+  ov.querySelector("#appSetAutoTgl").addEventListener("click", () => {
+    const on = !_appAutoPrefs().on;
+    try { localStorage.setItem(_APP_AUTOMG_KEY, on ? "1" : "0"); } catch (_) {}
+    paintTgl();
+    if (on) _appAutoManage();   // apply immediately if an episode is playing now
+  });
+  ov.querySelector("#appSetAhead").addEventListener("change", (e) => {
+    try { localStorage.setItem(_APP_AHEAD_KEY, e.target.value); } catch (_) {}
+    _appAutoManage();
+  });
+  ov.querySelector("#appSetAutoQ").addEventListener("change", (e) => {
+    try { localStorage.setItem(_APP_AUTOQ_KEY, e.target.value); } catch (_) {}
+  });
+}
+
+// Schedule an auto-manage pass for the episode that just started in the local
+// player. Called from _lpLoadIndex on every episode load (initial play, manual
+// nav, auto-advance) and from the Settings overlay when the feature turns on.
+// The 4 s delay lets the just-finished episode's completion write (fired by
+// lpNavEp/`ended` right before this load) land on the server, so the fresh
+// /files read below already sees it as completed.
+function _appAutoManage() {
+  if (!isApp || _appOffline || !_appAutoPrefs().on) return;
+  const itemId = lp.itemId, filePath = lp.filePath, pi = lp.pi;
+  if (!itemId || !filePath || (lp.playlist || []).length < 2) return;
+  setTimeout(() => { _appAutoManageRun(itemId, filePath, pi); }, 4000);
+}
+
+let _appAutoMgBusy = false;
+async function _appAutoManageRun(itemId, filePath, pi) {
+  if (_appAutoMgBusy || !isApp || _appOffline || !_cap.dl) return;
+  if (lp.itemId !== itemId || lp.filePath !== filePath) return;  // stopped / advanced meanwhile
+  if (!navigator.onLine || app._connected === false) return;     // acts only while connected
+  _appAutoMgBusy = true;
+  try {
+    const { ahead, q } = _appAutoPrefs();
+    // Fresh authoritative file list + per-profile progress for the playing item —
+    // the cached downloadFilesData may predate the episodes just watched.
+    let files = [];
+    try {
+      const pid = profile.id ? `?profile_id=${encodeURIComponent(profile.id)}` : "";
+      const r = await fetch(`/api/library/${itemId}/files${pid}`, { headers: _appAuthHeaders() });
+      if (!r.ok) return;
+      files = (await r.json()).files || [];
+      downloadFilesData.set(itemId, files);
+    } catch (_) { return; }
+    const byPath = new Map(files.map((f) => [f.path, f]));
+    // Keep window: the playing episode + the next `ahead` in playlist order (in
+    // Shuffle that IS the order the user will watch). Collect what's missing.
+    const keep = new Set([filePath]);
+    const toStart = [];
+    for (let i = pi + 1; i <= pi + ahead && i < lp.playlist.length; i++) {
+      const path = lp.playlist[i];
+      if (!path) break;
+      keep.add(path);
+      const f = byPath.get(path);
+      if (!f || f.complete === false) continue;   // not on the host's disk yet
+      const st = offlineBundles.get(offKey(itemId, path));
+      if (st && (st.complete || st.queued || (st.downloading && !st.waiting))) continue;
+      toStart.push(f);
+    }
+    // 1. Delete this series' watched episodes from the device. Never the one
+    //    playing, never the keep-ahead window (a rewatch keeps its window), and
+    //    only files the server reports as completed for this profile.
+    let removed = 0;
+    let ondevice = [];
+    try { ondevice = (await _cap.dl.list()).items || []; } catch (_) {}
+    for (const it of ondevice) {
+      if (it.itemId !== itemId || !it.complete || keep.has(it.filePath)) continue;
+      const f = byPath.get(it.filePath);
+      if (!f || !f.progress || !f.progress.completed) continue;
+      await _appRemoveOne(it.itemId, it.filePath);
+      removed++;
+    }
+    if (removed) _appRenderDashboard();
+    // 2. Top up the ahead window. Fire-and-forget (host prep can take minutes and
+    //    must not hold the busy flag across episodes); appDownloadBundle's own
+    //    in-flight guard + the `queued` marks above make overlapping passes safe.
+    if (toStart.length && hlsAvailable) {
+      for (const f of toStart)
+        offlineBundles.set(offKey(itemId, f.path), { queued: true, fraction: 0, name: f.name });
+      _appRunPooled(toStart, 2, (f) => appDownloadBundle(itemId, f.path, f.name, null, q));
+    }
+  } finally { _appAutoMgBusy = false; }
 }
 
 // --- Per-file "Prep for Streaming" -------------------------------------------
@@ -11442,6 +11608,10 @@ async function _lpLoadIndex(seekTo) {
   // episode so auto-advance / a Next hold resumes instantly.
   _lpRenderNavButtons();
   _lpWarmNextEp();
+
+  // iOS app: auto-managed downloads — drop this series' watched device copies and
+  // keep the next N episodes downloading ahead (Settings-gated; online only).
+  _appAutoManage();
 
   // Fetch skip-data in parallel — fire-and-forget; skip-offer logic just runs
   // off `lp.skipData` once it lands. Offline: no host, no skip markers.
@@ -13844,6 +14014,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.2.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.3.0</div>
 </body>
 </html>
