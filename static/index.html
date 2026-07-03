@@ -12425,7 +12425,12 @@ async function lpUnloadCurrent() {
 async function lpStop() {
   const v = document.getElementById("lpVideo");
   const t = v.currentTime || 0; const d = v.duration || lp.duration || 0;
-  if (lp.itemId && lp.filePath && d > 0) {
+  // Guard t≥5 (same near-zero guard _lpFlushProgress / lpNavEp / the timeupdate
+  // saver already use): stopping before the resume seek has landed — or in the
+  // first seconds — reads currentTime≈0, and saving that WIPES a near-finished
+  // episode's watched position, so the next Resume restarts it from the top.
+  // The `ended` path (_lpAdvanceOrEnd) records the completed state separately.
+  if (lp.itemId && lp.filePath && d > 0 && t >= 5) {
     saveProgress(lp.itemId, lp.filePath, t, d);
   }
   // Tear down any on-demand session promptly (the server-side reaper is the
@@ -13525,6 +13530,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.0.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.0.3</div>
 </body>
 </html>

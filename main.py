@@ -5375,7 +5375,6 @@ async def vlc_progress_tracker() -> None:
             now = asyncio.get_event_loop().time()
             if now - last_progress_save < 15:
                 continue
-            last_progress_save = now
 
             current_file = state.library_current_file
             if not current_file:
@@ -5386,14 +5385,42 @@ async def vlc_progress_tracker() -> None:
             if not item:
                 continue
 
-            pct = pos_sec / dur_sec
+            # Take a FRESH, self-consistent snapshot right before writing. The
+            # pos/dur read at the top of this loop iteration come from status.json,
+            # but the current file is resolved from a SEPARATE playlist.json call —
+            # and during an auto-advance those two reads straddle the transition,
+            # so one episode's position gets written under the NEXT episode's key.
+            # That single inconsistency produces both reported symptoms: a finished
+            # episode "restarts" (its key inherits the next file's t≈0) and playback
+            # "jumps to the wrong episode" (the next file is stamped complete at the
+            # old file's position). Re-read status + the active URI back-to-back and
+            # bail this tick unless they agree with the file we're about to key on
+            # and VLC is genuinely mid-playback (an end-of-file transition briefly
+            # reports state≠playing / time≈0). A skipped tick does NOT advance
+            # last_progress_save, so the next 2 s tick retries until consistent.
+            vs2 = await vlc_status()
+            if not vs2 or vs2.get("state") not in ("playing", "paused"):
+                continue
+            uri_now = await vlc_playlist_uri()
+            if not (uri_now and uri_now.startswith("file://")):
+                continue
+            save_file = _canonical_item_path(uri_to_path(uri_now), item)
+            if save_file != current_file:
+                continue  # mid-transition — next tick will be consistent
+            save_pos = float(vs2.get("time", 0) or 0)
+            save_dur = float(vs2.get("length", 0) or 0)
+            if save_dur < 10:
+                continue
+
+            last_progress_save = now
+            pct = save_pos / save_dur
             prof_prog = item.setdefault("progress", {}).setdefault(state.library_profile_id, {})
-            prof_prog["last_file"] = current_file
+            prof_prog["last_file"] = save_file
             file_prog = prof_prog.setdefault("file_progress", {})
-            existing_fp = file_prog.get(current_file, {})
-            file_prog[current_file] = {
-                "position_sec": round(pos_sec, 1),
-                "duration_sec": round(dur_sec, 1),
+            existing_fp = file_prog.get(save_file, {})
+            file_prog[save_file] = {
+                "position_sec": round(save_pos, 1),
+                "duration_sec": round(save_dur, 1),
                 "completed": pct > 0.92,
                 "updated_at": _now_iso(),
                 # Preserve saved track picks — they're sibling keys in the same
@@ -5409,10 +5436,10 @@ async def vlc_progress_tracker() -> None:
             await broadcast("progress_saved", {
                 "item_id": state.library_item_id,
                 "profile_id": state.library_profile_id,
-                "file_path": current_file,
-                "episode_name": Path(current_file).name,
-                "position_sec": pos_sec,
-                "duration_sec": dur_sec,
+                "file_path": save_file,
+                "episode_name": Path(save_file).name,
+                "position_sec": save_pos,
+                "duration_sec": save_dur,
                 "pct": round(pct * 100, 1),
             })
         except Exception:
