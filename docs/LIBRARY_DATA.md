@@ -356,12 +356,15 @@ The profile-level **`shuffle`** / **`shuffle_scope`** fields are the *persisted*
 
 ```jsonc
 "metadata": {
-  "tmdb_id":       12345,
+  "source":        "tmdb" | "manual" | "custom",  // see "pinning" below
+  "tmdb_id":       12345,                  // absent on custom entries
   "tmdb_kind":     "tv" | "movie",
   "title":         "Monster",
   "overview":      "...",
   "poster_path":   "/abc.jpg",            // join with /api/library/{id}/metadata → img_base
   "backdrop_path": "/xyz.jpg",
+  "poster_url":    "https://.../p.jpg",   // custom only: absolute image URL (wins over poster_path)
+  "backdrop_url":  "https://.../b.jpg",   // custom only: absolute image URL
   "first_air_date":"2004-04-07",          // tv only
   "release_date":  "1999-09-30",          // movie only
   "vote_average":  8.7,
@@ -384,9 +387,15 @@ The profile-level **`shuffle`** / **`shuffle_scope`** fields are the *persisted*
 
 Populated by `_fetch_item_metadata` ([main.py](../main.py)) on first hit of `GET /api/library/{id}/metadata`, then served from cache. Per-id `asyncio.Lock` coalesces concurrent first-loads. Force refresh via `POST /api/library/{id}/metadata/refresh` (admin); the same endpoint accepts an optional `{tmdb_id, kind}` to manually bind the item to a TMDb entry when auto-match picks the wrong show.
 
-The query the auto-match runs is built from `item.series` (or `item.title` for one-offs) by `_search_terms_for_item`, so a badly-named download (e.g. "AOT") can match the wrong show. `POST /api/library/{id}/rename` ([main.py](../main.py)) fixes this: it renames the series across the whole group (or the title for a movie/one-off), **drops the cached `metadata` on every renamed entry**, and re-fetches the requested item immediately — the next access of the siblings re-matches lazily. It also re-keys each profile's `series_subtitle_prefs[<series>]` so a remembered subtitle pick survives the rename. Surfaced in the UI by the pencil button on the episode page hero (`renameSeries()`).
+**`source` and pinning.** Every cached entry records how it was chosen: `"tmdb"` (auto-matched — the first search result), `"manual"` (a user force-bound a specific TMDb entry), or `"custom"` (a user hand-entered the fields). `manual` and `custom` are **pinned**: `_fetch_item_metadata` returns them unchanged on any non-forced access, and `rename` leaves them intact (see below). Only `tmdb` (or missing-`source`) entries are re-resolved. `custom` entries have **no `tmdb_id`** and use `poster_url`/`backdrop_url` (absolute) instead of TMDb paths; `seasons` is `{}` so episode titles/stills fall back to filename parsing.
 
-When no TMDb API key is configured (env or admin override), the endpoint returns `{enabled: false}` and the frontend gracefully falls back to filename parsing.
+**User-facing correction (any profile — not admin-gated, unlike `/refresh`).** Two endpoints back the "Fix metadata" control on the episode-page hero (`openMetaFix()`):
+- `GET /api/library/{id}/metadata/search?query=&kind=` — returns TMDb candidate matches (`{id, kind, title, year, overview, poster_path}`) so the user can pick the correct one. Empty `query` derives from the item name; `kind` (`tv`/`movie`/empty=both) filters.
+- `POST /api/library/{id}/metadata/set` — `mode:"tmdb"` force-binds the chosen `{tmdb_id, kind}` (stamped `source="manual"`, pulls full episode data, needs a key); `mode:"custom"` stores the hand-entered fields (stamped `source="custom"`, needs no key — the offline / no-good-match path).
+
+The query the auto-match runs is built from `item.series` (or `item.title` for one-offs) by `_search_terms_for_item`, so a badly-named download (e.g. "AOT") can match the wrong show. `POST /api/library/{id}/rename` ([main.py](../main.py)) fixes this: it renames the series across the whole group (or the title for a movie/one-off), **drops the cached `metadata` on every renamed entry (except pinned `manual`/`custom` ones, which are preserved)**, and re-fetches the requested item immediately — the next access of the siblings re-matches lazily. It also re-keys each profile's `series_subtitle_prefs[<series>]` so a remembered subtitle pick survives the rename. Surfaced in the UI by the pencil button on the episode page hero (`renameSeries()`).
+
+When no TMDb API key is configured (env or admin override), the metadata/search/refresh endpoints return `{enabled: false}` and the frontend gracefully falls back to filename parsing — but `metadata/set` with `mode:"custom"` still works, letting users supply metadata by hand with no key.
 
 ## Migration ([main.py:77](../main.py#L77))
 

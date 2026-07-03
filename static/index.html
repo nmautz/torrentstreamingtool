@@ -1411,6 +1411,13 @@
                 d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
             </svg>
           </button>
+          <button id="epMetaFixBtn" onclick="openMetaFix()" title="Fix metadata — pick the right match or enter your own"
+            class="hidden flex-shrink-0 mt-1 p-1 text-gray-500 hover:text-white hover:bg-white/10 transition-colors">
+            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+                d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2v-1M15 5h2a2 2 0 012 2v1m-7-3V3m0 0a2 2 0 100 4 2 2 0 000-4zm5.5 8.5l3 3L21 9"/>
+            </svg>
+          </button>
         </div>
         <p id="epMetaLine" class="text-[10px] sm:text-xs text-gray-400 uppercase tracking-widest mt-1"></p>
         <div class="mt-1.5">
@@ -1656,6 +1663,108 @@
       </div>
     </div>
     <div id="subResults" class="flex-1 overflow-y-auto px-5 py-3 space-y-2"></div>
+  </div>
+</div>
+
+<!-- ── Fix Metadata Modal ─────────────────────────────────────────────────── -->
+<!-- Correct a wrong auto-matched show/movie: pick the right TMDb entry from a
+     search list, or hand-enter custom metadata. z-[60] to sit above the z-50
+     episode page. Any profile may use this (matches the Rename control). -->
+<div id="metaFixModal"
+  class="hidden fixed inset-0 z-[60] bg-black/60
+         flex items-end sm:items-center justify-center sm:px-4 sm:py-6">
+  <div class="bg-gray-900 w-full sm:max-w-lg flex flex-col max-h-[92vh] sm:max-h-[88vh] fade-in border-t-[3px] border-indigo-600">
+    <div class="px-5 pt-5 pb-3 border-b border-gray-800 flex items-center justify-between flex-shrink-0">
+      <div class="min-w-0">
+        <h2 class="text-lg font-black uppercase tracking-wide">Fix Metadata</h2>
+        <p id="metaFixSub" class="text-xs text-gray-500 mt-0.5 truncate"></p>
+      </div>
+      <button onclick="closeMetaFix()"
+        class="text-gray-500 hover:text-white transition-colors flex-shrink-0 p-1">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+    <!-- Tab switch: Search TMDb vs. Custom -->
+    <div class="flex border-b border-gray-800 flex-shrink-0">
+      <button id="metaTabSearch" onclick="metaSwitchTab('search')"
+        class="flex-1 text-xs font-black uppercase tracking-widest px-4 py-3 transition-colors">Pick a match</button>
+      <button id="metaTabCustom" onclick="metaSwitchTab('custom')"
+        class="flex-1 text-xs font-black uppercase tracking-widest px-4 py-3 transition-colors">Custom</button>
+    </div>
+
+    <!-- ── Search & pick pane ── -->
+    <div id="metaPaneSearch" class="flex-1 min-h-0 flex flex-col">
+      <div class="px-5 py-3 border-b border-gray-800 flex-shrink-0">
+        <div class="flex gap-0">
+          <input id="metaSearchQuery" type="text" placeholder="Show or movie name"
+            onkeydown="if(event.key==='Enter') metaSearch()"
+            class="flex-1 min-w-0 bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500
+                   px-3 py-2.5 text-sm focus:outline-none transition-colors placeholder-gray-700"/>
+          <button onclick="metaSearch()"
+            class="bg-indigo-700 hover:bg-indigo-600 text-white text-sm font-black uppercase tracking-wide px-5 py-2.5 transition-colors flex-shrink-0">
+            Search
+          </button>
+        </div>
+        <div class="mt-2 flex items-center gap-2">
+          <span class="text-[10px] font-bold uppercase tracking-widest text-gray-500">Type</span>
+          <select id="metaSearchKind" onchange="metaSearch()"
+            class="bg-gray-800 text-gray-100 text-xs font-bold uppercase tracking-wide border-0 px-2 py-1.5 cursor-pointer focus:outline-none">
+            <option value="">TV &amp; Movies</option>
+            <option value="tv">TV only</option>
+            <option value="movie">Movies only</option>
+          </select>
+        </div>
+      </div>
+      <div id="metaResults" class="flex-1 overflow-y-auto px-5 py-3 space-y-2"></div>
+    </div>
+
+    <!-- ── Custom pane ── -->
+    <div id="metaPaneCustom" class="hidden flex-1 min-h-0 overflow-y-auto px-5 py-4 space-y-3">
+      <div>
+        <label class="text-[10px] font-bold uppercase tracking-widest text-gray-500">Title</label>
+        <input id="metaCustTitle" type="text" placeholder="Title"
+          class="w-full mt-1 bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500 px-3 py-2 text-sm focus:outline-none transition-colors placeholder-gray-700"/>
+      </div>
+      <div class="flex gap-3">
+        <div class="flex-1">
+          <label class="text-[10px] font-bold uppercase tracking-widest text-gray-500">Year</label>
+          <input id="metaCustYear" type="text" inputmode="numeric" placeholder="2021"
+            class="w-full mt-1 bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500 px-3 py-2 text-sm focus:outline-none transition-colors placeholder-gray-700"/>
+        </div>
+        <div class="flex-1">
+          <label class="text-[10px] font-bold uppercase tracking-widest text-gray-500">Rating (0–10)</label>
+          <input id="metaCustRating" type="text" inputmode="decimal" placeholder="8.4"
+            class="w-full mt-1 bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500 px-3 py-2 text-sm focus:outline-none transition-colors placeholder-gray-700"/>
+        </div>
+      </div>
+      <div>
+        <label class="text-[10px] font-bold uppercase tracking-widest text-gray-500">Genres (comma-separated)</label>
+        <input id="metaCustGenres" type="text" placeholder="Drama, Thriller"
+          class="w-full mt-1 bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500 px-3 py-2 text-sm focus:outline-none transition-colors placeholder-gray-700"/>
+      </div>
+      <div>
+        <label class="text-[10px] font-bold uppercase tracking-widest text-gray-500">Overview</label>
+        <textarea id="metaCustOverview" rows="3" placeholder="Short description…"
+          class="w-full mt-1 bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500 px-3 py-2 text-sm focus:outline-none transition-colors placeholder-gray-700 resize-none"></textarea>
+      </div>
+      <div>
+        <label class="text-[10px] font-bold uppercase tracking-widest text-gray-500">Poster image URL</label>
+        <input id="metaCustPoster" type="url" placeholder="https://…/poster.jpg"
+          class="w-full mt-1 bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500 px-3 py-2 text-sm focus:outline-none transition-colors placeholder-gray-700"/>
+      </div>
+      <div>
+        <label class="text-[10px] font-bold uppercase tracking-widest text-gray-500">Backdrop image URL</label>
+        <input id="metaCustBackdrop" type="url" placeholder="https://…/backdrop.jpg"
+          class="w-full mt-1 bg-gray-800 border-0 border-b-2 border-gray-700 focus:border-indigo-500 px-3 py-2 text-sm focus:outline-none transition-colors placeholder-gray-700"/>
+      </div>
+      <p class="text-[10px] text-gray-600 leading-snug">Use <span class="text-gray-400">https</span> image URLs — an http:// image is blocked as insecure content over the HTTPS dashboard.</p>
+      <button id="metaCustSaveBtn" onclick="metaSaveCustom()"
+        class="w-full bg-indigo-700 hover:bg-indigo-600 text-white text-sm font-black uppercase tracking-wide px-5 py-3 transition-colors">
+        Save custom metadata
+      </button>
+    </div>
   </div>
 </div>
 
@@ -6014,6 +6123,7 @@ function setEpHeroPlaceholder(title){
   poster.classList.add("hidden"); poster.removeAttribute("src");
   document.getElementById("epPosterFallback").classList.remove("hidden");
   document.getElementById("epRenameBtn").classList.add("hidden");
+  document.getElementById("epMetaFixBtn").classList.add("hidden");
   const ob=document.getElementById("epOndemandBtn");
   if(ob) ob.classList.add("hidden");
 }
@@ -6035,6 +6145,7 @@ function renderEpHero(fallbackTitle){
   // Reveal the rename control now the page has loaded — lets the user correct a
   // wrong auto-matched show (the metadata is fetched from the series name).
   document.getElementById("epRenameBtn").classList.remove("hidden");
+  document.getElementById("epMetaFixBtn").classList.remove("hidden");
   _renderEpOndemandBtn();
 
   const bits=[];
@@ -6050,23 +6161,21 @@ function renderEpHero(fallbackTitle){
   }
   metaEl.textContent = bits.join(" · ");
 
-  // Backdrop + poster (only when we have metadata)
-  if(m && epMetaImgBase){
-    if(m.backdrop_path){
-      backdrop.style.backgroundImage = `url("${epMetaImgBase}/w1280${m.backdrop_path}")`;
-    } else {
-      backdrop.style.backgroundImage = "";
-    }
-    if(m.poster_path){
-      poster.src = `${epMetaImgBase}/w342${m.poster_path}`;
-      poster.classList.remove("hidden");
-      posterFb.classList.add("hidden");
-    } else {
-      poster.classList.add("hidden"); poster.removeAttribute("src");
-      posterFb.classList.remove("hidden");
-    }
+  // Backdrop + poster. Custom metadata carries absolute image URLs
+  // (poster_url/backdrop_url); TMDb metadata carries paths joined with img_base.
+  // Prefer the absolute URL so custom items render art even with no TMDb key.
+  const posterSrc   = m?.poster_url   || (m?.poster_path   && epMetaImgBase ? `${epMetaImgBase}/w342${m.poster_path}`   : "");
+  const backdropSrc = m?.backdrop_url || (m?.backdrop_path && epMetaImgBase ? `${epMetaImgBase}/w1280${m.backdrop_path}` : "");
+  if(backdropSrc){
+    backdrop.style.backgroundImage = `url("${backdropSrc}")`;
   } else {
     backdrop.style.backgroundImage = "";
+  }
+  if(posterSrc){
+    poster.src = posterSrc;
+    poster.classList.remove("hidden");
+    posterFb.classList.add("hidden");
+  } else {
     poster.classList.add("hidden"); poster.removeAttribute("src");
     posterFb.classList.remove("hidden");
   }
@@ -6119,6 +6228,156 @@ async function renameSeries(){
   }finally{
     btn.disabled=false;
   }
+}
+
+// ── Fix Metadata ──────────────────────────────────────────────────────────
+// Correct a wrong auto-matched show/movie. Two paths: search TMDb and pick the
+// right entry (force-binds it, pinned as source="manual"), or hand-enter custom
+// metadata (pinned as source="custom", no TMDb key needed). Shared with the
+// Rename control — both fix the same "pulled the wrong show" problem.
+function _epCurrentName(){
+  const item=(window._libCache||[]).find(it=>it&&it.id===epItemId);
+  return (item&&((item.series||"").trim()||(item.title||"").trim()))
+       || (document.getElementById("epTitle").textContent||"").trim();
+}
+
+function openMetaFix(){
+  if(!epItemId) return;
+  document.getElementById("metaFixSub").textContent=_epCurrentName();
+  // Prefill the search box with the current name so a Search is one click away.
+  document.getElementById("metaSearchQuery").value=_epCurrentName();
+  document.getElementById("metaSearchKind").value="";
+  document.getElementById("metaResults").innerHTML=
+    `<p class="text-gray-600 text-sm text-center py-8">Search for the correct title, then pick a match.</p>`;
+  // Prefill custom fields from whatever metadata we currently have.
+  const m=epMetadata||{};
+  document.getElementById("metaCustTitle").value    = m.title || _epCurrentName();
+  document.getElementById("metaCustYear").value     = (m.first_air_date||m.release_date||"").slice(0,4);
+  document.getElementById("metaCustRating").value   = (typeof m.vote_average==="number"&&m.vote_average>0)?m.vote_average:"";
+  document.getElementById("metaCustGenres").value   = (m.genres||[]).join(", ");
+  document.getElementById("metaCustOverview").value = m.overview || "";
+  document.getElementById("metaCustPoster").value   = m.poster_url || "";
+  document.getElementById("metaCustBackdrop").value = m.backdrop_url || "";
+  metaSwitchTab("search");
+  document.getElementById("metaFixModal").classList.remove("hidden");
+}
+
+function closeMetaFix(){
+  document.getElementById("metaFixModal").classList.add("hidden");
+}
+
+function metaSwitchTab(tab){
+  const onCls="text-white border-b-2 border-indigo-500 bg-gray-800/40";
+  const offCls="text-gray-500 hover:text-gray-300 border-b-2 border-transparent";
+  const s=document.getElementById("metaTabSearch"), c=document.getElementById("metaTabCustom");
+  const isSearch=(tab==="search");
+  s.className="flex-1 text-xs font-black uppercase tracking-widest px-4 py-3 transition-colors "+(isSearch?onCls:offCls);
+  c.className="flex-1 text-xs font-black uppercase tracking-widest px-4 py-3 transition-colors "+(isSearch?offCls:onCls);
+  document.getElementById("metaPaneSearch").classList.toggle("hidden", !isSearch);
+  document.getElementById("metaPaneCustom").classList.toggle("hidden", isSearch);
+}
+
+async function metaSearch(){
+  const itemId=epItemId;
+  const q=document.getElementById("metaSearchQuery").value.trim();
+  const kind=document.getElementById("metaSearchKind").value;
+  const box=document.getElementById("metaResults");
+  box.innerHTML=`<p class="text-gray-600 text-sm text-center py-8">Searching…</p>`;
+  try{
+    const url=`/api/library/${itemId}/metadata/search?query=${encodeURIComponent(q)}&kind=${encodeURIComponent(kind)}`;
+    const r=await fetch(url);
+    const d=await r.json().catch(()=>({}));
+    if(epItemId!==itemId) return;
+    if(!r.ok){ box.innerHTML=`<p class="text-red-400 text-sm text-center py-8">${escHtml(d.detail||"Search failed.")}</p>`; return; }
+    if(d.enabled===false){
+      box.innerHTML=`<p class="text-gray-500 text-sm text-center py-8">TMDb search needs an API key. Use the <span class="text-gray-300 font-bold">Custom</span> tab to enter metadata by hand.</p>`;
+      return;
+    }
+    const img=d.img_base||"";
+    const results=d.results||[];
+    if(!results.length){ box.innerHTML=`<p class="text-gray-600 text-sm text-center py-8">No matches. Try a different name, or use the Custom tab.</p>`; return; }
+    box.innerHTML=results.map(res=>{
+      const poster=res.poster_path&&img?`${img}/w92${res.poster_path}`:"";
+      const kindLbl=res.kind==="movie"?"Movie":"TV";
+      const meta=[res.year||"", kindLbl].filter(Boolean).join(" · ");
+      const ov=res.overview?escHtml(res.overview):"";
+      return `<button onclick="metaPick(${res.id},'${res.kind}')"
+        class="w-full text-left flex gap-3 p-2 bg-gray-800/50 hover:bg-gray-800 border border-gray-800 hover:border-indigo-600 transition-colors">
+        <div class="flex-shrink-0 w-12 h-[72px] bg-gray-900 border border-gray-800 flex items-center justify-center overflow-hidden">
+          ${poster?`<img src="${poster}" class="w-full h-full object-cover" alt=""/>`
+                  :`<svg class="w-5 h-5 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>`}
+        </div>
+        <div class="min-w-0 flex-1">
+          <div class="text-sm font-bold text-white truncate">${escHtml(res.title||"Untitled")}</div>
+          <div class="text-[10px] uppercase tracking-widest text-gray-500 mt-0.5">${escHtml(meta)}</div>
+          <div class="text-xs text-gray-400 mt-1 line-clamp-2">${ov}</div>
+        </div>
+      </button>`;
+    }).join("");
+  }catch(_){
+    if(epItemId===itemId) box.innerHTML=`<p class="text-red-400 text-sm text-center py-8">Search failed.</p>`;
+  }
+}
+
+async function metaPick(tmdbId, kind){
+  const itemId=epItemId;
+  try{
+    const r=await fetch(`/api/library/${itemId}/metadata/set`,{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({mode:"tmdb", tmdb_id:tmdbId, kind}),
+    });
+    const d=await r.json().catch(()=>({}));
+    if(epItemId!==itemId) return;
+    if(!r.ok){ showAlert(d.detail||"Could not apply that match.","error"); return; }
+    _applyMetaResult(d, "Metadata updated.");
+  }catch(_){
+    if(epItemId===itemId) showAlert("Could not apply that match.","error");
+  }
+}
+
+async function metaSaveCustom(){
+  const itemId=epItemId;
+  const title=document.getElementById("metaCustTitle").value.trim();
+  if(!title){ showAlert("A title is required.","warn"); return; }
+  const ratingRaw=document.getElementById("metaCustRating").value.trim();
+  const payload={
+    mode:"custom",
+    title,
+    year:document.getElementById("metaCustYear").value.trim(),
+    overview:document.getElementById("metaCustOverview").value.trim(),
+    vote_average:ratingRaw?parseFloat(ratingRaw):null,
+    poster_url:document.getElementById("metaCustPoster").value.trim(),
+    backdrop_url:document.getElementById("metaCustBackdrop").value.trim(),
+    genres:document.getElementById("metaCustGenres").value.split(",").map(s=>s.trim()).filter(Boolean),
+  };
+  const btn=document.getElementById("metaCustSaveBtn");
+  btn.disabled=true;
+  try{
+    const r=await fetch(`/api/library/${itemId}/metadata/set`,{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(payload),
+    });
+    const d=await r.json().catch(()=>({}));
+    if(epItemId!==itemId) return;
+    if(!r.ok){ showAlert(d.detail||"Could not save.","error"); return; }
+    _applyMetaResult(d, "Custom metadata saved.");
+  }catch(_){
+    if(epItemId===itemId) showAlert("Could not save.","error");
+  }finally{
+    btn.disabled=false;
+  }
+}
+
+// Shared repaint after a manual pick or custom save — mirrors renameSeries().
+function _applyMetaResult(d, msg){
+  epMetadata=d.metadata||null;
+  if(d.img_base) epMetaImgBase=d.img_base;
+  renderEpHero(_epCurrentName());
+  renderEpSeasonTabs();
+  renderEpList();
+  loadLibrary();            // refresh the library grouping label / poster
+  closeMetaFix();
+  showAlert(msg,"success");
 }
 
 // On-Demand Stream Only toggle (episode page). When ON, on-device playback streams
@@ -13530,6 +13789,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.0.4</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.1.0</div>
 </body>
 </html>

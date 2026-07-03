@@ -756,7 +756,15 @@ The iOS app serves a device snapshot of the dashboard from `LocalMediaServer` wh
 
 ### Auto-match grabs the most-popular result
 
-`_tmdb_match_show` ([main.py](../main.py)) calls `/search/tv` (or `/search/movie` for single-file no-season items) and takes the **first** result. TMDb's search ranks by popularity, so for ambiguous titles ("Monster", "The Office", "It") the match may be the wrong show. Recovery path: an admin POSTs `/api/library/{id}/metadata/refresh` with `{tmdb_id: <correct>, kind: "tv"|"movie"}` to force-bind the item to a specific TMDb entry. The result is cached on `item["metadata"]` and only re-fetched on another `refresh=1`.
+`_tmdb_match_show` ([main.py](../main.py)) calls `/search/tv` (or `/search/movie` for single-file no-season items) and takes the **first** result. TMDb's search ranks by popularity, so for ambiguous titles ("Monster", "The Office", "It") the match may be the wrong show. Recovery paths: an admin POSTs `/api/library/{id}/metadata/refresh` with `{tmdb_id: <correct>, kind: "tv"|"movie"}`, OR **any user** uses the episode-page "Fix Metadata" control (`/metadata/search` → `/metadata/set`) to pick the right entry or hand-enter custom fields. The result is cached on `item["metadata"]`.
+
+### Manual/custom metadata is PINNED — auto-refetch and rename must not clobber it
+
+The metadata cache carries a `source`: `"tmdb"` (auto), `"manual"` (user picked a TMDb entry), `"custom"` (hand-entered). A user's deliberate choice must survive the two things that otherwise re-resolve metadata: (1) `_fetch_item_metadata` returns `manual`/`custom` unchanged on any **non-forced** call — critical for `custom`, which has **no `tmdb_id`** and would otherwise fail the old `cached.get("tmdb_id")` guard and get auto-re-matched; (2) `rename` skips `pop("metadata")` for pinned entries and does **not** force-refetch them (it hands the existing metadata straight back). If you add another code path that drops or force-refetches `item["metadata"]`, check `source` first or you'll silently wipe a user's fix. Custom entries use absolute `poster_url`/`backdrop_url` (not TMDb `poster_path`) and empty `seasons` — `renderEpHero` prefers the absolute URLs, and episode titles/stills fall back to filename parsing.
+
+### Custom poster/backdrop URLs must be https (mixed-content block)
+
+Custom metadata art is whatever URL the user pastes, loaded directly by the `<video>` hero's `<img>`/CSS `background-image`. The dashboard is served over **HTTPS** (and the iOS app runs under `capacitor://`), so an `http://` image URL is blocked as insecure mixed content and silently shows the placeholder. The Custom tab warns the user to use `https`. Don't proxy these through the host (that would re-introduce an SSRF surface for no real benefit) — just document the https requirement.
 
 ### Season tab uses `f.season` parsed off disk
 

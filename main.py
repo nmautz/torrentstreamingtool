@@ -1738,6 +1738,11 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
         if not item:
             return None
         cached = item.get("metadata") or {}
+        # Manual picks / hand-entered custom metadata are pinned — never let a
+        # plain (non-forced) access silently re-run the auto-match over them.
+        # Custom entries have no tmdb_id, so this is the guard that protects them.
+        if cached.get("source") in ("manual", "custom") and not force:
+            return cached
         if cached.get("tmdb_id") and not force and not override_tmdb_id:
             return cached
 
@@ -1757,6 +1762,11 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
             data = await _tmdb_fetch_tv(match["id"], seasons)
         else:
             data = await _tmdb_fetch_movie(match["id"])
+
+        # Record how this binding was chosen. A user-forced override is a
+        # deliberate "manual" pick and is pinned (see the early-return guard
+        # above and the rename handler); an auto-match is plain "tmdb".
+        data["source"] = "manual" if override_tmdb_id else "tmdb"
 
         # Re-read the library before writing — analyzer / progress writers may
         # have updated other fields while we were fetching from TMDb.
@@ -6159,6 +6169,26 @@ class MetadataRefreshReq(BaseModel):
     kind: Optional[str] = None        # "tv" | "movie"
 
 
+class MetadataSetReq(BaseModel):
+    """User-driven metadata correction (any profile — not admin-gated).
+
+    mode="tmdb"   → force-bind a chosen TMDb entry (tmdb_id + kind); pulls full
+                    episode data and is stamped source="manual".
+    mode="custom" → hand-entered metadata; needs no TMDb key, stamped
+                    source="custom". Art is supplied as absolute image URLs."""
+    mode: str = "tmdb"                     # "tmdb" | "custom"
+    tmdb_id: Optional[int] = None          # mode=tmdb
+    kind: Optional[str] = None             # "tv" | "movie"
+    # custom fields (mode=custom) ↓
+    title: Optional[str] = None
+    overview: Optional[str] = None
+    year: Optional[str] = None
+    vote_average: Optional[float] = None
+    poster_url: Optional[str] = None       # absolute image URL
+    backdrop_url: Optional[str] = None     # absolute image URL
+    genres: Optional[list[str]] = None
+
+
 class RenameReq(BaseModel):
     name: str                         # new series name (or movie title for one-offs)
 
@@ -6497,6 +6527,119 @@ async def refresh_item_metadata(item_id: str, request: Request,
     return JSONResponse({"ok": True, "metadata": data, "img_base": TMDB_IMG_BASE})
 
 
+@app.get("/api/library/{item_id}/metadata/search")
+async def search_item_metadata(item_id: str, query: str = "",
+                               kind: str = "") -> JSONResponse:
+    """Return a list of TMDb candidate matches so the user can pick the right
+    show/movie when auto-match guessed wrong. Not admin-gated (any profile can
+    correct metadata, same as `/rename`). `kind` filters to "tv"/"movie";
+    empty searches both. Empty `query` falls back to the item's derived name."""
+    if not await _tmdb_effective_key():
+        return JSONResponse({"enabled": False, "results": []})
+
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+
+    q = (query or "").strip()
+    if not q:
+        q, _year = _search_terms_for_item(item)
+    if not q:
+        return JSONResponse({"enabled": True, "img_base": TMDB_IMG_BASE,
+                             "results": []})
+
+    kind = kind if kind in ("tv", "movie") else ""
+    results: list[dict] = []
+
+    if kind in ("", "tv"):
+        tv = await _tmdb_get("/search/tv",
+                             {"query": q, "include_adult": "false"})
+        for r in (tv or {}).get("results", []) or []:
+            results.append({
+                "id":          r.get("id"),
+                "kind":        "tv",
+                "title":       r.get("name") or "",
+                "year":        (r.get("first_air_date") or "")[:4],
+                "overview":    r.get("overview") or "",
+                "poster_path": r.get("poster_path") or "",
+            })
+    if kind in ("", "movie"):
+        mv = await _tmdb_get("/search/movie",
+                             {"query": q, "include_adult": "false"})
+        for r in (mv or {}).get("results", []) or []:
+            results.append({
+                "id":          r.get("id"),
+                "kind":        "movie",
+                "title":       r.get("title") or "",
+                "year":        (r.get("release_date") or "")[:4],
+                "overview":    r.get("overview") or "",
+                "poster_path": r.get("poster_path") or "",
+            })
+
+    return JSONResponse({"enabled": True, "img_base": TMDB_IMG_BASE,
+                         "results": results})
+
+
+@app.post("/api/library/{item_id}/metadata/set")
+async def set_item_metadata(item_id: str,
+                            req: MetadataSetReq) -> JSONResponse:
+    """User-driven metadata correction (not admin-gated — same audience as
+    `/rename`). Two modes:
+
+    - "tmdb":   force-bind the chosen TMDb entry (pinned as source="manual",
+                pulls full episode data). Needs a TMDb key.
+    - "custom": store hand-entered metadata (pinned as source="custom"). Needs
+                no key — this is the offline / no-good-TMDb-match path."""
+    if req.mode == "tmdb":
+        if not await _tmdb_effective_key():
+            raise HTTPException(400, "TMDb API key is not configured.")
+        if not req.tmdb_id or req.kind not in ("tv", "movie"):
+            raise HTTPException(400, "tmdb_id and kind ('tv'|'movie') are required.")
+        data = await _fetch_item_metadata(
+            item_id, force=True,
+            override_tmdb_id=req.tmdb_id, override_kind=req.kind,
+        )
+        if not data:
+            raise HTTPException(404, "Could not load that TMDb entry.")
+        return JSONResponse({"ok": True, "metadata": data,
+                             "img_base": TMDB_IMG_BASE})
+
+    if req.mode != "custom":
+        raise HTTPException(400, "mode must be 'tmdb' or 'custom'.")
+
+    title = (req.title or "").strip()
+    if not title:
+        raise HTTPException(400, "A title is required for custom metadata.")
+
+    genres = [g.strip() for g in (req.genres or []) if g and g.strip()]
+    year = (req.year or "").strip()
+    # The hero renderer reads the year via (first_air_date|release_date)[:4], so
+    # stashing the bare year there is enough to surface it.
+    data = {
+        "source":        "custom",
+        "tmdb_kind":     req.kind if req.kind in ("tv", "movie") else "",
+        "title":         title,
+        "overview":      (req.overview or "").strip(),
+        "poster_url":    (req.poster_url or "").strip(),
+        "backdrop_url":  (req.backdrop_url or "").strip(),
+        "first_air_date": year,
+        "vote_average":  float(req.vote_average) if req.vote_average else 0,
+        "genres":        genres,
+        "seasons":       {},
+        "fetched_at":    _now_iso(),
+    }
+
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    item["metadata"] = data
+    await put_library(lib)
+    return JSONResponse({"ok": True, "metadata": data,
+                         "img_base": TMDB_IMG_BASE})
+
+
 @app.post("/api/library/{item_id}/rename")
 async def rename_library_item(item_id: str, req: RenameReq) -> JSONResponse:
     """Rename a series (or a movie/one-off's title). The name is what drives the
@@ -6524,7 +6667,10 @@ async def rename_library_item(item_id: str, req: RenameReq) -> JSONResponse:
         for it in lib["items"]:
             if (it.get("series") or "").strip() == old_series:
                 it["series"] = new_name
-                it.pop("metadata", None)
+                # Keep manual picks / custom metadata — the user chose those on
+                # purpose; only auto-matched art should re-resolve to the new name.
+                if (it.get("metadata") or {}).get("source") not in ("manual", "custom"):
+                    it.pop("metadata", None)
         # Series subtitle prefs are keyed by the series string — re-key them so a
         # remembered subtitle choice survives the rename.
         for prof in lib.get("profiles", []):
@@ -6537,15 +6683,18 @@ async def rename_library_item(item_id: str, req: RenameReq) -> JSONResponse:
         if new_name == (item.get("title") or "").strip():
             raise HTTPException(400, "That's already the title.")
         item["title"] = new_name
-        item.pop("metadata", None)
+        if (item.get("metadata") or {}).get("source") not in ("manual", "custom"):
+            item.pop("metadata", None)
 
     await put_library(lib)
 
     # Re-fetch this item's metadata now so the response carries the corrected
     # art/overview (best effort — no TMDb key just returns null and the UI falls
-    # back to the filename, exactly as before).
-    data = None
-    if await _tmdb_effective_key():
+    # back to the filename, exactly as before). A pinned manual/custom binding is
+    # left untouched: keep the user's choice and hand it straight back.
+    pinned = (item.get("metadata") or {}).get("source") in ("manual", "custom")
+    data = item.get("metadata") if pinned else None
+    if not pinned and await _tmdb_effective_key():
         data = await _fetch_item_metadata(item_id, force=True)
     return JSONResponse({
         "ok": True,
