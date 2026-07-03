@@ -1484,7 +1484,21 @@ Everything downstream (tracks, embedded `sub_*.vtt` renditions, skip-intro, the
 custom controls) is unchanged, so a mixed playlist (Ep A not downloaded → Ep B
 downloaded → Ep C not downloaded) routes per-file — A/C stream from the host, B
 plays from the phone — in the same player UI. On any failure it falls through to
-the normal online prepare path. Extras around the local path (7.17.0):
+the normal online prepare path.
+
+> **The loopback must be probed, not assumed reachable (8.0.1).** Online, the host
+> dashboard runs over HTTPS while the device copy is served over the `http://`
+> loopback; some WKWebView builds block that cross-scheme subresource, and the
+> failure is silent (a fatal hls.js `NETWORK_ERROR` is retried forever as if it
+> were a tunnel drop) — so the download "never loads while connected" even though
+> it plays instantly offline. `_appStartLocalPlayback` therefore fetches
+> `master.m3u8` **first as a reachability probe** (4 s timeout) and, when online,
+> abandons the device copy on failure — stopping the just-started
+> `LocalMediaServer` and throwing so `_lpLoadIndex` streams the episode from the
+> server instead (reachable, since we're online). Offline it proceeds regardless
+> (same-origin loopback, no server to fall back to). See [GOTCHAS.md](GOTCHAS.md).
+
+Extras around the local path (7.17.0):
 - **Remembered track picks**: the local path fires a parallel best-effort
   `GET /saved-tracks` (skipped offline via `navigator.onLine`) so audio/subtitle
   restore matches a server stream ([API.md](API.md)).

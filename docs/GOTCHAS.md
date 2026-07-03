@@ -1269,14 +1269,25 @@ host-side prep while minimized; for that the JS pool **self-resumes on foregroun
 valid up to its 3h ceiling). The durable path is the background `URLSession`: once a
 file is handed off, it transfers to completion while suspended regardless.
 
-### HTTPS dashboard playing from `http://127.0.0.1` is NOT mixed-content blocked — loopback is a secure context
-The dashboard is loaded over HTTPS but offline playback points `<video>.src` at
-`http://127.0.0.1:<port>/master.m3u8` (the loopback `LocalMediaServer`). WebKit
-treats `127.0.0.1`/`localhost` as a **potentially-trustworthy/secure** origin, so
-this is *not* blocked as mixed content (unlike a plain-LAN `http://` subresource,
-which would be). This is why the M1 ATS exception is scoped to loopback only and
-the host stays HTTPS. If you ever move the media server off loopback, both the ATS
-exception **and** the mixed-content guarantee break.
+### HTTPS dashboard → `http://127.0.0.1` loopback: secure-context in theory, blocked on some WKWebView builds in practice — probe it
+The dashboard is loaded over HTTPS but **online** device-copy playback points the
+player at `http://127.0.0.1:<port>/master.m3u8` (the loopback `LocalMediaServer`).
+Per spec WebKit treats `127.0.0.1`/`localhost` as a **potentially-trustworthy/secure**
+origin, so this *should* not be blocked as mixed content (unlike a plain-LAN
+`http://` subresource, which always is). **In practice some WKWebView builds still
+block the cross-scheme loopback subresource**, and when they do the failure is
+invisible: the loopback playlist/segment fetch just fails, and a fatal hls.js
+`NETWORK_ERROR` is (intentionally, for tunnels) retried forever rather than
+surfaced — so playback "never loads while connected" even though the offline copy
+plays instantly (offline the page itself is served from the same http loopback
+origin, so there is no scheme mismatch). **Never assume the loopback is reachable
+from the HTTPS page — probe it.** `_appStartLocalPlayback` fetches `master.m3u8`
+first as a reachability probe (4 s timeout) and, when online, abandons the device
+copy on failure so `_lpLoadIndex` falls back to streaming from the server (which is
+reachable — we're online). The M1 ATS exception (scoped to loopback only) governs
+plain `http` loads, **not** this cross-scheme mixed-content case, so it doesn't
+help here. If you move the media server off loopback, both the ATS exception and
+any remaining secure-context leniency break.
 
 ### Bundle downloads are durable, but only *completed files* survive a kill — partials resume
 `BundleDownloader` writes each finished file straight into the final

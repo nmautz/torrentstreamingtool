@@ -8791,13 +8791,34 @@ async function _appStartLocalPlayback(local) {
     // the server belongs to the page, not to playback.
     lp._lmsActive = true;
   }
+  // Fetch master.m3u8 first — it doubles as a loopback REACHABILITY PROBE. When
+  // ONLINE the host page is HTTPS but this bundle is served over the http://
+  // loopback LocalMediaServer; some WKWebView builds block that cross-scheme
+  // subresource, so the playlist never loads and the player would sit
+  // "buffering" forever (a fatal hls.js NETWORK_ERROR is treated as a
+  // recoverable tunnel drop and retried indefinitely — the "never loads while
+  // connected" report). If the probe fails while online, abort so _lpLoadIndex
+  // falls back to streaming from the server (reachable — we're online). Offline
+  // there IS no server to fall back to, so proceed regardless of the result.
+  let masterText = "";
+  try {
+    const mr = _appOffline ? await fetch(base + "master.m3u8")
+                           : await _appFetchT(base + "master.m3u8", {}, 4000);
+    if (!mr.ok) throw new Error("master " + mr.status);
+    masterText = await mr.text();
+    if (!masterText.trim()) throw new Error("empty master playlist");
+  } catch (e) {
+    if (!_appOffline) {
+      try { _cap.lms.stop(); } catch (_) {}
+      lp._lmsActive = false;
+      throw e;   // → _lpLoadIndex: prep=undefined → server /offline-prepare
+    }
+  }
   let meta = {};
   try { meta = await (await fetch(base + "meta.json")).json(); } catch (_) {}
   // Identify the downloaded rung + surface the full ladder so the quality menu
   // can offer the other rungs as server streams (the trimmed local master gives
   // hls.js only one level, so it can't drive the menu — see GOTCHAS.md).
-  let masterText = "";
-  try { masterText = await (await fetch(base + "master.m3u8")).text(); } catch (_) {}
   return {
     local_base:   base,
     local_rung:   _appIdentifyLocalRung(masterText, meta),
@@ -13494,6 +13515,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.0.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.0.1</div>
 </body>
 </html>
