@@ -521,7 +521,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "8.0.0"
+UI_VERSION = "8.4.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 # Retains references to fire-and-forget background tasks so the event loop's weak
@@ -1555,8 +1555,94 @@ async def _opensubtitles_search(
 
 TMDB_IMG_BASE = "https://image.tmdb.org/t/p"
 
+# Host-relative image base handed to clients instead of TMDB_IMG_BASE. Routes
+# through /api/metadata/img/{size}/{filename}, which serves from the on-disk
+# cache first — so artwork keeps working on the LAN when the internet is down.
+LOCAL_IMG_BASE = "/api/metadata/img"
+
+# On-disk cache for TMDb artwork (posters/backdrops/stills). TMDb image paths
+# are content-addressed, so entries never go stale and are kept forever.
+TMDB_IMG_CACHE = Path(__file__).parent / ".tmdb_img_cache"
+_TMDB_IMG_SIZES = {"w92", "w154", "w185", "w300", "w342", "w500", "w780",
+                   "w1280", "original"}
+_TMDB_IMG_FILE_RE = re.compile(r"^[A-Za-z0-9_-]+\.(?:jpg|jpeg|png|svg)$")
+_TMDB_IMG_CT = {".jpg": "image/jpeg", ".jpeg": "image/jpeg",
+                ".png": "image/png", ".svg": "image/svg+xml"}
+
 _tmdb_fetch_locks: dict[str, asyncio.Lock] = {}
-_tmdb_fetch_in_flight: set[str] = set()
+# item_id → in-flight background fetch task (see _spawn_metadata_fetch).
+_tmdb_fetch_tasks: dict[str, "asyncio.Task[Optional[dict]]"] = {}
+
+# Fire-and-forget tasks need a strong reference until they finish — a bare
+# asyncio.create_task() result can be garbage-collected mid-flight.
+_tmdb_bg_tasks: set = set()
+
+
+def _tmdb_bg(coro) -> None:
+    t = asyncio.create_task(coro)
+    _tmdb_bg_tasks.add(t)
+    t.add_done_callback(_tmdb_bg_tasks.discard)
+
+
+async def _tmdb_img_bytes(size: str, filename: str,
+                          fetch: bool = True) -> Optional[tuple[bytes, str]]:
+    """Return (bytes, content_type) for a TMDb image, serving the on-disk cache
+    first and (optionally) fetching + caching from TMDb on a miss. Returns None
+    when the image isn't cached and can't be fetched (e.g. internet down).
+    `size`/`filename` must already be validated against the whitelists above."""
+    ext = Path(filename).suffix.lower()
+    ct = _TMDB_IMG_CT.get(ext, "image/jpeg")
+    cache_file = TMDB_IMG_CACHE / size / filename
+    try:
+        if cache_file.exists():
+            return cache_file.read_bytes(), ct
+    except Exception:
+        pass
+    if not fetch:
+        return None
+    try:
+        url = f"{TMDB_IMG_BASE}/{size}/{filename}"
+        async with httpx.AsyncClient(timeout=httpx.Timeout(12.0, connect=5.0),
+                                     follow_redirects=True) as c:
+            r = await c.get(url)
+        if r.status_code == 200 and r.content:
+            try:
+                cache_file.parent.mkdir(parents=True, exist_ok=True)
+                # Atomic write so a concurrent reader never sees a torn file.
+                tmp = cache_file.with_suffix(cache_file.suffix + f".{os.getpid()}.tmp")
+                tmp.write_bytes(r.content)
+                os.replace(tmp, cache_file)
+            except Exception:
+                pass
+            return r.content, ct
+    except Exception:
+        pass
+    return None
+
+
+async def _prefetch_metadata_images(data: dict) -> None:
+    """Best-effort warm of the artwork cache right after a metadata fetch, so
+    posters/backdrops/stills survive a later internet outage. Sizes mirror what
+    the frontend requests (w342 poster, w1280 backdrop, w300 stills)."""
+    wanted: list[tuple[str, str]] = []
+    if data.get("poster_path"):
+        wanted.append(("w342", data["poster_path"]))
+    if data.get("backdrop_path"):
+        wanted.append(("w1280", data["backdrop_path"]))
+    for s in (data.get("seasons") or {}).values():
+        if s.get("poster_path"):
+            wanted.append(("w342", s["poster_path"]))
+        for ep in s.get("episodes", []) or []:
+            if ep.get("still_path"):
+                wanted.append(("w300", ep["still_path"]))
+    for size, path in wanted:
+        fn = path.lstrip("/")
+        if not _TMDB_IMG_FILE_RE.match(fn):
+            continue
+        try:
+            await _tmdb_img_bytes(size, fn)
+        except Exception:
+            pass
 
 
 async def _tmdb_effective_key() -> str:
@@ -1578,7 +1664,9 @@ async def _tmdb_get(path: str, params: Optional[dict] = None) -> Optional[dict]:
     q["api_key"] = key
     url = f"https://api.themoviedb.org/3{path}"
     try:
-        async with httpx.AsyncClient(timeout=15.0) as c:
+        # Short connect timeout so a dead/unreachable internet link fails fast
+        # (the read timeout stays generous for slow-but-working networks).
+        async with httpx.AsyncClient(timeout=httpx.Timeout(15.0, connect=5.0)) as c:
             r = await c.get(url, params=q)
             if r.status_code == 200:
                 return r.json()
@@ -1775,7 +1863,39 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
         if it2:
             it2["metadata"] = data
             await put_library(lib2)
+        # Warm the artwork cache in the background so posters/backdrops/stills
+        # keep rendering for every client even if the internet later drops.
+        _tmdb_bg(_prefetch_metadata_images(data))
         return data
+
+
+def _spawn_metadata_fetch(item_id: str) -> "asyncio.Task[Optional[dict]]":
+    """Start (or join) a background `_fetch_item_metadata` for an item. The GET
+    /metadata endpoint waits on this only briefly — on a slow/dead internet link
+    it returns `pending` and the task keeps running; when the fetch eventually
+    lands, a `metadata_update` SSE event tells open clients to re-pull."""
+    task = _tmdb_fetch_tasks.get(item_id)
+    if task and not task.done():
+        return task
+
+    async def _run() -> Optional[dict]:
+        try:
+            return await _fetch_item_metadata(item_id)
+        finally:
+            _tmdb_fetch_tasks.pop(item_id, None)
+
+    task = asyncio.create_task(_run())
+
+    def _notify(t: "asyncio.Task[Optional[dict]]") -> None:
+        try:
+            if not t.cancelled() and not t.exception() and t.result():
+                _tmdb_bg(broadcast("metadata_update", {"item_id": item_id}))
+        except Exception:
+            pass
+
+    task.add_done_callback(_notify)
+    _tmdb_fetch_tasks[item_id] = task
+    return task
 
 
 def _find_vlc_bin() -> Optional[str]:
@@ -6487,7 +6607,12 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
 async def get_item_metadata(item_id: str, refresh: int = 0) -> JSONResponse:
     """Return cached TMDb metadata for an item; auto-fetches on first access.
     Response always includes `enabled` so the UI can gracefully fall back to
-    filename parsing when no TMDb key is configured."""
+    filename parsing when no TMDb key is configured.
+
+    The first-access fetch is NOT allowed to block the response: we wait at
+    most a few seconds, then return `pending=true` with no metadata and let the
+    fetch finish in the background (a `metadata_update` SSE event fires when it
+    lands). Cached items always return instantly — internet down or not."""
     key_present = bool(await _tmdb_effective_key())
     lib = await get_library()
     item = next((it for it in lib["items"] if it["id"] == item_id), None)
@@ -6495,15 +6620,42 @@ async def get_item_metadata(item_id: str, refresh: int = 0) -> JSONResponse:
         raise HTTPException(404, "Item not found.")
 
     cached = item.get("metadata") or {}
+    pending = False
     if not cached and key_present:
-        cached = await _fetch_item_metadata(item_id) or {}
+        task = _spawn_metadata_fetch(item_id)
+        done, _ = await asyncio.wait({task}, timeout=4.0)
+        if done:
+            try:
+                cached = task.result() or {}
+            except Exception:
+                cached = {}
+        else:
+            pending = True
     elif refresh and key_present:
         cached = await _fetch_item_metadata(item_id, force=True) or cached
 
     return JSONResponse({
         "enabled":  key_present,
-        "img_base": TMDB_IMG_BASE,
+        "img_base": LOCAL_IMG_BASE,
         "metadata": cached or None,
+        "pending":  pending,
+    })
+
+
+@app.get("/api/metadata/img/{size}/{filename}")
+async def metadata_image(size: str, filename: str) -> Response:
+    """TMDb artwork proxy with a permanent on-disk cache. Clients join this
+    route via the `img_base` returned by the metadata endpoints, so posters,
+    backdrops and episode stills keep rendering on the LAN when the internet
+    is down (once cached). TMDb image paths are content-addressed → immutable."""
+    if size not in _TMDB_IMG_SIZES or not _TMDB_IMG_FILE_RE.match(filename):
+        raise HTTPException(404, "Not found.")
+    got = await _tmdb_img_bytes(size, filename)
+    if not got:
+        raise HTTPException(404, "Image unavailable (not cached, no internet).")
+    body, ct = got
+    return Response(content=body, media_type=ct, headers={
+        "Cache-Control": "public, max-age=31536000, immutable",
     })
 
 
@@ -6524,7 +6676,7 @@ async def refresh_item_metadata(item_id: str, request: Request,
     )
     if not data:
         raise HTTPException(404, "No TMDb match found for this item.")
-    return JSONResponse({"ok": True, "metadata": data, "img_base": TMDB_IMG_BASE})
+    return JSONResponse({"ok": True, "metadata": data, "img_base": LOCAL_IMG_BASE})
 
 
 @app.get("/api/library/{item_id}/metadata/search")
@@ -6546,7 +6698,7 @@ async def search_item_metadata(item_id: str, query: str = "",
     if not q:
         q, _year = _search_terms_for_item(item)
     if not q:
-        return JSONResponse({"enabled": True, "img_base": TMDB_IMG_BASE,
+        return JSONResponse({"enabled": True, "img_base": LOCAL_IMG_BASE,
                              "results": []})
 
     kind = kind if kind in ("tv", "movie") else ""
@@ -6577,7 +6729,7 @@ async def search_item_metadata(item_id: str, query: str = "",
                 "poster_path": r.get("poster_path") or "",
             })
 
-    return JSONResponse({"enabled": True, "img_base": TMDB_IMG_BASE,
+    return JSONResponse({"enabled": True, "img_base": LOCAL_IMG_BASE,
                          "results": results})
 
 
@@ -6603,7 +6755,7 @@ async def set_item_metadata(item_id: str,
         if not data:
             raise HTTPException(404, "Could not load that TMDb entry.")
         return JSONResponse({"ok": True, "metadata": data,
-                             "img_base": TMDB_IMG_BASE})
+                             "img_base": LOCAL_IMG_BASE})
 
     if req.mode != "custom":
         raise HTTPException(400, "mode must be 'tmdb' or 'custom'.")
@@ -6637,7 +6789,7 @@ async def set_item_metadata(item_id: str,
     item["metadata"] = data
     await put_library(lib)
     return JSONResponse({"ok": True, "metadata": data,
-                         "img_base": TMDB_IMG_BASE})
+                         "img_base": LOCAL_IMG_BASE})
 
 
 @app.post("/api/library/{item_id}/rename")
@@ -6700,7 +6852,7 @@ async def rename_library_item(item_id: str, req: RenameReq) -> JSONResponse:
         "ok": True,
         "series": new_name if old_series else "",
         "metadata": data,
-        "img_base": TMDB_IMG_BASE,
+        "img_base": LOCAL_IMG_BASE,
     })
 
 
@@ -18110,14 +18262,16 @@ async def _tmdb_image_data_url(path: str, size: str = "w342") -> str:
         if cached is not None:
             return cached
         try:
-            url = f"{TMDB_IMG_BASE}/{size}{path}"
-            async with httpx.AsyncClient(timeout=12.0, follow_redirects=True) as c:
-                r = await c.get(url)
-            if r.status_code == 200 and r.content:
-                ct = r.headers.get("content-type", "image/jpeg").split(";")[0].strip() or "image/jpeg"
-                data_url = f"data:{ct};base64,{base64.b64encode(r.content).decode('ascii')}"
-                _TMDB_IMG_DATA_URL_CACHE[ck] = data_url
-                return data_url
+            # Reads through the shared on-disk artwork cache (_tmdb_img_bytes),
+            # so a poster already cached for the dashboard needs no internet.
+            fn = path.lstrip("/")
+            if _TMDB_IMG_FILE_RE.match(fn):
+                got = await _tmdb_img_bytes(size, fn)
+                if got:
+                    body, ct = got
+                    data_url = f"data:{ct};base64,{base64.b64encode(body).decode('ascii')}"
+                    _TMDB_IMG_DATA_URL_CACHE[ck] = data_url
+                    return data_url
         except Exception:
             pass
         return ""

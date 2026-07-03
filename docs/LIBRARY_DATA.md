@@ -385,7 +385,9 @@ The profile-level **`shuffle`** / **`shuffle_scope`** fields are the *persisted*
 }
 ```
 
-Populated by `_fetch_item_metadata` ([main.py](../main.py)) on first hit of `GET /api/library/{id}/metadata`, then served from cache. Per-id `asyncio.Lock` coalesces concurrent first-loads. Force refresh via `POST /api/library/{id}/metadata/refresh` (admin); the same endpoint accepts an optional `{tmdb_id, kind}` to manually bind the item to a TMDb entry when auto-match picks the wrong show.
+Populated by `_fetch_item_metadata` ([main.py](../main.py)) on first hit of `GET /api/library/{id}/metadata`, then served from cache. Per-id `asyncio.Lock` coalesces concurrent first-loads. **The first-access fetch never blocks the endpoint**: it runs as a background task (`_spawn_metadata_fetch`) the endpoint waits on for ≤4 s before answering `pending:true`; a `metadata_update` SSE event fires when the fetch lands. Cached entries answer instantly regardless of internet state. Force refresh via `POST /api/library/{id}/metadata/refresh` (admin); the same endpoint accepts an optional `{tmdb_id, kind}` to manually bind the item to a TMDb entry when auto-match picks the wrong show.
+
+Each successful fetch also **pre-warms the on-disk artwork cache** (`.tmdb_img_cache/`, `_prefetch_metadata_images`): poster w342, backdrop w1280, season posters w342, episode stills w300 — served to clients via the `/api/metadata/img` proxy (the `img_base` all metadata endpoints now return), so artwork keeps rendering on the LAN when the internet is down.
 
 **`source` and pinning.** Every cached entry records how it was chosen: `"tmdb"` (auto-matched — the first search result), `"manual"` (a user force-bound a specific TMDb entry), or `"custom"` (a user hand-entered the fields). `manual` and `custom` are **pinned**: `_fetch_item_metadata` returns them unchanged on any non-forced access, and `rename` leaves them intact (see below). Only `tmdb` (or missing-`source`) entries are re-resolved. `custom` entries have **no `tmdb_id`** and use `poster_url`/`backdrop_url` (absolute) instead of TMDb paths; `seasons` is `{}` so episode titles/stills fall back to filename parsing.
 

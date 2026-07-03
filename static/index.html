@@ -3143,7 +3143,9 @@ let epItemId  = null;
 let epFiles   = [];   // full file objects from API
 let epChecked = new Set();  // checked file paths
 let epMetadata = null;     // TMDb metadata cache for the open item, or null
-let epMetaImgBase = "";    // TMDb image base URL (image.tmdb.org/t/p)
+let epMetaImgBase = "";    // metadata image base URL (host proxy /api/metadata/img)
+let epHeroTitle = "";      // fallback title for late metadata repaints (SSE)
+let _epMetaRetryTimer = null; // fallback re-pull while server metadata fetch is pending
 let epCurrentSeason = 0;   // active season tab; 0 = "all" / no season info
 let epSeasonList = [];     // sorted seasons present in epFiles (positive ints only)
 let epWatchedExpanded = new Set(); // season keys whose watched-episode section is expanded
@@ -6001,18 +6003,20 @@ async function openEpisodePicker(itemId, title){
     `<p class="text-gray-600 text-sm text-center py-12">Loading episodes…</p>`;
 
   const pid=profile.id?`?profile_id=${profile.id}`:"";
-  // Kick off files + metadata in parallel — metadata is best-effort, files are required.
-  const [filesR, metaR] = await Promise.allSettled([
-    fetch(`/api/library/${itemId}/files${pid}`),
-    fetch(`/api/library/${itemId}/metadata`),
-  ]);
+  // Only the files call gates the page. Metadata is kicked off in parallel but
+  // applied AFTER the episode list renders (_epApplyMetadata) — on a slow or
+  // dead internet link the TMDb fetch used to hold the whole page hostage.
+  const metaPromise=fetch(`/api/library/${itemId}/metadata`).catch(()=>null);
+  let filesResp=null;
+  try{ filesResp=await fetch(`/api/library/${itemId}/files${pid}`); }catch(_){}
 
-  if(filesR.status!=="fulfilled" || !filesR.value.ok){
+  if(!filesResp || !filesResp.ok){
     document.getElementById("epList").innerHTML=
       `<p class="text-red-400 text-sm text-center py-12">Could not load files.</p>`;
     return;
   }
-  const d=await filesR.value.json();
+  const d=await filesResp.json();
+  if(epItemId!==itemId) return;   // user navigated away mid-request
   epFiles=d.files||[];
   epHasTorrent=!!d.has_torrent;
   epDownloadMode=d.download_mode||"now";
@@ -6020,16 +6024,6 @@ async function openEpisodePicker(itemId, title){
   epOndemandLocked=!!d.ondemand_only_locked;
   epHlsAvailable=d.hls_available!==false;
   epFiles.forEach(f=>{ if(!f.progress?.completed) epChecked.add(f.path); });
-
-  if(metaR.status==="fulfilled" && metaR.value.ok){
-    try {
-      const m=await metaR.value.json();
-      if(m.enabled){
-        epMetadata=m.metadata||null;
-        epMetaImgBase=m.img_base||"";
-      }
-    } catch(_){}
-  }
 
   // Stream-prep status: tells the per-row Prep buttons which files are
   // already in the .offline_cache (or Safari-native) and which still need work.
@@ -6065,9 +6059,46 @@ async function openEpisodePicker(itemId, title){
   epIsMovie = epFiles.length === 1;
   _epApplyMovieChrome(epIsMovie);
 
+  epHeroTitle=title||"";
   renderEpHero(title);
   renderEpSeasonTabs();
   renderEpList();
+
+  // Fill the metadata in whenever it arrives (may already be resolved).
+  _epApplyMetadata(itemId, title, metaPromise);
+}
+
+// Apply a /metadata response to the open episode page — repaints hero, season
+// tabs and episode rows (names/stills/overviews) once metadata is available.
+// Never gates the page: called after the episode list has already rendered.
+// `respPromise` is the in-flight fetch from openEpisodePicker; pass null to
+// fetch fresh (SSE metadata_update handler / pending retry). When the server
+// answers `pending` (first TMDb fetch still running in the background), we
+// wait for the metadata_update SSE event, with a timer as a fallback.
+async function _epApplyMetadata(itemId, title, respPromise){
+  let m=null;
+  try{
+    const r=respPromise ? await respPromise
+                        : await fetch(`/api/library/${itemId}/metadata`).catch(()=>null);
+    if(r && r.ok) m=await r.json();
+  }catch(_){}
+  if(epItemId!==itemId || !m) return;
+  if(m.enabled){
+    epMetadata=m.metadata||null;
+    epMetaImgBase=m.img_base||"";
+  }
+  if(epMetadata){
+    renderEpHero(title);
+    renderEpSeasonTabs();
+    renderEpList();
+    return;
+  }
+  if(m.pending){
+    clearTimeout(_epMetaRetryTimer);
+    _epMetaRetryTimer=setTimeout(()=>{
+      if(epItemId===itemId && !epMetadata) _epApplyMetadata(itemId, title, null);
+    }, 8000);
+  }
 }
 
 // Toggle the episode-page chrome between episode mode (bulk chips + multi-select
@@ -6217,6 +6248,7 @@ async function renameSeries(){
     }
     epMetadata=d.metadata||null;
     if(d.img_base) epMetaImgBase=d.img_base;
+    epHeroTitle=name;
     renderEpHero(name);
     renderEpSeasonTabs();
     renderEpList();
@@ -6482,6 +6514,7 @@ function closeEpisodePage(){
   document.body.style.overflow="";
   epItemId=null; epFiles=[]; epChecked=new Set();
   epMetadata=null; epMetaImgBase=""; epCurrentSeason=0; epSeasonList=[]; epWatchedExpanded=new Set();
+  epHeroTitle=""; clearTimeout(_epMetaRetryTimer); _epMetaRetryTimer=null;
   epIsMovie=false; _epApplyMovieChrome(false);
 }
 // Back-compat alias for existing callers (refreshEpFiles, mark-watched etc).
@@ -13921,6 +13954,18 @@ function connectSSE(){
       } catch(_){ refreshEpFiles(); }
     }
   });
+  es.addEventListener("metadata_update",e=>{
+    _noteSSEMsg();
+    // A background TMDb fetch just landed for an item whose episode page we
+    // opened before the metadata existed — pull it in and repaint.
+    try{
+      const d=JSON.parse(e.data||"{}");
+      if(epItemId && d.item_id===epItemId && !epMetadata){
+        clearTimeout(_epMetaRetryTimer); _epMetaRetryTimer=null;
+        _epApplyMetadata(epItemId, epHeroTitle, null);
+      }
+    }catch(_){}
+  });
   es.addEventListener("subtitle_upgraded",e=>{
     _noteSSEMsg();
     // VLC (TV) auto-swapped an AI sub for a real one that finished downloading.
@@ -14101,6 +14146,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.3.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.4.0</div>
 </body>
 </html>

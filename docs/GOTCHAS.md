@@ -754,6 +754,16 @@ The iOS app serves a device snapshot of the dashboard from `LocalMediaServer` wh
 
 ## TMDb metadata
 
+### The metadata endpoint must never block on TMDb (episode pages on dead internet)
+
+`GET /api/library/{id}/metadata` used to run the whole first-access TMDb chain inline (search + details + one request per season, each with a 15 s timeout) — with the internet down, opening a never-fetched item hung the episode page for the full timeout chain. Now the first-access fetch runs as a background task (`_spawn_metadata_fetch`) the endpoint waits on for at most 4 s before answering `pending:true`; a `metadata_update` SSE event fires when the background fetch lands and the open episode page re-pulls. The frontend independently never gates the episode list on `/metadata` (`openEpisodePicker` renders on `/files` alone; `_epApplyMetadata` fills metadata in). **If you add another endpoint that may trigger a TMDb fetch, don't await it inline in a request that also carries local data** — split it the same way. `_tmdb_get` uses a 5 s *connect* timeout so unreachable links fail fast; keep that split (read stays 15 s for slow-but-working networks).
+
+Fire-and-forget tasks here (`_prefetch_metadata_images`, the SSE notify) go through `_tmdb_bg()`, which holds a strong reference until completion — a bare `asyncio.create_task()` result can be **garbage-collected mid-flight** and the task silently vanishes.
+
+### Artwork is proxied through the host — img_base is /api/metadata/img, not image.tmdb.org
+
+All metadata endpoints hand out `img_base = "/api/metadata/img"`; the route serves a permanent on-disk cache (`.tmdb_img_cache/{size}/{filename}`) and fetches from TMDb only on a miss, so posters/backdrops/stills work for every LAN client (including ones that never saw the show) with the internet down. Size + filename are strictly whitelisted (`_TMDB_IMG_SIZES`, `_TMDB_IMG_FILE_RE`) — the proxy can only ever hit `image.tmdb.org`, so this is NOT the SSRF surface the custom-art rule below worries about; keep user-supplied absolute `poster_url`/`backdrop_url` **unproxied**. One exception keeps the absolute `TMDB_IMG_BASE`: the iOS bundle's `meta.img_base` (`_bundle_meta_for_file`) — the offline player has no host to resolve a relative path against (it uses the inlined `poster_data_url` anyway, which now also reads through the disk cache).
+
 ### Auto-match grabs the most-popular result
 
 `_tmdb_match_show` ([main.py](../main.py)) calls `/search/tv` (or `/search/movie` for single-file no-season items) and takes the **first** result. TMDb's search ranks by popularity, so for ambiguous titles ("Monster", "The Office", "It") the match may be the wrong show. Recovery paths: an admin POSTs `/api/library/{id}/metadata/refresh` with `{tmdb_id: <correct>, kind: "tv"|"movie"}`, OR **any user** uses the episode-page "Fix Metadata" control (`/metadata/search` → `/metadata/set`) to pick the right entry or hand-enter custom fields. The result is cached on `item["metadata"]`.

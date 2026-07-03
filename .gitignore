@@ -19,6 +19,9 @@ Downloads/
 # Ephemeral share clips (auto-purged after 2h; see /api/library/{id}/clip)
 .clips/
 
+# Permanent on-disk cache of TMDb artwork (served via /api/metadata/img)
+.tmdb_img_cache/
+
 # User library database (profiles + watch history)
 library.json
 

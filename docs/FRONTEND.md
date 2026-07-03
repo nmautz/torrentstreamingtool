@@ -210,7 +210,8 @@ It also serves **downloading** series (opened from the card's ☰ Episodes butto
 
 State additions:
 - `epMetadata` — cached TMDb payload for the open item (or `null`).
-- `epMetaImgBase` — TMDb image base URL returned by the metadata endpoint.
+- `epMetaImgBase` — artwork base URL returned by the metadata endpoint (the host proxy `/api/metadata/img`).
+- `epHeroTitle` — fallback title for late metadata repaints (SSE `metadata_update` → `_epApplyMetadata`); `_epMetaRetryTimer` backs up a missed event while the server fetch is `pending`.
 - `epCurrentSeason` — visible season number, set by `pickDefaultSeason()`: season of the currently-playing file → season of the **most-recently-watched** episode (latest `progress.updated_at`) → first season with unwatched episodes → first available. Landing on last-watched (not first-unwatched) means an early episode skipped/saved on purpose doesn't pull the picker back to an earlier season.
 - `epSeasonList` — sorted positive seasons present in `epFiles`.
 - `epIsMovie` — single-file item flag; switches the page to the movie panel + chrome.
@@ -227,7 +228,9 @@ Per-episode ▶: `epPlayFrom(globalIndex)` slices `epFiles` from the tapped inde
 
 #### TMDb metadata
 
-Loaded in parallel with `/files` inside `openEpisodePicker`. Returns `{enabled, img_base, metadata}`. When `enabled=false` (no TMDb API key configured) or no match was found, the page degrades gracefully:
+**Never gates the page.** `openEpisodePicker` kicks the `/metadata` fetch off in parallel with `/files` but renders hero/tabs/episodes as soon as `/files` returns; `_epApplyMetadata(itemId, title, respPromise)` applies the metadata response whenever it lands and repaints (`renderEpHero` + `renderEpSeasonTabs` + `renderEpList`). If the server answers `pending:true` (first-ever TMDb fetch still running against a slow/dead internet link), the page waits for the `metadata_update` SSE event (handler re-calls `_epApplyMetadata` with `epHeroTitle`) with an 8 s `_epMetaRetryTimer` re-pull as fallback. `img_base` is now the host's artwork proxy (`/api/metadata/img`), so posters/backdrops/stills keep working on the LAN with the internet down once cached (see [API.md](API.md)).
+
+Returns `{enabled, img_base, metadata, pending}`. When `enabled=false` (no TMDb API key configured) or no match was found, the page degrades gracefully:
 - No backdrop / poster / stills.
 - Episode headlines fall through to `parseEpisodeInfo` (filename parsing).
 - Season tabs still work because they're built from `f.season` parsed off disk, not from TMDb.
