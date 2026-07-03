@@ -10304,10 +10304,11 @@ function _appOpenAppSettings() {
           font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;"></button>
       </div>
       <div style="font-size:12px;color:#8a8a92;margin-top:8px;line-height:1.45;">
-        While connected to the server and watching an episode in the app, finished
-        (fully watched) episodes of that series are removed from this device, and the
-        next episodes are downloaded ahead of the one playing. Other shows' downloads
-        are never touched.
+        While connected to the server, finished (fully watched) episodes of a series
+        you're watching are removed from this device, and the next episodes are kept
+        downloaded ahead of where you are. Applies to episodes watched in the app AND
+        on the TV — whenever this device reconnects it catches up from the server's
+        watch history. Other shows' downloads are never touched.
       </div>
       <div id="appSetAutoOpts" style="margin-top:13px;">
         <div style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#8a8a92;margin-bottom:6px;">Keep downloaded ahead</div>
@@ -10334,7 +10335,7 @@ function _appOpenAppSettings() {
     const on = !_appAutoPrefs().on;
     try { localStorage.setItem(_APP_AUTOMG_KEY, on ? "1" : "0"); } catch (_) {}
     paintTgl();
-    if (on) _appAutoManage();   // apply immediately if an episode is playing now
+    if (on) { _appAutoManage(); _appAutoSweep(500); }   // apply immediately
   });
   ov.querySelector("#appSetAhead").addEventListener("change", (e) => {
     try { localStorage.setItem(_APP_AHEAD_KEY, e.target.value); } catch (_) {}
@@ -10366,16 +10367,8 @@ async function _appAutoManageRun(itemId, filePath, pi) {
   _appAutoMgBusy = true;
   try {
     const { ahead, q } = _appAutoPrefs();
-    // Fresh authoritative file list + per-profile progress for the playing item —
-    // the cached downloadFilesData may predate the episodes just watched.
-    let files = [];
-    try {
-      const pid = profile.id ? `?profile_id=${encodeURIComponent(profile.id)}` : "";
-      const r = await fetch(`/api/library/${itemId}/files${pid}`, { headers: _appAuthHeaders() });
-      if (!r.ok) return;
-      files = (await r.json()).files || [];
-      downloadFilesData.set(itemId, files);
-    } catch (_) { return; }
+    const files = await _appAutoFiles(itemId);
+    if (!files) return;
     const byPath = new Map(files.map((f) => [f.path, f]));
     // Keep window: the playing episode + the next `ahead` in playlist order (in
     // Shuffle that IS the order the user will watch). Collect what's missing.
@@ -10385,35 +10378,120 @@ async function _appAutoManageRun(itemId, filePath, pi) {
       const path = lp.playlist[i];
       if (!path) break;
       keep.add(path);
-      const f = byPath.get(path);
-      if (!f || f.complete === false) continue;   // not on the host's disk yet
-      const st = offlineBundles.get(offKey(itemId, path));
-      if (st && (st.complete || st.queued || (st.downloading && !st.waiting))) continue;
-      toStart.push(f);
+      if (_appAutoWants(itemId, byPath.get(path))) toStart.push(byPath.get(path));
     }
-    // 1. Delete this series' watched episodes from the device. Never the one
-    //    playing, never the keep-ahead window (a rewatch keeps its window), and
-    //    only files the server reports as completed for this profile.
-    let removed = 0;
+    await _appAutoApply(itemId, byPath, keep, toStart, q);
+  } finally { _appAutoMgBusy = false; }
+}
+
+// Fresh authoritative file list + per-profile progress for one item — the cached
+// downloadFilesData may predate the episodes just watched. null on failure.
+async function _appAutoFiles(itemId) {
+  try {
+    const pid = profile.id ? `?profile_id=${encodeURIComponent(profile.id)}` : "";
+    const r = await fetch(`/api/library/${itemId}/files${pid}`, { headers: _appAuthHeaders() });
+    if (!r.ok) return null;
+    const files = (await r.json()).files || [];
+    downloadFilesData.set(itemId, files);
+    return files;
+  } catch (_) { return null; }
+}
+
+// Does this keep-window file need a download driven? (on the host's disk, and
+// not already on-device or actively in flight — a stranded `waiting` entry is
+// fair game, same rule as the durable-queue resumer.)
+function _appAutoWants(itemId, f) {
+  if (!f || f.complete === false) return false;
+  const st = offlineBundles.get(offKey(itemId, f.path));
+  return !(st && (st.complete || st.queued || (st.downloading && !st.waiting)));
+}
+
+// Apply one series' auto-manage decision. Shared by the in-app-player pass and
+// the server-progress sweep below.
+// 1. Delete this series' watched episodes from the device. Never a path in
+//    `keep` (the playing/frontier episode + its ahead window — a rewatch keeps
+//    its window), and only files the server reports completed for this profile.
+// 2. Top up the ahead window (`toStart`). Fire-and-forget (host prep can take
+//    minutes and must not hold the caller's busy flag across episodes);
+//    appDownloadBundle's own in-flight guard + the `queued` marks make
+//    overlapping passes safe.
+async function _appAutoApply(itemId, byPath, keep, toStart, q) {
+  let removed = 0;
+  let ondevice = [];
+  try { ondevice = (await _cap.dl.list()).items || []; } catch (_) {}
+  for (const it of ondevice) {
+    if (it.itemId !== itemId || !it.complete || keep.has(it.filePath)) continue;
+    const f = byPath.get(it.filePath);
+    if (!f || !f.progress || !f.progress.completed) continue;
+    await _appRemoveOne(it.itemId, it.filePath);
+    removed++;
+  }
+  if (removed) _appRenderDashboard();
+  if (toStart.length && hlsAvailable) {
+    for (const f of toStart)
+      offlineBundles.set(offKey(itemId, f.path), { queued: true, fraction: 0, name: f.name });
+    _appRunPooled(toStart, 2, (f) => appDownloadBundle(itemId, f.path, f.name, null, q));
+  }
+}
+
+// ── Server-progress sweep (TV/VLC playback, watch-anywhere) ──────────────────
+// Episodes watched on the TV (VLC) — or on any other device — never touch the
+// in-app player, and this phone may be locked or in another app the whole time.
+// So on every SSE (re)connect, on app foreground, and whenever the TV playback
+// advances to a different episode or stops (SSE `state` edges), sweep EVERY
+// series that has downloads on this device: read where the SERVER progress got
+// to and apply the same delete-watched / keep-N-ahead window from that frontier.
+let _appAutoSweepTimer = null, _appAutoSweepBusy = false, _appAutoSweepLast = 0;
+function _appAutoSweep(delayMs) {
+  if (!isApp || _appOffline || !_appAutoPrefs().on) return;
+  if (_appAutoSweepTimer) return;   // a pass is already pending — coalesce
+  // Default 4 s settle; TV episode-change edges pass longer (the finished
+  // episode's completion lands on the next VLC tracker tick, up to ~15 s).
+  _appAutoSweepTimer = setTimeout(() => { _appAutoSweepTimer = null; _appAutoSweepRun(); },
+                                  delayMs == null ? 4000 : delayMs);
+}
+async function _appAutoSweepRun() {
+  if (_appAutoSweepBusy || !isApp || _appOffline || !_cap.dl || !_appAutoPrefs().on) return;
+  if (!navigator.onLine || app._connected === false) return;
+  if (Date.now() - _appAutoSweepLast < 30000) return;   // foreground flaps, SSE churn
+  _appAutoSweepBusy = true;
+  _appAutoSweepLast = Date.now();
+  try {
+    const { ahead, q } = _appAutoPrefs();
     let ondevice = [];
     try { ondevice = (await _cap.dl.list()).items || []; } catch (_) {}
-    for (const it of ondevice) {
-      if (it.itemId !== itemId || !it.complete || keep.has(it.filePath)) continue;
-      const f = byPath.get(it.filePath);
-      if (!f || !f.progress || !f.progress.completed) continue;
-      await _appRemoveOne(it.itemId, it.filePath);
-      removed++;
+    const seriesIds = new Set();
+    for (const it of ondevice)
+      if (it.itemId && it.itemId !== _APP_PLAYER_KEY) seriesIds.add(it.itemId);
+    for (const itemId of seriesIds) {
+      // The in-app player pass owns the series it's playing — it has the live
+      // playlist order (incl. Shuffle); don't fight it with a second frontier.
+      if (lp.itemId === itemId && lp.filePath) continue;
+      const files = await _appAutoFiles(itemId);
+      if (!files || files.length < 2) continue;   // movies: nothing to roll
+      // Watch frontier from server progress, in natural episode order (= /files
+      // order): the furthest in-progress episode, else the episode after the
+      // last completed one. Untouched series are skipped (no basis to act);
+      // a fully-watched series has no frontier — its downloads are cleaned up.
+      let lastDone = -1, inProg = -1;
+      files.forEach((f, i) => {
+        const p = f.progress || {};
+        if (p.completed) lastDone = i;
+        else if ((p.position_sec || 0) > 5) inProg = i;
+      });
+      if (lastDone < 0 && inProg < 0) continue;   // never watched — leave alone
+      const frontier = Math.max(inProg, lastDone + 1 < files.length ? lastDone + 1 : -1);
+      const keep = new Set(), toStart = [];
+      if (frontier >= 0) {
+        for (let i = frontier; i <= frontier + ahead && i < files.length; i++) {
+          keep.add(files[i].path);
+          if (_appAutoWants(itemId, files[i])) toStart.push(files[i]);
+        }
+      }
+      const byPath = new Map(files.map((f) => [f.path, f]));
+      await _appAutoApply(itemId, byPath, keep, toStart, q);
     }
-    if (removed) _appRenderDashboard();
-    // 2. Top up the ahead window. Fire-and-forget (host prep can take minutes and
-    //    must not hold the busy flag across episodes); appDownloadBundle's own
-    //    in-flight guard + the `queued` marks above make overlapping passes safe.
-    if (toStart.length && hlsAvailable) {
-      for (const f of toStart)
-        offlineBundles.set(offKey(itemId, f.path), { queued: true, fraction: 0, name: f.name });
-      _appRunPooled(toStart, 2, (f) => appDownloadBundle(itemId, f.path, f.name, null, q));
-    }
-  } finally { _appAutoMgBusy = false; }
+  } finally { _appAutoSweepBusy = false; }
 }
 
 // --- Per-file "Prep for Streaming" -------------------------------------------
@@ -13738,6 +13816,9 @@ function connectSSE(){
     // realtime updates are flowing. The label was previously sm:block only.
     sseLabel.textContent="LIVE"; sseLabel.className="text-[10px] font-black uppercase tracking-wide text-green-500";
     if(wasOffline) hideAlert();
+    // iOS app: server progress may have moved while this device was away (TV /
+    // another device) — sweep the auto-managed download windows. Inert on web.
+    _appAutoSweep();
   });
   // Server keep-alive (≥ every 20 s). Carries no payload — it just proves the
   // pipe is alive so the staleness watchdog stays quiet.
@@ -13746,6 +13827,7 @@ function connectSSE(){
     _noteSSEMsg();
     const d=JSON.parse(e.data);
     const idleWas=app.download_idle_open;
+    const tvFileWas=app.library_current_file, tvPlayWas=app.is_library_playback;
     Object.assign(app,d);
     // When the idle/night download window opens or closes, the library cards'
     // "Idle — waiting" ↔ "Idle download" chips need to flip. Re-render if visible.
@@ -13769,6 +13851,11 @@ function connectSSE(){
     if(typeof d.vlc_night_mode==="boolean") renderNightMode();
     if(typeof d.window_mgmt_paused==="boolean") renderWindowControl();
     _tvRemoteSync();  // iOS app: keep the Dynamic Island TV remote in sync (inert on web)
+    // iOS app: the TV (VLC) playback advanced to another episode, or stopped —
+    // the finished episode's completion lands within a tracker tick (≤15 s), so
+    // sweep the auto-managed download windows shortly after. Inert on web.
+    if (app.library_current_file !== tvFileWas || (tvPlayWas && app.is_library_playback === false))
+      _appAutoSweep(18000);
   });
   es.addEventListener("vpn_status",e=>{
     _noteSSEMsg();
@@ -13873,7 +13960,7 @@ setInterval(()=>{
 // High-value mobile path: the moment the user comes back to the tab (unlocks the
 // phone / switches back to the app) or the network returns, re-check the stream
 // and reconnect at once if it didn't survive the suspension.
-document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible") _ensureSSEConnected(); });
+document.addEventListener("visibilitychange",()=>{ if(document.visibilityState==="visible"){ _ensureSSEConnected(); _appAutoSweep(); } });
 window.addEventListener("pageshow",()=>{ _ensureSSEConnected(); });   // bfcache restore
 window.addEventListener("focus",()=>{ _ensureSSEConnected(); });
 window.addEventListener("online",()=>{ _renderOnlineBadge(); _ensureSSEConnected(); _lpNetOnline(); });
@@ -13924,7 +14011,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
   _appRefreshPlayerSnapshot();
   // M3: when the browser regains connectivity, drain any offline progress the
   // native store accumulated while we were away. No-op in a plain browser.
-  if (isApp) window.addEventListener("online", () => { _appFlushOfflineProgress(); _appResumeDownloadQueue(); });
+  if (isApp) window.addEventListener("online", () => { _appFlushOfflineProgress(); _appResumeDownloadQueue(); _appAutoSweep(); });
   // App-only: offline-sync diagnostics row. Currently hidden from the UI —
   // re-enable by un-commenting the reveal below if we need it again. The row
   // markup, _appSyncDebug(), and the syncDebugModal are all left in place.
