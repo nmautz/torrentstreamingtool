@@ -1546,8 +1546,8 @@
 
 <!-- ── Resume-on-Shuffle Modal ─────────────────────────────────────────────── -->
 <!-- Shown when Resume / Play All is tapped on a show whose last session was on
-     Shuffle Play. Continue → fresh random run over the same scope; Normal → the
-     natural-order resume. See resumeLibraryItemWithChooser. -->
+     Shuffle Play. Continue → resume the in-progress episode, rest reshuffled over
+     the same scope; Normal → the natural-order resume. See resumeLibraryItemWithChooser. -->
 <div id="shuffleResumeModal"
   class="hidden fixed inset-0 z-[55] bg-black/60
          flex items-end sm:items-center justify-center sm:px-4 sm:py-6">
@@ -1568,7 +1568,7 @@
       <button onclick="shuffleResumeContinue()"
         class="w-full text-left px-4 py-3 bg-gray-800 hover:bg-purple-900/60 border border-gray-700 hover:border-purple-600 transition-colors">
         <div class="text-sm font-bold uppercase tracking-wide">Continue shuffle</div>
-        <div class="text-[11px] text-gray-400 mt-0.5">Fresh random order over the same episodes</div>
+        <div class="text-[11px] text-gray-400 mt-0.5">Pick up this episode, rest reshuffled</div>
       </button>
       <button onclick="shuffleResumeNormal()"
         class="w-full text-left px-4 py-3 bg-gray-800 hover:bg-indigo-900/60 border border-gray-700 hover:border-indigo-600 transition-colors">
@@ -10026,7 +10026,7 @@ function resumeLibraryItemWithChooser(itemId) {
   // to keep shuffling (fresh random run) or fall back to natural order. The pref
   // (and its scope) come from the resume hint; clearing happens on any normal play.
   if (resume && resume.shuffle) {
-    _shuffleResumeCtx = { itemId, scope: resume.shuffle_scope || "all", label: (item && item.title) || "" };
+    _shuffleResumeCtx = { itemId, scope: resume.shuffle_scope || "all", label: (item && item.title) || "", resume };
     document.getElementById("shuffleResumeModal").classList.remove("hidden");
     return;
   }
@@ -10066,16 +10066,23 @@ function shuffleResumeNormal() {
   const ctx = _shuffleResumeCtx; _closeShuffleResume();
   if (ctx) _resumeNormal(ctx.itemId);
 }
-// User chose "Continue Shuffle" — start a fresh random run over the same scope.
+// User chose "Continue Shuffle" — resume the in-progress episode where it stopped
+// and keep shuffling the rest behind it (the live random order is gone on stop).
 function shuffleResumeContinue() {
   const ctx = _shuffleResumeCtx; _closeShuffleResume();
-  if (ctx) startShuffleForItem(ctx.itemId, ctx.scope, ctx.label);
+  if (ctx) startShuffleForItem(ctx.itemId, ctx.scope, ctx.label, ctx.resume);
 }
 
 // Shuffle a whole item straight from the library row (no episode picker loaded).
 // Mirrors startShuffle() but fetches the file list itself. Used by "continue
 // shuffle" on Resume; routes through the normal play chooser (VLC vs device).
-async function startShuffleForItem(itemId, scope, label) {
+// `resume` (optional) is the item's resume hint: when it points at a mid-episode
+// file, that episode is kept playing from its saved position as the first file
+// and the rest is shuffled behind it — so "Continue shuffle" resumes the SAME
+// episode you stopped on (matching normal-order resume) instead of jumping to a
+// random different one. The ephemeral live shuffle order can't be restored, but
+// the in-progress episode can.
+async function startShuffleForItem(itemId, scope, label, resume) {
   if (!profile.id) { showAlert("Select a profile first.", "warn"); return; }
   let files = [];
   try {
@@ -10092,7 +10099,17 @@ async function startShuffleForItem(itemId, scope, label) {
   if (paths.length < 2) paths = files.map(f => f.path).filter(Boolean);
   if (!paths.length) { showAlert("Nothing to shuffle.", "warn"); return; }
   _shuffleInPlace(paths);
-  await playLibraryWithChooser(itemId, paths, 0, "Shuffle · " + (label || ""), true, scope);
+  // Pin the in-progress episode to the front (at its saved position) so continuing
+  // shuffle picks up where the viewer stopped, not on a random fresh episode.
+  let seekTo = 0;
+  const resumeFile = resume && resume.file_path;
+  const hasProgress = resume && resume.pct > 3 && !resume.all_completed;
+  if (resumeFile && hasProgress) {
+    paths = paths.filter(p => p !== resumeFile);
+    paths.unshift(resumeFile);
+    seekTo = resume.position_sec || 0;
+  }
+  await playLibraryWithChooser(itemId, paths, seekTo, "Shuffle · " + (label || ""), true, scope);
 }
 
 // Entry point used by Play buttons. Shows the chooser modal when both VLC and
@@ -13508,6 +13525,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.0.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.0.2</div>
 </body>
 </html>
