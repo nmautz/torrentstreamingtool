@@ -84,6 +84,18 @@ Current version lives in the `<div>` at the very bottom of `static/index.html`. 
 
 ---
 
+## iOS app changes — ALWAYS flag the rebuild (mandatory)
+
+The user builds the app **directly from Xcode**, which recompiles Swift but does **not** refresh web assets (`ios-app/www/` → `public/` only copies via `npx cap sync ios`). After any change under `ios-app/`:
+
+1. If `ios-app/www/*` changed → **run `npx cap sync ios` yourself** (in `ios-app/`; safe local copy), then verify with `grep <new-symbol> ios-app/ios/App/App/public/<file>`.
+2. **End your summary with an unmissable callout** stating exactly what the user must do, e.g.:
+   > **📱 App rebuild needed:** web assets changed — I already ran `cap sync`; rebuild from Xcode as usual. / Swift changed — rebuild from Xcode. / Host-only — no rebuild.
+
+Never let an `ios-app/` change ship without this callout — a stale `public/` looks like "my change didn't work" and has bitten three times (see docs/GOTCHAS.md § stale builds).
+
+---
+
 ## Style conventions
 
 - **Metro UI** throughout the frontend — flat tiles, no rounded corners, bold uppercase typography, square status dots, no `backdrop-blur`. See [docs/FRONTEND.md](docs/FRONTEND.md).

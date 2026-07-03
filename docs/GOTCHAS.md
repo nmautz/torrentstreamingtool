@@ -1460,7 +1460,7 @@ Edit `www/`, then re-copy and rebuild. A fresh clone has no `public/` until you 
 `npx cap copy ios` (or `cap sync`).
 
 ### After editing `www/` OR a `.swift` file you MUST do a full rebuild — stale builds look like "my change didn't ship"
-This has bitten twice. Two separate copy steps gate what actually runs on device:
+This has bitten **three** times. Two separate copy steps gate what actually runs on device:
 1. **Web (`www/`) changes** only reach the app via `npx cap copy`/`cap sync`. The
    `public/` dir is what's bundled — if it's stale, the app shows the OLD UI (e.g.
    a missing offline button, an old connect screen that hangs). `build-ipa.sh`
@@ -1468,9 +1468,17 @@ This has bitten twice. Two separate copy steps gate what actually runs on device
 2. **Native (`.swift`) changes** (e.g. the `BundleDownloader` foreground-session
    fix) require recompiling — only `xcodebuild` includes them. **Re-signing an
    existing `.ipa` ships none of this.**
-So to make any change take effect: `./build-ipa.sh` **with no `--fast`/`--no-sync`**,
-then re-sign + reinstall. Symptom of skipping it: the device behaves like the code
-was never changed. Quick check: `grep <your-new-symbol> ios/App/App/public/index.html`.
+**Building straight from Xcode is the sneaky variant (bite #3, v8.0.0):** Xcode
+recompiles every `.swift` (half your change works, which *hides* the problem) but
+bundles whatever is already sitting in `public/` — it never runs `cap sync`. The
+offline-cached-player rollout shipped fresh native code with a stale shell +
+downloads.html that way, so the device kept routing to the frozen fallback player.
+If you build from Xcode instead of `./build-ipa.sh`, run `npx cap sync ios` in
+`ios-app/` first, every time `www/` changed.
+So to make any change take effect: `./build-ipa.sh` **with no `--fast`/`--no-sync`**
+(or `cap sync` + Xcode), then reinstall. Symptom of skipping it: the device behaves
+like the code was never changed — or, worse, like only *half* of it was. Quick
+check: `grep <your-new-symbol> ios/App/App/public/index.html`.
 
 ## See also
 
