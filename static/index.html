@@ -11750,11 +11750,26 @@ async function _lpLoadIndex(seekTo) {
   const defAudioIdx = (saved.audio_idx != null) ? saved.audio_idx
                     : (lp.audios.findIndex(a => a.default) >= 0
                        ? lp.audios.findIndex(a => a.default) : 0);
-  // Subtitle default: a remembered descriptor (this file, else this series) wins;
-  // then the legacy bundle index; then the automatic policy (real over AI, lone
-  // option assumed correct). `subAutoApplied` marks an auto-chosen AI track so
-  // the upgrade poller can later swap in a real sub that finishes downloading.
-  const subSel = saved.subtitle_sel || saved.series_subtitle_sel || null;
+  // Subtitle default: a remembered descriptor wins — NEWEST intent first
+  // between the per-file pick (`at`) and the per-series pick (`updated_at`), so
+  // a series-wide choice made later on another episode/device beats a stale
+  // per-file pick (this also heals per-file `off` descriptors older builds
+  // wrote as a side effect of audio changes; legacy picks with no timestamp
+  // count as oldest). Then the legacy bundle index; then the automatic policy.
+  // `subAutoApplied` marks an auto-chosen AI track so the upgrade poller can
+  // later swap in a real sub that finishes downloading.
+  const fileSel = saved.subtitle_sel || null;
+  const serSel  = saved.series_subtitle_sel || null;
+  let subSel = fileSel || serSel;
+  if (fileSel && serSel) {
+    const fa = Date.parse(fileSel.at || "") || 0;
+    const sa = Date.parse(serSel.updated_at || "") || 0;
+    subSel = (sa > fa) ? serSel : fileSel;
+  }
+  // Group memory lives on the series entry — carry it when the file pick wins.
+  if (subSel === fileSel && serSel && serSel.groups) {
+    subSel = { ...fileSel, groups: serSel.groups };
+  }
   let defSubIdx = subSel ? _lpResolveSubSel(subSel) : null;
   if (defSubIdx == null && saved.subtitle_idx != null) defSubIdx = saved.subtitle_idx;
   if (defSubIdx == null) defSubIdx = _lpDefaultSubKey();
@@ -12131,15 +12146,46 @@ function _lpRebuildSidecars(subs, selectKey) {
 }
 
 // ── Subtitle selection: descriptor resolve + late-sub upgrade ────────────────
-// Light canonicalizer mirroring the backend so 2-letter and 3-letter language
-// tags compare equal (en==eng, ja==jpn, …).
+// Light canonicalizer mirroring the backend so 2-letter, 3-letter and full-name
+// spellings of a language compare equal (en==eng==English, ja==jpn, …).
 function _lpCanonLang(l) {
   l = String(l || "").trim().toLowerCase();
   const m = { en:"eng", ja:"jpn", es:"spa", fr:"fre", de:"ger", it:"ita",
     pt:"por", ru:"rus", zh:"chi", ko:"kor", ar:"ara", hi:"hin", nl:"nld",
     sv:"swe", fi:"fin", no:"nor", da:"dan", pl:"pol", tr:"tur", uk:"ukr",
-    th:"tha", vi:"vie" };
+    th:"tha", vi:"vie",
+    english:"eng", japanese:"jpn", spanish:"spa", castilian:"spa", french:"fre",
+    german:"ger", italian:"ita", portuguese:"por", brazilian:"por",
+    russian:"rus", chinese:"chi", mandarin:"chi", cantonese:"chi",
+    korean:"kor", arabic:"ara", hindi:"hin", dutch:"nld", swedish:"swe",
+    finnish:"fin", norwegian:"nor", danish:"dan", polish:"pol", turkish:"tur",
+    ukrainian:"ukr", thai:"tha", vietnamese:"vie" };
   return m[l] || l;
+}
+
+// Normalized container track title (mirrors backend _norm_sub_title).
+function _lpNormSubTitle(t) {
+  return String(t || "").trim().toLowerCase().replace(/\s+/g, " ");
+}
+
+// Episode-invariant core of a sidecar subtitle filename — SxxEyy / digits /
+// separators stripped — so "Show.S01E05.en.srt" matches the "Show.S01E02.en.srt"
+// pick remembered from another episode. Mirrors backend _sub_fuzzy_name.
+function _lpSubFuzzyName(name) {
+  let s = String(name || "").replace(/\.[^.]*$/, "").toLowerCase();
+  s = s.replace(/s\d{1,2}[ ._-]?e\d{1,3}/g, "");
+  s = s.replace(/\d+/g, "");
+  return s.replace(/[^a-z]+/g, "");
+}
+
+// Layout signature of this episode's embedded (bundle) text-subtitle list —
+// one "lang:title" token per track, in order. Identical to the signature the
+// backend computes over VLC's embedded text tracks, so a pick made on the TV
+// group-matches on the phone and vice versa. See backend _sub_sig_of.
+function _lpSubSig() {
+  return (lp.subtitles || [])
+    .map(s => (_lpCanonLang(s.language) || "und") + ":" + _lpNormSubTitle(s.title))
+    .join("|");
 }
 
 function _lpKeyIsAiSidecar(key) {
@@ -12149,35 +12195,67 @@ function _lpKeyIsAiSidecar(key) {
   return !!(lp.sidecarSubs && lp.sidecarSubs[i] && lp.sidecarSubs[i].ai);
 }
 
-// Build a resolvable descriptor {off,lang,ai,name} for a track key, for saving.
+// Build a resolvable descriptor {off,lang,ai,name,title,idx,sig,at} for a track
+// key, for saving. `sig`/`idx` pin the exact embedded slot for any episode with
+// the same track layout; `at` drives newest-wins against the series pick.
 function _lpDescriptorForKey(key) {
   const s = String(key);
-  if (s === "-1") return { off: true };
+  const at = new Date().toISOString();
+  if (s === "-1") return { off: true, at };
   if (s.startsWith("sidecar:")) {
     const sc = (lp.sidecarSubs || [])[Number(s.slice(8))];
     if (!sc) return null;
-    return { off: false, lang: _lpCanonLang(sc.lang || ""), ai: !!sc.ai, name: sc.name || "" };
+    return { off: false, lang: _lpCanonLang(sc.lang || ""), ai: !!sc.ai,
+             name: sc.name || "", title: "", idx: -1, sig: _lpSubSig(), at };
   }
   const b = (lp.subtitles || [])[Number(s)];
   if (!b) return null;
-  return { off: false, lang: _lpCanonLang(b.language || ""), ai: false, name: "" };
+  return { off: false, lang: _lpCanonLang(b.language || ""), ai: false, name: "",
+           title: _lpNormSubTitle(b.title), idx: Number(s), sig: _lpSubSig(), at };
 }
 
 // Resolve a remembered descriptor to a current track key, or null if unmatched.
-// Honors kind (real vs AI), falls back across kinds, and treats a lone real sub
-// as the preferred language (single-option). Returns "-1" for a remembered off.
+// Mirrors the backend's _resolve_sub_descriptor chain — keep the two in sync:
+// exact sidecar name → same layout (sig) same slot (idx) → group memory for
+// this layout → fuzzy sidecar name → language (same kind, then any) → title →
+// lone real option → last-resort real track (a remembered ON pick must never
+// silently revert to off). Returns "-1" for a remembered off.
 function _lpResolveSubSel(sel) {
   if (!sel) return null;
   if (sel.off) return "-1";
-  const want = _lpCanonLang(sel.lang || "");
   const side = lp.sidecarSubs || [];
   const bun  = lp.subtitles || [];
-  if (sel.name) {
-    const i = side.findIndex(s => s.name === sel.name);
-    if (i >= 0) return "sidecar:" + i;
+  const curSig = _lpSubSig();
+  const tryExact = (d) => {
+    if (d.name) {
+      const i = side.findIndex(s => s.name === d.name);
+      if (i >= 0) return "sidecar:" + i;
+    }
+    const idx = (d.idx != null) ? Number(d.idx) : -1;
+    if (d.sig && d.sig === curSig && idx >= 0 && idx < bun.length) return String(idx);
+    return null;
+  };
+  let k = tryExact(sel);
+  if (k != null) return k;
+  // Group memory: the pick remembered for THIS episode's exact track layout —
+  // what makes a series stitched from several releases resolve per group.
+  const g = (sel.groups || {})[curSig];
+  if (g && !g.off) {
+    k = tryExact(g);
+    if (k != null) return k;
+    const gi = (g.idx != null) ? Number(g.idx) : -1;
+    if (gi >= 0 && gi < bun.length) return String(gi);
   }
   const real = side.map((s, i) => ({ s, i })).filter(o => !o.s.ai);
   const ai   = side.map((s, i) => ({ s, i })).filter(o =>  o.s.ai);
+  const fz = _lpSubFuzzyName(sel.name || "");
+  if (fz) {
+    const kind = (sel.ai ? ai : real);
+    const hit = kind.find(o => _lpSubFuzzyName(o.s.name) === fz)
+             || side.map((s, i) => ({ s, i })).find(o => _lpSubFuzzyName(o.s.name) === fz);
+    if (hit) return "sidecar:" + hit.i;
+  }
+  const want = _lpCanonLang(sel.lang || "");
   if (want) {
     if (sel.ai) {
       const a = ai.find(o => _lpCanonLang(o.s.lang) === want);
@@ -12196,7 +12274,29 @@ function _lpResolveSubSel(sel) {
     const a2 = ai.find(o => _lpCanonLang(o.s.lang) === want);
     if (a2) return "sidecar:" + a2.i;
   }
+  const ti = _lpNormSubTitle(sel.title || "");
+  if (ti) {
+    const b = bun.findIndex(s => _lpNormSubTitle(s.title) === ti);
+    if (b >= 0) return String(b);
+  }
   if (subtitleSingleOption && real.length === 1) return "sidecar:" + real[0].i;
+  // Last resort — the viewer chose subs ON for this series, so pick the least-
+  // surprising available track instead of silently reverting to off: preferred-
+  // language real sub, else a non-signs/commentary bundle track, else any real
+  // sidecar, else anything (an AI pick is auto-upgraded later).
+  const pref = _lpCanonLang(subtitleDefaultLang || "");
+  if (pref) {
+    const r = real.find(o => _lpCanonLang(o.s.lang) === pref);
+    if (r) return "sidecar:" + r.i;
+    const b = bun.findIndex(s => _lpCanonLang(s.language) === pref);
+    if (b >= 0) return String(b);
+  }
+  const avoid = /sign|song|commentary|forced/;
+  const b3 = bun.findIndex(s => !avoid.test(_lpNormSubTitle(s.title)));
+  if (b3 >= 0) return String(b3);
+  if (bun.length) return "0";
+  if (real.length) return "sidecar:" + real[0].i;
+  if (side.length) return "sidecar:0";
   return null;
 }
 
@@ -12232,7 +12332,7 @@ async function _lpSubUpgradePoll() {
   if (!pick) return;                                  // no real sub yet — keep watching
   _lpRebuildSidecars(subs, "sidecar:" + pick.i);
   lp.subAutoApplied = false;
-  _lpSaveLocalTracks();                               // remember the upgrade (file + series)
+  _lpSaveLocalTracks("sub-auto");                     // remember the upgrade (file only)
   const lang = (pick.s.lang || pref || "").toUpperCase();
   showAlert("Switched to downloaded " + (lang ? lang + " " : "") + "subtitles", "success");
 }
@@ -12529,13 +12629,13 @@ function lpSetAudio(idx) {
     // re-encoding from a new session. Persist the pick, then re-enter _lpLoadIndex
     // at the current time — stream-ondemand picks up the saved audio_idx (or the
     // background full prep may have finished, promoting us to the bundle path).
-    _lpSaveLocalTracks();
+    _lpSaveLocalTracks("audio");
     const v = document.getElementById("lpVideo");
     _lpLoadIndex(v.currentTime || 0);
     return;
   }
   _lpApplyAudioIdx(idx);
-  _lpSaveLocalTracks();
+  _lpSaveLocalTracks("audio");
 }
 
 function lpSetSubtitle(idx) {
@@ -12585,14 +12685,26 @@ function _lpIndicateSubLoading(idx) {
 // across other episodes of the series. The legacy `subtitle_idx` only addresses
 // bundle subs; `subtitle_sel` is what carries a sidecar/AI pick (the old code
 // dropped those, saving -1, so a chosen .srt/AI sub was never remembered).
-function _lpSaveLocalTracks() {
+//
+// `what` scopes the write to the action that triggered it:
+//   "audio"    — persist the audio pick ONLY. Never snapshot the current
+//                subtitle state: when a remembered pick failed to resolve on
+//                this episode (subs sitting at off), an audio change used to
+//                persist that accidental `{off}` per-file AND series-wide,
+//                silently turning subtitles off for the whole series.
+//   "sub"      — a deliberate subtitle pick: per-file + series-wide.
+//   "sub-auto" — an automatic subtitle write (late-AI-sub upgrade): per-file
+//                only, never the series-wide preference.
+function _lpSaveLocalTracks(what) {
+  what = what || "sub";
   if (!lp.itemId || !lp.filePath) return;
   if (!profile.id && !_appOffline) return;
+  const wantSub = what !== "audio";
   const subIsBundle = lp.pendingSubtitleIdx != null
                    && !String(lp.pendingSubtitleIdx).startsWith("sidecar:");
   const audioIdx = Number.isFinite(Number(lp.pendingAudioIdx)) ? Number(lp.pendingAudioIdx) : null;
   const subIdx   = subIsBundle ? Number(lp.pendingSubtitleIdx) : -1;
-  const subSel   = _lpDescriptorForKey(lp.pendingSubtitleIdx);
+  const subSel   = wantSub ? _lpDescriptorForKey(lp.pendingSubtitleIdx) : null;
   // Offline cached-player mode: this origin's /api is the loopback server — the
   // pick goes into the native store instead (same fields _appOfflineSavedTracks
   // restores from; the eventual host sync carries them via /api/sync/progress).
@@ -12616,8 +12728,10 @@ function _lpSaveLocalTracks() {
             itemId, filePath, positionSec: pos, durationSec: dur,
             profileId: profile.id || "",
             localAudioIdx: audioIdx == null ? undefined : audioIdx,
-            localSubtitleIdx: subIdx,
-            subtitleSel: subSel || undefined,
+            // Subtitle fields only for subtitle-triggered saves — an audio
+            // change must not snapshot an accidental "off" (see `what` above).
+            localSubtitleIdx: wantSub ? subIdx : undefined,
+            subtitleSel: (wantSub && subSel) ? subSel : undefined,
           });
         } catch (_) {}
       })();
@@ -12628,8 +12742,11 @@ function _lpSaveLocalTracks() {
     profile_id: profile.id,
     file_path:  lp.filePath,
     audio_idx:  audioIdx,
-    subtitle_idx: subIdx,
-    subtitle_sel: subSel,
+    ...(wantSub ? {
+      subtitle_idx: subIdx,
+      subtitle_sel: subSel,
+      sub_series: what !== "sub-auto",   // auto writes never touch the series pref
+    } : {}),
   };
   fetch(`/api/library/${lp.itemId}/local-tracks`, {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -14146,6 +14263,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.4.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.5.0</div>
 </body>
 </html>

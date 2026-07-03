@@ -2794,6 +2794,7 @@ async def _save_track_pref(
             if sub_sel is not None:
                 norm = _norm_sub_sel(sub_sel)
                 if norm:
+                    norm.setdefault("at", _now_iso())   # newest-wins vs series pick
                     fp["subtitle_sel"] = norm
             await asyncio.to_thread(_save_lib_raw, lib)
     except Exception:
@@ -2829,22 +2830,92 @@ async def _set_shuffle_pref(item_id: str, profile_id: str, shuffle: bool, scope:
 # or HLS sidecar index, which both drift between replays (and especially once a
 # late-downloaded sidecar shifts the list). The descriptor captures the user's
 # intent so it survives across episodes of a series, even weeks later:
-#   {off: bool, lang: "<canon>", ai: bool, name: "<sidecar filename>"}
+#   {off: bool, lang: "<canon>", ai: bool, name: "<sidecar filename>",
+#    title: "<norm track title>", idx: <embedded-text index>, sig: "<track sig>",
+#    at: "<iso pick time>"}
 # `name` enables an exact re-match when the same file is present; `lang`+`ai`
-# drive the cross-episode / fallback match. Stored per-file (file_progress) and
-# per-series (profile["series_subtitle_prefs"][<series>]).
+# drive the cross-episode / fallback match. `sig` is the episode's embedded
+# TEXT-subtitle signature (see _sub_sig_of) and `idx` the pick's position in
+# that list — together they re-apply the exact slot on any episode with the
+# same track layout, even when tracks carry no language/title tags at all.
+# `at` (pick time) drives newest-wins between a per-file and a per-series pick.
+# Stored per-file (file_progress) and per-series
+# (profile["series_subtitle_prefs"][<series>]); the per-series entry also keeps
+# a `groups` map — one remembered pick per track-layout signature — so a series
+# stitched from several releases (different sub options per episode group)
+# remembers the right pick for EACH group.
+
+def _norm_sub_title(t: object) -> str:
+    """Normalized (lowercased, whitespace-collapsed) container track title."""
+    return re.sub(r"\s+", " ", str(t or "").strip().lower())
+
+
+def _sub_fuzzy_name(name: str) -> str:
+    """Episode-invariant core of a sidecar subtitle filename: lowercase stem
+    with SxxEyy / digits / separators stripped. Lets 'Show.S01E02.en.srt' match
+    the 'Show.S01E05.en.srt' pick from another episode when the language can't
+    be parsed. Keep in sync with the client's _lpSubFuzzyName."""
+    stem = Path(str(name or "")).stem.lower()
+    stem = re.sub(r"s\d{1,2}[ ._-]?e\d{1,3}", "", stem)
+    stem = re.sub(r"\d+", "", stem)
+    return re.sub(r"[^a-z]+", "", stem)
+
+
+# VLC codec strings that mean an image-based subtitle (PGS/VobSub/…) — excluded
+# from the track signature because HLS bundles carry text subs only, and the
+# signature must be identical between the VLC and on-device players.
+_VLC_IMAGE_SUB_HINTS = ("pgs", "vobsub", "dvd", "dvb", "xsub", "bitmap")
+
+
+def _vlc_track_is_image_sub(t: dict) -> bool:
+    c = (t.get("codec") or "").lower()
+    return any(h in c for h in _VLC_IMAGE_SUB_HINTS)
+
+
+def _vlc_embedded_text_subs(tracks: list[dict]) -> list[dict]:
+    """The embedded (non-sidecar) text subtitle tracks, in container order —
+    the index space the descriptor's sig/idx pair addresses. Takes annotated
+    tracks (with `path` set for loaded sidecars)."""
+    return [t for t in tracks if not t.get("path") and not _vlc_track_is_image_sub(t)]
+
+
+def _sub_sig_of(tracks: list[dict]) -> str:
+    """Layout signature of an episode's embedded text subtitle list: one
+    'lang:title' token per track, in order. Two episodes with the same
+    signature have interchangeable track indices. Keep in sync with the
+    client's _lpSubSig (bundle meta subtitles are the same list)."""
+    return "|".join(
+        f"{t.get('lang') or 'und'}:{_norm_sub_title(t.get('title'))}" for t in tracks
+    )
+
 
 def _norm_sub_sel(sel: Optional[dict]) -> Optional[dict]:
     """Normalize/validate a subtitle-selection descriptor; None if unusable."""
     if not isinstance(sel, dict):
         return None
+    at = str(sel.get("at") or "")
     if sel.get("off"):
-        return {"off": True, "lang": "", "ai": False, "name": ""}
+        out: dict = {"off": True, "lang": "", "ai": False, "name": ""}
+        if at:
+            out["at"] = at
+        return out
     lang = _canon_lang(str(sel.get("lang") or "")) if sel.get("lang") else ""
+    if lang == "und":
+        lang = ""
     name = str(sel.get("name") or "")
-    if not (lang or name):
+    title = _norm_sub_title(sel.get("title"))
+    sig = str(sel.get("sig") or "")
+    try:
+        idx = int(sel.get("idx", -1) if sel.get("idx") is not None else -1)
+    except (TypeError, ValueError):
+        idx = -1
+    if not (lang or name or title or (sig and idx >= 0)):
         return None                       # nothing matchable
-    return {"off": False, "lang": lang, "ai": bool(sel.get("ai")), "name": name}
+    out = {"off": False, "lang": lang, "ai": bool(sel.get("ai")), "name": name,
+           "title": title, "idx": idx, "sig": sig}
+    if at:
+        out["at"] = at
+    return out
 
 
 def _get_series_sub_sel(lib: dict, profile_id: str, series: str) -> Optional[dict]:
@@ -2860,11 +2931,20 @@ def _get_series_sub_sel(lib: dict, profile_id: str, series: str) -> Optional[dic
 
 async def _save_series_sub_sel(profile_id: str, series: str, sel: Optional[dict]) -> None:
     """Persist a subtitle descriptor for this profile + series so the same kind
-    of subtitle is auto-applied on the next episode (and on return weeks later)."""
+    of subtitle is auto-applied on the next episode (and on return weeks later).
+
+    Besides the latest pick, the entry accumulates a `groups` map — signature →
+    descriptor — one per distinct episode track-layout the viewer has picked on.
+    A series mixing releases (episodes 1–8 with one set of sub options, 9–12
+    with another) then resolves each episode against ITS group's remembered
+    pick instead of hoping the latest pick's language happens to match. An
+    explicit 'off' pick becomes the latest descriptor but keeps the groups, so
+    re-enabling subs later still restores each group's exact track."""
     series = (series or "").strip()
     sel = _norm_sub_sel(sel)
     if not (series and profile_id and sel):
         return
+    sel.setdefault("at", _now_iso())
     try:
         async with _lib_lock:
             lib = await asyncio.to_thread(_load_lib_raw)
@@ -2872,7 +2952,18 @@ async def _save_series_sub_sel(profile_id: str, series: str, sel: Optional[dict]
             if not prof:
                 return
             prefs = prof.setdefault("series_subtitle_prefs", {})
-            prefs[series] = {**sel, "updated_at": _now_iso()}
+            prev = prefs.get(series) or {}
+            groups = dict(prev.get("groups") or {})
+            if not sel.get("off") and sel.get("sig"):
+                groups[sel["sig"]] = {k: v for k, v in sel.items() if k != "groups"}
+            if len(groups) > 16:          # cap: drop the oldest picks
+                oldest = sorted(groups, key=lambda k: str(groups[k].get("at") or ""))
+                for k in oldest[:len(groups) - 16]:
+                    groups.pop(k, None)
+            entry = {**sel, "updated_at": _now_iso()}
+            if groups:
+                entry["groups"] = groups
+            prefs[series] = entry
             await asyncio.to_thread(_save_lib_raw, lib)
     except Exception:
         pass
@@ -2942,6 +3033,84 @@ async def _load_all_local_subs(video: Path) -> list[dict]:
     return annotated
 
 
+def _resolve_sub_descriptor(sel: dict, tracks: list[dict], *,
+                            single_option: bool) -> Optional[dict]:
+    """Match a remembered subtitle descriptor against the live annotated VLC
+    track list (each entry {id, lang, ai, path, title, codec, …}). Returns the
+    matched track or None. Mirrors the on-device _lpResolveSubSel — keep the
+    two chains in sync. Order:
+      1. exact sidecar filename;
+      2. same track layout (sig) → same embedded slot (idx);
+      3. group memory: the pick remembered for THIS episode's layout;
+      4. fuzzy sidecar filename (episode-number-invariant), kind-aware;
+      5. language — same kind (real/AI) first, then any;
+      6. embedded track with the same container title;
+      7. lone real option (admin single_option).
+    """
+    if not sel or sel.get("off"):
+        return None
+    real = [t for t in tracks if not t.get("ai")]
+    emb_text = _vlc_embedded_text_subs(tracks)
+    cur_sig = _sub_sig_of(emb_text)
+
+    def _try_exact(d: dict) -> Optional[dict]:
+        name = d.get("name") or ""
+        if name:
+            c = next((t for t in tracks if t.get("path")
+                      and Path(t["path"]).name == name), None)
+            if c:
+                return c
+        sig = d.get("sig") or ""
+        try:
+            idx = int(d.get("idx", -1) if d.get("idx") is not None else -1)
+        except (TypeError, ValueError):
+            idx = -1
+        if sig and 0 <= idx < len(emb_text) and sig == cur_sig:
+            return emb_text[idx]
+        return None
+
+    cand = _try_exact(sel)
+    if cand:
+        return cand
+    grp = (sel.get("groups") or {}).get(cur_sig)
+    if isinstance(grp, dict) and not grp.get("off"):
+        cand = _try_exact(grp)
+        if cand:
+            return cand
+        try:
+            gidx = int(grp.get("idx", -1) or -1)
+        except (TypeError, ValueError):
+            gidx = -1
+        if 0 <= gidx < len(emb_text):
+            return emb_text[gidx]
+    fuzzy = _sub_fuzzy_name(sel.get("name") or "")
+    if fuzzy:
+        side = [t for t in tracks if t.get("path")]
+        kind = [t for t in side if bool(t.get("ai")) == bool(sel.get("ai"))]
+        for pool in (kind, side):
+            cand = next((t for t in pool
+                         if _sub_fuzzy_name(Path(t["path"]).name) == fuzzy), None)
+            if cand:
+                return cand
+    slang = sel.get("lang") or ""
+    if slang:
+        ai = [t for t in tracks if t.get("ai")]
+        pool = ai if sel.get("ai") else real
+        cand = (next((t for t in pool if t["lang"] == slang), None)
+                or next((t for t in tracks if t["lang"] == slang), None))
+        if cand:
+            return cand
+    stitle = _norm_sub_title(sel.get("title"))
+    if stitle:
+        cand = next((t for t in emb_text
+                     if _norm_sub_title(t.get("title")) == stitle), None)
+        if cand:
+            return cand
+    if single_option and len(real) == 1:
+        return real[0]
+    return None
+
+
 async def _apply_subtitle_policy(lib: dict, profile_id: str, file_path: str,
                                  series_sel: Optional[dict] = None) -> None:
     """Decide and *explicitly* set the subtitle track for a freshly-started file
@@ -2957,7 +3126,9 @@ async def _apply_subtitle_policy(lib: dict, profile_id: str, file_path: str,
       (a) an embedded/loaded track in the preferred language (any track if the
           admin chose "Any") — embedded tracks rank ahead of sidecars;
       (b) an online auto-search download in the preferred language (if enabled);
-      (c) otherwise leave subtitles off.
+      (c) when a remembered ON descriptor is pending (the viewer chose subs for
+          this series), a last-resort real track — never silently revert to off;
+      (d) otherwise leave subtitles off.
     """
     subs = _subs_cfg(lib)
     prof = next((p for p in lib.get("profiles", []) if p["id"] == profile_id), {})
@@ -3008,34 +3179,21 @@ async def _apply_subtitle_policy(lib: dict, profile_id: str, file_path: str,
     # Per-series memory: honour the kind of subtitle the viewer last chose for
     # this series (real vs AI vs off), falling back across kinds when the exact
     # one isn't present on this episode. Takes priority over the generic policy.
+    want_on = bool(series_sel) and not series_sel.get("off")
     if series_sel:
         if series_sel.get("off"):
             state.current_subtitle_track = -1
             await vlc("subtitle_track", val="-1")
             return
-        slang = series_sel.get("lang") or ""
-        sname = series_sel.get("name") or ""
-        cand = None
-        if sname:
-            cand = next((t for t in tracks if t.get("path")
-                         and Path(t["path"]).name == sname), None)
-        if cand is None and slang:
-            pool = ai if series_sel.get("ai") else real
-            cand = (next((t for t in pool if t["lang"] == slang), None)
-                    or next((t for t in tracks if t["lang"] == slang), None))
-        if cand is None and subs["single_option"] and len(real) == 1:
-            cand = real[0]
+        cand = _resolve_sub_descriptor(series_sel, tracks,
+                                       single_option=subs["single_option"])
         if cand:
             await _select(cand)
             return
-        if not subs_on:
-            # The remembered pick didn't resolve on this file and the default
-            # is off — stay off rather than dropping into the generic
-            # on-policy (which would auto-search / pick a track the viewer
-            # never asked for).
-            state.current_subtitle_track = -1
-            await vlc("subtitle_track", val="-1")
-            return
+        # The remembered ON pick didn't resolve on this episode. Do NOT revert
+        # to off (that pick IS the on switch for this series, regardless of the
+        # admin/profile default) — fall through to the generic policy, and a
+        # last-resort track below if that also comes up empty.
 
     if pref:
         # Prefer a REAL preferred-language track over an AI one for that language.
@@ -3061,7 +3219,20 @@ async def _apply_subtitle_policy(lib: dict, profile_id: str, file_path: str,
         if new_id is not None:
             return
 
-    # (c) nothing usable — leave subtitles off.
+    # (c) the viewer chose subs for this series but nothing matched — pick the
+    #     least-surprising available track rather than silently reverting to
+    #     off (avoid signs/commentary-titled tracks when possible).
+    if want_on and tracks:
+        avoid = ("sign", "song", "commentary", "forced")
+        cand = (next((t for t in real
+                      if not any(a in _norm_sub_title(t.get("title")) for a in avoid)),
+                     None)
+                or (real[0] if real else None)
+                or tracks[0])
+        await _select(cand)
+        return
+
+    # (d) nothing usable — leave subtitles off.
     state.current_subtitle_track = -1
     await vlc("subtitle_track", val="-1")
 
@@ -3092,12 +3263,36 @@ async def _apply_track_prefs(
         if audio is not None:
             state.current_audio_track = audio
             await vlc("audio_track", val=str(audio))
-        if subtitle is not None:
-            # Explicit per-file user pick wins over the default policy. VLC's own
-            # sidecar autodetect is disabled, so load every sidecar ourselves first
-            # — otherwise the subtitle menu would show only embedded tracks and a
-            # saved sidecar ES ID wouldn't resolve. (The no-pick branch loads them
-            # via _apply_subtitle_policy.)
+        # Newest intent wins between the per-file and the per-series subtitle
+        # descriptor: a pick made later on another episode (or on the device)
+        # beats a stale per-file pick. This is also what heals per-file `off`
+        # descriptors older builds wrote as a side effect of audio changes.
+        # Legacy picks without timestamps are treated as oldest.
+        file_sel = _norm_sub_sel(fp.get("subtitle_sel"))
+        series_sel = _get_series_sub_sel(lib, profile_id, _series_of_item(item))
+        chose_file = file_sel is not None
+        sel = file_sel if chose_file else series_sel
+        if file_sel and series_sel:
+            f_at = _parse_iso_dt(file_sel.get("at"))
+            s_at = _parse_iso_dt(series_sel.get("updated_at"))
+            if s_at and (f_at is None or s_at > f_at):
+                sel, chose_file = series_sel, False
+        if chose_file and series_sel and isinstance(series_sel.get("groups"), dict):
+            # Group memory lives on the series entry — carry it so an exact
+            # per-layout match still works when the file's own pick wins.
+            sel = {**sel, "groups": series_sel["groups"]}
+
+        if subtitle is not None and (sel is None
+                                     or (chose_file and not sel.get("off")
+                                         and not sel.get("name"))):
+            # Raw VLC ES-ID pick for THIS file, not outranked by a newer series
+            # pick. Embedded ES IDs are container-derived and stable across
+            # replays; sidecar IDs drift with load order, so a sidecar pick
+            # (descriptor carries `name`) resolves via the descriptor branch
+            # instead. VLC's own sidecar autodetect is disabled, so load every
+            # sidecar ourselves first — otherwise the subtitle menu would show
+            # only embedded tracks. (The descriptor branch loads them via
+            # _apply_subtitle_policy.)
             video = Path(file_path)
             if video.exists():
                 await _load_all_local_subs(video)
@@ -3105,12 +3300,9 @@ async def _apply_track_prefs(
             state.sub_auto_ai_path = ""           # an explicit pick isn't auto-AI
             await vlc("subtitle_track", val=str(subtitle))
         else:
-            # No VLC ES-ID pick — a pick made in the on-device player is still
-            # carried by the per-file descriptor, so honour that first, then
-            # fall back to the per-series memory. This is what makes a subtitle
-            # chosen on the phone survive a switch back to VLC playback.
-            sel = (_norm_sub_sel(fp.get("subtitle_sel"))
-                   or _get_series_sub_sel(lib, profile_id, _series_of_item(item)))
+            # No usable raw pick — resolve the winning descriptor (per-file or
+            # per-series). This is what makes a subtitle chosen on the phone
+            # survive a switch back to VLC playback.
             await _apply_subtitle_policy(lib, profile_id, file_path, series_sel=sel)
         state.track_pref_applied_file = file_path
     except Exception:
@@ -3595,7 +3787,12 @@ _LANG_CANON = {
 
 def _canon_lang(code: str) -> str:
     code = (code or "").strip().lower()
-    return _LANG_CANON.get(code, code)
+    if code in _LANG_CANON:
+        return _LANG_CANON[code]
+    # VLC's status.json reports full language NAMES ("English"), not ISO codes —
+    # without this a device-saved descriptor ("eng") never language-matches a
+    # VLC embedded track, so series subtitle memory silently failed on the TV.
+    return _LANG_NAME_TO_CODE.get(code, code)
 
 
 def _hhmm_to_min(s: str) -> Optional[int]:
@@ -8088,9 +8285,15 @@ class LocalTracksReq(BaseModel):
     audio_idx: Optional[int] = None
     subtitle_idx: Optional[int] = None   # -1 = subtitles off (bundle index space only)
     # Resolvable descriptor for the chosen subtitle, used to re-apply the pick on
-    # replay AND on other episodes of the same series. {off,lang,ai,name}.
+    # replay AND on other episodes of the same series.
+    # {off,lang,ai,name,title,idx,sig,at} — see _norm_sub_sel.
     # Supersedes subtitle_idx, which can't address sidecar/AI picks (see GOTCHAS).
     subtitle_sel: Optional[dict] = None
+    # False ⇒ update the per-file pick only, NOT the per-series memory. The
+    # client sends False for automatic writes (e.g. the late-AI-sub upgrade);
+    # only a deliberate viewer pick may rewrite the series-wide preference —
+    # unintended series writes were how subs "reverted to off" for whole series.
+    sub_series: bool = True
 
 
 @app.post("/api/library/{item_id}/local-tracks")
@@ -8121,14 +8324,16 @@ async def set_local_tracks(item_id: str, req: LocalTracksReq) -> JSONResponse:
         if req.subtitle_sel is not None:
             norm = _norm_sub_sel(req.subtitle_sel)
             if norm:
+                norm.setdefault("at", _now_iso())   # newest-wins vs series pick
                 fp["subtitle_sel"] = norm
                 # Drop any older VLC ES-ID pick for this file — it would
                 # otherwise outrank this newer descriptor on the next VLC play
                 # (_apply_track_prefs prefers the raw ES ID when present).
                 fp.pop("subtitle_track", None)
         await asyncio.to_thread(_save_lib_raw, lib)
-    # Remember this kind of subtitle for the rest of the series (separate lock).
-    if req.subtitle_sel is not None and series:
+    # Remember this kind of subtitle for the rest of the series (separate lock)
+    # — but only for a deliberate viewer pick (see LocalTracksReq.sub_series).
+    if req.subtitle_sel is not None and req.sub_series and series:
         await _save_series_sub_sel(req.profile_id, series, req.subtitle_sel)
     return JSONResponse({"ok": True})
 
@@ -10110,19 +10315,32 @@ async def _remember_vlc_sub_pick(track_id: int) -> None:
     if not (item_id and profile_id):
         return
     if track_id is None or track_id < 0:
-        sel: dict = {"off": True}
+        sel: dict = {"off": True, "at": _now_iso()}
     else:
+        # Annotate the live track list with the lang/ai/path recorded when the
+        # sidecars were loaded (state.vlc_sub_meta) so we can build the full
+        # descriptor: language + kind + sidecar name, plus the embedded-text
+        # signature/index that lets episodes with the exact same track layout
+        # (a "group") restore this slot even with no language/title tags.
         meta = state.vlc_sub_meta.get(track_id, {})
-        lang = meta.get("lang", "")
-        if not lang:
-            for t in await _vlc_subtitle_tracks():
-                if t.get("id") == track_id:
-                    lang = _canon_lang(t.get("language", ""))
-                    break
+        raw = await _vlc_subtitle_tracks()
+        tracks = [{**t,
+                   "lang": (state.vlc_sub_meta.get(t["id"], {}).get("lang")
+                            or _canon_lang(t.get("language", ""))),
+                   "ai":   bool(state.vlc_sub_meta.get(t["id"], {}).get("ai")),
+                   "path": state.vlc_sub_meta.get(t["id"], {}).get("path", "")}
+                  for t in raw]
+        entry = next((t for t in tracks if t["id"] == track_id), None)
+        lang = meta.get("lang", "") or (entry["lang"] if entry else "")
         name = Path(meta["path"]).name if meta.get("path") else ""
-        if not (lang or name):
-            return
-        sel = {"off": False, "lang": lang, "ai": bool(meta.get("ai")), "name": name}
+        title = _norm_sub_title(entry.get("title")) if entry else ""
+        emb_text = _vlc_embedded_text_subs(tracks)
+        sig = _sub_sig_of(emb_text)
+        idx = next((i for i, t in enumerate(emb_text) if t["id"] == track_id), -1)
+        sel = {"off": False, "lang": lang, "ai": bool(meta.get("ai")), "name": name,
+               "title": title, "idx": idx, "sig": sig, "at": _now_iso()}
+        if _norm_sub_sel(sel) is None:
+            return                        # nothing matchable — not rememberable
     if file_path:
         await _save_track_pref(item_id, profile_id, file_path, sub_sel=sel)
     lib = await get_library()
