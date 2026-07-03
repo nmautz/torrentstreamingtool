@@ -29,6 +29,18 @@
 > Airplane Mode for hours → relaunch → all complete on reconnect; bulk remove /
 > series-remove). See [GOTCHAS.md](GOTCHAS.md) (durable-queue footguns).
 >
+> **Downloads picker redesign (`8.2.0`).** The overlay's "Downloaded on this
+> device" list is now a stripped-down mirror of the web episode picker: titles
+> sorted A→Z, each series' episodes bucketed under **season divider rows**
+> (positive seasons ascending, season-0 files trailing as "Specials" — the same
+> rule as the web season tabs; movies/no-season items stay a flat list), episodes
+> sorted by episode number within each season (`E05` chip — season implicit under
+> a divider), and the web picker's **✓ Watched / in-progress %** badges + 3 px
+> progress bar per row, read from `OfflineStore.all()` filtered to the active
+> profile (server-seeded on every reconnect, so one source serves online and
+> offline). Select mode / Remove all / Play semantics unchanged. Host-served
+> asset only — no app rebuild.
+>
 > **Status:** **M5 landed (code)** (`6.0.0-preview.5.0.0`) — device pairing/auth +
 > in-app navigation + downloads management. **A4** is implemented: **`POST /api/pair`**
 > ([main.py](../main.py)) issues a long-lived bearer token (admin password = pairing

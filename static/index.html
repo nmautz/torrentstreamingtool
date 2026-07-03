@@ -9885,9 +9885,11 @@ async function _appRenderDashboard() {
     }).join("");
   }
 
-  // 3. Downloaded bundles, grouped by series / movie (completed only) — each
-  //    episode playable (LocalMediaServer, via the normal dashboard player) and
-  //    removable, mirroring the offline downloads.html picker but online.
+  // 3. Downloaded bundles, grouped by series / movie (completed only) — a
+  //    stripped-down mirror of the web episode picker: titles A→Z, episodes
+  //    divided by season (ascending, Specials last) in episode order, with the
+  //    web picker's Watched / % badges. Each episode playable (LocalMediaServer,
+  //    via the normal dashboard player) and removable.
   const groups = new Map();   // gkey → { title, meta, eps:[item], bytes }
   let total = 0;
   for (const it of items) {
@@ -9903,7 +9905,21 @@ async function _appRenderDashboard() {
   }
   ov.querySelector("#appDashTotal").textContent = total ? fmtSize(total) + " used" : "";
   const stWrap = ov.querySelector("#appDashStorage");
-  const rows = [...groups.values()].sort((a, b) => b.bytes - a.bytes);
+  const rows = [...groups.values()].sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }));
+
+  // Watch progress for the badges — the native OfflineStore is authoritative
+  // offline and server-seeded on every reconnect, so one source serves both.
+  const progByKey = new Map();
+  if (rows.length && isApp && _cap.os) {
+    try {
+      const pid = (profile && profile.id) || "";
+      const { events } = await _cap.os.all();
+      for (const e of (events || [])) {
+        if (pid && e.profileId && e.profileId !== pid) continue;
+        progByKey.set(offKey(e.itemId, e.filePath), e);
+      }
+    } catch (_) {}
+  }
 
   // Wire up the bulk-management chrome: the Select toggle only matters when there's
   // something downloaded; the action bar + selection count reflect the live set.
@@ -9925,22 +9941,44 @@ async function _appRenderDashboard() {
   } else {
     const pad2 = (n) => String(n).padStart(2, "0");
     stWrap.innerHTML = rows.map((g) => {
-      g.eps.sort((a, b) => {
-        const am = a.meta || {}, bm = b.meta || {};
-        return ((am.season || 0) - (bm.season || 0)) || ((am.episode || 0) - (bm.episode || 0));
-      });
+      // Bucket the episodes by season, ordered like the web picker's season
+      // tabs: positive seasons ascending, season-0 files trailing as "Specials".
+      // No positive season anywhere (movies, unparsed names) ⇒ one flat list.
+      const bySeason = new Map();
+      for (const ep of g.eps) {
+        const s = +((ep.meta || {}).season) || 0;
+        if (!bySeason.has(s)) bySeason.set(s, []);
+        bySeason.get(s).push(ep);
+      }
+      const posSeasons = [...bySeason.keys()].filter((s) => s > 0).sort((a, b) => a - b);
+      const seasonOrder = bySeason.has(0) ? [...posSeasons, 0] : posSeasons;
+      const divided = posSeasons.length > 0;
       const poster = (g.meta && g.meta.poster_data_url)
         ? `<img src="${escHtml(g.meta.poster_data_url)}" style="flex:0 0 auto;width:46px;height:69px;object-fit:cover;background:#202028;">`
         : `<div style="flex:0 0 auto;width:46px;height:69px;background:#202028;display:flex;align-items:center;justify-content:center;color:#8a8a92;font-size:18px;font-weight:800;">${escHtml((g.title[0] || "?").toUpperCase())}</div>`;
       const isSeries = g.eps.length > 1 || (g.meta && g.meta.season && g.meta.episode);
       const _gk = escHtml(JSON.stringify(g.eps.map((ep) => offKey(ep.itemId, ep.filePath))));
-      const eps = g.eps.map((ep) => {
+      const epRow = (ep) => {
         const m = ep.meta || {};
-        const num = (m.season && m.episode) ? `S${pad2(m.season)}·E${pad2(m.episode)} ` : (m.episode ? `E${pad2(m.episode)} ` : "");
+        // Under a season divider the season is implicit — just the episode number.
+        const num = divided
+          ? (m.episode ? `E${pad2(m.episode)} ` : "")
+          : (m.season && m.episode) ? `S${pad2(m.season)}·E${pad2(m.episode)} ` : (m.episode ? `E${pad2(m.episode)} ` : "");
         const nm = m.episode_name || ep.name || ep.sha;
         const _id = escHtml(JSON.stringify(ep.itemId)), _p = escHtml(JSON.stringify(ep.filePath));
         const key = offKey(ep.itemId, ep.filePath);
         const _k = escHtml(JSON.stringify(key));
+        // Watched / in-progress badges — same thresholds as the web picker (>2 %).
+        const pr = progByKey.get(key);
+        const pct = pr ? Math.round(((pr.positionSec || 0) / ((pr.durationSec || 0) || 1)) * 100) : 0;
+        const watched = !!(pr && pr.completed);
+        const inProg = !!pr && !watched && pct > 2;
+        const badge = watched
+          ? `<span style="color:#22c55e;font-size:10px;font-weight:800;letter-spacing:.08em;text-transform:uppercase;flex:0 0 auto;">✓ Watched</span>`
+          : inProg ? `<span style="color:#eab308;font-size:10px;font-weight:800;flex:0 0 auto;">${pct}%</span>` : "";
+        const bar = (watched || inProg)
+          ? `<div style="height:3px;background:#26262c;margin-top:6px;"><i style="display:block;height:100%;background:#22c55e;width:${watched ? 100 : pct}%;"></i></div>`
+          : "";
         // In select mode the whole row toggles a checkbox; otherwise it's Play + ✕.
         const checked = _appDashSel.has(key);
         const box = `<span style="flex:0 0 auto;width:20px;height:20px;border:2px solid ${checked ? "#3a7afe" : "#4a4a52"};
@@ -9957,10 +9995,24 @@ async function _appRenderDashboard() {
           <div style="flex:1 1 auto;min-width:0;">
             <div style="font-size:13px;font-weight:600;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">
               ${num ? `<span style="color:#3a7afe;font-family:ui-monospace,Menlo,monospace;font-size:11px;font-weight:700;">${escHtml(num)}</span>` : ""}${escHtml(nm)}</div>
-            <div style="font-size:11px;color:#8a8a92;margin-top:2px;">${fmtSize(ep.bytesTotal || ep.bytesDone || 0)}</div>
+            <div style="font-size:11px;color:#8a8a92;margin-top:2px;display:flex;align-items:center;gap:8px;">
+              <span>${fmtSize(ep.bytesTotal || ep.bytesDone || 0)}</span>${badge}</div>
+            ${bar}
           </div>
           ${actions}
         </div>`;
+      };
+      const sections = seasonOrder.map((s) => {
+        const eps = bySeason.get(s).sort((a, b) => {
+          const am = a.meta || {}, bm = b.meta || {};
+          return ((+am.episode || 0) - (+bm.episode || 0))
+            || String(am.episode_name || a.name || "").localeCompare(String(bm.episode_name || b.name || ""));
+        });
+        const divider = divided
+          ? `<div style="padding:7px 11px 6px;border-top:1px solid #2a2a30;background:#101014;font-size:10px;font-weight:800;
+              letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;">${s === 0 ? "Specials" : "Season " + s} <span style="color:#4a4a52;">· ${eps.length}</span></div>`
+          : "";
+        return divider + eps.map(epRow).join("");
       }).join("");
       // Per-series header gets a "Remove all" shortcut (normal mode) and a
       // "Select all in series" toggle (select mode) — quick bulk without ticking
@@ -9970,16 +10022,19 @@ async function _appRenderDashboard() {
             border:1px solid #2a4a7e;padding:6px 11px;font-size:11px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;">All</button>`
         : `<button onclick="_appRemoveSeries(${_gk},${escHtml(JSON.stringify(g.title))})" title="Remove every episode of this title"
             style="all:unset;cursor:pointer;flex:0 0 auto;color:#8a8a92;border:1px solid #2a2a30;padding:6px 11px;font-size:11px;font-weight:700;">Remove all</button>`;
+      const subtitle = isSeries
+        ? `${seasonOrder.length > 1 ? `${seasonOrder.length} seasons · ` : ""}${g.eps.length} episode${g.eps.length === 1 ? "" : "s"} · ${fmtSize(g.bytes)}`
+        : fmtSize(g.bytes);
       return `<div style="border:1px solid #2a2a30;background:#141417;margin-bottom:12px;">
         <div style="display:flex;gap:11px;padding:11px;align-items:flex-start;">
           ${poster}
           <div style="flex:1 1 auto;min-width:0;">
             <div style="font-size:15px;font-weight:800;line-height:1.2;">${escHtml(g.title)}</div>
-            <div style="font-size:12px;color:#8a8a92;margin-top:3px;">${isSeries ? `${g.eps.length} episode${g.eps.length === 1 ? "" : "s"} · ` : ""}${fmtSize(g.bytes)}</div>
+            <div style="font-size:12px;color:#8a8a92;margin-top:3px;">${subtitle}</div>
           </div>
           ${headBtn}
         </div>
-        ${eps}
+        ${sections}
       </div>`;
     }).join("");
   }
@@ -13789,6 +13844,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.1.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.2.0</div>
 </body>
 </html>
