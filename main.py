@@ -521,7 +521,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "7.15.0"
+UI_VERSION = "8.0.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 # Retains references to fire-and-forget background tasks so the event loop's weak
@@ -9936,6 +9936,54 @@ async def get_ui_version() -> JSONResponse:
         {"version": UI_VERSION},
         headers={"Cache-Control": "no-cache, no-store, must-revalidate"},
     )
+
+
+# Files an iOS "player snapshot" must carry — the dashboard page plus every asset
+# it can lazily load (see docs/PLAYER_CACHE_PLAN.md). A fixed allowlist, not a
+# directory walk, so the snapshot never grows surprise files; every entry is
+# served by the root StaticFiles mount, which is what the app downloads from.
+_PLAYER_SNAPSHOT_FILES = [
+    "index.html",
+    "vendor/tailwind.js",
+    "vendor/hls.min.js",
+    "vendor/subtitles-octopus.js",
+    "vendor/subtitles-octopus-worker.js",
+    "vendor/subtitles-octopus-worker.wasm",
+    "vendor/libass-fallback-font.ttf",
+]
+_UI_BADGE_RE = re.compile(r"data-ui-version[^>]*>([^<]+)<")
+
+
+@app.get("/api/player-manifest")
+async def player_manifest(request: Request) -> JSONResponse:
+    """Manifest for the iOS app's offline player snapshot (docs/PLAYER_CACHE_PLAN.md).
+
+    Returns {version, files:[{name,size}]} — the app compares `version` against
+    its cached snapshot's and re-downloads on mismatch (BundleDownloader's
+    size-match resume makes a same-version refresh a no-op). The version is read
+    from the live index.html badge (the file on disk is the source of truth;
+    the UI_VERSION constant historically drifts)."""
+    _require_device_auth(request)
+
+    def _build() -> tuple[str, list[dict]]:
+        static_dir = Path(__file__).parent / "static"
+        files: list[dict] = []
+        for name in _PLAYER_SNAPSHOT_FILES:
+            try:
+                files.append({"name": name, "size": (static_dir / name).stat().st_size})
+            except OSError:
+                continue   # optional asset missing — the snapshot just omits it
+        version = UI_VERSION
+        try:
+            m = _UI_BADGE_RE.search((static_dir / "index.html").read_text("utf-8", errors="replace"))
+            if m:
+                version = m.group(1).strip()
+        except OSError:
+            pass
+        return version, files
+
+    version, files = await asyncio.to_thread(_build)
+    return JSONResponse({"version": version, "files": files})
 
 
 async def _all_library_paths() -> list[dict]:

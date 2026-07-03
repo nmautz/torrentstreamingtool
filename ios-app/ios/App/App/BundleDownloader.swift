@@ -892,7 +892,10 @@ final class BundleDownloadManager: NSObject, URLSessionDownloadDelegate {
         var moveError: String?
         var errTransient = false
         if ok {
-            try? fm.createDirectory(at: dir, withIntermediateDirectories: true)
+            // Create the DESTINATION's parent, not just the bundle root — player-
+            // snapshot files carry nested names ("vendor/hls.min.js") and the
+            // move fails without the intermediate dir. (No-op for flat bundles.)
+            try? fm.createDirectory(at: dest.deletingLastPathComponent(), withIntermediateDirectories: true)
             try? fm.removeItem(at: dest)
             do { try fm.moveItem(at: location, to: dest) } catch { moveError = error.localizedDescription }
         } else {

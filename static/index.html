@@ -14,7 +14,10 @@
        document-start, so window.Capacitor is already present here. */
     try { if (window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform()) document.documentElement.classList.add("is-app"); } catch (e) {}
   </script>
-  <script src="https://cdn.tailwindcss.com"></script>
+  <!-- Tailwind (Play-CDN JIT build) is VENDORED — the dashboard must render with
+       no internet (LAN-only hosts) and from the iOS app's offline player snapshot
+       (docs/PLAYER_CACHE_PLAN.md). Refresh by re-downloading cdn.tailwindcss.com. -->
+  <script src="/vendor/tailwind.js"></script>
   <script>tailwind.config = { darkMode: 'class' }</script>
   <style>
     :root { color-scheme: dark; }
@@ -696,6 +699,12 @@
     body:has(#profilePicker:not(.hidden)) #skipOffer,
     body:has(#profilePicker:not(.hidden)) #resumeOffer,
     body:has(#profilePicker:not(.hidden)) #localPlayer { display: none !important; }
+    /* Offline cached-player mode (docs/PLAYER_CACHE_PLAN.md): the Downloads
+       overlay IS the whole UI — its Close would strand the user on the dead
+       online chrome, so it's pinned open and the player floats ABOVE it
+       (playback never closes the overlay in this mode). */
+    html.is-offline #appDashClose { display: none !important; }
+    html.is-offline #localPlayer { z-index: 10001; }
 
     /* iOS app (M5): hide the always-on ☰ App menu during on-device playback so it
        doesn't float over the player. Tiny (picture-in-picture) mode keeps it. */
@@ -8246,12 +8255,26 @@ function offKey(itemId, filePath) { return `${itemId}|${filePath}`; }
 // the next 15-second tick (or the `pause`/`visibilitychange`/`pagehide` flush)
 // will overwrite it, and the server's last persisted value is still authoritative.
 async function saveProgress(itemId, filePath, posSec, durSec) {
-  if (!profile.id) return;
+  if (!profile.id && !_appOffline) return;
   // Drop saves at or near t=0. The server treats `pct = position/duration` as
   // the source of truth for `completed`, so a t≈0 write would wipe a fully-
   // watched episode back to unwatched. The resume offer also ignores anything
   // under 5 s, so saves below that threshold have no benefit either way.
   if (!(durSec > 0) || posSec < 5) return;
+  // Offline cached-player mode: this origin's /api is the loopback server —
+  // the POST below would RESOLVE as a 404 (not throw), so the catch-based
+  // fallback never fires. Go straight to the native store; it resolves the
+  // active profile itself when ours is empty, and the M3 sync machinery pushes
+  // everything to the host on the next online session.
+  if (_appOffline) {
+    if (isApp && _cap.os) {
+      try {
+        await _cap.os.saveProgress({ itemId, filePath,
+          positionSec: posSec, durationSec: durSec, profileId: profile.id || "" });
+      } catch (_) {}
+    }
+    return;
+  }
   try {
     await fetch(`/api/library/${itemId}/progress`, {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -8281,6 +8304,7 @@ function _appSyncSetProfile() {
 
 let _appSyncing = false;
 async function _appFlushOfflineProgress() {
+  if (_appOffline) return;   // no host behind this origin — sync runs on the next online session
   if (!(isApp && _cap.os) || !profile.id || _appSyncing) return;
   _appSyncing = true;
   let advancedServer = false;
@@ -8630,6 +8654,27 @@ const _cap = (() => {
 })();
 const isApp = !!_cap;
 
+// ── Offline cached-player mode (docs/PLAYER_CACHE_PLAN.md) ──────────────────
+// When the host is unreachable, the iOS shell serves a device-cached snapshot
+// of THIS page from the loopback LocalMediaServer and opens it with ?offline=1
+// plus the original host in ?host= (this loopback origin's localStorage is
+// empty and its port is ephemeral, so nothing can be read from storage here).
+// Offline mode boots Downloads-only: no SSE, no host fetches, playback comes
+// exclusively from on-device bundles the LMS player mode mounts same-origin
+// under /StreamLinkBundles/<sha>/. Deliberately NOT isApp-gated — a plain
+// browser pointed at a snapshot (with no /api behind it) must boot the same
+// way, which is how the mode is smoke-tested without a device.
+const _appOffline = (() => {
+  try { return new URLSearchParams(location.search).get("offline") === "1"; } catch (_) { return false; }
+})();
+const _appOfflineHost = (() => {
+  if (!_appOffline) return "";
+  try { return new URLSearchParams(location.search).get("host") || ""; } catch (_) { return ""; }
+})();
+// Sentinel bundle key the player snapshot is stored under in BundleDownloader —
+// it must never surface in any downloads UI or the durable-queue resumer.
+const _APP_PLAYER_KEY = "__player__";
+
 // offKey(itemId,filePath) → { complete?, downloading?, prepping?, fraction?, sha?, dir?, bytesTotal?, bytesDone? }
 const offlineBundles = new Map();
 
@@ -8730,8 +8775,22 @@ function _appIdentifyLocalRung(masterText, meta) {
 // the same shape /offline-prepare returns, reading meta.json straight from the
 // bundle so no host round-trip is needed (works in Airplane Mode).
 async function _appStartLocalPlayback(local) {
-  const { url } = await _cap.lms.start({ path: local.dir });
-  const base = url.replace(/\/+$/, "") + "/";
+  let base;
+  if (_appOffline) {
+    // Offline cached-player mode: LMS is ALREADY serving this page in player
+    // mode, with every bundle mounted same-origin under /StreamLinkBundles/.
+    // Never call lms.start here — restarting the server that serves the page
+    // would break every later asset load (lazy hls.js/octopus, next episodes).
+    base = window.location.origin + "/StreamLinkBundles/" + local.sha + "/";
+  } else {
+    const { url } = await _cap.lms.start({ path: local.dir });
+    base = url.replace(/\/+$/, "") + "/";
+    // LMS is running for playback from here on — flag it immediately (not via
+    // the caller, which may have raced with an episode advance) so lpStop
+    // always tears it down. Offline mode deliberately never sets this: there
+    // the server belongs to the page, not to playback.
+    lp._lmsActive = true;
+  }
   let meta = {};
   try { meta = await (await fetch(base + "meta.json")).json(); } catch (_) {}
   // Identify the downloaded rung + surface the full ladder so the quality menu
@@ -8739,9 +8798,6 @@ async function _appStartLocalPlayback(local) {
   // hls.js only one level, so it can't drive the menu — see GOTCHAS.md).
   let masterText = "";
   try { masterText = await (await fetch(base + "master.m3u8")).text(); } catch (_) {}
-  // LMS is running from here on — flag it immediately (not via the caller, which
-  // may have raced with an episode advance) so lpStop always tears it down.
-  lp._lmsActive = true;
   return {
     local_base:   base,
     local_rung:   _appIdentifyLocalRung(masterText, meta),
@@ -8766,6 +8822,7 @@ async function _appStartLocalPlayback(local) {
 // it fetches this tiny endpoint instead — best-effort and online-only, so
 // Airplane-Mode playback starts without waiting on a timeout.
 async function _appFetchSavedTracks(itemId, filePath) {
+  if (_appOffline) return _appOfflineSavedTracks(itemId, filePath);
   if (!navigator.onLine || !profile.id) return {};
   try {
     const u = `/api/library/${itemId}/saved-tracks?file_path=${encodeURIComponent(filePath)}`
@@ -8773,6 +8830,22 @@ async function _appFetchSavedTracks(itemId, filePath) {
     const r = await _appFetchT(u, { headers: _appAuthHeaders() }, 4000);
     if (!r.ok) return {};
     return (await r.json()).saved_tracks || {};
+  } catch (_) { return {}; }
+}
+
+// Offline: the host's remembered picks are unreachable, but OfflineStore keeps
+// the track fields the on-device player saved with each progress write —
+// restore from those so audio/subtitle picks survive offline sessions too.
+async function _appOfflineSavedTracks(itemId, filePath) {
+  if (!(isApp && _cap.os)) return {};
+  try {
+    const p = await _cap.os.getProgress({ itemId, filePath, profileId: profile.id || "" });
+    if (!p || !p.found) return {};
+    const out = {};
+    if (p.localAudioIdx != null) out.audio_idx = p.localAudioIdx;
+    if (p.localSubtitleIdx != null) out.subtitle_idx = p.localSubtitleIdx;
+    if (p.subtitleSel) out.subtitle_sel = p.subtitleSel;
+    return out;
   } catch (_) { return {}; }
 }
 
@@ -9166,6 +9239,7 @@ async function _appInitOfflineBundles() {
   if (!isApp) return;
   try {
     _cap.dl.addListener("bundleProgress", (ev) => {
+      if (ev.itemId === _APP_PLAYER_KEY) return;   // snapshot refresh — not a content download
       const key = offKey(ev.itemId, ev.filePath);
       const e = offlineBundles.get(key) || {};
       e.downloading = true; e.prepping = false; e.waiting = false;   // bytes flowing ⇒ connected
@@ -9176,6 +9250,7 @@ async function _appInitOfflineBundles() {
       _appRefreshDlBtn(ev.itemId, ev.filePath);
     });
     _cap.dl.addListener("bundleComplete", (ev) => {
+      if (ev.itemId === _APP_PLAYER_KEY) return;
       offlineBundles.set(offKey(ev.itemId, ev.filePath),
         { complete: true, sha: ev.sha, dir: ev.dir });
       _appQueueClear(ev.itemId, ev.filePath);   // fully on disk — drop the durable intent
@@ -9183,6 +9258,7 @@ async function _appInitOfflineBundles() {
       showAlert("Saved offline: " + (ev.filePath.split(/[\\/]/).pop() || ""), "ok");
     });
     _cap.dl.addListener("bundleError", (ev) => {
+      if (ev.itemId === _APP_PLAYER_KEY) return;   // snapshot refresh failure is silent (retried next connect)
       // The native side now retries transient (network) failures indefinitely, so a
       // bundleError is a PERMANENT failure — give up and clear the durable intent.
       offlineBundles.delete(offKey(ev.itemId, ev.filePath));
@@ -9192,6 +9268,7 @@ async function _appInitOfflineBundles() {
     });
     const { items } = await _cap.dl.list();
     for (const it of (items || [])) {
+      if (it.itemId === _APP_PLAYER_KEY) continue;   // player snapshot — never UI state
       // A partial bundle reconstructed from disk at launch is NOT actively
       // transferring: the page (and native `jobs`) that drove it died with the
       // previous app session, and iOS cancels background-URLSession tasks on app
@@ -9227,6 +9304,7 @@ async function _appInitOfflineBundles() {
 let _appResumeInFlight = false;
 async function _appResumeDownloadQueue() {
   if (!isApp || !_cap.dl || !_cap.dl.queueList) return;
+  if (_appOffline) return;   // nothing to download from — the host is unreachable
   if (_appResumeInFlight) return;
   _appResumeInFlight = true;
   try {
@@ -9249,6 +9327,90 @@ async function _appResumeDownloadQueue() {
           (e.quality === "" || e.quality == null) ? "original" : e.quality));
     } finally { _appReleaseBg(); }
   } finally { _appResumeInFlight = false; }
+}
+
+// ── Player snapshot refresh (docs/PLAYER_CACHE_PLAN.md) ──────────────────────
+// While ONLINE in the app, keep the device copy of this page + its vendor assets
+// fresh so the shell can serve it offline. Runs on every boot: a version
+// mismatch wipes the old snapshot first; a same-version run is a cheap heal
+// (BundleDownloader skips files already on disk at the manifest size).
+// Fire-and-forget; a failure just means the previous snapshot stays.
+async function _appRefreshPlayerSnapshot() {
+  if (!isApp || _appOffline || !_cap.dl) return;
+  try {
+    const r = await _appFetchT("/api/player-manifest", { headers: _appAuthHeaders() }, 15000);
+    if (!r.ok) return;
+    const man = await r.json();
+    if (!man || !man.version || !Array.isArray(man.files) || !man.files.length) return;
+    let local = null;
+    try { local = await _cap.dl.getLocal({ itemId: _APP_PLAYER_KEY, filePath: _APP_PLAYER_KEY }); } catch (_) {}
+    const cachedVer = local && local.found && local.meta && local.meta.version;
+    if (local && local.found && cachedVer !== man.version) {
+      try { await _cap.dl.remove({ itemId: _APP_PLAYER_KEY, filePath: _APP_PLAYER_KEY }); } catch (_) {}
+    }
+    await _cap.dl.download({
+      itemId: _APP_PLAYER_KEY, filePath: _APP_PLAYER_KEY, cacheKey: _APP_PLAYER_KEY,
+      name: "Player snapshot",
+      baseUrl: window.location.origin + "/",   // the StaticFiles mount serves every manifest entry
+      files: man.files,
+      token: _appPairingToken() || "",
+      meta: { version: man.version, player_snapshot: true },
+    });
+  } catch (_) {}
+}
+
+// ── Offline cached-player boot (docs/PLAYER_CACHE_PLAN.md) ───────────────────
+// The whole offline init path: called INSTEAD of the normal DOMContentLoaded
+// body when ?offline=1. Boots Downloads-only — profile from the native store,
+// no SSE, no host fetches — then pins the Downloads overlay open as the UI.
+async function _appOfflineBoot() {
+  document.documentElement.classList.add("is-offline");
+  _lpAttachVideoEvents();
+  _applyPhoneLandLayout();
+  lockSeekBar();
+  // The loopback origin's localStorage is empty; the active profile was pushed
+  // natively while online (_appSyncSetProfile → OfflineStore.setProfile).
+  if (isApp && _cap.os) {
+    try {
+      const p = await _cap.os.getProfile();
+      if (p && p.profileId) profile = { id: p.profileId, name: p.profileName || "" };
+    } catch (_) {}
+  }
+  try { renderNavProfile(); } catch (_) {}
+  if (!profile.id) {
+    showAlert("No profile stored on this device yet — watch progress will still be recorded and syncs after you connect once.", "warn");
+  }
+  // Hydrate the on-device bundle state (native only; its queue resumer is
+  // offline-gated) and open the overlay that IS the offline UI.
+  await _appInitOfflineBundles();
+  _appOpenDashboard();
+  _appOfflineReconnectInit();
+}
+
+// Reconnect probe: same always-resolves no-cors trick the shell uses. Auto-probe
+// every 15 s (skipped while something is playing — yanking the page out from
+// under an offline viewing session would be hostile); the overlay's Reconnect
+// button probes on demand. On success the page navigates back to the real host.
+let _appOfflineProbing = false;
+function _appOfflineReconnectInit() {
+  if (!_appOfflineHost) return;
+  setInterval(() => { if (!lp.itemId) _appOfflineTryReconnect(false); }, 15000);
+  window.addEventListener("online", () => { if (!lp.itemId) _appOfflineTryReconnect(false); });
+}
+async function _appOfflineTryReconnect(manual) {
+  if (_appOfflineProbing || !_appOfflineHost) return;
+  _appOfflineProbing = true;
+  try {
+    const ok = await new Promise((resolve) => {
+      let done = false;
+      const finish = (v) => { if (!done) { done = true; resolve(v); } };
+      setTimeout(() => finish(false), 2500);
+      fetch(_appOfflineHost + "/api/version", { mode: "no-cors", cache: "no-store" })
+        .then(() => finish(true)).catch(() => finish(false));
+    });
+    if (ok) { window.location.replace(_appOfflineHost); return; }
+    if (manual) showAlert("Server still unreachable.", "warn");
+  } finally { _appOfflineProbing = false; }
 }
 
 // ── iOS app: in-app navigation (M5) ──────────────────────────────────────────
@@ -9314,7 +9476,9 @@ let _appDashSelectMode = false;
 const _appDashSel = new Set();
 
 function _appOpenDashboard() {
-  if (!isApp) return;
+  // Offline cached-player mode boots this overlay as the whole UI, including in
+  // the plain-browser smoke test where isApp is false (see _appOfflineBoot).
+  if (!isApp && !_appOffline) return;
   let ov = document.getElementById("appDash");
   if (!ov) { ov = _appBuildDashboard(); document.body.appendChild(ov); }
   ov.style.display = "flex";
@@ -9323,6 +9487,7 @@ function _appOpenDashboard() {
   _appDashTimer = setInterval(_appRenderDashboard, 1000);
 }
 function _appCloseDashboard() {
+  if (_appOffline) return;   // pinned open — the overlay IS the offline UI
   const ov = document.getElementById("appDash");
   if (ov) ov.style.display = "none";
   if (_appDashTimer) { clearInterval(_appDashTimer); _appDashTimer = null; }
@@ -9347,6 +9512,8 @@ function _appBuildDashboard() {
       <div style="display:flex;align-items:center;gap:9px;">
         <span id="appDashDot" style="width:10px;height:10px;background:#8a8a92;display:inline-block;"></span>
         <span id="appDashConn" style="font-size:14px;font-weight:700;">Checking…</span>
+        <button id="appDashReconnect" style="all:unset;cursor:pointer;display:none;margin-left:auto;color:#3a7afe;
+          border:1px solid #2a4a7e;padding:6px 12px;font-size:11px;font-weight:800;letter-spacing:.05em;text-transform:uppercase;">Reconnect</button>
       </div>
       <div id="appDashHost" style="font-size:12px;color:#8a8a92;margin-top:7px;word-break:break-all;"></div>
     </div>
@@ -9378,6 +9545,7 @@ function _appBuildDashboard() {
     </div>
   `;
   ov.querySelector("#appDashClose").addEventListener("click", _appCloseDashboard);
+  ov.querySelector("#appDashReconnect").addEventListener("click", () => _appOfflineTryReconnect(true));
   ov.querySelector("#appDashResume").addEventListener("click", () => _appResumeDownloadQueue());
   ov.querySelector("#appDashSelect").addEventListener("click", () => _appDashSetSelect(true));
   ov.querySelector("#appDashSelCancel").addEventListener("click", () => _appDashSetSelect(false));
@@ -9393,13 +9561,23 @@ async function _appRenderDashboard() {
   if (!ov || ov.style.display === "none") return;
 
   // 1. Connection status — driven by the SSE link the host page keeps open.
-  const online = navigator.onLine && app._connected !== false;
+  //    Offline cached-player mode has no SSE at all: pin the state and surface
+  //    the Reconnect probe instead.
   const dot  = ov.querySelector("#appDashDot");
   const conn = ov.querySelector("#appDashConn");
-  dot.style.background = online ? "#3ec46d" : "#e0533d";
-  conn.textContent = online ? "Connected — live" : (navigator.onLine ? "Reconnecting…" : "Offline");
-  conn.style.color = online ? "#3ec46d" : "#e0a23d";
-  ov.querySelector("#appDashHost").textContent = (localStorage.getItem("streamlink_server_url") || window.location.origin);
+  ov.querySelector("#appDashReconnect").style.display = _appOffline ? "inline-block" : "none";
+  if (_appOffline) {
+    dot.style.background = "#e0a23d";
+    conn.textContent = "Offline — downloads only";
+    conn.style.color = "#e0a23d";
+    ov.querySelector("#appDashHost").textContent = _appOfflineHost || "";
+  } else {
+    const online = navigator.onLine && app._connected !== false;
+    dot.style.background = online ? "#3ec46d" : "#e0533d";
+    conn.textContent = online ? "Connected — live" : (navigator.onLine ? "Reconnecting…" : "Offline");
+    conn.style.color = online ? "#3ec46d" : "#e0a23d";
+    ov.querySelector("#appDashHost").textContent = (localStorage.getItem("streamlink_server_url") || window.location.origin);
+  }
 
   // Pull the authoritative on-device index for names, sizes and completion.
   let items = [];
@@ -9454,6 +9632,7 @@ async function _appRenderDashboard() {
   const groups = new Map();   // gkey → { title, meta, eps:[item], bytes }
   let total = 0;
   for (const it of items) {
+    if (it.itemId === _APP_PLAYER_KEY) continue;   // the player snapshot isn't content
     if (!it.complete) continue;
     const bytes = it.bytesTotal || it.bytesDone || 0;
     total += bytes;
@@ -9551,8 +9730,17 @@ async function _appRenderDashboard() {
 // dashboard player (which detects the on-device bundle and serves it from the
 // native LocalMediaServer), then close the overlay so the player is visible.
 async function _appPlayDownloaded(itemId, filePath) {
-  _appCloseDashboard();
-  try { await lpPlay(itemId, [filePath]); } catch (_) {}
+  _appCloseDashboard();   // offline mode: a no-op — the player floats above the pinned overlay
+  // Offline: resume comes from the native store (the host's progress is
+  // unreachable, and the M3 seed already adopted it while online).
+  let seekTo = 0;
+  if (_appOffline && isApp && _cap.os) {
+    try {
+      const p = await _cap.os.getProgress({ itemId, filePath, profileId: profile.id || "" });
+      if (p && p.found && !p.completed && (p.positionSec || 0) > 5) seekTo = p.positionSec;
+    } catch (_) {}
+  }
+  try { await lpPlay(itemId, [filePath], seekTo); } catch (_) {}
 }
 
 // Remove a downloaded bundle from the Downloads overlay and re-render in place.
@@ -10418,11 +10606,13 @@ function _ensureLibassLib() {
 }
 
 async function lpPlay(itemId, files, seekTo, label, shuffle, shuffleScope) {
-  if (!hlsAvailable) { showAlert("Stream-to-device isn’t available on this host.", "warn"); return; }
+  // Offline cached-player mode: both guards below are host-centric — playback
+  // comes from on-device bundles, so neither HLS-on-host nor connectivity matter.
+  if (!hlsAvailable && !_appOffline) { showAlert("Stream-to-device isn’t available on this host.", "warn"); return; }
   if (!Array.isArray(files) || !files.length) {
     showAlert("Nothing to play.", "warn"); return;
   }
-  if (!navigator.onLine) {
+  if (!navigator.onLine && !_appOffline) {
     showAlert("Disconnected — streaming needs the host to be reachable.", "error"); return;
   }
   await lpUnloadCurrent();
@@ -10438,14 +10628,31 @@ async function lpPlay(itemId, files, seekTo, label, shuffle, shuffleScope) {
   // would append episodes the user never shuffled in. A 1-file shuffle tail is the
   // last of the random run; keep it as-is.
   if (playlist.length === 1 && !shuffle) {
-    try {
-      const r = await fetch(`/api/library/${itemId}/files?profile_id=${encodeURIComponent(profile.id || "")}`);
-      if (r.ok) {
-        const all = ((await r.json()).files || []).map(f => f.path).filter(Boolean);
+    if (_appOffline) {
+      // Offline: expand to the item's other DOWNLOADED episodes (native index,
+      // season/episode order) so Prev/Next and auto-advance work with no host.
+      try {
+        const { items } = isApp ? await _cap.dl.list() : { items: [] };
+        const eps = (items || [])
+          .filter(it => it.itemId === itemId && it.complete && it.itemId !== _APP_PLAYER_KEY)
+          .sort((a, b) => {
+            const am = a.meta || {}, bm = b.meta || {};
+            return ((am.season || 0) - (bm.season || 0)) || ((am.episode || 0) - (bm.episode || 0));
+          });
+        const all = eps.map(it => it.filePath);
         const idx = all.indexOf(playlist[0]);
         if (idx >= 0 && all.length > 1) { playlist = all; startIdx = idx; }
-      }
-    } catch (_) {}
+      } catch (_) {}
+    } else {
+      try {
+        const r = await fetch(`/api/library/${itemId}/files?profile_id=${encodeURIComponent(profile.id || "")}`);
+        if (r.ok) {
+          const all = ((await r.json()).files || []).map(f => f.path).filter(Boolean);
+          const idx = all.indexOf(playlist[0]);
+          if (idx >= 0 && all.length > 1) { playlist = all; startIdx = idx; }
+        }
+      } catch (_) {}
+    }
   }
   lp.itemId = itemId; lp.playlist = playlist; lp.pi = startIdx;
   // Device shuffle lives only in this client's `lp.playlist` order — there's no
@@ -10464,10 +10671,12 @@ async function lpPlay(itemId, files, seekTo, label, shuffle, shuffleScope) {
   // episode (which wouldn't be in the in-memory prepFileState yet). Awaited
   // before _lpLoadIndex so it can't clobber the "prepping" mark _lpWarmNextEp
   // sets for the next episode. Best-effort.
-  try {
-    const r = await fetch(`/api/library/${itemId}/prep-status`);
-    if (r.ok) _ingestPrepStatusFiles(itemId, (await r.json()).files);
-  } catch (_) {}
+  if (!_appOffline) {
+    try {
+      const r = await fetch(`/api/library/${itemId}/prep-status`);
+      if (r.ok) _ingestPrepStatusFiles(itemId, (await r.json()).files);
+    } catch (_) {}
+  }
   await _lpLoadIndex(seekTo);
 }
 
@@ -10890,8 +11099,8 @@ async function _lpLoadIndex(seekTo) {
   _lpWarmNextEp();
 
   // Fetch skip-data in parallel — fire-and-forget; skip-offer logic just runs
-  // off `lp.skipData` once it lands.
-  (async () => {
+  // off `lp.skipData` once it lands. Offline: no host, no skip markers.
+  if (!_appOffline) (async () => {
     try {
       const r = await fetch(`/api/library/${lp.itemId}/skip-data?file_path=${encodeURIComponent(filePath)}`);
       if (!r.ok) return;
@@ -11150,18 +11359,22 @@ function _lpRenderTrackRows() {
   const rungLabel = (r) => r ? escHtml(r.label || ((r.height || 0) + "p")) : "Downloaded";
   if (lp.source === "device") {
     // Playing the downloaded copy. Per-rung server options need hls.js on the
-    // reload for pinning; Safari-native gets Auto — Server only.
+    // reload for pinning; Safari-native gets Auto — Server only. Offline
+    // cached-player mode has no server to switch to: only the device rung
+    // exists, so the whole row stays hidden.
     const opts = [`<option value="dev">${rungLabel(lp._localRung)} — On device</option>`];
-    if (lp.hls) {
-      const myName = lp._localRung && lp._localRung.name;
-      (lp._localLadder || [])
-        .filter(v => v.name !== myName && (v.height || 0) > 0)
-        .forEach(v => opts.push(`<option value="srv:${v.height}">${escHtml(v.label || v.height + "p")} — Server</option>`));
+    if (!_appOffline) {
+      if (lp.hls) {
+        const myName = lp._localRung && lp._localRung.name;
+        (lp._localLadder || [])
+          .filter(v => v.name !== myName && (v.height || 0) > 0)
+          .forEach(v => opts.push(`<option value="srv:${v.height}">${escHtml(v.label || v.height + "p")} — Server</option>`));
+      }
+      opts.push(`<option value="srv:auto">Auto — Server</option>`);
     }
-    opts.push(`<option value="srv:auto">Auto — Server</option>`);
     qSel.innerHTML = opts.join("");
     qSel.value = "dev";
-    qShow = true;
+    qShow = !_appOffline;
   } else if (ovr) {
     // Streaming from the server while a device copy of this file exists (the
     // user overrode) — normal Auto+levels, plus the way back to the device copy.
@@ -11747,15 +11960,50 @@ function _lpIndicateSubLoading(idx) {
 // bundle subs; `subtitle_sel` is what carries a sidecar/AI pick (the old code
 // dropped those, saving -1, so a chosen .srt/AI sub was never remembered).
 function _lpSaveLocalTracks() {
-  if (!lp.itemId || !lp.filePath || !profile.id) return;
+  if (!lp.itemId || !lp.filePath) return;
+  if (!profile.id && !_appOffline) return;
   const subIsBundle = lp.pendingSubtitleIdx != null
                    && !String(lp.pendingSubtitleIdx).startsWith("sidecar:");
+  const audioIdx = Number.isFinite(Number(lp.pendingAudioIdx)) ? Number(lp.pendingAudioIdx) : null;
+  const subIdx   = subIsBundle ? Number(lp.pendingSubtitleIdx) : -1;
+  const subSel   = _lpDescriptorForKey(lp.pendingSubtitleIdx);
+  // Offline cached-player mode: this origin's /api is the loopback server — the
+  // pick goes into the native store instead (same fields _appOfflineSavedTracks
+  // restores from; the eventual host sync carries them via /api/sync/progress).
+  if (_appOffline) {
+    if (isApp && _cap.os) {
+      const itemId = lp.itemId, filePath = lp.filePath;
+      const v = document.getElementById("lpVideo");
+      (async () => {
+        let pos = (v && v.currentTime) || 0;
+        let dur = (v && v.duration) || lp.duration || 0;
+        // A pick made right at playback start (t≈0, resume seek not landed yet)
+        // must not clobber the stored resume position — keep the old one.
+        if (pos < 5) {
+          try {
+            const p = await _cap.os.getProgress({ itemId, filePath, profileId: profile.id || "" });
+            if (p && p.found) { pos = p.positionSec || pos; dur = p.durationSec || dur; }
+          } catch (_) {}
+        }
+        try {
+          await _cap.os.saveProgress({
+            itemId, filePath, positionSec: pos, durationSec: dur,
+            profileId: profile.id || "",
+            localAudioIdx: audioIdx == null ? undefined : audioIdx,
+            localSubtitleIdx: subIdx,
+            subtitleSel: subSel || undefined,
+          });
+        } catch (_) {}
+      })();
+    }
+    return;
+  }
   const payload = {
     profile_id: profile.id,
     file_path:  lp.filePath,
-    audio_idx:  Number.isFinite(Number(lp.pendingAudioIdx)) ? Number(lp.pendingAudioIdx) : null,
-    subtitle_idx: subIsBundle ? Number(lp.pendingSubtitleIdx) : -1,
-    subtitle_sel: _lpDescriptorForKey(lp.pendingSubtitleIdx),
+    audio_idx:  audioIdx,
+    subtitle_idx: subIdx,
+    subtitle_sel: subSel,
   };
   fetch(`/api/library/${lp.itemId}/local-tracks`, {
     method: "POST", headers: { "Content-Type": "application/json" },
@@ -12348,7 +12596,7 @@ function _lpWarmNextEp() {
         return;
       }
     }
-    if (!hlsAvailable) return;
+    if (!hlsAvailable || _appOffline) return;   // offline: no host to prep on
     prepFileState.set(k, "prepping");
     _lpRenderNavButtons();
     try {
@@ -12386,7 +12634,8 @@ function _lpWarmNextEp() {
 // because fetch() requests in flight when the tab is closed are frequently
 // aborted by the browser.
 function _lpFlushProgress(useBeacon) {
-  if (!lp.itemId || !lp.filePath || !profile.id) return;
+  if (!lp.itemId || !lp.filePath) return;
+  if (!profile.id && !_appOffline) return;
   const v = document.getElementById("lpVideo");
   const t = v.currentTime || 0;
   const d = v.duration || lp.duration || 0;
@@ -12395,7 +12644,10 @@ function _lpFlushProgress(useBeacon) {
   // recomputes `completed` from pct, so a t≈0 flush wipes watched state.
   if (t < 5) return;
   lp.lastSaveAt = Date.now();
-  if (useBeacon && navigator.sendBeacon) {
+  // Offline cached-player mode: a beacon at the loopback /api is a lost write —
+  // saveProgress routes to the native store instead (survives pagehide: the
+  // Capacitor bridge call is synchronous into native before JS unwinds).
+  if (useBeacon && navigator.sendBeacon && !_appOffline) {
     try {
       const body = JSON.stringify({
         profile_id: profile.id, file_path: lp.filePath,
@@ -13131,6 +13383,10 @@ document.addEventListener("keydown",e=>{
 
 // ── Init ───────────────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded",async()=>{
+  // Offline cached-player mode (docs/PLAYER_CACHE_PLAN.md): the page is a
+  // device-served snapshot with NO host behind it — take the dedicated
+  // Downloads-only boot path and skip everything host-facing below.
+  if (_appOffline) { await _appOfflineBoot(); return; }
   // Stream-to-device bootstrap: kick off the one-shot SW eviction (drops any
   // legacy cached app shell + frees the registration) and wire the local
   // <video>'s timeupdate/ended/visibilitychange/pagehide handlers.
@@ -13144,6 +13400,8 @@ document.addEventListener("DOMContentLoaded",async()=>{
   await _appInitPairToken();
   _appInitNav();
   _appInitOfflineBundles();
+  // Keep the offline player snapshot fresh (fire-and-forget; no-op in a browser).
+  _appRefreshPlayerSnapshot();
   // M3: when the browser regains connectivity, drain any offline progress the
   // native store accumulated while we were away. No-op in a plain browser.
   if (isApp) window.addEventListener("online", () => { _appFlushOfflineProgress(); _appResumeDownloadQueue(); });
@@ -13236,6 +13494,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">7.17.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.0.0</div>
 </body>
 </html>

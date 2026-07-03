@@ -226,6 +226,32 @@
 
     function goToDownloads() { window.location.replace("downloads.html"); }
 
+    // Offline cached player (docs/PLAYER_CACHE_PLAN.md): if a complete snapshot
+    // of the host dashboard is on the device, serve it from LocalMediaServer in
+    // player mode and open it — the SAME player UI the host serves, booted
+    // Downloads-only via ?offline=1 (the original host rides ?host= so the page
+    // can probe for reconnection; its loopback localStorage is empty).
+    // Returns false when there's no usable snapshot → caller falls back to the
+    // frozen downloads.html.
+    async function goToCachedPlayer(hostUrl) {
+      try {
+        const dl = plugin("BundleDownloader"), lms = plugin("LocalMediaServer");
+        if (!dl || !lms) return false;
+        const local = await dl.getLocal({ itemId: "__player__", filePath: "__player__" });
+        if (!(local && local.found && local.complete && local.dir)) return false;
+        const { url } = await lms.start({ playerRoot: local.dir });
+        const base = String(url || "").replace(/\/+$/, "");
+        if (!base) return false;
+        window.location.replace(base + "/index.html?offline=1&host=" + encodeURIComponent(hostUrl || ""));
+        return true;
+      } catch (_) { return false; }
+    }
+
+    // The offline entry point: cached dashboard first, downloads.html fallback.
+    async function goOffline(hostUrl) {
+      if (!(await goToCachedPlayer(hostUrl || localStorage.getItem(KEY_URL) || ""))) goToDownloads();
+    }
+
     // Is the saved host actually reachable? A no-cors probe that ALWAYS resolves
     // within the timeout: a hard setTimeout wins the race even if the fetch never
     // settles (a stuck TLS handshake in WKWebView may ignore AbortController), so
@@ -251,13 +277,13 @@
       // "View offline downloads" button is tappable the whole time.
       const ok = await hostReachable(url);
       if (ok) { goToHost(url); return; }
-      $("connectStatus").textContent = "Can’t reach server — opening downloads…";
-      setTimeout(goToDownloads, 800);
+      $("connectStatus").textContent = "Can’t reach server — opening offline player…";
+      setTimeout(() => { goOffline(url); }, 800);
     }
 
     $("changeBtn").addEventListener("click", showForm);
-    $("downloadsBtn").addEventListener("click", goToDownloads);
-    $("downloadsBtn2").addEventListener("click", goToDownloads);
+    $("downloadsBtn").addEventListener("click", () => goOffline());
+    $("downloadsBtn2").addEventListener("click", () => goOffline());
 
     $("connect").addEventListener("click", async () => {
       const url = normalizeUrl($("server").value);

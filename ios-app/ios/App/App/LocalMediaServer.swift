@@ -45,7 +45,16 @@ public class LocalMediaServer: CAPPlugin, CAPBridgedPlugin {
     @objc func start(_ call: CAPPluginCall) {
         // Resolve the directory root to serve.
         let root: URL
-        if let p = call.getString("path"), !p.isEmpty {
+        var bundlesMount: URL? = nil
+        if let pr = call.getString("playerRoot"), !pr.isEmpty {
+            // Player mode (offline cached dashboard — docs/PLAYER_CACHE_PLAN.md):
+            // serve the snapshot dir at /, and mount its parent (the
+            // StreamLinkBundles storage dir) at /StreamLinkBundles/ so every
+            // downloaded bundle is same-origin and the server never restarts
+            // while it's serving the page itself.
+            root = URL(fileURLWithPath: pr, isDirectory: true)
+            bundlesMount = root.deletingLastPathComponent()
+        } else if let p = call.getString("path"), !p.isEmpty {
             root = URL(fileURLWithPath: p, isDirectory: true)
         } else if let bp = call.getString("bundledPath"), !bp.isEmpty {
             guard let base = Bundle.main.url(forResource: "public", withExtension: nil) else {
@@ -54,7 +63,7 @@ public class LocalMediaServer: CAPPlugin, CAPBridgedPlugin {
             }
             root = base.appendingPathComponent(bp, isDirectory: true)
         } else {
-            call.reject("start() requires `path` or `bundledPath`.")
+            call.reject("start() requires `playerRoot`, `path` or `bundledPath`.")
             return
         }
 
@@ -66,7 +75,7 @@ public class LocalMediaServer: CAPPlugin, CAPBridgedPlugin {
 
         // Single active server — tear down any previous one first.
         server?.stop()
-        let srv = HLSStaticServer(root: root)
+        let srv = HLSStaticServer(root: root, bundlesMount: bundlesMount)
         server = srv
         srv.start { [weak self] result in
             switch result {
@@ -104,6 +113,10 @@ public class LocalMediaServer: CAPPlugin, CAPBridgedPlugin {
 
 final class HLSStaticServer {
     let root: URL
+    /// Player mode only (offline cached dashboard): the StreamLinkBundles storage
+    /// dir mounted at /StreamLinkBundles/ alongside the snapshot root. Nil for
+    /// normal single-bundle serving. See resolve().
+    let bundlesMount: URL?
     private let queue = DispatchQueue(label: "com.streamlink.localmediaserver", attributes: .concurrent)
     private var listener: NWListener?
     private(set) var boundPort: UInt16?
@@ -126,10 +139,20 @@ final class HLSStaticServer {
         "ttc":   "font/collection",
         "woff":  "font/woff",
         "woff2": "font/woff2",
+        // Player-snapshot assets (offline cached dashboard — docs/PLAYER_CACHE_PLAN.md).
+        // WKWebView won't RENDER an octet-stream page, so html at least is load-bearing.
+        "html":  "text/html; charset=utf-8",
+        "js":    "text/javascript; charset=utf-8",
+        "css":   "text/css; charset=utf-8",
+        "wasm":  "application/wasm",
+        "svg":   "image/svg+xml",
+        "ico":   "image/x-icon",
+        "map":   "application/json",
     ]
 
-    init(root: URL) {
+    init(root: URL, bundlesMount: URL? = nil) {
         self.root = root.standardizedFileURL
+        self.bundlesMount = bundlesMount?.standardizedFileURL
     }
 
     enum StartError: Error, LocalizedError {
@@ -264,14 +287,26 @@ final class HLSStaticServer {
     }
 
     /// Map a request path to a file inside `root`, rejecting traversal.
+    /// Player mode (`bundlesMount` set — the offline cached dashboard): paths
+    /// under `/StreamLinkBundles/` resolve against the bundles storage dir
+    /// instead, so the snapshot page and every downloaded bundle share ONE
+    /// origin and the server never restarts mid-session. Same guard both ways.
     private func resolve(path: String) -> URL? {
         var rel = path
         while rel.hasPrefix("/") { rel.removeFirst() }
         if rel.isEmpty { rel = "" }    // a request for "/" maps to the root dir (will 404 as a dir)
-        let candidate = root.appendingPathComponent(rel).standardizedFileURL
-        // Containment check: candidate must be root itself or a descendant.
-        let rootPath = root.path.hasSuffix("/") ? root.path : root.path + "/"
-        if candidate.path == root.path || candidate.path.hasPrefix(rootPath) {
+        let bundlesPrefix = "StreamLinkBundles/"
+        if let mount = bundlesMount, rel.hasPrefix(bundlesPrefix) {
+            let sub = String(rel.dropFirst(bundlesPrefix.count))
+            return contained(mount.appendingPathComponent(sub).standardizedFileURL, in: mount)
+        }
+        return contained(root.appendingPathComponent(rel).standardizedFileURL, in: root)
+    }
+
+    /// Containment check: candidate must be `base` itself or a descendant.
+    private func contained(_ candidate: URL, in base: URL) -> URL? {
+        let basePath = base.path.hasSuffix("/") ? base.path : base.path + "/"
+        if candidate.path == base.path || candidate.path.hasPrefix(basePath) {
             return candidate
         }
         return nil

@@ -289,7 +289,7 @@ final class OfflineProgressStore {
             guard let rec = records[key(pid, itemId, filePath)] as? [String: Any] else {
                 return ["found": false, "positionSec": 0, "durationSec": 0, "completed": false]
             }
-            return [
+            var out: [String: Any] = [
                 "found": true,
                 "positionSec": rec["positionSec"] ?? 0,
                 "durationSec": rec["durationSec"] ?? 0,
@@ -297,6 +297,13 @@ final class OfflineProgressStore {
                 "clientUpdatedAt": rec["clientUpdatedAt"] ?? "",
                 "baseSyncedAt": rec["baseSyncedAt"] ?? NSNull(),
             ]
+            // Track picks saved alongside progress — the offline cached player
+            // restores audio/subtitle selections from these (the host's
+            // remembered picks are unreachable offline). Absent when never set.
+            if let s = rec["subtitleSel"] { out["subtitleSel"] = s }
+            if let a = rec["localAudioIdx"] { out["localAudioIdx"] = a }
+            if let i = rec["localSubtitleIdx"] { out["localSubtitleIdx"] = i }
+            return out
         }
     }
 

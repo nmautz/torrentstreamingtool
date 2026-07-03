@@ -1427,13 +1427,51 @@ Capacitor native-platform check (`isApp`), so it's inert in a plain browser.
 > the offline player. (`master_m3u8` is `null` for a ≤1-rung bundle ⇒ master is
 > fetched as-is.)
 
-**Offline entry point.** The dashboard (`static/index.html`) is served *by the
-host*, so it can't load with no connection — the offline UI can't live there. The
-app bundles **`ios-app/www/downloads.html`**: a self-contained library that lists
-`BundleDownloader.list()` and plays a bundle via `LocalMediaServer` (native HLS)
-with zero network. The connect shell (`www/index.html`) probes host reachability on
-launch and routes there when offline. The dashboard path below is the *online*
-convenience (play a downloaded copy instead of re-streaming).
+**Offline entry point — the cached player (v8.0.0,
+[PLAYER_CACHE_PLAN.md](PLAYER_CACHE_PLAN.md)).** The dashboard is served *by the
+host*, so it can't load from the host with no connection — instead the app keeps
+a **device snapshot of the dashboard** (`index.html` + `vendor/*`: tailwind,
+hls.min.js, the octopus wasm/worker/font) and serves *that* offline, so the SAME
+player UI works with no host. The pieces:
+
+- **Snapshot refresh** (`_appRefreshPlayerSnapshot`, static/index.html): every
+  online in-app boot fetches `GET /api/player-manifest` ({version, allowlisted
+  files+sizes} — see [API.md](API.md)); a version mismatch removes the old
+  snapshot, then `BundleDownloader.download` fetches everything from the root
+  StaticFiles mount under the sentinel key **`__player__`** (nested `vendor/…`
+  names; the native side creates intermediate dirs). Same-version runs are a
+  cheap heal (size-match resume). The sentinel is filtered out of the Downloads
+  overlay, the durable-queue resumer, and downloads.html's list.
+- **Serving — LMS "player mode"** (`start({playerRoot})`,
+  [LocalMediaServer.swift](../ios-app/ios/App/App/LocalMediaServer.swift)): the
+  snapshot dir is the server root (so the page's absolute `/vendor/*` paths
+  work) and the whole `StreamLinkBundles/` storage dir is mounted at
+  `/StreamLinkBundles/` — every downloaded bundle is same-origin and the server
+  **never restarts while serving the page** (offline playback builds
+  `origin + "/StreamLinkBundles/<sha>/"` instead of calling `lms.start`, and
+  never sets `_lmsActive`, so nothing ever stops the page's own server). MIME
+  map covers html/js/css/wasm — WKWebView won't render an octet-stream page.
+- **Offline boot mode** (`?offline=1&host=<url>` → `_appOfflineBoot`,
+  static/index.html): Downloads-only — profile from `OfflineStore.getProfile()`
+  (the loopback origin's localStorage is empty and its port is ephemeral), no
+  SSE/host fetches, the Downloads overlay pinned open as the UI (its Close is
+  hidden; the player floats above it via `html.is-offline` CSS), quality menu
+  device-rung only, Prev/Next expands across the item's *downloaded* episodes
+  from the native index, and a Reconnect probe (auto every 15 s while nothing
+  plays + a manual button) that `location.replace(host)`s back to the real
+  dashboard. Progress + track picks write to `OfflineStore` explicitly
+  (the loopback `/api` 404s RESOLVE — they don't throw — so the online code's
+  catch-based fallback would never fire); resume and audio/subtitle picks are
+  restored from `getProgress` (which returns the saved track fields). The M3
+  sync machinery pushes it all to the host on the next online session.
+- **Shell routing** (`ios-app/www/index.html`): probe fails → `goOffline()`
+  prefers the snapshot (`goToCachedPlayer`) and falls back to
+  **`downloads.html`** — which is now a **feature-frozen fallback** (first-ever
+  offline launch / corrupt cache only; new player features belong in
+  static/index.html where offline mode inherits them).
+
+The dashboard path below also runs while ONLINE as the play-a-downloaded-copy
+convenience (no re-streaming).
 
 **Playback (online, on the dashboard).** `_lpLoadIndex` checks
 `BundleDownloader.getLocal({itemId, filePath})` first; if a **complete** local copy

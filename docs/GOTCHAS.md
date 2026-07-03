@@ -715,7 +715,18 @@ The inverse of the dropped-cues gotcha above: a suspend (screen lock, long backg
 
 ### Service worker is an eviction stub — keep it that way
 
-`static/sw.js` exists only to unregister itself and `caches.delete` everything it ever cached, so devices with the old "Handoff" SW installed don't stay pinned to a stale app shell. Don't reintroduce caching strategies, navigation fallbacks, or API caches in `sw.js`. Once enough time has passed that no device has the old SW alive, the file and the `evictLegacyServiceWorker` call in `index.html` can be deleted entirely.
+`static/sw.js` exists only to unregister itself and `caches.delete` everything it ever cached, so devices with the old "Handoff" SW installed don't stay pinned to a stale app shell. Don't reintroduce caching strategies, navigation fallbacks, or API caches in `sw.js`. Once enough time has passed that no device has the old SW alive, the file and the `evictLegacyServiceWorker` call in `index.html` can be deleted entirely. (The offline cached player does NOT use a service worker — it's a device-side snapshot served by the native loopback server; see below.)
+
+### Offline cached-player mode (`?offline=1`) — the rules that keep it working
+
+The iOS app serves a device snapshot of the dashboard from `LocalMediaServer` when the host is unreachable ([PLAYER_CACHE_PLAN.md](PLAYER_CACHE_PLAN.md), [STREAMING.md](STREAMING.md)). Footguns, learned the careful way:
+
+- **Never restart LMS while it's serving the page.** In player mode the server *is* the page's origin: any `lms.start`/`lms.stop` kills every later asset load (lazy hls.js/octopus, the next episode's segments). That's why bundles are mounted same-origin at `/StreamLinkBundles/<sha>/` and offline `_appStartLocalPlayback` just builds that URL — and why offline never sets `lp._lmsActive` (so `lpStop`'s teardown can't fire either).
+- **A dead `/api` RESOLVES, it doesn't throw.** Offline, `location.origin` is the loopback server: `fetch("/api/…")` returns a fast 404 — `.catch()`-based offline fallbacks never fire. Every write path must branch on `_appOffline` explicitly (`saveProgress`, `_lpSaveLocalTracks`, `_lpFlushProgress` — a `sendBeacon` to the loopback is a silently lost write).
+- **Nothing can live in loopback-origin localStorage.** The LMS port is ephemeral, so the origin — and its storage — changes between runs. The profile comes from `OfflineStore.getProfile()`, and the host URL rides the `?host=` query param (for the Reconnect probe).
+- **The `data-ui-version` badge is load-bearing for staleness.** `/api/player-manifest` reads the served `index.html`'s badge as the snapshot version (the `UI_VERSION` constant historically drifts — it sat at 7.15.0 while the badge said 7.17.2). Same-size edits inside one version slip past the size-match heal; any real change bumps the badge per CLAUDE.md, which wipes the snapshot.
+- **Filter the `__player__` sentinel EVERYWHERE bundles are listed.** The snapshot rides `BundleDownloader` like a bundle, so it appears in `list()`, fires `bundleProgress/Complete/Error`, and would be "resurrected" by anything reading the index. Current filters: the three event listeners + hydrate in `_appInitOfflineBundles`, `_appRenderDashboard`'s grouped list, `lpPlay`'s offline playlist expansion, and downloads.html's list. A new bundle-listing surface must skip it too.
+- **downloads.html is feature-frozen.** It exists only for "no snapshot yet". Player features go in static/index.html, where offline mode inherits them — that asymmetric drift is the whole reason the cached player exists.
 
 ## Settings
 

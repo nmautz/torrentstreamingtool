@@ -2,14 +2,21 @@
 <!--
   StreamLink iOS — offline Downloads library + player  (M2 · 6.0.0-preview.2.x.x)
 
-  This is the OFFLINE entry point. The dashboard (static/index.html) is served by
-  the host, so it can't load when the host is unreachable (Airplane Mode); this
-  page is bundled into the app and works with no network. It lists the bundles
-  downloaded by `BundleDownloader` and plays a selected one from the loopback
-  `LocalMediaServer` (native HLS — audio + subtitle tracks appear in the player's
-  fullscreen menu). `www/index.html` routes here automatically when the saved
-  host can't be reached, and there's a manual "Downloads" link from the Connect
-  screen.
+  ⚠ FEATURE-FROZEN FALLBACK (v8.0.0 — docs/PLAYER_CACHE_PLAN.md). The primary
+  offline surface is now the CACHED DASHBOARD: the shell serves a device
+  snapshot of the host's static/index.html from LocalMediaServer (player mode)
+  and boots it with ?offline=1. This page remains only for the cases where no
+  usable snapshot exists (first-ever offline launch, corrupt/incomplete cache).
+  Do NOT add player features here — they belong in static/index.html, where the
+  offline mode inherits them automatically.
+
+  This is the offline fallback entry point. The dashboard (static/index.html) is
+  served by the host, so it can't load when the host is unreachable (Airplane
+  Mode); this page is bundled into the app and works with no network. It lists
+  the bundles downloaded by `BundleDownloader` and plays a selected one from the
+  loopback `LocalMediaServer` (native HLS — audio + subtitle tracks appear in
+  the player's fullscreen menu). `www/index.html` routes here when the saved
+  host can't be reached AND no player snapshot exists.
 -->
 <html lang="en">
 <head>
@@ -469,7 +476,9 @@
       try {
         const dl = plugin("BundleDownloader");
         const res = await dl.list();
-        items = (res.items || []).filter((i) => i.complete);
+        // "__player__" is the cached-dashboard snapshot (PLAYER_CACHE_PLAN.md),
+        // not content — never list it.
+        items = (res.items || []).filter((i) => i.complete && i.itemId !== "__player__");
         try { used = (await dl.bytesUsed()).bytes; } catch (_) {}
       } catch (e) { showErr(e); }
       $("used").textContent = used ? fmtBytes(used) + " used" : "";
