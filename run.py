@@ -194,9 +194,11 @@ def is_running(name: str) -> bool:
     return False
 
 
-def launch_bg(args: list[str], env: dict | None = None) -> None:
+def launch_bg(args: list[str], env: dict | None = None, no_activate: bool = False) -> None:
     """Start a process detached from this terminal. `env` overrides the child's
-    environment (used by FlareSolverr to set HOST/PORT)."""
+    environment (used by FlareSolverr to set HOST/PORT). `no_activate` launches
+    the process minimized without stealing foreground focus (used for qBit so its
+    window never pops over the fullscreen VLC playback / background video)."""
     kw: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     if env is not None:
         kw["env"] = env
@@ -204,6 +206,14 @@ def launch_bg(args: list[str], env: dict | None = None) -> None:
         kw["creationflags"] = (
             subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
         )
+        if no_activate:
+            # SW_SHOWMINNOACTIVE (7): come up minimized and DON'T take focus, so
+            # launching qBit can't cover the TV playback. Mirrors watchdog.py's
+            # _launch_bg. See docs/GOTCHAS.md.
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 7
+            kw["startupinfo"] = si
     else:
         kw["start_new_session"] = True
     subprocess.Popen(args, **kw)
@@ -441,7 +451,7 @@ def start_qbittorrent() -> bool:
         return False
 
     info("Starting qBittorrent …")
-    launch_bg([qbit_bin])
+    launch_bg([qbit_bin], no_activate=True)   # minimized, never over the TV playback
     return wait_for_port(qbit_port, 30.0, "qBittorrent Web UI")
 
 

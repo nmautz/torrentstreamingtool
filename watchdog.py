@@ -354,7 +354,7 @@ def find_flaresolverr() -> str | None:
 
 
 # ── Background launcher (detached) ─────────────────────────────────────────
-def _launch_bg(args: list[str], env: dict | None = None) -> None:
+def _launch_bg(args: list[str], env: dict | None = None, no_activate: bool = False) -> None:
     kw: dict = {"stdout": subprocess.DEVNULL, "stderr": subprocess.DEVNULL}
     if env is not None:
         # FlareSolverr reads its bind HOST/PORT from the environment, not argv.
@@ -363,6 +363,18 @@ def _launch_bg(args: list[str], env: dict | None = None) -> None:
         kw["creationflags"] = (
             subprocess.DETACHED_PROCESS | subprocess.CREATE_NEW_PROCESS_GROUP
         )
+        if no_activate:
+            # Come up minimized WITHOUT stealing foreground focus. Critical for
+            # qBittorrent: when the internet drops the VPN goes down and we kill
+            # qBit; when it returns the VPN reconnects and we relaunch qBit — and
+            # a plain launch pops its GUI window in front of the fullscreen VLC
+            # playback / idle background video on the TV. SW_SHOWMINNOACTIVE (7)
+            # both minimizes the window and stops it from activating, so playback
+            # stays on top. See docs/GOTCHAS.md.
+            si = subprocess.STARTUPINFO()
+            si.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+            si.wShowWindow = 7  # SW_SHOWMINNOACTIVE
+            kw["startupinfo"] = si
     else:
         kw["start_new_session"] = True
     subprocess.Popen(args, **kw)
@@ -428,6 +440,7 @@ class ServiceSpec:
         pre_restart: callable = None,    # () -> None; run before (re)launching
         failure_grace: int = 0,          # consecutive failed probes tolerated before "down"
         launch_env: dict | None = None,  # child-process env override (FlareSolverr HOST/PORT)
+        no_activate: bool = False,       # launch minimized w/o stealing focus (qBit)
     ):
         self.name            = name
         self.port            = port
@@ -439,6 +452,7 @@ class ServiceSpec:
         self.health_check    = health_check
         self.pre_restart     = pre_restart
         self.launch_env      = launch_env
+        self.no_activate     = no_activate
         # How many *consecutive* failed liveness probes to tolerate before we
         # treat the service as actually down and restart it. A bare TCP port
         # check (VLC, qBit) is reliable, so 0 keeps crash recovery immediate.
@@ -493,7 +507,7 @@ class ServiceSpec:
             log.info("Starting %s (handled inline)", self.name)
         else:
             log.info("Starting %s: %s", self.name, " ".join(str(a) for a in args))
-            _launch_bg(args, env=self.launch_env)
+            _launch_bg(args, env=self.launch_env, no_activate=self.no_activate)
         # Wait on the real liveness check, not just the port — for Jackett this
         # means we wait until it actually serves HTTP, which prevents a tight
         # restart loop where the port opens before the web stack is ready.
@@ -723,6 +737,11 @@ def _build_specs() -> tuple[list[ServiceSpec], ServiceSpec]:
         build_args=lambda b: [b],
         startup_timeout=30.0,
         back_off=5.0,
+        # A VPN-drop restart must NOT bring qBit's window up over the fullscreen
+        # VLC playback / background video on the TV — launch it minimized and
+        # non-activating. Pairs with the tray/StartMinimized ini keys setup.py
+        # writes so on a configured box qBit lands silently in the system tray.
+        no_activate=True,
     )
 
     plain_specs: list[ServiceSpec] = [vlc_spec]

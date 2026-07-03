@@ -82,6 +82,7 @@ A small dataclass-like class:
 - `startup_timeout`, `back_off`
 - `health_check`, `pre_restart` (optional; see Jackett specifics)
 - `launch_env` — optional child-process environment override passed to `_launch_bg`. Used by FlareSolverr, which reads its bind `HOST`/`PORT` from the environment rather than argv.
+- `no_activate` — when True, `_launch_bg` launches the process minimized without stealing foreground focus (`STARTUPINFO.wShowWindow = SW_SHOWMINNOACTIVE`, Windows only). Set on the qBit spec so a VPN-recovery restart can't cover the TV playback; default False everywhere else.
 - `failure_grace` — consecutive failed liveness probes tolerated before the service counts as down (default **0**). Port-checked services (VLC, qBit) keep 0 so crash recovery is immediate; Jackett uses **2** (its HTTP probe can falsely fail on a single slow response). Tracked via `_health_misses`, reset on any successful probe and after a (re)start.
 - Tracks `_failures` for exponential back-off capped at 120 s
 
@@ -93,6 +94,7 @@ Three steps each tick (default 3 s):
 2. **Enforce qBit ↔ VPN invariant**:
    - VPN down + qBit alive → kill qBit immediately via `_kill_by_name("qbittorrent")` (psutil-based, falls back to `taskkill`/`pkill`)
    - VPN up + qBit dead → wait back-off, re-check VPN didn't drop during sleep, then start qBit
+   - The restart launches qBit **minimized and non-activating** (`no_activate=True` on the qBit `ServiceSpec` → `_launch_bg` sets `STARTUPINFO.wShowWindow = SW_SHOWMINNOACTIVE` on Windows). Without this, the classic internet-blip sequence (LAN up, internet drops → VPN down → qBit killed → internet back → VPN up → qBit restarted) brought qBit's GUI window up **in front of the fullscreen VLC playback / idle background video** on the TV. Only the qBit spec sets this — VLC still launches fullscreen/foreground. Belt-and-suspenders with the `General\StartMinimized`/`SystrayEnabled`/`MinimizeToTray` ini keys `setup.py` writes, which make qBit land silently in the system tray on a configured box. See [GOTCHAS.md](GOTCHAS.md#qbittorrent-pops-over-tv-playback-after-a-vpn-blip).
    - This kill is **unconditional**. The admin "VPN Kill Switch" toggle (`settings.vpn_killswitch.block_ui`, see [ADMIN.md](ADMIN.md)) only governs whether the *dashboard UI* is locked on a drop — the watchdog never reads it and always kills qBit when the VPN is down.
 3. **Plain services** (VLC, Jackett): liveness probe → on failure increment `_health_misses`; only once it exceeds `failure_grace` is the service treated as down (wait back-off, restart, reset misses). A failed probe still inside the grace window is logged but **not** acted on. This stops a single slow Jackett HTTP probe from triggering a destructive force-kill + ~40 s mono cold restart that takes the indexer offline mid-search.
 

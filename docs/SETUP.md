@@ -82,6 +82,7 @@ Lets the non-elevated StreamLink watchdog recover a hung Jackett **without a reb
 
 Parses the existing ini preserving section order and unknown keys; then injects/overwrites the keys we need:
 - `Preferences\WebUI\Enabled=true`, `Port`, `Username`, `Password_ha1` (MD5 of `user:qBittorrent Web UI:pwd`), `LocalHostAuth=false`, `CSRFProtection=false`, `SessionTimeout=3600`
+- `Preferences\General\SystrayEnabled=true`, `StartMinimized=true`, `MinimizeToTray=true`, `CloseToTray=true` — qBit starts silently in the system tray with no visible window. The TV runs VLC fullscreen and qBit is driven entirely over the Web UI, so its GUI should never appear over the playback (see [GOTCHAS.md § qBittorrent pops over TV playback after a VPN blip](GOTCHAS.md#qbittorrent-pops-over-tv-playback-after-a-vpn-blip)). Paired with the `SW_SHOWMINNOACTIVE` launch in `run.py`/`watchdog.py`.
 - `BitTorrent\Session\DefaultSavePath` = download folder
 
 Path is platform-specific:

@@ -1338,6 +1338,17 @@ def configure_qbittorrent(cfg: dict) -> None:
         r"WebUI\LocalHostAuth":  "false",   # no auth needed from localhost
         r"WebUI\CSRFProtection": "false",   # allow API calls from our backend
         r"WebUI\SessionTimeout": "3600",
+        # Start silently in the system tray with no visible window. The TV runs
+        # VLC fullscreen (playback or the idle background video); qBit is driven
+        # entirely over the Web UI, so its GUI should never appear. This matters
+        # most on the watchdog restart path: an internet blip drops the VPN → we
+        # kill qBit → on reconnect we relaunch it, and without these keys its
+        # window pops in front of whatever's playing on the TV. Pairs with the
+        # SW_SHOWMINNOACTIVE launch in run.py / watchdog.py. See docs/GOTCHAS.md.
+        r"General\SystrayEnabled": "true",
+        r"General\StartMinimized": "true",
+        r"General\MinimizeToTray": "true",
+        r"General\CloseToTray":    "true",
     })
     sections["BitTorrent"][r"Session\DefaultSavePath"] = cfg["QBIT_DOWNLOAD_PATH"]
 

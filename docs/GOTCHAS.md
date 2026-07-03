@@ -309,6 +309,17 @@ When the VPN drops in `block_ui:false` mode, the dashboard greys the controls th
 1. **Don't grey with `pointer-events:none`.** That would kill the hover `title` tooltip (the whole point — telling the user *why* it's disabled) and stop the click guard from ever seeing the event. Greying is opacity/cursor only; pointer-events stay on.
 2. **The click guard is a `document`-level listener registered with `capture=true`.** Capture fires on `document` before the event reaches the target, so `e.stopPropagation()` there prevents the gated element's own inline `onclick`/`addEventListener` handlers from running at all. A bubble-phase guard would fire *after* the target's handlers (too late). Don't "simplify" it to a bubble listener or to setting `disabled` on each button (native `disabled` also suppresses the title tooltip and isn't reachable for dynamically-rendered result rows). Keyboard/programmatic paths that don't go through a pointer click (Enter in the search box, `epRecheckSelected`) call `vpnBlocked()` directly. The server still 403s (`/api/stream*`, `/api/library/download|prepare`, and now `/api/library/{id}/recheck`) — the greying is UX, not the security boundary. See [FRONTEND.md](FRONTEND.md), [ADMIN.md § VPN Kill Switch](ADMIN.md).
 
+### qBittorrent pops over TV playback after a VPN blip
+
+Launch it minimized + non-activating. The classic sequence: the internet drops while the **LAN stays up**, so Mullvad disconnects → the watchdog kills qBittorrent (the unconditional kill-switch invariant above). When the internet comes back the VPN reconnects and the watchdog **relaunches qBit** — and on Windows a plain `subprocess.Popen(qbittorrent.exe)` brings its GUI window up in the **foreground**, covering the fullscreen VLC playback / idle background video on the TV. Nobody's at the keyboard to dismiss it.
+
+Fix is two-layered, and you need **both**:
+
+1. **Launch minimized + non-activating.** `_launch_bg` (both [watchdog.py](../watchdog.py) and [run.py](../run.py)) takes a `no_activate` flag; when set it passes a `STARTUPINFO` with `dwFlags |= STARTF_USESHOWWINDOW` and `wShowWindow = 7` (`SW_SHOWMINNOACTIVE`) — minimized **and** it never grabs foreground focus. Only the qBit `ServiceSpec` / `start_qbittorrent()` set it; VLC must still come up fullscreen/foreground, so don't flip it globally. This is the layer that actually saves you when qBit's tray config isn't honoured.
+2. **Config: start in the tray, no window at all.** `setup.py`'s qBit ini writes `General\SystrayEnabled=true`, `StartMinimized=true`, `MinimizeToTray=true`, `CloseToTray=true`. On a configured box qBit lands silently as a tray icon — there's no window to steal focus in the first place. This only takes effect after `setup.py` runs (the auto-updater invokes it non-interactively), and needs a qBit restart to load; the launch-level fix covers the gap and any box where the tray isn't available.
+
+Don't rely on config alone (a pre-existing box or a suppressed tray still flashes a window) or on the launch flag alone (some Qt builds re-activate; the tray config makes it truly windowless). `STARTUPINFO`/`STARTF_USESHOWWINDOW` are Windows-only symbols — they're referenced only inside the `SYSTEM == "Windows"` branch so `setup.py`/`run.py` still import on macOS/Linux.
+
 ## Jackett
 
 ### `Category[]=0` returns no results
