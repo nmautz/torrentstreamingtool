@@ -10420,16 +10420,29 @@ async function _appPairCurrentHost(password) {
 const _APP_AUTOMG_KEY = "streamlink_app_automanage";  // "1" = on
 const _APP_AHEAD_KEY  = "streamlink_app_ahead";       // episodes to keep ahead
 const _APP_AUTOQ_KEY  = "streamlink_app_autoq";       // "original" | height
+const _APP_AUTOSCOPE_KEY = "streamlink_app_autoscope"; // "all_except" | "none_except"
+const _APP_AUTOSHOWS_KEY = "streamlink_app_autoshows"; // JSON array of itemIds
 
 function _appAutoPrefs() {
-  let on = false, ahead = 3, q = "original";
+  let on = false, ahead = 3, q = "original", mode = "all_except", shows = new Set();
   try {
     on = localStorage.getItem(_APP_AUTOMG_KEY) === "1";
     const n = parseInt(localStorage.getItem(_APP_AHEAD_KEY) || "3", 10);
     if (Number.isFinite(n)) ahead = Math.max(1, Math.min(10, n));
     q = localStorage.getItem(_APP_AUTOQ_KEY) || "original";
+    mode = localStorage.getItem(_APP_AUTOSCOPE_KEY) === "none_except" ? "none_except" : "all_except";
+    const arr = JSON.parse(localStorage.getItem(_APP_AUTOSHOWS_KEY) || "[]");
+    if (Array.isArray(arr)) shows = new Set(arr.filter((x) => typeof x === "string"));
   } catch (_) {}
-  return { on, ahead, q };
+  return { on, ahead, q, mode, shows };
+}
+
+// Is this series in scope for auto-manage under the current mode + selection?
+// all_except: a selected show is EXEMPT (not managed); every other show is managed.
+// none_except: ONLY selected shows are managed.
+function _appAutoScoped(itemId, prefs) {
+  const p = prefs || _appAutoPrefs();
+  return p.mode === "none_except" ? p.shows.has(itemId) : !p.shows.has(itemId);
 }
 
 function _appOpenAppSettings() {
@@ -10448,6 +10461,8 @@ function _appOpenAppSettings() {
     `<option value="${n}" ${n === p.ahead ? "selected" : ""}>${n} episode${n > 1 ? "s" : ""}</option>`).join("");
   const qOpts = [["original","Original quality"],["1080","1080p"],["720","720p"],["480","480p"]].map(([v,l]) =>
     `<option value="${v}" ${v === p.q ? "selected" : ""}>${l}</option>`).join("");
+  const scopeOpts = [["all_except","All shows except…"],["none_except","Only these shows…"]].map(([v,l]) =>
+    `<option value="${v}" ${v === p.mode ? "selected" : ""}>${l}</option>`).join("");
   ov.innerHTML = `
     <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:16px;">
       <div style="font-size:20px;font-weight:800;letter-spacing:.04em;text-transform:uppercase;">Settings</div>
@@ -10475,6 +10490,10 @@ function _appOpenAppSettings() {
         <div style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#8a8a92;margin:12px 0 6px;">Auto-download quality</div>
         <select id="appSetAutoQ" style="${selStyle}">${qOpts}</select>
         <div style="font-size:12px;color:#8a8a92;margin-top:7px;line-height:1.45;">If an episode doesn't have the chosen quality, the best available is downloaded.</div>
+        <div style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#8a8a92;margin:14px 0 6px;">Apply to</div>
+        <select id="appSetScope" style="${selStyle}">${scopeOpts}</select>
+        <div id="appSetScopeLabel" style="font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;color:#8a8a92;margin:12px 0 0;"></div>
+        <div id="appSetShows" style="border:1px solid #2a2a30;max-height:240px;overflow-y:auto;margin-top:6px;"></div>
       </div>
     </div>
   `;
@@ -10488,7 +10507,55 @@ function _appOpenAppSettings() {
     t.style.border = on ? "1px solid #3a7afe" : "1px solid #2a2a30";
     ov.querySelector("#appSetAutoOpts").style.opacity = on ? "1" : ".45";
   };
+  // Heading above the show picker changes meaning with the scope mode: in
+  // all_except the picked shows are the exemptions; in none_except they're the
+  // only shows managed. (The picker itself sits inside #appSetAutoOpts, so it's
+  // already dimmed with the rest of the options when the feature is off.)
+  const paintScopeLabel = () => {
+    const el = ov.querySelector("#appSetScopeLabel");
+    if (!el) return;
+    el.textContent = _appAutoPrefs().mode === "none_except"
+      ? "Managed shows — only these are auto-managed"
+      : "Excluded shows — these are never auto-managed";
+  };
+  // (Re)build the tappable series list from the full library. Async because it
+  // may lazily fetch /api/library if the cache is cold.
+  const renderShows = async () => {
+    const box = ov.querySelector("#appSetShows");
+    if (!box) return;
+    box.innerHTML = `<div style="padding:11px 12px;font-size:12px;color:#8a8a92;">Loading shows…</div>`;
+    const series = await _appScopeSeries();
+    if (!ov.isConnected) return;   // overlay closed while we waited
+    if (!series.length) {
+      box.innerHTML = `<div style="padding:11px 12px;font-size:12px;color:#8a8a92;line-height:1.45;">No multi-episode series in your library yet.</div>`;
+      return;
+    }
+    const sel = _appAutoPrefs().shows;
+    box.innerHTML = "";
+    series.forEach((s, i) => {
+      const on = sel.has(s.id);
+      const row = document.createElement("div");
+      row.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:12px;"
+        + "padding:11px 12px;cursor:pointer;" + (i ? "border-top:1px solid #2a2a30;" : "");
+      row.innerHTML = `
+        <div style="font-size:14px;font-weight:600;color:#f2f2f4;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;">${escHtml(s.title)}</div>
+        <div class="chk" style="flex:0 0 auto;width:20px;height:20px;border:1px solid ${on ? "#3a7afe" : "#2a2a30"};background:${on ? "#3a7afe" : "transparent"};"></div>`;
+      row.addEventListener("click", () => {
+        const cur = _appAutoPrefs().shows;
+        if (cur.has(s.id)) cur.delete(s.id); else cur.add(s.id);
+        try { localStorage.setItem(_APP_AUTOSHOWS_KEY, JSON.stringify([...cur])); } catch (_) {}
+        const nowOn = cur.has(s.id);
+        const chk = row.querySelector(".chk");
+        chk.style.border = "1px solid " + (nowOn ? "#3a7afe" : "#2a2a30");
+        chk.style.background = nowOn ? "#3a7afe" : "transparent";
+        _appAutoManage(); _appAutoSweep(500);   // re-apply with the new selection
+      });
+      box.appendChild(row);
+    });
+  };
   paintTgl();
+  paintScopeLabel();
+  renderShows();
   ov.querySelector("#appSetClose").addEventListener("click", () => ov.remove());
   ov.querySelector("#appSetAutoTgl").addEventListener("click", () => {
     const on = !_appAutoPrefs().on;
@@ -10503,6 +10570,32 @@ function _appOpenAppSettings() {
   ov.querySelector("#appSetAutoQ").addEventListener("change", (e) => {
     try { localStorage.setItem(_APP_AUTOQ_KEY, e.target.value); } catch (_) {}
   });
+  ov.querySelector("#appSetScope").addEventListener("change", (e) => {
+    const mode = e.target.value === "none_except" ? "none_except" : "all_except";
+    try { localStorage.setItem(_APP_AUTOSCOPE_KEY, mode); } catch (_) {}
+    paintScopeLabel();
+    _appAutoManage(); _appAutoSweep(500);   // scope changed — re-apply
+  });
+}
+
+// Full-library series list for the scope picker: every multi-episode item, as
+// { id, title }, sorted A→Z. Sourced from the cached library (window._libCache,
+// populated by loadLibrary); lazily fetched if the cache is cold so the picker
+// can list shows that aren't downloaded on this device yet (needed for the
+// allow-list "Only these shows…" mode).
+async function _appScopeSeries() {
+  let items = window._libCache;
+  if (!Array.isArray(items) || !items.length) {
+    try {
+      const pid = profile.id ? `?profile_id=${encodeURIComponent(profile.id)}` : "";
+      const r = await fetch(`/api/library${pid}`, { headers: _appAuthHeaders() });
+      if (r.ok) { items = (await r.json()).items || []; window._libCache = items; }
+    } catch (_) {}
+  }
+  return (items || [])
+    .filter((it) => it && it.id && (it.files || []).length >= 2)
+    .map((it) => ({ id: it.id, title: ((it.series || it.title || "Untitled") + "").trim() || "Untitled" }))
+    .sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }));
 }
 
 // Schedule an auto-manage pass for the episode that just started in the local
@@ -10515,6 +10608,7 @@ function _appAutoManage() {
   if (!isApp || _appOffline || !_appAutoPrefs().on) return;
   const itemId = lp.itemId, filePath = lp.filePath, pi = lp.pi;
   if (!itemId || !filePath || (lp.playlist || []).length < 2) return;
+  if (!_appAutoScoped(itemId)) return;   // this show is out of scope for the current mode
   setTimeout(() => { _appAutoManageRun(itemId, filePath, pi); }, 4000);
 }
 
@@ -10523,6 +10617,7 @@ async function _appAutoManageRun(itemId, filePath, pi) {
   if (_appAutoMgBusy || !isApp || _appOffline || !_cap.dl) return;
   if (lp.itemId !== itemId || lp.filePath !== filePath) return;  // stopped / advanced meanwhile
   if (!navigator.onLine || app._connected === false) return;     // acts only while connected
+  if (!_appAutoScoped(itemId)) return;                           // out of scope for the current mode
   _appAutoMgBusy = true;
   try {
     const { ahead, q } = _appAutoPrefs();
@@ -10616,13 +10711,15 @@ async function _appAutoSweepRun() {
   _appAutoSweepBusy = true;
   _appAutoSweepLast = Date.now();
   try {
-    const { ahead, q } = _appAutoPrefs();
+    const prefs = _appAutoPrefs();
+    const { ahead, q } = prefs;
     let ondevice = [];
     try { ondevice = (await _cap.dl.list()).items || []; } catch (_) {}
     const seriesIds = new Set();
     for (const it of ondevice)
       if (it.itemId && it.itemId !== _APP_PLAYER_KEY) seriesIds.add(it.itemId);
     for (const itemId of seriesIds) {
+      if (!_appAutoScoped(itemId, prefs)) continue;   // out of scope for the current mode
       // The in-app player pass owns the series it's playing — it has the live
       // playlist order (incl. Shuffle); don't fight it with a second frontier.
       if (lp.itemId === itemId && lp.filePath) continue;
@@ -14412,6 +14509,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.7.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.8.0</div>
 </body>
 </html>
