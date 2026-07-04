@@ -1481,25 +1481,47 @@ hangs). Two paths keep page and media same-origin:
 - **Offline** — the whole dashboard is already served from the loopback player-mode
   LMS, so `_lpLoadIndex`'s device branch (gated `_appOffline || !hlsAvailable`) loads
   the bundle directly. `!hlsAvailable` also covers a no-HLS macOS host.
-- **Online play-time handoff (8.6.0)** — to still prefer the downloaded copy while
-  connected, `lpPlay` (host side) calls **`_appTryLocalHandoff(itemId, filePath,
-  seekTo)`**: if the episode **and** the player snapshot (`__player__`) are both fully
-  downloaded, it starts the LMS in player mode over the snapshot and
-  `location.replace`s to that loopback page with `?offline=1&live=1&host=<origin>&
-  item=&file=&seek=`. On that page `_appLocalLive` is set; `_appOfflineBoot` **auto-
-  plays** the handed-off episode (Prev/Next spans the series' other *downloaded*
-  episodes), and on `lpStop` **`_appLiveReturnHost()`** navigates back to the live
-  host dashboard (which flushes the session's `OfflineStore` progress to the server
-  via M3 sync — see below). The auto-reconnect probe is skipped in `live` mode
-  (the host is already reachable; probing would bounce back before playback starts).
-  Only **single-file, non-shuffle** plays hand off (per-episode Play / Resume / "On
-  Device"); multi-file "Play All" and Shuffle keep their explicit order and stream.
-  Any miss (episode or snapshot not fully downloaded, no plugin) falls through to
-  normal server streaming. This supersedes the 8.0.1 "offline-only" restriction — the
-  intent of 7.17.0 ("prefer the device copy") is now delivered reliably via the
-  same-origin snapshot instead of a cross-origin load that never worked.
+- **Online proxied playback session (8.7.0)** — the downloaded copy plays while
+  connected **with full feature parity** (Play-to-TV, live SSE, library, auto-manage,
+  `/api` progress + track sync). `lpPlay` (host side) calls **`_appTryLocalHandoff(itemId,
+  filePath, seekTo)`**: if the episode **and** the player snapshot (`__player__`) are
+  both fully downloaded, it starts the LMS in **proxy mode** — `lms.start({playerRoot,
+  proxyHost: location.origin, proxyToken})` — and `location.replace`s to the loopback
+  page with `?proxied=1&host=<origin>&item=&file=&seek=&profile=&am=<automanage prefs>`.
+  In proxy mode the native `LocalMediaServer` serves the snapshot + bundles locally and
+  **reverse-proxies every non-local request (`/api/*`, SSE, server-stream media) to the
+  host** with the bearer token injected (see below + [GOTCHAS.md](GOTCHAS.md)). On the
+  loopback page `_appProxied` is set but **`_appOffline` stays false**, so it takes the
+  **normal online boot** — SSE, library, Play-to-TV, auto-manage, and real `/api` sync
+  all run, just served from the loopback. `_appProxiedSeedStorage` seeds the profile +
+  auto-manage prefs (the loopback origin's localStorage is empty); `_appProxiedAutoPlay`
+  starts the handed-off episode after the profile restores; `lpStop` →
+  **`_appProxiedReturnHost()`** navigates back to the direct host origin (progress
+  already synced live via the proxied `/api`). Prev/Next spans the **full series** —
+  downloaded episodes play from the device same-origin, non-downloaded ones stream from
+  the host through the proxy — one seamless playlist. Only **single-file, non-shuffle**
+  plays hand off (per-episode Play / Resume / "On Device"); multi-file "Play All" and
+  Shuffle keep their explicit order and stream. Any miss (episode or snapshot not fully
+  downloaded, no plugin) falls through to normal server streaming. This supersedes 8.6.0's
+  `offline=1&live=1` offline-mode handoff (which lost every live feature during playback).
 
 See [GOTCHAS.md § On-device (loopback) playback is SAME-ORIGIN only](GOTCHAS.md).
+
+**Native reverse proxy (proxied session).** `LocalMediaServer.start({proxyHost,
+proxyToken})` makes the hand-rolled `NWListener` server (`HLSStaticServer`) route each
+request: a path that resolves to a local snapshot/bundle file (GET/HEAD) is served from
+disk (existing `serveFile` + Range); **everything else is forwarded to `proxyHost`** via
+a per-request `URLSession` (`ProxyForwarder`). The forwarder streams JSON, long-lived
+**SSE** (`/api/events` — the response never ends; chunks relay until the client
+disconnects), and **ranged media** (`206`/`Content-Range` relayed verbatim) identically,
+with **back-pressure** (the delegate queue blocks on a semaphore until the socket accepts
+each chunk — the same discipline `streamBody` uses for local files), injects
+`Authorization: Bearer <proxyToken>`, sets `Accept-Encoding: identity` (so the host's
+`Content-Length` stays accurate to relay), and **accepts the host's self-signed TLS**
+(URLSession server-trust challenge → `.useCredential`, matching the app's
+`NSAllowsArbitraryLoads`). Because `master.m3u8`/segments are served at the **relative**
+`/api/library/offline-cache/…` path, server-stream media proxies same-origin with no
+URL rewriting. Offline player mode leaves `proxyHost` nil, so `/api` still 404s there.
 
 **Playback (offline, or no-HLS host).** When the device branch is taken,
 `_lpLoadIndex` checks `BundleDownloader.getLocal({itemId, filePath})`; if a
@@ -1510,13 +1532,13 @@ and sets `master_url` accordingly — synthesizing the same shape `/offline-prep
 returns, with **no host round-trip for the stream itself**. Everything downstream
 (tracks, embedded `sub_*.vtt` renditions, skip-intro, the custom controls) is
 unchanged. On any failure it falls through to the normal prepare path. Online, this
-device branch is reached inside the **`live=1` handoff page** (same-origin snapshot),
-never on the remote host page directly — so a mid-playlist mix still isn't split on
-the host page; instead the whole "play a downloaded episode" gesture is redirected
-to the snapshot up front (see the handoff above).
+device branch is reached inside the **`proxied=1` session page** (same-origin snapshot),
+never on the remote host page directly — the whole "play a downloaded episode" gesture is
+redirected to the snapshot up front (see the proxied session above); there a mixed
+playlist plays downloaded episodes locally and streams the rest through the proxy.
 
 Extras around the local path (7.17.0; runs whenever the device branch is taken —
-offline, no-HLS host, or the `live=1` online handoff):
+offline, no-HLS host, or the `proxied=1` online session):
 - **Remembered track picks**: the local path fires a parallel best-effort
   `GET /saved-tracks` (skipped offline via `navigator.onLine`) so audio/subtitle
   restore matches a server stream ([API.md](API.md)).

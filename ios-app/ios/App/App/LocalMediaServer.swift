@@ -12,13 +12,22 @@
 //  interface only, so nothing on the LAN can reach it.
 //
 //  JS surface (Capacitor plugin "LocalMediaServer"):
-//    start({ path? , bundledPath? }) -> { url, port, root }
+//    start({ path? , bundledPath? , playerRoot? , proxyHost? , proxyToken? }) -> { url, port, root }
 //    stop()                          -> {}
 //    info()                          -> { running, url?, port?, root? }
 //
 //  `path`        absolute filesystem dir (a downloaded bundle, M2+).
 //  `bundledPath` dir relative to the app's bundled web assets ("public/<bundledPath>"),
 //                used by the Gate 1b self-test to serve the shipped sample bundle.
+//  `playerRoot`  offline cached-dashboard snapshot dir (docs/PLAYER_CACHE_PLAN.md):
+//                served at /, with the StreamLinkBundles storage dir mounted at
+//                /StreamLinkBundles/.
+//  `proxyHost`   + `proxyToken` (v8.7 — proxied playback session): when set, ANY
+//                request that isn't a local snapshot/bundle file is reverse-proxied
+//                to this host (e.g. https://192.168.1.20:8000) with the bearer token
+//                injected — so the loopback page behaves as a full online dashboard
+//                (`/api/*`, SSE, server-stream media) while downloaded bundles play
+//                same-origin. See docs/STREAMING.md § proxied playback.
 //
 //  Only one server runs at a time: start() stops any previous instance first
 //  (one bundle is played at a time — matches the plan).
@@ -73,9 +82,20 @@ public class LocalMediaServer: CAPPlugin, CAPBridgedPlugin {
             return
         }
 
+        // Proxied playback session (v8.7): any non-local request is forwarded to
+        // this host so the loopback page is a full online dashboard.
+        var proxyURL: URL? = nil
+        if let s = call.getString("proxyHost"), !s.isEmpty {
+            var trimmed = s
+            while trimmed.hasSuffix("/") { trimmed.removeLast() }
+            proxyURL = URL(string: trimmed)
+        }
+        let proxyToken = call.getString("proxyToken")
+
         // Single active server — tear down any previous one first.
         server?.stop()
-        let srv = HLSStaticServer(root: root, bundlesMount: bundlesMount)
+        let srv = HLSStaticServer(root: root, bundlesMount: bundlesMount,
+                                  proxyHost: proxyURL, proxyToken: proxyToken)
         server = srv
         srv.start { [weak self] result in
             switch result {
@@ -117,6 +137,10 @@ final class HLSStaticServer {
     /// dir mounted at /StreamLinkBundles/ alongside the snapshot root. Nil for
     /// normal single-bundle serving. See resolve().
     let bundlesMount: URL?
+    /// Proxied playback session (v8.7): when set, requests that don't resolve to a
+    /// local snapshot/bundle file are reverse-proxied to this host. See `proxy()`.
+    let proxyHost: URL?
+    let proxyToken: String?
     private let queue = DispatchQueue(label: "com.streamlink.localmediaserver", attributes: .concurrent)
     private var listener: NWListener?
     private(set) var boundPort: UInt16?
@@ -150,9 +174,11 @@ final class HLSStaticServer {
         "map":   "application/json",
     ]
 
-    init(root: URL, bundlesMount: URL? = nil) {
+    init(root: URL, bundlesMount: URL? = nil, proxyHost: URL? = nil, proxyToken: String? = nil) {
         self.root = root.standardizedFileURL
         self.bundlesMount = bundlesMount?.standardizedFileURL
+        self.proxyHost = proxyHost
+        self.proxyToken = proxyToken
     }
 
     enum StartError: Error, LocalizedError {
@@ -235,7 +261,11 @@ final class HLSStaticServer {
 
             if let headerEnd = self.rangeOfHeaderTerminator(in: buf) {
                 let headerData = buf.subdata(in: 0..<headerEnd.lowerBound)
-                self.respond(conn, headerData: headerData)
+                // Bytes already received past the header terminator are the start of
+                // the request body (proxied POST/PUT) — hand them along.
+                let initialBody = headerEnd.upperBound < buf.count
+                    ? buf.subdata(in: headerEnd.upperBound..<buf.count) : Data()
+                self.respond(conn, headerData: headerData, initialBody: initialBody)
                 return
             }
             if error != nil || isComplete || buf.count > 64 * 1024 {
@@ -251,7 +281,7 @@ final class HLSStaticServer {
         return data.range(of: term)
     }
 
-    private func respond(_ conn: NWConnection, headerData: Data) {
+    private func respond(_ conn: NWConnection, headerData: Data, initialBody: Data) {
         guard let header = String(data: headerData, encoding: .utf8) else {
             sendStatus(conn, 400, "Bad Request"); return
         }
@@ -261,29 +291,94 @@ final class HLSStaticServer {
         guard parts.count >= 2 else { sendStatus(conn, 400, "Bad Request"); return }
 
         let method = String(parts[0]).uppercased()
-        guard method == "GET" || method == "HEAD" else {
-            sendStatus(conn, 405, "Method Not Allowed"); return
-        }
-
-        // Strip query/fragment and percent-decode the path.
-        var rawPath = String(parts[1])
+        // The full request target (path + query) — the query must survive for
+        // proxied API calls. `decoded` (path only) is for local-file resolution.
+        let rawTarget = String(parts[1])
+        var rawPath = rawTarget
         if let q = rawPath.firstIndex(where: { $0 == "?" || $0 == "#" }) {
             rawPath = String(rawPath[..<q])
         }
         let decoded = rawPath.removingPercentEncoding ?? rawPath
 
-        guard let fileURL = resolve(path: decoded) else {
-            sendStatus(conn, 403, "Forbidden"); return
+        // 1) Local snapshot / bundle file (GET/HEAD) — the same-origin page + its
+        //    downloaded bundles. A missing local asset falls through to the proxy,
+        //    which fetches the host's copy, so this is graceful.
+        if method == "GET" || method == "HEAD", let fileURL = resolve(path: decoded) {
+            var isDir: ObjCBool = false
+            if FileManager.default.fileExists(atPath: fileURL.path, isDirectory: &isDir), !isDir.boolValue {
+                let rangeHeader = headerValue(in: lines, name: "range")
+                serveFile(conn, url: fileURL, method: method, rangeHeader: rangeHeader)
+                return
+            }
         }
 
-        var isDir: ObjCBool = false
-        guard FileManager.default.fileExists(atPath: fileURL.path, isDirectory: &isDir), !isDir.boolValue else {
-            sendStatus(conn, 404, "Not Found"); return
+        // 2) Everything else → reverse-proxy to the host (proxied playback session).
+        if let host = proxyHost {
+            let clen = Int(headerValue(in: lines, name: "content-length") ?? "") ?? 0
+            if clen > initialBody.count {
+                readBody(conn, have: initialBody, need: clen) { [weak self] body in
+                    self?.proxy(conn, method: method, target: rawTarget, headerLines: lines, body: body, host: host)
+                }
+            } else {
+                let body = clen > 0 ? Data(initialBody.prefix(clen)) : Data()
+                proxy(conn, method: method, target: rawTarget, headerLines: lines, body: body, host: host)
+            }
+            return
         }
 
-        // Parse a single Range header if present.
-        let rangeHeader = headerValue(in: lines, name: "range")
-        serveFile(conn, url: fileURL, method: method, rangeHeader: rangeHeader)
+        // 3) No proxy configured (offline player mode) and not a local file.
+        if method == "GET" || method == "HEAD" { sendStatus(conn, 404, "Not Found") }
+        else { sendStatus(conn, 405, "Method Not Allowed") }
+    }
+
+    /// Read the rest of a request body up to `need` bytes (some may already be in
+    /// `have`). Best-effort: an early close proxies whatever arrived.
+    private func readBody(_ conn: NWConnection, have: Data, need: Int, completion: @escaping (Data) -> Void) {
+        if have.count >= need { completion(Data(have.prefix(need))); return }
+        conn.receive(minimumIncompleteLength: 1, maximumLength: 64 * 1024) { [weak self] data, _, isComplete, error in
+            guard let self = self else { conn.cancel(); return }
+            var buf = have
+            if let data = data { buf.append(data) }
+            if buf.count >= need { completion(Data(buf.prefix(need))); return }
+            if error != nil || isComplete { completion(buf); return }
+            self.readBody(conn, have: buf, need: need, completion: completion)
+        }
+    }
+
+    /// Reverse-proxy a request to the configured host, streaming the response back
+    /// (JSON, SSE, or ranged media) with the device bearer token injected.
+    private func proxy(_ conn: NWConnection, method: String, target: String,
+                       headerLines: [String], body: Data, host: URL) {
+        guard let url = URL(string: host.absoluteString + target) else {
+            sendStatus(conn, 502, "Bad Gateway"); return
+        }
+        var req = URLRequest(url: url)
+        req.httpMethod = method
+        if !body.isEmpty { req.httpBody = body }
+        // Forward client headers except hop-by-hop / managed ones. We override
+        // Authorization (device token) and Accept-Encoding (identity → the host's
+        // Content-Length stays accurate to relay).
+        let drop: Set<String> = ["host", "connection", "keep-alive", "proxy-connection",
+                                 "transfer-encoding", "te", "upgrade", "content-length",
+                                 "accept-encoding", "authorization"]
+        for line in headerLines.dropFirst() {
+            guard let idx = line.firstIndex(of: ":") else { continue }
+            let name = String(line[..<idx]).trimmingCharacters(in: .whitespaces)
+            let value = String(line[line.index(after: idx)...]).trimmingCharacters(in: .whitespaces)
+            if name.isEmpty || drop.contains(name.lowercased()) { continue }
+            req.setValue(value, forHTTPHeaderField: name)
+        }
+        req.setValue("identity", forHTTPHeaderField: "Accept-Encoding")
+        if let tok = proxyToken, !tok.isEmpty {
+            req.setValue("Bearer \(tok)", forHTTPHeaderField: "Authorization")
+        }
+
+        let fwd = ProxyForwarder(conn: conn)
+        // Stop pulling from the host the moment the client goes away (SSE / nav).
+        conn.stateUpdateHandler = { state in
+            switch state { case .failed, .cancelled: fwd.clientGone(); default: break }
+        }
+        fwd.start(req)
     }
 
     /// Map a request path to a file inside `root`, rejecting traversal.
@@ -461,5 +556,125 @@ final class HLSStaticServer {
                 then?()
             }
         })
+    }
+}
+
+// MARK: - Reverse-proxy forwarder (proxied playback session, v8.7)
+
+/// Streams one proxied request/response between a client `NWConnection` and the
+/// host over `URLSession`. One instance (and one ephemeral session) per request;
+/// self-retained by the session delegate until the transfer finishes. Handles
+/// plain JSON, ranged media (206), and long-lived SSE identically — the only
+/// difference is how long the body streams.
+///
+/// Back-pressure: `didReceive data` blocks the (serial) delegate queue on a
+/// semaphore until the socket accepts the bytes, so a slow client throttles the
+/// pull from the host instead of buffering unbounded — the same discipline
+/// `HLSStaticServer.streamBody` uses for local files.
+final class ProxyForwarder: NSObject, URLSessionDataDelegate {
+    private let conn: NWConnection
+    private var session: URLSession!
+    private var task: URLSessionDataTask?
+    private var wroteHead = false
+    private var finished = false
+
+    init(conn: NWConnection) {
+        self.conn = conn
+        super.init()
+        let cfg = URLSessionConfiguration.ephemeral
+        cfg.requestCachePolicy = .reloadIgnoringLocalCacheData
+        cfg.timeoutIntervalForRequest = 120           // idle gap (SSE keepalives are well under this)
+        cfg.timeoutIntervalForResource = 24 * 3600    // don't kill a long-lived SSE stream
+        cfg.httpShouldSetCookies = false
+        cfg.httpCookieAcceptPolicy = .never
+        let q = OperationQueue()
+        q.maxConcurrentOperationCount = 1             // serial → the semaphore back-pressure is safe
+        session = URLSession(configuration: cfg, delegate: self, delegateQueue: q)
+    }
+
+    func start(_ req: URLRequest) {
+        let t = session.dataTask(with: req)
+        task = t
+        t.resume()
+    }
+
+    /// The client disconnected (SSE close / page navigation) — stop the upstream pull.
+    func clientGone() { task?.cancel() }
+
+    private func finish(sendFinal: Bool) {
+        if finished { return }
+        finished = true
+        conn.stateUpdateHandler = nil
+        if sendFinal {
+            conn.send(content: nil, contentContext: .finalMessage, isComplete: true,
+                      completion: .contentProcessed { [conn] _ in conn.cancel() })
+        } else {
+            conn.cancel()
+        }
+        session.finishTasksAndInvalidate()
+    }
+
+    /// Synchronously push `data` to the client, blocking until the socket accepts it.
+    /// Returns false if the send failed (client gone). Runs on the serial delegate queue.
+    @discardableResult
+    private func sendSync(_ data: Data) -> Bool {
+        let sem = DispatchSemaphore(value: 0)
+        var ok = true
+        conn.send(content: data, completion: .contentProcessed { err in ok = (err == nil); sem.signal() })
+        sem.wait()
+        return ok
+    }
+
+    // Accept the host's (typically self-signed, LAN) TLS — matches the app's
+    // NSAllowsArbitraryLoads posture for WKWebView; URLSession needs it explicitly.
+    func urlSession(_ session: URLSession, didReceive challenge: URLAuthenticationChallenge,
+                    completionHandler: @escaping (URLSession.AuthChallengeDisposition, URLCredential?) -> Void) {
+        if challenge.protectionSpace.authenticationMethod == NSURLAuthenticationMethodServerTrust,
+           let trust = challenge.protectionSpace.serverTrust {
+            completionHandler(.useCredential, URLCredential(trust: trust))
+        } else {
+            completionHandler(.performDefaultHandling, nil)
+        }
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive response: URLResponse,
+                    completionHandler: @escaping (URLSession.ResponseDisposition) -> Void) {
+        writeHead(response)
+        completionHandler(.allow)
+    }
+
+    func urlSession(_ session: URLSession, dataTask: URLSessionDataTask, didReceive data: Data) {
+        if !sendSync(data) { dataTask.cancel() }   // client gone → stop pulling from the host
+    }
+
+    func urlSession(_ session: URLSession, task: URLSessionTask, didCompleteWithError error: Error?) {
+        if !wroteHead {
+            _ = sendSync(Data(("HTTP/1.1 502 Bad Gateway\r\nContent-Length: 0\r\n"
+                + "Access-Control-Allow-Origin: *\r\nConnection: close\r\n\r\n").utf8))
+        }
+        finish(sendFinal: wroteHead)
+    }
+
+    private func writeHead(_ response: URLResponse) {
+        wroteHead = true
+        guard let http = response as? HTTPURLResponse else {
+            _ = sendSync(Data("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n".utf8))
+            return
+        }
+        var out = "HTTP/1.1 \(http.statusCode) \(HTTPURLResponse.localizedString(forStatusCode: http.statusCode))\r\n"
+        var hasCORS = false
+        for (k, v) in http.allHeaderFields {
+            guard let key = k as? String, let val = v as? String else { continue }
+            let lk = key.lowercased()
+            // Drop hop-by-hop + anything that would contradict how we frame the body
+            // (we always `Connection: close`; Accept-Encoding:identity means no C-E).
+            if lk == "connection" || lk == "keep-alive" || lk == "transfer-encoding"
+                || lk == "content-encoding" || lk == "proxy-connection" { continue }
+            if lk == "access-control-allow-origin" { hasCORS = true }
+            out += "\(key): \(val)\r\n"
+        }
+        if !hasCORS { out += "Access-Control-Allow-Origin: *\r\n" }
+        out += "Connection: close\r\n\r\n"
+        _ = sendSync(Data(out.utf8))
     }
 }

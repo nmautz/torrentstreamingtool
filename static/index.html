@@ -8963,23 +8963,75 @@ const _appOfflineHost = (() => {
   if (!_appOffline) return "";
   try { return new URLSearchParams(location.search).get("host") || ""; } catch (_) { return ""; }
 })();
-// Online play-time handoff (`&live=1`): the loopback cached player was opened
-// while the host is REACHABLE (not a true offline session) to play a downloaded
-// episode from a same-origin bundle — see _appTryLocalHandoff. It reuses the
-// whole `_appOffline` same-origin infrastructure, but differs in two ways: it
-// auto-plays a target episode on boot, and it returns to the live host dashboard
-// (rather than the pinned Downloads overlay) when playback stops. `_appLiveTarget`
-// carries the episode + resume position the host handed off.
-const _appLocalLive = (() => {
-  try { return _appOffline && new URLSearchParams(location.search).get("live") === "1"; } catch (_) { return false; }
+// Proxied playback session (`?proxied=1`, v8.7): the loopback cached player was
+// opened WHILE ONLINE to play a downloaded episode same-origin, but — unlike
+// offline mode — the native LocalMediaServer reverse-proxies every non-local
+// request (`/api/*`, SSE, server-stream media) to the host. So this is a FULL
+// online dashboard (`_appOffline` stays false → SSE, Play-to-TV, live library,
+// auto-manage, and real `/api` progress/track sync all run) that merely happens
+// to be served from the loopback so the device bundle can play. It auto-plays a
+// target episode on boot and returns to the direct host origin when playback
+// stops. `_appProxyHost` is the origin to return to; `_appProxyTarget` is the
+// episode + resume position handed off. Supersedes 8.6.0's `&live=1` (which ran
+// in feature-poor offline mode). See docs/STREAMING.md § proxied playback.
+const _appProxied = (() => {
+  try { return new URLSearchParams(location.search).get("proxied") === "1"; } catch (_) { return false; }
 })();
-const _appLiveTarget = (() => {
-  if (!_appLocalLive) return { item: "", file: "", seek: 0 };
+const _appProxyHost = (() => {
+  if (!_appProxied) return "";
+  try { return new URLSearchParams(location.search).get("host") || ""; } catch (_) { return ""; }
+})();
+const _appProxyTarget = (() => {
+  if (!_appProxied) return { item: "", file: "", seek: 0 };
   try {
     const p = new URLSearchParams(location.search);
     return { item: p.get("item") || "", file: p.get("file") || "", seek: parseInt(p.get("seek") || "0", 10) || 0 };
   } catch (_) { return { item: "", file: "", seek: 0 }; }
 })();
+// Proxied mode boots as a normal ONLINE dashboard, but the loopback origin's
+// localStorage is empty — seed the active profile and auto-manage prefs the host
+// carried in the URL BEFORE the normal boot restores them (so it doesn't drop to
+// the profile picker and auto-manage keeps the user's settings mid-session).
+function _appProxiedSeedStorage() {
+  if (!_appProxied) return;
+  try {
+    const p = new URLSearchParams(location.search);
+    const pid = p.get("profile") || "";
+    if (pid && !localStorage.getItem("streamlink_profile")) {
+      localStorage.setItem("streamlink_profile", JSON.stringify({ id: pid, name: "" }));
+    }
+    // So the Downloads/Change-Server overlays label the real host, not the loopback.
+    if (_appProxyHost && !localStorage.getItem("streamlink_server_url")) {
+      localStorage.setItem("streamlink_server_url", _appProxyHost);
+    }
+    const am = p.get("am");
+    if (am) {
+      const o = JSON.parse(am);
+      if (o && typeof o === "object") {
+        if (o.on   != null) localStorage.setItem("streamlink_app_automanage", o.on ? "1" : "0");
+        if (o.ahead != null) localStorage.setItem("streamlink_app_automanage_ahead", String(o.ahead));
+        if (o.q    != null) localStorage.setItem("streamlink_app_automanage_autoq", String(o.q));
+      }
+    }
+  } catch (_) {}
+}
+// Auto-start the handed-off episode once the proxied dashboard has restored its
+// profile (called from the boot success path). Deferred a tick so SSE/boot
+// fetches are in flight first. Plays from the same-origin device bundle.
+function _appProxiedAutoPlay() {
+  if (!(_appProxied && _appProxyTarget.item && _appProxyTarget.file)) return;
+  setTimeout(() => {
+    try { lpPlay(_appProxyTarget.item, [_appProxyTarget.file], _appProxyTarget.seek); } catch (_) {}
+  }, 0);
+}
+// Proxied playback session: leave the loopback player and return to the DIRECT
+// host origin when playback stops. Progress was synced live via the proxied
+// `/api` during the session, so nothing to flush. A no-op outside proxied mode.
+function _appProxiedReturnHost() {
+  if (!(_appProxied && _appProxyHost)) return false;
+  window.location.replace(_appProxyHost);
+  return true;
+}
 // Sentinel bundle key the player snapshot is stored under in BundleDownloader —
 // it must never surface in any downloads UI or the durable-queue resumer.
 const _APP_PLAYER_KEY = "__player__";
@@ -9054,19 +9106,22 @@ async function _appLocalBundle(itemId, filePath) {
 }
 
 // ── iOS app: online play-time handoff to the same-origin cached player ────────
-// ALWAYS prefer the on-device bundle when a downloaded copy exists — even online.
+// ALWAYS prefer the on-device bundle when a downloaded copy exists — even online,
+// WITH FULL FEATURE PARITY (Play-to-TV, live SSE, library, track sync).
 // The catch (8.0.1): while online the dashboard runs on the REMOTE host origin,
 // so the loopback LocalMediaServer bundle is a cross-origin (and, on an HTTPS
 // host, mixed-content) media load that iOS native HLS stalls indefinitely. The
 // only reliable way to play the device copy is to make page + media SAME-ORIGIN,
-// which means booting the cached-player snapshot from the loopback and playing
-// the bundle there. This function does exactly that: verify the episode AND the
-// player snapshot are fully downloaded, start LMS in player mode, and navigate to
-// the snapshot's index.html in `&live=1` mode with the episode to auto-play + the
-// live host to return to on stop. Returns true when it navigated away (caller
-// must stop), false to fall back to normal server streaming. Online + isApp only.
+// which means serving the page from the loopback. To keep every host feature
+// working from there, the native LMS is started in PROXY mode: it serves the
+// snapshot + device bundles locally and reverse-proxies everything else (`/api/*`,
+// SSE, server streams) to the host. This verifies the episode AND the player
+// snapshot are fully downloaded, starts LMS with proxyHost+token, and navigates to
+// the snapshot's index.html in `?proxied=1` with the episode to auto-play + the
+// host to return to on stop. Returns true when it navigated away (caller must
+// stop), false to fall back to normal server streaming. Online + isApp only.
 async function _appTryLocalHandoff(itemId, filePath, seekTo) {
-  if (!(isApp && _cap.dl && _cap.lms) || _appOffline || !navigator.onLine) return false;
+  if (!(isApp && _cap.dl && _cap.lms) || _appOffline || _appProxied || !navigator.onLine) return false;
   try {
     // The episode must be fully on-device…
     const local = await _cap.dl.getLocal({ itemId, filePath });
@@ -9075,15 +9130,29 @@ async function _appTryLocalHandoff(itemId, filePath, seekTo) {
     // it there's nothing to load over the loopback, so stream from the host.
     const snap = await _cap.dl.getLocal({ itemId: _APP_PLAYER_KEY, filePath: _APP_PLAYER_KEY });
     if (!(snap && snap.complete && snap.dir)) return false;
-    // Push the active profile natively so the loopback page (empty localStorage)
-    // restores it, mirroring the offline boot path.
+    // Push the active profile natively too (belt & suspenders with the URL param).
     try { if (_cap.os && profile.id) await _cap.os.setProfile({ profileId: profile.id, profileName: profile.name || "" }); } catch (_) {}
-    const started = await _cap.lms.start({ playerRoot: snap.dir });
+    // Start the LMS in PROXY mode: snapshot + bundles local, everything else
+    // forwarded to this host with the device bearer token injected.
+    const started = await _cap.lms.start({
+      playerRoot: snap.dir, proxyHost: location.origin, proxyToken: _appPairingToken() || "",
+    });
     const base = String((started && started.url) || "").replace(/\/+$/, "");
     if (!base) return false;
+    // Carry the profile + auto-manage prefs — the loopback origin's localStorage
+    // is empty (see _appProxiedSeedStorage).
+    let am = "";
+    try {
+      am = JSON.stringify({
+        on:    localStorage.getItem("streamlink_app_automanage") === "1",
+        ahead: parseInt(localStorage.getItem("streamlink_app_automanage_ahead") || "", 10) || undefined,
+        q:     localStorage.getItem("streamlink_app_automanage_autoq") || undefined,
+      });
+    } catch (_) {}
     const q = new URLSearchParams({
-      offline: "1", live: "1", host: location.origin,
+      proxied: "1", host: location.origin,
       item: itemId, file: filePath, seek: String(Math.max(0, Math.floor(seekTo || 0))),
+      profile: profile.id || "", am,
     });
     window.location.replace(base + "/index.html?" + q.toString());
     return true;
@@ -9122,11 +9191,12 @@ function _appIdentifyLocalRung(masterText, meta) {
 // bundle so no host round-trip is needed (works in Airplane Mode).
 async function _appStartLocalPlayback(local) {
   let base;
-  if (_appOffline) {
-    // Offline cached-player mode: LMS is ALREADY serving this page in player
-    // mode, with every bundle mounted same-origin under /StreamLinkBundles/.
-    // Never call lms.start here — restarting the server that serves the page
-    // would break every later asset load (lazy hls.js/octopus, next episodes).
+  if (_appOffline || _appProxied) {
+    // Offline cached-player OR proxied playback mode: LMS is ALREADY serving this
+    // page (player/proxy mode), with every bundle mounted same-origin under
+    // /StreamLinkBundles/. Never call lms.start here — restarting the server that
+    // serves the page would break every later asset load (lazy hls.js/octopus,
+    // next episodes) AND drop the reverse proxy in proxied mode.
     base = window.location.origin + "/StreamLinkBundles/" + local.sha + "/";
   } else {
     const { url } = await _cap.lms.start({ path: local.dir });
@@ -9730,39 +9800,7 @@ async function _appOfflineBoot() {
   // offline-gated) and open the overlay that IS the offline UI.
   await _appInitOfflineBundles();
   _appOpenDashboard();
-  // Online play-time handoff (`&live=1`): auto-start the episode the host handed
-  // off, straight from its same-origin on-device bundle. lpPlay expands it to the
-  // series' other DOWNLOADED episodes for Prev/Next, and lpStop returns to the
-  // live host dashboard. The auto-reconnect probe is deliberately NOT started
-  // here — the host is already reachable, so probing would bounce us back before
-  // playback even begins; return-to-host is driven by lpStop instead.
-  if (_appLocalLive && _appLiveTarget.item && _appLiveTarget.file) {
-    try { await lpPlay(_appLiveTarget.item, [_appLiveTarget.file], _appLiveTarget.seek); }
-    catch (_) { _appLiveReturnHost(); }
-  } else {
-    _appOfflineReconnectInit();
-  }
-}
-
-// Online play-time handoff: return to the live host dashboard when local playback
-// stops. A no-op outside `&live=1`. The host we came from should still be reachable,
-// but the network can drop mid-session — so PROBE first (the same always-resolves
-// no-cors trick the shell uses) and only navigate when it answers; the host boot
-// then flushes the progress this session captured to OfflineStore back to the server
-// (M3 sync). If the host has since gone away, degrade in place to a normal offline
-// session (start the reconnect probe, keep the Downloads overlay) rather than
-// navigating to a dead page.
-async function _appLiveReturnHost() {
-  if (!(_appLocalLive && _appOfflineHost)) return false;
-  const ok = await new Promise((resolve) => {
-    let done = false; const finish = (v) => { if (!done) { done = true; resolve(v); } };
-    setTimeout(() => finish(false), 2500);
-    fetch(_appOfflineHost + "/api/version", { mode: "no-cors", cache: "no-store" })
-      .then(() => finish(true)).catch(() => finish(false));
-  });
-  if (ok) { window.location.replace(_appOfflineHost); return true; }
-  _appOfflineReconnectInit();   // host vanished — become a plain offline session
-  return false;
+  _appOfflineReconnectInit();
 }
 
 // Reconnect probe: same always-resolves no-cors trick the shell uses. Auto-probe
@@ -9770,7 +9808,7 @@ async function _appLiveReturnHost() {
 // under an offline viewing session would be hostile); the overlay's Reconnect
 // button probes on demand. On success the page navigates back to the real host.
 let _appOfflineProbing = false;
-let _appReconnectInited = false;   // guard: live-return can call this after boot too
+let _appReconnectInited = false;
 function _appOfflineReconnectInit() {
   if (!_appOfflineHost || _appReconnectInited) return;
   _appReconnectInited = true;
@@ -11708,19 +11746,19 @@ async function _lpLoadIndex(seekTo) {
   // while a server-quality override is active for this file (user explicitly
   // picked a rung the device copy doesn't have).
   //
-  // WHY OFFLINE-ONLY (8.0.1): the on-device bundle is served from the native
-  // http://127.0.0.1:<port> loopback LocalMediaServer. OFFLINE the whole
-  // dashboard is served from that same loopback, so the media is a *same-origin*
-  // load and plays instantly. ONLINE the dashboard is a REMOTE host page, so the
-  // device copy would be a *cross-origin* loopback load — WKWebView stalls that
-  // media pipeline indefinitely (a plain fetch() with CORS:* still succeeds,
-  // which is why it isn't obvious), so a downloaded episode "never loads while
-  // connected." Streaming the same episode from the server instead loads from
-  // the page's OWN origin (same-origin) and is the proven, reliable path, so
-  // online we deliberately skip the device copy. The lone exception is a host
-  // that can't stream at all (no-HLS macOS host, `hlsAvailable` false): there the
-  // device copy is the only option, cross-origin or not.
-  const _preferDeviceCopy = _appOffline || !hlsAvailable;
+  // WHEN WE PREFER THE DEVICE COPY: only when this page is served from the
+  // loopback, so the bundle is a SAME-ORIGIN load that iOS native HLS will play.
+  // (8.0.1: from the REMOTE host page the device copy is a cross-origin loopback
+  // load that WKWebView stalls indefinitely — a plain fetch() with CORS:* still
+  // succeeds, which is why it isn't obvious.) Three same-origin cases:
+  //   • `_appOffline`  — offline cached player (loopback serves the whole page).
+  //   • `_appProxied`  — proxied playback session (loopback serves the page and
+  //                      reverse-proxies /api to the host — full features, v8.7).
+  //   • `!hlsAvailable`— no-HLS macOS host: the device copy is the only option.
+  // From the plain remote host page (none set) we stream from the server instead
+  // (same-origin to that page), and the host handoff (_appTryLocalHandoff) is what
+  // moves a downloaded-episode play into `_appProxied` mode up front.
+  const _preferDeviceCopy = _appOffline || _appProxied || !hlsAvailable;
   if (isApp && !lp._srvOverride && _preferDeviceCopy) {
     try {
       const local = await _appLocalBundle(lp.itemId, filePath);
@@ -13240,11 +13278,11 @@ async function lpStop() {
   // episode's watched position, so the next Resume restarts it from the top.
   // The `ended` path (_lpAdvanceOrEnd) records the completed state separately.
   if (lp.itemId && lp.filePath && d > 0 && t >= 5) {
-    // In an online play-time handoff we're about to navigate back to the host,
-    // which reads OfflineStore to sync — so AWAIT the write here, otherwise
-    // location.replace can cut off the fire-and-forget native call and the
-    // server never learns this session's final position.
-    if (_appLocalLive) { await saveProgress(lp.itemId, lp.filePath, t, d); }
+    // In a proxied playback session we're about to navigate back to the host — so
+    // AWAIT the final write (a POST /api/progress through the proxy), otherwise
+    // location.replace can cut off the fire-and-forget call and the server never
+    // learns this session's final position.
+    if (_appProxied) { await saveProgress(lp.itemId, lp.filePath, t, d); }
     else saveProgress(lp.itemId, lp.filePath, t, d);
   }
   // Tear down any on-demand session promptly (the server-side reaper is the
@@ -13272,9 +13310,9 @@ async function lpStop() {
   _lpHidePreparing();
   _lpDevHudStop();
   lp.itemId = null; lp.filePath = null; lp.playlist = []; lp.pi = 0;
-  // Online play-time handoff: playback is done, so leave the loopback cached
-  // player and return to the live host dashboard (no-op in a normal session).
-  _appLiveReturnHost();
+  // Proxied playback session: playback is done, so leave the loopback player and
+  // return to the direct host dashboard (no-op in a normal/offline session).
+  _appProxiedReturnHost();
 }
 
 // Lead seconds for the auto-skip countdown — mirror the VLC marquee leads
@@ -14261,6 +14299,12 @@ document.addEventListener("DOMContentLoaded",async()=>{
   // device-served snapshot with NO host behind it — take the dedicated
   // Downloads-only boot path and skip everything host-facing below.
   if (_appOffline) { await _appOfflineBoot(); return; }
+  // Proxied playback session (v8.7): the page is a device snapshot too, but the
+  // native LMS reverse-proxies /api to the host — so it boots as a FULL online
+  // dashboard (below), just from the loopback origin. Seed the profile + auto-
+  // manage prefs the host handed off (empty localStorage on this origin) so the
+  // normal profile-restore proceeds and auto-manage keeps the user's settings.
+  _appProxiedSeedStorage();
   // Stream-to-device bootstrap: kick off the one-shot SW eviction (drops any
   // legacy cached app shell + frees the registration) and wire the local
   // <video>'s timeupdate/ended/visibilitychange/pagehide handlers.
@@ -14352,7 +14396,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
       try{
         const profiles=await fetchProfiles();
         const found=profiles.find(x=>x.id===p.id);
-        if(found){ profile=found; renderNavProfile(); applyMaxVolumeToSliders(); loadSearchIndexers(); _appSyncSetProfile(); _appFlushOfflineProgress(); connectSSE(); return; }
+        if(found){ profile=found; renderNavProfile(); applyMaxVolumeToSliders(); loadSearchIndexers(); _appSyncSetProfile(); _appFlushOfflineProgress(); connectSSE(); _appProxiedAutoPlay(); return; }
         // Saved profile no longer exists on the server (deleted/renamed id).
         if(window.__appShowError) window.__appShowError("Saved profile id "+p.id+" not found among "+profiles.length+" server profiles.");
       } catch(e){
@@ -14368,6 +14412,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.6.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.7.0</div>
 </body>
 </html>

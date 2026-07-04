@@ -1331,20 +1331,44 @@ neither can fix it. This is why the 7.17.0 "play the downloaded copy while onlin
 convenience was reverted to offline-only in 8.0.1: it never actually worked in
 WKWebView.
 
-**The reliable way to prefer the device copy online is the play-time handoff
-(8.6.0):** don't try to load the loopback bundle into the remote host page — instead
-move the *page* to the loopback first. `lpPlay` → `_appTryLocalHandoff` starts the
-player-mode LMS over the `__player__` snapshot and `location.replace`s to it with
-`?offline=1&live=1&host=<origin>&item=&file=&seek=`; on that same-origin snapshot page
-the bundle plays exactly like offline, and `lpStop` → `_appLiveReturnHost()` returns
-to the live host dashboard (which flushes `OfflineStore` progress to the server). So
-"serve the page from the loopback" isn't a dead end — it's the mechanism, just scoped
-to a single downloaded-episode playback session instead of the whole app. **Gotcha
-for the handoff itself:** the `live=1` page runs the device *snapshot* of
-static/index.html, so the auto-play/return-to-host code only exists there after the
-snapshot has refreshed (driven by the version-badge bump via `/api/player-manifest`) —
-an app connected to an upgraded host that hasn't re-snapshotted yet degrades safely
-(old snapshot boots Downloads-only, doesn't auto-play), it doesn't break.
+**The reliable way to prefer the device copy online is the proxied playback session
+(8.7.0):** don't try to load the loopback bundle into the remote host page — instead
+move the *page* to the loopback first, and reverse-proxy everything else back to the
+host so no feature is lost. `lpPlay` → `_appTryLocalHandoff` starts the LMS in **proxy
+mode** (`lms.start({playerRoot, proxyHost, proxyToken})`) over the `__player__` snapshot
+and `location.replace`s to it with `?proxied=1&host=<origin>&item=&file=&seek=&profile=&am=`.
+On that same-origin snapshot page the bundle plays exactly like offline, **but
+`_appOffline` stays false** so it boots as a full online dashboard — SSE, Play-to-TV,
+library, `/api` progress/track sync — because the native server forwards every `/api/*`
++ SSE + server-media request to the host (bearer token injected). `lpStop` →
+`_appProxiedReturnHost()` returns to the direct host origin. So "serve the page from the
+loopback" isn't a dead end — it's the mechanism, scoped to a single downloaded-episode
+playback session (the user chose "only during playback"; running the *whole* app from
+the proxy is a bigger, deferred option).
+
+**Native-proxy gotchas** (`ProxyForwarder` / `HLSStaticServer` in LocalMediaServer.swift):
+- **Set `Accept-Encoding: identity` on the outbound request** and drop
+  `Content-Encoding`/`Transfer-Encoding` from the relayed response — otherwise URLSession
+  transparently gunzips the body while the host's `Content-Length` still describes the
+  *compressed* size, and the relayed length mismatches the bytes.
+- **SSE must stream, not buffer** — `/api/events` never completes; forward each
+  `didReceive data` chunk immediately and cancel the upstream task when the client
+  `NWConnection` drops (`conn.stateUpdateHandler` → `clientGone()`), else the task lingers
+  until the resource timeout.
+- **Back-pressure or the proxy balloons memory on a slow client** — the delegate queue is
+  serial and blocks on a semaphore until `conn.send` completes, throttling the pull from
+  the host (mirrors `streamBody`).
+- **URLSession needs the self-signed-TLS opt-in explicitly** — `NSAllowsArbitraryLoads`
+  covers WKWebView/ATS but *not* URLSession; the server-trust challenge must return
+  `.useCredential`.
+- **Snapshot-version gotcha (unchanged from 8.6.0):** the `proxied=1` page runs the device
+  *snapshot* of static/index.html, so the proxied-boot/auto-play code only exists there
+  after the snapshot refreshes (version-badge bump via `/api/player-manifest`). An app on
+  an upgraded host that hasn't re-snapshotted degrades safely (old snapshot ignores the
+  unknown params). **But the native proxy needs the new Swift build** — a stale app binary
+  can't start proxy mode at all, so the handoff `lms.start({proxyHost})` param is simply
+  ignored and it behaves like a plain player-mode start (api calls 404) → keep the app
+  build and the host version in step.
 
 (The M1 ATS exception, scoped to loopback, only governs plain `http` cleartext loads
 — it's unrelated to this same-vs-cross-origin media behavior.)
