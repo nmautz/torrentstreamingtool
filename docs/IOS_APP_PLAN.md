@@ -27,10 +27,22 @@
 > is skipped — the in-app pass owns it), computing the frontier from `/files`
 > progress: furthest in-progress episode, else last-completed + 1; never-watched
 > series are skipped, fully-watched series get all their downloads cleaned up.
+> **Per-show scope (`8.6.0`).** An **Apply to** selector in Settings scopes which
+> shows auto-manage touches: **`all_except`** (block-list — every show except the
+> picked few) or **`none_except`** (allow-list — no show except the picked few),
+> followed by a tappable **show picker**. The picker lists every multi-episode
+> series in the **whole library** (`_appScopeSeries()` — from `window._libCache`,
+> lazily fetched via `GET /api/library` if cold), keyed by library **item id**, so
+> allow-list mode can pre-designate a not-yet-downloaded show (it starts feeding the
+> moment you watch it in-app). One shared selection set, interpreted per mode. A
+> single pure `_appAutoScoped(itemId, prefs)` membership test gates **both** feeders
+> (in-app pass + sweep) — nothing in the delete/keep-ahead logic changes.
+> **Default = unchanged behaviour**: `all_except` + empty set == all shows managed.
 > Prefs persist in host-origin localStorage: `streamlink_app_automanage`,
-> `streamlink_app_ahead`, `streamlink_app_autoq`. Online-only
-> (`_appOffline`/`navigator.onLine`/`app._connected` gated) and `isApp`-gated;
-> host-served, no app rebuild.
+> `streamlink_app_ahead`, `streamlink_app_autoq`, `streamlink_app_autoscope`
+> (`all_except`|`none_except`), `streamlink_app_autoshows` (JSON array of item ids).
+> Online-only (`_appOffline`/`navigator.onLine`/`app._connected` gated) and
+> `isApp`-gated; host-served, no app rebuild.
 >
 > **Styled ASS subtitles in the app (`7.15.0`, code).** The 7.14.0 libass-wasm
 > (SubtitlesOctopus) styled-subtitle overlay now works on **both** iOS surfaces:
