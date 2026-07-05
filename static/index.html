@@ -10592,8 +10592,10 @@ async function _appScopeSeries() {
       if (r.ok) { items = (await r.json()).items || []; window._libCache = items; }
     } catch (_) {}
   }
+  // /api/library returns file_count per item (not a files[] array — those live
+  // in the per-item /files endpoint), so multi-episode series are file_count >= 2.
   return (items || [])
-    .filter((it) => it && it.id && (it.files || []).length >= 2)
+    .filter((it) => it && it.id && (it.file_count || (it.files || []).length) >= 2)
     .map((it) => ({ id: it.id, title: ((it.series || it.title || "Untitled") + "").trim() || "Untitled" }))
     .sort((a, b) => a.title.localeCompare(b.title, undefined, { sensitivity: "base" }));
 }
@@ -14509,6 +14511,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.8.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.8.1</div>
 </body>
 </html>
