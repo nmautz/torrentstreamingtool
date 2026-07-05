@@ -3431,8 +3431,21 @@ async def _apply_track_prefs(
             state.current_audio_track = audio
             await vlc("audio_track", val=str(audio))
         elif a_sel is not None:
-            audio_tracks, _ = _parse_track_streams(await vlc_status())
-            cand = _resolve_audio_descriptor(a_sel, audio_tracks)
+            # Resolve against the LIVE audio-track list. VLC populates that list
+            # asynchronously after opening a stream, so a single snapshot at the
+            # fixed `delay` can arrive before the tracks exist — the resolve then
+            # finds nothing and audio silently stays on VLC's default. That race
+            # is exactly what made cross-episode audio memory "sometimes" work.
+            # Poll briefly (up to ~4 s) until tracks appear and the descriptor
+            # resolves; a genuinely absent track just falls through harmlessly.
+            cand = None
+            for _attempt in range(8):
+                audio_tracks, _ = _parse_track_streams(await vlc_status())
+                if audio_tracks:
+                    cand = _resolve_audio_descriptor(a_sel, audio_tracks)
+                    if cand or len(audio_tracks) > 1:
+                        break
+                await asyncio.sleep(0.5)
             if cand:
                 state.current_audio_track = cand["id"]
                 await vlc("audio_track", val=str(cand["id"]))
