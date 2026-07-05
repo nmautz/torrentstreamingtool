@@ -10731,26 +10731,44 @@ async function _appAutoSweepRun() {
       if (lp.itemId === itemId && lp.filePath) continue;
       const files = await _appAutoFiles(itemId);
       if (!files || files.length < 2) continue;   // movies: nothing to roll
-      // Watch frontier from server progress, in natural episode order (= /files
-      // order): the furthest in-progress episode, else the episode after the
-      // last completed one. Untouched series are skipped (no basis to act);
-      // a fully-watched series has no frontier — its downloads are cleaned up.
-      let lastDone = -1, inProg = -1;
-      files.forEach((f, i) => {
-        const p = f.progress || {};
-        if (p.completed) lastDone = i;
-        else if ((p.position_sec || 0) > 5) inProg = i;
-      });
-      if (lastDone < 0 && inProg < 0) continue;   // never watched — leave alone
-      const frontier = Math.max(inProg, lastDone + 1 < files.length ? lastDone + 1 : -1);
+      const byPath = new Map(files.map((f) => [f.path, f]));
       const keep = new Set(), toStart = [];
-      if (frontier >= 0) {
-        for (let i = frontier; i <= frontier + ahead && i < files.length; i++) {
-          keep.add(files[i].path);
-          if (_appAutoWants(itemId, files[i])) toStart.push(files[i]);
+      // Shuffle Play on the TV/VLC: the "next episodes" are the next `ahead`
+      // entries in the LIVE shuffle order (broadcast as library_playlist), NOT
+      // natural episode order — so we download exactly what's coming up in the
+      // shuffle. Only the active-on-TV series carries a live shuffle order;
+      // every other series falls through to the natural-order frontier below.
+      const shufPl = (app.library_item_id === itemId && app.library_shuffle
+                      && Array.isArray(app.library_playlist) && app.library_playlist.length)
+                   ? app.library_playlist : null;
+      if (shufPl) {
+        const start = Math.max(0, app.library_current_index ?? 0);   // TV's index in the shuffle
+        for (let i = start; i <= start + ahead && i < shufPl.length; i++) {
+          const f = byPath.get(shufPl[i]);
+          if (!f) continue;
+          keep.add(f.path);
+          if (_appAutoWants(itemId, f)) toStart.push(f);
+        }
+      } else {
+        // Watch frontier from server progress, in natural episode order (= /files
+        // order): the furthest in-progress episode, else the episode after the
+        // last completed one. Untouched series are skipped (no basis to act);
+        // a fully-watched series has no frontier — its downloads are cleaned up.
+        let lastDone = -1, inProg = -1;
+        files.forEach((f, i) => {
+          const p = f.progress || {};
+          if (p.completed) lastDone = i;
+          else if ((p.position_sec || 0) > 5) inProg = i;
+        });
+        if (lastDone < 0 && inProg < 0) continue;   // never watched — leave alone
+        const frontier = Math.max(inProg, lastDone + 1 < files.length ? lastDone + 1 : -1);
+        if (frontier >= 0) {
+          for (let i = frontier; i <= frontier + ahead && i < files.length; i++) {
+            keep.add(files[i].path);
+            if (_appAutoWants(itemId, files[i])) toStart.push(files[i]);
+          }
         }
       }
-      const byPath = new Map(files.map((f) => [f.path, f]));
       await _appAutoApply(itemId, byPath, keep, toStart, q);
     }
   } finally { _appAutoSweepBusy = false; }
@@ -14591,6 +14609,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.9.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.9.1</div>
 </body>
 </html>
