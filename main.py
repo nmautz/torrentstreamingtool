@@ -2770,13 +2770,13 @@ def find_resume_hint(item: dict, profile_id: str) -> Optional[dict]:
 async def _save_track_pref(
     item_id: str, profile_id: str, file_path: str,
     audio: Optional[int] = None, subtitle: Optional[int] = None,
-    sub_sel: Optional[dict] = None,
+    sub_sel: Optional[dict] = None, audio_sel: Optional[dict] = None,
 ) -> None:
     """Persist audio/subtitle track preference for a file into library.json.
 
-    `sub_sel` is the resolvable subtitle descriptor written alongside the raw
-    VLC ES ID — it's what the on-device player (and a VLC replay whose ES IDs
-    drifted) restores from."""
+    `sub_sel`/`audio_sel` are the resolvable descriptors written alongside the
+    raw VLC ES IDs — they're what the on-device player (and a VLC replay whose
+    ES IDs drifted, or the next episode of the series) restore from."""
     try:
         async with _lib_lock:
             lib = await asyncio.to_thread(_load_lib_raw)
@@ -2796,6 +2796,11 @@ async def _save_track_pref(
                 if norm:
                     norm.setdefault("at", _now_iso())   # newest-wins vs series pick
                     fp["subtitle_sel"] = norm
+            if audio_sel is not None:
+                norm = _norm_audio_sel(audio_sel)
+                if norm:
+                    norm.setdefault("at", _now_iso())   # newest-wins vs series pick
+                    fp["audio_sel"] = norm
             await asyncio.to_thread(_save_lib_raw, lib)
     except Exception:
         pass
@@ -2981,6 +2986,150 @@ def _series_of_item(item: dict) -> str:
     if s:
         return s
     return f"item:{item.get('id')}" if item.get("id") else ""
+
+
+# ── Audio-selection descriptor + per-series memory ───────────────────────────
+# Mirrors the subtitle machinery above, simplified: audio tracks are always
+# embedded (no sidecars, no AI, never "off"), so an audio pick is remembered as
+# {lang, title, idx, sig, at} — no name/ai/off fields. `sig` is the episode's
+# audio-track layout signature (one `lang:title` token per track, in container
+# order — identical between the VLC status list and the HLS bundle meta, so a
+# pick made on the TV resolves on the phone and vice versa). `idx` is the pick's
+# slot in that list, so episodes with the same layout restore the exact track
+# even when tracks carry no language/title tags. Stored per-file
+# (file_progress[path].audio_sel) and per-series
+# (profile["series_audio_prefs"][<key>]); the per-series entry also keeps a
+# `groups` map — one pick per distinct layout signature — for series stitched
+# from several releases. Keep _resolve_audio_descriptor in sync with the client
+# _lpResolveAudioSel.
+
+def _audio_sig_of(tracks: list[dict]) -> str:
+    """Layout signature of an audio-track list: one 'lang:title' token per
+    track, in order. `tracks` are VLC audio tracks ({language, title, …}); the
+    client computes the same over the bundle's audios[]. Keep in sync."""
+    return "|".join(
+        f"{_canon_lang(t.get('language', '')) or 'und'}:{_norm_sub_title(t.get('title'))}"
+        for t in tracks
+    )
+
+
+def _norm_audio_sel(sel: Optional[dict]) -> Optional[dict]:
+    """Normalize/validate an audio-selection descriptor; None if unusable."""
+    if not isinstance(sel, dict):
+        return None
+    lang = _canon_lang(str(sel.get("lang") or "")) if sel.get("lang") else ""
+    if lang == "und":
+        lang = ""
+    title = _norm_sub_title(sel.get("title"))
+    sig = str(sel.get("sig") or "")
+    try:
+        idx = int(sel.get("idx", -1) if sel.get("idx") is not None else -1)
+    except (TypeError, ValueError):
+        idx = -1
+    if not (lang or title or (sig and idx >= 0)):
+        return None                       # nothing matchable
+    out = {"lang": lang, "title": title, "idx": idx, "sig": sig}
+    at = str(sel.get("at") or "")
+    if at:
+        out["at"] = at
+    return out
+
+
+def _get_series_audio_sel(lib: dict, profile_id: str, series: str) -> Optional[dict]:
+    """The remembered audio descriptor for this profile + series, if any."""
+    series = (series or "").strip()
+    if not (series and profile_id):
+        return None
+    prof = next((p for p in lib.get("profiles", []) if p.get("id") == profile_id), None)
+    if not prof:
+        return None
+    return (prof.get("series_audio_prefs", {}) or {}).get(series)
+
+
+async def _save_series_audio_sel(profile_id: str, series: str, sel: Optional[dict]) -> None:
+    """Persist an audio descriptor for this profile + series so the same audio
+    track (language/kind) is auto-applied on the next episode. Accumulates a
+    `groups` map (signature → descriptor) so a series mixing releases resolves
+    each episode against ITS layout's remembered pick."""
+    series = (series or "").strip()
+    sel = _norm_audio_sel(sel)
+    if not (series and profile_id and sel):
+        return
+    sel.setdefault("at", _now_iso())
+    try:
+        async with _lib_lock:
+            lib = await asyncio.to_thread(_load_lib_raw)
+            prof = next((p for p in lib.get("profiles", []) if p.get("id") == profile_id), None)
+            if not prof:
+                return
+            prefs = prof.setdefault("series_audio_prefs", {})
+            prev = prefs.get(series) or {}
+            groups = dict(prev.get("groups") or {})
+            if sel.get("sig"):
+                groups[sel["sig"]] = {k: v for k, v in sel.items() if k != "groups"}
+            if len(groups) > 16:          # cap: drop the oldest picks
+                oldest = sorted(groups, key=lambda k: str(groups[k].get("at") or ""))
+                for k in oldest[:len(groups) - 16]:
+                    groups.pop(k, None)
+            entry = {**sel, "updated_at": _now_iso()}
+            if groups:
+                entry["groups"] = groups
+            prefs[series] = entry
+            await asyncio.to_thread(_save_lib_raw, lib)
+    except Exception:
+        pass
+
+
+def _resolve_audio_descriptor(sel: dict, tracks: list[dict]) -> Optional[dict]:
+    """Match a remembered audio descriptor against the live VLC audio-track list
+    (each {id, language, title, …}). Returns the matched track or None. Mirrors
+    the on-device _lpResolveAudioSel. Order:
+      1. same track layout (sig) → same slot (idx);
+      2. group memory: the pick remembered for THIS episode's layout;
+      3. language;
+      4. container title.
+    """
+    if not sel:
+        return None
+    cur_sig = _audio_sig_of(tracks)
+
+    def _try_exact(d: dict) -> Optional[dict]:
+        sig = d.get("sig") or ""
+        try:
+            idx = int(d.get("idx", -1) if d.get("idx") is not None else -1)
+        except (TypeError, ValueError):
+            idx = -1
+        if sig and 0 <= idx < len(tracks) and sig == cur_sig:
+            return tracks[idx]
+        return None
+
+    cand = _try_exact(sel)
+    if cand:
+        return cand
+    grp = (sel.get("groups") or {}).get(cur_sig)
+    if isinstance(grp, dict):
+        cand = _try_exact(grp)
+        if cand:
+            return cand
+        try:
+            gidx = int(grp.get("idx", -1) or -1)
+        except (TypeError, ValueError):
+            gidx = -1
+        if 0 <= gidx < len(tracks):
+            return tracks[gidx]
+    slang = sel.get("lang") or ""
+    if slang:
+        cand = next((t for t in tracks
+                     if _canon_lang(t.get("language", "")) == slang), None)
+        if cand:
+            return cand
+    stitle = _norm_sub_title(sel.get("title"))
+    if stitle:
+        cand = next((t for t in tracks
+                     if _norm_sub_title(t.get("title")) == stitle), None)
+        if cand:
+            return cand
+    return None
 
 
 async def _load_all_local_subs(video: Path) -> list[dict]:
@@ -3260,9 +3409,33 @@ async def _apply_track_prefs(
                   .get(file_path, {}))
         audio = fp.get("audio_track")
         subtitle = fp.get("subtitle_track")
-        if audio is not None:
+        # Audio: newest intent wins between the per-file descriptor (`at`) and
+        # the per-series pick (`updated_at`) — a track chosen later on another
+        # episode/device beats a stale per-file pick. The raw ES-ID fast path
+        # only applies when it isn't outranked by a newer series pick (embedded
+        # audio ES IDs are container-derived and stable across replays of the
+        # SAME file, but meaningless on a different episode — there the
+        # descriptor drives selection against the live track list).
+        a_file_sel = _norm_audio_sel(fp.get("audio_sel"))
+        a_series_sel = _get_series_audio_sel(lib, profile_id, _series_of_item(item))
+        a_chose_file = a_file_sel is not None
+        a_sel = a_file_sel if a_chose_file else a_series_sel
+        if a_file_sel and a_series_sel:
+            f_at = _parse_iso_dt(a_file_sel.get("at"))
+            s_at = _parse_iso_dt(a_series_sel.get("updated_at"))
+            if s_at and (f_at is None or s_at > f_at):
+                a_sel, a_chose_file = a_series_sel, False
+        if a_chose_file and a_series_sel and isinstance(a_series_sel.get("groups"), dict):
+            a_sel = {**a_sel, "groups": a_series_sel["groups"]}
+        if audio is not None and (a_sel is None or a_chose_file):
             state.current_audio_track = audio
             await vlc("audio_track", val=str(audio))
+        elif a_sel is not None:
+            audio_tracks, _ = _parse_track_streams(await vlc_status())
+            cand = _resolve_audio_descriptor(a_sel, audio_tracks)
+            if cand:
+                state.current_audio_track = cand["id"]
+                await vlc("audio_track", val=str(cand["id"]))
         # Newest intent wins between the per-file and the per-series subtitle
         # descriptor: a pick made later on another episode (or on the device)
         # beats a stale per-file pick. This is also what heals per-file `off`
@@ -5399,7 +5572,8 @@ async def _mark_file_watched_internal(
         "updated_at": _now_iso(),
         **{k: v for k, v in existing.items()
            if k in ("audio_track", "subtitle_track",
-                    "local_audio_idx", "local_subtitle_idx", "subtitle_sel")},
+                    "local_audio_idx", "local_subtitle_idx", "subtitle_sel",
+                    "audio_sel")},
     }
     await put_library(lib)
     await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "ready")})
@@ -5756,7 +5930,8 @@ async def vlc_progress_tracker() -> None:
                 # earlier, so replays defaulted back to subs-off).
                 **{k: v for k, v in existing_fp.items()
                    if k in ("audio_track", "subtitle_track",
-                            "local_audio_idx", "local_subtitle_idx", "subtitle_sel")},
+                            "local_audio_idx", "local_subtitle_idx", "subtitle_sel",
+                    "audio_sel")},
             }
             await put_library(lib)
 
@@ -7020,12 +7195,13 @@ async def rename_library_item(item_id: str, req: RenameReq) -> JSONResponse:
                 # purpose; only auto-matched art should re-resolve to the new name.
                 if (it.get("metadata") or {}).get("source") not in ("manual", "custom"):
                     it.pop("metadata", None)
-        # Series subtitle prefs are keyed by the series string — re-key them so a
-        # remembered subtitle choice survives the rename.
+        # Series subtitle/audio prefs are keyed by the series string — re-key
+        # them so a remembered track choice survives the rename.
         for prof in lib.get("profiles", []):
-            prefs = prof.get("series_subtitle_prefs")
-            if isinstance(prefs, dict) and old_series in prefs:
-                prefs[new_name] = prefs.pop(old_series)
+            for key in ("series_subtitle_prefs", "series_audio_prefs"):
+                prefs = prof.get(key)
+                if isinstance(prefs, dict) and old_series in prefs:
+                    prefs[new_name] = prefs.pop(old_series)
     else:
         # Movie / one-off: no series group, so rename this item's own title
         # (which is what its metadata query falls back to).
@@ -7964,7 +8140,8 @@ async def update_progress(item_id: str, req: ProgressReq) -> JSONResponse:
         # dropping it here reset subs to off on the next replay.
         **{k: v for k, v in existing.items()
            if k in ("audio_track", "subtitle_track",
-                    "local_audio_idx", "local_subtitle_idx", "subtitle_sel")},
+                    "local_audio_idx", "local_subtitle_idx", "subtitle_sel",
+                    "audio_sel")},
     }
     await put_library(lib)
     return JSONResponse({"ok": True})
@@ -8012,6 +8189,7 @@ class SyncProgressEvent(BaseModel):
     client_updated_at: str                       # when watched on the device (ISO)
     base_synced_at: Optional[str] = None         # device's last sync of THIS file (ISO)
     subtitle_sel: Optional[dict] = None          # preserved track picks (optional)
+    audio_sel: Optional[dict] = None
     local_audio_idx: Optional[int] = None
     local_subtitle_idx: Optional[int] = None
 
@@ -8075,6 +8253,14 @@ async def sync_progress(req: SyncProgressReq, request: Request) -> JSONResponse:
                         merged["subtitle_sel"] = prev["subtitle_sel"]
                 elif prev.get("subtitle_sel") is not None:
                     merged["subtitle_sel"] = prev["subtitle_sel"]
+                if ev.audio_sel is not None:
+                    norm = _norm_audio_sel(ev.audio_sel)
+                    if norm:
+                        merged["audio_sel"] = norm
+                    elif prev.get("audio_sel") is not None:
+                        merged["audio_sel"] = prev["audio_sel"]
+                elif prev.get("audio_sel") is not None:
+                    merged["audio_sel"] = prev["audio_sel"]
                 file_progress[ev.file_path] = merged
                 prof_prog["last_file"] = ev.file_path
                 applied.append({"item_id": ev.item_id, "file_path": ev.file_path,
@@ -8190,6 +8376,7 @@ class SyncResolution(BaseModel):
     duration_sec: Optional[float] = None
     client_updated_at: Optional[str] = None
     subtitle_sel: Optional[dict] = None
+    audio_sel: Optional[dict] = None
     local_audio_idx: Optional[int] = None
     local_subtitle_idx: Optional[int] = None
 
@@ -8254,6 +8441,14 @@ async def sync_resolve(req: SyncResolveReq, request: Request) -> JSONResponse:
                         merged["subtitle_sel"] = existing["subtitle_sel"]
                 elif existing.get("subtitle_sel") is not None:
                     merged["subtitle_sel"] = existing["subtitle_sel"]
+                if rz.audio_sel is not None:
+                    norm = _norm_audio_sel(rz.audio_sel)
+                    if norm:
+                        merged["audio_sel"] = norm
+                    elif existing.get("audio_sel") is not None:
+                        merged["audio_sel"] = existing["audio_sel"]
+                elif existing.get("audio_sel") is not None:
+                    merged["audio_sel"] = existing["audio_sel"]
                 file_progress[rz.file_path] = merged
                 prof_prog["last_file"] = rz.file_path
                 server_updated_at = now
@@ -8289,6 +8484,9 @@ class LocalTracksReq(BaseModel):
     # {off,lang,ai,name,title,idx,sig,at} — see _norm_sub_sel.
     # Supersedes subtitle_idx, which can't address sidecar/AI picks (see GOTCHAS).
     subtitle_sel: Optional[dict] = None
+    # Resolvable descriptor for the chosen audio track, applied on replay AND on
+    # other episodes of the series. {lang,title,idx,sig,at} — see _norm_audio_sel.
+    audio_sel: Optional[dict] = None
     # False ⇒ update the per-file pick only, NOT the per-series memory. The
     # client sends False for automatic writes (e.g. the late-AI-sub upgrade);
     # only a deliberate viewer pick may rewrite the series-wide preference —
@@ -8319,6 +8517,14 @@ async def set_local_tracks(item_id: str, req: LocalTracksReq) -> JSONResponse:
                   .setdefault(req.file_path, {}))
         if req.audio_idx is not None:
             fp["local_audio_idx"] = req.audio_idx
+        if req.audio_sel is not None:
+            norm = _norm_audio_sel(req.audio_sel)
+            if norm:
+                norm.setdefault("at", _now_iso())   # newest-wins vs series pick
+                fp["audio_sel"] = norm
+                # Drop any older VLC ES-ID pick for this file — it would
+                # otherwise outrank this newer descriptor on the next VLC play.
+                fp.pop("audio_track", None)
         if req.subtitle_idx is not None:
             fp["local_subtitle_idx"] = req.subtitle_idx
         if req.subtitle_sel is not None:
@@ -8335,6 +8541,10 @@ async def set_local_tracks(item_id: str, req: LocalTracksReq) -> JSONResponse:
     # — but only for a deliberate viewer pick (see LocalTracksReq.sub_series).
     if req.subtitle_sel is not None and req.sub_series and series:
         await _save_series_sub_sel(req.profile_id, series, req.subtitle_sel)
+    # An audio pick is always a deliberate viewer action (no automatic audio
+    # writes), so it always updates the series-wide preference.
+    if req.audio_sel is not None and series:
+        await _save_series_audio_sel(req.profile_id, series, req.audio_sel)
     return JSONResponse({"ok": True})
 
 
@@ -8392,7 +8602,7 @@ async def mark_watched(item_id: str, req: MarkWatchedReq) -> JSONResponse:
                 **{k: v for k, v in existing.items()
                    if k in ("audio_track", "subtitle_track",
                             "local_audio_idx", "local_subtitle_idx",
-                            "subtitle_sel")},
+                            "subtitle_sel", "audio_sel")},
             }
         else:
             file_prog[path] = {
@@ -8403,7 +8613,7 @@ async def mark_watched(item_id: str, req: MarkWatchedReq) -> JSONResponse:
                 **{k: v for k, v in existing.items()
                    if k in ("audio_track", "subtitle_track",
                             "local_audio_idx", "local_subtitle_idx",
-                            "subtitle_sel")},
+                            "subtitle_sel", "audio_sel")},
             }
 
     await put_library(lib)
@@ -10285,7 +10495,38 @@ async def set_audio_track(track_id: int) -> JSONResponse:
             state.library_item_id, state.library_profile_id,
             state.library_current_file, audio=track_id,
         ))
+        asyncio.create_task(_remember_vlc_audio_pick(track_id))
     return JSONResponse({"ok": True})
+
+
+async def _remember_vlc_audio_pick(track_id: int) -> None:
+    """Best-effort: record the viewer's manual VLC audio pick as a resolvable
+    descriptor — per-file (so this file replays with it, and the on-device
+    player picks it up on a VLC→device switch) and per-series (so the next
+    episode gets the same track). The language/title/signature come from VLC's
+    live audio-track list. A pick with no lang, title, or resolvable slot can't
+    be re-matched later, so it isn't remembered (the raw ES ID saved by
+    set_audio_track still covers same-file replays)."""
+    item_id, profile_id = state.library_item_id, state.library_profile_id
+    file_path = state.library_current_file
+    if not (item_id and profile_id) or track_id is None or track_id < 0:
+        return
+    audio_tracks, _ = _parse_track_streams(await vlc_status())
+    entry = next((t for t in audio_tracks if t["id"] == track_id), None)
+    if not entry:
+        return
+    idx = next((i for i, t in enumerate(audio_tracks) if t["id"] == track_id), -1)
+    sel = {"lang": _canon_lang(entry.get("language", "")),
+           "title": _norm_sub_title(entry.get("title")),
+           "idx": idx, "sig": _audio_sig_of(audio_tracks), "at": _now_iso()}
+    if _norm_audio_sel(sel) is None:
+        return                            # nothing matchable — not rememberable
+    if file_path:
+        await _save_track_pref(item_id, profile_id, file_path, audio_sel=sel)
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if item:
+        await _save_series_audio_sel(profile_id, _series_of_item(item), sel)
 
 
 @app.post("/api/vlc/track/subtitle/{track_id}")
@@ -17700,10 +17941,11 @@ def _dir_size_bytes(p: Path) -> int:
 def _saved_local_tracks(lib: dict, item: dict, profile_id: str, file_path: str) -> dict:
     """Return the local-player track picks saved for this profile + file.
 
-    `subtitle_sel` is the per-file resolvable subtitle descriptor; `series_subtitle_sel`
-    is the per-series fallback (applied when this file has no own pick). The client
-    resolves whichever applies against its live track list. `subtitle_idx` is kept
-    for the legacy bundle-index path only."""
+    `subtitle_sel`/`audio_sel` are the per-file resolvable descriptors;
+    `series_subtitle_sel`/`series_audio_sel` are the per-series fallbacks (applied
+    when this file has no own pick). The client resolves whichever applies against
+    its live track list. `subtitle_idx`/`audio_idx` are kept for the legacy
+    bundle-index path only."""
     fp = (item.get("progress", {})
               .get(profile_id, {})
               .get("file_progress", {})
@@ -17715,9 +17957,14 @@ def _saved_local_tracks(lib: dict, item: dict, profile_id: str, file_path: str) 
         out["subtitle_idx"] = fp["local_subtitle_idx"]
     if isinstance(fp.get("subtitle_sel"), dict):
         out["subtitle_sel"] = fp["subtitle_sel"]
+    if isinstance(fp.get("audio_sel"), dict):
+        out["audio_sel"] = fp["audio_sel"]
     series_sel = _get_series_sub_sel(lib, profile_id, _series_of_item(item))
     if series_sel:
         out["series_subtitle_sel"] = series_sel
+    series_asel = _get_series_audio_sel(lib, profile_id, _series_of_item(item))
+    if series_asel:
+        out["series_audio_sel"] = series_asel
     return out
 
 

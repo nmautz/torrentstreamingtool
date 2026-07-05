@@ -8621,6 +8621,7 @@ async function _appFlushOfflineProgress() {
             position_sec: e.positionSec, duration_sec: e.durationSec,
             client_updated_at: e.clientUpdatedAt, base_synced_at: e.baseSyncedAt || null,
             subtitle_sel: e.subtitleSel || null,
+            audio_sel: e.audioSel || null,
             local_audio_idx: (e.localAudioIdx ?? null),
             local_subtitle_idx: (e.localSubtitleIdx ?? null),
           })) }),
@@ -8783,6 +8784,7 @@ async function _appApplyConflictResolutions() {
       duration_sec: (ev.durationSec != null ? ev.durationSec : cl.duration_sec) || 0,
       client_updated_at: ev.clientUpdatedAt || cl.client_updated_at || null,
       subtitle_sel: (ev.subtitleSel || null),
+      audio_sel: (ev.audioSel || null),
       local_audio_idx: (ev.localAudioIdx ?? null),
       local_subtitle_idx: (ev.localSubtitleIdx ?? null),
     });
@@ -8889,6 +8891,7 @@ async function _appSyncDebug() {
           position_sec: e.positionSec, duration_sec: e.durationSec,
           client_updated_at: e.clientUpdatedAt, base_synced_at: e.baseSyncedAt || null,
           subtitle_sel: e.subtitleSel || null,
+          audio_sel: e.audioSel || null,
           local_audio_idx: (e.localAudioIdx ?? null),
           local_subtitle_idx: (e.localSubtitleIdx ?? null),
         })) }),
@@ -9261,6 +9264,7 @@ async function _appOfflineSavedTracks(itemId, filePath) {
     if (p.localAudioIdx != null) out.audio_idx = p.localAudioIdx;
     if (p.localSubtitleIdx != null) out.subtitle_idx = p.localSubtitleIdx;
     if (p.subtitleSel) out.subtitle_sel = p.subtitleSel;
+    if (p.audioSel) out.audio_sel = p.audioSel;
     return out;
   } catch (_) { return {}; }
 }
@@ -11981,9 +11985,25 @@ async function _lpLoadIndex(seekTo) {
   // when profile_id is provided), otherwise the rendition flagged `default`
   // in the master playlist (which mirrors the source's disposition.default).
   const saved = prep.saved_tracks || {};
-  const defAudioIdx = (saved.audio_idx != null) ? saved.audio_idx
-                    : (lp.audios.findIndex(a => a.default) >= 0
-                       ? lp.audios.findIndex(a => a.default) : 0);
+  // Audio default: a remembered descriptor wins — NEWEST intent first between
+  // the per-file pick (`at`) and the per-series pick (`updated_at`), so a track
+  // chosen later on another episode/device beats a stale per-file pick. Then the
+  // legacy bundle index; then the rendition flagged `default`.
+  const aFileSel = saved.audio_sel || null;
+  const aSerSel  = saved.series_audio_sel || null;
+  let audSel = aFileSel || aSerSel;
+  if (aFileSel && aSerSel) {
+    const fa = Date.parse(aFileSel.at || "") || 0;
+    const sa = Date.parse(aSerSel.updated_at || "") || 0;
+    audSel = (sa > fa) ? aSerSel : aFileSel;
+  }
+  if (audSel === aFileSel && aSerSel && aSerSel.groups) {
+    audSel = { ...aFileSel, groups: aSerSel.groups };
+  }
+  let defAudioIdx = audSel ? _lpResolveAudioSel(audSel) : null;
+  if (defAudioIdx == null && saved.audio_idx != null) defAudioIdx = saved.audio_idx;
+  if (defAudioIdx == null) defAudioIdx = (lp.audios.findIndex(a => a.default) >= 0
+                                          ? lp.audios.findIndex(a => a.default) : 0);
   // Subtitle default: a remembered descriptor wins — NEWEST intent first
   // between the per-file pick (`at`) and the per-series pick (`updated_at`), so
   // a series-wide choice made later on another episode/device beats a stale
@@ -12534,6 +12554,61 @@ function _lpResolveSubSel(sel) {
   return null;
 }
 
+// ── Audio-selection descriptor + resolution ─────────────────────────────────
+// Mirrors the subtitle machinery, simplified: audio is always embedded (no
+// sidecars/AI, never off). Keep in sync with backend _audio_sig_of /
+// _resolve_audio_descriptor. The signature is identical between the bundle's
+// audios[] and VLC's audio list, so a pick made on the phone group-matches on
+// the TV and vice versa.
+function _lpAudioSig() {
+  return (lp.audios || [])
+    .map(a => (_lpCanonLang(a.language) || "und") + ":" + _lpNormSubTitle(a.title))
+    .join("|");
+}
+
+// Build a resolvable descriptor {lang,title,idx,sig,at} for an audio index.
+function _lpDescriptorForAudioIdx(idx) {
+  const i = Number(idx);
+  const a = (lp.audios || [])[i];
+  if (!a) return null;
+  return { lang: _lpCanonLang(a.language || ""), title: _lpNormSubTitle(a.title),
+           idx: i, sig: _lpAudioSig(), at: new Date().toISOString() };
+}
+
+// Resolve a remembered audio descriptor to a current audio index, or null.
+// Mirrors backend _resolve_audio_descriptor: same layout (sig) same slot (idx)
+// → group memory for this layout → language → container title.
+function _lpResolveAudioSel(sel) {
+  if (!sel) return null;
+  const aud = lp.audios || [];
+  const curSig = _lpAudioSig();
+  const tryExact = (d) => {
+    const idx = (d.idx != null) ? Number(d.idx) : -1;
+    if (d.sig && d.sig === curSig && idx >= 0 && idx < aud.length) return idx;
+    return null;
+  };
+  let k = tryExact(sel);
+  if (k != null) return k;
+  const g = (sel.groups || {})[curSig];
+  if (g) {
+    k = tryExact(g);
+    if (k != null) return k;
+    const gi = (g.idx != null) ? Number(g.idx) : -1;
+    if (gi >= 0 && gi < aud.length) return gi;
+  }
+  const want = _lpCanonLang(sel.lang || "");
+  if (want) {
+    const i = aud.findIndex(a => _lpCanonLang(a.language) === want);
+    if (i >= 0) return i;
+  }
+  const ti = _lpNormSubTitle(sel.title || "");
+  if (ti) {
+    const i = aud.findIndex(a => _lpNormSubTitle(a.title) === ti);
+    if (i >= 0) return i;
+  }
+  return null;
+}
+
 // Automatic default when nothing is remembered. The on-device player leaves subs
 // OFF by default (returning null) — the real-over-AI policy lives on the VLC
 // path; here a real sub still gets surfaced by the upgrade poller once present.
@@ -12939,6 +13014,9 @@ function _lpSaveLocalTracks(what) {
   const audioIdx = Number.isFinite(Number(lp.pendingAudioIdx)) ? Number(lp.pendingAudioIdx) : null;
   const subIdx   = subIsBundle ? Number(lp.pendingSubtitleIdx) : -1;
   const subSel   = wantSub ? _lpDescriptorForKey(lp.pendingSubtitleIdx) : null;
+  // Audio descriptor only for audio-triggered saves — a subtitle change must not
+  // re-stamp (and re-broadcast to the series) the current audio track.
+  const audioSel = (what === "audio") ? _lpDescriptorForAudioIdx(lp.pendingAudioIdx) : null;
   // Offline cached-player mode: this origin's /api is the loopback server — the
   // pick goes into the native store instead (same fields _appOfflineSavedTracks
   // restores from; the eventual host sync carries them via /api/sync/progress).
@@ -12962,6 +13040,7 @@ function _lpSaveLocalTracks(what) {
             itemId, filePath, positionSec: pos, durationSec: dur,
             profileId: profile.id || "",
             localAudioIdx: audioIdx == null ? undefined : audioIdx,
+            audioSel: audioSel || undefined,
             // Subtitle fields only for subtitle-triggered saves — an audio
             // change must not snapshot an accidental "off" (see `what` above).
             localSubtitleIdx: wantSub ? subIdx : undefined,
@@ -12976,6 +13055,7 @@ function _lpSaveLocalTracks(what) {
     profile_id: profile.id,
     file_path:  lp.filePath,
     audio_idx:  audioIdx,
+    ...(audioSel ? { audio_sel: audioSel } : {}),
     ...(wantSub ? {
       subtitle_idx: subIdx,
       subtitle_sel: subSel,
@@ -14511,6 +14591,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.8.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.9.0</div>
 </body>
 </html>

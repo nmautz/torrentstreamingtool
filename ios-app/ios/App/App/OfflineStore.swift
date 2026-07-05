@@ -23,7 +23,7 @@
 //    setProfile({ profileId, profileName? })                 -> {}
 //    getProfile()                                            -> { profileId, profileName }
 //    saveProgress({ itemId, filePath, positionSec, durationSec,
-//                   profileId?, subtitleSel?, localAudioIdx?,
+//                   profileId?, subtitleSel?, audioSel?, localAudioIdx?,
 //                   localSubtitleIdx? })                      -> {}
 //    getProgress({ itemId, filePath, profileId? })           -> { found, positionSec,
 //                                                                  durationSec, completed,
@@ -45,8 +45,8 @@
 //  device-facing endpoints. Same cross-origin reason the progress log is native.
 //
 //  <event> = { profileId, itemId, filePath, positionSec, durationSec, completed,
-//              clientUpdatedAt, baseSyncedAt, subtitleSel?, localAudioIdx?,
-//              localSubtitleIdx? }
+//              clientUpdatedAt, baseSyncedAt, subtitleSel?, audioSel?,
+//              localAudioIdx?, localSubtitleIdx? }
 //
 
 import Foundation
@@ -97,10 +97,11 @@ public class OfflineStore: CAPPlugin, CAPBridgedPlugin {
         let pid = call.getString("profileId")
         // JSObject ([String: JSValue]) → plain [String: Any] for the Foundation-only store.
         let sel = call.getObject("subtitleSel")?.reduce(into: [String: Any]()) { $0[$1.key] = $1.value }
+        let asel = call.getObject("audioSel")?.reduce(into: [String: Any]()) { $0[$1.key] = $1.value }
         store.saveProgress(
             profileId: pid, itemId: itemId, filePath: filePath,
             positionSec: pos, durationSec: dur,
-            subtitleSel: sel,
+            subtitleSel: sel, audioSel: asel,
             localAudioIdx: call.getInt("localAudioIdx"),
             localSubtitleIdx: call.getInt("localSubtitleIdx"))
         call.resolve()
@@ -244,7 +245,8 @@ final class OfflineProgressStore {
 
     func saveProgress(profileId: String?, itemId: String, filePath: String,
                       positionSec: Double, durationSec: Double,
-                      subtitleSel: [String: Any]?, localAudioIdx: Int?, localSubtitleIdx: Int?) {
+                      subtitleSel: [String: Any]?, audioSel: [String: Any]?,
+                      localAudioIdx: Int?, localSubtitleIdx: Int?) {
         queue.sync {
             var obj = read()
             let pid = (profileId?.isEmpty == false ? profileId! : activeProfileLocked(obj))
@@ -272,6 +274,7 @@ final class OfflineProgressStore {
             rec["dirty"] = true
             if rec["baseSyncedAt"] == nil { rec["baseSyncedAt"] = NSNull() }
             if let s = subtitleSel { rec["subtitleSel"] = s }
+            if let a = audioSel { rec["audioSel"] = a }
             if let a = localAudioIdx { rec["localAudioIdx"] = a }
             if let s = localSubtitleIdx { rec["localSubtitleIdx"] = s }
 
@@ -301,6 +304,7 @@ final class OfflineProgressStore {
             // restores audio/subtitle selections from these (the host's
             // remembered picks are unreachable offline). Absent when never set.
             if let s = rec["subtitleSel"] { out["subtitleSel"] = s }
+            if let a = rec["audioSel"] { out["audioSel"] = a }
             if let a = rec["localAudioIdx"] { out["localAudioIdx"] = a }
             if let i = rec["localSubtitleIdx"] { out["localSubtitleIdx"] = i }
             return out
@@ -422,6 +426,7 @@ final class OfflineProgressStore {
             "dirty": rec["dirty"] ?? true,
         ]
         if let s = rec["subtitleSel"] { e["subtitleSel"] = s }
+        if let a = rec["audioSel"] { e["audioSel"] = a }
         if let a = rec["localAudioIdx"] { e["localAudioIdx"] = a }
         if let s = rec["localSubtitleIdx"] { e["localSubtitleIdx"] = s }
         return e

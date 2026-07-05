@@ -723,6 +723,14 @@ Two ways to populate the cache:
      next play the resolver (`_lpResolveSubSel`) matches the file's, then the
      series', descriptor against the live track list: `name` → `lang`+kind →
      any-kind in that language → lone-option.
+   - **Audio picks work the same way (8.9.0).** An audio switch POSTs
+     `audio_sel` (`{lang, title, idx, sig, at}` — no sidecar/AI/off, since audio
+     is always embedded), saved per-file *and* per profile+series
+     (`series_audio_prefs`). `_lpResolveAudioSel` restores the newest of the
+     file/series pick by same-layout slot → group → language → title, falling
+     back to the legacy `audio_idx` then the `default` rendition. Both this
+     player and the VLC/TV path read and write it, so an audio choice follows
+     the viewer across a device↔VLC switch and onto the next episode.
    - **Late-sub upgrade.** When the default selection lands on an *auto-applied*
      AI sub (`lp.subAutoApplied`), `_lpStartSubUpgradePoll` polls
      `GET /api/library/{id}/subs` every 15 s for a real preferred-language sub
@@ -813,9 +821,9 @@ exit/transition:
 
 `update_progress` preserves the file's existing `audio_track` /
 `subtitle_track` (VLC ES IDs) **and** `local_audio_idx` /
-`local_subtitle_idx` / `subtitle_sel` (HLS rendition indices + the subtitle
-descriptor) across writes, so a progress
-write doesn't wipe either track-pref system.
+`local_subtitle_idx` / `subtitle_sel` / `audio_sel` (HLS rendition indices + the
+subtitle & audio descriptors) across writes, so a progress
+write doesn't wipe any track-pref system.
 
 ### 5. Auto-advance + manual Prev/Next + next-episode warm-prep
 

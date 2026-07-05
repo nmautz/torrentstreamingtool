@@ -45,7 +45,7 @@ The on-device save path (`_lpSaveLocalTracks`) snapshots `lp.pendingSubtitleIdx`
 
 ### Every `file_progress` writer must preserve the sibling track-pick keys
 
-`file_progress[path]` holds watch position **and** the track picks (`audio_track`, `subtitle_track`, `local_audio_idx`, `local_subtitle_idx`, `subtitle_sel`) as sibling keys in one dict. Any writer that replaces the whole entry with just `{position_sec, duration_sec, completed, updated_at}` silently wipes the picks — and progress writers fire *constantly*: `vlc_progress_tracker` saves every 15 s during VLC playback, and the on-device player POSTs `/api/library/{id}/progress` on a similar cadence (plus a `sendBeacon` on page hide). This was exactly the "subtitles default back to off after stop/start" bug (fixed 7.16.1): the pick was saved correctly at selection time, then clobbered by the next periodic progress write, so the replay found no pick and fell back to the subs-off default. When adding or touching **any** code that writes a `file_progress` entry, spread the existing entry's track keys into the new dict (grep for `_TRACK_KEYS` / the five key names — `mark_watched`, `update_progress`, `sync_progress`, `sync_resolve`, and the tracker all do this).
+`file_progress[path]` holds watch position **and** the track picks (`audio_track`, `subtitle_track`, `local_audio_idx`, `local_subtitle_idx`, `subtitle_sel`, `audio_sel`) as sibling keys in one dict. Any writer that replaces the whole entry with just `{position_sec, duration_sec, completed, updated_at}` silently wipes the picks — and progress writers fire *constantly*: `vlc_progress_tracker` saves every 15 s during VLC playback, and the on-device player POSTs `/api/library/{id}/progress` on a similar cadence (plus a `sendBeacon` on page hide). This was exactly the "subtitles default back to off after stop/start" bug (fixed 7.16.1): the pick was saved correctly at selection time, then clobbered by the next periodic progress write, so the replay found no pick and fell back to the subs-off default. When adding or touching **any** code that writes a `file_progress` entry, spread the existing entry's track keys into the new dict (grep for `_TRACK_KEYS` / the six key names — `mark_watched`, `update_progress`, `sync_progress`, `sync_resolve`, and the tracker all do this). `audio_sel` (8.9.0) is the audio equivalent of `subtitle_sel` — a resolvable descriptor remembered per-file and per profile+series (`series_audio_prefs`); spread and preserve it exactly the same way.
 
 ### A progress save's position and file must come from the same instant — don't straddle an auto-advance
 
@@ -698,11 +698,12 @@ HLS playback seeks land on the nearest fmp4 segment boundary, then plays from th
 
 ### Local-player track picks ≠ VLC track picks
 
-Two parallel persistence systems live in `file_progress`:
+Three persistence layers live in `file_progress`:
 - `audio_track` / `subtitle_track` — VLC's elementary-stream IDs (from `"Stream N"` keys of `vs.information.category`). Set via `/api/vlc/track/audio/{id}`, applied by `_apply_track_prefs` after a short delay on VLC playback start.
 - `local_audio_idx` / `local_subtitle_idx` — 0-based indices into the HLS bundle's `meta.json.audios` / `subtitles` arrays. Set via `/api/library/{id}/local-tracks`, applied by the frontend on `MANIFEST_PARSED` / `loadedmetadata`.
+- `audio_sel` / `subtitle_sel` — the **resolvable descriptors** (8.9.0 / 8.5.0). These are the cross-player, cross-episode layer: they carry a pick across a device↔VLC switch and onto the next episode (also stored per profile+series). They **outrank** the raw ES-ID / bundle-index layers, which remain the same-file/legacy fallback.
 
-The two are intentionally independent — a user who switches audio to Japanese in VLC on TV might still want English on their phone (different speakers / different room). `update_progress` and `mark_watched` both preserve **all four** keys across writes. Don't merge them into a single field thinking "they mean the same thing" — they don't.
+The raw ES-ID and bundle-index layers are engine-local (a VLC ES ID means nothing to the phone and vice versa), which is why they're separate keys — but the descriptor layer is deliberately shared, so a deliberate audio/subtitle pick now follows the viewer between the TV and their phone. `update_progress` and `mark_watched` preserve **all six** keys across writes (grep `_TRACK_KEYS`). Don't collapse the raw ES-ID and bundle-index keys into one field thinking "they mean the same thing" — they don't.
 
 ### Styled ASS/SSA subtitles: libass overlay in bundle mode, VTT everywhere else
 
