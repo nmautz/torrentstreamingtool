@@ -3080,6 +3080,82 @@ async def _save_series_audio_sel(profile_id: str, series: str, sel: Optional[dic
         pass
 
 
+# ── Profile-level preferred-audio-language memory ────────────────────────────
+# The per-series descriptor above only crosses episodes that share a series key
+# (`_series_of_item`). But episodes downloaded individually are each a SEPARATE
+# library item with an empty `series` → a unique `item:<id>` key, so per-series
+# audio memory never carries between them. Subtitles don't suffer this because
+# the admin subtitle policy re-selects the preferred *language* on every episode
+# regardless of item grouping; audio had no equivalent. This is that equivalent:
+# a self-learning per-profile audio-language preference, updated on every
+# deliberate pick and applied as a fallback whenever no descriptor resolves — so
+# choosing e.g. Japanese once makes every later episode prefer Japanese audio,
+# even across unrelated items. Stored as {lang, idx, count, at}; `idx`/`count`
+# let untagged multi-audio releases (no language tags) still restore the same
+# slot, but only when the track count matches (avoids picking the wrong slot on
+# a differently-laid-out episode).
+
+def _get_profile_audio_pref(lib: dict, profile_id: str) -> Optional[dict]:
+    if not profile_id:
+        return None
+    prof = next((p for p in lib.get("profiles", []) if p.get("id") == profile_id), None)
+    if not prof:
+        return None
+    pref = prof.get("audio_language_pref")
+    return pref if isinstance(pref, dict) else None
+
+
+async def _learn_profile_audio_pref(profile_id: str, sel: Optional[dict]) -> None:
+    """Record the profile's preferred audio language/slot from a deliberate pick.
+    Derived from the same descriptor VLC/device picks build, so both players feed
+    it. A pick with neither a language nor a resolvable slot isn't learnable."""
+    sel = _norm_audio_sel(sel)
+    if not (profile_id and sel):
+        return
+    lang = sel.get("lang") or ""
+    try:
+        idx = int(sel.get("idx", -1))
+    except (TypeError, ValueError):
+        idx = -1
+    sig = sel.get("sig") or ""
+    count = (sig.count("|") + 1) if sig else 0
+    if not (lang or (count and idx >= 0)):
+        return
+    try:
+        async with _lib_lock:
+            lib = await asyncio.to_thread(_load_lib_raw)
+            prof = next((p for p in lib.get("profiles", []) if p.get("id") == profile_id), None)
+            if not prof:
+                return
+            prof["audio_language_pref"] = {
+                "lang": lang, "idx": idx, "count": count, "at": _now_iso()}
+            await asyncio.to_thread(_save_lib_raw, lib)
+    except Exception:
+        pass
+
+
+def _resolve_profile_audio_pref(pref: Optional[dict], tracks: list[dict]) -> Optional[dict]:
+    """Match the profile audio-language preference against the live track list:
+    language first (stable across releases), then the remembered slot only when
+    this episode's audio layout has the same number of tracks."""
+    if not pref or not tracks:
+        return None
+    lang = pref.get("lang") or ""
+    if lang:
+        cand = next((t for t in tracks
+                     if _canon_lang(t.get("language", "")) == lang), None)
+        if cand:
+            return cand
+    try:
+        idx = int(pref.get("idx", -1))
+        count = int(pref.get("count", 0))
+    except (TypeError, ValueError):
+        return None
+    if count and count == len(tracks) and 0 <= idx < len(tracks):
+        return tracks[idx]
+    return None
+
+
 def _resolve_audio_descriptor(sel: dict, tracks: list[dict]) -> Optional[dict]:
     """Match a remembered audio descriptor against the live VLC audio-track list
     (each {id, language, title, …}). Returns the matched track or None. Mirrors
@@ -3427,22 +3503,31 @@ async def _apply_track_prefs(
                 a_sel, a_chose_file = a_series_sel, False
         if a_chose_file and a_series_sel and isinstance(a_series_sel.get("groups"), dict):
             a_sel = {**a_sel, "groups": a_series_sel["groups"]}
+        # Profile-level preferred-audio-language fallback — the audio analog of
+        # the subtitle language default. Carries a pick across episodes even when
+        # they're separate library items (no shared series key), which is the
+        # common case for individually-downloaded episodes.
+        prof_pref = _get_profile_audio_pref(lib, profile_id)
         if audio is not None and (a_sel is None or a_chose_file):
             state.current_audio_track = audio
             await vlc("audio_track", val=str(audio))
-        elif a_sel is not None:
+        elif a_sel is not None or prof_pref is not None:
             # Resolve against the LIVE audio-track list. VLC populates that list
             # asynchronously after opening a stream, so a single snapshot at the
             # fixed `delay` can arrive before the tracks exist — the resolve then
             # finds nothing and audio silently stays on VLC's default. That race
             # is exactly what made cross-episode audio memory "sometimes" work.
-            # Poll briefly (up to ~4 s) until tracks appear and the descriptor
-            # resolves; a genuinely absent track just falls through harmlessly.
+            # Poll briefly (up to ~4 s) until tracks appear, then resolve the
+            # per-file/series descriptor first, else the profile language pref; a
+            # genuinely unmatchable pick just falls through harmlessly.
             cand = None
             for _attempt in range(8):
                 audio_tracks, _ = _parse_track_streams(await vlc_status())
                 if audio_tracks:
-                    cand = _resolve_audio_descriptor(a_sel, audio_tracks)
+                    if a_sel is not None:
+                        cand = _resolve_audio_descriptor(a_sel, audio_tracks)
+                    if cand is None and prof_pref is not None:
+                        cand = _resolve_profile_audio_pref(prof_pref, audio_tracks)
                     if cand or len(audio_tracks) > 1:
                         break
                 await asyncio.sleep(0.5)
@@ -8555,9 +8640,12 @@ async def set_local_tracks(item_id: str, req: LocalTracksReq) -> JSONResponse:
     if req.subtitle_sel is not None and req.sub_series and series:
         await _save_series_sub_sel(req.profile_id, series, req.subtitle_sel)
     # An audio pick is always a deliberate viewer action (no automatic audio
-    # writes), so it always updates the series-wide preference.
-    if req.audio_sel is not None and series:
-        await _save_series_audio_sel(req.profile_id, series, req.audio_sel)
+    # writes), so it always updates the series-wide preference AND the
+    # profile-level language fallback (which carries across separate items).
+    if req.audio_sel is not None:
+        await _learn_profile_audio_pref(req.profile_id, req.audio_sel)
+        if series:
+            await _save_series_audio_sel(req.profile_id, series, req.audio_sel)
     return JSONResponse({"ok": True})
 
 
@@ -10536,6 +10624,7 @@ async def _remember_vlc_audio_pick(track_id: int) -> None:
         return                            # nothing matchable — not rememberable
     if file_path:
         await _save_track_pref(item_id, profile_id, file_path, audio_sel=sel)
+    await _learn_profile_audio_pref(profile_id, sel)
     lib = await get_library()
     item = next((it for it in lib["items"] if it["id"] == item_id), None)
     if item:
@@ -17978,6 +18067,13 @@ def _saved_local_tracks(lib: dict, item: dict, profile_id: str, file_path: str) 
     series_asel = _get_series_audio_sel(lib, profile_id, _series_of_item(item))
     if series_asel:
         out["series_audio_sel"] = series_asel
+    # Profile-level audio-language fallback (8.9.3) — carries a pick across
+    # separate items when no per-file/per-series descriptor resolves. Same role
+    # the admin subtitle language default plays for subs. The client applies it
+    # after its descriptor chain, before the rendition `default`.
+    audio_pref = _get_profile_audio_pref(lib, profile_id)
+    if audio_pref:
+        out["audio_language_pref"] = audio_pref
     return out
 
 

@@ -730,7 +730,17 @@ Two ways to populate the cache:
      file/series pick by same-layout slot → group → language → title, falling
      back to the legacy `audio_idx` then the `default` rendition. Both this
      player and the VLC/TV path read and write it, so an audio choice follows
-     the viewer across a device↔VLC switch and onto the next episode.
+     the viewer across a device↔VLC switch and onto the next episode. **Between
+     the descriptor chain and the `default` rendition sits the profile-level
+     language fallback (8.9.4):** `_lpResolveAudioPref(saved.audio_language_pref)`
+     matches by language (then slot, when the track count matches). This carries
+     an audio pick across episodes that are *separate library items* (empty
+     `series` → no shared per-series key — the common case for individually
+     downloaded episodes). `audio_language_pref` arrives in `saved_tracks` from
+     the host; for fully-offline playback the app reads a per-profile
+     `localStorage` mirror (`_appLearnAudioPref`/`_appReadAudioPref`) written on
+     every pick, since `library.json` is unreachable in airplane mode. See
+     [LIBRARY_DATA.md](LIBRARY_DATA.md) and [GOTCHAS.md](GOTCHAS.md).
    - **Late-sub upgrade.** When the default selection lands on an *auto-applied*
      AI sub (`lp.subAutoApplied`), `_lpStartSubUpgradePoll` polls
      `GET /api/library/{id}/subs` every 15 s for a real preferred-language sub

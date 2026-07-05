@@ -9265,8 +9265,43 @@ async function _appOfflineSavedTracks(itemId, filePath) {
     if (p.localSubtitleIdx != null) out.subtitle_idx = p.localSubtitleIdx;
     if (p.subtitleSel) out.subtitle_sel = p.subtitleSel;
     if (p.audioSel) out.audio_sel = p.audioSel;
+    // Profile-level audio-language fallback (8.9.3). The host stores it in
+    // library.json, unreachable offline — so the app mirrors it to localStorage
+    // on every audio pick (_appLearnAudioPref) and restores it here, giving the
+    // fully-offline player the same cross-episode audio memory the online path
+    // gets from /saved-tracks. Merged even when there's no per-file progress row.
+    const ap = _appReadAudioPref();
+    if (ap) out.audio_language_pref = ap;
     return out;
-  } catch (_) { return {}; }
+  } catch (_) {
+    const ap = _appReadAudioPref();
+    return ap ? { audio_language_pref: ap } : {};
+  }
+}
+
+// localStorage mirror of the profile-level preferred-audio-language, keyed per
+// profile so profiles on the same device don't collide. Written on every audio
+// pick (online OR offline) so it's current whenever the app later plays offline;
+// read only by the offline saved-tracks path (the online path gets the pref from
+// the host). Derives {lang, idx, count} from the same descriptor picks build.
+function _appAudioPrefKey() { return "sl_audio_pref:" + (profile.id || ""); }
+function _appLearnAudioPref(sel) {
+  if (!sel) return;
+  const lang = _lpCanonLang(sel.lang || "");
+  const idx = (sel.idx != null) ? Number(sel.idx) : -1;
+  const sig = sel.sig || "";
+  const count = sig ? sig.split("|").length : 0;
+  if (!(lang || (count && idx >= 0))) return;   // nothing matchable later
+  try {
+    localStorage.setItem(_appAudioPrefKey(),
+      JSON.stringify({ lang, idx, count, at: new Date().toISOString() }));
+  } catch (_) {}
+}
+function _appReadAudioPref() {
+  try {
+    const s = localStorage.getItem(_appAudioPrefKey());
+    return s ? JSON.parse(s) : null;
+  } catch (_) { return null; }
 }
 
 // fetch with an AbortController timeout. A brief connectivity loss can leave a
@@ -12019,6 +12054,11 @@ async function _lpLoadIndex(seekTo) {
     audSel = { ...aFileSel, groups: aSerSel.groups };
   }
   let defAudioIdx = audSel ? _lpResolveAudioSel(audSel) : null;
+  // Profile-level language fallback — carries an audio pick across episodes that
+  // are separate library items (the common case for individually-downloaded
+  // episodes, where the per-series descriptor above never shares a key).
+  if (defAudioIdx == null && saved.audio_language_pref)
+    defAudioIdx = _lpResolveAudioPref(saved.audio_language_pref);
   if (defAudioIdx == null && saved.audio_idx != null) defAudioIdx = saved.audio_idx;
   if (defAudioIdx == null) defAudioIdx = (lp.audios.findIndex(a => a.default) >= 0
                                           ? lp.audios.findIndex(a => a.default) : 0);
@@ -12627,6 +12667,26 @@ function _lpResolveAudioSel(sel) {
   return null;
 }
 
+// Profile-level preferred-audio-language fallback (8.9.3) — the audio analog of
+// the subtitle language default. Carries a pick across episodes even when they're
+// separate library items (no shared series key). Mirrors the backend
+// _resolve_profile_audio_pref: match by language first (release-stable), then the
+// remembered slot index only when this episode's audio track count matches.
+function _lpResolveAudioPref(pref) {
+  if (!pref) return null;
+  const aud = lp.audios || [];
+  if (!aud.length) return null;
+  const want = _lpCanonLang(pref.lang || "");
+  if (want) {
+    const i = aud.findIndex(a => _lpCanonLang(a.language) === want);
+    if (i >= 0) return i;
+  }
+  const idx = (pref.idx != null) ? Number(pref.idx) : -1;
+  const count = (pref.count != null) ? Number(pref.count) : 0;
+  if (count && count === aud.length && idx >= 0 && idx < aud.length) return idx;
+  return null;
+}
+
 // Automatic default when nothing is remembered. The on-device player leaves subs
 // OFF by default (returning null) — the real-over-AI policy lives on the VLC
 // path; here a real sub still gets surfaced by the upgrade poller once present.
@@ -13035,6 +13095,11 @@ function _lpSaveLocalTracks(what) {
   // Audio descriptor only for audio-triggered saves — a subtitle change must not
   // re-stamp (and re-broadcast to the series) the current audio track.
   const audioSel = (what === "audio") ? _lpDescriptorForAudioIdx(lp.pendingAudioIdx) : null;
+  // Mirror the profile-level audio-language preference locally so the FULLY
+  // OFFLINE player restores it too (the host copy in library.json is
+  // unreachable offline). Online picks also update it via /local-tracks on the
+  // backend; this keeps the offline cache current either way.
+  if (isApp && audioSel) _appLearnAudioPref(audioSel);
   // Offline cached-player mode: this origin's /api is the loopback server — the
   // pick goes into the native store instead (same fields _appOfflineSavedTracks
   // restores from; the eventual host sync carries them via /api/sync/progress).
@@ -14609,6 +14674,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.9.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.9.4</div>
 </body>
 </html>
