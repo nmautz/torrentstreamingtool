@@ -686,7 +686,15 @@ Two ways to populate the cache:
      switch fails (host unreachable) `_lpFallBackToLocal` clears the override
      and reloads the downloaded copy instead of stopping.
    - **Audio** (in-manifest): hls.js path sets `hls.audioTrack = idx`; Safari
-     native sets `video.audioTracks[i].enabled = (i===idx)`.
+     native sets `video.audioTracks[i].enabled = (i===idx)`. Applied via
+     `_lpApplyAudioIdx` → `_lpApplyAudioIdxRetry`, which **retries until the
+     audio-track list is populated** (Safari fills `video.audioTracks`
+     asynchronously — at `loadedmetadata` it's often empty, and a one-shot set
+     is silently dropped, leaving the default playing under a dropdown that
+     shows the remembered track) and re-applies if Safari later reverts to its
+     default; it bails when `lp.pendingAudioIdx`/`lp.filePath` change so a stale
+     retry never fights a manual pick. See GOTCHAS.md § "VLC re-runs its default
+     audio selection".
    - **Subtitles** (`<track>` children): `_lpLoadIndex` appends one `<track>`
      per bundle `sub_<i>.vtt` then per on-disk sidecar, recording each in
      `lp.subTracks` as `{el, key}` in dropdown order (key = `"i"` for bundle,

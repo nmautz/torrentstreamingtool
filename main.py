@@ -3462,6 +3462,51 @@ async def _apply_subtitle_policy(lib: dict, profile_id: str, file_path: str,
     await vlc("subtitle_track", val="-1")
 
 
+async def _reassert_audio(a_sel: Optional[dict], prof_pref: Optional[dict],
+                          raw_id: Optional[int]) -> None:
+    """Re-send the chosen audio track a few times after the initial pick.
+
+    VLC re-runs its own default audio selection as the input finishes buffering
+    (common with sequential torrent streaming, where the head trickles in),
+    silently overriding the `audio_track` command `_apply_track_prefs` just sent.
+    The symptom: the dropdown shows the remembered track (it mirrors
+    `state.current_audio_track`, which we set) while VLC actually plays its
+    default — e.g. Japanese under an English dub. VLC 3.x's HTTP API can't report
+    the current audio track, so we can't read-verify; instead re-assert the pick
+    a few times over the next few seconds so a late default-select loses.
+
+    Re-resolves each pass in case ES IDs drifted, and stops the instant a manual
+    pick (`set_audio_track`) or a newer `_apply_track_prefs` changes the state we
+    set — otherwise this would fight the viewer's own choice. A new video resets
+    `state.current_audio_track` to -1, which also trips that guard and ends the
+    loop harmlessly.
+    """
+    last = state.current_audio_track
+    for _ in range(4):
+        await asyncio.sleep(1.0)
+        if state.current_audio_track != last:
+            return                         # superseded by a manual/newer pick
+        audio_tracks, _ = _parse_track_streams(await vlc_status())
+        if not audio_tracks:
+            continue
+        recand = None
+        if a_sel is not None:
+            recand = _resolve_audio_descriptor(a_sel, audio_tracks)
+        if recand is None and prof_pref is not None:
+            recand = _resolve_profile_audio_pref(prof_pref, audio_tracks)
+        if recand is not None:
+            rid: Optional[int] = recand["id"]
+        elif raw_id is not None and any(t["id"] == raw_id for t in audio_tracks):
+            rid = raw_id                   # raw ES ID still present on this input
+        else:
+            rid = None
+        if rid is None:
+            continue
+        state.current_audio_track = rid
+        await vlc("audio_track", val=str(rid))
+        last = rid
+
+
 async def _apply_track_prefs(
     item_id: str, profile_id: str, file_path: str, delay: float = 2.0,
 ) -> None:
@@ -3511,6 +3556,9 @@ async def _apply_track_prefs(
         if audio is not None and (a_sel is None or a_chose_file):
             state.current_audio_track = audio
             await vlc("audio_track", val=str(audio))
+            # Same file replay: ES IDs are stable, so re-assert the raw pick too
+            # (VLC can still override it with its default as buffering finishes).
+            asyncio.create_task(_reassert_audio(None, None, audio))
         elif a_sel is not None or prof_pref is not None:
             # Resolve against the LIVE audio-track list. VLC populates that list
             # asynchronously after opening a stream, so a single snapshot at the
@@ -3534,6 +3582,9 @@ async def _apply_track_prefs(
             if cand:
                 state.current_audio_track = cand["id"]
                 await vlc("audio_track", val=str(cand["id"]))
+                # Re-assert in the background so a late default-select loses; the
+                # subtitle work below must not wait on it.
+                asyncio.create_task(_reassert_audio(a_sel, prof_pref, None))
         # Newest intent wins between the per-file and the per-series subtitle
         # descriptor: a pick made later on another episode (or on the device)
         # beats a stale per-file pick. This is also what heals per-file `off`

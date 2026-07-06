@@ -12755,9 +12755,36 @@ function lpSetQuality(val) {
 function _lpApplyAudioIdx(idx) {
   idx = Number(idx);
   if (!Number.isFinite(idx) || idx < 0) return;
+  _lpApplyAudioIdxRetry(idx, lp.filePath, 0);
+}
+
+// Apply the chosen audio rendition, retrying until the player's audio-track list
+// is populated (and re-asserting if the player later reverts to its default).
+//
+// The bug this guards: the audio dropdown is rendered from `lp.pendingAudioIdx`
+// (the remembered/selected index), but the *actual* selection here was applied
+// once and could silently no-op — so the dropdown showed the dub while the
+// player kept playing its default (e.g. Japanese under an English dub). Two
+// causes, both intermittent:
+//   • Safari native HLS (iOS) fills `v.audioTracks` *asynchronously* as it loads
+//     the alternate-audio rendition; at `loadedmetadata` the list is often still
+//     empty, and the old early-return dropped the pick with nothing re-applying.
+//   • Safari can also re-assert its own default track as that rendition finishes
+//     loading, clobbering a selection that HAD applied.
+// hls.js populates tracks by MANIFEST_PARSED, but retrying there is harmless and
+// keeps the two paths symmetric. Bail the instant a newer pick
+// (`lp.pendingAudioIdx`) or a new file supersedes this apply, so a stale retry
+// never fights the viewer's own choice or a track change.
+function _lpApplyAudioIdxRetry(idx, forFile, tries) {
+  if (Number(lp.pendingAudioIdx) !== idx || lp.filePath !== forFile) return;
+  const retry = () => {
+    if (tries < 12) setTimeout(() => _lpApplyAudioIdxRetry(idx, forFile, tries + 1), 250);
+  };
   if (lp.hls) {
     // hls.js: setting `audioTrack` swaps the rendition mid-stream without a
     // gap on Chrome/Firefox/Edge. Indices map 1:1 to meta.json.
+    const tracks = lp.hls.audioTracks || [];
+    if (idx >= tracks.length) { retry(); return; }
     try { lp.hls.audioTrack = idx; } catch (_) {}
     return;
   }
@@ -12765,11 +12792,18 @@ function _lpApplyAudioIdx(idx) {
   // `enabled` on the chosen one (and clearing the others) is the canonical
   // way to switch — Safari handles the actual stream cutover internally.
   const v = document.getElementById("lpVideo");
-  const tracks = v.audioTracks;
-  if (!tracks || tracks.length === 0) return;
+  const tracks = v && v.audioTracks;
+  if (!tracks || idx >= tracks.length) { retry(); return; }
   for (let i = 0; i < tracks.length; i++) {
     tracks[i].enabled = (i === idx);
   }
+  // Re-check shortly after: if Safari re-selected its default as the alternate
+  // audio finished loading, our track will be disabled again — re-apply it.
+  if (tries < 12) setTimeout(() => {
+    if (Number(lp.pendingAudioIdx) !== idx || lp.filePath !== forFile) return;
+    const t = v.audioTracks;
+    if (t && t[idx] && !t[idx].enabled) _lpApplyAudioIdxRetry(idx, forFile, tries + 1);
+  }, 500);
 }
 
 function _lpApplySubIdx(idx) {
@@ -14674,6 +14708,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.9.4</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.9.6</div>
 </body>
 </html>
