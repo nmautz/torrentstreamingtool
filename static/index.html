@@ -3151,6 +3151,7 @@ let epSeasonList = [];     // sorted seasons present in epFiles (positive ints o
 let epWatchedExpanded = new Set(); // season keys whose watched-episode section is expanded
 let epHasTorrent = false;  // item has a qBit torrent → download-scheduling controls apply
 let epDownloadMode = "now"; // item-level download mode (now | idle) from /files
+let epPrepPrioDefault = "mid"; // item/series-level stream-prep queue priority default
 let epOndemandOnly = false;   // item flagged on-demand stream only (no permanent HLS bundle)
 let epOndemandLocked = false; // admin-locked → this UI can't change epOndemandOnly
 let epHlsAvailable = true;    // HLS prep/JIT available (false on macOS → hide the toggle)
@@ -6020,6 +6021,7 @@ async function openEpisodePicker(itemId, title){
   epFiles=d.files||[];
   epHasTorrent=!!d.has_torrent;
   epDownloadMode=d.download_mode||"now";
+  epPrepPrioDefault=d.prep_priority_default||"mid";
   epOndemandOnly=!!d.ondemand_only;
   epOndemandLocked=!!d.ondemand_only_locked;
   epHlsAvailable=d.hls_available!==false;
@@ -6705,8 +6707,23 @@ function _epCardHtml(f){
             </svg>
           </a>`}
         </div>
+        ${_epCardPrioRow(f, _p, notDownloaded)}
       </div>
     </div>`;
+}
+
+// Compact per-episode priority row for the multi-episode card: DOWNLOAD order while
+// the file is still fetching, STREAM-PREP queue order once it's on disk. Hidden when
+// neither applies (nothing to prioritise). Mid is the default tier for both.
+function _epCardPrioRow(f, _p, notDownloaded){
+  const dl = (notDownloaded && epHasTorrent)
+    ? `<span class="font-black text-gray-600 uppercase tracking-widest" title="Download order within the torrent — High fetches first.">DL</span>${_prioSeg(f.dl_priority||"mid",`epDlPrioFile(${_p},'%V%',this)`)}`
+    : "";
+  const prep = (!notDownloaded && hlsAvailable && !epOndemandOnly)
+    ? `<span class="font-black text-gray-600 uppercase tracking-widest" title="Stream-prep queue order — High preps ahead of other auto-prep.">PREP</span>${_prioSeg(f.prep_priority||"mid",`epPrepPrioFile(${_p},'%V%',this)`)}`
+    : "";
+  if(!dl && !prep) return "";
+  return `<div class="flex items-center gap-x-2 gap-y-1 flex-wrap mt-1 -ml-0.5">${dl}${prep?(dl?`<span class="w-px h-3.5 bg-gray-800 mx-0.5"></span>`:"")+prep:""}</div>`;
 }
 
 // Compact scheduling button for the episode-picker download bar.
@@ -6775,6 +6792,85 @@ async function epSchedPrep(mode, btn){
     }catch(_){ showAlert("Failed to set stream-prep schedule.","error"); }
   });
 }
+
+// ── Priority controls (download + stream-prep) ───────────────────────────────
+// A Low/Mid/High segmented control. `cur` highlights the active level; `fnTpl` is
+// an onclick expression where the literal token %V% is substituted with the level.
+function _prioSeg(cur, fnTpl){
+  const items=[["low","LOW"],["mid","MID"],["high","HIGH"]];
+  const on={low:"bg-slate-600 text-white",mid:"bg-indigo-700 text-white",high:"bg-amber-600 text-white"};
+  return items.map(([v,lbl])=>{
+    const a=cur===v;
+    return `<button onclick="${fnTpl.split('%V%').join(v)}" title="${lbl[0]+lbl.slice(1).toLowerCase()} priority"
+      class="text-[10px] font-black uppercase tracking-wide px-2 py-1 transition-colors ${a?on[v]:'bg-gray-800 hover:bg-gray-700 text-gray-400'}">${lbl}</button>`;
+  }).join("");
+}
+// Shared DOWNLOAD priority across the visible scope ("" if mixed).
+function _visibleSeasonDlPrio(){
+  const s=new Set(_visibleSeasonFiles().map(f=>f.dl_priority||"mid"));
+  return s.size===1?[...s][0]:"";
+}
+// Shared PREP priority across the visible scope ("" if mixed).
+function _visibleSeasonPrepPrio(){
+  const s=new Set(_visibleSeasonFiles().map(f=>f.prep_priority||"mid"));
+  return s.size===1?[...s][0]:"";
+}
+// Set the qBit DOWNLOAD priority (low/mid/high) for specific files. file-schedule
+// accepts the priority levels as modes; the reconcile loop pushes them to qBit.
+async function epDlPrio(level, paths, btn){
+  if(!paths||!paths.length) return;
+  await withInflight(`epdlp_${level}_${paths.join(",")}`, btn, async () => {
+    try{
+      const r=await fetch(`/api/library/${epItemId}/file-schedule`,{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({file_paths:paths,mode:level}),
+      });
+      if(!r.ok){ const e=await r.json().catch(()=>({detail:"Failed."})); showAlert(e.detail||"Failed.","error"); return; }
+      const set=new Set(paths);
+      epFiles.forEach(f=>{ if(set.has(f.path)){ f.mode=level; f.dl_priority=level; } });
+      renderEpList();
+      showAlert(`Download priority → ${level.toUpperCase()} (${paths.length} file${paths.length===1?"":"s"}).`,"success");
+      refreshEpFiles();
+    }catch(_){ showAlert("Failed to set download priority.","error"); }
+  });
+}
+function epDlPrioSeason(level, btn){ epDlPrio(level, _visibleSeasonPaths(), btn); }
+function epDlPrioFile(path, level, btn){ epDlPrio(level, [path], btn); }
+
+// Set the STREAM-PREP queue priority. scope "item" writes the series-level default
+// every episode inherits; otherwise it's a per-episode / per-season override.
+async function epPrepPrio(level, opts){
+  const o=opts||{};
+  const scope=o.scope==="item"?"item":"files";
+  const paths=o.paths||[];
+  await withInflight(`eppp_${scope}_${level}_${paths.join(",")}`, o.btn, async () => {
+    try{
+      const body={priority:level, scope};
+      if(scope!=="item") body.file_paths=paths;
+      const r=await fetch(`/api/library/${epItemId}/prep-priority`,{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify(body),
+      });
+      if(!r.ok){ const e=await r.json().catch(()=>({detail:"Failed."})); showAlert(e.detail||"Failed.","error"); return; }
+      const d=await r.json().catch(()=>({}));
+      if(scope==="item"){
+        epPrepPrioDefault=d.priority_default||level;
+      } else {
+        const set=new Set(paths);
+        epFiles.forEach(f=>{ if(set.has(f.path)) f.prep_priority=level; });
+      }
+      renderEpList();
+      showAlert(scope==="item"
+        ? `Series prep priority default → ${level.toUpperCase()}.`
+        : `Prep priority → ${level.toUpperCase()} (${paths.length} file${paths.length===1?"":"s"}).`,
+        "success");
+      refreshEpFiles();
+    }catch(_){ showAlert("Failed to set prep priority.","error"); }
+  });
+}
+function epPrepPrioSeason(level, btn){ epPrepPrio(level, {paths:_visibleSeasonPaths(), scope:"files", btn}); }
+function epPrepPrioDefaultSet(level, btn){ epPrepPrio(level, {scope:"item", btn}); }
+function epPrepPrioFile(path, level, btn){ epPrepPrio(level, {paths:[path], scope:"files", btn}); }
 
 // Recheck the CHECKED episodes against the torrent's piece hashes (qBittorrent
 // force-recheck). Any file that was complete but comes back damaged has its cached
@@ -6906,13 +7002,26 @@ function _epMoviePanel(f){
     }
   }
 
-  // Download scheduling for an item still fetching (Now / Idle), like the episode bar.
+  // Download scheduling for an item still fetching (Now / Idle), like the episode bar,
+  // plus this episode's own download PRIORITY (which files in the torrent fetch first).
   let schedHtml="";
   if(epHasTorrent && notDownloaded){
     schedHtml = `<div class="flex items-center gap-1.5 flex-wrap mt-1">
       <span class="text-[10px] font-black text-gray-500 uppercase tracking-widest mr-0.5">Download:</span>
       ${_epSchedBtn("epSchedSeason('now',this)","⬇ Now","text-emerald-300 hover:bg-emerald-950/40")}
       ${_epSchedBtn("epSchedSeason('idle',this)","🌙 Idle","text-sky-300 hover:bg-sky-950/40")}
+    </div>
+    <div class="flex items-center gap-1.5 flex-wrap mt-1" title="Download order within the torrent — High fetches first. Default: Mid.">
+      <span class="text-[10px] font-black text-gray-500 uppercase tracking-widest mr-0.5">DL Prio:</span>
+      ${_prioSeg(f.dl_priority||"mid",`epDlPrioFile(${_p},'%V%',this)`)}
+    </div>`;
+  }
+  // Per-episode stream-prep priority (queue order) for a downloaded file.
+  let prepPrioHtml="";
+  if(hlsAvailable && !notDownloaded && !epOndemandOnly){
+    prepPrioHtml = `<div class="flex items-center gap-1.5 flex-wrap mt-1" title="Stream-prep queue order — High preps ahead of other auto-prep. Default: Mid (series default).">
+      <span class="text-[10px] font-black text-gray-500 uppercase tracking-widest mr-0.5">Prep Prio:</span>
+      ${_prioSeg(f.prep_priority||"mid",`epPrepPrioFile(${_p},'%V%',this)`)}
     </div>`;
   }
 
@@ -6923,7 +7032,7 @@ function _epMoviePanel(f){
     ${progressBar}
     <div class="text-[11px] text-gray-600 mt-2 font-mono">${meta}</div>
     <p class="text-[11px] text-gray-700 mt-1 font-mono break-all">${escHtml(f.name)}</p>
-    ${schedHtml}
+    ${schedHtml}${prepPrioHtml}
     <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-4">${actions.join("")}</div>
   </div>`;
 }
@@ -7008,6 +7117,12 @@ function renderEpList(){
           ${_epSchedBtn("epSchedItem('now',this)","⬇ Now","text-emerald-300 hover:bg-emerald-950/40")}
           ${_epSchedBtn("epSchedItem('idle',this)","🌙 Idle","text-sky-300 hover:bg-sky-950/40")}`:""}
       </div>`;
+      // Download PRIORITY (low/mid/high → qBit Normal/High/Maximal) — which episodes
+      // in this torrent fetch first. Mid is the default tier.
+      rows += `<div class="flex items-center gap-1.5 flex-wrap" title="Download order within the torrent — High fetches first, Low last. Default: Mid.">
+        <span class="text-[10px] font-black text-gray-500 uppercase tracking-widest mr-0.5">DL PRIO · ${escHtml(scope)}:</span>
+        ${_prioSeg(_visibleSeasonDlPrio(),"epDlPrioSeason('%V%',this)")}
+      </div>`;
     }
     // Stream-prep row (only when HLS is available on this host).
     if(hlsAvailable){
@@ -7016,6 +7131,16 @@ function renderEpList(){
         ${_epPrepBtn("now","⚡ Now","text-emerald-300 hover:bg-emerald-950/40",prepCur)}
         ${_epPrepBtn("idle","🌙 Idle","text-sky-300 hover:bg-sky-950/40",prepCur)}
         ${_epPrepBtn("never","⊘ Never","text-red-300 hover:bg-red-950/40",prepCur)}
+      </div>`;
+      // Stream-prep PRIORITY — orders the auto/bulk prep queue. Season scope sets the
+      // visible episodes; "Series default" sets the item-wide default (mid) every
+      // episode inherits. Interactive play-on-device prep still outranks all of this.
+      rows += `<div class="flex items-center gap-1.5 flex-wrap" title="Prep-queue order — High preps ahead of Mid/Low auto-prep. Default: Mid.">
+        <span class="text-[10px] font-black text-gray-500 uppercase tracking-widest mr-0.5">PREP PRIO · ${escHtml(scope)}:</span>
+        ${_prioSeg(_visibleSeasonPrepPrio(),"epPrepPrioSeason('%V%',this)")}
+        <span class="w-px h-4 bg-gray-700 mx-1"></span>
+        <span class="text-[10px] font-black text-gray-500 uppercase tracking-widest mr-0.5">Series default:</span>
+        ${_prioSeg(epPrepPrioDefault,"epPrepPrioDefaultSet('%V%',this)")}
       </div>`;
     }
     // Recheck button.
@@ -7354,6 +7479,7 @@ async function refreshEpFiles(){
     epFiles=d.files||[];
     epHasTorrent=!!d.has_torrent;
     epDownloadMode=d.download_mode||"now";
+    epPrepPrioDefault=d.prep_priority_default||"mid";
     // Drop any checked paths that are no longer in the file list.
     epChecked=new Set([...epChecked].filter(p=>epFiles.some(f=>f.path===p)));
     renderEpList();
@@ -14710,6 +14836,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.10.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.11.0</div>
 </body>
 </html>

@@ -2535,9 +2535,15 @@ def human_size(n: int) -> str:
 #
 # Effective per-file schedule = files[path] if present else mode. Mapping to a live
 # qBit priority depends on whether the idle/night download window is open right now:
-#   skip → 0 (never)          high → 7 (download now, first)
-#   now  → 1 (download now)    idle → 1 when window open, else 0
-_FILE_MODES = ("now", "high", "idle", "skip")
+#   skip → 0 (never)          high → 7 (download now, MAXIMAL priority)
+#   idle → 1 when open, else 0
+# The three exposed download-priority levels (mid = default) map to qBit's own
+# file-priority tiers so episodes within one torrent fetch in the chosen order:
+#   low  → 1 (Normal)         mid → 6 (High)          high → 7 (Maximal, first)
+# Legacy "now" is treated as "mid" (the default tier) so old items keep working.
+_FILE_MODES = ("now", "low", "mid", "high", "idle", "skip")
+# The subset that is a pure download-PRIORITY choice (not a schedule like idle/skip).
+_DL_PRIORITIES = ("low", "mid", "high")
 
 
 def _download_cfg(item: dict) -> dict:
@@ -2586,14 +2592,36 @@ def _item_has_compressed(item: dict) -> bool:
 #   idle  → let auto_prep_loop prep it during the idle/always window (default)
 #   never → exclude from auto-prep entirely (_enqueue_library_prep skips it). The
 #           existing cached bundle, if any, is left intact (non-destructive).
+#
+# Independently, prep PRIORITY orders the (single-slot) bulk prep queue so a
+# whole series or a single episode can jump ahead of other auto-prep work. Three
+# tiers (mid = default), stored alongside the schedule:
+#
+#   item["prep"] = {
+#       "files":            { "<abs path>": "now" | "idle" | "never" },
+#       "priority_default": "low" | "mid" | "high",   # item/series-level default
+#       "priority":         { "<abs path>": "low" | "mid" | "high" },  # per-episode
+#   }
+#
+# Effective per-file priority = priority[path] if set, else priority_default, else
+# "mid". A higher tier runs ahead of a lower one at the bulk-queue gate in
+# _run_offline_job (interactive / admin prep still outrank ALL bulk work).
 _PREP_MODES = ("now", "idle", "never")
+_PREP_PRIORITIES = ("low", "mid", "high")
+_PREP_PRIO_NUM = {"low": 0, "mid": 1, "high": 2}
 
 
 def _prep_cfg(item: dict) -> dict:
     """Return item['prep'] with defaults filled in (never mutates the item)."""
     pr = item.get("prep") or {}
     files = pr.get("files") or {}
-    return {"files": {k: v for k, v in files.items() if v in _PREP_MODES}}
+    pdef = pr.get("priority_default")
+    prio = pr.get("priority") or {}
+    return {
+        "files": {k: v for k, v in files.items() if v in _PREP_MODES},
+        "priority_default": pdef if pdef in _PREP_PRIORITIES else "mid",
+        "priority": {k: v for k, v in prio.items() if v in _PREP_PRIORITIES},
+    }
 
 
 def _effective_prep_mode(cfg: dict, path: str) -> str:
@@ -2604,15 +2632,45 @@ def _effective_prep_mode(cfg: dict, path: str) -> str:
     return pm if pm in _PREP_MODES else "idle"
 
 
+def _effective_prep_priority(cfg: dict, path: str) -> str:
+    """Resolve a file's effective prep-queue priority: per-file override → the
+    item/series-level default → "mid"."""
+    pp = cfg["priority"].get(path)
+    return pp if pp in _PREP_PRIORITIES else cfg["priority_default"]
+
+
+def _prep_priority_num_for(item: dict, path: str) -> int:
+    """Numeric prep priority (0=low, 1=mid, 2=high) for one file of an item."""
+    return _PREP_PRIO_NUM.get(_effective_prep_priority(_prep_cfg(item), path), 1)
+
+
 def _file_mode_to_priority(mode: str, idle_open: bool) -> int:
-    """Map an effective file mode + current idle-window state to a qBit priority."""
+    """Map an effective file mode + current idle-window state to a qBit priority.
+
+    The three priority tiers (low/mid/high) map onto qBit's Normal/High/Maximal so
+    episodes in one torrent download in the chosen order; legacy "now" is "mid"."""
     if mode == "skip":
         return 0
     if mode == "high":
-        return 7
+        return 7          # Maximal — download first
+    if mode == "mid":
+        return 6          # High — the default tier
+    if mode == "low":
+        return 1          # Normal — download after mid/high files
     if mode == "idle":
         return 1 if idle_open else 0
-    return 1   # "now"
+    return 6   # legacy "now" → mid (default tier)
+
+
+def _dl_priority_of(mode: str) -> str:
+    """Collapse an effective file mode to one of the three UI priority levels.
+    Schedule-only modes (idle/skip) still report their would-be download tier so the
+    priority control shows a sensible position; the schedule is surfaced separately."""
+    if mode == "high":
+        return "high"
+    if mode == "low":
+        return "low"
+    return "mid"   # now / mid / idle / skip
 
 
 def _analyzable_files(item: dict) -> list[dict]:
@@ -7105,8 +7163,10 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
             "season": f.get("season", 0),
             "episode": f.get("episode", 0),
             "progress": progress,
-            "mode": mode,                               # now | high | idle | skip
+            "mode": mode,                               # now | low | mid | high | idle | skip
+            "dl_priority": _dl_priority_of(mode),       # low | mid | high — download-order tier (mid default)
             "prep_mode": _effective_prep_mode(prep_cfg, path),  # now | idle | never (stream-prep schedule)
+            "prep_priority": _effective_prep_priority(prep_cfg, path),  # low | mid | high — prep-queue order
             "dl_pct": dl_pct,                           # download % (None if unknown)
             "complete": complete,                       # file fully downloaded → playable
             "compressed": compressed,                   # re-encoded in place → local-only, not torrent-backed
@@ -7116,6 +7176,7 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
         "item_status": item.get("status", "ready"),
         "has_torrent": has_torrent,                     # gates the download-scheduling controls
         "download_mode": cfg["mode"],
+        "prep_priority_default": prep_cfg["priority_default"],   # item/series-level prep-queue tier (mid default)
         "idle_open": state.download_idle_open,
         "idle_configured": state.download_idle_configured,
         "ondemand_only": bool(item.get("ondemand_only")),          # user can toggle unless locked
@@ -7735,6 +7796,12 @@ class PrepScheduleReq(BaseModel):
     mode: str   # "now" (prep immediately) | "idle" (auto-prep when idle) | "never" (opt out)
 
 
+class PrepPriorityReq(BaseModel):
+    priority: str                       # "low" | "mid" | "high"
+    file_paths: list[str] = []          # per-episode override; empty ⇒ set the item/series default
+    scope: str = "files"                # "files" (per-episode) | "item" (series-level default)
+
+
 class RecheckReq(BaseModel):
     file_paths: list[str]   # which files to verify (the episode-picker checkboxes)
 
@@ -7763,7 +7830,7 @@ async def set_download_schedule(item_id: str, req: DownloadScheduleReq) -> JSONR
     elif mode == "idle":
         # Pause: defer the active files, but keep explicit skips skipped.
         for p, m in list(files.items()):
-            if m in ("now", "high"):
+            if m in ("now", "low", "mid", "high"):
                 files[p] = "idle"
     else:
         for p, m in list(files.items()):
@@ -7893,6 +7960,7 @@ async def set_prep_schedule(item_id: str, req: PrepScheduleReq) -> JSONResponse:
     # and "never" only persist intent — auto_prep_loop / the prep bar act on them.
     started = 0
     if mode == "now":
+        prep_cfg = _prep_cfg(item)
         for p in req.file_paths:
             src = Path(p)
             try:
@@ -7900,11 +7968,57 @@ async def set_prep_schedule(item_id: str, req: PrepScheduleReq) -> JSONResponse:
                     continue
             except OSError:
                 continue
-            st = await _maybe_start_prep_job(src, item_id)
+            prio = _PREP_PRIO_NUM.get(_effective_prep_priority(prep_cfg, p), 1)
+            st = await _maybe_start_prep_job(src, item_id, prep_prio=prio)
             if st.get("status") in ("processing", "pending", "paused"):
                 started += 1
             await asyncio.sleep(0)
     return JSONResponse({"ok": True, "updated": len(req.file_paths), "mode": mode, "started": started})
+
+
+@app.post("/api/library/{item_id}/prep-priority")
+async def set_prep_priority(item_id: str, req: PrepPriorityReq) -> JSONResponse:
+    """Set the prep-queue PRIORITY (low/mid/high, mid = default) that orders bulk /
+    auto-prep. `scope="item"` (or an empty `file_paths`) sets the item/series-level
+    default every episode inherits; otherwise it's a per-episode override. Any bulk
+    prep jobs already queued for the affected files are re-stamped so a change takes
+    effect immediately, and a "high" bump re-triggers the auto-prep enqueue so the
+    newly-prioritised files jump ahead without waiting for the next idle sweep."""
+    if not HLS_AVAILABLE:
+        raise HTTPException(503, HLS_UNAVAILABLE_MSG)
+    prio = req.priority if req.priority in _PREP_PRIORITIES else "mid"
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    pr = item.setdefault("prep", {"files": {}})
+    item_scope = req.scope == "item" or not req.file_paths
+    if item_scope:
+        pr["priority_default"] = prio
+    else:
+        prio_map = pr.setdefault("priority", {})
+        for p in req.file_paths:
+            prio_map[p] = prio
+    await put_library(lib)
+
+    # Re-stamp any queued/running bulk jobs for the affected files so the new tier
+    # orders the queue right away (a running encode isn't preempted — HLS can't
+    # checkpoint — but its tier updates so subsequent parking decisions are correct).
+    prep_cfg = _prep_cfg(item)
+    affected = set(req.file_paths) if not item_scope else {
+        f.get("path", "") for f in item.get("files", [])
+    }
+    num = _PREP_PRIO_NUM.get(prio, 1)
+    for j in _offline_jobs.values():
+        if j.get("queue") == "bulk" and j.get("src") in affected:
+            j["_prep_prio"] = _PREP_PRIO_NUM.get(
+                _effective_prep_priority(prep_cfg, j.get("src", "")), num
+            )
+    return JSONResponse({
+        "ok": True, "priority": prio,
+        "scope": "item" if item_scope else "files",
+        "priority_default": prep_cfg["priority_default"],
+    })
 
 
 @app.post("/api/library/{item_id}/recheck")
@@ -15692,8 +15806,11 @@ async def _run_offline_job(job_id: str) -> None:
     # encoding is separately booted by _preempt_running_bulk so the slot frees
     # without waiting for it. (The `not prep_paused` escape lets a bulk job fall
     # through to park at the pause gate below instead of spinning here.)
+    my_prio = int(job.get("_prep_prio", 1))
     if is_bulk:
-        while _priority_hls_pending() > 0 and not state.prep_paused:
+        while not state.prep_paused and (
+            _priority_hls_pending() > 0 or _higher_priority_bulk_pending(my_prio) > 0
+        ):
             await asyncio.sleep(0.25)
     # Hold pending until the global concurrency slot frees up. This is what
     # keeps a 77-file /prep-all from spawning 77 ffmpegs at once.
@@ -15703,7 +15820,9 @@ async def _run_offline_job(job_id: str) -> None:
         # interactive job (also waiting on the slot) takes it first. (When prep is
         # paused, skip this and fall through to park at the pause gate instead — a
         # paused job holds no slot, so interactive still wins without the churn.)
-        if is_bulk and not state.prep_paused and _priority_hls_pending() > 0:
+        if is_bulk and not state.prep_paused and (
+            _priority_hls_pending() > 0 or _higher_priority_bulk_pending(my_prio) > 0
+        ):
             job["status"] = "pending"
             asyncio.create_task(_requeue_offline_job(job_id))
             return
@@ -16366,6 +16485,18 @@ def _priority_hls_pending() -> int:
                and j.get("status") in ("pending", "processing"))
 
 
+def _higher_priority_bulk_pending(prio: int) -> int:
+    """Count bulk HLS jobs of a STRICTLY-higher prep-priority tier that are queued or
+    encoding. A bulk job parks at the encode-slot gate while any exist, so a whole
+    series / episode marked "high" preps ahead of "mid"/"low" auto-prep work. Equal
+    tiers don't block each other (FIFO), and the top tier never parks, so there's no
+    deadlock or starvation of the highest-priority work — see _run_offline_job."""
+    return sum(1 for j in _offline_jobs.values()
+               if j.get("queue") == "bulk"
+               and j.get("status") in ("pending", "processing")
+               and int(j.get("_prep_prio", 1)) > prio)
+
+
 def _preempt_running_bulk(except_job_id: str = "") -> bool:
     """Terminate the bulk HLS encode currently holding the single concurrency slot
     (if any) so a just-queued interactive prep can take it over immediately, instead
@@ -16451,7 +16582,8 @@ async def _enqueue_library_prep() -> int:
                     continue
             except OSError:
                 continue
-            st = await _maybe_start_prep_job(p, item.get("id", ""))
+            prio = _PREP_PRIO_NUM.get(_effective_prep_priority(prep_cfg, f.get("path", "")), 1)
+            st = await _maybe_start_prep_job(p, item.get("id", ""), prep_prio=prio)
             if st.get("status") in ("processing", "pending", "paused"):
                 queued += 1
             elif st.get("status") == "cached":
@@ -18283,12 +18415,17 @@ def _rebuild_ondemand_only_items(lib: dict) -> None:
 
 
 async def _maybe_start_prep_job(src: Path, item_id: str = "",
-                                force_reencode_video: bool = False) -> dict:
+                                force_reencode_video: bool = False,
+                                prep_prio: int = 1) -> dict:
     """Per-file: return current prep state, starting an HLS job if none exists.
 
     `force_reencode_video` re-encodes the original video rung instead of
     stream-copying it (used by the audio-sync repair so the re-prep can't carry
     the same constant offset forward — see _run_offline_job's A/V sync guard).
+
+    `prep_prio` (0=low, 1=mid, 2=high) orders this bulk job against other queued
+    bulk prep — a higher tier reaches the single encode slot first (see the gate
+    in _run_offline_job). Interactive / admin prep outrank all bulk work regardless.
 
     Returns one of:
       {status:"cached"}                              — bundle already on disk
@@ -18326,6 +18463,9 @@ async def _maybe_start_prep_job(src: Path, item_id: str = "",
         "item_id": item_id,
         # Bulk / per-item / auto-prep — honors the global pause gate.
         "queue": "bulk",
+        # Prep-queue priority tier (0=low, 1=mid, 2=high) — orders this against
+        # other queued bulk prep at the encode-slot gate.
+        "_prep_prio": int(prep_prio),
         # Repair flag: re-encode the original rung to fix a baked-in A/V offset.
         "_force_reencode_video": bool(force_reencode_video),
     }
@@ -18376,13 +18516,15 @@ async def prep_all(item_id: str) -> JSONResponse:
     item = next((it for it in lib["items"] if it["id"] == item_id), None)
     if not item:
         raise HTTPException(404, "Item not found.")
+    prep_cfg = _prep_cfg(item)
     out = []
     for f in item.get("files", []):
         p = Path(f.get("path", ""))
         if not p.exists():
             out.append({"file_path": f.get("path", ""), "name": f.get("name", ""), "status": "missing"})
             continue
-        st = await _maybe_start_prep_job(p, item_id)
+        prio = _PREP_PRIO_NUM.get(_effective_prep_priority(prep_cfg, f.get("path", "")), 1)
+        st = await _maybe_start_prep_job(p, item_id, prep_prio=prio)
         out.append({"file_path": f["path"], "name": f.get("name", ""), **st})
         # _maybe_start_prep_job is sync (FS stat + task spawn, no internal await),
         # so yield between files — a 77-file pack otherwise hogs the event loop in

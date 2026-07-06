@@ -236,6 +236,14 @@ The qBittorrent API endpoint is `toggleSequentialDownload`. It's a toggle, so ch
 
 `toggleFirstLastPiecePrio` fetches the last piece early. That **breaks** piece-order streaming because the playhead is at the start, not the end. We deliberately leave it off.
 
+### Download-priority tiers use qBit 1/6/7 — and the default tier "mid" is 6, not 1
+
+The three exposed download-priority levels map onto qBit's file-priority tiers in `_file_mode_to_priority`: `low → 1` (Normal), `mid → 6` (High), `high → 7` (Maximal). **`mid` is the default and maps to 6, not 1** — and legacy `now` now reads as `mid` (6) too. This is only ever observable *relative to other files in the same torrent* (qBit orders by priority; an all-equal torrent behaves identically whether every file is 1 or 6), and `_reconcile_item_downloads` still leaves a plain "download now, no per-file overrides" item completely untouched — so nothing changes for un-prioritised torrents. Don't "fix" `mid` back to 1 thinking 6 is a bug: a `mid` vs `low` split must produce a real qBit ordering difference, which 6-vs-1 gives and 1-vs-1 wouldn't. The `download_scheduler_loop` remains the single writer of these priorities (see LIBRARY_DATA.md).
+
+### Prep priority orders QUEUED bulk work only — it never preempts a running encode
+
+`item.prep.priority_default` + per-file `priority` (low/mid/high, mid default) order the single-slot **bulk/auto-prep** queue via the park gate in `_run_offline_job` (`_higher_priority_bulk_pending`). Two hard boundaries to preserve: (1) **interactive (play-on-device) + admin force-prep still outrank every bulk tier** — they're counted by `_priority_hls_pending`, a separate gate, and `_preempt_running_bulk` boots an in-flight bulk encode for them; a *higher bulk tier* does **not** get that preemption (HLS can't checkpoint, so killing a running encode to reorder bulk-vs-bulk just wastes work). (2) The gate keys on a **strictly-higher** tier, so equal tiers stay FIFO and the top tier never parks — no starvation, no deadlock. `POST /api/library/{id}/prep-priority` re-stamps already-queued jobs' `_prep_prio` so a change reorders the queue immediately without touching the running encode. See STREAMING.md.
+
 ### LocalHost auth is disabled
 
 `setup.py` writes `WebUI\LocalHostAuth=false` to qBit's ini. Localhost requests never need a cookie. `qbit_login` is still called on startup and `qreq` retries on 403 for safety, but the cookie is mostly cosmetic.

@@ -542,6 +542,23 @@ Two ways to populate the cache:
 > Net effect: holding **Prep for Device** boots the in-flight bulk encode and starts
 > your file within a tick; the booted bulk file resumes once interactive prep clears.
 
+> **Prep priority orders bulk work (three tiers, mid default).** Within the bulk /
+> auto-prep class, a per-item **prep priority** (`item.prep.priority_default` +
+> per-file `item.prep.priority`, `low`/`mid`/`high`) decides which files build first.
+> `_maybe_start_prep_job` stamps each bulk job's numeric tier as `_prep_prio` (from
+> `_effective_prep_priority`), and the precedence gate in `_run_offline_job` parks a
+> bulk job while `_higher_priority_bulk_pending(_prep_prio) > 0` — i.e. any *strictly*
+> higher-tier bulk job is `pending`/`processing` — in the **same** loop that already
+> defers to `_priority_hls_pending()`. So a "high" series/episode jumps the auto-prep
+> queue ahead of "mid"/"low" work. Two boundaries: (a) **interactive + admin prep
+> still outrank every bulk tier** (they're counted by `_priority_hls_pending`, not this
+> gate), and (b) a running **bulk** encode is **never preempted for a higher-tier bulk
+> job** — HLS can't checkpoint, so only *queued* order changes; the top tier never
+> parks (no starvation/deadlock), and equal tiers stay FIFO. `POST
+> /api/library/{id}/prep-priority` re-stamps any already-queued bulk jobs for the
+> affected files so a change takes effect immediately. See
+> [LIBRARY_DATA.md § prep](LIBRARY_DATA.md).
+
 > **Staying responsive while prepping.** Three layers keep controls/UI/VLC-control
 > snappy under heavy prep:
 > 1. **The server runs at raised OS priority.** `_raise_own_priority()` (called

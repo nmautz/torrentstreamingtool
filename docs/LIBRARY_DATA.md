@@ -225,12 +225,20 @@ for any `downloading` item still carrying a `pending_download.magnet`. Normal, f
 "download": {
   "mode": "now",                 // "now" = download anytime · "idle" = only during idle/night
   "files": {                     // per-file overrides (by absolute path); inherit `mode` if absent
-    "/abs/path/S01E01.mkv": "high",   // download now, first
+    "/abs/path/S01E01.mkv": "high",   // High priority — Maximal (download first)
+    "/abs/path/S01E02.mkv": "mid",    // Mid priority — High (the default tier)
+    "/abs/path/S01E03.mkv": "low",    // Low priority — Normal (download after mid/high)
     "/abs/path/S01E09.mkv": "idle",   // only during the idle/night window
     "/abs/path/extras.mkv": "skip"    // never download
   }
 }
 ```
+
+The per-file mode is BOTH a schedule (`idle`/`skip`) and a **download-priority tier**
+(`low`/`mid`/`high`) — the three tiers order which episodes in one torrent fetch first,
+by mapping onto qBit's own file-priority levels (`_file_mode_to_priority`). `mid` is the
+default; legacy `now` reads as `mid`. The `dl_priority` field in the `/files` response
+collapses the effective mode to one of the three tiers for the UI segmented control.
 
 Controls **when** an item's torrent (and individual files) download. The
 `download_scheduler_loop` task ([main.py](../main.py)) is the **single source of
@@ -246,8 +254,9 @@ window is open right now (`_download_idle_open`, derived from the admin
 | effective mode | qBit priority |
 |----------------|---------------|
 | `skip` | 0 (never) |
-| `now`  | 1 (download now) |
-| `high` | 7 (download now, first) |
+| `low`  | 1 (Normal) |
+| `mid`  | 6 (High) — the default tier; legacy `now` maps here too |
+| `high` | 7 (Maximal — download first) |
 | `idle` | 1 when the idle window is open, else 0 |
 
 If no managed file should download right now, the torrent is paused (`qbit_pause`,
@@ -267,6 +276,10 @@ Missing/legacy items read as `{mode: "now", files: {}}` (plain anytime download)
     "/abs/path/S01E01.mkv": "now",    // prep immediately (the bar's "⚡ Now")
     "/abs/path/S01E09.mkv": "idle",   // prep during the idle/always auto-prep window (default)
     "/abs/path/extras.mkv": "never"   // opt out of all auto-prep
+  },
+  "priority_default": "mid",     // optional; item/series-level prep-QUEUE tier (low|mid|high). Absent ⇒ "mid"
+  "priority": {                  // optional; per-episode prep-queue tier override (by absolute path)
+    "/abs/path/S01E01.mkv": "high"    // preps ahead of other bulk/auto-prep work
   }
 }
 ```
@@ -289,6 +302,21 @@ active segment. Missing/legacy items read as `{files: {}}` (everything defaults 
 `idle`). Note `never` only suppresses *building a bundle ahead of time* — playing a
 "never" file still works via the on-demand (JIT) streaming path. Admin **Force Stream
 Prep** ignores `never` by design (it's an explicit "prep everything" override).
+
+**Prep priority (queue order).** Independent of the schedule, `priority_default` (the
+item/series-level tier every episode inherits) and the per-file `priority` map set a
+three-tier **prep-queue priority** (`low`/`mid`/`high`, `mid` default) read via
+`_effective_prep_priority` / `_prep_cfg`. It orders the single-slot **bulk / auto-prep**
+queue only: `_maybe_start_prep_job` stamps each bulk job's numeric tier as `_prep_prio`,
+and `_run_offline_job` parks a lower-tier bulk job at the encode-slot gate while any
+strictly-higher-tier bulk job is `pending`/`processing` (`_higher_priority_bulk_pending`)
+— so a "high" series/episode builds ahead of "mid"/"low" auto-prep. **Interactive**
+(play-on-device) and **admin force-prep** still outrank *all* bulk work regardless of
+tier, and an in-flight bulk encode is never preempted for a higher-tier *bulk* job (HLS
+can't checkpoint) — only the queued order changes. Set via
+`POST /api/library/{id}/prep-priority` (`scope:"item"` for the series default, else
+per-file); surfaced as `prep_priority` per file + `prep_priority_default` (item-level)
+in the `/files` response. See [STREAMING.md](STREAMING.md).
 
 **Moving a series** (`POST /api/library/{id}/move`, admin). Each file's `path` is rewritten to the new directory; for torrent-backed items the data is relocated via qBittorrent `setLocation` (seeding continues from the new path), and each file's co-located HLS bundle (`<file_dir>/.streamlink_cache/<key>/`) rides along. The cache key is path/mtime-independent (`version | filename | size`), so the move never invalidates a bundle. See [STREAMING.md](STREAMING.md) and [ADMIN.md § Content Lock](ADMIN.md).
 
