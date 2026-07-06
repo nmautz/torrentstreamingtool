@@ -12029,10 +12029,11 @@ async function _lpLoadIndex(seekTo) {
   lp.audios     = prep.audios || [];
   lp.subtitles  = prep.subtitles || [];
   lp.sidecarSubs = prep.subs || [];
-  // Embedded fonts for styled ASS subs (libass-wasm overlay). Bundle mode only;
-  // on-demand has no bundle dir so it never sets these (styled subs fall back to
-  // the VTT <track> there). See _lpApplyStyledSub / STREAMING.md.
-  lp.fonts      = (lp.mode === "bundle") ? (prep.fonts || []) : [];
+  // Embedded fonts for styled ASS subs (libass-wasm overlay). Bundle AND
+  // on-demand both serve sub_<i>.ass + font_* under lp.subBase, so both carry
+  // fonts; only the iOS device-copy path (no bundle dir) falls back to the VTT
+  // <track>. See _lpApplyStyledSub / STREAMING.md.
+  lp.fonts      = (lp.mode === "bundle" || lp.mode === "ondemand") ? (prep.fonts || []) : [];
 
   // Default selections: saved per-file picks (sent back by /offline-prepare
   // when profile_id is provided), otherwise the rendition flagged `default`
@@ -12378,11 +12379,11 @@ function _lpRenderTrackRows() {
   // The track row's visibility is owned by the gear toggle (.lp-opts on
   // #localPlayer — see lpToggleOpts), not by track counts: it always carries
   // the Clip row, so the gear button is always meaningful.
-  // Clipping re-encodes from the prepped bundle (the server 409s without one),
-  // so it's unavailable while streaming on-demand — hide the row until the file
-  // is fully prepped (a subsequent play then runs in bundle mode).
+  // Clipping cuts straight from the source, so it works in BOTH bundle and
+  // on-demand mode (the server accepts either once playback is active) — the row
+  // stays visible whenever a file is loaded on-device.
   const clipRow = document.getElementById("lpClipRow");
-  if (clipRow) clipRow.classList.toggle("hidden", lp.mode === "ondemand");
+  if (clipRow) clipRow.classList.remove("hidden");
 }
 
 // On-device AI subtitle generation for the current file. Non-blocking: the user
@@ -12832,11 +12833,12 @@ function _lpApplySubIdx(idx) {
   });
 }
 
-// The bundle sub descriptor for `key` IFF it's a styled ASS sub we can render
-// with libass: bundle mode only (on-demand/iOS have no bundle dir → VTT), a
-// numeric bundle index (not "-1"/"sidecar:N"), and the meta carries `ass_file`.
+// The sub descriptor for `key` IFF it's a styled ASS sub we can render with
+// libass: bundle OR on-demand mode (both expose sub_<i>.ass + fonts under
+// lp.subBase; iOS device-copy still has no bundle dir → VTT), a numeric index
+// (not "-1"/"sidecar:N"), and the meta carries `ass_file`.
 function _lpStyledSubFor(key) {
-  if (lp.mode !== "bundle" || !lp.subBase) return null;
+  if ((lp.mode !== "bundle" && lp.mode !== "ondemand") || !lp.subBase) return null;
   if (!/^\d+$/.test(key)) return null;
   const s = (lp.subtitles || [])[Number(key)];
   return (s && s.styled && s.ass_file) ? s : null;
@@ -14708,6 +14710,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.9.6</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.10.0</div>
 </body>
 </html>

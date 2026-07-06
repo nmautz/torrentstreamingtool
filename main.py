@@ -19142,13 +19142,16 @@ def _od_text_subs(info: dict) -> list[dict]:
 
 def _od_subs_meta(info: dict) -> list[dict]:
     """Build the on-demand `subtitles` list (UI index → sub_<i>.vtt), mirroring the
-    bundle's meta.json subtitles[] so the client attaches them identically."""
+    bundle's meta.json subtitles[] so the client attaches them identically. Styled
+    ASS/SSA subs also carry `ass_file` (raw sidecar extracted lazily) so the client
+    renders them with libass-wasm — same as bundle mode; the VTT stays the fallback."""
     return [{
         "idx":      i,
         "file":     f"sub_{i}.vtt",
         "language": s.get("language") or "und",
         "title":    s.get("title") or "",
         "label":    _track_label(s, f"Subtitles {i+1}"),
+        **({"styled": True, "ass_file": f"sub_{i}.ass"} if s.get("styled") else {}),
     } for i, s in enumerate(_od_text_subs(info))]
 
 
@@ -19171,7 +19174,30 @@ async def _od_extract_sub(src: str, src_sub_idx: int, out: Path) -> None:
         pass
 
 
+async def _od_extract_ass(src: str, src_sub_idx: int, out: Path) -> None:
+    """Extract one embedded ASS/SSA subtitle stream from the source to a raw `.ass`
+    sidecar (stream-copied, styling intact) — the libass-wasm input for styled
+    on-demand subs. Lazy (first fetch), below-normal priority, best-effort. Mirrors
+    the bundle's `sub_<i>.ass` output; the flattened `sub_<i>.vtt` remains the
+    fallback. ffmpeg picks the ass muxer from the `.ass` extension."""
+    ffmpeg = analyzer.ffmpeg_bin()
+    if not ffmpeg:
+        return
+    args = [ffmpeg, "-hide_banner", "-v", "error", "-y",
+            "-i", src, "-map", f"0:s:{src_sub_idx}",
+            "-c:s", "copy", "-f", "ass", str(out)]
+    try:
+        proc = await asyncio.create_subprocess_exec(
+            *args, stdout=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.DEVNULL, **_FFMPEG_SUBPROCESS_KW)
+        await proc.wait()
+    except Exception:
+        pass
+
+
 _OD_SUB_RE = re.compile(r"^sub_(\d+)\.vtt$")
+_OD_ASS_RE = re.compile(r"^sub_(\d+)\.ass$")
+_OD_FONT_RE = re.compile(r"^font_\d+\.[A-Za-z0-9]+$")
 
 
 def _od_build_ffmpeg_args(
@@ -19414,10 +19440,22 @@ async def stream_ondemand(item_id: str, req: OnDemandReq) -> JSONResponse:
             "last_access": time.time(),
             "lock":        asyncio.Lock(),
             "sub_idxs":    sub_idxs,
+            "fonts":       [],           # embedded fonts for styled ASS subs (libass)
             "video":       info.get("video") or {},   # codec/pix_fmt for NVDEC probe
         }
         session["dir"].mkdir(parents=True, exist_ok=True)
         _od_sessions[key] = session
+        # Styled subs need the fansub's embedded fonts. Extract them eagerly (once,
+        # cheap `-dump_attachment` pass, only when a styled sub exists) so the
+        # `fonts` list below is populated before the client's first libass apply;
+        # the raw `sub_<i>.ass` files stay lazy (extracted on first fetch). The
+        # reaper wipes the whole session dir, fonts included.
+        if any(s.get("styled") for s in _od_text_subs(info)):
+            try:
+                session["fonts"] = await asyncio.to_thread(
+                    _extract_bundle_fonts, src, session["dir"], info)
+            except Exception as exc:
+                hls_log.warning("ondemand %s: font extraction skipped: %s", key, exc)
         hls_log.info("ondemand %s session created src=%s audio=%d dur=%.1fs",
                      key, src.name, aidx, duration)
     else:
@@ -19441,6 +19479,7 @@ async def stream_ondemand(item_id: str, req: OnDemandReq) -> JSONResponse:
         "duration_sec":      duration,
         "audios":            audios_meta,
         "subtitles":         _od_subs_meta(info),   # embedded text subs, served as sub_<i>.vtt
+        "fonts":             session.get("fonts") or [],  # for styled ASS (libass-wasm)
         "subs":              sidecar_subs,
         "saved_tracks":      saved,
         "default_audio_idx": aidx,
@@ -19508,6 +19547,30 @@ async def ondemand_file(session_key: str, filename: str):
         if not out.exists():
             raise HTTPException(404, "Subtitle could not be extracted.")
         return FileResponse(str(out), media_type="text/vtt")
+
+    # Raw styled ASS/SSA sidecar for the libass-wasm overlay, extracted lazily on
+    # first fetch (styling intact). Same set as the VTT subs above; the client only
+    # requests it for subs `_od_subs_meta` flagged `styled`.
+    am = _OD_ASS_RE.match(filename)
+    if am:
+        i = int(am.group(1))
+        sub_idxs = session.get("sub_idxs") or []
+        if i >= len(sub_idxs):
+            raise HTTPException(404, "No such subtitle.")
+        out = session["dir"] / f"sub_{i}.ass"
+        if not out.exists():
+            await _od_extract_ass(session["src"], sub_idxs[i], out)
+        if not out.exists():
+            raise HTTPException(404, "Subtitle could not be extracted.")
+        return FileResponse(str(out), media_type=_HLS_MIME[".ass"])
+
+    # Embedded font for styled ASS rendering (extracted eagerly at session create).
+    if _OD_FONT_RE.match(filename):
+        out = session["dir"] / filename
+        if not out.exists() or not out.is_file():
+            raise HTTPException(404, "Font not found.")
+        media = _HLS_MIME.get(out.suffix.lower(), "application/octet-stream")
+        return FileResponse(str(out), media_type=media, filename=out.name)
 
     m = _OD_SEG_RE.match(filename)
     if not m:
@@ -19687,10 +19750,15 @@ async def make_clip(item_id: str, req: ClipReq) -> JSONResponse:
         raise HTTPException(404, "File not on disk.")
     _assert_not_compressing(str(src))
 
-    # Prepped-only: require the HLS bundle to exist (matches the product gate and
-    # guarantees the source is readable + probed).
-    if not (_offline_cache_dir(src) / "master.m3u8").exists():
-        raise HTTPException(409, "Prep this episode for streaming first, then you can clip it.")
+    # Clippable when the file is actively watchable on-device: either a full HLS
+    # bundle exists, OR a live JIT (on-demand) session is streaming it. Both
+    # guarantee the source is on disk + probed — the same invariant the old
+    # bundle-only gate provided. `_build_clip` cuts straight from the source, so no
+    # bundle artifact is actually read; this only gates on active playback.
+    bundle_ready = (_offline_cache_dir(src) / "master.m3u8").exists()
+    od_active = any(s.get("src") == str(src) for s in _od_sessions.values())
+    if not (bundle_ready or od_active):
+        raise HTTPException(409, "Play this episode on-device first, then you can clip it.")
 
     dur = max(1.0, min(float(CLIP_MAX_SECONDS), float(req.duration_sec or 30.0)))
     end = max(0.0, float(req.end_sec or 0.0))

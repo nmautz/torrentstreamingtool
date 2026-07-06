@@ -324,9 +324,11 @@ Key decisions:
   > pass). In **bundle mode** the on-device player renders that raw ASS with
   > **libass-wasm (SubtitlesOctopus)** on a canvas overlay (`_lpApplyStyledSub`,
   > vendored `static/vendor/subtitles-octopus*` + `libass-fallback-font.ttf`), so
-  > karaoke/positioning/fonts survive. The flattened `sub_<i>.vtt` is kept as the
-  > **universal fallback** — used for old bundles (no `ass_file`), on-demand/JIT
-  > playback (no bundle dir), and any libass failure. Re-prep an existing item to
+  > karaoke/positioning/fonts survive. **On-demand/JIT now renders styled subs the
+  > same way (8.10.0)** — it extracts `sub_<i>.ass` + fonts into its session dir; see
+  > the On-Demand § "Tracks" note below. The flattened `sub_<i>.vtt` is kept as the
+  > **universal fallback** — used for old bundles (no `ass_file`), the iOS
+  > device-copy path (no bundle dir), and any libass failure. Re-prep an existing item to
   > gain styling (`OFFLINE_CACHE_VERSION` isn't bumped). The **iOS app** renders
   > styled subs on both surfaces: the online in-app dashboard reuses this same
   > path, and the **offline downloads player** (`ios-app/www/downloads.html`) has a
@@ -1072,8 +1074,18 @@ wins (on-demand is a supplement, never a replacement).
   **identical** `<track>` machinery as the bundle (`prep.subtitles` + `prep.subs` from
   `_list_sidecar_subs`) — `subBase` resolves to `/api/library/ondemand/<key>/sub_<i>.vtt`.
   So a show played via JIT (un-prepped fallback **or** an *on-demand-only* item) keeps its
-  in-MKV subtitles. The **Clip** row is hidden in OD mode — clipping needs the bundle
-  (`409` otherwise), so it returns once the file is fully prepped.
+  in-MKV subtitles. **Styled ASS/SSA subs are rendered with full libass styling in OD too
+  (8.10.0).** `_od_subs_meta` flags a styled sub with `ass_file` (mirroring the bundle
+  meta); the raw `sub_<i>.ass` is stream-copied out lazily on first fetch (`_od_extract_ass`)
+  and the source's embedded **fonts** are extracted eagerly at session-create
+  (`_extract_bundle_fonts` into the session dir, only when a styled sub exists), returned in
+  the `stream-ondemand` `fonts` list. `ondemand_file` serves `sub_<i>.ass` + `font_*`, and the
+  client's `_lpStyledSubFor` / `lp.fonts` now accept `lp.mode==="ondemand"`, so
+  `_lpApplyStyledSub` (SubtitlesOctopus) fires exactly as in bundle mode. The flattened
+  `sub_<i>.vtt` stays the fallback on any libass failure. All are reaped with the session dir.
+  The **Clip** row is now **shown in OD mode too (8.10.0)** — `_build_clip` cuts straight from
+  the source, so `make_clip` accepts either a bundle `master.m3u8` **or** a live OD session for
+  the source (both prove it's on disk + probed); the old bundle-only `409` gate is relaxed.
 - **Session keepalive & 410 recovery.** The OD session is short-lived (the reaper
   deletes it `OD_SESSION_IDLE_SECS` after the last fetch), but the player buffers far
   ahead and — paused / fully buffered — can out-wait that window, so the session can be
