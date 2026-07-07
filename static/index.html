@@ -14663,8 +14663,13 @@ function connectSSE(){
     if(d.item_id&&(d.status==="ready"||d.status==="error")) libDownloadStats.delete(d.item_id);
     // Always refresh if on library tab; otherwise just update the badge via next state event
     if(activeTab==="library") loadLibrary();
-    // If an item just became ready, decrement the local badge immediately (state event confirms it)
-    if(d.status==="ready"||d.status==="error"){
+    // If an item just became ready, decrement the local badge immediately (a
+    // following state event confirms the authoritative count). Skip the optimistic
+    // decrement for an item that isn't in THIS viewer's library — an admin-locked
+    // item never counted toward their badge, so decrementing would wrongly skew it.
+    // (libCache absent = can't tell yet; fall through and let the state event heal.)
+    const knownItem = !window._libCache || window._libCache.some(it=>it.id===d.item_id);
+    if((d.status==="ready"||d.status==="error") && knownItem){
       app.downloading_count=Math.max(0,(app.downloading_count||0)-1);
       updateDlBadge(app.downloading_count);
     }
@@ -14884,6 +14889,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.11.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.11.3</div>
 </body>
 </html>

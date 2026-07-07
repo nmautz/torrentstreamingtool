@@ -700,7 +700,8 @@ class AppState:
     # keep the persisted Resume-on-shuffle scope intact). Empty when not shuffling.
     library_shuffle_scope: str = ""
     library_current_file: Optional[str] = None            # path VLC is playing now
-    downloading_count: int = 0                            # active library downloads
+    downloading_count: int = 0                            # active library downloads (ALL, incl. admin-only — drives host-busy/idle gating)
+    downloading_count_visible: int = 0                    # active downloads a non-elevated viewer may know about (excludes admin_only) — drives the user-facing badge
     play_when_ready_item_id: Optional[str] = None        # auto-play this item on download complete
     play_when_ready_profile_id: Optional[str] = None
     play_when_ready_file_path: Optional[str] = None      # if set, wait for this specific file
@@ -936,7 +937,11 @@ def state_snapshot() -> dict:
         "total_mb": round(state.total_mb, 2),
         "dl_speed_bps": state.dl_speed_bps,
         "ul_speed_bps": state.ul_speed_bps,
-        "downloading_count": state.downloading_count,
+        # Only the count of downloads a non-elevated viewer is allowed to know
+        # about — admin-locked items must leave NO trace (no badge, no count) for
+        # profiles that can't see them. Internal busy/idle gating still reads the
+        # true `state.downloading_count`. See docs/ADMIN.md § Content Lock.
+        "downloading_count": state.downloading_count_visible,
         "vlc_time": state.vlc_time,
         "vlc_duration": state.vlc_duration,
         "vlc_volume": state.vlc_volume,
@@ -4292,6 +4297,8 @@ async def _apply_item_schedule(item: dict, lib: dict) -> bool:
             if pending:
                 item["status"] = "downloading"
                 state.downloading_count += 1
+                if not item.get("admin_only"):
+                    state.downloading_count_visible += 1
     return idle_open
 
 
@@ -5175,6 +5182,9 @@ async def library_download_monitor() -> None:
             lib = await get_library()
             pending = [it for it in lib["items"] if it.get("status") == "downloading"]
             state.downloading_count = len(pending)
+            # The visible count excludes admin-locked items so a non-elevated
+            # viewer's download badge never reveals hidden content is fetching.
+            state.downloading_count_visible = sum(1 for it in pending if not it.get("admin_only"))
             if not pending:
                 continue
             changed = False
@@ -5210,11 +5220,15 @@ async def library_download_monitor() -> None:
                 if qstate in ("error", "missingFiles"):
                     item["status"] = "error"
                     state.downloading_count = max(0, state.downloading_count - 1)
+                    if not item.get("admin_only"):
+                        state.downloading_count_visible = max(0, state.downloading_count_visible - 1)
                     changed = True
                     await broadcast("library_update", {"item_id": item["id"], "status": "error"})
                 elif nonskip_done:
                     item["status"] = "ready"
                     state.downloading_count = max(0, state.downloading_count - 1)
+                    if not item.get("admin_only"):
+                        state.downloading_count_visible = max(0, state.downloading_count_visible - 1)
                     changed = True
                     await broadcast("library_update", {"item_id": item["id"], "status": "ready"})
                     # Smart Skip fingerprinting is NOT triggered here anymore — it
@@ -7752,6 +7766,11 @@ async def library_download(req: DownloadReq) -> JSONResponse:
     lib["items"].append(item)
     await put_library(lib)
     state.downloading_count += 1
+    # A freshly-created download is never admin-locked yet (the lock is toggled
+    # later from the Content Lock tab), so it always counts toward the visible
+    # badge; the monitor re-derives both counts authoritatively each tick.
+    if not item.get("admin_only"):
+        state.downloading_count_visible += 1
     save_path = req.save_path.strip() or settings.qbit_download_path
     asyncio.create_task(library_download_pipeline(
         item["id"], req.magnet, save_path,
@@ -18716,15 +18735,32 @@ async def offline_active(request: Request, profile_id: str = "") -> JSONResponse
     held. Done/error jobs are NOT returned; those are still visible via the
     per-item /prep-status when the card mounts.
 
-    All callers see the SAME counts/progress so prep activity looks identical to
-    everyone. Item titles are redacted to "Library content" and item_id is blanked
-    when the requesting profile can't see any one of the active items (admin_only
-    without admin/elevated). Redaction is all-or-nothing per response, so the
-    absence of a title doesn't leak which specific item the user is blocked from.
+    Prep jobs for **admin-locked** items are **fully excluded** for any requester
+    who can't see the item (not admin and not an elevated profile) — not redacted.
+    A viewer who can't see the content must see NO evidence it's being prepped: no
+    job, no count, no "something is running" bar. If admin-locked jobs are the only
+    thing active, such a viewer gets `active:false`, exactly as if the box were
+    idle. Privileged requesters (admin / elevated) still see everything, including
+    real item titles. See docs/ADMIN.md § Content Lock.
     """
     active = [j for j in _offline_jobs.values()
               if j.get("status") in ("pending", "processing", "paused")]
     if not active:
+        return JSONResponse({"active": False, "paused": state.prep_paused,
+                             "total_jobs": 0, "items": []})
+    lib = await get_library()
+    is_admin = _check_admin(request)
+    elevated_ids = {p["id"] for p in lib.get("profiles", []) if p.get("elevated")}
+    is_elevated = bool(profile_id) and profile_id in elevated_ids
+    items_by_id = {it["id"]: it for it in lib.get("items", [])}
+    # Drop every job the requester isn't allowed to know about. A job with no
+    # resolvable item (untagged / deleted) can't be admin-locked, so it stays.
+    if not is_admin and not is_elevated:
+        active = [j for j in active
+                  if not (items_by_id.get(j.get("item_id", "")) or {}).get("admin_only")]
+    if not active:
+        # Everything active was admin-locked and hidden from this viewer — report
+        # idle so no trace of the hidden prep leaks.
         return JSONResponse({"active": False, "paused": state.prep_paused,
                              "total_jobs": 0, "items": []})
     # Group by item_id, falling back to "" for jobs created before item_id
@@ -18732,20 +18768,6 @@ async def offline_active(request: Request, profile_id: str = "") -> JSONResponse
     by_item: dict[str, list[dict]] = {}
     for j in active:
         by_item.setdefault(j.get("item_id", ""), []).append(j)
-    lib = await get_library()
-    is_admin = _check_admin(request)
-    elevated_ids = {p["id"] for p in lib.get("profiles", []) if p.get("elevated")}
-    is_elevated = bool(profile_id) and profile_id in elevated_ids
-    items_by_id = {it["id"]: it for it in lib.get("items", [])}
-    # Redact when ANY active job is restricted from this requester — keeps the
-    # response shape identical so a curious user can't infer which one is hidden.
-    redact = False
-    if not is_admin and not is_elevated:
-        for iid in by_item.keys():
-            it = items_by_id.get(iid)
-            if it and it.get("admin_only"):
-                redact = True
-                break
     items_out: list[dict] = []
     now = time.time()
     for item_id, jobs in by_item.items():
@@ -18761,8 +18783,8 @@ async def offline_active(request: Request, profile_id: str = "") -> JSONResponse
                 eta_count += 1
         it = items_by_id.get(item_id)
         items_out.append({
-            "item_id":    "" if redact else item_id,
-            "title":      "Library content" if redact else (it.get("title", "") if it else ""),
+            "item_id":    item_id,
+            "title":      it.get("title", "") if it else "",
             "processing": len(jobs),
             "progress":   round(total_progress / len(jobs), 3) if jobs else 0,
             "eta_secs":   round(eta_total, 1) if eta_count > 0 else None,
