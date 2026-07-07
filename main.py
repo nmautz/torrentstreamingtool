@@ -5685,6 +5685,13 @@ SKIP_COUNTDOWN_CREDITS_SEC = 10
 # mistake), the viewer comes back to that file within the window and we leave
 # their real progress alone. If they don't return, we mark it watched.
 CREDIT_SKIP_WATCH_DELAY_SEC = 60   # grace period before marking watched
+WATCHED_PCT = 0.92                 # position/duration above which a file counts as finished
+
+# Track-preference sibling keys carried across every file_progress rewrite, so a
+# periodic/stop/supersede save never clobbers a subtitle/audio pick. See GOTCHAS.md.
+_TRACK_PREF_KEYS = ("audio_track", "subtitle_track",
+                    "local_audio_idx", "local_subtitle_idx",
+                    "subtitle_sel", "audio_sel")
 
 
 def _cancel_pending_watch() -> None:
@@ -5784,6 +5791,68 @@ async def _mark_file_watched_internal(
     }
     await put_library(lib)
     await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "ready")})
+
+
+def _position_is_finished(item: dict, file_path: str, pos: float, dur: float) -> bool:
+    """Whether a stop/supersede at `pos` should count the file as finished.
+
+    True when past the `completed` fraction OR at/after the detected credits —
+    the latter catches shows with long credits/next-episode tails whose content
+    ends well before the 0.92 mark, which the periodic saver would leave forever
+    un-completed (and therefore resumable)."""
+    if dur <= 0:
+        return False
+    if pos / dur > WATCHED_PCT:
+        return True
+    meta = _find_file_meta(item, file_path) or {}
+    cs = meta.get("credits_start")
+    if cs and pos >= float(cs) - 1:
+        return True
+    return False
+
+
+async def _finalize_stopped_file(
+    item_id: Optional[str], profile_id: Optional[str], file_path: Optional[str],
+    pos: float, dur: float,
+) -> None:
+    """Persist a final position when VLC library playback of `file_path` stops or
+    is superseded by another episode, marking it completed if it's effectively
+    finished (near the end, or past the credits).
+
+    Neither Stop nor starting a different episode ever flushed the outgoing
+    episode's position — the only completion writers were the 15 s periodic saver
+    (which needs a live `playing`/`paused` state and lags up to 15 s) and the
+    credit-skip grace timer. So stopping — or jumping to another episode from the
+    library list — while near the end left the episode below the 0.92 threshold,
+    `completed:false`, and therefore resumable: the next Play jumped back into an
+    episode the viewer considered finished. This closes that gap.
+
+    A non-finished stop still refreshes the position (closing the ≤15 s periodic
+    gap) but never regresses a newer saved position — which also makes an
+    end-of-file race that briefly reports the *next* file at t≈0 a no-op."""
+    if not (item_id and profile_id and file_path) or dur <= 0 or pos <= 0:
+        return
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        return
+    canon = _canonical_item_path(file_path, item)
+    prof_prog = item.setdefault("progress", {}).setdefault(profile_id, {})
+    file_prog = prof_prog.setdefault("file_progress", {})
+    existing = file_prog.get(canon) or file_prog.get(file_path) or {}
+    if existing.get("completed"):
+        return
+    finished = _position_is_finished(item, canon, pos, dur)
+    if not finished and pos <= existing.get("position_sec", 0):
+        return  # older/stale snapshot (or an EOF-race t≈0) — keep what we have
+    file_prog[canon] = {
+        "position_sec": round(dur if finished else pos, 1),
+        "duration_sec": round(dur, 1),
+        "completed": finished,
+        "updated_at": _now_iso(),
+        **{k: v for k, v in existing.items() if k in _TRACK_PREF_KEYS},
+    }
+    await put_library(lib)
 
 
 async def _vlc_marquee(text: str) -> None:
@@ -8311,6 +8380,19 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     prof_obj = next((p for p in lib.get("profiles", []) if p["id"] == req.profile_id), {})
     resume_mode = prof_obj.get("resume_mode", "auto")
 
+    # Starting a different episode supersedes whatever was playing — flush the
+    # outgoing episode's final position first, so jumping to another episode from
+    # the library list credits a near-finished one instead of leaving it
+    # resumable (see _finalize_stopped_file). Skip a same-file replay.
+    prev_item = state.library_item_id
+    prev_profile = state.library_profile_id
+    prev_file = state.library_current_file
+    if prev_item and prev_profile and prev_file and prev_file != playlist[0]:
+        asyncio.create_task(_finalize_stopped_file(
+            prev_item, prev_profile, prev_file,
+            float(state.vlc_time or 0), float(state.vlc_duration or 0),
+        ))
+
     # If a prior library play is still mid-handoff, cancel it so we don't race VLC
     prior = state.library_play_task
     if prior and not prior.done():
@@ -8392,19 +8474,24 @@ async def update_progress(item_id: str, req: ProgressReq) -> JSONResponse:
     prof_prog["last_file"] = req.file_path
     file_progress = prof_prog.setdefault("file_progress", {})
     existing = file_progress.get(req.file_path, {})
+    # `completed` is monotonic — a late/out-of-order progress POST (e.g. the
+    # on-device player flushing a stale position after a resume) must never
+    # un-finish an episode, or find_resume_hint jumps back into one already
+    # watched. Matches the batch-sync endpoint's rule.
+    already_done = bool(existing.get("completed"))
     file_progress[req.file_path] = {
-        "position_sec": round(req.position_sec, 1),
+        # Keep a finished episode pinned at the end rather than stamping the
+        # incoming (older) mid position, so its resume point stays past-the-end.
+        "position_sec": round(req.duration_sec if already_done and not (pct > 0.92)
+                              else req.position_sec, 1),
         "duration_sec": round(req.duration_sec, 1),
-        "completed": pct > 0.92,
+        "completed": (pct > 0.92) or already_done,
         "updated_at": _now_iso(),
         # Preserve VLC + local-player track picks across progress writes —
         # these are sibling keys in the same file_progress dict. subtitle_sel
         # is the resolvable descriptor the on-device player restores from;
         # dropping it here reset subs to off on the next replay.
-        **{k: v for k, v in existing.items()
-           if k in ("audio_track", "subtitle_track",
-                    "local_audio_idx", "local_subtitle_idx", "subtitle_sel",
-                    "audio_sel")},
+        **{k: v for k, v in existing.items() if k in _TRACK_PREF_KEYS},
     }
     await put_library(lib)
     return JSONResponse({"ok": True})
@@ -10194,6 +10281,19 @@ async def stop() -> JSONResponse:
     library_item_id = state.library_item_id
     prepare_hash = state.prepare_hash
     was_youtube = state.youtube_active
+
+    # Flush the outgoing episode's final position before we clear state — stopping
+    # near the end otherwise leaves it un-completed and resumable (see
+    # _finalize_stopped_file). Snapshot the live pos/dur (kept fresh every 2 s by
+    # stat_broadcaster) as a consistent pair with the current file.
+    fin_profile = state.library_profile_id
+    fin_file = state.library_current_file
+    fin_pos = float(state.vlc_time or 0)
+    fin_dur = float(state.vlc_duration or 0)
+    if library_item_id and fin_profile and fin_file:
+        asyncio.create_task(_finalize_stopped_file(
+            library_item_id, fin_profile, fin_file, fin_pos, fin_dur,
+        ))
 
     # Clear state + broadcast idle immediately — the UI updates before slow qBit/VLC roundtrips run
     state.active_hash = None
