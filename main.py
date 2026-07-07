@@ -6010,8 +6010,12 @@ async def _maybe_emit_skip_offer(
                 )
                 await broadcast("state", state_snapshot())
                 return
-        elif (start - SKIP_PREROLL_SEC) <= pos_sec < end:
+        elif ((start - SKIP_PREROLL_SEC) <= pos_sec < end
+                and state.skip_offer_file != f"{file_path}#intro-done"):
             # Manual path: show the Skip button across [start - PREROLL, end].
+            # The done-marker guard mirrors the auto path so a dismissed offer
+            # (DELETE /api/skip-now sets `#intro-done`) doesn't pop back on the
+            # next tick while still inside the intro window.
             offer = {"type": "intro", "end_at": round(end, 1), "file_path": file_path}
             if state.skip_offer != offer:
                 state.skip_offer = offer
@@ -6037,8 +6041,11 @@ async def _maybe_emit_skip_offer(
                 )
                 await broadcast("state", state_snapshot())
                 return
-        elif pos_sec >= cs - SKIP_PREROLL_SEC:
+        elif (pos_sec >= cs - SKIP_PREROLL_SEC
+                and state.skip_offer_file != f"{file_path}#credits-done"):
             # Manual path: show the Skip button from [credits_start - PREROLL, end).
+            # Done-marker guard mirrors the auto path so a dismissed offer stays
+            # dismissed for the rest of the credits window.
             next_path = _next_file_in_item(item, file_path)
             next_exists = bool(next_path) and Path(next_path).exists()
             offer = {
