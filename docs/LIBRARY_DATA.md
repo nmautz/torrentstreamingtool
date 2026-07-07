@@ -200,6 +200,8 @@ PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "so
 }
 ```
 
+**`series` is the cohesion key.** `_series_key(item)` = `series:<lowercased series>` (or `item:<id>` when empty) groups items into one show. The grouped-search download flow tags every episode/pack of a show with `series = <show title>` (no trailing season), so episodes downloaded individually **collapse into one library tile** and play as one merged, cross-item show. `GET /api/library` surfaces `series_key` per item; `GET /api/library/series/{key}` returns the merged, item-tagged file list + a series-level resume hint (`find_series_resume_hint`). A season-pack download is still a single multi-file item; a show can mix pack items and single-episode items under the same `series`. See [BACKEND.md](BACKEND.md) § merged series and [GOTCHAS.md](GOTCHAS.md) § cross-item series playback.
+
 ### `pending_download` (restart-recovery params)
 
 ```jsonc

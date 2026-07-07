@@ -1518,6 +1518,102 @@
   </div><!-- /#epRightPane -->
 </div>
 
+<!-- ── Search Show Detail (grouped results) ────────────────────────────────── -->
+<!-- Full-screen show page for a grouped search result: TMDb hero + two sections
+     (Single Episodes / Season & Multi-season Packs). Cloned styling from
+     #episodePage but wired to search results, not a library item. -->
+<div id="searchShowPage" class="hidden fixed inset-0 z-50 bg-gray-950 flex flex-col fade-in">
+  <div id="ssHero" class="relative flex-shrink-0 overflow-hidden">
+    <div id="ssBackdrop" class="absolute inset-0 bg-cover bg-center opacity-40 transition-opacity duration-300"></div>
+    <div class="absolute inset-0 bg-gradient-to-t from-gray-950 via-gray-950/85 to-gray-950/40"></div>
+    <div class="relative flex items-center justify-between gap-2 px-2 sm:px-4 py-2 safe-top">
+      <button onclick="closeSearchShow()"
+        class="flex items-center gap-1.5 px-2 py-1.5 text-gray-300 hover:text-white hover:bg-white/10 transition-colors">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+        </svg>
+        <span class="text-[11px] font-bold uppercase tracking-widest">Back</span>
+      </button>
+      <div id="ssHeaderTitle" class="text-[10px] sm:text-xs font-bold text-gray-400 uppercase tracking-widest truncate text-center flex-1 min-w-0"></div>
+      <div class="w-12 flex-shrink-0"></div>
+    </div>
+    <div class="relative px-3 sm:px-6 pb-4 pt-1 flex gap-3 sm:gap-5">
+      <div class="flex-shrink-0 w-24 sm:w-32 bg-gray-900 border border-gray-800 flex items-center justify-center overflow-hidden">
+        <img id="ssPoster" class="w-full h-full object-cover hidden" alt=""/>
+        <svg id="ssPosterFallback" class="w-10 h-10 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+            d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+        </svg>
+      </div>
+      <div class="min-w-0 flex-1 flex flex-col justify-end">
+        <h1 id="ssTitle" class="text-lg sm:text-2xl font-black uppercase tracking-wide leading-tight min-w-0"></h1>
+        <p id="ssMetaLine" class="text-[10px] sm:text-xs text-gray-400 uppercase tracking-widest mt-1"></p>
+        <p id="ssOverview" class="text-xs sm:text-sm text-gray-300 mt-2 line-clamp-3 sm:line-clamp-4"></p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Section toggle -->
+  <div id="ssSectionToggle" class="flex gap-3 px-3 sm:px-5 border-b border-gray-800 flex-shrink-0">
+    <button id="ssTabEpisodes" onclick="ssSwitchSection('episodes')"
+      class="py-2.5 text-xs font-black uppercase tracking-wide tab-inactive">Single Episodes</button>
+    <button id="ssTabPacks" onclick="ssSwitchSection('packs')"
+      class="py-2.5 text-xs font-black uppercase tracking-wide tab-inactive">Season Packs</button>
+  </div>
+
+  <!-- Episode tools: bulk-download + season tabs (episodes section only) -->
+  <div id="ssEpisodesTools" class="hidden flex-shrink-0">
+    <div class="px-3 sm:px-5 py-2 border-b border-gray-800 flex gap-1.5 items-center flex-wrap">
+      <button onclick="ssOpenBulkSheet()"
+        class="text-[11px] px-2.5 py-1.5 bg-indigo-700 hover:bg-indigo-600 text-white uppercase tracking-wide transition-colors flex items-center gap-1 min-h-[34px]">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+        </svg>Bulk download season
+      </button>
+    </div>
+    <div id="ssSeasonTabs"
+      class="hidden flex gap-1 px-2 sm:px-5 overflow-x-auto border-b border-gray-800
+             [scrollbar-width:none] [-ms-overflow-style:none]"></div>
+  </div>
+
+  <!-- Scrollable body (episode list or packs list) -->
+  <div id="ssBody" class="flex-1 overflow-y-auto"></div>
+</div>
+
+<!-- Per-episode / per-pack source picker (bottom-sheet) -->
+<div id="ssSourceSheet" class="hidden fixed inset-0 z-[55] bg-black/60 flex items-end sm:items-center justify-center sm:px-4 sm:py-6">
+  <div class="bg-gray-900 w-full sm:max-w-lg border-t-[3px] border-indigo-600 max-h-[85vh] flex flex-col">
+    <div class="flex items-center justify-between gap-2 px-4 py-3 border-b border-gray-800 flex-shrink-0">
+      <div class="min-w-0">
+        <h2 id="ssSourceTitle" class="text-sm font-black uppercase tracking-wide truncate">Sources</h2>
+        <p class="text-[10px] text-gray-500 uppercase tracking-widest">Pick a torrent to download</p>
+      </div>
+      <button onclick="ssCloseSourceSheet()" class="p-1 text-gray-500 hover:text-white flex-shrink-0">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+    <div id="ssSourceList" class="overflow-y-auto p-2 space-y-1.5"></div>
+  </div>
+</div>
+
+<!-- Bulk season download (bottom-sheet) -->
+<div id="ssBulkSheet" class="hidden fixed inset-0 z-[55] bg-black/60 flex items-end sm:items-center justify-center sm:px-4 sm:py-6">
+  <div class="bg-gray-900 w-full sm:max-w-lg border-t-[3px] border-indigo-600 max-h-[88vh] flex flex-col">
+    <div class="flex items-center justify-between gap-2 px-4 py-3 border-b border-gray-800 flex-shrink-0">
+      <h2 id="ssBulkTitle" class="text-sm font-black uppercase tracking-wide">Bulk download</h2>
+      <button onclick="ssCloseBulkSheet()" class="p-1 text-gray-500 hover:text-white flex-shrink-0">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+        </svg>
+      </button>
+    </div>
+    <div id="ssBulkBody" class="overflow-y-auto p-3 space-y-3 flex-1"></div>
+    <div id="ssBulkFooter" class="px-3 py-3 border-t border-gray-800 flex-shrink-0"></div>
+  </div>
+</div>
+
 <!-- ── Shuffle Scope Modal ─────────────────────────────────────────────────── -->
 <!-- Asks whether Shuffle Play should draw from unwatched episodes only or all. -->
 <div id="shuffleScopeModal"
@@ -3140,7 +3236,14 @@ let selectedColor = "indigo";
 let downloadTarget = null;
 // Episode picker state
 let epItemId  = null;
-let epFiles   = [];   // full file objects from API
+// Merged-series mode: when the episode page shows one cohesive show whose
+// episodes span several single-episode items, epSeriesKey is set and epFileItem
+// maps each file path → its owning item id (so play/prep/progress target the
+// right item). null/empty for a normal single-item open.
+let epSeriesKey = null;
+let epFileItem  = {};
+let _epSeriesResume = null;   // series-level resume hint from /library/series/{key}
+let epFiles   = [];   // full file objects from API (each carries item_id)
 let epChecked = new Set();  // checked file paths
 let epMetadata = null;     // TMDb metadata cache for the open item, or null
 let epMetaImgBase = "";    // metadata image base URL (host proxy /api/metadata/img)
@@ -5130,6 +5233,65 @@ function toggleLibHiddenView(){
   loadLibrary();
 }
 
+// One cohesive show tile for a series made of multiple items (e.g. episodes
+// downloaded individually). Opens the merged episode page; Play resumes across
+// the episodes on the TV.
+function _libShowTileHtml(seriesTitle, gItems){
+  const key=gItems[0].series_key||"";
+  const title=seriesTitle||gItems[0].series||gItems[0].title||"";
+  const totalEps=gItems.reduce((n,it)=>n+(it.file_count||1),0);
+  const seasons=[...new Set(gItems.map(it=>+it.season||0).filter(s=>s>0))];
+  const anyDownloading=gItems.some(it=>it.status==="downloading");
+  const anyError=gItems.some(it=>it.status==="error");
+  const doneCount=gItems.filter(it=>it.resume&&it.resume.all_completed).length;
+  const inProgress=gItems.some(it=>it.resume&&it.resume.pct>3&&!it.resume.all_completed);
+  const accent=anyError?"border-l-red-600":anyDownloading?"border-l-yellow-600":"border-l-indigo-800";
+  const bits=[`${totalEps} episode${totalEps===1?"":"s"}`];
+  if(seasons.length) bits.push(`${seasons.length} season${seasons.length>1?"s":""}`);
+  if(doneCount) bits.push(`${doneCount}/${gItems.length} watched`);
+  const badges=anyDownloading
+    ?`<span class="text-[10px] px-1.5 py-0.5 bg-yellow-900/50 text-yellow-400 border border-yellow-800 blink">↓ Downloading</span>`
+    :anyError?`<span class="text-[10px] px-1.5 py-0.5 bg-red-900/50 text-red-400 border border-red-800">Error</span>`:"";
+  const kAttr=escHtml(key), tAttr=escHtml(title);
+  return `<div class="mb-6"><div class="space-y-2">
+    <div class="bg-gray-900 border border-gray-800 border-l-4 ${accent} p-3">
+      <div class="lib-show-open cursor-pointer" role="button" tabindex="0" data-series-key="${kAttr}" data-title="${tAttr}">
+        <div class="flex items-center gap-2 mb-0.5">
+          <p class="text-sm font-black uppercase tracking-wide text-gray-100 leading-snug flex-1 min-w-0 truncate">${escHtml(title)}</p>
+          ${badges}
+        </div>
+        <div class="text-[11px] text-gray-500 uppercase tracking-wide">${escHtml(bits.join(" · "))}</div>
+      </div>
+      <div class="lib-card-actions flex items-center gap-2 flex-wrap mt-2.5">
+        <button class="lib-show-open flex-1 min-h-[40px] bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white text-xs font-black uppercase tracking-wide px-3 transition-colors" data-series-key="${kAttr}" data-title="${tAttr}">Episodes</button>
+        <button class="lib-show-play flex-[1.4] min-h-[40px] bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-black uppercase tracking-wide px-3 transition-colors" data-series-key="${kAttr}" data-mode="${inProgress?"resume":"all"}">▶ ${inProgress?"Resume":"Play"}</button>
+      </div>
+    </div>
+  </div></div>`;
+}
+
+// Play (or resume) a merged series on the TV/device — fetches the authoritative
+// merged file list + series resume, then hands the cross-item playlist to the
+// player chooser.
+async function playSeries(seriesKey, mode){
+  if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
+  let d;
+  try{
+    const r=await fetch(`/api/library/series/${encodeURIComponent(seriesKey)}?profile_id=${encodeURIComponent(profile.id)}`);
+    if(!r.ok) throw 0; d=await r.json();
+  }catch(_){ showAlert("Could not load show.","error"); return; }
+  const files=(d.files||[]).map(f=>f.path);
+  const items=(d.files||[]).map(f=>f.item_id);
+  if(!files.length){ showAlert("Nothing to play.","warn"); return; }
+  let startPath=(mode!=="all" && d.resume)?d.resume.file_path:files[0];
+  let idx=files.indexOf(startPath); if(idx<0) idx=0;
+  const ordered=files.slice(idx), orderedItems=items.slice(idx);
+  const seekTo=(mode!=="all" && d.resume && !d.resume.all_completed && (d.resume.position_sec||0)>5)?d.resume.position_sec:null;
+  const rf=(d.files||[])[idx];
+  const label=(rf&&rf.name)||d.title||"";
+  await playLibraryWithChooser(orderedItems[0]||items[0], ordered, seekTo, label, false, "", orderedItems);
+}
+
 function renderLibrary(items){
   const el=document.getElementById("libraryContent");
 
@@ -5203,6 +5365,14 @@ function renderLibrary(items){
   });
 
   groups.forEach(({label,items:gItems})=>{
+    // A real series with multiple items (e.g. episodes downloaded individually)
+    // renders as ONE cohesive show tile that opens the merged episode page —
+    // never as N separate tiles. A single-item series (or a season-pack item)
+    // keeps the normal per-item tile.
+    if(gItems.length>1 && (gItems[0].series||"").trim()){
+      html+=_libShowTileHtml(label, gItems);
+      return;
+    }
     // Only split a series into 2 columns when it actually has multiple items —
     // a single-item series spans full width instead of stranding an empty column.
     const gridCls=gItems.length>1?"grid grid-cols-1 lg:grid-cols-2 gap-2 items-start":"space-y-2";
@@ -5508,6 +5678,15 @@ function renderLibrary(items){
     tile.addEventListener("click",open);
     tile.addEventListener("keydown",e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); open(); }});
   });
+  // Merged-show tiles → merged episode page / series play.
+  el.querySelectorAll(".lib-show-open").forEach(tile=>{
+    const open=()=>openSeriesPage(tile.dataset.seriesKey, tile.dataset.title||"");
+    tile.addEventListener("click",open);
+    tile.addEventListener("keydown",e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); open(); }});
+  });
+  el.querySelectorAll(".lib-show-play").forEach(btn=>{
+    btn.addEventListener("click",e=>{ e.stopPropagation(); playSeries(btn.dataset.seriesKey, btn.dataset.mode||"resume"); });
+  });
   // Re-populate any Files expander that was open before this re-render (a status
   // flip — e.g. un-skipping a file — rebuilds the card with an empty container).
   expandedDownloads.forEach(id=>{
@@ -5542,7 +5721,7 @@ async function continueLibraryItem(itemId, label){
 }
 
 // Play a specific ordered list of files with optional seek on first
-async function playLibraryFiles(itemId,files,seekTo,label,shuffle,shuffleScope){
+async function playLibraryFiles(itemId,files,seekTo,label,shuffle,shuffleScope,items){
   if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
   if(!app._connected){
     showAlert("Reconnecting — try again in a moment.","warn"); return;
@@ -5555,6 +5734,8 @@ async function playLibraryFiles(itemId,files,seekTo,label,shuffle,shuffleScope){
     // plain `seekTo||null` would collapse 0 to null, making the server fall back to
     // the resume hint and seek a freshly-shuffled first file partway in.
     const body={profile_id:profile.id,files,seek_first_to:(seekTo==null?null:seekTo),shuffle:!!shuffle,shuffle_scope:shuffleScope||""};
+    // Merged-series play: parallel owning-item ids so the server can span items.
+    if(items && items.length===files.length) body.items=items;
     const r=await fetch(`/api/library/${itemId}/play`,{
       method:"POST", headers:{"Content-Type":"application/json"},
       body:JSON.stringify(body),
@@ -5992,6 +6173,7 @@ async function queuePlayFile(itemId,filePath){
 async function openEpisodePicker(itemId, title){
   // Backwards-compatible name; under the hood we render the full-screen page.
   epItemId=itemId;
+  epSeriesKey=null; epFileItem={};   // single-item open — clear any series mode
   epFiles=[]; epChecked=new Set();
   epMetadata=null; epMetaImgBase=""; epCurrentSeason=0; epSeasonList=[]; epIsMovie=false;
 
@@ -6068,6 +6250,90 @@ async function openEpisodePicker(itemId, title){
 
   // Fill the metadata in whenever it arrives (may already be resolved).
   _epApplyMetadata(itemId, title, metaPromise);
+}
+
+// Open the episode page for a merged SERIES (a show whose episodes live in
+// several single-episode items). Reuses the same renderers as a single item —
+// they're file-list-driven — but sources a merged, item-tagged file list from
+// /api/library/series/{key} so play/resume/next can span the items.
+async function openSeriesPage(seriesKey, title){
+  epItemId=null; epSeriesKey=seriesKey; epFileItem={};
+  epFiles=[]; epChecked=new Set();
+  epMetadata=null; epMetaImgBase=""; epCurrentSeason=0; epSeasonList=[]; epIsMovie=false;
+
+  document.getElementById("episodePage").classList.remove("hidden");
+  document.body.style.overflow="hidden";
+  setEpHeroPlaceholder(title||"Loading…");
+  document.getElementById("epList").innerHTML=
+    `<p class="text-gray-600 text-sm text-center py-12">Loading episodes…</p>`;
+
+  const pid=profile.id?`?profile_id=${profile.id}`:"";
+  let resp=null;
+  try{ resp=await fetch(`/api/library/series/${encodeURIComponent(seriesKey)}${pid}`); }catch(_){}
+  if(!resp || !resp.ok){
+    document.getElementById("epList").innerHTML=
+      `<p class="text-red-400 text-sm text-center py-12">Could not load this show.</p>`;
+    return;
+  }
+  const d=await resp.json();
+  if(epSeriesKey!==seriesKey) return;   // navigated away
+  epFiles=d.files||[];
+  epFiles.forEach(f=>{ epFileItem[f.path]=f.item_id; if(!f.progress?.completed) epChecked.add(f.path); });
+  epHasTorrent=true; epDownloadMode="now"; epPrepPrioDefault="mid";
+  epOndemandOnly=false; epOndemandLocked=false;
+  epHlsAvailable=d.hls_available!==false;
+  epMetadata=d.metadata||null; epMetaImgBase=d.img_base||"";
+  _epSeriesResume=d.resume||null;
+
+  const positiveSeasons=[...new Set(epFiles.map(f=>+f.season||0).filter(s=>s>0))].sort((a,b)=>a-b);
+  const hasZeroSeason=epFiles.some(f=>(+f.season||0)===0);
+  epSeasonList = positiveSeasons.length && hasZeroSeason ? [...positiveSeasons,0] : positiveSeasons;
+  epCurrentSeason = pickDefaultSeason();
+  epIsMovie=false;
+  _epApplyMovieChrome(false);
+  // The bottom "Download selected" ZIP is a per-item endpoint — hide it in the
+  // merged view (per-episode ⬇ download buttons on each row still work).
+  const _dlSel=document.getElementById("epDownloadSelBtn");
+  if(_dlSel) _dlSel.classList.add("hidden");
+
+  epHeroTitle=d.title||title||"";
+  renderEpHero(epHeroTitle);
+  renderEpSeasonTabs();
+  renderEpList();
+
+  // Enrich with full-series TMDb metadata by title (member items only cache the
+  // seasons they contain; a merged show wants every season's episode names).
+  if(!epMetadata || Object.keys((epMetadata.seasons)||{}).length < epSeasonList.filter(s=>s>0).length){
+    try{
+      const r=await fetch(`/api/tmdb/lookup?title=${encodeURIComponent(epHeroTitle)}`);
+      if(r.ok){
+        const m=await r.json();
+        if(epSeriesKey===seriesKey && m.metadata){
+          epMetadata=m.metadata; epMetaImgBase=m.img_base||epMetaImgBase;
+          renderEpHero(epHeroTitle); renderEpSeasonTabs(); renderEpList();
+        }
+      }
+    }catch(_){}
+  }
+}
+
+// Item id that owns a given file path — the merged-series map when in series
+// mode, else the single open item.
+function _epItemFor(path){ return (epSeriesKey && epFileItem[path]) || epItemId; }
+// Parallel item-id array for an ordered path list (null when not a series play).
+function _epItemsForPaths(paths){
+  return epSeriesKey ? paths.map(p=>epFileItem[p]||epItemId) : null;
+}
+// Group file paths by their owning item (for bulk actions that hit per-item
+// endpoints — mark-watched, delete). One entry in single-item mode.
+function _epGroupByItem(paths){
+  const m=new Map();
+  paths.forEach(p=>{
+    const iid=_epItemFor(p); if(!iid) return;
+    if(!m.has(iid)) m.set(iid,[]);
+    m.get(iid).push(p);
+  });
+  return m;
 }
 
 // Apply a /metadata response to the open episode page — repaints hero, season
@@ -6177,9 +6443,13 @@ function renderEpHero(fallbackTitle){
   overviewEl.textContent = m?.overview || "";
   // Reveal the rename control now the page has loaded — lets the user correct a
   // wrong auto-matched show (the metadata is fetched from the series name).
-  document.getElementById("epRenameBtn").classList.remove("hidden");
-  document.getElementById("epMetaFixBtn").classList.remove("hidden");
-  _renderEpOndemandBtn();
+  // These are per-item actions; in merged-series mode (no single epItemId) they
+  // don't apply, so keep them hidden.
+  const _perItem=!epSeriesKey;
+  document.getElementById("epRenameBtn").classList.toggle("hidden", !_perItem);
+  document.getElementById("epMetaFixBtn").classList.toggle("hidden", !_perItem);
+  if(_perItem) _renderEpOndemandBtn();
+  else document.getElementById("epOndemandBtn").classList.add("hidden");
 
   const bits=[];
   const yr = (m?.first_air_date || m?.release_date || "").slice(0,4);
@@ -6514,7 +6784,8 @@ function epSwitchSeason(s){
 function closeEpisodePage(){
   document.getElementById("episodePage").classList.add("hidden");
   document.body.style.overflow="";
-  epItemId=null; epFiles=[]; epChecked=new Set();
+  epItemId=null; epSeriesKey=null; epFileItem={}; _epSeriesResume=null;
+  epFiles=[]; epChecked=new Set();
   epMetadata=null; epMetaImgBase=""; epCurrentSeason=0; epSeasonList=[]; epWatchedExpanded=new Set();
   epHeroTitle=""; clearTimeout(_epMetaRetryTimer); _epMetaRetryTimer=null;
   epIsMovie=false; _epApplyMovieChrome(false);
@@ -6547,6 +6818,7 @@ function _epDisplayTitle(file){
 
 function _epCardHtml(f){
   const epIdx=epFiles.indexOf(f);
+  const fid=f.item_id||epItemId;   // owning item (merged-series aware)
   const checked=epChecked.has(f.path);
   const prog=f.progress;
   const dur=prog?.duration_sec||0;
@@ -6590,11 +6862,11 @@ function _epCardHtml(f){
     ? `<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 border border-gray-700 uppercase tracking-widest font-bold" title="Re-encoded to save space — no longer torrent-backed (won't seed, can't re-download).">⤓ Compressed</span>`
     : "";
 
-  const prepState = prepFileState.get(offKey(epItemId,f.path));
+  const prepState = prepFileState.get(offKey(fid,f.path));
   const isReady    = prepState === "ready";
   const isPrepping = prepState === "prepping";
   // HTML-encode JSON-quoted args so embedded "..." don't break the onclick="..." attribute.
-  const _id=escHtml(JSON.stringify(epItemId));
+  const _id=escHtml(JSON.stringify(fid));
   const _p =escHtml(JSON.stringify(f.path));
   const _n =escHtml(JSON.stringify(f.name));
 
@@ -6697,8 +6969,8 @@ function _epCardHtml(f){
               </button>`
             : ""}
           ${notDownloaded?"":offlineBtn}
-          ${(notDownloaded||!isApp)?"":`<span class="ep-appdl-slot" data-path="${escHtml(f.path)}">${_appDlBtnHTML(epItemId, f.path, f.name)}</span>`}
-          ${(notDownloaded||isApp)?"":`<a href="/api/library/${escHtml(epItemId)}/download?file_path=${encodeURIComponent(f.path)}" download="${escHtml(f.name)}"
+          ${(notDownloaded||!isApp)?"":`<span class="ep-appdl-slot" data-path="${escHtml(f.path)}">${_appDlBtnHTML(fid, f.path, f.name)}</span>`}
+          ${(notDownloaded||isApp)?"":`<a href="/api/library/${escHtml(fid)}/download?file_path=${encodeURIComponent(f.path)}" download="${escHtml(f.name)}"
             class="w-9 h-9 flex items-center justify-center text-gray-600 hover:text-indigo-300 hover:bg-indigo-950/40 transition-colors"
             title="Download to device">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -7388,32 +7660,30 @@ function epDownloadAll(itemId, title){
 // qBit won't refetch them; their rows stay (showing "not downloaded") with a
 // Download button to grab them again later.
 async function epDeleteFiles(paths, btn){
-  if(!epItemId) return;
   if(!paths || !paths.length){ showAlert("Select at least one episode.","warn"); return; }
+  const byItem=_epGroupByItem(paths);
+  if(!byItem.size) return;
   const n=paths.length;
   if(!confirm(`Delete ${n} file${n>1?"s":""} from the host to free space?\n\nThe bytes are removed from disk but the ${n>1?"episodes stay":"title stays"} re-downloadable — a ⬇ Download button reappears so you can fetch ${n>1?"them":"it"} again later.`)) return;
-  const itemId=epItemId;
   await withInflight("ep_delete", btn, async () => {
-    try{
-      const r=await fetch(`/api/library/${itemId}/delete-files`,{
-        method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({file_paths:paths}),
-      });
-      if(!r.ok){ const e=await r.json().catch(()=>({detail:"Delete failed."})); showAlert(e.detail||"Delete failed.","error"); return; }
-      const d=await r.json().catch(()=>({}));
-      const freed = d.freed_bytes ? ` — freed ${_fmtBytes(d.freed_bytes)}` : "";
-      // Compressed files are refused by the server (not re-downloadable). Tell the user.
-      if(d.blocked && d.blocked.length){
-        showAlert(`${d.blocked.length} compressed file(s) skipped — they're no longer torrent-backed and can't be re-downloaded. Remove the whole item to delete them.`,"warn");
-      }
-      if(d.deleted){
-        showAlert(`Deleted ${d.deleted} file${d.deleted>1?"s":""}${freed}.`,"success");
-      } else if(!(d.blocked && d.blocked.length)){
-        showAlert("Nothing to delete.","warn");
-      }
-      await refreshEpFiles();
-      loadLibrary();   // card meta / badges update too
-    }catch(_){ showAlert("Delete failed.","error"); }
+    let deleted=0, blocked=0, freed=0, failed=false;
+    for(const [itemId,ps] of byItem){
+      try{
+        const r=await fetch(`/api/library/${itemId}/delete-files`,{
+          method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({file_paths:ps}),
+        });
+        if(!r.ok){ failed=true; continue; }
+        const d=await r.json().catch(()=>({}));
+        deleted+=d.deleted||0; blocked+=(d.blocked||[]).length; freed+=d.freed_bytes||0;
+      }catch(_){ failed=true; }
+    }
+    if(blocked) showAlert(`${blocked} compressed file(s) skipped — they're no longer torrent-backed and can't be re-downloaded. Remove the whole item to delete them.`,"warn");
+    if(deleted) showAlert(`Deleted ${deleted} file${deleted>1?"s":""}${freed?` — freed ${_fmtBytes(freed)}`:""}.`,"success");
+    else if(failed) showAlert("Delete failed.","error");
+    else if(!blocked) showAlert("Nothing to delete.","warn");
+    await refreshEpFiles();
+    loadLibrary();   // card meta / badges update too
   });
 }
 
@@ -7424,28 +7694,32 @@ function epDeleteSelected(btn){
 
 async function epMarkWatched(watched, btn){
   if(!epChecked.size){ showAlert("Select at least one episode.","warn"); return; }
-  if(!epItemId) return;
   if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
   const paths=[...epChecked];
+  const byItem=_epGroupByItem(paths);
+  if(!byItem.size) return;
   await withInflight("mark_watched", btn, async () => {
-    const r=await fetch(`/api/library/${epItemId}/mark-watched`,{
-      method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({profile_id:profile.id,watched,file_paths:paths}),
-    });
-    if(r.ok){
-      showAlert(`Marked ${paths.length} episode${paths.length>1?"s":""} as ${watched?"watched":"unwatched"}.`,"success");
-      await openEpisodePicker(epItemId);
-    } else {
-      const e=await r.json().catch(()=>({detail:"Failed."}));
-      showAlert(e.detail||"Failed.","error");
+    let ok=true;
+    for(const [itemId,ps] of byItem){
+      const r=await fetch(`/api/library/${itemId}/mark-watched`,{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({profile_id:profile.id,watched,file_paths:ps}),
+      });
+      if(!r.ok) ok=false;
     }
+    if(ok) showAlert(`Marked ${paths.length} episode${paths.length>1?"s":""} as ${watched?"watched":"unwatched"}.`,"success");
+    else showAlert("Some updates failed.","error");
+    await refreshEpFiles();
+    loadLibrary();
   });
 }
 
 async function epToggleWatched(btn){
-  if(!epItemId||!profile.id) return;
+  if(!profile.id) return;
   const path=btn?.dataset?.path;
   if(!path) return;
+  const fid=_epItemFor(path);   // per-file owner (merged-series aware)
+  if(!fid) return;
   const wasWatched=btn.dataset.watched==="true";
   // Show loading spinner on the button until the server confirms.
   btn.disabled=true;
@@ -7455,7 +7729,7 @@ async function epToggleWatched(btn){
   if(spin) spin.classList.remove("hidden");
   btn.setAttribute("title","Updating…");
   try{
-    const r=await fetch(`/api/library/${epItemId}/mark-watched`,{
+    const r=await fetch(`/api/library/${fid}/mark-watched`,{
       method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({profile_id:profile.id,watched:!wasWatched,file_paths:[path]}),
     });
@@ -7470,8 +7744,21 @@ async function epToggleWatched(btn){
 // Used after a watched-toggle, and from the progress_saved SSE handler so the
 // open picker never displays stale watch data once the server has new state.
 async function refreshEpFiles(){
-  if(!epItemId) return;
   const pid=profile.id?`?profile_id=${profile.id}`:"";
+  // Merged-series view: re-pull the merged, item-tagged file list.
+  if(epSeriesKey){
+    try{
+      const r=await fetch(`/api/library/series/${encodeURIComponent(epSeriesKey)}${pid}`);
+      if(!r.ok) return;
+      const d=await r.json();
+      epFiles=d.files||[]; epFileItem={};
+      epFiles.forEach(f=>{ epFileItem[f.path]=f.item_id; });
+      epChecked=new Set([...epChecked].filter(p=>epFiles.some(f=>f.path===p)));
+      renderEpList();
+    } catch(_){}
+    return;
+  }
+  if(!epItemId) return;
   try{
     const r=await fetch(`/api/library/${epItemId}/files${pid}`);
     if(!r.ok) return;
@@ -7488,10 +7775,11 @@ async function refreshEpFiles(){
 
 async function epPlay(){
   if(!epChecked.size){ showAlert("Select at least one episode.","warn"); return; }
-  if(!epItemId) return;
-  const itemId=epItemId; // capture before closeEpisodeModal resets it to null
+  if(!epItemId && !epSeriesKey) return;
 
   const ordered=epFiles.filter(f=>epChecked.has(f.path)).map(f=>f.path);
+  const items=_epItemsForPaths(ordered);
+  const itemId=(items&&items[0])||epItemId; // owner of the first file
   const firstFile=epFiles.find(f=>f.path===ordered[0]);
   let seekTo=null;
   if(firstFile?.progress && !firstFile.progress.completed && firstFile.progress.position_sec>5)
@@ -7499,7 +7787,7 @@ async function epPlay(){
 
   const label=firstFile?(epLabel(firstFile)+" — "+firstFile.name):"";
   closeEpisodeModal();
-  await playLibraryWithChooser(itemId, ordered, seekTo, label);
+  await playLibraryWithChooser(itemId, ordered, seekTo, label, false, "", items);
 }
 
 // ── Shuffle Play ────────────────────────────────────────────────────────────
@@ -7526,14 +7814,15 @@ function _shuffleInPlace(a){
 }
 async function startShuffle(scope){
   closeShuffleScope();
-  if(!epItemId) return;
-  const itemId=epItemId; // capture before closeEpisodeModal resets it to null
+  if(!epItemId && !epSeriesKey) return;
   let pool=(scope==="unwatched")
     ? epFiles.filter(f=>!f.progress?.completed)
     : epFiles.slice();
   let paths=pool.map(f=>f.path).filter(Boolean);
   if(!paths.length){ showAlert("Nothing to shuffle.","warn"); return; }
   _shuffleInPlace(paths);
+  const items=_epItemsForPaths(paths);
+  const itemId=(items&&items[0])||epItemId;
   const firstFile=epFiles.find(f=>f.path===paths[0]);
   const label=firstFile?("Shuffle · "+firstFile.name):"Shuffle";
   closeEpisodeModal();
@@ -7541,22 +7830,23 @@ async function startShuffle(scope){
   // fresh random run, not a resume. shuffle=true records the order server-side
   // so TV Next/Prev navigate it instead of natural episode order. `scope` is
   // persisted so a later Resume can offer to re-shuffle the same pool.
-  await playLibraryWithChooser(itemId, paths, 0, label, true, scope);
+  await playLibraryWithChooser(itemId, paths, 0, label, true, scope, items);
 }
 
 // Play from a specific episode (by index in epFiles), continuing sequentially
 async function epPlayFrom(fileIndex){
-  if(!epItemId) return;
-  const itemId=epItemId; // capture before closeEpisodeModal resets it to null
+  if(!epItemId && !epSeriesKey) return;
   if(fileIndex<0||fileIndex>=epFiles.length) return;
   const ordered=epFiles.slice(fileIndex).map(f=>f.path);
+  const items=_epItemsForPaths(ordered);
+  const itemId=(items&&items[0])||epItemId; // owner of the first file
   const firstFile=epFiles[fileIndex];
   let seekTo=null;
   if(firstFile?.progress && !firstFile.progress.completed && firstFile.progress.position_sec>5)
     seekTo=firstFile.progress.position_sec;
   const label=firstFile?(epLabel(firstFile)+" — "+firstFile.name):"";
   closeEpisodeModal();
-  await playLibraryWithChooser(itemId, ordered, seekTo, label);
+  await playLibraryWithChooser(itemId, ordered, seekTo, label, false, "", items);
 }
 
 // ── Download modal ─────────────────────────────────────────────────────────
@@ -7606,7 +7896,8 @@ function renderDlPathChips(){
   });
 }
 
-async function openDownloadModal(magnet,title){
+async function openDownloadModal(magnet,title,overrides){
+  overrides=overrides||{};
   downloadTarget={magnet,title};
   document.getElementById("dlFilePickerRow").classList.remove("hidden");
   await Promise.all([ensureDefaultSavePath(), ensureLibraryPaths()]);
@@ -7625,6 +7916,10 @@ async function openDownloadModal(magnet,title){
     .replace(/\b(720p|1080p|2160p|4K|BluRay|WEB[-.]?DL|WEBRip|HDTV|x264|x265|HEVC|h\.?264|h\.?265|AAC|DD5|DDP5|Atmos)\b.*/i,"")
     .replace(/[._-]+/g," ").trim();
   document.getElementById("dlSeries").value=epMatch?seriesGuess:"";
+  // Caller overrides (grouped-search packs/movies): force the show's series so a
+  // downloaded pack coheres with the show's single-episode entries.
+  if(overrides.series!==undefined) document.getElementById("dlSeries").value=overrides.series;
+  if(overrides.episode!==undefined) document.getElementById("dlEpisode").value=overrides.episode;
 
   // Reset the idle-only toggle + warn if no idle/night window is configured.
   document.getElementById("dlIdleOnly").checked=false;
@@ -8269,9 +8564,10 @@ async function doSearch(q){
     if(catParam!==null) url+=`&categories=${encodeURIComponent(catParam)}`;
     const r=await fetch(url);
     if(!r.ok){ const e=await r.json().catch(()=>({detail:"Search failed"})); throw new Error(e.detail||`HTTP ${r.status}`); }
-    const items=(await r.json()).results||[];
-    count.textContent=items.length?`${items.length} results`:"";
-    if(!items.length){
+    const data=await r.json();
+    const groups=data.groups||[];
+    count.textContent=groups.length?`${groups.length} show${groups.length===1?"":"s"}`:"";
+    if(!groups.length){
       empty.classList.remove("hidden");
       empty.innerHTML=`<div class="w-16 h-16 bg-gray-800 border border-gray-700 flex items-center justify-center mb-4">
         <svg class="w-8 h-8 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -8281,54 +8577,443 @@ async function doSearch(q){
         <p class="text-gray-700 text-xs mt-1">Try different keywords or check your indexer</p>`;
       return;
     }
-    items.forEach((item,i)=>{
+    _ssGroupsById={};
+    groups.forEach((g,i)=>{
+      const gid="g"+i; _ssGroupsById[gid]=g;
       const card=document.createElement("div");
-      card.className="result-row bg-gray-900 border border-gray-800 border-l-4 border-l-indigo-900 p-4 transition-colors";
+      card.className="result-row bg-gray-900 border border-gray-800 border-l-4 border-l-indigo-900 p-4 transition-colors cursor-pointer hover:bg-gray-800/60";
       card.style.animationDelay=`${i*18}ms`;
-      const sc=item.seeders>30?"text-green-400":item.seeders>8?"text-yellow-400":"text-red-400";
+      const sc=g.seeders_max>30?"text-green-400":g.seeders_max>8?"text-yellow-400":"text-red-400";
+      // Meta bits: episode/season coverage + torrent count.
+      const bits=[];
+      const nEp=g.kinds?.episode||0, nSe=g.kinds?.season||0, nMs=g.kinds?.multiseason||0, nMv=g.kinds?.movie||0;
+      if((g.seasons||[]).length) bits.push(`${g.seasons.length} season${g.seasons.length>1?"s":""}`);
+      if(nEp) bits.push(`${nEp} episode${nEp>1?"s":""}`);
+      if(nSe+nMs) bits.push(`${nSe+nMs} pack${(nSe+nMs)>1?"s":""}`);
+      if(!nEp && !nSe && !nMs && nMv) bits.push(nMv>1?`${nMv} sources`:"movie");
+      const movieOnly=(nEp+nSe+nMs===0);
+      card.dataset.gid=gid;
       card.innerHTML=`
-        <p class="text-sm font-semibold text-gray-200 leading-snug mb-1 line-clamp-2">${escHtml(item.title)}</p>
-        <div class="flex items-center gap-2 mb-3 flex-wrap">
-          <span class="text-xs text-gray-500">${escHtml(item.size_human)}</span>
-          <span class="text-gray-700">·</span>
-          <span class="text-xs font-mono font-semibold ${sc}">${item.seeders} ↑</span>
-          ${item.peers?`<span class="text-gray-700">·</span><span class="text-xs text-gray-700">${item.peers} peers</span>`:""}
-          ${item.tracker?`<span class="text-gray-700">·</span><span class="text-[11px] text-gray-700 truncate max-w-[120px]">${escHtml(item.tracker)}</span>`:""}
+        <div class="flex items-center gap-2 mb-1">
+          <p class="text-sm font-black uppercase tracking-wide text-gray-100 leading-snug line-clamp-2 flex-1 min-w-0">${escHtml(g.title)}${g.year?` <span class="text-gray-600 font-bold">(${g.year})</span>`:""}</p>
+          <svg class="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/></svg>
         </div>
-        <div class="flex gap-2">
-          <button class="dl-btn vpn-gated flex-1 flex items-center justify-center gap-1.5
-                         bg-gray-800 hover:bg-gray-700 border border-gray-700
-                         text-gray-300 hover:text-white text-sm font-black uppercase tracking-wide
-                         py-3 transition-all active:scale-95"
-            data-magnet="${escHtml(item.magnet)}" data-title="${escHtml(item.title)}">
-            <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
-            </svg>Save
-          </button>
-          <button class="play-btn vpn-gated flex-1 flex items-center justify-center gap-1.5
-                         bg-indigo-600 hover:bg-indigo-500 text-white
-                         text-sm font-black uppercase tracking-wide py-3 transition-all active:scale-95
-                         disabled:opacity-40 disabled:cursor-not-allowed"
-            data-magnet="${escHtml(item.magnet)}" data-title="${escHtml(item.title)}">
-            ▶ Play
-          </button>
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="text-xs font-mono font-semibold ${sc}">${g.seeders_max} ↑</span>
+          <span class="text-gray-700">·</span>
+          <span class="text-[11px] text-gray-500 uppercase tracking-wide">${escHtml(bits.join(" · "))||`${g.torrent_count} torrents`}</span>
         </div>`;
-      card.querySelector(".play-btn").addEventListener("click",e=>{
-        const b=e.currentTarget; openStreamPicker(b.dataset.magnet,b.dataset.title,b);
-      });
-      card.querySelector(".dl-btn").addEventListener("click",e=>{
-        const b=e.currentTarget; openDownloadModal(b.dataset.magnet,b.dataset.title);
+      card.addEventListener("click",()=>{
+        const grp=_ssGroupsById[card.dataset.gid];
+        // A movie-only single-torrent group: skip the show screen, go straight
+        // to download options (there are no episodes/packs to browse).
+        if(movieOnly && grp.results.length===1){
+          openDownloadModal(grp.results[0].magnet, grp.results[0].title, {series:grp.title});
+        } else {
+          openSearchShow(grp);
+        }
       });
       grid.appendChild(card);
     });
     wrap.classList.remove("hidden");
-    applyVpnGate();   // title the freshly-rendered Save/Play buttons if VPN is down
+    applyVpnGate();   // title any freshly-rendered vpn-gated controls if VPN is down
   } catch(err){
     showAlert(err.message,"error"); empty.classList.remove("hidden");
   } finally {
     btn.disabled=false; btn.textContent="Search"; _markLoading(btn, false);
   }
+}
+
+// ── Grouped Search: Show Detail ──────────────────────────────────────────────
+// A grouped search result ("one card per show") opens a full-screen show page
+// (#searchShowPage): TMDb hero + two sections — Single Episodes (ordered, with
+// a per-episode source picker and season bulk-download) and Season Packs
+// (season + multi-season + movie/other torrents). Everything the screen needs
+// rides inside the group object from /api/search; TMDb art/episode-names are
+// fetched lazily by title via /api/tmdb/lookup.
+let _ssGroupsById={};           // gid → group (for the result cards)
+let _ssGroup=null;              // the open group
+let _ssMeta=null;               // TMDb metadata for the open show (or null)
+let _ssImgBase="/api/metadata/img";
+let _ssEpisodes=[];             // [{season,episode,sources:[result,…]}] sorted
+let _ssPacks=[];                // season/multiseason/movie results, seeder-sorted
+let _ssSection="episodes";
+let _ssSeason=0;                // current episode-season tab
+
+function _ssBuildEpisodes(results){
+  const map=new Map();
+  results.filter(r=>r.kind==="episode").forEach(r=>{
+    const k=`${r.season}-${r.episode}`;
+    let e=map.get(k);
+    if(!e){ e={season:r.season,episode:r.episode,sources:[]}; map.set(k,e); }
+    e.sources.push(r);
+  });
+  const eps=[...map.values()];
+  eps.forEach(e=>e.sources.sort((a,b)=>b.seeders-a.seeders));
+  eps.sort((a,b)=>(a.season-b.season)||(a.episode-b.episode));
+  return eps;
+}
+
+function _ssSeasonsWithEpisodes(){
+  return [...new Set(_ssEpisodes.map(e=>e.season))].sort((a,b)=>a-b);
+}
+
+// TMDb episode title for (season,episode), or "" when unknown.
+function _ssEpName(season,episode){
+  const s=_ssMeta&&_ssMeta.seasons&&_ssMeta.seasons[String(season)];
+  if(!s||!s.episodes) return "";
+  const ep=s.episodes.find(e=>e.episode===episode);
+  return ep?(ep.name||""):"";
+}
+
+async function openSearchShow(group){
+  _ssGroup=group; _ssMeta=null;
+  _ssEpisodes=_ssBuildEpisodes(group.results||[]);
+  _ssPacks=(group.results||[]).filter(r=>r.kind!=="episode")
+             .sort((a,b)=>b.seeders-a.seeders);
+  _ssSection=_ssEpisodes.length?"episodes":"packs";
+  const seasons=_ssSeasonsWithEpisodes();
+  _ssSeason=seasons.length?seasons[0]:0;
+
+  document.getElementById("ssHeaderTitle").textContent=group.title||"";
+  document.getElementById("ssTitle").textContent=group.title||"";
+  document.getElementById("ssOverview").textContent="";
+  document.getElementById("ssMetaLine").textContent=_ssMetaBits();
+  // Reset hero art to fallback until TMDb resolves.
+  document.getElementById("ssBackdrop").style.backgroundImage="";
+  const poster=document.getElementById("ssPoster");
+  poster.classList.add("hidden"); poster.removeAttribute("src");
+  document.getElementById("ssPosterFallback").classList.remove("hidden");
+
+  document.getElementById("searchShowPage").classList.remove("hidden");
+  document.body.style.overflow="hidden";
+  _ssRender();
+
+  // Lazy TMDb lookup (poster/backdrop/overview/episode titles).
+  try{
+    const kind=(!_ssEpisodes.length && !_ssPacks.some(p=>p.kind!=="movie"))?"movie":"";
+    const url=`/api/tmdb/lookup?title=${encodeURIComponent(group.title||"")}`
+      +(group.year?`&year=${group.year}`:"")+(kind?`&kind=${kind}`:"");
+    const r=await fetch(url);
+    if(r.ok){
+      const d=await r.json();
+      if(_ssGroup===group && d.metadata){   // still the open show
+        _ssMeta=d.metadata; _ssImgBase=d.img_base||_ssImgBase;
+        _ssRenderHero(); _ssRenderBody();
+      }
+    }
+  }catch(_){}
+}
+
+function closeSearchShow(){
+  document.getElementById("searchShowPage").classList.add("hidden");
+  ssCloseSourceSheet(); ssCloseBulkSheet();
+  document.body.style.overflow="";
+  _ssGroup=null; _ssMeta=null;
+}
+
+function _ssMetaBits(){
+  const g=_ssGroup, m=_ssMeta; if(!g) return "";
+  const bits=[];
+  const yr=(m&&(m.first_air_date||m.release_date)||"").slice(0,4)||(g.year?String(g.year):"");
+  if(yr) bits.push(yr);
+  const seasons=(g.seasons||[]).length;
+  if(seasons) bits.push(`${seasons} season${seasons>1?"s":""}`);
+  if(g.kinds&&g.kinds.episode) bits.push(`${g.kinds.episode} episodes`);
+  if(m&&m.genres&&m.genres.length) bits.push(m.genres.slice(0,3).join(" · "));
+  if(m&&typeof m.vote_average==="number"&&m.vote_average>0) bits.push(`★ ${m.vote_average.toFixed(1)}`);
+  return bits.join(" · ");
+}
+
+function _ssRenderHero(){
+  const m=_ssMeta;
+  document.getElementById("ssTitle").textContent=(m&&m.title)||(_ssGroup&&_ssGroup.title)||"";
+  document.getElementById("ssOverview").textContent=(m&&m.overview)||"";
+  document.getElementById("ssMetaLine").textContent=_ssMetaBits();
+  const backdrop=document.getElementById("ssBackdrop");
+  const poster=document.getElementById("ssPoster");
+  const posterFb=document.getElementById("ssPosterFallback");
+  const posterSrc=m&&m.poster_path?`${_ssImgBase}/w342${m.poster_path}`:"";
+  const backdropSrc=m&&m.backdrop_path?`${_ssImgBase}/w1280${m.backdrop_path}`:"";
+  backdrop.style.backgroundImage=backdropSrc?`url("${backdropSrc}")`:"";
+  if(posterSrc){ poster.src=posterSrc; poster.classList.remove("hidden"); posterFb.classList.add("hidden"); }
+  else { poster.classList.add("hidden"); poster.removeAttribute("src"); posterFb.classList.remove("hidden"); }
+}
+
+function _ssRender(){
+  _ssRenderHero();
+  // Section toggle: hide a section that has nothing.
+  const tabEp=document.getElementById("ssTabEpisodes"), tabPk=document.getElementById("ssTabPacks");
+  tabEp.classList.toggle("hidden", _ssEpisodes.length===0);
+  tabPk.classList.toggle("hidden", _ssPacks.length===0);
+  document.getElementById("ssTabPacks").textContent=
+    _ssPacks.some(p=>p.kind==="season"||p.kind==="multiseason")?"Season Packs":"Downloads";
+  const toggle=document.getElementById("ssSectionToggle");
+  toggle.classList.toggle("hidden", _ssEpisodes.length===0 && _ssPacks.length===0);
+  // apply active styling
+  [["ssTabEpisodes","episodes"],["ssTabPacks","packs"]].forEach(([id,sec])=>{
+    const el=document.getElementById(id);
+    el.classList.toggle("tab-active", _ssSection===sec);
+    el.classList.toggle("tab-inactive", _ssSection!==sec);
+  });
+  document.getElementById("ssEpisodesTools").classList.toggle("hidden", _ssSection!=="episodes");
+  _ssRenderBody();
+}
+
+function ssSwitchSection(sec){ _ssSection=sec; _ssRender(); }
+
+function ssSwitchSeason(s){ _ssSeason=s; _ssRenderBody(); }
+
+function _ssRenderBody(){
+  if(_ssSection==="packs"){ _ssRenderPacks(); return; }
+  _ssRenderEpisodes();
+}
+
+function _ssRenderEpisodes(){
+  const body=document.getElementById("ssBody");
+  const seasons=_ssSeasonsWithEpisodes();
+  // Season tabs
+  const tabs=document.getElementById("ssSeasonTabs");
+  if(seasons.length>1){
+    tabs.classList.remove("hidden");
+    tabs.innerHTML=seasons.map(s=>{
+      const on=s===_ssSeason;
+      return `<button onclick="ssSwitchSeason(${s})"
+        class="px-3 py-2 text-xs font-bold uppercase tracking-wide whitespace-nowrap transition-colors
+               ${on?"text-white border-b-2 border-indigo-500":"text-gray-500 hover:text-gray-300 border-b-2 border-transparent"}">
+        Season ${s}</button>`;
+    }).join("");
+  } else { tabs.classList.add("hidden"); }
+  if(seasons.length && !seasons.includes(_ssSeason)) _ssSeason=seasons[0];
+
+  const eps=_ssEpisodes.filter(e=>seasons.length<=1||e.season===_ssSeason);
+  body.innerHTML=`<div class="divide-y divide-gray-800">`+eps.map(e=>{
+    const best=e.sources[0];
+    const code=`S${String(e.season).padStart(2,"0")}E${String(e.episode).padStart(2,"0")}`;
+    const name=_ssEpName(e.season,e.episode);
+    const sc=best.seeders>30?"text-green-400":best.seeders>8?"text-yellow-400":"text-red-400";
+    return `<button onclick="ssOpenSourceSheet(${e.season},${e.episode})"
+      class="w-full text-left px-3 sm:px-5 py-3 hover:bg-gray-800/50 transition-colors flex items-center gap-3">
+      <div class="text-[11px] font-mono font-bold text-indigo-400 w-14 flex-shrink-0">${code}</div>
+      <div class="min-w-0 flex-1">
+        <p class="text-sm text-gray-200 truncate">${name?escHtml(name):`Episode ${e.episode}`}</p>
+        <p class="text-[11px] text-gray-500">
+          <span class="font-mono font-semibold ${sc}">${best.seeders} ↑</span> ·
+          ${escHtml(best.size_human)} · ${e.sources.length} source${e.sources.length>1?"s":""}
+        </p>
+      </div>
+      <svg class="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+      </svg>
+    </button>`;
+  }).join("")+`</div>`;
+  if(!eps.length) body.innerHTML=`<p class="text-center text-gray-600 text-sm py-10">No single episodes found.</p>`;
+}
+
+function _ssPackLabel(p){
+  if(p.kind==="multiseason") return p.season_from?`Seasons ${p.season_from}–${p.season_to||p.season_from}`:"Complete series";
+  if(p.kind==="season") return `Season ${p.season}`;
+  return "Movie / other";
+}
+
+function _ssRenderPacks(){
+  document.getElementById("ssSeasonTabs").classList.add("hidden");
+  const body=document.getElementById("ssBody");
+  body.innerHTML=`<div class="divide-y divide-gray-800">`+_ssPacks.map((p,i)=>{
+    const sc=p.seeders>30?"text-green-400":p.seeders>8?"text-yellow-400":"text-red-400";
+    return `<button onclick="ssDownloadPack(${i})"
+      class="w-full text-left px-3 sm:px-5 py-3 hover:bg-gray-800/50 transition-colors flex items-center gap-3">
+      <div class="min-w-0 flex-1">
+        <div class="flex items-center gap-2 mb-0.5">
+          <span class="text-[10px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-indigo-900/60 text-indigo-300">${escHtml(_ssPackLabel(p))}</span>
+        </div>
+        <p class="text-sm text-gray-200 truncate">${escHtml(p.title)}</p>
+        <p class="text-[11px] text-gray-500">
+          <span class="font-mono font-semibold ${sc}">${p.seeders} ↑</span> · ${escHtml(p.size_human)}
+          ${p.tracker?` · <span class="text-gray-600">${escHtml(p.tracker)}</span>`:""}
+        </p>
+      </div>
+      <svg class="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+      </svg>
+    </button>`;
+  }).join("")+`</div>`;
+  if(!_ssPacks.length) body.innerHTML=`<p class="text-center text-gray-600 text-sm py-10">No season packs found.</p>`;
+}
+
+// A pack opens the full Add-to-Library modal (save path, file selection,
+// visibility) prefilled with the show's series so it coheres in the library.
+function ssDownloadPack(i){
+  const p=_ssPacks[i]; if(!p) return;
+  openDownloadModal(p.magnet, p.title, {series:_ssGroup.title});
+}
+
+// ── Per-episode source picker ────────────────────────────────────────────────
+function ssOpenSourceSheet(season,episode){
+  const e=_ssEpisodes.find(x=>x.season===season&&x.episode===episode);
+  if(!e) return;
+  const code=`S${String(season).padStart(2,"0")}E${String(episode).padStart(2,"0")}`;
+  const name=_ssEpName(season,episode);
+  document.getElementById("ssSourceTitle").textContent=code+(name?` — ${name}`:"");
+  const list=document.getElementById("ssSourceList");
+  list.innerHTML=e.sources.map((s,i)=>{
+    const sc=s.seeders>30?"text-green-400":s.seeders>8?"text-yellow-400":"text-red-400";
+    return `<button onclick="ssPickSource(${season},${episode},${i})"
+      class="w-full text-left p-3 bg-gray-950 hover:bg-gray-800 border border-gray-800 hover:border-indigo-700 transition-colors">
+      <p class="text-xs text-gray-200 line-clamp-2 mb-1">${escHtml(s.title)}</p>
+      <p class="text-[11px] text-gray-500">
+        <span class="font-mono font-semibold ${sc}">${s.seeders} ↑</span> · ${escHtml(s.size_human)}
+        ${s.tracker?` · <span class="text-gray-600">${escHtml(s.tracker)}</span>`:""}
+      </p>
+    </button>`;
+  }).join("");
+  document.getElementById("ssSourceSheet").classList.remove("hidden");
+}
+
+function ssCloseSourceSheet(){ document.getElementById("ssSourceSheet").classList.add("hidden"); }
+
+function ssPickSource(season,episode,i){
+  const e=_ssEpisodes.find(x=>x.season===season&&x.episode===episode);
+  if(!e||!e.sources[i]) return;
+  ssCloseSourceSheet();
+  _ssDownloadOne(e.sources[i], season, episode);
+}
+
+// Fire a single-episode download tagged with the show's series so all episodes
+// of the show cohere into one library entry (Phase 4).
+async function _ssDownloadOne(src, season, episode, opts={}){
+  const body={magnet:src.magnet, title:src.title, series:_ssGroup.title,
+              season, episode, save_path:""};
+  const r=await fetch("/api/library/download",{
+    method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body),
+  });
+  if(!r.ok){
+    const err=await r.json().catch(()=>({detail:"Failed"}));
+    if(!opts.silent) showAlert(err.detail||"Download failed.","error");
+    return false;
+  }
+  if(!opts.silent){ showAlert("Downloading — switch to Library to track progress.","success"); closeSearchShow(); switchTab("library"); }
+  return true;
+}
+
+// ── Bulk season download (Phase 3) ───────────────────────────────────────────
+let _ssBulkScope="all";   // "all" or a season number
+function ssOpenBulkSheet(){
+  _ssBulkScope=_ssSeason||"all";
+  document.getElementById("ssBulkSheet").classList.remove("hidden");
+  _ssRenderBulkChoose();
+}
+function ssCloseBulkSheet(){ document.getElementById("ssBulkSheet").classList.add("hidden"); }
+
+function _ssBulkEpisodesInScope(){
+  return _ssEpisodes.filter(e=>_ssBulkScope==="all"||e.season===_ssBulkScope);
+}
+
+// Step 1: choose scope + Auto/Manual mode.
+function _ssRenderBulkChoose(){
+  document.getElementById("ssBulkTitle").textContent="Bulk download";
+  const seasons=_ssSeasonsWithEpisodes();
+  const body=document.getElementById("ssBulkBody");
+  const chip=(label,val)=>{
+    const on=String(_ssBulkScope)===String(val);
+    return `<button onclick="_ssSetBulkScope('${val}')"
+      class="text-xs px-3 py-1.5 uppercase tracking-wide transition-colors
+             ${on?"bg-indigo-600 text-white":"bg-gray-800 text-gray-400 hover:bg-gray-700"}">${label}</button>`;
+  };
+  const n=_ssBulkEpisodesInScope().length;
+  body.innerHTML=`
+    <div>
+      <p class="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Scope</p>
+      <div class="flex gap-1.5 flex-wrap">
+        ${seasons.length>1?chip("All seasons","all"):""}
+        ${seasons.map(s=>chip("Season "+s,s)).join("")}
+      </div>
+    </div>
+    <p class="text-xs text-gray-500">${n} episode${n===1?"":"s"} in scope.</p>
+    <div>
+      <p class="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">How should sources be picked?</p>
+      <div class="grid grid-cols-1 gap-2">
+        <button onclick="ssBulkAuto()"
+          class="text-left p-3 bg-gray-950 border border-gray-800 hover:border-indigo-700 hover:bg-gray-800 transition-colors">
+          <p class="text-sm font-black uppercase tracking-wide text-indigo-300">Auto — highest seeders</p>
+          <p class="text-[11px] text-gray-500 mt-0.5">Grab the best-seeded torrent for every episode.</p>
+        </button>
+        <button onclick="_ssRenderBulkManual()"
+          class="text-left p-3 bg-gray-950 border border-gray-800 hover:border-indigo-700 hover:bg-gray-800 transition-colors">
+          <p class="text-sm font-black uppercase tracking-wide text-gray-200">Choose per episode</p>
+          <p class="text-[11px] text-gray-500 mt-0.5">Pick which torrent to use for each episode.</p>
+        </button>
+      </div>
+    </div>`;
+  document.getElementById("ssBulkFooter").innerHTML=`
+    <button onclick="ssCloseBulkSheet()" class="w-full bg-gray-800 hover:bg-gray-700 py-3 text-xs font-bold uppercase tracking-wide min-h-[44px]">Cancel</button>`;
+}
+function _ssSetBulkScope(v){ _ssBulkScope=(v==="all")?"all":parseInt(v); _ssRenderBulkChoose(); }
+
+// Step 2 (manual): a <select> of sources per episode, defaulting to best.
+function _ssRenderBulkManual(){
+  document.getElementById("ssBulkTitle").textContent="Choose per episode";
+  const eps=_ssBulkEpisodesInScope();
+  const body=document.getElementById("ssBulkBody");
+  body.innerHTML=eps.map((e,idx)=>{
+    const code=`S${String(e.season).padStart(2,"0")}E${String(e.episode).padStart(2,"0")}`;
+    const name=_ssEpName(e.season,e.episode);
+    const opts=e.sources.map((s,i)=>
+      `<option value="${i}">${escHtml((s.size_human||"")+" · "+s.seeders+"↑ · "+(s.title.length>48?s.title.slice(0,48)+"…":s.title))}</option>`).join("");
+    return `<div class="flex items-center gap-2">
+      <label class="flex items-center gap-1.5 flex-shrink-0">
+        <input type="checkbox" class="ss-bulk-cb w-4 h-4 accent-indigo-500" data-idx="${idx}" checked/>
+        <span class="text-[11px] font-mono font-bold text-indigo-400 w-14">${code}</span>
+      </label>
+      <select class="ss-bulk-sel flex-1 min-w-0 bg-gray-950 border border-gray-800 text-xs text-gray-300 py-1.5 px-2" data-idx="${idx}">
+        ${opts}
+      </select>
+    </div>`+(name?`<p class="text-[10px] text-gray-600 ml-16 -mt-1 mb-1 truncate">${escHtml(name)}</p>`:"");
+  }).join("");
+  if(!eps.length) body.innerHTML=`<p class="text-center text-gray-600 text-sm py-6">No episodes in scope.</p>`;
+  document.getElementById("ssBulkFooter").innerHTML=`
+    <div class="flex gap-2">
+      <button onclick="_ssRenderBulkChoose()" class="flex-1 bg-gray-800 hover:bg-gray-700 py-3 text-xs font-bold uppercase tracking-wide min-h-[44px]">Back</button>
+      <button onclick="ssBulkManual()" class="flex-[1.4] bg-indigo-600 hover:bg-indigo-500 py-3 text-xs font-black uppercase tracking-wide min-h-[44px]">Download</button>
+    </div>`;
+}
+
+function ssBulkAuto(){
+  const eps=_ssBulkEpisodesInScope();
+  const jobs=eps.map(e=>({src:e.sources[0], season:e.season, episode:e.episode}));
+  _ssRunBulk(jobs);
+}
+
+function ssBulkManual(){
+  const eps=_ssBulkEpisodesInScope();
+  const cbs=[...document.querySelectorAll(".ss-bulk-cb")];
+  const sels=[...document.querySelectorAll(".ss-bulk-sel")];
+  const jobs=[];
+  cbs.forEach(cb=>{
+    if(!cb.checked) return;
+    const idx=parseInt(cb.dataset.idx);
+    const e=eps[idx]; if(!e) return;
+    const sel=sels.find(s=>parseInt(s.dataset.idx)===idx);
+    const si=sel?parseInt(sel.value):0;
+    jobs.push({src:e.sources[si]||e.sources[0], season:e.season, episode:e.episode});
+  });
+  _ssRunBulk(jobs);
+}
+
+// Fire the batch sequentially (throttled) so qBit isn't hammered; every episode
+// shares the show's series string → one cohesive library entry.
+async function _ssRunBulk(jobs){
+  if(!jobs.length){ showAlert("Nothing selected.","warn"); return; }
+  ssCloseBulkSheet();
+  const total=jobs.length; let ok=0;
+  showAlert(`Queuing ${total} episode${total>1?"s":""}…`,"success");
+  for(const j of jobs){
+    const done=await _ssDownloadOne(j.src, j.season, j.episode, {silent:true});
+    if(done) ok++;
+    await new Promise(r=>setTimeout(r,250));
+  }
+  showAlert(`Queued ${ok}/${total} episode${total>1?"s":""} — switch to Library to track progress.`, ok?"success":"error");
+  closeSearchShow(); switchTab("library");
 }
 
 // ── VLC Controls ───────────────────────────────────────────────────────────
@@ -11113,12 +11798,12 @@ async function startShuffleForItem(itemId, scope, label, resume) {
 
 // Entry point used by Play buttons. Shows the chooser modal when both VLC and
 // local-device playback are reachable; falls through to VLC otherwise.
-async function playLibraryWithChooser(itemId, files, seekTo, label, shuffle, shuffleScope) {
+async function playLibraryWithChooser(itemId, files, seekTo, label, shuffle, shuffleScope, items) {
   if (!navigator.onLine) {
     showAlert("Disconnected — playback needs the host to be reachable.", "error");
     return;
   }
-  pcCtx = { itemId, files, seekTo, label, shuffle: !!shuffle, shuffleScope: shuffleScope || "" };
+  pcCtx = { itemId, files, seekTo, label, shuffle: !!shuffle, shuffleScope: shuffleScope || "", items: items || null };
   // macOS host: no device option — go straight to VLC instead of a 1-item modal.
   if (!hlsAvailable) return pcChoose("vlc");
   document.getElementById("pcSubtitle").textContent = label || "";
@@ -11144,11 +11829,22 @@ function pcChoose(target) {
       // Multi-file resume on VLC: let the backend pick up from the resume hint.
       return continueLibraryItem(ctx.itemId, ctx.label);
     }
-    return playLibraryFiles(ctx.itemId, ctx.files, ctx.seekTo, ctx.label, ctx.shuffle, ctx.shuffleScope);
+    return playLibraryFiles(ctx.itemId, ctx.files, ctx.seekTo, ctx.label, ctx.shuffle, ctx.shuffleScope, ctx.items);
   }
   if (target === "local") {
     // Dismiss the server-side offer (VLC stays put; user is watching on device).
     if (ctx._isResume) fetch("/api/resume-now", {method:"DELETE"}).catch(()=>{});
+    // Merged-series → device: the on-device player is single-item (its prep /
+    // offline-prepare / progress-sync endpoints validate file∈item), so it can't
+    // auto-advance across episode-torrents like the TV does. Play just the leading
+    // run of files owned by the first item (each series episode is its own 1-file
+    // item, so this is the tapped episode). Cross-item auto-advance is TV-only.
+    if (ctx.items && ctx.items.length) {
+      const owner = ctx.items[0];
+      const trimmed = [];
+      for (let i = 0; i < ctx.files.length && ctx.items[i] === owner; i++) trimmed.push(ctx.files[i]);
+      return lpPlay(owner, trimmed, ctx.seekTo, ctx.label, ctx.shuffle, ctx.shuffleScope);
+    }
     if (ctx._continueMode && !ctx.files.length) {
       // "Play All" with no resume hint: fetch the item's ordered file list from
       // the server and start at the first episode. (_libCache only carries
@@ -14889,6 +15585,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.11.4</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.0.0</div>
 </body>
 </html>

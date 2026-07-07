@@ -699,6 +699,17 @@ class AppState:
     # alongside library_shuffle_order so a VLC→device handoff can carry it (and
     # keep the persisted Resume-on-shuffle scope intact). Empty when not shuffling.
     library_shuffle_scope: str = ""
+    # Merged-series playback: a single show whose episodes live in *separate*
+    # library items (each a single-episode torrent) is played as one playlist that
+    # spans those items. `library_series_map` maps each playlist path → its owning
+    # item id; the progress tracker re-points `library_item_id` at the owner of the
+    # file VLC is actually playing so progress/skip/track-prefs key off the right
+    # item as playback crosses item boundaries. `library_series_order` is the full,
+    # stable ordered path list (like library_shuffle_order — doesn't shrink) so
+    # prev/next and the credit auto-advance can span items. Both empty for a normal
+    # single-item play. See docs/GOTCHAS.md § cross-item series playback.
+    library_series_map: dict = field(default_factory=dict)
+    library_series_order: list = field(default_factory=list)
     library_current_file: Optional[str] = None            # path VLC is playing now
     downloading_count: int = 0                            # active library downloads (ALL, incl. admin-only — drives host-busy/idle gating)
     downloading_count_visible: int = 0                    # active downloads a non-elevated viewer may know about (excludes admin_only) — drives the user-facing badge
@@ -2482,6 +2493,86 @@ def parse_season_episode(name: str) -> tuple[int, int]:
     return 0, 0
 
 
+# ── Search-result title parsing (show grouping) ──────────────────────────────
+# Structural markers that separate a show's name from its season/episode/release
+# info. Used by parse_torrent_title() to group flat search results into shows.
+_TT_EP_RE          = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,2})")
+_TT_EP_X_RE        = re.compile(r"\b(\d{1,2})x(\d{2})\b")
+_TT_MULTI_LIST_RE  = re.compile(r"[Ss]\d{1,2}(?:\s*-\s*[Ss]?\d{1,2}){2,}")     # S01-S02-S03…
+_TT_MULTI_RANGE_RE = re.compile(r"[Ss](\d{1,2})\s*-\s*[Ss]?(\d{1,2})")         # S01-S05 / S01-5
+_TT_SEASONS_WORD_RE = re.compile(r"[Ss]easons?\s*(\d{1,2})\s*-\s*(\d{1,2})")   # Seasons 1-5
+_TT_SEASON_RE      = re.compile(r"\b[Ss](\d{1,2})\b")
+_TT_SEASON_WORD_RE = re.compile(r"\b[Ss]eason\s*(\d{1,2})\b")
+_TT_COMPLETE_SERIES_RE = re.compile(r"\bComplete\s+(?:Series|Pack|Collection)\b", re.IGNORECASE)
+
+
+def parse_torrent_title(title: str) -> dict:
+    """Classify a raw torrent title into a show + kind so flat search results can
+    be grouped. Returns:
+        show        display-cased show name ("Breaking Bad")
+        show_key    normalised grouping key ("breaking bad")
+        kind        "episode" | "season" | "multiseason" | "movie"
+        season      episode/season kinds: the season number (0 otherwise)
+        episode     episode kind: the episode number (0 otherwise)
+        season_from/season_to  multiseason kind: inclusive season range
+        year        detected release year (or None)
+    The show name is the text *before* the first structural marker, run through
+    _strip_release_tags — this is what separates e.g. a "Better Call Saul S06E11
+    Breaking Bad" or "Moonshiners S15E12 Braking Badly" hit out of a search for
+    "breaking bad" into their own groups instead of polluting the show."""
+    raw = title or ""
+    norm = re.sub(r"[._]+", " ", raw)
+    norm = re.sub(r"\s+", " ", norm).strip()
+
+    ym = _YEAR_RE.search(norm)
+    year = int(ym.group(0)) if ym else None
+
+    season = episode = season_from = season_to = 0
+
+    ep_m    = _TT_EP_RE.search(norm) or _TT_EP_X_RE.search(norm)
+    range_m = _TT_SEASONS_WORD_RE.search(norm) or _TT_MULTI_RANGE_RE.search(norm)
+    list_m  = _TT_MULTI_LIST_RE.search(norm)
+    complete_series = bool(_TT_COMPLETE_SERIES_RE.search(norm))
+
+    if list_m or range_m or complete_series:
+        kind = "multiseason"
+        if list_m:
+            # A chained list (S01-S02-S03-…) carries the full span; prefer it over
+            # the 2-season range regex, which would only capture the first pair.
+            nums = [int(x) for x in re.findall(r"\d{1,2}", list_m.group(0))]
+            if nums:
+                season_from, season_to = min(nums), max(nums)
+        elif range_m:
+            a, b = int(range_m.group(1)), int(range_m.group(2))
+            season_from, season_to = min(a, b), max(a, b)
+    elif ep_m:
+        kind = "episode"
+        season, episode = int(ep_m.group(1)), int(ep_m.group(2))
+    else:
+        sm = _TT_SEASON_WORD_RE.search(norm) or _TT_SEASON_RE.search(norm)
+        if sm:
+            kind, season = "season", int(sm.group(1))
+        else:
+            kind = "movie"
+
+    # Show name = text before the earliest structural marker.
+    positions = []
+    for rx in (_TT_EP_RE, _TT_EP_X_RE, _TT_SEASONS_WORD_RE, _TT_MULTI_RANGE_RE,
+               _TT_SEASON_WORD_RE, _TT_SEASON_RE, _TT_COMPLETE_SERIES_RE):
+        m = rx.search(norm)
+        if m:
+            positions.append(m.start())
+    cut = min(positions) if positions else len(norm)
+    show = _strip_release_tags(norm[:cut]) or _strip_release_tags(norm) or norm.strip()
+    show_key = re.sub(r"\s+", " ", show.lower()).strip()
+
+    return {
+        "show": show, "show_key": show_key, "kind": kind,
+        "season": season, "episode": episode,
+        "season_from": season_from, "season_to": season_to, "year": year,
+    }
+
+
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".m2ts", ".webm"}
 
 
@@ -2826,6 +2917,76 @@ def find_resume_hint(item: dict, profile_id: str) -> Optional[dict]:
         "shuffle": bool(prof.get("shuffle")),
         "shuffle_scope": prof.get("shuffle_scope", "") or "",
     }
+
+
+def _merged_series_files(items: list[dict]) -> list[dict]:
+    """Flatten every member item's files into one (season, episode)-ordered list,
+    tagging each file with its owning ``item_id`` — the join key that lets the
+    merged-series UI drive play/prep/progress against the right item."""
+    out: list[dict] = []
+    for it in items:
+        iid = it.get("id", "")
+        for f in it.get("files", []):
+            g = dict(f)
+            g["item_id"] = iid
+            out.append(g)
+    out.sort(key=lambda f: (f.get("season", 0) or 9999,
+                            f.get("episode", 0) or 9999, f.get("name", "")))
+    return out
+
+
+def find_series_resume_hint(items: list[dict], profile_id: str) -> Optional[dict]:
+    """Series-level resume across a show whose episodes live in separate items.
+    Picks the most-recently-updated non-completed episode (so "continue watching"
+    lands on whatever the viewer last had open), else the first unwatched episode
+    in order, else the first episode (all-completed rewatch). Returns a hint that
+    also carries the owning ``item_id`` so the caller knows which item to seek."""
+    if not profile_id:
+        return None
+    files = _merged_series_files(items)
+    if not files:
+        return None
+    prog_by_item = {
+        it.get("id", ""): it.get("progress", {}).get(profile_id, {}).get("file_progress", {})
+        for it in items
+    }
+
+    def _fp(f):
+        return prog_by_item.get(f.get("item_id", ""), {}).get(f.get("path", ""), {})
+
+    def _hint(f, *, all_completed=False):
+        fp = _fp(f)
+        pos = 0 if all_completed else fp.get("position_sec", 0)
+        dur = 0 if all_completed else fp.get("duration_sec", 0)
+        return {
+            "item_id": f.get("item_id", ""),
+            "file_path": f.get("path", ""),
+            "episode_name": f.get("name", Path(f.get("path", "")).name),
+            "position_sec": pos,
+            "duration_sec": dur,
+            "pct": round(pos / dur * 100, 1) if dur else (100 if all_completed else 0),
+            **({"all_completed": True} if all_completed else {}),
+        }
+
+    # Most-recently-touched un-finished episode.
+    best = None
+    best_at = ""
+    for f in files:
+        fp = _fp(f)
+        if fp and not fp.get("completed") and fp.get("position_sec", 0) > 5:
+            at = fp.get("updated_at", "")
+            if best is None or at > best_at:
+                best, best_at = f, at
+    if best is not None:
+        return _hint(best)
+
+    # First unwatched in order.
+    for f in files:
+        if not _fp(f).get("completed"):
+            return _hint(f)
+
+    # Everything watched → rewatch from the top.
+    return _hint(files[0], all_completed=True)
 
 
 # ── Track Preference Helpers ──────────────────────────────────────────────────
@@ -4996,6 +5157,8 @@ async def _auto_play_item(item: dict, profile_id: str, file_path: str = "") -> N
         state.library_item_file_count = len(item.get("files", []))
         state.library_playlist = playlist
         state.library_shuffle_order = []   # auto-play is always natural order
+        state.library_series_map = {}
+        state.library_series_order = []
         state.library_current_file = playlist[0]
 
         await broadcast("stream_status", {"status": "playing", "message": f"Auto-playing: {first.name}"})
@@ -5039,6 +5202,8 @@ async def _play_background_video() -> bool:
     state.library_item_file_count = 0
     state.library_playlist = []
     state.library_shuffle_order = []
+    state.library_series_map = {}
+    state.library_series_order = []
     state.library_current_file = None
     state.active_title = None
     state.active_file = None
@@ -5318,15 +5483,34 @@ def _skip_settings_for_profile(lib: dict, profile_id: str) -> dict:
     }
 
 
+def _series_owner_for_path(path: str) -> Optional[str]:
+    """For merged-series playback, the library item id that owns `path` (the file
+    VLC is playing), or None when no series playlist is active. Tolerates minor
+    path differences via a basename fallback."""
+    m = state.library_series_map
+    if not m or not path:
+        return None
+    if path in m:
+        return m[path]
+    base = Path(path).name
+    for p, iid in m.items():
+        if Path(p).name == base:
+            return iid
+    return None
+
+
 def _nav_order(item: dict) -> list[str]:
     """The path order that defines next/prev for the active playback.
 
     Shuffle Play overrides natural file order: while `library_shuffle_order` is
     set, "next" / "prev" (and the credit auto-advance) follow the random order.
-    Otherwise it's the item's natural season/episode-sorted file list.
+    A merged-series play (`library_series_order`) spans multiple items. Otherwise
+    it's the item's natural season/episode-sorted file list.
     """
     if state.library_shuffle_order:
         return list(state.library_shuffle_order)
+    if state.library_series_order:
+        return list(state.library_series_order)
     return [f.get("path", "") for f in item.get("files", [])]
 
 
@@ -5869,6 +6053,37 @@ async def _finalize_stopped_file(
     await put_library(lib)
 
 
+async def _series_finalize_and_switch(new_item_id: str,
+                                       outgoing_file: Optional[str]) -> None:
+    """Merged-series playback crossed from one item's episode into another's.
+    Finalize the outgoing episode under its OWN (old) item, then re-point
+    `state.library_item_id` at the new owner so progress/skip/track-prefs key off
+    the right item from here on. Idempotent — a no-op if the item didn't change."""
+    old_id = state.library_item_id
+    old_prof = state.library_profile_id
+    lib = await get_library()
+    new_item = next((it for it in lib["items"] if it["id"] == new_item_id), None)
+    if not new_item:
+        return
+    if old_id and old_prof and outgoing_file and old_id != new_item_id:
+        old_item = next((it for it in lib["items"] if it["id"] == old_id), None)
+        if old_item:
+            canon = _canonical_item_path(outgoing_file, old_item)
+            rec = (old_item.get("progress", {}).get(old_prof, {})
+                           .get("file_progress", {}).get(canon, {}))
+            if rec.get("duration_sec"):
+                await _finalize_stopped_file(
+                    old_id, old_prof, canon,
+                    float(rec.get("position_sec", 0) or 0),
+                    float(rec.get("duration_sec", 0) or 0),
+                )
+    state.library_item_id = new_item_id
+    state.library_item_file_count = len(new_item.get("files", []))
+    # Force the tracker to (re)apply saved audio/subtitle prefs for the new item's
+    # episode — the applied-file guard would otherwise treat it as already done.
+    state.track_pref_applied_file = None
+
+
 async def _vlc_marquee(text: str) -> None:
     """Show `text` on the TV (or clear it when empty). Offloads the file I/O."""
     await asyncio.to_thread(_marquee_write, text)
@@ -6111,6 +6326,7 @@ async def vlc_progress_tracker() -> None:
     - progress save runs every 15 s
     """
     last_progress_save = 0.0
+    series_prev_file: Optional[str] = None   # outgoing file, for cross-item finalize
     while True:
         await asyncio.sleep(2)
         if not state.library_item_id or not state.library_profile_id:
@@ -6142,6 +6358,18 @@ async def vlc_progress_tracker() -> None:
             if current_uri and current_uri.startswith("file://"):
                 state.library_current_file = uri_to_path(current_uri)
             cur_file = state.library_current_file
+
+            # Merged-series playback spans multiple items (one per episode torrent).
+            # Keep state.library_item_id pointed at the item that owns the file VLC
+            # is actually playing so everything below (skip offers, track prefs,
+            # progress save) keys off the right item as playback auto-advances
+            # across item boundaries.
+            if cur_file and state.library_series_map:
+                owner = _series_owner_for_path(cur_file)
+                if owner and owner != state.library_item_id:
+                    await _series_finalize_and_switch(owner, series_prev_file)
+            series_prev_file = cur_file
+
             if cur_file:
                 lib_q = await get_library()
                 item_q = next((it for it in lib_q["items"] if it["id"] == state.library_item_id), None)
@@ -6800,6 +7028,9 @@ class LibraryPlayReq(BaseModel):
                                   # it so next/prev navigate the shuffle, not natural order
     shuffle_scope: str = ""       # last-used pool ("all" | "unwatched"), persisted so a
                                   # later Resume can re-shuffle the same scope
+    items: list[str] = []         # merged-series play: the owning item id for each entry in
+                                  # `files` (same length/order). When set, playback spans
+                                  # these items and the tracker re-targets library_item_id.
 
 
 class MarkWatchedReq(BaseModel):
@@ -7149,6 +7380,7 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
             "added_at": it.get("added_at", ""),
             "status": it.get("status", "ready"),
             "torrent_hash": it.get("torrent_hash", ""),
+            "series_key": _series_key(it),   # groups same-series items into one show tile
             "resume": resume,
             "first_file": first_file,
             "hidden": _item_hidden_for_profile(it, profile_id),
@@ -7166,14 +7398,11 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
     return JSONResponse({"items": items})
 
 
-@app.get("/api/library/{item_id}/files")
-async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
-    """Return the video file list for a library item with per-profile progress."""
-    lib = await get_library()
-    item = next((it for it in lib["items"] if it["id"] == item_id), None)
-    if not item:
-        raise HTTPException(404, "Item not found.")
-
+async def _build_item_files(item: dict, profile_id: str) -> list[dict]:
+    """Build the per-file payload (progress + live download/prep state) for one
+    library item. Shared by the single-item `/files` endpoint and the merged
+    `/series/{key}` endpoint so both emit identically-shaped file objects — each
+    file additionally carries its owning ``item_id`` for the merged-series UI."""
     file_progs = (
         item.get("progress", {}).get(profile_id, {}).get("file_progress", {})
         if profile_id else {}
@@ -7246,6 +7475,7 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
             complete = is_ready or not has_torrent
             dl_pct = 100.0 if complete else None
         out.append({
+            "item_id": item.get("id", ""),              # owning item (join key for merged-series)
             "name": f.get("name", Path(path).name),
             "path": path,
             "size_bytes": f.get("size_bytes", 0),
@@ -7261,6 +7491,19 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
             "complete": complete,                       # file fully downloaded → playable
             "compressed": compressed,                   # re-encoded in place → local-only, not torrent-backed
         })
+    return out
+
+
+@app.get("/api/library/{item_id}/files")
+async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
+    """Return the video file list for a library item with per-profile progress."""
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    cfg = _download_cfg(item)
+    prep_cfg = _prep_cfg(item)
+    out = await _build_item_files(item, profile_id)
     return JSONResponse({
         "files": out,
         "item_status": item.get("status", "ready"),
@@ -7272,6 +7515,47 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
         "ondemand_only": bool(item.get("ondemand_only")),          # user can toggle unless locked
         "ondemand_only_locked": bool(item.get("ondemand_only_locked")),  # admin-locked → toggle disabled
         "hls_available": HLS_AVAILABLE,                  # JIT/prep unavailable on macOS → hide the toggle
+    })
+
+
+@app.get("/api/library/series/{series_key}")
+async def get_series_files(request: Request, series_key: str,
+                            profile_id: str = "") -> JSONResponse:
+    """Merged view of a show whose episodes span several single-episode items.
+    Concatenates every member item's files (each tagged with its owning item_id),
+    ordered by (season, episode), plus a series-level resume hint and the show's
+    cached TMDb metadata — everything the one-cohesive-show UI needs to render and
+    to drive cross-item play/resume. See docs/LIBRARY_DATA.md § merged series."""
+    is_admin = _check_admin(request)
+    lib = await get_library()
+    elevated_ids = {p["id"] for p in lib["profiles"] if p.get("elevated")}
+    is_elevated  = bool(profile_id) and profile_id in elevated_ids
+    members = [it for it in _items_for_series_key(lib, series_key)
+               if not (it.get("admin_only") and not is_admin and not is_elevated)]
+    if not members:
+        raise HTTPException(404, "Series not found.")
+
+    files: list[dict] = []
+    for it in members:
+        files.extend(await _build_item_files(it, profile_id))
+    files.sort(key=lambda f: (f.get("season", 0) or 9999,
+                              f.get("episode", 0) or 9999, f.get("name", "")))
+
+    # Title + metadata: prefer a member that already has cached TMDb metadata.
+    title = next((it.get("series") for it in members if (it.get("series") or "").strip()),
+                 members[0].get("title", ""))
+    meta = next((it.get("metadata") for it in members if it.get("metadata")), None)
+    resume = find_series_resume_hint(members, profile_id) if profile_id else None
+
+    return JSONResponse({
+        "series_key": series_key,
+        "title": title,
+        "item_ids": [it["id"] for it in members],
+        "files": files,
+        "resume": resume,
+        "metadata": meta,
+        "img_base": LOCAL_IMG_BASE,
+        "hls_available": HLS_AVAILABLE,
     })
 
 
@@ -7328,6 +7612,82 @@ async def metadata_image(size: str, filename: str) -> Response:
     body, ct = got
     return Response(content=body, media_type=ct, headers={
         "Cache-Control": "public, max-age=31536000, immutable",
+    })
+
+
+# (title, year, kind) → cached metadata dict, for the search show-detail screen
+# which looks up TMDb by name (not by library item). Coalesces concurrent
+# lookups and survives for the process lifetime (TMDb data is effectively static).
+_tmdb_title_cache: dict[tuple, dict] = {}
+_tmdb_title_locks: dict[tuple, asyncio.Lock] = {}
+
+
+async def _tmdb_lookup_by_title(title: str, year: Optional[int],
+                                 kind: str = "") -> Optional[dict]:
+    """Match a free-text show/movie title to TMDb and return the cache-shaped
+    metadata (poster/backdrop/overview/seasons→episodes). Mirrors
+    _tmdb_match_show but keyed off a bare title rather than a library item, so
+    the grouped-search detail screen can show real metadata before anything is
+    downloaded. `kind` ("tv"/"movie"/"") biases the search."""
+    query = _strip_release_tags(title or "").strip() or (title or "").strip()
+    if not query or not await _tmdb_effective_key():
+        return None
+    ck = (query.lower(), year or 0, kind or "")
+    if ck in _tmdb_title_cache:
+        return _tmdb_title_cache[ck]
+    lock = _tmdb_title_locks.setdefault(ck, asyncio.Lock())
+    async with lock:
+        if ck in _tmdb_title_cache:
+            return _tmdb_title_cache[ck]
+
+        match = None
+        if kind != "movie":
+            tv = await _tmdb_get("/search/tv", {"query": query, "include_adult": "false"})
+            tv_results = (tv or {}).get("results", []) or []
+            if tv_results:
+                match = {"kind": "tv", "id": tv_results[0]["id"]}
+        if match is None and kind != "tv":
+            mv = await _tmdb_get("/search/movie",
+                                 {"query": query, "include_adult": "false",
+                                  **({"year": year} if year else {})})
+            mv_results = (mv or {}).get("results", []) or []
+            if mv_results:
+                match = {"kind": "movie", "id": mv_results[0]["id"]}
+        if match is None:
+            return None
+
+        if match["kind"] == "tv":
+            # Fetch details first to learn how many seasons exist, then pull
+            # every real season's episodes (skip specials / season 0).
+            details = await _tmdb_get(f"/tv/{match['id']}", {}) or {}
+            seasons = sorted({
+                int(s.get("season_number", 0))
+                for s in details.get("seasons", []) or []
+                if int(s.get("season_number", 0)) > 0
+            })
+            data = await _tmdb_fetch_tv(match["id"], seasons)
+        else:
+            data = await _tmdb_fetch_movie(match["id"])
+        data["source"] = "tmdb"
+        _tmdb_title_cache[ck] = data
+        _tmdb_bg(_prefetch_metadata_images(data))
+        return data
+
+
+@app.get("/api/tmdb/lookup")
+async def tmdb_lookup(title: str = "", year: int = 0, kind: str = "") -> JSONResponse:
+    """TMDb lookup by title for the grouped-search show-detail screen. Returns the
+    same shape as the per-item metadata endpoint so the frontend renderers are
+    shared. `pending`/`enabled` let the UI fall back to filename parsing."""
+    key_present = bool(await _tmdb_effective_key())
+    data = None
+    if key_present and title.strip():
+        data = await _tmdb_lookup_by_title(
+            title.strip(), year or None, kind if kind in ("tv", "movie") else "")
+    return JSONResponse({
+        "enabled":  key_present,
+        "img_base": LOCAL_IMG_BASE,
+        "metadata": data,
     })
 
 
@@ -8444,6 +8804,19 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     # so next/prev walk it. Any normal play clears it back to natural order.
     state.library_shuffle_order = list(playlist) if req.shuffle else []
     state.library_shuffle_scope = (req.shuffle_scope or "") if req.shuffle else ""
+    # Merged-series play: record the path→owning-item map so the progress tracker
+    # re-targets the active item as playback crosses item boundaries (needed for
+    # BOTH natural and shuffle order — else a later episode's progress lands under
+    # the first episode's item). The full stable order (for prev/next/credits-
+    # advance) is only set in natural order; shuffle owns navigation via
+    # library_shuffle_order. Cleared for a normal single-item play.
+    if req.items and len(req.items) == len(req.files):
+        _full_map = {p: iid for p, iid in zip(req.files, req.items)}
+        state.library_series_map = {p: _full_map[p] for p in playlist if p in _full_map}
+        state.library_series_order = [] if req.shuffle else list(playlist)
+    else:
+        state.library_series_map = {}
+        state.library_series_order = []
     # Persist the shuffle preference (or clear it on a normal play) so Resume can
     # offer to keep shuffling after a stop. Fire-and-forget — doesn't gate playback.
     asyncio.create_task(_set_shuffle_pref(
@@ -8463,7 +8836,13 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
 
     # Auto-prep this episode (and the rest of the playlist) for on-device, if
     # enabled. Runs regardless of idle/activity settings — see _maybe_start_play_prep.
-    await _maybe_start_play_prep(lib, item, req.profile_id, playlist, seek_sec)
+    # For a merged-series play the playlist spans items, but play-prep is per-item
+    # (its files must belong to `item`), so restrict it to this item's own files.
+    prep_playlist = playlist
+    if state.library_series_map:
+        own = {f.get("path", "") for f in item.get("files", [])}
+        prep_playlist = [p for p in playlist if p in own] or playlist[:1]
+    await _maybe_start_play_prep(lib, item, req.profile_id, prep_playlist, seek_sec)
 
     return JSONResponse(
         {"ok": True, "playlist_count": len(playlist), "seek_to": seek_sec},
@@ -9182,13 +9561,15 @@ def _profile_allowed_indexers(lib: dict, profile_id: str) -> Optional[set]:
 
 def _shape_search_results(items: list, limit: int) -> list:
     """Map raw Jackett result dicts → the trimmed UI shape, drop entries with no
-    magnet/link, and sort by seeders."""
-    results = []
+    magnet/link, de-duplicate (same torrent surfaced by multiple indexers keeps
+    the highest-seeder copy), and sort by seeders."""
+    seen: dict = {}
+    results: list = []
     for it in items:
         mag = it.get("MagnetUri") or it.get("Link", "")
         if not mag:
             continue
-        results.append({
+        row = {
             "title": it.get("Title", "Unknown"),
             "size": it.get("Size", 0),
             "size_human": human_size(it.get("Size", 0)),
@@ -9196,9 +9577,64 @@ def _shape_search_results(items: list, limit: int) -> list:
             "peers": it.get("Peers", 0),
             "magnet": mag,
             "tracker": it.get("Tracker", ""),
-        })
+        }
+        h = extract_hash(mag) if mag.startswith("magnet:") else None
+        key = h or (row["title"].lower(), row["size"])
+        prev = seen.get(key)
+        if prev is not None:
+            if row["seeders"] > prev["seeders"]:
+                prev.update(row)   # same object lives in `results`
+            continue
+        seen[key] = row
+        results.append(row)
     results.sort(key=lambda x: x["seeders"], reverse=True)
     return results[:limit]
+
+
+def _group_search_results(shaped: list, query: str) -> list:
+    """Group already-shaped, seeder-sorted search results into one entry per
+    detected show (see parse_torrent_title). Each group carries its member
+    results (enriched with kind/season/episode) so the show-detail screen needs
+    no second search call. Groups are ordered by query relevance, then seeders."""
+    q_tokens = set(re.sub(r"[^a-z0-9 ]", " ", (query or "").lower()).split())
+    groups: dict[str, dict] = {}
+    for r in shaped:
+        p = parse_torrent_title(r["title"])
+        er = dict(r)
+        er.update({
+            "kind": p["kind"], "season": p["season"], "episode": p["episode"],
+            "season_from": p["season_from"], "season_to": p["season_to"],
+        })
+        key = p["show_key"] or "?"
+        g = groups.get(key)
+        if g is None:
+            g = groups[key] = {
+                "key": key, "title": p["show"] or r["title"], "year": p["year"],
+                "torrent_count": 0, "seeders_max": 0, "seasons": set(),
+                "kinds": {"episode": 0, "season": 0, "multiseason": 0, "movie": 0},
+                "results": [],
+            }
+        g["results"].append(er)
+        g["torrent_count"] += 1
+        g["seeders_max"] = max(g["seeders_max"], r.get("seeders", 0))
+        g["kinds"][p["kind"]] = g["kinds"].get(p["kind"], 0) + 1
+        if p["year"] and not g["year"]:
+            g["year"] = p["year"]
+        if p["kind"] in ("episode", "season") and p["season"]:
+            g["seasons"].add(p["season"])
+        elif p["kind"] == "multiseason" and p["season_from"]:
+            for s in range(p["season_from"], (p["season_to"] or p["season_from"]) + 1):
+                g["seasons"].add(s)
+    out = []
+    for g in groups.values():
+        g["seasons"] = sorted(g["seasons"])
+        gk = set(re.sub(r"[^a-z0-9 ]", " ", g["key"]).split())
+        g["_rel"] = len(q_tokens & gk)
+        out.append(g)
+    out.sort(key=lambda g: (g["_rel"], g["seeders_max"], g["torrent_count"]), reverse=True)
+    for g in out:
+        g.pop("_rel", None)
+    return out
 
 
 @app.get("/api/search")
@@ -9214,7 +9650,7 @@ async def search(q: str, limit: int = 30,
     ever search within what the admin allows the profile, and within the admin's
     ``INDEXER_CATEGORIES`` base restriction."""
     if not q.strip():
-        return JSONResponse({"results": []})
+        return JSONResponse({"results": [], "groups": []})
 
     lib = await get_library()
     cats_override = lib.get("settings", {}).get("admin_overrides", {}).get("indexer_categories")
@@ -9224,7 +9660,7 @@ async def search(q: str, limit: int = 30,
     if cat_filter == []:
         # Explicit empty selection (user unticked every category, or it's disjoint
         # from the admin restriction) — nothing to search, don't query everything.
-        return JSONResponse({"results": []})
+        return JSONResponse({"results": [], "groups": []})
     params: dict = {"apikey": settings.indexer_api_key, "Query": q}
     if cat_filter:
         params["Category[]"] = cat_filter
@@ -9250,7 +9686,9 @@ async def search(q: str, limit: int = 30,
         except Exception as e:
             raise HTTPException(502, f"Indexer unreachable: {e}")
         await _record_indexer_health(data.get("Indexers", []))
-        return JSONResponse({"results": _shape_search_results(data.get("Results", []), limit)})
+        shaped = _shape_search_results(data.get("Results", []), 10000)
+        return JSONResponse({"results": shaped[:limit],
+                             "groups": _group_search_results(shaped, q)})
 
     # Profile allowlist (admin-enforced) ∩ user selection (UI-chosen subset).
     allowed = _profile_allowed_indexers(lib, profile_id or "")
@@ -9262,7 +9700,7 @@ async def search(q: str, limit: int = 30,
     if not configured:
         # Profile blocks every indexer, or the selection is empty/disjoint — nothing
         # to query, so don't fall through to the aggregate (which queries them all).
-        return JSONResponse({"results": []})
+        return JSONResponse({"results": [], "groups": []})
 
     indexers = configured
     PER_INDEXER_TIMEOUT = 12.0
@@ -9299,7 +9737,9 @@ async def search(q: str, limit: int = 30,
     if health and all(not h["ok"] for h in health):
         raise HTTPException(502, "All indexers failed to respond. Check Jackett / your VPN.")
 
-    return JSONResponse({"results": _shape_search_results(items, limit)})
+    shaped = _shape_search_results(items, 10000)
+    return JSONResponse({"results": shaped[:limit],
+                         "groups": _group_search_results(shaped, q)})
 
 
 @app.get("/api/search/indexers")
@@ -9517,6 +9957,8 @@ async def stream_now(req: StreamReq) -> JSONResponse:
     state.library_item_file_count = 0
     state.library_playlist = []
     state.library_shuffle_order = []
+    state.library_series_map = {}
+    state.library_series_order = []
     state.library_current_file = None
     state.resume_offer = None
 
@@ -10133,6 +10575,8 @@ async def youtube_play(req: YouTubeReq) -> JSONResponse:
     state.library_item_file_count = 0
     state.library_playlist = []
     state.library_shuffle_order = []
+    state.library_series_map = {}
+    state.library_series_order = []
     state.library_current_file = None
     state.youtube_active = True
     state.youtube_video_id = video_id
@@ -10338,6 +10782,8 @@ async def stop() -> JSONResponse:
     state.library_item_file_count = 0
     state.library_playlist = []
     state.library_shuffle_order = []
+    state.library_series_map = {}
+    state.library_series_order = []
     state.library_current_file = None
     state.progress = 0.0
     state.downloaded_mb = 0.0
@@ -10499,7 +10945,11 @@ async def seek_to(position_pct: float) -> JSONResponse:
 
 
 async def _item_all_paths() -> list[str]:
-    """Return the full sorted file path list for the currently playing library item."""
+    """Return the full sorted file path list for the current playback. For a
+    merged-series play this is the stable cross-item order (so prev/unshuffle can
+    walk back past an item boundary); otherwise the active item's file list."""
+    if state.library_series_order:
+        return list(state.library_series_order)
     if not state.library_item_id:
         return []
     lib = await get_library()
