@@ -11727,6 +11727,7 @@ function _lpDestroyHls() {
   lp.everPlayed = false;
   _lpStallSince = 0; _lpStallLastT = 0;
   _lpOdKeepAliveAt = 0;   // touch any new OD session promptly on the next tick
+  _lpDisarmColdStartKick();
   _lpNetReset();
 }
 
@@ -11981,6 +11982,51 @@ function _lpInstallIosPreroll(hls, video) {
     if (_lpFwdBuffer(video) < IOS_PREROLL_TARGET_SECS) return;
     return origPause();
   };
+}
+
+// iOS cold-start kick. On iOS the only MSE is ManagedMediaSource, and the OS
+// won't begin fetching segments until the media element actually *demands* data
+// — which at a cold start it sometimes never does: `play()` resolves, the first
+// frame decodes (element looks "ready"), but MMS never fires `startstreaming`,
+// so hls.js's loaders sit idle and the buffer stays empty. Playback is wedged
+// with no error. The manual cure users find is to skip ±10 s: a real seek to a
+// NEW position forces MMS to reassess and start streaming. This watchdog does
+// that automatically — a tiny forward nudge (imperceptible at the very start)
+// once the natural start has clearly failed. `_lpStallWatch` can't cover this:
+// it's armed only AFTER the first `playing` (lp.everPlayed), i.e. after the very
+// stall we're breaking here. iOS-only (the MMS quirk); on every other platform a
+// cold start just works. See GOTCHAS.md § ManagedMediaSource.
+let _lpColdKickTimer = null;
+let _lpColdKickStalls = 0;
+function _lpArmColdStartKick() {
+  _lpDisarmColdStartKick();
+  if (!_isIOSDevice()) return;
+  _lpColdKickStalls = 0;
+  _lpColdKickTimer = setInterval(_lpColdStartKickTick, 900);
+}
+function _lpDisarmColdStartKick() {
+  if (_lpColdKickTimer) { clearInterval(_lpColdKickTimer); _lpColdKickTimer = null; }
+  _lpColdKickStalls = 0;
+}
+function _lpColdStartKickTick() {
+  const v = document.getElementById("lpVideo");
+  // Playback started (or the player was torn down) → nothing left to unstick.
+  if (!v || !lp.itemId || lp.everPlayed) { _lpDisarmColdStartKick(); return; }
+  // Not a cold-start stall right now: paused (autoplay blocked, awaiting the
+  // user's tap — a nudge can't help there), scrubbing, data already flowing
+  // (readyState ≥ HAVE_FUTURE_DATA, `playing` imminent), or the loadedmetadata
+  // resume-seek hasn't landed yet. Reset the streak so we only act on a genuine,
+  // sustained stall.
+  if (v.paused || _lpScrub || v.readyState >= 3 || !lp.resumeApplied) {
+    _lpColdKickStalls = 0;
+    return;
+  }
+  // Give the natural start ~1.8 s before intervening; then nudge each tick.
+  if (++_lpColdKickStalls < 2) return;
+  if (_lpColdKickStalls > 8) { _lpDisarmColdStartKick(); return; }  // ~6 s of trying, then give up
+  // The manual fix, automated: a real seek to a fresh position makes MMS start
+  // fetching. Relative nudge stays near the start; accumulates ≤ ~2 s worst case.
+  try { v.currentTime = (v.currentTime || 0) + 0.35; } catch (_) {}
 }
 
 // A server prepare/stream failed while the user had explicitly switched a
@@ -12392,6 +12438,7 @@ async function _lpLoadIndex(seekTo) {
   v.addEventListener("playing", reassertSub, { once: true });
 
   try { await v.play(); } catch (_) { /* iOS may block autoplay until user gesture */ }
+  _lpArmColdStartKick();      // iOS/MMS may never start fetching until a real seek nudges it
   _lpCtlSync(); _lpCtlTick(); _lpCtlShow();   // fresh custom-controls state for the new file
   _lpStartSubUpgradePoll();   // watch for late-downloaded real subs to upgrade off AI
 }
@@ -14045,6 +14092,7 @@ function _lpAttachVideoEvents() {
     // on FRAG_LOADED instead — buffered playback also fires `playing`).
     if (!lp.hls && lp.netDown) _lpNetReset();
     lp.everPlayed = true; _lpStallSince = 0;   // arm + clear the stall watchdog
+    _lpDisarmColdStartKick();                  // cold start succeeded — stop nudging
     document.getElementById("localPlayer").classList.remove("lp-buffering");
     _lpCtlSync(); _lpCtlShow();
     _lpHidePreparing();
@@ -14836,6 +14884,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.11.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">8.11.1</div>
 </body>
 </html>

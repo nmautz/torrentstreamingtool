@@ -675,6 +675,20 @@ Two ways to populate the cache:
 >    kicked. The global `online` event also kicks immediately via
 >    `_lpNetOnline → _lpKickIfStalled` when playback is starved (tunnel exit the
 >    OS *does* notice). Watchdog state resets in `_lpDestroyHls`.
+> 5. **iOS cold-start kick** (`_lpArmColdStartKick` / `_lpColdStartKickTick`,
+>    v8.11.1). A separate failure from the outage handling above, at the *very
+>    start*: on iOS the only MSE is ManagedMediaSource, and it occasionally never
+>    fires the first `startstreaming`, so hls.js's loaders never begin — `play()`
+>    resolves and the first frame decodes (the video *looks* ready) but the buffer
+>    stays empty and playback is wedged with **no error**. The manual cure is to
+>    skip ±10 s (a real seek makes MMS start fetching), so this automates it:
+>    armed after the cold-start `play()`, a 900 ms poll runs while `!lp.everPlayed`
+>    and, once a genuine sustained stall is confirmed (~1.8 s; not paused/scrubbing,
+>    `readyState < 3`, resume-seek applied), applies a tiny imperceptible forward
+>    `currentTime` nudge each tick until playback starts, giving up after ~6 s.
+>    iOS-only, disarmed on the first `playing` and in `_lpDestroyHls`. Piece 4's
+>    `_lpStallWatch` can't cover this — it arms only *after* the first `playing`.
+>    See [GOTCHAS.md](GOTCHAS.md) § ManagedMediaSource.
    - **Safari** (iOS + macOS): set `<video>.src = master_url` directly.
      Safari plays HLS natively, exposing `AudioTrackList` for audio
      switching. Wait for `loadedmetadata` → populate dropdowns. (Subtitles
