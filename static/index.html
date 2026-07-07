@@ -3186,7 +3186,7 @@ let app = {
   dl_speed_bps:0, ul_speed_bps:0,
   vlc_time:0, vlc_duration:0, vlc_volume:100, vlc_night_mode:false, vlc_night_mode_preset:"medium",
   library_playlist_count:0, library_current_index:-1, library_current_file:null,
-  library_playlist:[], library_item_file_count:0, is_library_playback:false,
+  library_playlist:[], library_series_map:{}, library_item_file_count:0, is_library_playback:false,
   library_item_id:null,
   play_when_ready_item_id:null,
   play_when_ready_file_path:null,
@@ -3271,7 +3271,13 @@ let _fcDismissed  = false; // user manually closed fullscreen for the current tr
 let lp = {
   itemId: null, filePath: null, name: "",
   duration: 0,
-  playlist: [], pi: 0,    // ordered file paths within the active item, current index
+  playlist: [], pi: 0,    // ordered file paths, current index
+  // Merged-series playback: the owning item id for each entry in `playlist`
+  // (same length/order). `lp.itemId` is kept re-pointed to `playlistItems[pi]`
+  // by _lpLoadIndex, so every per-current-file call (prep, stream-ondemand,
+  // progress, saved tracks, skip-data) targets the right item as playback
+  // auto-advances across episode-torrents. Empty ⇒ single-item (itemId used).
+  playlistItems: [],
   shuffle: false,         // device Shuffle Play: playlist is a random order (not natural)
   shuffleScope: "",       // "all" | "unwatched" — pool the random order was drawn from
   // Skip-offer logic (mirrors backend _maybe_emit_skip_offer)
@@ -11483,6 +11489,10 @@ async function _appAutoManageRun(itemId, filePath, pi) {
     for (let i = pi + 1; i <= pi + ahead && i < lp.playlist.length; i++) {
       const path = lp.playlist[i];
       if (!path) break;
+      // Merged-series: ahead episodes owned by a *different* item are pre-cached
+      // by that item's own auto-manage pass — skip them here (their paths aren't
+      // in this item's `byPath`). Offline bundle prefetch stays per-item.
+      if (lp.playlistItems && lp.playlistItems[i] && lp.playlistItems[i] !== itemId) continue;
       keep.add(path);
       if (_appAutoWants(itemId, byPath.get(path))) toStart.push(byPath.get(path));
     }
@@ -11834,16 +11844,13 @@ function pcChoose(target) {
   if (target === "local") {
     // Dismiss the server-side offer (VLC stays put; user is watching on device).
     if (ctx._isResume) fetch("/api/resume-now", {method:"DELETE"}).catch(()=>{});
-    // Merged-series → device: the on-device player is single-item (its prep /
-    // offline-prepare / progress-sync endpoints validate file∈item), so it can't
-    // auto-advance across episode-torrents like the TV does. Play just the leading
-    // run of files owned by the first item (each series episode is its own 1-file
-    // item, so this is the tapped episode). Cross-item auto-advance is TV-only.
-    if (ctx.items && ctx.items.length) {
-      const owner = ctx.items[0];
-      const trimmed = [];
-      for (let i = 0; i < ctx.files.length && ctx.items[i] === owner; i++) trimmed.push(ctx.files[i]);
-      return lpPlay(owner, trimmed, ctx.seekTo, ctx.label, ctx.shuffle, ctx.shuffleScope);
+    // Merged-series → device: hand the on-device player the full cross-item
+    // playlist + its parallel owning-item ids. `lp` re-points `lp.itemId` to the
+    // current file's item on every advance (_lpLoadIndex), so prep / stream-
+    // ondemand / progress all target the right item as it auto-advances across
+    // episode-torrents — matching the TV.
+    if (ctx.items && ctx.items.length === (ctx.files || []).length) {
+      return lpPlay(ctx.items[0], ctx.files, ctx.seekTo, ctx.label, ctx.shuffle, ctx.shuffleScope, ctx.items);
     }
     if (ctx._continueMode && !ctx.files.length) {
       // "Play All" with no resume hint: fetch the item's ordered file list from
@@ -11916,6 +11923,11 @@ async function handoffToDevice(btn, allowOnDemand = false) {
       showAlert("Couldn't tell what's playing — handoff aborted.", "error");
       return;
     }
+    // Merged-series: carry the per-file owning-item map so the device re-targets
+    // the active item across episode-torrents (else later episodes' progress lands
+    // under the wrong item). Empty map ⇒ single-item, items stays null.
+    const smap = app.library_series_map || {};
+    const items = Object.keys(smap).length ? files.map(p => smap[p] || itemId) : null;
 
     // Close the fullscreen VLC controls (if open) so the device player takes over.
     const fc = document.getElementById("fullscreenControls");
@@ -11926,7 +11938,7 @@ async function handoffToDevice(btn, allowOnDemand = false) {
     // (library_playlist stays shuffled during a shuffle session), so passing the
     // flag + scope keeps the device's Exit-Shuffle control and the persisted
     // Resume-on-shuffle pref intact instead of silently dropping to natural order.
-    await lpPlay(itemId, files, seekTo, label, !!app.library_shuffle, app.library_shuffle_scope || "");
+    await lpPlay(itemId, files, seekTo, label, !!app.library_shuffle, app.library_shuffle_scope || "", items);
   });
 }
 
@@ -12249,6 +12261,11 @@ async function lpHandoffToVlc(btn) {
     // Remaining playlist tail from the current file forward, so the TV keeps
     // auto-advancing the series exactly as the device would have.
     const files = lp.playlist.slice(lp.pi);
+    // Merged-series: carry the parallel owning-item tail so the TV re-targets the
+    // active item across boundaries too (else later episodes' progress lands under
+    // the wrong item).
+    const items = (lp.playlistItems && lp.playlistItems.length === lp.playlist.length)
+                    ? lp.playlistItems.slice(lp.pi) : null;
     if (!files.length) {
       showAlert("Couldn't tell what's playing — handoff aborted.", "error");
       return;
@@ -12259,7 +12276,7 @@ async function lpHandoffToVlc(btn) {
     // so passing the flag + scope records it as state.library_shuffle_order on the
     // server (TV Next/Prev follow the random order, Exit Shuffle shows) instead of
     // VLC treating it as a normal play and snapping Next/Prev back to natural order.
-    await playLibraryFiles(itemId, files, seekTo, label, lp.shuffle, lp.shuffleScope || "");
+    await playLibraryFiles(itemId, files, seekTo, label, lp.shuffle, lp.shuffleScope || "", items);
   });
 }
 
@@ -12317,7 +12334,7 @@ function _ensureLibassLib() {
   return _libassLibPromise;
 }
 
-async function lpPlay(itemId, files, seekTo, label, shuffle, shuffleScope) {
+async function lpPlay(itemId, files, seekTo, label, shuffle, shuffleScope, items) {
   // Offline cached-player mode: both guards below are host-centric — playback
   // comes from on-device bundles, so neither HLS-on-host nor connectivity matter.
   if (!hlsAvailable && !_appOffline) { showAlert("Stream-to-device isn’t available on this host.", "warn"); return; }
@@ -12345,6 +12362,10 @@ async function lpPlay(itemId, files, seekTo, label, shuffle, shuffleScope) {
   // episodes / "Play All" / handoff tail) are intentional queues, kept verbatim.
   // Best-effort: on any failure we fall back to the single passed file.
   let playlist = files.slice(), startIdx = 0;
+  // Parallel owning-item ids (merged-series play). Aligned to `playlist`; falls
+  // back to the single `itemId` for a normal play.
+  let playlistItems = (Array.isArray(items) && items.length === files.length)
+                        ? items.slice() : files.map(() => itemId);
   // Don't expand a single shuffled file into the item's natural-order tail — that
   // would append episodes the user never shuffled in. A 1-file shuffle tail is the
   // last of the random run; keep it as-is.
@@ -12362,7 +12383,7 @@ async function lpPlay(itemId, files, seekTo, label, shuffle, shuffleScope) {
           });
         const all = eps.map(it => it.filePath);
         const idx = all.indexOf(playlist[0]);
-        if (idx >= 0 && all.length > 1) { playlist = all; startIdx = idx; }
+        if (idx >= 0 && all.length > 1) { playlist = all; startIdx = idx; playlistItems = all.map(() => itemId); }
       } catch (_) {}
     } else {
       try {
@@ -12370,12 +12391,13 @@ async function lpPlay(itemId, files, seekTo, label, shuffle, shuffleScope) {
         if (r.ok) {
           const all = ((await r.json()).files || []).map(f => f.path).filter(Boolean);
           const idx = all.indexOf(playlist[0]);
-          if (idx >= 0 && all.length > 1) { playlist = all; startIdx = idx; }
+          if (idx >= 0 && all.length > 1) { playlist = all; startIdx = idx; playlistItems = all.map(() => itemId); }
         }
       } catch (_) {}
     }
   }
-  lp.itemId = itemId; lp.playlist = playlist; lp.pi = startIdx;
+  lp.playlist = playlist; lp.playlistItems = playlistItems; lp.pi = startIdx;
+  lp.itemId = playlistItems[startIdx] || itemId;
   // Device shuffle lives only in this client's `lp.playlist` order — there's no
   // server shuffle state for on-device playback. Record the preference so Resume
   // can offer to keep shuffling, and so the gear menu shows "Exit Shuffle".
@@ -12742,6 +12764,10 @@ async function _lpLoadIndex(seekTo) {
   const filePath = lp.playlist[lp.pi];
   if (!filePath) { lpStop(); return; }
   lp.filePath = filePath;
+  // Merged-series: re-point the active item to the file we're about to load, so
+  // prep / stream-ondemand / progress / saved-tracks all target its owning item
+  // as playback crosses episode-torrent boundaries. No-op for single-item plays.
+  if (lp.playlistItems && lp.playlistItems[lp.pi]) lp.itemId = lp.playlistItems[lp.pi];
   lp.name = filePath.split(/[/\\]/).pop();
   lp.skipData = null;
   _lpHideSkipOffer(); lp.skipOfferEnd = 0;
@@ -14105,6 +14131,9 @@ async function lpExitShuffle(btn) {
     const idx = natural.indexOf(cur);
     if (natural.length && idx >= 0) {
       lp.playlist = natural;
+      // `natural` is one item's file list — keep playlistItems aligned (exiting
+      // shuffle on a merged series drops back to the current item's episodes).
+      lp.playlistItems = natural.map(() => lp.itemId);
       lp.pi = idx;
     }
     lp.shuffle = false; lp.shuffleScope = "";
@@ -14476,7 +14505,7 @@ async function lpStop() {
   document.getElementById("lpSkipOffer").classList.add("hidden");
   _lpHidePreparing();
   _lpDevHudStop();
-  lp.itemId = null; lp.filePath = null; lp.playlist = []; lp.pi = 0;
+  lp.itemId = null; lp.filePath = null; lp.playlist = []; lp.playlistItems = []; lp.pi = 0;
   // Proxied playback session: playback is done, so leave the loopback player and
   // return to the direct host dashboard (no-op in a normal/offline session).
   _appProxiedReturnHost();
@@ -14618,7 +14647,7 @@ function _lpRenderNavButtons() {
     btn.classList.remove("hidden");
     const dot = btn.querySelector(".lp-ep-dot");
     if (!dot) return;
-    const st = prepFileState.get(offKey(lp.itemId, path));
+    const st = prepFileState.get(offKey(lp.playlistItems[idx] || lp.itemId, path));
     dot.classList.remove("bg-emerald-500", "bg-amber-400", "bg-gray-600");
     dot.classList.add(st === "ready" ? "bg-emerald-500" : st === "prepping" ? "bg-amber-400" : "bg-gray-600");
     btn.title = (st === "ready" ? "Ready — " : st === "prepping" ? "Preparing — " : "Not prepped yet — ")
@@ -14634,8 +14663,11 @@ function _lpRenderNavButtons() {
 // gate and preempts bulk work, since the user is actively watching the series.
 // Fire-and-forget; updates prepFileState + the nav dot as it progresses.
 function _lpWarmNextEp() {
-  const itemId = lp.itemId;
   const nextPath = lp.playlist[lp.pi + 1];
+  // Merged-series: the next episode may live in a different item — warm it under
+  // its OWN item so the host prep (file∈item) validates and the prep-state key
+  // matches the episode list.
+  const itemId = lp.playlistItems[lp.pi + 1] || lp.itemId;
   if (!itemId || !nextPath) return;
   const k = offKey(itemId, nextPath);
   const cur = prepFileState.get(k);

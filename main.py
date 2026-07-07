@@ -974,6 +974,10 @@ def state_snapshot() -> dict:
         "library_current_index": cur_idx,
         "library_current_file": current,
         "library_playlist": list(playlist),
+        # Merged-series playback: path→owning-item map (empty for a normal play).
+        # Lets a TV→device handoff carry the per-file item so the device re-targets
+        # the active item across episode-torrents exactly as the TV does.
+        "library_series_map": dict(state.library_series_map),
         # True while Shuffle Play is active (random episode order). Lets the UI
         # surface a "shuffle" badge; next/prev already follow the random order.
         "library_shuffle": bool(state.library_shuffle_order),
