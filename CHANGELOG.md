@@ -1,5 +1,11 @@
 # Changelog
 
+## [9.2.0] — 2026-07-08
+- **Library card view (default) + List/Card toggle.** The library now renders as a **poster-card grid** by default — a 2:3 TMDb poster per show/movie with the watch-progress bar, status badges and a ▶ Play/Resume overlay, plus a **⋯** button that opens an in-card drawer holding the **full action set** (Episodes, On Device, Download, Prep, Hide, Delete, download Pause/Idle, When Ready/Queued, the partial-download Files manager…). Posters lazy-load per card as they scroll into view via the existing `/metadata` proxy; a flat Metro title tile shows when there's no artwork or no TMDb key.
+  - A new **Settings → This Device → Library View** segmented control (Cards / List) switches between the poster grid and the original detailed **list** view. The preference is **device-local** (`localStorage.streamlink_libview`), like Dev Mode / Locked Progress Bar — never per-profile or on the server. Card is the default.
+  - **No functionality is lost between views:** both are built from a single shared `_libItemChrome(item)` (badges + every action button), so the list shows the actions inline and the cards tuck the identical set behind the ⋯ drawer. Merged multi-item series still collapse into one poster card (`_libShowCardHtml`) that opens the same merged episode page.
+- (Host-served — **no app rebuild**. No native/Swift change. `static/index.html` only.) **Docs:** [docs/FRONTEND.md](docs/FRONTEND.md).
+
 ## [9.1.0] — 2026-07-07
 - **Fix (crash): opening a show's episodes 500'd.** A refactor left `get_item_files` ([main.py](main.py)) referencing `has_torrent` after that local moved into the shared `_build_item_files` helper — `GET /api/library/{id}/files` (and thus every episode/show screen) raised `NameError`. Restored it to read `item.torrent_hash` directly.
 - **More robust season-pack / episode detection** (`parse_torrent_title`, [main.py](main.py)) — validated against a wide range of live TV/movie/anime searches:

@@ -177,6 +177,33 @@
       display:flex; align-items:center; justify-content:center;
       white-space:nowrap; min-height:44px; line-height:1;
     }
+    /* ── Library CARD view (poster grid) ──────────────────────────────────────
+       Toggleable per-device in Settings → This Device (card is the default). Each
+       card is a 2:3 poster with an overlay ▶ Play + a ⋯ button; the ⋯ opens a
+       drawer that holds the SAME action set the list view shows (buttons + icon
+       cluster), so no feature is list-only. Posters lazy-load per card via the
+       /metadata proxy; a flat Metro title tile shows when there's no art. */
+    .lib-cardv{ background:#111827; border:1px solid #1f2937; display:flex; flex-direction:column; }
+    .lib-cardv-poster{ position:relative; aspect-ratio:2/3; background:#0b0f19; overflow:hidden; }
+    .lib-cardv-poster.lib-tile-open, .lib-cardv-poster.lib-show-open{ cursor:pointer; }
+    .lib-poster-img{ width:100%; height:100%; object-fit:cover; display:block; }
+    .lib-poster-ph{ position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+      text-align:center; padding:.5rem; font-weight:900; text-transform:uppercase; letter-spacing:.04em;
+      font-size:.72rem; line-height:1.15; color:#6b7280; }
+    .lib-cardv-more{ position:absolute; top:.25rem; right:.25rem; width:30px; height:30px; z-index:3;
+      display:flex; align-items:center; justify-content:center; background:rgba(0,0,0,.6); color:#e5e7eb;
+      font-weight:900; font-size:1.05rem; line-height:1; }
+    .lib-cardv-more:hover{ background:rgba(0,0,0,.85); color:#fff; }
+    .lib-cardv-play{ position:absolute; left:50%; top:50%; transform:translate(-50%,-50%); z-index:2;
+      width:48px; height:48px; display:flex; align-items:center; justify-content:center;
+      background:rgba(79,70,229,.85); color:#fff; font-size:1.15rem; line-height:1; }
+    .lib-cardv-play:hover{ background:#4f46e5; }
+    .lib-cardv-badges{ position:absolute; left:0; right:0; bottom:3px; z-index:2;
+      display:flex; flex-wrap:wrap; gap:.2rem; padding:.5rem .3rem .25rem; align-items:flex-end;
+      background:linear-gradient(to top,rgba(0,0,0,.85),rgba(0,0,0,0)); pointer-events:none; }
+    .lib-cardv-prog{ position:absolute; left:0; right:0; bottom:0; height:3px; background:rgba(0,0,0,.5); z-index:3; }
+    .lib-cardv-info{ padding:.4rem .5rem .5rem; }
+    .lib-cardv-drawer{ border-top:1px solid #1f2937; padding:.5rem; }
     /* ── Mobile landscape (short viewport) ──────────────────────────────────
        Phones in landscape are ~320-430px tall. The episode page hero and the
        player footer were sized for portrait and ate the whole screen, leaving
@@ -1061,6 +1088,19 @@
         <input id="psSeekLock" type="checkbox" onchange="toggleSeekLock(this)"
           class="w-5 h-5 accent-emerald-500 cursor-pointer flex-shrink-0"/>
       </label>
+
+      <div class="flex items-center justify-between gap-3 bg-gray-800/60 px-4 py-3">
+        <div class="min-w-0">
+          <div class="text-sm font-bold text-gray-200 uppercase tracking-wide">Library View</div>
+          <div class="text-[11px] text-gray-500 mt-0.5">Show your library as poster cards or as a detailed list. Every action stays available in both — the list shows them inline, cards tuck them behind a ⋯ button.</div>
+        </div>
+        <div class="flex flex-shrink-0 border border-gray-700">
+          <button id="psLibViewCard" type="button" onclick="setLibView('card')"
+            class="px-3 py-1.5 text-xs font-bold uppercase tracking-wide transition-colors">Cards</button>
+          <button id="psLibViewList" type="button" onclick="setLibView('list')"
+            class="px-3 py-1.5 text-xs font-bold uppercase tracking-wide transition-colors">List</button>
+        </div>
+      </div>
 
       <!-- App-only: offline-sync diagnostics. Hidden in the plain browser; shown
            by initAppUi() when running inside the Capacitor shell. -->
@@ -3923,6 +3963,12 @@ let _seekUnlocked    = false;  // truly unlocked → taps seek
 // unlocked (taps seek directly, no hold gesture).
 let _seekLockEnabled = true;
 try { _seekLockEnabled = localStorage.getItem("streamlink_seeklock") !== "0"; } catch (_) {}
+// Library view mode (Settings → This Device). Device-local UI preference (never
+// per-profile / server): "card" (poster grid, default) or "list" (detailed rows).
+let libViewMode = "card";
+try { const _lv = localStorage.getItem("streamlink_libview"); if (_lv === "list" || _lv === "card") libViewMode = _lv; } catch (_) {}
+let _libPosterCache = new Map();   // itemId → poster URL ("" = none/definitive-miss)
+let _libPosterObs = null;          // IntersectionObserver for lazy poster loading
 let _seekPhase       = 0;      // 0 idle, 1 holding, 2 ready (awaiting release), 3 settling — 1-3 still LOCKED
 let _seekRelockTimer = null;   // 5s re-lock after last interaction
 let _seekHoldTimer   = null;   // phase 1 → phase 2
@@ -4871,6 +4917,7 @@ function openProfileSettings(){
   // Device-local, synchronous (localStorage) — no loader needed.
   document.getElementById("psDevMode").checked = devMode;
   document.getElementById("psSeekLock").checked = _seekLockEnabled;
+  _renderLibViewToggle();
   _psLoadProfilePrefs();
   _psLoadMaxVolume();
   _psLoadVlcStartVolume();
@@ -4900,6 +4947,28 @@ function toggleSeekLock(el){
   _seekLockEnabled = !!el.checked;
   try { localStorage.setItem("streamlink_seeklock", _seekLockEnabled ? "1" : "0"); } catch (_) {}
   lockSeekBar();   // re-lock when enabling; unlock-and-keep-open when disabling
+}
+
+// Library View toggle (Settings → This Device) — poster cards vs detailed list.
+// Device-local: persisted to localStorage and applied live to the library tab.
+function setLibView(mode){
+  libViewMode = mode === "list" ? "list" : "card";
+  try { localStorage.setItem("streamlink_libview", libViewMode); } catch (_) {}
+  _renderLibViewToggle();
+  if (activeTab === "library") {
+    if (window._libCache) renderLibrary(window._libCache);
+    else loadLibrary();
+  }
+}
+// Paint the segmented Cards/List control to reflect the active mode.
+function _renderLibViewToggle(){
+  const c = document.getElementById("psLibViewCard");
+  const l = document.getElementById("psLibViewList");
+  if (!c || !l) return;
+  const card = libViewMode === "card";
+  const base = "px-3 py-1.5 text-xs font-bold uppercase tracking-wide transition-colors ";
+  c.className = base + (card ? "bg-indigo-600 text-white" : "text-gray-400 hover:text-white");
+  l.className = base + (!card ? "bg-indigo-600 text-white" : "text-gray-400 hover:text-white");
 }
 
 // Refetch the current profile from server to get freshest auto-skip values.
@@ -5298,6 +5367,393 @@ async function playSeries(seriesKey, mode){
   await playLibraryWithChooser(orderedItems[0]||items[0], ordered, seekTo, label, false, "", orderedItems);
 }
 
+// Per-item chrome — the badges, action buttons, progress bar, meta and flags for
+// one library item. Extracted so the LIST and CARD renderers build from the exact
+// same source (guaranteeing no action is view-only). Returns a plain object.
+function _libItemChrome(item){
+  const isDownloading=item.status==="downloading";
+  const isError=item.status==="error";
+  const isReady=item.status==="ready";
+  const isMulti=item.file_count>1;
+  const resume=item.resume;
+  const pct=resume?resume.pct:0;
+  const hasProgress=resume&&pct>3&&!resume.all_completed;
+  const allDone=resume&&resume.all_completed;
+
+  // Episode label for single-episode items
+  const epPrefix=(item.season&&item.episode)?`S${pad2(item.season)}E${pad2(item.episode)} · `:"";
+
+  // Downloading badge: an idle-only item that the scheduler is currently holding
+  // (idle window closed) reads "Idle — waiting"; otherwise the live "Downloading".
+  let dlBadge;
+  if(!app.vpn_secure){
+    dlBadge=`<span class="text-[10px] px-1.5 py-0.5 bg-red-900/50 text-red-400 border border-red-800" title="VPN disconnected — qBittorrent was stopped, so this download is paused until the VPN reconnects.">⚠ VPN down — paused</span>`;
+  } else if(item.download_mode==="idle"){
+    dlBadge=app.download_idle_open
+      ?`<span class="text-[10px] px-1.5 py-0.5 bg-yellow-900/50 text-yellow-400 border border-yellow-800 blink">↓ Idle download</span>`
+      :`<span class="text-[10px] px-1.5 py-0.5 bg-sky-950 text-sky-300 border border-sky-800" title="Will download during the idle/night window">⏸ Idle — waiting</span>`;
+  } else {
+    dlBadge=`<span class="text-[10px] px-1.5 py-0.5 bg-yellow-900/50 text-yellow-400 border border-yellow-800 blink">↓ Downloading</span>`;
+  }
+  const statusBadge=isDownloading
+    ?dlBadge
+    :isError?`<span class="text-[10px] px-1.5 py-0.5 bg-red-900/50 text-red-400 border border-red-800">Error</span>`
+    :allDone?`<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-500 border border-gray-700">✓ All watched</span>`:"";
+
+  let skipBadge = "";
+  if (isReady) {
+    if (item.skip_status === "failed") {
+      skipBadge = `<span class="text-[10px] px-1.5 py-0.5 bg-amber-950 text-amber-300 border border-amber-800" title="Audio fingerprinting could not produce skip points for the file(s) in this item. Ask an admin if this should be working.">⚠ Intro/credits skip not available</span>`;
+    } else if (item.skip_status === "partial") {
+      const n = item.skip_affected || 0, tot = item.skip_total || 0;
+      const epWord = n === 1 ? "episode" : "episodes";
+      skipBadge = `<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 border border-gray-700" title="No intro/credits skip points on ${n} of ${tot} ${epWord}. This is usually normal — plenty of episodes have no intro or no end-credits sequence to skip.">ⓘ No skip on ${n}/${tot}</span>`;
+    }
+  }
+
+  const partialBadge = item.download_partial
+    ? `<span class="text-[10px] px-1.5 py-0.5 bg-orange-950 text-orange-300 border border-orange-900" title="Some files in this torrent were skipped — not everything is downloaded.">⊘ Partial</span>`
+    : "";
+
+  const compressedBadge = item.compressed
+    ? `<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 border border-gray-700" title="A file here was compressed to save space — no longer torrent-backed (won't seed, can't re-download).">⤓ Compressed</span>`
+    : "";
+
+  // Buttons — multi-episode vs single. Primary actions go in `buttons`; icon-only
+  // buttons (download / prep / hide / delete) collect in `iconBtns`.
+  let buttons="";
+  let iconBtns="";
+  if(isDownloading){
+    if(isMulti){
+      buttons+=`<button onclick="openEpisodePicker('${item.id}',${escHtml(JSON.stringify(item.title))})"
+        class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 hover:text-white px-3 py-2.5 transition-colors min-h-[44px] flex items-center gap-1.5 flex-shrink-0">
+        ☰ <span class="text-xs">Episodes</span>
+      </button>`;
+    }
+    const isIdle=item.download_mode==="idle";
+    buttons+=isIdle
+      ?`<button onclick="setDownloadSchedule('${item.id}','now',false,this)"
+          class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white px-3 py-2.5 transition-colors min-h-[44px] flex items-center gap-1.5 flex-shrink-0"
+          title="Download now (stop waiting for the idle window)">▶︎ Resume</button>`
+      :`<button onclick="setDownloadSchedule('${item.id}','idle',false,this)"
+          class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 hover:text-white px-3 py-2.5 transition-colors min-h-[44px] flex items-center gap-1.5 flex-shrink-0"
+          title="Pause — only download during the idle/night window">⏸︎ Idle</button>`;
+    const isItemQueued=app.play_when_ready_item_id===item.id&&!app.play_when_ready_file_path;
+    if(isItemQueued){
+      buttons+=`<button onclick="cancelQueuePlay('${item.id}',this)"
+        class="text-sm bg-indigo-900/50 border border-indigo-700 text-indigo-300 flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
+        ⏳︎ Queued — tap to cancel
+      </button>`;
+    } else {
+      buttons+=`<button onclick="queuePlay('${item.id}',this)"
+        class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
+        ▶︎ When Ready
+      </button>`;
+    }
+  }
+  if(isReady){
+    if(item.download_partial && item.torrent_hash){
+      buttons+=`<button id="dl-files-btn-${item.id}" onclick="toggleDownloadFiles('${item.id}')"
+        class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 hover:text-white px-3 py-2.5 transition-colors min-h-[44px] flex items-center gap-1.5 flex-shrink-0"
+        title="Manage which files download (priority / idle / skip)">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"/>
+        </svg><span class="dl-files-label text-xs">Files</span>
+      </button>`;
+    }
+    if(isMulti){
+      const contLabel=hasProgress?`↩︎ Resume ${Math.round(pct)}%`:`▶︎ Play All`;
+      buttons+=`<button onclick="openEpisodePicker('${item.id}',${escHtml(JSON.stringify(item.title))})"
+        class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white
+               flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
+        ☰ Episodes
+      </button>
+      <button onclick="resumeLibraryItemWithChooser('${item.id}')"
+        class="text-sm ${hasProgress?'bg-green-900/50 hover:bg-green-800/60 text-green-300 border border-green-800':'bg-indigo-700 hover:bg-indigo-600 text-white border-0'}
+               flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
+        ${escHtml(contLabel)}
+      </button>`;
+    } else {
+      if(hasProgress){
+        buttons+=`<button onclick="continueLibraryItem('${item.id}')"
+          class="text-sm bg-green-900/50 hover:bg-green-800/60 text-green-300 border border-green-800
+                 flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
+          ↩︎ Resume ${Math.round(pct)}%
+        </button>
+        <button class="lib-restart-btn text-sm bg-indigo-700 hover:bg-indigo-600 text-white flex-1 py-2.5 transition-colors min-h-[44px]"
+          data-item-id="${item.id}" data-path="${escHtml(resume.file_path)}">
+          ▶︎ Restart
+        </button>`;
+      } else {
+        buttons+=`<button onclick="continueLibraryItem('${item.id}')"
+          class="text-sm bg-indigo-700 hover:bg-indigo-600 text-white flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
+          ▶︎ Play
+        </button>`;
+      }
+      const onlyFile = item.first_file || null;
+      const fpath  = (resume && resume.file_path) || (onlyFile && onlyFile.path) || "";
+      const fname  = (onlyFile && onlyFile.name) || item.title || "";
+      const fseek  = hasProgress ? (resume.position_sec || 0) : 0;
+      if (fpath) {
+        buttons+=`<button onclick="playLibraryWithChooser(${escHtml(JSON.stringify(item.id))},[${escHtml(JSON.stringify(fpath))}],${fseek},${escHtml(JSON.stringify(item.title||fname))})"
+          class="text-sm bg-emerald-900/50 hover:bg-emerald-800/60 text-emerald-200 border border-emerald-800
+                 flex-1 py-2.5 transition-colors font-medium min-h-[44px]"
+          title="Stream to this device or play on the host's VLC">
+          📱 On Device
+        </button>`;
+      }
+    }
+  }
+
+  if(isReady){
+    const useApp = isApp && hlsAvailable;
+    const dlIcon = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+        </svg>`;
+    const dlCls = "text-gray-500 hover:text-indigo-300 p-2.5 hover:bg-indigo-950/40 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0";
+    if(isMulti){
+      iconBtns+= useApp
+        ? `<button onclick="appDownloadAllBundles('${item.id}',${escHtml(JSON.stringify(item.title))})"
+            class="${dlCls}" title="Save all episodes offline on this device">${dlIcon}</button>`
+        : `<button onclick="epDownloadAll('${item.id}',${escHtml(JSON.stringify(item.title))})"
+            class="${dlCls}" title="Download all to device (ZIP)">${dlIcon}</button>`;
+    } else {
+      const sf = item.first_file || null;
+      if(useApp && sf && sf.path){
+        iconBtns+=`<button onclick="appDownloadBundle(${escHtml(JSON.stringify(item.id))},${escHtml(JSON.stringify(sf.path))},${escHtml(JSON.stringify(sf.name||item.title||''))},this)"
+          class="${dlCls}" title="Save offline on this device">${dlIcon}</button>`;
+      } else {
+        iconBtns+=`<a href="/api/library/${item.id}/download" download
+          class="${dlCls}" title="Download to device">${dlIcon}</a>`;
+      }
+    }
+  }
+
+  if(isReady){
+    iconBtns+=`<button onclick="prepItemForStreaming('${item.id}')"
+      title="Pre-convert all files to a stream-friendly MP4 (server-side)"
+      class="text-gray-500 hover:text-amber-300 p-2.5 hover:bg-amber-950/40 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" d="M12 6V3m0 0L9 6m3-3l3 3M6 12H3m0 0l3-3m-3 3l3 3m12-3h3m0 0l-3-3m3 3l-3 3M12 18v3m0 0l-3-3m3 3l3-3"/>
+      </svg>
+    </button>`;
+  }
+
+  if(profile.id){
+    if(item.hidden){
+      iconBtns+=`<button onclick="toggleItemVisibility('${item.id}',false)"
+        title="Show in main list"
+        class="text-gray-500 hover:text-indigo-300 p-2.5 hover:bg-indigo-950/40 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+        </svg>
+      </button>`;
+    } else {
+      iconBtns+=`<button onclick="toggleItemVisibility('${item.id}',true)"
+        title="Hide for me"
+        class="text-gray-600 hover:text-gray-400 p-2.5 hover:bg-gray-800/60 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"/>
+        </svg>
+      </button>`;
+    }
+  }
+
+  iconBtns+=`<button onclick="deleteLibraryItem('${item.id}',this)"
+    class="text-gray-600 hover:text-red-400 p-2.5 hover:bg-red-950/30 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0">
+    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+    </svg>
+  </button>`;
+
+  const progBar=hasProgress
+    ?`<div class="w-full bg-gray-800 h-0.5 mt-1.5">
+        <div class="bg-green-500 h-0.5" style="width:${Math.round(pct)}%"></div>
+      </div>`:"";
+
+  const meta=[
+    item.file_count>1?`${item.file_count} ep`:"",
+    item.size_bytes>0?item.size_human:"",
+  ].filter(Boolean).join(" · ");
+
+  const dlStat=isDownloading&&libDownloadStats.has(item.id)
+    ?`<div id="dl-stat-${item.id}" class="text-[11px] text-gray-500 font-mono mt-0.5">${formatDlStat(libDownloadStats.get(item.id))}</div>`
+    :isDownloading?`<div id="dl-stat-${item.id}" class="text-[11px] text-gray-500 font-mono mt-0.5"></div>`
+    :"";
+  const prepChip=prepStats.has(item.id)
+    ?`<div id="prep-stat-${item.id}" class="text-[11px] mt-0.5">${prepChipHtml(prepStats.get(item.id))}</div>`
+    :`<div id="prep-stat-${item.id}" class="hidden"></div>`;
+  const borderAccent=isDownloading?"border-l-yellow-600":isError?"border-l-red-600":"border-l-indigo-800";
+  const tileOpen=(isReady||isDownloading);
+
+  return {isDownloading,isError,isReady,isMulti,hasProgress,pct,allDone,epPrefix,
+    statusBadge,skipBadge,partialBadge,compressedBadge,buttons,iconBtns,progBar,
+    meta,dlStat,prepChip,borderAccent,tileOpen};
+}
+
+// LIST-view card for one item (the original wide row). Uses the shared chrome.
+function _libItemListHtml(item){
+  const c=_libItemChrome(item);
+  return `<div class="bg-gray-900 border border-gray-800 border-l-4 ${c.borderAccent} px-4 py-3 flex flex-col gap-2" data-item-id="${item.id}">
+    <div class="min-w-0 ${c.tileOpen?'lib-tile-open cursor-pointer hover:bg-gray-800/40 -mx-1 px-1 transition-colors':''}"
+      ${c.tileOpen?`data-item-id="${item.id}" data-title="${escHtml(item.title)}" role="button" tabindex="0" title="View details"`:''}>
+      <div class="flex items-center gap-2 flex-wrap">
+        <span class="text-sm font-medium text-gray-200 truncate ${c.tileOpen?'hover:text-white':''}">${c.epPrefix}${escHtml(item.title)}</span>
+        ${c.statusBadge}
+        ${c.partialBadge}
+        ${c.compressedBadge}
+        ${c.skipBadge}
+      </div>
+      <div class="text-[11px] text-gray-600 mt-0.5">${escHtml(c.meta)}</div>
+      ${c.dlStat}
+      ${c.prepChip}
+      ${c.progBar}
+    </div>
+    ${(c.buttons||c.iconBtns)?`<div class="lib-card-actions flex items-center gap-2 flex-wrap">${c.buttons}${c.iconBtns?`<div class="flex items-center gap-1">${c.iconBtns}</div>`:""}</div>`:""}
+    ${(c.isReady&&item.download_partial&&item.torrent_hash)?`<div id="dl-files-${item.id}" class="hidden"></div>`:""}
+  </div>`;
+}
+
+// CARD-view poster tile for one item. The poster face carries a ▶ Play/Resume
+// overlay (ready items) + a ⋯ button that opens a drawer holding the SAME full
+// action set (buttons + icon cluster) the list row shows — so no feature is lost.
+function _libItemCardHtml(item){
+  const c=_libItemChrome(item);
+  const title=item.title||"";
+  const badges=`${c.statusBadge}${c.partialBadge}${c.compressedBadge}${c.skipBadge}`;
+  let playOverlay="";
+  if(c.isReady){
+    const oc=c.isMulti?`resumeLibraryItemWithChooser('${item.id}')`:`continueLibraryItem('${item.id}')`;
+    playOverlay=`<button class="lib-cardv-play" title="${c.hasProgress?'Resume':'Play'}"
+      onclick="event.stopPropagation();${oc}">${c.hasProgress?'↩︎':'▶︎'}</button>`;
+  }
+  const posterCls=`lib-cardv-poster${c.tileOpen?' lib-tile-open':''}`;
+  const posterAttrs=c.tileOpen?`data-item-id="${item.id}" data-title="${escHtml(title)}" role="button" tabindex="0" title="View details"`:'';
+  const progOverlay=c.hasProgress?`<div class="lib-cardv-prog"><div class="bg-green-500 h-full" style="width:${Math.round(c.pct)}%"></div></div>`:'';
+  const actionRow=(c.buttons||c.iconBtns)
+    ?`<div class="lib-card-actions flex items-center gap-2 flex-wrap">${c.buttons}${c.iconBtns?`<div class="flex items-center gap-1">${c.iconBtns}</div>`:""}</div>`
+    :`<div class="text-[11px] text-gray-600 uppercase tracking-wide py-1">No actions available</div>`;
+  const expander=(c.isReady&&item.download_partial&&item.torrent_hash)?`<div id="dl-files-${item.id}" class="hidden"></div>`:'';
+  return `<div class="lib-cardv" data-item-id="${item.id}">
+    <div class="${posterCls}" ${posterAttrs}>
+      <img class="lib-poster-img hidden" data-item-id="${item.id}" alt="">
+      <div class="lib-poster-ph">${c.epPrefix}${escHtml(title)}</div>
+      <button class="lib-cardv-more" title="More actions" onclick="event.stopPropagation();_libCardMore(this)">⋯</button>
+      ${playOverlay}
+      ${badges?`<div class="lib-cardv-badges">${badges}</div>`:''}
+      ${progOverlay}
+    </div>
+    <div class="lib-cardv-info">
+      <div class="text-xs font-medium text-gray-200 leading-snug" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${c.epPrefix}${escHtml(title)}</div>
+      <div class="text-[10px] text-gray-600 mt-0.5">${escHtml(c.meta)}</div>
+      ${c.dlStat}
+      ${c.prepChip}
+    </div>
+    <div class="lib-cardv-drawer hidden">
+      ${actionRow}
+      ${expander}
+    </div>
+  </div>`;
+}
+
+// CARD-view poster tile for a merged multi-item series (the show-tile analogue).
+// Reuses the .lib-show-open / .lib-show-play classes so the existing post-render
+// delegation wires the poster + play button with no extra code.
+function _libShowCardHtml(seriesTitle, gItems){
+  const key=gItems[0].series_key||"";
+  const title=seriesTitle||gItems[0].series||gItems[0].title||"";
+  const totalEps=gItems.reduce((n,it)=>n+(it.file_count||1),0);
+  const seasons=[...new Set(gItems.map(it=>+it.season||0).filter(s=>s>0))];
+  const anyDownloading=gItems.some(it=>it.status==="downloading");
+  const anyError=gItems.some(it=>it.status==="error");
+  const doneCount=gItems.filter(it=>it.resume&&it.resume.all_completed).length;
+  const inProgress=gItems.some(it=>it.resume&&it.resume.pct>3&&!it.resume.all_completed);
+  const bits=[`${totalEps} ep`];
+  if(seasons.length) bits.push(`${seasons.length} season${seasons.length>1?"s":""}`);
+  if(doneCount) bits.push(`${doneCount}/${gItems.length} watched`);
+  const badges=anyDownloading
+    ?`<span class="text-[10px] px-1.5 py-0.5 bg-yellow-900/50 text-yellow-400 border border-yellow-800 blink">↓ Downloading</span>`
+    :anyError?`<span class="text-[10px] px-1.5 py-0.5 bg-red-900/50 text-red-400 border border-red-800">Error</span>`:"";
+  const kAttr=escHtml(key), tAttr=escHtml(title);
+  return `<div class="lib-cardv" data-item-id="${gItems[0].id}">
+    <div class="lib-cardv-poster lib-show-open" data-series-key="${kAttr}" data-title="${tAttr}" role="button" tabindex="0" title="View episodes">
+      <img class="lib-poster-img hidden" data-item-id="${gItems[0].id}" alt="">
+      <div class="lib-poster-ph">${escHtml(title)}</div>
+      <button class="lib-cardv-more" title="More actions" onclick="event.stopPropagation();_libCardMore(this)">⋯</button>
+      <button class="lib-cardv-play lib-show-play" data-series-key="${kAttr}" data-mode="${inProgress?"resume":"all"}" title="${inProgress?'Resume':'Play'}">${inProgress?'↩︎':'▶︎'}</button>
+      ${badges?`<div class="lib-cardv-badges">${badges}</div>`:''}
+    </div>
+    <div class="lib-cardv-info">
+      <div class="text-xs font-medium text-gray-200 leading-snug" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${escHtml(title)}</div>
+      <div class="text-[10px] text-gray-600 mt-0.5">${escHtml(bits.join(" · "))}</div>
+    </div>
+    <div class="lib-cardv-drawer hidden">
+      <div class="lib-card-actions flex items-center gap-2 flex-wrap">
+        <button class="lib-show-open flex-1 min-h-[40px] bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white text-xs font-black uppercase tracking-wide px-3 transition-colors" data-series-key="${kAttr}" data-title="${tAttr}">Episodes</button>
+        <button class="lib-show-play flex-[1.4] min-h-[40px] bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-black uppercase tracking-wide px-3 transition-colors" data-series-key="${kAttr}" data-mode="${inProgress?"resume":"all"}">▶ ${inProgress?"Resume":"Play"}</button>
+      </div>
+    </div>
+  </div>`;
+}
+
+// Toggle a card's action drawer (the ⋯ button).
+function _libCardMore(btn){
+  const card=btn.closest(".lib-cardv"); if(!card) return;
+  const d=card.querySelector(".lib-cardv-drawer"); if(!d) return;
+  const opening=d.classList.contains("hidden");
+  d.classList.toggle("hidden");
+  btn.classList.toggle("bg-indigo-600", opening);
+}
+
+// Lazy-load poster art for the card grid. Fetches the item's cached metadata and
+// applies its poster; retries a couple times while a first-ever TMDb fetch is
+// still pending, and caches definitive results so re-renders don't refetch.
+function _libApplyPoster(img,url){
+  if(!img || !document.contains(img)) return;
+  img.onload=()=>{ img.classList.remove("hidden"); const ph=img.closest(".lib-cardv-poster")?.querySelector(".lib-poster-ph"); if(ph) ph.classList.add("hidden"); };
+  img.src=url;
+}
+async function _libLoadPoster(itemId,img,tries){
+  tries=tries||0;
+  if(!itemId||!img) return;
+  if(_libPosterCache.has(itemId)){ const u=_libPosterCache.get(itemId); if(u) _libApplyPoster(img,u); return; }
+  try{
+    const r=await fetch(`/api/library/${itemId}/metadata`);
+    if(!r.ok){ _libPosterCache.set(itemId,""); return; }
+    const d=await r.json();
+    if(d.enabled===false){ _libPosterCache.set(itemId,""); return; }
+    const m=d.metadata||{}; const base=d.img_base||"";
+    const url=m.poster_url || (m.poster_path&&base?`${base}/w342${m.poster_path}`:"");
+    if(!url){
+      if(d.pending && tries<3 && document.contains(img)){ setTimeout(()=>_libLoadPoster(itemId,img,tries+1),4000); return; }
+      _libPosterCache.set(itemId,""); return;
+    }
+    _libPosterCache.set(itemId,url); _libApplyPoster(img,url);
+  }catch(_){
+    if(tries<2 && document.contains(img)) setTimeout(()=>_libLoadPoster(itemId,img,tries+1),4000);
+    else _libPosterCache.set(itemId,"");
+  }
+}
+// Observe card posters and load each as it scrolls near the viewport.
+function _libWirePosters(el){
+  if(_libPosterObs){ try{_libPosterObs.disconnect();}catch(_){} _libPosterObs=null; }
+  const imgs=el.querySelectorAll(".lib-poster-img");
+  if(typeof IntersectionObserver==="undefined"){
+    imgs.forEach(img=>_libLoadPoster(img.dataset.itemId,img));
+    return;
+  }
+  _libPosterObs=new IntersectionObserver((entries,obs)=>{
+    entries.forEach(en=>{ if(en.isIntersecting){ obs.unobserve(en.target); _libLoadPoster(en.target.dataset.itemId,en.target); }});
+  },{rootMargin:"300px 0px"});
+  imgs.forEach(img=>_libPosterObs.observe(img));
+}
+
 function renderLibrary(items){
   const el=document.getElementById("libraryContent");
 
@@ -5370,17 +5826,28 @@ function renderLibrary(items){
     groups.get(key).items.push(item);
   });
 
+  // Card view = one flat responsive poster grid (no per-series headers — the
+  // poster + title already identify each show). List view keeps the grouped
+  // header + row layout. BOTH build every item from the shared _libItemChrome, so
+  // no action exists in only one view.
+  const isCard = libViewMode==="card";
+  if(isCard) html+=`<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 items-start">`;
+
   groups.forEach(({label,items:gItems})=>{
     // A real series with multiple items (e.g. episodes downloaded individually)
-    // renders as ONE cohesive show tile that opens the merged episode page —
-    // never as N separate tiles. A single-item series (or a season-pack item)
-    // keeps the normal per-item tile.
+    // renders as ONE cohesive show tile/card that opens the merged episode page —
+    // never as N separate tiles.
     if(gItems.length>1 && (gItems[0].series||"").trim()){
-      html+=_libShowTileHtml(label, gItems);
+      html+= isCard ? _libShowCardHtml(label, gItems) : _libShowTileHtml(label, gItems);
       return;
     }
-    // Only split a series into 2 columns when it actually has multiple items —
-    // a single-item series spans full width instead of stranding an empty column.
+    // Card view: each item is a poster card appended straight into the flat grid.
+    if(isCard){
+      gItems.forEach(item=>{ html+=_libItemCardHtml(item); });
+      return;
+    }
+    // List view: 2 columns only for a genuine multi-item series; a single-item
+    // series spans full width instead of stranding an empty column.
     const gridCls=gItems.length>1?"grid grid-cols-1 lg:grid-cols-2 gap-2 items-start":"space-y-2";
     if(label){
       html+=`<div class="mb-6">
@@ -5388,291 +5855,12 @@ function renderLibrary(items){
     } else {
       html+=`<div class="mb-2"><div class="${gridCls}">`;
     }
-
-    gItems.forEach(item=>{
-      const isDownloading=item.status==="downloading";
-      const isError=item.status==="error";
-      const isReady=item.status==="ready";
-      const isMulti=item.file_count>1;
-      const resume=item.resume;
-      const pct=resume?resume.pct:0;
-      const hasProgress=resume&&pct>3&&!resume.all_completed;
-      const allDone=resume&&resume.all_completed;
-
-      // Episode label for single-episode items
-      const epPrefix=(item.season&&item.episode)?`S${pad2(item.season)}E${pad2(item.episode)} · `:"";
-
-      // Downloading badge: an idle-only item that the scheduler is currently holding
-      // (idle window closed) reads "Idle — waiting"; otherwise the live "Downloading".
-      let dlBadge;
-      if(!app.vpn_secure){
-        // VPN down ⇒ qBittorrent was terminated server-side, so nothing is
-        // actually downloading regardless of the scheduled mode. Say so plainly.
-        dlBadge=`<span class="text-[10px] px-1.5 py-0.5 bg-red-900/50 text-red-400 border border-red-800" title="VPN disconnected — qBittorrent was stopped, so this download is paused until the VPN reconnects.">⚠ VPN down — paused</span>`;
-      } else if(item.download_mode==="idle"){
-        dlBadge=app.download_idle_open
-          ?`<span class="text-[10px] px-1.5 py-0.5 bg-yellow-900/50 text-yellow-400 border border-yellow-800 blink">↓ Idle download</span>`
-          :`<span class="text-[10px] px-1.5 py-0.5 bg-sky-950 text-sky-300 border border-sky-800" title="Will download during the idle/night window">⏸ Idle — waiting</span>`;
-      } else {
-        dlBadge=`<span class="text-[10px] px-1.5 py-0.5 bg-yellow-900/50 text-yellow-400 border border-yellow-800 blink">↓ Downloading</span>`;
-      }
-      const statusBadge=isDownloading
-        ?dlBadge
-        :isError?`<span class="text-[10px] px-1.5 py-0.5 bg-red-900/50 text-red-400 border border-red-800">Error</span>`
-        :allDone?`<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-500 border border-gray-700">✓ All watched</span>`:"";
-
-      // Smart Skip availability chip. Driven by the server-computed
-      // `skip_status` on the item. Shown only on ready items — downloading
-      // items haven't been analyzed yet by definition, and the "Downloading"
-      // badge already explains why nothing's available.
-      let skipBadge = "";
-      if (isReady) {
-        if (item.skip_status === "failed") {
-          skipBadge = `<span class="text-[10px] px-1.5 py-0.5 bg-amber-950 text-amber-300 border border-amber-800" title="Audio fingerprinting could not produce skip points for the file(s) in this item. Ask an admin if this should be working.">⚠ Intro/credits skip not available</span>`;
-        } else if (item.skip_status === "partial") {
-          // Not a warning: many episodes legitimately have no intro and/or no
-          // end credits, so "no skip points" is often expected, not a fault.
-          // Neutral info chip + a count so it's clear how many are affected.
-          const n = item.skip_affected || 0, tot = item.skip_total || 0;
-          const epWord = n === 1 ? "episode" : "episodes";
-          skipBadge = `<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 border border-gray-700" title="No intro/credits skip points on ${n} of ${tot} ${epWord}. This is usually normal — plenty of episodes have no intro or no end-credits sequence to skip.">ⓘ No skip on ${n}/${tot}</span>`;
-        }
-      }
-
-      // Partial-download badge: some files were deselected (Skip), so not every file
-      // in this torrent is on disk — shown even once the kept files are "ready".
-      const partialBadge = item.download_partial
-        ? `<span class="text-[10px] px-1.5 py-0.5 bg-orange-950 text-orange-300 border border-orange-900" title="Some files in this torrent were skipped — not everything is downloaded.">⊘ Partial</span>`
-        : "";
-
-      // Compressed badge: at least one file was re-encoded in place to save space and
-      // is no longer torrent-backed (won't seed, can't re-download). See the episode
-      // picker for per-file detail; recheck/recover/delete-to-free-space are blocked.
-      const compressedBadge = item.compressed
-        ? `<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 border border-gray-700" title="A file here was compressed to save space — no longer torrent-backed (won't seed, can't re-download).">⤓ Compressed</span>`
-        : "";
-
-      // Buttons — multi-episode vs single. Primary actions go in `buttons`;
-      // icon-only buttons (download / prep / hide / delete) collect in `iconBtns`
-      // so they render as one right-aligned cluster that wraps together on mobile
-      // instead of a single stray icon dropping to its own line.
-      let buttons="";
-      let iconBtns="";
-      if(isDownloading){
-        // Episodes — the clean episode UI replaces the old inline per-file download
-        // menu. The episode page supports in-flight downloads (per-episode progress +
-        // the per-season download/prep scheduling bar), so it's the single surface
-        // for managing what downloads while it's still in progress.
-        if(isMulti){
-          buttons+=`<button onclick="openEpisodePicker('${item.id}',${escHtml(JSON.stringify(item.title))})"
-            class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 hover:text-white px-3 py-2.5 transition-colors min-h-[44px] flex items-center gap-1.5 flex-shrink-0">
-            ☰ <span class="text-xs">Episodes</span>
-          </button>`;
-        }
-        // Pause (defer to idle/night) ↔ Resume (download now). The download keeps
-        // its files; "idle" just gates them to the admin's idle download window.
-        const isIdle=item.download_mode==="idle";
-        buttons+=isIdle
-          ?`<button onclick="setDownloadSchedule('${item.id}','now',false,this)"
-              class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white px-3 py-2.5 transition-colors min-h-[44px] flex items-center gap-1.5 flex-shrink-0"
-              title="Download now (stop waiting for the idle window)">▶︎ Resume</button>`
-          :`<button onclick="setDownloadSchedule('${item.id}','idle',false,this)"
-              class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 hover:text-white px-3 py-2.5 transition-colors min-h-[44px] flex items-center gap-1.5 flex-shrink-0"
-              title="Pause — only download during the idle/night window">⏸︎ Idle</button>`;
-        // Whole-item Play When Ready (only shown as queued when no specific file is targeted)
-        const isItemQueued=app.play_when_ready_item_id===item.id&&!app.play_when_ready_file_path;
-        if(isItemQueued){
-          buttons+=`<button onclick="cancelQueuePlay('${item.id}',this)"
-            class="text-sm bg-indigo-900/50 border border-indigo-700 text-indigo-300 flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
-            ⏳︎ Queued — tap to cancel
-          </button>`;
-        } else {
-          buttons+=`<button onclick="queuePlay('${item.id}',this)"
-            class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
-            ▶︎ When Ready
-          </button>`;
-        }
-      }
-      if(isReady){
-        // Partial download finished its kept files: still expose the per-file
-        // Top/Now/Idle/Skip controls (and "download this skipped file now") via the
-        // same Files expander used while downloading.
-        if(item.download_partial && item.torrent_hash){
-          buttons+=`<button id="dl-files-btn-${item.id}" onclick="toggleDownloadFiles('${item.id}')"
-            class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 hover:text-white px-3 py-2.5 transition-colors min-h-[44px] flex items-center gap-1.5 flex-shrink-0"
-            title="Manage which files download (priority / idle / skip)">
-            <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 10h16M4 14h16M4 18h16"/>
-            </svg><span class="dl-files-label text-xs">Files</span>
-          </button>`;
-        }
-        if(isMulti){
-          const contLabel=hasProgress?`↩︎ Resume ${Math.round(pct)}%`:`▶︎ Play All`;
-          buttons+=`<button onclick="openEpisodePicker('${item.id}',${escHtml(JSON.stringify(item.title))})"
-            class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white
-                   flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
-            ☰ Episodes
-          </button>
-          <button onclick="resumeLibraryItemWithChooser('${item.id}')"
-            class="text-sm ${hasProgress?'bg-green-900/50 hover:bg-green-800/60 text-green-300 border border-green-800':'bg-indigo-700 hover:bg-indigo-600 text-white border-0'}
-                   flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
-            ${escHtml(contLabel)}
-          </button>`;
-        } else {
-          if(hasProgress){
-            buttons+=`<button onclick="continueLibraryItem('${item.id}')"
-              class="text-sm bg-green-900/50 hover:bg-green-800/60 text-green-300 border border-green-800
-                     flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
-              ↩︎ Resume ${Math.round(pct)}%
-            </button>
-            <button class="lib-restart-btn text-sm bg-indigo-700 hover:bg-indigo-600 text-white flex-1 py-2.5 transition-colors min-h-[44px]"
-              data-item-id="${item.id}" data-path="${escHtml(resume.file_path)}">
-              ▶︎ Restart
-            </button>`;
-          } else {
-            buttons+=`<button onclick="continueLibraryItem('${item.id}')"
-              class="text-sm bg-indigo-700 hover:bg-indigo-600 text-white flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
-              ▶︎ Play
-            </button>`;
-          }
-          // Direct "Stream to this device" button — opens the chooser, where
-          // "On Device" hands the file off to the local browser <video>.
-          const onlyFile = item.first_file || null;
-          const fpath  = (resume && resume.file_path) || (onlyFile && onlyFile.path) || "";
-          const fname  = (onlyFile && onlyFile.name) || item.title || "";
-          const fseek  = hasProgress ? (resume.position_sec || 0) : 0;
-          if (fpath) {
-            buttons+=`<button onclick="playLibraryWithChooser(${escHtml(JSON.stringify(item.id))},[${escHtml(JSON.stringify(fpath))}],${fseek},${escHtml(JSON.stringify(item.title||fname))})"
-              class="text-sm bg-emerald-900/50 hover:bg-emerald-800/60 text-emerald-200 border border-emerald-800
-                     flex-1 py-2.5 transition-colors font-medium min-h-[44px]"
-              title="Stream to this device or play on the host's VLC">
-              📱 On Device
-            </button>`;
-          }
-        }
-      }
-
-      // Download button — in the app it saves an offline bundle on the device; in a
-      // browser it pulls the file(s) over HTTP (single = direct link, multi = ZIP).
-      if(isReady){
-        // App download needs a host that can build HLS bundles; without it, fall
-        // back to the web download path (mirrors `_appDlBtnHTML` returning "").
-        const useApp = isApp && hlsAvailable;
-        const dlIcon = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
-            </svg>`;
-        const dlCls = "text-gray-500 hover:text-indigo-300 p-2.5 hover:bg-indigo-950/40 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0";
-        if(isMulti){
-          iconBtns+= useApp
-            ? `<button onclick="appDownloadAllBundles('${item.id}',${escHtml(JSON.stringify(item.title))})"
-                class="${dlCls}" title="Save all episodes offline on this device">${dlIcon}</button>`
-            : `<button onclick="epDownloadAll('${item.id}',${escHtml(JSON.stringify(item.title))})"
-                class="${dlCls}" title="Download all to device (ZIP)">${dlIcon}</button>`;
-        } else {
-          const sf = item.first_file || null;
-          if(useApp && sf && sf.path){
-            iconBtns+=`<button onclick="appDownloadBundle(${escHtml(JSON.stringify(item.id))},${escHtml(JSON.stringify(sf.path))},${escHtml(JSON.stringify(sf.name||item.title||''))},this)"
-              class="${dlCls}" title="Save offline on this device">${dlIcon}</button>`;
-          } else {
-            iconBtns+=`<a href="/api/library/${item.id}/download" download
-              class="${dlCls}" title="Download to device">${dlIcon}</a>`;
-          }
-        }
-      }
-
-      // "Prep for Streaming" — pre-runs remux/transcode on every video file in
-      // the item so a subsequent device-side Play taps a cached MP4 and the
-      // browser starts streaming immediately instead of waiting on ffmpeg.
-      if(isReady){
-        iconBtns+=`<button onclick="prepItemForStreaming('${item.id}')"
-          title="Pre-convert all files to a stream-friendly MP4 (server-side)"
-          class="text-gray-500 hover:text-amber-300 p-2.5 hover:bg-amber-950/40 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0">
-          <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
-            <path stroke-linecap="round" stroke-linejoin="round" d="M12 6V3m0 0L9 6m3-3l3 3M6 12H3m0 0l3-3m-3 3l3 3m12-3h3m0 0l-3-3m3 3l-3 3M12 18v3m0 0l-3-3m3 3l3-3"/>
-          </svg>
-        </button>`;
-      }
-
-      // Hide/show eye button (per-profile; only when a profile is active)
-      if(profile.id){
-        if(item.hidden){
-          iconBtns+=`<button onclick="toggleItemVisibility('${item.id}',false)"
-            title="Show in main list"
-            class="text-gray-500 hover:text-indigo-300 p-2.5 hover:bg-indigo-950/40 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
-            </svg>
-          </button>`;
-        } else {
-          iconBtns+=`<button onclick="toggleItemVisibility('${item.id}',true)"
-            title="Hide for me"
-            class="text-gray-600 hover:text-gray-400 p-2.5 hover:bg-gray-800/60 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0">
-            <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-                d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"/>
-            </svg>
-          </button>`;
-        }
-      }
-
-      // Delete button (fixed width, doesn't flex-grow)
-      iconBtns+=`<button onclick="deleteLibraryItem('${item.id}',this)"
-        class="text-gray-600 hover:text-red-400 p-2.5 hover:bg-red-950/30 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0">
-        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
-            d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
-        </svg>
-      </button>`;
-
-      // Progress bar
-      const progBar=hasProgress
-        ?`<div class="w-full bg-gray-800 h-0.5 mt-1.5">
-            <div class="bg-green-500 h-0.5" style="width:${Math.round(pct)}%"></div>
-          </div>`:""
-
-      const meta=[
-        item.file_count>1?`${item.file_count} ep`:"",
-        item.size_bytes>0?item.size_human:"",
-      ].filter(Boolean).join(" · ");
-
-      const dlStat=isDownloading&&libDownloadStats.has(item.id)
-        ?`<div id="dl-stat-${item.id}" class="text-[11px] text-gray-500 font-mono mt-0.5">${formatDlStat(libDownloadStats.get(item.id))}</div>`
-        :isDownloading?`<div id="dl-stat-${item.id}" class="text-[11px] text-gray-500 font-mono mt-0.5"></div>`
-        :"";
-      const prepChip=prepStats.has(item.id)
-        ?`<div id="prep-stat-${item.id}" class="text-[11px] mt-0.5">${prepChipHtml(prepStats.get(item.id))}</div>`
-        :`<div id="prep-stat-${item.id}" class="hidden"></div>`;
-      const borderAccent=isDownloading?"border-l-yellow-600":isError?"border-l-red-600":"border-l-indigo-800";
-      // The title/meta block is a clickable surface that opens the info page
-      // (episode list for series, movie-info panel for single-file items). Wired
-      // via .lib-tile-open + data attrs after render so quoted titles are safe.
-      const tileOpen=(isReady||isDownloading);
-      html+=`<div class="bg-gray-900 border border-gray-800 border-l-4 ${borderAccent} px-4 py-3 flex flex-col gap-2" data-item-id="${item.id}">
-        <div class="min-w-0 ${tileOpen?'lib-tile-open cursor-pointer hover:bg-gray-800/40 -mx-1 px-1 transition-colors':''}"
-          ${tileOpen?`data-item-id="${item.id}" data-title="${escHtml(item.title)}" role="button" tabindex="0" title="View details"`:''}>
-          <div class="flex items-center gap-2 flex-wrap">
-            <span class="text-sm font-medium text-gray-200 truncate ${tileOpen?'hover:text-white':''}">${epPrefix}${escHtml(item.title)}</span>
-            ${statusBadge}
-            ${partialBadge}
-            ${compressedBadge}
-            ${skipBadge}
-          </div>
-          <div class="text-[11px] text-gray-600 mt-0.5">${escHtml(meta)}</div>
-          ${dlStat}
-          ${prepChip}
-          ${progBar}
-        </div>
-        ${(buttons||iconBtns)?`<div class="lib-card-actions flex items-center gap-2 flex-wrap">${buttons}${iconBtns?`<div class="flex items-center gap-1">${iconBtns}</div>`:""}</div>`:""}
-        ${(isReady&&item.download_partial&&item.torrent_hash)?`<div id="dl-files-${item.id}" class="hidden"></div>`:""}
-      </div>`;
-    });
+    gItems.forEach(item=>{ html+=_libItemListHtml(item); });
     html+=`</div></div>`;
   });
+  if(isCard) html+=`</div>`;
   el.innerHTML=html;
+  if(isCard) _libWirePosters(el);
   // Wire restart buttons via data attributes so paths never need JS-string escaping
   el.querySelectorAll(".lib-restart-btn").forEach(btn=>{
     btn.addEventListener("click",()=>playLibraryWithChooser(btn.dataset.itemId,[btn.dataset.path],0,""));
@@ -6530,7 +6718,8 @@ async function renameSeries(){
     renderEpHero(name);
     renderEpSeasonTabs();
     renderEpList();
-    loadLibrary();                        // refresh the library grouping label
+    try { _libPosterCache.clear(); } catch(_) {}   // art re-fetched — drop cached poster URLs
+    loadLibrary();                        // refresh the library grouping label / poster
     showAlert(d.metadata?"Renamed — artwork updated.":"Renamed.","success");
   }catch(_){
     if(epItemId===itemId) renderEpHero(current);
@@ -6685,6 +6874,7 @@ function _applyMetaResult(d, msg){
   renderEpHero(_epCurrentName());
   renderEpSeasonTabs();
   renderEpList();
+  try { _libPosterCache.clear(); } catch(_) {}   // art may have changed — drop cached poster URLs
   loadLibrary();            // refresh the library grouping label / poster
   closeMetaFix();
   showAlert(msg,"success");
@@ -15746,6 +15936,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.1.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.2.0</div>
 </body>
 </html>
