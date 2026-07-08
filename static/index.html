@@ -8663,6 +8663,16 @@ function _ssBuildEpisodes(results){
 function _ssSeasonsWithEpisodes(){
   return [...new Set(_ssEpisodes.map(e=>e.season))].sort((a,b)=>a-b);
 }
+// Union of seasons we have episodes for AND seasons TMDb lists — so an entirely
+// missing season still gets a tab (all rows show "Find sources").
+function _ssAllSeasons(){
+  const s=new Set(_ssEpisodes.map(e=>e.season));
+  if(_ssMeta&&_ssMeta.tmdb_kind==="tv"&&_ssMeta.seasons){
+    Object.keys(_ssMeta.seasons).forEach(k=>{ const n=+k; if(n>0) s.add(n); });
+  }
+  return [...s].sort((a,b)=>a-b);
+}
+let _ssSearching=new Set();   // "<season>-<episode>" keys currently being searched
 
 // TMDb episode title for (season,episode), or "" when unknown.
 function _ssEpName(season,episode){
@@ -8673,7 +8683,7 @@ function _ssEpName(season,episode){
 }
 
 async function openSearchShow(group){
-  _ssGroup=group; _ssMeta=null;
+  _ssGroup=group; _ssMeta=null; _ssSearching.clear();
   _ssEpisodes=_ssBuildEpisodes(group.results||[]);
   _ssPacks=(group.results||[]).filter(r=>r.kind!=="episode")
              .sort((a,b)=>b.seeders-a.seeders);
@@ -8777,7 +8787,7 @@ function _ssRenderBody(){
 
 function _ssRenderEpisodes(){
   const body=document.getElementById("ssBody");
-  const seasons=_ssSeasonsWithEpisodes();
+  const seasons=_ssAllSeasons();
   // Season tabs
   const tabs=document.getElementById("ssSeasonTabs");
   if(seasons.length>1){
@@ -8792,28 +8802,147 @@ function _ssRenderEpisodes(){
   } else { tabs.classList.add("hidden"); }
   if(seasons.length && !seasons.includes(_ssSeason)) _ssSeason=seasons[0];
 
-  const eps=_ssEpisodes.filter(e=>seasons.length<=1||e.season===_ssSeason);
-  body.innerHTML=`<div class="divide-y divide-gray-800">`+eps.map(e=>{
-    const best=e.sources[0];
-    const code=`S${String(e.season).padStart(2,"0")}E${String(e.episode).padStart(2,"0")}`;
-    const name=_ssEpName(e.season,e.episode);
-    const sc=best.seeders>30?"text-green-400":best.seeders>8?"text-yellow-400":"text-red-400";
-    return `<button onclick="ssOpenSourceSheet(${e.season},${e.episode})"
-      class="w-full text-left px-3 sm:px-5 py-3 hover:bg-gray-800/50 transition-colors flex items-center gap-3">
-      <div class="text-[11px] font-mono font-bold text-indigo-400 w-14 flex-shrink-0">${code}</div>
-      <div class="min-w-0 flex-1">
-        <p class="text-sm text-gray-200 truncate">${name?escHtml(name):`Episode ${e.episode}`}</p>
-        <p class="text-[11px] text-gray-500">
-          <span class="font-mono font-semibold ${sc}">${best.seeders} ↑</span> ·
-          ${escHtml(best.size_human)} · ${e.sources.length} source${e.sources.length>1?"s":""}
-        </p>
-      </div>
-      <svg class="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
-      </svg>
-    </button>`;
-  }).join("")+`</div>`;
-  if(!eps.length) body.innerHTML=`<p class="text-center text-gray-600 text-sm py-10">No single episodes found.</p>`;
+  const inSeason=e=>seasons.length<=1||e.season===_ssSeason;
+  const avail=new Map();  // episode number → our bucket (with sources)
+  _ssEpisodes.filter(inSeason).forEach(e=>avail.set(e.episode, e));
+
+  // TMDb's episode list for this season is authoritative for what *should* exist,
+  // so we can flag missing episodes and offer to hunt sources for them.
+  const seasonNo=seasons.length?_ssSeason:(seasons[0]||1);
+  const tmdbEps=(_ssMeta&&_ssMeta.seasons&&_ssMeta.seasons[String(seasonNo)]&&_ssMeta.seasons[String(seasonNo)].episodes)||[];
+  const missing=_ssMissingEpisodes(seasonNo);
+
+  let rows="";
+  if(tmdbEps.length){
+    // Interleave in TMDb order: an available episode renders normally, a missing
+    // one renders greyed with a "Find sources" action.
+    tmdbEps.forEach(te=>{
+      const e=avail.get(te.episode);
+      rows+= e ? _ssEpRowHtml(e) : _ssMissingRowHtml(seasonNo, te.episode, te.name);
+    });
+    // Any episodes we have that TMDb doesn't list (specials/extras) go after.
+    [...avail.values()].filter(e=>!tmdbEps.some(te=>te.episode===e.episode))
+      .sort((a,b)=>a.episode-b.episode).forEach(e=>rows+=_ssEpRowHtml(e));
+  } else {
+    [...avail.values()].sort((a,b)=>a.episode-b.episode).forEach(e=>rows+=_ssEpRowHtml(e));
+  }
+
+  // "Find missing" banner when TMDb shows episodes we have no source for.
+  const banner=missing.length
+    ? `<div class="px-3 sm:px-5 py-2 bg-amber-950/40 border-b border-amber-900/50 flex items-center justify-between gap-2">
+         <span class="text-[11px] text-amber-300 uppercase tracking-wide">${missing.length} episode${missing.length>1?"s":""} missing a source</span>
+         <button id="ssFindMissingBtn" onclick="ssFindMissing(${seasonNo})"
+           class="text-[11px] px-2.5 py-1 bg-amber-700 hover:bg-amber-600 text-white uppercase tracking-wide transition-colors">Find sources</button>
+       </div>` : "";
+
+  body.innerHTML = banner + (rows
+    ? `<div class="divide-y divide-gray-800">${rows}</div>`
+    : `<p class="text-center text-gray-600 text-sm py-10">No single episodes found.</p>`);
+}
+
+function _ssEpRowHtml(e){
+  const best=e.sources[0];
+  const code=`S${String(e.season).padStart(2,"0")}E${String(e.episode).padStart(2,"0")}`;
+  const name=_ssEpName(e.season,e.episode);
+  const sc=best.seeders>30?"text-green-400":best.seeders>8?"text-yellow-400":"text-red-400";
+  return `<button onclick="ssOpenSourceSheet(${e.season},${e.episode})"
+    class="w-full text-left px-3 sm:px-5 py-3 hover:bg-gray-800/50 transition-colors flex items-center gap-3">
+    <div class="text-[11px] font-mono font-bold text-indigo-400 w-14 flex-shrink-0">${code}</div>
+    <div class="min-w-0 flex-1">
+      <p class="text-sm text-gray-200 truncate">${name?escHtml(name):`Episode ${e.episode}`}</p>
+      <p class="text-[11px] text-gray-500">
+        <span class="font-mono font-semibold ${sc}">${best.seeders} ↑</span> ·
+        ${escHtml(best.size_human)} · ${e.sources.length} source${e.sources.length>1?"s":""}
+      </p>
+    </div>
+    <svg class="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+    </svg>
+  </button>`;
+}
+
+// A missing episode (TMDb lists it, no torrent found) — greyed, with a per-row
+// search that spawns a targeted follow-up query to hunt sources for just it.
+function _ssMissingRowHtml(season, episode, name){
+  const code=`S${String(season).padStart(2,"0")}E${String(episode).padStart(2,"0")}`;
+  const busy=_ssSearching.has(`${season}-${episode}`);
+  return `<div class="w-full text-left px-3 sm:px-5 py-3 flex items-center gap-3 opacity-70">
+    <div class="text-[11px] font-mono font-bold text-gray-600 w-14 flex-shrink-0">${code}</div>
+    <div class="min-w-0 flex-1">
+      <p class="text-sm text-gray-400 truncate">${name?escHtml(name):`Episode ${episode}`}</p>
+      <p class="text-[11px] text-gray-600 uppercase tracking-wide">No source found</p>
+    </div>
+    <button onclick="ssSearchEpisode(${season},${episode})" ${busy?"disabled":""}
+      class="text-[11px] px-2.5 py-1.5 flex-shrink-0 ${busy?"bg-gray-800 text-gray-500":"bg-gray-800 hover:bg-indigo-700 text-gray-300 hover:text-white"} uppercase tracking-wide transition-colors flex items-center gap-1">
+      ${busy?`<svg class="w-3.5 h-3.5 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg>Searching`:`Find`}
+    </button>
+  </div>`;
+}
+
+// Episode numbers TMDb lists for a season that we currently have no source for.
+function _ssMissingEpisodes(season){
+  const tmdbEps=(_ssMeta&&_ssMeta.seasons&&_ssMeta.seasons[String(season)]&&_ssMeta.seasons[String(season)].episodes)||[];
+  if(!tmdbEps.length) return [];
+  const have=new Set(_ssEpisodes.filter(e=>e.season===season).map(e=>e.episode));
+  return tmdbEps.map(te=>te.episode).filter(ep=>ep>0 && !have.has(ep));
+}
+
+// Spawn a targeted follow-up search for one missing episode, merging any matching
+// sources into the show's episode buckets. Absolute-numbered anime (season 1,
+// high episode #) is queried by the bare number, else by SxxExx.
+async function ssSearchEpisode(season, episode, opts={}){
+  const key=`${season}-${episode}`;
+  if(_ssSearching.has(key)) return 0;
+  _ssSearching.add(key);
+  if(!opts.silent) _ssRenderBody();
+  const grp=_ssGroup;
+  const code=`S${String(season).padStart(2,"0")}E${String(episode).padStart(2,"0")}`;
+  const abs=(season<=1 && episode>=100);   // absolute-numbered anime
+  const q=`${grp.title} ${abs?episode:code}`;
+  let found=[];
+  try{
+    let url=`/api/search?q=${encodeURIComponent(q)}`;
+    if(profile.id) url+=`&profile_id=${encodeURIComponent(profile.id)}`;
+    const r=await fetch(url);
+    if(r.ok){
+      const data=await r.json();
+      (data.groups||[]).forEach(g=>(g.results||[]).forEach(res=>{
+        if(res.kind==="episode" && res.season===season && res.episode===episode) found.push(res);
+      }));
+    }
+  }catch(_){}
+  if(_ssGroup===grp && found.length){
+    let e=_ssEpisodes.find(x=>x.season===season && x.episode===episode);
+    if(!e){ e={season,episode,sources:[]}; _ssEpisodes.push(e); _ssEpisodes.sort((a,b)=>(a.season-b.season)||(a.episode-b.episode)); }
+    const have=new Set(e.sources.map(s=>s.magnet));
+    found.forEach(f=>{ if(!have.has(f.magnet)){ e.sources.push(f); have.add(f.magnet); } });
+    e.sources.sort((a,b)=>b.seeders-a.seeders);
+  }
+  _ssSearching.delete(key);
+  if(_ssGroup===grp && !opts.silent){
+    _ssRenderBody();
+    if(!found.length) showAlert(`No sources found for ${code}.`,"warn");
+  }
+  return found.length;
+}
+
+// Hunt sources for every missing episode of a season (throttled). Re-renders as
+// each result lands so the list fills in live.
+async function ssFindMissing(season){
+  const missing=_ssMissingEpisodes(season);
+  if(!missing.length){ showAlert("Nothing missing.","success"); return; }
+  const btn=document.getElementById("ssFindMissingBtn");
+  if(btn){ btn.disabled=true; btn.textContent="Searching…"; }
+  showAlert(`Searching ${missing.length} missing episode${missing.length>1?"s":""}…`,"success");
+  let got=0;
+  for(const ep of missing){
+    if(_ssGroup==null) return;   // user navigated away
+    if(await ssSearchEpisode(season, ep, {silent:true})) got++;
+    _ssRenderBody();
+    await new Promise(r=>setTimeout(r,250));
+  }
+  showAlert(`Found sources for ${got}/${missing.length} missing episode${missing.length>1?"s":""}.`, got?"success":"warn");
+  _ssRenderBody();
 }
 
 function _ssPackLabel(p){
@@ -15617,6 +15746,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.0.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.1.0</div>
 </body>
 </html>

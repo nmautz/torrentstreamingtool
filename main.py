@@ -2502,12 +2502,36 @@ def parse_season_episode(name: str) -> tuple[int, int]:
 # info. Used by parse_torrent_title() to group flat search results into shows.
 _TT_EP_RE          = re.compile(r"[Ss](\d{1,2})[Ee](\d{1,2})")
 _TT_EP_X_RE        = re.compile(r"\b(\d{1,2})x(\d{2})\b")
-_TT_MULTI_LIST_RE  = re.compile(r"[Ss]\d{1,2}(?:\s*-\s*[Ss]?\d{1,2}){2,}")     # S01-S02-S03…
-_TT_MULTI_RANGE_RE = re.compile(r"[Ss](\d{1,2})\s*-\s*[Ss]?(\d{1,2})")         # S01-S05 / S01-5
-_TT_SEASONS_WORD_RE = re.compile(r"[Ss]easons?\s*(\d{1,2})\s*-\s*(\d{1,2})")   # Seasons 1-5
+# Multi-season packs. The trailing (?!\d) stops the second number from matching a
+# resolution/year *prefix* — "S01 - 720p" must NOT read as S1-72, "S08 - 2019"
+# not as S8-20. Legit forms: S01-S05, S01-05, S01-5, S1+S2+S3, S01-S02-S03.
+_TT_MULTI_PLUS_RE  = re.compile(r"[Ss]\d{1,2}(?:\s*\+\s*[Ss]?\d{1,2})+")           # S1+S2+S3
+_TT_MULTI_LIST_RE  = re.compile(r"[Ss]\d{1,2}(?:\s*-\s*[Ss]?\d{1,2}(?!\d)){2,}")   # S01-S02-S03…
+_TT_MULTI_RANGE_RE = re.compile(r"[Ss](\d{1,2})\s*-\s*[Ss]?(\d{1,2})(?!\d)")       # S01-S05 / S01-5
+_TT_SEASONS_WORD_RE = re.compile(r"[Ss]easons?\s*(\d{1,2})\s*-\s*(\d{1,2})(?!\d)") # Seasons 1-5
 _TT_SEASON_RE      = re.compile(r"\b[Ss](\d{1,2})\b")
 _TT_SEASON_WORD_RE = re.compile(r"\b[Ss]eason\s*(\d{1,2})\b")
 _TT_COMPLETE_SERIES_RE = re.compile(r"\bComplete\s+(?:Series|Pack|Collection)\b", re.IGNORECASE)
+# Absolute-numbered anime episode ("[Grp] One Piece - 1168 [1080p]", "One Piece
+# EP1168", "Naruto 121 (..."). Only consulted when NO S/E or season marker exists.
+# Dash / EP are strong fansub signals (1-4 digits); a bare trailing number needs
+# 3-4 digits so "Ocean's 11" (a movie) isn't read as an episode.
+_TT_ABS_EP_RE      = re.compile(r"\b[Ee][Pp]\s?(\d{1,4})\b")                       # EP1168
+_TT_ABS_DASH_RE    = re.compile(r"\s-\s+(\d{1,4})(?!\d)")                          # Show - 121
+_TT_ABS_TAIL_RE    = re.compile(r"\s(\d{3,4})\s*(?=[\[(]|$)")                      # Show 1168 [.. / (..
+_TT_TRAIL_YEAR_RE  = re.compile(r"\s+(?:19|20)\d{2}$")
+_TT_EXT_RE         = re.compile(r"\.(?:mkv|mp4|avi|mov|m4v|ts|webm)$", re.IGNORECASE)
+_TT_RES_NUMS       = {480, 540, 576, 720, 1080, 1440, 2160, 4320}
+
+
+def _tt_bounded_span(a: int, b: int):
+    """Accept a season range only if it's plausible. Rejects the resolution/year
+    bleed and absolute-ep dashes ("S4 - 37") that would otherwise read as a
+    30+-season pack — real multi-season packs span a handful of seasons."""
+    lo, hi = min(a, b), max(a, b)
+    if hi > 50 or (hi - lo) > 30:
+        return None
+    return lo, hi
 
 
 def parse_torrent_title(title: str) -> dict:
@@ -2517,8 +2541,8 @@ def parse_torrent_title(title: str) -> dict:
         show_key    normalised grouping key ("breaking bad")
         kind        "episode" | "season" | "multiseason" | "movie"
         season      episode/season kinds: the season number (0 otherwise)
-        episode     episode kind: the episode number (0 otherwise)
-        season_from/season_to  multiseason kind: inclusive season range
+        episode     episode kind: episode number (absolute-numbered anime → season 1)
+        season_from/season_to  multiseason kind: inclusive season range (0 = "complete")
         year        detected release year (or None)
     The show name is the text *before* the first structural marker, run through
     _strip_release_tags — this is what separates e.g. a "Better Call Saul S06E11
@@ -2532,43 +2556,68 @@ def parse_torrent_title(title: str) -> dict:
     year = int(ym.group(0)) if ym else None
 
     season = episode = season_from = season_to = 0
+    abs_marker_pos = None   # where to cut the show name for an absolute-numbered ep
 
     ep_m    = _TT_EP_RE.search(norm) or _TT_EP_X_RE.search(norm)
-    range_m = _TT_SEASONS_WORD_RE.search(norm) or _TT_MULTI_RANGE_RE.search(norm)
+    plus_m  = _TT_MULTI_PLUS_RE.search(norm)
     list_m  = _TT_MULTI_LIST_RE.search(norm)
+    range_m = _TT_SEASONS_WORD_RE.search(norm) or _TT_MULTI_RANGE_RE.search(norm)
     complete_series = bool(_TT_COMPLETE_SERIES_RE.search(norm))
 
-    if list_m or range_m or complete_series:
-        kind = "multiseason"
-        if list_m:
-            # A chained list (S01-S02-S03-…) carries the full span; prefer it over
-            # the 2-season range regex, which would only capture the first pair.
+    kind = None
+    if plus_m or list_m or range_m or complete_series:
+        span = None
+        if plus_m:
+            nums = [int(x) for x in re.findall(r"\d{1,2}", plus_m.group(0))]
+            span = _tt_bounded_span(min(nums), max(nums)) if nums else None
+        elif list_m:
             nums = [int(x) for x in re.findall(r"\d{1,2}", list_m.group(0))]
-            if nums:
-                season_from, season_to = min(nums), max(nums)
+            span = _tt_bounded_span(min(nums), max(nums)) if nums else None
         elif range_m:
-            a, b = int(range_m.group(1)), int(range_m.group(2))
-            season_from, season_to = min(a, b), max(a, b)
-    elif ep_m:
-        kind = "episode"
-        season, episode = int(ep_m.group(1)), int(ep_m.group(2))
-    else:
-        sm = _TT_SEASON_WORD_RE.search(norm) or _TT_SEASON_RE.search(norm)
-        if sm:
-            kind, season = "season", int(sm.group(1))
+            span = _tt_bounded_span(int(range_m.group(1)), int(range_m.group(2)))
+        if span:
+            kind, (season_from, season_to) = "multiseason", span
+        elif complete_series:
+            kind = "multiseason"          # "Complete Series" with no explicit numbers
+        elif range_m:
+            # Implausible span ("S01 - 720p" already blocked by (?!\d); "S4 - 37")
+            # → treat as the single leading season, not a bogus pack.
+            kind, season = "season", int(range_m.group(1))
+
+    if kind is None:
+        if ep_m:
+            kind = "episode"
+            season, episode = int(ep_m.group(1)), int(ep_m.group(2))
         else:
-            kind = "movie"
+            sm = _TT_SEASON_WORD_RE.search(norm) or _TT_SEASON_RE.search(norm)
+            if sm:
+                kind, season = "season", int(sm.group(1))
+            else:
+                am = (_TT_ABS_EP_RE.search(norm) or _TT_ABS_DASH_RE.search(norm)
+                      or _TT_ABS_TAIL_RE.search(norm))
+                if am:
+                    n = int(am.group(1))
+                    if not (1900 <= n <= 2099) and n not in _TT_RES_NUMS:
+                        kind, season, episode = "episode", 1, n
+                        abs_marker_pos = am.start()   # cut before " - " / "EP" / the number
+                if kind is None:
+                    kind = "movie"
 
     # Show name = text before the earliest structural marker.
     positions = []
-    for rx in (_TT_EP_RE, _TT_EP_X_RE, _TT_SEASONS_WORD_RE, _TT_MULTI_RANGE_RE,
-               _TT_SEASON_WORD_RE, _TT_SEASON_RE, _TT_COMPLETE_SERIES_RE):
+    for rx in (_TT_EP_RE, _TT_EP_X_RE, _TT_SEASONS_WORD_RE, _TT_MULTI_PLUS_RE,
+               _TT_MULTI_LIST_RE, _TT_MULTI_RANGE_RE, _TT_SEASON_WORD_RE,
+               _TT_SEASON_RE, _TT_COMPLETE_SERIES_RE):
         m = rx.search(norm)
         if m:
             positions.append(m.start())
+    if abs_marker_pos is not None:
+        positions.append(abs_marker_pos)
     cut = min(positions) if positions else len(norm)
     show = _strip_release_tags(norm[:cut]) or _strip_release_tags(norm) or norm.strip()
     show_key = re.sub(r"\s+", " ", show.lower()).strip()
+    show_key = _TT_EXT_RE.sub("", show_key)                       # drop a trailing .mkv etc
+    show_key = _TT_TRAIL_YEAR_RE.sub("", show_key).strip()        # "inception 2010" ⇒ "inception"
 
     return {
         "show": show, "show_key": show_key, "kind": kind,
@@ -7511,7 +7560,7 @@ async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
     return JSONResponse({
         "files": out,
         "item_status": item.get("status", "ready"),
-        "has_torrent": has_torrent,                     # gates the download-scheduling controls
+        "has_torrent": bool(item.get("torrent_hash")),  # gates the download-scheduling controls
         "download_mode": cfg["mode"],
         "prep_priority_default": prep_cfg["priority_default"],   # item/series-level prep-queue tier (mid default)
         "idle_open": state.download_idle_open,
