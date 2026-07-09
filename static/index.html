@@ -9548,6 +9548,9 @@ async function _ssDownloadOne(src, season, episode, opts={}){
 
 // ── Bulk season download (Phase 3) ───────────────────────────────────────────
 let _ssBulkScope="all";   // "all" or a season number
+// Auto-pick constraints (persist across re-renders / scope changes). Blank = no
+// limit. Seeders win over size — see _ssAutoPick.
+let _ssBulkFilters={minSeed:"",minGB:"",maxGB:""};
 function ssOpenBulkSheet(){
   _ssBulkScope=_ssSeason||"all";
   document.getElementById("ssBulkSheet").classList.remove("hidden");
@@ -9571,6 +9574,7 @@ function _ssRenderBulkChoose(){
              ${on?"bg-indigo-600 text-white":"bg-gray-800 text-gray-400 hover:bg-gray-700"}">${label}</button>`;
   };
   const n=_ssBulkEpisodesInScope().length;
+  const f=_ssBulkFilters;
   body.innerHTML=`
     <div>
       <p class="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Scope</p>
@@ -9581,12 +9585,36 @@ function _ssRenderBulkChoose(){
     </div>
     <p class="text-xs text-gray-500">${n} episode${n===1?"":"s"} in scope.</p>
     <div>
+      <p class="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Auto-pick limits (optional)</p>
+      <div class="grid grid-cols-3 gap-2">
+        <label class="flex flex-col gap-1">
+          <span class="text-[9px] uppercase tracking-widest text-gray-500">Min seeders</span>
+          <input type="number" min="0" step="1" inputmode="numeric" value="${escHtml(f.minSeed)}"
+            oninput="_ssBulkFilters.minSeed=this.value" placeholder="any"
+            class="bg-gray-950 border border-gray-800 text-xs text-gray-200 py-1.5 px-2 min-w-0"/>
+        </label>
+        <label class="flex flex-col gap-1">
+          <span class="text-[9px] uppercase tracking-widest text-gray-500">Min size (GB)</span>
+          <input type="number" min="0" step="0.1" inputmode="decimal" value="${escHtml(f.minGB)}"
+            oninput="_ssBulkFilters.minGB=this.value" placeholder="any"
+            class="bg-gray-950 border border-gray-800 text-xs text-gray-200 py-1.5 px-2 min-w-0"/>
+        </label>
+        <label class="flex flex-col gap-1">
+          <span class="text-[9px] uppercase tracking-widest text-gray-500">Max size (GB)</span>
+          <input type="number" min="0" step="0.1" inputmode="decimal" value="${escHtml(f.maxGB)}"
+            oninput="_ssBulkFilters.maxGB=this.value" placeholder="any"
+            class="bg-gray-950 border border-gray-800 text-xs text-gray-200 py-1.5 px-2 min-w-0"/>
+        </label>
+      </div>
+      <p class="text-[10px] text-gray-600 mt-1.5">Applies to Auto only. Seeders win over size — if no source fits the size range, the best-seeded one that clears the seeder floor is used anyway; if nothing clears the floor, the best-seeded source is used.</p>
+    </div>
+    <div>
       <p class="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">How should sources be picked?</p>
       <div class="grid grid-cols-1 gap-2">
         <button onclick="ssBulkAuto()"
           class="text-left p-3 bg-gray-950 border border-gray-800 hover:border-indigo-700 hover:bg-gray-800 transition-colors">
-          <p class="text-sm font-black uppercase tracking-wide text-indigo-300">Auto — highest seeders</p>
-          <p class="text-[11px] text-gray-500 mt-0.5">Grab the best-seeded torrent for every episode.</p>
+          <p class="text-sm font-black uppercase tracking-wide text-indigo-300">Auto — best seeded within limits</p>
+          <p class="text-[11px] text-gray-500 mt-0.5">Grab the best-seeded torrent that fits the limits above for every episode.</p>
         </button>
         <button onclick="_ssRenderBulkManual()"
           class="text-left p-3 bg-gray-950 border border-gray-800 hover:border-indigo-700 hover:bg-gray-800 transition-colors">
@@ -9628,9 +9656,41 @@ function _ssRenderBulkManual(){
     </div>`;
 }
 
+// Read the Auto-pick limit inputs into a normalised filter (bytes + int seeders).
+// Blank / non-positive fields become "no limit".
+function _ssParseBulkFilters(){
+  const f=_ssBulkFilters, GB=1024**3;
+  const pos=v=>{ const x=parseFloat(v); return isFinite(x)&&x>0?x:0; };
+  const maxGB=pos(f.maxGB);
+  return {
+    minSeed:Math.max(0, parseInt(f.minSeed,10)||0),
+    minBytes:pos(f.minGB)*GB,
+    maxBytes:maxGB?maxGB*GB:Infinity,
+  };
+}
+
+// Choose the source to grab for one episode under the Auto-pick limits. Priority
+// order, seeders always breaking ties:
+//   1. clears the seeder floor AND fits the size window,
+//   2. clears the seeder floor (size relaxed — seeders win over size),
+//   3. nothing clears the floor → best-seeded source outright ("find whatever").
+function _ssAutoPick(sources, filt){
+  if(!sources||!sources.length) return null;
+  const bySeed=(a,b)=>(b.seeders||0)-(a.seeders||0);
+  const okSeed=s=>(s.seeders||0)>=filt.minSeed;
+  const okSize=s=>{ const z=s.size||0; return z>=filt.minBytes && z<=filt.maxBytes; };
+  let c=sources.filter(s=>okSeed(s)&&okSize(s)).sort(bySeed);
+  if(c.length) return c[0];
+  c=sources.filter(okSeed).sort(bySeed);
+  if(c.length) return c[0];
+  return [...sources].sort(bySeed)[0];
+}
+
 function ssBulkAuto(){
+  const filt=_ssParseBulkFilters();
   const eps=_ssBulkEpisodesInScope();
-  const jobs=eps.map(e=>({src:e.sources[0], season:e.season, episode:e.episode}));
+  const jobs=eps.map(e=>({src:_ssAutoPick(e.sources,filt), season:e.season, episode:e.episode}))
+                .filter(j=>j.src);
   _ssRunBulk(jobs);
 }
 
@@ -16261,6 +16321,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.4.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.5.0</div>
 </body>
 </html>
