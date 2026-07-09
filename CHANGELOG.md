@@ -1,5 +1,9 @@
 # Changelog
 
+## [9.4.0] — 2026-07-08
+- **You can now hide *and* delete a whole show — including one that's still downloading.** Merged multi-episode series tiles (list + card view) previously only offered **Episodes** and **Play/Resume**; the hide (eye) and delete (trash) icons lived only on single-item cards, so an in-progress multi-episode download could not be hidden or removed from the library at the show level. Both show-tile renderers (`_libShowTileHtml`, `_libShowCardHtml`) now render a shared `_libShowIconBtns` cluster. Hide fans out `POST /api/library/{id}/visibility` across every item in the series (`toggleSeriesVisibility`); delete fans out `DELETE /api/library/{id}?delete_file=true` (`deleteSeries`, confirm-gated, wrapped in `withInflight`). In the Hidden view the eye becomes a restore-to-main-list action. Single-item cards already had these and are unchanged.
+- (Host-served — **no app rebuild**. `static/index.html` + version badge.) **Docs:** [docs/FRONTEND.md](docs/FRONTEND.md).
+
 ## [9.3.1] — 2026-07-08
 - **Fix: the "Add to Library" download modal opened behind the search-show page.** `#downloadModal` was `z-50` — the same stacking level as the full-screen `#searchShowPage` (`z-50`) — and since the show page sits later in the DOM it won the tie and painted on top, burying the modal when a Season Pack was downloaded (`ssDownloadPack` → `openDownloadModal`). Bumped the modal to `z-[60]` so it floats above the show page (still below the `z-[70]` global toast).
 - (Host-served — **no app rebuild**. `static/index.html` + version badge.) **Docs:** none.

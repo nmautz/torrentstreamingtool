@@ -5326,6 +5326,86 @@ function toggleLibHiddenView(){
   loadLibrary();
 }
 
+// Hide/unhide every item in a merged series show tile in one action — so a
+// multi-episode show (including one still downloading) can be hidden/restored
+// just like a single item. Fans out to the per-item visibility endpoint.
+async function toggleSeriesVisibility(ids,makeHidden){
+  if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
+  let ok=true;
+  for(const id of (ids||[])){
+    const r=await fetch(`/api/library/${id}/visibility`,{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({profile_id:profile.id,hidden:makeHidden}),
+    });
+    if(!r.ok) ok=false;
+  }
+  if(ok) loadLibrary();
+  else showAlert("Could not update visibility.","error");
+}
+
+// Delete an entire merged series (every item + its files) — the show-tile
+// analogue of deleteLibraryItem, for shows that are still downloading or done.
+async function deleteSeries(ids,title,btn){
+  ids=ids||[];
+  const n=ids.length;
+  if(!confirm(`Remove "${title||"this show"}" (${n} download${n===1?"":"s"}) from the library and delete the file(s)?`)) return;
+  await withInflight(`delseries_${ids.join("_")}`, btn, async () => {
+    let ok=true;
+    for(const id of ids){
+      const r=await fetch(`/api/library/${id}?delete_file=true`,{method:"DELETE"});
+      if(r.ok){
+        expandedDownloads.delete(id);
+        downloadFilesData.delete(id);
+      } else ok=false;
+    }
+    loadLibrary();
+    if(!ok) showAlert("Some episodes could not be deleted.","error");
+  });
+}
+
+// Hide + delete icon cluster shared by the list and card show-tile renderers, so
+// a merged SHOW carries the same visibility/delete actions a single item does.
+// All items in a show tile share one visibility bucket (renderLibrary splits
+// visible vs hidden before grouping), so gItems[0].hidden is authoritative.
+function _libShowIconBtns(gItems){
+  const idsAttr=escHtml(JSON.stringify(gItems.map(it=>it.id)));
+  const title=gItems[0].series||gItems[0].title||"";
+  const tArg=escHtml(JSON.stringify(title));
+  let h="";
+  if(profile.id){
+    if(gItems[0].hidden){
+      h+=`<button onclick="event.stopPropagation();toggleSeriesVisibility(${idsAttr},false)"
+        title="Show in main list"
+        class="text-gray-500 hover:text-indigo-300 p-2.5 hover:bg-indigo-950/40 transition-colors min-h-[40px] w-11 flex items-center justify-center flex-shrink-0">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/>
+        </svg>
+      </button>`;
+    } else {
+      h+=`<button onclick="event.stopPropagation();toggleSeriesVisibility(${idsAttr},true)"
+        title="Hide for me"
+        class="text-gray-600 hover:text-gray-400 p-2.5 hover:bg-gray-800/60 transition-colors min-h-[40px] w-11 flex items-center justify-center flex-shrink-0">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+            d="M13.875 18.825A10.05 10.05 0 0112 19c-4.478 0-8.268-2.943-9.543-7a9.97 9.97 0 011.563-3.029m5.858.908a3 3 0 114.243 4.243M9.878 9.878l4.242 4.242M9.88 9.88l-3.29-3.29m7.532 7.532l3.29 3.29M3 3l3.59 3.59m0 0A9.953 9.953 0 0112 5c4.478 0 8.268 2.943 9.543 7a10.025 10.025 0 01-4.132 5.411m0 0L21 21"/>
+        </svg>
+      </button>`;
+    }
+  }
+  h+=`<button onclick="event.stopPropagation();deleteSeries(${idsAttr},${tArg},this)"
+    title="Delete show + files"
+    class="text-gray-600 hover:text-red-400 p-2.5 hover:bg-red-950/30 transition-colors min-h-[40px] w-11 flex items-center justify-center flex-shrink-0">
+    <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+        d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16"/>
+    </svg>
+  </button>`;
+  return h;
+}
+
 // One cohesive show tile for a series made of multiple items (e.g. episodes
 // downloaded individually). Opens the merged episode page; Play resumes across
 // the episodes on the TV.
@@ -5358,6 +5438,7 @@ function _libShowTileHtml(seriesTitle, gItems){
       <div class="lib-card-actions flex items-center gap-2 flex-wrap mt-2.5">
         <button class="lib-show-open flex-1 min-h-[40px] bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white text-xs font-black uppercase tracking-wide px-3 transition-colors" data-series-key="${kAttr}" data-title="${tAttr}">Episodes</button>
         <button class="lib-show-play flex-[1.4] min-h-[40px] bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-black uppercase tracking-wide px-3 transition-colors" data-series-key="${kAttr}" data-mode="${inProgress?"resume":"all"}">▶ ${inProgress?"Resume":"Play"}</button>
+        <div class="flex items-center gap-1">${_libShowIconBtns(gItems)}</div>
       </div>
     </div>
   </div></div>`;
@@ -5715,6 +5796,7 @@ function _libShowCardHtml(seriesTitle, gItems){
       <div class="lib-card-actions flex items-center gap-2 flex-wrap">
         <button class="lib-show-open flex-1 min-h-[40px] bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white text-xs font-black uppercase tracking-wide px-3 transition-colors" data-series-key="${kAttr}" data-title="${tAttr}">Episodes</button>
         <button class="lib-show-play flex-[1.4] min-h-[40px] bg-indigo-600 hover:bg-indigo-500 text-white text-xs font-black uppercase tracking-wide px-3 transition-colors" data-series-key="${kAttr}" data-mode="${inProgress?"resume":"all"}">▶ ${inProgress?"Resume":"Play"}</button>
+        <div class="flex items-center gap-1">${_libShowIconBtns(gItems)}</div>
       </div>
     </div>
   </div>`;
@@ -16179,6 +16261,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.3.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.4.0</div>
 </body>
 </html>
