@@ -1731,6 +1731,48 @@ def _search_terms_for_item(item: dict) -> tuple[str, Optional[int]]:
     return cleaned, year
 
 
+# Country/region suffixes torrent titles append but TMDb usually omits from the
+# canonical show name (e.g. "Big Brother US" → TMDb "Big Brother"). Used only for
+# match scoring, never to alter the search query we send.
+_TMDB_COUNTRY_SUFFIXES = {"us", "usa", "uk", "gb", "au", "aus", "ca", "nz"}
+
+
+def _tmdb_norm_title(s: str) -> str:
+    """Lowercase, strip punctuation, collapse whitespace, and drop a trailing
+    country code so 'Big Brother US' and 'Big Brother' normalise equal."""
+    s = re.sub(r"[^\w\s]", " ", (s or "").lower())
+    s = re.sub(r"\s+", " ", s).strip()
+    toks = s.split()
+    if len(toks) > 1 and toks[-1] in _TMDB_COUNTRY_SUFFIXES:
+        toks = toks[:-1]
+    return " ".join(toks)
+
+
+def _tmdb_pick_tv(query: str, results: list[dict]) -> Optional[dict]:
+    """Choose the best TV match from a TMDb /search/tv result set.
+
+    TMDb's text ranking sometimes floats a low-signal partial match above the
+    obvious show — e.g. `query="Big Brother US"` returns "Celebrity Big Brother"
+    (popularity 3.7) ahead of the canonical "Big Brother" (popularity 68, 28
+    seasons). Blindly taking results[0] then binds the wrong show and only its
+    handful of seasons ever surface. We score by title-match tier first, then
+    break ties by popularity, so the canonical show wins."""
+    if not results:
+        return None
+    q = _tmdb_norm_title(query)
+
+    def score(r: dict) -> tuple[int, float]:
+        name = _tmdb_norm_title(r.get("name") or r.get("original_name") or "")
+        if name == q:                       tier = 3   # exact (after country-strip)
+        elif q and name.startswith(q):      tier = 2   # candidate extends the query
+        elif q and q in name:               tier = 1   # query appears inside candidate
+        elif name and q.startswith(name):   tier = 1   # candidate is a prefix of query
+        else:                               tier = 0
+        return (tier, float(r.get("popularity") or 0))
+
+    return max(results, key=score)
+
+
 async def _tmdb_match_show(item: dict) -> Optional[dict]:
     """Find the most plausible TMDb TV show for this library item. Movies are
     treated as one-shot items and matched via /search/movie when there's only
@@ -1745,10 +1787,10 @@ async def _tmdb_match_show(item: dict) -> Optional[dict]:
     # TV first — most of our library is series.
     tv = await _tmdb_get("/search/tv", {"query": query, "include_adult": "false"})
     tv_results = (tv or {}).get("results", []) or []
-    # Prefer first result; year hint just biases nothing for TV (first-air-date
-    # isn't always present and the search ranks by popularity already).
+    # Score by title-match tier + popularity rather than trusting TMDb's raw
+    # ranking (which can float a low-signal partial above the obvious show).
     if tv_results and not is_movieish:
-        r = tv_results[0]
+        r = _tmdb_pick_tv(query, tv_results)
         return {"kind": "tv", "id": r["id"], "raw": r}
 
     if is_movieish:
@@ -1764,7 +1806,7 @@ async def _tmdb_match_show(item: dict) -> Optional[dict]:
 
     # Fall back to the TV result for series-shaped items even if movieish failed
     if tv_results:
-        r = tv_results[0]
+        r = _tmdb_pick_tv(query, tv_results)
         return {"kind": "tv", "id": r["id"], "raw": r}
     return None
 
@@ -7698,7 +7740,8 @@ async def _tmdb_lookup_by_title(title: str, year: Optional[int],
             tv = await _tmdb_get("/search/tv", {"query": query, "include_adult": "false"})
             tv_results = (tv or {}).get("results", []) or []
             if tv_results:
-                match = {"kind": "tv", "id": tv_results[0]["id"]}
+                best = _tmdb_pick_tv(query, tv_results)
+                match = {"kind": "tv", "id": best["id"]}
         if match is None and kind != "tv":
             mv = await _tmdb_get("/search/movie",
                                  {"query": query, "include_adult": "false",

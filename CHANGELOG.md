@@ -1,5 +1,9 @@
 # Changelog
 
+## [9.2.2] — 2026-07-08
+- **Fix: grouped search bound the wrong TMDb show, so most seasons never appeared.** Searching e.g. "Big Brother US" resolved to **Celebrity Big Brother** (3 seasons) instead of the canonical **Big Brother** (28 seasons), because both `_tmdb_lookup_by_title` (search show page) and `_tmdb_match_show` (library) blindly took TMDb's first `/search/tv` hit — and TMDb floats a low-signal partial match (popularity 3.7) above the obvious show (popularity 68). Seasons the metadata didn't list (4–16, 18–26) then had no tab and no "Find sources" row. Now a shared `_tmdb_pick_tv()` scores candidates by title-match tier (exact after country-suffix strip → prefix → substring) with **popularity as the tie-breaker**, so the canonical show wins and every real season gets a tab. Country suffixes (`US`/`UK`/`AU`…) are stripped for scoring only, never from the search query.
+- (Host-served — **no app rebuild**. `main.py` + version badge.) **Docs:** [docs/GOTCHAS.md](docs/GOTCHAS.md).
+
 ## [9.2.1] — 2026-07-08
 - **Fix: card-view posters never loaded** (blank tiles with only the title placeholder). `_libWirePosters` attached the lazy-load IntersectionObserver directly to the `<img class="lib-poster-img hidden">` element — but `hidden` is `display:none`, which has a zero-size box the observer never reports as intersecting, so `_libLoadPoster` was never called. Now observes the always-laid-out `.lib-cardv-poster` **container** and resolves the inner `<img>` in the callback.
 
