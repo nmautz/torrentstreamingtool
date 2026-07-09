@@ -1,5 +1,9 @@
 # Changelog
 
+## [9.3.1] — 2026-07-08
+- **Fix: the "Add to Library" download modal opened behind the search-show page.** `#downloadModal` was `z-50` — the same stacking level as the full-screen `#searchShowPage` (`z-50`) — and since the show page sits later in the DOM it won the tie and painted on top, burying the modal when a Season Pack was downloaded (`ssDownloadPack` → `openDownloadModal`). Bumped the modal to `z-[60]` so it floats above the show page (still below the `z-[70]` global toast).
+- (Host-served — **no app rebuild**. `static/index.html` + version badge.) **Docs:** none.
+
 ## [9.3.0] — 2026-07-08
 - **Search is now TMDb-first.** The search box queries **TMDb** for real shows/movies and shows a clean poster-card list, instead of dumping raw Jackett torrent results. Picking a title opens the show page (`openSearchShowFromTmdb`) — fetched by TMDb id (`/api/tmdb/lookup?tmdb_id=&kind=`, exact entry, no fuzzy re-match) — with the **full season/episode skeleton and no torrents**. Jackett is only queried when the user **explicitly** taps a button: **Search episodes** (`ssSearchShowEpisodes`) or **Search packs** (`ssSearchPacks`), plus the existing per-season **Find sources** and per-episode **Find**. Both explicit buttons share one cached `/api/search` request (`_ssBroadSearch`) so they never double-hit the indexers. Movies open straight to a **Downloads** (sources) list.
   - New endpoint **`GET /api/tmdb/search?query=&kind=`** returns TMDb candidates (`{id,kind,title,year,overview,poster_path}`, popularity-ordered). Not admin-gated. `/api/tmdb/lookup` now also accepts `tmdb_id`+`kind` for an exact by-id fetch.
