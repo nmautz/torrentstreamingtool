@@ -1601,11 +1601,17 @@
       class="py-2.5 text-xs font-black uppercase tracking-wide tab-inactive">Season Packs</button>
   </div>
 
-  <!-- Episode tools: bulk-download + season tabs (episodes section only) -->
+  <!-- Episode tools: search + bulk-download + season tabs (episodes section only) -->
   <div id="ssEpisodesTools" class="hidden flex-shrink-0">
     <div class="px-3 sm:px-5 py-2 border-b border-gray-800 flex gap-1.5 items-center flex-wrap">
-      <button onclick="ssOpenBulkSheet()"
+      <button id="ssSearchEpBtn" onclick="ssSearchShowEpisodes(this)"
         class="text-[11px] px-2.5 py-1.5 bg-indigo-700 hover:bg-indigo-600 text-white uppercase tracking-wide transition-colors flex items-center gap-1 min-h-[34px]">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+        </svg>Search episodes
+      </button>
+      <button onclick="ssOpenBulkSheet()"
+        class="text-[11px] px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-200 uppercase tracking-wide transition-colors flex items-center gap-1 min-h-[34px]">
         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
         </svg>Bulk download season
@@ -1614,6 +1620,18 @@
     <div id="ssSeasonTabs"
       class="hidden flex gap-1 px-2 sm:px-5 overflow-x-auto border-b border-gray-800
              [scrollbar-width:none] [-ms-overflow-style:none]"></div>
+  </div>
+
+  <!-- Packs tools: search (packs section only) -->
+  <div id="ssPacksTools" class="hidden flex-shrink-0">
+    <div class="px-3 sm:px-5 py-2 border-b border-gray-800 flex gap-1.5 items-center flex-wrap">
+      <button id="ssSearchPacksBtn" onclick="ssSearchPacks(this)"
+        class="text-[11px] px-2.5 py-1.5 bg-indigo-700 hover:bg-indigo-600 text-white uppercase tracking-wide transition-colors flex items-center gap-1 min-h-[34px]">
+        <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+        </svg><span id="ssSearchPacksLabel">Search packs</span>
+      </button>
+    </div>
   </div>
 
   <!-- Scrollable body (episode list or packs list) -->
@@ -8746,6 +8764,23 @@ function _selectedCategoriesParam(){
 }
 
 // ── Search ─────────────────────────────────────────────────────────────────
+// Search is TMDb-first: the box queries TMDb for real shows/movies (poster
+// cards); Jackett is only hit *inside* the show page (explicit Search buttons).
+// With no TMDb key (or zero TMDb matches) it falls back to the legacy Jackett-
+// first grouped search (doJackettSearch), so nothing regresses without a key.
+let _tmdbResultsById={};   // "id-kind" → TMDb candidate (for the result cards)
+
+// Narrow TMDb to tv/movie only when the Categories picker unambiguously selects
+// one video type; otherwise search both.
+function _searchTmdbKind(){
+  const sel=selectedCategories;
+  if(!sel||sel.has("__none__")||sel.size===0) return "";   // "all"
+  const hasMovies=sel.has("movies"), hasTv=sel.has("tv");
+  if(hasMovies && !hasTv) return "movie";
+  if(hasTv && !hasMovies) return "tv";
+  return "";
+}
+
 async function doSearch(q){
   q=q.trim(); if(!q) return;
   if(vpnBlocked()) return;   // qBit is down; downloading/streaming a result would 403 anyway
@@ -8756,6 +8791,70 @@ async function doSearch(q){
   btn.disabled=true; btn.textContent="…"; _markLoading(btn, true);
   grid.innerHTML=""; wrap.classList.add("hidden"); empty.classList.add("hidden"); hideAlert();
   try{
+    // 1) TMDb-first — pick a real show/movie before touching any indexer.
+    let tmdb=null;
+    try{
+      const catKind=_searchTmdbKind();
+      let turl=`/api/tmdb/search?query=${encodeURIComponent(q)}`;
+      if(catKind) turl+=`&kind=${catKind}`;
+      const tr=await fetch(turl);
+      if(tr.ok) tmdb=await tr.json();
+    }catch(_){}
+    if(tmdb && tmdb.enabled && (tmdb.results||[]).length){
+      _renderTmdbResults(q, tmdb, grid, wrap, count);
+      applyVpnGate();
+      return;
+    }
+    // 2) Fallback: legacy Jackett-first grouped search (no TMDb key or no match).
+    await doJackettSearch(q, grid, wrap, empty, count);
+  } catch(err){
+    showAlert(err.message,"error"); empty.classList.remove("hidden");
+  } finally {
+    btn.disabled=false; btn.textContent="Search"; _markLoading(btn, false);
+  }
+}
+
+// Render the TMDb candidate list as poster cards. Clicking one opens the show
+// page (openSearchShowFromTmdb), which is where Jackett is finally queried.
+function _renderTmdbResults(q, tmdb, grid, wrap, count){
+  const results=tmdb.results||[];
+  const imgBase=tmdb.img_base||"/api/metadata/img";
+  _tmdbResultsById={};
+  count.textContent=`${results.length} result${results.length===1?"":"s"}`;
+  grid.innerHTML="";
+  results.forEach((c,i)=>{
+    const cid=`${c.id}-${c.kind}`;
+    _tmdbResultsById[cid]=c;
+    const card=document.createElement("div");
+    card.className="result-row bg-gray-900 border border-gray-800 overflow-hidden cursor-pointer hover:border-indigo-700 transition-colors flex";
+    card.style.animationDelay=`${i*18}ms`;
+    const poster=c.poster_path
+      ? `<img src="${imgBase}/w185${c.poster_path}" alt="" loading="lazy"
+             class="w-16 sm:w-20 h-24 sm:h-28 object-cover bg-gray-950 flex-shrink-0"/>`
+      : `<div class="w-16 sm:w-20 h-24 sm:h-28 bg-gray-950 border-r border-gray-800 flex items-center justify-center flex-shrink-0">
+           <span class="text-[9px] font-black uppercase tracking-widest text-gray-700 text-center px-1 line-clamp-3">${escHtml(c.title)}</span>
+         </div>`;
+    const chip=c.kind==="movie"
+      ? `<span class="text-[9px] font-black uppercase tracking-widest px-1.5 py-0.5 bg-purple-900/60 text-purple-300">Movie</span>`
+      : `<span class="text-[9px] font-black uppercase tracking-widest px-1.5 py-0.5 bg-indigo-900/60 text-indigo-300">TV</span>`;
+    card.innerHTML=`${poster}
+      <div class="min-w-0 flex-1 p-3 flex flex-col">
+        <div class="flex items-center gap-2 mb-1">${chip}${c.year?`<span class="text-[11px] text-gray-500 font-bold">${escHtml(c.year)}</span>`:""}</div>
+        <p class="text-sm font-black uppercase tracking-wide text-gray-100 leading-snug line-clamp-2">${escHtml(c.title)}</p>
+        <p class="text-[11px] text-gray-500 mt-1 line-clamp-2 flex-1">${escHtml(c.overview||"")}</p>
+      </div>`;
+    card.dataset.cid=cid;
+    card.addEventListener("click",()=>openSearchShowFromTmdb(_tmdbResultsById[card.dataset.cid]));
+    grid.appendChild(card);
+  });
+  wrap.classList.remove("hidden");
+}
+
+// Legacy Jackett-first grouped search: "one card per show" from raw indexer
+// results. Used only as the no-TMDb-key / no-TMDb-match fallback. The caller
+// (doSearch) owns the search button chrome + the outer try/catch.
+async function doJackettSearch(q, grid, wrap, empty, count){
+  {
     const srcParam=_selectedSourcesParam();
     const catParam=_selectedCategoriesParam();
     let url=`/api/search?q=${encodeURIComponent(q)}`;
@@ -8817,10 +8916,6 @@ async function doSearch(q){
     });
     wrap.classList.remove("hidden");
     applyVpnGate();   // title any freshly-rendered vpn-gated controls if VPN is down
-  } catch(err){
-    showAlert(err.message,"error"); empty.classList.remove("hidden");
-  } finally {
-    btn.disabled=false; btn.textContent="Search"; _markLoading(btn, false);
   }
 }
 
@@ -8839,6 +8934,9 @@ let _ssEpisodes=[];             // [{season,episode,sources:[result,…]}] sorte
 let _ssPacks=[];                // season/multiseason/movie results, seeder-sorted
 let _ssSection="episodes";
 let _ssSeason=0;                // current episode-season tab
+let _ssKind="";                 // "tv"/"movie" when opened from TMDb; "" = Jackett-fallback (openSearchShow)
+let _ssBroadResults=null;       // cached shaped /api/search results for the open show (shared by the pack + episode Search buttons)
+let _ssPacksSearched=false;     // has the user run "Search packs" yet (distinguishes "not searched" from "none found")
 
 function _ssBuildEpisodes(results){
   const map=new Map();
@@ -8878,6 +8976,7 @@ function _ssEpName(season,episode){
 
 async function openSearchShow(group){
   _ssGroup=group; _ssMeta=null; _ssSearching.clear();
+  _ssKind=""; _ssBroadResults=null; _ssPacksSearched=(group.results||[]).length>0;
   _ssEpisodes=_ssBuildEpisodes(group.results||[]);
   _ssPacks=(group.results||[]).filter(r=>r.kind!=="episode")
              .sort((a,b)=>b.seeders-a.seeders);
@@ -8915,11 +9014,123 @@ async function openSearchShow(group){
   }catch(_){}
 }
 
+// TMDb-first entry: open the show page from a TMDb candidate the user picked.
+// The page opens with NO torrents — Jackett is queried only when the user taps
+// the explicit "Search episodes" / "Search packs" (or per-episode/season Find)
+// buttons. Full metadata is fetched by id (exact entry, no fuzzy re-match).
+async function openSearchShowFromTmdb(cand){
+  if(!cand) return;
+  const group={title:cand.title||"", year:cand.year?parseInt(cand.year,10)||null:null, results:[]};
+  _ssGroup=group; _ssMeta=null; _ssSearching.clear();
+  _ssKind=cand.kind==="movie"?"movie":"tv"; _ssBroadResults=null; _ssPacksSearched=false;
+  _ssEpisodes=[]; _ssPacks=[];
+  _ssSection=_ssKind==="movie"?"packs":"episodes";
+  _ssSeason=0;
+
+  document.getElementById("ssHeaderTitle").textContent=group.title;
+  document.getElementById("ssTitle").textContent=group.title;
+  document.getElementById("ssOverview").textContent=cand.overview||"";
+  document.getElementById("ssMetaLine").textContent=_ssMetaBits();
+  document.getElementById("ssBackdrop").style.backgroundImage="";
+  const poster=document.getElementById("ssPoster");
+  poster.classList.add("hidden"); poster.removeAttribute("src");
+  document.getElementById("ssPosterFallback").classList.remove("hidden");
+
+  document.getElementById("searchShowPage").classList.remove("hidden");
+  document.body.style.overflow="hidden";
+  _ssRender();
+
+  // Fetch the exact TMDb entry by id (poster/backdrop/overview + season/episode
+  // skeleton) so the page shows a full show layout before any indexer is hit.
+  try{
+    const url=`/api/tmdb/lookup?tmdb_id=${encodeURIComponent(cand.id)}&kind=${encodeURIComponent(cand.kind)}`;
+    const r=await fetch(url);
+    if(r.ok){
+      const d=await r.json();
+      if(_ssGroup===group && d.metadata){
+        _ssMeta=d.metadata; _ssImgBase=d.img_base||_ssImgBase;
+        const seasons=_ssAllSeasons();
+        if(seasons.length && !seasons.includes(_ssSeason)) _ssSeason=seasons[0];
+        _ssRenderHero(); _ssRender();
+      }
+    }
+  }catch(_){}
+}
+
 function closeSearchShow(){
   document.getElementById("searchShowPage").classList.add("hidden");
   ssCloseSourceSheet(); ssCloseBulkSheet();
   document.body.style.overflow="";
-  _ssGroup=null; _ssMeta=null;
+  _ssGroup=null; _ssMeta=null; _ssKind=""; _ssBroadResults=null;
+}
+
+// Shared broad Jackett query for the open show — one /api/search?q=<title>
+// request, cached on _ssBroadResults so the "Search episodes" and "Search packs"
+// buttons don't double-hit Jackett. Returns the flat shaped results array.
+async function _ssBroadSearch(){
+  if(_ssBroadResults) return _ssBroadResults;
+  const grp=_ssGroup;
+  const q=grp.title+(grp.year?` ${grp.year}`:"");
+  let out=[], ok=false;
+  let url=`/api/search?q=${encodeURIComponent(q)}`;
+  if(profile.id) url+=`&profile_id=${encodeURIComponent(profile.id)}`;
+  try{
+    const r=await fetch(url);
+    if(r.ok){
+      ok=true;
+      const data=await r.json();
+      (data.groups||[]).forEach(g=>(g.results||[]).forEach(res=>out.push(res)));
+    }
+  }catch(_){}
+  // Cache only a successful query — a failed one (e.g. Jackett briefly down)
+  // must be retryable, not stick as an empty result.
+  if(_ssGroup===grp && ok) _ssBroadResults=out;
+  return out;
+}
+
+// Explicit "Search episodes" — one broad Jackett query, bucket episode-kind
+// results into _ssEpisodes. Per-season/per-episode Find fills any gaps after.
+async function ssSearchShowEpisodes(btn){
+  if(btn){ btn.disabled=true; _markLoading(btn,true); }
+  const grp=_ssGroup;
+  try{
+    const results=await _ssBroadSearch();
+    if(_ssGroup!==grp) return;
+    const eps=_ssBuildEpisodes(results);
+    // Merge into any episodes already found (per-episode Find), dedup by magnet.
+    eps.forEach(ne=>{
+      let e=_ssEpisodes.find(x=>x.season===ne.season&&x.episode===ne.episode);
+      if(!e){ e={season:ne.season,episode:ne.episode,sources:[]}; _ssEpisodes.push(e); }
+      const have=new Set(e.sources.map(s=>s.magnet));
+      ne.sources.forEach(s=>{ if(!have.has(s.magnet)){ e.sources.push(s); have.add(s.magnet); } });
+      e.sources.sort((a,b)=>b.seeders-a.seeders);
+    });
+    _ssEpisodes.sort((a,b)=>(a.season-b.season)||(a.episode-b.episode));
+    _ssRender();
+    if(!eps.length) showAlert("No single episodes found for this show.","warn");
+  } finally {
+    if(btn){ btn.disabled=false; _markLoading(btn,false); }
+  }
+}
+
+// Explicit "Search packs" — reuse the broad query, keep the non-episode results
+// (season / multi-season / movie) into _ssPacks.
+async function ssSearchPacks(btn){
+  if(btn){ btn.disabled=true; _markLoading(btn,true); }
+  const grp=_ssGroup;
+  try{
+    const results=await _ssBroadSearch();
+    if(_ssGroup!==grp) return;
+    const packs=results.filter(r=>r.kind!=="episode");
+    const have=new Set(_ssPacks.map(p=>p.magnet));
+    packs.forEach(p=>{ if(!have.has(p.magnet)){ _ssPacks.push(p); have.add(p.magnet); } });
+    _ssPacks.sort((a,b)=>b.seeders-a.seeders);
+    _ssPacksSearched=true;
+    _ssRender();
+    if(!packs.length) showAlert("No packs found for this show.","warn");
+  } finally {
+    if(btn){ btn.disabled=false; _markLoading(btn,false); }
+  }
 }
 
 function _ssMetaBits(){
@@ -8952,14 +9163,24 @@ function _ssRenderHero(){
 
 function _ssRender(){
   _ssRenderHero();
-  // Section toggle: hide a section that has nothing.
+  // Tab visibility. Opened from TMDb (_ssKind set) the sections always show —
+  // they hold the explicit Search buttons even before any torrent exists. The
+  // Jackett fallback (_ssKind="") keeps the has-results gating.
+  const tmdbMode=!!_ssKind;
+  const showEp=_ssEpisodes.length>0 || _ssKind==="tv";
+  const showPk=_ssPacks.length>0 || tmdbMode;   // TMDb-first always offers a pack search; movie only has packs
   const tabEp=document.getElementById("ssTabEpisodes"), tabPk=document.getElementById("ssTabPacks");
-  tabEp.classList.toggle("hidden", _ssEpisodes.length===0);
-  tabPk.classList.toggle("hidden", _ssPacks.length===0);
+  tabEp.classList.toggle("hidden", !showEp);
+  tabPk.classList.toggle("hidden", !showPk);
   document.getElementById("ssTabPacks").textContent=
-    _ssPacks.some(p=>p.kind==="season"||p.kind==="multiseason")?"Season Packs":"Downloads";
+    (_ssKind==="movie") ? "Downloads"
+      : (_ssPacks.some(p=>p.kind==="season"||p.kind==="multiseason")||_ssKind==="tv") ? "Season Packs"
+      : "Downloads";
+  // A section that's hidden can't stay selected.
+  if(_ssSection==="episodes" && !showEp) _ssSection="packs";
+  if(_ssSection==="packs" && !showPk) _ssSection="episodes";
   const toggle=document.getElementById("ssSectionToggle");
-  toggle.classList.toggle("hidden", _ssEpisodes.length===0 && _ssPacks.length===0);
+  toggle.classList.toggle("hidden", !showEp && !showPk);
   // apply active styling
   [["ssTabEpisodes","episodes"],["ssTabPacks","packs"]].forEach(([id,sec])=>{
     const el=document.getElementById(id);
@@ -8967,6 +9188,10 @@ function _ssRender(){
     el.classList.toggle("tab-inactive", _ssSection!==sec);
   });
   document.getElementById("ssEpisodesTools").classList.toggle("hidden", _ssSection!=="episodes");
+  document.getElementById("ssPacksTools").classList.toggle("hidden", _ssSection!=="packs");
+  // The pack Search button doubles as a re-search once packs exist.
+  const pl=document.getElementById("ssSearchPacksLabel");
+  if(pl) pl.textContent=_ssPacks.length?"Search again":"Search packs";
   _ssRenderBody();
 }
 
@@ -9167,7 +9392,21 @@ function _ssRenderPacks(){
       </svg>
     </button>`;
   }).join("")+`</div>`;
-  if(!_ssPacks.length) body.innerHTML=`<p class="text-center text-gray-600 text-sm py-10">No season packs found.</p>`;
+  if(!_ssPacks.length){
+    // Distinguish "haven't searched yet" (TMDb-first, before the user tapped
+    // Search packs) from "searched, found nothing".
+    const label=_ssKind==="movie"?"sources":"packs";
+    body.innerHTML=_ssPacksSearched
+      ? `<p class="text-center text-gray-600 text-sm py-10">No ${label} found for this show.</p>`
+      : `<div class="flex flex-col items-center gap-3 py-12 px-4 text-center">
+           <p class="text-gray-500 text-sm">Search your indexers for downloadable ${label}.</p>
+           <button onclick="ssSearchPacks(this)"
+             class="text-xs px-4 py-2 bg-indigo-700 hover:bg-indigo-600 text-white uppercase tracking-wide transition-colors flex items-center gap-1.5">
+             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+             Search ${label}
+           </button>
+         </div>`;
+  }
 }
 
 // A pack opens the full Add-to-Library modal (save path, file selection,
@@ -15940,6 +16179,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.2.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.3.0</div>
 </body>
 </html>

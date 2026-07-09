@@ -7716,6 +7716,43 @@ async def metadata_image(size: str, filename: str) -> Response:
 _tmdb_title_cache: dict[tuple, dict] = {}
 _tmdb_title_locks: dict[tuple, asyncio.Lock] = {}
 
+# (kind, tmdb_id) → cached metadata dict, for the TMDb-first search flow which
+# opens a show-detail page from a specific candidate the user picked (so we fetch
+# by id rather than re-matching by title). Same lifetime/coalescing as above.
+_tmdb_id_cache: dict[tuple, dict] = {}
+_tmdb_id_locks: dict[tuple, asyncio.Lock] = {}
+
+
+async def _tmdb_lookup_by_id(tmdb_id: int, kind: str) -> Optional[dict]:
+    """Fetch the cache-shaped metadata for an exact TMDb entry the user already
+    picked from the search list — no fuzzy title re-match. Mirrors the TV
+    season-enumeration + fetch path of _tmdb_lookup_by_title but keyed by id."""
+    if not tmdb_id or kind not in ("tv", "movie") or not await _tmdb_effective_key():
+        return None
+    ck = (kind, int(tmdb_id))
+    if ck in _tmdb_id_cache:
+        return _tmdb_id_cache[ck]
+    lock = _tmdb_id_locks.setdefault(ck, asyncio.Lock())
+    async with lock:
+        if ck in _tmdb_id_cache:
+            return _tmdb_id_cache[ck]
+        if kind == "tv":
+            details = await _tmdb_get(f"/tv/{tmdb_id}", {}) or {}
+            seasons = sorted({
+                int(s.get("season_number", 0))
+                for s in details.get("seasons", []) or []
+                if int(s.get("season_number", 0)) > 0
+            })
+            data = await _tmdb_fetch_tv(int(tmdb_id), seasons)
+        else:
+            data = await _tmdb_fetch_movie(int(tmdb_id))
+        if not data or not data.get("title"):
+            return None
+        data["source"] = "tmdb"
+        _tmdb_id_cache[ck] = data
+        _tmdb_bg(_prefetch_metadata_images(data))
+        return data
+
 
 async def _tmdb_lookup_by_title(title: str, year: Optional[int],
                                  kind: str = "") -> Optional[dict]:
@@ -7771,20 +7808,85 @@ async def _tmdb_lookup_by_title(title: str, year: Optional[int],
 
 
 @app.get("/api/tmdb/lookup")
-async def tmdb_lookup(title: str = "", year: int = 0, kind: str = "") -> JSONResponse:
-    """TMDb lookup by title for the grouped-search show-detail screen. Returns the
-    same shape as the per-item metadata endpoint so the frontend renderers are
-    shared. `pending`/`enabled` let the UI fall back to filename parsing."""
+async def tmdb_lookup(title: str = "", year: int = 0, kind: str = "",
+                     tmdb_id: int = 0) -> JSONResponse:
+    """TMDb lookup for the search show-detail screen. Returns the same shape as
+    the per-item metadata endpoint so the frontend renderers are shared.
+    `pending`/`enabled` let the UI fall back to filename parsing.
+
+    When `tmdb_id` + `kind` are given (the TMDb-first flow, where the user picked
+    a specific candidate) the entry is fetched **directly by id** — no fuzzy title
+    re-match. Otherwise it matches by `title` (the grouped-search fallback)."""
     key_present = bool(await _tmdb_effective_key())
     data = None
-    if key_present and title.strip():
-        data = await _tmdb_lookup_by_title(
-            title.strip(), year or None, kind if kind in ("tv", "movie") else "")
+    if key_present:
+        if tmdb_id and kind in ("tv", "movie"):
+            data = await _tmdb_lookup_by_id(tmdb_id, kind)
+        elif title.strip():
+            data = await _tmdb_lookup_by_title(
+                title.strip(), year or None, kind if kind in ("tv", "movie") else "")
     return JSONResponse({
         "enabled":  key_present,
         "img_base": LOCAL_IMG_BASE,
         "metadata": data,
     })
+
+
+@app.get("/api/tmdb/search")
+async def tmdb_search(query: str = "", kind: str = "") -> JSONResponse:
+    """TMDb candidate shows/movies for a free-text query — the entry point of the
+    TMDb-first search flow. Returns `{enabled, img_base, results:[{id, kind, title,
+    year, overview, poster_path}]}` (same candidate shape as the metadata /search
+    endpoint but keyed off a bare query, not a library item). Not admin-gated.
+    `kind` filters "tv"/"movie"; empty searches both. `enabled=false` (no key) is
+    the frontend's signal to fall back to the Jackett-first grouped search."""
+    if not await _tmdb_effective_key():
+        return JSONResponse({"enabled": False, "img_base": LOCAL_IMG_BASE,
+                             "results": []})
+    q = (query or "").strip()
+    if not q:
+        return JSONResponse({"enabled": True, "img_base": LOCAL_IMG_BASE,
+                             "results": []})
+
+    kind = kind if kind in ("tv", "movie") else ""
+    results: list[dict] = []
+
+    if kind in ("", "tv"):
+        tv = await _tmdb_get("/search/tv",
+                             {"query": q, "include_adult": "false"})
+        for r in (tv or {}).get("results", []) or []:
+            results.append({
+                "id":          r.get("id"),
+                "kind":        "tv",
+                "title":       r.get("name") or "",
+                "year":        (r.get("first_air_date") or "")[:4],
+                "overview":    r.get("overview") or "",
+                "poster_path": r.get("poster_path") or "",
+                "popularity":  r.get("popularity") or 0,
+            })
+    if kind in ("", "movie"):
+        mv = await _tmdb_get("/search/movie",
+                             {"query": q, "include_adult": "false"})
+        for r in (mv or {}).get("results", []) or []:
+            results.append({
+                "id":          r.get("id"),
+                "kind":        "movie",
+                "title":       r.get("title") or "",
+                "year":        (r.get("release_date") or "")[:4],
+                "overview":    r.get("overview") or "",
+                "poster_path": r.get("poster_path") or "",
+                "popularity":  r.get("popularity") or 0,
+            })
+
+    # Interleave tv + movie by TMDb popularity so the most relevant title leads
+    # regardless of type (each list already comes back popularity-sorted).
+    results = [r for r in results if r.get("id") and r.get("title")]
+    results.sort(key=lambda r: r.get("popularity") or 0, reverse=True)
+    for r in results:
+        r.pop("popularity", None)
+
+    return JSONResponse({"enabled": True, "img_base": LOCAL_IMG_BASE,
+                         "results": results})
 
 
 @app.post("/api/library/{item_id}/metadata/refresh")
