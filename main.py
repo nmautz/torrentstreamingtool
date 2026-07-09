@@ -9789,12 +9789,49 @@ def _shape_search_results(items: list, limit: int) -> list:
     return results[:limit]
 
 
+# ── Search-result relevance ──────────────────────────────────────────────────
+# A raw seeder sort floats a high-seed *unrelated* release above the title the
+# user actually opened — e.g. searching "Attack of the Clones" surfaces a brand-
+# new "Star Wars: The Mandalorian and Grogu" (7869 seeders) at the top purely
+# because it shares the "Star Wars" franchise words. We score each result title
+# against the query so the intended release ranks first even with fewer seeders.
+# See docs/GOTCHAS.md § search-result relevance.
+_REL_STOPWORDS = {"the", "a", "an", "of", "and", "to", "in", "on", "at",
+                  "for", "with", "from"}
+
+
+def _rel_tokens(s: str) -> set:
+    """Distinctive lowercase word tokens of a title: split on punctuation, drop
+    stop-words and bare release years (years are scored separately below)."""
+    toks = re.sub(r"[^a-z0-9]+", " ", (s or "").lower()).split()
+    return {t for t in toks if t not in _REL_STOPWORDS and not _YEAR_RE.fullmatch(t)}
+
+
+def _title_relevance(query: str, title: str, year_hint: Optional[int]) -> float:
+    """Relevance of a torrent `title` to the search `query`. Base score is the
+    fraction of the query's distinctive tokens present in the title; a matching
+    release year confirms (+0.5), a *different* one strongly demotes (−0.7) since
+    it's almost always a different film that merely shares franchise words."""
+    qt = _rel_tokens(query)
+    if not qt:
+        return 0.0
+    ct = _rel_tokens(title)
+    score = len(qt & ct) / len(qt)
+    if year_hint:
+        ym = _YEAR_RE.search(title)
+        if ym:
+            score += 0.5 if int(ym.group(0)) == year_hint else -0.7
+    return score
+
+
 def _group_search_results(shaped: list, query: str) -> list:
     """Group already-shaped, seeder-sorted search results into one entry per
     detected show (see parse_torrent_title). Each group carries its member
-    results (enriched with kind/season/episode) so the show-detail screen needs
-    no second search call. Groups are ordered by query relevance, then seeders."""
-    q_tokens = set(re.sub(r"[^a-z0-9 ]", " ", (query or "").lower()).split())
+    results (enriched with kind/season/episode and a per-result ``rel`` relevance
+    score) so the show-detail screen needs no second search call and can rank its
+    downloads by relevance. Groups are ordered by relevance, then seeders."""
+    qy = _YEAR_RE.search(query or "")
+    year_hint = int(qy.group(0)) if qy else None
     groups: dict[str, dict] = {}
     for r in shaped:
         p = parse_torrent_title(r["title"])
@@ -9802,6 +9839,7 @@ def _group_search_results(shaped: list, query: str) -> list:
         er.update({
             "kind": p["kind"], "season": p["season"], "episode": p["episode"],
             "season_from": p["season_from"], "season_to": p["season_to"],
+            "rel": round(_title_relevance(query, r["title"], year_hint), 3),
         })
         key = p["show_key"] or "?"
         g = groups.get(key)
@@ -9826,8 +9864,8 @@ def _group_search_results(shaped: list, query: str) -> list:
     out = []
     for g in groups.values():
         g["seasons"] = sorted(g["seasons"])
-        gk = set(re.sub(r"[^a-z0-9 ]", " ", g["key"]).split())
-        g["_rel"] = len(q_tokens & gk)
+        # A group is as relevant as its best-matching member title.
+        g["_rel"] = max((m.get("rel", 0) for m in g["results"]), default=0)
         out.append(g)
     out.sort(key=lambda g: (g["_rel"], g["seeders_max"], g["torrent_count"]), reverse=True)
     for g in out:

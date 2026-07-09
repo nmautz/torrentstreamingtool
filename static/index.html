@@ -9013,7 +9013,7 @@ let _ssGroup=null;              // the open group
 let _ssMeta=null;               // TMDb metadata for the open show (or null)
 let _ssImgBase="/api/metadata/img";
 let _ssEpisodes=[];             // [{season,episode,sources:[result,…]}] sorted
-let _ssPacks=[];                // season/multiseason/movie results, seeder-sorted
+let _ssPacks=[];                // season/multiseason/movie results, relevance- then seeder-sorted (_ssPackCmp)
 let _ssSection="episodes";
 let _ssSeason=0;                // current episode-season tab
 let _ssKind="";                 // "tv"/"movie" when opened from TMDb; "" = Jackett-fallback (openSearchShow)
@@ -9060,8 +9060,7 @@ async function openSearchShow(group){
   _ssGroup=group; _ssMeta=null; _ssSearching.clear();
   _ssKind=""; _ssBroadResults=null; _ssPacksSearched=(group.results||[]).length>0;
   _ssEpisodes=_ssBuildEpisodes(group.results||[]);
-  _ssPacks=(group.results||[]).filter(r=>r.kind!=="episode")
-             .sort((a,b)=>b.seeders-a.seeders);
+  _ssPacks=(group.results||[]).filter(r=>r.kind!=="episode").sort(_ssPackCmp);
   _ssSection=_ssEpisodes.length?"episodes":"packs";
   const seasons=_ssSeasonsWithEpisodes();
   _ssSeason=seasons.length?seasons[0]:0;
@@ -9206,7 +9205,7 @@ async function ssSearchPacks(btn){
     const packs=results.filter(r=>r.kind!=="episode");
     const have=new Set(_ssPacks.map(p=>p.magnet));
     packs.forEach(p=>{ if(!have.has(p.magnet)){ _ssPacks.push(p); have.add(p.magnet); } });
-    _ssPacks.sort((a,b)=>b.seeders-a.seeders);
+    _ssPacks.sort(_ssPackCmp);
     _ssPacksSearched=true;
     _ssRender();
     if(!packs.length) showAlert("No packs found for this show.","warn");
@@ -9450,6 +9449,17 @@ function _ssPackLabel(p){
   if(p.kind==="multiseason") return p.season_from?`Seasons ${p.season_from}–${p.season_to||p.season_from}`:"Complete series";
   if(p.kind==="season") return `Season ${p.season}`;
   return "Movie / other";
+}
+
+// Rank downloads by title relevance to the searched title first, then seeders.
+// A raw seeder sort floats a high-seed *unrelated* release (one that merely
+// shares a franchise word — e.g. a new "Star Wars" film under an older one's
+// page) above the release the user actually opened. `rel` comes from the backend
+// (_title_relevance); absent ⇒ 0 so everything falls back to a pure seeder sort.
+function _ssPackCmp(a,b){
+  const ra=(typeof a.rel==="number")?a.rel:0, rb=(typeof b.rel==="number")?b.rel:0;
+  if(rb!==ra) return rb-ra;
+  return (b.seeders||0)-(a.seeders||0);
 }
 
 function _ssRenderPacks(){
@@ -16321,6 +16331,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.5.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.6.0</div>
 </body>
 </html>
