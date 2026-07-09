@@ -5740,18 +5740,22 @@ async function _libLoadPoster(itemId,img,tries){
     else _libPosterCache.set(itemId,"");
   }
 }
-// Observe card posters and load each as it scrolls near the viewport.
+// Observe card posters and load each as it scrolls near the viewport. We observe
+// the poster CONTAINER (always laid out), never the <img> — the img starts
+// `hidden` (display:none), which has a zero-size box the observer would never
+// report as intersecting, so posters would never load.
 function _libWirePosters(el){
   if(_libPosterObs){ try{_libPosterObs.disconnect();}catch(_){} _libPosterObs=null; }
-  const imgs=el.querySelectorAll(".lib-poster-img");
+  const posters=el.querySelectorAll(".lib-cardv-poster");
+  const load=(poster)=>{ const img=poster.querySelector(".lib-poster-img"); if(img) _libLoadPoster(img.dataset.itemId,img); };
   if(typeof IntersectionObserver==="undefined"){
-    imgs.forEach(img=>_libLoadPoster(img.dataset.itemId,img));
+    posters.forEach(load);
     return;
   }
   _libPosterObs=new IntersectionObserver((entries,obs)=>{
-    entries.forEach(en=>{ if(en.isIntersecting){ obs.unobserve(en.target); _libLoadPoster(en.target.dataset.itemId,en.target); }});
+    entries.forEach(en=>{ if(en.isIntersecting){ obs.unobserve(en.target); load(en.target); }});
   },{rootMargin:"300px 0px"});
-  imgs.forEach(img=>_libPosterObs.observe(img));
+  posters.forEach(p=>_libPosterObs.observe(p));
 }
 
 function renderLibrary(items){
@@ -15936,6 +15940,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.2.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.2.1</div>
 </body>
 </html>

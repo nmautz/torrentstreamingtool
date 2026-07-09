@@ -1,5 +1,8 @@
 # Changelog
 
+## [9.2.1] — 2026-07-08
+- **Fix: card-view posters never loaded** (blank tiles with only the title placeholder). `_libWirePosters` attached the lazy-load IntersectionObserver directly to the `<img class="lib-poster-img hidden">` element — but `hidden` is `display:none`, which has a zero-size box the observer never reports as intersecting, so `_libLoadPoster` was never called. Now observes the always-laid-out `.lib-cardv-poster` **container** and resolves the inner `<img>` in the callback.
+
 ## [9.2.0] — 2026-07-08
 - **Library card view (default) + List/Card toggle.** The library now renders as a **poster-card grid** by default — a 2:3 TMDb poster per show/movie with the watch-progress bar, status badges and a ▶ Play/Resume overlay, plus a **⋯** button that opens an in-card drawer holding the **full action set** (Episodes, On Device, Download, Prep, Hide, Delete, download Pause/Idle, When Ready/Queued, the partial-download Files manager…). Posters lazy-load per card as they scroll into view via the existing `/metadata` proxy; a flat Metro title tile shows when there's no artwork or no TMDb key.
   - A new **Settings → This Device → Library View** segmented control (Cards / List) switches between the poster grid and the original detailed **list** view. The preference is **device-local** (`localStorage.streamlink_libview`), like Dev Mode / Locked Progress Bar — never per-profile or on the server. Card is the default.
