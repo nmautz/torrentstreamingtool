@@ -8909,24 +8909,27 @@ async function doSearch(q){
   btn.disabled=true; btn.textContent="…"; _markLoading(btn, true);
   grid.innerHTML=""; wrap.classList.add("hidden"); empty.classList.add("hidden"); hideAlert();
   try{
-    // 1) TMDb-first — pick a real show/movie before touching any indexer.
-    //    Skipped entirely when the user has chosen Classic search mode.
-    if(searchMode!=="classic"){
-      let tmdb=null;
-      try{
-        const catKind=_searchTmdbKind();
-        let turl=`/api/tmdb/search?query=${encodeURIComponent(q)}`;
-        if(catKind) turl+=`&kind=${catKind}`;
-        const tr=await fetch(turl);
-        if(tr.ok) tmdb=await tr.json();
-      }catch(_){}
-      if(tmdb && tmdb.enabled && (tmdb.results||[]).length){
-        _renderTmdbResults(q, tmdb, grid, wrap, count);
-        applyVpnGate();
-        return;
-      }
+    // Classic mode: the pre-9.0 flat indexer list — one card per raw torrent,
+    // no show grouping, no TMDb. Straight to doClassicSearch and done.
+    if(searchMode==="classic"){
+      await doClassicSearch(q, grid, wrap, empty, count);
+      return;
     }
-    // 2) Fallback (or Classic mode): legacy Jackett-first grouped search.
+    // 1) TMDb-first — pick a real show/movie before touching any indexer.
+    let tmdb=null;
+    try{
+      const catKind=_searchTmdbKind();
+      let turl=`/api/tmdb/search?query=${encodeURIComponent(q)}`;
+      if(catKind) turl+=`&kind=${catKind}`;
+      const tr=await fetch(turl);
+      if(tr.ok) tmdb=await tr.json();
+    }catch(_){}
+    if(tmdb && tmdb.enabled && (tmdb.results||[]).length){
+      _renderTmdbResults(q, tmdb, grid, wrap, count);
+      applyVpnGate();
+      return;
+    }
+    // 2) Fallback (no TMDb key or no match): legacy Jackett-first grouped search.
     await doJackettSearch(q, grid, wrap, empty, count);
   } catch(err){
     showAlert(err.message,"error"); empty.classList.remove("hidden");
@@ -8969,6 +8972,76 @@ function _renderTmdbResults(q, tmdb, grid, wrap, count){
     grid.appendChild(card);
   });
   wrap.classList.remove("hidden");
+}
+
+// Classic search (the pre-9.0 flat list, restored via the Classic toggle):
+// renders the raw `results[]` from /api/search as one card per torrent — title,
+// size, seeders/peers/tracker, and Save (→ download modal) / ▶ Play (→ stream
+// picker) — with NO show grouping and NO TMDb. Caller owns the button chrome.
+async function doClassicSearch(q, grid, wrap, empty, count){
+  const srcParam=_selectedSourcesParam();
+  const catParam=_selectedCategoriesParam();
+  let url=`/api/search?q=${encodeURIComponent(q)}`;
+  if(profile.id) url+=`&profile_id=${encodeURIComponent(profile.id)}`;
+  if(srcParam!==null) url+=`&indexers=${encodeURIComponent(srcParam)}`;
+  if(catParam!==null) url+=`&categories=${encodeURIComponent(catParam)}`;
+  const r=await fetch(url);
+  if(!r.ok){ const e=await r.json().catch(()=>({detail:"Search failed"})); throw new Error(e.detail||`HTTP ${r.status}`); }
+  const items=(await r.json()).results||[];
+  count.textContent=items.length?`${items.length} results`:"";
+  if(!items.length){
+    empty.classList.remove("hidden");
+    empty.innerHTML=`<div class="w-16 h-16 bg-gray-800 border border-gray-700 flex items-center justify-center mb-4">
+      <svg class="w-8 h-8 text-gray-600" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9.172 16.172a4 4 0 015.656 0M9 10h.01M15 10h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+      </svg></div>
+      <p class="text-gray-500 font-medium">No results for "${escHtml(q)}"</p>
+      <p class="text-gray-700 text-xs mt-1">Try different keywords or check your indexer</p>`;
+    return;
+  }
+  items.forEach((item,i)=>{
+    const card=document.createElement("div");
+    card.className="result-row bg-gray-900 border border-gray-800 border-l-4 border-l-indigo-900 p-4 transition-colors";
+    card.style.animationDelay=`${i*18}ms`;
+    const sc=item.seeders>30?"text-green-400":item.seeders>8?"text-yellow-400":"text-red-400";
+    card.innerHTML=`
+      <p class="text-sm font-semibold text-gray-200 leading-snug mb-1 line-clamp-2">${escHtml(item.title)}</p>
+      <div class="flex items-center gap-2 mb-3 flex-wrap">
+        <span class="text-xs text-gray-500">${escHtml(item.size_human)}</span>
+        <span class="text-gray-700">·</span>
+        <span class="text-xs font-mono font-semibold ${sc}">${item.seeders} ↑</span>
+        ${item.peers?`<span class="text-gray-700">·</span><span class="text-xs text-gray-700">${item.peers} peers</span>`:""}
+        ${item.tracker?`<span class="text-gray-700">·</span><span class="text-[11px] text-gray-700 truncate max-w-[120px]">${escHtml(item.tracker)}</span>`:""}
+      </div>
+      <div class="flex gap-2">
+        <button class="dl-btn vpn-gated flex-1 flex items-center justify-center gap-1.5
+                       bg-gray-800 hover:bg-gray-700 border border-gray-700
+                       text-gray-300 hover:text-white text-sm font-black uppercase tracking-wide
+                       py-3 transition-all active:scale-95"
+          data-magnet="${escHtml(item.magnet)}" data-title="${escHtml(item.title)}">
+          <svg class="w-4 h-4 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+          </svg>Save
+        </button>
+        <button class="play-btn vpn-gated flex-1 flex items-center justify-center gap-1.5
+                       bg-indigo-600 hover:bg-indigo-500 text-white
+                       text-sm font-black uppercase tracking-wide py-3 transition-all active:scale-95
+                       disabled:opacity-40 disabled:cursor-not-allowed"
+          data-magnet="${escHtml(item.magnet)}" data-title="${escHtml(item.title)}">
+          ▶ Play
+        </button>
+      </div>`;
+    card.querySelector(".play-btn").addEventListener("click",e=>{
+      const b=e.currentTarget; openStreamPicker(b.dataset.magnet,b.dataset.title,b);
+    });
+    card.querySelector(".dl-btn").addEventListener("click",e=>{
+      const b=e.currentTarget; openDownloadModal(b.dataset.magnet,b.dataset.title);
+    });
+    grid.appendChild(card);
+  });
+  wrap.classList.remove("hidden");
+  applyVpnGate();   // title the freshly-rendered Save/Play buttons if VPN is down
 }
 
 // Legacy Jackett-first grouped search: "one card per show" from raw indexer
