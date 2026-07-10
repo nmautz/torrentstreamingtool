@@ -1811,10 +1811,44 @@ async def _tmdb_match_show(item: dict) -> Optional[dict]:
     return None
 
 
+_TMDB_LATIN_RE = re.compile(r"[A-Za-z]")
+
+
+def _tmdb_akas(alt_results: list, primary: str, original: str) -> list[str]:
+    """Latin-script alternative titles for a show/movie, for cross-language
+    search + relevance (e.g. an anime indexed under its romaji name as well as
+    its English title). Romaji / JP-region titles are ordered first (they're what
+    the torrent scene tends to use), the English `primary` and non-Latin (CJK)
+    names are dropped — our tokenizer can't score CJK anyway. Capped so the show
+    page fires only a couple of extra queries."""
+    seen = {(primary or "").strip().lower()}
+    prefer: list[str] = []
+    rest: list[str] = []
+    def _add(t: str, bucket: list) -> None:
+        t = (t or "").strip()
+        if not t or not _TMDB_LATIN_RE.search(t):
+            return
+        k = t.lower()
+        if k in seen:
+            return
+        seen.add(k)
+        bucket.append(t)
+    for a in alt_results or []:
+        t = a.get("title") or ""
+        romaji = (a.get("iso_3166_1") == "JP"
+                  or "roman" in (a.get("type") or "").lower())
+        _add(t, prefer if romaji else rest)
+    _add(original, rest)   # original_name, only if it's already Latin script
+    return (prefer + rest)[:6]
+
+
 async def _tmdb_fetch_tv(show_id: int, seasons: list[int]) -> dict:
     """Fetch show details + each requested season's episodes. Returns the
     cache-shaped dict (see _build_metadata_cache)."""
-    details = await _tmdb_get(f"/tv/{show_id}", {}) or {}
+    details = await _tmdb_get(
+        f"/tv/{show_id}", {"append_to_response": "alternative_titles"}) or {}
+    akas = _tmdb_akas((details.get("alternative_titles") or {}).get("results", []),
+                      details.get("name") or "", details.get("original_name") or "")
     cache_seasons: dict[str, dict] = {}
     # Default to season 1 if no seasons were detected on disk (so a one-off
     # picker that opens before season parsing still gets *something*).
@@ -1844,6 +1878,8 @@ async def _tmdb_fetch_tv(show_id: int, seasons: list[int]) -> dict:
         "tmdb_id":       show_id,
         "tmdb_kind":     "tv",
         "title":         details.get("name") or "",
+        "original_title": details.get("original_name") or "",
+        "aka":           akas,
         "overview":      details.get("overview") or "",
         "poster_path":   details.get("poster_path") or "",
         "backdrop_path": details.get("backdrop_path") or "",
@@ -1856,11 +1892,16 @@ async def _tmdb_fetch_tv(show_id: int, seasons: list[int]) -> dict:
 
 
 async def _tmdb_fetch_movie(movie_id: int) -> dict:
-    details = await _tmdb_get(f"/movie/{movie_id}", {}) or {}
+    details = await _tmdb_get(
+        f"/movie/{movie_id}", {"append_to_response": "alternative_titles"}) or {}
+    akas = _tmdb_akas((details.get("alternative_titles") or {}).get("titles", []),
+                      details.get("title") or "", details.get("original_title") or "")
     return {
         "tmdb_id":       movie_id,
         "tmdb_kind":     "movie",
         "title":         details.get("title") or "",
+        "original_title": details.get("original_title") or "",
+        "aka":           akas,
         "overview":      details.get("overview") or "",
         "poster_path":   details.get("poster_path") or "",
         "backdrop_path": details.get("backdrop_path") or "",
@@ -9851,6 +9892,13 @@ _REL_STOPWORDS = {"the", "a", "an", "of", "and", "to", "in", "on", "at",
                   "for", "with", "from"}
 
 
+def _rel_squash(s: str) -> str:
+    """A title collapsed to bare alphanumerics (years dropped) for matching
+    delimiter-less scene names — a hyphenated title and its space-stripped scene
+    form collapse to the same string."""
+    return re.sub(r"[^a-z0-9]+", "", _YEAR_RE.sub(" ", (s or "").lower()))
+
+
 def _rel_tokens(s: str) -> set:
     """Distinctive lowercase word tokens of a title: split on punctuation, drop
     stop-words and bare release years (years are scored separately below)."""
@@ -9886,6 +9934,16 @@ def _title_relevance(query: str, title: str, name: str,
     recall = inter / len(qt)
     precision = inter / len(ct) if ct else 0.0
     score = 0.7 * recall + 0.3 * precision
+    # Squashed-name fallback: a delimiter-less scene name (all spaces/punctuation
+    # stripped) tokenizes to one blob that matches nothing, so a legit release
+    # scores 0.
+    # If the whole query, stripped to alphanumerics, is contained in the same-
+    # stripped name (or vice versa), floor the score to a strong match.
+    if score < 0.9:
+        sqq = _rel_squash(query)
+        sqn = _rel_squash(name) or _rel_squash(title)
+        if len(sqq) >= 5 and sqn and (sqq in sqn or sqn in sqq):
+            score = 0.9
     if year_hint:
         ym = _YEAR_RE.search(title)
         if ym:
@@ -9893,22 +9951,35 @@ def _title_relevance(query: str, title: str, name: str,
     return score
 
 
-def _group_search_results(shaped: list, query: str) -> list:
+def _group_search_results(shaped: list, query: str,
+                          akas: Optional[list] = None,
+                          year_hint: Optional[int] = None) -> list:
     """Group already-shaped, seeder-sorted search results into one entry per
     detected show (see parse_torrent_title). Each group carries its member
     results (enriched with kind/season/episode and a per-result ``rel`` relevance
     score) so the show-detail screen needs no second search call and can rank its
-    downloads by relevance. Groups are ordered by relevance, then seeders."""
-    qy = _YEAR_RE.search(query or "")
-    year_hint = int(qy.group(0)) if qy else None
+    downloads by relevance. Groups are ordered by relevance, then seeders.
+
+    ``akas`` are alternative titles (e.g. an anime's romaji name alongside the
+    English one) — a result's ``rel`` is the **best** score across the query and
+    every alias, so a JP-named season pack ranks with the English ones instead of
+    scoring 0. ``year_hint`` overrides the year parsed from ``query`` (the show
+    page passes it separately so the year can drive ranking without being baked
+    into the indexer query, where it would exclude anime releases that carry no
+    year)."""
+    cands = [query] + [a for a in (akas or []) if a and a.strip()]
+    if year_hint is None:
+        qy = _YEAR_RE.search(query or "")
+        year_hint = int(qy.group(0)) if qy else None
     groups: dict[str, dict] = {}
     for r in shaped:
         p = parse_torrent_title(r["title"])
+        rel = max(_title_relevance(c, r["title"], p["show"], year_hint) for c in cands)
         er = dict(r)
         er.update({
             "kind": p["kind"], "season": p["season"], "episode": p["episode"],
             "season_from": p["season_from"], "season_to": p["season_to"],
-            "rel": round(_title_relevance(query, r["title"], p["show"], year_hint), 3),
+            "rel": round(rel, 3),
         })
         key = p["show_key"] or "?"
         g = groups.get(key)
@@ -9946,16 +10017,26 @@ def _group_search_results(shaped: list, query: str) -> list:
 async def search(q: str, limit: int = 30,
                  indexers: Optional[str] = None,
                  categories: Optional[str] = None,
-                 profile_id: Optional[str] = None) -> JSONResponse:
+                 profile_id: Optional[str] = None,
+                 year: int = 0,
+                 aka: Optional[str] = None) -> JSONResponse:
     """Search configured indexers. ``indexers`` (comma-separated IDs) narrows the
     query to the user-chosen subset; ``categories`` (comma-separated content-type
     labels — movies/tv/music/…) narrows it to those Torznab category buckets so
     deselected types (e.g. ``xxx``) are never returned by any indexer; ``profile_id``
     enforces the admin's per-profile allowlist. All three intersect — a user can only
     ever search within what the admin allows the profile, and within the admin's
-    ``INDEXER_CATEGORIES`` base restriction."""
+    ``INDEXER_CATEGORIES`` base restriction.
+
+    ``year`` and ``aka`` (comma-separated alternative titles) tune **relevance
+    only** — they are *not* sent to the indexer. The show-detail page passes them
+    so the year can rank releases without being baked into the indexer query
+    (which would drop anime/TV releases that carry no year), and so a result under
+    an alias (e.g. an anime's romaji name) scores against that alias too."""
     if not q.strip():
         return JSONResponse({"results": [], "groups": []})
+    akas = [a.strip() for a in (aka or "").split(",") if a.strip()]
+    year_hint = year or None
 
     lib = await get_library()
     cats_override = lib.get("settings", {}).get("admin_overrides", {}).get("indexer_categories")
@@ -9993,7 +10074,7 @@ async def search(q: str, limit: int = 30,
         await _record_indexer_health(data.get("Indexers", []))
         shaped = _shape_search_results(data.get("Results", []), 10000)
         return JSONResponse({"results": shaped[:limit],
-                             "groups": _group_search_results(shaped, q)})
+                             "groups": _group_search_results(shaped, q, akas, year_hint)})
 
     # Profile allowlist (admin-enforced) ∩ user selection (UI-chosen subset).
     allowed = _profile_allowed_indexers(lib, profile_id or "")
@@ -10044,7 +10125,7 @@ async def search(q: str, limit: int = 30,
 
     shaped = _shape_search_results(items, 10000)
     return JSONResponse({"results": shaped[:limit],
-                         "groups": _group_search_results(shaped, q)})
+                         "groups": _group_search_results(shaped, q, akas, year_hint)})
 
 
 @app.get("/api/search/indexers")

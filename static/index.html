@@ -9257,24 +9257,48 @@ function closeSearchShow(){
   _ssGroup=null; _ssMeta=null; _ssKind=""; _ssBroadResults=null;
 }
 
-// Shared broad Jackett query for the open show — one /api/search?q=<title>
-// request, cached on _ssBroadResults so the "Search episodes" and "Search packs"
-// buttons don't double-hit Jackett. Returns the flat shaped results array.
+// Alternative titles for the open show (an anime's romaji name, etc.), from the
+// TMDb metadata — drop the primary title + case-insensitive dupes.
+function _ssAkaTitles(){
+  const m=_ssMeta||{}; const prim=((_ssGroup&&_ssGroup.title)||"").toLowerCase();
+  const seen=new Set([prim]); const out=[];
+  const add=t=>{ if(!t) return; const k=t.toLowerCase(); if(seen.has(k)) return; seen.add(k); out.push(t); };
+  (m.aka||[]).forEach(add);
+  if(m.original_title && /[A-Za-z]/.test(m.original_title)) add(m.original_title);
+  return out;
+}
+
+// Shared broad Jackett query for the open show, cached on _ssBroadResults so the
+// "Search episodes" and "Search packs" buttons don't double-hit Jackett. Returns
+// the flat shaped results array. The **year is NOT put in the indexer query** —
+// anime/TV releases rarely carry it, and appending it drops nearly everything (a
+// multi-season anime can fall ~25× and lose its later seasons). Instead the year is
+// passed as a relevance-only param for movies (to demote same-franchise different-
+// year films); for TV it's omitted entirely, since later seasons legitimately span
+// years. Aliases are queried too (up to two extra) and passed as `aka=` so a
+// JP-named season pack ranks alongside the English ones instead of scoring 0.
 async function _ssBroadSearch(){
   if(_ssBroadResults) return _ssBroadResults;
   const grp=_ssGroup;
-  const q=grp.title+(grp.year?` ${grp.year}`:"");
-  let out=[], ok=false;
-  let url=`/api/search?q=${encodeURIComponent(q)}`;
-  if(profile.id) url+=`&profile_id=${encodeURIComponent(profile.id)}`;
-  try{
-    const r=await fetch(url);
-    if(r.ok){
-      ok=true;
-      const data=await r.json();
-      (data.groups||[]).forEach(g=>(g.results||[]).forEach(res=>out.push(res)));
-    }
-  }catch(_){}
+  const akas=_ssAkaTitles();
+  const akaParam=akas.length?`&aka=${encodeURIComponent(akas.join(","))}`:"";
+  const yearParam=(grp.year&&_ssKind==="movie")?`&year=${grp.year}`:"";
+  const pidParam=profile.id?`&profile_id=${encodeURIComponent(profile.id)}`:"";
+  const queries=[grp.title, ...akas.slice(0,2)].filter(Boolean);
+  const bundles=await Promise.all(queries.map(async(qt)=>{
+    try{
+      const r=await fetch(`/api/search?q=${encodeURIComponent(qt)}${yearParam}${akaParam}${pidParam}`);
+      return r.ok ? await r.json() : null;
+    }catch(_){ return null; }
+  }));
+  const seen=new Set(); const out=[]; let ok=false;
+  bundles.forEach(data=>{
+    if(!data) return; ok=true;
+    (data.groups||[]).forEach(g=>(g.results||[]).forEach(res=>{
+      if(res.magnet){ if(seen.has(res.magnet)) return; seen.add(res.magnet); }
+      out.push(res);
+    }));
+  });
   // Cache only a successful query — a failed one (e.g. Jackett briefly down)
   // must be retryable, not stick as an empty result.
   if(_ssGroup===grp && ok) _ssBroadResults=out;
@@ -16444,6 +16468,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.8.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.9.0</div>
 </body>
 </html>
