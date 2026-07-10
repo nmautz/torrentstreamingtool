@@ -5978,7 +5978,13 @@ SKIP_COUNTDOWN_CREDITS_SEC = 10
 # mistake), the viewer comes back to that file within the window and we leave
 # their real progress alone. If they don't return, we mark it watched.
 CREDIT_SKIP_WATCH_DELAY_SEC = 60   # grace period before marking watched
-WATCHED_PCT = 0.92                 # position/duration above which a file counts as finished
+# A stop / supersede / periodic save counts a file finished only once playback
+# has reached the OUTRO: within this many seconds of the detected credits start,
+# or — when no credits were detected — within this many seconds of the file's
+# real end. Deliberately tighter than a blanket %-of-duration: stopping mid-
+# episode (even well past the old 0.92 mark) leaves the file resumable; only
+# reaching the outro credits it.
+STOP_OUTRO_WINDOW_SEC = 10
 
 # Track-preference sibling keys carried across every file_progress rewrite, so a
 # periodic/stop/supersede save never clobbers a subtitle/audio pick. See GOTCHAS.md.
@@ -6087,21 +6093,22 @@ async def _mark_file_watched_internal(
 
 
 def _position_is_finished(item: dict, file_path: str, pos: float, dur: float) -> bool:
-    """Whether a stop/supersede at `pos` should count the file as finished.
+    """Whether a stop/supersede/periodic-save at `pos` should count the file as
+    finished — i.e. playback reached the outro.
 
-    True when past the `completed` fraction OR at/after the detected credits —
-    the latter catches shows with long credits/next-episode tails whose content
-    ends well before the 0.92 mark, which the periodic saver would leave forever
-    un-completed (and therefore resumable)."""
+    Finished only when `pos` is within `STOP_OUTRO_WINDOW_SEC` of the outro: the
+    detected `skip_data[...].credits_start`, or the file's real end when no
+    credits were detected. Completion is tied to the outro, not an arbitrary
+    fraction — an episode the viewer stopped in the middle of (even past the old
+    0.92 mark) stays resumable, which is the behaviour requested for a plain
+    Stop. The next-episode / credit-skip path finalises via its own grace timer,
+    so this stricter rule doesn't affect skip-to-next completion."""
     if dur <= 0:
         return False
-    if pos / dur > WATCHED_PCT:
-        return True
     meta = _find_file_meta(item, file_path) or {}
     cs = meta.get("credits_start")
-    if cs and pos >= float(cs) - 1:
-        return True
-    return False
+    outro = float(cs) if cs else dur
+    return pos >= outro - STOP_OUTRO_WINDOW_SEC
 
 
 async def _finalize_stopped_file(
@@ -6116,9 +6123,11 @@ async def _finalize_stopped_file(
     episode's position — the only completion writers were the 15 s periodic saver
     (which needs a live `playing`/`paused` state and lags up to 15 s) and the
     credit-skip grace timer. So stopping — or jumping to another episode from the
-    library list — while near the end left the episode below the 0.92 threshold,
-    `completed:false`, and therefore resumable: the next Play jumped back into an
-    episode the viewer considered finished. This closes that gap.
+    library list — while at the outro left the episode `completed:false` and
+    therefore resumable: the next Play jumped back into an episode the viewer
+    considered finished. This closes that gap. Completion is gated on reaching
+    the outro (see `_position_is_finished`), so a stop partway through — even past
+    the old 0.92 mark — is preserved as a resume point rather than credited.
 
     A non-finished stop still refreshes the position (closing the ≤15 s periodic
     gap) but never regresses a newer saved position — which also makes an
@@ -6149,11 +6158,18 @@ async def _finalize_stopped_file(
 
 
 async def _series_finalize_and_switch(new_item_id: str,
-                                       outgoing_file: Optional[str]) -> None:
+                                       outgoing_file: Optional[str],
+                                       pos: float = 0.0, dur: float = 0.0) -> None:
     """Merged-series playback crossed from one item's episode into another's.
     Finalize the outgoing episode under its OWN (old) item, then re-point
     `state.library_item_id` at the new owner so progress/skip/track-prefs key off
-    the right item from here on. Idempotent — a no-op if the item didn't change."""
+    the right item from here on. Idempotent — a no-op if the item didn't change.
+
+    `pos`/`dur` are the outgoing file's live position at the crossing. When given
+    they're preferred over the last saved progress record, which on a natural
+    end-of-file advance can sit up to a 15 s save-tick short of the real end —
+    enough to fall outside the outro window and leave a finished episode
+    un-completed (see `_position_is_finished`)."""
     old_id = state.library_item_id
     old_prof = state.library_profile_id
     lib = await get_library()
@@ -6166,12 +6182,10 @@ async def _series_finalize_and_switch(new_item_id: str,
             canon = _canonical_item_path(outgoing_file, old_item)
             rec = (old_item.get("progress", {}).get(old_prof, {})
                            .get("file_progress", {}).get(canon, {}))
-            if rec.get("duration_sec"):
-                await _finalize_stopped_file(
-                    old_id, old_prof, canon,
-                    float(rec.get("position_sec", 0) or 0),
-                    float(rec.get("duration_sec", 0) or 0),
-                )
+            fpos = pos if pos > 0 else float(rec.get("position_sec", 0) or 0)
+            fdur = dur if dur > 0 else float(rec.get("duration_sec", 0) or 0)
+            if fdur > 0:
+                await _finalize_stopped_file(old_id, old_prof, canon, fpos, fdur)
     state.library_item_id = new_item_id
     state.library_item_file_count = len(new_item.get("files", []))
     # Force the tracker to (re)apply saved audio/subtitle prefs for the new item's
@@ -6422,6 +6436,8 @@ async def vlc_progress_tracker() -> None:
     """
     last_progress_save = 0.0
     series_prev_file: Optional[str] = None   # outgoing file, for cross-item finalize
+    prev_item_id: Optional[str] = None       # item that owned series_prev_file
+    prev_pos = prev_dur = 0.0                 # its last-observed position/duration
     while True:
         await asyncio.sleep(2)
         if not state.library_item_id or not state.library_profile_id:
@@ -6454,6 +6470,14 @@ async def vlc_progress_tracker() -> None:
                 state.library_current_file = uri_to_path(current_uri)
             cur_file = state.library_current_file
 
+            # VLC advanced from series_prev_file to a different file on its own
+            # (reached EOF and stepped to the next playlist entry). Provisionally a
+            # within-item advance; the series branch below downgrades it if the new
+            # file belongs to another item (that path finalizes separately).
+            advanced = (series_prev_file is not None and cur_file
+                        and cur_file != series_prev_file
+                        and state.library_item_id == prev_item_id)
+
             # Merged-series playback spans multiple items (one per episode torrent).
             # Keep state.library_item_id pointed at the item that owns the file VLC
             # is actually playing so everything below (skip offers, track prefs,
@@ -6462,8 +6486,24 @@ async def vlc_progress_tracker() -> None:
             if cur_file and state.library_series_map:
                 owner = _series_owner_for_path(cur_file)
                 if owner and owner != state.library_item_id:
-                    await _series_finalize_and_switch(owner, series_prev_file)
+                    await _series_finalize_and_switch(
+                        owner, series_prev_file, prev_pos, prev_dur)
+                    advanced = False  # cross-item crossing already finalized it
+
+            # Within-item natural auto-advance: nothing else flushes the outgoing
+            # episode (Stop/supersede go through their own handlers, cross-item via
+            # the branch above), so finalize it from its last-observed position.
+            # _finalize_stopped_file only credits it when that position reached the
+            # outro — a natural EOF advance (pos ≈ dur) completes it; a manual jump
+            # from mid-episode just refreshes the position without completing.
+            if advanced and prev_dur > 0 and state.library_profile_id:
+                await _finalize_stopped_file(
+                    state.library_item_id, state.library_profile_id,
+                    series_prev_file, prev_pos, prev_dur)
+
             series_prev_file = cur_file
+            prev_item_id = state.library_item_id
+            prev_pos, prev_dur = pos_sec, dur_sec
 
             if cur_file:
                 lib_q = await get_library()
@@ -6542,7 +6582,12 @@ async def vlc_progress_tracker() -> None:
             file_prog[save_file] = {
                 "position_sec": round(save_pos, 1),
                 "duration_sec": round(save_dur, 1),
-                "completed": pct > 0.92,
+                # Complete only once playback reaches the outro (never regress an
+                # already-completed file). Same rule as the stop/supersede
+                # finalize, so a mid-episode position is never blanket-credited
+                # at 0.92 and then left un-resumable.
+                "completed": bool(existing_fp.get("completed"))
+                             or _position_is_finished(item, save_file, save_pos, save_dur),
                 "updated_at": _now_iso(),
                 # Preserve saved track picks — they're sibling keys in the same
                 # file_progress dict, and this write fires every 15 s (a full
