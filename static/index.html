@@ -9131,6 +9131,7 @@ let _ssSeason=0;                // current episode-season tab
 let _ssKind="";                 // "tv"/"movie" when opened from TMDb; "" = Jackett-fallback (openSearchShow)
 let _ssBroadResults=null;       // cached shaped /api/search results for the open show (shared by the pack + episode Search buttons)
 let _ssPacksSearched=false;     // has the user run "Search packs" yet (distinguishes "not searched" from "none found")
+let _ssEpisodesSearched=false;  // ditto for the single-episodes broad search
 
 function _ssBuildEpisodes(results){
   const map=new Map();
@@ -9150,17 +9151,19 @@ function _ssSeasonsWithEpisodes(){
   return [...new Set(_ssEpisodes.map(e=>e.season))].sort((a,b)=>a-b);
 }
 // True when TMDb catalogs the show as a single, very long season (absolute
-// episode numbering) while the torrent scene splits it across several seasons —
-// common for long-running anime (e.g. TMDb lists one 60-episode season, the scene
-// ships S01–S05). In that case TMDb's per-season episode list is meaningless for
-// the scene's seasons, so we drive the breakdown from the torrents we actually
-// found instead of showing 60 mostly-"missing" rows under Season 1.
+// episode numbering) — common for long-running anime (e.g. TMDb lists one
+// 60-episode season while the torrent scene ships S01–S05). TMDb's per-season
+// episode list is then meaningless for the scene's seasons, so we drive the
+// breakdown from the torrents we actually find rather than dumping 60 mostly-
+// "missing" rows under Season 1. Inferred from TMDb structure alone (one season
+// of >26 eps — longer than a normal 2-cour run) so it holds **before** the user
+// searches too; a scene that splits into multiple seasons confirms it outright.
 function _ssTmdbAbsolute(){
   const ss=(_ssMeta&&_ssMeta.tmdb_kind==="tv"&&_ssMeta.seasons)||null;
   if(!ss) return false;
   const nums=Object.keys(ss).map(Number).filter(n=>n>0);
   if(nums.length!==1) return false;
-  if(new Set(_ssEpisodes.map(e=>e.season)).size<=1) return false;
+  if(new Set(_ssEpisodes.map(e=>e.season)).size>1) return true;
   return ((ss[String(nums[0])].episodes)||[]).length>26;
 }
 // Union of seasons we have episodes for AND seasons TMDb lists — so an entirely
@@ -9186,6 +9189,7 @@ function _ssEpName(season,episode){
 async function openSearchShow(group){
   _ssGroup=group; _ssMeta=null; _ssSearching.clear();
   _ssKind=""; _ssBroadResults=null; _ssPacksSearched=(group.results||[]).length>0;
+  _ssEpisodesSearched=(group.results||[]).length>0;
   _ssEpisodes=_ssBuildEpisodes(group.results||[]);
   _ssPacks=(group.results||[]).filter(r=>r.kind!=="episode").sort(_ssPackCmp);
   _ssSection=_ssEpisodes.length?"episodes":"packs";
@@ -9230,7 +9234,7 @@ async function openSearchShowFromTmdb(cand){
   if(!cand) return;
   const group={title:cand.title||"", year:cand.year?parseInt(cand.year,10)||null:null, results:[]};
   _ssGroup=group; _ssMeta=null; _ssSearching.clear();
-  _ssKind=cand.kind==="movie"?"movie":"tv"; _ssBroadResults=null; _ssPacksSearched=false;
+  _ssKind=cand.kind==="movie"?"movie":"tv"; _ssBroadResults=null; _ssPacksSearched=false; _ssEpisodesSearched=false;
   _ssEpisodes=[]; _ssPacks=[];
   _ssSection=_ssKind==="movie"?"packs":"episodes";
   _ssSeason=0;
@@ -9338,6 +9342,7 @@ async function ssSearchShowEpisodes(btn){
       e.sources.sort((a,b)=>b.seeders-a.seeders);
     });
     _ssEpisodes.sort((a,b)=>(a.season-b.season)||(a.episode-b.episode));
+    _ssEpisodesSearched=true;
     _ssRender();
     if(!eps.length) showAlert("No single episodes found for this show.","warn");
   } finally {
@@ -9486,9 +9491,21 @@ function _ssRenderEpisodes(){
            class="text-[11px] px-2.5 py-1 bg-amber-700 hover:bg-amber-600 text-white uppercase tracking-wide transition-colors">Find sources</button>
        </div>` : "";
 
+  // Empty: distinguish "haven't searched yet" (prompt to search — don't dump the
+  // TMDb skeleton) from "searched, found nothing".
+  const empty=_ssEpisodesSearched
+    ? `<p class="text-center text-gray-600 text-sm py-10">No single episodes found.</p>`
+    : `<div class="flex flex-col items-center gap-3 py-12 px-4 text-center">
+         <p class="text-gray-500 text-sm">Search your indexers for downloadable episodes.</p>
+         <button onclick="ssSearchShowEpisodes(this)"
+           class="text-xs px-4 py-2 bg-indigo-700 hover:bg-indigo-600 text-white uppercase tracking-wide transition-colors flex items-center gap-1.5">
+           <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+           Search episodes
+         </button>
+       </div>`;
   body.innerHTML = banner + (rows
     ? `<div class="divide-y divide-gray-800">${rows}</div>`
-    : `<p class="text-center text-gray-600 text-sm py-10">No single episodes found.</p>`);
+    : empty);
 }
 
 function _ssEpRowHtml(e){
@@ -16484,6 +16501,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.9.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.9.2</div>
 </body>
 </html>
