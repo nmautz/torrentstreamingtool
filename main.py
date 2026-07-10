@@ -2560,6 +2560,10 @@ _TT_COMPLETE_SERIES_RE = re.compile(r"\bComplete\s+(?:Series|Pack|Collection)\b"
 # 3-4 digits so "Ocean's 11" (a movie) isn't read as an episode.
 _TT_ABS_EP_RE      = re.compile(r"\b[Ee][Pp]\s?(\d{1,4})\b")                       # EP1168
 _TT_ABS_DASH_RE    = re.compile(r"\s-\s+(\d{1,4})(?!\d)")                          # Show - 121
+# Size tags ("1.85GB", "700 MB", "2 GB") — stripped before structural parsing so a
+# YIFY-style "- 1.85GB" can't be misread as absolute episode 1 (dots → spaces in
+# norm turn "1.85GB" into "1 85GB", so match the split form too).
+_TT_SIZE_RE        = re.compile(r"\b\d+(?:[ .]\d+)?\s*(?:[GMKT]i?B|MB|GB|KB|TB)\b", re.I)
 _TT_ABS_TAIL_RE    = re.compile(r"\s(\d{3,4})\s*(?=[\[(]|$)")                      # Show 1168 [.. / (..
 _TT_TRAIL_YEAR_RE  = re.compile(r"\s+(?:19|20)\d{2}$")
 _TT_EXT_RE         = re.compile(r"\.(?:mkv|mp4|avi|mov|m4v|ts|webm)$", re.IGNORECASE)
@@ -2593,6 +2597,8 @@ def parse_torrent_title(title: str) -> dict:
     raw = title or ""
     norm = re.sub(r"[._]+", " ", raw)
     norm = re.sub(r"\s+", " ", norm).strip()
+    # Drop size tags so "- 1.85GB" / "- 700 MB" aren't misread as absolute episodes.
+    norm = re.sub(r"\s+", " ", _TT_SIZE_RE.sub(" ", norm)).strip()
 
     ym = _YEAR_RE.search(norm)
     year = int(ym.group(0)) if ym else None
@@ -9852,16 +9858,34 @@ def _rel_tokens(s: str) -> set:
     return {t for t in toks if t not in _REL_STOPWORDS and not _YEAR_RE.fullmatch(t)}
 
 
-def _title_relevance(query: str, title: str, year_hint: Optional[int]) -> float:
-    """Relevance of a torrent `title` to the search `query`. Base score is the
-    fraction of the query's distinctive tokens present in the title; a matching
-    release year confirms (+0.5), a *different* one strongly demotes (−0.7) since
-    it's almost always a different film that merely shares franchise words."""
+def _title_relevance(query: str, title: str, name: str,
+                     year_hint: Optional[int]) -> float:
+    """Relevance of a torrent to the search `query`, scored against its *parsed
+    show name* (`name`, release tags already stripped) with the raw `title` used
+    only for the year signal. Two components:
+
+    - **recall** — fraction of the query's distinctive tokens present in the name
+      (the original signal: did we find what the user asked for?),
+    - **precision** — fraction of the *name's* tokens that the query accounts for.
+      This is the new lever: a franchise sibling, parody, or soundtrack
+      ("The Matrix **Reloaded**", "**Rifftrax** The Matrix", "The Matrix
+      **Soundtrack**") carries extra distinctive words the query never had, so it
+      ranks below a clean exact-title match instead of tying at a saturated score.
+      Scoring `name` rather than the raw title keeps quality tags (1080p, x264,
+      BluRay…) from counting as "extra" words.
+
+    Blended recall-heavy (0.7/0.3) so a longer *official* title whose every query
+    word is present ("Star Wars Episode II Attack of the Clones") still scores
+    high. A matching release year confirms (+0.5), a *different* one strongly
+    demotes (−0.7) — almost always a different film sharing franchise words."""
     qt = _rel_tokens(query)
     if not qt:
         return 0.0
-    ct = _rel_tokens(title)
-    score = len(qt & ct) / len(qt)
+    ct = _rel_tokens(name) or _rel_tokens(title)
+    inter = len(qt & ct)
+    recall = inter / len(qt)
+    precision = inter / len(ct) if ct else 0.0
+    score = 0.7 * recall + 0.3 * precision
     if year_hint:
         ym = _YEAR_RE.search(title)
         if ym:
@@ -9884,7 +9908,7 @@ def _group_search_results(shaped: list, query: str) -> list:
         er.update({
             "kind": p["kind"], "season": p["season"], "episode": p["episode"],
             "season_from": p["season_from"], "season_to": p["season_to"],
-            "rel": round(_title_relevance(query, r["title"], year_hint), 3),
+            "rel": round(_title_relevance(query, r["title"], p["show"], year_hint), 3),
         })
         key = p["show_key"] or "?"
         g = groups.get(key)
