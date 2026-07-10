@@ -2097,6 +2097,16 @@
             <div id="catList" class="max-h-64 overflow-y-auto divide-y divide-gray-800"></div>
           </div>
         </div>
+        <!-- Search mode: TMDb-first "Smart" poster browse vs the legacy indexer-first list -->
+        <div id="searchModeWrap" class="mt-2 px-1 flex items-center gap-2">
+          <span class="text-[11px] font-bold uppercase tracking-wide text-gray-500">Search</span>
+          <div class="inline-flex border border-gray-800">
+            <button id="searchModeSmart" type="button" onclick="setSearchMode('smart')"
+              title="Browse real shows/movies by poster (uses TMDb)">Smart</button>
+            <button id="searchModeClassic" type="button" onclick="setSearchMode('classic')"
+              title="Classic search: list raw indexer results grouped by show (no TMDb)">Classic</button>
+          </div>
+        </div>
         <div class="flex justify-between mt-2 px-1">
           <span id="resultCount" class="text-[11px] text-gray-600 uppercase tracking-wide"></span>
           <span class="text-[11px] text-gray-700 uppercase tracking-wide">sorted by seeders</span>
@@ -3985,6 +3995,12 @@ try { _seekLockEnabled = localStorage.getItem("streamlink_seeklock") !== "0"; } 
 // per-profile / server): "card" (poster grid, default) or "list" (detailed rows).
 let libViewMode = "card";
 try { const _lv = localStorage.getItem("streamlink_libview"); if (_lv === "list" || _lv === "card") libViewMode = _lv; } catch (_) {}
+
+// Search mode (device-local UI preference, never per-profile / server): "smart"
+// (TMDb-first poster browse, default) or "classic" (legacy indexer-first grouped
+// list — skips TMDb entirely). The Classic toggle lives beside Sources/Categories.
+let searchMode = "smart";
+try { const _sm = localStorage.getItem("streamlink_search_mode"); if (_sm === "classic" || _sm === "smart") searchMode = _sm; } catch (_) {}
 let _libPosterCache = new Map();   // itemId → poster URL ("" = none/definitive-miss)
 let _libPosterObs = null;          // IntersectionObserver for lazy poster loading
 let _seekPhase       = 0;      // 0 idle, 1 holding, 2 ready (awaiting release), 3 settling — 1-3 still LOCKED
@@ -8693,6 +8709,7 @@ async function loadSearchIndexers(){
   else { wrap.classList.add("hidden"); document.getElementById("srcPanel").classList.add("hidden"); }
   renderSourceList(); updateSrcSummary();
   rebuildSearchCategories();
+  _renderSearchModeToggle();
 }
 
 function renderSourceList(){
@@ -8845,11 +8862,30 @@ function _selectedCategoriesParam(){
   return [...selectedCategories].join(",");
 }
 
+// ── Search mode (Smart TMDb-first vs Classic indexer-first) ──────────────────
+// Device-local toggle beside Sources/Categories. "classic" forces the legacy
+// Jackett-first grouped search, skipping TMDb even when a key is configured.
+function setSearchMode(mode){
+  searchMode = mode === "classic" ? "classic" : "smart";
+  try { localStorage.setItem("streamlink_search_mode", searchMode); } catch (_) {}
+  _renderSearchModeToggle();
+}
+function _renderSearchModeToggle(){
+  const s=document.getElementById("searchModeSmart");
+  const c=document.getElementById("searchModeClassic");
+  if(!s||!c) return;
+  const classic=searchMode==="classic";
+  const base="text-[10px] font-bold uppercase tracking-wide px-2.5 py-1 transition-colors ";
+  s.className = base + (!classic ? "bg-indigo-600 text-white" : "bg-gray-900 text-gray-400 hover:text-gray-200");
+  c.className = base + "border-l border-gray-800 " + (classic ? "bg-indigo-600 text-white" : "bg-gray-900 text-gray-400 hover:text-gray-200");
+}
+
 // ── Search ─────────────────────────────────────────────────────────────────
 // Search is TMDb-first: the box queries TMDb for real shows/movies (poster
 // cards); Jackett is only hit *inside* the show page (explicit Search buttons).
 // With no TMDb key (or zero TMDb matches) it falls back to the legacy Jackett-
 // first grouped search (doJackettSearch), so nothing regresses without a key.
+// The user can also force the legacy path via the Classic search-mode toggle.
 let _tmdbResultsById={};   // "id-kind" → TMDb candidate (for the result cards)
 
 // Narrow TMDb to tv/movie only when the Categories picker unambiguously selects
@@ -8874,20 +8910,23 @@ async function doSearch(q){
   grid.innerHTML=""; wrap.classList.add("hidden"); empty.classList.add("hidden"); hideAlert();
   try{
     // 1) TMDb-first — pick a real show/movie before touching any indexer.
-    let tmdb=null;
-    try{
-      const catKind=_searchTmdbKind();
-      let turl=`/api/tmdb/search?query=${encodeURIComponent(q)}`;
-      if(catKind) turl+=`&kind=${catKind}`;
-      const tr=await fetch(turl);
-      if(tr.ok) tmdb=await tr.json();
-    }catch(_){}
-    if(tmdb && tmdb.enabled && (tmdb.results||[]).length){
-      _renderTmdbResults(q, tmdb, grid, wrap, count);
-      applyVpnGate();
-      return;
+    //    Skipped entirely when the user has chosen Classic search mode.
+    if(searchMode!=="classic"){
+      let tmdb=null;
+      try{
+        const catKind=_searchTmdbKind();
+        let turl=`/api/tmdb/search?query=${encodeURIComponent(q)}`;
+        if(catKind) turl+=`&kind=${catKind}`;
+        const tr=await fetch(turl);
+        if(tr.ok) tmdb=await tr.json();
+      }catch(_){}
+      if(tmdb && tmdb.enabled && (tmdb.results||[]).length){
+        _renderTmdbResults(q, tmdb, grid, wrap, count);
+        applyVpnGate();
+        return;
+      }
     }
-    // 2) Fallback: legacy Jackett-first grouped search (no TMDb key or no match).
+    // 2) Fallback (or Classic mode): legacy Jackett-first grouped search.
     await doJackettSearch(q, grid, wrap, empty, count);
   } catch(err){
     showAlert(err.message,"error"); empty.classList.remove("hidden");
@@ -16230,6 +16269,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
   evictLegacyServiceWorker();
   _lpAttachVideoEvents();
   _renderOnlineBadge();
+  _renderSearchModeToggle();  // paint the Smart/Classic search toggle from the saved pref
   _applyPhoneLandLayout();   // position the footer fullscreen btn for the current orientation
   // iOS app: load the pairing token (M5) before any device-facing fetch, add the
   // always-on app nav (Downloads / Change server), subscribe to BundleDownloader
@@ -16331,6 +16371,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.6.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.7.0</div>
 </body>
 </html>
