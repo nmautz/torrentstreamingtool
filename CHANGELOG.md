@@ -1,5 +1,9 @@
 # Changelog
 
+## [9.9.1] — 2026-07-09
+- **Single-episode lists now break down by season for absolute-numbered anime.** When TMDb catalogs a show as one long season (absolute episode numbering — e.g. a single 60-episode "Season 1") but the torrent scene splits it across several seasons (S01–S05), the show page's episode list was driven by TMDb's list: the Season 1 tab rendered all 60 TMDb episodes (most greyed "missing"), and the scene's real per-season breakdown was buried. New `_ssTmdbAbsolute()` detects this mismatch (TMDb has exactly one season of >26 episodes while the found torrents span multiple seasons) and, when it holds, drives the season tabs and episode rows from the **scene** data instead — each season tab shows the single episodes actually available, and the meaningless TMDb "missing episode" enumeration is suppressed. Normal shows (TMDb seasons match the scene) are unaffected. **Frontend:** `static/index.html` (`_ssTmdbAbsolute`, `_ssAllSeasons`, `_ssRenderEpisodes`, `_ssMissingEpisodes`). **Docs:** [docs/GOTCHAS.md](docs/GOTCHAS.md) § anime naming / seasons.
+- (Host-served — **no app rebuild**. `static/index.html` + version badge.)
+
 ## [9.9.0] — 2026-07-09
 - **Smart search now finds every season and every bulk pack — including cross-language (JP/EN) anime releases.** Fixes two problems most visible on multi-season anime:
   - **The year is no longer baked into the indexer query.** The show page queried `"{title} {year}"`, but anime/TV episodes rarely carry the year, so Jackett dropped almost everything — a multi-season anime returned **7 results with 0 episodes** (~190 without the year), so the season tabs never populated and it "only showed 1 season." The year is now a **relevance-only** signal (`&year=`), applied for **movies** only (for TV the different-year penalty would wrongly demote later seasons). Dropping it restores the full episode list across every season.
