@@ -1146,7 +1146,21 @@ async def qbit_add_magnet(
         # This is the qBittorrent /add API field, separate from the toggle endpoint.
         data["sequentialDownload"] = "true"
     r = await qreq("POST", "/api/v2/torrents/add", data=data)
-    return h if (r and r.text.strip() == "Ok.") else None
+    if r and r.text.strip() == "Ok.":
+        return h
+    # qBit replies "Fails." (HTTP 200) when it *rejects* the add — most commonly
+    # because the torrent is ALREADY in the session (a duplicate add, a prior
+    # errored attempt still present, or a torrent qBit already has on disk). That
+    # is not a failure for us: we extracted the info-hash from the magnet, so if
+    # qBit is already tracking that torrent we adopt it instead of orphaning the
+    # caller's item as an un-hashed "error" while the file quietly downloads.
+    # Only give up when the hash truly isn't present (genuine bad-magnet reject).
+    if h:
+        for _ in range(3):
+            if await qbit_info(h):
+                return h
+            await asyncio.sleep(1)
+    return None
 
 
 async def qbit_set_file_priority(h: str, indices: list[int], priority: int) -> None:
@@ -8468,6 +8482,26 @@ async def library_download(req: DownloadReq) -> JSONResponse:
     if not state.vpn_secure:
         raise HTTPException(403, "VPN not connected — download blocked.")
     lib = await get_library()
+    # Dedup: bulk "download all episodes" can fire the same torrent twice (a double
+    # click, a retry, or overlapping season/episode pickers), which used to create
+    # two library items backed by one torrent — one of which then errors on the qBit
+    # duplicate-add reject. If a still-live item already backs this exact info-hash,
+    # return it instead of minting a duplicate. Errored items are ignored so a real
+    # retry of a failed add still works. Distinct per-episode torrents (different
+    # hashes) never collide, so genuine bulk downloads are unaffected.
+    want_hash = (req.torrent_hash or extract_hash(req.magnet) or "").lower()
+    if want_hash:
+        dup = next((it for it in lib["items"]
+                    if (it.get("torrent_hash") or "").lower() == want_hash
+                    and it.get("status") != "error"), None)
+        if dup is None:
+            # Also match an in-flight add that hasn't recorded its hash yet.
+            dup = next((it for it in lib["items"]
+                        if (extract_hash((it.get("pending_download") or {}).get("magnet", "")) or "").lower() == want_hash
+                        and it.get("status") != "error"), None)
+        if dup is not None:
+            return JSONResponse({"ok": True, "item_id": dup["id"], "duplicate": True,
+                                 "default_save_path": settings.qbit_download_path})
     item: dict = {
         "id": str(uuid.uuid4()),
         "title": req.title,
