@@ -3314,6 +3314,7 @@ let epItemId  = null;
 // maps each file path → its owning item id (so play/prep/progress target the
 // right item). null/empty for a normal single-item open.
 let epSeriesKey = null;
+let epSeriesItemIds = [];   // member item ids of the open merged series (for series-wide rename/metafix/ondemand)
 let epFileItem  = {};
 let _epSeriesResume = null;   // series-level resume hint from /library/series/{key}
 let epFiles   = [];   // full file objects from API (each carries item_id)
@@ -6597,9 +6598,12 @@ async function openSeriesPage(seriesKey, title){
   const d=await resp.json();
   if(epSeriesKey!==seriesKey) return;   // navigated away
   epFiles=d.files||[];
+  epSeriesItemIds=d.item_ids||[];
   epFiles.forEach(f=>{ epFileItem[f.path]=f.item_id; if(!f.progress?.completed) epChecked.add(f.path); });
   epHasTorrent=true; epDownloadMode="now"; epPrepPrioDefault="mid";
-  epOndemandOnly=false; epOndemandLocked=false;
+  // Series-wide on-demand state (aggregate across members): "on" only when every
+  // member is on-demand-only; "locked" when any member is admin-locked.
+  epOndemandOnly=!!d.ondemand_only; epOndemandLocked=!!d.ondemand_only_locked;
   epHlsAvailable=d.hls_available!==false;
   epMetadata=d.metadata||null; epMetaImgBase=d.img_base||"";
   _epSeriesResume=d.resume||null;
@@ -6636,6 +6640,16 @@ async function openSeriesPage(seriesKey, title){
   }
 }
 
+// Representative item id for series-scoped reads/actions (metadata search, and
+// as the id passed to the group-aware /rename). Single open item, else the first
+// member of the merged series.
+function _epTargetId(){ return epItemId || epSeriesItemIds[0] || null; }
+// True while the episode page is still showing the same view a request started
+// against — series mode tracks epSeriesKey, single-item mode tracks epItemId
+// (epItemId is null in series mode, so a plain id compare would falsely bail).
+function _epStillOpen(itemId, seriesKey){
+  return seriesKey ? epSeriesKey===seriesKey : epItemId===itemId;
+}
 // Item id that owns a given file path — the merged-series map when in series
 // mode, else the single open item.
 function _epItemFor(path){ return (epSeriesKey && epFileItem[path]) || epItemId; }
@@ -6760,15 +6774,13 @@ function renderEpHero(fallbackTitle){
   titleEl.textContent = show;
   headerEl.textContent = show;
   overviewEl.textContent = m?.overview || "";
-  // Reveal the rename control now the page has loaded — lets the user correct a
-  // wrong auto-matched show (the metadata is fetched from the series name).
-  // These are per-item actions; in merged-series mode (no single epItemId) they
-  // don't apply, so keep them hidden.
-  const _perItem=!epSeriesKey;
-  document.getElementById("epRenameBtn").classList.toggle("hidden", !_perItem);
-  document.getElementById("epMetaFixBtn").classList.toggle("hidden", !_perItem);
-  if(_perItem) _renderEpOndemandBtn();
-  else document.getElementById("epOndemandBtn").classList.add("hidden");
+  // Reveal the rename/metadata controls now the page has loaded — lets the user
+  // correct a wrong auto-matched show (the metadata is fetched from the series
+  // name). These work in BOTH single-item and merged-series mode: the backend
+  // fans rename/metadata/ondemand across every member of the series group.
+  document.getElementById("epRenameBtn").classList.remove("hidden");
+  document.getElementById("epMetaFixBtn").classList.remove("hidden");
+  _renderEpOndemandBtn();
 
   const bits=[];
   const yr = (m?.first_air_date || m?.release_date || "").slice(0,4);
@@ -6808,12 +6820,21 @@ function renderEpHero(fallbackTitle){
 // (e.g. an "AOT" download that pulled "AOTU"). The server renames the whole
 // series group + re-fetches artwork; we repaint the hero with the result.
 async function renameSeries(){
-  const itemId=epItemId;
-  const item=(window._libCache||[]).find(it=>it&&it.id===itemId);
-  const isSeries=!!(item&&(item.series||"").trim());
-  const current=isSeries
-      ? item.series.trim()
-      : ((item&&item.title)||document.getElementById("epTitle").textContent||"").trim();
+  // Merged-series mode: any member id renames the whole group (the /rename
+  // endpoint is series-aware). Single-item mode: rename that one item/title.
+  const isSeries=!!epSeriesKey;
+  const seriesKey=epSeriesKey, itemId=_epTargetId();
+  if(!itemId) return;
+  let current;
+  if(isSeries){
+    current=(epHeroTitle||document.getElementById("epTitle").textContent||"").trim();
+  }else{
+    const item=(window._libCache||[]).find(it=>it&&it.id===itemId);
+    const itemIsSeries=!!(item&&(item.series||"").trim());
+    current=itemIsSeries
+        ? item.series.trim()
+        : ((item&&item.title)||document.getElementById("epTitle").textContent||"").trim();
+  }
   const next=prompt(
     (isSeries?"Rename series":"Rename title")+" — used to fetch artwork & episode info:",
     current);
@@ -6831,10 +6852,20 @@ async function renameSeries(){
       body:JSON.stringify({name}),
     });
     const d=await r.json().catch(()=>({}));
-    if(epItemId!==itemId) return;         // user navigated away mid-request
+    // Bail if the user navigated away mid-request.
+    if(isSeries ? epSeriesKey!==seriesKey : epItemId!==itemId) return;
     if(!r.ok){
       showAlert(d.detail||"Rename failed.","error");
       renderEpHero(current);
+      return;
+    }
+    try { _libPosterCache.clear(); } catch(_) {}   // art re-fetched — drop cached poster URLs
+    loadLibrary();                        // refresh the library grouping label / poster
+    if(isSeries){
+      // The series_key is derived from the (lowercased) name, so it changed —
+      // re-open the page under the new key to reload the regrouped members.
+      showAlert(d.metadata?"Renamed — artwork updated.":"Renamed.","success");
+      openSeriesPage("series:"+name.toLowerCase(), name);
       return;
     }
     epMetadata=d.metadata||null;
@@ -6843,11 +6874,9 @@ async function renameSeries(){
     renderEpHero(name);
     renderEpSeasonTabs();
     renderEpList();
-    try { _libPosterCache.clear(); } catch(_) {}   // art re-fetched — drop cached poster URLs
-    loadLibrary();                        // refresh the library grouping label / poster
     showAlert(d.metadata?"Renamed — artwork updated.":"Renamed.","success");
   }catch(_){
-    if(epItemId===itemId) renderEpHero(current);
+    if(isSeries ? epSeriesKey===seriesKey : epItemId===itemId) renderEpHero(current);
     showAlert("Rename failed.","error");
   }finally{
     btn.disabled=false;
@@ -6860,13 +6889,14 @@ async function renameSeries(){
 // metadata (pinned as source="custom", no TMDb key needed). Shared with the
 // Rename control — both fix the same "pulled the wrong show" problem.
 function _epCurrentName(){
+  if(epSeriesKey) return (epHeroTitle||document.getElementById("epTitle").textContent||"").trim();
   const item=(window._libCache||[]).find(it=>it&&it.id===epItemId);
   return (item&&((item.series||"").trim()||(item.title||"").trim()))
        || (document.getElementById("epTitle").textContent||"").trim();
 }
 
 function openMetaFix(){
-  if(!epItemId) return;
+  if(!_epTargetId()) return;
   document.getElementById("metaFixSub").textContent=_epCurrentName();
   // Prefill the search box with the current name so a Search is one click away.
   document.getElementById("metaSearchQuery").value=_epCurrentName();
@@ -6902,7 +6932,9 @@ function metaSwitchTab(tab){
 }
 
 async function metaSearch(){
-  const itemId=epItemId;
+  // Search is read-only and identical across members, so a representative id is
+  // fine (single item, or the first member in merged-series mode).
+  const seriesKey=epSeriesKey, itemId=_epTargetId();
   const q=document.getElementById("metaSearchQuery").value.trim();
   const kind=document.getElementById("metaSearchKind").value;
   const box=document.getElementById("metaResults");
@@ -6911,7 +6943,7 @@ async function metaSearch(){
     const url=`/api/library/${itemId}/metadata/search?query=${encodeURIComponent(q)}&kind=${encodeURIComponent(kind)}`;
     const r=await fetch(url);
     const d=await r.json().catch(()=>({}));
-    if(epItemId!==itemId) return;
+    if(!_epStillOpen(itemId, seriesKey)) return;
     if(!r.ok){ box.innerHTML=`<p class="text-red-400 text-sm text-center py-8">${escHtml(d.detail||"Search failed.")}</p>`; return; }
     if(d.enabled===false){
       box.innerHTML=`<p class="text-gray-500 text-sm text-center py-8">TMDb search needs an API key. Use the <span class="text-gray-300 font-bold">Custom</span> tab to enter metadata by hand.</p>`;
@@ -6939,28 +6971,36 @@ async function metaSearch(){
       </button>`;
     }).join("");
   }catch(_){
-    if(epItemId===itemId) box.innerHTML=`<p class="text-red-400 text-sm text-center py-8">Search failed.</p>`;
+    if(_epStillOpen(itemId, seriesKey)) box.innerHTML=`<p class="text-red-400 text-sm text-center py-8">Search failed.</p>`;
   }
 }
 
+// Endpoint for a metadata write — the series-wide fan-out in merged mode, else
+// the single item. Both accept the same MetadataSetReq body.
+function _epMetaSetUrl(){
+  return epSeriesKey
+    ? `/api/library/series/${encodeURIComponent(epSeriesKey)}/metadata/set`
+    : `/api/library/${epItemId}/metadata/set`;
+}
+
 async function metaPick(tmdbId, kind){
-  const itemId=epItemId;
+  const seriesKey=epSeriesKey, itemId=epItemId, url=_epMetaSetUrl();
   try{
-    const r=await fetch(`/api/library/${itemId}/metadata/set`,{
+    const r=await fetch(url,{
       method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({mode:"tmdb", tmdb_id:tmdbId, kind}),
     });
     const d=await r.json().catch(()=>({}));
-    if(epItemId!==itemId) return;
+    if(!_epStillOpen(itemId, seriesKey)) return;
     if(!r.ok){ showAlert(d.detail||"Could not apply that match.","error"); return; }
     _applyMetaResult(d, "Metadata updated.");
   }catch(_){
-    if(epItemId===itemId) showAlert("Could not apply that match.","error");
+    if(_epStillOpen(itemId, seriesKey)) showAlert("Could not apply that match.","error");
   }
 }
 
 async function metaSaveCustom(){
-  const itemId=epItemId;
+  const seriesKey=epSeriesKey, itemId=epItemId, url=_epMetaSetUrl();
   const title=document.getElementById("metaCustTitle").value.trim();
   if(!title){ showAlert("A title is required.","warn"); return; }
   const ratingRaw=document.getElementById("metaCustRating").value.trim();
@@ -6977,16 +7017,16 @@ async function metaSaveCustom(){
   const btn=document.getElementById("metaCustSaveBtn");
   btn.disabled=true;
   try{
-    const r=await fetch(`/api/library/${itemId}/metadata/set`,{
+    const r=await fetch(url,{
       method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify(payload),
     });
     const d=await r.json().catch(()=>({}));
-    if(epItemId!==itemId) return;
+    if(!_epStillOpen(itemId, seriesKey)) return;
     if(!r.ok){ showAlert(d.detail||"Could not save.","error"); return; }
     _applyMetaResult(d, "Custom metadata saved.");
   }catch(_){
-    if(epItemId===itemId) showAlert("Could not save.","error");
+    if(_epStillOpen(itemId, seriesKey)) showAlert("Could not save.","error");
   }finally{
     btn.disabled=false;
   }
@@ -6994,15 +7034,21 @@ async function metaSaveCustom(){
 
 // Shared repaint after a manual pick or custom save — mirrors renameSeries().
 function _applyMetaResult(d, msg){
+  try { _libPosterCache.clear(); } catch(_) {}   // art may have changed — drop cached poster URLs
+  loadLibrary();            // refresh the library grouping label / poster
+  closeMetaFix();
+  showAlert(msg,"success");
+  if(epSeriesKey){
+    // Every member was re-bound; re-open so the merged view re-runs its
+    // all-seasons TMDb enrichment (the response only carries one member's seasons).
+    openSeriesPage(epSeriesKey, epHeroTitle);
+    return;
+  }
   epMetadata=d.metadata||null;
   if(d.img_base) epMetaImgBase=d.img_base;
   renderEpHero(_epCurrentName());
   renderEpSeasonTabs();
   renderEpList();
-  try { _libPosterCache.clear(); } catch(_) {}   // art may have changed — drop cached poster URLs
-  loadLibrary();            // refresh the library grouping label / poster
-  closeMetaFix();
-  showAlert(msg,"success");
 }
 
 // On-Demand Stream Only toggle (episode page). When ON, on-device playback streams
@@ -7031,23 +7077,27 @@ function _renderEpOndemandBtn(){
 
 async function toggleEpOndemandOnly(btn){
   if(epOndemandLocked) return;            // disabled; admin-locked
-  const itemId=epItemId;
+  const seriesKey=epSeriesKey, itemId=epItemId;
   const next=!epOndemandOnly;
+  const url=seriesKey
+    ? `/api/library/series/${encodeURIComponent(seriesKey)}/ondemand-only`
+    : `/api/library/${itemId}/ondemand-only`;
   if(next && !confirm("Make this show on-demand stream only?\n\nIts on-device bundles will be deleted to free space, and no permanent files will be kept. On-device playback uses the just-in-time stream instead. Playing on the TV is unaffected.\n\nProceed?")) return;
   btn.disabled=true;
   try{
-    const r=await fetch(`/api/library/${itemId}/ondemand-only`,{
+    const r=await fetch(url,{
       method:"POST",headers:{"Content-Type":"application/json"},
       body:JSON.stringify({enabled:next}),
     });
     const d=await r.json().catch(()=>({}));
-    if(epItemId!==itemId) return;         // navigated away mid-request
+    if(!_epStillOpen(itemId, seriesKey)) return;   // navigated away mid-request
     if(!r.ok){ showAlert(d.detail||"Could not change setting.","error"); btn.disabled=false; return; }
     epOndemandOnly=next;
     _renderEpOndemandBtn();
-    showAlert(next?(d.purging?"On-demand only enabled — freeing disk space.":"On-demand only enabled."):"On-demand only disabled.","success");
+    const skipped=(d.skipped_locked||0)>0 ? ` (${d.skipped_locked} locked skipped)` : "";
+    showAlert((next?(d.purging?"On-demand only enabled — freeing disk space.":"On-demand only enabled."):"On-demand only disabled.")+skipped,"success");
   }catch(_){
-    if(epItemId===itemId){ showAlert("Could not change setting.","error"); btn.disabled=false; }
+    if(_epStillOpen(itemId, seriesKey)){ showAlert("Could not change setting.","error"); btn.disabled=false; }
   }
 }
 
@@ -16538,6 +16588,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.9.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.10.1</div>
 </body>
 </html>

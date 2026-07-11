@@ -7323,6 +7323,10 @@ class OndemandOnlyLockReq(BaseModel):
     locked: bool                                # True ⇒ non-admin dashboard users can't change the on-demand-only flag
 
 
+class SeriesLockReq(BaseModel):
+    locked: bool                                # series-wide on-demand-only lock (series key is in the path)
+
+
 class OndemandOnlyUserReq(BaseModel):
     enabled: bool                               # user-facing toggle (item id is in the path); honours the admin lock
 
@@ -7734,6 +7738,9 @@ async def get_series_files(request: Request, series_key: str,
     meta = next((it.get("metadata") for it in members if it.get("metadata")), None)
     resume = find_series_resume_hint(members, profile_id) if profile_id else None
 
+    # Series-level on-demand-only state so the merged-series episode page can
+    # render its toggle: "on" only when EVERY member is on-demand-only; "locked"
+    # when ANY member is admin-locked (a non-admin then can't flip the group).
     return JSONResponse({
         "series_key": series_key,
         "title": title,
@@ -7743,6 +7750,8 @@ async def get_series_files(request: Request, series_key: str,
         "metadata": meta,
         "img_base": LOCAL_IMG_BASE,
         "hls_available": HLS_AVAILABLE,
+        "ondemand_only": all(it.get("ondemand_only") for it in members),
+        "ondemand_only_locked": any(it.get("ondemand_only_locked") for it in members),
     })
 
 
@@ -8109,6 +8118,73 @@ async def set_item_metadata(item_id: str,
     if not item:
         raise HTTPException(404, "Item not found.")
     item["metadata"] = data
+    await put_library(lib)
+    return JSONResponse({"ok": True, "metadata": data,
+                         "img_base": LOCAL_IMG_BASE})
+
+
+@app.post("/api/library/series/{series_key}/metadata/set")
+async def set_series_metadata(series_key: str,
+                              req: MetadataSetReq) -> JSONResponse:
+    """Series-wide metadata correction — fans `metadata/set` across every member of
+    a merged series (a show whose episodes were downloaded as separate single-episode
+    items). Same two modes and pinning as the per-item `set_item_metadata`, applied to
+    all members so the whole show re-binds together. Not admin-gated (same audience as
+    `/rename`). Returns the representative (first member's) metadata for the UI to paint."""
+    if req.mode == "tmdb":
+        if not await _tmdb_effective_key():
+            raise HTTPException(400, "TMDb API key is not configured.")
+        if not req.tmdb_id or req.kind not in ("tv", "movie"):
+            raise HTTPException(400, "tmdb_id and kind ('tv'|'movie') are required.")
+        lib = await get_library()
+        member_ids = [it["id"] for it in _items_for_series_key(lib, series_key)]
+        if not member_ids:
+            raise HTTPException(404, "Series not found.")
+        rep_data = None
+        for mid in member_ids:
+            # Force-bind the chosen TMDb entry on every member (each pins
+            # source="manual"; all resolve the same show-level metadata).
+            d = await _fetch_item_metadata(
+                mid, force=True,
+                override_tmdb_id=req.tmdb_id, override_kind=req.kind,
+            )
+            if rep_data is None:
+                rep_data = d
+        if not rep_data:
+            raise HTTPException(404, "Could not load that TMDb entry.")
+        return JSONResponse({"ok": True, "metadata": rep_data,
+                             "img_base": LOCAL_IMG_BASE})
+
+    if req.mode != "custom":
+        raise HTTPException(400, "mode must be 'tmdb' or 'custom'.")
+
+    title = (req.title or "").strip()
+    if not title:
+        raise HTTPException(400, "A title is required for custom metadata.")
+
+    genres = [g.strip() for g in (req.genres or []) if g and g.strip()]
+    year = (req.year or "").strip()
+    data = {
+        "source":        "custom",
+        "tmdb_kind":     req.kind if req.kind in ("tv", "movie") else "",
+        "title":         title,
+        "overview":      (req.overview or "").strip(),
+        "poster_url":    (req.poster_url or "").strip(),
+        "backdrop_url":  (req.backdrop_url or "").strip(),
+        "first_air_date": year,
+        "vote_average":  float(req.vote_average) if req.vote_average else 0,
+        "genres":        genres,
+        "seasons":       {},
+        "fetched_at":    _now_iso(),
+    }
+
+    lib = await get_library()
+    members = _items_for_series_key(lib, series_key)
+    if not members:
+        raise HTTPException(404, "Series not found.")
+    for it in members:
+        # dict() so each member owns its own copy (they diverge over time, e.g. seasons).
+        it["metadata"] = dict(data)
     await put_library(lib)
     return JSONResponse({"ok": True, "metadata": data,
                          "img_base": LOCAL_IMG_BASE})
@@ -14020,17 +14096,42 @@ async def admin_hls_resync(request: Request, body: HlsResyncReq) -> JSONResponse
 
 @app.get("/api/admin/ondemand-only")
 async def admin_get_ondemand_only(request: Request) -> JSONResponse:
-    """List every library item with its on-demand-only flag (for the Storage tab)."""
+    """List shows (grouped by series) with their on-demand-only + lock flags for the
+    Storage tab. Episodes downloaded individually collapse into ONE row keyed by
+    `series_key`, so the admin toggles / locks the whole show at once instead of
+    episode-by-episode (matching the merged-series dashboard). A season pack or an
+    untagged item is its own single-item row (`item:<id>` key). Each row carries the
+    member `item_ids[]` and aggregate flags: `ondemand_only`/`ondemand_only_locked`
+    are true only when EVERY member is on/locked; the `*_mixed` flags mark a partial
+    state so the UI can show it."""
     _require_admin(request)
     lib = await get_library()
+    order: list[str] = []
+    groups: dict[str, dict] = {}
+    for it in lib.get("items", []):
+        key = _series_key(it)
+        g = groups.get(key)
+        if g is None:
+            g = groups[key] = {"series_key": key, "title": "", "item_ids": [],
+                               "file_count": 0, "on": [], "locked": []}
+            order.append(key)
+        if not g["title"]:
+            g["title"] = (it.get("series") or "").strip() or it.get("title", "")
+        g["item_ids"].append(it.get("id", ""))
+        g["file_count"] += sum(1 for f in it.get("files", [])
+                               if Path(f.get("path", "")).suffix.lower() in VIDEO_EXTS)
+        g["on"].append(bool(it.get("ondemand_only")))
+        g["locked"].append(bool(it.get("ondemand_only_locked")))
     items = [{
-        "id": it.get("id", ""),
-        "title": it.get("title", ""),
-        "ondemand_only": bool(it.get("ondemand_only")),
-        "ondemand_only_locked": bool(it.get("ondemand_only_locked")),
-        "file_count": sum(1 for f in it.get("files", [])
-                          if Path(f.get("path", "")).suffix.lower() in VIDEO_EXTS),
-    } for it in lib.get("items", [])]
+        "series_key": g["series_key"],
+        "title": g["title"],
+        "item_ids": g["item_ids"],
+        "file_count": g["file_count"],
+        "ondemand_only": all(g["on"]),
+        "ondemand_only_mixed": any(g["on"]) and not all(g["on"]),
+        "ondemand_only_locked": all(g["locked"]),
+        "ondemand_only_locked_mixed": any(g["locked"]) and not all(g["locked"]),
+    } for g in (groups[k] for k in order)]
     return JSONResponse({"items": items, "hls_available": HLS_AVAILABLE})
 
 
@@ -14159,6 +14260,26 @@ async def admin_set_ondemand_only_lock(request: Request, body: OndemandOnlyLockR
     return JSONResponse({"ok": True, "ondemand_only_locked": bool(body.locked)})
 
 
+@app.post("/api/admin/series/{series_key}/ondemand-only-lock")
+async def admin_set_series_ondemand_only_lock(series_key: str, body: SeriesLockReq,
+                                              request: Request) -> JSONResponse:
+    """Series-wide on-demand-only lock — sets `ondemand_only_locked` on **every**
+    member of a merged show so the admin locks/unlocks the whole show in one action
+    (bulk-downloaded episodes render as one row in the Storage tab). Admin only.
+    A season pack / untagged item is its own single-member series (`item:<id>` key),
+    so this also drives the single-row case. Returns the count applied."""
+    _require_admin(request)
+    lib = await get_library()
+    members = _items_for_series_key(lib, series_key)
+    if not members:
+        raise HTTPException(404, "Series not found.")
+    for it in members:
+        it["ondemand_only_locked"] = bool(body.locked)
+    await put_library(lib)
+    return JSONResponse({"ok": True, "ondemand_only_locked": bool(body.locked),
+                         "applied": len(members)})
+
+
 @app.post("/api/library/{item_id}/ondemand-only")
 async def set_ondemand_only(item_id: str, body: OndemandOnlyUserReq,
                             request: Request) -> JSONResponse:
@@ -14172,6 +14293,35 @@ async def set_ondemand_only(item_id: str, body: OndemandOnlyUserReq,
     if item.get("ondemand_only_locked") and not _check_admin(request):
         raise HTTPException(403, "This setting is locked by the administrator.")
     return JSONResponse(await _apply_ondemand_only(item_id, body.enabled))
+
+
+@app.post("/api/library/series/{series_key}/ondemand-only")
+async def set_series_ondemand_only(series_key: str, body: OndemandOnlyUserReq,
+                                   request: Request) -> JSONResponse:
+    """Series-wide on-demand-only toggle for the merged-series episode page. Fans
+    `_apply_ondemand_only` across every member of the series. Members that are
+    admin-locked (`ondemand_only_locked`) are **skipped** for non-admins rather than
+    failing the whole call — so a partly-locked show still toggles the rest. Returns
+    the count applied and skipped. Raises 404 if the series has no members, or 403
+    only when EVERY member is locked (nothing the requester may change)."""
+    is_admin = _check_admin(request)
+    lib = await get_library()
+    members = _items_for_series_key(lib, series_key)
+    if not members:
+        raise HTTPException(404, "Series not found.")
+
+    changeable = [it["id"] for it in members
+                  if is_admin or not it.get("ondemand_only_locked")]
+    skipped_locked = len(members) - len(changeable)
+    if not changeable:
+        raise HTTPException(403, "This setting is locked by the administrator.")
+
+    for mid in changeable:
+        # _apply_ondemand_only re-reads/persists the library per call (and rebuilds
+        # state.ondemand_only_items), so looping is safe and self-consistent.
+        await _apply_ondemand_only(mid, body.enabled)
+    return JSONResponse({"ok": True, "ondemand_only": bool(body.enabled),
+                         "applied": len(changeable), "skipped_locked": skipped_locked})
 
 
 @app.get("/api/admin/cache-autopurge")

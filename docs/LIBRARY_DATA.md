@@ -202,6 +202,8 @@ PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "so
 
 **`series` is the cohesion key.** `_series_key(item)` = `series:<lowercased series>` (or `item:<id>` when empty) groups items into one show. The grouped-search download flow tags every episode/pack of a show with `series = <show title>` (no trailing season), so episodes downloaded individually **collapse into one library tile** and play as one merged, cross-item show. `GET /api/library` surfaces `series_key` per item; `GET /api/library/series/{key}` returns the merged, item-tagged file list + a series-level resume hint (`find_series_resume_hint`). A season-pack download is still a single multi-file item; a show can mix pack items and single-episode items under the same `series`. See [BACKEND.md](BACKEND.md) § merged series and [GOTCHAS.md](GOTCHAS.md) § cross-item series playback.
 
+**Series-wide management fans across members.** Rename, Fix-Metadata, and On-Demand-Only are per-item operations, but a merged show (many single-episode items) can invoke them across the whole group: `/rename` already loops the group; `POST /api/library/series/{key}/metadata/set` writes each member's `metadata` (respecting `manual`/`custom` pins); `POST /api/library/series/{key}/ondemand-only` flips `ondemand_only` on every member the caller may change (admin-locked members are skipped, not errored). `GET /api/library/series/{key}` exposes aggregate `ondemand_only` (all members on) / `ondemand_only_locked` (any member locked) for the toggle's state. (ZIP "Download selected" stays per-item — it can't span items.)
+
 ### `pending_download` (restart-recovery params)
 
 ```jsonc

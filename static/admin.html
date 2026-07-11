@@ -3337,27 +3337,43 @@ function _renderOndemandOnly(d){
   if(unavail) unavail.classList.toggle("hidden", d.hls_available !== false);
   const items = (d && d.items) || [];
   if(!items.length){ list.innerHTML = `<div class="text-gray-600">No library items yet.</div>`; return; }
+  // Rows are grouped by series (bulk-downloaded episodes = one row), so the lock
+  // and on-demand toggles fan across every member of the show at once.
   list.innerHTML = items.map(it=>{
-    const on = !!it.ondemand_only;
-    const locked = !!it.ondemand_only_locked;
+    const on = !!it.ondemand_only, onMixed = !!it.ondemand_only_mixed;
+    const locked = !!it.ondemand_only_locked, lockMixed = !!it.ondemand_only_locked_mixed;
+    const key = escHtml(it.series_key || "");
+    const sub = [
+      `${it.file_count} file${it.file_count===1?'':'s'}`,
+      on ? 'on-demand only — no permanent files' : (onMixed ? 'on-demand: some episodes' : ''),
+      locked ? 'locked for users' : (lockMixed ? 'partially locked' : ''),
+    ].filter(Boolean).join(' · ');
+    // Lock button: unlock only when fully locked; otherwise (unlocked OR mixed) lock all.
+    const lockNext = !locked;                 // fully-locked → unlock; else lock all
+    const lockLbl = locked ? '🔒 Locked' : (lockMixed ? '🔓 Partial' : 'Unlocked');
+    const lockCls = locked ? 'bg-amber-600 border-amber-500 text-white'
+                  : lockMixed ? 'bg-amber-900/40 border-amber-700 text-amber-300 hover:text-white'
+                  : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white';
+    // On-demand button: turn off only when fully on; otherwise (off OR mixed) turn all on.
+    const onNext = !on;                        // fully-on → off; else on all
+    const onLbl = on ? 'On-Demand Only' : (onMixed ? 'Mixed' : 'Off');
+    const onCls = on ? 'bg-indigo-600 border-indigo-500 text-white'
+                : onMixed ? 'bg-indigo-900/40 border-indigo-700 text-indigo-300 hover:text-white'
+                : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white';
     return `<div class="flex items-center justify-between gap-3 border border-gray-800 bg-gray-950/40 px-3 py-2">
       <div class="min-w-0">
         <div class="text-gray-300 font-bold break-all">${escHtml(it.title || "(untitled)")}</div>
-        <div class="text-[10px] text-gray-600">${it.file_count} file${it.file_count===1?'':'s'}${on?' · on-demand only — no permanent files':''}${locked?' · locked for users':''}</div>
+        <div class="text-[10px] text-gray-600">${escHtml(sub)}</div>
       </div>
       <div class="flex-shrink-0 flex items-center gap-2">
-        <button onclick="toggleOndemandLock('${escHtml(it.id)}', ${locked?'false':'true'}, this)"
-          title="${locked?'Unlock — let dashboard users change this':'Lock — stop dashboard users changing this'}"
-          class="text-xs font-bold uppercase tracking-wide px-3 py-1.5 border transition-colors ${locked
-            ? 'bg-amber-600 border-amber-500 text-white'
-            : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white'}">
-          ${locked ? '🔒 Locked' : 'Unlocked'}
+        <button onclick="toggleOndemandLock('${key}', ${lockNext}, this)"
+          title="${locked?'Unlock — let dashboard users change this':'Lock — stop dashboard users changing this'+(lockMixed?' (locks all episodes)':'')}"
+          class="text-xs font-bold uppercase tracking-wide px-3 py-1.5 border transition-colors ${lockCls}">
+          ${lockLbl}
         </button>
-        <button onclick="toggleOndemandOnly('${escHtml(it.id)}', ${on?'false':'true'}, this)"
-          class="text-xs font-bold uppercase tracking-wide px-3 py-1.5 border transition-colors ${on
-            ? 'bg-indigo-600 border-indigo-500 text-white'
-            : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white'}">
-          ${on ? 'On-Demand Only' : 'Off'}
+        <button onclick="toggleOndemandOnly('${key}', ${onNext}, this)"
+          class="text-xs font-bold uppercase tracking-wide px-3 py-1.5 border transition-colors ${onCls}">
+          ${onLbl}
         </button>
       </div>
     </div>`;
@@ -3372,36 +3388,39 @@ async function loadOndemandOnly(){
   }catch(_){}
 }
 
-async function toggleOndemandOnly(itemId, enabled, btn){
+// seriesKey is the row's series_key (a merged show, or `item:<id>` for a lone
+// item). Both toggles fan across every member server-side via the series endpoints.
+async function toggleOndemandOnly(seriesKey, enabled, btn){
   if(enabled && !confirm("Make this show on-demand stream only?\n\nIts existing on-device bundles will be deleted to free space, and no permanent files will be built going forward. On-device playback uses the just-in-time stream instead. Playing on the TV (VLC) is unaffected.\n\nProceed?")) return;
-  await withInflight("ondemand_only_"+itemId, btn, async ()=>{
+  await withInflight("ondemand_only_"+seriesKey, btn, async ()=>{
     try{
-      const r = await fetch("/api/admin/ondemand-only",{
+      // Admin (authHeader) bypasses per-episode locks; applies to every member.
+      const r = await fetch(`/api/library/series/${encodeURIComponent(seriesKey)}/ondemand-only`,{
         method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
-        body: JSON.stringify({item_id: itemId, enabled}),
+        body: JSON.stringify({enabled}),
       });
       const d = await r.json().catch(()=>({}));
       if(!r.ok){ showToast(`Failed: ${d.detail || r.status}`, true); return; }
-      if(enabled && d.purging){
-        showToast("On-demand only enabled — reclaiming disk space in the background.");
-      } else {
-        showToast(enabled ? "On-demand only enabled." : "On-demand only disabled.");
-      }
+      const n = d.applied || 0;
+      showToast(enabled ? `On-demand only enabled (${n} item${n===1?'':'s'}) — reclaiming disk in the background.`
+                        : `On-demand only disabled (${n} item${n===1?'':'s'}).`);
       loadOndemandOnly();
     }catch(_){ showToast("Failed.", true); }
   });
 }
 
-async function toggleOndemandLock(itemId, locked, btn){
-  await withInflight("ondemand_lock_"+itemId, btn, async ()=>{
+async function toggleOndemandLock(seriesKey, locked, btn){
+  await withInflight("ondemand_lock_"+seriesKey, btn, async ()=>{
     try{
-      const r = await fetch("/api/admin/ondemand-only-lock",{
+      const r = await fetch(`/api/admin/series/${encodeURIComponent(seriesKey)}/ondemand-only-lock`,{
         method:"POST", headers:{...authHeader(),"Content-Type":"application/json"},
-        body: JSON.stringify({item_id: itemId, locked}),
+        body: JSON.stringify({locked}),
       });
       const d = await r.json().catch(()=>({}));
       if(!r.ok){ showToast(`Failed: ${d.detail || r.status}`, true); return; }
-      showToast(locked ? "Locked — users can't change this." : "Unlocked — users can change this.");
+      const n = d.applied || 0;
+      showToast(locked ? `Locked ${n} item${n===1?'':'s'} — users can't change this.`
+                       : `Unlocked ${n} item${n===1?'':'s'} — users can change this.`);
       loadOndemandOnly();
     }catch(_){ showToast("Failed.", true); }
   });
