@@ -340,7 +340,17 @@ Key decisions:
   > instance; a resize "nudge" on the video's `resize`/`loadeddata`/`playing`
   > events un-sticks an overlay constructed before `videoWidth` was known; and a
   > `TextTrackList` `change` enforcer keeps every VTT `<track>` disabled while
-  > the overlay is up. **Loopback bundles (7.17.1, both players):** when the
+  > the overlay is up. **Cue-clearing clock pump (9.10.3):** libass only *erases*
+  > a finished cue when its worker re-renders past the cue's end, and the worker
+  > re-renders continuously only while it thinks the video is *playing*. Because
+  > the overlay is built after the ~3 MB wasm loads (often after `playing`
+  > already fired) and the worker also self-pauses on its own "no currentTime for
+  > > 5 s" watchdog whenever `timeupdate` gaps (iOS/HLS ManagedMediaSource does
+  > this routinely), a finished styled cue could stay painted until the *next*
+  > cue — up to a minute over a quiet stretch. `_lpOctopusPumpStart` runs a
+  > 250 ms interval while the overlay is up that re-asserts the real play/paused
+  > state and feeds `currentTime`, so the 5 s watchdog never trips and cues erase
+  > on time (stopped by `_lpTeardownOctopus`). **Loopback bundles (7.17.1, both players):** when the
   > ass/fonts live on the loopback `LocalMediaServer` (a downloaded copy), the
   > page prefetches them on the main thread and passes octopus `subContent` +
   > `blob:` font URLs — the worker's own sync-XHR fetch of a loopback URL is a

@@ -3382,6 +3382,7 @@ let lp = {
   octopus: null,          // active SubtitlesOctopus (libass) overlay instance, null when off
   _octopusSub: null,      // subUrl the overlay is rendering OR building (dedup guard; see _lpOctopusSeq)
   _octopusBlobUrls: null, // blob: font URLs created for a device-copy overlay (revoked on teardown)
+  _octopusPump: null,     // setInterval feeding the libass worker the video clock (clears finished cues; see _lpOctopusPumpStart)
   pendingAudioIdx: 0,     // applied on MANIFEST_PARSED / loadedmetadata
   pendingSubtitleIdx: -1, // -1 = off, integer = bundle idx, "sidecar:N" = on-disk sidecar idx
   // True when the active subtitle was AUTO-applied AI (not a deliberate pick) —
@@ -14783,10 +14784,48 @@ async function _lpApplyStyledSub(s) {
   try {
     lp.octopus = new SO(opts);
     _lpOctopusNudge();   // size + paint now if the video is already dimensioned
+    _lpOctopusPumpStart();  // keep the worker clock fed so finished cues clear
   } catch (_) {
     lp.octopus = null;
     fallbackToVtt();
   }
+}
+
+// Feed the libass worker the video clock on a fixed ~250 ms cadence while an
+// overlay is up. SubtitlesOctopus only ERASES a finished cue when its worker
+// re-renders past that cue's end time, and the worker re-renders continuously
+// only while it believes the video is *playing* (`setIsPaused(false)`, fired by
+// the <video>'s `playing` event). Two things break that erase, both leaving the
+// last cue painted until the NEXT cue forces a fresh render — "the sub stays on
+// screen, sometimes for a minute" over a quiet stretch:
+//   1. The instance is constructed AFTER the ~3 MB wasm downloads, often *after*
+//      `playing` already fired, so `onPlaying` is missed and the worker sits in
+//      its initial paused state — re-rendering only once per browser `timeupdate`.
+//   2. Even when free-running, the worker self-pauses via its own watchdog
+//      ("Didn't receive currentTime > 5 seconds. Assuming video was paused.")
+//      whenever `timeupdate` messages gap — which iOS/HLS (ManagedMediaSource)
+//      does routinely, for many seconds.
+// Both make cue-clearing hostage to the browser's irregular `timeupdate` cadence.
+// This pump removes that dependency: it re-asserts the real play/paused state
+// (idempotent — the lib no-ops when unchanged) and pushes `currentTime` so the
+// 5 s watchdog never trips and the worker keeps erasing cues on time. 250 ms is
+// well inside the 5 s window and cheap (one postMessage per tick). Stopped by
+// _lpTeardownOctopus.
+function _lpOctopusPumpStart() {
+  _lpOctopusPumpStop();
+  const v = document.getElementById("lpVideo");
+  if (!v || !lp.octopus) return;
+  lp._octopusPump = setInterval(() => {
+    if (!lp.octopus) { _lpOctopusPumpStop(); return; }
+    try {
+      lp.octopus.setIsPaused(!!v.paused, v.currentTime);
+      lp.octopus.setCurrentTime(v.currentTime);
+    } catch (_) {}
+  }, 250);
+}
+
+function _lpOctopusPumpStop() {
+  if (lp._octopusPump) { clearInterval(lp._octopusPump); lp._octopusPump = null; }
 }
 
 // Re-size (and thereby re-paint) the live libass overlay. The vendored lib
@@ -14810,6 +14849,7 @@ function _lpOctopusNudge() {
 // renders ghost ASS forever — cheap insurance).
 function _lpTeardownOctopus() {
   _lpOctopusSeq++;
+  _lpOctopusPumpStop();
   lp._octopusSub = null;
   if (lp.octopus) {
     try { lp.octopus.dispose(); } catch (_) {}
@@ -16588,6 +16628,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.10.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.10.3</div>
 </body>
 </html>
