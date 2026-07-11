@@ -1587,7 +1587,12 @@
       </div>
       <div class="min-w-0 flex-1 flex flex-col justify-end">
         <h1 id="ssTitle" class="text-lg sm:text-2xl font-black uppercase tracking-wide leading-tight min-w-0"></h1>
-        <p id="ssMetaLine" class="text-[10px] sm:text-xs text-gray-400 uppercase tracking-widest mt-1"></p>
+        <div class="flex items-center gap-2 mt-1 flex-wrap">
+          <p id="ssMetaLine" class="text-[10px] sm:text-xs text-gray-400 uppercase tracking-widest"></p>
+          <span id="ssLoading" class="hidden items-center gap-1 text-[10px] sm:text-xs text-indigo-300 uppercase tracking-widest">
+            <svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg>Loading details…
+          </span>
+        </div>
         <p id="ssOverview" class="text-xs sm:text-sm text-gray-300 mt-2 line-clamp-3 sm:line-clamp-4"></p>
       </div>
     </div>
@@ -9132,6 +9137,7 @@ let _ssKind="";                 // "tv"/"movie" when opened from TMDb; "" = Jack
 let _ssBroadResults=null;       // cached shaped /api/search results for the open show (shared by the pack + episode Search buttons)
 let _ssPacksSearched=false;     // has the user run "Search packs" yet (distinguishes "not searched" from "none found")
 let _ssEpisodesSearched=false;  // ditto for the single-episodes broad search
+let _ssMetaLoading=false;       // true while the initial TMDb lookup (art + season/episode skeleton) is in flight
 
 function _ssBuildEpisodes(results){
   const map=new Map();
@@ -9186,6 +9192,27 @@ function _ssEpName(season,episode){
   return ep?(ep.name||""):"";
 }
 
+// Toggle the loading state while the (often multi-second) initial TMDb lookup —
+// poster/backdrop + the season/episode skeleton — is in flight, so a click
+// doesn't look like a no-op and an empty content area doesn't read as "done,
+// nothing found". Shows a hero badge AND (via _ssRenderBody) a body spinner
+// wherever the eps/seasons list would otherwise be empty.
+function _ssSetLoading(on){
+  _ssMetaLoading=on;
+  const el=document.getElementById("ssLoading");
+  if(el) el.classList.toggle("hidden", !on), el.classList.toggle("inline-flex", on);
+  _ssRenderBody();
+}
+
+// Body placeholder shown while the initial metadata load is in flight and the
+// section has nothing to list yet.
+function _ssLoadingBodyHtml(){
+  return `<div class="flex flex-col items-center gap-3 py-12 px-4 text-center">
+      <svg class="w-6 h-6 animate-spin text-indigo-400" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg>
+      <p class="text-gray-500 text-sm uppercase tracking-widest">Loading seasons &amp; episodes…</p>
+    </div>`;
+}
+
 async function openSearchShow(group){
   _ssGroup=group; _ssMeta=null; _ssSearching.clear();
   _ssKind=""; _ssBroadResults=null; _ssPacksSearched=(group.results||[]).length>0;
@@ -9209,6 +9236,7 @@ async function openSearchShow(group){
   document.getElementById("searchShowPage").classList.remove("hidden");
   document.body.style.overflow="hidden";
   _ssRender();
+  _ssSetLoading(true);
 
   // Lazy TMDb lookup (poster/backdrop/overview/episode titles).
   try{
@@ -9224,6 +9252,7 @@ async function openSearchShow(group){
       }
     }
   }catch(_){}
+  finally{ if(_ssGroup===group) _ssSetLoading(false); }
 }
 
 // TMDb-first entry: open the show page from a TMDb candidate the user picked.
@@ -9251,6 +9280,7 @@ async function openSearchShowFromTmdb(cand){
   document.getElementById("searchShowPage").classList.remove("hidden");
   document.body.style.overflow="hidden";
   _ssRender();
+  _ssSetLoading(true);
 
   // Fetch the exact TMDb entry by id (poster/backdrop/overview + season/episode
   // skeleton) so the page shows a full show layout before any indexer is hit.
@@ -9267,13 +9297,14 @@ async function openSearchShowFromTmdb(cand){
       }
     }
   }catch(_){}
+  finally{ if(_ssGroup===group) _ssSetLoading(false); }
 }
 
 function closeSearchShow(){
   document.getElementById("searchShowPage").classList.add("hidden");
   ssCloseSourceSheet(); ssCloseBulkSheet();
   document.body.style.overflow="";
-  _ssGroup=null; _ssMeta=null; _ssKind=""; _ssBroadResults=null;
+  _ssGroup=null; _ssMeta=null; _ssKind=""; _ssBroadResults=null; _ssMetaLoading=false;
 }
 
 // Alternative titles for the open show (an anime's romaji name, etc.), from the
@@ -9491,9 +9522,13 @@ function _ssRenderEpisodes(){
            class="text-[11px] px-2.5 py-1 bg-amber-700 hover:bg-amber-600 text-white uppercase tracking-wide transition-colors">Find sources</button>
        </div>` : "";
 
-  // Empty: distinguish "haven't searched yet" (prompt to search — don't dump the
-  // TMDb skeleton) from "searched, found nothing".
-  const empty=_ssEpisodesSearched
+  // Empty: while the initial TMDb skeleton is still loading, show a spinner
+  // instead of the search prompt (which reads as "done, nothing here"). Then
+  // distinguish "haven't searched yet" (prompt to search — don't dump the TMDb
+  // skeleton) from "searched, found nothing".
+  const empty=_ssMetaLoading
+    ? _ssLoadingBodyHtml()
+    : _ssEpisodesSearched
     ? `<p class="text-center text-gray-600 text-sm py-10">No single episodes found.</p>`
     : `<div class="flex flex-col items-center gap-3 py-12 px-4 text-center">
          <p class="text-gray-500 text-sm">Search your indexers for downloadable episodes.</p>
@@ -9657,7 +9692,9 @@ function _ssRenderPacks(){
     // Distinguish "haven't searched yet" (TMDb-first, before the user tapped
     // Search packs) from "searched, found nothing".
     const label=_ssKind==="movie"?"sources":"packs";
-    body.innerHTML=_ssPacksSearched
+    body.innerHTML=_ssMetaLoading
+      ? _ssLoadingBodyHtml()
+      : _ssPacksSearched
       ? `<p class="text-center text-gray-600 text-sm py-10">No ${label} found for this show.</p>`
       : `<div class="flex flex-col items-center gap-3 py-12 px-4 text-center">
            <p class="text-gray-500 text-sm">Search your indexers for downloadable ${label}.</p>
@@ -16501,6 +16538,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.9.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.9.3</div>
 </body>
 </html>
