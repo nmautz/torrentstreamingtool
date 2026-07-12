@@ -14757,6 +14757,19 @@ async function _lpApplyStyledSub(s) {
     fonts: (lp.fonts || []).map(f => lp.subBase + f),
     fallbackFont: "/vendor/libass-fallback-font.ttf",
     workerUrl: "/vendor/subtitles-octopus-worker.js",
+    // Force the "js-blend" renderer (stock libass `renderImage()` + libass's own
+    // detect_change) instead of the DEFAULT "wasm-blend" (`renderBlend()`). A
+    // STATIONARY cue posts a canvas exactly twice — when it appears and when it
+    // ends (the "now empty" frame) — so its clear hinges on that single
+    // end-of-cue post firing. renderBlend does NOT reliably flag the transition
+    // to an empty frame as `changed`, so the empty post never happens and the
+    // cue stays painted until the NEXT cue forces a fresh render (up to a whole
+    // minute over a quiet stretch). MOVING cues are immune — they post a canvas
+    // every frame, so their end is always caught. libass's own detect_change
+    // flags the disappearance correctly, so js-blend clears stationary cues on
+    // time. Slightly more main-thread compositing than wasm-blend; correctness
+    // wins. See GOTCHAS.md. (The clock pump below fixes a separate freeze.)
+    renderMode: "js-blend",
     // Worker death (it disposes itself right after this callback): drop our
     // handle and show the flattened VTT instead of silently losing subs.
     onError: () => { if (attempt === _lpOctopusSeq) { lp.octopus = null; fallbackToVtt(); } },
@@ -16628,6 +16641,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.11.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.11.1</div>
 </body>
 </html>

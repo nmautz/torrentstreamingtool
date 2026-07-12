@@ -350,7 +350,14 @@ Key decisions:
   > cue — up to a minute over a quiet stretch. `_lpOctopusPumpStart` runs a
   > 250 ms interval while the overlay is up that re-asserts the real play/paused
   > state and feeds `currentTime`, so the 5 s watchdog never trips and cues erase
-  > on time (stopped by `_lpTeardownOctopus`). **Loopback bundles (7.17.1, both players):** when the
+  > on time (stopped by `_lpTeardownOctopus`). **Stationary-cue renderer (9.11.1):**
+  > the pump wasn't enough for *stationary* cues — libass only erases a cue when
+  > its worker *posts* a "now empty" frame, and the default `wasm-blend` renderer
+  > (`renderBlend()`) doesn't reliably flag that empty transition as changed, so a
+  > stationary cue's single end-of-cue post never fired and it lingered until the
+  > next cue (moving cues post every frame, so they were fine). The overlay is now
+  > built with `renderMode:"js-blend"` (stock libass `renderImage()` + libass's own
+  > `detect_change`), which clears stationary cues on time. **Loopback bundles (7.17.1, both players):** when the
   > ass/fonts live on the loopback `LocalMediaServer` (a downloaded copy), the
   > page prefetches them on the main thread and passes octopus `subContent` +
   > `blob:` font URLs — the worker's own sync-XHR fetch of a loopback URL is a
