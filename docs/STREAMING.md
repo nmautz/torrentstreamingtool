@@ -357,7 +357,15 @@ Key decisions:
   > stationary cue's single end-of-cue post never fired and it lingered until the
   > next cue (moving cues post every frame, so they were fine). The overlay is now
   > built with `renderMode:"js-blend"` (stock libass `renderImage()` + libass's own
-  > `detect_change`), which clears stationary cues on time. **Loopback bundles (7.17.1, both players):** when the
+  > `detect_change`), which clears stationary cues on time. **Synchronous draw —
+  > the real fix (9.11.2):** on-device it turned out the worker was fine (rendering
+  > continuously) but the canvas wasn't being *repainted* — opening devtools
+  > cleared a stuck cue. The vendored `subtitles-octopus.js` drew each frame from a
+  > `window.requestAnimationFrame` callback, and a playing `<video>` starves the
+  > page's rAF, so a stationary cue's lone end-of-cue draw sat un-serviced. We
+  > **patched the lib** (`renderCanvas`/`renderFastCanvas` → draw synchronously in
+  > the worker-message handler; grep `StreamLink patch`) — re-apply after any
+  > SubtitlesOctopus upgrade. **Loopback bundles (7.17.1, both players):** when the
   > ass/fonts live on the loopback `LocalMediaServer` (a downloaded copy), the
   > page prefetches them on the main thread and passes octopus `subContent` +
   > `blob:` font URLs — the worker's own sync-XHR fetch of a loopback URL is a

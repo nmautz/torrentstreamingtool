@@ -1335,7 +1335,22 @@ var SubtitlesOctopus = function (options) {
                         if (self.lastRenderTime < data.time) {
                             self.lastRenderTime = data.time;
                             self.renderFramesData = data;
-                            window.requestAnimationFrame(renderFrames);
+                            // StreamLink patch: draw SYNCHRONOUSLY, not via
+                            // window.requestAnimationFrame. While a <video> is
+                            // actively presenting frames, the page's rAF
+                            // callbacks get starved/coalesced, so a STATIONARY
+                            // cue's single "now empty" draw (posted once, at the
+                            // cue's end) sat on an un-serviced rAF and the stale
+                            // subtitle stayed painted until some unrelated event
+                            // (devtools resize, a tap, the next cue) forced a
+                            // repaint — "sub lingers until the next one, up to a
+                            // minute." Moving cues masked it by posting a fresh
+                            // frame every tick. The worker message runs on a
+                            // normal task (not rAF-gated), and a canvas-2D draw
+                            // done here still composites on the video's own
+                            // frame cadence, so drawing inline clears cues on
+                            // time. See docs/GOTCHAS.md.
+                            renderFrames();
                         }
                         break;
                     }
@@ -1343,7 +1358,7 @@ var SubtitlesOctopus = function (options) {
                         if (self.lastRenderTime < data.time) {
                             self.lastRenderTime = data.time;
                             self.renderFramesData = data;
-                            window.requestAnimationFrame(renderFastFrames);
+                            renderFastFrames();   // StreamLink patch: synchronous draw (see renderCanvas above)
                         }
                         break;
                     }
