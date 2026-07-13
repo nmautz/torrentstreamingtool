@@ -4,6 +4,7 @@ import asyncio
 import base64
 import gzip
 import hashlib
+import html as _html
 import io
 import json
 import logging
@@ -1724,6 +1725,7 @@ def _strip_release_tags(name: str) -> str:
         r"\b(2160p|1080p|720p|480p|4K|UHD|BluRay|BDRip|BRRip|DVDRip|WEB-?DL|WEBRip|"
         r"HDTV|HDR|HDR10|HEVC|x264|x265|H\.?264|H\.?265|AAC|AC3|DTS|FLAC|EAC3|"
         r"REMUX|REPACK|PROPER|EXTENDED|UNRATED|MULTi|DUAL|SUBBED|DUBBED|BATCH|"
+        r"VOSTFR|SUBFRENCH|\d{1,2}[ -]?bit|"
         r"COMPLETE|S\d{1,2}|Season\s*\d{1,2}|E\d{1,3})\b.*",
         " ", s, flags=re.IGNORECASE,
     )
@@ -1892,6 +1894,7 @@ async def _tmdb_fetch_tv(show_id: int, seasons: list[int]) -> dict:
         "tmdb_id":       show_id,
         "tmdb_kind":     "tv",
         "title":         details.get("name") or "",
+        "original_language": details.get("original_language") or "",
         "original_title": details.get("original_name") or "",
         "aka":           akas,
         "overview":      details.get("overview") or "",
@@ -1914,6 +1917,7 @@ async def _tmdb_fetch_movie(movie_id: int) -> dict:
         "tmdb_id":       movie_id,
         "tmdb_kind":     "movie",
         "title":         details.get("title") or "",
+        "original_language": details.get("original_language") or "",
         "original_title": details.get("original_title") or "",
         "aka":           akas,
         "overview":      details.get("overview") or "",
@@ -2626,6 +2630,10 @@ _TT_COMPLETE_SERIES_RE = re.compile(r"\bComplete\s+(?:Series|Pack|Collection)\b"
 # EP1168", "Naruto 121 (..."). Only consulted when NO S/E or season marker exists.
 # Dash / EP are strong fansub signals (1-4 digits); a bare trailing number needs
 # 3-4 digits so "Ocean's 11" (a movie) isn't read as an episode.
+# Absolute-episode-range batch ("One Piece 001-574", "One Piece 1094-1099") —
+# the long-running-anime bulk form. Requires a 3+-digit upper bound so year
+# spans and small number pairs never match; validated further at the use site.
+_TT_EP_RANGE_RE    = re.compile(r"\b(\d{1,4})\s*[-~]\s*(\d{3,4})(?!\d)")
 _TT_ABS_EP_RE      = re.compile(r"\b[Ee][Pp]\s?(\d{1,4})\b")                       # EP1168
 _TT_ABS_DASH_RE    = re.compile(r"\s-\s+(\d{1,4})(?!\d)")                          # Show - 121
 # Size tags ("1.85GB", "700 MB", "2 GB") — stripped before structural parsing so a
@@ -2657,12 +2665,14 @@ def parse_torrent_title(title: str) -> dict:
         season      episode/season kinds: the season number (0 otherwise)
         episode     episode kind: episode number (absolute-numbered anime → season 1)
         season_from/season_to  multiseason kind: inclusive season range (0 = "complete")
+        ep_from/ep_to  multiseason kind only: absolute-episode-range batch
+                       ("One Piece 001-574"; 0 when the pack is season-based)
         year        detected release year (or None)
     The show name is the text *before* the first structural marker, run through
     _strip_release_tags — this is what separates e.g. a "Better Call Saul S06E11
     Breaking Bad" or "Moonshiners S15E12 Braking Badly" hit out of a search for
     "breaking bad" into their own groups instead of polluting the show."""
-    raw = title or ""
+    raw = _html.unescape(title or "")   # Jackett titles can carry &amp; etc.
     norm = re.sub(r"[._]+", " ", raw)
     norm = re.sub(r"\s+", " ", norm).strip()
     # Drop size tags so "- 1.85GB" / "- 700 MB" aren't misread as absolute episodes.
@@ -2671,7 +2681,7 @@ def parse_torrent_title(title: str) -> dict:
     ym = _YEAR_RE.search(norm)
     year = int(ym.group(0)) if ym else None
 
-    season = episode = season_from = season_to = 0
+    season = episode = season_from = season_to = ep_from = ep_to = 0
     abs_marker_pos = None   # where to cut the show name for an absolute-numbered ep
 
     ep_m    = _TT_EP_RE.search(norm) or _TT_EP_X_RE.search(norm)
@@ -2735,13 +2745,28 @@ def parse_torrent_title(title: str) -> dict:
                         if not (1900 <= n <= 2099) and n not in _TT_RES_NUMS:
                             kind, episode = "episode", n
             else:
-                am = (_TT_ABS_EP_RE.search(norm) or _TT_ABS_DASH_RE.search(norm)
-                      or _TT_ABS_TAIL_RE.search(norm))
-                if am:
-                    n = int(am.group(1))
-                    if not (1900 <= n <= 2099) and n not in _TT_RES_NUMS:
-                        kind, season, episode = "episode", 1, n
-                        abs_marker_pos = am.start()   # cut before " - " / "EP" / the number
+                # Absolute-episode-range batch ("One Piece 001-574") — must be
+                # tested before the single abs-episode forms, whose " - NNN"
+                # would otherwise read the range's upper bound as one episode.
+                rm = _TT_EP_RANGE_RE.search(norm)
+                if rm:
+                    a_, b_ = int(rm.group(1)), int(rm.group(2))
+                    if (b_ <= a_ or b_ < 100
+                            or (1900 <= a_ <= 2099 and 1900 <= b_ <= 2099)
+                            or (a_ in _TT_RES_NUMS and b_ in _TT_RES_NUMS)):
+                        rm = None
+                if rm is not None:
+                    kind = "multiseason"     # an episodes batch is a pack
+                    ep_from, ep_to = int(rm.group(1)), int(rm.group(2))
+                    abs_marker_pos = rm.start()
+                else:
+                    am = (_TT_ABS_EP_RE.search(norm) or _TT_ABS_DASH_RE.search(norm)
+                          or _TT_ABS_TAIL_RE.search(norm))
+                    if am:
+                        n = int(am.group(1))
+                        if not (1900 <= n <= 2099) and n not in _TT_RES_NUMS:
+                            kind, season, episode = "episode", 1, n
+                            abs_marker_pos = am.start()   # cut before " - " / "EP" / the number
                 if kind is None:
                     kind = "movie"
 
@@ -2766,13 +2791,19 @@ def parse_torrent_title(title: str) -> dict:
     # ("Frieren: Beyond Journey's End" / "Frieren Beyond Journeys End") land in
     # one group instead of fragmenting by scene-name styling.
     show_key = re.sub(r"\s+", " ", re.sub(r"[^\w\s]+", "", show.lower())).strip()
+    # …and ignores CJK decoration when a Latin name remains ("DanDaDan ダンダダン"
+    # groups with "Dandadan"; a purely-CJK title keeps its CJK key).
+    ascii_key = re.sub(r"\s+", " ", re.sub(r"[^\x00-\x7f]+", " ", show_key)).strip()
+    if len(re.sub(r"[^a-z0-9]", "", ascii_key)) >= 3:
+        show_key = ascii_key
     show_key = _TT_EXT_RE.sub("", show_key)                       # drop a trailing .mkv etc
     show_key = _TT_TRAIL_YEAR_RE.sub("", show_key).strip()        # "inception 2010" ⇒ "inception"
 
     return {
         "show": show, "show_key": show_key, "kind": kind,
         "season": season, "episode": episode,
-        "season_from": season_from, "season_to": season_to, "year": year,
+        "season_from": season_from, "season_to": season_to,
+        "ep_from": ep_from, "ep_to": ep_to, "year": year,
     }
 
 
@@ -2783,18 +2814,30 @@ def parse_torrent_title(title: str) -> dict:
 # seeder sort is blind to this — an English-dub household bulk-grabbing a season
 # gets a language lottery. Classify each release title so the UI can badge
 # sources and the auto-picker can honour an audio preference.
-# "MULTi" (no sub suffix) is the multi-audio scene tag; "Multi-Subs" is not.
-_AUD_DUAL_RE = re.compile(
-    r"\b(?:dual|multi)[ ._-]?audio\b|\bdual\b|\bmulti\b(?![ ._-]?subs?)", re.IGNORECASE)
-_AUD_DUB_RE  = re.compile(r"\bdub(?:bed|s)?\b", re.IGNORECASE)
-_AUD_SUB_RE  = re.compile(
-    r"\bmulti[ ._-]?subs?\b|\bsubbed\b|\beng(?:lish)?[ ._-]?subs?\b", re.IGNORECASE)
+# "MULTi" (no sub suffix) is a multi-*language* scene tag, but it does NOT
+# imply English — the French scene uses it for FR+original (Tsundere-Raws) —
+# so it's resolved contextually in _parse_release_audio, not treated as dual
+# outright. Explicit Dual/Multi-Audio and bare DUAL do imply English.
+_AUD_DUAL_RE  = re.compile(r"\b(?:dual|multi)[ ._-]?audio\b|\bdual\b", re.IGNORECASE)
+_AUD_MULTI_RE = re.compile(r"\bmulti\b(?![ ._-]?subs?)", re.IGNORECASE)
+_AUD_DUB_RE   = re.compile(r"\bdub(?:bed|s)?\b", re.IGNORECASE)
+# "Multiple Subtitle" is the Erai-raws batch form whose bracketed language list
+# ([ENG][POR-BR]…) describes SUBS, not audio — it must win over those tokens.
+_AUD_SUB_RE   = re.compile(
+    r"\bmulti(?:ple)?[ ._-]?sub(?:title)?s?\b|\bsubbed\b|\beng(?:lish)?[ ._-]?subs?\b",
+    re.IGNORECASE)
+# English *audio* evidence ("ENG-ITA", "[Eng-Hindi-Tam-Tel]", "AUDIO #1 ENGLISH")
+# — checked only after eng-subs phrases are stripped, so "ENG SUBS" never counts.
+_AUD_ENG_RE      = re.compile(r"\beng(?:lish)?\b", re.IGNORECASE)
+_AUD_ENG_SUB_RE  = re.compile(r"\beng(?:lish)?[ ._-]?sub(?:title)?s?\b", re.IGNORECASE)
+# Release groups whose language is known but untagged in the title.
+_AUD_FRENCH_GROUP_RE = re.compile(r"tsundere[ ._-]?raws", re.IGNORECASE)
 # Token → display language for non-English tags. Deliberately conservative —
 # only unambiguous full words / well-known scene tags (no "GER"/"SPA"/"POR"
 # abbreviations that collide with title words).
 _AUD_LANGS = {
     "french": "French", "truefrench": "French", "vf": "French", "vff": "French",
-    "vfq": "French", "vostfr": "French subs",
+    "vfq": "French", "vostfr": "French subs", "subfrench": "French subs",
     "ita": "Italian", "italian": "Italian",
     "spanish": "Spanish", "castellano": "Spanish", "latino": "Latino",
     "german": "German", "hindi": "Hindi", "tamil": "Tamil", "telugu": "Telugu",
@@ -2807,25 +2850,45 @@ _AUD_LANGS = {
 
 def _parse_release_audio(title: str) -> tuple:
     """Classify a release title's audio → ``(audio, lang)``:
-        "dual"  – dual/multi-audio (carries original *and* English audio)
-        "other" – a non-English language tag (foreign dub/subs); ``lang`` names it
+        "dual"  – carries original *and* English audio (Dual/Multi-Audio, DUAL,
+                  or an explicit English token alongside foreign ones: ENG-ITA)
+        "other" – non-English language tag(s), no English audio; ``lang`` names it
         "dub"   – English dub
         "sub"   – explicitly subtitled (original audio)
         ""      – no language markers (plain English content, or an untagged
                   fansub release — original audio + English subs for anime)
-    Precedence: dual > other > dub > sub. A foreign tag next to "dub"
-    ("ArabicDub", "Korean Dub") must not read as an English dub."""
+    Precedence: dual > other > dub > sub, with two context rules: a foreign tag
+    next to "dub" ("ArabicDub", "Korean Dub") must not read as an English dub,
+    and a multi-SUB marker means the language tokens describe subtitles
+    (Erai-raws "[Multiple Subtitle] [ENG][POR-BR]…" is original audio + subs,
+    not an English/Portuguese release)."""
     t = re.sub(r"[._]+", " ", title or "").lower()
     t = re.sub(r"\b([a-z]{3,})dub\b", r"\1 dub", t)   # split fused "arabicdub"
     toks = set(re.sub(r"[^a-z0-9]+", " ", t).split())
+    langs = sorted({v for k, v in _AUD_LANGS.items() if k in toks})
+    sub_marked = bool(_AUD_SUB_RE.search(t))
+    # English *audio* token — strip eng-subs phrases first so they don't count.
+    eng_audio = bool(_AUD_ENG_RE.search(_AUD_ENG_SUB_RE.sub(" ", t)))
     if _AUD_DUAL_RE.search(t):
         return "dual", ""
-    langs = sorted({v for k, v in _AUD_LANGS.items() if k in toks})
+    if _AUD_FRENCH_GROUP_RE.search(t):
+        # Known French release group: its MULTi/Multi-Subs releases are
+        # FR+original audio, no English — the sub-marker rule must not fire.
+        return "other", "French"
     if langs:
+        if sub_marked and not _AUD_DUB_RE.search(t):
+            return "sub", ""          # the language tokens are the subs list
+        if eng_audio:
+            return "dual", "/".join(langs)   # multi-language incl. English
         return "other", "/".join(langs)
+    if _AUD_MULTI_RE.search(t):
+        # Bare "MULTi" with no language context: multi-audio from an English-
+        # facing scene (ToonsHub) — treat as dual. (Foreign MULTi carries its
+        # own language tokens/group names and is caught above.)
+        return "dual", ""
     if _AUD_DUB_RE.search(t):
         return "dub", ""
-    if _AUD_SUB_RE.search(t):
+    if sub_marked:
         return "sub", ""
     return "", ""
 
@@ -10191,6 +10254,7 @@ def _group_search_results(shaped: list, query: str,
         er.update({
             "kind": p["kind"], "season": p["season"], "episode": p["episode"],
             "season_from": p["season_from"], "season_to": p["season_to"],
+            "ep_from": p["ep_from"], "ep_to": p["ep_to"],
             "rel": round(rel, 3),
             "audio": aud, "audio_lang": aud_lang,
         })
@@ -10203,6 +10267,12 @@ def _group_search_results(shaped: list, query: str,
                 "kinds": {"episode": 0, "season": 0, "multiseason": 0, "movie": 0},
                 "results": [],
             }
+        # Prefer a clean Latin display title once one appears — CJK-decorated
+        # variants ("DanDaDan ダンダダン") share the key but make a noisy card.
+        if (p["show"] and g["title"] != p["show"]
+                and any(ord(ch) > 127 for ch in g["title"])
+                and all(ord(ch) <= 127 for ch in p["show"])):
+            g["title"] = p["show"]
         g["results"].append(er)
         g["torrent_count"] += 1
         g["seeders_max"] = max(g["seeders_max"], r.get("seeders", 0))

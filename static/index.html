@@ -9203,15 +9203,25 @@ let _ssMetaLoading=false;       // true while the initial TMDb lookup (art + sea
 // lottery. "any" = off; "eng" = English audio; "sub" = original audio + subs.
 let _ssAudioPref=localStorage.getItem("streamlink_audio_pref")||"any";
 
+// Is the open show originally in English? TMDb metadata carries
+// original_language ("en"/"ja"/"es"…); null = unknown (no TMDb match/key).
+function _ssOrigEnglish(){
+  const ol=(_ssMeta&&_ssMeta.original_language)||"";
+  return ol?ol==="en":null;
+}
+
 // Does a source satisfy the audio preference? Dual/multi-audio carries both the
-// original and English tracks, so it satisfies everyone. Untagged ("") counts
-// for "sub" (fansub releases default to original audio + subs; plain English
-// content has no marker either way) but not for "eng" — an untagged anime
-// episode is almost certainly not English-audio.
+// original and English tracks, so it satisfies everyone. Untagged ("") and
+// subbed releases depend on the show's ORIGINAL language: for an English-
+// original show (Breaking Bad) untagged/subbed *is* English audio — the titles
+// never say "English" because it's implied — while for anime untagged means
+// original audio. Unknown original language falls back to English (the common
+// case outside anime, and anime virtually always has TMDb metadata here).
 function _ssAudioMatch(s){
   const a=(s&&s.audio)||"";
   if(_ssAudioPref==="any") return true;
-  if(_ssAudioPref==="eng") return a==="dual"||a==="dub";
+  if(_ssAudioPref==="eng")
+    return a==="dual"||a==="dub"||((a===""||a==="sub")&&_ssOrigEnglish()!==false);
   return a==="dual"||a==="sub"||a==="";
 }
 
@@ -9783,6 +9793,7 @@ async function ssFindMissing(season){
 }
 
 function _ssPackLabel(p){
+  if(p.ep_from) return `Episodes ${p.ep_from}–${p.ep_to||p.ep_from}`;   // abs-numbered batch
   if(p.kind==="multiseason") return p.season_from?`Seasons ${p.season_from}–${p.season_to||p.season_from}`:"Complete series";
   if(p.kind==="season") return `Season ${p.season}`;
   return "Movie / other";
@@ -10026,6 +10037,7 @@ function _ssBestPackForScope(){
   const seasons=_ssSeasonsWithEpisodes();
   const cand=_ssPacks.filter(p=>{
     if(typeof p.rel==="number"&&p.rel<0.7) return false;
+    if(p.ep_from) return false;   // abs-episode batch — coverage unverifiable
     if(p.kind==="season")
       return (want==="all")?(seasons.length<=1):(p.season===want);
     if(p.kind==="multiseason"){
@@ -16814,6 +16826,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.12.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.12.1</div>
 </body>
 </html>
