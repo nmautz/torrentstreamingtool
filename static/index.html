@@ -1606,6 +1606,10 @@
       class="py-2.5 text-xs font-black uppercase tracking-wide tab-inactive">Season Packs</button>
   </div>
 
+  <!-- Audio-language preference (shown only when the results mix audio variants
+       — dub / dual-audio / foreign — i.e. anime and foreign content) -->
+  <div id="ssAudioChips" class="hidden flex-shrink-0 px-3 sm:px-5 py-2 border-b border-gray-800 flex gap-1.5 items-center flex-wrap"></div>
+
   <!-- Episode tools: search + bulk-download + season tabs (episodes section only) -->
   <div id="ssEpisodesTools" class="hidden flex-shrink-0">
     <div class="px-3 sm:px-5 py-2 border-b border-gray-800 flex gap-1.5 items-center flex-wrap">
@@ -9190,6 +9194,69 @@ let _ssPacksSearched=false;     // has the user run "Search packs" yet (distingu
 let _ssEpisodesSearched=false;  // ditto for the single-episodes broad search
 let _ssMetaLoading=false;       // true while the initial TMDb lookup (art + season/episode skeleton) is in flight
 
+// ── Audio-language preference ────────────────────────────────────────────────
+// Anime (and foreign content) results mix audio variants — original+subs
+// fansubs, English DUBBED, Dual/Multi-Audio, foreign dubs (ArabicDub, VOSTFR…).
+// The backend classifies each release (`audio` ∈ dual|dub|sub|other|"" +
+// `audio_lang`); this device-local preference steers source ordering, the bulk
+// Auto picker and pack ranking so a dub household never bulk-grabs a language
+// lottery. "any" = off; "eng" = English audio; "sub" = original audio + subs.
+let _ssAudioPref=localStorage.getItem("streamlink_audio_pref")||"any";
+
+// Does a source satisfy the audio preference? Dual/multi-audio carries both the
+// original and English tracks, so it satisfies everyone. Untagged ("") counts
+// for "sub" (fansub releases default to original audio + subs; plain English
+// content has no marker either way) but not for "eng" — an untagged anime
+// episode is almost certainly not English-audio.
+function _ssAudioMatch(s){
+  const a=(s&&s.audio)||"";
+  if(_ssAudioPref==="any") return true;
+  if(_ssAudioPref==="eng") return a==="dual"||a==="dub";
+  return a==="dual"||a==="sub"||a==="";
+}
+
+// Best-seeded source that satisfies the audio preference (sources are already
+// seeder-sorted); falls back to the raw best when nothing matches.
+function _ssPreferredSource(sources){
+  return (sources&&(sources.find(_ssAudioMatch)||sources[0]))||null;
+}
+
+// Square Metro badge for a source's audio class ("" → no badge).
+function _ssAudioBadgeHtml(s){
+  const a=(s&&s.audio)||"";
+  const base="text-[9px] font-black uppercase tracking-wide px-1.5 py-0.5 whitespace-nowrap";
+  if(a==="dual")  return `<span class="${base} bg-emerald-900/60 text-emerald-300">Dual Audio</span>`;
+  if(a==="dub")   return `<span class="${base} bg-sky-900/60 text-sky-300">Eng Dub</span>`;
+  if(a==="sub")   return `<span class="${base} bg-gray-800 text-gray-400">Subs</span>`;
+  if(a==="other") return `<span class="${base} bg-amber-900/60 text-amber-300">${escHtml((s.audio_lang||"Other"))}</span>`;
+  return "";
+}
+
+// Chips only appear when the loaded results actually mix audio variants —
+// a plain English show never shows them (nothing to choose).
+function _ssHasAudioVariety(){
+  const tagged=s=>s.audio==="dual"||s.audio==="dub"||s.audio==="other";
+  return _ssPacks.some(tagged)||_ssEpisodes.some(e=>e.sources.some(tagged));
+}
+
+function ssSetAudioPref(v){
+  _ssAudioPref=v;
+  try{ localStorage.setItem("streamlink_audio_pref",v); }catch(_){}
+  _ssPacks.sort(_ssPackCmp);   // pref participates in pack ranking
+  _ssRenderBody();
+}
+
+function _ssRenderAudioChips(){
+  const el=document.getElementById("ssAudioChips"); if(!el) return;
+  if(!_ssGroup||!_ssHasAudioVariety()){ el.classList.add("hidden"); el.innerHTML=""; return; }
+  const chip=(v,label)=>`<button onclick="ssSetAudioPref('${v}')"
+    class="text-[10px] px-2.5 py-1.5 uppercase tracking-wide transition-colors min-h-[30px]
+           ${_ssAudioPref===v?"bg-indigo-600 text-white":"bg-gray-800 text-gray-400 hover:bg-gray-700"}">${label}</button>`;
+  el.innerHTML=`<span class="text-[9px] font-bold uppercase tracking-widest text-gray-500">Audio</span>`
+    +chip("any","Any")+chip("eng","English")+chip("sub","Original + Subs");
+  el.classList.remove("hidden");
+}
+
 function _ssBuildEpisodes(results){
   const map=new Map();
   results.filter(r=>r.kind==="episode").forEach(r=>{
@@ -9414,6 +9481,14 @@ async function ssSearchShowEpisodes(btn){
   try{
     const results=await _ssBroadSearch();
     if(_ssGroup!==grp) return;
+    // The broad query is shared with "Search packs" — bucket the non-episode
+    // results too, so the bulk sheet can recommend a season pack (and the
+    // Packs tab is ready) without a second tap.
+    const packs=results.filter(r=>r.kind!=="episode");
+    const havePk=new Set(_ssPacks.map(p=>p.magnet));
+    packs.forEach(p=>{ if(!havePk.has(p.magnet)){ _ssPacks.push(p); havePk.add(p.magnet); } });
+    _ssPacks.sort(_ssPackCmp);
+    if(packs.length) _ssPacksSearched=true;
     const eps=_ssBuildEpisodes(results);
     // Merge into any episodes already found (per-episode Find), dedup by magnet.
     eps.forEach(ne=>{
@@ -9519,6 +9594,7 @@ function ssSwitchSection(sec){ _ssSection=sec; _ssRender(); }
 function ssSwitchSeason(s){ _ssSeason=s; _ssRenderBody(); }
 
 function _ssRenderBody(){
+  _ssRenderAudioChips();
   if(_ssSection==="packs"){ _ssRenderPacks(); return; }
   _ssRenderEpisodes();
 }
@@ -9595,18 +9671,24 @@ function _ssRenderEpisodes(){
 }
 
 function _ssEpRowHtml(e){
-  const best=e.sources[0];
+  // Headline the best source that satisfies the audio preference, not the raw
+  // seeder-best — a dub watcher sees the dub row's stats, not the fansub's.
+  const best=_ssPreferredSource(e.sources);
   const code=`S${String(e.season).padStart(2,"0")}E${String(e.episode).padStart(2,"0")}`;
   const name=_ssEpName(e.season,e.episode);
   const sc=best.seeders>30?"text-green-400":best.seeders>8?"text-yellow-400":"text-red-400";
+  const badge=_ssAudioBadgeHtml(best);
+  const miss=(_ssAudioPref!=="any"&&!_ssAudioMatch(best))
+    ?`<span class="text-[9px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-red-950/70 text-red-400 whitespace-nowrap">${_ssAudioPref==="eng"?"No Eng audio":"Dub only"}</span>`:"";
   return `<button onclick="ssOpenSourceSheet(${e.season},${e.episode})"
     class="w-full text-left px-3 sm:px-5 py-3 hover:bg-gray-800/50 transition-colors flex items-center gap-3">
     <div class="text-[11px] font-mono font-bold text-indigo-400 w-14 flex-shrink-0">${code}</div>
     <div class="min-w-0 flex-1">
       <p class="text-sm text-gray-200 truncate">${name?escHtml(name):`Episode ${e.episode}`}</p>
-      <p class="text-[11px] text-gray-500">
+      <p class="text-[11px] text-gray-500 flex items-center gap-1.5 flex-wrap">
         <span class="font-mono font-semibold ${sc}">${best.seeders} ↑</span> ·
         ${escHtml(best.size_human)} · ${e.sources.length} source${e.sources.length>1?"s":""}
+        ${badge}${miss}
       </p>
     </div>
     <svg class="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -9706,13 +9788,24 @@ function _ssPackLabel(p){
   return "Movie / other";
 }
 
-// Rank downloads by title relevance to the searched title first, then seeders.
-// A raw seeder sort floats a high-seed *unrelated* release (one that merely
-// shares a franchise word — e.g. a new "Star Wars" film under an older one's
-// page) above the release the user actually opened. `rel` comes from the backend
-// (_title_relevance); absent ⇒ 0 so everything falls back to a pure seeder sort.
+// Rank downloads by title relevance to the searched title first, then the
+// audio preference, then seeders. A raw seeder sort floats a high-seed
+// *unrelated* release (one that merely shares a franchise word — e.g. a new
+// "Star Wars" film under an older one's page) above the release the user
+// actually opened. `rel` comes from the backend (_title_relevance); absent ⇒ 0
+// so everything falls back to a pure seeder sort. Relevance is compared in
+// coarse 0.25 buckets so the audio preference can outrank a small rel edge
+// (a Dual-Audio pack at 0.9 beats a subbed one at 1.0 for a dub household)
+// while an actually-unrelated release (rel ≤ 0.5) can never float up just for
+// carrying a DUB tag.
 function _ssPackCmp(a,b){
   const ra=(typeof a.rel==="number")?a.rel:0, rb=(typeof b.rel==="number")?b.rel:0;
+  const ka=Math.round(ra*4), kb=Math.round(rb*4);
+  if(kb!==ka) return kb-ka;
+  if(_ssAudioPref!=="any"){
+    const ma=_ssAudioMatch(a)?1:0, mb=_ssAudioMatch(b)?1:0;
+    if(mb!==ma) return mb-ma;
+  }
   if(rb!==ra) return rb-ra;
   return (b.seeders||0)-(a.seeders||0);
 }
@@ -9722,11 +9815,13 @@ function _ssRenderPacks(){
   const body=document.getElementById("ssBody");
   body.innerHTML=`<div class="divide-y divide-gray-800">`+_ssPacks.map((p,i)=>{
     const sc=p.seeders>30?"text-green-400":p.seeders>8?"text-yellow-400":"text-red-400";
+    const dim=(_ssAudioPref!=="any"&&!_ssAudioMatch(p))?" opacity-50":"";
     return `<button onclick="ssDownloadPack(${i})"
-      class="w-full text-left px-3 sm:px-5 py-3 hover:bg-gray-800/50 transition-colors flex items-center gap-3">
+      class="w-full text-left px-3 sm:px-5 py-3 hover:bg-gray-800/50 transition-colors flex items-center gap-3${dim}">
       <div class="min-w-0 flex-1">
-        <div class="flex items-center gap-2 mb-0.5">
+        <div class="flex items-center gap-2 mb-0.5 flex-wrap">
           <span class="text-[10px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-indigo-900/60 text-indigo-300">${escHtml(_ssPackLabel(p))}</span>
+          ${_ssAudioBadgeHtml(p)}
         </div>
         <p class="text-sm text-gray-200 truncate">${escHtml(p.title)}</p>
         <p class="text-[11px] text-gray-500">
@@ -9773,14 +9868,22 @@ function ssOpenSourceSheet(season,episode){
   const name=_ssEpName(season,episode);
   document.getElementById("ssSourceTitle").textContent=code+(name?` — ${name}`:"");
   const list=document.getElementById("ssSourceList");
-  list.innerHTML=e.sources.map((s,i)=>{
+  // Preference-matching sources first (each bucket stays seeder-sorted);
+  // non-matching ones render dimmed below. Original indices are kept so
+  // ssPickSource keeps addressing e.sources directly.
+  const rows=e.sources.map((s,i)=>({s,i}));
+  if(_ssAudioPref!=="any") rows.sort((a,b)=>(_ssAudioMatch(b.s)?1:0)-(_ssAudioMatch(a.s)?1:0));
+  list.innerHTML=rows.map(({s,i})=>{
     const sc=s.seeders>30?"text-green-400":s.seeders>8?"text-yellow-400":"text-red-400";
+    const dim=(_ssAudioPref!=="any"&&!_ssAudioMatch(s))?" opacity-50":"";
+    const badge=_ssAudioBadgeHtml(s);
     return `<button onclick="ssPickSource(${season},${episode},${i})"
-      class="w-full text-left p-3 bg-gray-950 hover:bg-gray-800 border border-gray-800 hover:border-indigo-700 transition-colors">
+      class="w-full text-left p-3 bg-gray-950 hover:bg-gray-800 border border-gray-800 hover:border-indigo-700 transition-colors${dim}">
       <p class="text-xs text-gray-200 line-clamp-2 mb-1">${escHtml(s.title)}</p>
-      <p class="text-[11px] text-gray-500">
+      <p class="text-[11px] text-gray-500 flex items-center gap-1.5 flex-wrap">
         <span class="font-mono font-semibold ${sc}">${s.seeders} ↑</span> · ${escHtml(s.size_human)}
         ${s.tracker?` · <span class="text-gray-600">${escHtml(s.tracker)}</span>`:""}
+        ${badge}
       </p>
     </button>`;
   }).join("");
@@ -9842,6 +9945,23 @@ function _ssRenderBulkChoose(){
   };
   const n=_ssBulkEpisodesInScope().length;
   const f=_ssBulkFilters;
+  // A matching season pack is usually the better grab: one torrent, one
+  // consistent release (audio/subs/quality) — recommend it above the per-
+  // episode modes instead of hiding it on the other tab.
+  const rec=_ssBestPackForScope();
+  const recHtml=rec?`
+    <div class="p-3 bg-indigo-950/50 border border-indigo-800">
+      <p class="text-[10px] font-black uppercase tracking-widest text-indigo-300 mb-1">Season pack available</p>
+      <p class="text-xs text-gray-200 line-clamp-2">${escHtml(rec.title)}</p>
+      <p class="text-[11px] text-gray-500 mt-1 flex items-center gap-1.5 flex-wrap">
+        <span class="text-[10px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-indigo-900/60 text-indigo-300">${escHtml(_ssPackLabel(rec))}</span>
+        ${_ssAudioBadgeHtml(rec)}
+        <span class="font-mono font-semibold ${rec.seeders>30?"text-green-400":rec.seeders>8?"text-yellow-400":"text-red-400"}">${rec.seeders} ↑</span> · ${escHtml(rec.size_human)}
+      </p>
+      <p class="text-[10px] text-gray-500 mt-1.5">One download, consistent quality and audio across every episode — usually better than grabbing episodes one by one.</p>
+      <button onclick="ssBulkUsePack()"
+        class="mt-2 w-full bg-indigo-600 hover:bg-indigo-500 py-2.5 text-xs font-black uppercase tracking-wide min-h-[40px]">Download the pack instead</button>
+    </div>`:"";
   body.innerHTML=`
     <div>
       <p class="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Scope</p>
@@ -9851,6 +9971,7 @@ function _ssRenderBulkChoose(){
       </div>
     </div>
     <p class="text-xs text-gray-500">${n} episode${n===1?"":"s"} in scope.</p>
+    ${recHtml}
     <div>
       <p class="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Auto-pick limits (optional)</p>
       <div class="grid grid-cols-3 gap-2">
@@ -9873,7 +9994,7 @@ function _ssRenderBulkChoose(){
             class="bg-gray-950 border border-gray-800 text-xs text-gray-200 py-1.5 px-2 min-w-0"/>
         </label>
       </div>
-      <p class="text-[10px] text-gray-600 mt-1.5">Applies to Auto only. Seeders win over size — if no source fits the size range, the best-seeded one that clears the seeder floor is used anyway; if nothing clears the floor, the best-seeded source is used.</p>
+      <p class="text-[10px] text-gray-600 mt-1.5">Applies to Auto only. The Audio preference wins over everything (an episode with any matching-language source never falls back to another language); then seeders win over size — if no source fits the size range, the best-seeded one that clears the seeder floor is used anyway; if nothing clears the floor, the best-seeded source is used.</p>
     </div>
     <div>
       <p class="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">How should sources be picked?</p>
@@ -9881,7 +10002,7 @@ function _ssRenderBulkChoose(){
         <button onclick="ssBulkAuto()"
           class="text-left p-3 bg-gray-950 border border-gray-800 hover:border-indigo-700 hover:bg-gray-800 transition-colors">
           <p class="text-sm font-black uppercase tracking-wide text-indigo-300">Auto — best seeded within limits</p>
-          <p class="text-[11px] text-gray-500 mt-0.5">Grab the best-seeded torrent that fits the limits above for every episode.</p>
+          <p class="text-[11px] text-gray-500 mt-0.5">Honours the Audio preference first, then grabs the best-seeded torrent that fits the limits above for every episode.</p>
         </button>
         <button onclick="_ssRenderBulkManual()"
           class="text-left p-3 bg-gray-950 border border-gray-800 hover:border-indigo-700 hover:bg-gray-800 transition-colors">
@@ -9895,16 +10016,52 @@ function _ssRenderBulkChoose(){
 }
 function _ssSetBulkScope(v){ _ssBulkScope=(v==="all")?"all":parseInt(v); _ssRenderBulkChoose(); }
 
+// Best season/multi-season pack covering the current bulk scope — the "one
+// download beats N episode grabs" recommendation. Only plausibly-relevant packs
+// (rel ≥ 0.7 — the downloads list carries every group from the broad search,
+// including franchise siblings) qualify; preference-matching packs win, then
+// _ssPackCmp (relevance bucket → audio pref → seeders) picks the best.
+function _ssBestPackForScope(){
+  const want=_ssBulkScope;
+  const seasons=_ssSeasonsWithEpisodes();
+  const cand=_ssPacks.filter(p=>{
+    if(typeof p.rel==="number"&&p.rel<0.7) return false;
+    if(p.kind==="season")
+      return (want==="all")?(seasons.length<=1):(p.season===want);
+    if(p.kind==="multiseason"){
+      const from=p.season_from||0, to=p.season_to||from;
+      if(!from) return true;                       // "Complete series"
+      if(want==="all") return seasons.every(s=>s>=from&&s<=to);
+      return want>=from&&want<=to;
+    }
+    return false;
+  });
+  if(!cand.length) return null;
+  const pref=cand.filter(_ssAudioMatch);
+  return (pref.length?pref:cand).sort(_ssPackCmp)[0];
+}
+
+function ssBulkUsePack(){
+  const p=_ssBestPackForScope(); if(!p) return;
+  ssCloseBulkSheet();
+  openDownloadModal(p.magnet, p.title, {series:_ssGroup.title});
+}
+
 // Step 2 (manual): a <select> of sources per episode, defaulting to best.
 function _ssRenderBulkManual(){
   document.getElementById("ssBulkTitle").textContent="Choose per episode";
   const eps=_ssBulkEpisodesInScope();
   const body=document.getElementById("ssBulkBody");
+  const filt=_ssParseBulkFilters();
   body.innerHTML=eps.map((e,idx)=>{
     const code=`S${String(e.season).padStart(2,"0")}E${String(e.episode).padStart(2,"0")}`;
     const name=_ssEpName(e.season,e.episode);
+    // Default each dropdown to what Auto would pick (audio-pref aware), and
+    // label options with their audio class so the language is visible in-list.
+    const def=e.sources.indexOf(_ssAutoPick(e.sources,filt));
+    const audTag=s=>{ const a=s.audio||""; return a==="dual"?"[DUAL] ":a==="dub"?"[DUB] ":a==="sub"?"[SUB] ":a==="other"?`[${(s.audio_lang||"OTHER").toUpperCase()}] `:""; };
     const opts=e.sources.map((s,i)=>
-      `<option value="${i}">${escHtml((s.size_human||"")+" · "+s.seeders+"↑ · "+(s.title.length>48?s.title.slice(0,48)+"…":s.title))}</option>`).join("");
+      `<option value="${i}"${i===def?" selected":""}>${escHtml(audTag(s)+(s.size_human||"")+" · "+s.seeders+"↑ · "+(s.title.length>48?s.title.slice(0,48)+"…":s.title))}</option>`).join("");
     return `<div class="flex items-center gap-2">
       <label class="flex items-center gap-1.5 flex-shrink-0">
         <input type="checkbox" class="ss-bulk-cb w-4 h-4 accent-indigo-500" data-idx="${idx}" checked/>
@@ -9936,13 +10093,20 @@ function _ssParseBulkFilters(){
   };
 }
 
-// Choose the source to grab for one episode under the Auto-pick limits. Priority
-// order, seeders always breaking ties:
+// Choose the source to grab for one episode under the Auto-pick limits. The
+// audio preference is applied first — if any source satisfies it, the whole
+// cascade runs inside that subset (language consistency beats seeders: a
+// 10-seed dub is right for a dub household, a 300-seed fansub isn't). Then,
+// priority order with seeders always breaking ties:
 //   1. clears the seeder floor AND fits the size window,
 //   2. clears the seeder floor (size relaxed — seeders win over size),
 //   3. nothing clears the floor → best-seeded source outright ("find whatever").
 function _ssAutoPick(sources, filt){
   if(!sources||!sources.length) return null;
+  const pref=sources.filter(_ssAudioMatch);
+  return _ssAutoPickFrom(pref.length?pref:sources, filt);
+}
+function _ssAutoPickFrom(sources, filt){
   const bySeed=(a,b)=>(b.seeders||0)-(a.seeders||0);
   const okSeed=s=>(s.seeders||0)>=filt.minSeed;
   const okSize=s=>{ const z=s.size||0; return z>=filt.minBytes && z<=filt.maxBytes; };
@@ -9958,7 +10122,14 @@ function ssBulkAuto(){
   const eps=_ssBulkEpisodesInScope();
   const jobs=eps.map(e=>({src:_ssAutoPick(e.sources,filt), season:e.season, episode:e.episode}))
                 .filter(j=>j.src);
-  _ssRunBulk(jobs);
+  // Be honest about episodes where no source satisfies the audio preference —
+  // silent fallback is exactly the "mixed languages" surprise this exists to kill.
+  let note="";
+  if(_ssAudioPref!=="any"){
+    const off=jobs.filter(j=>!_ssAudioMatch(j.src)).length;
+    if(off) note=`${off} had no ${_ssAudioPref==="eng"?"English-audio":"original-audio"} source — best available used.`;
+  }
+  _ssRunBulk(jobs, note);
 }
 
 function ssBulkManual(){
@@ -9979,7 +10150,7 @@ function ssBulkManual(){
 
 // Fire the batch sequentially (throttled) so qBit isn't hammered; every episode
 // shares the show's series string → one cohesive library entry.
-async function _ssRunBulk(jobs){
+async function _ssRunBulk(jobs, note=""){
   if(!jobs.length){ showAlert("Nothing selected.","warn"); return; }
   ssCloseBulkSheet();
   const total=jobs.length; let ok=0;
@@ -9989,7 +10160,9 @@ async function _ssRunBulk(jobs){
     if(done) ok++;
     await new Promise(r=>setTimeout(r,250));
   }
-  showAlert(`Queued ${ok}/${total} episode${total>1?"s":""} — switch to Library to track progress.`, ok?"success":"error");
+  // `note` rides the final toast (e.g. the audio-preference fallback count) —
+  // an earlier separate alert would be clobbered by the "Queuing…" one.
+  showAlert(`Queued ${ok}/${total} episode${total>1?"s":""}${note?` — ${note}`:" — switch to Library to track progress."}`, ok?(note?"warn":"success"):"error");
   closeSearchShow(); switchTab("library");
 }
 
@@ -16641,6 +16814,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.11.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.12.0</div>
 </body>
 </html>

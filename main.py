@@ -2602,12 +2602,25 @@ _TT_EP_X_RE        = re.compile(r"\b(\d{1,2})x(\d{2})\b")
 # Multi-season packs. The trailing (?!\d) stops the second number from matching a
 # resolution/year *prefix* — "S01 - 720p" must NOT read as S1-72, "S08 - 2019"
 # not as S8-20. Legit forms: S01-S05, S01-05, S01-5, S1+S2+S3, S01-S02-S03.
-_TT_MULTI_PLUS_RE  = re.compile(r"[Ss]\d{1,2}(?:\s*\+\s*[Ss]?\d{1,2})+")           # S1+S2+S3
+_TT_MULTI_PLUS_RE  = re.compile(r"[Ss]\d{1,2}(?:\s*[+&]\s*[Ss]?\d{1,2})+")         # S1+S2+S3 / S01&02
+_TT_MULTI_WORD_PLUS_RE = re.compile(
+    r"[Ss]easons?\s*\d{1,2}(?:\s*[+&]\s*(?:[Ss]easons?\s*)?\d{1,2})+")             # Season 1 + 2
 _TT_MULTI_LIST_RE  = re.compile(r"[Ss]\d{1,2}(?:\s*-\s*[Ss]?\d{1,2}(?!\d)){2,}")   # S01-S02-S03…
 _TT_MULTI_RANGE_RE = re.compile(r"[Ss](\d{1,2})\s*-\s*[Ss]?(\d{1,2})(?!\d)")       # S01-S05 / S01-5
+# Fansub per-episode form for sequel seasons: "[SubsPlease] Show S2 - 05" /
+# "Show Season 2 - 05". A *spaced* dash + a 2+-digit second number with no S
+# prefix is an episode, not a season range — real packs write "S01-S05"/"S01-05"
+# tight, or "Seasons 1-5" (plural, which this pattern's singular "Season" never
+# matches). Must be tested before the multiseason ranges, which would otherwise
+# swallow "S2 - 05" as a bogus seasons-2-to-5 pack.
+_TT_SEASON_EP_DASH_RE = re.compile(r"\b[Ss](?:eason\s*)?(\d{1,2})\s+-\s+(\d{2,4})(?!\d)")
 _TT_SEASONS_WORD_RE = re.compile(r"[Ss]easons?\s*(\d{1,2})\s*-\s*(\d{1,2})(?!\d)") # Seasons 1-5
 _TT_SEASON_RE      = re.compile(r"\b[Ss](\d{1,2})\b")
 _TT_SEASON_WORD_RE = re.compile(r"\b[Ss]eason\s*(\d{1,2})\b")
+# Ordinal season ("Sousou no Frieren 2nd Season") — the dominant fansub form for
+# anime sequels. Without it, "…2nd Season - 10" reads as absolute S1E10 and the
+# ordinal stays in the show name, fragmenting the group away from season 1.
+_TT_ORDINAL_SEASON_RE = re.compile(r"\b(\d{1,2})(?:st|nd|rd|th)\s+[Ss]eason\b", re.IGNORECASE)
 _TT_COMPLETE_SERIES_RE = re.compile(r"\bComplete\s+(?:Series|Pack|Collection)\b", re.IGNORECASE)
 # Absolute-numbered anime episode ("[Grp] One Piece - 1168 [1080p]", "One Piece
 # EP1168", "Naruto 121 (..."). Only consulted when NO S/E or season marker exists.
@@ -2662,13 +2675,26 @@ def parse_torrent_title(title: str) -> dict:
     abs_marker_pos = None   # where to cut the show name for an absolute-numbered ep
 
     ep_m    = _TT_EP_RE.search(norm) or _TT_EP_X_RE.search(norm)
-    plus_m  = _TT_MULTI_PLUS_RE.search(norm)
+    plus_m  = _TT_MULTI_PLUS_RE.search(norm) or _TT_MULTI_WORD_PLUS_RE.search(norm)
     list_m  = _TT_MULTI_LIST_RE.search(norm)
     range_m = _TT_SEASONS_WORD_RE.search(norm) or _TT_MULTI_RANGE_RE.search(norm)
     complete_series = bool(_TT_COMPLETE_SERIES_RE.search(norm))
 
+    # "S2 - 05" / "Season 2 - 05" (spaced dash, padded episode) is a sequel-
+    # season *episode*, not a range — claim it before the multiseason block.
+    epdash_m = None
+    if ep_m is None:
+        m = _TT_SEASON_EP_DASH_RE.search(norm)
+        if m:
+            n = int(m.group(2))
+            if not (1900 <= n <= 2099) and n not in _TT_RES_NUMS:
+                epdash_m = m
+
     kind = None
-    if plus_m or list_m or range_m or complete_series:
+    if epdash_m is not None:
+        kind = "episode"
+        season, episode = int(epdash_m.group(1)), int(epdash_m.group(2))
+    if kind is None and (plus_m or list_m or range_m or complete_series):
         span = None
         if plus_m:
             nums = [int(x) for x in re.findall(r"\d{1,2}", plus_m.group(0))]
@@ -2692,9 +2718,22 @@ def parse_torrent_title(title: str) -> dict:
             kind = "episode"
             season, episode = int(ep_m.group(1)), int(ep_m.group(2))
         else:
-            sm = _TT_SEASON_WORD_RE.search(norm) or _TT_SEASON_RE.search(norm)
+            sm = (_TT_SEASON_WORD_RE.search(norm) or _TT_ORDINAL_SEASON_RE.search(norm)
+                  or _TT_SEASON_RE.search(norm))
             if sm:
                 kind, season = "season", int(sm.group(1))
+                # "<show> 2nd Season - 10" / "<show> Season 2 - 10": an absolute
+                # episode number AFTER a word/ordinal season marker is that
+                # season's episode (the fansub form for sequel seasons), not a
+                # batch. Bare "S2 - 10" is left alone — _TT_MULTI_RANGE_RE owns
+                # that ambiguity.
+                if sm.re is not _TT_SEASON_RE:
+                    am = (_TT_ABS_EP_RE.search(norm, sm.end())
+                          or _TT_ABS_DASH_RE.search(norm, sm.end()))
+                    if am:
+                        n = int(am.group(1))
+                        if not (1900 <= n <= 2099) and n not in _TT_RES_NUMS:
+                            kind, episode = "episode", n
             else:
                 am = (_TT_ABS_EP_RE.search(norm) or _TT_ABS_DASH_RE.search(norm)
                       or _TT_ABS_TAIL_RE.search(norm))
@@ -2709,8 +2748,9 @@ def parse_torrent_title(title: str) -> dict:
     # Show name = text before the earliest structural marker.
     positions = []
     for rx in (_TT_EP_RE, _TT_EP_X_RE, _TT_SEASONS_WORD_RE, _TT_MULTI_PLUS_RE,
-               _TT_MULTI_LIST_RE, _TT_MULTI_RANGE_RE, _TT_SEASON_WORD_RE,
-               _TT_SEASON_RE, _TT_COMPLETE_SERIES_RE):
+               _TT_MULTI_WORD_PLUS_RE, _TT_MULTI_LIST_RE, _TT_MULTI_RANGE_RE,
+               _TT_SEASON_WORD_RE, _TT_ORDINAL_SEASON_RE, _TT_SEASON_RE,
+               _TT_COMPLETE_SERIES_RE):
         m = rx.search(norm)
         if m:
             positions.append(m.start())
@@ -2718,7 +2758,14 @@ def parse_torrent_title(title: str) -> dict:
         positions.append(abs_marker_pos)
     cut = min(positions) if positions else len(norm)
     show = _strip_release_tags(norm[:cut]) or _strip_release_tags(norm) or norm.strip()
-    show_key = re.sub(r"\s+", " ", show.lower()).strip()
+    # A cut inside parens ("Show (Season 1) …") leaves a dangling "(" the tag
+    # stripper can't remove (it only strips balanced pairs) — trim trailing
+    # opener/separator punctuation so the group key merges with the clean name.
+    show = re.sub(r"[\s(\[{|:,&+\-–—]+$", "", show).strip() or show
+    # Key ignores punctuation so apostrophe/colon variants of the same title
+    # ("Frieren: Beyond Journey's End" / "Frieren Beyond Journeys End") land in
+    # one group instead of fragmenting by scene-name styling.
+    show_key = re.sub(r"\s+", " ", re.sub(r"[^\w\s]+", "", show.lower())).strip()
     show_key = _TT_EXT_RE.sub("", show_key)                       # drop a trailing .mkv etc
     show_key = _TT_TRAIL_YEAR_RE.sub("", show_key).strip()        # "inception 2010" ⇒ "inception"
 
@@ -2727,6 +2774,60 @@ def parse_torrent_title(title: str) -> dict:
         "season": season, "episode": episode,
         "season_from": season_from, "season_to": season_to, "year": year,
     }
+
+
+# ── Release audio-language classification ───────────────────────────────────
+# Anime (and foreign-content) releases mix audio variants under one show:
+# original audio + subs (SubsPlease/Erai-raws), English DUBBED, Dual/Multi-
+# Audio, and foreign-language dubs (ArabicDub, Korean Dub, VOSTFR, LATINO…). A
+# seeder sort is blind to this — an English-dub household bulk-grabbing a season
+# gets a language lottery. Classify each release title so the UI can badge
+# sources and the auto-picker can honour an audio preference.
+# "MULTi" (no sub suffix) is the multi-audio scene tag; "Multi-Subs" is not.
+_AUD_DUAL_RE = re.compile(
+    r"\b(?:dual|multi)[ ._-]?audio\b|\bdual\b|\bmulti\b(?![ ._-]?subs?)", re.IGNORECASE)
+_AUD_DUB_RE  = re.compile(r"\bdub(?:bed|s)?\b", re.IGNORECASE)
+_AUD_SUB_RE  = re.compile(
+    r"\bmulti[ ._-]?subs?\b|\bsubbed\b|\beng(?:lish)?[ ._-]?subs?\b", re.IGNORECASE)
+# Token → display language for non-English tags. Deliberately conservative —
+# only unambiguous full words / well-known scene tags (no "GER"/"SPA"/"POR"
+# abbreviations that collide with title words).
+_AUD_LANGS = {
+    "french": "French", "truefrench": "French", "vf": "French", "vff": "French",
+    "vfq": "French", "vostfr": "French subs",
+    "ita": "Italian", "italian": "Italian",
+    "spanish": "Spanish", "castellano": "Spanish", "latino": "Latino",
+    "german": "German", "hindi": "Hindi", "tamil": "Tamil", "telugu": "Telugu",
+    "russian": "Russian", "rus": "Russian",
+    "arabic": "Arabic", "korean": "Korean",
+    "portuguese": "Portuguese", "dublado": "Portuguese",
+    "polish": "Polish", "lektor": "Polish",
+}
+
+
+def _parse_release_audio(title: str) -> tuple:
+    """Classify a release title's audio → ``(audio, lang)``:
+        "dual"  – dual/multi-audio (carries original *and* English audio)
+        "other" – a non-English language tag (foreign dub/subs); ``lang`` names it
+        "dub"   – English dub
+        "sub"   – explicitly subtitled (original audio)
+        ""      – no language markers (plain English content, or an untagged
+                  fansub release — original audio + English subs for anime)
+    Precedence: dual > other > dub > sub. A foreign tag next to "dub"
+    ("ArabicDub", "Korean Dub") must not read as an English dub."""
+    t = re.sub(r"[._]+", " ", title or "").lower()
+    t = re.sub(r"\b([a-z]{3,})dub\b", r"\1 dub", t)   # split fused "arabicdub"
+    toks = set(re.sub(r"[^a-z0-9]+", " ", t).split())
+    if _AUD_DUAL_RE.search(t):
+        return "dual", ""
+    langs = sorted({v for k, v in _AUD_LANGS.items() if k in toks})
+    if langs:
+        return "other", "/".join(langs)
+    if _AUD_DUB_RE.search(t):
+        return "dub", ""
+    if _AUD_SUB_RE.search(t):
+        return "sub", ""
+    return "", ""
 
 
 VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".m2ts", ".webm"}
@@ -10085,11 +10186,13 @@ def _group_search_results(shaped: list, query: str,
     for r in shaped:
         p = parse_torrent_title(r["title"])
         rel = max(_title_relevance(c, r["title"], p["show"], year_hint) for c in cands)
+        aud, aud_lang = _parse_release_audio(r["title"])
         er = dict(r)
         er.update({
             "kind": p["kind"], "season": p["season"], "episode": p["episode"],
             "season_from": p["season_from"], "season_to": p["season_to"],
             "rel": round(rel, 3),
+            "audio": aud, "audio_lang": aud_lang,
         })
         key = p["show_key"] or "?"
         g = groups.get(key)
