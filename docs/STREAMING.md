@@ -1151,7 +1151,19 @@ wins (on-demand is a supplement, never a replacement).
     server's `last_access` even when no segments are being fetched.
   - When a fetch still 410s (a reap won the race, or the tab was backgrounded with
     throttled timers), `_lpReloadOnDemand(reason)` re-runs `_lpLoadIndex` at the current
-    playhead instead of the dead-session retry loop. That re-POSTs `/offline-prepare`: if
+    playhead instead of the dead-session retry loop. **"Current playhead" must not
+    trust `video.currentTime` blindly (9.12.2):** the reap most often wins while the
+    app is suspended, and iOS can reset the media element in that same stretch, so
+    `currentTime` reads 0 on return — reloading there restarted playback (and the
+    next 15 s progress save, which then clobbered the server's position) from the
+    beginning. The player tracks a per-file last-known-good playhead (`lp.lastKnownT`,
+    fed by `timeupdate` >2 s and every `seeked`, reset by `_lpLoadIndex`) and all
+    recovery paths — `_lpReloadOnDemand`, both `recoverMediaError()` sites, the
+    Safari-native `load()` reloads, the OD audio-switch reload — fall back to it
+    (or `lp.resumeSec`) when `currentTime` reads ~0. `recoverMediaError()` also
+    resets `currentTime` to 0 by rebuilding the MediaSource, so those sites arm the
+    resume machinery (`lp.resumeSec`/`resumeApplied`) before recovering — see
+    GOTCHAS.md. That re-POSTs `/offline-prepare`: if
     the background full prep finished it **switches to the rich bundle**; otherwise it
     creates a fresh OD session (same deterministic `_od_session_key`) and resumes. The
     hls.js path detects the 410 directly (`_lpIsOdSessionGone` → `data.response.code===410`);

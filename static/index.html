@@ -3370,6 +3370,12 @@ let lp = {
   // True after we've loaded the metadata once (so seek-to-resume only fires once)
   resumeApplied: false,
   resumeSec: 0,
+  // Last known good playhead for THIS file — updated on timeupdate/seeked, reset
+  // by _lpLoadIndex. The recovery paths (OD 410 reload, recoverMediaError, the
+  // Safari src-reload) fall back to it when v.currentTime reads 0 because iOS
+  // reset the media element while suspended — reading currentTime at that moment
+  // would restart playback (and the next progress save) at the beginning.
+  lastKnownT: 0,
   // Streaming mode: "bundle" (a fully-prepped .offline_cache/<sha>/ HLS bundle)
   // or "ondemand" (just-in-time — segments transcoded as the player requests
   // them, used when the file isn't fully prepped yet). See STREAMING.md.
@@ -13658,7 +13664,9 @@ function _lpNetRetryNow() {
     if (!v) return;
     // First attempt: currentTime still holds the death position (load() resets
     // it to 0, so later attempts keep the resumeSec captured here instead).
-    const t = v.currentTime || 0;
+    // lastKnownT covers the element already reading 0 (iOS reset it while the
+    // page was suspended) — without it the reload restarts at the beginning.
+    const t = v.currentTime || lp.lastKnownT || 0;
     if (t > 2) { lp.resumeSec = t; lp.resumeApplied = false; }
     try { v.load(); v.play().catch(() => {}); } catch (_) {}
   }
@@ -13693,10 +13701,11 @@ function _lpKickLoader() {
     try { lp.hls.stopLoad(); lp.hls.startLoad(-1); } catch (_) {}
   } else {
     // Safari native HLS: reload the still-set src, seeking back to the death
-    // position via the resume machinery (load() resets currentTime to 0).
+    // position via the resume machinery (load() resets currentTime to 0;
+    // lastKnownT covers an element iOS already reset while suspended).
     const v = document.getElementById("lpVideo");
     if (!v) return;
-    const t = v.currentTime || 0;
+    const t = v.currentTime || lp.lastKnownT || 0;
     if (t > 2) { lp.resumeSec = t; lp.resumeApplied = false; }
     try { v.load(); v.play().catch(() => {}); } catch (_) {}
   }
@@ -13739,7 +13748,13 @@ function _lpReloadOnDemand(reason) {
   if (_lpReloading || !lp.itemId) return;
   _lpReloading = true;
   const v = document.getElementById("lpVideo");
-  const at = (v && v.currentTime) || lp.resumeSec || 0;
+  // Reload at the real playhead. currentTime can read 0 here even mid-watch:
+  // the reap most often wins while the app is suspended, and iOS may have reset
+  // the media element in the same stretch — trusting that 0 restarted playback
+  // (and the next 15 s progress save) from the beginning. lastKnownT holds the
+  // pre-suspend position; resumeSec covers a session that never got going.
+  const cur = (v && v.currentTime) || 0;
+  const at = cur > 2 ? cur : Math.max(lp.lastKnownT || 0, lp.resumeSec || 0);
   console.warn("[lp] on-demand session lost (" + (reason || "") + ") — re-preparing at " + at.toFixed(1) + "s");
   _lpNetReset();                       // drop any dead-session retry that was pending
   _lpShowPreparing("Reconnecting…");
@@ -13928,6 +13943,7 @@ async function _lpLoadIndex(seekTo) {
   lp.skipData = null;
   _lpHideSkipOffer(); lp.skipOfferEnd = 0;
   lp.resumeApplied = false; lp.resumeSec = seekTo || 0;
+  lp.lastKnownT = seekTo || 0;
   lp.audios = []; lp.subtitles = []; lp.sidecarSubs = []; lp.subTracks = []; lp._sttBusy = false;
   lp.fonts = []; lp.subBase = null; _lpTeardownOctopus();   // drop prior file's styled-sub overlay
   // Push the throttle window forward so the first `timeupdate` after this load
@@ -14248,7 +14264,13 @@ async function _lpLoadIndex(seekTo) {
       }
       // Media errors are MSE decoding crashes — `recoverMediaError` re-attaches
       // the buffer; if that fails, fall through to surface the error.
+      // recoverMediaError detaches + re-attaches the MediaSource, which resets
+      // currentTime to 0 and never restores it — arm the resume machinery with
+      // the death position first so the post-recovery loadedmetadata seeks back
+      // (same pattern as the Safari-native src reload).
       if (data.type === window.Hls.ErrorTypes.MEDIA_ERROR) {
+        const t = v.currentTime || lp.lastKnownT || 0;
+        if (t > 2) { lp.resumeSec = t; lp.resumeApplied = false; }
         try { hls.recoverMediaError(); return; } catch (_) {}
       }
       // Surface a code + filename so a "won't play" report is self-diagnosing.
@@ -15133,6 +15155,11 @@ function _lpRecoverMediaPipeline() {
     if (!(v.currentTime > t0 + 0.4)) return; // clock stalled → buffering/net path owns it
     if (_lpDecodedFrames(v) !== f0) return;  // frames flowing → healthy
     if (lp.hls) {
+      // recoverMediaError rebuilds the MediaSource, resetting currentTime to 0
+      // without restoring it — arm the resume machinery so the post-recovery
+      // loadedmetadata seeks back to where the decoder died.
+      const t = v.currentTime || lp.lastKnownT || 0;
+      if (t > 2) { lp.resumeSec = t; lp.resumeApplied = false; }
       try { lp.hls.recoverMediaError(); } catch (_) { _lpNetLost(); return; }
       v.play().catch(() => {});
     } else {
@@ -15157,7 +15184,11 @@ function lpSetAudio(idx) {
     // background full prep may have finished, promoting us to the bundle path).
     _lpSaveLocalTracks("audio");
     const v = document.getElementById("lpVideo");
-    _lpLoadIndex(v.currentTime || 0);
+    // A pick made while the resume seek hasn't landed yet (cold OD start) or
+    // after an iOS suspend reset reads currentTime 0 — reload at the real
+    // playhead instead of restarting the episode.
+    const t = v.currentTime || 0;
+    _lpLoadIndex(t > 2 ? t : Math.max(lp.lastKnownT || 0, lp.resumeSec || 0));
     return;
   }
   _lpApplyAudioIdx(idx);
@@ -15973,6 +16004,10 @@ function _lpAttachVideoEvents() {
   });
   v.addEventListener("timeupdate", () => {
     const t = v.currentTime || 0;
+    // Track the live playhead for the recovery paths. Only above 2 s — a media
+    // element iOS reset while suspended reads 0 on return, and capturing that
+    // transient would defeat the fallback this exists for.
+    if (t > 2) lp.lastKnownT = t;
     lpEvaluateSkipOffer(t);
     _lpCtlTick();
     // Throttle progress saves to once every 15 s (matches vlc_progress_tracker).
@@ -16005,7 +16040,11 @@ function _lpAttachVideoEvents() {
   v.addEventListener("volumechange",   () => _lpCtlSync());
   v.addEventListener("durationchange", () => _lpCtlTick());
   v.addEventListener("progress",       () => _lpCtlTick());
-  v.addEventListener("seeked", () => _lpFlushProgress(false));
+  // A completed seek is user/player intent — adopt it as the last known playhead
+  // even below the timeupdate threshold (a deliberate jump back to 0:00 must not
+  // leave a stale high-water mark for the recovery paths to snap forward to).
+  // An iOS suspend reset never fires `seeked`, so it can't sneak in here.
+  v.addEventListener("seeked", () => { lp.lastKnownT = v.currentTime || 0; _lpFlushProgress(false); });
   v.addEventListener("ended", () => { _lpAdvanceOrEnd(); });
   // On-demand: when playback stalls waiting for data (initial start, or a seek
   // into a not-yet-generated region) the segment request is being held open
@@ -16826,6 +16865,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.12.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.12.2</div>
 </body>
 </html>
