@@ -250,6 +250,12 @@ class Settings(BaseSettings):
     # is persisted in library.json → settings.admin_overrides.tmdb_api_key.
     tmdb_api_key: str = ""
 
+    # HID wireless remote (air-mouse) media-key support. The remote's dongle
+    # presents as a keyboard; remote_input.py hooks its media keys globally and
+    # routes them into the VLC / YouTube control paths (see docs/REMOTE.md).
+    # Set REMOTE_CONTROL=0 in .env to disable the listener entirely.
+    remote_control: bool = True
+
 
 settings = Settings()
 
@@ -7213,12 +7219,27 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     od_reaper_loop  = asyncio.create_task(_od_reaper())
     maint_loop      = asyncio.create_task(background_maintenance_loop())
 
+    # HID wireless remote (air-mouse) media keys — optional; needs pynput and
+    # an interactive desktop session. None when disabled (REMOTE_CONTROL=0),
+    # pynput is missing, or the hook couldn't install (headless service) —
+    # start_listener logs the reason and the dashboard runs without it.
+    remote_listener = None
+    if settings.remote_control:
+        try:
+            import remote_input
+            remote_listener = remote_input.start_listener(
+                asyncio.get_running_loop(), _remote_key_action, _remote_should_handle)
+        except Exception:
+            log.warning("HID remote media-key listener failed to start", exc_info=True)
+
     yield
 
     for t in (guard, broadcaster, dl_monitor, vlc_tracker, bg_loop, jackett_mon,
               reboot_loop, autoprep_loop, update_loop, dlsched_loop, sysmon_loop,
               cachepurge_loop, subupgrade_loop, od_reaper_loop, maint_loop):
         t.cancel()
+    if remote_listener is not None:
+        remote_listener.stop()
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
     await qbit.aclose()
@@ -11611,6 +11632,65 @@ async def seek_to(position_pct: float) -> JSONResponse:
     pct = max(0.0, min(100.0, position_pct))
     await vlc("seek", val=f"{pct:.2f}%")
     return JSONResponse({"ok": True})
+
+
+# ── HID wireless remote (air-mouse) media keys ───────────────────────────────
+# remote_input.py hooks the host's media keys globally (the remote's dongle
+# presents as a HID keyboard) and calls back into the two functions below —
+# `_remote_should_handle` synchronously from the listener thread, the dispatch
+# via run_coroutine_threadsafe onto the main loop. See docs/REMOTE.md.
+
+REMOTE_SEEK_STEP_SECS = 10   # remote ⏮/⏭ buttons: ± seconds (matches the UI's small skip)
+REMOTE_VOLUME_STEP    = 5    # remote vol ± buttons: % per press (matches the UI's ± buttons)
+
+
+def _remote_should_handle() -> bool:
+    """Whether a remote media-key press should be acted on (and, on Windows,
+    suppressed system-wide).
+
+    Called from the pynput listener thread — keep it to plain attribute reads
+    (no awaits, no locks). Keys are only claimed while real playback is up
+    (VLC stream/library play, incl. paused, or YouTube-on-TV); when idle —
+    incl. the idle background video — they pass through to the OS untouched.
+    """
+    return state.youtube_active or state.stream_status in ("playing", "buffering")
+
+
+async def _remote_key_action(action: str) -> None:
+    """Dispatch a remote media-key press into the normal control paths.
+
+    action ∈ {playpause, volume_up, volume_down, seek_forward, seek_back}.
+    Routes exactly like the dashboard footer: YouTube-on-TV when active
+    (volume = host OS mixer), else VLC (volume capped by settings.max_volume).
+    """
+    try:
+        if state.youtube_active:
+            yt_action, yt_value = {
+                "playpause":    ("playpause", None),
+                "volume_up":    ("volume_step", float(REMOTE_VOLUME_STEP)),
+                "volume_down":  ("volume_step", float(-REMOTE_VOLUME_STEP)),
+                "seek_forward": ("seek", float(REMOTE_SEEK_STEP_SECS)),
+                "seek_back":    ("seek", float(-REMOTE_SEEK_STEP_SECS)),
+            }[action]
+            await youtube_control(YouTubeControlReq(action=yt_action, value=yt_value))
+            return
+        if action == "playpause":
+            await vlc("pl_pause")
+        elif action in ("volume_up", "volume_down"):
+            await volume("up" if action == "volume_up" else "down",
+                         step=REMOTE_VOLUME_STEP)
+        elif action == "seek_forward":
+            await vlc("seek", val=f"+{REMOTE_SEEK_STEP_SECS}s")
+        elif action == "seek_back":
+            await vlc("seek", val=f"-{REMOTE_SEEK_STEP_SECS}s")
+        # Reflect the change on every open dashboard immediately instead of
+        # waiting for the next 2 s stat_broadcaster tick.
+        await broadcast("state", state_snapshot())
+    except Exception:
+        # Races are expected (YouTube stopping between the gate and the call,
+        # VLC mid-restart) — a lost keypress is fine; never let it propagate
+        # out of the scheduled coroutine.
+        log.debug("remote key '%s' dispatch failed", action, exc_info=True)
 
 
 async def _item_all_paths() -> list[str]:

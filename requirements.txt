@@ -18,3 +18,7 @@ numpy>=1.24.0
 # and producing "No module named 'comtypes'" at runtime. Belt-and-braces.
 pycaw>=20240210; sys_platform == "win32"
 comtypes>=1.2.0; sys_platform == "win32"
+# HID wireless remote (air-mouse) media-key listener (remote_input.py).
+# Optional at runtime — a venv without it just disables remote support
+# (logged once at startup). See docs/REMOTE.md.
+pynput>=1.7.6

@@ -1109,6 +1109,17 @@ For subtitle *timing* accuracy `_run_whisper` passes `-dtw <preset>` (Dynamic Ti
 
 `_build_offline_cache_inventory` (admin → Offline Cache tab) sums every file in every HLS bundle via `_dir_size_bytes` (recursive `rglob` + `stat`) and `stat()`s every library file. Doing that **synchronously in the async handler** blocks the asyncio event loop for the whole walk — and since the ABR ladder (v3.3.0) tripled the segment count per bundle, a real-world cache makes that long enough to freeze the *entire* server (SSE, VLC polling, all requests) until it looks crashed and the service restarts. The symptom is the tab stuck on "Loading cache inventory…" forever (the request never returns; the frontend *does* handle 500/network errors, so a permanent "Loading…" means a blocked loop, not an error). Fixed in v4.0.1 by running the walk in `asyncio.to_thread` (`_offline_cache_inventory_sync`), snapshotting `_offline_jobs` first so the thread doesn't iterate the live dict. Rule: any admin/inventory path that touches the full cache or many files on disk must offload to a thread — same as `_run_offline_job` already does for `_dir_size_bytes` / `shutil.rmtree`.
 
+## HID remote (media keys)
+
+### Media keys must be *suppressed* on Windows, or every press double-fires
+
+`remote_input.py` hooks the air-mouse remote's media keys globally. On Windows the same keypress is otherwise **also** delivered to the OS (volume keys change the system mixer natively) and to the focused app (the dashboard force-fullscreens VLC, and VLC's Qt UI acts on media keys) — so without suppression a volume press changes both OS *and* VLC volume, and play/pause toggles twice (netting out to nothing). The pynput listener therefore uses `win32_event_filter` + `listener.suppress_event()` to swallow **only** the five handled VK codes, and **only while `_remote_should_handle()` is true** (real playback active). Two traps baked into that filter:
+
+- **Dispatch must happen inside the filter** — pynput never delivers a suppressed event to `on_press` (`suppress_event()` raises before `_convert` posts to the message loop). If you "clean it up" by moving the action into `on_press`, suppressed keys silently stop working on Windows.
+- **`suppress_event()` raises** (`SystemHook.SuppressException`) — it must be the *last* statement in the filter path.
+
+On Linux (X11) and macOS pynput has no selective suppression, so keys are observed only and the DE may double-handle volume — accepted per the Windows-first policy (documented in [REMOTE.md](REMOTE.md)). macOS additionally needs the Input Monitoring TCC grant. The hook also receives nothing in a session-0 Windows service (hooks are per-desktop); `start_listener` failing/receiving nothing is by design non-fatal. Finally: the filter runs on the low-level hook thread with a hard OS time budget — `_remote_should_handle()` must stay plain attribute reads (no locks, no awaits) or Windows silently unhooks the listener.
+
 ## Frontend layout
 
 ### The dashboard is a height-locked app shell — the document must never become scrollable again (except the player escape hatch)
