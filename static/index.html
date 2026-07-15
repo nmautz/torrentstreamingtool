@@ -444,6 +444,25 @@
        programmatic focus from the arrow-key handler always shows it. Inset so
        the flat Metro tiles don't shift layout. */
     body.tv-mode :focus { outline: 3px solid #818cf8 !important; outline-offset: -1px; }
+    /* TV layout: strip the desktop/phone chrome the remote can't use well —
+       the library toolbar (storage gear, Upload, Hidden, Refresh), the
+       per-card ⋯ action drawers, the fullscreen-controls overlay + its
+       opener, and the whole player footer. The remote IS the transport on
+       the TV (⏯/OK, seek, volume, 🏠 Home), and fewer focus stops makes the
+       D-pad navigation predictable. */
+    body.tv-mode [onclick="openStorageModal()"],
+    body.tv-mode [onclick="openUploadModal()"],
+    body.tv-mode #libHiddenToggle,
+    body.tv-mode [onclick="loadLibrary(this)"],
+    body.tv-mode .lib-cardv-more,
+    body.tv-mode #fullscreenBtn,
+    body.tv-mode #fullscreenControls,
+    body.tv-mode footer { display: none !important; }
+    /* 10-foot readability: uniform upscale (the kiosk is Chrome-only, so
+       `zoom` is safe) and reclaim the padding that cleared the now-hidden
+       fixed footer. */
+    body.tv-mode { zoom: 1.15; }
+    body.tv-mode main { padding-bottom: 2rem !important; }
     /* The stage fills the WHOLE player — header, transport, and options panel
        are all absolute overlays on top of the video, so the video always gets
        every pixel of the screen and nothing can overflow the viewport. */
@@ -4393,6 +4412,7 @@ function _applyPhoneLandLayout(){
 _fcPhoneLand.addEventListener("change", _applyPhoneLandLayout);
 
 function openFullscreenControls(){
+  if (TV_MODE) return;   // TV: the remote is the transport — the fc overlay is hidden chrome
   _applyPhoneLandLayout();   // place relocated controls per orientation before showing
   const fc=document.getElementById("fullscreenControls");
   // Populate title and current state immediately
@@ -16962,6 +16982,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.1.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.2.0</div>
 </body>
 </html>

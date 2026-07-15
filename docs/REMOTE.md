@@ -47,6 +47,19 @@ plain attribute reads only:
   player's own gain via the `player_volume_step` yt_command (tv.html), NOT
   `set_system_volume`. The dashboard *slider* keeps its documented OS-volume
   behaviour during YouTube — this rule is remote-only.
+
+  The keyboard hook alone can't enforce this: many air-mouse remotes send
+  volume as HID **consumer-control usages** (Usage Page 0x0C) that Windows'
+  audio stack applies to the mixer directly — the hook never sees a
+  suppressible `VK_VOLUME_*` for the press (or sees a synthesized one whose
+  suppression doesn't undo the applied change). **`remote_volume_guard`**
+  (`main.py`, Windows-only, ~3 Hz endpoint-volume poll via the winvol helper)
+  is the backstop: every legitimate OS-volume writer goes through
+  `set_system_volume`, which records `state.host_volume_expected`; any other
+  change is reverted and its delta re-routed to VLC / the player gain. A
+  ~1.2 s dedupe window (`_remote_vol_key_ts`, stamped by the hook's volume
+  dispatch) stops remotes that emit *both* forms from double-stepping. The
+  guard stands down (and resyncs) during the "Use My Computer" pause.
 - **`ok`** (Enter): claimed only during real playback while the TV UI is not
   up → acts as ⏯. Otherwise it passes through so it activates the focused
   element in the kiosk. Its pointer-mode twin (left click) is handled off the
@@ -152,6 +165,17 @@ Mechanics (`main.py`):
 - Additionally hides the hand-off-to-this-device buttons (`#handoffBtn`,
   `#fcHandoffBtn`) via `.tv-mode` CSS and the download-to-device buttons via a
   `TV_MODE` guard in the library-card renderer.
+- **TV layout** (`.tv-mode` CSS): the desktop/phone chrome the remote can't
+  use well is stripped — the library toolbar (storage gear, Upload, Hidden,
+  Refresh), the per-card ⋯ action drawers (`.lib-cardv-more`), the
+  fullscreen-controls overlay + its opener (`#fullscreenControls` /
+  `#fullscreenBtn`; `openFullscreenControls()` also early-returns in TV mode
+  so nothing can open it), and the **entire player footer** — on the TV the
+  remote is the transport. The page is upscaled (`zoom: 1.15`, safe in the
+  Chrome-only kiosk) for 10-foot readability, and `main`'s footer-clearance
+  padding is reclaimed. Fewer focus stops also makes the D-pad navigation
+  predictable. Actions tucked behind the hidden chrome (rename/delete/hide,
+  track menus, upload) remain available from any phone/desktop browser.
 - Everything else is the stock dashboard — profiles, search, library, admin.
 
 ## Platform behaviour (Windows first)

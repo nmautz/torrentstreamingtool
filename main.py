@@ -844,6 +844,7 @@ class AppState:
     # ── TV UI (Firestick-style dashboard kiosk on the host display) ──
     tv_ui_active: bool = False                            # True while the dashboard kiosk should hold the screen; gates every VLC focus assertion (see docs/REMOTE.md)
     tv_input_last: float = 0.0                            # time.time() of the last HID input (key/click/move) — drives the TV UI idle hand-back
+    host_volume_expected: Optional[int] = None            # last OS volume WE set/accepted (0-100). remote_volume_guard reverts any other change — the remote's consumer-control volume bypasses the keyboard hook (Windows)
     # ── Auto-updater (transient view of the current update operation) ──
     # All persisted updater state lives in library.json → settings.autoupdate.
     # These fields just expose the live state of an in-flight check/apply so
@@ -7260,6 +7261,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     od_reaper_loop  = asyncio.create_task(_od_reaper())
     maint_loop      = asyncio.create_task(background_maintenance_loop())
     tvui_task       = asyncio.create_task(tv_ui_loop())
+    rvol_guard      = asyncio.create_task(remote_volume_guard())   # no-op off Windows
 
     # HID wireless remote (air-mouse) input — optional; needs pynput and an
     # interactive desktop session. None when disabled (REMOTE_CONTROL=0),
@@ -7282,7 +7284,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     for t in (guard, broadcaster, dl_monitor, vlc_tracker, bg_loop, jackett_mon,
               reboot_loop, autoprep_loop, update_loop, dlsched_loop, sysmon_loop,
               cachepurge_loop, subupgrade_loop, od_reaper_loop, maint_loop,
-              tvui_task):
+              tvui_task, rvol_guard):
         t.cancel()
     if remote_listener is not None:
         remote_listener.stop()
@@ -11128,8 +11130,14 @@ async def set_system_volume(pct: int) -> bool:
     pct = max(0, min(100, int(pct)))
     if platform.system() == "Windows":
         resp = await _winvol_request({"op": "set", "pct": pct})
-        return bool(resp and resp.get("ok"))
-    return await asyncio.to_thread(_set_system_volume_sync, pct)
+        ok = bool(resp and resp.get("ok"))
+    else:
+        ok = await asyncio.to_thread(_set_system_volume_sync, pct)
+    if ok:
+        # Every legitimate OS-volume write records itself so remote_volume_guard
+        # can tell "we did this" apart from a remote volume press it must revert.
+        state.host_volume_expected = pct
+    return ok
 
 
 async def get_system_volume() -> Optional[int]:
@@ -11979,6 +11987,8 @@ async def _remote_key_action(action: str) -> None:
                 await stop()
             return
         if action in ("volume_up", "volume_down"):
+            global _remote_vol_key_ts
+            _remote_vol_key_ts = time.monotonic()   # dedupe vs remote_volume_guard
             delta = REMOTE_VOLUME_STEP if action == "volume_up" else -REMOTE_VOLUME_STEP
             if state.youtube_active:
                 # Player gain only — never set_system_volume from the remote.
@@ -12012,6 +12022,71 @@ async def _remote_key_action(action: str) -> None:
         # VLC mid-restart) — a lost keypress is fine; never let it propagate
         # out of the scheduled coroutine.
         log.debug("remote key '%s' dispatch failed", action, exc_info=True)
+
+
+# monotonic() of the last volume press the KEYBOARD HOOK dispatched — lets the
+# guard below tell hook-handled presses (already routed to VLC) apart from
+# consumer-control presses it must route itself.
+_remote_vol_key_ts: float = 0.0
+
+
+async def remote_volume_guard() -> None:
+    """Windows backstop that keeps the remote's volume off the host OS mixer.
+
+    Many air-mouse remotes send volume as HID **consumer-control usages**
+    (Usage Page 0x0C), which Windows' audio stack applies to the endpoint
+    volume directly — the low-level keyboard hook either never sees a
+    VK_VOLUME_* event for the press, or sees a synthesized one whose
+    suppression does NOT undo the already-applied mixer change. So the hook
+    alone cannot honour the "remote volume never touches the host" rule.
+
+    This loop polls the endpoint volume (~3 Hz, via the winvol helper child).
+    Every legitimate writer goes through set_system_volume, which records
+    `state.host_volume_expected`; any other change is treated as remote
+    volume: it's **reverted**, and the delta is re-routed to VLC's amp (or
+    the YouTube player gain) — unless the keyboard hook already dispatched a
+    volume press in the last ~1 s, in which case the change is only reverted
+    (the hook path already stepped VLC; double-stepping would jump 2× per
+    press on remotes that emit both forms).
+
+    Stands down during the "Use My Computer" window-pause (the user owns
+    their mixer then) — it resyncs, so changes made during the pause stick.
+    Windows-only: POSIX volume reads spawn a process per call, and the
+    consumer-control problem is a Windows-target concern.
+    """
+    if platform.system() != "Windows" or not settings.remote_control:
+        return
+    while True:
+        await asyncio.sleep(0.35)
+        try:
+            if window_mgmt_paused():
+                state.host_volume_expected = None   # resync when the pause lifts
+                continue
+            cur = await get_system_volume()
+            if cur is None:
+                await asyncio.sleep(5)   # pycaw/helper unavailable — back off
+                continue
+            exp = state.host_volume_expected
+            if exp is None or cur == exp:
+                state.host_volume_expected = cur
+                continue
+            delta = cur - exp
+            await set_system_volume(exp)   # revert (re-records expected)
+            if time.monotonic() - _remote_vol_key_ts < 1.2:
+                continue   # the keyboard hook already routed this press
+            # Windows steps the mixer by 2 per volume-key press; a tick may
+            # batch several presses of a held button.
+            presses = max(1, round(abs(delta) / 2))
+            step = min(50, presses * REMOTE_VOLUME_STEP)
+            if state.youtube_active:
+                await broadcast("yt_command", {
+                    "action": "player_volume_step",
+                    "value": float(step if delta > 0 else -step)})
+            else:
+                await volume("up" if delta > 0 else "down", step=step)
+                await broadcast("state", state_snapshot())
+        except Exception:
+            pass
 
 
 async def _item_all_paths() -> list[str]:
