@@ -11299,6 +11299,8 @@ async def _bring_tv_to_front(video_id: str) -> None:
 #   TV UI ──idle `tv_ui_idle_secs` w/ no input──▶  background video
 #   TV UI ──user plays something──────────────▶  VLC / YouTube fullscreen
 #   playback ──🏠 Home button────────────────▶  stop + TV UI
+#   playback ──⏻ Power button────────────────▶  stop + background video
+#   background video ⇄ TV UI ──⏻ Power──────▶  toggle between the two
 #
 # `state.tv_ui_active` means "the kiosk should hold the screen": every VLC
 # focus assertion (vlc_focus_and_fullscreen, the background-video loop) stands
@@ -11957,6 +11959,10 @@ def _remote_should_handle(action: str = "") -> bool:
       must never reach the host OS mixer (no Windows volume overlay, no
       changed system volume after a session) — it drives VLC's amp (or the
       YouTube player's own gain) instead, whatever the playback state.
+    - `power` (⏻, VK_SLEEP) is **always** claimed: unsuppressed, Windows
+      sleeps/hibernates the media box — never desirable from the couch. It
+      toggles between the two idle surfaces instead (background video ⇄
+      TV UI; during playback: stop, back to the background video).
     - `ok` (Enter) is claimed only during real playback while the TV UI is
       NOT up — it acts as ⏯; with the dashboard kiosk foreground it must keep
       activating the focused element (D-pad navigation).
@@ -11971,7 +11977,7 @@ def _remote_should_handle(action: str = "") -> bool:
         return bool(settings.tv_ui) or playing
     if action == "back":
         return playing or state.tv_ui_active
-    if action in ("volume_up", "volume_down"):
+    if action in ("volume_up", "volume_down", "power"):
         return True
     if action == "ok":
         return playing and not state.tv_ui_active
@@ -11982,7 +11988,7 @@ async def _remote_key_action(action: str) -> None:
     """Dispatch a remote media-key press into the normal control paths.
 
     action ∈ {playpause, ok, volume_up, volume_down, seek_forward, seek_back,
-    home}. Routes like the dashboard footer with one deliberate exception:
+    home, back, power}. Routes like the dashboard footer with one deliberate exception:
     the remote's **volume never touches the host OS mixer** — VLC playback and
     idle adjust VLC's amp (capped by settings.max_volume); YouTube-on-TV
     adjusts the IFrame player's own gain via a `player_volume_step` yt_command
@@ -11992,8 +11998,11 @@ async def _remote_key_action(action: str) -> None:
     equivalent: during playback it exits the player to the dashboard (same
     path as Home — here the dashboard IS the screen behind every playback);
     with the kiosk up it steps back inside the UI via a `tv_command` SSE
-    event (`?tv=1` closes its topmost modal / drops focus). `ok` (Enter / OK
-    button) is ⏯.
+    event (`?tv=1` closes its topmost modal / drops focus). `power` (⏻,
+    VK_SLEEP — unsuppressed it would sleep the box) is the standby toggle
+    between the two idle surfaces: background video showing → dashboard
+    kiosk; kiosk showing → background video; playback up → stop, back to
+    the background video. `ok` (Enter / OK button) is ⏯.
     """
     try:
         if action == "ok":
@@ -12020,6 +12029,29 @@ async def _remote_key_action(action: str) -> None:
                 # dashboard. The key was suppressed (Chrome must not
                 # history-back the kiosk), so the page acts on this instead.
                 await broadcast("tv_command", {"action": "back"})
+            return
+        if action == "power":
+            # Standby toggle between the two idle surfaces — never the OS
+            # sleep the key means to Windows (suppressed while claimed).
+            if state.youtube_active or state.stream_status != "idle" \
+                    or state.library_item_id or state.active_hash:
+                # "Screen off": end playback. background_video_loop brings the
+                # idle video back within ~3 s — starting it here directly would
+                # race stop()'s async VLC teardown (pl_stop/pl_empty would kill
+                # the just-started video).
+                await stop()
+            elif state.tv_ui_active:
+                # Kiosk showing → hand back to the background video. With no
+                # video configured keep the dashboard — a black VLC window is
+                # worse (same rule as tv_ui_loop's idle hand-back).
+                if await _bg_video_ready():
+                    await _tv_ui_hide("power key")
+            elif state.background_playing:
+                await _tv_ui_show("power key")
+            elif not await _play_background_video():
+                # Idle with nothing on screen: prefer the background video,
+                # fall back to the dashboard kiosk.
+                await _tv_ui_show("power key")
             return
         if action in ("volume_up", "volume_down"):
             global _remote_vol_key_ts

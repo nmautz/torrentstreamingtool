@@ -68,6 +68,9 @@ _VK_ACTIONS = {
     0x0D: "ok",            # VK_RETURN            (remote OK/Enter → ⏯ during
                            #   playback; unclaimed while the TV UI is up so it
                            #   keeps activating the focused element)
+    0x5F: "power",         # VK_SLEEP             (remote ⏻ power → toggle
+                           #   background video ⇄ TV UI; unsuppressed Windows
+                           #   sleeps/hibernates the box)
 }
 
 _WM_KEYDOWN = (0x0100, 0x0104)   # WM_KEYDOWN, WM_SYSKEYDOWN
@@ -96,6 +99,8 @@ _MIN_INTERVAL = {
     "home":         1.00,
     "back":         0.40,   # once per press — a held Back must not machine-gun
                             # stop() or blow through nested modals
+    "power":        1.00,   # surface toggle (stop / kiosk / bg video) — a held
+                            # press must not flap between the surfaces
 }
 
 # Throttle for the generic activity callback, per kind. Mouse moves arrive per
@@ -207,7 +212,8 @@ class RemoteListener:
             keyboard.Key.media_next:        "seek_forward",
             keyboard.Key.media_previous:    "seek_back",
             keyboard.Key.enter:             "ok",
-            # No "home"/"back": pynput's Key enum has no browser keys off-Windows.
+            # No "home"/"back"/"power": pynput's Key enum has no browser or
+            # sleep keys off-Windows.
         }
         if platform.system() == "Windows":
             self._listener = keyboard.Listener(

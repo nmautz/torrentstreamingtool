@@ -1117,7 +1117,7 @@ For subtitle *timing* accuracy `_run_whisper` passes `-dtw <preset>` (Dynamic Ti
 
 ### Media keys must be *suppressed* on Windows, or every press double-fires
 
-`remote_input.py` hooks the air-mouse remote's media keys globally. On Windows the same keypress is otherwise **also** delivered to the OS (volume keys change the system mixer natively) and to the focused app (the dashboard force-fullscreens VLC, and VLC's Qt UI acts on media keys) — so without suppression a volume press changes both OS *and* VLC volume, and play/pause toggles twice (netting out to nothing). The pynput listener therefore uses `win32_event_filter` + `listener.suppress_event()` to swallow **only** the five handled VK codes, and **only while `_remote_should_handle()` is true** (real playback active). Two traps baked into that filter:
+`remote_input.py` hooks the air-mouse remote's media keys globally. On Windows the same keypress is otherwise **also** delivered to the OS (volume keys change the system mixer natively) and to the focused app (the dashboard force-fullscreens VLC, and VLC's Qt UI acts on media keys) — so without suppression a volume press changes both OS *and* VLC volume, and play/pause toggles twice (netting out to nothing). The pynput listener therefore uses `win32_event_filter` + `listener.suppress_event()` to swallow **only** the handled VK codes (`_VK_ACTIONS`), and **only while `_remote_should_handle()` is true** (real playback active). Two traps baked into that filter:
 
 - **Dispatch must happen inside the filter** — pynput never delivers a suppressed event to `on_press` (`suppress_event()` raises before `_convert` posts to the message loop). If you "clean it up" by moving the action into `on_press`, suppressed keys silently stop working on Windows.
 - **`suppress_event()` raises** (`SystemHook.SuppressException`) — it must be the *last* statement in the filter path.
@@ -1127,6 +1127,13 @@ On Linux (X11) and macOS pynput has no selective suppression, so keys are observ
 ### The 🏠 Home key (VK_BROWSER_HOME) must always be claimed, or it opens Edge
 
 The remote's Home button sends `VK_BROWSER_HOME` (0xAC) — Windows' default handler for it is "launch the default browser", so an unclaimed press pops Edge over the TV. `_remote_should_handle("home")` therefore claims it whenever the TV UI is enabled **or** playback is active (i.e. effectively always with default settings), independent of the media keys' playback-only rule. The one deliberate exception is `window_mgmt_paused()` ("Use My Computer") — the user asked for their desktop back, so Home may open their browser again.
+
+### The ⏻ Power key must always be claimed — unclaimed, it sleeps/hibernates the box
+
+The remote's power button emits the HID keyboard "System Sleep" usage, which Windows maps to `VK_SLEEP` (0x5F) and, unhandled, acts on per the power plan — the media box suspends mid-session. `_remote_should_handle("power")` therefore claims it **unconditionally** (except during `window_mgmt_paused()`, where the user owns their desktop and may genuinely want sleep), and `_remote_key_action` repurposes it as the standby toggle between the idle surfaces (background video ⇄ TV UI; playback → stop + background video). Two traps:
+
+- **Not every remote's power button is suppressible.** Some emit power as a HID **System Control** usage (Generic Desktop page, `System Sleep` 0x82) instead of a keyboard key — that report goes straight to the Windows power manager, never enters the keyboard stack, and **no keyboard hook can see or block it**. If a remote still sleeps the machine with remote support running, that's why; the fix is the OS power setting ("When I press the sleep button → Do nothing" / `powercfg -setacvalueindex scheme_current sub_buttons sbuttonaction 0`), not more hook code.
+- **The playback branch must not start the background video itself.** `stop()` schedules its VLC teardown (`pl_stop` + `pl_empty` + minimize) as a background task; a `_play_background_video()` right after `await stop()` races it and the teardown kills the just-started video. The branch just stops and lets `background_video_loop` restart the idle video on its ≤3 s tick.
 
 ### The remote's volume must never reach the host OS mixer
 

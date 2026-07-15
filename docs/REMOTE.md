@@ -27,6 +27,7 @@ ordinary consumer key codes:
 | 🏠 Home | `VK_BROWSER_HOME` (0xAC) | **Stop playback + show the TV UI** (unsuppressed this key launches the default browser — Edge — which is why it must be claimed) |
 | ← Back | `VK_BROWSER_BACK` (0xA6) | Firestick semantics: during playback **exit the player back to the TV UI** (stop + kiosk, same path as Home); with the TV UI up **step back inside the dashboard** — close the topmost open modal, else drop focus (relayed as the `tv_command` SSE event; unsuppressed the kiosk Chrome would history-back away from `?tv=1`). Idle it passes through and wakes the TV UI like any button. Remotes whose Back emits **Escape/Backspace** instead work too — those reach the kiosk directly and `_tvNavKey` routes them to the same `_tvBack()` |
 | OK | `VK_RETURN` (0x0D) — or a left **click** in pointer mode | During playback: ⏯ toggle (both forms). With the TV UI up: activates the focused element (D-pad navigation) |
+| ⏻ Power | `VK_SLEEP` (0x5F) | **Standby toggle between the idle surfaces** — background video showing → show the TV UI; TV UI showing → hand back to the background video (kept up if none is configured); during playback → stop, back to the background video (no kiosk — the Home/Back path is the one that shows the UI). Unsuppressed, Windows **sleeps/hibernates the box** — which is why it must always be claimed. Caveat: some remotes emit power as a HID *System Control* usage (power page) instead of the keyboard sleep key; that path goes straight to the Windows power manager and a keyboard hook can never see or block it — fix in Windows power settings ("When I press the sleep button → Do nothing"). See GOTCHAS.md |
 | Arrows / mouse ring | normal keys + pointer | Not intercepted — arrows **navigate the TV UI** (spatial focus, see below); the pointer stays a mouse. Any of them wakes the UI when idle |
 
 The next/prev *track* keys are mapped to ±10 s seeks (not playlist next/prev)
@@ -67,6 +68,9 @@ plain attribute reads only:
   It is off by default because an always-on guard **fights quantizing audio
   endpoints** and drip-steps VLC's volume — see
   [GOTCHAS.md](GOTCHAS.md#and-the-os-mixer-volume-guard-is-opt-in--an-always-on-guard-fights-quantizing-audio-endpoints).
+- **`power`** (⏻, `VK_SLEEP`): **always claimed** — unsuppressed it sleeps or
+  hibernates the media box, never desirable from the couch. Windows-only,
+  like `home`/`back` (pynput exposes no sleep key off-Windows).
 - **`ok`** (Enter): claimed only during real playback while the TV UI is not
   up → acts as ⏯. Otherwise it passes through so it activates the focused
   element in the kiosk. Its pointer-mode twin (left click) is handled off the
@@ -102,8 +106,15 @@ remote button ──HID──▶ host input events
   {action:"back"}` instead — the `?tv=1` page's `_tvBack()` closes the
   topmost open modal (via the modal's own `close*` button so its cleanup
   runs), else blurs the focused element (dismisses a card overlay).
+- `power` toggles the idle surfaces: during playback it just calls the
+  `/api/stop` handler and lets `background_video_loop` restart the idle video
+  (≤ 3 s — starting it directly would race stop()'s async `pl_stop`/`pl_empty`
+  teardown); with the kiosk up it `_tv_ui_hide`s back to the background video
+  (only if `_bg_video_ready()` — otherwise the UI stays, same rule as the
+  idle hand-back); with the background video showing it `_tv_ui_show`s; fully
+  idle it tries `_play_background_video()` first, kiosk as fallback.
 - **Debounce** (`_MIN_INTERVAL`): play/pause and the seeks fire once per press
-  (0.30–0.35 s), Back 0.4 s, Home once per second; volume repeats while held but is
+  (0.30–0.35 s), Back 0.4 s, Home and Power once per second; volume repeats while held but is
   throttled to ~10 Hz. The activity feed has its own throttle
   (`_ACTIVITY_MIN_INTERVAL`, mouse moves ≤ 1/s).
 
@@ -118,6 +129,8 @@ idle background video ──any remote button/click──▶ TV UI (dashboard ki
 TV UI ── no input for TV_UI_IDLE_SECS (120 s) ───▶ background video
 TV UI ── user plays something ───────────────────▶ VLC / YouTube fullscreen
 playback ── 🏠 Home or ← Back ───────────────────▶ stop + TV UI
+playback ── ⏻ Power ─────────────────────────────▶ stop + background video
+background video ⇄ TV UI ────── ⏻ Power ────────▶ toggle between the two
 ```
 
 Mechanics (`main.py`):
