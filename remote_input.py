@@ -62,6 +62,9 @@ _VK_ACTIONS = {
     0xB1: "seek_back",     # VK_MEDIA_PREV_TRACK  (remote ⏮ → skip back)
     0xAC: "home",          # VK_BROWSER_HOME      (remote 🏠 → stop + TV UI;
                            #   unsuppressed it launches the default browser)
+    0xA6: "back",          # VK_BROWSER_BACK      (remote ← Back → exit playback
+                           #   to the TV UI / step back inside it; unsuppressed
+                           #   the kiosk Chrome would treat it as history-back)
     0x0D: "ok",            # VK_RETURN            (remote OK/Enter → ⏯ during
                            #   playback; unclaimed while the TV UI is up so it
                            #   keeps activating the focused element)
@@ -91,6 +94,8 @@ _MIN_INTERVAL = {
     "volume_up":    0.10,
     "volume_down":  0.10,
     "home":         1.00,
+    "back":         0.40,   # once per press — a held Back must not machine-gun
+                            # stop() or blow through nested modals
 }
 
 # Throttle for the generic activity callback, per kind. Mouse moves arrive per
@@ -202,7 +207,7 @@ class RemoteListener:
             keyboard.Key.media_next:        "seek_forward",
             keyboard.Key.media_previous:    "seek_back",
             keyboard.Key.enter:             "ok",
-            # No "home": pynput's Key enum has no browser-home off-Windows.
+            # No "home"/"back": pynput's Key enum has no browser keys off-Windows.
         }
         if platform.system() == "Windows":
             self._listener = keyboard.Listener(

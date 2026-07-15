@@ -11948,6 +11948,11 @@ def _remote_should_handle(action: str = "") -> bool:
       Home key may open their browser — it's their desktop.
     - `home` (🏠) is claimed whenever the TV UI is enabled OR playback is up
       (it must never fall through to launching Edge mid-session).
+    - `back` (←) is claimed during playback (exit to the TV UI, Firestick
+      style) and while the kiosk holds the screen (step back *inside* the
+      dashboard — unsuppressed, Chrome would treat VK_BROWSER_BACK as
+      history-back and navigate the kiosk away from `?tv=1`). Idle it passes
+      through and counts as generic input, waking the TV UI like any button.
     - `volume_up`/`volume_down` are **always** claimed: the remote's volume
       must never reach the host OS mixer (no Windows volume overlay, no
       changed system volume after a session) — it drives VLC's amp (or the
@@ -11964,6 +11969,8 @@ def _remote_should_handle(action: str = "") -> bool:
     playing = state.youtube_active or state.stream_status in ("playing", "buffering")
     if action == "home":
         return bool(settings.tv_ui) or playing
+    if action == "back":
+        return playing or state.tv_ui_active
     if action in ("volume_up", "volume_down"):
         return True
     if action == "ok":
@@ -11981,7 +11988,12 @@ async def _remote_key_action(action: str) -> None:
     adjusts the IFrame player's own gain via a `player_volume_step` yt_command
     (NOT the dashboard slider's server-side OS-volume path). `home` (🏠) is
     the Firestick Home equivalent: end whatever is playing and put the
-    dashboard kiosk on the screen. `ok` (Enter / OK button) is ⏯.
+    dashboard kiosk on the screen. `back` (←) is the Firestick Back
+    equivalent: during playback it exits the player to the dashboard (same
+    path as Home — here the dashboard IS the screen behind every playback);
+    with the kiosk up it steps back inside the UI via a `tv_command` SSE
+    event (`?tv=1` closes its topmost modal / drops focus). `ok` (Enter / OK
+    button) is ⏯.
     """
     try:
         if action == "ok":
@@ -11994,6 +12006,20 @@ async def _remote_key_action(action: str) -> None:
             if state.youtube_active or state.stream_status != "idle" \
                     or state.library_item_id or state.active_hash:
                 await stop()
+            return
+        if action == "back":
+            if state.youtube_active or state.stream_status != "idle" \
+                    or state.library_item_id or state.active_hash:
+                # Exit the player back to the dashboard — UI first so
+                # tv_ui_active gates the focus churn, exactly like Home.
+                if settings.tv_ui:
+                    await _tv_ui_show("back key")
+                await stop()
+            elif state.tv_ui_active:
+                # Kiosk foreground, nothing playing: navigate back inside the
+                # dashboard. The key was suppressed (Chrome must not
+                # history-back the kiosk), so the page acts on this instead.
+                await broadcast("tv_command", {"action": "back"})
             return
         if action in ("volume_up", "volume_down"):
             global _remote_vol_key_ts

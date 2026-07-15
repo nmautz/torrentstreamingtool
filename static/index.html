@@ -3374,11 +3374,38 @@ function _tvCandidates(scope){
     return st.visibility !== "hidden" && st.display !== "none" && st.pointerEvents !== "none";
   });
 }
+// Remote ← Back, Firestick-style "step back": close the topmost open modal
+// (via its own close button so any cleanup it does runs), else drop focus so
+// a card overlay / focus ring is dismissed. Returns whether it consumed the
+// press. Reached two ways: the backend relays a suppressed VK_BROWSER_BACK as
+// a `tv_command` SSE event, and remotes whose Back emits Escape/Backspace hit
+// _tvNavKey directly.
+function _tvBack(){
+  const open = [...document.querySelectorAll('[id$="Modal"]:not(.hidden)')];
+  if (open.length){
+    const m = open[open.length - 1];
+    const closer = m.querySelector('[onclick^="close"]');
+    if (closer) closer.click(); else m.classList.add("hidden");
+    return true;
+  }
+  if (document.activeElement && document.activeElement !== document.body){
+    document.activeElement.blur();
+    return true;
+  }
+  return false;
+}
 function _tvNavKey(e){
   const DIRS = { ArrowUp:[0,-1], ArrowDown:[0,1], ArrowLeft:[-1,0], ArrowRight:[1,0] };
   const cur = (document.activeElement && document.activeElement !== document.body)
     ? document.activeElement : null;
   const tag = cur ? cur.tagName : "";
+  // Back for remotes that emit Escape/Backspace instead of VK_BROWSER_BACK.
+  // Backspace still deletes inside text fields.
+  if (e.key === "Escape" ||
+      (e.key === "Backspace" && tag !== "INPUT" && tag !== "TEXTAREA")){
+    if (_tvBack()) e.preventDefault();
+    return;
+  }
   if (e.key === "Enter"){
     if (!cur){                              // nothing focused yet → land somewhere useful
       const first = _tvCandidates(_tvNavScope())[0];
@@ -16842,6 +16869,16 @@ function connectSSE(){
       }
     }catch(_){}
   });
+  es.addEventListener("tv_command",e=>{
+    _noteSSEMsg();
+    // Backend-relayed remote press for the TV kiosk (the key itself was
+    // suppressed on the host). Only the ?tv=1 kiosk acts on it.
+    if(!TV_MODE) return;
+    try{
+      const d=JSON.parse(e.data||"{}");
+      if(d.action==="back") _tvBack();
+    }catch(_){}
+  });
   es.addEventListener("subtitle_upgraded",e=>{
     _noteSSEMsg();
     // VLC (TV) auto-swapped an AI sub for a real one that finished downloading.
@@ -17030,6 +17067,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.3.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.4.0</div>
 </body>
 </html>

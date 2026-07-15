@@ -25,6 +25,7 @@ ordinary consumer key codes:
 | ⏭ Next track | `VK_MEDIA_NEXT_TRACK` (0xB0) | Skip **forward** `REMOTE_SEEK_STEP_SECS` (10 s) |
 | ⏮ Prev track | `VK_MEDIA_PREV_TRACK` (0xB1) | Skip **back** 10 s |
 | 🏠 Home | `VK_BROWSER_HOME` (0xAC) | **Stop playback + show the TV UI** (unsuppressed this key launches the default browser — Edge — which is why it must be claimed) |
+| ← Back | `VK_BROWSER_BACK` (0xA6) | Firestick semantics: during playback **exit the player back to the TV UI** (stop + kiosk, same path as Home); with the TV UI up **step back inside the dashboard** — close the topmost open modal, else drop focus (relayed as the `tv_command` SSE event; unsuppressed the kiosk Chrome would history-back away from `?tv=1`). Idle it passes through and wakes the TV UI like any button. Remotes whose Back emits **Escape/Backspace** instead work too — those reach the kiosk directly and `_tvNavKey` routes them to the same `_tvBack()` |
 | OK | `VK_RETURN` (0x0D) — or a left **click** in pointer mode | During playback: ⏯ toggle (both forms). With the TV UI up: activates the focused element (D-pad navigation) |
 | Arrows / mouse ring | normal keys + pointer | Not intercepted — arrows **navigate the TV UI** (spatial focus, see below); the pointer stays a mouse. Any of them wakes the UI when idle |
 
@@ -40,6 +41,10 @@ plain attribute reads only:
   claimed. A real keyboard's volume keys must drive the OS mixer and Home may
   open the user's browser — it's their desktop.
 - **`home`**: claimed whenever the TV UI is enabled OR playback is up.
+- **`back`**: claimed during playback (exit to the TV UI) and while the kiosk
+  holds the screen (`tv_ui_active` — Chrome must not treat the key as
+  history-back). Idle it passes through as generic input (wakes the TV UI).
+  Windows-only, like `home` — pynput exposes no browser keys off-Windows.
 - **`volume_up` / `volume_down`**: **always claimed** — the remote's volume
   must never reach the host OS mixer (no Windows overlay, no changed system
   volume after a session). Idle presses adjust VLC's amp (they apply to the
@@ -92,8 +97,13 @@ remote button ──HID──▶ host input events
   the press without waiting for the 2 s `stat_broadcaster` tick.
 - `home` shows the TV UI **first** (so `tv_ui_active` gates the focus churn),
   then calls the `/api/stop` handler if anything was playing.
+- `back` during playback takes the same show-UI-then-stop path as `home`;
+  with the kiosk up (nothing playing) it broadcasts `tv_command
+  {action:"back"}` instead — the `?tv=1` page's `_tvBack()` closes the
+  topmost open modal (via the modal's own `close*` button so its cleanup
+  runs), else blurs the focused element (dismisses a card overlay).
 - **Debounce** (`_MIN_INTERVAL`): play/pause and the seeks fire once per press
-  (0.30–0.35 s), Home once per second; volume repeats while held but is
+  (0.30–0.35 s), Back 0.4 s, Home once per second; volume repeats while held but is
   throttled to ~10 Hz. The activity feed has its own throttle
   (`_ACTIVITY_MIN_INTERVAL`, mouse moves ≤ 1/s).
 
@@ -107,7 +117,7 @@ and buttons. The host display cycles between three surfaces:
 idle background video ──any remote button/click──▶ TV UI (dashboard kiosk)
 TV UI ── no input for TV_UI_IDLE_SECS (120 s) ───▶ background video
 TV UI ── user plays something ───────────────────▶ VLC / YouTube fullscreen
-playback ── 🏠 Home ─────────────────────────────▶ stop + TV UI
+playback ── 🏠 Home or ← Back ───────────────────▶ stop + TV UI
 ```
 
 Mechanics (`main.py`):
@@ -164,7 +174,10 @@ Mechanics (`main.py`):
   (←/→ in text inputs, ↑/↓ in selects) are left alone, and with no candidate
   in a direction the key falls through to native scrolling. Hold-to-activate
   buttons (Stop, handoff) still need the pointer — Enter fires a plain click,
-  not a pointer hold.
+  not a pointer hold. **Back** (`_tvBack()`, fired by the `tv_command` SSE
+  event or a direct Escape/Backspace keypress — Backspace still deletes in
+  text fields) closes the topmost open `*Modal` via its own `close*` button
+  (fallback: add `.hidden`), else blurs the focused element.
 - **TV card overlay**: hovering or D-pad-focusing a library/show poster card
   reveals a full-card overlay split horizontally — **▶ Play/Resume top,
   Episodes bottom** (Episodes only for multi-file items/shows); the centered
