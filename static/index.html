@@ -3402,9 +3402,28 @@ if (TV_MODE) {
 // into the dimmed page behind. Hold-to-activate buttons (Stop etc.) still need
 // the pointer (Enter fires a plain click, not a pointer hold) — acceptable.
 const _TV_FOCUS_SEL = 'a[href],button,input,select,textarea,[onclick],[tabindex]:not([tabindex="-1"])';
+// Full-screen overlays whose ids don't end in "Modal" but that must behave
+// like one for the remote: D-pad navigation scoped inside them, ← Back closes
+// them via their own close function (so their state cleanup runs).
+const _TV_PAGE_CLOSERS = {
+  episodePage:    () => closeEpisodePage(),
+  searchShowPage: () => closeSearchShow(),
+  ssSourceSheet:  () => ssCloseSourceSheet(),
+  ssBulkSheet:    () => ssCloseBulkSheet(),
+};
+function _tvOpenOverlays(){
+  // Every open overlay (modals + the pages/sheets above), topmost LAST —
+  // ordered by z-index (a z-[60] modal over the z-50 episode page closes
+  // first), DOM order breaking ties (matches the old last-modal-wins rule).
+  const sel = '[id$="Modal"]:not(.hidden),' +
+    Object.keys(_TV_PAGE_CLOSERS).map(id => "#" + id + ":not(.hidden)").join(",");
+  return [...document.querySelectorAll(sel)]
+    .map((el, i) => [el, parseInt(getComputedStyle(el).zIndex, 10) || 0, i])
+    .sort((a, b) => a[1] - b[1] || a[2] - b[2])
+    .map(x => x[0]);
+}
 function _tvNavScope(){
-  // Last visible *Modal in DOM order wins (matches the repo's modal id scheme).
-  const open = [...document.querySelectorAll('[id$="Modal"]:not(.hidden)')];
+  const open = _tvOpenOverlays();
   return open.length ? open[open.length - 1] : document;
 }
 function _tvCandidates(scope){
@@ -3419,16 +3438,19 @@ function _tvCandidates(scope){
     return st.visibility !== "hidden" && st.display !== "none" && st.pointerEvents !== "none";
   });
 }
-// Remote ← Back, Firestick-style "step back": close the topmost open modal
-// (via its own close button so any cleanup it does runs), else drop focus so
-// a card overlay / focus ring is dismissed. Returns whether it consumed the
-// press. Reached two ways: the backend relays a suppressed VK_BROWSER_BACK as
-// a `tv_command` SSE event, and remotes whose Back emits Escape/Backspace hit
-// _tvNavKey directly.
+// Remote ← Back, Firestick-style "step back": close the topmost open overlay
+// — modal, episode page, search show page, or bottom-sheet — one layer per
+// press (via its own close function so any cleanup it does runs), else drop
+// focus so a card overlay / focus ring is dismissed. Returns whether it
+// consumed the press. Reached two ways: the backend relays a suppressed
+// VK_BROWSER_BACK as a `tv_command` SSE event, and remotes whose Back emits
+// Escape/Backspace hit _tvNavKey directly.
 function _tvBack(){
-  const open = [...document.querySelectorAll('[id$="Modal"]:not(.hidden)')];
+  const open = _tvOpenOverlays();
   if (open.length){
     const m = open[open.length - 1];
+    const pageClose = _TV_PAGE_CLOSERS[m.id];
+    if (pageClose){ pageClose(); return true; }
     const closer = m.querySelector('[onclick^="close"]');
     if (closer) closer.click(); else m.classList.add("hidden");
     return true;
@@ -17005,7 +17027,10 @@ document.addEventListener("keydown",e=>{
     if(e.key==="f"){ lpToggleFullscreen(); return; }
     if(e.key==="m"){ lpToggleMute(); return; }
   }
-  if(e.key==="Escape"){
+  // TV mode: Escape is the remote's Back — _tvNavKey already closed exactly
+  // one layer via _tvBack(); this bulk close-everything would blow through
+  // the whole stack (episode page included) on a single press.
+  if(e.key==="Escape" && !TV_MODE){
     closeFullscreenControls();
     closeDownloadModal(); closeProfileModal(); closeEpisodeModal(); closeStorageModal();
     closeStreamPicker(true);
@@ -17135,6 +17160,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.7.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.7.3</div>
 </body>
 </html>

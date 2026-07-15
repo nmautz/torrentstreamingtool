@@ -25,7 +25,7 @@ ordinary consumer key codes:
 | ⏭ Next track | `VK_MEDIA_NEXT_TRACK` (0xB0) | Skip **forward** `REMOTE_SEEK_STEP_SECS` (10 s) |
 | ⏮ Prev track | `VK_MEDIA_PREV_TRACK` (0xB1) | Skip **back** 10 s |
 | 🏠 Home | `VK_BROWSER_HOME` (0xAC) | **Stop playback + show the TV UI** (unsuppressed this key launches the default browser — Edge — which is why it must be claimed) |
-| ← Back | `VK_BROWSER_BACK` (0xA6) | Firestick semantics: during playback **exit the player back to the TV UI** (stop + kiosk, same path as Home); with the TV UI up **step back inside the dashboard** — close the topmost open modal, else drop focus (relayed as the `tv_command` SSE event; unsuppressed the kiosk Chrome would history-back away from `?tv=1`). Idle it passes through and wakes the TV UI like any button. Remotes whose Back emits **Escape/Backspace** instead work too — those reach the kiosk directly and `_tvNavKey` routes them to the same `_tvBack()` |
+| ← Back | `VK_BROWSER_BACK` (0xA6) | Firestick semantics: during playback **exit the player back to the TV UI** (stop + kiosk, same path as Home); with the TV UI up **step back inside the dashboard** — close the topmost open overlay (modal, episode page, search show page, or bottom-sheet — one layer per press), else drop focus (relayed as the `tv_command` SSE event; unsuppressed the kiosk Chrome would history-back away from `?tv=1`). Idle it passes through and wakes the TV UI like any button. Remotes whose Back emits **Escape/Backspace** instead work too — those reach the kiosk directly and `_tvNavKey` routes them to the same `_tvBack()` |
 | OK | `VK_RETURN` (0x0D) — or a left **click** in pointer mode | During playback: ⏯ toggle (both forms). With the TV UI up: activates the focused element (D-pad navigation) |
 | ⏻ Power | HID **System Control** "System Sleep" usage (Generic Desktop page 0x01, usage-0x80 collection); some remotes emit keyboard `VK_SLEEP` (0x5F) instead / as well | **Standby toggle between the idle surfaces** — background video showing → show the TV UI; TV UI showing → hand back to the background video (kept up if none is configured); during playback → stop, back to the background video (no kiosk — Home/Back is the path that shows the UI). Unhandled, Windows **locks + sleeps/hibernates the box** and wakes to the lock screen (autologin only runs at boot). The System Control usage never enters the keyboard stack, so it needs the dedicated two-part interception — see "⏻ Power interception" below |
 | Arrows / mouse ring | normal keys + pointer | Not intercepted — arrows **navigate the TV UI** (spatial focus, see below); the pointer stays a mouse. Any of them wakes the UI when idle |
@@ -108,8 +108,14 @@ remote button ──HID──▶ host input events
 - `back` during playback takes the same show-UI-then-stop path as `home`;
   with the kiosk up (nothing playing) it broadcasts `tv_command
   {action:"back"}` instead — the `?tv=1` page's `_tvBack()` closes the
-  topmost open modal (via the modal's own `close*` button so its cleanup
-  runs), else blurs the focused element (dismisses a card overlay).
+  topmost open overlay, one layer per press: modals **and** the full-screen
+  pages/sheets whose ids don't end in `Modal` (`#episodePage`,
+  `#searchShowPage`, `#ssSourceSheet`, `#ssBulkSheet` — enumerated in
+  `_TV_PAGE_CLOSERS` with their own close functions so state cleanup runs;
+  modals still close via their `close*` button). "Topmost" = highest
+  z-index, DOM order breaking ties, so a modal stacked over the episode
+  page closes first and the page on the next press. With nothing open it
+  blurs the focused element (dismisses a card overlay).
 - `power` toggles the idle surfaces: during playback it just calls the
   `/api/stop` handler and lets `background_video_loop` restart the idle video
   (≤ 3 s — starting it directly would race stop()'s async `pl_stop`/`pl_empty`
@@ -225,14 +231,18 @@ Mechanics (`main.py`):
   scrolled to center and marked by the `.tv-mode :focus` indigo ring), OK /
   Enter activates it (native click for buttons/links, synthesized `click()`
   for `[onclick]` tiles). Navigation is scoped inside the topmost open
-  `*Modal` so focus can't wander behind a dialog; arrows that edit a control
+  overlay (`_tvOpenOverlays`: `*Modal`s plus the episode/search pages and
+  bottom-sheets, ranked by z-index then DOM order) so focus can't wander
+  behind a dialog or the episode page; arrows that edit a control
   (←/→ in text inputs, ↑/↓ in selects) are left alone, and with no candidate
   in a direction the key falls through to native scrolling. Hold-to-activate
   buttons (Stop, handoff) still need the pointer — Enter fires a plain click,
   not a pointer hold. **Back** (`_tvBack()`, fired by the `tv_command` SSE
   event or a direct Escape/Backspace keypress — Backspace still deletes in
-  text fields) closes the topmost open `*Modal` via its own `close*` button
-  (fallback: add `.hidden`), else blurs the focused element.
+  text fields) closes the topmost open overlay, one layer per press (see
+  Dispatch above), else blurs the focused element; the desktop
+  close-everything Escape handler is skipped in TV mode so a single press
+  can't blow through the whole stack.
 - **TV card overlay**: hovering or D-pad-focusing a library/show poster card
   reveals a full-card overlay split horizontally — **▶ Play/Resume top,
   Episodes bottom** (Episodes only for multi-file items/shows); the centered
