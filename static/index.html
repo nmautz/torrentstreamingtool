@@ -496,6 +496,26 @@
     .tv-card-btn + .tv-card-btn { border-top: 1px solid rgba(129,140,248,.5); }
     .tv-card-btn.tv-card-play { background: rgba(49,46,129,.82); }
     .tv-card-btn:hover, .tv-card-btn:focus { background: rgba(79,70,229,.88); }
+    /* TV loading overlay: the player footer that normally shows "buffering"
+       is display:none on TV, so a Play press had zero visible feedback while
+       the backend spins up VLC. renderPlayer mirrors stream_status==="buffering"
+       into this fullscreen layer (shown instantly via _optimisticBuffering).
+       pointer-events:none — a long buffer never traps the D-pad, and it sits
+       above modals so it's visible from the episode picker too. */
+    #tvLoading { display: none; position: fixed; inset: 0; z-index: 10005;
+      background: rgba(3,7,18,.86); pointer-events: none;
+      flex-direction: column; align-items: center; justify-content: center;
+      gap: 1.5rem; }
+    body.tv-mode #tvLoading.show { display: flex; }
+    #tvLoading .tv-load-spin { width: 56px; height: 56px;
+      border: 6px solid rgba(255,255,255,.18); border-top-color: #818cf8;
+      animation: lpspin 0.8s steps(8) infinite; }
+    #tvLoadingTitle { max-width: 70vw; text-align: center; color: #e5e7eb;
+      font-size: 1.1rem; font-weight: 900; text-transform: uppercase;
+      letter-spacing: .12em; overflow: hidden; display: -webkit-box;
+      -webkit-line-clamp: 2; -webkit-box-orient: vertical; }
+    #tvLoadingSub { color: #6b7280; font-size: .8rem; font-weight: 700;
+      text-transform: uppercase; letter-spacing: .18em; }
     /* The stage fills the WHOLE player — header, transport, and options panel
        are all absolute overlays on top of the video, so the video always gets
        every pixel of the screen and nothing can overflow the viewport. */
@@ -2288,6 +2308,14 @@
   </button>
 </div>
 
+<!-- ── TV loading overlay (?tv=1 only) — Play-press feedback while VLC starts.
+     Toggled by renderPlayer off stream_status === "buffering". ─────────────── -->
+<div id="tvLoading">
+  <div class="tv-load-spin"></div>
+  <div id="tvLoadingTitle"></div>
+  <div id="tvLoadingSub">Starting playback…</div>
+</div>
+
 <!-- ── Player Footer ──────────────────────────────────────────────────────── -->
 <footer class="fixed bottom-0 left-0 right-0 z-40 bg-gray-950 border-t-2 border-gray-800 safe-bottom">
   <!-- Seek bar — flat Metro track -->
@@ -3994,6 +4022,20 @@ function renderPlayer(s){
   if(s.stream_status==="buffering"){
     if(s.total_mb>0) si.textContent=`${s.downloaded_mb.toFixed(1)} MB / ${s.total_mb.toFixed(1)} MB (${s.progress.toFixed(1)}%)`;
     else si.textContent=s.is_library_playback?"Starting playback…":"Connecting…";
+  }
+
+  // TV kiosk: the footer above is display:none, so mirror the buffering state
+  // into the fullscreen #tvLoading overlay — _optimisticBuffering calls
+  // renderPlayer before the /play fetch, so a Play press lights this up
+  // instantly; the SSE state event clears it once VLC is actually up.
+  if(TV_MODE){
+    const tl=document.getElementById("tvLoading");
+    const buffering=s.stream_status==="buffering";
+    tl.classList.toggle("show",buffering);
+    if(buffering){
+      document.getElementById("tvLoadingTitle").textContent=s.active_title||"";
+      document.getElementById("tvLoadingSub").textContent=si.textContent||"Starting playback…";
+    }
   }
   else if(isPlaying&&!hasVlcTime&&s.total_mb>0)
     si.textContent=`${s.downloaded_mb.toFixed(1)} / ${s.total_mb.toFixed(1)} MB`;
@@ -17093,6 +17135,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.5.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.6.0</div>
 </body>
 </html>

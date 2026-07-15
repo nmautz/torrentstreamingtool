@@ -209,6 +209,15 @@ Mechanics (`main.py`):
   Chrome-only kiosk) for 10-foot readability, and `main`'s footer-clearance
   padding is reclaimed. Fewer focus stops also makes the D-pad navigation
   predictable.
+- **Play-press loading overlay** (10.6.0): with the footer gone, a ▶ Play
+  press had no visible feedback until VLC took the screen. `renderPlayer`
+  mirrors `stream_status === "buffering"` into a fullscreen `#tvLoading`
+  overlay (square Metro spinner + title + the footer's "Starting playback…" /
+  MB-progress line). It appears instantly on the press — `_optimisticBuffering`
+  renders before the `/play` request is sent — and clears when the SSE state
+  event flips to playing/idle (or `_revertOptimistic` on a failed request).
+  `pointer-events: none` so a stuck buffer never traps the D-pad; z-index above
+  modals so it shows over the episode picker too.
 - **TV is browse + play only — management/detail chrome is hidden** (10.5.0),
   left to any phone/desktop browser. The same `.tv-mode` CSS block hides the
   profile-settings gear (`#navSettingsBtn`), the profile picker's Manage
