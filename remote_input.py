@@ -70,6 +70,14 @@ _VK_ACTIONS = {
 _WM_KEYDOWN = (0x0100, 0x0104)   # WM_KEYDOWN, WM_SYSKEYDOWN
 _WM_KEYUP   = (0x0101, 0x0105)   # WM_KEYUP,   WM_SYSKEYUP
 
+# KBDLLHOOKSTRUCT.flags bit: the event was synthesized via SendInput /
+# keybd_event, not typed on hardware. main.py's Windows focus cocktail
+# (`_vlc_focus_windows` / `_focus_tv_browser_windows`) fires a synthetic ALT
+# press to defeat foreground-lock; without this check that ALT counts as
+# "activity" and re-wakes the TV UI ~1.5 s after every idle hand-back, so the
+# background video flashes for a moment and then loses the screen to the kiosk.
+_LLKHF_INJECTED = 0x10
+
 # Per-action debounce (seconds) — the remotes auto-repeat while a button is
 # held. Volume is allowed to repeat (held button = continuous ramp) but is
 # throttled so VLC's HTTP interface isn't flooded; play/pause and the seeks
@@ -140,6 +148,11 @@ class RemoteListener:
             pass
 
     def _win32_event_filter(self, msg: int, data: Any) -> bool:
+        # Injected (software-synthesized) events are never remote input —
+        # deliver them untouched and don't let them wake the TV UI or refresh
+        # its idle timer. See _LLKHF_INJECTED above.
+        if data.flags & _LLKHF_INJECTED:
+            return True
         action = _VK_ACTIONS.get(data.vkCode)
         if action is None or not self._should(action):
             # Not ours — deliver normally everywhere, but count a keydown as

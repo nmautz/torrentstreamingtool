@@ -126,7 +126,11 @@ Mechanics (`main.py`):
   while nothing is playing. Pointer **motion never wakes** (gyro drift would
   light the TV at night) and neither do handled media keys (a volume press
   during playback is not a request for the dashboard). During playback the
-  deliberate way to the UI is 🏠 Home.
+  deliberate way to the UI is 🏠 Home. On Windows, **injected keys**
+  (`LLKHF_INJECTED`) are ignored entirely — the focus cocktail's own synthetic
+  ALT press (`_vlc_focus_windows`) would otherwise re-wake the UI ~1.5 s after
+  every idle hand-back, flashing the background video and stealing the screen
+  right back (see docs/GOTCHAS.md).
 - **Show** (`_tv_ui_show`): pauses the background video (`pl_forcepause` —
   keeps its position; `background_playing` stays True so the loop stays out),
   launches the kiosk if its Chrome isn't running (matched by
