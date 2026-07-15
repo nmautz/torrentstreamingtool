@@ -463,6 +463,22 @@
        fixed footer. */
     body.tv-mode { zoom: 1.15; }
     body.tv-mode main { padding-bottom: 2rem !important; }
+    /* TV card overlay (rendered only in TV mode): hover / D-pad focus splits
+       the poster into full-card actions — Play/Resume on top, Episodes below.
+       Buttons exist invisibly (opacity, NOT display) so the D-pad can focus
+       them; :focus-within then reveals the overlay. The old centered ▶ is
+       replaced by it. */
+    body.tv-mode .lib-cardv-play { display: none !important; }
+    .tv-card-ov { position: absolute; inset: 0; z-index: 4; display: flex;
+      flex-direction: column; opacity: 0; transition: opacity .12s; }
+    .lib-cardv-poster:hover .tv-card-ov,
+    .lib-cardv-poster:focus-within .tv-card-ov { opacity: 1; }
+    .tv-card-btn { flex: 1; display: flex; align-items: center; justify-content: center;
+      font-weight: 900; text-transform: uppercase; letter-spacing: .1em;
+      font-size: .85rem; color: #fff; background: rgba(3,7,18,.72); }
+    .tv-card-btn + .tv-card-btn { border-top: 1px solid rgba(129,140,248,.5); }
+    .tv-card-btn.tv-card-play { background: rgba(49,46,129,.82); }
+    .tv-card-btn:hover, .tv-card-btn:focus { background: rgba(79,70,229,.88); }
     /* The stage fills the WHOLE player — header, transport, and options panel
        are all absolute overlays on top of the video, so the video always gets
        every pixel of the screen and nothing can overflow the viewport. */
@@ -3349,6 +3365,9 @@ function _tvNavScope(){
 function _tvCandidates(scope){
   return [...scope.querySelectorAll(_TV_FOCUS_SEL)].filter(el => {
     if (el.disabled || el.closest(".hidden,[hidden]")) return false;
+    // A container holding a tv-card overlay defers to its buttons — the
+    // poster itself (role=button) must not compete with Play/Episodes.
+    if (el.querySelector && el.querySelector(".tv-card-btn")) return false;
     const r = el.getBoundingClientRect();
     if (r.width <= 0 || r.height <= 0) return false;
     const st = getComputedStyle(el);
@@ -3398,6 +3417,14 @@ function _tvNavKey(e){
     if (score < bestScore){ bestScore = score; best = el; }
   }
   if (best){
+    // Entering a tv-card group from outside → land on its default action
+    // (Play/Resume), whichever of the group's buttons scored best. Moving
+    // WITHIN the group (Play ↔ Episodes) is left alone.
+    const grp = best.closest("[data-tv-group]");
+    if (grp && (!cur || cur.closest("[data-tv-group]") !== grp)){
+      const def = grp.querySelector("[data-tv-default]");
+      if (def) best = def;
+    }
     e.preventDefault();
     if (best.tabIndex < 0 && !best.hasAttribute("tabindex")) best.tabIndex = -1; // make [onclick] divs focusable
     best.focus({preventScroll:true});
@@ -5875,11 +5902,25 @@ function _libItemCardHtml(item){
   const c=_libItemChrome(item);
   const title=item.title||"";
   const badges=`${c.statusBadge}${c.partialBadge}${c.compressedBadge}${c.skipBadge}`;
+  const oc=c.isMulti?`resumeLibraryItemWithChooser('${item.id}')`:`continueLibraryItem('${item.id}')`;
   let playOverlay="";
   if(c.isReady){
-    const oc=c.isMulti?`resumeLibraryItemWithChooser('${item.id}')`:`continueLibraryItem('${item.id}')`;
     playOverlay=`<button class="lib-cardv-play" title="${c.hasProgress?'Resume':'Play'}"
       onclick="event.stopPropagation();${oc}">${c.hasProgress?'↩︎':'▶︎'}</button>`;
+  }
+  // TV mode: hovering/D-pad-focusing a card splits the poster into full-card
+  // actions — top ▶ Play/Resume (the D-pad default via data-tv-default), bottom
+  // Episodes (multi-file items only; reuses the .lib-tile-open delegation).
+  // Both stop keydown/click propagation so OK on a button can't ALSO trigger
+  // the poster's own open handlers. The centered .lib-cardv-play is CSS-hidden.
+  let tvOverlay="";
+  if(TV_MODE){
+    const top=c.isReady?`<button class="tv-card-btn tv-card-play" data-tv-default
+        onkeydown="if(event.key==='Enter'||event.key===' ')event.stopPropagation()"
+        onclick="event.stopPropagation();${oc}">${c.hasProgress?'↩︎ Resume':'▶ Play'}</button>`:'';
+    const eps=(c.tileOpen&&c.isMulti)?`<button class="tv-card-btn lib-tile-open" data-item-id="${item.id}" data-title="${escHtml(title)}"
+        onkeydown="if(event.key==='Enter'||event.key===' ')event.stopPropagation()" onclick="event.stopPropagation()">Episodes</button>`:'';
+    if(top||eps) tvOverlay=`<div class="tv-card-ov" data-tv-group>${top}${eps}</div>`;
   }
   const posterCls=`lib-cardv-poster${c.tileOpen?' lib-tile-open':''}`;
   const posterAttrs=c.tileOpen?`data-item-id="${item.id}" data-title="${escHtml(title)}" role="button" tabindex="0" title="View details"`:'';
@@ -5896,6 +5937,7 @@ function _libItemCardHtml(item){
       ${playOverlay}
       ${badges?`<div class="lib-cardv-badges">${badges}</div>`:''}
       ${progOverlay}
+      ${tvOverlay}
     </div>
     <div class="lib-cardv-info">
       <div class="text-xs font-medium text-gray-200 leading-snug" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${c.epPrefix}${escHtml(title)}</div>
@@ -5936,6 +5978,12 @@ function _libShowCardHtml(seriesTitle, gItems){
       <button class="lib-cardv-more" title="More actions" onclick="event.stopPropagation();_libCardMore(this)">⋯</button>
       <button class="lib-cardv-play lib-show-play" data-series-key="${kAttr}" data-mode="${inProgress?"resume":"all"}" title="${inProgress?'Resume':'Play'}">${inProgress?'↩︎':'▶︎'}</button>
       ${badges?`<div class="lib-cardv-badges">${badges}</div>`:''}
+      ${TV_MODE?`<div class="tv-card-ov" data-tv-group>
+        <button class="tv-card-btn tv-card-play lib-show-play" data-tv-default data-series-key="${kAttr}" data-mode="${inProgress?"resume":"all"}"
+          onkeydown="if(event.key==='Enter'||event.key===' ')event.stopPropagation()">${inProgress?'↩︎ Resume':'▶ Play'}</button>
+        <button class="tv-card-btn lib-show-open" data-series-key="${kAttr}" data-title="${tAttr}"
+          onkeydown="if(event.key==='Enter'||event.key===' ')event.stopPropagation()" onclick="event.stopPropagation()">Episodes</button>
+      </div>`:''}
     </div>
     <div class="lib-cardv-info">
       <div class="text-xs font-medium text-gray-200 leading-snug" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${escHtml(title)}</div>
@@ -16982,6 +17030,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.2.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.3.0</div>
 </body>
 </html>

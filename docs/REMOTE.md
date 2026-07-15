@@ -159,6 +159,21 @@ Mechanics (`main.py`):
   in a direction the key falls through to native scrolling. Hold-to-activate
   buttons (Stop, handoff) still need the pointer — Enter fires a plain click,
   not a pointer hold.
+- **TV card overlay**: hovering or D-pad-focusing a library/show poster card
+  reveals a full-card overlay split horizontally — **▶ Play/Resume top,
+  Episodes bottom** (Episodes only for multi-file items/shows); the centered
+  ▶ button is hidden on TV. Entering a card with the D-pad always lands on
+  Play/Resume: the Play button carries `data-tv-default`, the overlay is a
+  `data-tv-group`, and `_tvNavKey` redirects any cross-group entry to the
+  group's default (movement *within* the group — Play ↔ Episodes — is left
+  alone); `_tvCandidates` excludes the poster itself whenever it contains
+  `.tv-card-btn`s so the buttons don't compete with their container. The
+  buttons are invisible-but-focusable (opacity 0, revealed by
+  `:hover`/`:focus-within`) and reuse the card delegation classes
+  (`lib-tile-open`/`lib-show-open`/`lib-show-play`); their inline handlers
+  stop Enter/Space + click propagation so OK on Play can't also fire the
+  poster's open handler — **Enter/Space only**, an unconditional keydown
+  stop would swallow the arrows and freeze navigation on the buttons.
 - Forces `hlsAvailable = false`: VLC *is* "on device" on the TV, so every
   Prep / On-Device / play-chooser affordance is hidden and the play chooser
   collapses straight to VLC (the same path a no-HLS macOS host uses).
