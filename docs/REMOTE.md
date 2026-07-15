@@ -27,7 +27,7 @@ ordinary consumer key codes:
 | 🏠 Home | `VK_BROWSER_HOME` (0xAC) | **Stop playback + show the TV UI** (unsuppressed this key launches the default browser — Edge — which is why it must be claimed) |
 | ← Back | `VK_BROWSER_BACK` (0xA6) | Firestick semantics: during playback **exit the player back to the TV UI** (stop + kiosk, same path as Home); with the TV UI up **step back inside the dashboard** — close the topmost open modal, else drop focus (relayed as the `tv_command` SSE event; unsuppressed the kiosk Chrome would history-back away from `?tv=1`). Idle it passes through and wakes the TV UI like any button. Remotes whose Back emits **Escape/Backspace** instead work too — those reach the kiosk directly and `_tvNavKey` routes them to the same `_tvBack()` |
 | OK | `VK_RETURN` (0x0D) — or a left **click** in pointer mode | During playback: ⏯ toggle (both forms). With the TV UI up: activates the focused element (D-pad navigation) |
-| ⏻ Power | `VK_SLEEP` (0x5F) | **Standby toggle between the idle surfaces** — background video showing → show the TV UI; TV UI showing → hand back to the background video (kept up if none is configured); during playback → stop, back to the background video (no kiosk — the Home/Back path is the one that shows the UI). Unsuppressed, Windows **sleeps/hibernates the box** — which is why it must always be claimed. Caveat: some remotes emit power as a HID *System Control* usage (power page) instead of the keyboard sleep key; that path goes straight to the Windows power manager and a keyboard hook can never see or block it — fix in Windows power settings ("When I press the sleep button → Do nothing"). See GOTCHAS.md |
+| ⏻ Power | HID **System Control** "System Sleep" usage (Generic Desktop page 0x01, usage-0x80 collection); some remotes emit keyboard `VK_SLEEP` (0x5F) instead / as well | **Standby toggle between the idle surfaces** — background video showing → show the TV UI; TV UI showing → hand back to the background video (kept up if none is configured); during playback → stop, back to the background video (no kiosk — Home/Back is the path that shows the UI). Unhandled, Windows **locks + sleeps/hibernates the box** and wakes to the lock screen (autologin only runs at boot). The System Control usage never enters the keyboard stack, so it needs the dedicated two-part interception — see "⏻ Power interception" below |
 | Arrows / mouse ring | normal keys + pointer | Not intercepted — arrows **navigate the TV UI** (spatial focus, see below); the pointer stays a mouse. Any of them wakes the UI when idle |
 
 The next/prev *track* keys are mapped to ±10 s seeks (not playlist next/prev)
@@ -68,9 +68,13 @@ plain attribute reads only:
   It is off by default because an always-on guard **fights quantizing audio
   endpoints** and drip-steps VLC's volume — see
   [GOTCHAS.md](GOTCHAS.md#and-the-os-mixer-volume-guard-is-opt-in--an-always-on-guard-fights-quantizing-audio-endpoints).
-- **`power`** (⏻, `VK_SLEEP`): **always claimed** — unsuppressed it sleeps or
-  hibernates the media box, never desirable from the couch. Windows-only,
-  like `home`/`back` (pynput exposes no sleep key off-Windows).
+- **`power`** (⏻): **always claimed** — unhandled it sleeps or hibernates the
+  media box, never desirable from the couch. Windows-only, like `home`/`back`
+  (pynput exposes no sleep key off-Windows). This gate is shared by both
+  arrival paths (the keyboard hook's `VK_SLEEP` and the Raw Input listener —
+  see "⏻ Power interception" below), so during "Use My Computer" a press does
+  nothing (the OS action is neutered machine-wide by `_neuter_sleep_button`,
+  so it can't fall through to sleep either).
 - **`ok`** (Enter): claimed only during real playback while the TV UI is not
   up → acts as ⏯. Otherwise it passes through so it activates the focused
   element in the kiosk. Its pointer-mode twin (left click) is handled off the
@@ -117,6 +121,38 @@ remote button ──HID──▶ host input events
   (0.30–0.35 s), Back 0.4 s, Home and Power once per second; volume repeats while held but is
   throttled to ~10 Hz. The activity feed has its own throttle
   (`_ACTIVITY_MIN_INTERVAL`, mouse moves ≤ 1/s).
+
+## ⏻ Power interception (Windows)
+
+The power button is the one remote key that (on most remotes) **never enters
+the keyboard stack**: it's sent as a HID *System Control* usage (Generic
+Desktop page 0x01, usage-0x80 collection — "System Sleep"), which the HID
+class driver hands straight to the Windows power manager. A low-level
+keyboard hook cannot see or suppress it — the box locks ("Locking…") and
+sleeps/hibernates, then wakes to the lock screen (autologin only runs at a
+real boot). Interception is therefore split in two (both parts run at
+startup when `REMOTE_CONTROL=1` on Windows):
+
+1. **Neuter the OS action** — `_neuter_sleep_button()` (`main.py`) sets the
+   active power plan's sleep-button action to *Do nothing* (AC + DC:
+   `powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS SBUTTONACTION 0`,
+   same for `/setdcvalueindex`, then `/setactive SCHEME_CURRENT`). This is a
+   **persistent, machine-wide power-plan change** — deliberate: a media box
+   must never be slept by a stray remote press, even while StreamLink isn't
+   running. The physical power button (`PBUTTONACTION`) is left alone.
+   `powercfg` needs elevation; on failure a warning logs the manual commands.
+2. **Observe the press via Raw Input** — `PowerButtonListener`
+   (`remote_input.py`) registers a hidden window for Raw Input from the
+   System Control usage page (`RIDEV_INPUTSINK`, so delivery doesn't depend
+   on focus) and dispatches `power` into `_remote_key_action` on each press
+   (release reports are all-zero past the report ID and skipped). Raw Input
+   is observation-only — it can't block the power manager; that's what step 1
+   is for.
+
+The keyboard hook additionally maps `VK_SLEEP` (0x5F) → `power` for remotes
+that emit the keyboard form. A remote emitting **both** forms per press is
+deduped by the power branch's 1 s cross-path debounce in `_remote_key_action`
+(`_remote_power_ts`).
 
 ## TV UI (Firestick-style dashboard kiosk)
 
@@ -254,7 +290,7 @@ Mechanics (`main.py`):
 
 | Platform | Listener | Suppression | TV UI |
 |---|---|---|---|
-| **Windows** | pynput low-level keyboard + mouse hooks | **Yes, selective** — `win32_event_filter` + `suppress_event()` swallow only the handled keys, only when claimed. Required: without it the OS mixer also changes volume, a focused VLC also toggles pause, and Home opens Edge. Dispatch happens *inside* the filter (a suppressed event never reaches `on_press`); both key-down and key-up are swallowed. | Full (kiosk focus cocktail) |
+| **Windows** | pynput low-level keyboard + mouse hooks, plus the Raw Input power-button window (`PowerButtonListener`) | **Yes, selective** — `win32_event_filter` + `suppress_event()` swallow only the handled keys, only when claimed. Required: without it the OS mixer also changes volume, a focused VLC also toggles pause, and Home opens Edge. Dispatch happens *inside* the filter (a suppressed event never reaches `on_press`); both key-down and key-up are swallowed. The ⏻ power usage isn't suppressible at all — its OS action is disabled via powercfg instead (see "⏻ Power interception"). | Full (kiosk focus cocktail) |
 | **Linux (X11)** | pynput X listeners (need `DISPLAY`) | No selective suppression — the DE may also act on volume keys. No Home action (pynput exposes no browser-home key off-Windows). | Wake/hide work; kiosk raise via `wmctrl` if installed |
 | **macOS** | pynput CGEventTap | No suppression; requires the **Input Monitoring** permission (TCC) — without it the listeners receive nothing (so the TV UI never wakes). Dev convenience only. | Launch only; no reliable re-raise of an existing kiosk |
 

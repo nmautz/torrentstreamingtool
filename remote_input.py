@@ -17,6 +17,10 @@ input globally and feeds two things back into main.py:
    wake the fullscreen dashboard kiosk on any button when the box is idle,
    and hand the screen back to the idle background video after a period of
    no input. See docs/REMOTE.md.
+3. **⏻ power button** (`PowerButtonListener`, Windows) — most remotes emit
+   power as a HID System Control usage that bypasses the keyboard stack
+   entirely (the box locks + sleeps); a Raw Input window observes it while
+   main.py disables the OS sleep-button action. See the class docstring.
 
 Platform notes (Windows first — see docs/REMOTE.md):
 
@@ -48,6 +52,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import platform
+import threading
 import time
 from typing import Any, Awaitable, Callable, Optional
 
@@ -248,6 +253,219 @@ class RemoteListener:
                     l.stop()
             except Exception:
                 pass
+
+
+class PowerButtonListener:
+    """Windows-only Raw Input listener for the remote's ⏻ power button.
+
+    Air-mouse power buttons usually never enter the keyboard stack: they emit
+    a HID **System Control** usage (Generic Desktop page 0x01, usage 0x80
+    collection — System Sleep / Power Down), which the HID class driver hands
+    straight to the Windows power manager. A low-level keyboard hook neither
+    sees nor suppresses it — the box locks and sleeps. Interception is
+    therefore split in two:
+
+    - main.py's `_neuter_sleep_button()` sets the power plan's sleep-button
+      action to "Do nothing" (`powercfg … SBUTTONACTION 0`), so the press no
+      longer suspends the box;
+    - this listener registers a hidden window for Raw Input from the System
+      Control usage page (`RIDEV_INPUTSINK` — delivered regardless of focus)
+      and dispatches "power" on each press. Raw Input is observation-only (it
+      can't block the power manager) — that's what the powercfg step is for.
+
+    Button-release reports (all-zero past the report ID) are skipped, and
+    main.py's power branch debounces cross-path, so a remote that emits BOTH
+    the VK_SLEEP keyboard key and the System Control usage fires once.
+    """
+
+    _WM_INPUT        = 0x00FF
+    _WM_QUIT         = 0x0012
+    _RIDEV_INPUTSINK = 0x0100
+    _RID_INPUT       = 0x10000003
+    _RIM_TYPEHID     = 2
+
+    def __init__(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        dispatch: Callable[[str], Awaitable[None]],
+        should_handle: Callable[[str], bool],
+    ) -> None:
+        self._loop = loop
+        self._dispatch = dispatch
+        self._should = should_handle
+        self._tid: Optional[int] = None            # message-pump thread id (for WM_QUIT)
+        self._thread: Optional[threading.Thread] = None
+        self._started = threading.Event()
+        self._error: Optional[BaseException] = None
+
+    def _fire(self) -> None:
+        try:
+            if not self._should("power"):
+                return
+            asyncio.run_coroutine_threadsafe(self._dispatch("power"), self._loop)
+        except Exception:
+            pass
+
+    def _thread_main(self) -> None:
+        try:
+            import ctypes
+            from ctypes import wintypes
+
+            user32 = ctypes.windll.user32
+            kernel32 = ctypes.windll.kernel32
+
+            LRESULT = ctypes.c_ssize_t
+            WNDPROC = ctypes.WINFUNCTYPE(
+                LRESULT, wintypes.HWND, wintypes.UINT,
+                wintypes.WPARAM, wintypes.LPARAM)
+            user32.DefWindowProcW.restype = LRESULT
+            user32.DefWindowProcW.argtypes = (
+                wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+            user32.CreateWindowExW.restype = wintypes.HWND
+            user32.GetRawInputData.restype = wintypes.UINT
+            user32.GetRawInputData.argtypes = (
+                wintypes.HANDLE, wintypes.UINT, ctypes.c_void_p,
+                ctypes.POINTER(wintypes.UINT), wintypes.UINT)
+
+            class WNDCLASSW(ctypes.Structure):
+                _fields_ = [
+                    ("style",         wintypes.UINT),
+                    ("lpfnWndProc",   WNDPROC),
+                    ("cbClsExtra",    ctypes.c_int),
+                    ("cbWndExtra",    ctypes.c_int),
+                    ("hInstance",     wintypes.HINSTANCE),
+                    ("hIcon",         wintypes.HANDLE),
+                    ("hCursor",       wintypes.HANDLE),
+                    ("hbrBackground", wintypes.HANDLE),
+                    ("lpszMenuName",  wintypes.LPCWSTR),
+                    ("lpszClassName", wintypes.LPCWSTR),
+                ]
+
+            class RAWINPUTDEVICE(ctypes.Structure):
+                _fields_ = [
+                    ("usUsagePage", wintypes.USHORT),
+                    ("usUsage",     wintypes.USHORT),
+                    ("dwFlags",     wintypes.DWORD),
+                    ("hwndTarget",  wintypes.HWND),
+                ]
+
+            class RAWINPUTHEADER(ctypes.Structure):
+                _fields_ = [
+                    ("dwType",  wintypes.DWORD),
+                    ("dwSize",  wintypes.DWORD),
+                    ("hDevice", wintypes.HANDLE),
+                    ("wParam",  wintypes.WPARAM),
+                ]
+
+            header_sz = ctypes.sizeof(RAWINPUTHEADER)
+
+            def handle_input(lparam: int) -> None:
+                hraw = wintypes.HANDLE(lparam)
+                size = wintypes.UINT(0)
+                user32.GetRawInputData(
+                    hraw, self._RID_INPUT, None, ctypes.byref(size), header_sz)
+                if not size.value:
+                    return
+                buf = (ctypes.c_ubyte * size.value)()
+                if user32.GetRawInputData(
+                        hraw, self._RID_INPUT, buf,
+                        ctypes.byref(size), header_sz) != size.value:
+                    return
+                hdr = ctypes.cast(buf, ctypes.POINTER(RAWINPUTHEADER)).contents
+                if hdr.dwType != self._RIM_TYPEHID:
+                    return
+                # Past the header: RAWHID = dwSizeHid (DWORD) + dwCount (DWORD)
+                # + bRawData[dwSizeHid * dwCount].
+                sz_hid = int.from_bytes(bytes(buf[header_sz:header_sz + 4]), "little")
+                count  = int.from_bytes(bytes(buf[header_sz + 4:header_sz + 8]), "little")
+                data_off = header_sz + 8
+                payload = bytes(buf[data_off:data_off + sz_hid * count])
+                # A button-release report is all zeros past the report ID —
+                # only the press dispatches (a release must not re-toggle).
+                pressed = any(payload[1:]) if len(payload) > 1 else any(payload)
+                if pressed:
+                    self._fire()
+
+            @WNDPROC
+            def wndproc(hwnd: Any, msg: int, wparam: int, lparam: int) -> int:
+                if msg == self._WM_INPUT:
+                    try:
+                        handle_input(lparam)
+                    except Exception:
+                        pass
+                    return 0
+                return user32.DefWindowProcW(hwnd, msg, wparam, lparam)
+
+            hinst = kernel32.GetModuleHandleW(None)
+            wc = WNDCLASSW()
+            wc.lpfnWndProc = wndproc
+            wc.hInstance = hinst
+            wc.lpszClassName = "StreamLinkPowerButtonSink"
+            if not user32.RegisterClassW(ctypes.byref(wc)):
+                raise ctypes.WinError()
+            hwnd = user32.CreateWindowExW(
+                0, wc.lpszClassName, wc.lpszClassName,
+                0, 0, 0, 0, 0, None, None, hinst, None)
+            if not hwnd:
+                raise ctypes.WinError()
+            rid = RAWINPUTDEVICE(0x01, 0x80, self._RIDEV_INPUTSINK, hwnd)
+            if not user32.RegisterRawInputDevices(
+                    ctypes.byref(rid), 1, ctypes.sizeof(RAWINPUTDEVICE)):
+                raise ctypes.WinError()
+
+            self._tid = kernel32.GetCurrentThreadId()
+            self._started.set()
+
+            msg = wintypes.MSG()
+            while user32.GetMessageW(ctypes.byref(msg), None, 0, 0) > 0:
+                user32.TranslateMessage(ctypes.byref(msg))
+                user32.DispatchMessageW(ctypes.byref(msg))
+            # `wndproc` (and the ctypes callback keeping it alive) lives in
+            # this frame — the pump exiting is what ends its lifetime.
+        except BaseException as e:   # report registration failures to start()
+            self._error = e
+            self._started.set()
+
+    def start(self) -> None:
+        self._thread = threading.Thread(
+            target=self._thread_main, name="power-button-rawinput", daemon=True)
+        self._thread.start()
+        self._started.wait(timeout=5.0)
+        if self._error is not None:
+            raise self._error
+        if self._tid is None:
+            raise RuntimeError("raw-input thread did not become ready")
+
+    def stop(self) -> None:
+        if self._tid is None:
+            return
+        try:
+            import ctypes
+            ctypes.windll.user32.PostThreadMessageW(self._tid, self._WM_QUIT, 0, 0)
+        except Exception:
+            pass
+
+
+def start_power_listener(
+    loop: asyncio.AbstractEventLoop,
+    dispatch: Callable[[str], Awaitable[None]],
+    should_handle: Callable[[str], bool],
+) -> Optional[PowerButtonListener]:
+    """Start the Raw Input listener for the remote's ⏻ power button.
+    Windows-only; returns None (after logging why) elsewhere or when window /
+    raw-input registration fails — power handling then relies on the keyboard
+    hook's VK_SLEEP mapping alone."""
+    if platform.system() != "Windows":
+        return None
+    listener = PowerButtonListener(loop, dispatch, should_handle)
+    try:
+        listener.start()
+    except Exception as e:
+        log.warning("power-button interception unavailable — raw-input "
+                    "listener failed to start (%s)", e)
+        return None
+    log.info("power-button raw-input listener active (System Control usage page)")
+    return listener
 
 
 def start_listener(

@@ -7279,6 +7279,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # `_tv_input_event` activity feed is what wakes the TV UI kiosk.
     state.tv_input_last = time.time()
     remote_listener = None
+    power_listener = None
     if settings.remote_control:
         try:
             import remote_input
@@ -7287,6 +7288,20 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
                 _remote_should_handle, on_input=_tv_input_event)
         except Exception:
             log.warning("HID remote input listener failed to start", exc_info=True)
+        # ⏻ power button (Windows): usually a HID System Control usage the
+        # keyboard hook can't see — Windows locks + sleeps the box. Disable
+        # the OS sleep-button action and observe the press via Raw Input
+        # instead. See docs/REMOTE.md + docs/GOTCHAS.md.
+        if platform.system() == "Windows":
+            asyncio.create_task(_neuter_sleep_button())
+            try:
+                import remote_input
+                power_listener = remote_input.start_power_listener(
+                    asyncio.get_running_loop(), _remote_key_action,
+                    _remote_should_handle)
+            except Exception:
+                log.warning("power-button raw-input listener failed to start",
+                            exc_info=True)
 
     yield
 
@@ -7297,6 +7312,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         t.cancel()
     if remote_listener is not None:
         remote_listener.stop()
+    if power_listener is not None:
+        power_listener.stop()
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
     await qbit.aclose()
@@ -11938,6 +11955,50 @@ REMOTE_SEEK_STEP_SECS = 10   # remote ⏮/⏭ buttons: ± seconds (matches the U
 REMOTE_VOLUME_STEP    = 5    # remote vol ± buttons: % per press (matches the UI's ± buttons)
 
 
+async def _neuter_sleep_button() -> None:
+    """Windows: set the active power plan's sleep-button action to "Do
+    nothing" (AC + DC), so the remote's ⏻ press stops suspending the box.
+
+    Most air-mouse power buttons emit a HID System Control usage that goes
+    straight to the Windows power manager — no keyboard hook can see or
+    suppress it, so the box locks + sleeps and wakes to the lock screen
+    (autologin only runs at boot). With the OS action disabled, the press
+    does nothing system-wide and the Raw Input listener
+    (remote_input.start_power_listener) handles it instead. Persistent,
+    machine-wide power-plan change, deliberately: a media box must never be
+    slept by a stray remote press, even while StreamLink isn't running. The
+    physical power button (PBUTTONACTION) is left alone.
+
+    powercfg needs an elevated process — on failure, log the manual commands.
+    """
+    cmds = [
+        ("powercfg", "/setacvalueindex", "SCHEME_CURRENT", "SUB_BUTTONS", "SBUTTONACTION", "0"),
+        ("powercfg", "/setdcvalueindex", "SCHEME_CURRENT", "SUB_BUTTONS", "SBUTTONACTION", "0"),
+        ("powercfg", "/setactive", "SCHEME_CURRENT"),
+    ]
+    for cmd in cmds:
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdout=asyncio.subprocess.DEVNULL,
+                stderr=asyncio.subprocess.DEVNULL,
+            )
+            rc = await proc.wait()
+        except Exception:
+            rc = -1
+        if rc != 0:
+            log.warning(
+                "could not set the sleep-button action to 'do nothing' "
+                "(powercfg rc=%s — not elevated?). The remote's ⏻ press may "
+                "still sleep the box; run from an ADMIN prompt:  "
+                "powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS SBUTTONACTION 0  &&  "
+                "powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS SBUTTONACTION 0  &&  "
+                "powercfg /setactive SCHEME_CURRENT", rc)
+            return
+    log.info("sleep-button action set to 'do nothing' — remote ⏻ presses are "
+             "intercepted via Raw Input instead")
+
+
 def _remote_should_handle(action: str = "") -> bool:
     """Whether a remote key press should be acted on (and, on Windows,
     suppressed system-wide).
@@ -12031,8 +12092,17 @@ async def _remote_key_action(action: str) -> None:
                 await broadcast("tv_command", {"action": "back"})
             return
         if action == "power":
+            # Cross-path debounce: a single press can arrive twice — remotes
+            # may emit BOTH the VK_SLEEP keyboard key (hook path) and the HID
+            # System Control usage (raw-input path) — and neither path shares
+            # the RemoteListener per-action debounce.
+            global _remote_power_ts
+            now_m = time.monotonic()
+            if now_m - _remote_power_ts < 1.0:
+                return
+            _remote_power_ts = now_m
             # Standby toggle between the two idle surfaces — never the OS
-            # sleep the key means to Windows (suppressed while claimed).
+            # sleep the key means to Windows (suppressed / neutered while claimed).
             if state.youtube_active or state.stream_status != "idle" \
                     or state.library_item_id or state.active_hash:
                 # "Screen off": end playback. background_video_loop brings the
@@ -12095,6 +12165,10 @@ async def _remote_key_action(action: str) -> None:
 # guard below tell hook-handled presses (already routed to VLC) apart from
 # consumer-control presses it must route itself.
 _remote_vol_key_ts: float = 0.0
+
+# monotonic() of the last acted-on ⏻ power press — cross-path debounce (see
+# the power branch above; VK_SLEEP hook path + raw-input path can both fire).
+_remote_power_ts: float = 0.0
 
 
 async def remote_volume_guard() -> None:
