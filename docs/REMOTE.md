@@ -48,18 +48,20 @@ plain attribute reads only:
   `set_system_volume`. The dashboard *slider* keeps its documented OS-volume
   behaviour during YouTube — this rule is remote-only.
 
-  The keyboard hook alone can't enforce this: many air-mouse remotes send
-  volume as HID **consumer-control usages** (Usage Page 0x0C) that Windows'
-  audio stack applies to the mixer directly — the hook never sees a
-  suppressible `VK_VOLUME_*` for the press (or sees a synthesized one whose
-  suppression doesn't undo the applied change). **`remote_volume_guard`**
-  (`main.py`, Windows-only, ~3 Hz endpoint-volume poll via the winvol helper)
-  is the backstop: every legitimate OS-volume writer goes through
-  `set_system_volume`, which records `state.host_volume_expected`; any other
-  change is reverted and its delta re-routed to VLC / the player gain. A
-  ~1.2 s dedupe window (`_remote_vol_key_ts`, stamped by the hook's volume
-  dispatch) stops remotes that emit *both* forms from double-stepping. The
-  guard stands down (and resyncs) during the "Use My Computer" pause.
+  Enforcement is **hook-only by default** — claim + suppress + route, the
+  behaviour verified on the reference remote since v9.13.0. For a remote
+  whose volume provably bypasses the keyboard hook (HID consumer-control
+  usages the hook can't suppress: system volume changes even with remote
+  support running), there is an **opt-in** backstop: `REMOTE_VOLUME_GUARD=1`
+  enables `remote_volume_guard` (`main.py`, Windows-only, ~3 Hz
+  endpoint-volume poll via the winvol helper) — every legitimate OS-volume
+  writer records itself via `set_system_volume`
+  (`state.host_volume_expected`); any other change is reverted and its delta
+  re-routed to VLC / the player gain, with a ~1.2 s dedupe window
+  (`_remote_vol_key_ts`) so remotes emitting *both* forms don't double-step.
+  It is off by default because an always-on guard **fights quantizing audio
+  endpoints** and drip-steps VLC's volume — see
+  [GOTCHAS.md](GOTCHAS.md#and-the-os-mixer-volume-guard-is-opt-in--an-always-on-guard-fights-quantizing-audio-endpoints).
 - **`ok`** (Enter): claimed only during real playback while the TV UI is not
   up → acts as ⏯. Otherwise it passes through so it activates the focused
   element in the kiosk. Its pointer-mode twin (left click) is handled off the

@@ -256,6 +256,15 @@ class Settings(BaseSettings):
     # Set REMOTE_CONTROL=0 in .env to disable the listener entirely.
     remote_control: bool = True
 
+    # Opt-in OS-mixer volume guard (see remote_volume_guard). Default OFF: on
+    # real hardware the keyboard hook's suppression alone keeps the remote's
+    # volume off the host mixer, and the guard's revert loop can FIGHT audio
+    # endpoints that quantize volume (HDMI outputs), flickering the mixer and
+    # drifting VLC's volume on its own. Enable (REMOTE_VOLUME_GUARD=1) only
+    # for a remote whose volume provably bypasses the keyboard hook (system
+    # volume changes even though remote support is active during playback).
+    remote_volume_guard: bool = False
+
     # TV UI (Firestick-style): a fullscreen Chrome kiosk showing the dashboard
     # (`/?tv=1`) on the host display. Any remote button wakes it when nothing is
     # playing; after `tv_ui_idle_secs` with no input it hands the screen back to
@@ -844,7 +853,7 @@ class AppState:
     # ── TV UI (Firestick-style dashboard kiosk on the host display) ──
     tv_ui_active: bool = False                            # True while the dashboard kiosk should hold the screen; gates every VLC focus assertion (see docs/REMOTE.md)
     tv_input_last: float = 0.0                            # time.time() of the last HID input (key/click/move) — drives the TV UI idle hand-back
-    host_volume_expected: Optional[int] = None            # last OS volume WE set/accepted (0-100). remote_volume_guard reverts any other change — the remote's consumer-control volume bypasses the keyboard hook (Windows)
+    host_volume_expected: Optional[int] = None            # last OS volume WE set/accepted (0-100). Only consumed by the OPT-IN remote_volume_guard (REMOTE_VOLUME_GUARD=1, Windows) which reverts any other change
     # ── Auto-updater (transient view of the current update operation) ──
     # All persisted updater state lives in library.json → settings.autoupdate.
     # These fields just expose the live state of an in-flight check/apply so
@@ -7261,7 +7270,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     od_reaper_loop  = asyncio.create_task(_od_reaper())
     maint_loop      = asyncio.create_task(background_maintenance_loop())
     tvui_task       = asyncio.create_task(tv_ui_loop())
-    rvol_guard      = asyncio.create_task(remote_volume_guard())   # no-op off Windows
+    rvol_guard      = asyncio.create_task(remote_volume_guard())   # opt-in: no-op unless REMOTE_VOLUME_GUARD=1 (Windows)
 
     # HID wireless remote (air-mouse) input — optional; needs pynput and an
     # interactive desktop session. None when disabled (REMOTE_CONTROL=0),
@@ -12031,31 +12040,39 @@ _remote_vol_key_ts: float = 0.0
 
 
 async def remote_volume_guard() -> None:
-    """Windows backstop that keeps the remote's volume off the host OS mixer.
+    """OPT-IN (REMOTE_VOLUME_GUARD=1) Windows backstop for remotes whose
+    volume buttons bypass the keyboard hook.
 
-    Many air-mouse remotes send volume as HID **consumer-control usages**
-    (Usage Page 0x0C), which Windows' audio stack applies to the endpoint
-    volume directly — the low-level keyboard hook either never sees a
-    VK_VOLUME_* event for the press, or sees a synthesized one whose
-    suppression does NOT undo the already-applied mixer change. So the hook
-    alone cannot honour the "remote volume never touches the host" rule.
+    Some HID remotes emit volume as consumer-control usages the hook can't
+    suppress — the system volume then changes even with remote support
+    active. This loop polls the endpoint volume (~3 Hz, via the winvol
+    helper child): every legitimate writer goes through set_system_volume,
+    which records `state.host_volume_expected`; any other change is treated
+    as remote volume — **reverted**, and the delta re-routed to VLC's amp
+    (or the YouTube player gain) unless the keyboard hook already dispatched
+    a volume press in the last ~1.2 s (then it's only reverted; the hook
+    path already stepped VLC, and double-stepping would jump 2× per press
+    on remotes that emit both forms).
 
-    This loop polls the endpoint volume (~3 Hz, via the winvol helper child).
-    Every legitimate writer goes through set_system_volume, which records
-    `state.host_volume_expected`; any other change is treated as remote
-    volume: it's **reverted**, and the delta is re-routed to VLC's amp (or
-    the YouTube player gain) — unless the keyboard hook already dispatched a
-    volume press in the last ~1 s, in which case the change is only reverted
-    (the hook path already stepped VLC; double-stepping would jump 2× per
-    press on remotes that emit both forms).
+    Default OFF, deliberately: on the reference hardware the hook's
+    suppression alone keeps the mixer untouched (v9.13.0 behaviour, verified
+    live), and an always-on guard can FIGHT endpoints that quantize volume
+    (HDMI audio often can't hold every integer percent): revert to 43 →
+    device stores 42 → next tick sees a fresh "change" → revert again,
+    flickering the mixer forever and drip-stepping VLC's volume. Two
+    defences below for when the guard IS enabled: a ±1 tolerance band that
+    adopts drift instead of reverting it, and adopting the endpoint's ACTUAL
+    post-revert value as the new expectation.
 
     Stands down during the "Use My Computer" window-pause (the user owns
     their mixer then) — it resyncs, so changes made during the pause stick.
     Windows-only: POSIX volume reads spawn a process per call, and the
     consumer-control problem is a Windows-target concern.
     """
-    if platform.system() != "Windows" or not settings.remote_control:
+    if (platform.system() != "Windows" or not settings.remote_control
+            or not settings.remote_volume_guard):
         return
+    log.info("remote volume guard active (REMOTE_VOLUME_GUARD=1)")
     while True:
         await asyncio.sleep(0.35)
         try:
@@ -12067,11 +12084,18 @@ async def remote_volume_guard() -> None:
                 await asyncio.sleep(5)   # pycaw/helper unavailable — back off
                 continue
             exp = state.host_volume_expected
-            if exp is None or cur == exp:
+            if exp is None or abs(cur - exp) <= 1:
+                # In-band drift is endpoint quantization, not a press — adopt
+                # it, or the loop would fight the device forever.
                 state.host_volume_expected = cur
                 continue
             delta = cur - exp
             await set_system_volume(exp)   # revert (re-records expected)
+            # Adopt whatever the endpoint ACTUALLY stored — a quantizing
+            # device may be unable to hold `exp` exactly.
+            actual = await get_system_volume()
+            if actual is not None:
+                state.host_volume_expected = actual
             if time.monotonic() - _remote_vol_key_ts < 1.2:
                 continue   # the keyboard hook already routed this press
             # Windows steps the mixer by 2 per volume-key press; a tick may
