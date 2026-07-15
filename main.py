@@ -256,6 +256,14 @@ class Settings(BaseSettings):
     # Set REMOTE_CONTROL=0 in .env to disable the listener entirely.
     remote_control: bool = True
 
+    # TV UI (Firestick-style): a fullscreen Chrome kiosk showing the dashboard
+    # (`/?tv=1`) on the host display. Any remote button wakes it when nothing is
+    # playing; after `tv_ui_idle_secs` with no input it hands the screen back to
+    # the idle background video. Needs remote_control (the wake signal comes
+    # from the global input listener). See docs/REMOTE.md.
+    tv_ui: bool = True
+    tv_ui_idle_secs: int = 120
+
 
 settings = Settings()
 
@@ -405,6 +413,11 @@ BACKGROUND_DIR = Path(__file__).parent / ".background"
 # launching/killing it never touches the user's normal Chrome, and so we can
 # identify *just* the kiosk instance to kill on Stop (match this path in cmdline).
 TV_CHROME_PROFILE = Path(__file__).parent / ".tv_chrome_profile"
+# Separate user-data-dir for the TV UI dashboard kiosk (`/?tv=1`). MUST differ
+# from TV_CHROME_PROFILE: the YouTube Stop path kills its kiosk by matching the
+# profile path in the cmdline, and sharing a dir would take the dashboard kiosk
+# down with it (it also keeps its own localStorage: profile pick, prefs).
+TVUI_CHROME_PROFILE = Path(__file__).parent / ".tvui_chrome_profile"
 
 # Countdown popup shown on the TV itself. VLC is launched with a `marq`
 # sub-source that re-reads this file ~5×/s and renders its contents bottom-right.
@@ -828,6 +841,9 @@ class AppState:
     youtube_playback: str = ""                            # last player state from /tv: unstarted|buffering|playing|paused|ended
     youtube_tv_seen_at: float = 0.0                       # time.time() of last /tv heartbeat (drives relaunch-vs-load decision)
     system_volume_before_yt: Optional[int] = None        # OS volume (0-100) snapshot at YouTube start; falls back when no default configured
+    # ── TV UI (Firestick-style dashboard kiosk on the host display) ──
+    tv_ui_active: bool = False                            # True while the dashboard kiosk should hold the screen; gates every VLC focus assertion (see docs/REMOTE.md)
+    tv_input_last: float = 0.0                            # time.time() of the last HID input (key/click/move) — drives the TV UI idle hand-back
     # ── Auto-updater (transient view of the current update operation) ──
     # All persisted updater state lives in library.json → settings.autoupdate.
     # These fields just expose the live state of an in-flight check/apply so
@@ -840,6 +856,10 @@ class AppState:
 
 
 state = AppState()
+# The main asyncio loop, captured at lifespan startup. Needed by code running
+# on foreign threads (the HID input listener) to schedule coroutines back onto
+# the loop via run_coroutine_threadsafe.
+_MAIN_LOOP: Optional[asyncio.AbstractEventLoop] = None
 qbit: Optional[httpx.AsyncClient] = None
 vlc_client: Optional[httpx.AsyncClient] = None   # persistent keep-alive client for VLC (see _vlc_http)
 _admin_sessions: dict[str, float] = {}   # token → expiry Unix timestamp
@@ -1350,6 +1370,12 @@ async def vlc(command: str, **params) -> None:
     try:
         c = _vlc_http()
         if command == "in_play":
+            # Real content is taking the screen — the TV UI kiosk (if up) loses
+            # it, and every focus assertion may again bring VLC forward. Must
+            # happen before the play paths' vlc_focus_and_fullscreen() tasks
+            # run their first tv_ui_active check. (The bg video bypasses vlc()
+            # and posts in_play directly, so it never trips this.)
+            state.tv_ui_active = False
             # User content is taking over from the idle background video —
             # restore the volume the user had before bg took the floor.
             if state.background_playing:
@@ -2353,6 +2379,11 @@ async def vlc_focus_and_fullscreen() -> None:
         # this, a still-running background focus loop would keep minimizing the
         # kiosk window (via _minimize_other_windows) and re-focusing VLC.
         if state.youtube_active:
+            return
+        # Same for the TV UI dashboard kiosk: while it should hold the screen,
+        # don't minimize it / pull VLC back over it. Real plays clear the flag
+        # (vlc() in_play branch) before this loop's first iteration runs.
+        if state.tv_ui_active:
             return
         # User paused window control mid-loop — stop fighting for the screen.
         if window_mgmt_paused():
@@ -5548,7 +5579,10 @@ async def _play_background_video() -> bool:
         await c.get("/requests/status.xml", params={"command": "in_play", "input": vlc_file_uri(p)})
     except Exception:
         return False
-    asyncio.create_task(vlc_focus_and_fullscreen())
+    # Belt-and-braces: never let the idle video pull VLC over the TV UI kiosk
+    # (the loop already skips while tv_ui_active, but direct callers exist).
+    if not state.tv_ui_active:
+        asyncio.create_task(vlc_focus_and_fullscreen())
     await broadcast("state", state_snapshot())
     return True
 
@@ -5570,6 +5604,12 @@ async def background_video_loop() -> None:
             # Window control paused by the user — leave the desktop alone and
             # don't (re)start the idle background video over their work.
             if window_mgmt_paused():
+                continue
+            # TV UI kiosk holds the screen — don't (re)start the bg video under
+            # it (its audio would play over the dashboard). A bg video we
+            # paused on wake reads `paused` below and is skipped anyway; this
+            # guard covers the stopped/ended case. tv_ui_loop hands back.
+            if state.tv_ui_active:
                 continue
             lib = await get_library()
             bg = lib.get("settings", {}).get("background_video") or {}
@@ -7142,7 +7182,8 @@ async def subtitle_upgrade_loop() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator:
-    global qbit, vlc_client, _lib_lock, _jackett_cookie_lock, _analysis_gate
+    global qbit, vlc_client, _lib_lock, _jackett_cookie_lock, _analysis_gate, _MAIN_LOOP
+    _MAIN_LOOP = asyncio.get_running_loop()
     # Make StreamLink's request handling the box's top priority before anything
     # else — so controls / UI / VLC-control stay responsive under heavy prep load.
     _raise_own_priority()
@@ -7218,25 +7259,30 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     subupgrade_loop = asyncio.create_task(subtitle_upgrade_loop())
     od_reaper_loop  = asyncio.create_task(_od_reaper())
     maint_loop      = asyncio.create_task(background_maintenance_loop())
+    tvui_task       = asyncio.create_task(tv_ui_loop())
 
-    # HID wireless remote (air-mouse) media keys — optional; needs pynput and
-    # an interactive desktop session. None when disabled (REMOTE_CONTROL=0),
+    # HID wireless remote (air-mouse) input — optional; needs pynput and an
+    # interactive desktop session. None when disabled (REMOTE_CONTROL=0),
     # pynput is missing, or the hook couldn't install (headless service) —
-    # start_listener logs the reason and the dashboard runs without it.
+    # start_listener logs the reason and the dashboard runs without it. The
+    # `_tv_input_event` activity feed is what wakes the TV UI kiosk.
+    state.tv_input_last = time.time()
     remote_listener = None
     if settings.remote_control:
         try:
             import remote_input
             remote_listener = remote_input.start_listener(
-                asyncio.get_running_loop(), _remote_key_action, _remote_should_handle)
+                asyncio.get_running_loop(), _remote_key_action,
+                _remote_should_handle, on_input=_tv_input_event)
         except Exception:
-            log.warning("HID remote media-key listener failed to start", exc_info=True)
+            log.warning("HID remote input listener failed to start", exc_info=True)
 
     yield
 
     for t in (guard, broadcaster, dl_monitor, vlc_tracker, bg_loop, jackett_mon,
               reboot_loop, autoprep_loop, update_loop, dlsched_loop, sysmon_loop,
-              cachepurge_loop, subupgrade_loop, od_reaper_loop, maint_loop):
+              cachepurge_loop, subupgrade_loop, od_reaper_loop, maint_loop,
+              tvui_task):
         t.cancel()
     if remote_listener is not None:
         remote_listener.stop()
@@ -10856,26 +10902,20 @@ def _find_chrome() -> Optional[str]:
     return None
 
 
-def _launch_tv_browser(video_id: str) -> bool:
-    """Open the /tv player page in a fullscreen Chrome kiosk on the host display.
+def _launch_kiosk_browser(url: str, profile_dir: Path, label: str) -> bool:
+    """Open `url` in a fullscreen Chrome kiosk on the host display.
 
     Uses an isolated --user-data-dir so we never disturb the user's Chrome and
-    can kill exactly this instance later. --autoplay-policy lets the IFrame
-    player start with sound without a user gesture. Returns False if no Chrome.
+    can identify/kill exactly this instance later (match `profile_dir` in the
+    cmdline). --autoplay-policy lets media start with sound without a user
+    gesture. Returns False if no Chrome/Edge was found or the spawn failed.
     """
     chrome = _find_chrome()
     if not chrome:
         return False
-    # 127.0.0.1, NOT localhost. On Windows the hosts file resolves localhost to
-    # both `::1` and `127.0.0.1`, and Chromium prefers IPv6 first; uvicorn binds
-    # `0.0.0.0` (IPv4 only), so the kiosk hits ECONNREFUSED on `::1` and may
-    # show an error page or hang long enough that the heartbeat watchdog fires
-    # before the page ever loads. Pinning v4 sidesteps all of that. See
-    # docs/GOTCHAS.md.
-    url = f"http://127.0.0.1/tv?v={video_id}"
     args = [
         chrome,
-        f"--user-data-dir={TV_CHROME_PROFILE}",
+        f"--user-data-dir={profile_dir}",
         "--no-first-run",
         "--no-default-browser-check",
         # Suppress the Edge / Chrome welcome / signin / promo modals that can
@@ -10896,11 +10936,25 @@ def _launch_tv_browser(video_id: str) -> bool:
         kw["start_new_session"] = True
     try:
         subprocess.Popen(args, **kw)
-        log.info("YouTube TV: launched kiosk (%s) for video %s", Path(chrome).name, video_id)
+        log.info("%s: launched kiosk (%s) at %s", label, Path(chrome).name, url)
         return True
     except Exception as e:
-        log.warning("YouTube TV: kiosk launch failed (%s): %s", chrome, e)
+        log.warning("%s: kiosk launch failed (%s): %s", label, chrome, e)
         return False
+
+
+def _launch_tv_browser(video_id: str) -> bool:
+    """Open the /tv player page in a fullscreen Chrome kiosk on the host display.
+
+    127.0.0.1, NOT localhost. On Windows the hosts file resolves localhost to
+    both `::1` and `127.0.0.1`, and Chromium prefers IPv6 first; uvicorn binds
+    `0.0.0.0` (IPv4 only), so the kiosk hits ECONNREFUSED on `::1` and may
+    show an error page or hang long enough that the heartbeat watchdog fires
+    before the page ever loads. Pinning v4 sidesteps all of that. See
+    docs/GOTCHAS.md.
+    """
+    return _launch_kiosk_browser(
+        f"http://127.0.0.1/tv?v={video_id}", TV_CHROME_PROFILE, "YouTube TV")
 
 
 def _kill_tv_browser() -> None:
@@ -11112,8 +11166,11 @@ async def _youtube_start_volume() -> int:
 _TV_WINDOW_MARKER = "StreamLink TV Player"
 
 
-def _find_tv_browser_hwnds_windows() -> list:
-    """Visible top-level windows whose title marks them as our kiosk page."""
+def _find_tv_browser_hwnds_windows(marker: str = None) -> list:
+    """Visible top-level windows whose title marks them as our kiosk page.
+    `marker` defaults to the YouTube kiosk; the TV UI kiosk passes its own."""
+    if marker is None:
+        marker = _TV_WINDOW_MARKER
     try:
         import ctypes
         from ctypes import wintypes
@@ -11127,7 +11184,7 @@ def _find_tv_browser_hwnds_windows() -> list:
                 if n:
                     buf = ctypes.create_unicode_buffer(n + 1)
                     user32.GetWindowTextW(hwnd, buf, n + 1)
-                    if _TV_WINDOW_MARKER in buf.value:
+                    if marker in buf.value:
                         found.append(hwnd)
             return True
 
@@ -11138,14 +11195,14 @@ def _find_tv_browser_hwnds_windows() -> list:
         return []
 
 
-def _focus_tv_browser_windows() -> bool:
-    """Pull the kiosk window to the foreground past focus-stealing prevention.
+def _focus_tv_browser_windows(marker: str = None) -> bool:
+    """Pull a kiosk window to the foreground past focus-stealing prevention.
 
     Same cocktail as `_vlc_focus_windows` (zero foreground-lock timeout +
     synthetic ALT + AttachThreadInput + SetForegroundWindow + clear taskbar
     flash). Returns True once a kiosk window exists (so the caller can stop
-    retrying)."""
-    hwnds = _find_tv_browser_hwnds_windows()
+    retrying). `marker` picks which kiosk (default: the YouTube player)."""
+    hwnds = _find_tv_browser_hwnds_windows(marker)
     if not hwnds:
         return False
     hwnd = hwnds[0]
@@ -11216,6 +11273,198 @@ async def _bring_tv_to_front(video_id: str) -> None:
         await asyncio.sleep(delay)
 
 
+# ── TV UI (Firestick-style dashboard kiosk on the host display) ──────────────
+# The dashboard itself, in a fullscreen Chrome kiosk at `/?tv=1`, driven from
+# the couch with the air-mouse remote (pointer + buttons). The host display
+# cycles between three surfaces:
+#
+#   idle background video  ──any remote button──▶  TV UI (dashboard kiosk)
+#   TV UI ──idle `tv_ui_idle_secs` w/ no input──▶  background video
+#   TV UI ──user plays something──────────────▶  VLC / YouTube fullscreen
+#   playback ──🏠 Home button────────────────▶  stop + TV UI
+#
+# `state.tv_ui_active` means "the kiosk should hold the screen": every VLC
+# focus assertion (vlc_focus_and_fullscreen, the background-video loop) stands
+# down while it's set, exactly like the YouTube kiosk. It's cleared the moment
+# real content plays (`vlc("in_play")` / youtube_play) so those paths regain
+# the screen. Wake events come from remote_input.py's global input listener
+# (`_tv_input_event`, called on its hook threads). See docs/REMOTE.md.
+
+# index.html sets document.title to this when loaded with ?tv=1 — it's how the
+# Windows focus code finds the kiosk window. Must NOT contain (or be contained
+# by) the YouTube marker "StreamLink TV Player".
+_TVUI_WINDOW_MARKER = "StreamLink TV Dashboard"
+
+TV_UI_MIN_IDLE_SECS = 15   # floor for the configurable idle hand-back
+
+
+def _tvui_kiosk_alive() -> bool:
+    """True if the TV UI kiosk Chrome is running (matched by --user-data-dir).
+    Blocking psutil scan — call via asyncio.to_thread."""
+    needle = str(TVUI_CHROME_PROFILE)
+    for p in psutil.process_iter(["pid", "cmdline"]):
+        try:
+            if any(needle in str(a) for a in (p.info.get("cmdline") or [])):
+                return True
+        except Exception:
+            pass
+    return False
+
+
+def _launch_tvui_browser() -> bool:
+    """Spawn the dashboard kiosk (`/?tv=1`). Blocking — call via to_thread."""
+    return _launch_kiosk_browser("http://127.0.0.1/?tv=1", TVUI_CHROME_PROFILE, "TV UI")
+
+
+async def _bring_tvui_to_front() -> None:
+    """Get VLC out of the way and pull the dashboard kiosk forward.
+
+    Mirrors `_bring_tv_to_front` (the YouTube variant): minimize VLC, then on
+    Windows force the kiosk window past focus-stealing prevention for a few
+    seconds (a fresh launch takes ~1–2 s to create its window). Aborts if the
+    TV UI loses the screen mid-loop (playback started / idle hand-back)."""
+    await vlc_minimize()
+    system = platform.system()
+    if system != "Windows":
+        # Linux: wmctrl by window title, best-effort. macOS: the freshly
+        # launched --app kiosk fronts itself; an existing one can't be raised
+        # reliably without scripting the specific browser — dev-only gap.
+        if system == "Linux" and shutil.which("wmctrl"):
+            try:
+                proc = await asyncio.create_subprocess_exec(
+                    "wmctrl", "-a", _TVUI_WINDOW_MARKER,
+                    stdout=asyncio.subprocess.DEVNULL,
+                    stderr=asyncio.subprocess.DEVNULL,
+                )
+                await proc.wait()
+            except Exception:
+                pass
+        return
+    loop = asyncio.get_running_loop()
+    reinforced = 0
+    for delay in [0.4] * 6 + [0.8] * 5 + [1.5] * 3:   # ~10 s, slowing cadence
+        if not state.tv_ui_active:
+            return  # superseded (playback took over / hidden again)
+        try:
+            got = await loop.run_in_executor(
+                None, _focus_tv_browser_windows, _TVUI_WINDOW_MARKER)
+        except Exception:
+            got = False
+        if got:
+            reinforced += 1
+            if reinforced >= 3:   # found + two reinforcing passes → settle
+                return
+        await asyncio.sleep(delay)
+
+
+async def _tv_ui_show(reason: str) -> None:
+    """Put the dashboard kiosk on the screen (launching it if needed)."""
+    if not settings.tv_ui or state.tv_ui_active or window_mgmt_paused():
+        return
+    state.tv_ui_active = True
+    state.tv_input_last = time.time()
+    log.info("TV UI: showing dashboard kiosk (%s)", reason)
+    # Silence the idle background video while the UI is up — it keeps its
+    # playlist position, background_playing stays True, and the paused state
+    # keeps background_video_loop from restarting it underneath the kiosk.
+    if state.background_playing:
+        await vlc("pl_forcepause")
+    alive = await asyncio.to_thread(_tvui_kiosk_alive)
+    if not alive:
+        ok = await asyncio.to_thread(_launch_tvui_browser)
+        if not ok:
+            log.warning("TV UI: no Chrome/Edge found — cannot show the dashboard kiosk")
+            state.tv_ui_active = False
+            if state.background_playing:
+                await vlc("pl_forceresume")
+            return
+    asyncio.create_task(_bring_tvui_to_front())
+
+
+async def _tv_ui_hide(reason: str) -> None:
+    """Hand the screen back to whatever owns it (background video / YouTube).
+    The kiosk window is left running behind, so the next wake is instant."""
+    if not state.tv_ui_active:
+        return
+    state.tv_ui_active = False
+    log.info("TV UI: hiding dashboard kiosk (%s)", reason)
+    if state.youtube_active:
+        asyncio.create_task(_bring_tv_to_front(state.youtube_video_id or ""))
+        return
+    if state.background_playing:
+        await vlc("pl_forceresume")
+    asyncio.create_task(vlc_focus_and_fullscreen())
+
+
+def _tv_input_event(kind: str) -> None:
+    """Any HID input, reported by remote_input.py FROM ITS HOOK THREADS.
+
+    kind ∈ {key, click, move, media}. Keep this to plain attribute reads plus
+    (at most) a run_coroutine_threadsafe — on Windows part of it runs on the
+    low-level hook thread, which has a hard OS time budget.
+
+    Rules: everything refreshes the idle timer; only a key or click *wakes*
+    the UI, and only while nothing is playing (during playback the media keys
+    control VLC and the 🏠 Home key is the deliberate way to the dashboard —
+    a stray key must not pop the UI over a movie). Pointer motion never wakes
+    (gyro drift would light the TV up at night)."""
+    state.tv_input_last = time.time()
+    if kind in ("move", "media"):
+        return
+    if not settings.tv_ui or state.tv_ui_active or window_mgmt_paused():
+        return
+    if state.youtube_active or state.stream_status in ("playing", "buffering"):
+        return
+    loop = _MAIN_LOOP
+    if loop is not None:
+        asyncio.run_coroutine_threadsafe(_tv_ui_show("input"), loop)
+
+
+async def _bg_video_ready() -> bool:
+    """True when the idle background video is configured, enabled, on disk."""
+    try:
+        lib = await get_library()
+        bg = lib.get("settings", {}).get("background_video") or {}
+        p = bg.get("path", "")
+        return bool(p and bg.get("enabled", True) and Path(p).exists())
+    except Exception:
+        return False
+
+
+async def tv_ui_loop() -> None:
+    """Every 5 s: reconcile who owns the host display.
+
+    - Real playback started → the kiosk is no longer the foreground surface;
+      just drop the flag (VLC/YouTube already grabbed the screen).
+    - No input for `tv_ui_idle_secs` while idle → hand the screen back to the
+      background video. If no background video is configured, the dashboard
+      stays up — a black VLC window is worse than the UI.
+    """
+    while True:
+        await asyncio.sleep(5)
+        try:
+            if not settings.tv_ui or not state.tv_ui_active:
+                continue
+            if window_mgmt_paused():
+                continue
+            if state.youtube_active or state.stream_status in ("playing", "buffering"):
+                # Janitor only: the normal paths already release the claim
+                # (vlc() in_play / youtube_play). Require stale input so a
+                # just-pressed 🏠 Home (UI shown, stop() still tearing the old
+                # playback down) isn't robbed of the screen it just claimed.
+                if time.time() - state.tv_input_last > 10:
+                    state.tv_ui_active = False
+                continue
+            idle_for = time.time() - state.tv_input_last
+            if idle_for < max(TV_UI_MIN_IDLE_SECS, settings.tv_ui_idle_secs):
+                continue
+            if not await _bg_video_ready():
+                continue
+            await _tv_ui_hide(f"idle {int(idle_for)}s")
+        except Exception:
+            pass
+
+
 @app.get("/tv", include_in_schema=False)
 async def tv_player_page() -> FileResponse:
     """The host-side kiosk page: YouTube IFrame player + SSE command listener."""
@@ -11271,6 +11520,10 @@ async def youtube_play(req: YouTubeReq) -> JSONResponse:
     state.youtube_active = True
     state.youtube_video_id = video_id
     state.youtube_playback = "buffering"
+    # The YouTube kiosk takes the screen from the TV UI dashboard kiosk (its
+    # own focus loop must not be gated off, and `_bring_tv_to_front` needs the
+    # dashboard's claim released).
+    state.tv_ui_active = False
     state.active_title = "YouTube"
     state.vlc_time = 0
     state.vlc_duration = 0
@@ -11644,26 +11897,49 @@ REMOTE_SEEK_STEP_SECS = 10   # remote ⏮/⏭ buttons: ± seconds (matches the U
 REMOTE_VOLUME_STEP    = 5    # remote vol ± buttons: % per press (matches the UI's ± buttons)
 
 
-def _remote_should_handle() -> bool:
-    """Whether a remote media-key press should be acted on (and, on Windows,
+def _remote_should_handle(action: str = "") -> bool:
+    """Whether a remote key press should be acted on (and, on Windows,
     suppressed system-wide).
 
     Called from the pynput listener thread — keep it to plain attribute reads
-    (no awaits, no locks). Keys are only claimed while real playback is up
-    (VLC stream/library play, incl. paused, or YouTube-on-TV); when idle —
-    incl. the idle background video — they pass through to the OS untouched.
+    (no awaits, no locks).
+
+    - While the user paused window control ("Use My Computer") nothing is
+      claimed: a real keyboard's volume keys must drive the OS mixer and the
+      Home key may open their browser — it's their desktop.
+    - `home` (🏠) is claimed whenever the TV UI is enabled OR playback is up
+      (it must never fall through to launching Edge mid-session).
+    - Media keys are only claimed while real playback is up (VLC stream /
+      library play, incl. paused, or YouTube-on-TV); when idle — incl. the
+      idle background video — they pass through to the OS untouched.
     """
-    return state.youtube_active or state.stream_status in ("playing", "buffering")
+    if window_mgmt_paused():
+        return False
+    playing = state.youtube_active or state.stream_status in ("playing", "buffering")
+    if action == "home":
+        return bool(settings.tv_ui) or playing
+    return playing
 
 
 async def _remote_key_action(action: str) -> None:
     """Dispatch a remote media-key press into the normal control paths.
 
-    action ∈ {playpause, volume_up, volume_down, seek_forward, seek_back}.
+    action ∈ {playpause, volume_up, volume_down, seek_forward, seek_back, home}.
     Routes exactly like the dashboard footer: YouTube-on-TV when active
     (volume = host OS mixer), else VLC (volume capped by settings.max_volume).
+    `home` (🏠) is the Firestick Home equivalent: end whatever is playing and
+    put the dashboard kiosk on the screen.
     """
     try:
+        if action == "home":
+            # Show the UI first so tv_ui_active gates the focus/background
+            # churn that stop() kicks off, then end the active playback.
+            if settings.tv_ui:
+                await _tv_ui_show("home key")
+            if state.youtube_active or state.stream_status != "idle" \
+                    or state.library_item_id or state.active_hash:
+                await stop()
+            return
         if state.youtube_active:
             yt_action, yt_value = {
                 "playpause":    ("playpause", None),

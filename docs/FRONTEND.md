@@ -530,6 +530,15 @@ On `DOMContentLoaded`:
 3. Calls `/api/admin/status`; shows admin link if enabled.
 4. Reads `localStorage.streamlink_profile`. If valid profile is restored, connects SSE and goes straight to the dashboard. Otherwise shows the full-screen profile picker first.
 
+## TV mode (`/?tv=1`)
+
+The same `index.html`, loaded by the backend's TV UI kiosk (a fullscreen Chrome on the host display, driven by the air-mouse remote — see [REMOTE.md](REMOTE.md)). Detected at boot via `const TV_MODE = new URLSearchParams(location.search).get("tv") === "1"` (declared next to `hlsAvailable`):
+
+- Sets `document.title = "StreamLink TV Dashboard"` — this is the **window-title marker** the backend's Windows focus code matches (`main.py _TVUI_WINDOW_MARKER`); keep the two strings in sync and never retitle the page in TV mode.
+- Adds `tv-mode` + `no-hls` body classes and forces `hlsAvailable = false` (also in the `/api/state` fetch callback, which would otherwise overwrite it). On the TV, VLC *is* "on device", so all Prep / On-Device / play-chooser affordances hide through the existing `no-hls` machinery and the play chooser collapses straight to VLC (the macOS no-HLS path).
+- `.tv-mode` CSS additionally hides the handoff buttons (`#handoffBtn`, `#fcHandoffBtn`), and the library-card download-to-device buttons are skipped in the renderer (`if(isReady && !TV_MODE)`).
+- Everything else is the stock dashboard: the kiosk keeps its own Chrome profile (`.tvui_chrome_profile`), so the profile pick and device-local prefs persist across wakes.
+
 ## `static/admin.html` (990 lines)
 
 Password-protected at `/admin`. Token stored in `sessionStorage.admin_token` and sent via `Authorization: Bearer …`. The dashboard auto-redirects HTTP → HTTPS for `/admin*` ([main.py:1772](../main.py#L1772)).

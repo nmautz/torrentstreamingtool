@@ -435,6 +435,11 @@
     body.no-hls [onclick^="prepForStreaming"],
     body.no-hls [onclick^="prepItemForStreaming"],
     body.no-hls [onclick^="playLibraryWithChooser"] { display: none !important; }
+    /* TV mode (?tv=1): this page IS the host's fullscreen kiosk — the no-hls
+       class above already hides Prep / On-Device play; additionally hide the
+       hand-off-to-this-device buttons (the "device" is the TV itself). */
+    body.tv-mode #handoffBtn,
+    body.tv-mode #fcHandoffBtn { display: none !important; }
     /* The stage fills the WHOLE player — header, transport, and options panel
        are all absolute overlays on top of the video, so the video always gets
        every pixel of the screen and nothing can overflow the viewport. */
@@ -3292,10 +3297,22 @@ const libDownloadStats = new Map(); // item_id → latest library_progress paylo
 let profile      = { id:"", name:"", color:"indigo" };
 let allProfiles  = [];
 let globalMaxVolume = 200;   // global VLC volume cap (0-200); fetched at startup
+// TV mode (?tv=1) — this page IS the host's fullscreen "Firestick" kiosk,
+// driven by the air-mouse remote. Playing "on device" makes no sense (VLC is
+// the device), so every Prep / On-Device / handoff / download-to-device
+// affordance is hidden by forcing the no-hls path + the tv-mode class. The
+// document.title below is the window marker the backend's kiosk focus code
+// looks for (main.py _TVUI_WINDOW_MARKER) — keep the two in sync.
+const TV_MODE = new URLSearchParams(location.search).get("tv") === "1";
+if (TV_MODE) {
+  document.title = "StreamLink TV Dashboard";
+  document.body.classList.add("tv-mode", "no-hls");
+}
 // Stream-to-device availability — false when the host runs macOS (ffmpeg can't
 // read TCC-protected media). Fetched from /api/state at startup; toggles the
 // `no-hls` body class which hides every Prep / On-Device affordance via CSS.
-let hlsAvailable = true;
+// Forced off in TV mode (see above).
+let hlsAvailable = !TV_MODE;
 // Auto-subtitle (whisper.cpp STT) availability — fetched from /api/state at
 // startup; gates the "Generate with AI" affordances in the subtitle menus.
 let sttAvailable = false;
@@ -5637,7 +5654,7 @@ function _libItemChrome(item){
     }
   }
 
-  if(isReady){
+  if(isReady && !TV_MODE){   // TV mode: "download to device" is meaningless on the TV itself
     const useApp = isApp && hlsAvailable;
     const dlIcon = `<svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
@@ -16814,9 +16831,10 @@ document.addEventListener("DOMContentLoaded",async()=>{
   }).catch(()=>{});
 
   // Stream-to-device availability (false on macOS hosts). Toggles the `no-hls`
-  // body class which hides Prep / On-Device affordances via CSS.
+  // body class which hides Prep / On-Device affordances via CSS. TV mode
+  // forces it off regardless — the kiosk IS the TV; VLC is "on device".
   fetch("/api/state").then(r=>r.ok?r.json():null).then(d=>{
-    hlsAvailable = !(d && d.hls_available === false);
+    hlsAvailable = !TV_MODE && !(d && d.hls_available === false);
     document.body.classList.toggle("no-hls", !hlsAvailable);
     sttAvailable = !!(d && d.stt_available === true);
     if(d && typeof d.subtitle_default_language === "string") subtitleDefaultLang = d.subtitle_default_language;
@@ -16865,6 +16883,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">9.13.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.0.0</div>
 </body>
 </html>

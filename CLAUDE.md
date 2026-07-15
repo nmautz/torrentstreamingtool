@@ -49,7 +49,7 @@ Each entry is a short hook so future Claude instances can jump straight to the r
 | [docs/STREAMING.md](docs/STREAMING.md) | Working on Stream-to-Device — `/offline-prepare`, `.offline_cache/`, per-row Prep buttons, the local `<video>` player, progress sync. (Successor to the old `OFFLINE.md`.) |
 | [docs/STT.md](docs/STT.md) | Working on AI auto-subtitles — `stt.py` (whisper.cpp), the `_needs_stt_subs` trigger, STT jobs, `/api/.../generate-subtitles`, the Generate-with-AI UI, whisper bundling in `setup.py`. |
 | [docs/YOUTUBE.md](docs/YOUTUBE.md) | Working on YouTube-on-TV — `/api/youtube*`, the Chrome kiosk + `static/tv.html` IFrame player, the `yt_command` SSE relay, the dashboard control routing (`app.youtube_active`). |
-| [docs/REMOTE.md](docs/REMOTE.md) | Working on HID wireless remote (air-mouse) support — `remote_input.py` (pynput media-key hook), `_remote_key_action` / `_remote_should_handle` in `main.py`, button map, Windows key suppression, the planned remote-driven TV UI. |
+| [docs/REMOTE.md](docs/REMOTE.md) | Working on HID wireless remote (air-mouse) support or the Firestick-style TV UI — `remote_input.py` (pynput input hooks), `_remote_key_action` / `_remote_should_handle` / the `tv_ui_*` block in `main.py`, `?tv=1` in `index.html`, button map (incl. 🏠 Home), Windows key suppression, screen arbitration. |
 | [docs/GOTCHAS.md](docs/GOTCHAS.md) | **Read before any non-trivial change.** VLC ES-ID quirks, qBit sequential-download traps, VPN dual-enforcement, Jackett `Category[]=0`, canonical path matching, etc. |
 
 ---
