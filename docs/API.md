@@ -25,7 +25,7 @@ Event types:
 | `library_update` | library item status changed | `{item_id, status, message?}` |
 | `progress_saved` | every 15 s while a library item is playing | `{item_id, profile_id, file_path, episode_name, position_sec, duration_sec, pct}` |
 | `analysis_status` | Smart Skip job progress | `{series_key, job: {status, stage, current, total, message, episode_name?, …}}` |
-| `yt_command` | YouTube-on-TV: a playback command for the `/tv` kiosk page | `{action, value?, video_id?}` — `action ∈ load\|play\|pause\|playpause\|seek\|seek_to\|volume_set\|volume_step\|close`. Broadcast to all SSE clients; only `static/tv.html` acts on it. See [YOUTUBE.md](YOUTUBE.md) |
+| `yt_command` | YouTube-on-TV: a playback command for the `/tv` kiosk page | `{action, value?, video_id?}` — `action ∈ load\|play\|pause\|playpause\|seek\|seek_to\|volume_set\|volume_step\|player_volume_step\|close`. Broadcast to all SSE clients; only `static/tv.html` acts on it. `volume_set`/`volume_step` are ignored by the page (the dashboard slider drives the OS mixer server-side); `player_volume_step` (value = ±percent) is the **air-mouse remote's** volume path — it steps the IFrame player's own gain so the remote never touches the host OS volume. See [YOUTUBE.md](YOUTUBE.md) and [REMOTE.md](REMOTE.md) |
 | `subtitle_upgraded` | VLC auto-swapped an AI sub for a real one that finished downloading (`subtitle_upgrade_loop`) | `{lang, label}` — the dashboard shows `label` as a toast. The on-device player does its own upgrade (no event) |
 | `metadata_update` | a background TMDb fetch landed for an item (first `GET …/metadata` returned `pending:true`) | `{item_id}` — an open episode page for that item re-pulls `/metadata` and repaints hero/stills |
 

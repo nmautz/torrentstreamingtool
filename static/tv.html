@@ -123,6 +123,17 @@
         case "volume_set":
         case "volume_step":
           break;
+        // The AIR-MOUSE REMOTE's volume path (main.py _remote_key_action):
+        // it must never touch the host OS mixer, so it steps the IFrame
+        // player's own gain instead. value = ±percent. Resets to 100 on the
+        // next video (the onReady lock) — deliberate, matching a fresh start.
+        case "player_volume_step": {
+          const cur = player.getVolume ? player.getVolume() : 100;
+          const nv = Math.max(0, Math.min(100, cur + (Number(v) || 0)));
+          player.setVolume(nv);
+          if (nv > 0 && player.isMuted && player.isMuted()) player.unMute();
+          break;
+        }
         case "close":
           try { player.pauseVideo(); } catch (_) {}
           // App/kiosk windows opened by Chrome honor window.close(); the server

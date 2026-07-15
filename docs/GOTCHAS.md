@@ -1124,6 +1124,10 @@ On Linux (X11) and macOS pynput has no selective suppression, so keys are observ
 
 The remote's Home button sends `VK_BROWSER_HOME` (0xAC) — Windows' default handler for it is "launch the default browser", so an unclaimed press pops Edge over the TV. `_remote_should_handle("home")` therefore claims it whenever the TV UI is enabled **or** playback is active (i.e. effectively always with default settings), independent of the media keys' playback-only rule. The one deliberate exception is `window_mgmt_paused()` ("Use My Computer") — the user asked for their desktop back, so Home may open their browser again.
 
+### The remote's volume must never reach the host OS mixer
+
+`_remote_should_handle` claims `volume_up`/`volume_down` **unconditionally** (except during window-pause) — an unclaimed press would hit Windows' default handler and change the system volume (overlay pops, volume stays changed after the session). Idle presses route to VLC's amp; **during YouTube** they broadcast the `player_volume_step` yt_command, which steps the IFrame player's own gain in `tv.html`. That case is a deliberate exception to tv.html's "the IFrame must not attenuate — the OS mixer is the amp" invariant (which still holds for the dashboard slider's `volume_set`/`volume_step`, ignored by the page): don't "clean it up" by removing the case or by routing the remote through `set_system_volume`. Note the two YouTube volume paths are independent attenuators (slider = OS mixer, remote = player gain) and the player gain resets to 100 on each new video via the onReady lock.
+
 ### TV UI screen arbitration: `state.tv_ui_active` gates every VLC focus assertion
 
 The host display is contested by four surfaces: fullscreen VLC (playback), the idle background video (also VLC), the YouTube kiosk, and the TV UI dashboard kiosk. VLC's side is enforced by `vlc_focus_and_fullscreen()` — a ~24 s loop that **minimizes every other window** — plus `background_video_loop` restarting the idle video. Rules that keep them from fighting the dashboard kiosk:

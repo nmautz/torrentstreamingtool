@@ -240,6 +240,13 @@ OS mixer is the sole amp.
 - **tv-state heartbeat ignores the player's `volume` field** while
   `youtube_active` — reading `player.getVolume()` would just stomp the
   authoritative OS-volume value with `100` every second.
+- **Exception — the air-mouse remote**: the remote's Vol± buttons must never
+  touch the host OS mixer (see [REMOTE.md](REMOTE.md)), so
+  `_remote_key_action` broadcasts a `player_volume_step` yt_command (value =
+  ±percent) and `tv.html` steps the IFrame player's own gain instead. The
+  onReady lock still resets the player to 100 on each new video, and the
+  dashboard slider keeps its OS-volume behaviour — the two paths are
+  independent attenuators (combined loudness = slider × remote).
 
 ### Pre-set on Start (the "starting volume")
 

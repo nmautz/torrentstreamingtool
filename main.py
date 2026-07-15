@@ -11396,6 +11396,11 @@ async def _tv_ui_hide(reason: str) -> None:
     asyncio.create_task(vlc_focus_and_fullscreen())
 
 
+# Debounce for the click→⏯ path below (remote_input debounces key actions,
+# but raw clicks arrive straight off the activity feed).
+_tv_click_pause_last: float = 0.0
+
+
 def _tv_input_event(kind: str) -> None:
     """Any HID input, reported by remote_input.py FROM ITS HOOK THREADS.
 
@@ -11407,13 +11412,30 @@ def _tv_input_event(kind: str) -> None:
     the UI, and only while nothing is playing (during playback the media keys
     control VLC and the 🏠 Home key is the deliberate way to the dashboard —
     a stray key must not pop the UI over a movie). Pointer motion never wakes
-    (gyro drift would light the TV up at night)."""
+    (gyro drift would light the TV up at night). A **click during VLC
+    playback** is the remote's OK button in pointer mode landing on the
+    fullscreen video — treat it as ⏯ (YouTube excluded: the IFrame player
+    already toggles on its own clicks; VLC doesn't act on single clicks, so
+    there's no double-toggle)."""
+    global _tv_click_pause_last
     state.tv_input_last = time.time()
+    playing = state.youtube_active or state.stream_status in ("playing", "buffering")
+    if kind == "click" and playing:
+        if (not state.youtube_active and not state.tv_ui_active
+                and not window_mgmt_paused()):
+            now = time.monotonic()
+            if now - _tv_click_pause_last >= 0.4:
+                _tv_click_pause_last = now
+                loop = _MAIN_LOOP
+                if loop is not None:
+                    asyncio.run_coroutine_threadsafe(
+                        _remote_key_action("playpause"), loop)
+        return
     if kind in ("move", "media"):
         return
     if not settings.tv_ui or state.tv_ui_active or window_mgmt_paused():
         return
-    if state.youtube_active or state.stream_status in ("playing", "buffering"):
+    if playing:
         return
     loop = _MAIN_LOOP
     if loop is not None:
@@ -11909,28 +11931,44 @@ def _remote_should_handle(action: str = "") -> bool:
       Home key may open their browser — it's their desktop.
     - `home` (🏠) is claimed whenever the TV UI is enabled OR playback is up
       (it must never fall through to launching Edge mid-session).
-    - Media keys are only claimed while real playback is up (VLC stream /
-      library play, incl. paused, or YouTube-on-TV); when idle — incl. the
-      idle background video — they pass through to the OS untouched.
+    - `volume_up`/`volume_down` are **always** claimed: the remote's volume
+      must never reach the host OS mixer (no Windows volume overlay, no
+      changed system volume after a session) — it drives VLC's amp (or the
+      YouTube player's own gain) instead, whatever the playback state.
+    - `ok` (Enter) is claimed only during real playback while the TV UI is
+      NOT up — it acts as ⏯; with the dashboard kiosk foreground it must keep
+      activating the focused element (D-pad navigation).
+    - The remaining media keys are claimed while real playback is up (VLC
+      stream / library play, incl. paused, or YouTube-on-TV); when idle they
+      pass through to the OS untouched.
     """
     if window_mgmt_paused():
         return False
     playing = state.youtube_active or state.stream_status in ("playing", "buffering")
     if action == "home":
         return bool(settings.tv_ui) or playing
+    if action in ("volume_up", "volume_down"):
+        return True
+    if action == "ok":
+        return playing and not state.tv_ui_active
     return playing
 
 
 async def _remote_key_action(action: str) -> None:
     """Dispatch a remote media-key press into the normal control paths.
 
-    action ∈ {playpause, volume_up, volume_down, seek_forward, seek_back, home}.
-    Routes exactly like the dashboard footer: YouTube-on-TV when active
-    (volume = host OS mixer), else VLC (volume capped by settings.max_volume).
-    `home` (🏠) is the Firestick Home equivalent: end whatever is playing and
-    put the dashboard kiosk on the screen.
+    action ∈ {playpause, ok, volume_up, volume_down, seek_forward, seek_back,
+    home}. Routes like the dashboard footer with one deliberate exception:
+    the remote's **volume never touches the host OS mixer** — VLC playback and
+    idle adjust VLC's amp (capped by settings.max_volume); YouTube-on-TV
+    adjusts the IFrame player's own gain via a `player_volume_step` yt_command
+    (NOT the dashboard slider's server-side OS-volume path). `home` (🏠) is
+    the Firestick Home equivalent: end whatever is playing and put the
+    dashboard kiosk on the screen. `ok` (Enter / OK button) is ⏯.
     """
     try:
+        if action == "ok":
+            action = "playpause"   # only dispatched while claimed (= playback up)
         if action == "home":
             # Show the UI first so tv_ui_active gates the focus/background
             # churn that stop() kicks off, then end the active playback.
@@ -11940,11 +11978,21 @@ async def _remote_key_action(action: str) -> None:
                     or state.library_item_id or state.active_hash:
                 await stop()
             return
+        if action in ("volume_up", "volume_down"):
+            delta = REMOTE_VOLUME_STEP if action == "volume_up" else -REMOTE_VOLUME_STEP
+            if state.youtube_active:
+                # Player gain only — never set_system_volume from the remote.
+                # tv.html applies this to the IFrame player (see its
+                # `player_volume_step` case); the host mixer stays put.
+                await broadcast("yt_command",
+                                {"action": "player_volume_step", "value": float(delta)})
+            else:
+                await volume("up" if delta > 0 else "down", step=REMOTE_VOLUME_STEP)
+                await broadcast("state", state_snapshot())
+            return
         if state.youtube_active:
             yt_action, yt_value = {
                 "playpause":    ("playpause", None),
-                "volume_up":    ("volume_step", float(REMOTE_VOLUME_STEP)),
-                "volume_down":  ("volume_step", float(-REMOTE_VOLUME_STEP)),
                 "seek_forward": ("seek", float(REMOTE_SEEK_STEP_SECS)),
                 "seek_back":    ("seek", float(-REMOTE_SEEK_STEP_SECS)),
             }[action]
@@ -11952,9 +12000,6 @@ async def _remote_key_action(action: str) -> None:
             return
         if action == "playpause":
             await vlc("pl_pause")
-        elif action in ("volume_up", "volume_down"):
-            await volume("up" if action == "volume_up" else "down",
-                         step=REMOTE_VOLUME_STEP)
         elif action == "seek_forward":
             await vlc("seek", val=f"+{REMOTE_SEEK_STEP_SECS}s")
         elif action == "seek_back":

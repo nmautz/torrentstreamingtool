@@ -440,6 +440,10 @@
        hand-off-to-this-device buttons (the "device" is the TV itself). */
     body.tv-mode #handoffBtn,
     body.tv-mode #fcHandoffBtn { display: none !important; }
+    /* D-pad navigation focus ring: a plain :focus rule (not :focus-visible) so
+       programmatic focus from the arrow-key handler always shows it. Inset so
+       the flat Metro tiles don't shift layout. */
+    body.tv-mode :focus { outline: 3px solid #818cf8 !important; outline-offset: -1px; }
     /* The stage fills the WHOLE player — header, transport, and options panel
        are all absolute overlays on top of the video, so the video always gets
        every pixel of the screen and nothing can overflow the viewport. */
@@ -3308,6 +3312,81 @@ if (TV_MODE) {
   document.title = "StreamLink TV Dashboard";
   document.body.classList.add("tv-mode", "no-hls");
 }
+
+// ── TV mode: D-pad spatial navigation ─────────────────────────────────────────
+// The air-mouse remote's arrow ring + OK button navigate the kiosk like a
+// Firestick: arrows move focus to the geometrically nearest actionable element
+// in that direction (a visible indigo ring marks it — see the .tv-mode :focus
+// CSS), OK/Enter activates it. The pointer keeps working as a mouse throughout.
+// When a modal is open, navigation is scoped inside it so focus can't wander
+// into the dimmed page behind. Hold-to-activate buttons (Stop etc.) still need
+// the pointer (Enter fires a plain click, not a pointer hold) — acceptable.
+const _TV_FOCUS_SEL = 'a[href],button,input,select,textarea,[onclick],[tabindex]:not([tabindex="-1"])';
+function _tvNavScope(){
+  // Last visible *Modal in DOM order wins (matches the repo's modal id scheme).
+  const open = [...document.querySelectorAll('[id$="Modal"]:not(.hidden)')];
+  return open.length ? open[open.length - 1] : document;
+}
+function _tvCandidates(scope){
+  return [...scope.querySelectorAll(_TV_FOCUS_SEL)].filter(el => {
+    if (el.disabled || el.closest(".hidden,[hidden]")) return false;
+    const r = el.getBoundingClientRect();
+    if (r.width <= 0 || r.height <= 0) return false;
+    const st = getComputedStyle(el);
+    return st.visibility !== "hidden" && st.display !== "none" && st.pointerEvents !== "none";
+  });
+}
+function _tvNavKey(e){
+  const DIRS = { ArrowUp:[0,-1], ArrowDown:[0,1], ArrowLeft:[-1,0], ArrowRight:[1,0] };
+  const cur = (document.activeElement && document.activeElement !== document.body)
+    ? document.activeElement : null;
+  const tag = cur ? cur.tagName : "";
+  if (e.key === "Enter"){
+    if (!cur){                              // nothing focused yet → land somewhere useful
+      const first = _tvCandidates(_tvNavScope())[0];
+      if (first){ e.preventDefault(); first.focus({preventScroll:true});
+                  first.scrollIntoView({block:"center", behavior:"smooth"}); }
+      return;
+    }
+    // Native Enter already clicks BUTTON/A and submits inputs; [onclick] divs
+    // and other non-native targets need the click fired by hand.
+    if (tag !== "BUTTON" && tag !== "A" && tag !== "INPUT" &&
+        tag !== "TEXTAREA" && tag !== "SELECT"){
+      e.preventDefault(); cur.click();
+    }
+    return;
+  }
+  const d = DIRS[e.key];
+  if (!d) return;
+  // Don't steal arrows that edit a control: ←/→ in text fields, ↑/↓ in selects.
+  if ((tag === "INPUT" || tag === "TEXTAREA") && d[0] !== 0) return;
+  if (tag === "SELECT" && d[1] !== 0) return;
+  const scope = _tvNavScope();
+  const cands = _tvCandidates(scope).filter(el => el !== cur);
+  // Origin: the focused element's center, else the screen center.
+  const cr = cur ? cur.getBoundingClientRect() : null;
+  const cx = cr ? (cr.left + cr.right) / 2 : innerWidth / 2;
+  const cy = cr ? (cr.top + cr.bottom) / 2 : innerHeight / 2;
+  let best = null, bestScore = Infinity;
+  for (const el of cands){
+    const r = el.getBoundingClientRect();
+    const dx = (r.left + r.right) / 2 - cx, dy = (r.top + r.bottom) / 2 - cy;
+    const proj = dx * d[0] + dy * d[1];              // progress along the pressed direction
+    if (proj <= 1) continue;                          // must actually be that way
+    const orth = Math.abs(dx * d[1]) + Math.abs(dy * d[0]);   // off-axis drift
+    if (orth > proj * 2 + 120) continue;              // outside a forgiving cone
+    const score = proj + orth * 2.5;                  // nearest, prefer aligned
+    if (score < bestScore){ bestScore = score; best = el; }
+  }
+  if (best){
+    e.preventDefault();
+    if (best.tabIndex < 0 && !best.hasAttribute("tabindex")) best.tabIndex = -1; // make [onclick] divs focusable
+    best.focus({preventScroll:true});
+    best.scrollIntoView({block:"center", inline:"nearest", behavior:"smooth"});
+  }
+  // No candidate → leave the key alone so the page can scroll natively.
+}
+if (TV_MODE) document.addEventListener("keydown", _tvNavKey);
 // Stream-to-device availability — false when the host runs macOS (ffmpeg can't
 // read TCC-protected media). Fetched from /api/state at startup; toggles the
 // `no-hls` body class which hides every Prep / On-Device affordance via CSS.
@@ -16883,6 +16962,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.0.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.1.0</div>
 </body>
 </html>

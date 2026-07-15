@@ -222,18 +222,19 @@ You can drive playback from the couch with a cheap **air-mouse wireless remote**
 | Button | Action |
 |--------|--------|
 | ⏯ Play/Pause | Toggle pause |
-| Vol + / Vol − | Volume up / down 5 % per press (hold to ramp). Respects the admin max-volume cap; during YouTube-on-TV it drives the host system volume, same as the dashboard slider |
+| OK (or a click in pointer mode) | During playback: same as ⏯. In the TV UI: activates the highlighted item |
+| Vol + / Vol − | Volume up / down 5 % per press (hold to ramp). Respects the admin max-volume cap. **Never changes the host's system volume** — VLC's own volume, or the YouTube player's own gain |
 | ⏭ (next track) | Skip forward 10 s |
 | ⏮ (previous track) | Skip back 10 s |
 | 🏠 Home | Stop whatever is playing and open the **TV UI** (below). Without StreamLink this key would open the default browser — it's captured while StreamLink runs |
-| Arrows / OK / mouse pointer | Not intercepted — they navigate the TV UI as normal keyboard/mouse input, and pressing any of them wakes it |
+| Arrow ring / mouse pointer | Navigate the TV UI: arrows move the highlight between buttons/tiles (Firestick-style), OK selects; the pointer keeps working as a mouse. Pressing any of them wakes the UI when idle |
 
 ### TV UI (Firestick-style)
 
 The host also runs a **fullscreen dashboard kiosk** — the normal web UI in a borderless Chrome window, minus the on-device playback options (VLC *is* the device on the TV). It behaves like a streaming-stick home screen:
 
 - **Idle**: the [background video](docs/ADMIN.md) plays fullscreen. The TV UI stays out of the way.
-- **Press any button** (or click) on the remote → the dashboard appears. Browse with the air-mouse pointer, play something → VLC takes the screen as usual.
+- **Press any button** (or click) on the remote → the dashboard appears. Browse with the arrow ring + OK (an indigo highlight shows where you are) or just point and click with the air-mouse pointer; play something → VLC takes the screen as usual.
 - **No input for 2 minutes** with nothing playing → the screen hands back to the background video automatically.
 - **🏠 Home during playback** → playback stops and the dashboard comes up.
 

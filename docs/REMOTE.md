@@ -21,11 +21,12 @@ ordinary consumer key codes:
 | Remote button | HID / Windows VK code | Mapped action |
 |---|---|---|
 | ⏯ Play/Pause | `VK_MEDIA_PLAY_PAUSE` (0xB3) | Toggle pause |
-| Vol + / Vol − | `VK_VOLUME_UP` / `VK_VOLUME_DOWN` (0xAF/0xAE) | Volume ±`REMOTE_VOLUME_STEP` (5) per press; auto-repeats while held |
+| Vol + / Vol − | `VK_VOLUME_UP` / `VK_VOLUME_DOWN` (0xAF/0xAE) | Volume ±`REMOTE_VOLUME_STEP` (5) per press; auto-repeats while held. **Never the host OS mixer** — VLC's amp (capped), or the YouTube player's own gain |
 | ⏭ Next track | `VK_MEDIA_NEXT_TRACK` (0xB0) | Skip **forward** `REMOTE_SEEK_STEP_SECS` (10 s) |
 | ⏮ Prev track | `VK_MEDIA_PREV_TRACK` (0xB1) | Skip **back** 10 s |
 | 🏠 Home | `VK_BROWSER_HOME` (0xAC) | **Stop playback + show the TV UI** (unsuppressed this key launches the default browser — Edge — which is why it must be claimed) |
-| Arrows / OK / mouse ring | normal keys + pointer | Not intercepted — they drive the TV UI kiosk as ordinary keyboard/mouse input (and wake it, see below) |
+| OK | `VK_RETURN` (0x0D) — or a left **click** in pointer mode | During playback: ⏯ toggle (both forms). With the TV UI up: activates the focused element (D-pad navigation) |
+| Arrows / mouse ring | normal keys + pointer | Not intercepted — arrows **navigate the TV UI** (spatial focus, see below); the pointer stays a mouse. Any of them wakes the UI when idle |
 
 The next/prev *track* keys are mapped to ±10 s seeks (not playlist next/prev)
 because that's what the buttons mean on a streaming remote.
@@ -39,10 +40,23 @@ plain attribute reads only:
   claimed. A real keyboard's volume keys must drive the OS mixer and Home may
   open the user's browser — it's their desktop.
 - **`home`**: claimed whenever the TV UI is enabled OR playback is up.
-- **Media keys**: claimed only while real playback is up (VLC stream/library
-  play incl. paused, or YouTube-on-TV). When idle — incl. the idle background
-  video — they pass through untouched (and count as generic input, so they
-  wake the TV UI like any other button).
+- **`volume_up` / `volume_down`**: **always claimed** — the remote's volume
+  must never reach the host OS mixer (no Windows overlay, no changed system
+  volume after a session). Idle presses adjust VLC's amp (they apply to the
+  background video / next playback); during YouTube they step the IFrame
+  player's own gain via the `player_volume_step` yt_command (tv.html), NOT
+  `set_system_volume`. The dashboard *slider* keeps its documented OS-volume
+  behaviour during YouTube — this rule is remote-only.
+- **`ok`** (Enter): claimed only during real playback while the TV UI is not
+  up → acts as ⏯. Otherwise it passes through so it activates the focused
+  element in the kiosk. Its pointer-mode twin (left click) is handled off the
+  activity feed: a click during VLC playback (the kiosk is behind fullscreen
+  VLC, so every click lands on the video) fires ⏯ too, 0.4 s debounced;
+  YouTube is excluded because the IFrame player already toggles on clicks.
+- **Remaining media keys**: claimed only while real playback is up (VLC
+  stream/library play incl. paused, or YouTube-on-TV). When idle — incl. the
+  idle background video — they pass through untouched (and count as generic
+  input, so they wake the TV UI like any other button).
 
 ## Dispatch
 
@@ -121,6 +135,17 @@ Mechanics (`main.py`):
 - Sets `document.title = "StreamLink TV Dashboard"` (the window marker — keep
   in sync with `_TVUI_WINDOW_MARKER`) and adds the `tv-mode` + `no-hls` body
   classes.
+- **D-pad spatial navigation** (`_tvNavKey`, TV mode only): arrow keys move
+  focus to the geometrically nearest actionable element in that direction
+  (distance + off-axis-penalty scoring inside a forgiving cone; the target is
+  scrolled to center and marked by the `.tv-mode :focus` indigo ring), OK /
+  Enter activates it (native click for buttons/links, synthesized `click()`
+  for `[onclick]` tiles). Navigation is scoped inside the topmost open
+  `*Modal` so focus can't wander behind a dialog; arrows that edit a control
+  (←/→ in text inputs, ↑/↓ in selects) are left alone, and with no candidate
+  in a direction the key falls through to native scrolling. Hold-to-activate
+  buttons (Stop, handoff) still need the pointer — Enter fires a plain click,
+  not a pointer hold.
 - Forces `hlsAvailable = false`: VLC *is* "on device" on the TV, so every
   Prep / On-Device / play-chooser affordance is hidden and the play chooser
   collapses straight to VLC (the same path a no-HLS macOS host uses).

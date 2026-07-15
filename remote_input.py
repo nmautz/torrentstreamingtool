@@ -62,6 +62,9 @@ _VK_ACTIONS = {
     0xB1: "seek_back",     # VK_MEDIA_PREV_TRACK  (remote ⏮ → skip back)
     0xAC: "home",          # VK_BROWSER_HOME      (remote 🏠 → stop + TV UI;
                            #   unsuppressed it launches the default browser)
+    0x0D: "ok",            # VK_RETURN            (remote OK/Enter → ⏯ during
+                           #   playback; unclaimed while the TV UI is up so it
+                           #   keeps activating the focused element)
 }
 
 _WM_KEYDOWN = (0x0100, 0x0104)   # WM_KEYDOWN, WM_SYSKEYDOWN
@@ -74,6 +77,7 @@ _WM_KEYUP   = (0x0101, 0x0105)   # WM_KEYUP,   WM_SYSKEYUP
 # triggers a full stop + kiosk wake, so it gets a long guard.
 _MIN_INTERVAL = {
     "playpause":    0.35,
+    "ok":           0.35,   # same semantics as playpause while claimed
     "seek_forward": 0.30,
     "seek_back":    0.30,
     "volume_up":    0.10,
@@ -184,6 +188,7 @@ class RemoteListener:
             keyboard.Key.media_volume_down: "volume_down",
             keyboard.Key.media_next:        "seek_forward",
             keyboard.Key.media_previous:    "seek_back",
+            keyboard.Key.enter:             "ok",
             # No "home": pynput's Key enum has no browser-home off-Windows.
         }
         if platform.system() == "Windows":
