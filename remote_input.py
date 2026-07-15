@@ -20,7 +20,7 @@ input globally and feeds two things back into main.py:
 3. **⏻ power button** (`PowerButtonListener`, Windows) — most remotes emit
    power as a HID System Control usage that bypasses the keyboard stack
    entirely (the box locks + sleeps); a Raw Input window observes it while
-   main.py disables the OS sleep-button action. See the class docstring.
+   main.py disables the OS sleep/power-button actions. See the class docstring.
 
 Platform notes (Windows first — see docs/REMOTE.md):
 
@@ -265,9 +265,11 @@ class PowerButtonListener:
     sees nor suppresses it — the box locks and sleeps. Interception is
     therefore split in two:
 
-    - main.py's `_neuter_sleep_button()` sets the power plan's sleep-button
-      action to "Do nothing" (`powercfg … SBUTTONACTION 0`), so the press no
-      longer suspends the box;
+    - main.py's `_neuter_power_buttons()` sets the power plan's sleep-button
+      AND power-button actions to "Do nothing" (`powercfg … SBUTTONACTION /
+      PBUTTONACTION 0` — Windows maps System Sleep 0x82 to the former but
+      System Power Down 0x81 to the latter), so the press no longer suspends
+      the box;
     - this listener registers a hidden window for Raw Input from the System
       Control usage page (`RIDEV_INPUTSINK` — delivered regardless of focus)
       and dispatches "power" on each press. Raw Input is observation-only (it

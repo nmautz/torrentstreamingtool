@@ -7293,7 +7293,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         # the OS sleep-button action and observe the press via Raw Input
         # instead. See docs/REMOTE.md + docs/GOTCHAS.md.
         if platform.system() == "Windows":
-            asyncio.create_task(_neuter_sleep_button())
+            asyncio.create_task(_neuter_power_buttons())
             try:
                 import remote_input
                 power_listener = remote_input.start_power_listener(
@@ -11955,25 +11955,34 @@ REMOTE_SEEK_STEP_SECS = 10   # remote ⏮/⏭ buttons: ± seconds (matches the U
 REMOTE_VOLUME_STEP    = 5    # remote vol ± buttons: % per press (matches the UI's ± buttons)
 
 
-async def _neuter_sleep_button() -> None:
-    """Windows: set the active power plan's sleep-button action to "Do
-    nothing" (AC + DC), so the remote's ⏻ press stops suspending the box.
+async def _neuter_power_buttons() -> None:
+    """Windows: set the active power plan's sleep-button AND power-button
+    actions to "Do nothing" (AC + DC), so the remote's ⏻ press stops
+    suspending the box.
 
     Most air-mouse power buttons emit a HID System Control usage that goes
     straight to the Windows power manager — no keyboard hook can see or
     suppress it, so the box locks + sleeps and wakes to the lock screen
-    (autologin only runs at boot). With the OS action disabled, the press
-    does nothing system-wide and the Raw Input listener
-    (remote_input.start_power_listener) handles it instead. Persistent,
-    machine-wide power-plan change, deliberately: a media box must never be
-    slept by a stray remote press, even while StreamLink isn't running. The
-    physical power button (PBUTTONACTION) is left alone.
+    (autologin only runs at boot). Windows maps "System Sleep" (0x82) to the
+    sleep button (SBUTTONACTION) but "System Power Down" (0x81) — what the
+    reference remote actually sends — to the POWER button (PBUTTONACTION),
+    so both must be neutered. With the OS actions disabled, the press does
+    nothing system-wide and the Raw Input listener
+    (remote_input.start_power_listener) handles it instead.
+
+    Persistent, machine-wide power-plan change, deliberately: a media box
+    must never be slept by a stray remote press, even while StreamLink isn't
+    running. Side effect (accepted, media-box-first): a short press of the
+    PHYSICAL chassis power button also does nothing now — shut down from the
+    Start menu / admin panel; a 4 s hold still hard-cuts at firmware level.
 
     powercfg needs an elevated process — on failure, log the manual commands.
     """
     cmds = [
         ("powercfg", "/setacvalueindex", "SCHEME_CURRENT", "SUB_BUTTONS", "SBUTTONACTION", "0"),
         ("powercfg", "/setdcvalueindex", "SCHEME_CURRENT", "SUB_BUTTONS", "SBUTTONACTION", "0"),
+        ("powercfg", "/setacvalueindex", "SCHEME_CURRENT", "SUB_BUTTONS", "PBUTTONACTION", "0"),
+        ("powercfg", "/setdcvalueindex", "SCHEME_CURRENT", "SUB_BUTTONS", "PBUTTONACTION", "0"),
         ("powercfg", "/setactive", "SCHEME_CURRENT"),
     ]
     for cmd in cmds:
@@ -11988,15 +11997,17 @@ async def _neuter_sleep_button() -> None:
             rc = -1
         if rc != 0:
             log.warning(
-                "could not set the sleep-button action to 'do nothing' "
-                "(powercfg rc=%s — not elevated?). The remote's ⏻ press may "
-                "still sleep the box; run from an ADMIN prompt:  "
+                "could not set the sleep/power-button actions to 'do nothing' "
+                "(powercfg rc=%s on %s — not elevated?). The remote's ⏻ press "
+                "may still sleep the box; run from an ADMIN prompt:  "
                 "powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS SBUTTONACTION 0  &&  "
                 "powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS SBUTTONACTION 0  &&  "
-                "powercfg /setactive SCHEME_CURRENT", rc)
+                "powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION 0  &&  "
+                "powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION 0  &&  "
+                "powercfg /setactive SCHEME_CURRENT", rc, " ".join(cmd[1:]))
             return
-    log.info("sleep-button action set to 'do nothing' — remote ⏻ presses are "
-             "intercepted via Raw Input instead")
+    log.info("sleep + power button actions set to 'do nothing' — remote ⏻ "
+             "presses are intercepted via Raw Input instead")
 
 
 def _remote_should_handle(action: str = "") -> bool:
@@ -12101,6 +12112,9 @@ async def _remote_key_action(action: str) -> None:
             if now_m - _remote_power_ts < 1.0:
                 return
             _remote_power_ts = now_m
+            log.info("remote ⏻ power press (status=%s youtube=%s tv_ui=%s bg=%s)",
+                     state.stream_status, state.youtube_active,
+                     state.tv_ui_active, state.background_playing)
             # Standby toggle between the two idle surfaces — never the OS
             # sleep the key means to Windows (suppressed / neutered while claimed).
             if state.youtube_active or state.stream_status != "idle" \

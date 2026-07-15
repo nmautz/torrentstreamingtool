@@ -73,8 +73,8 @@ plain attribute reads only:
   (pynput exposes no sleep key off-Windows). This gate is shared by both
   arrival paths (the keyboard hook's `VK_SLEEP` and the Raw Input listener —
   see "⏻ Power interception" below), so during "Use My Computer" a press does
-  nothing (the OS action is neutered machine-wide by `_neuter_sleep_button`,
-  so it can't fall through to sleep either).
+  nothing (the OS actions are neutered machine-wide by
+  `_neuter_power_buttons`, so it can't fall through to sleep either).
 - **`ok`** (Enter): claimed only during real playback while the TV UI is not
   up → acts as ⏯. Otherwise it passes through so it activates the focused
   element in the kiosk. Its pointer-mode twin (left click) is handled off the
@@ -133,14 +133,20 @@ sleeps/hibernates, then wakes to the lock screen (autologin only runs at a
 real boot). Interception is therefore split in two (both parts run at
 startup when `REMOTE_CONTROL=1` on Windows):
 
-1. **Neuter the OS action** — `_neuter_sleep_button()` (`main.py`) sets the
-   active power plan's sleep-button action to *Do nothing* (AC + DC:
-   `powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS SBUTTONACTION 0`,
-   same for `/setdcvalueindex`, then `/setactive SCHEME_CURRENT`). This is a
-   **persistent, machine-wide power-plan change** — deliberate: a media box
-   must never be slept by a stray remote press, even while StreamLink isn't
-   running. The physical power button (`PBUTTONACTION`) is left alone.
-   `powercfg` needs elevation; on failure a warning logs the manual commands.
+1. **Neuter the OS actions** — `_neuter_power_buttons()` (`main.py`) sets the
+   active power plan's **sleep-button AND power-button** actions to *Do
+   nothing* (AC + DC: `powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS
+   SBUTTONACTION 0`, same for `PBUTTONACTION`, each also `/setdcvalueindex`,
+   then `/setactive SCHEME_CURRENT`). Both, because Windows maps "System
+   Sleep" (0x82) to the sleep button but "System Power Down" (0x81) — what
+   the reference remote actually sends — to the **power** button; neutering
+   only `SBUTTONACTION` left the box still sleeping. This is a **persistent,
+   machine-wide power-plan change** — deliberate: a media box must never be
+   slept by a stray remote press, even while StreamLink isn't running. Side
+   effect (accepted): a short press of the physical chassis power button
+   also does nothing now — shut down from the Start menu or the admin panel
+   (a 4 s hold still hard-cuts at firmware level). `powercfg` needs
+   elevation; on failure a warning logs the manual commands.
 2. **Observe the press via Raw Input** — `PowerButtonListener`
    (`remote_input.py`) registers a hidden window for Raw Input from the
    System Control usage page (`RIDEV_INPUTSINK`, so delivery doesn't depend
