@@ -458,6 +458,23 @@
     body.tv-mode #fullscreenBtn,
     body.tv-mode #fullscreenControls,
     body.tv-mode footer { display: none !important; }
+    /* TV: management/detail chrome lives on touchscreen devices — the TV is
+       browse + play. Profile settings / profile management / admin entry, the
+       search source & category pickers, and the episode page's metadata,
+       bulk-select and selection-driven controls are hidden (all remain
+       available from any phone/desktop browser). Fewer focus stops also keeps
+       the D-pad navigation predictable. */
+    body.tv-mode #navSettingsBtn,
+    body.tv-mode #manageProfilesBtn,
+    body.tv-mode #adminPanelLink,
+    body.tv-mode #srcWrap,
+    body.tv-mode #catWrap,
+    body.tv-mode #epRenameBtn,
+    body.tv-mode #epMetaFixBtn,
+    body.tv-mode #epOndemandBtn,
+    body.tv-mode #epBulkChips,
+    body.tv-mode #epDownloadSelBtn,
+    body.tv-mode #epPlaySelBtn { display: none !important; }
     /* 10-foot readability: uniform upscale (the kiosk is Chrome-only, so
        `zoom` is safe) and reclaim the padding that cleared the now-hidden
        fixed footer. */
@@ -4181,6 +4198,9 @@ try { _seekLockEnabled = localStorage.getItem("streamlink_seeklock") !== "0"; } 
 // per-profile / server): "card" (poster grid, default) or "list" (detailed rows).
 let libViewMode = "card";
 try { const _lv = localStorage.getItem("streamlink_libview"); if (_lv === "list" || _lv === "card") libViewMode = _lv; } catch (_) {}
+// TV kiosk: always the poster grid — list view's dense rows + action strips are
+// touchscreen chrome (and the settings toggle that could undo this is hidden).
+if (TV_MODE) libViewMode = "card";
 
 // Search mode (device-local UI preference, never per-profile / server): "smart"
 // (TMDb-first poster browse, default) or "classic" (legacy indexer-first grouped
@@ -7511,14 +7531,16 @@ function _epCardHtml(f){
             ${subOverview}
             <div class="text-[10px] text-gray-700 mt-1 font-mono">${escHtml(f.size_human)}${dur?` · ${fmtTime(dur)}`:""}</div>
           </div>
-          <!-- Checkbox (top-right) -->
-          <label class="flex-shrink-0 p-1 cursor-pointer">
+          <!-- Checkbox (top-right) — not on TV: selection drives the bulk/download
+               controls, which are touchscreen chrome (hidden in TV mode) -->
+          ${TV_MODE?"":`<label class="flex-shrink-0 p-1 cursor-pointer">
             <input type="checkbox" class="ep-check accent-indigo-500 w-5 h-5"
               ${checked?"checked":""} data-path="${escHtml(f.path)}" onchange="epToggle(this)"/>
-          </label>
+          </label>`}
         </div>
-        <!-- Inline action row -->
-        <div class="flex items-center gap-0.5 mt-1.5 -ml-1">
+        <!-- Inline action row (watched toggle / fetch / prep / device download) —
+             management detail, hidden on TV (the still IS the play control there) -->
+        ${TV_MODE?"":`<div class="flex items-center gap-0.5 mt-1.5 -ml-1">
           <button data-watch-toggle data-path="${escHtml(f.path)}" data-watched="${!!isComplete}"
             onclick="epToggleWatched(this)"
             class="w-9 h-9 flex items-center justify-center transition-colors
@@ -7551,8 +7573,8 @@ function _epCardHtml(f){
                 d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
             </svg>
           </a>`}
-        </div>
-        ${_epCardPrioRow(f, _p, notDownloaded)}
+        </div>`}
+        ${TV_MODE?"":_epCardPrioRow(f, _p, notDownloaded)}
       </div>
     </div>`;
 }
@@ -7798,9 +7820,12 @@ function _epMoviePanel(f){
   const isReady=prepState==="ready";
   const isPrepping=prepState==="prepping";
 
-  // Action buttons.
+  // Action buttons. None on TV — download/prep/delete are host management,
+  // left to touchscreen devices; the TV gets status + the sticky Play.
   const actions=[];
-  if(notDownloaded){
+  if(TV_MODE){
+    // browse + play only
+  } else if(notDownloaded){
     // Re-fetch to the host (it was skipped/deferred). Mirrors epDownloadSkipped.
     if(f.mode==="skip"||f.mode==="idle"){
       actions.push(`<button onclick="epDownloadSkipped(${_id},${_p},this)"
@@ -7850,7 +7875,7 @@ function _epMoviePanel(f){
   // Download scheduling for an item still fetching (Now / Idle), like the episode bar,
   // plus this episode's own download PRIORITY (which files in the torrent fetch first).
   let schedHtml="";
-  if(epHasTorrent && notDownloaded){
+  if(epHasTorrent && notDownloaded && !TV_MODE){
     schedHtml = `<div class="flex items-center gap-1.5 flex-wrap mt-1">
       <span class="text-[10px] font-black text-gray-500 uppercase tracking-widest mr-0.5">Download:</span>
       ${_epSchedBtn("epSchedSeason('now',this)","⬇ Now","text-emerald-300 hover:bg-emerald-950/40")}
@@ -7878,7 +7903,7 @@ function _epMoviePanel(f){
     <div class="text-[11px] text-gray-600 mt-2 font-mono">${meta}</div>
     <p class="text-[11px] text-gray-700 mt-1 font-mono break-all">${escHtml(f.name)}</p>
     ${schedHtml}${prepPrioHtml}
-    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-4">${actions.join("")}</div>
+    ${actions.length?`<div class="grid grid-cols-1 sm:grid-cols-2 gap-2 mt-4">${actions.join("")}</div>`:""}
   </div>`;
 }
 
@@ -7924,14 +7949,14 @@ function renderEpList(){
         ${sMeta.overview ? `<p class="text-xs text-gray-400 line-clamp-3">${escHtml(sMeta.overview)}</p>` : ""}
         <div class="flex items-center justify-between gap-2 mt-2">
           <span class="text-[10px] font-black text-gray-600 uppercase tracking-widest">${visibleFiles.length} episode${visibleFiles.length===1?"":"s"}</span>
-          <button onclick="epDownloadSeason(${epCurrentSeason})"
+          ${TV_MODE?"":`<button onclick="epDownloadSeason(${epCurrentSeason})"
             class="text-[10px] text-gray-500 hover:text-indigo-300 hover:bg-indigo-950/40 px-2 py-1 flex items-center gap-1 transition-colors uppercase tracking-wide">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                 d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
             </svg>
             Save ZIP
-          </button>
+          </button>`}
         </div>
       </div>`;
     }
@@ -7944,7 +7969,8 @@ function renderEpList(){
   //     what to download is moot then).
   //   • Stream-prep (Now/Idle/Never) — the HLS-prep sibling; hidden on macOS (no HLS).
   //   • Recheck — force a piece-hash verify of the checked episodes.
-  if(epHasTorrent){
+  // Not on TV: download/prep scheduling is host management, done from a phone.
+  if(epHasTorrent && !TV_MODE){
     const scope=epSeasonList.length?`Season ${epCurrentSeason}`:"All files";
     const multi=epSeasonList.length>1;
     const allDownloaded=epFiles.length>0 && epFiles.every(f=>f.complete!==false);
@@ -17067,6 +17093,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.4.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.5.0</div>
 </body>
 </html>

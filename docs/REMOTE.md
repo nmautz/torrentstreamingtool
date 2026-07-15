@@ -208,9 +208,25 @@ Mechanics (`main.py`):
   remote is the transport. The page is upscaled (`zoom: 1.15`, safe in the
   Chrome-only kiosk) for 10-foot readability, and `main`'s footer-clearance
   padding is reclaimed. Fewer focus stops also makes the D-pad navigation
-  predictable. Actions tucked behind the hidden chrome (rename/delete/hide,
-  track menus, upload) remain available from any phone/desktop browser.
-- Everything else is the stock dashboard — profiles, search, library, admin.
+  predictable.
+- **TV is browse + play only — management/detail chrome is hidden** (10.5.0),
+  left to any phone/desktop browser. The same `.tv-mode` CSS block hides the
+  profile-settings gear (`#navSettingsBtn`), the profile picker's Manage
+  profiles / Admin links, and the search Sources/Categories pickers
+  (`#srcWrap`/`#catWrap`); on the **episode page** it hides the rename /
+  fix-metadata / on-demand-only hero buttons, the bulk-select chips
+  (`#epBulkChips`), and the selection-driven Download (N) / Play bottom
+  buttons (`#epDownloadSelBtn`/`#epPlaySelBtn` — selection doesn't exist on
+  TV, so they'd be dead). `TV_MODE` guards in the renderers additionally drop
+  the per-episode checkboxes + inline action row (watched toggle, prep,
+  fetch-now, download-to-device) and priority rows (`_epCardHtml`), the
+  download/prep/recheck scheduling bar + Save ZIP (`renderEpList`), and the
+  movie panel's secondary actions/scheduling (`_epMoviePanel` — status + the
+  sticky ▶ Play only). Episodes play by activating their stills; Shuffle and
+  Close stay in the bottom bar. The library is **forced to poster-card view**
+  (`libViewMode="card"`) regardless of the kiosk's stored preference — list
+  view's dense rows and action strips are touchscreen chrome.
+- Everything else is the stock dashboard — profiles, search, library.
 
 ## Platform behaviour (Windows first)
 
