@@ -5634,6 +5634,28 @@ async def background_video_loop() -> None:
                 continue
             vlc_state = vs.get("state", "")
             if vlc_state in ("playing", "paused"):
+                # Usually the bg video this loop started. But VLC can put REAL
+                # content on screen without the app knowing (auto-advance out
+                # of a leaked playlist entry — see vlc_clear_playlist /
+                # GOTCHAS) — stream_status stays "idle" + background_playing
+                # True, and the remote's gates then misroute every button:
+                # ← Back is never claimed, and ⏻/🏠 take the idle-surface
+                # branches instead of stopping playback. Re-adopt such content
+                # (same restore as a server restart) so state matches reality.
+                if state.stream_status == "idle":
+                    uri = await vlc_playlist_uri()
+                    if uri and uri.startswith("file://"):
+                        cur = uri_to_path(uri)
+                        try:
+                            is_bg = Path(bg["path"]).resolve() == Path(cur).resolve()
+                        except Exception:
+                            is_bg = True   # can't tell — leave it alone
+                        if not is_bg:
+                            log.info("VLC is playing non-bg content while idle "
+                                     "(%s) — re-adopting as active playback", cur)
+                            state.background_playing = False
+                            await _sync_state_from_vlc()
+                            await broadcast("state", state_snapshot())
                 continue
             await _play_background_video()
         except Exception:

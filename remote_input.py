@@ -82,11 +82,17 @@ _WM_KEYDOWN = (0x0100, 0x0104)   # WM_KEYDOWN, WM_SYSKEYDOWN
 _WM_KEYUP   = (0x0101, 0x0105)   # WM_KEYUP,   WM_SYSKEYUP
 
 # KBDLLHOOKSTRUCT.flags bit: the event was synthesized via SendInput /
-# keybd_event, not typed on hardware. main.py's Windows focus cocktail
-# (`_vlc_focus_windows` / `_focus_tv_browser_windows`) fires a synthetic ALT
-# press to defeat foreground-lock; without this check that ALT counts as
-# "activity" and re-wakes the TV UI ~1.5 s after every idle hand-back, so the
-# background video flashes for a moment and then loses the screen to the kiosk.
+# keybd_event, not typed on hardware. Injected events never count as generic
+# ACTIVITY — main.py's Windows focus cocktail (`_vlc_focus_windows` /
+# `_focus_tv_browser_windows`) fires a synthetic ALT press to defeat
+# foreground-lock, and counted as activity that ALT re-wakes the TV UI ~1.5 s
+# after every idle hand-back. But injected events are NOT skipped for the
+# handled action keys: Windows' HID input service translates consumer-page
+# usages (AC Home / AC Back, sleep, media) into VK keystrokes *via SendInput*,
+# so on many remotes the very keys this module exists for arrive with this
+# flag set — blanket-skipping every injected event let 🏠 Home fall through to
+# the default browser and made ← Back / ⏻ (VK_SLEEP form) dead on those
+# remotes.
 _LLKHF_INJECTED = 0x10
 
 # Per-action debounce (seconds) — the remotes auto-repeat while a button is
@@ -163,16 +169,14 @@ class RemoteListener:
             pass
 
     def _win32_event_filter(self, msg: int, data: Any) -> bool:
-        # Injected (software-synthesized) events are never remote input —
-        # deliver them untouched and don't let them wake the TV UI or refresh
-        # its idle timer. See _LLKHF_INJECTED above.
-        if data.flags & _LLKHF_INJECTED:
-            return True
         action = _VK_ACTIONS.get(data.vkCode)
         if action is None or not self._should(action):
             # Not ours — deliver normally everywhere, but count a keydown as
             # activity so any button can wake the TV UI / refresh its timer.
-            if msg in _WM_KEYDOWN:
+            # Injected (software-synthesized) keys never count as activity:
+            # the focus cocktail's own synthetic ALT would re-wake the UI it
+            # just handed the screen back from. See _LLKHF_INJECTED above.
+            if msg in _WM_KEYDOWN and not (data.flags & _LLKHF_INJECTED):
                 self._activity("key")
             return True
         if msg in _WM_KEYDOWN:

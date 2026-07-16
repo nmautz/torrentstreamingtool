@@ -198,10 +198,15 @@ Mechanics (`main.py`):
   light the TV at night) and neither do handled media keys (a volume press
   during playback is not a request for the dashboard). During playback the
   deliberate way to the UI is 🏠 Home. On Windows, **injected keys**
-  (`LLKHF_INJECTED`) are ignored entirely — the focus cocktail's own synthetic
-  ALT press (`_vlc_focus_windows`) would otherwise re-wake the UI ~1.5 s after
-  every idle hand-back, flashing the background video and stealing the screen
-  right back (see docs/GOTCHAS.md).
+  (`LLKHF_INJECTED`) never count as wake activity — the focus cocktail's own
+  synthetic ALT press (`_vlc_focus_windows`) would otherwise re-wake the UI
+  ~1.5 s after every idle hand-back, flashing the background video and
+  stealing the screen right back (see docs/GOTCHAS.md). Injected **action
+  keys are still claimed and handled**, though: Windows' HID input service
+  translates consumer-page usages (AC Home/Back, sleep, media) into VK
+  keystrokes via `SendInput`, so on many remotes 🏠/←/⏻ (VK_SLEEP form)
+  arrive with the injected flag set — skipping every injected event sent
+  Home to the default browser and made Back/⏻ dead during playback (10.7.4).
 - **Show** (`_tv_ui_show`): pauses the background video (`pl_forcepause` —
   keeps its position; `background_playing` stays True so the loop stays out),
   launches the kiosk if its Chrome isn't running (matched by
