@@ -51,9 +51,49 @@
       padding:10px 12px; font-size:11px; line-height:1.55; color:#d1d5db;
       pointer-events:none; white-space:normal; box-shadow:0 8px 24px rgba(0,0,0,0.6);
     }
+
+    /* ── Icon system — inline SVG sprite sized to the local font.
+       See docs/FRONTEND.md § Iconography. ── */
+    .ic{width:1.1em;height:1.1em;display:inline-block;vertical-align:-.18em;fill:currentColor;flex-shrink:0;pointer-events:none}
   </style>
 </head>
 <body class="dark bg-gray-950 text-gray-100 min-h-screen flex flex-col">
+
+<!-- ── Icon sprite ──────────────────────────────────────────────────────────
+     Single source for every pictographic UI glyph (docs/FRONTEND.md § Iconography).
+     Emoji / dingbat characters are banned in the UI — they render differently on
+     every OS. Reference these symbols instead:
+       static HTML : <svg class="ic" aria-hidden="true"><use href="#i-NAME"/></svg>
+       JS templates: ${ic("NAME")}   (helper near the top of the main script)
+     Keep this block byte-identical in index.html and admin.html. -->
+<svg xmlns="http://www.w3.org/2000/svg" style="display:none" aria-hidden="true">
+  <symbol id="i-play" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></symbol>
+  <symbol id="i-pause" viewBox="0 0 24 24"><path d="M6 5h4v14H6zM14 5h4v14h-4z"/></symbol>
+  <symbol id="i-resume" viewBox="0 0 24 24"><path d="M18 20h-2v-6a3 3 0 0 0-3-3H7.8l3.1 3.1-1.4 1.4L4 10l5.5-5.5 1.4 1.4L7.8 9H13a5 5 0 0 1 5 5z"/></symbol>
+  <symbol id="i-hourglass" viewBox="0 0 24 24"><path d="M6 2h12v5l-4.5 5 4.5 5v5H6v-5l4.5-5L6 7z"/></symbol>
+  <symbol id="i-check" viewBox="0 0 24 24"><path d="M9.55 17.65 4.2 12.3l1.7-1.7 3.65 3.65 8.6-8.6 1.7 1.7z"/></symbol>
+  <symbol id="i-x" viewBox="0 0 24 24"><path d="M6.4 5 12 10.6 17.6 5 19 6.4 13.4 12l5.6 5.6-1.4 1.4-5.6-5.6L6.4 19 5 17.6l5.6-5.6L5 6.4z"/></symbol>
+  <symbol id="i-warn" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M12 1.8 23.4 21H.6zM10.9 9v6h2.2V9zm0 7.6V19h2.2v-2.4z"/></symbol>
+  <symbol id="i-bolt" viewBox="0 0 24 24"><path d="M13.2 2 4.8 13.5h5L8.6 22l8.6-11.5h-5z"/></symbol>
+  <symbol id="i-star" viewBox="0 0 24 24"><path d="m12 2 2.95 6.32 6.93.84-5.12 4.75L18.18 21 12 17.6 5.82 21l1.42-7.09-5.12-4.75 6.93-.84z"/></symbol>
+  <symbol id="i-menu" viewBox="0 0 24 24"><path d="M3 5.2h18v2.4H3zM3 10.8h18v2.4H3zM3 16.4h18v2.4H3z"/></symbol>
+  <symbol id="i-gear" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M10 2h4v3.1c.62.16 1.21.4 1.76.71l2.19-2.19 2.83 2.83-2.19 2.19c.31.55.55 1.14.71 1.76H22v4h-3.1c-.16.62-.4 1.21-.71 1.76l2.19 2.19-2.83 2.83-2.19-2.19c-.55.31-1.14.55-1.76.71V22h-4v-3.1c-.62-.16-1.21-.4-1.76-.71l-2.19 2.19-2.83-2.83 2.19-2.19c-.31-.55-.55-1.14-.71-1.76H2v-4h3.1c.16-.62.4-1.21.71-1.76L3.62 6.45l2.83-2.83 2.19 2.19c.55-.31 1.14-.55 1.36-.6zM12 8.5a3.5 3.5 0 1 0 0 7 3.5 3.5 0 0 0 0-7z"/></symbol>
+  <symbol id="i-up" viewBox="0 0 24 24"><path d="M12 2.8 19 9.8l-1.7 1.7-4.1-4.1V21h-2.4V7.4l-4.1 4.1L5 9.8z"/></symbol>
+  <symbol id="i-down" viewBox="0 0 24 24"><path d="M12 21.2 5 14.2l1.7-1.7 4.1 4.1V3h2.4v13.6l4.1-4.1 1.7 1.7z"/></symbol>
+  <symbol id="i-moon" viewBox="0 0 24 24"><path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z"/></symbol>
+  <symbol id="i-ban" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M12 1.8a10.2 10.2 0 1 0 0 20.4 10.2 10.2 0 0 0 0-20.4zM4.2 12a7.8 7.8 0 0 1 12.5-6.2L5.8 16.7A7.74 7.74 0 0 1 4.2 12zm7.8 7.8a7.74 7.74 0 0 1-4.7-1.6L18.2 7.3A7.8 7.8 0 0 1 12 19.8z"/></symbol>
+  <symbol id="i-lock" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M17.2 9.5V7.2a5.2 5.2 0 0 0-10.4 0v2.3H4.5V22h15V9.5zM9 7.2a3 3 0 0 1 6 0v2.3H9z"/></symbol>
+  <symbol id="i-unlock" viewBox="0 0 24 24"><path d="M9 9.5V7.2a3 3 0 0 1 5.9-.7h2.3A5.2 5.2 0 0 0 6.8 7.2v2.3H4.5V22h15V9.5z"/></symbol>
+  <symbol id="i-key" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M15.2 1.8a7 7 0 0 0-6.6 9.3l-6.8 6.8V22h4.3l1.5-1.5v-2.2h2.2l2-2A7 7 0 1 0 15.2 1.8zm1.9 6.6a2.1 2.1 0 1 1 0-4.2 2.1 2.1 0 0 1 0 4.2z"/></symbol>
+  <symbol id="i-phone" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M6 1h12v22H6zM8 4.5v13h8v-13zm3 15.2v1.6h2v-1.6z"/></symbol>
+  <symbol id="i-folder" viewBox="0 0 24 24"><path d="M2.5 4h7.2l2 2.3h9.8V20H2.5z"/></symbol>
+  <symbol id="i-dots" viewBox="0 0 24 24"><path d="M3.5 10.5h3.6v3.6H3.5zM10.2 10.5h3.6v3.6h-3.6zM16.9 10.5h3.6v3.6h-3.6z"/></symbol>
+  <symbol id="i-chev-up" viewBox="0 0 24 24"><path d="m12 8.4 7.4 7.4-1.7 1.7-5.7-5.7-5.7 5.7-1.7-1.7z"/></symbol>
+  <symbol id="i-chev-down" viewBox="0 0 24 24"><path d="M12 15.6 4.6 8.2l1.7-1.7 5.7 5.7 5.7-5.7 1.7 1.7z"/></symbol>
+  <symbol id="i-chev-right" viewBox="0 0 24 24"><path d="M15.6 12 8.2 19.4l-1.7-1.7 5.7-5.7-5.7-5.7 1.7-1.7z"/></symbol>
+  <symbol id="i-ext" viewBox="0 0 24 24"><path d="M13.5 2.5h8v8h-2.3V6.4l-8.1 8.1-1.6-1.6 8.1-8.1h-4.1zM4 5h6v2.3H6.3v10.4h10.4V13H19v7H4z"/></symbol>
+</svg>
+
 
 <!-- ── Login Overlay ─────────────────────────────────────────────────────────── -->
 <div id="loginOverlay"
@@ -269,7 +309,7 @@
       <div class="px-5 py-3 border-t border-gray-800">
         <a id="jackettLink" href="#" target="_blank" rel="noopener"
           class="text-xs text-indigo-400 hover:text-indigo-300 uppercase tracking-wide font-bold transition-colors">
-          Open Jackett Admin ↗
+          Open Jackett Admin <svg class="ic" aria-hidden="true"><use href="#i-ext"/></svg>
         </a>
         <span class="text-xs text-gray-600 ml-2">— log in to add, configure, or remove indexers directly.</span>
       </div>
@@ -354,7 +394,7 @@
           <h3 class="text-sm font-black uppercase tracking-wide" id="skipEditorTitle">Edit Skip Times</h3>
           <p class="text-xs text-gray-500 mt-0.5">Values are in seconds. Leave blank to clear.</p>
         </div>
-        <button onclick="closeSkipEditor()" class="text-gray-600 hover:text-gray-300 text-lg leading-none">✕</button>
+        <button onclick="closeSkipEditor()" class="text-gray-600 hover:text-gray-300 text-lg leading-none"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
       </div>
       <div id="skipEditorFiles" class="divide-y divide-gray-800"></div>
     </div>
@@ -1545,7 +1585,7 @@
         <h2 class="text-lg font-black uppercase tracking-wide" id="aiTitle">Add Indexer</h2>
         <p class="text-xs text-gray-500 mt-0.5" id="aiSub">Browse and add indexers from Jackett</p>
       </div>
-      <button onclick="closeAddIndexer()" class="text-gray-600 hover:text-gray-300 transition-colors text-xl font-bold leading-none">✕</button>
+      <button onclick="closeAddIndexer()" class="text-gray-600 hover:text-gray-300 transition-colors text-xl font-bold leading-none"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg></button>
     </div>
 
     <!-- Browse view -->
@@ -1664,6 +1704,10 @@
 </div>
 
 <script>
+
+// Icon helper — sprite markup for JS-built HTML (docs/FRONTEND.md § Iconography).
+// Emoji / dingbat glyphs are banned in the UI; use ${ic("name")} instead.
+function ic(name,cls){ return `<svg class="ic${cls?" "+cls:""}" aria-hidden="true"><use href="#i-${name}"/></svg>`; }
 // ── State ─────────────────────────────────────────────────────────────────────
 let adminToken = localStorage.getItem("streamlink_admin_token") || "";
 let activeTab  = "activity";
@@ -2192,7 +2236,7 @@ async function loadLogs(){
         <div class="border-t border-gray-800">
           <div class="px-5 py-3 flex items-center justify-between gap-3 bg-gray-950">
             <button onclick="togglePriorLogs()" class="min-w-0 flex-1 text-left flex items-center gap-2 group">
-              <span id="priorChevron" class="text-gray-500 text-xs transition-transform">▶</span>
+              <span id="priorChevron" class="text-gray-500 text-xs transition-transform"><svg class="ic" aria-hidden="true"><use href="#i-chev-right"/></svg></span>
               <span class="min-w-0">
                 <span class="text-sm font-bold text-gray-300 group-hover:text-gray-100">Prior Logs</span>
                 <span class="block text-[11px] text-gray-600 mt-0.5">${prior.length} ${plural} · ${_fmtBytes(totalBytes)} · archived automatically on server update</span>
@@ -2220,7 +2264,7 @@ function togglePriorLogs(){
   const chevron = document.getElementById("priorChevron");
   if(!list) return;
   const open = list.classList.toggle("hidden") === false;
-  if(chevron) chevron.textContent = open ? "▼" : "▶";
+  if(chevron) chevron.innerHTML = ic(open ? "chev-down" : "chev-right");
 }
 
 function _downloadViaAnchor(url){
@@ -2683,7 +2727,7 @@ function _renderNetwork(d){
   sel.innerHTML = opts;
   sel.value = pref;
   if(d.used_fallback && d.fallback_reason){
-    status.innerHTML = `<span class="text-amber-400">⚠ ${_esc(d.fallback_reason)}.</span> Other adapters redirect to <span class="font-mono text-gray-400">${_esc(d.active_ip||"")}</span>.`;
+    status.innerHTML = `<span class="text-amber-400"><svg class="ic" aria-hidden="true"><use href="#i-warn"/></svg> ${_esc(d.fallback_reason)}.</span> Other adapters redirect to <span class="font-mono text-gray-400">${_esc(d.active_ip||"")}</span>.`;
   } else if(d.active_ip){
     const where = pref ? `the selected adapter` : `auto-picked`;
     status.innerHTML = `Primary address (${where}): <span class="font-mono text-gray-300">${_esc(d.active_ip)}</span>. Other adapters redirect here.`;
@@ -3322,7 +3366,7 @@ function _renderStorageBreakdown(){
     }</div>` : "";
     return `<div class="border border-gray-800 bg-gray-950/40 px-3 py-2">
       <div class="flex items-center gap-3 cursor-pointer select-none" onclick="_sbToggle('${escHtml(it.id)}')">
-        <span class="text-gray-600 w-3 flex-shrink-0">${open?'▾':'▸'}</span>
+        <span class="text-gray-600 w-3 flex-shrink-0">${open?ic("chev-down"):ic("chev-right")}</span>
         <div class="min-w-0 flex-1">
           <div class="flex items-baseline justify-between gap-3">
             <span class="text-gray-200 font-bold break-all min-w-0">${escHtml(it.title||"(untitled)")}</span>
@@ -3362,7 +3406,7 @@ function _renderOndemandOnly(d){
     ].filter(Boolean).join(' · ');
     // Lock button: unlock only when fully locked; otherwise (unlocked OR mixed) lock all.
     const lockNext = !locked;                 // fully-locked → unlock; else lock all
-    const lockLbl = locked ? '🔒 Locked' : (lockMixed ? '🔓 Partial' : 'Unlocked');
+    const lockLbl = locked ? '<svg class="ic" aria-hidden="true"><use href="#i-lock"/></svg> Locked' : (lockMixed ? '<svg class="ic" aria-hidden="true"><use href="#i-unlock"/></svg> Partial' : 'Unlocked');
     const lockCls = locked ? 'bg-amber-600 border-amber-500 text-white'
                   : lockMixed ? 'bg-amber-900/40 border-amber-700 text-amber-300 hover:text-white'
                   : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white';
@@ -4566,13 +4610,13 @@ function _statusBadge(job, filesWithSkip, fileCount, filesFailed){
   filesFailed = filesFailed || 0;
   if(!job){
     if(filesFailed >= fileCount && fileCount > 0){
-      return `<span class="text-[10px] font-bold uppercase tracking-widest px-2 py-1 border bg-red-950 border-red-800 text-red-300" title="Every file in this item failed audio fingerprinting. Open the editor for details.">✗ Failed · ${filesFailed}/${fileCount}</span>`;
+      return `<span class="text-[10px] font-bold uppercase tracking-widest px-2 py-1 border bg-red-950 border-red-800 text-red-300" title="Every file in this item failed audio fingerprinting. Open the editor for details."><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg> Failed · ${filesFailed}/${fileCount}</span>`;
     }
     if(filesWithSkip >= fileCount && fileCount > 0){
       return `<span class="text-[10px] font-bold uppercase tracking-widest px-2 py-1 border bg-emerald-950 border-emerald-700 text-emerald-300">Complete · ${filesWithSkip}/${fileCount}</span>`;
     }
     if(filesFailed > 0){
-      return `<span class="text-[10px] font-bold uppercase tracking-widest px-2 py-1 border bg-amber-950 border-amber-800 text-amber-300" title="Some files in this item failed fingerprinting. Open the editor for per-file detail.">⚠ ${filesWithSkip} ok · ${filesFailed} failed</span>`;
+      return `<span class="text-[10px] font-bold uppercase tracking-widest px-2 py-1 border bg-amber-950 border-amber-800 text-amber-300" title="Some files in this item failed fingerprinting. Open the editor for per-file detail."><svg class="ic" aria-hidden="true"><use href="#i-warn"/></svg> ${filesWithSkip} ok · ${filesFailed} failed</span>`;
     }
     if(filesWithSkip > 0){
       return `<span class="text-[10px] font-bold uppercase tracking-widest px-2 py-1 border bg-gray-800 border-gray-700 text-gray-400">Partial · ${filesWithSkip}/${fileCount}</span>`;
@@ -4606,10 +4650,10 @@ function _statusBadge(job, filesWithSkip, fileCount, filesFailed){
       </div>`;
   }
   if(job.status === "complete"){
-    return `<span class="text-[10px] font-bold uppercase tracking-widest px-2 py-1 border bg-emerald-950 border-emerald-700 text-emerald-300" title="${escHtml(job.message||"")}">✓ Complete</span>`;
+    return `<span class="text-[10px] font-bold uppercase tracking-widest px-2 py-1 border bg-emerald-950 border-emerald-700 text-emerald-300" title="${escHtml(job.message||"")}"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg> Complete</span>`;
   }
   if(job.status === "failed"){
-    return `<span class="text-[10px] font-bold uppercase tracking-widest px-2 py-1 border bg-red-950 border-red-800 text-red-300" title="${escHtml(job.message||"")}">✗ Failed</span>`;
+    return `<span class="text-[10px] font-bold uppercase tracking-widest px-2 py-1 border bg-red-950 border-red-800 text-red-300" title="${escHtml(job.message||"")}"><svg class="ic" aria-hidden="true"><use href="#i-x"/></svg> Failed</span>`;
   }
   return `<span class="text-[10px] font-bold uppercase tracking-widest px-2 py-1 border bg-gray-800 border-gray-700 text-gray-400">${escHtml(job.status||"")}</span>`;
 }
@@ -5141,7 +5185,7 @@ function _renderFlaresolverr(d){
       </p>
       <a href="${escHtml(d.jackett_url)}" target="_blank" rel="noopener"
         class="inline-block text-xs text-indigo-400 hover:text-indigo-300 uppercase tracking-wide font-bold transition-colors">
-        Open Jackett ↗</a>
+        Open Jackett <svg class="ic" aria-hidden="true"><use href="#i-ext"/></svg></a>
     </div>` : `
     <p class="text-xs text-gray-500 leading-relaxed">
       Not installed. Most indexers don't need FlareSolverr — install it only if an indexer fails with a Cloudflare / "challenge" error.
@@ -5234,14 +5278,14 @@ async function loadContentList(){
       <div class="flex-shrink-0 flex gap-2">
         <button onclick="openMoveModal('${escHtml(it.id)}', ${JSON.stringify(it.series || it.title).replace(/"/g,'&quot;')})"
           class="text-xs font-bold uppercase tracking-wide px-3 py-2 border bg-gray-800 border-gray-700 text-gray-400 hover:text-white transition-colors">
-          📁 Move
+          <svg class="ic" aria-hidden="true"><use href="#i-folder"/></svg> Move
         </button>
         <button onclick="toggleLock('${escHtml(it.id)}',${!it.admin_only},this)"
           class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
                  ${it.admin_only
                    ? 'bg-red-950 border-red-800 text-red-400 hover:bg-red-900'
                    : 'bg-gray-800 border-gray-700 text-gray-400 hover:text-white'}">
-          ${it.admin_only ? '🔒 Admin Only' : 'Unlocked'}
+          ${it.admin_only ? '<svg class="ic" aria-hidden="true"><use href="#i-lock"/></svg> Admin Only' : 'Unlocked'}
         </button>
       </div>
     </div>`).join("");
@@ -5595,7 +5639,7 @@ function _renderOffItem(it){
         <button onclick="toggleOffItemExpand('${escHtml(it.item_id)}')"
           class="min-w-0 flex-1 text-left">
           <div class="text-sm font-bold text-gray-200 truncate flex items-center gap-2">
-            <span class="text-gray-600 font-mono text-xs flex-shrink-0">${expanded?"▾":"▸"}</span>
+            <span class="text-gray-600 font-mono text-xs flex-shrink-0">${expanded?ic("chev-down"):ic("chev-right")}</span>
             <span class="truncate">${escHtml(it.title)}</span>
           </div>
           <div class="text-xs text-gray-600 mt-1 pl-5 flex items-center gap-2 flex-wrap">
@@ -5924,7 +5968,7 @@ async function loadProfilePins(){
           <div class="min-w-0">
             <div class="text-sm font-bold text-gray-200">${escHtml(p.name)}</div>
             <div class="text-xs mt-0.5 ${p.has_pin?'text-indigo-400 font-bold':'text-gray-600'}">
-              ${p.has_pin ? '🔑 PIN set' : 'No PIN'}
+              ${p.has_pin ? '<svg class="ic" aria-hidden="true"><use href="#i-key"/></svg> PIN set' : 'No PIN'}
             </div>
           </div>
         </div>
@@ -5947,7 +5991,7 @@ async function loadProfilePins(){
                  ${p.elevated
                    ? 'bg-indigo-900 border-indigo-700 text-indigo-300 hover:bg-indigo-800'
                    : 'bg-gray-800 border-gray-700 text-gray-500 hover:text-white'}">
-          ${p.elevated ? '✓ Allowed' : 'Blocked'}
+          ${p.elevated ? '<svg class="ic" aria-hidden="true"><use href="#i-check"/></svg> Allowed' : 'Blocked'}
         </button>
       </div>
       <div class="flex items-center justify-between pl-12 gap-3">
@@ -6346,7 +6390,7 @@ async function loadBackgroundVideo(){
   document.getElementById("bgVolLabel").textContent = `${d.volume}%`;
 
   if(d.enabled){
-    enabledBtn.textContent = "✓ Enabled";
+    enabledBtn.innerHTML = ic("check")+" Enabled";
     enabledBtn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-indigo-900 border-indigo-700 text-indigo-300 hover:bg-indigo-800";
   } else {
     enabledBtn.textContent = "Disabled";

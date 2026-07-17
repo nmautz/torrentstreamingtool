@@ -100,6 +100,7 @@ Never let an `ios-app/` change ship without this callout — a stale `public/` l
 ## Style conventions
 
 - **Metro UI** throughout the frontend — flat tiles, no rounded corners, bold uppercase typography, square status dots, no `backdrop-blur`. See [docs/FRONTEND.md](docs/FRONTEND.md).
+- **No emoji/dingbat glyphs in the UI** — they render differently on every OS. Use the inline SVG icon sprite (`<use href="#i-NAME">` in HTML, `ic("NAME")` in JS templates). See [docs/FRONTEND.md § Iconography](docs/FRONTEND.md).
 - Backend uses `asyncio` everywhere — never `time.sleep` inside a request handler or background task. Use `await asyncio.sleep(...)`.
 - Library access goes through `get_library()` / `put_library()` (both hold `_lib_lock`) — never read/write `library.json` raw outside that lock.
 - VLC track IDs are **ES IDs** from the `"Stream N"` keys, not 1/2/3 counters. See [docs/GOTCHAS.md](docs/GOTCHAS.md).

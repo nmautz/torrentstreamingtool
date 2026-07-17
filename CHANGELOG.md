@@ -1,5 +1,10 @@
 # Changelog
 
+## [10.8.0] — 2026-07-15
+- **All UI emoji/dingbat glyphs replaced with a dedicated SVG icon set.** The dashboard and admin panel drew ~115 glyphs (`▶ ⏸ ⏳ ↩ ✓ ✗ ✕ ⚠ ⚡ ☰ ⚙ ⬆ ⬇ ⋯ ⊘ ▾ ▸ ↗ 🌙 🚫 🔒 🔓 🔑 📱 📁`) from the OS emoji/symbol font, so buttons and badges looked different on Windows, iOS, Android and the TV kiosk (iOS promotes many of them to rounded colour emoji). Both pages now carry an identical inline **SVG sprite** of 25 Metro-drawn symbols (flat fill, hard corners, `currentColor`, 24×24 grid), used via `<use href="#i-NAME">` in static HTML and the new `ic("NAME")` helper in JS templates. Plain-text sinks (`confirm()`, the sync debug log, code comments) were reworded glyph-free; the old U+FE0E variation-selector workaround is retired.
+- **Frontend:** `static/index.html`, `static/admin.html` (sprite + `.ic` CSS + `ic()` helper + every call site). **Docs:** new [docs/FRONTEND.md § Iconography](docs/FRONTEND.md) (symbol names, usage rules, enforcement grep), CLAUDE.md style bullet.
+- (Host-only — **no app rebuild**; `ios-app/www` was already glyph-free. Hard-refresh open dashboards / the TV kiosk.)
+
 ## [10.7.4] — 2026-07-15
 - **Fixed: during VLC playback the remote's 🏠 Home opened the default browser, and ← Back / ⏻ Power didn't end playback.** Two independent causes:
   1. **Injected keys were blanket-skipped by the keyboard hook.** Windows' HID input service translates consumer-page usages (AC Home / AC Back, sleep, media) into VK keystrokes *via `SendInput`* — so on many remotes 🏠/←/⏻(VK_SLEEP) arrive with `LLKHF_INJECTED` set, and the filter's early-return (added in 10.6.x so the focus cocktail's synthetic ALT couldn't re-wake the TV UI) made them invisible: Home fell through to Edge, Back/⏻ did nothing. The filter now claims/suppresses/dispatches action keys **regardless of the injected flag** and only ignores injected input for the generic wake-activity path (the ALT protection is preserved — it isn't an action key).
