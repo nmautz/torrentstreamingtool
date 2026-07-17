@@ -1,5 +1,10 @@
 # Changelog
 
+## [10.8.1] — 2026-07-16
+- **Fixed: multi-episode library cards showed raw `<svg …>` markup instead of the Resume/Play All button.** The 10.8.0 icon migration put SVG markup inside `contLabel`, but the card template still ran it through `escHtml()` (a leftover from when the label was plain text), so the tag was escaped into visible text. The label is now inserted unescaped — it's built only from static markup and a rounded number.
+- **Frontend:** `static/index.html` (library card render).
+- (Host-only — **no app rebuild**. Hard-refresh open dashboards.)
+
 ## [10.8.0] — 2026-07-15
 - **All UI emoji/dingbat glyphs replaced with a dedicated SVG icon set.** The dashboard and admin panel drew ~115 glyphs (`▶ ⏸ ⏳ ↩ ✓ ✗ ✕ ⚠ ⚡ ☰ ⚙ ⬆ ⬇ ⋯ ⊘ ▾ ▸ ↗ 🌙 🚫 🔒 🔓 🔑 📱 📁`) from the OS emoji/symbol font, so buttons and badges looked different on Windows, iOS, Android and the TV kiosk (iOS promotes many of them to rounded colour emoji). Both pages now carry an identical inline **SVG sprite** of 25 Metro-drawn symbols (flat fill, hard corners, `currentColor`, 24×24 grid), used via `<use href="#i-NAME">` in static HTML and the new `ic("NAME")` helper in JS templates. Plain-text sinks (`confirm()`, the sync debug log, code comments) were reworded glyph-free; the old U+FE0E variation-selector workaround is retired.
 - **Frontend:** `static/index.html`, `static/admin.html` (sprite + `.ic` CSS + `ic()` helper + every call site). **Docs:** new [docs/FRONTEND.md § Iconography](docs/FRONTEND.md) (symbol names, usage rules, enforcement grep), CLAUDE.md style bullet.

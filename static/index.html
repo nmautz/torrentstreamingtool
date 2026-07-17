@@ -5901,7 +5901,7 @@ function _libItemChrome(item){
       <button onclick="resumeLibraryItemWithChooser('${item.id}')"
         class="text-sm ${hasProgress?'bg-green-900/50 hover:bg-green-800/60 text-green-300 border border-green-800':'bg-indigo-700 hover:bg-indigo-600 text-white border-0'}
                flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
-        ${escHtml(contLabel)}
+        ${contLabel}
       </button>`;
     } else {
       if(hasProgress){
@@ -17204,6 +17204,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.8.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.8.1</div>
 </body>
 </html>
