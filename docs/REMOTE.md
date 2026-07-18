@@ -152,7 +152,15 @@ startup when `REMOTE_CONTROL=1` on Windows):
    effect (accepted): a short press of the physical chassis power button
    also does nothing now — shut down from the Start menu or the admin panel
    (a 4 s hold still hard-cuts at firmware level). `powercfg` needs
-   elevation; on failure a warning logs the manual commands.
+   elevation — `_neuter_power_buttons` delegates to the shared
+   `run.apply_windows_power_settings()` (idempotent, registry-verified),
+   which tries powercfg directly and falls back to a one-shot elevated
+   Scheduled Task using `WINDOWS_ADMIN_USER` / `WINDOWS_ADMIN_PASSWORD`
+   from `.env` (settable in the admin panel → Updates → feature keys). The
+   elevated `run.py --install` path and every `run.py` launch apply the same
+   tweak, so on most boxes it's already in place before the server starts.
+   See [RUNTIME.md § Windows power / sleep buttons](RUNTIME.md). Only if
+   every path fails does a warning log the manual commands story.
 2. **Observe the press via Raw Input** — `PowerButtonListener`
    (`remote_input.py`) registers a hidden window for Raw Input from the
    System Control usage page (`RIDEV_INPUTSINK`, so delivery doesn't depend

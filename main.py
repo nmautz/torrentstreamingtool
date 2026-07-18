@@ -234,6 +234,14 @@ class Settings(BaseSettings):
     admin_password: str = ""   # if empty, admin panel is disabled
     jackett_password: str = ""  # Jackett UI login password for indexer management
 
+    # Windows host-admin credentials for elevated OS tweaks (currently:
+    # setting the physical power/sleep buttons to "Do nothing" via powercfg,
+    # which needs an admin token the un-elevated service task doesn't have).
+    # Optional — the elevated `run.py --install` path applies the tweak
+    # directly, so these only matter when that never ran. Windows only.
+    windows_admin_user: str = ""
+    windows_admin_password: str = ""
+
     # iOS client app (M5) device pairing. When True, the device-facing sync +
     # bundle-manifest endpoints require a valid pairing token (issued by
     # POST /api/pair against admin_password) OR a valid admin session token.
@@ -330,17 +338,64 @@ ENV_KEY_FEATURES: list[dict] = [
     },
 ]
 
+# Windows-only: host-admin credentials for elevated OS tweaks (power/sleep
+# buttons → "Do nothing"). Appended conditionally so macOS/Linux admins are
+# never nagged about keys their platform can't use.
+if platform.system() == "Windows":
+    ENV_KEY_FEATURES += [
+        {
+            "key": "WINDOWS_ADMIN_USER",
+            "attr": "windows_admin_user",
+            "label": "Windows admin account",
+            "description": "Administrator username for elevated host tweaks (disables the "
+                           "physical power/sleep buttons so they can't suspend the host "
+                           "mid-stream). Not needed if run.py --install already ran elevated.",
+            "required": False,
+            "secret": False,
+        },
+        {
+            "key": "WINDOWS_ADMIN_PASSWORD",
+            "attr": "windows_admin_password",
+            "label": "Windows admin password",
+            "description": "Password for the Windows admin account above. Stored only in "
+                           "this host's .env.",
+            "required": False,
+            "secret": True,
+        },
+    ]
+
+
+# Cached result of run.windows_power_buttons_disabled(). Read at most once per
+# process (it's registry I/O and _missing_env_keys rides in every state
+# snapshot); refreshed by _neuter_power_buttons() after each apply attempt.
+_power_buttons_ok: bool | None = None
+
+
+def _power_buttons_applied() -> bool:
+    global _power_buttons_ok
+    if _power_buttons_ok is None:
+        try:
+            from run import windows_power_buttons_disabled
+            _power_buttons_ok = bool(windows_power_buttons_disabled())
+        except Exception:
+            _power_buttons_ok = False
+    return _power_buttons_ok
+
 
 def _missing_env_keys() -> list[dict]:
     """Return the registry entries whose Settings attribute is empty.
 
     `tmdb_api_key` may be set live via the admin overrides — when that's the
     case, treat the key as present so the UI doesn't nag for one that's
-    already configured a different way.
+    already configured a different way. The Windows admin credentials are
+    only surfaced while the power-button tweak hasn't been applied — once it
+    has (e.g. via the elevated --install), the credentials serve no purpose.
     """
     out: list[dict] = []
     for feat in ENV_KEY_FEATURES:
         val = getattr(settings, feat["attr"], "") or ""
+        if feat["attr"].startswith("windows_admin_") and _power_buttons_applied():
+            continue
         if not val and feat["attr"] == "tmdb_api_key":
             # Honour the admin override (set via /api/admin/settings) — the
             # library file is the runtime source of truth for that key.
@@ -11998,38 +12053,32 @@ async def _neuter_power_buttons() -> None:
     PHYSICAL chassis power button also does nothing now — shut down from the
     Start menu / admin panel; a 4 s hold still hard-cuts at firmware level.
 
-    powercfg needs an elevated process — on failure, log the manual commands.
+    Delegates to run.apply_windows_power_settings: idempotent (registry-
+    verified skip), tries powercfg directly (succeeds when this process is
+    elevated), then falls back to a one-shot elevated Scheduled Task using
+    WINDOWS_ADMIN_USER / WINDOWS_ADMIN_PASSWORD from .env. See
+    docs/RUNTIME.md § Windows power / sleep buttons.
     """
-    cmds = [
-        ("powercfg", "/setacvalueindex", "SCHEME_CURRENT", "SUB_BUTTONS", "SBUTTONACTION", "0"),
-        ("powercfg", "/setdcvalueindex", "SCHEME_CURRENT", "SUB_BUTTONS", "SBUTTONACTION", "0"),
-        ("powercfg", "/setacvalueindex", "SCHEME_CURRENT", "SUB_BUTTONS", "PBUTTONACTION", "0"),
-        ("powercfg", "/setdcvalueindex", "SCHEME_CURRENT", "SUB_BUTTONS", "PBUTTONACTION", "0"),
-        ("powercfg", "/setactive", "SCHEME_CURRENT"),
-    ]
-    for cmd in cmds:
-        try:
-            proc = await asyncio.create_subprocess_exec(
-                *cmd,
-                stdout=asyncio.subprocess.DEVNULL,
-                stderr=asyncio.subprocess.DEVNULL,
-            )
-            rc = await proc.wait()
-        except Exception:
-            rc = -1
-        if rc != 0:
-            log.warning(
-                "could not set the sleep/power-button actions to 'do nothing' "
-                "(powercfg rc=%s on %s — not elevated?). The remote's ⏻ press "
-                "may still sleep the box; run from an ADMIN prompt:  "
-                "powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS SBUTTONACTION 0  &&  "
-                "powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS SBUTTONACTION 0  &&  "
-                "powercfg /setacvalueindex SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION 0  &&  "
-                "powercfg /setdcvalueindex SCHEME_CURRENT SUB_BUTTONS PBUTTONACTION 0  &&  "
-                "powercfg /setactive SCHEME_CURRENT", rc, " ".join(cmd[1:]))
-            return
-    log.info("sleep + power button actions set to 'do nothing' — remote ⏻ "
-             "presses are intercepted via Raw Input instead")
+    global _power_buttons_ok
+    try:
+        from run import apply_windows_power_settings
+        applied = await asyncio.to_thread(
+            apply_windows_power_settings,
+            settings.windows_admin_user, settings.windows_admin_password)
+    except Exception:
+        log.exception("power/sleep-button neuter failed")
+        return
+    _power_buttons_ok = bool(applied)
+    if applied:
+        log.info("sleep + power button actions set to 'do nothing' — remote ⏻ "
+                 "presses are intercepted via Raw Input instead")
+    else:
+        log.warning(
+            "could not set the sleep/power-button actions to 'do nothing' — "
+            "the remote's ⏻ press may still sleep the box. Run once from an "
+            "ADMIN prompt (or `python run.py --install`), or set "
+            "WINDOWS_ADMIN_USER / WINDOWS_ADMIN_PASSWORD in .env (admin "
+            "panel → Updates → feature keys) so StreamLink can apply it itself.")
 
 
 def _remote_should_handle(action: str = "") -> bool:
@@ -16163,6 +16212,13 @@ async def admin_set_env_keys(request: Request, body: EnvKeysReq) -> JSONResponse
         sanitised[k] = (v or "").replace("\r", "").replace("\n", "").strip()
     written = _write_env_keys(sanitised)
     _reload_settings()
+    # Saving the Windows admin credentials → re-run the power/sleep-button
+    # neuter right away (it can now use the credential fallback) so the admin
+    # doesn't have to wait for the next service start.
+    if (platform.system() == "Windows"
+            and any(sanitised.get(k) for k in ("WINDOWS_ADMIN_USER", "WINDOWS_ADMIN_PASSWORD"))
+            and settings.windows_admin_user and settings.windows_admin_password):
+        asyncio.create_task(_neuter_power_buttons())
     # Broadcast immediately so the banner clears on every connected client.
     try:
         await broadcast("state", state_snapshot())

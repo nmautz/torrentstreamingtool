@@ -31,6 +31,9 @@ device_tokens.json
 # Runtime scratch: countdown text VLC reads for the on-TV skip popup
 .vlc_marquee.txt
 
+# Runtime scratch: one-shot elevated powercfg script (Windows power buttons)
+_powercfg_apply.bat
+
 # Dedicated Chrome profile for the YouTube-on-TV kiosk window
 .tv_chrome_profile/
 

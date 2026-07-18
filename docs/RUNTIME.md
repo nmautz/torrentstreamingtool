@@ -108,6 +108,17 @@ Uses `zeroconf`. `start_mdns(lan_ip, http_port, https_port)` registers `_http._t
 
 Adds inbound rules for the HTTP port, HTTPS port (if certs), and UDP 5353 (mDNS). Idempotent — checks `netsh advfirewall firewall show rule name=…` before adding. Requires Administrator; warns if not elevated.
 
+## Windows power / sleep buttons ([run.py](../run.py) `apply_windows_power_settings`)
+
+On Windows, every launch (plus the service wrapper and the elevated `--install`) sets the physical **power and sleep buttons to "Do nothing"** (AC + DC, active scheme) so a stray press on the host can't suspend it mid-stream — `powercfg /set{ac,dc}valueindex SCHEME_CURRENT SUB_BUTTONS {P,S}BUTTONACTION 0` + `powercfg /setactive SCHEME_CURRENT`.
+
+- **Idempotent.** `windows_power_buttons_disabled()` verifies via the **registry** (`HKLM\SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes\<active>\<SUB_BUTTONS guid>\<setting guid>`, `ACSettingIndex`/`DCSettingIndex`), *not* by parsing `powercfg /query` — that text is localized on non-English Windows. Already applied → logged and skipped.
+- **Elevation ladder.** `powercfg /set*valueindex` needs an admin token. The function tries: (1) **direct execution** — succeeds when the process is elevated (the `--install` path, an Admin shell); (2) a **one-shot Scheduled Task** registered with `WINDOWS_ADMIN_USER` / `WINDOWS_ADMIN_PASSWORD` from `.env` (`schtasks /Create /RU <user> /RP <pass> /RL HIGHEST` → `/Run` → registry-verify → `/Delete`; a batch logon at HIGHEST run level gets the full admin token with no UAC prompt). The task runs a generated `_powercfg_apply.bat` at the repo root (gitignored, removed afterwards).
+- **Not elevated and no credentials** → a warning with the fix: run once from an Admin shell (or `run.py --install`), or set the two env keys — they're editable in the admin panel (Updates → feature keys, surfaced on Windows only).
+- `main.py`'s `_neuter_power_buttons` (lifespan, `REMOTE_CONTROL=1` on Windows — see [REMOTE.md § ⏻ Power interception](REMOTE.md)) delegates to the same helper, re-runs it when the admin saves those keys via `POST /api/admin/env-keys`, and stops nagging for them in `missing_env_keys` once the tweak is verified applied (`_power_buttons_applied` cache).
+
+No-op on macOS/Linux (returns True).
+
 ## Privileged ports
 
 Port 80 / 443 require root on macOS/Linux. If `os.geteuid() != 0`, warns about needing `sudo python3 run.py`.

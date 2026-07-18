@@ -835,6 +835,135 @@ def setup_windows_firewall(port: int) -> None:
             warn(f"  netsh advfirewall firewall add rule name=\"{name}\" protocol={proto} dir=in localport={lport} action=allow")
 
 
+# ── Windows power / sleep buttons ─────────────────────────────────────────
+# A couch-press of the physical power (or sleep) button suspends the host mid-
+# stream, so StreamLink sets both to "Do nothing" (index 0, AC + DC) on the
+# active power scheme. powercfg /set*valueindex needs an elevated token; when
+# we don't have one, a one-shot Scheduled Task registered with the admin
+# credentials from .env (WINDOWS_ADMIN_USER / WINDOWS_ADMIN_PASSWORD) runs the
+# same commands elevated — batch logons with /RL HIGHEST get the full admin
+# token, no UAC prompt. Verification reads the registry (locale-independent;
+# powercfg's text output is localized and unparseable on non-English Windows).
+
+_WIN_SUB_BUTTONS   = "4f971e89-eebd-4455-a8de-9e59040e7347"  # SUB_BUTTONS
+_WIN_PBUTTONACTION = "7648efa3-dd9c-4e3e-b566-50f929386280"  # power button
+_WIN_SBUTTONACTION = "96996bc0-ad50-47ec-923b-6f41874dd9eb"  # sleep button
+_WIN_POWERCFG_TASK = "StreamLinkPowerCfg"
+_WIN_POWERCFG_BAT  = HERE / "_powercfg_apply.bat"
+
+_POWERCFG_CMDS = [
+    ["powercfg", "/setacvalueindex", "SCHEME_CURRENT", "SUB_BUTTONS", "PBUTTONACTION", "0"],
+    ["powercfg", "/setdcvalueindex", "SCHEME_CURRENT", "SUB_BUTTONS", "PBUTTONACTION", "0"],
+    ["powercfg", "/setacvalueindex", "SCHEME_CURRENT", "SUB_BUTTONS", "SBUTTONACTION", "0"],
+    ["powercfg", "/setdcvalueindex", "SCHEME_CURRENT", "SUB_BUTTONS", "SBUTTONACTION", "0"],
+    ["powercfg", "/setactive", "SCHEME_CURRENT"],
+]
+
+
+def windows_power_buttons_disabled() -> bool | None:
+    """True when power+sleep buttons are already "Do nothing" (AC and DC),
+    False when any index is set to sleep/shutdown or has no override recorded
+    (i.e. still on the Windows default), None when it can't be determined."""
+    if SYSTEM != "Windows":
+        return None
+    try:
+        import winreg
+        base = r"SYSTEM\CurrentControlSet\Control\Power\User\PowerSchemes"
+        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, base) as k:
+            scheme, _ = winreg.QueryValueEx(k, "ActivePowerScheme")
+        for setting in (_WIN_PBUTTONACTION, _WIN_SBUTTONACTION):
+            try:
+                path = rf"{base}\{scheme}\{_WIN_SUB_BUTTONS}\{setting}"
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, path) as k:
+                    for name in ("ACSettingIndex", "DCSettingIndex"):
+                        val, _ = winreg.QueryValueEx(k, name)
+                        if int(val) != 0:
+                            return False
+            except FileNotFoundError:
+                return False
+        return True
+    except Exception:
+        return None
+
+
+def _powercfg_run_direct() -> bool:
+    """Run the powercfg commands in-process. Succeeds only when elevated."""
+    for cmd in _POWERCFG_CMDS:
+        try:
+            res = subprocess.run(cmd, capture_output=True, text=True, timeout=15)
+        except Exception:
+            return False
+        if res.returncode != 0:
+            return False
+    return True
+
+
+def _powercfg_run_as_admin(admin_user: str, admin_password: str) -> bool:
+    """Run the powercfg commands elevated via a one-shot Scheduled Task
+    registered with the given admin credentials (batch logon + /RL HIGHEST
+    bypasses UAC token filtering). The task and its .bat are always removed."""
+    _WIN_POWERCFG_BAT.write_text(
+        "@echo off\r\n" + "\r\n".join(" ".join(c) for c in _POWERCFG_CMDS) + "\r\n",
+        encoding="ascii",
+    )
+    try:
+        create = subprocess.run(
+            ["schtasks", "/Create", "/F", "/TN", _WIN_POWERCFG_TASK,
+             "/TR", f'"{_WIN_POWERCFG_BAT}"', "/SC", "ONCE", "/ST", "00:00",
+             "/RU", admin_user, "/RP", admin_password, "/RL", "HIGHEST"],
+            capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30,
+        )
+        if create.returncode != 0:
+            warn(f"Could not register elevated powercfg task: {create.stderr.strip()}")
+            return False
+        subprocess.run(["schtasks", "/Run", "/TN", _WIN_POWERCFG_TASK],
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL, timeout=30)
+        # The task runs asynchronously — poll the registry for the result.
+        for _ in range(15):
+            if windows_power_buttons_disabled():
+                return True
+            time.sleep(1)
+        return bool(windows_power_buttons_disabled())
+    except Exception as exc:
+        warn(f"Elevated powercfg task failed: {exc}")
+        return False
+    finally:
+        subprocess.run(["schtasks", "/Delete", "/F", "/TN", _WIN_POWERCFG_TASK],
+                       capture_output=True, text=True, stdin=subprocess.DEVNULL)
+        try:
+            _WIN_POWERCFG_BAT.unlink()
+        except OSError:
+            pass
+
+
+def apply_windows_power_settings(admin_user: str = "", admin_password: str = "") -> bool:
+    """Idempotently set the Windows power + sleep buttons to "Do nothing".
+
+    Order of attack: skip if already applied → run powercfg directly (works
+    when this process is elevated, e.g. the --install path) → fall back to the
+    credential-backed elevated task. Returns True when the buttons are
+    verified disabled (or this isn't Windows)."""
+    if SYSTEM != "Windows":
+        return True
+    if windows_power_buttons_disabled():
+        ok("Power/sleep buttons already set to Do Nothing")
+        return True
+    if _powercfg_run_direct() and windows_power_buttons_disabled() is not False:
+        ok("Power/sleep buttons set to Do Nothing")
+        return True
+    if admin_user and admin_password:
+        if _powercfg_run_as_admin(admin_user, admin_password):
+            ok("Power/sleep buttons set to Do Nothing (via elevated task)")
+            return True
+        warn("Could not disable power/sleep buttons — check WINDOWS_ADMIN_USER / "
+             "WINDOWS_ADMIN_PASSWORD in .env (admin panel → Updates → feature keys)")
+        return False
+    warn("Disabling the power/sleep buttons needs Administrator rights.")
+    warn("  Either run once from an Administrator shell, or set WINDOWS_ADMIN_USER")
+    warn("  and WINDOWS_ADMIN_PASSWORD in .env (admin panel → Updates → feature keys).")
+    return False
+
+
 # ── mDNS ──────────────────────────────────────────────────────────────────
 def start_mdns(lan_ip: str, http_port: int, https_port: int = 0):
     """Register remote.local via mDNS (HTTP, and optionally HTTPS) for LAN access."""
@@ -1081,6 +1210,13 @@ def main():
         setup_windows_firewall(PORT)
         if has_cert:
             setup_windows_firewall(ADMIN_PORT)
+        print()
+
+        # Disable the physical power/sleep buttons so a couch-press can't
+        # suspend the host mid-stream. Idempotent; uses the .env admin
+        # credentials when this process isn't elevated.
+        print(f"{BOLD}  Power buttons{RESET}")
+        apply_windows_power_settings(e("WINDOWS_ADMIN_USER"), e("WINDOWS_ADMIN_PASSWORD"))
         print()
 
     # Register mDNS hostname (remote.local) for HTTP + HTTPS. Resilient: waits

@@ -502,6 +502,8 @@ Saving writes through `POST /api/admin/env-keys`, which merges the changes into 
 
 The same registry feeds `state_snapshot()` → `missing_env_keys`, which drives the sticky banner in [static/index.html](../static/index.html) (`renderServerAttention`). Required-key gaps banner everyone; optional gaps only show up on this admin card.
 
+On **Windows** the registry also carries `WINDOWS_ADMIN_USER` / `WINDOWS_ADMIN_PASSWORD` (optional) — host-admin credentials for elevated OS tweaks, currently disabling the physical power/sleep buttons (`powercfg` needs an admin token the un-elevated service task doesn't have). Saving them triggers an immediate apply attempt (`_neuter_power_buttons`), and once the tweak is registry-verified applied the two keys drop out of `missing_env_keys` — they're only nagged for while unapplied. Never surfaced on macOS/Linux. See [RUNTIME.md § Windows power / sleep buttons](RUNTIME.md).
+
 ## Server endpoints (admin)
 
 All require admin auth (`_require_admin`). See [API.md](API.md#admin) for the full table.

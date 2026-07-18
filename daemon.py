@@ -130,6 +130,23 @@ if _SYSTEM == "Windows":
     except Exception as exc:
         log.error("Firewall setup failed: %s", exc)
 
+    # Power/sleep buttons → "Do nothing" so a couch-press can't suspend the
+    # host mid-stream. Idempotent (registry-verified skip). The install path
+    # normally already applied this while elevated; the credential fallback
+    # (WINDOWS_ADMIN_USER / WINDOWS_ADMIN_PASSWORD in .env) covers a machine
+    # where it hasn't stuck yet — this task runs un-elevated.
+    try:
+        from run import apply_windows_power_settings, e as _envval
+        if apply_windows_power_settings(_envval("WINDOWS_ADMIN_USER"),
+                                        _envval("WINDOWS_ADMIN_PASSWORD")):
+            log.info("Power/sleep buttons disabled (or already set)")
+        else:
+            log.warning("Could not disable power/sleep buttons — set "
+                        "WINDOWS_ADMIN_USER / WINDOWS_ADMIN_PASSWORD in .env "
+                        "(admin panel, Updates tab) or re-run run.py --install")
+    except Exception as exc:
+        log.error("Power-button setup failed: %s", exc)
+
 # mDNS — registers remote.local so phones can find the dashboard. RESILIENT:
 # at boot the service starts before Wi-Fi has associated, so a one-shot
 # registration would see no LAN IP and silently skip it — remote.local would
@@ -644,6 +661,17 @@ def _windows_install() -> bool:
                 _fw(443)
         except Exception as exc:
             warn(f"Could not add firewall rules: {exc}")
+
+        # Disable the physical power/sleep buttons now, while we hold an admin
+        # token — a couch-press otherwise suspends the host mid-stream. The
+        # Standard-User task can't run powercfg /set*valueindex itself (that's
+        # why WINDOWS_ADMIN_USER/_PASSWORD exist as a runtime fallback), so
+        # applying it here means most installs never need those credentials.
+        try:
+            from run import apply_windows_power_settings as _pwr
+            _pwr()
+        except Exception as exc:
+            warn(f"Could not disable power/sleep buttons: {exc}")
 
         # schtasks /Create — fires at the chosen user's logon.
         #
