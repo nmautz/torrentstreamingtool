@@ -1956,11 +1956,32 @@ def _tmdb_akas(alt_results: list, primary: str, original: str) -> list[str]:
     return (prefer + rest)[:6]
 
 
+def _tmdb_pick_trailer(videos: Optional[dict]) -> str:
+    """Best YouTube video key from a TMDb `videos` payload (append_to_response).
+    Official Trailers beat unofficial ones beat Teasers; newest wins within a
+    tier. "" when nothing usable — the UI hides its Trailer button then."""
+    best_key, best_rank = "", ("9", "")
+    for v in (videos or {}).get("results") or []:
+        if (v.get("site") or "").lower() != "youtube" or not v.get("key"):
+            continue
+        vtype = (v.get("type") or "").lower()
+        if vtype == "trailer":
+            tier = "0" if v.get("official") else "1"
+        elif vtype == "teaser":
+            tier = "2" if v.get("official") else "3"
+        else:
+            continue
+        rank = (tier, v.get("published_at") or "")
+        if rank[0] < best_rank[0] or (rank[0] == best_rank[0] and rank[1] > best_rank[1]):
+            best_key, best_rank = str(v["key"]), rank
+    return best_key
+
+
 async def _tmdb_fetch_tv(show_id: int, seasons: list[int]) -> dict:
     """Fetch show details + each requested season's episodes. Returns the
     cache-shaped dict (see _build_metadata_cache)."""
     details = await _tmdb_get(
-        f"/tv/{show_id}", {"append_to_response": "alternative_titles"}) or {}
+        f"/tv/{show_id}", {"append_to_response": "alternative_titles,videos"}) or {}
     akas = _tmdb_akas((details.get("alternative_titles") or {}).get("results", []),
                       details.get("name") or "", details.get("original_name") or "")
     cache_seasons: dict[str, dict] = {}
@@ -1969,7 +1990,8 @@ async def _tmdb_fetch_tv(show_id: int, seasons: list[int]) -> dict:
     if not seasons:
         seasons = [1]
     for sn in seasons:
-        s = await _tmdb_get(f"/tv/{show_id}/season/{sn}", {}) or {}
+        s = await _tmdb_get(f"/tv/{show_id}/season/{sn}",
+                            {"append_to_response": "videos"}) or {}
         eps = []
         for ep in s.get("episodes", []) or []:
             eps.append({
@@ -1986,6 +2008,7 @@ async def _tmdb_fetch_tv(show_id: int, seasons: list[int]) -> dict:
                 "name":     s.get("name", f"Season {sn}"),
                 "overview": s.get("overview", "") or "",
                 "poster_path": s.get("poster_path") or "",
+                "trailer":  _tmdb_pick_trailer(s.get("videos")),
                 "episodes": eps,
             }
     return {
@@ -2001,6 +2024,7 @@ async def _tmdb_fetch_tv(show_id: int, seasons: list[int]) -> dict:
         "first_air_date": details.get("first_air_date") or "",
         "vote_average":  details.get("vote_average") or 0,
         "genres":        [g.get("name", "") for g in details.get("genres", []) or []],
+        "trailer":       _tmdb_pick_trailer(details.get("videos")),
         "seasons":       cache_seasons,
         "fetched_at":    _now_iso(),
     }
@@ -2008,7 +2032,7 @@ async def _tmdb_fetch_tv(show_id: int, seasons: list[int]) -> dict:
 
 async def _tmdb_fetch_movie(movie_id: int) -> dict:
     details = await _tmdb_get(
-        f"/movie/{movie_id}", {"append_to_response": "alternative_titles"}) or {}
+        f"/movie/{movie_id}", {"append_to_response": "alternative_titles,videos"}) or {}
     akas = _tmdb_akas((details.get("alternative_titles") or {}).get("titles", []),
                       details.get("title") or "", details.get("original_title") or "")
     return {
@@ -2025,6 +2049,7 @@ async def _tmdb_fetch_movie(movie_id: int) -> dict:
         "vote_average":  details.get("vote_average") or 0,
         "runtime":       details.get("runtime") or 0,
         "genres":        [g.get("name", "") for g in details.get("genres", []) or []],
+        "trailer":       _tmdb_pick_trailer(details.get("videos")),
         "seasons":       {},
         "fetched_at":    _now_iso(),
     }

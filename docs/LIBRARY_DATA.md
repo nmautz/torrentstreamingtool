@@ -444,11 +444,13 @@ The profile-level **`shuffle`** / **`shuffle_scope`** fields are the *persisted*
   "release_date":  "1999-09-30",          // movie only
   "vote_average":  8.7,
   "genres":        ["Drama", "Mystery"],
+  "trailer":       "dQw4w9WgXcQ",          // YouTube key (movie/show trailer; "" = none) — _tmdb_pick_trailer
   "seasons": {                             // tv only
     "1": {
       "name":     "Season 1",
       "overview": "...",
       "poster_path": "/season1.jpg",
+      "trailer":  "aBcDeFgHiJk",           // YouTube key for this season's trailer ("" = none)
       "episodes": [
         {"season": 1, "episode": 1, "name": "Herr Dr. Tenma",
          "overview": "...", "still_path": "/...jpg",

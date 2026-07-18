@@ -1718,6 +1718,11 @@
           <span id="ssLoading" class="hidden items-center gap-1 text-[10px] sm:text-xs text-indigo-300 uppercase tracking-widest">
             <svg class="w-3 h-3 animate-spin" fill="none" viewBox="0 0 24 24"><circle class="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" stroke-width="4"/><path class="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8v8H4z"/></svg>Loading details…
           </span>
+          <button id="ssTrailerBtn" onclick="ssPlayTrailer()"
+            class="hidden items-center gap-1 px-2 py-1 bg-white/10 hover:bg-white/20 text-white text-[10px] sm:text-xs font-bold uppercase tracking-widest transition-colors">
+            <svg class="w-3 h-3" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+            <span id="ssTrailerLabel">Trailer</span>
+          </button>
         </div>
         <p id="ssOverview" class="text-xs sm:text-sm text-gray-300 mt-2 line-clamp-3 sm:line-clamp-4"></p>
       </div>
@@ -1871,6 +1876,40 @@
         <div class="text-sm font-bold uppercase tracking-wide">Normal order</div>
         <div class="text-[11px] text-gray-400 mt-0.5">Resume in season / episode order</div>
       </button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Trailer Modal ───────────────────────────────────────────────────────── -->
+<!-- YouTube embed for a movie / season trailer (key from TMDb metadata).
+     z-[60]: must sit above the z-50 search show page. Backdrop click closes;
+     "Watch on TV" routes the same key through the YouTube-on-TV kiosk. -->
+<div id="trailerModal"
+  class="hidden fixed inset-0 z-[60] bg-black/80 flex items-center justify-center p-3 sm:p-6"
+  onclick="closeTrailerModal()">
+  <div class="bg-gray-900 w-full max-w-3xl fade-in border-t-[3px] border-indigo-600"
+    onclick="event.stopPropagation()">
+    <div class="px-4 py-3 flex items-center justify-between gap-3 border-b border-gray-800">
+      <h2 id="trailerTitle" class="text-sm font-black uppercase tracking-wide truncate min-w-0">Trailer</h2>
+      <div class="flex items-center gap-2 flex-shrink-0">
+        <button onclick="trailerToTv(this)"
+          class="flex items-center gap-1.5 px-2.5 py-1.5 bg-indigo-700 hover:bg-indigo-600 text-white text-[11px] font-bold uppercase tracking-wide transition-colors">
+          <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v8a2 2 0 002 2z"/>
+          </svg>Watch on TV
+        </button>
+        <button onclick="closeTrailerModal()"
+          class="text-gray-500 hover:text-white transition-colors p-1">
+          <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+          </svg>
+        </button>
+      </div>
+    </div>
+    <div class="relative w-full bg-black" style="padding-top:56.25%">
+      <iframe id="trailerFrame" class="absolute inset-0 w-full h-full" src="" title="Trailer"
+        allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe>
     </div>
   </div>
 </div>
@@ -9923,6 +9962,68 @@ function _ssRenderHero(){
   backdrop.style.backgroundImage=backdropSrc?`url("${backdropSrc}")`:"";
   if(posterSrc){ poster.src=posterSrc; poster.classList.remove("hidden"); posterFb.classList.add("hidden"); }
   else { poster.classList.add("hidden"); poster.removeAttribute("src"); posterFb.classList.remove("hidden"); }
+  _ssUpdateTrailerBtn();
+}
+
+// ── Trailers (TMDb videos → YouTube embed) ──────────────────────────────────
+// The metadata payload carries `trailer` (movie / show level) and a per-season
+// `seasons[n].trailer` (both YouTube keys, "" when TMDb has none). For TV the
+// hero button follows the selected season tab — season trailer when TMDb has
+// one, else the show trailer — so the label/keys stay in sync via
+// _ssUpdateTrailerBtn from both the hero render and every body re-render.
+function _ssTrailerFor(){
+  const m=_ssMeta; if(!m) return null;
+  const title=m.title||(_ssGroup&&_ssGroup.title)||"";
+  if(m.tmdb_kind==="tv"){
+    const s=m.seasons&&m.seasons[String(_ssSeason)];
+    if(s&&s.trailer) return {key:s.trailer, label:`S${_ssSeason} Trailer`,
+                             title:`${title} — ${s.name||("Season "+_ssSeason)}`};
+    if(m.trailer) return {key:m.trailer, label:"Trailer", title};
+    return null;
+  }
+  return m.trailer?{key:m.trailer, label:"Trailer", title}:null;
+}
+function _ssUpdateTrailerBtn(){
+  const btn=document.getElementById("ssTrailerBtn"); if(!btn) return;
+  const t=document.getElementById("searchShowPage").classList.contains("hidden")?null:_ssTrailerFor();
+  btn.classList.toggle("hidden", !t);
+  btn.classList.toggle("inline-flex", !!t);
+  if(t) document.getElementById("ssTrailerLabel").textContent=t.label;
+}
+function ssPlayTrailer(){
+  const t=_ssTrailerFor(); if(!t) return;
+  openTrailerModal(t.key, t.title);
+}
+let _trailerKey="";
+function openTrailerModal(key, title){
+  _trailerKey=key;
+  document.getElementById("trailerTitle").textContent=title?`${title} — Trailer`:"Trailer";
+  document.getElementById("trailerFrame").src=
+    `https://www.youtube-nocookie.com/embed/${encodeURIComponent(key)}?autoplay=1&rel=0`;
+  document.getElementById("trailerModal").classList.remove("hidden");
+}
+function closeTrailerModal(){
+  document.getElementById("trailerModal").classList.add("hidden");
+  // Dropping the src is what stops the audio — hiding the iframe doesn't.
+  document.getElementById("trailerFrame").src="";
+  _trailerKey="";
+}
+// Hand the same video off to the YouTube-on-TV kiosk (POST /api/youtube takes
+// a bare video id) and close the embed so the two aren't playing over each other.
+async function trailerToTv(btn){
+  const key=_trailerKey; if(!key) return;
+  await withInflight("yt_play", btn, async ()=>{
+    const r=await fetch("/api/youtube",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({url:key}),
+    }).catch(()=>null);
+    if(r&&r.ok){ closeTrailerModal(); showAlert("Playing trailer on TV…","success"); }
+    else {
+      const e=r?await r.json().catch(()=>({})):{};
+      showAlert(e.detail||"Could not play the trailer on the TV.","error");
+    }
+  });
 }
 
 function _ssRender(){
@@ -9965,6 +10066,7 @@ function ssSwitchSeason(s){ _ssSeason=s; _ssRenderBody(); }
 
 function _ssRenderBody(){
   _ssRenderAudioChips();
+  _ssUpdateTrailerBtn();   // the hero trailer follows the selected season tab
   if(_ssSection==="packs"){ _ssRenderPacks(); return; }
   _ssRenderEpisodes();
 }
@@ -17443,6 +17545,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.10.4</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.11.0</div>
 </body>
 </html>
