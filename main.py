@@ -1013,9 +1013,10 @@ def state_snapshot() -> dict:
     except (ValueError, AttributeError):
         cur_idx = -1
     # Window control pause: compute the live remaining seconds for the UI.
-    # window_mgmt_paused() auto-expires a finished timed pause as a side effect.
-    wm_until = state.window_mgmt_paused_until
+    # window_mgmt_paused() auto-expires a finished timed pause — and can slide
+    # the deadline of one still in use — so read the deadline AFTER calling it.
     wm_paused = window_mgmt_paused()
+    wm_until = state.window_mgmt_paused_until
     if not wm_paused:
         wm_remaining = 0                       # 0 ⇒ active (normal behaviour)
     elif wm_until == WINDOW_MGMT_PAUSE_INDEFINITE:
@@ -2210,6 +2211,12 @@ def _stop_vlc_flash_windows() -> None:
 
 WINDOW_MGMT_PAUSE_INDEFINITE = float("inf")
 
+# A timed pause never hard-expires under an actively-used desktop: while HID
+# input stays this recent, the deadline slides to last-input + grace, so the
+# background video / TV UI can't pop fullscreen over the user's work the moment
+# the timer runs out. The pause really ends this many secs after the last input.
+WINDOW_MGMT_EXPIRY_GRACE_SECS = 120
+
 
 def window_mgmt_paused() -> bool:
     """True while the user has paused window control via POST /api/window-control.
@@ -2218,11 +2225,21 @@ def window_mgmt_paused() -> bool:
     / fullscreen assertion stand down so the user can use the desktop normally
     without VLC grabbing the screen or their windows being minimized. A timed
     pause auto-expires on read, so callers don't need their own clock.
+
+    Called from hook threads too — keep it to plain attribute reads/writes.
     """
     until = state.window_mgmt_paused_until
     if until <= 0:
         return False
     if until != WINDOW_MGMT_PAUSE_INDEFINITE and time.time() >= until:
+        # Timer ran out — but if someone is still typing/mousing, slide the
+        # deadline instead of expiring (see WINDOW_MGMT_EXPIRY_GRACE_SECS).
+        # tv_input_last is 0.0 when the input listener isn't running
+        # (REMOTE_CONTROL=0) — then the pause expires on schedule.
+        last = state.tv_input_last
+        if last and time.time() - last < WINDOW_MGMT_EXPIRY_GRACE_SECS:
+            state.window_mgmt_paused_until = last + WINDOW_MGMT_EXPIRY_GRACE_SECS
+            return True
         state.window_mgmt_paused_until = 0.0   # auto-expire a finished timed pause
         return False
     return True
@@ -11357,6 +11374,26 @@ def _focus_tv_browser_windows(marker: str = None) -> bool:
     return True
 
 
+def _minimize_tv_browser_windows(marker: str = None) -> None:
+    """Minimize a kiosk's windows on Windows (same technique as VLC's).
+
+    Used by the "Use My Computer" pause: a hidden kiosk is deliberately left
+    running fullscreen *behind* VLC, so minimizing VLC alone would just reveal
+    the dashboard instead of the desktop. Blocking — call via to_thread."""
+    try:
+        import ctypes
+        user32 = ctypes.windll.user32
+        WM_SYSCOMMAND = 0x0112
+        SC_MINIMIZE   = 0xF020
+        for hwnd in _find_tv_browser_hwnds_windows(marker):
+            # PostMessage puts SC_MINIMIZE into Chrome's own message queue
+            # (UI-thread safe); SW_FORCEMINIMIZE (11) is the cross-process form.
+            user32.PostMessageW(hwnd, WM_SYSCOMMAND, SC_MINIMIZE, 0)
+            user32.ShowWindow(hwnd, 11)
+    except Exception:
+        pass
+
+
 async def _bring_tv_to_front(video_id: str) -> None:
     """Get VLC out of the way and pull the kiosk window to the foreground.
 
@@ -11456,6 +11493,12 @@ async def _bring_tvui_to_front() -> None:
     loop = asyncio.get_running_loop()
     reinforced = 0
     for delay in [0.4] * 6 + [0.8] * 5 + [1.5] * 3:   # ~10 s, slowing cadence
+        if window_mgmt_paused():
+            # "Use My Computer" engaged mid-show — stop fronting the kiosk and
+            # get its (possibly just-launched) window off the user's desktop.
+            await loop.run_in_executor(
+                None, _minimize_tv_browser_windows, _TVUI_WINDOW_MARKER)
+            return
         if not state.tv_ui_active:
             return  # superseded (playback took over / hidden again)
         try:
@@ -13984,10 +14027,13 @@ async def window_control(req: WindowControlReq) -> JSONResponse:
       action: "pause" | "resume" | "toggle" (default — pause if active, else resume)
       seconds: pause duration; 0 / omitted = pause until the user resumes.
 
-    On pause we also minimize VLC immediately so the desktop is usable right away
-    (otherwise a fullscreen idle background video would just sit there until it
-    ends). On resume we kick `vlc_focus_and_fullscreen` so the background video
-    comes back to the foreground without waiting for the loop's 3 s poll.
+    On pause we also minimize VLC AND the TV dashboard kiosk immediately (and
+    release its screen claim) so the desktop is usable right away — a hidden
+    kiosk sits fullscreen behind VLC, so minimizing VLC alone would reveal the
+    dashboard, not the desktop. On resume we kick `vlc_focus_and_fullscreen` so
+    the background video comes back to the foreground without waiting for the
+    loop's 3 s poll. A timed pause won't expire while the desktop is actively
+    in use — see WINDOW_MGMT_EXPIRY_GRACE_SECS.
     """
     action = (req.action or "toggle").lower()
     if action == "toggle":
@@ -13996,13 +14042,20 @@ async def window_control(req: WindowControlReq) -> JSONResponse:
     if action == "pause":
         secs = int(req.seconds or 0)
         if secs > 0:
-            secs = max(1, min(3600, secs))     # clamp to a sane 1 s … 1 h window
+            secs = max(1, min(7200, secs))     # clamp to a sane 1 s … 2 h window
             state.window_mgmt_paused_until = time.time() + secs
         else:
             state.window_mgmt_paused_until = WINDOW_MGMT_PAUSE_INDEFINITE
-        # Get VLC out of the way now so the user isn't staring at a fullscreen
-        # idle video while "paused". Best-effort; never blocks the response long.
+        # Get VLC AND the TV dashboard kiosk out of the way now so the user
+        # isn't staring at a fullscreen surface while "paused". The kiosk is
+        # left running fullscreen behind VLC even when "hidden", so minimizing
+        # VLC alone would just reveal the dashboard instead of the desktop.
+        # Best-effort; never blocks the response long.
+        state.tv_ui_active = False
         asyncio.create_task(vlc_minimize())
+        if platform.system() == "Windows":
+            asyncio.create_task(asyncio.to_thread(
+                _minimize_tv_browser_windows, _TVUI_WINDOW_MARKER))
     else:  # resume
         state.window_mgmt_paused_until = 0.0
         # Bring the background video back to the foreground promptly.

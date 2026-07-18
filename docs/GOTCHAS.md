@@ -1168,6 +1168,15 @@ The host display is contested by four surfaces: fullscreen VLC (playback), the i
 - The dashboard kiosk uses its **own Chrome profile dir** (`.tvui_chrome_profile`). Sharing `.tv_chrome_profile` would (a) merge it into the YouTube kiosk's browser instance and (b) get it killed by YouTube's Stop, which matches that path in process cmdlines.
 - The Windows focus code finds the kiosk by **window title marker** (`_TVUI_WINDOW_MARKER` = "StreamLink TV Dashboard", set via `document.title` when `?tv=1`). The markers are substring matches — neither marker may contain the other ("StreamLink TV Player" is the YouTube one), and the frontend must never retitle the page in TV mode.
 
+### "Use My Computer" + TV UI: minimizing VLC reveals the kiosk, and a timed pause must not hard-expire under a busy desktop
+
+Two traps found in 10.10.0, both presenting as "I paused window control but the web UI keeps taking the screen":
+
+- **The hidden kiosk sits fullscreen *behind* VLC.** `_tv_ui_hide` deliberately leaves the kiosk Chrome running (instant next wake), and `_tv_ui_show` may have launched it at any point in the session. So a pause handler that only calls `vlc_minimize()` doesn't produce a desktop — it produces the dashboard, fullscreen, because that's the next window in the Z-order. `/api/window-control` pause therefore also clears `tv_ui_active` and minimizes every `_TVUI_WINDOW_MARKER` window (`_minimize_tv_browser_windows`); `_bring_tvui_to_front` additionally aborts-and-minimizes if the pause engages during its ~10 s reinforcement loop (a freshly launched kiosk window can appear seconds after the pause starts).
+- **A timed pause used to hard-expire mid-typing.** The moment `window_mgmt_paused()` flipped false, `background_video_loop` restarted the idle video with a full focus grab and the very next keystroke woke the TV UI (`_tv_input_event`) — a fullscreen dashboard over the user's work, seemingly at random. `window_mgmt_paused()` now slides an expired deadline forward while `state.tv_input_last` is within `WINDOW_MGMT_EXPIRY_GRACE_SECS` (120 s), so a timed pause ends only after the desktop has actually gone quiet. Two consequences to respect: read `state.window_mgmt_paused_until` **after** calling `window_mgmt_paused()` (the call mutates it — `state_snapshot` does this for the countdown), and remember the slide relies on the input listener (`REMOTE_CONTROL=1`) stamping `tv_input_last`; with the listener off, timed pauses expire on schedule. Since remote presses are HID input too, a dead-remote press during a pause also extends it — accepted.
+
+Related pre-existing trap fixed at the same time: the endpoint clamped timed pauses to **3600 s while the settings panel offers a "2 Hours" button** — the button silently became a 1-hour pause. Clamp is 7200 now; keep the UI's longest option ≤ the clamp.
+
 ## Frontend layout
 
 ### The dashboard is a height-locked app shell — the document must never become scrollable again (except the player escape hatch)

@@ -464,6 +464,10 @@
        bulk-select and selection-driven controls are hidden (all remain
        available from any phone/desktop browser). Fewer focus stops also keeps
        the D-pad navigation predictable. */
+    /* "Use My Computer" nav toggle exists only on the TV kiosk — everywhere
+       else the settings panel hosts the pause controls. */
+    #tvUseComputerBtn { display: none; }
+    body.tv-mode #tvUseComputerBtn { display: flex !important; }
     body.tv-mode #navSettingsBtn,
     body.tv-mode #manageProfilesBtn,
     body.tv-mode #adminPanelLink,
@@ -858,6 +862,7 @@
   <symbol id="i-chev-down" viewBox="0 0 24 24"><path d="M12 15.6 4.6 8.2l1.7-1.7 5.7 5.7 5.7-5.7 1.7 1.7z"/></symbol>
   <symbol id="i-chev-right" viewBox="0 0 24 24"><path d="M15.6 12 8.2 19.4l-1.7-1.7 5.7-5.7-5.7-5.7 1.7-1.7z"/></symbol>
   <symbol id="i-ext" viewBox="0 0 24 24"><path d="M13.5 2.5h8v8h-2.3V6.4l-8.1 8.1-1.6-1.6 8.1-8.1h-4.1zM4 5h6v2.3H6.3v10.4h10.4V13H19v7H4z"/></symbol>
+  <symbol id="i-monitor" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M2 3.5h20v13.5H13.2v2.3H17v2.2H7v-2.2h3.8V17H2zm2.2 2.2v9.1h15.6V5.7z"/></symbol>
 </svg>
 
 
@@ -2132,6 +2137,15 @@
                 d="M10.325 4.317a1.724 1.724 0 013.35 0c.13.598.625 1.041 1.235 1.106.61.064 1.097.524 1.193 1.13l.082.51c.097.605.582 1.066 1.193 1.13.61.065 1.105.508 1.235 1.106.13.598-.024 1.226-.402 1.69-.378.463-.401 1.115-.057 1.602.345.487.345 1.135 0 1.622-.344.487-.32 1.139.057 1.602.378.463.532 1.092.402 1.69-.13.598-.625 1.041-1.235 1.106-.61.064-1.096.525-1.193 1.13l-.082.51c-.096.606-.582 1.066-1.193 1.13-.61.065-1.105.508-1.235 1.107a1.724 1.724 0 01-3.35 0c-.13-.599-.625-1.042-1.235-1.107-.61-.064-1.097-.524-1.193-1.13l-.082-.51c-.096-.605-.582-1.066-1.193-1.13-.61-.065-1.105-.508-1.235-1.106-.13-.598.024-1.227.402-1.69.378-.463.401-1.115.057-1.602-.345-.487-.345-1.135 0-1.622.344-.487.32-1.139-.057-1.602-.378-.464-.532-1.092-.402-1.69.13-.598.625-1.042 1.235-1.107.61-.064 1.097-.524 1.193-1.13l.082-.51c.096-.605.582-1.065 1.193-1.13.61-.064 1.105-.508 1.235-1.106z"/>
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/>
             </svg>
+          </button>
+          <!-- TV mode only (CSS): "Use My Computer" toggle. The settings panel
+               that hosts the pause controls is hidden on the TV kiosk, so the
+               pause needs its own entry point there. -->
+          <button id="tvUseComputerBtn" onclick="tvUseComputer()" title="Use my computer"
+            class="items-center gap-1.5 px-2 py-1.5 bg-gray-900 border border-gray-800
+                   hover:bg-gray-800 transition-colors flex-shrink-0 text-gray-400 hover:text-gray-200">
+            <svg class="ic w-4 h-4" aria-hidden="true"><use href="#i-monitor"/></svg>
+            <span id="tvUseComputerLabel" class="text-xs font-bold uppercase tracking-wide whitespace-nowrap">Use My PC</span>
           </button>
         </div>
       </div>
@@ -4903,6 +4917,19 @@ async function resumeWindowControl(){
   if(!r || !r.ok) showAlert("Couldn't resume window control.","error");
 }
 
+// TV-kiosk nav toggle for the pause (the settings panel is hidden on TV).
+// Timed (2 h), not indefinite: the remote is dead while paused, so a forgotten
+// pause must expire on its own — the server slides the deadline while the
+// keyboard/mouse are in use, so it can't pop the UI over an active desktop.
+// The server also minimizes this kiosk on pause; restore it from the taskbar
+// (or open the dashboard on any device) to press Resume.
+function tvUseComputer(){
+  if(app.window_mgmt_paused){ resumeWindowControl(); return; }
+  if(!confirm("Switch to using this computer normally? StreamLink will hide and the remote will stop working until you resume (or the pause times out)."))
+    return;
+  pauseWindowControl(7200);
+}
+
 // Reflect app.window_mgmt_* on the settings panel: show the timed buttons when
 // active, or a "Paused — resumes in m:ss" line + Resume button when paused.
 function renderWindowControl(){
@@ -4913,6 +4940,8 @@ function renderWindowControl(){
   const paused = !!app.window_mgmt_paused;
   btns.classList.toggle("hidden", paused);
   resume.classList.toggle("hidden", !paused);
+  const tvLabel = document.getElementById("tvUseComputerLabel");
+  if(tvLabel) tvLabel.textContent = paused ? "Resume TV" : "Use My PC";
   if(wcCountdownTimer){ clearInterval(wcCountdownTimer); wcCountdownTimer = null; }
   if(!paused) return;
 
@@ -17227,6 +17256,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.9.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.10.0</div>
 </body>
 </html>

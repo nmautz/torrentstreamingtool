@@ -227,6 +227,21 @@ Mechanics (`main.py`):
   and nothing playing, `pl_forceresume` the background video +
   `vlc_focus_and_fullscreen`. If **no background video is configured**, the
   UI simply stays up (a black VLC window is worse than the dashboard).
+- **"Use My Computer" pause** (`window_mgmt_paused()`): the pause endpoint
+  clears `tv_ui_active` and **minimizes the kiosk Chrome window**
+  (`_minimize_tv_browser_windows`) along with VLC — a hidden kiosk sits
+  fullscreen *behind* VLC, so minimizing VLC alone would just reveal the
+  dashboard instead of the desktop. While paused, nothing can bring the UI
+  back: `_tv_ui_show` and the `_tv_input_event` wake path bail, and
+  `_bring_tvui_to_front`'s reinforcement loop aborts (minimizing any
+  late-launching kiosk window it was about to front). A **timed** pause never
+  hard-expires under an actively-used desktop — `window_mgmt_paused()` slides
+  the deadline while HID input is recent (`WINDOW_MGMT_EXPIRY_GRACE_SECS`,
+  120 s), so the pause really ends ~2 min after the last keystroke/mouse move
+  and the kiosk/background video can't pop over the user's work. On the TV
+  kiosk itself the pause is reachable via the TV-only **Use My PC** nav button
+  (`#tvUseComputerBtn` — confirm → 2 h timed pause, "Resume TV" while paused);
+  the settings panel that hosts the pause tile is hidden on TV.
 - **Separate Chrome profile** (`.tvui_chrome_profile`): must differ from the
   YouTube kiosk's `.tv_chrome_profile` — YouTube's Stop kills its kiosk by
   matching the profile path in the cmdline and would otherwise take the
