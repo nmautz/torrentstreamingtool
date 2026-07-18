@@ -2138,6 +2138,8 @@
         <div class="order-3 sm:order-2 w-full sm:w-auto flex sm:flex-shrink-0 h-11 sm:h-14 border-t border-gray-800 sm:border-t-0 -mx-2 sm:mx-0">
           <button id="tabSearch" onclick="switchTab('search')"
             class="tab-btn tab-active flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap">Search</button>
+          <button id="tabExplore" onclick="switchTab('explore')"
+            class="tab-btn tab-inactive flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap">Explore</button>
           <button id="tabLibrary" onclick="switchTab('library')"
             class="tab-btn tab-inactive flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap">Library</button>
         </div>
@@ -2308,6 +2310,49 @@
         </div>
         <p class="text-gray-500 font-black uppercase tracking-wide">Search for media</p>
         <p class="text-gray-700 text-xs mt-1">Public domain archives, open-source video, and more</p>
+      </div>
+    </div>
+
+    <!-- Explore tab: TMDb browse — trending / popular / new releases + genre
+         filters. Tiles open the same search show page as TMDb-first results. -->
+    <div id="exploreTab" class="hidden">
+      <div id="exploreFilters" class="hidden mb-4 space-y-2">
+        <!-- Kind: All / Shows / Movies -->
+        <div class="flex items-center gap-1.5">
+          <button id="exKindAll" type="button" onclick="exSetKind('')">All</button>
+          <button id="exKindTv" type="button" onclick="exSetKind('tv')">Shows</button>
+          <button id="exKindMovie" type="button" onclick="exSetKind('movie')">Movies</button>
+        </div>
+        <!-- Genre chips: single scrollable row -->
+        <div id="exGenreChips" class="flex gap-1.5 overflow-x-auto pb-1"></div>
+      </div>
+
+      <!-- No TMDb key configured -->
+      <div id="exploreDisabled" class="hidden flex-col items-center justify-center py-20 text-center">
+        <div class="w-16 h-16 bg-gray-900 border border-gray-800 flex items-center justify-center mb-4">
+          <svg class="ic text-2xl text-gray-700" aria-hidden="true"><use href="#i-key"/></svg>
+        </div>
+        <p class="text-gray-500 font-black uppercase tracking-wide">Explore needs a TMDb key</p>
+        <p class="text-gray-700 text-xs mt-1 max-w-sm">Add a free TMDb API key in the Admin panel (or .env) to browse popular shows, movies, and new releases.</p>
+      </div>
+
+      <!-- Rails view (default): one horizontal poster row per curated list -->
+      <div id="exploreRails" class="space-y-6"></div>
+
+      <!-- Grid view: a rail's "All" expansion or a genre filter, with paging -->
+      <div id="exploreGridWrap" class="hidden">
+        <div class="flex items-center justify-between mb-3 gap-2">
+          <h2 id="exGridTitle" class="text-sm font-black uppercase tracking-wide border-l-4 border-indigo-600 pl-2 min-w-0 truncate"></h2>
+          <button type="button" onclick="exCloseGrid()"
+            class="flex-shrink-0 text-[11px] font-bold uppercase tracking-wide px-2.5 py-1 border border-gray-800 text-gray-400 hover:text-gray-200 hover:border-gray-600 transition-colors">‹ Back</button>
+        </div>
+        <div id="exGridSections" class="hidden flex-wrap gap-1.5 mb-3"></div>
+        <div id="exGrid" class="grid grid-cols-3 sm:grid-cols-4 lg:grid-cols-6 xl:grid-cols-8 gap-2 items-start"></div>
+        <div id="exGridEmpty" class="hidden py-16 text-center text-gray-600 text-sm font-bold uppercase tracking-wide">Nothing found</div>
+        <div class="flex justify-center mt-4">
+          <button id="exMoreBtn" type="button" onclick="exLoadMore(this)"
+            class="hidden px-6 py-2.5 bg-gray-900 border border-gray-800 hover:border-indigo-600 text-xs font-black uppercase tracking-wide text-gray-300 transition-colors">Load more</button>
+        </div>
       </div>
     </div>
 
@@ -5152,13 +5197,16 @@ async function saveSubtitlesPref(){
 // ── Tabs ───────────────────────────────────────────────────────────────────
 function switchTab(tab){
   activeTab=tab;
-  const isS=tab==="search", isL=tab==="library";
+  const isS=tab==="search", isL=tab==="library", isE=tab==="explore";
   document.getElementById("searchTab").classList.toggle("hidden",!isS);
+  document.getElementById("exploreTab").classList.toggle("hidden",!isE);
   document.getElementById("libraryTab").classList.toggle("hidden",!isL);
   const cls=(on)=>`tab-btn flex-1 sm:flex-initial sm:px-4 text-xs sm:text-sm font-black uppercase tracking-wide transition-colors whitespace-nowrap ${on?"tab-active":"tab-inactive"}`;
   document.getElementById("tabSearch").className=cls(isS);
+  document.getElementById("tabExplore").className=cls(isE);
   document.getElementById("tabLibrary").className=cls(isL);
   if(isL) loadLibrary();
+  if(isE) loadExplore();
 }
 
 // ── Profiles ───────────────────────────────────────────────────────────────
@@ -9337,6 +9385,241 @@ function _renderSearchModeToggle(){
   const base="text-[10px] font-bold uppercase tracking-wide px-2.5 py-1 transition-colors ";
   s.className = base + (!classic ? "bg-indigo-600 text-white" : "bg-gray-900 text-gray-400 hover:text-gray-200");
   c.className = base + "border-l border-gray-800 " + (classic ? "bg-indigo-600 text-white" : "bg-gray-900 text-gray-400 hover:text-gray-200");
+}
+
+// ── Explore (TMDb browse: trending / popular / new releases + genres) ──────
+// Query-less browsing of /api/tmdb/explore. Default view = horizontal poster
+// rails; a genre chip (or a rail's "All ›") switches to a paged grid. Tiles
+// open the existing TMDb-first show page (openSearchShowFromTmdb), so all
+// download/stream plumbing is shared with Search.
+let _exLoaded=false;          // one-time init (genres fetched, first rails load)
+let _exEnabled=null;          // TMDb key present (from /api/tmdb/genres)
+let _exImgBase="/api/metadata/img";
+let _exGenres=[];             // [{name, tv_id, movie_id}]
+let _exKind="";               // "" | "tv" | "movie"
+let _exGenre="";              // active genre name ("" = none → rails view)
+let _exGridState=null;        // {kind, section, genre, title, genreMode, page, totalPages}
+let _exSeq=0;                 // invalidates in-flight fetches on view change
+
+const _EX_GRID_SECTIONS=[["popular","Popular"],["top_rated","Top Rated"],["new","New"]];
+
+function _exRailDefs(){
+  if(_exKind==="tv") return [
+    {section:"trending",  kind:"tv",    title:"Trending Shows"},
+    {section:"new",       kind:"tv",    title:"New On TV"},
+    {section:"popular",   kind:"tv",    title:"Popular Shows"},
+    {section:"top_rated", kind:"tv",    title:"Top Rated Shows"}];
+  if(_exKind==="movie") return [
+    {section:"trending",  kind:"movie", title:"Trending Movies"},
+    {section:"new",       kind:"movie", title:"New Releases"},
+    {section:"popular",   kind:"movie", title:"Popular Movies"},
+    {section:"top_rated", kind:"movie", title:"Top Rated Movies"}];
+  return [
+    {section:"trending",  kind:"",      title:"Trending Now"},
+    {section:"new",       kind:"movie", title:"New Movies"},
+    {section:"new",       kind:"tv",    title:"New On TV"},
+    {section:"popular",   kind:"tv",    title:"Popular Shows"},
+    {section:"popular",   kind:"movie", title:"Popular Movies"},
+    {section:"top_rated", kind:"tv",    title:"Top Rated Shows"},
+    {section:"top_rated", kind:"movie", title:"Top Rated Movies"}];
+}
+
+async function loadExplore(){
+  if(_exLoaded) return;
+  _exLoaded=true;
+  try{
+    const r=await fetch("/api/tmdb/genres");
+    const d=r.ok?await r.json():{enabled:false};
+    _exEnabled=!!d.enabled; _exGenres=d.genres||[];
+  }catch(_){ _exEnabled=false; }
+  if(!_exEnabled){
+    const dis=document.getElementById("exploreDisabled");
+    dis.classList.remove("hidden"); dis.classList.add("flex");
+    _exLoaded=false;   // retry on next tab visit (key may get configured)
+    return;
+  }
+  document.getElementById("exploreFilters").classList.remove("hidden");
+  _exRenderChips();
+  _exShowRails();
+}
+
+async function _exFetch(kind, section, genre, page){
+  let url=`/api/tmdb/explore?section=${encodeURIComponent(section)}&page=${page}`;
+  if(kind)  url+=`&kind=${kind}`;
+  if(genre) url+=`&genre=${encodeURIComponent(genre)}`;
+  const r=await fetch(url);
+  if(!r.ok) throw new Error(`Explore fetch failed (HTTP ${r.status})`);
+  const d=await r.json();
+  _exImgBase=d.img_base||_exImgBase;
+  return d;
+}
+
+// One poster tile. `grid` = fluid width (grid cell) vs fixed rail width.
+function _exTile(c, grid){
+  const t=document.createElement("button");
+  t.type="button";
+  t.className=`${grid?"w-full":"flex-shrink-0 w-28 sm:w-36"} text-left bg-gray-900 border border-gray-800 hover:border-indigo-600 transition-colors overflow-hidden`;
+  const img=c.poster_path
+    ? `<img src="${_exImgBase}/w185${c.poster_path}" alt="" loading="lazy"
+           class="w-full aspect-[2/3] object-cover bg-gray-950"/>`
+    : `<div class="w-full aspect-[2/3] bg-gray-950 flex items-center justify-center p-2">
+         <span class="text-[10px] font-black uppercase tracking-widest text-gray-700 text-center line-clamp-4">${escHtml(c.title)}</span>
+       </div>`;
+  const chip=c.kind==="movie"
+    ? `<span class="font-black uppercase tracking-widest px-1 py-0.5 bg-purple-900/60 text-purple-300">Movie</span>`
+    : `<span class="font-black uppercase tracking-widest px-1 py-0.5 bg-indigo-900/60 text-indigo-300">TV</span>`;
+  const rating=(c.rating&&c.rating>0)?`<span class="text-amber-400/90 font-bold">★ ${c.rating.toFixed(1)}</span>`:"";
+  t.innerHTML=`${img}
+    <div class="p-1.5">
+      <p class="text-[11px] font-bold uppercase tracking-wide text-gray-200 truncate">${escHtml(c.title)}</p>
+      <div class="flex items-center gap-1.5 text-[9px] text-gray-500 mt-0.5">${chip}${c.year?`<span class="font-bold">${escHtml(c.year)}</span>`:""}${rating}</div>
+    </div>`;
+  t.addEventListener("click",()=>openSearchShowFromTmdb(c));
+  return t;
+}
+
+function _exSkeletonTiles(n, grid){
+  let h="";
+  for(let i=0;i<n;i++)
+    h+=`<div class="${grid?"w-full":"flex-shrink-0 w-28 sm:w-36"} bg-gray-900 border border-gray-800 animate-pulse">
+          <div class="w-full aspect-[2/3] bg-gray-800/40"></div>
+          <div class="p-1.5"><div class="h-3 bg-gray-800/60 w-3/4"></div></div>
+        </div>`;
+  return h;
+}
+
+// ── Filter chips ──
+function _exChipCls(on){
+  return `flex-shrink-0 px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide border transition-colors ${on?"bg-indigo-600 border-indigo-600 text-white":"bg-gray-900 border-gray-800 text-gray-400 hover:border-gray-600 hover:text-gray-200"}`;
+}
+function _exRenderChips(){
+  [["exKindAll",""],["exKindTv","tv"],["exKindMovie","movie"]].forEach(([id,k])=>{
+    document.getElementById(id).className=_exChipCls(_exKind===k);
+  });
+  const wrap=document.getElementById("exGenreChips");
+  wrap.innerHTML="";
+  _exGenres
+    .filter(g=>!_exKind||(_exKind==="tv"?g.tv_id:g.movie_id))
+    .forEach(g=>{
+      const b=document.createElement("button");
+      b.type="button";
+      b.className=_exChipCls(_exGenre===g.name);
+      b.textContent=g.name;
+      b.addEventListener("click",()=>exToggleGenre(g.name));
+      wrap.appendChild(b);
+    });
+}
+function exSetKind(k){
+  if(_exKind===k) return;
+  _exKind=k;
+  if(_exGenre){
+    // Drop an active genre the new kind doesn't have (e.g. movie "Action"
+    // after switching to Shows-only).
+    const g=_exGenres.find(x=>x.name===_exGenre);
+    if(!g||(k&&!(k==="tv"?g.tv_id:g.movie_id))) _exGenre="";
+  }
+  _exRenderChips();
+  if(_exGenre) _exOpenGenreGrid(_exGridState&&_exGridState.genreMode?_exGridState.section:"popular");
+  else _exShowRails();
+}
+function exToggleGenre(name){
+  _exGenre=_exGenre===name?"":name;
+  _exRenderChips();
+  if(_exGenre) _exOpenGenreGrid("popular");
+  else _exShowRails();
+}
+
+// ── Rails view ──
+function _exShowRails(){
+  const seq=++_exSeq;
+  _exGridState=null;
+  document.getElementById("exploreGridWrap").classList.add("hidden");
+  const rails=document.getElementById("exploreRails");
+  rails.classList.remove("hidden");
+  rails.innerHTML="";
+  _exRailDefs().forEach(def=>{
+    const sec=document.createElement("section");
+    sec.innerHTML=`
+      <div class="flex items-center justify-between mb-2">
+        <h2 class="text-sm font-black uppercase tracking-wide border-l-4 border-indigo-600 pl-2">${escHtml(def.title)}</h2>
+        <button type="button" class="ex-more text-[11px] font-bold uppercase tracking-wide text-gray-500 hover:text-gray-300 transition-colors">All ›</button>
+      </div>
+      <div class="ex-rail-row flex gap-2 overflow-x-auto pb-2">${_exSkeletonTiles(8,false)}</div>`;
+    sec.querySelector(".ex-more").addEventListener("click",
+      ()=>_exOpenGrid({kind:def.kind, section:def.section, genre:"", title:def.title, genreMode:false}));
+    rails.appendChild(sec);
+    _exFillRail(sec, def, seq);
+  });
+}
+async function _exFillRail(sec, def, seq){
+  try{
+    const d=await _exFetch(def.kind, def.section, "", 1);
+    if(seq!==_exSeq) return;
+    const items=(d.results||[]).slice(0,20);
+    if(!items.length){ sec.remove(); return; }
+    const row=sec.querySelector(".ex-rail-row");
+    row.innerHTML="";
+    items.forEach(c=>row.appendChild(_exTile(c,false)));
+  }catch(_){ if(seq===_exSeq) sec.remove(); }
+}
+
+// ── Grid view (rail "All ›" or a genre filter) ──
+function _exOpenGenreGrid(section){
+  const kindLabel=_exKind==="tv"?"Shows":(_exKind==="movie"?"Movies":"Shows & Movies");
+  _exOpenGrid({kind:_exKind, section:section||"popular", genre:_exGenre,
+               title:`${_exGenre} · ${kindLabel}`, genreMode:true});
+}
+function _exOpenGrid(st){
+  _exSeq++;
+  _exGridState={...st, page:0, totalPages:1};
+  document.getElementById("exploreRails").classList.add("hidden");
+  document.getElementById("exploreGridWrap").classList.remove("hidden");
+  document.getElementById("exGridTitle").textContent=st.title;
+  document.getElementById("exGridEmpty").classList.add("hidden");
+  document.getElementById("exMoreBtn").classList.add("hidden");
+  const secWrap=document.getElementById("exGridSections");
+  secWrap.classList.toggle("hidden",!st.genreMode);
+  secWrap.classList.toggle("flex",!!st.genreMode);
+  if(st.genreMode){
+    secWrap.innerHTML="";
+    _EX_GRID_SECTIONS.forEach(([sect,label])=>{
+      const b=document.createElement("button");
+      b.type="button";
+      b.className=_exChipCls(st.section===sect);
+      b.textContent=label;
+      b.addEventListener("click",()=>{ if(st.section!==sect) _exOpenGenreGrid(sect); });
+      secWrap.appendChild(b);
+    });
+  }
+  document.getElementById("exGrid").innerHTML=_exSkeletonTiles(12,true);
+  exLoadMore();
+}
+async function exLoadMore(btn){
+  const st=_exGridState; if(!st) return;
+  const page=st.page+1, seq=_exSeq;
+  const moreBtn=document.getElementById("exMoreBtn");
+  await withInflight("ex_grid", btn||null, async ()=>{
+    try{
+      const d=await _exFetch(st.kind, st.section, st.genre, page);
+      if(seq!==_exSeq||_exGridState!==st) return;
+      st.page=page; st.totalPages=d.total_pages||1;
+      const grid=document.getElementById("exGrid");
+      if(page===1) grid.innerHTML="";
+      (d.results||[]).forEach(c=>grid.appendChild(_exTile(c,true)));
+      document.getElementById("exGridEmpty").classList.toggle("hidden",
+        !(page===1&&!(d.results||[]).length));
+      moreBtn.classList.toggle("hidden", st.page>=st.totalPages);
+    }catch(e){
+      if(seq!==_exSeq||_exGridState!==st) return;
+      if(page===1) document.getElementById("exGrid").innerHTML="";
+      showAlert(e.message||"Explore fetch failed","error");
+    }
+  });
+}
+function exCloseGrid(){
+  _exGenre="";
+  _exRenderChips();
+  _exShowRails();
 }
 
 // ── Search ─────────────────────────────────────────────────────────────────
@@ -17545,6 +17828,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.11.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.0.0</div>
 </body>
 </html>

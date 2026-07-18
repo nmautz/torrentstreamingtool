@@ -28,7 +28,7 @@ import zipfile
 from collections import deque
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
 from typing import AsyncGenerator, Optional
@@ -8394,6 +8394,189 @@ async def tmdb_search(query: str = "", kind: str = "") -> JSONResponse:
 
     return JSONResponse({"enabled": True, "img_base": LOCAL_IMG_BASE,
                          "results": results})
+
+
+# ── TMDb Explore (browse: trending / popular / new releases / genres) ─────────
+#
+# Backs the Explore tab: query-less browsing of TMDb's curated lists (plus
+# /discover for genre filtering), returned in the same candidate shape as
+# /api/tmdb/search so a tile click opens the existing search show-detail page
+# (/api/tmdb/lookup by id). Responses are cached in-process — curated lists
+# move slowly, and tab flips / genre browsing shouldn't hammer TMDb.
+
+_TMDB_EXPLORE_TTL = 30 * 60           # explore list cache (curated lists move slowly)
+_TMDB_GENRES_TTL = 24 * 3600          # genre id lists are effectively static
+_tmdb_explore_cache: dict[tuple, tuple[float, dict]] = {}
+_tmdb_genres_cache: Optional[tuple[float, list[dict]]] = None
+_tmdb_genres_lock = asyncio.Lock()
+
+_EXPLORE_SECTIONS = ("trending", "popular", "top_rated", "new")
+
+
+def _tmdb_explore_candidate(r: dict, kind: str) -> Optional[dict]:
+    """Normalize one TMDb list entry to the /api/tmdb/search candidate shape
+    (+ backdrop/rating extras the Explore tiles show)."""
+    title = r.get("title") or r.get("name") or ""
+    if not r.get("id") or not title:
+        return None
+    date = r.get("release_date") or r.get("first_air_date") or ""
+    return {
+        "id":            r["id"],
+        "kind":          kind,
+        "title":         title,
+        "year":          date[:4],
+        "overview":      r.get("overview") or "",
+        "poster_path":   r.get("poster_path") or "",
+        "backdrop_path": r.get("backdrop_path") or "",
+        "rating":        round(float(r.get("vote_average") or 0.0), 1),
+    }
+
+
+async def _tmdb_genre_union() -> list[dict]:
+    """Merged tv+movie genre list: [{name, tv_id, movie_id}], name-sorted.
+    One entry per distinct name — "Comedy" carries both ids, while "Action"
+    (movie-only) and "Action & Adventure" (tv-only) stay separate entries."""
+    global _tmdb_genres_cache
+    if _tmdb_genres_cache and time.time() - _tmdb_genres_cache[0] < _TMDB_GENRES_TTL:
+        return _tmdb_genres_cache[1]
+    async with _tmdb_genres_lock:
+        if _tmdb_genres_cache and time.time() - _tmdb_genres_cache[0] < _TMDB_GENRES_TTL:
+            return _tmdb_genres_cache[1]
+        tv, mv = await asyncio.gather(_tmdb_get("/genre/tv/list"),
+                                      _tmdb_get("/genre/movie/list"))
+        merged: dict[str, dict] = {}
+        for src, key in ((tv, "tv_id"), (mv, "movie_id")):
+            for g in (src or {}).get("genres", []) or []:
+                name = (g.get("name") or "").strip()
+                if not name or not g.get("id"):
+                    continue
+                ent = merged.setdefault(
+                    name.lower(), {"name": name, "tv_id": 0, "movie_id": 0})
+                ent[key] = int(g["id"])
+        genres = sorted(merged.values(), key=lambda g: g["name"].lower())
+        if genres:                       # never cache a failed fetch
+            _tmdb_genres_cache = (time.time(), genres)
+        return genres
+
+
+async def _tmdb_explore_fetch(kind: str, section: str, genre_id: int,
+                              page: int) -> tuple[list[dict], int]:
+    """One kind's worth of an Explore list → (candidates, total_pages).
+    A genre filter goes through /discover (the curated list endpoints can't
+    filter), mapping each section onto a discover sort; without a genre the
+    dedicated curated endpoint is used."""
+    if genre_id:
+        params: dict = {"with_genres": str(genre_id), "include_adult": "false",
+                        "page": page, "sort_by": "popularity.desc"}
+        if section == "top_rated":
+            params["sort_by"] = "vote_average.desc"
+            params["vote_count.gte"] = "200"   # keep obscure 10.0-rated junk out
+        elif section == "new":
+            # "New" inside a genre = popularity-sorted within a recent window
+            # (a pure date sort surfaces unreleased/obscure entries).
+            today = datetime.now(timezone.utc).date()
+            dk = "primary_release_date" if kind == "movie" else "first_air_date"
+            params[f"{dk}.gte"] = (today - timedelta(days=120)).isoformat()
+            params[f"{dk}.lte"] = today.isoformat()
+        data = await _tmdb_get(f"/discover/{kind}", params)
+    else:
+        path = {"trending":  f"/trending/{kind}/week",
+                "popular":   f"/{kind}/popular",
+                "top_rated": f"/{kind}/top_rated",
+                "new":       "/movie/now_playing" if kind == "movie"
+                             else "/tv/on_the_air"}[section]
+        data = await _tmdb_get(path, {"page": page})
+    out: list[dict] = []
+    for r in (data or {}).get("results", []) or []:
+        c = _tmdb_explore_candidate(r, kind)
+        if c:
+            out.append(c)
+    return out, int((data or {}).get("total_pages") or 1)
+
+
+@app.get("/api/tmdb/genres")
+async def tmdb_genres() -> JSONResponse:
+    """Merged TMDb genre list for the Explore tab's filter chips:
+    `{enabled, genres:[{name, tv_id, movie_id}]}` (an id of 0 = the genre
+    doesn't exist for that kind). `enabled:false` when no TMDb key is set."""
+    if not await _tmdb_effective_key():
+        return JSONResponse({"enabled": False, "genres": []})
+    return JSONResponse({"enabled": True, "genres": await _tmdb_genre_union()})
+
+
+@app.get("/api/tmdb/explore")
+async def tmdb_explore(kind: str = "", section: str = "popular",
+                       genre: str = "", page: int = 1) -> JSONResponse:
+    """Explore-tab browse. `section` ∈ trending|popular|top_rated|new;
+    `kind` ∈ tv|movie|"" ("" = both, alternately interleaved so one media
+    type's larger popularity scale can't crowd the other out); `genre` = a
+    name from /api/tmdb/genres (resolved to per-kind ids server-side — a kind
+    that lacks the genre is skipped). Returns `{enabled, img_base, results,
+    page, total_pages}` with the /api/tmdb/search candidate shape
+    (+ backdrop_path/rating). Not admin-gated; results cached ~30 min."""
+    if not await _tmdb_effective_key():
+        return JSONResponse({"enabled": False, "img_base": LOCAL_IMG_BASE,
+                             "results": [], "page": 1, "total_pages": 1})
+    section = section if section in _EXPLORE_SECTIONS else "popular"
+    kind = kind if kind in ("tv", "movie") else ""
+    genre = (genre or "").strip()
+    try:
+        page = max(1, min(int(page), 500))   # TMDb caps pagination at 500
+    except (TypeError, ValueError):
+        page = 1
+
+    ck = (kind, section, genre.lower(), page)
+    hit = _tmdb_explore_cache.get(ck)
+    if hit and time.time() - hit[0] < _TMDB_EXPLORE_TTL:
+        return JSONResponse(hit[1])
+
+    genre_ids = {"tv": 0, "movie": 0}
+    if genre:
+        for g in await _tmdb_genre_union():
+            if g["name"].lower() == genre.lower():
+                genre_ids = {"tv": g["tv_id"], "movie": g["movie_id"]}
+                break
+
+    kinds = [kind] if kind else ["tv", "movie"]
+    if genre:
+        kinds = [k for k in kinds if genre_ids[k]]
+
+    results: list[dict] = []
+    total_pages = 1
+    if not kinds:
+        pass                                  # genre unknown for every kind
+    elif not kind and not genre and section == "trending":
+        # Mixed trending has a dedicated endpoint (media_type per entry) —
+        # one call, already interleaved by TMDb's own trending rank.
+        data = await _tmdb_get("/trending/all/week", {"page": page})
+        for r in (data or {}).get("results", []) or []:
+            if r.get("media_type") in ("tv", "movie"):
+                c = _tmdb_explore_candidate(r, r["media_type"])
+                if c:
+                    results.append(c)
+        total_pages = int((data or {}).get("total_pages") or 1)
+    elif len(kinds) == 1:
+        results, total_pages = await _tmdb_explore_fetch(
+            kinds[0], section, genre_ids[kinds[0]], page)
+    else:
+        (tv_res, tv_tp), (mv_res, mv_tp) = await asyncio.gather(
+            _tmdb_explore_fetch("tv", section, genre_ids["tv"], page),
+            _tmdb_explore_fetch("movie", section, genre_ids["movie"], page))
+        total_pages = max(tv_tp, mv_tp)
+        for i in range(max(len(tv_res), len(mv_res))):
+            if i < len(mv_res):
+                results.append(mv_res[i])
+            if i < len(tv_res):
+                results.append(tv_res[i])
+
+    payload = {"enabled": True, "img_base": LOCAL_IMG_BASE, "results": results,
+               "page": page, "total_pages": min(total_pages, 500)}
+    _tmdb_explore_cache[ck] = (time.time(), payload)
+    if len(_tmdb_explore_cache) > 400:        # cap in-process cache growth
+        for k in sorted(_tmdb_explore_cache,
+                        key=lambda k: _tmdb_explore_cache[k][0])[:100]:
+            _tmdb_explore_cache.pop(k, None)
+    return JSONResponse(payload)
 
 
 @app.post("/api/library/{item_id}/metadata/refresh")
