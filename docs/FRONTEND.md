@@ -358,7 +358,12 @@ Don't re-add the `controls` attribute. Pieces:
   scrub (`_lpSeekBarInit`): dragging previews via `_lpScrub.t` without touching
   `currentTime`; the seek commits **once on release** (matters in on-demand
   mode, where each cold seek restarts the JIT ffmpeg). Time labels use
-  `fmtTimeSecs`.
+  `fmtTimeSecs`. All user-intent seeks (±10 s, scrub commit, skip-intro) go
+  through `_lpCommitSeek`, which verifies via `requestVideoFrameCallback` that
+  the pipeline actually jumped and rebuilds it at the target if the element
+  accepted the seek but kept presenting the old position (10.10.3; see
+  [GOTCHAS.md](GOTCHAS.md) § ManagedMediaSource) — never set `currentTime`
+  directly for a user seek.
 - **Options panel** — the **gear button** (`#lpOptsBtn`, `lpToggleOpts`)
   toggles `.lp-opts` on `#localPlayer`, showing `#lpTrackRow` (quality /
   audio / subtitle selectors, AI button, Clip row) as an absolute panel

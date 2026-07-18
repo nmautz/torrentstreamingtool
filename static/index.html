@@ -14352,6 +14352,7 @@ async function _lpLoadIndex(seekTo) {
   _lpHideSkipOffer(); lp.skipOfferEnd = 0;
   lp.resumeApplied = false; lp.resumeSec = seekTo || 0;
   lp.lastKnownT = seekTo || 0;
+  _lpCancelSeekVerify();   // a rebuild/advance invalidates any in-flight seek verdict
   lp.audios = []; lp.subtitles = []; lp.sidecarSubs = []; lp.subTracks = []; lp._sttBusy = false;
   lp.fonts = []; lp.subBase = null; _lpTeardownOctopus();   // drop prior file's styled-sub overlay
   // Push the throttle window forward so the first `timeupdate` after this load
@@ -15845,11 +15846,88 @@ function lpTogglePlay() {
   _lpCtlShow();
 }
 
+// ── Swallowed-seek detector ─────────────────────────────────────────────────
+// Rare iOS wedge — the half 10.8.2's repaint fix didn't cover: the media
+// element keeps honoring seeks *virtually* (currentTime jumps, `seeked` fires,
+// the bar repaints) while the underlying decode pipeline ignores them and keeps
+// presenting the old position, so the seek bar and ±10 s buttons visibly do
+// nothing to the picture until the player is stopped and restarted. No error or
+// event fires for this state, so detect it from the composited frames
+// themselves: after a committed user seek, requestVideoFrameCallback reports
+// each newly-presented frame's mediaTime. A real seek halts presentation until
+// the target frame decodes (both engines seek frame-accurately), so a sustained
+// run of fresh frames still advancing along the PRE-seek trajectory is proof
+// the pipeline dropped the seek → rebuild it at the intended target. A seek
+// into cold/unbuffered media presents no frames at all while it buffers, so it
+// can never trip this. See GOTCHAS.md § ManagedMediaSource.
+let _lpSeekVerifyToken = 0;
+let _lpSeekRebuildLast = 0;   // last pipeline rebuild (escalation window)
+function _lpCancelSeekVerify() { _lpSeekVerifyToken++; }
+
+// Every user-intent seek (±10 s, scrub commit, skip-intro) funnels through here.
+function _lpCommitSeek(t) {
+  const v = _lpV(); if (!v) return;
+  const anchor = v.currentTime || 0;
+  try { v.currentTime = t; } catch (_) {}
+  _lpVerifySeek(v, anchor, t);
+}
+
+function _lpVerifySeek(v, anchor, target) {
+  _lpCancelSeekVerify();                       // the newest seek owns the verdict
+  if (typeof v.requestVideoFrameCallback !== "function") return;
+  if (Math.abs(target - anchor) < 5) return;   // too small to tell apart from normal playback
+  const token = _lpSeekVerifyToken;
+  const t0 = performance.now();
+  let onOldPath = 0;
+  const step = (_now, meta) => {
+    if (token !== _lpSeekVerifyToken || !lp.itemId || lp.netDown) return;
+    const el = (performance.now() - t0) / 1000;
+    const mt = meta && typeof meta.mediaTime === "number" ? meta.mediaTime : NaN;
+    if (Math.abs(mt - target) < 4) return;     // a frame presented at the target → seek landed
+    // Fresh frame still advancing along the pre-seek trajectory: the pipeline is
+    // demonstrably still streaming the old position. Require a sustained run so
+    // a single stale composite can never trigger a rebuild. (NaN mediaTime
+    // fails both distance checks and just falls through to re-arm.)
+    if (Math.abs(mt - (anchor + el)) < 2.5 && ++onOldPath >= 8 && el > 1.2) {
+      _lpPipelineRebuild(target);
+      return;
+    }
+    if (el > 4) return;                        // inconclusive → give up quietly
+    try { v.requestVideoFrameCallback(step); } catch (_) {}
+  };
+  try { v.requestVideoFrameCallback(step); } catch (_) {}
+}
+
+// The pipeline dropped a committed seek. First attempt: rebuild the media
+// pipeline in place (hls.js recoverMediaError; Safari-native src reload) with
+// the resume machinery armed at the user's target, so the seek lands after all.
+// If a second seek is swallowed within a minute, the wedge survives in-place
+// rebuilds — escalate to a full _lpLoadIndex teardown, which is exactly the
+// manual stop+restart cure, automated.
+function _lpPipelineRebuild(t) {
+  if (!lp.itemId || lp.netDown || _lpReloading) return;
+  const now = Date.now();
+  const escalate = now - _lpSeekRebuildLast < 60000;
+  _lpSeekRebuildLast = now;
+  console.warn("[lp] media pipeline ignored a seek to " + t.toFixed(1) + "s — " +
+               (escalate ? "full player rebuild" : "rebuilding pipeline in place"));
+  lp.lastKnownT = t;                 // user intent — same trust as a `seeked` adoption
+  if (escalate) { _lpLoadIndex(t); return; }
+  lp.resumeSec = t; lp.resumeApplied = false;
+  const v = _lpV();
+  if (lp.hls) {
+    try { lp.hls.recoverMediaError(); } catch (_) { _lpLoadIndex(t); return; }
+    if (v) v.play().catch(() => {});
+  } else if (v) {
+    try { v.load(); v.play().catch(() => {}); } catch (_) {}
+  }
+}
+
 function lpSeekBy(delta) {
   const v = _lpV();
   const d = v.duration || lp.duration || 0;
   if (!d) return;
-  v.currentTime = Math.min(Math.max((v.currentTime || 0) + delta, 0), d - 0.5);
+  _lpCommitSeek(Math.min(Math.max((v.currentTime || 0) + delta, 0), d - 0.5));
   _lpCtlShow(); _lpCtlTick();
 }
 
@@ -16002,7 +16080,7 @@ function _lpSeekBarInit() {
     const t = _lpScrub.t;
     _lpScrub = null;
     c.classList.remove("lp-scrub");
-    if (commit) { const v = _lpV(); try { v.currentTime = t; } catch (_) {} }
+    if (commit) _lpCommitSeek(t);
     _lpCtlShow(); _lpCtlTick();
   };
   bar.addEventListener("pointerup", end(true));
@@ -16152,6 +16230,7 @@ async function lpStop() {
   _lpExitFullscreen();
   if (_lpCtlTimer) { clearTimeout(_lpCtlTimer); _lpCtlTimer = null; }
   _lpScrub = null;
+  _lpCancelSeekVerify();
   const c = document.getElementById("localPlayer");
   _lpClearOrientLock();
   c.classList.remove("lp-active", "lp-tiny", "lp-idle", "lp-buffering", "lp-scrub", "lp-opts");
@@ -16242,9 +16321,8 @@ function _lpHideSkipOffer() {
   document.getElementById("lpSkipOffer").classList.add("hidden");
 }
 function lpAcceptSkipOffer() {
-  const v = document.getElementById("lpVideo");
   if (lp.skipOfferType === "intro") {
-    v.currentTime = Math.max(0, lp.skipOfferEnd + 1);
+    _lpCommitSeek(Math.max(0, lp.skipOfferEnd + 1));
     lp.skipDoneFor.add(lp.filePath + "#intro");
   } else if (lp.skipOfferType === "credits") {
     lp.skipDoneFor.add(lp.filePath + "#credits");
@@ -17316,6 +17394,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.10.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.10.3</div>
 </body>
 </html>
