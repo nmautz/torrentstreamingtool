@@ -1,5 +1,10 @@
 # Changelog
 
+## [10.8.2] — 2026-07-17
+- **Fixed: on-device player's seek bar (and the skip-intro/credits offers with it) could freeze mid-episode and stop responding while the video kept playing.** Everything clock-driven in the player — the seek-bar repaint, `lpEvaluateSkipOffer`, the throttled progress save, and the `lp.lastKnownT` recovery playhead — ran **only** from the `<video>` `timeupdate` event, and on iOS HLS ManagedMediaSource routinely gaps `timeupdate` for many seconds (or stops it outright) while `currentTime` keeps advancing — the same quirk the libass overlay's 250 ms clock pump (9.10.3) already works around. With `timeupdate` gone the bar froze, drags looked ignored (the seek actually committed but nothing repainted; a drag into an unbuffered region stalled playback until dragged back), skip offers never appeared or auto-fired, and progress stopped saving. The `timeupdate` handler body is now `_lpClockTick`, also driven by a 500 ms `_lpClockPump` interval whenever the player is actively playing (no-op otherwise; idempotent alongside healthy `timeupdate`), and `seeked` repaints the bar immediately so a committed seek shows at once even inside a gap.
+- **Frontend:** `static/index.html` (`_lpClockTick` / `_lpClockPump`, `seeked` repaint). **Docs:** [docs/GOTCHAS.md](docs/GOTCHAS.md), [docs/FRONTEND.md](docs/FRONTEND.md).
+- (Host-only — **no app rebuild**. Hard-refresh open dashboards; the app's offline page copy refreshes on its next online sync.)
+
 ## [10.8.1] — 2026-07-16
 - **Fixed: multi-episode library cards showed raw `<svg …>` markup instead of the Resume/Play All button.** The 10.8.0 icon migration put SVG markup inside `contLabel`, but the card template still ran it through `escHtml()` (a leftover from when the label was plain text), so the tag was escaped into visible text. The label is now inserted unescaped — it's built only from static markup and a rounded number.
 - **Frontend:** `static/index.html` (library card render).

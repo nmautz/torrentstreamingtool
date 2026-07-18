@@ -848,7 +848,10 @@ Two ways to populate the cache:
 
 ### 3. Skip-intro / credits
 
-`lpEvaluateSkipOffer(t)` runs on every `timeupdate` and mirrors the backend
+`lpEvaluateSkipOffer(t)` runs on every `_lpClockTick` — the `timeupdate`
+handler **plus** the 500 ms `_lpClockPump` fallback interval, because iOS MMS
+gaps `timeupdate` for seconds at a time while the clock advances (10.8.2; see
+[GOTCHAS.md](GOTCHAS.md)) — and mirrors the backend
 `_maybe_emit_skip_offer` — **including its per-profile auto-skip**. The current
 profile's `auto_skip_intro` / `auto_skip_credits` toggles are read live via
 `_lpAutoSkipPrefs()` (the freshly-fetched `allProfiles` entry, falling back to
@@ -866,7 +869,7 @@ re-fetch). Behaviour per window:
   leads as VLC's `SKIP_COUNTDOWN_*_SEC`) showing e.g. "Skipping Intro in 3" /
   "Next Episode in 7" / "Ending in 7", and at `t ≥ skip_point` calls
   `lpAcceptSkipOffer()` automatically (intro → seek to `end + 1`; credits →
-  `_lpAdvanceOrEnd`). The countdown is `timeupdate`-driven, so it freezes while
+  `_lpAdvanceOrEnd`). The countdown is clock-tick-driven, so it freezes while
   paused and tracks seeks, and the user can still tap the tile to skip early or
   **Hide** to cancel. Intro auto-skip only engages while there's still >1 s of
   intro left to skip (matching VLC).
@@ -879,7 +882,8 @@ The offer (`#lpSkipOffer`) renders only when the player is in full overlay
 
 ### 4. Watch progress
 
-`#lpVideo`'s `timeupdate` calls `saveProgress(itemId, filePath, posSec, durSec)`
+`_lpClockTick` (`#lpVideo`'s `timeupdate` + the `_lpClockPump` interval) calls
+`saveProgress(itemId, filePath, posSec, durSec)`
 at most once every 15 s (matches `vlc_progress_tracker`). `saveProgress` is a
 single best-effort POST to `/api/library/{id}/progress`; failure is silent
 because the next tick or flush will overwrite anyway.
@@ -1157,7 +1161,8 @@ wins (on-demand is a supplement, never a replacement).
     `currentTime` reads 0 on return — reloading there restarted playback (and the
     next 15 s progress save, which then clobbered the server's position) from the
     beginning. The player tracks a per-file last-known-good playhead (`lp.lastKnownT`,
-    fed by `timeupdate` >2 s and every `seeked`, reset by `_lpLoadIndex`) and all
+    fed by `_lpClockTick` (`timeupdate` + the 500 ms pump) >2 s and every
+    `seeked`, reset by `_lpLoadIndex`) and all
     recovery paths — `_lpReloadOnDemand`, both `recoverMediaError()` sites, the
     Safari-native `load()` reloads, the OD audio-switch reload — fall back to it
     (or `lp.resumeSec`) when `currentTime` reads ~0. `recoverMediaError()` also

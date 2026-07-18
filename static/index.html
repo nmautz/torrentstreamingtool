@@ -16314,12 +16314,47 @@ function _lpFlushProgress(useBeacon) {
   saveProgress(lp.itemId, lp.filePath, t, d);
 }
 
+// One tick of playback-clock housekeeping: last-known playhead, skip-offer
+// evaluation, seek-bar repaint, throttled progress save. Fired from `timeupdate`
+// AND from the 500 ms pump below — on iOS, HLS ManagedMediaSource routinely gaps
+// `timeupdate` for many seconds (and can stop it for good) while currentTime
+// keeps advancing, which used to freeze the seek bar mid-episode, kill the
+// skip-intro/credits offers, and stall progress saves — the same root cause the
+// libass overlay's clock pump works around (see GOTCHAS.md). Idempotent and
+// cheap, so double-firing alongside a healthy timeupdate stream is harmless.
+function _lpClockTick(v) {
+  const t = v.currentTime || 0;
+  // Track the live playhead for the recovery paths. Only above 2 s — a media
+  // element iOS reset while suspended reads 0 on return, and capturing that
+  // transient would defeat the fallback this exists for.
+  if (t > 2) lp.lastKnownT = t;
+  lpEvaluateSkipOffer(t);
+  _lpCtlTick();
+  // Throttle progress saves to once every 15 s (matches vlc_progress_tracker).
+  const now = Date.now();
+  if (now - lp.lastSaveAt > 15000 && (v.duration||0) > 0 && lp.itemId && lp.filePath) {
+    lp.lastSaveAt = now;
+    saveProgress(lp.itemId, lp.filePath, t, v.duration);
+  }
+}
+
+// Steady fallback clock driving _lpClockTick when `timeupdate` gaps (iOS MMS).
+// No-ops unless the on-device player is actively playing something.
+function _lpClockPump() {
+  const v = document.getElementById("lpVideo");
+  if (!v || !lp.itemId || v.paused || v.ended) return;
+  _lpClockTick(v);
+}
+
 function _lpAttachVideoEvents() {
   const v = document.getElementById("lpVideo");
   // Poll for a hung-fragment stall (silently-dropped-then-recovered connection
   // that never fires a fatal NETWORK_ERROR). No-ops unless the on-device player
   // is active and starved for data. See _lpStallWatch.
   setInterval(_lpStallWatch, 3000);
+  // Fallback playback clock — keeps the seek bar / skip offers / progress saves
+  // alive through iOS MMS timeupdate gaps. See _lpClockTick.
+  setInterval(_lpClockPump, 500);
   v.addEventListener("loadedmetadata", () => {
     lp.duration = v.duration || 0;
     if (!lp.resumeApplied && lp.resumeSec > 0 && lp.resumeSec < (v.duration||0) - 5) {
@@ -16327,21 +16362,7 @@ function _lpAttachVideoEvents() {
     }
     lp.resumeApplied = true;
   });
-  v.addEventListener("timeupdate", () => {
-    const t = v.currentTime || 0;
-    // Track the live playhead for the recovery paths. Only above 2 s — a media
-    // element iOS reset while suspended reads 0 on return, and capturing that
-    // transient would defeat the fallback this exists for.
-    if (t > 2) lp.lastKnownT = t;
-    lpEvaluateSkipOffer(t);
-    _lpCtlTick();
-    // Throttle progress saves to once every 15 s (matches vlc_progress_tracker).
-    const now = Date.now();
-    if (now - lp.lastSaveAt > 15000 && (v.duration||0) > 0 && lp.itemId && lp.filePath) {
-      lp.lastSaveAt = now;
-      saveProgress(lp.itemId, lp.filePath, t, v.duration);
-    }
-  });
+  v.addEventListener("timeupdate", () => _lpClockTick(v));
   // Keep the libass styled-sub overlay sized: `resize` fires when the video's
   // INTRINSIC dimensions change (the case the vendored lib misses — see
   // _lpOctopusNudge), loadeddata/playing are cheap backstops. No-ops otherwise.
@@ -16369,7 +16390,9 @@ function _lpAttachVideoEvents() {
   // even below the timeupdate threshold (a deliberate jump back to 0:00 must not
   // leave a stale high-water mark for the recovery paths to snap forward to).
   // An iOS suspend reset never fires `seeked`, so it can't sneak in here.
-  v.addEventListener("seeked", () => { lp.lastKnownT = v.currentTime || 0; _lpFlushProgress(false); });
+  // _lpCtlTick here repaints the bar at the landed position immediately — during
+  // an MMS timeupdate gap the next natural repaint could otherwise be seconds out.
+  v.addEventListener("seeked", () => { lp.lastKnownT = v.currentTime || 0; _lpCtlTick(); _lpFlushProgress(false); });
   v.addEventListener("ended", () => { _lpAdvanceOrEnd(); });
   // On-demand: when playback stalls waiting for data (initial start, or a seek
   // into a not-yet-generated region) the segment request is being held open
@@ -17204,6 +17227,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.8.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.8.2</div>
 </body>
 </html>

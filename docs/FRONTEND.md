@@ -348,7 +348,11 @@ Don't re-add the `controls` attribute. Pieces:
 - **Transport** — center cluster: ±10 s tiles (`lpSeekBy`) around a play/pause
   tile (`lpTogglePlay`, icons synced by `_lpCtlSync`).
 - **Seek bar** (`#lpSeekBar`) — bottom strip; played fill + buffered fill +
-  square handle, updated by `_lpCtlTick` on `timeupdate`/`progress`. Pointer
+  square handle, updated by `_lpCtlTick` via `_lpClockTick`
+  (`timeupdate` **plus** the 500 ms `_lpClockPump` interval — iOS MMS gaps
+  `timeupdate` for seconds at a time while the clock advances, which used to
+  freeze the bar and the skip offers; see [GOTCHAS.md](GOTCHAS.md)) and on
+  `progress`/`durationchange`/`seeked`. Pointer
   scrub (`_lpSeekBarInit`): dragging previews via `_lpScrub.t` without touching
   `currentTime`; the seek commits **once on release** (matters in on-demand
   mode, where each cold seek restarts the JIT ffmpeg). Time labels use
@@ -394,7 +398,8 @@ marks the row "ready" with no host prep. See
 [STREAMING.md § Auto-advance](STREAMING.md).
 
 `saveProgress(itemId, filePath, posSec, durSec)` is called every 15 s by
-`#lpVideo`'s `timeupdate` handler and POSTs `/api/library/{id}/progress`.
+`_lpClockTick` (`#lpVideo`'s `timeupdate` handler + the `_lpClockPump`
+interval) and POSTs `/api/library/{id}/progress`.
 **Writes with `posSec < 5` or `durSec ≤ 0` are dropped** — the server
 recomputes `completed` from `pct = position/duration`, so a t≈0 write would
 wipe a watched episode back to unwatched. The same guard lives in
