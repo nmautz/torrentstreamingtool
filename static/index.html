@@ -13953,7 +13953,61 @@ function _lpHidePreparing() {
 // Tear down any prior hls.js instance. Calling it before `v.src=…` prevents
 // a leftover hls.js from re-attaching to the new media and fighting Safari's
 // native HLS pipeline.
+// --- Auto-quality (ABR) bandwidth seeding ----------------------------------
+// hls.js's EWMA bandwidth estimator weights each throughput sample by its
+// download DURATION in seconds. On a fast LAN a whole 6 s segment arrives in
+// ~20 ms, so even dozens of back-to-back loads accumulate almost no weight
+// against the 3 s / 9 s VoD half-lives — the estimate never climbs off
+// abrEwmaDefaultEstimate (500 kbps stock) and Auto sits on the lowest rung
+// indefinitely despite a gigabit link. Down-switching is unaffected (slow
+// loads have large duration weight), so the fix is asymmetric: seed the
+// estimator optimistically and persist what we MEASURE — each big-enough
+// fragment yields a bytes/duration sample, and the median of recent samples
+// is written to localStorage to seed the next Hls instance (every episode
+// change builds a fresh instance, so a stale seed self-corrects within one
+// episode; hls.js's abandon rules bail out of a too-ambitious first fragment
+// mid-load, so a slow link never hard-stalls on a high seed). Samples are
+// taken only in bundle mode streaming from the server: on-demand segments are
+// encode-bound (their "throughput" is the transcoder, not the network) and
+// loopback device copies aren't the network either — both would poison the
+// seed. See GOTCHAS.md § "hls.js Auto quality sticks to the lowest rung".
+const LP_BW_KEY = "lpBwEstimate";
+const LP_BW_DEFAULT = 2e7;              // assume LAN-class (20 Mb/s) until measured
+const LP_BW_MIN = 1e6, LP_BW_MAX = 5e8; // sanity clamp for persisted values
+let _lpBwSamples = [];
+
+function _lpBwSeed() {
+  let v = 0;
+  try { v = Number(localStorage.getItem(LP_BW_KEY)); } catch (_) {}
+  return (v >= LP_BW_MIN && v <= LP_BW_MAX) ? v : LP_BW_DEFAULT;
+}
+
+function _lpBwNoteFrag(data) {
+  if (lp.mode !== "bundle" || lp.source === "device") return;
+  try {
+    const st = (data.frag && data.frag.stats) || data.stats;
+    if (!st || !st.loading) return;
+    const bytes = st.loaded || st.total || 0;
+    if (bytes < 300000) return;   // tiny (audio/TTFB-dominated) loads underestimate
+    const secs = (st.loading.end - st.loading.start) / 1000;
+    if (!(secs > 0)) return;
+    _lpBwSamples.push(bytes * 8 / secs);
+    if (_lpBwSamples.length > 20) _lpBwSamples.shift();
+    if (_lpBwSamples.length === 5) _lpBwPersist(); // early save for short sessions
+  } catch (_) {}
+}
+
+function _lpBwPersist() {
+  if (_lpBwSamples.length < 3) return;
+  const s = _lpBwSamples.slice().sort((a, b) => a - b);
+  const med = s[Math.floor(s.length / 2)];
+  const v = Math.round(Math.min(Math.max(med, LP_BW_MIN), LP_BW_MAX));
+  try { localStorage.setItem(LP_BW_KEY, String(v)); } catch (_) {}
+}
+
 function _lpDestroyHls() {
+  _lpBwPersist();
+  _lpBwSamples = [];
   if (lp.hls) {
     try { lp.hls.destroy(); } catch (_) {}
     lp.hls = null;
@@ -14562,6 +14616,11 @@ async function _lpLoadIndex(seekTo) {
       // encode, so raise it above the server's wait window. Harmless in bundle
       // mode (those segments load instantly). See STREAMING.md § On-Demand.
       fragLoadingTimeOut: 45000,
+      // Seed ABR with the last measured throughput (default 20 Mb/s) so Auto
+      // can start on the original rung. The stock 500 kbps seed pins Auto to
+      // the lowest rung ~forever on fast links: the duration-weighted EWMA
+      // never gains weight from millisecond-fast segment loads. See _lpBwSeed.
+      abrEwmaDefaultEstimate: _lpBwSeed(),
     });
     lp.hls = hls;
     // iOS prerolls only ~30 s under ManagedMediaSource; force a larger forward
@@ -14634,6 +14693,7 @@ async function _lpLoadIndex(seekTo) {
     // Any successfully loaded fragment means the network is back.
     hls.on(window.Hls.Events.FRAG_LOADED, (_evt, data) => {
       if (lp.netDown) _lpNetReset();
+      _lpBwNoteFrag(data);
       if (devMode) _lpDevNoteFrag(data);
     });
     hls.loadSource(masterUrl);
@@ -17256,6 +17316,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.10.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.10.2</div>
 </body>
 </html>

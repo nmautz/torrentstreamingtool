@@ -727,6 +727,15 @@ Two ways to populate the cache:
      right rung is connection-dependent and Auto is the sensible default. Safari
      native HLS auto-adapts among the variants but exposes no reliable manual
      level API, so its Res row stays hidden (auto-only).
+     **Auto's start rung is seeded, not discovered (10.10.2):** hls.js's
+     duration-weighted EWMA never climbs off its 500 kbps default on a fast LAN
+     (millisecond segment loads carry ~no weight), so Auto used to sit on the
+     lowest rung forever. The Hls config now sets `abrEwmaDefaultEstimate` from
+     `_lpBwSeed()` — the last self-measured throughput (median of ≥300 KB
+     fragment samples via `_lpBwNoteFrag`, persisted to `localStorage` in
+     `_lpBwPersist`; bundle-mode server streaming only — on-demand and
+     device-copy samples would poison it), defaulting to 20 Mb/s. See
+     [GOTCHAS.md](GOTCHAS.md) § "hls.js Auto quality sticks to the lowest rung".
      **iOS app, device-copy playback**: the downloaded master is trimmed to ONE
      rung, so `hls.levels` can't drive the menu. It's built from the bundle's
      own `meta.json` ladder instead: `"<label> — On device"` (value `dev`,
