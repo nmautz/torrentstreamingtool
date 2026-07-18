@@ -76,7 +76,7 @@ All four services (VLC, qBittorrent, Jackett, dashboard) run on the same host ex
 ## Key invariants
 
 - **VPN gating**: `/api/stream` and `/api/library/download` return 403 if `state.vpn_secure` is False. `watchdog.py` enforces the same at the process level: qBit is killed on VPN drop and not restarted until VPN reconnects.
-- **No sequential download for library items**: only stream-now uses sequential. Library items download normally so all files arrive complete.
+- **No sequential download for library items**: only stream-now uses sequential. Library items download normally so all files arrive complete. One scoped exception: `/api/library/{id}/stream-file` (play an unfinished file now) toggles sequential ON while that file is being streamed ahead of completion, and a watcher toggles it back OFF as soon as the file finishes.
 - **Track IDs are VLC ES IDs**, not sequential 1/2/3 counters. See [GOTCHAS.md](GOTCHAS.md).
 - **`state.library_item_id is not None`** means the active playback is a library item — `/api/stop` will NOT delete the torrent. See [main.py:2580](../main.py#L2580) (`stop` handler).
 

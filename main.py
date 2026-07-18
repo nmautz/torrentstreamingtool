@@ -1233,13 +1233,21 @@ async def qbit_add_magnet(
     sequential: bool = False,
 ) -> Optional[str]:
     h = extract_hash(magnet)
+    before: Optional[set] = None
+    if not h:
+        # Link-style result (indexers without magnets hand out a Jackett /dl/
+        # .torrent proxy URL) — there is no info-hash in the URI, so snapshot
+        # qBit's current torrent set NOW; after a successful add the new hash is
+        # whatever appears that wasn't in this set.
+        before = {t.get("hash", "").lower() for t in (await qbit_info_all() or [])}
     data: dict = {"urls": magnet, "savepath": save_path or settings.qbit_download_path}
     if sequential:
         # Set sequential download at add-time so it applies before any pieces download.
         # This is the qBittorrent /add API field, separate from the toggle endpoint.
         data["sequentialDownload"] = "true"
     r = await qreq("POST", "/api/v2/torrents/add", data=data)
-    if r and r.text.strip() == "Ok.":
+    ok = bool(r and r.text.strip() == "Ok.")
+    if ok and h:
         return h
     # qBit replies "Fails." (HTTP 200) when it *rejects* the add — most commonly
     # because the torrent is ALREADY in the session (a duplicate add, a prior
@@ -1253,6 +1261,24 @@ async def qbit_add_magnet(
             if await qbit_info(h):
                 return h
             await asyncio.sleep(1)
+        return None
+    if not ok:
+        return None
+    # "Ok." but the hash is unknown (link-style URL): qBit fetches the .torrent
+    # (or follows a redirect to a magnet) asynchronously, so poll for a torrent
+    # we haven't seen before. Without this, every link-only indexer result made
+    # the caller think the add failed while the torrent quietly downloaded —
+    # the "Play from search errors with 'qBittorrent rejected the magnet'" bug.
+    for _ in range(30):
+        await asyncio.sleep(1)
+        cur = await qbit_info_all() or []
+        fresh = [t for t in cur if t.get("hash", "").lower() not in before]
+        if fresh:
+            # Most-recently-added unseen torrent — guards against a concurrent
+            # unrelated add being misattributed.
+            fresh.sort(key=lambda t: t.get("added_on", 0), reverse=True)
+            got = (fresh[0].get("hash") or "").lower()
+            return got or None
     return None
 
 
@@ -9823,6 +9849,177 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
         {"ok": True, "playlist_count": len(playlist), "seek_to": seek_sec},
         status_code=202,
     )
+
+
+class LibraryStreamFileReq(BaseModel):
+    path: str                     # absolute path of the (possibly unfinished) file
+    profile_id: str = ""
+
+
+async def _sequential_off_when_complete(h: str, path: str) -> None:
+    """Watchdog for a stream-while-downloading play: once the streamed file is
+    fully downloaded (or the torrent disappears), flip the torrent's sequential
+    mode back OFF so the rest of a library download proceeds normally (the
+    "library items never download sequentially" invariant is only suspended
+    while a file is actively being streamed ahead of its completion)."""
+    try:
+        while True:
+            await asyncio.sleep(10)
+            info = await qbit_info(h)
+            if not info:
+                return                       # torrent deleted — nothing to restore
+            if not info.get("seq_dl", False):
+                return                       # already off (someone else flipped it)
+            qfiles = await qbit_files(h)
+            if not qfiles:
+                continue
+            sp = info.get("save_path", settings.qbit_download_path)
+            target = next((qf for qf in qfiles
+                           if str(Path(sp) / qf.get("name", "")) == path), None)
+            if target is None or target.get("progress", 0.0) >= 0.999:
+                await qreq("POST", "/api/v2/torrents/toggleSequentialDownload",
+                           data={"hashes": h})
+                return
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass
+
+
+async def _library_stream_file_launch(
+    item_id: str, path: str, profile_id: str, h: str,
+) -> None:
+    """Buffer-then-play for a still-downloading library file (runs as
+    state.library_play_task so /api/stop and any newer play cancel it).
+
+    Polls the target file's qBit progress until the stream-now buffer threshold
+    (settings.buffer_min_mb / buffer_min_pct — same bar as /api/stream), then
+    hands off to the shared VLC launch with a single-file playlist. No resume
+    seek: seeking past the buffered head of a sequential download stalls VLC."""
+    try:
+        first = Path(path)
+        while True:
+            info = await qbit_info(h)
+            qfiles = await qbit_files(h) if info else []
+            if info and qfiles:
+                sp = info.get("save_path", settings.qbit_download_path)
+                target = next((qf for qf in qfiles
+                               if str(Path(sp) / qf.get("name", "")) == path), None)
+                if target is None:
+                    raise RuntimeError("File not found in the torrent.")
+                f_size = target.get("size", 1) or 1
+                f_prog = target.get("progress", 0.0)
+                mb = f_size * f_prog / 1_048_576
+                pct = f_prog * 100
+                total_mb = f_size / 1_048_576
+                state.dl_speed_bps = info.get("dlspeed", 0)
+                state.ul_speed_bps = info.get("upspeed", 0)
+                await broadcast("stream_status", {
+                    "status": "buffering",
+                    "message": f"Buffering {first.name}: {mb:.1f} MB / {total_mb:.1f} MB ({pct:.1f}%)",
+                    "progress": pct, "downloaded_mb": mb, "total_mb": total_mb,
+                    "dl_speed_bps": state.dl_speed_bps, "ul_speed_bps": state.ul_speed_bps,
+                })
+                if (f_prog >= 0.999 or mb >= settings.buffer_min_mb
+                        or pct >= settings.buffer_min_pct):
+                    break
+            await asyncio.sleep(1)
+        if not first.exists():
+            raise RuntimeError("Buffered data not on disk yet — try again in a moment.")
+        # Restore normal (non-sequential) downloading once the file completes.
+        asyncio.create_task(_sequential_off_when_complete(h, path))
+        await _library_play_launch([path], item_id, profile_id, None, "auto")
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        state.stream_status = "error"
+        await broadcast("stream_status", {"status": "error", "message": str(e)})
+        await broadcast("state", state_snapshot())
+
+
+@app.post("/api/library/{item_id}/stream-file")
+async def stream_library_file(item_id: str, req: LibraryStreamFileReq) -> JSONResponse:
+    """Play a library file that hasn't finished downloading: force it to fetch
+    now-and-first (schedule override → 'high', so the download scheduler keeps
+    the boost), flip the torrent to sequential, and start VLC playback as soon
+    as the beginning is buffered. Also un-skips a file the user had deselected.
+    A file that is already complete simply passes the buffer gate instantly."""
+    if not state.vpn_secure:
+        raise HTTPException(403, "VPN not connected — downloading blocked.")
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    f = next((x for x in item.get("files", []) if x.get("path") == req.path), None)
+    if not f:
+        raise HTTPException(404, "File not found in this item.")
+    if _file_is_compressed(f):
+        raise HTTPException(409, "File was compressed in place — it can't be re-downloaded.")
+    h = item.get("torrent_hash")
+    if not h:
+        raise HTTPException(400, "This item has no torrent backing it.")
+    _assert_not_compressing(req.path)
+
+    # Route the boost through the download model (a raw filePrio write would be
+    # reverted by the scheduler's next reconcile — see queue_play). "high" both
+    # un-skips a deselected file and puts it first in the torrent's fetch order.
+    dl = item.setdefault("download", {"mode": "now", "files": {}})
+    dl.setdefault("files", {})[req.path] = "high"
+    await _apply_item_schedule(item, lib)     # reconcile priorities + resume + reactivate
+    await put_library(lib)
+    await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "downloading")})
+
+    # Sequential piece order so the beginning of the file arrives first.
+    await qbit_streaming_mode(h)
+
+    # Supersede whatever is playing/buffering (same dance as play_library_item).
+    prev_item = state.library_item_id
+    prev_profile = state.library_profile_id
+    prev_file = state.library_current_file
+    if prev_item and prev_profile and prev_file and prev_file != req.path:
+        asyncio.create_task(_finalize_stopped_file(
+            prev_item, prev_profile, prev_file,
+            float(state.vlc_time or 0), float(state.vlc_duration or 0),
+        ))
+    if state.stream_task and not state.stream_task.done():
+        state.stream_task.cancel()
+    prior = state.library_play_task
+    if prior and not prior.done():
+        prior.cancel()
+    await _cancel_skip_countdown()
+
+    prof_obj = next((p for p in lib.get("profiles", []) if p["id"] == req.profile_id), {})
+    state.stream_status = "buffering"
+    state.active_title = item["title"]
+    state.active_file = Path(req.path)
+    state.current_audio_track = -1
+    state.current_subtitle_track = -1
+    state.track_pref_applied_file = req.path
+    state.active_hash = h
+    state.library_item_id = item_id
+    state.library_profile_id = req.profile_id
+    state.library_profile_name = (prof_obj or {}).get("name", "") or ""
+    state.library_profile_color = (prof_obj or {}).get("color", "") or ""
+    state.library_item_file_count = len(item.get("files", []))
+    state.library_playlist = [req.path]
+    state.library_shuffle_order = []
+    state.library_series_map = {}
+    state.library_series_order = []
+    state.library_current_file = req.path
+    state.skip_offer = None
+    state.skip_offer_file = None
+    state.resume_offer = None
+
+    await broadcast("stream_status", {
+        "status": "buffering",
+        "message": f"Downloading the beginning of {Path(req.path).name}…",
+    })
+    await broadcast("state", state_snapshot())
+
+    state.library_play_task = asyncio.create_task(_library_stream_file_launch(
+        item_id, req.path, req.profile_id, h,
+    ))
+    return JSONResponse({"ok": True}, status_code=202)
 
 
 class ShufflePrefReq(BaseModel):

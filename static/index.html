@@ -1915,8 +1915,10 @@
 </div>
 
 <!-- ── Stream File Picker Modal ────────────────────────────────────────────── -->
+<!-- z-[60]: must stack above the search show page (z-50) AND its source/bulk sheets
+     (z-[55]) — the show page's stream-now buttons open this picker on top of them. -->
 <div id="streamPickerModal"
-  class="hidden fixed inset-0 z-50 bg-black/60
+  class="hidden fixed inset-0 z-[60] bg-black/60
          flex items-end sm:items-center justify-center sm:px-4 sm:py-6">
   <div class="bg-gray-900 w-full sm:max-w-lg flex flex-col max-h-[85vh] fade-in border-t-[3px] border-indigo-600">
     <!-- Header -->
@@ -6789,10 +6791,12 @@ function _dlFileRow(itemId, f, i){
       ? `<span class="text-[11px] text-gray-500 font-mono flex-shrink-0">${pct.toFixed(0)}%</span>`
       : (mode==="skip"?`<span class="text-[10px] text-gray-600 flex-shrink-0">Skipped</span>`:"");
   // Right action: a complete file can play to the TV (VLC) right now even while the
-  // rest of the torrent downloads; an incomplete one offers the queue-when-ready toggle.
+  // rest of the torrent downloads; an incomplete one offers stream-now (sequential
+  // fetch → play once the beginning is buffered) plus the queue-when-ready toggle.
   const action=complete
     ? `<button class="dl-play-btn flex-shrink-0 text-[10px] font-bold uppercase tracking-wide bg-emerald-900/50 hover:bg-emerald-800/60 text-emerald-200 border border-emerald-800 px-2.5 py-1 transition-colors" data-idx="${i}" title="Play this file on the TV (VLC) now"><svg class="ic" aria-hidden="true"><use href="#i-play"/></svg> Play</button>`
-    : `<button class="dl-pwr-btn flex-shrink-0 p-1.5 transition-colors ${isQueued?'text-indigo-400 hover:text-red-400':'text-gray-600 hover:text-indigo-300'}" data-idx="${i}" title="${isQueued?'Cancel — play when ready':'Play this file when it finishes'}">${isQueued?'<svg class="ic" aria-hidden="true"><use href="#i-hourglass"/></svg>':'<svg class="ic" aria-hidden="true"><use href="#i-play"/></svg>'}</button>`;
+    : `<button class="dl-snow-btn flex-shrink-0 text-[10px] font-bold uppercase tracking-wide bg-indigo-900/50 hover:bg-indigo-800/60 text-indigo-200 border border-indigo-800 px-2.5 py-1 transition-colors" data-idx="${i}" title="Download this file sequentially and play on the TV once the beginning is buffered"><svg class="ic" aria-hidden="true"><use href="#i-play"/></svg> Play now</button>
+       <button class="dl-pwr-btn flex-shrink-0 p-1.5 transition-colors ${isQueued?'text-indigo-400 hover:text-red-400':'text-gray-600 hover:text-indigo-300'}" data-idx="${i}" title="${isQueued?'Cancel — play when ready':'Play this file when it finishes'}"><svg class="ic" aria-hidden="true"><use href="#i-hourglass"/></svg></button>`;
   const bar=(pct!=null&&!complete)
     ? `<div class="h-1 bg-gray-800 overflow-hidden mt-1"><div class="${barColor} h-full" style="width:${pct}%"></div></div>`
     : "";
@@ -6845,6 +6849,12 @@ function renderDownloadFiles(itemId,files){
     btn.addEventListener("click",()=>{
       const f=cached[parseInt(btn.dataset.idx)]; if(!f) return;
       playLibraryFiles(itemId,[f.path],0,f.name);
+    });
+  });
+  el.querySelectorAll(".dl-snow-btn").forEach(btn=>{
+    btn.addEventListener("click",()=>{
+      const f=cached[parseInt(btn.dataset.idx)]; if(!f) return;
+      streamLibraryFile(itemId,f.path).then(ok=>{ if(ok) refreshDownloadFiles(itemId); });
     });
   });
   el.querySelectorAll(".dl-pwr-btn").forEach(btn=>{
@@ -6917,6 +6927,31 @@ async function epDownloadSkipped(itemId, filePath, btn){
     if(epItemId===itemId) refreshEpFiles();
     showAlert("Downloading this file now.","success");
   });
+}
+
+// Stream a still-downloading library file NOW: the server forces the file to
+// fetch first (schedule → "high"), flips the torrent sequential, and starts VLC
+// once the beginning is buffered (same threshold as Search-tab stream-now).
+async function streamLibraryFile(itemId,filePath){
+  if(!app.vpn_secure){ showAlert("VPN not connected — downloading blocked.","error"); return false; }
+  const r=await fetch(`/api/library/${itemId}/stream-file`,{
+    method:"POST",headers:{"Content-Type":"application/json"},
+    body:JSON.stringify({path:filePath,profile_id:profile.id||""}),
+  });
+  if(r.ok){
+    showAlert("Buffering on the TV — plays as soon as the beginning is downloaded.","success");
+    return true;
+  }
+  const e=await r.json().catch(()=>({detail:"Could not start."}));
+  showAlert(e.detail||"Could not start.","error");
+  return false;
+}
+
+// Episode-card tap on a not-yet-downloaded episode: stream it now (see above).
+async function epStreamNow(i){
+  const f=epFiles[i]; if(!f) return;
+  const fid=f.item_id||epItemId;
+  if(await streamLibraryFile(fid,f.path)) refreshEpFiles();
 }
 
 async function queuePlayFile(itemId,filePath){
@@ -7733,12 +7768,16 @@ function _epCardHtml(f){
     : `<p class="text-[11px] text-gray-600 mt-1 truncate font-mono">${escHtml(f.name)}</p>`;
 
   return `<div class="ep-card px-2 sm:px-5 ${isNowPlaying?'playing':''} ${notDownloaded?'opacity-60':''}" data-path="${escHtml(f.path)}">
-      <!-- Still / thumbnail; click plays from this episode (skipped files aren't on disk) -->
-      <div class="ep-still" ${notDownloaded?`onclick="showAlert('Not downloaded — this file was skipped from the download.','warn')"`:`onclick="epPlayFrom(${epIdx})"`} role="button" aria-label="${notDownloaded?'Not downloaded':'Play episode'}">
+      <!-- Still / thumbnail; click plays from this episode. A not-yet-downloaded
+           torrent-backed file streams NOW (sequential fetch → play when buffered);
+           only a compressed/torrentless missing file stays unplayable. -->
+      <div class="ep-still" ${notDownloaded?(epHasTorrent&&!f.compressed?`onclick="epStreamNow(${epIdx})"`:`onclick="showAlert('Not downloaded — and this file can\\'t be fetched (no torrent backing it).','warn')"`):`onclick="epPlayFrom(${epIdx})"`} role="button" aria-label="${notDownloaded?(epHasTorrent&&!f.compressed?'Stream now (downloads first)':'Not downloaded'):'Play episode'}" ${notDownloaded&&epHasTorrent&&!f.compressed?`title="Not downloaded yet — tap to download sequentially and play once the beginning is buffered"`:""}>
         ${stillBlock}
         ${progressBar}
         ${notDownloaded
-          ? `<div class="ep-play-overlay" style="opacity:1"><svg class="w-8 h-8 text-orange-300" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/></svg></div>`
+          ? (epHasTorrent&&!f.compressed
+            ? `<div class="ep-play-overlay" style="opacity:1"><svg class="w-9 h-9 text-sky-300" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></div>`
+            : `<div class="ep-play-overlay" style="opacity:1"><svg class="w-8 h-8 text-orange-300" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" d="M18.364 18.364A9 9 0 005.636 5.636m12.728 12.728A9 9 0 015.636 5.636m12.728 12.728L5.636 5.636"/></svg></div>`)
           : `<div class="ep-play-overlay"><svg class="w-9 h-9" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg></div>`}
       </div>
       <div class="flex-1 min-w-0 flex flex-col">
@@ -9102,7 +9141,14 @@ async function selectStreamFile(fileIndex){
   if(!r.ok){
     const e=await r.json().catch(()=>({detail:"Stream failed"}));
     showAlert(e.detail||"Could not start stream.","error");
+    return;
   }
+  // Stream started — if this play came from the show page (smart search /
+  // Explore stream-now), drop back to the dashboard so the buffering /
+  // now-playing card is visible. No-ops for the classic Search-tab flow.
+  if(!document.getElementById("ssSourceSheet").classList.contains("hidden")) ssCloseSourceSheet();
+  const _sp=document.getElementById("searchShowPage");
+  if(_sp && !_sp.classList.contains("hidden")) closeSearchShow();
 }
 
 async function openStreamPicker(magnet, title, btn){
@@ -9122,6 +9168,7 @@ async function openStreamPicker(magnet, title, btn){
   document.getElementById("streamPickerModal").classList.remove("hidden");
 
   document.querySelectorAll(".play-btn").forEach(b=>{b.disabled=true;});
+  const prevBtnHtml=btn.innerHTML;   // restore verbatim — callers include icon-only buttons
   btn.textContent="Fetching…";
   streamPrepAbort=new AbortController();
 
@@ -9170,7 +9217,7 @@ async function openStreamPicker(magnet, title, btn){
     showAlert(err.message,"error");
   } finally{
     streamPrepAbort=null;
-    btn.innerHTML=ic("play")+" Play";
+    btn.innerHTML=prevBtnHtml;
     document.querySelectorAll(".play-btn").forEach(b=>{b.disabled=false;});
   }
 }
@@ -10435,21 +10482,50 @@ function _ssEpRowHtml(e){
   const badge=_ssAudioBadgeHtml(best);
   const miss=(_ssAudioPref!=="any"&&!_ssAudioMatch(best))
     ?`<span class="text-[9px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-red-950/70 text-red-400 whitespace-nowrap">${_ssAudioPref==="eng"?"No Eng audio":"Dub only"}</span>`:"";
-  return `<button onclick="ssOpenSourceSheet(${e.season},${e.episode})"
-    class="w-full text-left px-3 sm:px-5 py-3 hover:bg-gray-800/50 transition-colors flex items-center gap-3">
-    <div class="text-[11px] font-mono font-bold text-indigo-400 w-14 flex-shrink-0">${code}</div>
-    <div class="min-w-0 flex-1">
-      <p class="text-sm text-gray-200 truncate">${name?escHtml(name):`Episode ${e.episode}`}</p>
-      <p class="text-[11px] text-gray-500 flex items-center gap-1.5 flex-wrap">
-        <span class="font-mono font-semibold ${sc}">${best.seeders} ↑</span> ·
-        ${escHtml(best.size_human)} · ${e.sources.length} source${e.sources.length>1?"s":""}
-        ${badge}${miss}
-      </p>
-    </div>
-    <svg class="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-      <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
-    </svg>
-  </button>`;
+  return `<div class="w-full flex items-stretch">
+    <button onclick="ssOpenSourceSheet(${e.season},${e.episode})"
+      class="flex-1 min-w-0 text-left px-3 sm:px-5 py-3 hover:bg-gray-800/50 transition-colors flex items-center gap-3">
+      <div class="text-[11px] font-mono font-bold text-indigo-400 w-14 flex-shrink-0">${code}</div>
+      <div class="min-w-0 flex-1">
+        <p class="text-sm text-gray-200 truncate">${name?escHtml(name):`Episode ${e.episode}`}</p>
+        <p class="text-[11px] text-gray-500 flex items-center gap-1.5 flex-wrap">
+          <span class="font-mono font-semibold ${sc}">${best.seeders} ↑</span> ·
+          ${escHtml(best.size_human)} · ${e.sources.length} source${e.sources.length>1?"s":""}
+          ${badge}${miss}
+        </p>
+      </div>
+      <svg class="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+      </svg>
+    </button>
+    <button onclick="ssPlayEpisode(${e.season},${e.episode},this)" title="Stream now — plays on the TV without saving to the library"
+      class="play-btn flex-shrink-0 w-12 sm:w-14 flex items-center justify-center text-indigo-400 hover:text-white hover:bg-indigo-700 border-l border-gray-800/60 transition-colors disabled:opacity-40">
+      <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+    </button>
+  </div>`;
+}
+
+// Stream-now for an episode row: plays the preference-best source immediately via
+// the Search-tab stream pipeline (sequential buffer → VLC), no library save.
+function ssPlayEpisode(season,episode,btn){
+  const e=_ssEpisodes.find(x=>x.season===season&&x.episode===episode);
+  if(!e||!e.sources.length) return;
+  const best=_ssPreferredSource(e.sources);
+  openStreamPicker(best.magnet,best.title,btn);
+}
+
+// Stream-now for a specific source inside the per-episode source sheet.
+function ssPlaySource(season,episode,i,btn){
+  const e=_ssEpisodes.find(x=>x.season===season&&x.episode===episode);
+  if(!e||!e.sources[i]) return;
+  openStreamPicker(e.sources[i].magnet,e.sources[i].title,btn);
+}
+
+// Stream-now for a pack/movie row: multi-file packs open the stream file picker
+// so the user chooses which episode to play.
+function ssPlayPack(i,btn){
+  const p=_ssPacks[i]; if(!p) return;
+  openStreamPicker(p.magnet,p.title,btn);
 }
 
 // A missing episode (TMDb lists it, no torrent found) — greyed, with a per-row
@@ -10572,23 +10648,29 @@ function _ssRenderPacks(){
   body.innerHTML=`<div class="divide-y divide-gray-800">`+_ssPacks.map((p,i)=>{
     const sc=p.seeders>30?"text-green-400":p.seeders>8?"text-yellow-400":"text-red-400";
     const dim=(_ssAudioPref!=="any"&&!_ssAudioMatch(p))?" opacity-50":"";
-    return `<button onclick="ssDownloadPack(${i})"
-      class="w-full text-left px-3 sm:px-5 py-3 hover:bg-gray-800/50 transition-colors flex items-center gap-3${dim}">
-      <div class="min-w-0 flex-1">
-        <div class="flex items-center gap-2 mb-0.5 flex-wrap">
-          <span class="text-[10px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-indigo-900/60 text-indigo-300">${escHtml(_ssPackLabel(p))}</span>
-          ${_ssAudioBadgeHtml(p)}
+    return `<div class="w-full flex items-stretch${dim}">
+      <button onclick="ssDownloadPack(${i})"
+        class="flex-1 min-w-0 text-left px-3 sm:px-5 py-3 hover:bg-gray-800/50 transition-colors flex items-center gap-3">
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-2 mb-0.5 flex-wrap">
+            <span class="text-[10px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-indigo-900/60 text-indigo-300">${escHtml(_ssPackLabel(p))}</span>
+            ${_ssAudioBadgeHtml(p)}
+          </div>
+          <p class="text-sm text-gray-200 truncate">${escHtml(p.title)}</p>
+          <p class="text-[11px] text-gray-500">
+            <span class="font-mono font-semibold ${sc}">${p.seeders} ↑</span> · ${escHtml(p.size_human)}
+            ${p.tracker?` · <span class="text-gray-600">${escHtml(p.tracker)}</span>`:""}
+          </p>
         </div>
-        <p class="text-sm text-gray-200 truncate">${escHtml(p.title)}</p>
-        <p class="text-[11px] text-gray-500">
-          <span class="font-mono font-semibold ${sc}">${p.seeders} ↑</span> · ${escHtml(p.size_human)}
-          ${p.tracker?` · <span class="text-gray-600">${escHtml(p.tracker)}</span>`:""}
-        </p>
-      </div>
-      <svg class="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
-      </svg>
-    </button>`;
+        <svg class="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+        </svg>
+      </button>
+      <button onclick="ssPlayPack(${i},this)" title="Stream now — plays on the TV without saving to the library"
+        class="play-btn flex-shrink-0 w-12 sm:w-14 flex items-center justify-center text-indigo-400 hover:text-white hover:bg-indigo-700 border-l border-gray-800/60 transition-colors disabled:opacity-40">
+        <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+      </button>
+    </div>`;
   }).join("")+`</div>`;
   if(!_ssPacks.length){
     // Distinguish "haven't searched yet" (TMDb-first, before the user tapped
@@ -10633,15 +10715,21 @@ function ssOpenSourceSheet(season,episode){
     const sc=s.seeders>30?"text-green-400":s.seeders>8?"text-yellow-400":"text-red-400";
     const dim=(_ssAudioPref!=="any"&&!_ssAudioMatch(s))?" opacity-50":"";
     const badge=_ssAudioBadgeHtml(s);
-    return `<button onclick="ssPickSource(${season},${episode},${i})"
-      class="w-full text-left p-3 bg-gray-950 hover:bg-gray-800 border border-gray-800 hover:border-indigo-700 transition-colors${dim}">
-      <p class="text-xs text-gray-200 line-clamp-2 mb-1">${escHtml(s.title)}</p>
-      <p class="text-[11px] text-gray-500 flex items-center gap-1.5 flex-wrap">
-        <span class="font-mono font-semibold ${sc}">${s.seeders} ↑</span> · ${escHtml(s.size_human)}
-        ${s.tracker?` · <span class="text-gray-600">${escHtml(s.tracker)}</span>`:""}
-        ${badge}
-      </p>
-    </button>`;
+    return `<div class="w-full flex items-stretch bg-gray-950 border border-gray-800 hover:border-indigo-700 transition-colors${dim}">
+      <button onclick="ssPickSource(${season},${episode},${i})" title="Save to library (download)"
+        class="flex-1 min-w-0 text-left p-3 hover:bg-gray-800 transition-colors">
+        <p class="text-xs text-gray-200 line-clamp-2 mb-1">${escHtml(s.title)}</p>
+        <p class="text-[11px] text-gray-500 flex items-center gap-1.5 flex-wrap">
+          <span class="font-mono font-semibold ${sc}">${s.seeders} ↑</span> · ${escHtml(s.size_human)}
+          ${s.tracker?` · <span class="text-gray-600">${escHtml(s.tracker)}</span>`:""}
+          ${badge}
+        </p>
+      </button>
+      <button onclick="ssPlaySource(${season},${episode},${i},this)" title="Stream now — plays on the TV without saving to the library"
+        class="play-btn flex-shrink-0 w-12 flex items-center justify-center text-indigo-400 hover:text-white hover:bg-indigo-700 border-l border-gray-800/60 transition-colors disabled:opacity-40">
+        <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+      </button>
+    </div>`;
   }).join("");
   document.getElementById("ssSourceSheet").classList.remove("hidden");
 }
@@ -17828,6 +17916,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.0.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.1.0</div>
 </body>
 </html>
