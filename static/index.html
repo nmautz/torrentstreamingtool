@@ -14126,10 +14126,13 @@ function _lpKickLoader() {
 // paused or fully-buffered it can legitimately go that long without fetching —
 // so the session (and its segment dir) can be reaped out from under live
 // playback. The next fetch then 410s and the generic reconnect loop would just
-// retry the DEAD session URL forever ("stuck reconnecting"). Two pieces avoid
-// that: a keepalive ping keeps the session warm, and a 410 triggers a full
-// re-prepare instead of a dead-session retry — which also seamlessly promotes
-// playback to the now-ready full bundle if the background prep finished.
+// retry the DEAD session URL forever ("stuck reconnecting"). Three pieces avoid
+// that: a keepalive ping keeps the session warm; a keepalive that answers 410
+// silently re-attaches the session in place (`_lpOdResurrect` — covers the
+// pause-through-sleep case where frozen timers let the reaper win); and a 410
+// on a real fetch triggers a full re-prepare instead of a dead-session retry —
+// which also seamlessly promotes playback to the now-ready full bundle if the
+// background prep finished.
 
 let _lpOdKeepAliveAt = 0;       // last keepalive ping (ms), throttle gate
 let _lpReloading = false;       // guards _lpReloadOnDemand against re-entry
@@ -14137,14 +14140,56 @@ let _lpReloading = false;       // guards _lpReloadOnDemand against re-entry
 // Touch the OD session so its last_access stays fresh even when we're not
 // fetching segments (paused / fully buffered). Called from the 3 s stall-watch
 // tick; self-throttled to ~30 s. No-op outside on-demand mode.
-function _lpOdKeepAlive() {
+//
+// The keepalive can still lose to the reaper when the page's timers freeze
+// entirely — system/display sleep, or a long-backgrounded tab (the classic
+// case: pause on a laptop, come back later). So the ping also LOOKS at the
+// response: a 410 means the session is already gone, and rather than waiting
+// for playback to drain the buffer and trip the visible mid-watch reload
+// (`_lpReloadOnDemand` — "Reconnecting…" + a cold ffmpeg spin-up), we
+// resurrect the session silently right now (`_lpOdResurrect`). `play` and the
+// foreground-return handler force an immediate un-throttled check for the
+// same reason: the first tick after a wake should heal the session before the
+// user notices anything.
+function _lpOdKeepAlive(force) {
   if (lp.mode !== "ondemand" || !lp.odKey || !lp.itemId) return;
   const now = Date.now();
-  if (now - _lpOdKeepAliveAt < 30000) return;
+  if (!force && now - _lpOdKeepAliveAt < 30000) return;
   _lpOdKeepAliveAt = now;
   // master.m3u8 is a tiny static response; GETting it refreshes last_access.
   fetch(`/api/library/ondemand/${lp.odKey}/master.m3u8`, { cache: "no-store" })
+    .then(r => { if (r.status === 410) _lpOdResurrect(); })
     .catch(() => {});
+}
+
+// The reaper beat the keepalive (timers frozen through the 90 s idle window —
+// sleep/lid-close, backgrounded tab). Re-POST /stream-ondemand: the session
+// key is deterministic per (source, audio track), so the server re-attaches
+// at the SAME master_url and the live hls.js instance / <video> never notices
+// — the still-buffered content keeps playing untouched, works equally while
+// paused, and the next segment fetch just restarts the encode at that
+// position. Only if the re-attach resolves to a DIFFERENT key (saved audio
+// pick changed elsewhere) do we fall back to the visible full reload. On
+// fetch failure we do nothing: the next keepalive tick retries, and the 410
+// machinery in the hls.js error handler still backstops live playback.
+let _lpOdResurrecting = false;
+async function _lpOdResurrect() {
+  if (_lpOdResurrecting || lp.mode !== "ondemand" || !lp.itemId || !lp.filePath) return;
+  _lpOdResurrecting = true;
+  const filePath = lp.filePath;
+  try {
+    const r = await fetch(`/api/library/${lp.itemId}/stream-ondemand`, {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ file_path: filePath, profile_id: (profile && profile.id) || "" }),
+    });
+    if (!r.ok) return;
+    const od = await r.json();
+    if (lp.filePath !== filePath || lp.mode !== "ondemand") return;  // raced a stop/advance
+    const key = _odKeyFromUrl(od.master_url);
+    if (key && key !== lp.odKey) { _lpReloadOnDemand("session re-keyed"); return; }
+    console.warn("[lp] on-demand session resurrected in place after reap");
+  } catch (_) {
+  } finally { _lpOdResurrecting = false; }
 }
 
 // The OD session is gone (reaped / expired → 410). Re-run the prepare flow at
@@ -16548,7 +16593,10 @@ function _lpAttachVideoEvents() {
     }
   });
   // Custom control overlay sync (see "Custom player controls" section).
-  v.addEventListener("play",  () => { _lpCtlSync(); _lpCtlShow(); });
+  // The un-throttled keepalive check on resume heals an OD session the reaper
+  // took while the page's timers were frozen (sleep/backgrounded pause) before
+  // the drained buffer can force a visible mid-watch reload.
+  v.addEventListener("play",  () => { _lpCtlSync(); _lpCtlShow(); _lpOdKeepAlive(true); });
   v.addEventListener("pause", () => { _lpCtlSync(); _lpCtlShow(); _lpFlushProgress(false); });
   v.addEventListener("volumechange",   () => _lpCtlSync());
   v.addEventListener("durationchange", () => _lpCtlTick());
@@ -16607,6 +16655,7 @@ function _lpAttachVideoEvents() {
   document.addEventListener("visibilitychange", () => {
     if (document.visibilityState === "hidden") _lpFlushProgress(false);
     else {
+      _lpOdKeepAlive(true);   // heal a reaped OD session the moment we're back
       setTimeout(_lpRecoverActiveSub, 400);
       setTimeout(_lpRecoverMediaPipeline, 600);
     }
@@ -17394,6 +17443,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.10.3</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">10.10.4</div>
 </body>
 </html>

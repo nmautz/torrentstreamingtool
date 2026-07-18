@@ -1158,10 +1158,26 @@ wins (on-demand is a supplement, never a replacement).
 - **Session keepalive & 410 recovery.** The OD session is short-lived (the reaper
   deletes it `OD_SESSION_IDLE_SECS` after the last fetch), but the player buffers far
   ahead and — paused / fully buffered — can out-wait that window, so the session can be
-  reaped mid-watch. Two client pieces keep that from wedging playback:
-  - `_lpOdKeepAlive()` (called from the 3 s `_lpStallWatch` tick, self-throttled to
+  reaped mid-watch. Three client pieces keep that from wedging playback:
+  - `_lpOdKeepAlive(force?)` (called from the 3 s `_lpStallWatch` tick, self-throttled to
     ~30 s) GETs the session's `master.m3u8` while `lp.mode==="ondemand"`, refreshing the
     server's `last_access` even when no segments are being fetched.
+  - **Silent in-place resurrect (10.10.4).** The keepalive can still *lose* when the
+    page's timers freeze through the whole 90 s idle window — system/display sleep or a
+    long-backgrounded tab, the classic "paused on a laptop, came back later" case. So
+    the keepalive inspects its response: on `410` it calls `_lpOdResurrect()`, which
+    re-POSTs `/stream-ondemand` for the current file. Because `_od_session_key` is
+    deterministic per (source, audio track), the server re-attaches at the **same
+    `master_url`** — the live hls.js instance and its buffered content are untouched
+    (works equally while paused; the next segment fetch just restarts the encode at
+    that position). This heads off the *visible* mid-watch reload below, which
+    previously read as "resume after a pause has to reload from the server". `play`
+    and the foreground-return `visibilitychange` handler force an un-throttled check
+    (`_lpOdKeepAlive(true)`) so the heal races ahead of the user noticing; wake from
+    display-sleep (no `visibilitychange` fires) is covered by the stall-watch tick
+    resuming. If the re-attach resolves to a *different* key (a saved audio pick
+    changed elsewhere) it falls back to `_lpReloadOnDemand`; on fetch failure it does
+    nothing and the next tick retries.
   - When a fetch still 410s (a reap won the race, or the tab was backgrounded with
     throttled timers), `_lpReloadOnDemand(reason)` re-runs `_lpLoadIndex` at the current
     playhead instead of the dead-session retry loop. **"Current playhead" must not
