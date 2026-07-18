@@ -1,5 +1,9 @@
 # Changelog
 
+## [10.10.1] — 2026-07-17
+- **Fix: credit skip could jump several episodes ahead.** `vlc_progress_tracker` reads position/duration from `status.json` and the current file from a separate `playlist.json` call; on the tick straddling an episode transition it paired the *outgoing* episode's near-credits position with the *incoming* episode's skip metadata. Since sibling episodes have similar `credits_start` times, that instantly (re)fired the auto-skip-credits countdown on the just-started episode — which could chain, landing playback a few episodes past the intended next one. The skip-offer evaluation now sits out any tick where the current file just changed (mirroring the 8.0.3 progress-save consistency fix); the next 2 s tick evaluates with consistent data. `main.py` (`vlc_progress_tracker`). Docs: [docs/GOTCHAS.md](docs/GOTCHAS.md), [docs/ANALYZER.md](docs/ANALYZER.md).
+- (Host-only — **no app rebuild**. Server update + restart required.)
+
 ## [10.10.0] — 2026-07-17
 - **"Use My Computer" now actually frees the PC with the TV UI around, and the dashboard can't pop over the desktop anymore.** Four fixes:
   1. **Pausing gets the kiosk off the screen.** The pause endpoint only minimized VLC — but the TV dashboard kiosk is deliberately left running fullscreen *behind* VLC, so the "desktop" the user got was the fullscreen web UI. Pause now also clears the kiosk's screen claim (`tv_ui_active`) and minimizes its Chrome window (`_minimize_tv_browser_windows`, same technique as VLC's).

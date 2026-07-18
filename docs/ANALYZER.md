@@ -111,6 +111,8 @@ prepped content is the right population.) On macOS prep is disabled
 3. **Credits window**: if `pos ≥ credits_start - 2s` and not at the very end — with auto-skip on (profile pref + `pos ≥ credits_start`) start the **credits countdown**; otherwise set `state.skip_offer = {type:"credits", credits_start, file_path, has_next, next_file_path}`
 4. **Outside any window** → clear offer
 
+**Transition-tick guard (10.10.1):** the tick's `pos/dur` come from `status.json` while the current file resolves from a separate `playlist.json` call, so the tick straddling an episode change can pair the outgoing episode's near-credits position with the incoming episode's metadata — which used to fire the credits countdown instantly on the new episode and chain the skip several episodes ahead. The tracker now skips the offer evaluation on any tick where the file just changed (`file_changed`). See [GOTCHAS.md § straddle](GOTCHAS.md).
+
 The `SKIP_PREROLL_SEC = 2.0` ([main.py:1352](../main.py#L1352)) gives the user 2 s of visual time to react before the range starts.
 
 `state.skip_offer_file` carries the file path while an offer is active. After acting/dismissing, it gets a `#intro-done` / `#credits-done` suffix so the same offer doesn't re-emit on the next tick.

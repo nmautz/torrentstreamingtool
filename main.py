@@ -6853,6 +6853,19 @@ async def vlc_progress_tracker() -> None:
                         and cur_file != series_prev_file
                         and state.library_item_id == prev_item_id)
 
+            # pos_sec/dur_sec came from status.json but cur_file from a SEPARATE
+            # playlist.json call — on the tick that straddles an episode
+            # transition they describe different files (same class of bug as the
+            # 8.0.3 progress-save fix below). Sibling episodes share similar
+            # credits_start times, so pairing the outgoing file's near-credits
+            # position with the incoming file's skip metadata fired the
+            # auto-skip-credits countdown the instant a new episode started —
+            # chaining the credit skip several episodes ahead. Mark the tick so
+            # the skip-offer evaluation sits it out (the next 2 s tick is
+            # consistent).
+            file_changed = bool(series_prev_file and cur_file
+                                and cur_file != series_prev_file)
+
             # Merged-series playback spans multiple items (one per episode torrent).
             # Keep state.library_item_id pointed at the item that owns the file VLC
             # is actually playing so everything below (skip offers, track prefs,
@@ -6892,7 +6905,8 @@ async def vlc_progress_tracker() -> None:
                         _cancel_pending_watch()
                     meta = _find_file_meta(item_q, cur_file)
                     prefs = _skip_settings_for_profile(lib_q, state.library_profile_id)
-                    await _maybe_emit_skip_offer(item_q, cur_file, meta, prefs, pos_sec, dur_sec)
+                    if not file_changed:
+                        await _maybe_emit_skip_offer(item_q, cur_file, meta, prefs, pos_sec, dur_sec)
 
             # Apply saved track prefs when VLC advances to a new episode. This
             # runs on the 2 s cadence — it used to sit under the 15 s progress
