@@ -1,5 +1,11 @@
 # Changelog
 
+## [11.5.2] — 2026-07-20
+- **Fix: 4K / 2160p sources failed to prep with "Conversion failed!"** The HLS encoder hardcoded H.264 `-level 4.1` on every rendition, but level 4.1 caps at ~1080p. On a 4K source (e.g. *Your Name* 2160p BD) NVENC rejected the full-res rung with `InitializeEncoder failed: Invalid Level` (error -22), which killed the whole job — both the all-GPU and CPU-decode fallback paths — so the prep never produced a bundle. The level is now chosen from the **output height** (4.1 ≤1080p, 5.0 ≤1440p, 5.2 for 4K), so high-res rungs encode correctly while 1080p-and-below keep the widely-compatible 4.1.
+  - Same fix applied to the on-demand JIT transcode (`_od_build_ffmpeg_args`, which encodes at source resolution) and the shareable-clip encoder (`_build_clip`, now caps clips at 1080p).
+- **Backend:** `main.py` — `_encode_video` / `_od_build_ffmpeg_args` level-by-height; `_build_clip` 1080p downscale cap.
+- (Host-only — **no app rebuild**. Server update + restart required; re-prep any 4K titles that previously failed.)
+
 ## [11.5.1] — 2026-07-20
 - **Fix: Explore filters no longer return a near-empty page.** A strict filter — especially **9+ ★** — used to come back with only a handful of tiles. Two causes, both fixed:
   - **Backend vote-count floor was too aggressive.** `/api/tmdb/explore` applied a flat `vote_count.gte=200` to every rating filter; almost nothing rated 9.0+ clears 200 votes, so *9+ ★* returned ~3 total results. The floor now **scales with the rating bar** (25 at ≥9.0, 100 at ≥8.5, 200 below) — a 9.0 mean over 25 votes is still a real signal — taking *9+ ★* from ~3 to ~80+ matches while still excluding 1-vote junk.

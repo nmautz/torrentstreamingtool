@@ -550,6 +550,21 @@ Failures inside the parallel `gather(..., return_exceptions=True)` are silently 
 
 ## Stream to Device (HLS)
 
+### H.264 `-level` must scale with the OUTPUT resolution — 4.1 kills 4K encodes
+
+H.264 level 4.1 caps at ~1080p (2.1 MP frame). Hardcoding `-level:v 4.1` on a
+2160p rung makes NVENC (and libx264) abort at init with
+`InitializeEncoder failed: invalid param (8): Invalid Level` → task error `-22`
+→ **the whole ffmpeg job dies** with a bare `Conversion failed!` and Windows
+`rc=4294967274`. This killed *both* the all-GPU and the CPU-decode fallback
+paths, so a 4K source (e.g. *Your Name* 2160p BD) never produced a bundle. The
+level is now derived from the output height in `_encode_video`: `4.1` ≤1080p,
+`5.0` ≤1440p, `5.2` for 4K. Same rule applies to any path that encodes at
+**source** resolution with no scale filter — `_od_build_ffmpeg_args` (on-demand
+JIT) takes a `src_height`; `_build_clip` sidesteps it entirely by capping clips
+at 1080p (`scale=-2:'min(1080,ih)'`). If you add a new encode path, don't copy
+the old flat `4.1` — pick the level from the actual output height.
+
 ### Bundles live BESIDE the media now (v8) — resolve via `_offline_cache_dir`, never `OFFLINE_CACHE / key`
 
 As of `OFFLINE_CACHE_VERSION = "v8-colocated"` each bundle lives in

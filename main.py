@@ -18502,7 +18502,14 @@ def _build_hls_ffmpeg_args(
         if v.get("maxrate"):
             a += [f"-maxrate:v:{i}", f"{v['maxrate']}k",
                   f"-bufsize:v:{i}", f"{v['bufsize']}k"]
-        a += [f"-profile:v:{i}", "high", f"-level:v:{i}", "4.1"]
+        # H.264 level must be high enough for the OUTPUT resolution or the
+        # encoder refuses to init ("Invalid Level" → NVENC/x264 error -22 →
+        # whole job dies). Level 4.1 caps at ~1080p (2.1 MP frame); a 4K/2160p
+        # rung needs 5.x. `-2:<h>` keeps 16:9-ish widths, so height alone is a
+        # safe proxy: 5.2 covers 4K up to 60fps with room to spare.
+        out_h = int(v.get("height") or 0)
+        level = "4.1" if out_h <= 1080 else ("5.0" if out_h <= 1440 else "5.2")
+        a += [f"-profile:v:{i}", "high", f"-level:v:{i}", level]
         return a
 
     for i, v in enumerate(videos):
@@ -22297,6 +22304,7 @@ _OD_FONT_RE = re.compile(r"^font_\d+\.[A-Za-z0-9]+$")
 def _od_build_ffmpeg_args(
     ffmpeg: str, src: Path, audio_idx: int, has_audio: bool,
     start_seg: int, use_nvenc: bool, hw_decode: bool = True,
+    src_height: int = 0,
 ) -> list[str]:
     """JIT ffmpeg command: transcode from segment `start_seg` forward, emitting
     mpegts HLS segments named seg_<start_seg>.ts, seg_<start_seg+1>.ts, … . All
@@ -22324,8 +22332,12 @@ def _od_build_ffmpeg_args(
     else:
         args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
                  "-threads", str(OFFLINE_FFMPEG_THREADS)]
+    # This path transcodes at SOURCE resolution (no scale filter), so a 4K
+    # source needs a level above 4.1 or the encoder aborts with "Invalid Level"
+    # (error -22), tearing down the session. 4.1 caps at ~1080p; 5.2 covers 4K.
+    level = "4.1" if src_height <= 1080 else ("5.0" if src_height <= 1440 else "5.2")
     args += [
-        "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", "4.1",
+        "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", level,
         "-force_key_frames", f"expr:gte(t,n_forced*{OD_SEGMENT_SECS})",
     ]
     if has_audio:
@@ -22394,6 +22406,7 @@ async def _od_start_encode(session: dict, start_seg: int) -> None:
     args = _od_build_ffmpeg_args(
         ffmpeg, Path(session["src"]), session["audio_idx"],
         session["has_audio"], start_seg, use_nvenc, hw_decode,
+        src_height=int(v.get("height") or 0),
     )
     cmd = _ffmpeg_nice_prefix() + args
     hls_log.info("ondemand %s START seg=%d nvenc=%s hwdec=%s cmd: %s",
@@ -22777,6 +22790,10 @@ async def _build_clip(src: Path, start: float, dur: float, audio_idx: int,
         ffmpeg, "-y", "-hide_banner", "-loglevel", "error",
         "-ss", f"{max(0.0, start):.3f}", "-i", str(src), "-t", f"{dur:.3f}",
         "-map", "0:v:0", "-map", f"0:a:{max(0, audio_idx)}?",
+        # Cap the clip at 1080p (downscale only — never upscales when ih≤1080).
+        # A 4K source would otherwise exceed H.264 level 4.1 below and fail to
+        # encode ("Invalid Level"); 1080p also keeps shareable clips small.
+        "-vf", "scale=-2:'min(1080,ih)'",
     ]
     if use_nvenc:
         args += ["-c:v", "h264_nvenc", "-preset", "medium", "-rc", "vbr", "-cq", "23"]
