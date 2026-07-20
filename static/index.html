@@ -1725,6 +1725,10 @@
           </button>
         </div>
         <p id="ssOverview" class="text-xs sm:text-sm text-gray-300 mt-2 line-clamp-3 sm:line-clamp-4"></p>
+        <div id="ssTheaterBanner" class="hidden mt-2 flex items-start gap-2 bg-amber-950/60 border border-amber-800/70 px-2.5 py-1.5">
+          <svg class="w-4 h-4 flex-shrink-0 text-amber-400 mt-0.5" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-warn"/></svg>
+          <p data-txt class="text-[10px] sm:text-xs text-amber-200 uppercase tracking-wide font-bold leading-snug"></p>
+        </div>
       </div>
     </div>
   </div>
@@ -2319,13 +2323,46 @@
          filters. Tiles open the same search show page as TMDb-first results. -->
     <div id="exploreTab" class="hidden">
       <div id="exploreFilters" class="hidden mb-4 space-y-2">
+        <!-- Inline TMDb title search -->
+        <div class="relative">
+          <svg class="w-4 h-4 absolute left-2 top-1/2 -translate-y-1/2 text-gray-600 pointer-events-none" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/></svg>
+          <input id="exSearch" type="text" placeholder="Search titles…" autocomplete="off"
+            oninput="exSearchInput(this.value)"
+            class="w-full bg-gray-900 border border-gray-800 focus:border-indigo-600 outline-none text-sm text-gray-200 placeholder-gray-600 pl-8 pr-8 py-2 uppercase tracking-wide"/>
+          <button id="exSearchClear" type="button" onclick="exClearSearch()"
+            class="hidden absolute right-2 top-1/2 -translate-y-1/2 text-gray-500 hover:text-gray-200">
+            <svg class="ic" aria-hidden="true"><use href="#i-x"/></svg>
+          </button>
+        </div>
         <!-- Kind: All / Shows / Movies -->
         <div class="flex items-center gap-1.5">
           <button id="exKindAll" type="button" onclick="exSetKind('')">All</button>
           <button id="exKindTv" type="button" onclick="exSetKind('tv')">Shows</button>
           <button id="exKindMovie" type="button" onclick="exSetKind('movie')">Movies</button>
         </div>
-        <!-- Genre chips: single scrollable row -->
+        <!-- Filter row: sort / rating / year / hide-owned -->
+        <div class="flex flex-wrap items-center gap-1.5">
+          <select id="exSort" onchange="exSetSort(this.value)"
+            class="bg-gray-900 border border-gray-800 text-[11px] font-bold uppercase tracking-wide text-gray-300 px-2 py-1 outline-none focus:border-indigo-600">
+            <option value="">Sort · Popular</option>
+            <option value="rating">Sort · Top Rated</option>
+            <option value="newest">Sort · Newest</option>
+          </select>
+          <select id="exMinRating" onchange="exSetMinRating(this.value)"
+            class="bg-gray-900 border border-gray-800 text-[11px] font-bold uppercase tracking-wide text-gray-300 px-2 py-1 outline-none focus:border-indigo-600">
+            <option value="0">Any rating</option>
+            <option value="6">6+ ★</option>
+            <option value="7">7+ ★</option>
+            <option value="8">8+ ★</option>
+            <option value="9">9+ ★</option>
+          </select>
+          <select id="exYear" onchange="exSetYear(this.value)"
+            class="bg-gray-900 border border-gray-800 text-[11px] font-bold uppercase tracking-wide text-gray-300 px-2 py-1 outline-none focus:border-indigo-600">
+            <!-- populated in JS (decades relative to the current year) -->
+          </select>
+          <button id="exHideOwned" type="button" onclick="exToggleHideOwned()">Hide owned</button>
+        </div>
+        <!-- Genre chips: single scrollable row (multi-select) -->
         <div id="exGenreChips" class="flex gap-1.5 overflow-x-auto pb-1"></div>
       </div>
 
@@ -9489,11 +9526,51 @@ let _exEnabled=null;          // TMDb key present (from /api/tmdb/genres)
 let _exImgBase="/api/metadata/img";
 let _exGenres=[];             // [{name, tv_id, movie_id}]
 let _exKind="";               // "" | "tv" | "movie"
-let _exGenre="";              // active genre name ("" = none → rails view)
-let _exGridState=null;        // {kind, section, genre, title, genreMode, page, totalPages}
-let _exSeq=0;                 // invalidates in-flight fetches on view change
+let _exSelGenres=[];          // selected genre names (multi-select; AND on the server)
+let _exSort="";               // "" (popular) | "rating" | "newest"
+let _exYearMin=0, _exYearMax=0;  // release/air year range (0 = unset)
+let _exMinRating=0;           // TMDb vote floor (0 = any)
+let _exHideOwned=false;       // filter out titles already in the library
+let _exSearchQ="";            // active inline search query ("" = not searching)
+let _exLibKeys=new Set();     // "kind:tmdb_id" for library items (In-library badge / hide-owned)
+let _exGridState=null;        // full param object of the open grid (see _exFetch)
+let _exSeq=0;                 // invalidates in-flight rail/grid fetches on view change
+let _exSearchSeq=0;           // invalidates in-flight inline-search fetches
+let _exSearchTimer=null;      // debounce handle for the search box
 
-const _EX_GRID_SECTIONS=[["popular","Popular"],["top_rated","Top Rated"],["new","New"]];
+// Any browse filter active → the paged grid replaces the curated rails.
+function _exFiltersActive(){
+  return !!(_exSelGenres.length||_exSort||_exYearMin||_exYearMax||_exMinRating);
+}
+// Library membership set, rebuilt from the cached library list. Items only carry
+// tmdb_id once their metadata has resolved, so this is best-effort (a freshly
+// added item with no metadata yet simply won't match until it resolves).
+function _exBuildLibKeys(){
+  _exLibKeys=new Set();
+  (window._libCache||[]).forEach(it=>{
+    if(it.tmdb_id&&it.tmdb_kind) _exLibKeys.add(`${it.tmdb_kind}:${it.tmdb_id}`);
+  });
+}
+async function _exEnsureLib(){
+  if(!window._libCache){
+    try{
+      const pid=profile.id?`?profile_id=${profile.id}`:"";
+      const r=await fetch(`/api/library${pid}`);
+      if(r.ok) window._libCache=(await r.json()).items||[];
+    }catch(_){}
+  }
+  _exBuildLibKeys();
+}
+const _exInLib=c=>_exLibKeys.has(`${c.kind}:${c.id}`);
+// Heuristic theatrical-window flag for a *list* tile (list endpoints don't carry
+// full release_dates): a movie released within the last ~45 days is very likely
+// still theaters-only. The show detail page confirms this accurately.
+function _exInTheaters(c){
+  if(c.kind!=="movie"||!c.date) return false;
+  const t=Date.parse(c.date); if(isNaN(t)) return false;
+  const days=(Date.now()-t)/86400000;
+  return days>=0 && days<=45;
+}
 
 function _exRailDefs(){
   if(_exKind==="tv") return [
@@ -9531,14 +9608,43 @@ async function loadExplore(){
     return;
   }
   document.getElementById("exploreFilters").classList.remove("hidden");
+  _exBuildYearOptions();
+  await _exEnsureLib();
   _exRenderChips();
+  _exRenderFilterBar();
+  _exApply();
+}
+
+// Central dispatcher: search box wins, then any active filter → grid, else rails.
+function _exApply(){
+  _exBuildLibKeys();
+  if(_exSearchQ){ _exShowSearch(); return; }
+  if(_exFiltersActive()){ _exOpenFilterGrid(); return; }
   _exShowRails();
 }
 
-async function _exFetch(kind, section, genre, page){
-  let url=`/api/tmdb/explore?section=${encodeURIComponent(section)}&page=${page}`;
-  if(kind)  url+=`&kind=${kind}`;
-  if(genre) url+=`&genre=${encodeURIComponent(genre)}`;
+// Decade options relative to the current year (value = "min-max", "" = any).
+function _exBuildYearOptions(){
+  const sel=document.getElementById("exYear");
+  if(!sel||sel.dataset.built) return;
+  const cy=new Date().getFullYear();
+  const opts=[["","Any year"],[`${cy}-${cy}`,"This year"]];
+  const d0=Math.floor(cy/10)*10;
+  for(let d=d0; d>=1980; d-=10) opts.push([`${d}-${d+9}`, `${d}s`]);
+  opts.push(["1870-1979","Before 1980"]);
+  sel.innerHTML=opts.map(([v,l])=>`<option value="${v}">${l}</option>`).join("");
+  sel.dataset.built="1";
+}
+
+// p = {kind, section, genres:[], sort, yearMin, yearMax, minRating}
+async function _exFetch(p, page){
+  let url=`/api/tmdb/explore?section=${encodeURIComponent(p.section||"popular")}&page=${page}`;
+  if(p.kind)                 url+=`&kind=${p.kind}`;
+  if(p.genres&&p.genres.length) url+=`&genre=${encodeURIComponent(p.genres.join(","))}`;
+  if(p.sort)                 url+=`&sort=${p.sort}`;
+  if(p.yearMin)              url+=`&year_gte=${p.yearMin}`;
+  if(p.yearMax)              url+=`&year_lte=${p.yearMax}`;
+  if(p.minRating)            url+=`&min_rating=${p.minRating}`;
   const r=await fetch(url);
   if(!r.ok) throw new Error(`Explore fetch failed (HTTP ${r.status})`);
   const d=await r.json();
@@ -9557,11 +9663,16 @@ function _exTile(c, grid){
     : `<div class="w-full aspect-[2/3] bg-gray-950 flex items-center justify-center p-2">
          <span class="text-[10px] font-black uppercase tracking-widest text-gray-700 text-center line-clamp-4">${escHtml(c.title)}</span>
        </div>`;
+  const badges=[];
+  if(_exInLib(c)) badges.push(`<span class="bg-green-700/90 text-white text-[8px] font-black uppercase tracking-widest px-1 py-0.5 leading-none">In Library</span>`);
+  if(_exInTheaters(c)) badges.push(`<span class="bg-amber-500/90 text-black text-[8px] font-black uppercase tracking-widest px-1 py-0.5 leading-none">In Theaters</span>`);
+  const overlay=badges.length
+    ? `<div class="absolute top-1 left-1 flex flex-col gap-0.5 items-start">${badges.join("")}</div>` : "";
   const chip=c.kind==="movie"
     ? `<span class="font-black uppercase tracking-widest px-1 py-0.5 bg-purple-900/60 text-purple-300">Movie</span>`
     : `<span class="font-black uppercase tracking-widest px-1 py-0.5 bg-indigo-900/60 text-indigo-300">TV</span>`;
   const rating=(c.rating&&c.rating>0)?`<span class="text-amber-400/90 font-bold">★ ${c.rating.toFixed(1)}</span>`:"";
-  t.innerHTML=`${img}
+  t.innerHTML=`<div class="relative">${img}${overlay}</div>
     <div class="p-1.5">
       <p class="text-[11px] font-bold uppercase tracking-wide text-gray-200 truncate">${escHtml(c.title)}</p>
       <div class="flex items-center gap-1.5 text-[9px] text-gray-500 mt-0.5">${chip}${c.year?`<span class="font-bold">${escHtml(c.year)}</span>`:""}${rating}</div>
@@ -9584,41 +9695,61 @@ function _exSkeletonTiles(n, grid){
 function _exChipCls(on){
   return `flex-shrink-0 px-2.5 py-1 text-[11px] font-bold uppercase tracking-wide border transition-colors ${on?"bg-indigo-600 border-indigo-600 text-white":"bg-gray-900 border-gray-800 text-gray-400 hover:border-gray-600 hover:text-gray-200"}`;
 }
+const _exGenreOkForKind=g=>!_exKind||(_exKind==="tv"?g.tv_id:g.movie_id);
 function _exRenderChips(){
   [["exKindAll",""],["exKindTv","tv"],["exKindMovie","movie"]].forEach(([id,k])=>{
     document.getElementById(id).className=_exChipCls(_exKind===k);
   });
   const wrap=document.getElementById("exGenreChips");
   wrap.innerHTML="";
-  _exGenres
-    .filter(g=>!_exKind||(_exKind==="tv"?g.tv_id:g.movie_id))
-    .forEach(g=>{
-      const b=document.createElement("button");
-      b.type="button";
-      b.className=_exChipCls(_exGenre===g.name);
-      b.textContent=g.name;
-      b.addEventListener("click",()=>exToggleGenre(g.name));
-      wrap.appendChild(b);
-    });
+  _exGenres.filter(_exGenreOkForKind).forEach(g=>{
+    const b=document.createElement("button");
+    b.type="button";
+    b.className=_exChipCls(_exSelGenres.includes(g.name));
+    b.textContent=g.name;
+    b.addEventListener("click",()=>exToggleGenre(g.name));
+    wrap.appendChild(b);
+  });
+}
+// Reflect the sort/rating/year/hide-owned control states.
+function _exRenderFilterBar(){
+  document.getElementById("exSort").value=_exSort;
+  document.getElementById("exMinRating").value=String(_exMinRating||0);
+  const yv=(_exYearMin||_exYearMax)?`${_exYearMin}-${_exYearMax}`:"";
+  const ysel=document.getElementById("exYear"); if(ysel) ysel.value=yv;
+  const ho=document.getElementById("exHideOwned");
+  ho.className=_exChipCls(_exHideOwned);
+  ho.textContent=_exHideOwned?"Owned hidden":"Hide owned";
 }
 function exSetKind(k){
   if(_exKind===k) return;
   _exKind=k;
-  if(_exGenre){
-    // Drop an active genre the new kind doesn't have (e.g. movie "Action"
-    // after switching to Shows-only).
-    const g=_exGenres.find(x=>x.name===_exGenre);
-    if(!g||(k&&!(k==="tv"?g.tv_id:g.movie_id))) _exGenre="";
-  }
+  // Drop any selected genres the new kind doesn't have (e.g. movie "Action"
+  // after switching to Shows-only).
+  _exSelGenres=_exSelGenres.filter(n=>{
+    const g=_exGenres.find(x=>x.name===n);
+    return g&&_exGenreOkForKind(g);
+  });
   _exRenderChips();
-  if(_exGenre) _exOpenGenreGrid(_exGridState&&_exGridState.genreMode?_exGridState.section:"popular");
-  else _exShowRails();
+  _exApply();
 }
 function exToggleGenre(name){
-  _exGenre=_exGenre===name?"":name;
+  _exSelGenres=_exSelGenres.includes(name)
+    ? _exSelGenres.filter(n=>n!==name) : [..._exSelGenres, name];
   _exRenderChips();
-  if(_exGenre) _exOpenGenreGrid("popular");
-  else _exShowRails();
+  _exApply();
+}
+function exSetSort(v){ _exSort=["rating","newest"].includes(v)?v:""; _exApply(); }
+function exSetMinRating(v){ _exMinRating=parseInt(v,10)||0; _exApply(); }
+function exSetYear(v){
+  const m=/^(\d{4})-(\d{4})$/.exec(v||"");
+  _exYearMin=m?parseInt(m[1],10):0; _exYearMax=m?parseInt(m[2],10):0;
+  _exApply();
+}
+function exToggleHideOwned(){
+  _exHideOwned=!_exHideOwned;
+  _exRenderFilterBar();
+  _exApply();
 }
 
 // ── Rails view ──
@@ -9638,16 +9769,18 @@ function _exShowRails(){
       </div>
       <div class="ex-rail-row flex gap-2 overflow-x-auto pb-2">${_exSkeletonTiles(8,false)}</div>`;
     sec.querySelector(".ex-more").addEventListener("click",
-      ()=>_exOpenGrid({kind:def.kind, section:def.section, genre:"", title:def.title, genreMode:false}));
+      ()=>_exOpenGrid({kind:def.kind, section:def.section, genres:[], title:def.title}));
     rails.appendChild(sec);
     _exFillRail(sec, def, seq);
   });
 }
 async function _exFillRail(sec, def, seq){
   try{
-    const d=await _exFetch(def.kind, def.section, "", 1);
+    const d=await _exFetch({kind:def.kind, section:def.section}, 1);
     if(seq!==_exSeq) return;
-    const items=(d.results||[]).slice(0,20);
+    let items=(d.results||[]);
+    if(_exHideOwned) items=items.filter(c=>!_exInLib(c));
+    items=items.slice(0,20);
     if(!items.length){ sec.remove(); return; }
     const row=sec.querySelector(".ex-rail-row");
     row.innerHTML="";
@@ -9655,11 +9788,15 @@ async function _exFillRail(sec, def, seq){
   }catch(_){ if(seq===_exSeq) sec.remove(); }
 }
 
-// ── Grid view (rail "All ›" or a genre filter) ──
-function _exOpenGenreGrid(section){
+// ── Grid view (rail "All ›" or the active filter set) ──
+// Grid built from the current kind + selected genres + sort/year/rating filters.
+function _exOpenFilterGrid(){
   const kindLabel=_exKind==="tv"?"Shows":(_exKind==="movie"?"Movies":"Shows & Movies");
-  _exOpenGrid({kind:_exKind, section:section||"popular", genre:_exGenre,
-               title:`${_exGenre} · ${kindLabel}`, genreMode:true});
+  const bits=[]; if(_exSelGenres.length) bits.push(_exSelGenres.join(" + "));
+  bits.push(kindLabel);
+  _exOpenGrid({kind:_exKind, section:"popular", genres:[..._exSelGenres],
+               sort:_exSort, yearMin:_exYearMin, yearMax:_exYearMax,
+               minRating:_exMinRating, title:bits.join(" · ")});
 }
 function _exOpenGrid(st){
   _exSeq++;
@@ -9669,20 +9806,7 @@ function _exOpenGrid(st){
   document.getElementById("exGridTitle").textContent=st.title;
   document.getElementById("exGridEmpty").classList.add("hidden");
   document.getElementById("exMoreBtn").classList.add("hidden");
-  const secWrap=document.getElementById("exGridSections");
-  secWrap.classList.toggle("hidden",!st.genreMode);
-  secWrap.classList.toggle("flex",!!st.genreMode);
-  if(st.genreMode){
-    secWrap.innerHTML="";
-    _EX_GRID_SECTIONS.forEach(([sect,label])=>{
-      const b=document.createElement("button");
-      b.type="button";
-      b.className=_exChipCls(st.section===sect);
-      b.textContent=label;
-      b.addEventListener("click",()=>{ if(st.section!==sect) _exOpenGenreGrid(sect); });
-      secWrap.appendChild(b);
-    });
-  }
+  document.getElementById("exGridSections").classList.add("hidden");   // sort control replaces the old sub-tabs
   document.getElementById("exGrid").innerHTML=_exSkeletonTiles(12,true);
   exLoadMore();
 }
@@ -9692,14 +9816,16 @@ async function exLoadMore(btn){
   const moreBtn=document.getElementById("exMoreBtn");
   await withInflight("ex_grid", btn||null, async ()=>{
     try{
-      const d=await _exFetch(st.kind, st.section, st.genre, page);
+      const d=await _exFetch(st, page);
       if(seq!==_exSeq||_exGridState!==st) return;
       st.page=page; st.totalPages=d.total_pages||1;
       const grid=document.getElementById("exGrid");
       if(page===1) grid.innerHTML="";
-      (d.results||[]).forEach(c=>grid.appendChild(_exTile(c,true)));
+      let items=(d.results||[]);
+      if(_exHideOwned) items=items.filter(c=>!_exInLib(c));
+      items.forEach(c=>grid.appendChild(_exTile(c,true)));
       document.getElementById("exGridEmpty").classList.toggle("hidden",
-        !(page===1&&!(d.results||[]).length));
+        !(page===1&&!grid.children.length));
       moreBtn.classList.toggle("hidden", st.page>=st.totalPages);
     }catch(e){
       if(seq!==_exSeq||_exGridState!==st) return;
@@ -9708,10 +9834,55 @@ async function exLoadMore(btn){
     }
   });
 }
+// "‹ Back" from any grid/search view: clear every active filter → curated rails.
 function exCloseGrid(){
-  _exGenre="";
-  _exRenderChips();
+  _exSelGenres=[]; _exSort=""; _exYearMin=0; _exYearMax=0; _exMinRating=0;
+  _exSearchQ=""; const box=document.getElementById("exSearch"); if(box) box.value="";
+  document.getElementById("exSearchClear").classList.add("hidden");
+  _exRenderChips(); _exRenderFilterBar();
   _exShowRails();
+}
+
+// ── Inline Explore search (debounced TMDb title lookup → same poster grid) ──
+function exSearchInput(v){
+  const q=(v||"").trim();
+  document.getElementById("exSearchClear").classList.toggle("hidden",!q);
+  clearTimeout(_exSearchTimer);
+  _exSearchTimer=setTimeout(()=>{ _exSearchQ=q; _exApply(); }, 300);
+}
+function exClearSearch(){
+  const box=document.getElementById("exSearch"); if(box) box.value="";
+  document.getElementById("exSearchClear").classList.add("hidden");
+  clearTimeout(_exSearchTimer);
+  _exSearchQ=""; _exApply();
+}
+async function _exShowSearch(){
+  const q=_exSearchQ, seq=++_exSearchSeq; _exSeq++; _exGridState=null;
+  document.getElementById("exploreRails").classList.add("hidden");
+  document.getElementById("exploreGridWrap").classList.remove("hidden");
+  document.getElementById("exGridSections").classList.add("hidden");
+  document.getElementById("exMoreBtn").classList.add("hidden");
+  document.getElementById("exGridEmpty").classList.add("hidden");
+  document.getElementById("exGridTitle").textContent=`Search · ${q}`;
+  const grid=document.getElementById("exGrid");
+  grid.innerHTML=_exSkeletonTiles(12,true);
+  try{
+    let url=`/api/tmdb/search?query=${encodeURIComponent(q)}`;
+    if(_exKind) url+=`&kind=${_exKind}`;
+    const r=await fetch(url);
+    const d=r.ok?await r.json():{results:[]};
+    if(seq!==_exSearchSeq) return;
+    _exImgBase=d.img_base||_exImgBase;
+    let items=(d.results||[]);
+    if(_exHideOwned) items=items.filter(c=>!_exInLib(c));
+    grid.innerHTML="";
+    items.forEach(c=>grid.appendChild(_exTile(c,true)));
+    document.getElementById("exGridEmpty").classList.toggle("hidden",items.length>0);
+  }catch(e){
+    if(seq!==_exSearchSeq) return;
+    grid.innerHTML="";
+    showAlert(e.message||"Search failed","error");
+  }
 }
 
 // ── Search ─────────────────────────────────────────────────────────────────
@@ -10186,6 +10357,7 @@ async function openSearchShow(group){
   const poster=document.getElementById("ssPoster");
   poster.classList.add("hidden"); poster.removeAttribute("src");
   document.getElementById("ssPosterFallback").classList.remove("hidden");
+  document.getElementById("ssTheaterBanner").classList.add("hidden");
 
   document.getElementById("searchShowPage").classList.remove("hidden");
   document.body.style.overflow="hidden";
@@ -10230,6 +10402,7 @@ async function openSearchShowFromTmdb(cand){
   const poster=document.getElementById("ssPoster");
   poster.classList.add("hidden"); poster.removeAttribute("src");
   document.getElementById("ssPosterFallback").classList.remove("hidden");
+  document.getElementById("ssTheaterBanner").classList.add("hidden");
 
   document.getElementById("searchShowPage").classList.remove("hidden");
   document.body.style.overflow="hidden";
@@ -10389,7 +10562,20 @@ function _ssRenderHero(){
   backdrop.style.backgroundImage=backdropSrc?`url("${backdropSrc}")`:"";
   if(posterSrc){ poster.src=posterSrc; poster.classList.remove("hidden"); posterFb.classList.add("hidden"); }
   else { poster.classList.add("hidden"); poster.removeAttribute("src"); posterFb.classList.remove("hidden"); }
+  _ssRenderTheaterBanner();
   _ssUpdateTrailerBtn();
+}
+// "Theaters only" warning: an accurately-flagged movie (no home release yet)
+// won't have a real home-quality torrent — only cams. Hidden for TV / released
+// movies. `digital_date` (if TMDb has one) tells the user when to check back.
+function _ssRenderTheaterBanner(){
+  const banner=document.getElementById("ssTheaterBanner");
+  const m=_ssMeta;
+  if(!m||!m.theatrical_only){ banner.classList.add("hidden"); return; }
+  let msg="In theaters only — no home release yet; downloads may be cam-quality.";
+  if(m.digital_date) msg+=` Digital: ${m.digital_date}.`;
+  banner.querySelector("[data-txt]").textContent=msg;
+  banner.classList.remove("hidden");
 }
 
 // ── Trailers (TMDb videos → YouTube embed) ──────────────────────────────────
@@ -18017,6 +18203,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.4.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.5.0</div>
 </body>
 </html>

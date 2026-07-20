@@ -1,5 +1,17 @@
 # Changelog
 
+## [11.5.0] — 2026-07-20
+- **New: Explore now helps you actually *find* something.** The Explore tab gained a full set of quality-of-life finders on top of the curated rails:
+  - **Inline title search** — a search box right on Explore queries TMDb for a specific show/movie without leaving for the Search tab (debounced; results open the same show page). Clear it to return to the rails.
+  - **Filter by sort / rating / year** — a Sort control (Popular · Top Rated · Newest), a minimum-rating floor (6+/7+/8+/9+ ★), and a release-year range (decade picker). Any filter switches from rails to a paged results grid.
+  - **Multi-genre selection** — genre chips are now multi-select and **AND-combined** (e.g. *Animation + Action + Sci-Fi* returns only titles carrying all three).
+  - **"In Library" badge + "Hide owned" toggle** — tiles for titles already in your library are tagged green, and a one-tap toggle removes owned titles from every rail/grid so you don't browse what you already have.
+- **New: theater-only warning — stop picking movies that don't have a real download yet.** A movie that's had its theatrical release but no digital/physical/TV release is flagged so you don't waste time on cam-only torrents:
+  - **Show page banner (accurate):** an amber "**In theaters only — no home release yet; downloads may be cam-quality**" banner (with the digital-release date when TMDb has one), derived from the movie's `release_dates`.
+  - **Explore tile badge (heuristic):** movies released within the last ~45 days get an "**In Theaters**" tag on their poster; the show page confirms it precisely.
+- **Backend:** `main.py` — `_movie_release_flags` + `release_dates` in `_tmdb_fetch_movie`; `/api/tmdb/explore` gains `sort`/`year_gte`/`year_lte`/`min_rating`/`lang` params and comma-separated multi-genre (`_tmdb_explore_fetch` reworked around /discover); `date` added to explore + search candidates; `tmdb_id`/`tmdb_kind` surfaced on the `/api/library` list. **Frontend:** `static/index.html` — Explore filter bar, inline search, multi-genre chips, in-library/theater tile badges, and the show-page theater banner (`_ssRenderTheaterBanner`). **Docs:** [docs/API.md](docs/API.md), [docs/FRONTEND.md](docs/FRONTEND.md).
+- (Host-only — **no app rebuild**. Server update + restart required; hard-refresh open dashboards.)
+
 ## [11.4.0] — 2026-07-20
 - **New: "Play now" on still-downloading library items.** A library item that hasn't finished downloading now has a **Play now** button right on its card (previously the only option was "When Ready", which waits for the whole download to complete). It streams the file on the TV as soon as the beginning is buffered — forcing that file sequential + first/last-piece so it demuxes — and keeps the rest downloading in the background. If the item already has watch progress it reads **Resume now** and streams the resume file; otherwise it streams the first (earliest) episode. Multi-file packs also keep their per-episode Play-now in the Episodes picker. (The mechanism — `POST /api/library/{id}/stream-file`, which already forced sequential — was previously only reachable from the Episodes picker; this surfaces it on the card.)
 - **Frontend:** `static/index.html` — `_libItemChrome` adds the downloading-item Play-now/Resume-now button (reuses `streamLibraryFile`). **Docs:** [docs/FRONTEND.md](docs/FRONTEND.md).
