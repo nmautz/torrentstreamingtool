@@ -9808,25 +9808,59 @@ function _exOpenGrid(st){
   document.getElementById("exMoreBtn").classList.add("hidden");
   document.getElementById("exGridSections").classList.add("hidden");   // sort control replaces the old sub-tabs
   document.getElementById("exGrid").innerHTML=_exSkeletonTiles(12,true);
-  exLoadMore();
+  _exFillGrid();
 }
+// Keep pulling pages until the grid holds at least this many tiles (or TMDb
+// runs out) — a strict filter or Hide-owned thinning a page shouldn't leave a
+// near-empty grid while more matching pages exist.
+const _EX_GRID_TARGET=24;
+// Fetch page `page`, append its (optionally owned-filtered) tiles, advance the
+// paging state. Returns the live grid element, or null if superseded.
+async function _exAppendPage(st, page, seq){
+  const d=await _exFetch(st, page);
+  if(seq!==_exSeq||_exGridState!==st) return null;
+  st.page=page; st.totalPages=d.total_pages||1;
+  const grid=document.getElementById("exGrid");
+  if(page===1) grid.innerHTML="";
+  let items=(d.results||[]);
+  if(_exHideOwned) items=items.filter(c=>!_exInLib(c));
+  items.forEach(c=>grid.appendChild(_exTile(c,true)));
+  return grid;
+}
+function _exGridPostUpdate(grid){
+  document.getElementById("exGridEmpty").classList.toggle("hidden",!!grid.children.length);
+  document.getElementById("exMoreBtn").classList.toggle("hidden",
+    _exGridState.page>=_exGridState.totalPages);
+}
+// Initial grid fill: auto-load successive pages up to _EX_GRID_TARGET tiles.
+async function _exFillGrid(){
+  const st=_exGridState; if(!st) return;
+  const seq=_exSeq;
+  await withInflight("ex_grid", null, async ()=>{
+    let grid=null;
+    for(let guard=0; guard<6; guard++){
+      try{ grid=await _exAppendPage(st, st.page+1, seq); }
+      catch(e){
+        if(seq!==_exSeq||_exGridState!==st) return;
+        document.getElementById("exGrid").innerHTML="";
+        showAlert(e.message||"Explore fetch failed","error"); return;
+      }
+      if(!grid) return;                                  // superseded
+      if(st.page>=st.totalPages) break;                 // no more pages
+      if(grid.children.length>=_EX_GRID_TARGET) break;  // grid comfortably full
+    }
+    _exGridPostUpdate(grid);
+  });
+}
+// "Show more" button: load one further page on demand.
 async function exLoadMore(btn){
   const st=_exGridState; if(!st) return;
   const page=st.page+1, seq=_exSeq;
-  const moreBtn=document.getElementById("exMoreBtn");
   await withInflight("ex_grid", btn||null, async ()=>{
     try{
-      const d=await _exFetch(st, page);
-      if(seq!==_exSeq||_exGridState!==st) return;
-      st.page=page; st.totalPages=d.total_pages||1;
-      const grid=document.getElementById("exGrid");
-      if(page===1) grid.innerHTML="";
-      let items=(d.results||[]);
-      if(_exHideOwned) items=items.filter(c=>!_exInLib(c));
-      items.forEach(c=>grid.appendChild(_exTile(c,true)));
-      document.getElementById("exGridEmpty").classList.toggle("hidden",
-        !(page===1&&!grid.children.length));
-      moreBtn.classList.toggle("hidden", st.page>=st.totalPages);
+      const grid=await _exAppendPage(st, page, seq);
+      if(!grid) return;
+      _exGridPostUpdate(grid);
     }catch(e){
       if(seq!==_exSeq||_exGridState!==st) return;
       if(page===1) document.getElementById("exGrid").innerHTML="";
@@ -18203,6 +18237,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.5.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.5.1</div>
 </body>
 </html>

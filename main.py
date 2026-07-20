@@ -8631,7 +8631,15 @@ async def _tmdb_explore_fetch(kind: str, section: str, with_genres: str,
             params[f"{dk}.lte"] = lte.isoformat()
         if min_rating > 0:
             params["vote_average.gte"] = f"{min_rating:.1f}"
-            params.setdefault("vote_count.gte", "200")
+            # Scale the vote-count floor to the rating bar. A flat 200 keeps
+            # 1-vote junk out at normal ratings, but starves strict thresholds
+            # — almost nothing rated 9.0+ clears 200 votes, so the grid comes
+            # back with ~3 tiles. Relax the floor as the bar rises (a 9.0 mean
+            # over 25 votes is still a real signal) so matching results fill
+            # the page. Overrides the rating-sort default floor set above.
+            params["vote_count.gte"] = ("25" if min_rating >= 9.0
+                                        else "100" if min_rating >= 8.5
+                                        else "200")
         data = await _tmdb_get(f"/discover/{kind}", params)
     else:
         path = {"trending":  f"/trending/{kind}/week",

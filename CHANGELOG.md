@@ -1,5 +1,12 @@
 # Changelog
 
+## [11.5.1] — 2026-07-20
+- **Fix: Explore filters no longer return a near-empty page.** A strict filter — especially **9+ ★** — used to come back with only a handful of tiles. Two causes, both fixed:
+  - **Backend vote-count floor was too aggressive.** `/api/tmdb/explore` applied a flat `vote_count.gte=200` to every rating filter; almost nothing rated 9.0+ clears 200 votes, so *9+ ★* returned ~3 total results. The floor now **scales with the rating bar** (25 at ≥9.0, 100 at ≥8.5, 200 below) — a 9.0 mean over 25 votes is still a real signal — taking *9+ ★* from ~3 to ~80+ matches while still excluding 1-vote junk.
+  - **Grid stopped after one page.** The results grid now **auto-fills**: it pulls successive pages until it holds a comfortable number of tiles (or TMDb runs out), so a page thinned by *Hide owned* or a sparse filter tops itself up instead of showing a few lonely posters. "Show more" still loads further pages on demand.
+- **Backend:** `main.py` — `_tmdb_explore_fetch` scales `vote_count.gte` by `min_rating`. **Frontend:** `static/index.html` — Explore grid `_exFillGrid` auto-pagination (`_exAppendPage`/`_exGridPostUpdate` refactor).
+- (Host-only — **no app rebuild**. Server update + restart required; hard-refresh open dashboards.)
+
 ## [11.5.0] — 2026-07-20
 - **New: Explore now helps you actually *find* something.** The Explore tab gained a full set of quality-of-life finders on top of the curated rails:
   - **Inline title search** — a search box right on Explore queries TMDb for a specific show/movie without leaving for the Search tab (debounced; results open the same show page). Clear it to return to the rails.
