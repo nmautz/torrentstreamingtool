@@ -9102,6 +9102,7 @@ function renderStreamPickerList(files){
     const parts=f.name.replace(/\\/g,"/").split("/");
     const display=parts.length>2?parts.slice(-2).join("/"):f.name;
     if(isVid){
+      const shealth=_streamHealthBadge(_streamHealth(f.size_bytes, streamPrepData&&streamPrepData.seeders));
       return `<button onclick="selectStreamFile(${f.index})"
         class="w-full flex items-center gap-3 px-4 py-3.5 border-b border-gray-800/60
                hover:bg-gray-800 active:bg-gray-800/80 transition-colors text-left">
@@ -9110,7 +9111,7 @@ function renderStreamPickerList(files){
         </svg>
         <div class="flex-1 min-w-0">
           <div class="text-sm text-gray-200 break-all leading-snug">${escHtml(display)}</div>
-          <div class="text-xs text-gray-600 mt-0.5">${escHtml(f.size_human)}</div>
+          <div class="text-xs text-gray-600 mt-0.5 flex items-center gap-1.5 flex-wrap">${escHtml(f.size_human)}${shealth}</div>
         </div>
         <svg class="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
@@ -9133,6 +9134,17 @@ function renderStreamPickerList(files){
 async function selectStreamFile(fileIndex){
   if(!streamPrepData) return;
   const d=streamPrepData;
+  // Warn before streaming a slow/dead source — it'll buffer or never start.
+  // Health uses the SELECTED file's size (accurate for multi-file packs) with
+  // the torrent's seeder count.
+  const f=(d.files||[]).find(x=>x.index===fileIndex);
+  const h=_streamHealth(f&&f.size_bytes, d.seeders);
+  if(_streamHealthRisky(h)){
+    const noun=h.seeders===1?"seeder":"seeders";
+    const ok=window.confirm(
+      `This source has ${h.seeders} ${noun} and may buffer badly or never start playing.\n\nPlay anyway?`);
+    if(!ok) return;
+  }
   closeStreamPicker(false); // close without cancelling — we're using this torrent
   // Play NOW but PERSIST: /api/library/play-now adopts the torrent into the
   // library and streams it, so Stop no longer deletes the torrent + files — it
@@ -9203,7 +9215,8 @@ async function openStreamPicker(magnet, title, btn, ctx){
     }
 
     streamPrepData={...d, magnet, title,
-      series:(ctx&&ctx.series)||"", season:(ctx&&ctx.season)||0, episode:(ctx&&ctx.episode)||0};
+      series:(ctx&&ctx.series)||"", season:(ctx&&ctx.season)||0, episode:(ctx&&ctx.episode)||0,
+      seeders:(ctx&&ctx.seeders!==undefined)?ctx.seeders:null};
     const videoFiles=d.files.filter(f=>isVideoFile(f.name));
 
     if(videoFiles.length===0){
@@ -9212,9 +9225,15 @@ async function openStreamPicker(magnet, title, btn, ctx){
       return;
     }
 
-    // Single video file: skip picker and start immediately
+    // Single video file: skip the picker and auto-play ONLY when the source is
+    // fast (streams well). A slow/fair source keeps the picker open with its
+    // streamability flag so the user sees it'll buffer and decides — instead of
+    // silently casting a source that never keeps up. (Play is one more tap.)
     if(videoFiles.length===1){
-      await selectStreamFile(videoFiles[0].index);
+      const h=_streamHealth(videoFiles[0].size_bytes, streamPrepData.seeders);
+      if(_streamHealthAutoPlay(h)){ await selectStreamFile(videoFiles[0].index); return; }
+      document.getElementById("streamPickerSubtitle").textContent=_streamHealthSubtitle(h);
+      renderStreamPickerList(d.files);
       return;
     }
 
@@ -9805,6 +9824,7 @@ async function doClassicSearch(q, grid, wrap, empty, count){
     card.className="result-row bg-gray-900 border border-gray-800 border-l-4 border-l-indigo-900 p-4 transition-colors";
     card.style.animationDelay=`${i*18}ms`;
     const sc=item.seeders>30?"text-green-400":item.seeders>8?"text-yellow-400":"text-red-400";
+    const shealth=_streamHealthBadge(_streamHealth(item.size,item.seeders));
     card.innerHTML=`
       <p class="text-sm font-semibold text-gray-200 leading-snug mb-1 line-clamp-2">${escHtml(item.title)}</p>
       <div class="flex items-center gap-2 mb-3 flex-wrap">
@@ -9813,6 +9833,7 @@ async function doClassicSearch(q, grid, wrap, empty, count){
         <span class="text-xs font-mono font-semibold ${sc}">${item.seeders} ↑</span>
         ${item.peers?`<span class="text-gray-700">·</span><span class="text-xs text-gray-700">${item.peers} peers</span>`:""}
         ${item.tracker?`<span class="text-gray-700">·</span><span class="text-[11px] text-gray-700 truncate max-w-[120px]">${escHtml(item.tracker)}</span>`:""}
+        ${shealth}
       </div>
       <div class="flex gap-2">
         <button class="dl-btn vpn-gated flex-1 flex items-center justify-center gap-1.5
@@ -9834,7 +9855,8 @@ async function doClassicSearch(q, grid, wrap, empty, count){
         </button>
       </div>`;
     card.querySelector(".play-btn").addEventListener("click",e=>{
-      const b=e.currentTarget; openStreamPicker(b.dataset.magnet,b.dataset.title,b);
+      const b=e.currentTarget;
+      openStreamPicker(b.dataset.magnet,b.dataset.title,b,{seeders:item.seeders,size:item.size});
     });
     card.querySelector(".dl-btn").addEventListener("click",e=>{
       const b=e.currentTarget; openDownloadModal(b.dataset.magnet,b.dataset.title);
@@ -9981,6 +10003,55 @@ function _ssAudioBadgeHtml(s){
   if(a==="sub")   return `<span class="${base} bg-gray-800 text-gray-400">Subs</span>`;
   if(a==="other") return `<span class="${base} bg-amber-900/60 text-amber-300">${escHtml((s.audio_lang||"Other"))}</span>`;
   return "";
+}
+
+// ── Streamability: how well a torrent plays WHILE it downloads ────────────────
+// "Play now" streams sequentially — playback only keeps up if the swarm feeds
+// data faster than the video's bitrate. Two independent risks: too few seeders
+// (slow/erratic speed) and a very large file (high bitrate no download can
+// match). Fold both into one score: the seeders needed rises with file size
+// (~8 per GB, floor 6), then bucket. `bytes` is the file being streamed — for a
+// multi-file pack pass the SELECTED file's size, not the whole torrent. Returns
+// null when seeders are unknown (→ no badge, and the auto-play gate stays open).
+function _streamHealth(bytes, seeders){
+  if(seeders===undefined||seeders===null) return null;
+  const gb=Math.max(0,(bytes||0)/1e9);
+  const sd=seeders||0;
+  const need=Math.max(6, Math.round(gb*8));
+  let level;
+  if(sd<=0)            level="dead";   // no seeders — may never buffer
+  else if(sd<need*0.5) level="slow";   // will buffer / stall
+  else if(sd<need)     level="fair";   // may buffer
+  else                 level="good";   // streams smoothly
+  return {level, seeders:sd, gb, need};
+}
+
+// Square Metro badge for a source's streamability (null → no badge).
+function _streamHealthBadge(h){
+  if(!h) return "";
+  const base="text-[9px] font-black uppercase tracking-wide px-1.5 py-0.5 whitespace-nowrap";
+  const M={
+    good:["bg-green-900/60 text-green-300","Streams well"],
+    fair:["bg-yellow-900/60 text-yellow-300","May buffer"],
+    slow:["bg-orange-900/70 text-orange-300","Slow"],
+    dead:["bg-red-950/70 text-red-400","No seeds"],
+  };
+  const [cls,txt]=M[h.level]||M.fair;
+  return `<span class="${base} ${cls}">${txt}</span>`;
+}
+
+// Risky to stream-as-it-downloads → warn before Play now.
+function _streamHealthRisky(h){ return !!h && (h.level==="slow"||h.level==="dead"); }
+// Only a "good" source may skip the picker and auto-play a single-file torrent.
+function _streamHealthAutoPlay(h){ return !h || h.level==="good"; }
+
+// Subtitle line for the stream picker that surfaces a slow/dead warning.
+function _streamHealthSubtitle(h){
+  if(!h) return "Tap a file to stream";
+  if(h.level==="dead") return "No seeders — this may never buffer";
+  if(h.level==="slow") return `Slow source (${h.seeders} seeders) — may buffer while you watch`;
+  if(h.level==="fair") return `Could buffer (${h.seeders} seeders) — tap to play anyway`;
+  return "Tap a file to stream";
 }
 
 // Chips only appear when the loaded results actually mix audio variants —
@@ -10492,6 +10563,7 @@ function _ssEpRowHtml(e){
   const name=_ssEpName(e.season,e.episode);
   const sc=best.seeders>30?"text-green-400":best.seeders>8?"text-yellow-400":"text-red-400";
   const badge=_ssAudioBadgeHtml(best);
+  const shealth=_streamHealthBadge(_streamHealth(best.size,best.seeders));
   const miss=(_ssAudioPref!=="any"&&!_ssAudioMatch(best))
     ?`<span class="text-[9px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-red-950/70 text-red-400 whitespace-nowrap">${_ssAudioPref==="eng"?"No Eng audio":"Dub only"}</span>`:"";
   return `<div class="w-full flex items-stretch">
@@ -10503,7 +10575,7 @@ function _ssEpRowHtml(e){
         <p class="text-[11px] text-gray-500 flex items-center gap-1.5 flex-wrap">
           <span class="font-mono font-semibold ${sc}">${best.seeders} ↑</span> ·
           ${escHtml(best.size_human)} · ${e.sources.length} source${e.sources.length>1?"s":""}
-          ${badge}${miss}
+          ${shealth}${badge}${miss}
         </p>
       </div>
       <svg class="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -10523,21 +10595,23 @@ function ssPlayEpisode(season,episode,btn){
   const e=_ssEpisodes.find(x=>x.season===season&&x.episode===episode);
   if(!e||!e.sources.length) return;
   const best=_ssPreferredSource(e.sources);
-  openStreamPicker(best.magnet,best.title,btn,{series:_ssGroup&&_ssGroup.title,season,episode});
+  openStreamPicker(best.magnet,best.title,btn,{series:_ssGroup&&_ssGroup.title,season,episode,seeders:best.seeders,size:best.size});
 }
 
 // Stream-now for a specific source inside the per-episode source sheet.
 function ssPlaySource(season,episode,i,btn){
   const e=_ssEpisodes.find(x=>x.season===season&&x.episode===episode);
   if(!e||!e.sources[i]) return;
-  openStreamPicker(e.sources[i].magnet,e.sources[i].title,btn,{series:_ssGroup&&_ssGroup.title,season,episode});
+  const s=e.sources[i];
+  openStreamPicker(s.magnet,s.title,btn,{series:_ssGroup&&_ssGroup.title,season,episode,seeders:s.seeders,size:s.size});
 }
 
 // Stream-now for a pack/movie row: multi-file packs open the stream file picker
 // so the user chooses which episode to play. The whole pack persists to library.
+// (seeders/size carried so the picker's per-file streamability + slow warning fire.)
 function ssPlayPack(i,btn){
   const p=_ssPacks[i]; if(!p) return;
-  openStreamPicker(p.magnet,p.title,btn,{series:_ssGroup&&_ssGroup.title});
+  openStreamPicker(p.magnet,p.title,btn,{series:_ssGroup&&_ssGroup.title,seeders:p.seeders,size:p.size});
 }
 
 // A missing episode (TMDb lists it, no torrent found) — greyed, with a per-row
@@ -10727,6 +10801,7 @@ function ssOpenSourceSheet(season,episode){
     const sc=s.seeders>30?"text-green-400":s.seeders>8?"text-yellow-400":"text-red-400";
     const dim=(_ssAudioPref!=="any"&&!_ssAudioMatch(s))?" opacity-50":"";
     const badge=_ssAudioBadgeHtml(s);
+    const shealth=_streamHealthBadge(_streamHealth(s.size,s.seeders));
     return `<div class="w-full flex items-stretch bg-gray-950 border border-gray-800 hover:border-indigo-700 transition-colors${dim}">
       <button onclick="ssPickSource(${season},${episode},${i})" title="Save to library (download)"
         class="flex-1 min-w-0 text-left p-3 hover:bg-gray-800 transition-colors">
@@ -10734,7 +10809,7 @@ function ssOpenSourceSheet(season,episode){
         <p class="text-[11px] text-gray-500 flex items-center gap-1.5 flex-wrap">
           <span class="font-mono font-semibold ${sc}">${s.seeders} ↑</span> · ${escHtml(s.size_human)}
           ${s.tracker?` · <span class="text-gray-600">${escHtml(s.tracker)}</span>`:""}
-          ${badge}
+          ${shealth}${badge}
         </p>
       </button>
       <button onclick="ssPlaySource(${season},${episode},${i},this)" title="Stream now — plays on the TV without saving to the library"
@@ -17928,6 +18003,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.2.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.3.0</div>
 </body>
 </html>

@@ -7101,8 +7101,16 @@ async def stream_pipeline(
                 "status": "buffering", "message": "Sequential mode set. Buffering first pieces…",
             })
 
-        # Buffer loop — track per-file progress when a specific file is selected
+        # Buffer loop — track per-file progress when a specific file is selected.
+        # `waited` drives a stall notice: a slow/dead source (few or no seeders)
+        # never reaches the gate, so after STALL_SECS with near-zero download
+        # speed we flag it in the message + a `stalled` flag rather than sitting
+        # silently on "Buffering 0.0 MB" forever (the "play now won't work" case).
+        STALL_SECS, STALL_BPS = 40, 50_000
+        waited = 0
         while True:
+            stalled = waited >= STALL_SECS and state.dl_speed_bps < STALL_BPS
+            note = " — slow source, few/no seeders" if stalled else ""
             if file_index is not None:
                 file_list = await qbit_files(h)
                 target = _file_by_index(file_list, file_index)
@@ -7120,9 +7128,10 @@ async def stream_pipeline(
                     state.ul_speed_bps = info.get("upspeed", 0)
                     await broadcast("stream_status", {
                         "status": "buffering",
-                        "message": f"Buffering {mb:.1f} MB / {total_mb:.1f} MB ({pct:.1f}%)",
+                        "message": f"Buffering {mb:.1f} MB / {total_mb:.1f} MB ({pct:.1f}%){note}",
                         "progress": pct, "downloaded_mb": mb, "total_mb": total_mb,
                         "dl_speed_bps": state.dl_speed_bps, "ul_speed_bps": state.ul_speed_bps,
+                        "stalled": stalled,
                     })
                     if mb >= settings.buffer_min_mb or pct >= settings.buffer_min_pct:
                         break
@@ -7140,13 +7149,15 @@ async def stream_pipeline(
                     state.ul_speed_bps = info.get("upspeed", 0)
                     await broadcast("stream_status", {
                         "status": "buffering",
-                        "message": f"Buffering {mb:.1f} MB / {state.total_mb:.1f} MB ({pct:.1f}%)",
+                        "message": f"Buffering {mb:.1f} MB / {state.total_mb:.1f} MB ({pct:.1f}%){note}",
                         "progress": pct, "downloaded_mb": mb, "total_mb": state.total_mb,
                         "dl_speed_bps": state.dl_speed_bps, "ul_speed_bps": state.ul_speed_bps,
+                        "stalled": stalled,
                     })
                     if mb >= settings.buffer_min_mb or pct >= settings.buffer_min_pct:
                         break
             await asyncio.sleep(1)
+            waited += 1
 
         # Resolve the file to play
         files = await qbit_files(h)
@@ -10027,6 +10038,12 @@ async def _library_stream_file_launch(
     seek: seeking past the buffered head of a sequential download stalls VLC."""
     try:
         first = Path(path)
+        # `waited` drives a stall notice: a slow/dead source (few or no seeders)
+        # never reaches the buffer gate, so after STALL_SECS with near-zero speed
+        # we flag it in the message + a `stalled` flag rather than sitting
+        # silently on "Buffering 0.0 MB" forever (the "play now won't work" case).
+        STALL_SECS, STALL_BPS = 40, 50_000
+        waited = 0
         while True:
             info = await qbit_info(h)
             qfiles = await qbit_files(h) if info else []
@@ -10043,16 +10060,20 @@ async def _library_stream_file_launch(
                 total_mb = f_size / 1_048_576
                 state.dl_speed_bps = info.get("dlspeed", 0)
                 state.ul_speed_bps = info.get("upspeed", 0)
+                stalled = waited >= STALL_SECS and state.dl_speed_bps < STALL_BPS
+                note = " — slow source, few/no seeders" if stalled else ""
                 await broadcast("stream_status", {
                     "status": "buffering",
-                    "message": f"Buffering {first.name}: {mb:.1f} MB / {total_mb:.1f} MB ({pct:.1f}%)",
+                    "message": f"Buffering {first.name}: {mb:.1f} MB / {total_mb:.1f} MB ({pct:.1f}%){note}",
                     "progress": pct, "downloaded_mb": mb, "total_mb": total_mb,
                     "dl_speed_bps": state.dl_speed_bps, "ul_speed_bps": state.ul_speed_bps,
+                    "stalled": stalled,
                 })
                 if (f_prog >= 0.999 or mb >= settings.buffer_min_mb
                         or pct >= settings.buffer_min_pct):
                     break
             await asyncio.sleep(1)
+            waited += 1
         if not first.exists():
             raise RuntimeError("Buffered data not on disk yet — try again in a moment.")
         # Restore normal (non-sequential) downloading once the file completes.
