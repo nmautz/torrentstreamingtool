@@ -300,9 +300,13 @@ Three consequences:
 
 The qBittorrent API endpoint is `toggleSequentialDownload`. It's a toggle, so check `seq_dl` from `qbit_info` before calling — see `qbit_streaming_mode` ([main.py:344](../main.py#L344)). Sequential is also passed at add-time as the `sequentialDownload=true` form field to `/torrents/add`.
 
-### Don't enable first/last-piece priority
+### Enable first/last-piece priority when streaming — the last piece carries the index
 
-`toggleFirstLastPiecePrio` fetches the last piece early. That **breaks** piece-order streaming because the playhead is at the start, not the end. We deliberately leave it off.
+Sequential download alone only puts the **head** of the file on disk. That is not enough for a tail-index container — an MP4 with its `moov` atom at the end (the common, **non**-web-optimised torrent) or an MKV whose Cues are appended last. VLC opens such a file, finds no seek table, and stops right after the buffer gate **without ever reporting a duration** (`length` stays 0), so `_vlc_wait_until_ready` times out and the rebuffer guard — which keys off a known duration — can't recover it either. That is the "play now fails after buffering even on good torrents" report: it's not a speed problem, so a fast swarm doesn't help.
+
+Fix: `qbit_first_last_piece_prio` (`toggleFirstLastPiecePrio`, a toggle — read `f_l_piece_prio` first) is enabled **alongside** `qbit_streaming_mode` on every stream-while-downloading play (`_begin_library_file_stream`, `stream_pipeline`). The last piece is a single piece regardless of file size, so grabbing it first costs almost nothing while the rest still arrives sequentially from the head — the standard webtorrent/peerflix approach. `_sequential_off_when_complete` flips both back off once the streamed file finishes so the rest of a library download proceeds normally.
+
+The earlier policy here said the opposite ("fetching the last piece breaks piece-order streaming") — that reasoning was wrong for tail-index containers and was the actual cause of the bug. Don't re-disable it.
 
 ### Download-priority tiers use qBit 1/6/7 — and the default tier "mid" is 6, not 1
 

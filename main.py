@@ -1306,6 +1306,33 @@ async def qbit_streaming_mode(h: str) -> None:
                    data={"hashes": h})
 
 
+async def qbit_first_last_piece_prio(h: str) -> None:
+    """Ensure first+last-piece priority is ON for a file we're streaming.
+
+    Sequential download alone only puts the *head* of the file on disk. That is
+    not enough for a container whose index lives at the END — an MP4 with its
+    `moov` atom at the tail (the common, non-web-optimised case for torrents),
+    or a Matroska whose Cues are appended last. VLC opens such a file, finds no
+    seek table, and stops right after the buffer gate without ever reporting a
+    duration — the "play now fails after buffering even on good torrents" report.
+    Because `length` stays 0, `_vlc_wait_until_ready` times out and the rebuffer
+    guard (which keys off a known duration) can't recover it either.
+
+    Grabbing the last piece first (it's a single piece — a few MB regardless of
+    file size) makes that tail index available so the demuxer can start, while
+    the rest still arrives sequentially from the head. This is the standard
+    torrent-streaming approach (webtorrent/peerflix do the same); the previous
+    "never enable first/last-piece prio" policy was the cause of the bug.
+
+    Like sequential mode this is a qBit *toggle*, so read `f_l_piece_prio` first
+    and only flip it when it's currently off. Restored to off by
+    `_sequential_off_when_complete` once the streamed file finishes."""
+    info = await qbit_info(h)
+    if info is not None and not info.get("f_l_piece_prio", False):
+        await qreq("POST", "/api/v2/torrents/toggleFirstLastPiecePrio",
+                   data={"hashes": h})
+
+
 async def qbit_info(h: str) -> Optional[dict]:
     r = await qreq("GET", f"/api/v2/torrents/info?hashes={h}")
     if r and r.status_code == 200:
@@ -7085,6 +7112,10 @@ async def stream_pipeline(
                 raise RuntimeError("Torrent did not appear in qBittorrent after 30 s.")
 
         await qbit_streaming_mode(h)
+        # First/last-piece priority too, so a moov-at-end MP4 (or Cues-at-end
+        # MKV) has its tail index on disk and VLC can actually demux it after
+        # the buffer gate. See qbit_first_last_piece_prio.
+        await qbit_first_last_piece_prio(h)
 
         if file_index is not None:
             # Skip all files except the selected one
@@ -9998,18 +10029,21 @@ def _spawn_rebuffer_guard(h: str, path: str) -> None:
 
 async def _sequential_off_when_complete(h: str, path: str) -> None:
     """Watchdog for a stream-while-downloading play: once the streamed file is
-    fully downloaded (or the torrent disappears), flip the torrent's sequential
-    mode back OFF so the rest of a library download proceeds normally (the
-    "library items never download sequentially" invariant is only suspended
-    while a file is actively being streamed ahead of its completion)."""
+    fully downloaded (or the torrent disappears), restore normal download order —
+    flip the torrent's sequential mode AND first/last-piece priority back OFF so
+    the rest of a library download proceeds normally (both streaming overrides
+    are only suspended while a file is actively streamed ahead of its
+    completion)."""
     try:
         while True:
             await asyncio.sleep(10)
             info = await qbit_info(h)
             if not info:
                 return                       # torrent deleted — nothing to restore
-            if not info.get("seq_dl", False):
-                return                       # already off (someone else flipped it)
+            seq_on = bool(info.get("seq_dl", False))
+            flp_on = bool(info.get("f_l_piece_prio", False))
+            if not seq_on and not flp_on:
+                return                       # already restored (someone else flipped it)
             qfiles = await qbit_files(h)
             if not qfiles:
                 continue
@@ -10017,8 +10051,12 @@ async def _sequential_off_when_complete(h: str, path: str) -> None:
             target = next((qf for qf in qfiles
                            if str(Path(sp) / qf.get("name", "")) == path), None)
             if target is None or target.get("progress", 0.0) >= 0.999:
-                await qreq("POST", "/api/v2/torrents/toggleSequentialDownload",
-                           data={"hashes": h})
+                if seq_on:
+                    await qreq("POST", "/api/v2/torrents/toggleSequentialDownload",
+                               data={"hashes": h})
+                if flp_on:
+                    await qreq("POST", "/api/v2/torrents/toggleFirstLastPiecePrio",
+                               data={"hashes": h})
                 return
     except asyncio.CancelledError:
         raise
@@ -10108,8 +10146,12 @@ async def _begin_library_file_stream(
     await put_library(lib)
     await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "downloading")})
 
-    # Sequential piece order so the beginning of the file arrives first.
+    # Sequential piece order so the beginning of the file arrives first, PLUS
+    # first/last-piece priority so a tail-index container (moov-at-end MP4,
+    # Cues-at-end MKV) can be demuxed — without the last piece VLC dies right
+    # after the buffer gate. See qbit_first_last_piece_prio.
     await qbit_streaming_mode(h)
+    await qbit_first_last_piece_prio(h)
 
     # Supersede whatever is playing/buffering (same dance as play_library_item).
     prev_item = state.library_item_id

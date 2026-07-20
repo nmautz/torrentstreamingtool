@@ -5986,6 +5986,20 @@ function _libItemChrome(item){
       :`<button onclick="setDownloadSchedule('${item.id}','idle',false,this)"
           class="text-sm bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-400 hover:text-white px-3 py-2.5 transition-colors min-h-[44px] flex items-center gap-1.5 flex-shrink-0"
           title="Pause — only download during the idle/night window"><svg class="ic" aria-hidden="true"><use href="#i-pause"/></svg> Idle</button>`;
+    // Play NOW while it's still downloading — streams the file on the TV as soon
+    // as the beginning is buffered (forces the file sequential + first/last-piece
+    // so it demuxes, keeps the rest downloading). Streams the resume file if this
+    // item already has watch progress, else the first (earliest) video file.
+    // Distinct from "When Ready", which waits for the whole download to finish.
+    const dlPlayPath=(hasProgress&&resume&&resume.file_path)||(item.first_file&&item.first_file.path)||"";
+    if(item.torrent_hash && dlPlayPath && !item.compressed){
+      const dlPlayLabel=hasProgress?`<svg class="ic" aria-hidden="true"><use href="#i-resume"/></svg> Resume now`:`<svg class="ic" aria-hidden="true"><use href="#i-play"/></svg> Play now`;
+      buttons+=`<button onclick="streamLibraryFile(${escHtml(JSON.stringify(item.id))},${escHtml(JSON.stringify(dlPlayPath))})"
+        class="text-sm bg-indigo-700 hover:bg-indigo-600 text-white flex-[1.4] py-2.5 transition-colors font-medium min-h-[44px] flex items-center justify-center gap-1.5"
+        title="Stream on the TV now — plays as soon as the beginning is buffered; the rest keeps downloading in the background">
+        ${dlPlayLabel}
+      </button>`;
+    }
     const isItemQueued=app.play_when_ready_item_id===item.id&&!app.play_when_ready_file_path;
     if(isItemQueued){
       buttons+=`<button onclick="cancelQueuePlay('${item.id}',this)"
@@ -18003,6 +18017,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.3.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.4.0</div>
 </body>
 </html>
