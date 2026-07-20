@@ -7164,6 +7164,9 @@ async def stream_pipeline(
         asyncio.create_task(vlc_focus_and_fullscreen())
         state.stream_status = "playing"
         await broadcast("stream_status", {"status": "playing", "message": f"Playing: {file_path.name}"})
+        # The file is still downloading (buffered only to the start gate) — guard
+        # against buffer underruns for the rest of it (slow-link VLC EOF stalls).
+        _spawn_rebuffer_guard(h, str(file_path))
 
     except asyncio.CancelledError:
         pass
@@ -9856,6 +9859,132 @@ class LibraryStreamFileReq(BaseModel):
     profile_id: str = ""
 
 
+# Seconds of downloaded margin (ahead of the last playback position) to rebuild
+# before resuming after a buffer underrun — a bigger cushion than the initial
+# start gate so a resume doesn't instantly re-stall on a slow link.
+_REBUFFER_AHEAD_SEC = 25.0
+# The single active rebuffer guard (only one file streams-while-downloading at a
+# time). Replaced/cancelled when a new stream starts or playback stops.
+_rebuffer_guard_task: Optional[asyncio.Task] = None
+
+
+def _stream_anchor_ok(h: str, path: str) -> bool:
+    """True while VLC is still supposed to be playing `path` from torrent `h`.
+    Both the library stream-file path and the transient stream pipeline set
+    state.active_hash + state.active_file, and Stop / a superseding play reset
+    them — so this is the cancellation signal for the rebuffer guard regardless
+    of which flow started it."""
+    return (state.active_hash == h and state.active_file is not None
+            and str(state.active_file) == path)
+
+
+async def _stream_rebuffer_guard(h: str, path: str) -> None:
+    """Recover from buffer underruns while streaming a still-downloading file.
+
+    A sequential download only has the first N% of the file on disk; when VLC
+    reaches that downloaded head mid-file it reads it as EOF and goes to
+    stopped/ended with the position well short of the true duration. VLC does
+    not retry on its own (the "it fails in VLC and doesn't retry" report), so
+    this guard detects the underrun, waits for a margin of new data to arrive,
+    then re-issues playback seeked back to where it ran dry. Exits when the file
+    finishes downloading, playback moves off this file, or the user stops."""
+    uri = vlc_file_uri(Path(path))
+    resolved = Path(path).resolve()
+    last_pos = last_dur = 0.0
+    frozen_ticks = 0            # consecutive ticks stuck at the download head while "playing"
+    try:
+        while True:
+            await asyncio.sleep(3)
+            if not _stream_anchor_ok(h, path) or state.youtube_active:
+                return
+            info = await qbit_info(h)
+            if not info:
+                return
+            qfiles = await qbit_files(h)
+            sp = info.get("save_path", settings.qbit_download_path)
+
+            def _frac(qfs: list) -> float:
+                t = next((qf for qf in qfs
+                          if str(Path(sp) / qf.get("name", "")) == path), None)
+                return float((t or {}).get("progress", 1.0))
+
+            frac = _frac(qfiles)
+            if frac >= 0.999:
+                return                       # fully on disk — no more underruns possible
+            vs = await vlc_status()
+            if not vs:
+                continue
+            vstate = vs.get("state", "")
+            pos = float(vs.get("time", 0) or 0)
+            dur = float(vs.get("length", 0) or 0)
+            if dur > 0:
+                last_dur = dur
+            prev_pos = last_pos
+            if pos > 0:
+                last_pos = pos
+            # Two underrun signatures:
+            #  (a) VLC went to stopped/ended mid-file (read the download head as EOF);
+            #  (b) VLC still "playing" but frozen right at the download head (pos not
+            #      advancing and within ~3 s of what's on disk) for ~9 s.
+            head_sec = frac * last_dur if last_dur else 0.0
+            at_head = last_dur > 0 and (head_sec - last_pos) < 3
+            stopped_mid = vstate in ("stopped", "ended") and last_dur > 0 and last_pos < last_dur - 5
+            if vstate == "playing" and at_head and abs(last_pos - prev_pos) < 0.5:
+                frozen_ticks += 1
+            else:
+                frozen_ticks = 0
+            if not (stopped_mid or frozen_ticks >= 3):
+                continue
+            frozen_ticks = 0
+
+            state.stream_status = "buffering"
+            await broadcast("stream_status", {
+                "status": "buffering",
+                "message": f"Buffering {Path(path).name}… slow connection",
+            })
+            await broadcast("state", state_snapshot())
+            # Wait for a comfortable margin ahead of last_pos (or completion).
+            while True:
+                await asyncio.sleep(2)
+                if not _stream_anchor_ok(h, path):
+                    return
+                info = await qbit_info(h)
+                if not info:
+                    return
+                frac = _frac(await qbit_files(h))
+                have_sec = frac * last_dur if last_dur else 0.0
+                if frac >= 0.999 or (have_sec - last_pos) >= _REBUFFER_AHEAD_SEC:
+                    break
+            if not _stream_anchor_ok(h, path):
+                return
+            # Resume from where playback ran dry (nudge back 2 s to avoid a gap).
+            await vlc_clear_playlist()
+            await vlc("in_play", input=uri)
+            await _vlc_wait_until_ready(resolved, timeout=10.0)
+            resume_to = int(max(0, last_pos - 2))
+            if resume_to > 3:
+                await vlc("seek", val=str(resume_to))
+            state.stream_status = "playing"
+            await broadcast("stream_status", {
+                "status": "playing", "message": f"Resumed: {Path(path).name}",
+            })
+            await broadcast("state", state_snapshot())
+            if not state.tv_ui_active:
+                asyncio.create_task(vlc_focus_and_fullscreen())
+    except asyncio.CancelledError:
+        raise
+    except Exception:
+        pass
+
+
+def _spawn_rebuffer_guard(h: str, path: str) -> None:
+    """(Re)start the single rebuffer guard for a stream-while-downloading play."""
+    global _rebuffer_guard_task
+    if _rebuffer_guard_task and not _rebuffer_guard_task.done():
+        _rebuffer_guard_task.cancel()
+    _rebuffer_guard_task = asyncio.create_task(_stream_rebuffer_guard(h, path))
+
+
 async def _sequential_off_when_complete(h: str, path: str) -> None:
     """Watchdog for a stream-while-downloading play: once the streamed file is
     fully downloaded (or the torrent disappears), flip the torrent's sequential
@@ -9929,12 +10058,85 @@ async def _library_stream_file_launch(
         # Restore normal (non-sequential) downloading once the file completes.
         asyncio.create_task(_sequential_off_when_complete(h, path))
         await _library_play_launch([path], item_id, profile_id, None, "auto")
+        # Recover from underruns for the rest of the still-downloading file.
+        _spawn_rebuffer_guard(h, path)
     except asyncio.CancelledError:
         raise
     except Exception as e:
         state.stream_status = "error"
         await broadcast("stream_status", {"status": "error", "message": str(e)})
         await broadcast("state", state_snapshot())
+
+
+async def _begin_library_file_stream(
+    item: dict, lib: dict, path: str, profile_id: str,
+) -> None:
+    """Shared core of the stream-a-library-file flow: force the file to fetch
+    now-and-first (schedule → 'high', kept by the scheduler + un-skips a
+    deselected file), set the torrent sequential, supersede whatever is playing,
+    flip state to buffering, and launch the buffer→VLC task.
+
+    Caller has already looked up + validated `item` (with a torrent_hash) and
+    `path`, and holds no lock. Mutates the library and persists it."""
+    item_id = item["id"]
+    h = item.get("torrent_hash")
+
+    dl = item.setdefault("download", {"mode": "now", "files": {}})
+    dl.setdefault("files", {})[path] = "high"
+    await _apply_item_schedule(item, lib)     # reconcile priorities + resume + reactivate
+    await put_library(lib)
+    await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "downloading")})
+
+    # Sequential piece order so the beginning of the file arrives first.
+    await qbit_streaming_mode(h)
+
+    # Supersede whatever is playing/buffering (same dance as play_library_item).
+    prev_item = state.library_item_id
+    prev_profile = state.library_profile_id
+    prev_file = state.library_current_file
+    if prev_item and prev_profile and prev_file and prev_file != path:
+        asyncio.create_task(_finalize_stopped_file(
+            prev_item, prev_profile, prev_file,
+            float(state.vlc_time or 0), float(state.vlc_duration or 0),
+        ))
+    if state.stream_task and not state.stream_task.done():
+        state.stream_task.cancel()
+    prior = state.library_play_task
+    if prior and not prior.done():
+        prior.cancel()
+    await _cancel_skip_countdown()
+
+    prof_obj = next((p for p in lib.get("profiles", []) if p["id"] == profile_id), {})
+    state.stream_status = "buffering"
+    state.active_title = item["title"]
+    state.active_file = Path(path)
+    state.current_audio_track = -1
+    state.current_subtitle_track = -1
+    state.track_pref_applied_file = path
+    state.active_hash = h
+    state.library_item_id = item_id
+    state.library_profile_id = profile_id
+    state.library_profile_name = (prof_obj or {}).get("name", "") or ""
+    state.library_profile_color = (prof_obj or {}).get("color", "") or ""
+    state.library_item_file_count = len(item.get("files", []))
+    state.library_playlist = [path]
+    state.library_shuffle_order = []
+    state.library_series_map = {}
+    state.library_series_order = []
+    state.library_current_file = path
+    state.skip_offer = None
+    state.skip_offer_file = None
+    state.resume_offer = None
+
+    await broadcast("stream_status", {
+        "status": "buffering",
+        "message": f"Downloading the beginning of {Path(path).name}…",
+    })
+    await broadcast("state", state_snapshot())
+
+    state.library_play_task = asyncio.create_task(_library_stream_file_launch(
+        item_id, path, profile_id, h,
+    ))
 
 
 @app.post("/api/library/{item_id}/stream-file")
@@ -9955,71 +10157,105 @@ async def stream_library_file(item_id: str, req: LibraryStreamFileReq) -> JSONRe
         raise HTTPException(404, "File not found in this item.")
     if _file_is_compressed(f):
         raise HTTPException(409, "File was compressed in place — it can't be re-downloaded.")
-    h = item.get("torrent_hash")
-    if not h:
+    if not item.get("torrent_hash"):
         raise HTTPException(400, "This item has no torrent backing it.")
     _assert_not_compressing(req.path)
-
-    # Route the boost through the download model (a raw filePrio write would be
-    # reverted by the scheduler's next reconcile — see queue_play). "high" both
-    # un-skips a deselected file and puts it first in the torrent's fetch order.
-    dl = item.setdefault("download", {"mode": "now", "files": {}})
-    dl.setdefault("files", {})[req.path] = "high"
-    await _apply_item_schedule(item, lib)     # reconcile priorities + resume + reactivate
-    await put_library(lib)
-    await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "downloading")})
-
-    # Sequential piece order so the beginning of the file arrives first.
-    await qbit_streaming_mode(h)
-
-    # Supersede whatever is playing/buffering (same dance as play_library_item).
-    prev_item = state.library_item_id
-    prev_profile = state.library_profile_id
-    prev_file = state.library_current_file
-    if prev_item and prev_profile and prev_file and prev_file != req.path:
-        asyncio.create_task(_finalize_stopped_file(
-            prev_item, prev_profile, prev_file,
-            float(state.vlc_time or 0), float(state.vlc_duration or 0),
-        ))
-    if state.stream_task and not state.stream_task.done():
-        state.stream_task.cancel()
-    prior = state.library_play_task
-    if prior and not prior.done():
-        prior.cancel()
-    await _cancel_skip_countdown()
-
-    prof_obj = next((p for p in lib.get("profiles", []) if p["id"] == req.profile_id), {})
-    state.stream_status = "buffering"
-    state.active_title = item["title"]
-    state.active_file = Path(req.path)
-    state.current_audio_track = -1
-    state.current_subtitle_track = -1
-    state.track_pref_applied_file = req.path
-    state.active_hash = h
-    state.library_item_id = item_id
-    state.library_profile_id = req.profile_id
-    state.library_profile_name = (prof_obj or {}).get("name", "") or ""
-    state.library_profile_color = (prof_obj or {}).get("color", "") or ""
-    state.library_item_file_count = len(item.get("files", []))
-    state.library_playlist = [req.path]
-    state.library_shuffle_order = []
-    state.library_series_map = {}
-    state.library_series_order = []
-    state.library_current_file = req.path
-    state.skip_offer = None
-    state.skip_offer_file = None
-    state.resume_offer = None
-
-    await broadcast("stream_status", {
-        "status": "buffering",
-        "message": f"Downloading the beginning of {Path(req.path).name}…",
-    })
-    await broadcast("state", state_snapshot())
-
-    state.library_play_task = asyncio.create_task(_library_stream_file_launch(
-        item_id, req.path, req.profile_id, h,
-    ))
+    await _begin_library_file_stream(item, lib, req.path, req.profile_id)
     return JSONResponse({"ok": True}, status_code=202)
+
+
+class PlayNowReq(BaseModel):
+    magnet: str = ""
+    title: str = ""
+    torrent_hash: str = ""        # pre-added hash from /api/stream/prepare
+    file_index: int = -1          # chosen video file from the picker; -1 ⇒ largest video
+    series: str = ""
+    season: int = 0
+    episode: int = 0
+    profile_id: str = ""
+
+
+@app.post("/api/library/play-now")
+async def library_play_now(req: PlayNowReq) -> JSONResponse:
+    """Play-right-away from Search/Explore that **persists**: adopt the (already
+    prepared) torrent into the library and stream it immediately, instead of the
+    transient /api/stream path that deletes the torrent + files on Stop.
+
+    The item stays in the library until the user deletes it — the whole torrent
+    keeps downloading (the picked file first, sequentially, so playback starts
+    fast), and Stop leaves it in place because state.library_item_id is set."""
+    if not state.vpn_secure:
+        raise HTTPException(403, "VPN not connected — streaming blocked.")
+    h = (req.torrent_hash or extract_hash(req.magnet) or "").lower()
+    if not h:
+        # No pre-added hash and an un-hashable (link-style) magnet — add it now
+        # and resolve the hash via the same diff path as qbit_add_magnet.
+        h = (await qbit_add_magnet(req.magnet) or "").lower()
+        if not h:
+            raise HTTPException(500, "qBittorrent rejected the magnet.")
+
+    info = await qbit_info(h)
+    if not info:
+        # Prepared torrent vanished (or was never added) — add and wait for metadata.
+        if not await qbit_add_magnet(req.magnet):
+            raise HTTPException(500, "qBittorrent rejected the magnet.")
+        for _ in range(30):
+            await asyncio.sleep(1)
+            info = await qbit_info(h)
+            if info:
+                break
+        if not info:
+            raise HTTPException(504, "Torrent metadata timed out.")
+
+    lib = await get_library()
+    # Adopt the transient prepare torrent so Stop's prepare-hash cleanup can't
+    # delete it out from under the new library item.
+    if state.prepare_hash == h:
+        state.prepare_hash = None
+
+    # Reuse a live library item already backing this hash (repeat Play of the
+    # same result) instead of minting a duplicate.
+    item = next((it for it in lib["items"]
+                 if (it.get("torrent_hash") or "").lower() == h
+                 and it.get("status") != "error"), None)
+    save_path = info.get("save_path", settings.qbit_download_path)
+    qfiles = await qbit_files(h)
+    if not qfiles:
+        raise HTTPException(504, "Could not read the torrent's file list.")
+
+    if item is None:
+        item = {
+            "id": str(uuid.uuid4()),
+            "title": req.title or "Untitled",
+            "series": req.series,
+            "season": req.season,
+            "episode": req.episode,
+            "files": build_file_list(qfiles, save_path),
+            "size_bytes": info.get("size", 0),
+            "added_at": _now_iso(),
+            "status": "downloading",
+            "torrent_hash": h,
+            "progress": {},
+            "default_visible_profiles": [],
+            "hidden_by_profiles": [],
+            "download": {"mode": "now", "files": {}},
+        }
+        lib["items"].append(item)
+        state.downloading_count += 1
+        if not item.get("admin_only"):
+            state.downloading_count_visible += 1
+    elif not item.get("files"):
+        item["files"] = build_file_list(qfiles, save_path)
+        item["size_bytes"] = info.get("size", 0)
+
+    # Resolve the file the user picked (or the main video for a single-file torrent).
+    vid = _file_by_index(qfiles, req.file_index) if req.file_index >= 0 else largest_video(qfiles)
+    if not vid:
+        raise HTTPException(400, "No playable video file in this torrent.")
+    target_path = str(Path(save_path) / vid.get("name", ""))
+
+    await _begin_library_file_stream(item, lib, target_path, req.profile_id)
+    return JSONResponse({"ok": True, "item_id": item["id"]}, status_code=202)
 
 
 class ShufflePrefReq(BaseModel):
@@ -12285,6 +12521,8 @@ async def stop() -> JSONResponse:
         state.stream_task.cancel()
     if state.library_play_task and not state.library_play_task.done():
         state.library_play_task.cancel()
+    if _rebuffer_guard_task and not _rebuffer_guard_task.done():
+        _rebuffer_guard_task.cancel()
 
     # Snapshot the cleanup targets before clearing state so the background task knows what to do
     active_hash = state.active_hash

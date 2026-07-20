@@ -9132,26 +9132,37 @@ function renderStreamPickerList(files){
 
 async function selectStreamFile(fileIndex){
   if(!streamPrepData) return;
-  const magnet=streamPrepData.magnet, title=streamPrepData.title, hash=streamPrepData.hash;
+  const d=streamPrepData;
   closeStreamPicker(false); // close without cancelling — we're using this torrent
-  const r=await fetch("/api/stream",{
+  // Play NOW but PERSIST: /api/library/play-now adopts the torrent into the
+  // library and streams it, so Stop no longer deletes the torrent + files — it
+  // stays in the library until manually deleted. (The old transient /api/stream
+  // deleted everything on Stop.) The whole torrent keeps downloading; the picked
+  // file is fetched first (sequentially) so playback starts fast.
+  const r=await fetch("/api/library/play-now",{
     method:"POST", headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({magnet, title, file_index:fileIndex, torrent_hash:hash}),
+    body:JSON.stringify({
+      magnet:d.magnet, title:d.title, torrent_hash:d.hash, file_index:fileIndex,
+      series:d.series||"", season:d.season||0, episode:d.episode||0,
+      profile_id:profile.id||"",
+    }),
   });
   if(!r.ok){
     const e=await r.json().catch(()=>({detail:"Stream failed"}));
     showAlert(e.detail||"Could not start stream.","error");
     return;
   }
-  // Stream started — if this play came from the show page (smart search /
-  // Explore stream-now), drop back to the dashboard so the buffering /
-  // now-playing card is visible. No-ops for the classic Search-tab flow.
+  showAlert("Playing now — saved to your library (Stop won't delete it).","success");
+  // Drop back to the dashboard so the buffering / now-playing card is visible if
+  // this came from the show page (smart search / Explore). No-op for classic Search.
   if(!document.getElementById("ssSourceSheet").classList.contains("hidden")) ssCloseSourceSheet();
   const _sp=document.getElementById("searchShowPage");
   if(_sp && !_sp.classList.contains("hidden")) closeSearchShow();
 }
 
-async function openStreamPicker(magnet, title, btn){
+// ctx (optional): {series, season, episode} — carried into /api/library/play-now
+// so the persisted library item coheres with its show (episode/season tagging).
+async function openStreamPicker(magnet, title, btn, ctx){
   if(!app.vpn_secure){ showAlert("VPN not connected — streaming blocked.","error"); return; }
 
   // Show modal immediately with loading state
@@ -9191,7 +9202,8 @@ async function openStreamPicker(magnet, title, btn){
       return;
     }
 
-    streamPrepData={...d, magnet, title};
+    streamPrepData={...d, magnet, title,
+      series:(ctx&&ctx.series)||"", season:(ctx&&ctx.season)||0, episode:(ctx&&ctx.episode)||0};
     const videoFiles=d.files.filter(f=>isVideoFile(f.name));
 
     if(videoFiles.length===0){
@@ -10511,21 +10523,21 @@ function ssPlayEpisode(season,episode,btn){
   const e=_ssEpisodes.find(x=>x.season===season&&x.episode===episode);
   if(!e||!e.sources.length) return;
   const best=_ssPreferredSource(e.sources);
-  openStreamPicker(best.magnet,best.title,btn);
+  openStreamPicker(best.magnet,best.title,btn,{series:_ssGroup&&_ssGroup.title,season,episode});
 }
 
 // Stream-now for a specific source inside the per-episode source sheet.
 function ssPlaySource(season,episode,i,btn){
   const e=_ssEpisodes.find(x=>x.season===season&&x.episode===episode);
   if(!e||!e.sources[i]) return;
-  openStreamPicker(e.sources[i].magnet,e.sources[i].title,btn);
+  openStreamPicker(e.sources[i].magnet,e.sources[i].title,btn,{series:_ssGroup&&_ssGroup.title,season,episode});
 }
 
 // Stream-now for a pack/movie row: multi-file packs open the stream file picker
-// so the user chooses which episode to play.
+// so the user chooses which episode to play. The whole pack persists to library.
 function ssPlayPack(i,btn){
   const p=_ssPacks[i]; if(!p) return;
-  openStreamPicker(p.magnet,p.title,btn);
+  openStreamPicker(p.magnet,p.title,btn,{series:_ssGroup&&_ssGroup.title});
 }
 
 // A missing episode (TMDb lists it, no torrent found) — greyed, with a per-row
@@ -17916,6 +17928,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.1.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.2.0</div>
 </body>
 </html>

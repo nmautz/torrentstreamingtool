@@ -54,11 +54,13 @@ All four services (VLC, qBittorrent, Jackett, dashboard) run on the same host ex
 
 ## Data flow examples
 
-### Stream-now (Search tab → Play)
-1. Browser POST `/api/stream` `{magnet, title}` → returns 202 immediately.
-2. `stream_pipeline` task: adds magnet to qBit with `sequentialDownload=true`, waits for torrent metadata (up to 30 s), polls every 1 s until `BUFFER_MIN_MB` or `BUFFER_MIN_PCT`, resolves the largest video file path, sends `in_play` to VLC's Lua HTTP, optionally fullscreens VLC.
-3. `stat_broadcaster` keeps pushing `state` snapshots every 2 s with download progress and VLC playback position.
-4. On `/api/stop` (or new Play): cancel the task, delete torrent + files via qBit, `pl_stop` VLC.
+### Play-now (Search / Explore / show page → Play) — **persists to library** (11.2.0)
+1. Browser opens the stream file picker (`/api/stream/prepare` adds the magnet, returns the file list), then POST `/api/library/play-now` `{magnet, title, torrent_hash, file_index, series, season, episode, profile_id}` → 202.
+2. `library_play_now` **adopts** the prepared torrent into the library (creates a `downloading` item, or reuses a live one on the same hash), then `_begin_library_file_stream` → `_library_stream_file_launch`: sets the picked file `high`, torrent sequential, buffers to `BUFFER_MIN_MB`/`BUFFER_MIN_PCT`, then `in_play` to VLC.
+3. `stat_broadcaster` keeps pushing `state` snapshots every 2 s. `_stream_rebuffer_guard` recovers from buffer underruns (slow-link VLC EOF stalls) by re-buffering a margin and resuming from the last position; `_sequential_off_when_complete` restores non-sequential downloading once the file finishes.
+4. On `/api/stop`: because `state.library_item_id` is set, the torrent + files are **NOT** deleted — the item stays in the library until manually deleted. The whole torrent keeps downloading in the background.
+
+*(Legacy transient path: `POST /api/stream` still exists — `stream_pipeline`, same buffer/`in_play` flow, but `library_item_id` stays `None` so `/api/stop` deletes the torrent + files. The UI no longer routes Play through it; it deletes on stop.)*
 
 ### YouTube on TV (Search tab → Play on TV)
 1. Browser POST `/api/youtube` `{url}` → 202. Backend extracts the video id, sets `youtube_active`, stops VLC, broadcasts `yt_command:load`, and launches a fullscreen Chrome kiosk at `/tv?v=<id>` (or hot-swaps if the page is already open).
