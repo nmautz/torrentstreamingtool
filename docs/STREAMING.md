@@ -613,13 +613,15 @@ Two ways to populate the cache:
 
 ### 2. Play on this device
 
-1. User taps Play (or the "📱 On Device" button on a library card). The
-   flow goes through `playLibraryWithChooser`, which opens
+1. User taps the library card's Play/Resume (movies and shows alike as of
+   11.6.0 — there's no longer a separate "On Device" button; Play itself asks).
+   The flow goes through `playLibraryWithChooser` (movies via
+   `resumeLibraryItemWithChooser` → `_resumeNormal`), which opens
    `#playChooserModal` — **On TV (VLC)** vs **On This Device**.
 2. "On This Device" calls `lpPlay(itemId, files, seekTo, label)`. The
    player sets `lp.itemId/playlist/pi`, applies the `.lp-active` class to
    `#localPlayer`, and calls `_lpLoadIndex(seekTo)`. A **single-file** `files`
-   (per-episode Play / Resume / one-file On Device) is expanded to the item's
+   (per-episode Play / Resume / a one-file movie played to device) is expanded to the item's
    **full ordered file list** by fetching `/api/library/{id}/files`
    (season/episode-sorted) positioned at the chosen file, so Prev/Next span the
    whole series; multi-file queues (selected episodes / Play All / handoff tail)
@@ -1636,7 +1638,7 @@ hangs). Two paths keep page and media same-origin:
   already synced live via the proxied `/api`). Prev/Next spans the **full series** —
   downloaded episodes play from the device same-origin, non-downloaded ones stream from
   the host through the proxy — one seamless playlist. Only **single-file, non-shuffle**
-  plays hand off (per-episode Play / Resume / "On Device"); multi-file "Play All" and
+  plays hand off (per-episode Play / Resume / a one-file movie played to device); multi-file "Play All" and
   Shuffle keep their explicit order and stream. Any miss (episode or snapshot not fully
   downloaded, no plugin) falls through to normal server streaming. This supersedes 8.6.0's
   `offline=1&live=1` offline-mode handoff (which lost every live feature during playback).

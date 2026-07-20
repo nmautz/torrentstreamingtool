@@ -6073,8 +6073,12 @@ function _libItemChrome(item){
         ${contLabel}
       </button>`;
     } else {
+      // Single-file movie: primary Play/Resume opens the same VLC-vs-device chooser
+      // that multi-episode items use, so movies also ask where to play (previously
+      // they went straight to VLC and needed the separate "On Device" button, which
+      // is now redundant and removed). macOS auto-falls to VLC (no device option).
       if(hasProgress){
-        buttons+=`<button onclick="continueLibraryItem('${item.id}')"
+        buttons+=`<button onclick="resumeLibraryItemWithChooser('${item.id}')"
           class="text-sm bg-green-900/50 hover:bg-green-800/60 text-green-300 border border-green-800
                  flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
           <svg class="ic" aria-hidden="true"><use href="#i-resume"/></svg> Resume ${Math.round(pct)}%
@@ -6084,21 +6088,9 @@ function _libItemChrome(item){
           <svg class="ic" aria-hidden="true"><use href="#i-play"/></svg> Restart
         </button>`;
       } else {
-        buttons+=`<button onclick="continueLibraryItem('${item.id}')"
+        buttons+=`<button onclick="resumeLibraryItemWithChooser('${item.id}')"
           class="text-sm bg-indigo-700 hover:bg-indigo-600 text-white flex-1 py-2.5 transition-colors font-medium min-h-[44px]">
           <svg class="ic" aria-hidden="true"><use href="#i-play"/></svg> Play
-        </button>`;
-      }
-      const onlyFile = item.first_file || null;
-      const fpath  = (resume && resume.file_path) || (onlyFile && onlyFile.path) || "";
-      const fname  = (onlyFile && onlyFile.name) || item.title || "";
-      const fseek  = hasProgress ? (resume.position_sec || 0) : 0;
-      if (fpath) {
-        buttons+=`<button onclick="playLibraryWithChooser(${escHtml(JSON.stringify(item.id))},[${escHtml(JSON.stringify(fpath))}],${fseek},${escHtml(JSON.stringify(item.title||fname))})"
-          class="text-sm bg-emerald-900/50 hover:bg-emerald-800/60 text-emerald-200 border border-emerald-800
-                 flex-1 py-2.5 transition-colors font-medium min-h-[44px]"
-          title="Stream to this device or play on the host's VLC">
-          <svg class="ic" aria-hidden="true"><use href="#i-phone"/></svg> On Device
         </button>`;
       }
     }
@@ -6226,7 +6218,11 @@ function _libItemCardHtml(item){
   const c=_libItemChrome(item);
   const title=item.title||"";
   const badges=`${c.statusBadge}${c.partialBadge}${c.compressedBadge}${c.skipBadge}`;
-  const oc=c.isMulti?`resumeLibraryItemWithChooser('${item.id}')`:`continueLibraryItem('${item.id}')`;
+  // Both multi-episode shows and single-file movies route through the chooser so
+  // the poster Play/Resume always asks "On TV vs On Device" (macOS auto-falls to
+  // VLC since there's no device option). resumeLibraryItemWithChooser handles the
+  // single-file case via _resumeNormal (VLC path = continueLibraryItem).
+  const oc=`resumeLibraryItemWithChooser('${item.id}')`;
   let playOverlay="";
   if(c.isReady){
     playOverlay=`<button class="lib-cardv-play" title="${c.hasProgress?'Resume':'Play'}"
@@ -18237,6 +18233,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.5.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.6.0</div>
 </body>
 </html>

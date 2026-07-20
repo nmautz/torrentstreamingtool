@@ -1,5 +1,10 @@
 # Changelog
 
+## [11.6.0] — 2026-07-20
+- **Movies now ask "On TV vs On Device" too.** The library card Play/Resume button for a single-file movie used to go straight to the host's VLC, while multi-episode shows popped the VLC-vs-device chooser. Movies now route through the **same chooser**, so every title asks where to play. The separate green **"On Device"** button on movie rows is removed (redundant now that Play itself asks). macOS hosts (no stream-to-device) still go straight to VLC with no modal, unchanged.
+- **Frontend:** `static/index.html` — `_libItemCardHtml` poster overlay and `_libItemChrome` single-file branch both call `resumeLibraryItemWithChooser` (which handles single-file items via `_resumeNormal`) instead of `continueLibraryItem`; dropped the standalone `playLibraryWithChooser` "On Device" button.
+- (Host-only — **no app rebuild**. Server update + restart required; hard-refresh open dashboards.)
+
 ## [11.5.2] — 2026-07-20
 - **Fix: 4K / 2160p sources failed to prep with "Conversion failed!"** The HLS encoder hardcoded H.264 `-level 4.1` on every rendition, but level 4.1 caps at ~1080p. On a 4K source (e.g. *Your Name* 2160p BD) NVENC rejected the full-res rung with `InitializeEncoder failed: Invalid Level` (error -22), which killed the whole job — both the all-GPU and CPU-decode fallback paths — so the prep never produced a bundle. The level is now chosen from the **output height** (4.1 ≤1080p, 5.0 ≤1440p, 5.2 for 4K), so high-res rungs encode correctly while 1080p-and-below keep the widely-compatible 4.1.
   - Same fix applied to the on-demand JIT transcode (`_od_build_ffmpeg_args`, which encodes at source resolution) and the shareable-clip encoder (`_build_clip`, now caps clips at 1080p).
