@@ -22179,8 +22179,10 @@ async def bundle_manifest(item_id: str, request: Request, file_path: str = "", p
 #     covers exactly [N*6,(N+1)*6) — which is what makes the virtual playlist's
 #     timing correct and seeking land precisely. Stream-copy can't guarantee
 #     that boundary alignment, so it's not used here (it stays a full-prep win).
-#   • single source-resolution rendition + one (switchable) audio track. The ABR
-#     ladder, seamless quality menu and seamless multi-audio stay full-prep-only.
+#   • single rendition + one (switchable) audio track. NVENC transcodes at source
+#     resolution; the CPU (libx264) path caps at OD_CPU_MAX_HEIGHT so it beats
+#     real-time and playback doesn't stall at the buffer edge. The ABR ladder,
+#     seamless quality menu and seamless multi-audio stay full-prep-only.
 
 ONDEMAND_CACHE = Path(__file__).parent / ".ondemand_cache"
 OD_SEGMENT_SECS = HLS_SEGMENT_SECS    # MUST match for segment-index ↔ time math
@@ -22189,6 +22191,15 @@ OD_SEG_WAIT_TIMEOUT  = 30             # max seconds to hold a segment request op
 OD_LOOKAHEAD_SEGS    = 12             # running encode may be this far behind a
                                       # requested seg before we restart vs. wait
 OD_MAX_SESSIONS      = 4              # reap the least-recently-used beyond this
+# Interactive JIT must beat real-time or the client's forward buffer drains and
+# playback stalls at the buffer edge ("won't play past the buffer"). The CPU
+# (libx264) path can't sustain that at 1080p/4K, so on the non-NVENC path we
+# downscale to at most OD_CPU_MAX_HEIGHT and let libx264 use the whole box
+# (below-normal priority keeps the server snappy — see _FFMPEG_SUBPROCESS_KW).
+# NVENC beats real-time at source resolution, so it's left at full res.
+OD_CPU_MAX_HEIGHT    = 720            # cap libx264 JIT height so a CPU box keeps up
+OD_FFMPEG_THREADS    = 0              # 0 = libx264 auto (all cores); this is
+                                      # interactive playback, not bulk prep
 _OD_SEG_RE = re.compile(r"^seg_(\d+)\.ts$")
 
 # session_key → {src, dir, duration, audio_idx, has_audio, start_seg, proc,
@@ -22327,15 +22338,27 @@ def _od_build_ffmpeg_args(
     args += ["-ss", str(start_sec), "-i", str(src), "-map", "0:v:0"]
     if has_audio:
         args += ["-map", f"0:a:{audio_idx}"]
+    # Interactive JIT must beat real-time or the client's forward buffer drains
+    # and playback stalls at the buffer edge ("won't play past the buffer"). NVENC
+    # keeps up at source resolution (better quality for the bridge stream); the CPU
+    # (libx264) path downscales to at most OD_CPU_MAX_HEIGHT and uses the whole box
+    # (below-normal priority still keeps the server snappy). `out_height` drives the
+    # level calc below.
+    out_height = src_height
     if use_nvenc:
         args += ["-c:v", "h264_nvenc", "-preset", "medium", "-rc", "vbr", "-cq", "23"]
     else:
         args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
-                 "-threads", str(OFFLINE_FFMPEG_THREADS)]
-    # This path transcodes at SOURCE resolution (no scale filter), so a 4K
-    # source needs a level above 4.1 or the encoder aborts with "Invalid Level"
-    # (error -22), tearing down the session. 4.1 caps at ~1080p; 5.2 covers 4K.
-    level = "4.1" if src_height <= 1080 else ("5.0" if src_height <= 1440 else "5.2")
+                 "-threads", str(OD_FFMPEG_THREADS)]
+        if src_height and src_height > OD_CPU_MAX_HEIGHT:
+            # -2 keeps the width even (required by yuv420p); scaling happens before
+            # encode so the level below reflects the capped output height.
+            args += ["-vf", f"scale=-2:{OD_CPU_MAX_HEIGHT}"]
+            out_height = OD_CPU_MAX_HEIGHT
+    # Output resolution → HLS level. A 4K/1440p rendition needs a level above 4.1
+    # or the encoder aborts with "Invalid Level" (error -22), tearing down the
+    # session. 4.1 caps at ~1080p; 5.0 ~1440p; 5.2 covers 4K.
+    level = "4.1" if out_height <= 1080 else ("5.0" if out_height <= 1440 else "5.2")
     args += [
         "-pix_fmt", "yuv420p", "-profile:v", "high", "-level", level,
         "-force_key_frames", f"expr:gte(t,n_forced*{OD_SEGMENT_SECS})",

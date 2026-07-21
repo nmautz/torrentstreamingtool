@@ -1064,7 +1064,16 @@ wins (on-demand is a supplement, never a replacement).
 - **ffmpeg shape** (`_od_build_ffmpeg_args`): `-ss <start_seg*6>` **before** `-i`
   (fast keyframe seek, output PTS reset to 0), `-map 0:v:0 -map 0:a:<idx>`, video
   **always transcodes** (NVENC transparent tier when present, else `libx264
-  -preset veryfast`) with `-force_key_frames expr:gte(t,n_forced*OD_SEGMENT_SECS)`,
+  -preset veryfast`) with `-force_key_frames expr:gte(t,n_forced*OD_SEGMENT_SECS)`.
+  **The CPU path must beat real-time** or the client's forward buffer drains and
+  playback stalls at the buffer edge (the "won't play past the buffer" glitch,
+  which then triggers stall-kicks / 410 reloads that can reset position → lost
+  progress). So on the **non-NVENC** path the encode **downscales to at most
+  `OD_CPU_MAX_HEIGHT` (720p)** via `-vf scale=-2:720` and uses **`-threads 0`**
+  (all cores — this is interactive playback, not bulk prep; the below-normal
+  priority still keeps the server snappy). NVENC keeps source resolution (it
+  already beats real-time, and the bridge stream stays sharper). The HLS `-level`
+  is derived from the **output** height (720p → 4.1). Then
   audio → AAC stereo, `-hls_segment_type mpegts -start_number <start_seg>
   -hls_segment_filename seg_%d.ts -hls_list_size 0`. All outputs are **bare names**
   run with `cwd=<session dir>` (same Windows-safe rule as the bundle path). Reuses
