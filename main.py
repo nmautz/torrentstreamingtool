@@ -22237,7 +22237,10 @@ def _od_wipe_segments(d: Path) -> None:
     the 'is the encode ahead of n' check."""
     try:
         for f in d.iterdir():
-            if _OD_SEG_RE.match(f.name) or f.name == "internal.m3u8":
+            # `.ts.tmp` = a segment the (now-killed) encoder was mid-write on when
+            # `temp_file` is active; drop it too so a stale partial can't linger.
+            if (_OD_SEG_RE.match(f.name) or f.name == "internal.m3u8"
+                    or f.name.endswith(".ts.tmp")):
                 try:
                     f.unlink()
                 except OSError:
@@ -22346,7 +22349,17 @@ def _od_build_ffmpeg_args(
     # level calc below.
     out_height = src_height
     if use_nvenc:
-        args += ["-c:v", "h264_nvenc", "-preset", "medium", "-rc", "vbr", "-cq", "23"]
+        # `-forced-idr 1` is LOAD-BEARING: without it h264_nvenc SILENTLY IGNORES
+        # `-force_key_frames` and emits keyframes only at its own default GOP
+        # (~250 frames ≈ 10.4 s), so segments come out ~10 s instead of
+        # OD_SEGMENT_SECS. The virtual playlist (built from duration alone) assumes
+        # every segment is exactly OD_SEGMENT_SECS, so mismatched lengths break the
+        # segment-index↔time contract: seeks land seconds off, subs desync, and the
+        # PTS timeline drifts ahead of the playlist → buffer holes / stalls. Forcing
+        # IDR makes the forced keyframes real split points → exact 6 s segments.
+        # (libx264 honors -force_key_frames on its own; this flag is nvenc-only.)
+        args += ["-c:v", "h264_nvenc", "-preset", "medium", "-rc", "vbr", "-cq", "23",
+                 "-forced-idr", "1"]
     else:
         args += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
                  "-threads", str(OD_FFMPEG_THREADS)]
@@ -22366,6 +22379,14 @@ def _od_build_ffmpeg_args(
     if has_audio:
         args += ["-c:a", "aac", "-b:a", "160k", "-ac", "2"]
     args += [
+        # Zero the MPEG-TS muxer's default initial timestamp cushion. Without this
+        # the muxer starts the first PTS at ~1.4 s (muxdelay 0.7 + muxpreload 0.5,
+        # rounded up), so EVERY segment's PTS lands ~1.4 s ABOVE its virtual-playlist
+        # slot — a player seeking to N*6 gets content labeled (N*6 + 1.4), which the
+        # virtual playlist can't reconcile → a gap at every segment/seek boundary.
+        # Zeroing both makes seg_N start at EXACTLY N*OD_SEGMENT_SECS (verified with
+        # `-output_ts_offset` below → first PTS == start_sec to the millisecond).
+        "-muxpreload", "0", "-muxdelay", "0",
         # Shift the MUXED timestamps to the absolute source position. `-ss` reset
         # output PTS to 0 (so force_key_frames' `t` is correctly 0-based and
         # boundaries land at 0/6/12…), but a player seeking across a session
@@ -22378,7 +22399,16 @@ def _od_build_ffmpeg_args(
         "-f", "hls",
         "-hls_time", str(OD_SEGMENT_SECS),
         "-hls_segment_type", "mpegts",
-        "-hls_flags", "independent_segments",
+        # temp_file: ffmpeg writes each segment to seg_N.ts.tmp and renames to
+        # seg_N.ts ONLY when the segment is finalized (i.e. the next one opens, or
+        # the encode ends). Without it the muxer grows seg_N.ts in place, so a
+        # segment request whose 150 ms poll lands mid-write streams a TRUNCATED .ts
+        # → decode gap / re-buffer. Atomic rename means `seg_path.exists()` (the
+        # serve gate + `_od_max_seg_on_disk`) only ever sees COMPLETE segments. The
+        # request is already held open up to OD_SEG_WAIT_TIMEOUT, so the ~1-segment
+        # finalize lag is absorbed by the existing wait — worst under a slow/
+        # contended encode, which is exactly when the truncation race bit hardest.
+        "-hls_flags", "independent_segments+temp_file",
         "-start_number", str(start_seg),
         "-hls_segment_filename", "seg_%d.ts",   # bare name → lands in cwd (session dir)
         "-hls_list_size", "0",

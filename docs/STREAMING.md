@@ -1074,18 +1074,34 @@ wins (on-demand is a supplement, never a replacement).
   priority still keeps the server snappy). NVENC keeps source resolution (it
   already beats real-time, and the bridge stream stays sharper). The HLS `-level`
   is derived from the **output** height (720p → 4.1). Then
-  audio → AAC stereo, `-hls_segment_type mpegts -start_number <start_seg>
-  -hls_segment_filename seg_%d.ts -hls_list_size 0`. All outputs are **bare names**
-  run with `cwd=<session dir>` (same Windows-safe rule as the bundle path). Reuses
-  `_ffmpeg_nice_prefix()` / `_FFMPEG_SUBPROCESS_KW` (below-normal priority) and
-  `_has_nvenc()`.
+  audio → AAC stereo, `-muxpreload 0 -muxdelay 0 -output_ts_offset <start_seg*6>
+  -hls_segment_type mpegts -hls_flags independent_segments+temp_file
+  -start_number <start_seg> -hls_segment_filename seg_%d.ts -hls_list_size 0`. All
+  outputs are **bare names** run with `cwd=<session dir>` (same Windows-safe rule as
+  the bundle path). Reuses `_ffmpeg_nice_prefix()` / `_FFMPEG_SUBPROCESS_KW`
+  (below-normal priority) and `_has_nvenc()`.
+  - **Three flags are load-bearing for the virtual-playlist contract** (each fixed a
+    real "JIT is buggy" symptom — see [GOTCHAS.md](GOTCHAS.md)):
+    - `-forced-idr 1` on the **NVENC** branch. Without it `h264_nvenc` silently
+      **ignores** `-force_key_frames` and emits keyframes only at its default GOP
+      (~250 frames ≈ 10.4 s), so segments come out ~10 s instead of 6 s → the
+      index↔time map is wrong (seeks land seconds off, subs desync, PTS drifts ahead
+      of the playlist → buffer holes). libx264 honors `-force_key_frames` unaided.
+    - `-muxpreload 0 -muxdelay 0`. The MPEG-TS muxer otherwise starts the first PTS
+      at ~1.4 s, so every segment's PTS lands 1.4 s above its playlist slot → a gap
+      at each segment/seek boundary. Zeroed, seg *N* starts at exactly *N*·6.
+    - `temp_file` in `-hls_flags`. Segments are written to `seg_N.ts.tmp` and
+      renamed to `seg_N.ts` only on finalize, so the serve gate (`seg_path.exists()`)
+      never streams a half-written `.ts`.
 - **Why mpegts + forced keyframes** (see [GOTCHAS.md](GOTCHAS.md)): TS segments are
   self-contained (no shared `EXT-X-MAP` init), so independently-seeked encodes never
   produce mismatched init segments the way fmp4 would. Forcing keyframes every
-  `OD_SEGMENT_SECS` (with the PTS reset from input-seek) guarantees segment *N*
-  covers exactly `[N*6,(N+1)*6)` — which is what makes the virtual playlist's timing
-  correct and seeking land precisely. Stream-copy can't guarantee that boundary
-  alignment, so it stays a full-prep-only win.
+  `OD_SEGMENT_SECS` (with the PTS reset from input-seek, `-forced-idr 1` so NVENC
+  actually obeys the force, and `muxdelay/muxpreload 0` so the PTS isn't skewed)
+  makes segment *N* cover **exactly** `[N*6,(N+1)*6)` with its first PTS landing on
+  *N*·6 — which is what makes the virtual playlist's timing correct and seeking land
+  precisely. Stream-copy can't guarantee that boundary alignment, so it stays a
+  full-prep-only win.
 - **Lifecycle.** `_od_reaper` (a `lifespan` task) terminates ffmpeg + `rmtree`s the
   dir for sessions idle past `OD_SESSION_IDLE_SECS` (90 s) and caps the live count at
   `OD_MAX_SESSIONS`. Active playback refreshes `last_access` on every segment fetch.
