@@ -10691,12 +10691,17 @@ function openTrailerModal(key, title){
   document.getElementById("trailerFrame").src=
     `https://www.youtube-nocookie.com/embed/${encodeURIComponent(key)}?autoplay=1&rel=0`;
   document.getElementById("trailerModal").classList.remove("hidden");
+  // On the TV kiosk the IFrame's audio plays through the *host* OS mixer (often
+  // at max), so duck it to the configured start level for the trailer — same as
+  // Watch-on-TV, which the YouTube-on-TV path already ducks. Restored on close.
+  if(TV_MODE) fetch("/api/trailer/host-audio/duck",{method:"POST"}).catch(()=>{});
 }
 function closeTrailerModal(){
   document.getElementById("trailerModal").classList.add("hidden");
   // Dropping the src is what stops the audio — hiding the iframe doesn't.
   document.getElementById("trailerFrame").src="";
   _trailerKey="";
+  if(TV_MODE) fetch("/api/trailer/host-audio/restore",{method:"POST"}).catch(()=>{});
 }
 // Hand the same video off to the YouTube-on-TV kiosk (POST /api/youtube takes
 // a bare video id) and close the embed so the two aren't playing over each other.
@@ -10708,6 +10713,9 @@ async function trailerToTv(btn){
       headers:{"Content-Type":"application/json"},
       body:JSON.stringify({url:key}),
     }).catch(()=>null);
+    // closeTrailerModal() fires a host-volume RESTORE on the TV kiosk, but by
+    // now youtube_play has already adopted (and cleared) our trailer snapshot,
+    // so that restore no-ops and the YouTube path owns the mixer from here.
     if(r&&r.ok){ closeTrailerModal(); showAlert("Playing trailer on TV…","success"); }
     else {
       const e=r?await r.json().catch(()=>({})):{};
@@ -18407,6 +18415,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.9.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.9.1</div>
 </body>
 </html>

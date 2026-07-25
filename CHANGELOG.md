@@ -1,5 +1,10 @@
 # Changelog
 
+## [11.9.1] — 2026-07-24
+- **Fix: watching a trailer on the TV no longer blasts the room.** When you open a trailer from the TV kiosk itself (the fullscreen `?tv=1` "Firestick" UI driven by the remote), its YouTube player runs in the host's own browser, so its audio rode the OS mixer — usually at max — instead of the controlled level everything else plays at. The trailer now **ducks the host volume** to the same configured start level Watch-on-TV / YouTube-on-TV already uses (`settings.youtube_start_volume`, default 30) the moment it opens, and **restores your previous volume** when you close it. Handing a trailer off to the big YouTube-on-TV kiosk mid-watch ("Watch on TV") stays seamless — that path adopts the pre-duck snapshot, so Stop still restores your real volume, not the ducked one.
+- **Backend:** `main.py` — new `POST /api/trailer/host-audio/{duck|restore}` endpoint, `state.system_volume_before_trailer`, and snapshot-adoption in `youtube_play`. **Frontend:** `static/index.html` — `openTrailerModal`/`closeTrailerModal` duck/restore on the TV kiosk (`TV_MODE`). **Docs:** [docs/API.md](docs/API.md), [docs/YOUTUBE.md](docs/YOUTUBE.md).
+- (Host-only — **no app rebuild**. Server update + restart required; hard-refresh open dashboards.)
+
 ## [11.9.0] — 2026-07-24
 - **New: plain-language help throughout the dashboard.** The admin panel had nice tap-to-explain "?" help chips but the main dashboard — the part everyone uses — had none, so its jargon ("prep", "sources", "seeders", "On TV vs On This Device") assumed insider knowledge. Ported the `help-tip` component to the dashboard (a shared popover that works on **touch**, not just hover, since it's used from phones) and attached it to the worst offenders:
   - **"Prep" is now defined** wherever you meet it — the prep-warning modal leads with "'Prep' converts this title into a format your phone, tablet or computer can play directly", and the "Prep Prio" control carries the same explanation.

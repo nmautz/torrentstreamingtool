@@ -911,6 +911,7 @@ class AppState:
     youtube_playback: str = ""                            # last player state from /tv: unstarted|buffering|playing|paused|ended
     youtube_tv_seen_at: float = 0.0                       # time.time() of last /tv heartbeat (drives relaunch-vs-load decision)
     system_volume_before_yt: Optional[int] = None        # OS volume (0-100) snapshot at YouTube start; falls back when no default configured
+    system_volume_before_trailer: Optional[int] = None   # OS volume (0-100) snapshot when a TV-kiosk inline trailer ducked the host mixer; restored on close (or adopted by youtube_play on Watch-on-TV handoff)
     # ── TV UI (Firestick-style dashboard kiosk on the host display) ──
     tv_ui_active: bool = False                            # True while the dashboard kiosk should hold the screen; gates every VLC focus assertion (see docs/REMOTE.md)
     tv_input_last: float = 0.0                            # time.time() of the last HID input (key/click/move) — drives the TV UI idle hand-back
@@ -12552,7 +12553,13 @@ async def youtube_play(req: YouTubeReq) -> JSONResponse:
     # is configured. Do this BEFORE we change anything below (so the snapshot is
     # the user's "before" state, not whatever we set later).
     cur_sys_vol = await get_system_volume()
-    if cur_sys_vol is not None:
+    if state.system_volume_before_trailer is not None:
+        # A TV-kiosk inline trailer already ducked the host mixer (Watch-on-TV
+        # handoff). Its snapshot is the user's real "before" level — adopt it so
+        # Stop restores to that, not the ducked trailer value the mixer is at now.
+        state.system_volume_before_yt = state.system_volume_before_trailer
+        state.system_volume_before_trailer = None
+    elif cur_sys_vol is not None:
         state.system_volume_before_yt = cur_sys_vol
 
     # Pre-set the OS mixer to the configured "start" volume BEFORE the kiosk
@@ -15102,6 +15109,38 @@ async def set_host_volume(req: HostVolumeReq) -> JSONResponse:
         if ok:
             _host_volume_last_written = target
     return JSONResponse({"ok": ok, "host_volume": capped})
+
+
+@app.post("/api/trailer/host-audio/{action}")
+async def trailer_host_audio(action: str) -> JSONResponse:
+    """Duck / restore the host OS mixer around an inline trailer on the TV kiosk.
+
+    The trailer modal's YouTube IFrame plays *in the host's own browser* when the
+    dashboard is the fullscreen TV kiosk (`?tv=1`), so its audio rides the OS
+    mixer — often at max, blasting the room. Only the ?tv=1 kiosk calls this.
+
+    - `duck`    — snapshot the current OS volume, then drop it to the same
+                  "start" level Watch-on-TV / YouTube-on-TV uses
+                  (`settings.youtube_start_volume`, default 30).
+    - `restore` — put the snapshot back and clear it.
+
+    Best-effort: a null snapshot (pycaw/helper unavailable) just no-ops, and the
+    snapshot is adopted by `youtube_play` if the user hands off via Watch-on-TV.
+    """
+    if action == "duck":
+        cur = await get_system_volume()
+        if cur is not None:
+            state.system_volume_before_trailer = cur
+        start_vol = await _youtube_start_volume()
+        applied = start_vol if await set_system_volume(start_vol) else cur
+        return JSONResponse({"ok": True, "host_volume": applied})
+    if action == "restore":
+        snap = state.system_volume_before_trailer
+        state.system_volume_before_trailer = None
+        if snap is not None:
+            await set_system_volume(snap)
+        return JSONResponse({"ok": True, "host_volume": snap})
+    raise HTTPException(400, "action must be 'duck' or 'restore'")
 
 
 @app.post("/api/skip-now")
