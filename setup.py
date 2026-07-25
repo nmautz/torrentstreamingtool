@@ -775,6 +775,10 @@ def install_core_deps(tools: dict) -> dict:
 
     header("Core Applications")
     warn(f"Missing: {', '.join(_CORE_LABELS[k] for k in missing)}")
+    if "mullvad" in missing:
+        note("Mullvad is optional: the VPN kill switch also supports a 'generic' mode "
+             "(any VPN) or 'off' — set it in Admin → VPN Kill Switch. Install it here "
+             "only if you use Mullvad.")
 
     if SYSTEM == "Windows":
         winget = find_exe("winget")
@@ -1381,10 +1385,6 @@ def generate_ssl_cert() -> bool:
     key  = HERE / "key.pem"
     ca   = HERE / "ca.pem"
 
-    if cert.exists() and key.exists() and ca.exists():
-        ok("SSL certs already exist — skipping generation")
-        return True
-
     try:
         import ipaddress as _ip
         from datetime import datetime as _dt, timedelta as _td, timezone as _tz
@@ -1396,6 +1396,33 @@ def generate_ssl_cert() -> bool:
         warn("cryptography package not found — cannot generate SSL cert.")
         warn("Run: pip install cryptography  (or re-run setup.py to install it)")
         return False
+
+    # SHA-256 fingerprint of the CA that was accidentally committed to the repo in
+    # early builds. Any checkout carrying it shares one publicly-known private key,
+    # so the "secure" HTTPS admin panel is trivially MITM-able. Force a regenerate
+    # for those installs even though the files exist. (New clones won't have the
+    # PEMs at all — they're now gitignored — so this only rescues old checkouts.)
+    _LEAKED_CA_FPR = "c9004b439071e3c336ccd89dd5177e1c4750068b385fbd022cc42ad47c1878c6"
+
+    def _is_leaked_ca() -> bool:
+        try:
+            _c = _x509.load_pem_x509_certificate(ca.read_bytes())
+            return _c.fingerprint(_hashes.SHA256()).hex() == _LEAKED_CA_FPR
+        except Exception:
+            return False
+
+    if cert.exists() and key.exists() and ca.exists():
+        if _is_leaked_ca():
+            warn("Detected the shared/committed demo certificate — regenerating a "
+                 "unique one for this machine (the old one's private key is public).")
+            for _p in (cert, key, ca):
+                try:
+                    _p.unlink()
+                except OSError:
+                    pass
+        else:
+            ok("SSL certs already exist — skipping generation")
+            return True
 
     note("Generating self-signed CA and server certificate…")
     now = _dt.now(_tz.utc)
@@ -1635,6 +1662,25 @@ def main():
         warn(f"Still needs manual install: {', '.join(missing)}")
     if not tools.get("mullvad"):
         note("VPN guard will be inactive until Mullvad CLI is in PATH.")
+
+    # These can't be automated — they need a login, a third-party UI, or a key you
+    # fetch by hand. The dashboard shows the same list (its first-run checklist),
+    # but call it out here too so the CLI hands off cleanly instead of leaving a
+    # working-looking dashboard that silently can't search.
+    print()
+    header("A few steps you still do by hand")
+    if tools.get("mullvad"):
+        note("1. Open Mullvad and LOG IN + connect — streaming is blocked until the VPN is up.")
+    else:
+        note("1. Install Mullvad, log in, and connect (streaming is VPN-gated).")
+    if not (cfg.get("INDEXER_API_KEY") or "").strip():
+        warn("2. Jackett: add an indexer, copy its API Key into INDEXER_API_KEY "
+             "(re-run setup.py or edit .env). REQUIRED — search does nothing without it.")
+    else:
+        note("2. Jackett: confirm you've added at least one indexer for your content.")
+    if not (cfg.get("TMDB_API_KEY") or "").strip():
+        note("3. Optional: add a free TMDb API key (posters + Explore + episode names) "
+             "in the admin panel → Indexers, or as TMDB_API_KEY in .env.")
 
     print()
     if service_installed:

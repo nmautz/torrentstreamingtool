@@ -10,6 +10,13 @@ build/
 # Environment / secrets
 .env
 
+# Self-signed TLS certs — regenerated per-machine by setup.py. NEVER commit these:
+# a shared private key means every install has the same (public) key → the HTTPS
+# admin panel is trivially MITM-able. setup.py regenerates a unique CA+cert locally.
+cert.pem
+key.pem
+ca.pem
+
 # Downloaded media (configured via QBIT_DOWNLOAD_PATH)
 Downloads/
 .offline_cache/

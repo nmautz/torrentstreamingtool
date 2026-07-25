@@ -2,6 +2,10 @@
 
 `/admin` — served by `static/admin.html` ([main.py:3167](../main.py#L3167)). Disabled if `ADMIN_PASSWORD` is empty in `.env`.
 
+## Trust boundary (deliberate)
+
+Only `/admin` and admin API routes are gated (`_check_admin`). **The main dashboard has no per-request auth** and uvicorn binds `0.0.0.0`, so anyone on the LAN can drive search/stream/play. This is intentional: StreamLink is a trusted-home-network appliance, and gating every phone/TV client would break the zero-config connect flow. The mitigation is *network*, not app-level: keep it on a home LAN, never port-forward it. Adding real dashboard auth is deliberately **out of scope** — revisit only if the deployment model changes (e.g. exposing it to the internet). The TLS cert (`cert.pem`/`key.pem`/`ca.pem`) is generated per-machine by `setup.py` and git-ignored; `setup.py` detects and regenerates the old accidentally-committed shared cert.
+
 ## Auth flow
 
 1. `GET /api/admin/status` returns `{enabled: bool}`. If false, the login overlay shows "Admin disabled" and the dashboard hides the admin link

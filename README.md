@@ -1,6 +1,6 @@
 # P2P StreamLink — Setup Guide (Windows)
 
-Local dashboard for searching, buffering, and instantly streaming P2P media through VLC — with a Mullvad VPN kill-switch.
+Local dashboard for searching, buffering, and instantly streaming P2P media through VLC — with a VPN kill-switch (Mullvad, any generic VPN, or off).
 
 **Windows is the primary, supported platform.** Linux and macOS work but are secondary; this guide is written for Windows. Platform differences are called out where they matter.
 
@@ -142,15 +142,15 @@ Rules:
 
 ---
 
-## 3 — Log into Mullvad (manual)
+## 3 — Set up the VPN kill switch (manual)
 
-`setup.py` can *install* the Mullvad app, but it cannot log into your account for you.
+StreamLink runs a VPN kill switch: while it's active, the backend checks your VPN every 3 seconds and, if you're not protected, **kills qBittorrent**, overlays a red warning, and blocks new streams until you reconnect. **You choose how it verifies the VPN** in **Admin → VPN Kill Switch**:
 
-1. Open the **Mullvad VPN** app.
-2. Enter your **account number** and **connect**.
-3. Make sure the Mullvad **CLI** is on your PATH (the official installer adds it). `run.py` runs `mullvad status` to verify the kill-switch.
+- **Mullvad** (default) — runs `mullvad status` and requires `Connected`. `setup.py` can *install* the Mullvad app, but can't log in for you: open the **Mullvad VPN** app, enter your **account number** and **connect**, and make sure the Mullvad **CLI** is on PATH (the installer adds it).
+- **Generic VPN** — provider-agnostic: you're considered protected whenever a VPN tunnel interface (WireGuard, OpenVPN, NordLynx, …) is up. Use this with any non-Mullvad VPN — no vendor CLI needed.
+- **Off** — disables the kill switch entirely (qBittorrent runs freely; the dashboard shows a small "VPN OFF" pill instead of the overlay). Only pick this if you're protected another way, e.g. a VPN on your router.
 
-The VPN kill-switch is core to this tool: every 3 seconds the backend checks `mullvad status`, and if you're not connected it **kills qBittorrent**, overlays a red warning, and blocks new streams until you reconnect. Without Mullvad connected, downloads will not run.
+So Mullvad is the default but **not required** — pick Generic or Off if you don't use it. In Mullvad/Generic mode, if the VPN isn't verified, downloads won't run until it is.
 
 ---
 
@@ -266,9 +266,16 @@ Without both, a reboot leaves the dashboard offline until you run `python run.py
 
 ---
 
+## Security & network boundary (read this)
+
+StreamLink is a **trusted-LAN home appliance**. Two things follow:
+
+- **The dashboard has no login.** It binds every network interface (`0.0.0.0`) and the main UI is open to anyone who can reach the host's IP — that's what lets phones and the TV connect with zero setup. **Keep it on your home network. Never port-forward its ports (80/443) to the internet.** Only the `/admin` panel is password-gated (`ADMIN_PASSWORD`).
+- **The TLS cert is generated per machine.** `cert.pem` / `key.pem` / `ca.pem` are created locally by `setup.py` and are **git-ignored — never commit them**. Each install gets its own unique private key. (Early builds accidentally shipped a shared cert; re-running `setup.py` detects that one and regenerates a unique cert automatically.)
+
 ## Trusting the HTTPS certificate (optional)
 
-The admin panel uses a self-signed cert, so browsers show a warning. To remove it, add `ca.pem` (in the project root) to the Windows trust store:
+The admin panel uses your machine's self-signed cert, so browsers show a warning. To remove it, add `ca.pem` (generated in the project root by `setup.py`) to the Windows trust store:
 
 ```powershell
 # elevated PowerShell
@@ -326,7 +333,7 @@ Stop → torrent + local file deleted → VLC stopped
 
 **TMDb key powers title search.** Set a TMDb API key under **Admin → Indexers → TMDb Metadata** (also used for library artwork/episode names). With a key, the search box searches TMDb first so you pick a real show/movie before any indexer is queried. **Without** a key it falls back to searching Jackett directly (the legacy grouped results) — you still need a **Jackett** indexer + API key either way, since Jackett is what actually finds the torrents.
 
-**VPN kill-switch** — every 3 s the backend runs `mullvad status`. If `"Connected"` is absent: qBittorrent is killed, a full-screen red warning overlays the dashboard, and new `/api/stream` requests return HTTP 403 until the VPN reconnects.
+**VPN kill-switch** — every 3 s the backend verifies the VPN using the mode set in **Admin → VPN Kill Switch** (Mullvad `mullvad status` / Generic tunnel-interface check / Off). Unless it's Off, when the VPN isn't verified: qBittorrent is killed, a full-screen red warning overlays the dashboard, and new `/api/stream` requests return HTTP 403 until the VPN reconnects. See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) and `vpncheck.py`.
 
 ---
 

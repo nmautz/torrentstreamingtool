@@ -825,6 +825,25 @@
     /* ── Icon system — inline SVG sprite sized to the local font.
        See docs/FRONTEND.md § Iconography. ── */
     .ic{width:1.1em;height:1.1em;display:inline-block;vertical-align:-.18em;fill:currentColor;flex-shrink:0;pointer-events:none}
+
+    /* ── Help-tip chip + shared popover (ported from admin.html) ──────────────
+       A small square "?" that explains user-facing jargon in plain words. Works
+       on touch (tap to pin) as well as hover/focus — the dashboard is used from
+       phones, where title= tooltips never appear. See docs/FRONTEND.md. */
+    .help-tip{
+      display:inline-flex; align-items:center; justify-content:center;
+      width:15px; height:15px; margin-left:6px; flex-shrink:0;
+      font-size:10px; font-weight:900; line-height:1; vertical-align:1px;
+      color:#818cf8; border:1px solid #3730a3; background:#111827;
+      cursor:help; user-select:none; -webkit-user-select:none;
+    }
+    .help-tip:hover, .help-tip.tip-open{ color:#fff; border-color:#6366f1; background:#312e81; }
+    #tipPop{
+      position:fixed; z-index:80; max-width:290px; display:none;
+      background:#030712; border:1px solid #374151; border-top:3px solid #4f46e5;
+      padding:10px 12px; font-size:11px; line-height:1.55; color:#d1d5db;
+      pointer-events:none; white-space:normal; box-shadow:0 8px 24px rgba(0,0,0,0.6);
+    }
   </style>
 </head>
 <body class="dark bg-gray-950 text-gray-100 flex flex-col">
@@ -2206,6 +2225,10 @@
 
     <!-- Search tab -->
     <div id="searchTab">
+      <!-- First-run setup checklist: rendered by refreshSetupChecklist() from
+           /api/setup-status when a required prerequisite (indexer, etc.) is missing.
+           Stays hidden once everything required is configured. -->
+      <div id="setupChecklist" class="hidden mb-4"></div>
       <!-- YouTube → TV: paste a link, play it fullscreen in the host browser on the TV -->
       <div class="mb-3">
         <div class="flex gap-0">
@@ -2249,7 +2272,7 @@
           </button>
           <div id="srcPanel" class="hidden mt-2 bg-gray-900 border border-gray-800">
             <div class="flex items-center justify-between px-3 py-2 border-b border-gray-800">
-              <span class="text-[11px] font-black uppercase tracking-widest text-gray-500">Search Sources</span>
+              <span class="text-[11px] font-black uppercase tracking-widest text-gray-500">Search Sources<span class="help-tip" tabindex="0" data-tip="The sites StreamLink searches for a download (your configured indexers). Tick the ones to include in this search; leave them all on if you're not sure.">?</span></span>
               <div class="flex gap-2">
                 <button type="button" onclick="setAllSources(true)"
                   class="text-[10px] font-bold uppercase tracking-wide text-gray-400 hover:text-white">All</button>
@@ -2290,7 +2313,7 @@
         </div>
         <!-- Search mode: TMDb-first "Smart" poster browse vs the legacy indexer-first list -->
         <div id="searchModeWrap" class="mt-2 px-1 flex items-center gap-2">
-          <span class="text-[11px] font-bold uppercase tracking-wide text-gray-500">Search</span>
+          <span class="text-[11px] font-bold uppercase tracking-wide text-gray-500">Search<span class="help-tip" tabindex="0" data-tip="Smart: pick a real show or movie by its poster first (uses TMDb artwork), then choose a download. Classic: skip that and see the raw download list grouped by title. Smart is easier; use Classic if a title has no TMDb match.">?</span></span>
           <div class="inline-flex border border-gray-800">
             <button id="searchModeSmart" type="button" onclick="setSearchMode('smart')"
               title="Browse real shows/movies by poster (uses TMDb)">Smart</button>
@@ -2300,7 +2323,7 @@
         </div>
         <div class="flex justify-between mt-2 px-1">
           <span id="resultCount" class="text-[11px] text-gray-600 uppercase tracking-wide"></span>
-          <span class="text-[11px] text-gray-700 uppercase tracking-wide">sorted by seeders</span>
+          <span class="text-[11px] text-gray-700 uppercase tracking-wide">sorted by seeders<span class="help-tip" tabindex="0" data-tip="Seeders = how many people are currently sharing a file. More seeders usually means a faster, smoother download that's more likely to play without buffering.">?</span></span>
         </div>
       </div>
       <div id="alert" class="hidden mb-4 px-4 py-3 border-l-4 text-sm"></div>
@@ -2314,8 +2337,8 @@
               d="M21 21l-4.35-4.35m0 0A7.5 7.5 0 104.5 4.5a7.5 7.5 0 0012.15 12.15z"/>
           </svg>
         </div>
-        <p class="text-gray-500 font-black uppercase tracking-wide">Search for media</p>
-        <p class="text-gray-700 text-xs mt-1">Public domain archives, open-source video, and more</p>
+        <p class="text-gray-500 font-black uppercase tracking-wide">Search for movies &amp; shows</p>
+        <p class="text-gray-700 text-xs mt-1">Type a title above to find something to watch. If nothing comes back, check the setup steps at the top of this page.</p>
       </div>
     </div>
 
@@ -3038,6 +3061,7 @@
       </div>
     </div>
     <div class="px-5 py-4 text-sm text-gray-300 space-y-2">
+      <p class="text-xs text-gray-400"><strong class="text-gray-200">"Prep"</strong> converts this title into a format your phone, tablet or computer can play directly — so you can watch it on this device (and download it for offline).</p>
       <p>While files are being prepared, <strong class="text-amber-300">the server will get laggy</strong> and can become unusable at times — playback, search and downloads may stutter.</p>
       <p class="text-xs text-gray-500">You can <strong class="text-gray-300">pause</strong> at any time from the indicator in the top-right and resume later. The admin can also set this to run automatically when the box is idle.</p>
     </div>
@@ -3087,7 +3111,7 @@
   class="hidden fixed inset-0 z-[60] bg-black/70 flex items-end sm:items-center justify-center sm:px-4">
   <div class="bg-gray-900 w-full sm:max-w-sm fade-in border-t-[3px] border-indigo-600">
     <div class="px-5 pt-5 pb-3 border-b border-gray-800">
-      <h2 class="text-lg font-black uppercase tracking-wide">Play where?</h2>
+      <h2 class="text-lg font-black uppercase tracking-wide">Where do you want to watch?</h2>
       <p id="pcSubtitle" class="text-xs text-gray-500 mt-0.5 truncate"></p>
     </div>
     <div class="p-4 grid grid-cols-1 gap-2">
@@ -3098,8 +3122,8 @@
           <path d="M8 20h8M12 18v2"/>
         </svg>
         <div class="min-w-0">
-          <div class="text-sm font-black uppercase tracking-wide">On TV (VLC)</div>
-          <div class="text-[11px] text-gray-500 mt-0.5">Stream to the host's VLC player</div>
+          <div class="text-sm font-black uppercase tracking-wide">On the TV</div>
+          <div class="text-[11px] text-gray-500 mt-0.5">Play on the big screen connected to StreamLink (via VLC)</div>
         </div>
       </button>
       <button id="pcLocalBtn" onclick="pcChoose('local')"
@@ -3109,8 +3133,8 @@
           <path d="M11 18h2"/>
         </svg>
         <div class="min-w-0">
-          <div class="text-sm font-black uppercase tracking-wide">On This Device</div>
-          <div id="pcLocalSub" class="text-[11px] text-gray-500 mt-0.5">Stream to this device's browser</div>
+          <div class="text-sm font-black uppercase tracking-wide">On this device</div>
+          <div id="pcLocalSub" class="text-[11px] text-gray-500 mt-0.5">Play right here — the phone, tablet, or computer you're holding</div>
         </div>
       </button>
     </div>
@@ -3438,6 +3462,16 @@
 // Icon helper — sprite markup for JS-built HTML (docs/FRONTEND.md § Iconography).
 // Emoji / dingbat glyphs are banned in the UI; use ${ic("name")} instead.
 function ic(name,cls){ return `<svg class="ic${cls?" "+cls:""}" aria-hidden="true"><use href="#i-${name}"/></svg>`; }
+
+// Help-tip chip for JS-built HTML — a "?" that explains user-facing jargon in
+// plain words (works on touch, unlike title=). Mirrors admin.html's markup and
+// the shared #tipPop popover below. Static HTML can also just add class="help-tip"
+// tabindex="0" data-tip="…". See docs/FRONTEND.md.
+function helpTip(text){
+  const esc = (s)=>String(s==null?"":s).replace(/[&<>"]/g,
+    c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
+  return `<span class="help-tip" tabindex="0" data-tip="${esc(text)}">?</span>`;
+}
 "use strict";
 
 // ── UI version self-check ──────────────────────────────────────────────────
@@ -3528,7 +3562,7 @@ const PROFILE_COLORS = {
 
 // ── App state ──────────────────────────────────────────────────────────────
 let app = {
-  vpn_secure:true, vpn_status:"Checking…", vpn_block_ui:true, stream_status:"idle",
+  vpn_secure:true, vpn_status:"Checking…", vpn_block_ui:true, vpn_mode:"mullvad", stream_status:"idle",
   active_title:null, progress:0, downloaded_mb:0, total_mb:0,
   dl_speed_bps:0, ul_speed_bps:0,
   vlc_time:0, vlc_duration:0, vlc_volume:100, vlc_night_mode:false, vlc_night_mode_preset:"medium",
@@ -4117,7 +4151,20 @@ function renderFcNotice(){
 }
 
 // ── VPN UI ─────────────────────────────────────────────────────────────────
-function renderVpn(secure,statusText,blockUi){
+function renderVpn(secure,statusText,blockUi,mode){
+  if(mode===undefined) mode = (typeof app!=="undefined" && app.vpn_mode) ? app.vpn_mode : "mullvad";
+  // Kill switch disabled by the admin: qBit runs freely, there's no overlay, and
+  // the pill reads a muted "VPN OFF" rather than a misleading green "Connected".
+  if(mode==="off"){
+    const dot=document.getElementById("vpnDot"),label=document.getElementById("vpnLabel");
+    const pill=document.getElementById("vpnPill"),overlay=document.getElementById("vpnOverlay");
+    dot.className="w-2 h-2 bg-gray-500 flex-shrink-0 transition-colors";
+    label.className="text-xs font-medium text-gray-400 whitespace-nowrap hidden sm:inline";
+    label.textContent="VPN: OFF"; pill.classList.remove("border-red-800");
+    overlay.classList.add("hidden");
+    applyVpnGate(true);   // nothing is VPN-gated when the kill switch is off
+    return;
+  }
   // blockUi (admin setting, default true): when the VPN drops, gate the whole UI
   // behind the overlay. When false, only the pill turns red — qBit is still
   // killed server-side and P2P stream/download stay 403'd, but the rest of the
@@ -6001,7 +6048,7 @@ function _libItemChrome(item){
     : "";
 
   const compressedBadge = item.compressed
-    ? `<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 border border-gray-700" title="A file here was compressed to save space — no longer torrent-backed (won't seed, can't re-download).">⤓ Compressed</span>`
+    ? `<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 border border-gray-700" title="A file here was compressed to save space — this copy was shrunk to save space, so it can no longer be shared with others or re-downloaded.">⤓ Compressed</span>`
     : "";
 
   // Buttons — multi-episode vs single. Primary actions go in `buttons`; icon-only
@@ -7758,7 +7805,7 @@ function _epCardHtml(f){
   // Re-encoded in place to save space → no longer torrent-backed: won't seed, can't be
   // re-downloaded, and recheck/recover/delete-to-free-space refuse it (server-enforced).
   const compressedBadge = f.compressed
-    ? `<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 border border-gray-700 uppercase tracking-widest font-bold" title="Re-encoded to save space — no longer torrent-backed (won't seed, can't re-download).">⤓ Compressed</span>`
+    ? `<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 border border-gray-700 uppercase tracking-widest font-bold" title="Re-encoded to save space — this copy was shrunk to save space, so it can no longer be shared with others or re-downloaded.">⤓ Compressed</span>`
     : "";
 
   const prepState = prepFileState.get(offKey(fid,f.path));
@@ -8117,7 +8164,7 @@ function _epMoviePanel(f){
     statusHtml = `<span class="text-[11px] text-yellow-500 font-bold uppercase tracking-widest">${pct}% watched</span>`;
   }
   if(compressed){
-    statusHtml += ` <span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 border border-gray-700 uppercase tracking-widest font-bold align-middle" title="Re-encoded to save space — no longer torrent-backed (won't seed, can't re-download).">⤓ Compressed</span>`;
+    statusHtml += ` <span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 border border-gray-700 uppercase tracking-widest font-bold align-middle" title="Re-encoded to save space — this copy was shrunk to save space, so it can no longer be shared with others or re-downloaded.">⤓ Compressed</span>`;
   }
 
   const progressBar = (inProgress||isComplete)
@@ -8170,7 +8217,7 @@ function _epMoviePanel(f){
     if(compressed){
       actions.push(`<button disabled
         class="bg-gray-900 text-gray-600 border border-gray-800 py-3 px-4 text-sm font-bold uppercase tracking-wide min-h-[44px] flex items-center justify-center gap-1.5 opacity-70 cursor-not-allowed"
-        title="Compressed file — no longer torrent-backed, so it can't be re-downloaded. Remove the whole item to delete it permanently.">
+        title="This copy was shrunk to save space, so it can't be re-downloaded. Remove the whole item to delete it permanently.">
         <svg class="ic" aria-hidden="true"><use href="#i-ban"/></svg> Can't free (compressed)
       </button>`);
     } else {
@@ -8200,7 +8247,7 @@ function _epMoviePanel(f){
   let prepPrioHtml="";
   if(hlsAvailable && !notDownloaded && !epOndemandOnly){
     prepPrioHtml = `<div class="flex items-center gap-1.5 flex-wrap mt-1" title="Stream-prep queue order — High preps ahead of other auto-prep. Default: Mid (series default).">
-      <span class="text-[10px] font-black text-gray-500 uppercase tracking-widest mr-0.5">Prep Prio:</span>
+      <span class="text-[10px] font-black text-gray-500 uppercase tracking-widest mr-0.5">Prep Prio:${helpTip("\"Prep\" converts a title so your phone/tablet/computer can play it directly (and download it for offline). This sets which titles get prepped first when several are queued.")}</span>
       ${_prioSeg(f.prep_priority||"mid",`epPrepPrioFile(${_p},'%V%',this)`)}
     </div>`;
   }
@@ -17939,7 +17986,7 @@ function connectSSE(){
     if(typeof d.subtitle_upgrade_late === "boolean") subtitleUpgradeLate = d.subtitle_upgrade_late;
     if(typeof d.subtitle_single_option === "boolean") subtitleSingleOption = d.subtitle_single_option;
     if(typeof d.vpn_block_ui === "boolean") app.vpn_block_ui=d.vpn_block_ui;
-    renderVpn(d.vpn_secure,d.vpn_status,app.vpn_block_ui); renderPlayer(app);
+    renderVpn(d.vpn_secure,d.vpn_status,app.vpn_block_ui,app.vpn_mode); renderPlayer(app);
     updateDlBadge(d.downloading_count||0);
     renderServerAttention(d);
     if(typeof d.vlc_night_mode==="boolean") renderNightMode();
@@ -18112,6 +18159,130 @@ document.addEventListener("keydown",e=>{
   }
 });
 
+// ── Help-tip popover (ported from admin.html) ────────────────────────────────
+// One shared popover serves every [data-tip] element. Hover / keyboard focus
+// shows it transiently; tapping a `.help-tip` chip pins it (tap again or tap
+// elsewhere to dismiss) so tips work on touch screens too.
+let _tipEl = null, _tipPinned = false;
+function _tipShow(el){
+  const text = el.dataset.tip || "";
+  if(!text) return;
+  let pop = document.getElementById("tipPop");
+  if(!pop){ pop = document.createElement("div"); pop.id = "tipPop"; document.body.appendChild(pop); }
+  pop.textContent = text;
+  pop.style.display = "block";
+  const r = el.getBoundingClientRect(), pw = pop.offsetWidth, ph = pop.offsetHeight;
+  const x = Math.min(Math.max(8, r.left + r.width/2 - pw/2), Math.max(8, window.innerWidth - pw - 8));
+  let y = r.top - ph - 8;
+  if(y < 8) y = r.bottom + 8;       // no room above → flip below
+  pop.style.left = `${Math.round(x)}px`;
+  pop.style.top  = `${Math.round(y)}px`;
+  if(_tipEl && _tipEl !== el) _tipEl.classList.remove("tip-open");
+  el.classList.add("tip-open");
+  _tipEl = el;
+}
+function _tipHide(){
+  if(_tipEl) _tipEl.classList.remove("tip-open");
+  _tipEl = null; _tipPinned = false;
+  const pop = document.getElementById("tipPop");
+  if(pop) pop.style.display = "none";
+}
+document.addEventListener("mouseover", e=>{
+  const t = e.target.closest("[data-tip]");
+  if(t && t !== _tipEl){ _tipPinned = false; _tipShow(t); }
+});
+document.addEventListener("mouseout", e=>{
+  const t = e.target.closest("[data-tip]");
+  if(t && t === _tipEl && !_tipPinned) _tipHide();
+});
+document.addEventListener("focusin", e=>{
+  const t = e.target.closest("[data-tip]");
+  if(t){ _tipPinned = false; _tipShow(t); }
+});
+document.addEventListener("focusout", ()=>{ if(_tipEl && !_tipPinned) _tipHide(); });
+// Chips pin on tap/click (and swallow the click so a chip inside a control can't
+// trigger it); a click anywhere else dismisses.
+document.addEventListener("click", e=>{
+  const chip = e.target.closest(".help-tip");
+  if(chip){
+    e.preventDefault(); e.stopPropagation();
+    if(_tipEl === chip && _tipPinned) _tipHide();
+    else { _tipShow(chip); _tipPinned = true; }
+    return;
+  }
+  if(_tipEl) _tipHide();
+}, true);
+document.addEventListener("scroll", ()=>{ if(_tipEl) _tipHide(); }, true);
+window.addEventListener("resize",  ()=>{ if(_tipEl) _tipHide(); });
+
+// ── First-run setup checklist ────────────────────────────────────────────────
+// Fetches /api/setup-status and, when a prerequisite is missing, paints a
+// "finish setup" card at the top of Search so a fresh install explains WHY its
+// tabs look empty instead of just showing blank screens. Hides itself once every
+// required item is satisfied. Dismissible per session, but a failing REQUIRED
+// item (e.g. no indexer) re-shows it on reload so the real blocker can't be
+// permanently hidden.
+async function refreshSetupChecklist(){
+  const box = document.getElementById("setupChecklist");
+  if(!box) return;
+  // The offline/app snapshots have no host config to report on.
+  if(typeof _appOffline !== "undefined" && _appOffline){ box.classList.add("hidden"); return; }
+  let data;
+  try{
+    const r = await fetch("/api/setup-status");
+    if(!r.ok) throw new Error("status "+r.status);
+    data = await r.json();
+  }catch(_){ box.classList.add("hidden"); return; }   // host unreachable → stay quiet
+
+  const notOk = (data.items||[]).filter(it=>!it.ok);
+  if(notOk.length===0){ box.classList.add("hidden"); return; }
+
+  const anyRequiredFailing = notOk.some(it=>it.required);
+  if(!anyRequiredFailing && sessionStorage.getItem("setupChecklistDismissed")==="1"){
+    box.classList.add("hidden"); return;
+  }
+
+  const esc = (s) => String(s==null?"":s).replace(/[&<>"]/g,
+    ch => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;"}[ch]));
+  const rows = notOk.map(it=>{
+    const req = it.required
+      ? `<span class="text-[9px] font-black uppercase tracking-widest text-amber-400 bg-amber-950/60 px-1.5 py-0.5">Required</span>`
+      : `<span class="text-[9px] font-black uppercase tracking-widest text-gray-500 bg-gray-800 px-1.5 py-0.5">Optional</span>`;
+    const fix = it.admin_tab
+      ? `<a href="/admin#${esc(it.admin_tab)}" class="shrink-0 self-start text-[11px] font-black uppercase tracking-wide bg-indigo-600 hover:bg-indigo-500 px-3 py-1.5 transition-colors">Fix</a>`
+      : "";
+    return `<div class="flex items-start gap-3 py-2.5 border-t border-gray-800">
+      <div class="flex-1 min-w-0">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="w-2 h-2 ${it.required?"bg-amber-400":"bg-gray-600"} shrink-0"></span>
+          <span class="text-sm font-bold text-gray-200">${esc(it.label)}</span>${req}
+        </div>
+        <p class="text-xs text-gray-500 mt-1">${esc(it.detail)}</p>
+        <p class="text-[11px] text-gray-600 mt-0.5">${esc(it.how_to_fix)}</p>
+      </div>
+      ${fix}
+    </div>`;
+  }).join("");
+
+  box.innerHTML = `<div class="bg-gray-900 border border-amber-900/60">
+    <div class="flex items-center justify-between px-4 py-3 bg-amber-950/40">
+      <div class="flex items-center gap-2">
+        ${ic("warn","text-amber-400")}
+        <span class="text-xs font-black uppercase tracking-widest text-amber-300">Finish setting up StreamLink</span>
+      </div>
+      <button onclick="dismissSetupChecklist()" title="Hide (reappears if a required step is still missing)"
+        class="text-gray-500 hover:text-gray-300 text-lg leading-none px-1">&times;</button>
+    </div>
+    <div class="px-4 pb-3">${rows}</div>
+  </div>`;
+  box.classList.remove("hidden");
+}
+function dismissSetupChecklist(){
+  sessionStorage.setItem("setupChecklistDismissed","1");
+  const box = document.getElementById("setupChecklist");
+  if(box) box.classList.add("hidden");
+}
+
 // ── Init ───────────────────────────────────────────────────────────────────
 document.addEventListener("DOMContentLoaded",async()=>{
   // Offline cached-player mode (docs/PLAYER_CACHE_PLAN.md): the page is a
@@ -18152,6 +18323,9 @@ document.addEventListener("DOMContentLoaded",async()=>{
   startGlobalPrepPoller();
   // Pre-fetch default download path so modal opens instantly
   ensureDefaultSavePath();
+  // First-run checklist: surface any missing prerequisite (indexer/TMDb/etc.)
+  // so a fresh install isn't just empty tabs. Fire-and-forget.
+  refreshSetupChecklist();
 
   // VPN feature gate: block clicks on any `.vpn-gated` control while the VPN is
   // down, in the capture phase so the element's own onclick/listener never runs.
@@ -18233,6 +18407,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.6.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.9.0</div>
 </body>
 </html>

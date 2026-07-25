@@ -23,6 +23,8 @@ import sys
 import time
 from pathlib import Path
 
+import vpncheck   # leaf module (stdlib + optional psutil) — safe pre-venv too
+
 HERE   = Path(__file__).parent
 VENV   = HERE / ".venv"
 SYSTEM = platform.system()
@@ -700,10 +702,39 @@ def _diagnose_jackett_service_state() -> None:
         vlog(f"  event log query failed: {exc}")
 
 
-def check_mullvad() -> bool:
+def check_vpn() -> bool:
+    """Startup VPN check, honouring settings.vpn_killswitch.mode (vpncheck.py):
+
+    - "off"     → kill-switch disabled; report ok (no gating).
+    - "generic" → any VPN tunnel interface up (provider-agnostic).
+    - "mullvad" → the Mullvad CLI must report Connected (default).
+
+    Returns True when streaming is allowed to proceed. On False the caller
+    prompts (interactive) or continues (service) — the watchdog gates qBit either
+    way, so proceeding is safe.
+    """
+    try:
+        mode = vpncheck.vpn_mode()
+    except Exception:
+        mode = "mullvad"
+
+    if mode == "off":
+        note("VPN kill-switch is OFF (settings.vpn_killswitch.mode=off) — not gating on a VPN.")
+        return True
+
+    if mode == "generic":
+        if vpncheck.generic_tunnel_up():
+            ok("VPN: tunnel interface detected (generic mode)")
+            return True
+        warn("VPN: no tunnel interface detected (generic mode)")
+        warn("Connect your VPN before streaming, or set the kill-switch mode to 'off' in Admin.")
+        return False
+
+    # Default: Mullvad.
     mullvad_bin = find_mullvad()
     if not mullvad_bin:
-        warn("Mullvad CLI not found — VPN kill-switch disabled")
+        warn("Mullvad CLI not found — VPN kill-switch inactive")
+        warn("Install/connect Mullvad, switch the kill-switch to 'generic', or set it to 'off' in Admin.")
         return False
     try:
         result = subprocess.run(
@@ -1110,15 +1141,15 @@ def main():
     # ── Services ──────────────────────────────────────────────────────────
     print(f"{BOLD}  Services{RESET}")
     vlc_ok     = start_vlc()
-    mullvad_ok = check_mullvad()
+    vpn_ok     = check_vpn()
     _          = start_jackett()          # optional; don't block on failure
     _          = start_flaresolverr()     # optional Cloudflare proxy; no-op if not installed
 
-    if not mullvad_ok:
+    if not vpn_ok:
         # No-stdin context (system service / piped invocation) → continue
         # without prompting. The watchdog gates qBit on VPN status, so
         # silently proceeding is safe — qBit won't actually launch until
-        # Mullvad reconnects.
+        # the VPN reconnects.
         interactive = bool(getattr(sys.stdin, "isatty", lambda: False)())
         if interactive:
             print(f"  {YLW}Continue anyway? VPN kill-switch will be inactive. [y/N]{RESET} ", end="")
@@ -1128,12 +1159,12 @@ def main():
                 answer = "n"
             if not answer.startswith("y"):
                 print()
-                info("Connect Mullvad and re-run.")
+                info("Connect your VPN and re-run (or set the kill-switch to 'off' in Admin).")
                 sys.exit(0)
             print()
         else:
-            info("Mullvad disconnected and stdin is non-interactive — continuing; watchdog will start qBit once VPN reconnects.")
-        info("qBittorrent will not start — watchdog will launch it once Mullvad connects")
+            info("VPN not verified and stdin is non-interactive — continuing; watchdog will start qBit once the VPN reconnects.")
+        info("qBittorrent will not start — watchdog will launch it once the VPN connects")
         qbit_ok = True   # intentionally skipped; watchdog gates it
     else:
         qbit_ok = start_qbittorrent()
@@ -1191,6 +1222,12 @@ def main():
                     break
             except AttributeError:
                 break
+
+    # The dashboard binds 0.0.0.0 and the main UI has no per-request auth by
+    # design (trusted-LAN appliance). Make that boundary explicit so nobody
+    # port-forwards it to the open internet without realising.
+    warn("The dashboard is open to anyone on your local network — keep StreamLink "
+         "on a home/trusted network and do NOT forward its ports to the internet.")
 
     info("Press Ctrl+C to stop")
     print()

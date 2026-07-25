@@ -1219,9 +1219,22 @@
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800">
         <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">VPN Kill Switch</h2>
-        <p class="text-xs text-gray-500 mt-0.5">qBittorrent is <strong>always</strong> killed the moment Mullvad VPN drops — that can't be turned off. This setting only chooses how far the lockout reaches.</p>
+        <p class="text-xs text-gray-500 mt-0.5">While the kill switch is active, qBittorrent is <strong>always</strong> killed the moment the VPN drops — that can't be turned off. Choose how the VPN is verified, and how far the lockout reaches.</p>
       </div>
-      <div class="px-5 py-4 flex items-center justify-between gap-3">
+      <!-- Verification mode -->
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <div class="text-sm font-bold text-gray-200">Verify VPN Using<span class="help-tip" tabindex="0" data-tip="Mullvad: require the Mullvad CLI to report Connected (the default, most reliable). Generic: works with any provider — considers you protected whenever a VPN tunnel interface (WireGuard, OpenVPN, NordLynx, …) is up. Off: no VPN gating at all — qBittorrent runs freely and the dashboard shows a small 'VPN OFF' pill instead of the overlay. Only pick Off if you protect this machine another way (e.g. a VPN on your router).">?</span></div>
+          <div class="text-[11px] text-gray-600 mt-0.5">Mullvad is the default. Pick Generic for any other VPN, or Off to disable the kill switch entirely.</div>
+        </div>
+        <select id="vpnKsMode" onchange="saveVpnKsMode(this.value)"
+          class="flex-shrink-0 bg-gray-800 border border-gray-700 text-gray-200 text-xs font-bold uppercase tracking-wide px-3 py-2 focus:outline-none focus:border-indigo-500">
+          <option value="mullvad">Mullvad</option>
+          <option value="generic">Generic VPN</option>
+          <option value="off">Off (no VPN)</option>
+        </select>
+      </div>
+      <div id="vpnKsBlockRow" class="px-5 py-4 flex items-center justify-between gap-3">
         <div class="min-w-0">
           <div class="text-sm font-bold text-gray-200">Block The Entire UI On Drop</div>
           <div id="vpnKsHint" class="text-[11px] text-gray-600 mt-0.5">When on, a VPN drop locks the whole dashboard behind a full-screen overlay. When off, only qBittorrent is killed (and torrent stream/download stay blocked) — the rest of the UI keeps working, so a viewer can still watch already-prepped on-device content.</div>
@@ -1831,6 +1844,12 @@ function showDashboard(){
   loadOfflineEncoder();
   loadActivity();
   startActivityPolling();
+  // Deep link: the dashboard's first-run checklist links here as /admin#indexers
+  // so "Fix" jumps straight to the relevant tab instead of the default Activity.
+  const _hashTab = (location.hash || "").replace(/^#/, "");
+  const _tabs = ["activity","indexers","content","profiles","skip","offline",
+                 "storage","cleanup","background","system","updates"];
+  if(_tabs.includes(_hashTab)) switchTab(_hashTab);
 }
 
 async function loadOfflineEncoder(){
@@ -2655,10 +2674,17 @@ async function setPrepValidate(mode){
 
 // ── VPN Kill Switch ────────────────────────────────────────────────────────────
 let _vpnKsBlockUi = true;
+let _vpnKsMode = "mullvad";
 
 function _renderVpnKs(){
+  const sel = document.getElementById("vpnKsMode");
+  if(sel) sel.value = _vpnKsMode;
+  // "Block UI on drop" is meaningless when the kill switch is off — dim that row.
+  const blockRow = document.getElementById("vpnKsBlockRow");
+  if(blockRow) blockRow.classList.toggle("opacity-40", _vpnKsMode === "off");
   const btn = document.getElementById("vpnKsBtn");
   if(!btn) return;
+  btn.disabled = (_vpnKsMode === "off");
   if(_vpnKsBlockUi){
     btn.textContent = "Block UI";
     btn.className = "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-emerald-950 border-emerald-700 text-emerald-300 hover:bg-emerald-900 disabled:opacity-50";
@@ -2676,8 +2702,41 @@ async function loadVpnKillswitch(){
     if(!r.ok) return;
     const d = await r.json();
     _vpnKsBlockUi = !!d.block_ui;
+    _vpnKsMode = d.mode || "mullvad";
     _renderVpnKs();
   }catch(_){}
+}
+
+async function saveVpnKsMode(mode){
+  const prev = _vpnKsMode;
+  const sel = document.getElementById("vpnKsMode");
+  if(sel) sel.disabled = true;
+  try{
+    const r = await fetch("/api/admin/vpn-killswitch",{
+      method:"POST",
+      headers:{...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify({block_ui: _vpnKsBlockUi, mode}),
+    });
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      showToast(`Save failed: ${d.detail || r.status}`, true);
+      if(sel) sel.value = prev;
+      return;
+    }
+    _vpnKsMode = mode;
+    _renderVpnKs();
+    const msg = mode === "off"
+      ? "VPN kill switch is now OFF — qBittorrent will run without a VPN. Make sure you're protected another way."
+      : (mode === "generic"
+          ? "VPN now verified generically (any tunnel interface up)."
+          : "VPN now verified via the Mullvad CLI.");
+    showToast(msg, mode === "off");
+  }catch(_){
+    showToast("Save failed.", true);
+    if(sel) sel.value = prev;
+  }finally{
+    if(sel) sel.disabled = false;
+  }
 }
 
 async function toggleVpnKillswitch(){
@@ -2688,7 +2747,7 @@ async function toggleVpnKillswitch(){
     const r = await fetch("/api/admin/vpn-killswitch",{
       method:"POST",
       headers:{...authHeader(), "Content-Type":"application/json"},
-      body: JSON.stringify({block_ui: next}),
+      body: JSON.stringify({block_ui: next, mode: _vpnKsMode}),
     });
     if(!r.ok){
       const d = await r.json().catch(()=>({}));
