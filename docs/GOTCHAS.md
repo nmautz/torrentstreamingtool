@@ -410,9 +410,17 @@ If you're tempted to remove one, **don't**. They cover different failure modes:
 - `vpn_guard` runs inside the dashboard process and protects the API
 - `watchdog.py` runs in a thread (or as a separate service) and protects the process
 
-### Mullvad CLI missing → treated as unsafe
+### Verification mode: `mullvad` / `generic` / `off` (shared via `vpncheck.py`)
 
-Both guards return `vpn=False` if `mullvad` is not in PATH. Cannot-verify = unsafe. Make sure the CLI is on PATH (or set `_MULLVAD_BIN` in `.env`).
+`settings.vpn_killswitch.mode` (admin: **VPN Kill Switch → Verify VPN Using**, mirrored to `state.vpn_mode`) selects HOW all three enforcement points verify the VPN. The mode-read (`vpncheck.vpn_mode()`, reads `library.json`) and the provider-agnostic tunnel check (`vpncheck.generic_tunnel_up()`, psutil interface scan) live in the leaf module **`vpncheck.py`** so `main.py`, `run.py`, and `watchdog.py` agree — `run.py`/`watchdog.py` deliberately don't import `main.py`, so the shared logic can't live there.
+
+- **`mullvad`** (default) — `mullvad status` must report `Connected`.
+- **`generic`** — any VPN tunnel interface up (WireGuard/OpenVPN/NordLynx/…). For non-Mullvad VPNs, no vendor CLI.
+- **`off`** — kill-switch disabled: `vpn_guard` forces `vpn_secure=True`, never kills qBit, and the UI shows a muted "VPN OFF" pill instead of the overlay. `watchdog._vpn_connected()` returns True. **Only** `off` may let qBit run without a VPN — never weaken `mullvad`/`generic`.
+
+### Mullvad CLI missing → treated as unsafe (in `mullvad` mode)
+
+In `mullvad` mode, both guards return `vpn=False` if `mullvad` is not in PATH. Cannot-verify = unsafe. Put the CLI on PATH (or set `_MULLVAD_BIN` in `.env`) — **or** switch the mode to `generic`/`off` in the admin panel if you don't use Mullvad.
 
 ### Kill-switch `block_ui` governs the UI lockout ONLY — never the qBit kill
 

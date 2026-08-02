@@ -46,6 +46,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 import analyzer
 import stt
 import updater
+import vpncheck
 import winaccept_patch
 
 # Harden the Windows Proactor accept loop before uvicorn starts serving: a
@@ -737,6 +738,11 @@ class AppState:
     # VPN drops; False ⇒ only kill qBit (qBit is killed either way). Mirror of
     # settings.vpn_killswitch.block_ui; seeded at lifespan, updated by the admin POST.
     vpn_block_ui: bool = True
+    # VPN verification mode: "mullvad" (require the CLI's Connected), "generic"
+    # (any VPN tunnel interface up — provider-agnostic), or "off" (kill-switch
+    # disabled). Mirror of settings.vpn_killswitch.mode; seeded at lifespan,
+    # updated by the admin POST. See vpncheck.py.
+    vpn_mode: str = "mullvad"
     # Admin-selected primary network adapter (interface *name*, "" = auto). The
     # network_adapter_redirect middleware bounces a client that connected on any
     # other adapter's IP to this adapter's current IP. Mirror of
@@ -905,6 +911,7 @@ class AppState:
     youtube_playback: str = ""                            # last player state from /tv: unstarted|buffering|playing|paused|ended
     youtube_tv_seen_at: float = 0.0                       # time.time() of last /tv heartbeat (drives relaunch-vs-load decision)
     system_volume_before_yt: Optional[int] = None        # OS volume (0-100) snapshot at YouTube start; falls back when no default configured
+    system_volume_before_trailer: Optional[int] = None   # OS volume (0-100) snapshot when a TV-kiosk inline trailer ducked the host mixer; restored on close (or adopted by youtube_play on Watch-on-TV handoff)
     # ── TV UI (Firestick-style dashboard kiosk on the host display) ──
     tv_ui_active: bool = False                            # True while the dashboard kiosk should hold the screen; gates every VLC focus assertion (see docs/REMOTE.md)
     tv_input_last: float = 0.0                            # time.time() of the last HID input (key/click/move) — drives the TV UI idle hand-back
@@ -1028,6 +1035,9 @@ def state_snapshot() -> dict:
         "vpn_status": state.vpn_status_text,
         # Whether a VPN drop locks the whole UI (overlay) or only kills qBit.
         "vpn_block_ui": state.vpn_block_ui,
+        # "mullvad" | "generic" | "off" — the UI shows a subtle "VPN off" pill
+        # instead of the red overlay when the kill-switch is disabled.
+        "vpn_mode": state.vpn_mode,
         "jackett_ok": state.jackett_ok,
         # Some configured indexers are failing while others work (set on search).
         # The user-facing banner only needs the boolean + counts — never the names.
@@ -4420,18 +4430,33 @@ async def _apply_track_prefs(
 # ── Background Task: Mullvad Guard ───────────────────────────────────────────
 
 async def vpn_guard() -> None:
-    """Poll `mullvad status` every 3 s; kill qBittorrent if not connected."""
+    """Poll the configured VPN check every 3 s; kill qBittorrent if not connected.
+
+    The check depends on `settings.vpn_killswitch.mode` (mirrored to
+    `state.vpn_mode`): "mullvad" runs `mullvad status`; "generic" checks for any
+    VPN tunnel interface (provider-agnostic); "off" disables the kill-switch
+    entirely (always treated connected — no overlay, qBit not killed). Switching
+    to "off" while the VPN happens to be down flips `vpn_secure` back True and
+    broadcasts, so the overlay clears live. See vpncheck.py."""
     while True:
         try:
-            proc = await asyncio.create_subprocess_exec(
-                "mullvad", "status",
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            out, _ = await proc.communicate()
-            text = out.decode(errors="replace")
-            connected = "Connected" in text
-            first_line = text.strip().splitlines()[0] if text.strip() else "Unknown"
+            mode = state.vpn_mode
+            if mode == "off":
+                connected, first_line = True, "VPN kill-switch off"
+            elif mode == "generic":
+                # psutil enumeration is fast but sync — keep it off the loop.
+                connected = await asyncio.to_thread(vpncheck.generic_tunnel_up)
+                first_line = "VPN tunnel detected" if connected else "No VPN tunnel detected"
+            else:  # "mullvad"
+                proc = await asyncio.create_subprocess_exec(
+                    "mullvad", "status",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                out, _ = await proc.communicate()
+                text = out.decode(errors="replace")
+                connected = "Connected" in text
+                first_line = text.strip().splitlines()[0] if text.strip() else "Unknown"
             state.vpn_status_text = first_line
 
             if not connected and state.vpn_secure:
@@ -4865,9 +4890,15 @@ def _vpn_killswitch_cfg(lib: dict) -> dict:
     down** — that invariant is enforced unconditionally by `vpn_guard` here and by
     `watchdog.py` at the process level; `block_ui` only governs the UI lockout.
     Default `True` preserves the historical behaviour (overlay on every drop).
+
+    `mode` selects how the VPN is verified — "mullvad" (default), "generic" (any
+    VPN tunnel interface up), or "off" (kill-switch disabled). See vpncheck.py.
     """
     cfg = (lib.get("settings", {}) or {}).get("vpn_killswitch") or {}
-    return {"block_ui": bool(cfg.get("block_ui", True))}
+    mode = str(cfg.get("mode", "mullvad") or "mullvad").strip().lower()
+    if mode not in vpncheck.VALID_MODES:
+        mode = "mullvad"
+    return {"block_ui": bool(cfg.get("block_ui", True)), "mode": mode}
 
 
 def _network_cfg(lib: dict) -> dict:
@@ -7469,7 +7500,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         state.subtitle_default_language = _subs0["default_language"]
         state.subtitle_upgrade_late = _subs0["upgrade_late_subs"]
         state.subtitle_single_option = _subs0["single_option"]
-        state.vpn_block_ui = _vpn_killswitch_cfg(_lib0)["block_ui"]
+        _ks0 = _vpn_killswitch_cfg(_lib0)
+        state.vpn_block_ui = _ks0["block_ui"]
+        state.vpn_mode = _ks0["mode"]
         _rebuild_ondemand_only_items(_lib0)
         state.preferred_adapter = _network_cfg(_lib0)["preferred_adapter"]
     except Exception:
@@ -12520,7 +12553,13 @@ async def youtube_play(req: YouTubeReq) -> JSONResponse:
     # is configured. Do this BEFORE we change anything below (so the snapshot is
     # the user's "before" state, not whatever we set later).
     cur_sys_vol = await get_system_volume()
-    if cur_sys_vol is not None:
+    if state.system_volume_before_trailer is not None:
+        # A TV-kiosk inline trailer already ducked the host mixer (Watch-on-TV
+        # handoff). Its snapshot is the user's real "before" level — adopt it so
+        # Stop restores to that, not the ducked trailer value the mixer is at now.
+        state.system_volume_before_yt = state.system_volume_before_trailer
+        state.system_volume_before_trailer = None
+    elif cur_sys_vol is not None:
         state.system_volume_before_yt = cur_sys_vol
 
     # Pre-set the OS mixer to the configured "start" volume BEFORE the kiosk
@@ -14134,6 +14173,74 @@ async def admin_status() -> JSONResponse:
     return JSONResponse({"enabled": bool(settings.admin_password)})
 
 
+@app.get("/api/setup-status")
+async def setup_status() -> JSONResponse:
+    """First-run health check the dashboard uses to render its 'finish setup'
+    checklist. Aggregates signals that already exist — no new polling — so a
+    fresh, still-unconfigured install can explain *why* its tabs look empty and
+    where to fix each gap. Deliberately UNAUTHENTICATED and secret-free: it only
+    returns booleans + human hints (never the keys themselves), so it's safe to
+    call before ADMIN_PASSWORD is even set.
+
+    Each item: {key, ok, required, label, detail, how_to_fix, admin_tab}.
+    `required` items gate core functionality (search/artwork); the checklist card
+    shows only not-ok items and hides itself once every required item is ok.
+    """
+    tmdb_key = await _tmdb_effective_key()
+    indexer_key_set = bool(settings.indexer_api_key.strip())
+    # Health is only known after a search/test; treat "key set but no health data
+    # yet" as ok-so-far, and "key set + health data with zero healthy" as failing.
+    if not indexer_key_set:
+        indexer_ok = False
+    elif state.indexers_total > 0 and state.indexers_failing >= state.indexers_total:
+        indexer_ok = False   # health data exists and every known indexer is failing
+    else:
+        indexer_ok = True    # key set, and no failing-everything signal
+
+    # qBittorrent reachability (best-effort; the streaming backend). Don't let a
+    # slow/absent qBit hang the checklist — qbit_login already has its own timeout.
+    try:
+        qbit_ok = await qbit_login()
+    except Exception:
+        qbit_ok = False
+
+    items = [
+        {
+            "key": "admin", "ok": bool(settings.admin_password), "required": False,
+            "label": "Admin password",
+            "detail": "Protects the /admin settings panel.",
+            "how_to_fix": "Set ADMIN_PASSWORD in .env (or re-run setup.py) and restart.",
+            "admin_tab": None,
+        },
+        {
+            "key": "indexer", "ok": indexer_ok, "required": True,
+            "label": "Torrent indexer (Jackett)",
+            "detail": "Nothing can be found or streamed until an indexer is wired up.",
+            "how_to_fix": "In Jackett add an indexer, copy its API Key into "
+                          "INDEXER_API_KEY (.env or setup.py), and restart.",
+            "admin_tab": "indexers",
+        },
+        {
+            "key": "tmdb", "ok": bool(tmdb_key), "required": False,
+            "label": "TMDb metadata key",
+            "detail": "Powers posters, the Explore tab, and episode names. Without "
+                      "it, search still works but falls back to plain text results.",
+            "how_to_fix": "Paste a free TMDb API key in Admin → Indexers → TMDb Metadata.",
+            "admin_tab": "indexers",
+        },
+        {
+            "key": "qbit", "ok": qbit_ok, "required": False,
+            "label": "qBittorrent",
+            "detail": "The download engine. If unreachable, playback can't start.",
+            "how_to_fix": "Confirm qBittorrent is running with its Web UI enabled and "
+                          "QBIT_URL / QBIT_USERNAME / QBIT_PASSWORD match .env.",
+            "admin_tab": None,
+        },
+    ]
+    ready = all(it["ok"] for it in items if it["required"])
+    return JSONResponse({"ready": ready, "items": items})
+
+
 @app.post("/api/admin/login")
 async def admin_login(req: AdminLoginReq) -> JSONResponse:
     if not settings.admin_password:
@@ -15002,6 +15109,38 @@ async def set_host_volume(req: HostVolumeReq) -> JSONResponse:
         if ok:
             _host_volume_last_written = target
     return JSONResponse({"ok": ok, "host_volume": capped})
+
+
+@app.post("/api/trailer/host-audio/{action}")
+async def trailer_host_audio(action: str) -> JSONResponse:
+    """Duck / restore the host OS mixer around an inline trailer on the TV kiosk.
+
+    The trailer modal's YouTube IFrame plays *in the host's own browser* when the
+    dashboard is the fullscreen TV kiosk (`?tv=1`), so its audio rides the OS
+    mixer — often at max, blasting the room. Only the ?tv=1 kiosk calls this.
+
+    - `duck`    — snapshot the current OS volume, then drop it to the same
+                  "start" level Watch-on-TV / YouTube-on-TV uses
+                  (`settings.youtube_start_volume`, default 30).
+    - `restore` — put the snapshot back and clear it.
+
+    Best-effort: a null snapshot (pycaw/helper unavailable) just no-ops, and the
+    snapshot is adopted by `youtube_play` if the user hands off via Watch-on-TV.
+    """
+    if action == "duck":
+        cur = await get_system_volume()
+        if cur is not None:
+            state.system_volume_before_trailer = cur
+        start_vol = await _youtube_start_volume()
+        applied = start_vol if await set_system_volume(start_vol) else cur
+        return JSONResponse({"ok": True, "host_volume": applied})
+    if action == "restore":
+        snap = state.system_volume_before_trailer
+        state.system_volume_before_trailer = None
+        if snap is not None:
+            await set_system_volume(snap)
+        return JSONResponse({"ok": True, "host_volume": snap})
+    raise HTTPException(400, "action must be 'duck' or 'restore'")
 
 
 @app.post("/api/skip-now")
@@ -16555,6 +16694,9 @@ async def admin_set_subtitles(request: Request, body: SubsConfigReq) -> JSONResp
 
 class VpnKillswitchReq(BaseModel):
     block_ui: bool
+    # "mullvad" | "generic" | "off". Optional so older clients that only send
+    # block_ui keep working (mode is left unchanged when omitted).
+    mode: Optional[str] = None
 
 
 @app.get("/api/admin/vpn-killswitch")
@@ -16577,9 +16719,15 @@ async def admin_set_vpn_killswitch(request: Request, body: VpnKillswitchReq) -> 
     lib = await get_library()
     s = lib.setdefault("settings", {}).setdefault("vpn_killswitch", {})
     s["block_ui"] = bool(body.block_ui)
+    if body.mode is not None:
+        m = str(body.mode).strip().lower()
+        if m not in vpncheck.VALID_MODES:
+            raise HTTPException(400, f"mode must be one of {vpncheck.VALID_MODES}")
+        s["mode"] = m
     await put_library(lib)
     cfg = _vpn_killswitch_cfg(lib)
     state.vpn_block_ui = cfg["block_ui"]
+    state.vpn_mode = cfg["mode"]
     await broadcast("state", state_snapshot())
     return JSONResponse({"ok": True, **cfg})
 

@@ -4,7 +4,7 @@ High-level system overview. Read this first if you're new to the project.
 
 ## What it is
 
-P2P StreamLink — a local web dashboard that searches Jackett indexers, buffers magnet links through qBittorrent, and streams the file into VLC. Mullvad VPN is enforced as a kill-switch. There is also a persistent **library** (downloaded items kept around), per-profile watch history, intro/credits Smart Skip, subtitle download, and an admin panel.
+P2P StreamLink — a local web dashboard that searches Jackett indexers, buffers magnet links through qBittorrent, and streams the file into VLC. A VPN kill-switch is enforced (mode-selectable: Mullvad CLI, any generic VPN tunnel, or off — see `vpncheck.py`). There is also a persistent **library** (downloaded items kept around), per-profile watch history, intro/credits Smart Skip, subtitle download, and an admin panel.
 
 ## Service topology
 
@@ -24,7 +24,7 @@ All four services (VLC, qBittorrent, Jackett, dashboard) run on the same host ex
 
 - **One Python process** runs FastAPI/uvicorn (the dashboard). All state is in-memory in `AppState` ([main.py:138](../main.py#L138)).
 - **External processes**: VLC, qBittorrent, Jackett — launched by `run.py` and supervised by `watchdog.py`. They keep running after the dashboard is stopped.
-- **VPN guard task** runs `mullvad status` every 3 s inside the dashboard process and kills `qbittorrent` via psutil on VPN drop.
+- **VPN guard task** verifies the VPN every 3 s inside the dashboard process and kills `qbittorrent` via psutil on VPN drop. The verification method is set by `settings.vpn_killswitch.mode` (mirrored to `state.vpn_mode`): `mullvad` (`mullvad status`), `generic` (any VPN tunnel interface up), or `off` (disabled). The mode-read + generic tunnel check are shared across `main.py`/`run.py`/`watchdog.py` via the leaf module `vpncheck.py`.
 - **Persistence**: a single `library.json` file at the repo root. No database.
 
 ## Code map (where things live)

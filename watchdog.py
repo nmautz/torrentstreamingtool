@@ -37,6 +37,8 @@ import threading
 import time
 from pathlib import Path
 
+import vpncheck   # shared VPN-mode + generic-tunnel check (stdlib + optional psutil)
+
 HERE   = Path(__file__).parent
 SYSTEM = platform.system()
 
@@ -407,9 +409,25 @@ def _kill_by_name(name: str) -> int:
 
 # ── VPN check ──────────────────────────────────────────────────────────────
 def _vpn_connected() -> bool:
-    """Return True if Mullvad reports 'Connected'.
-    Returns False on any error or if the CLI is not found
-    (absent CLI = cannot verify VPN = treat as unsafe)."""
+    """Return True when the VPN is verified for the configured kill-switch mode
+    (settings.vpn_killswitch.mode — see vpncheck.py):
+
+    - "off"     → kill-switch disabled; always True (qBit runs freely).
+    - "generic" → any VPN tunnel interface up (provider-agnostic).
+    - "mullvad" → Mullvad CLI must report 'Connected' (default).
+
+    Returns False on any error or a missing Mullvad CLI in mullvad mode
+    (absent proof = cannot verify VPN = treat as unsafe → qBit stays killed)."""
+    try:
+        mode = vpncheck.vpn_mode()
+    except Exception:
+        mode = "mullvad"
+
+    if mode == "off":
+        return True
+    if mode == "generic":
+        return vpncheck.generic_tunnel_up()
+
     mullvad = find_mullvad()
     if not mullvad:
         return False
