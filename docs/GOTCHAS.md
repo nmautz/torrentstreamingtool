@@ -206,6 +206,14 @@ A leak has a second-order casualty: content VLC starts **on its own** (auto-adva
 
 Fix: `vlc_clear_playlist()` (`pl_empty`) is called, **awaited, immediately before every fresh `in_play`** so VLC's playlist is always a faithful mirror of `state.library_playlist` (or just the bg video) — the only auto-advance target is the intended tail. Call sites: `_library_play_launch`, `_vlc_relaunch_playlist` (prev/next), `vlc_next_file` (natural auto-advance), the stream-now single-file play, `_play_background_video` (raw `pl_empty` GET), and `_stop_cleanup` (after `pl_stop`). The VLC-process-restart paths (`/api/retry`, night-mode relaunch) **don't** need it — a freshly launched VLC starts with an empty playlist. If you add a new `in_play` caller that doesn't restart VLC, clear the playlist first.
 
+### The idle background video must re-check for real playback *immediately* before it touches VLC
+
+`background_video_loop` decides to start the idle video, then `_play_background_video()` does more `await`s of its own (`get_library()` for the configured path, `_global_max_volume()`) before issuing `pl_empty` + `in_play`. Every one of those is a window in which a real play can start — and an episode auto-advance is exactly the kind of thing that lands in it, because the loop's "VLC is stopped" reading is *taken* during the gap between two episodes. The loop's `stream_status == "buffering"` guard doesn't help: it's read before the awaits.
+
+Observed (v11.9.1): the next episode's `in_play` and the background video's `in_play` were issued in the **same second**, the reef video won, and the TV showed the idle video while the app believed BoJack was playing. The screen glitch was the mild half — see [§ Anything that clears `library_item_id`](#anything-that-clears-library_item_id-must-clear-active_hash-too) for how it went on to delete the series.
+
+Fix: `_real_playback_active()` (status not idle / YouTube up / a library item set / a live `library_play_task` or `stream_task`) is re-checked inside `_play_background_video()` **after** its awaits and **before** the VLC calls, with no `await` in between. If you add a new caller or a new await to that function, keep the guard as the last thing before VLC.
+
 ### Leaving Shuffle without a rebuffer — edit the tail, don't `pl_empty`
 
 `/api/library/unshuffle` must swap the upcoming queue from the random tail to natural order while the **current episode keeps playing**. `pl_empty` is out — it drops the playing item and forces a relaunch (rebuffer). `_vlc_replace_upcoming` instead reads `playlist.json`, finds the `current` leaf, `pl_delete`s only the leaves **after** it, then `in_enqueue`s the natural tail. Clearing server state alone is *not* enough: VLC physically auto-advances through its **own** enqueued list at true end-of-file (the credits-skip path re-derives order via `_nav_order`, but bare end-of-file does not), so the stale shuffle tail would still play next unless the queue itself is rewritten. The endpoint keeps a `_vlc_relaunch_playlist`+reseek fallback for when the in-place edit fails, trading a brief rebuffer for guaranteed-correct order.
@@ -295,6 +303,21 @@ Three consequences:
 - **A change restarts VLC**, so it's deliberately low-frequency. The on/off toggle is a subtle moon button in the fullscreen overlay header **and** a checkbox in the global section of profile settings; the **intensity picker is settings-menu only** (not in the fullscreen UI). The audio/subtitle track selection resets on the relaunch; `_apply_night_mode` re-applies the saved library track prefs via `_apply_track_prefs` to compensate.
 
 ## qBittorrent
+
+### A teardown delete must re-derive ownership from `library.json` — never trust `state`
+
+Stream teardown deletes the ad-hoc torrent **and its files** (`deleteFiles=true`), and decides "is this disposable?" from a pair of `AppState` fields: `active_hash` set + `library_item_id` clear ⇒ temporary stream. That pair desyncs, and when it does the delete lands on a saved series. It has happened for real: a background-video takeover cleared `library_item_id` while `active_hash` still pointed at the library torrent, and the next 🏠 Home press removed a 76-file, 33.8 GB item from qBit and from disk (v11.9.2).
+
+So **every** stream/prepare teardown delete goes through `_qbit_delete_transient()` ([main.py:1388](../main.py#L1388)), which calls `_hash_backs_library_item()` and refuses when any library item carries that info-hash — whatever `state` claims. Two rules:
+
+- **Never call `qbit_delete(h)` bare in a teardown path.** Its `delete_files` defaults to **`True`**, so the destructive form is the one you get by forgetting an argument. `qbit_delete` direct is only for *explicit user intent* (delete a library item, admin Cleanup).
+- **The guard is not redundant with the `state` check** — it exists precisely because the `state` check is known-fallible. Keep both.
+
+This also covers a second, independent path to the same loss: **qBit dedupes adds by info-hash**, so `/api/stream/prepare` or `/api/library/prepare` on a torrent already in your library returns that *same* hash — and dismissing the file picker (`DELETE /api/stream/cancel`) then deleted the library copy.
+
+### Anything that clears `library_item_id` must clear `active_hash` too
+
+They're read as a pair (above). `_play_background_video()` and `_sync_state_from_vlc()`'s no-match branch both blank the playback fields; both must blank `active_hash` as well, or they mint the exact "ad-hoc stream holding a library torrent" state that gets files deleted.
 
 ### `setSequentialDownload` doesn't exist
 

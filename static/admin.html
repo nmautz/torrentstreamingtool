@@ -5880,8 +5880,8 @@ async function loadCleanup(force){
         <div class="text-[11px] text-gray-500 mt-0.5">${m.missing_count} file${m.missing_count!==1?"s":""} missing: ${escHtml(m.missing.map(f=>f.name).slice(0,3).join(", "))}${m.missing.length>3?" …":""}</div>
       </div>
       <div class="flex items-center gap-2 flex-shrink-0">
-        ${m.has_torrent
-          ? `<button onclick="cmRecover(${i},this)" class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-emerald-800 bg-emerald-950 text-emerald-300 hover:bg-emerald-900 transition-colors">Re-download</button>`
+        ${m.has_torrent || m.has_hash
+          ? `<button onclick="cmRecover(${i},this)" title="${m.has_torrent?"Recheck + resume the torrent":"Re-add the torrent from its info-hash (keeps watch progress + Smart Skip data)"}" class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-emerald-800 bg-emerald-950 text-emerald-300 hover:bg-emerald-900 transition-colors">${m.has_torrent?"Re-download":"Re-add torrent"}</button>`
           : `<span class="text-[10px] font-bold uppercase tracking-widest px-2 py-1.5 bg-gray-800 text-gray-500">No torrent</span>`}
         <button onclick="cmDelete(${i},this)" class="text-xs font-bold uppercase tracking-wide px-3 py-2 border border-red-800 bg-red-950 text-red-300 hover:bg-red-900 transition-colors">Delete</button>
       </div>
@@ -5954,8 +5954,12 @@ function coDelete(i, btn){
 }
 function cmRecover(i, btn){
   const m = _cleanData.missing_items[i]; if(!m) return;
-  if(!confirm(`Re-download the missing files for "${m.title}"?`)) return;
-  _cleanAct(btn, `/api/admin/cleanup/item/${m.item_id}/recover`, "POST", "Re-download started.");
+  const msg = m.has_torrent
+    ? `Re-download the missing files for "${m.title}"?`
+    : `The torrent for "${m.title}" is gone from qBittorrent. Re-add it from its info-hash and re-download ${m.missing_count} file${m.missing_count!==1?"s":""}?\n\nFiles land back on their original paths, so watch progress and Smart Skip data are kept. Finding peers over DHT can take a minute.`;
+  if(!confirm(msg)) return;
+  _cleanAct(btn, `/api/admin/cleanup/item/${m.item_id}/recover`, "POST",
+            m.has_torrent ? "Re-download started." : "Torrent re-added — download starting.");
 }
 function cmDelete(i, btn){
   const m = _cleanData.missing_items[i]; if(!m) return;

@@ -1371,6 +1371,40 @@ async def qbit_delete(h: str, delete_files: bool = True) -> None:
                 data={"hashes": h, "deleteFiles": "true" if delete_files else "false"})
 
 
+async def _hash_backs_library_item(h: Optional[str]) -> bool:
+    """True when a library item is backed by this info-hash (i.e. its files are
+    saved media, not an ad-hoc stream's scratch download)."""
+    if not h:
+        return False
+    want = h.lower()
+    try:
+        lib = await get_library()
+    except Exception:
+        return True   # can't tell ⇒ assume it's owned; never delete on a guess
+    return any((it.get("torrent_hash") or "").lower() == want
+               for it in lib.get("items", []))
+
+
+async def _qbit_delete_transient(h: Optional[str], why: str = "stream cleanup") -> None:
+    """Delete an **ad-hoc stream's** torrent and its scratch files — never a
+    library item's.
+
+    Stream teardown decides "is this torrent disposable?" from `state`
+    (`active_hash` set / `library_item_id` clear). That pair can desync: a
+    background-video takeover, a `_sync_state_from_vlc` re-adopt, or any early
+    return between the two assignments clears `library_item_id` while
+    `active_hash` still points at the library torrent — and the next Stop then
+    deletes a whole series off disk. Re-derive ownership from `library.json`,
+    which is the only durable answer. See docs/GOTCHAS.md § Transient deletes.
+    """
+    if not h:
+        return
+    if await _hash_backs_library_item(h):
+        log.warning("Refusing %s delete of %s — that torrent backs a library item", why, h)
+        return
+    await qbit_delete(h, delete_files=True)
+
+
 async def qbit_recheck(h: str) -> None:
     """Force a piece-level recheck of a torrent (re-verifies every downloaded piece
     against the .torrent hashes). qBit re-fetches any piece that fails. Operates on
@@ -5761,6 +5795,21 @@ async def _auto_play_item(item: dict, profile_id: str, file_path: str = "") -> N
 
 # ── Idle Background Video ─────────────────────────────────────────────────────
 
+def _real_playback_active() -> bool:
+    """True when real content is playing or a play is mid-handoff to VLC.
+
+    Every caller of `_play_background_video()` decides to start the idle video
+    across at least one `await` (a VLC status poll, a library read), so its
+    decision is always stale by the time it lands. Re-check this immediately
+    before stomping VLC.
+    """
+    return (state.stream_status != "idle"
+            or state.youtube_active
+            or bool(state.library_item_id)
+            or (state.library_play_task is not None and not state.library_play_task.done())
+            or (state.stream_task is not None and not state.stream_task.done()))
+
+
 async def _play_background_video() -> bool:
     """Start the configured background video on VLC. Returns True on success.
 
@@ -5777,6 +5826,12 @@ async def _play_background_video() -> bool:
     if not p.exists():
         return False
     cap = await _global_max_volume()
+    # Re-check after the awaits above: a play that started while we were reading
+    # the library must not be stomped. Losing that race did more than blank the
+    # screen — it cleared `library_item_id` while `active_hash` still pointed at
+    # the library torrent, so the next Stop deleted the whole series off disk.
+    if _real_playback_active():
+        return False
     bg_vol = max(0, min(cap, max(0, min(200, int(bg.get("volume", 50))))))
     raw = max(0, min(512, round(bg_vol / 100 * 256)))
 
@@ -5800,6 +5855,9 @@ async def _play_background_video() -> bool:
     state.library_current_file = None
     state.active_title = None
     state.active_file = None
+    # Must be cleared with `library_item_id` — the two are read as a pair by
+    # stop()'s cleanup ("hash set + no item ⇒ ad-hoc stream, delete its files").
+    state.active_hash = None
     state.skip_offer = None
     state.skip_offer_file = None
     state.resume_offer = None
@@ -5957,6 +6015,11 @@ async def _sync_state_from_vlc() -> None:
         else:
             state.active_title = Path(cur_path).stem
             state.library_current_file = cur_path
+            # Unmatched file ⇒ no library item owns this playback. Drop any
+            # carried-over hash so the pair can't read as "ad-hoc stream with a
+            # library torrent attached" and get its files deleted on Stop.
+            state.library_item_id = None
+            state.active_hash = None
     except Exception:
         pass
 
@@ -11511,7 +11574,7 @@ async def stream_prepare(req: StreamPrepareReq) -> JSONResponse:
 
     # Clean up any previous prepare torrent that the user didn't explicitly cancel
     if state.prepare_hash:
-        await qbit_delete(state.prepare_hash, delete_files=True)
+        await _qbit_delete_transient(state.prepare_hash, "stale prepare")
         state.prepare_hash = None
 
     h = await qbit_add_magnet(req.magnet)
@@ -11526,7 +11589,7 @@ async def stream_prepare(req: StreamPrepareReq) -> JSONResponse:
         if await qbit_info(h):
             break
     else:
-        await qbit_delete(h, delete_files=True)
+        await _qbit_delete_transient(h, "prepare timeout")
         state.prepare_hash = None
         raise HTTPException(504, "Torrent metadata timed out — check connectivity and try again.")
 
@@ -11537,7 +11600,7 @@ async def stream_prepare(req: StreamPrepareReq) -> JSONResponse:
             break
         await asyncio.sleep(1)
     else:
-        await qbit_delete(h, delete_files=True)
+        await _qbit_delete_transient(h, "prepare timeout")
         state.prepare_hash = None
         raise HTTPException(504, "Could not fetch file list — torrent may have no seeds.")
 
@@ -11556,7 +11619,7 @@ async def stream_prepare(req: StreamPrepareReq) -> JSONResponse:
 @app.delete("/api/stream/cancel")
 async def stream_cancel(hash: str) -> JSONResponse:
     """Delete a torrent that was added by /stream/prepare but never started streaming."""
-    await qbit_delete(hash, delete_files=True)
+    await _qbit_delete_transient(hash, "prepare cancel")
     if state.prepare_hash == hash:
         state.prepare_hash = None
     return JSONResponse({"ok": True})
@@ -11582,7 +11645,7 @@ async def library_prepare(req: StreamPrepareReq) -> JSONResponse:
         if await qbit_info(h):
             break
     else:
-        await qbit_delete(h, delete_files=True)
+        await _qbit_delete_transient(h, "prepare timeout")
         raise HTTPException(504, "Torrent metadata timed out — check connectivity and try again.")
 
     for _ in range(30):
@@ -11591,7 +11654,7 @@ async def library_prepare(req: StreamPrepareReq) -> JSONResponse:
             break
         await asyncio.sleep(1)
     else:
-        await qbit_delete(h, delete_files=True)
+        await _qbit_delete_transient(h, "prepare timeout")
         raise HTTPException(504, "Could not fetch file list — torrent may have no seeds.")
 
     result = [
@@ -11708,9 +11771,9 @@ async def stream_now(req: StreamReq) -> JSONResponse:
         async def _cleanup_prior(active: Optional[str], prepare: Optional[str]) -> None:
             try:
                 if active:
-                    await qbit_delete(active)
+                    await _qbit_delete_transient(active, "superseded stream")
                 if prepare:
-                    await qbit_delete(prepare, delete_files=True)
+                    await _qbit_delete_transient(prepare, "superseded prepare")
             except Exception:
                 pass
         asyncio.create_task(_cleanup_prior(prior_active, prior_prepare))
@@ -12826,9 +12889,9 @@ async def stop() -> JSONResponse:
                             yt: bool, sys_vol_snapshot: Optional[int]) -> None:
         try:
             if ah and not lid:
-                await qbit_delete(ah)
+                await _qbit_delete_transient(ah, "stop")
             if ph:
-                await qbit_delete(ph, delete_files=True)
+                await _qbit_delete_transient(ph, "stop prepare")
             if yt:
                 # Give the page a beat to pause via the SSE 'close' command, then
                 # kill the dedicated kiosk Chrome instance (matched by profile dir).
@@ -24069,6 +24132,9 @@ def _cleanup_inventory_sync(lib: dict, torrents: list[dict], in_use: set[str],
                 "missing":       gone,
                 "missing_count": len(gone),
                 "has_torrent":   bool(h and h in qbit_hashes),
+                # An info-hash with no qBit torrent is still recoverable — recover
+                # re-adds it from the hash rather than dead-ending on "No torrent".
+                "has_hash":      bool(h),
             })
 
     # Category D: top-level entries in ANY configured download/library folder owned
@@ -24259,30 +24325,72 @@ async def admin_cleanup_adopt_orphan(torrent_hash: str, request: Request) -> JSO
     return JSONResponse({"ok": True, "item_id": item_id})
 
 
+async def _item_save_root(item: dict) -> str:
+    """The qBit save path an item's files were downloaded into — the configured
+    download/library root that contains them (deepest match wins, so a nested
+    root beats its parent). Falls back to the default download path."""
+    first = next((f.get("path", "") for f in item.get("files", []) if f.get("path")), "")
+    best = ""
+    if first:
+        try:
+            fp = Path(first).resolve()
+        except OSError:
+            fp = Path(first)
+        for info in await _all_library_paths():
+            try:
+                root = Path(info["path"]).resolve()
+            except OSError:
+                continue
+            try:
+                fp.relative_to(root)
+            except ValueError:
+                continue
+            if len(str(root)) > len(best):
+                best = str(root)
+    return best or settings.qbit_download_path
+
+
 @app.post("/api/admin/cleanup/item/{item_id}/recover")
 async def admin_cleanup_recover_item(item_id: str, request: Request) -> JSONResponse:
-    """Re-download a library item's missing files: recheck + resume its torrent and
-    flip it back to `downloading` so the monitor + scheduler manage it again. 404
-    when no qBit torrent backs the item (nothing to recover — delete it instead)."""
+    """Re-download a library item's missing files and flip it back to `downloading`
+    so the monitor + scheduler manage it again.
+
+    Torrent still in qBit ⇒ recheck + resume (it re-fetches whatever is missing).
+    Torrent **gone** from qBit ⇒ re-add it from the item's stored info-hash, into
+    the same root its files were saved under, so the content lands back on the
+    recorded paths and the item's watch progress + Smart Skip data keep working.
+    Re-adding is the only recovery for an item whose torrent was removed, and
+    beats delete-and-re-add, which throws that history away. 404 only when no
+    info-hash was ever recorded (e.g. an uploaded item) — delete it instead."""
     _require_admin(request)
     lib = await get_library()
     item = next((it for it in lib["items"] if it["id"] == item_id), None)
     if not item:
         raise HTTPException(404, "Item not found.")
     h = (item.get("torrent_hash") or "").lower()
-    if not h or await qbit_info(h) is None:
-        raise HTTPException(404, "No qBittorrent torrent backs this item — delete it instead.")
-    # Recover = recheck + resume, which would re-fetch over any compressed-in-place file.
+    if not h:
+        raise HTTPException(404, "No torrent backs this item — delete it instead.")
+    # Recover re-fetches torrent content, which would overwrite any compressed-in-place file.
     if _item_has_compressed(item):
         raise HTTPException(409, "This item has compressed files that are no longer "
                                  "torrent-backed — recovering would re-download over them.")
-    await qbit_recheck(h)
-    await qbit_resume(h)
+    readded = False
+    if await qbit_info(h) is None:
+        save_path = await _item_save_root(item)
+        # Bare info-hash magnet — the original announce list isn't kept anywhere,
+        # so this resolves over DHT/PeX and can take a minute to find metadata.
+        if not await qbit_add_magnet(f"magnet:?xt=urn:btih:{h}", save_path=save_path):
+            raise HTTPException(502, "qBittorrent rejected the re-add of this torrent.")
+        log.info("Cleanup: re-added missing torrent %s for item %s into %s", h, item_id, save_path)
+        readded = True
+    else:
+        await qbit_recheck(h)
+        await qbit_resume(h)
     item["status"] = "downloading"
     await _apply_item_schedule(item, lib)   # reconcile file priorities/pause state
     await put_library(lib)
     _invalidate_cleanup_inventory()
-    return JSONResponse({"ok": True})
+    return JSONResponse({"ok": True, "readded": readded})
 
 
 @app.delete("/api/admin/cleanup/item/{item_id}")
