@@ -1,5 +1,10 @@
 # Changelog
 
+## [11.12.1] — 2026-08-28
+- **Fix: the Detect & Repair Audio Sync panel described only half of what it does, and got the cost wrong.** It said it scans for audio that "drifted out of sync … ending up at different lengths" — that's only the drift detector; the constant-offset check (the one that finds a steadily-early dub track) went unmentioned, as did the fact that it now inspects **every** audio track rather than the default one. It also promised that repairing "re-encodes them", which stopped being true in 11.12.0: most flagged bundles are now rebuilt at remux speed. Panel text and the Repair Now confirm dialog both corrected.
+- **Frontend:** `static/admin.html`. **Docs:** unchanged ([docs/ADMIN.md](docs/ADMIN.md) already described the current behaviour).
+- (Host-only — **no app rebuild**. Hard-refresh the admin page.)
+
 ## [11.12.0] — 2026-08-28
 - **Fix: prepped bundles no longer desync a delayed audio track — and the detector can finally see it.** ([#13](https://github.com/nmautz/torrentstreamingtool/issues/13)) A source that ships one audio track with a delay (8 of 11 *The Promised Neverland S02* episodes carry **+0.5 s** on the English dub alone) had that delay reproduced in the bundle as a **cross-rendition gap**, which Safari / iOS AVPlayer / hls.js drop — so the dub played ~478 ms early. VLC and on-demand playback were always fine, which is what made it look like a one-episode problem.
   - **Prep now pins every audio rendition to the video rung's first PTS**, on the stream-**copy** path too. The pin was previously `first_pts=0` and re-encode-only, because 0 is the wrong anchor for a copied rung that keeps its own arbitrary start. Anchoring to the *video's* start instead is safe on both paths and can never be worse than not pinning. Verified end-to-end on a synthetic two-track source (English delayed 0.5 s, at a different sample rate): copy-path gap **+0.476 s → −0.024 s**, with the video still stream-copied.
