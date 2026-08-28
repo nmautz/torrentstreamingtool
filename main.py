@@ -606,7 +606,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "8.7.0"
+UI_VERSION = "11.10.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 # Retains references to fire-and-forget background tasks so the event loop's weak
@@ -6582,7 +6582,7 @@ STOP_OUTRO_WINDOW_SEC = 10
 # periodic/stop/supersede save never clobbers a subtitle/audio pick. See GOTCHAS.md.
 _TRACK_PREF_KEYS = ("audio_track", "subtitle_track",
                     "local_audio_idx", "local_subtitle_idx",
-                    "subtitle_sel", "audio_sel")
+                    "subtitle_sel", "audio_sel", "audio_offset_ms")
 
 
 def _cancel_pending_watch() -> None:
@@ -6675,10 +6675,7 @@ async def _mark_file_watched_internal(
         "duration_sec": round(dur, 1),
         "completed": True,
         "updated_at": _now_iso(),
-        **{k: v for k, v in existing.items()
-           if k in ("audio_track", "subtitle_track",
-                    "local_audio_idx", "local_subtitle_idx", "subtitle_sel",
-                    "audio_sel")},
+        **{k: v for k, v in existing.items() if k in _TRACK_PREF_KEYS},
     }
     await put_library(lib)
     await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "ready")})
@@ -7199,10 +7196,7 @@ async def vlc_progress_tracker() -> None:
                 # file_progress dict, and this write fires every 15 s (a full
                 # replacement here silently wiped a subtitle pick made seconds
                 # earlier, so replays defaulted back to subs-off).
-                **{k: v for k, v in existing_fp.items()
-                   if k in ("audio_track", "subtitle_track",
-                            "local_audio_idx", "local_subtitle_idx", "subtitle_sel",
-                    "audio_sel")},
+                **{k: v for k, v in existing_fp.items() if k in _TRACK_PREF_KEYS},
             }
             await put_library(lib)
 
@@ -10661,7 +10655,8 @@ async def sync_progress(req: SyncProgressReq, request: Request) -> JSONResponse:
     applied: list[dict] = []
     conflicts: list[dict] = []
     now = _now_iso()
-    _TRACK_KEYS = ("audio_track", "subtitle_track", "local_audio_idx", "local_subtitle_idx")
+    _TRACK_KEYS = ("audio_track", "subtitle_track", "local_audio_idx",
+                   "local_subtitle_idx", "audio_offset_ms")
 
     async with _lib_lock:
         lib = await asyncio.to_thread(_load_lib_raw)
@@ -10854,7 +10849,8 @@ async def sync_resolve(req: SyncResolveReq, request: Request) -> JSONResponse:
     _require_device_auth(request)
     resolved: list[dict] = []
     now = _now_iso()
-    _TRACK_KEYS = ("audio_track", "subtitle_track", "local_audio_idx", "local_subtitle_idx")
+    _TRACK_KEYS = ("audio_track", "subtitle_track", "local_audio_idx",
+                   "local_subtitle_idx", "audio_offset_ms")
 
     async with _lib_lock:
         lib = await asyncio.to_thread(_load_lib_raw)
@@ -10942,6 +10938,12 @@ class LocalTracksReq(BaseModel):
     # Resolvable descriptor for the chosen audio track, applied on replay AND on
     # other episodes of the series. {lang,title,idx,sig,at} — see _norm_audio_sel.
     audio_sel: Optional[dict] = None
+    # Manual audio-delay nudge for this file, in milliseconds (0–1000, 25 ms
+    # steps). Pushes the sound LATER only — the direction that fixes a dub
+    # playing early, which is all the WebAudio DelayNode behind it can do (you
+    # can't delay video). Per-file; never broadcast to the series. 0 clears it.
+    # See docs/STREAMING.md § Manual audio offset.
+    audio_offset_ms: Optional[int] = None
     # False ⇒ update the per-file pick only, NOT the per-series memory. The
     # client sends False for automatic writes (e.g. the late-AI-sub upgrade);
     # only a deliberate viewer pick may rewrite the series-wide preference —
@@ -10952,6 +10954,11 @@ class LocalTracksReq(BaseModel):
 @app.post("/api/library/{item_id}/local-tracks")
 async def set_local_tracks(item_id: str, req: LocalTracksReq) -> JSONResponse:
     """Persist the in-browser player's audio/subtitle picks for a file.
+
+    Also carries `audio_offset_ms` — the local player's manual audio-delay
+    nudge — which is a plain per-file scalar, not a resolvable descriptor: it
+    describes THIS encode's bad track delay, so it is deliberately never
+    broadcast to the series the way audio_sel/subtitle_sel are.
 
     These are 0-based indices into the HLS bundle's audios/subtitles arrays
     (the order seen in meta.json), distinct from the VLC `audio_track` /
@@ -10980,6 +10987,14 @@ async def set_local_tracks(item_id: str, req: LocalTracksReq) -> JSONResponse:
                 # Drop any older VLC ES-ID pick for this file — it would
                 # otherwise outrank this newer descriptor on the next VLC play.
                 fp.pop("audio_track", None)
+        if req.audio_offset_ms is not None:
+            ms = int(max(0, min(1000, req.audio_offset_ms)))
+            # 0 is the overwhelmingly common value — drop the key rather than
+            # writing it on every file_progress entry the player ever touches.
+            if ms:
+                fp["audio_offset_ms"] = ms
+            else:
+                fp.pop("audio_offset_ms", None)
         if req.subtitle_idx is not None:
             fp["local_subtitle_idx"] = req.subtitle_idx
         if req.subtitle_sel is not None:
@@ -11057,10 +11072,7 @@ async def mark_watched(item_id: str, req: MarkWatchedReq) -> JSONResponse:
                 "duration_sec": existing.get("duration_sec", 0),
                 "completed": True,
                 "updated_at": _now_iso(),
-                **{k: v for k, v in existing.items()
-                   if k in ("audio_track", "subtitle_track",
-                            "local_audio_idx", "local_subtitle_idx",
-                            "subtitle_sel", "audio_sel")},
+                **{k: v for k, v in existing.items() if k in _TRACK_PREF_KEYS},
             }
         else:
             file_prog[path] = {
@@ -11068,10 +11080,7 @@ async def mark_watched(item_id: str, req: MarkWatchedReq) -> JSONResponse:
                 "duration_sec": existing.get("duration_sec", 0),
                 "completed": False,
                 "updated_at": _now_iso(),
-                **{k: v for k, v in existing.items()
-                   if k in ("audio_track", "subtitle_track",
-                            "local_audio_idx", "local_subtitle_idx",
-                            "subtitle_sel", "audio_sel")},
+                **{k: v for k, v in existing.items() if k in _TRACK_PREF_KEYS},
             }
 
     await put_library(lib)
@@ -21397,7 +21406,8 @@ def _saved_local_tracks(lib: dict, item: dict, profile_id: str, file_path: str) 
     `series_subtitle_sel`/`series_audio_sel` are the per-series fallbacks (applied
     when this file has no own pick). The client resolves whichever applies against
     its live track list. `subtitle_idx`/`audio_idx` are kept for the legacy
-    bundle-index path only."""
+    bundle-index path only. `audio_offset_ms` is the manual audio-delay nudge
+    (ms, 0 = none); it is per-file only and has no series-level fallback."""
     fp = (item.get("progress", {})
               .get(profile_id, {})
               .get("file_progress", {})
@@ -21411,6 +21421,8 @@ def _saved_local_tracks(lib: dict, item: dict, profile_id: str, file_path: str) 
         out["subtitle_sel"] = fp["subtitle_sel"]
     if isinstance(fp.get("audio_sel"), dict):
         out["audio_sel"] = fp["audio_sel"]
+    if isinstance(fp.get("audio_offset_ms"), int):
+        out["audio_offset_ms"] = fp["audio_offset_ms"]
     series_sel = _get_series_sub_sel(lib, profile_id, _series_of_item(item))
     if series_sel:
         out["series_subtitle_sel"] = series_sel

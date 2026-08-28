@@ -3391,6 +3391,32 @@
         class="flex-1 min-w-0 bg-gray-900 border-b border-gray-700 text-xs text-gray-300 px-2 py-1.5 focus:outline-none focus:border-indigo-500 cursor-pointer">
       </select>
     </div>
+    <!-- Audio delay (issue #14) — manual nudge for a file whose audio track
+         carries a bad delay the HLS bundle reproduces as a cross-rendition gap
+         (docs/STREAMING.md § Manual audio offset). One-directional by
+         construction:
+         the WebAudio DelayNode behind it can only push the sound LATER, which
+         is the direction a dub playing early needs. Not gated on track count —
+         a single-audio file can be desynced too. -->
+    <div id="lpSyncRow" class="hidden">
+      <div class="flex items-center gap-3">
+        <span class="text-[9px] font-black uppercase tracking-widest text-gray-600 flex-shrink-0 w-8">Sync<span
+          class="help-tip" tabindex="0"
+          data-tip="If the voices land before the mouths move, drag this to the right until they line up. It only ever pushes the sound later, never earlier.">?</span></span>
+        <input id="lpSyncSlider" type="range" min="0" max="1000" step="25" value="0"
+          class="flex-1 min-w-0 accent-indigo-500 cursor-pointer"
+          oninput="lpSetAudioOffset(this.value, false)"
+          onchange="lpSetAudioOffset(this.value, true)"/>
+        <span id="lpSyncVal" class="text-xs font-mono font-bold text-indigo-400 tabular-nums flex-shrink-0 w-14 text-right">0 ms</span>
+        <button id="lpSyncReset" onclick="lpSetAudioOffset(0, true)" title="Back to no delay"
+          class="flex-shrink-0 text-[10px] font-bold uppercase tracking-wide text-gray-500 hover:text-indigo-300 px-1 py-1 transition-colors">
+          Reset
+        </button>
+      </div>
+      <div class="text-[9px] font-bold uppercase tracking-widest text-gray-600 mt-1 pl-11">
+        Audio delay — raise if the dub plays early
+      </div>
+    </div>
     <div id="lpSubRow" class="hidden flex items-center gap-3">
       <span class="text-[9px] font-black uppercase tracking-widest text-gray-600 flex-shrink-0 w-8">Sub</span>
       <select id="lpSubSelect" onchange="lpSetSubtitle(this.value)"
@@ -3867,6 +3893,11 @@ let lp = {
                       // (the downloaded master.m3u8 is trimmed to it; see GOTCHAS.md)
   _localLadder: [],   // full ABR ladder from the device bundle's meta.json videos[] —
                       // the quality menu's server options come from here, not hls.levels
+  // Manual audio delay for the current file, in ms (0 = none). Applied by a
+  // WebAudio DelayNode hung off #lpVideo (see _lpEnsureAudioGraph); persisted
+  // per-file via /local-tracks + a localStorage mirror. Re-applied on EVERY
+  // load, including with 0 — the graph outlives the file. See issue #14.
+  audioOffsetMs: 0,
   _srvOverride: null, // {key:offKey(itemId,filePath), sel:"auto"|<height>, localRung} —
                       // per-file "stream from server instead of the device copy";
                       // session-only, cleared whenever a different file loads
@@ -15455,6 +15486,15 @@ async function _lpLoadIndex(seekTo) {
   lp.pendingAudioIdx    = defAudioIdx;
   lp.pendingSubtitleIdx = defSubIdx;
   lp.subAutoApplied = _lpKeyIsAiSidecar(defSubIdx) && !(subSel && subSel.ai === true);
+  // Manual audio delay for THIS file. Applied unconditionally — including 0 —
+  // because the WebAudio graph hangs off the reused <video> element and would
+  // otherwise carry the previous episode's delay into this one. Offline the
+  // host copy is unreachable, so the localStorage mirror is the only source.
+  lpSetAudioOffset(
+    (!_appOffline && saved.audio_offset_ms != null)
+      ? saved.audio_offset_ms
+      : _lpOffsetRecall(lp.itemId, filePath),
+    false);
 
   const v = document.getElementById("lpVideo");
   _lpDestroyHls();
@@ -15762,6 +15802,7 @@ function _lpRenderTrackRows() {
   // stays visible whenever a file is loaded on-device.
   const clipRow = document.getElementById("lpClipRow");
   if (clipRow) clipRow.classList.remove("hidden");
+  _lpRenderSyncRow();
 }
 
 // On-device AI subtitle generation for the current file. Non-blocking: the user
@@ -16500,6 +16541,140 @@ function lpSetAudio(idx) {
   _lpSaveLocalTracks("audio");
 }
 
+// ── Manual audio delay (issue #14) ───────────────────────────────────────────
+// Some source files ship a delay on one audio track (a release group's encode
+// bug). ffmpeg reproduces it faithfully in the HLS bundle as a cross-rendition
+// first-PTS gap, and hls.js / Safari / AVPlayer all anchor each rendition to
+// playback start and drop it — so that track lands early (measured: +478 ms on
+// the English dub of 8 of 11 Promised Neverland S02 bundles). This is the
+// viewer-side bandaid: push the sound back by hand until it lines up.
+//
+// Mechanism: a WebAudio DelayNode between the <video> and the speakers. That
+// makes the control ONE-DIRECTIONAL by construction — you can delay audio, but
+// there is no way to delay video, so a negative offset is not expressible here.
+// Which is fine: the failure mode this exists for always makes audio early.
+// (The symmetric alternative — biasing the audio SourceBuffer's timestampOffset
+// — silently no-ops in on-demand mode, where audio and video share one
+// SourceBuffer, and is dead on the Safari-native path. See docs/STREAMING.md.)
+//
+// The graph is built LAZILY, only once a non-zero offset is actually asked for.
+// createMediaElementSource is a one-way door: once the element is routed
+// through WebAudio it stays routed for the life of the page, and on iOS that
+// moves playback onto the WebAudio session (where the ringer switch can silence
+// it). Nobody pays that price for a feature they never touch. See GOTCHAS.md.
+const LP_AOFF_MAX_MS  = 1000;
+const LP_AOFF_STEP_MS = 25;
+const LP_AOFF_KEY     = "streamlink_audio_offsets";   // localStorage mirror
+const LP_AOFF_CAP     = 200;                          // entries kept in the mirror
+
+let _lpAudioCtx = null, _lpAudioSrc = null, _lpAudioDelay = null;
+
+function _lpAudioGraphSupported() {
+  return !!(window.AudioContext || window.webkitAudioContext);
+}
+
+// Build (once) <video> → DelayNode → speakers. Returns the DelayNode, or null
+// if this browser has no WebAudio / refused the routing.
+function _lpEnsureAudioGraph() {
+  if (_lpAudioDelay) return _lpAudioDelay;
+  const AC = window.AudioContext || window.webkitAudioContext;
+  const v  = _lpV();
+  if (!AC || !v) return null;
+  try {
+    _lpAudioCtx   = new AC();
+    _lpAudioSrc   = _lpAudioCtx.createMediaElementSource(v);
+    _lpAudioDelay = _lpAudioCtx.createDelay((LP_AOFF_MAX_MS / 1000) + 1);
+    _lpAudioSrc.connect(_lpAudioDelay);
+    _lpAudioDelay.connect(_lpAudioCtx.destination);
+  } catch (_) {
+    _lpAudioCtx = _lpAudioSrc = _lpAudioDelay = null;
+    return null;
+  }
+  return _lpAudioDelay;
+}
+
+function _lpNormOffset(ms) {
+  const raw = Number(ms);
+  if (!Number.isFinite(raw)) return 0;
+  const n = Math.round(raw / LP_AOFF_STEP_MS) * LP_AOFF_STEP_MS;
+  return Math.min(LP_AOFF_MAX_MS, Math.max(0, n));
+}
+
+// Device-local mirror of the per-file offset. The host copy in library.json is
+// the source of truth online; this is what the FULLY OFFLINE iOS player reads
+// (its native store has no field for it, and adding one would mean a Swift
+// change + an app rebuild for a value the web layer owns end to end).
+function _lpOffsetStore() {
+  try {
+    const o = JSON.parse(localStorage.getItem(LP_AOFF_KEY) || "{}");
+    return (o && typeof o === "object") ? o : {};
+  } catch (_) { return {}; }
+}
+function _lpOffsetRemember(itemId, filePath, ms) {
+  if (!itemId || !filePath) return;
+  const store = _lpOffsetStore();
+  const k = offKey(itemId, filePath);
+  delete store[k];                 // re-insert so key order tracks recency
+  if (ms) store[k] = ms;           // 0 = no entry, not a stored zero
+  const keys = Object.keys(store);
+  for (const dead of keys.slice(0, Math.max(0, keys.length - LP_AOFF_CAP))) delete store[dead];
+  try { localStorage.setItem(LP_AOFF_KEY, JSON.stringify(store)); } catch (_) {}
+}
+function _lpOffsetRecall(itemId, filePath) {
+  if (!itemId || !filePath) return 0;
+  return _lpNormOffset(_lpOffsetStore()[offKey(itemId, filePath)] || 0);
+}
+
+// Slider + readout state. Kept out of _lpRenderTrackRows' body so the live drag
+// (which fires on every step) doesn't rebuild every dropdown on the panel.
+function _lpRenderSyncRow() {
+  const row = document.getElementById("lpSyncRow");
+  if (!row) return;
+  // Shown for any loaded file — a single-audio file can be desynced too — as
+  // long as the browser can actually do the delay.
+  row.classList.toggle("hidden", !(lp.filePath && _lpAudioGraphSupported()));
+  const sl  = document.getElementById("lpSyncSlider");
+  const lab = document.getElementById("lpSyncVal");
+  // Don't write back the value the user is currently dragging (identical here,
+  // since the input's own step is LP_AOFF_STEP_MS — but never fight the drag).
+  if (sl && sl.value !== String(lp.audioOffsetMs)) sl.value = String(lp.audioOffsetMs);
+  if (lab) lab.textContent = lp.audioOffsetMs + " ms";
+}
+
+// `persist` false = live feedback while dragging (and the restore on load);
+// true = the committed value, written to the host and the local mirror.
+function lpSetAudioOffset(ms, persist) {
+  const val = _lpNormOffset(ms);
+  lp.audioOffsetMs = val;
+  _lpRenderSyncRow();
+  // 0 with no graph yet: nothing to undo, and building one just to apply a
+  // no-op would route the element through WebAudio for good (see above).
+  if (val || _lpAudioDelay) {
+    const delay = _lpEnsureAudioGraph();
+    if (!delay) {
+      if (val) {
+        showAlert("This browser can\u2019t adjust audio timing.", "warn");
+        lp.audioOffsetMs = 0;
+        _lpRenderSyncRow();
+      }
+      return;
+    }
+    // Every caller is a user gesture or a post-load apply; an AudioContext that
+    // autoplay policy started suspended needs the nudge either way.
+    try { if (_lpAudioCtx.state === "suspended") _lpAudioCtx.resume(); } catch (_) {}
+    // Ramp rather than assign — a hard jump in delayTime clicks audibly.
+    try {
+      _lpAudioDelay.delayTime.setTargetAtTime(val / 1000, _lpAudioCtx.currentTime, 0.02);
+    } catch (_) {
+      try { _lpAudioDelay.delayTime.value = val / 1000; } catch (_) {}
+    }
+  }
+  if (persist) {
+    _lpOffsetRemember(lp.itemId, lp.filePath, lp.audioOffsetMs);
+    _lpSaveLocalTracks("offset");
+  }
+}
+
 function lpSetSubtitle(idx) {
   lp.pendingSubtitleIdx = idx;
   lp.subAutoApplied = false;          // a deliberate pick — never auto-upgrade it
@@ -16557,14 +16732,21 @@ function _lpIndicateSubLoading(idx) {
 //   "sub"      — a deliberate subtitle pick: per-file + series-wide.
 //   "sub-auto" — an automatic subtitle write (late-AI-sub upgrade): per-file
 //                only, never the series-wide preference.
+//   "offset"   — the manual audio-delay nudge ONLY. Per-file, never series-wide
+//                (it describes one encode's bad track delay, not a taste), and
+//                it must not re-stamp the audio/subtitle picks on its way past.
 function _lpSaveLocalTracks(what) {
   what = what || "sub";
   if (!lp.itemId || !lp.filePath) return;
   if (!profile.id && !_appOffline) return;
-  const wantSub = what !== "audio";
+  // Fully offline: the audio delay lives in the localStorage mirror, which
+  // lpSetAudioOffset already wrote — the native store has no field for it.
+  if (what === "offset" && _appOffline) return;
+  const wantSub = what !== "audio" && what !== "offset";
   const subIsBundle = lp.pendingSubtitleIdx != null
                    && !String(lp.pendingSubtitleIdx).startsWith("sidecar:");
-  const audioIdx = Number.isFinite(Number(lp.pendingAudioIdx)) ? Number(lp.pendingAudioIdx) : null;
+  const audioIdx = (what !== "offset" && Number.isFinite(Number(lp.pendingAudioIdx)))
+                   ? Number(lp.pendingAudioIdx) : null;
   const subIdx   = subIsBundle ? Number(lp.pendingSubtitleIdx) : -1;
   const subSel   = wantSub ? _lpDescriptorForKey(lp.pendingSubtitleIdx) : null;
   // Audio descriptor only for audio-triggered saves — a subtitle change must not
@@ -16614,6 +16796,7 @@ function _lpSaveLocalTracks(what) {
     file_path:  lp.filePath,
     audio_idx:  audioIdx,
     ...(audioSel ? { audio_sel: audioSel } : {}),
+    ...(what === "offset" ? { audio_offset_ms: lp.audioOffsetMs } : {}),
     ...(wantSub ? {
       subtitle_idx: subIdx,
       subtitle_sel: subSel,
@@ -16650,6 +16833,7 @@ function _lpOptsOpen() {
 function lpToggleOpts() {
   document.getElementById("localPlayer").classList.toggle("lp-opts");
   _lpRenderExitShuffle();
+  _lpRenderSyncRow();
   _lpCtlShow();
 }
 
@@ -18415,6 +18599,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.9.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.10.0</div>
 </body>
 </html>

@@ -491,6 +491,56 @@ with video. The admin **Detect & Repair Audio Sync** tool (`_hls_resync_bundles`
 - `scope` restricts to one library item (by `meta.json src`); `dry_run` only counts
   the flagged bundles for the UI estimate. See [ADMIN.md § Storage & Compression](ADMIN.md).
 
+## Manual audio offset (viewer-side)
+
+The repair tool above fixes a bundle. The **Sync** row in the on-device player's
+options panel (`#lpSyncRow`, gear button) fixes a *playback*, immediately, with no
+re-prep — the bandaid for the case the detector misses or hasn't been run on
+(issue #14; the motivating defect is issue #13, where 8 of 11 *Promised Neverland
+S02* bundles carry **+478 ms** on the English rendition only, and
+`_bundle_introduced_av_offset` probes just the nominal default rendition so it
+reports zero).
+
+- **Range 0–1000 ms, 25 ms steps**, value shown numerically, with a **Reset**.
+- **One-directional, by construction.** The mechanism is a WebAudio `DelayNode`
+  spliced between `#lpVideo` and the speakers (`_lpEnsureAudioGraph` →
+  `createMediaElementSource` → `createDelay` → `destination`). It can push audio
+  **later**; it cannot push audio earlier, because that would mean delaying video
+  and nothing can. That is the direction this failure mode always needs — a player
+  that drops the cross-rendition gap makes the delayed track land *early*. The UI
+  says so in words ("audio delay — raise if the dub plays early") rather than
+  offering a ± the lower half of which would be dead.
+- **Why not `timestampOffset` on the audio SourceBuffer** (the symmetric
+  alternative): it costs a buffer flush + re-append on every adjustment, it depends
+  on hls.js internals, it is unavailable on the Safari-native path (no MSE), and it
+  **silently no-ops in on-demand mode**, where the JIT stream is a single muxed
+  program in one SourceBuffer, so shifting the offset moves audio and video
+  together. The DelayNode works in bundle mode, on-demand mode, device-copy
+  playback and Safari-native alike. Revisit only if a negative offset is ever
+  actually needed in the field.
+- **The graph is built lazily**, on the first non-zero value only —
+  `createMediaElementSource` is irreversible and moves iOS playback onto the
+  WebAudio audio session. See [GOTCHAS.md](GOTCHAS.md).
+- **Persistence is per file and nothing else.** `lpSetAudioOffset(ms, persist)`
+  POSTs `audio_offset_ms` via `_lpSaveLocalTracks("offset")` →
+  `POST /api/library/{id}/local-tracks` → `file_progress[path].audio_offset_ms`,
+  and `/offline-prepare` hands it back in `saved_tracks`. Unlike `audio_sel` /
+  `subtitle_sel` it is deliberately **never** broadcast to the series: it describes
+  one encode's defect, not a viewer preference, and a season is not guaranteed to be
+  uniformly broken (3 of the 11 episodes above are clean). A value of 0 deletes the
+  key rather than storing a zero. It is also mirrored into `localStorage`
+  (`streamlink_audio_offsets`, keyed by `offKey(itemId, filePath)`, 200-entry cap)
+  so the **fully offline** iOS player can restore it with no host to ask — that
+  mirror is why this feature needs no Swift change and no app rebuild.
+- **Re-applied on every `_lpLoadIndex`, including as 0.** There is one
+  `<video id="lpVideo">` for the whole page, so the graph outlives the file; without
+  the unconditional re-apply an episode advance would inherit the previous
+  episode's delay.
+- **Not applicable to the TV kiosk.** `?tv=1` forces the `no-hls` + `tv-mode`
+  classes, so the on-device player never opens there; the kiosk plays through VLC,
+  which honours the source's track delay correctly (which is exactly why the defect
+  is bundle-only).
+
 ## Source-file compression
 
 `_compress_one_file` / `_run_file_compression` re-encode **source** files in place to
@@ -838,7 +888,7 @@ Two ways to populate the cache:
    (the seek commits once on release — in on-demand mode every cold seek
    restarts the JIT ffmpeg, so don't seek per pointermove), ±10 s tiles,
    play/pause, mute, a **gear button** that opens the options panel
-   (`#lpTrackRow`: quality / audio / subtitles / AI / Clip — hidden
+   (`#lpTrackRow`: quality / audio / **sync** / subtitles / AI / Clip — hidden
    otherwise), and OS fullscreen on the **whole container** (so the gear
    panel stays usable in fullscreen). iPhone Safari lacks
    element-fullscreen, so there the button falls back to
@@ -912,9 +962,11 @@ exit/transition:
 
 `update_progress` preserves the file's existing `audio_track` /
 `subtitle_track` (VLC ES IDs) **and** `local_audio_idx` /
-`local_subtitle_idx` / `subtitle_sel` / `audio_sel` (HLS rendition indices + the
-subtitle & audio descriptors) across writes, so a progress
-write doesn't wipe any track-pref system.
+`local_subtitle_idx` / `subtitle_sel` / `audio_sel` / `audio_offset_ms` (HLS
+rendition indices, the subtitle & audio descriptors, and the manual audio
+delay) across writes, so a progress
+write doesn't wipe any track-pref system. The canonical list is
+`_TRACK_PREF_KEYS` in `main.py` — every `file_progress` writer spreads it.
 
 ### 5. Auto-advance + manual Prev/Next + next-episode warm-prep
 

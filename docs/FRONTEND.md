@@ -335,8 +335,12 @@ native HLS** (`<video>.src = master_url`). See [STREAMING.md](STREAMING.md) for
 the engine branch.
 
 `_lpRenderTrackRows` (run on `MANIFEST_PARSED` / `loadedmetadata`) populates the
-three `#lpTrackRow` selectors: **Res** (quality), **Aud**, **Sub** — each row
-hidden when it has ≤1 option. Quality is hls.js-only: the Res dropdown is built
+`#lpTrackRow` controls: **Res** (quality), **Aud**, **Sync**, **Sub** — the three
+selectors each hidden when they have ≤1 option. **Sync** is the manual audio-delay
+slider (`#lpSyncRow`, `lpSetAudioOffset`); it is deliberately **not** gated on track
+count (a single-audio file can be desynced too), only on the browser having
+WebAudio, and its own state is rendered by `_lpRenderSyncRow` so a live drag doesn't
+rebuild every dropdown on the panel. Quality is hls.js-only: the Res dropdown is built
 from `lp.hls.levels` (sorted high→low) as `Auto` + each resolution, and
 `lpSetQuality(val)` sets `lp.hls.currentLevel` (`-1` = Auto/ABR; session-only,
 not persisted). Safari's Res row stays hidden (no manual-level API). **iOS app,
@@ -346,7 +350,9 @@ the downloaded bundle's `meta.json` ladder instead — `"— On device"` (value
 values make `lpSetQuality` switch the *source* (a per-file `lp._srvOverride` +
 full `_lpLoadIndex` reload at position). While overridden, the server menu adds
 the `dev` switch-back option. See [STREAMING.md](STREAMING.md). `lpSetAudio`
-/ `lpSetSubtitle` persist their picks via `/api/library/{id}/local-tracks`.
+/ `lpSetSubtitle` persist their picks via `/api/library/{id}/local-tracks`, as does
+`lpSetAudioOffset` (`audio_offset_ms`, per-file only — see
+[STREAMING.md § Manual audio offset](STREAMING.md)).
 
 Subtitle `<track>` elements are wired from the bundle's `subtitles[]` (each a
 `sub_<i>.vtt` in the cache dir) plus on-disk `subs[].url` sidecars (each points
@@ -395,7 +401,8 @@ Don't re-add the `controls` attribute. Pieces:
   directly for a user seek.
 - **Options panel** — the **gear button** (`#lpOptsBtn`, `lpToggleOpts`)
   toggles `.lp-opts` on `#localPlayer`, showing `#lpTrackRow` (quality /
-  audio / subtitle selectors, AI button, Clip row) as an absolute panel
+  audio / subtitle selectors, the **Sync** audio-delay slider, AI button, Clip
+  row) as an absolute panel
   anchored above the bottom strip — scrollable, ≤380px wide. The panel is
   **never** visible otherwise (`_lpRenderTrackRows` doesn't unhide it; the
   gear owns visibility). While open, the overlay won't auto-hide
