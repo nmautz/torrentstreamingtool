@@ -141,7 +141,14 @@ audio rendition (`{idx, playlist, label, language, default}`) and each subtitle
 (`{idx, file, label, language, title}` where `file` is the bundle-relative
 `sub_<i>.vtt`), plus a `skipped_image_subs` list noting PGS/VOBSUB tracks that
 couldn't be included (they need image-OCR or burn-in, neither of which is
-implemented). The UI reads `meta.json` via `/offline-prepare` to populate the
+implemented). Three A/V-sync fields describe how the bundle was built and are read
+by the resync detector, not the UI: `audio_padded_to_video_start` (each audio
+rendition was pinned to the video rung's first PTS) with `audio_pad_pts_sec` (the
+target used, `null` when unpinned), and `video_reencoded` (the original rung was
+re-encoded rather than stream-copied — it then carries a frame-reorder residual, so
+the detector applies a looser threshold). Bundles prepped before 11.12.0 carry the
+superseded `audio_padded_to_zero` instead, which meant both at once. The UI reads
+`meta.json` via `/offline-prepare` to populate the
 audio/subtitle dropdowns — it never re-probes the bundle. The **quality** menu
 is instead built from hls.js `levels` (the master-playlist parse), so it never
 depends on `videos[]` ordering; `videos[]` is informational (admin/API).
@@ -292,9 +299,24 @@ Key decisions:
   the copied video (intermittent, source-dependent). `-fflags +genpts` gives
   every stream a clean monotonic clock; the per-output `-filter:a:{i}
   aresample=async=1:min_hard_comp=0.100000` stretches/squeezes the audio and pads
-  gaps with silence so it tracks the video. **No `first_pts=0`** — anchoring audio
-  at 0 against a copied video whose first PTS isn't 0 would *introduce* a constant
-  offset. This handles the **drift / gap** class.
+  gaps with silence so it tracks the video. This handles the **drift / gap** class.
+- **Every audio rendition is pinned to the video's first PTS** (`:first_pts=<v_start
+  × that track's sample_rate>` on the same `aresample`, on **both** the copy and
+  re-encode paths since 11.12.0). A source's per-track audio delay — *Promised
+  Neverland S02* carries +0.5s on the English dub alone — is otherwise reproduced as
+  a **cross-rendition `baseMediaDecodeTime` gap** that Safari / iOS AVPlayer /
+  hls.js **drop**, anchoring each rendition to playback start so that track plays
+  ~0.5s early (VLC and single-program JIT honor the gap, which is why the symptom is
+  bundle-only). The pin pads the rendition's start with real silence up to the
+  video's own start, so there is no gap to drop and the dialog still lands at its
+  true time. The anchor is the **video's** first PTS, never a hardcoded 0: a
+  stream-copied rung keeps its own arbitrary start, so 0 would *introduce* an offset
+  there — which is why the copy path was previously left unpinned (issue #13) at the
+  cost of needing a full re-encode to fix. `HLS_AUDIO_PAD_MAX_SECS = 1.0` bounds it:
+  past that the pin would trim real audio instead of padding silence, so prep leaves
+  the copy path unpinned. Recorded in `meta.json` as
+  `audio_padded_to_video_start` / `audio_pad_pts_sec`. This handles the **constant
+  offset** class for everything except an edit list.
 - **Constant-offset guard: re-encode the original rung when the source has a video
   edit list.** `aresample` fixes drift but **not** a fixed offset. The dominant
   real-world cause of a fixed offset is a video **edit list** in the source (common
@@ -466,10 +488,20 @@ with video. The admin **Detect & Repair Audio Sync** tool (`_hls_resync_bundles`
     `max(HLS_SYNC_FLAG_SECS=1.0s, 1% of duration)`.
   - **Constant offset** (`_bundle_introduced_av_offset`) ffprobes the bundle's
     audio-vs-video first-pts **gap** `apts − vpts` (`_probe_rendition_first_pts`
-    reads each rendition playlist + its fmp4 EXT-X-MAP init) and flags it directly:
-    `AV_OFFSET_FLAG_SECS=0.12s` for an unpadded bundle, the looser
-    `AV_OFFSET_PAD_FLAG_SECS=0.35s` when meta `audio_padded_to_zero` is set (tolerates
-    the encoder frame-reorder residual that re-prep can't remove). This catches the
+    reads each rendition playlist + its fmp4 EXT-X-MAP init) for **every audio
+    rendition** — not just the nominal default — and flags the worst one, returning
+    `(gap, "audio_2/eng")` so the log names it. Probing one rendition missed a
+    per-track dub delay entirely, and since `meta:audios[].default` is copied
+    verbatim from the source disposition (often *every* track is `default:true`) the
+    old `next(x for x in audios if x.get("default"))` could only ever pick
+    `audios[0]` — issue #13. `stop_at` returns the first rendition over threshold, so
+    a bad bundle costs fewer probes; a clean one probes them all. Thresholds:
+    `AV_OFFSET_FLAG_SECS=0.12s`, or the looser `AV_OFFSET_PAD_FLAG_SECS=0.35s` when
+    meta `video_reencoded` is set (pre-11.12 bundles: `audio_padded_to_zero`, which
+    meant the same thing) — a re-encoded original rung carries a frame-reorder
+    residual (~0.125s on B-frame sources) that re-prep can't remove, while a
+    stream-copied one doesn't (measured ≈0.02s) and keeps the tight bound. This
+    catches the
     fixed early/late offset the duration check is structurally blind to (both
     renditions are the same length, just shifted). **It flags the raw gap rather than
     diffing against the source's intended offset:** `av_probe.py` showed the bundle
@@ -480,12 +512,21 @@ with video. The admin **Detect & Repair Audio Sync** tool (`_hls_resync_bundles`
     fix is to collapse the gap, not preserve it. No source needed for detection (only
     for repair).
 - **Repair** (non-`dry_run`) purges each flagged bundle (`_delete_cache_artifacts`
-  + `_invalidate_bundle_index`) and re-queues a prep via `_maybe_start_prep_job(src,
-  item_id, force_reencode_video=True)` — the **force_reencode** re-encodes the
-  original rung (so both streams route through one timestamp normalization) AND
-  silence-pads the audio to the video's zero (`first_pts=0` → `audio_padded_to_zero`),
-  collapsing the cross-rendition gap to ≈0 while preserving any real delay as leading
-  silence so it can't carry the offset forward. Re-preps run at the usual bulk
+  + `_invalidate_bundle_index`) and re-queues a prep — **cheap first**:
+  - **Offset-only, on a bundle that was never pinned** ⇒ a plain
+    `_maybe_start_prep_job(src, item_id)`. Since 11.12.0 the re-prep pins the audio
+    to the video's start on the **copy** path too, so a 6 GB remux is repaired at
+    remux speed instead of paying for a full 1080p re-encode of every episode.
+  - **Drift, or an offset that survived a pin** (`audio_padded_to_video_start` /
+    legacy `audio_padded_to_zero` already set) ⇒ escalate to
+    `force_reencode_video=True`, which re-encodes the original rung so both streams
+    route through one timestamp normalization.
+
+  That escalation makes repair self-limiting at two passes: the cheap re-prep writes
+  `audio_padded_to_video_start`, so anything still flagged next scan gets the hammer.
+  Edit-list sources are covered either way — `_run_offline_job` forces the re-encode
+  itself via `_source_has_editlist`. The log line records which mode ran
+  (`… (offset=+0.48s on audio_2/eng, remux)`). Re-preps run at the usual bulk
   concurrency / pause semantics (background, not blocking). Bundles with an active
   prep job, or whose source is gone, are skipped.
 - `scope` restricts to one library item (by `meta.json src`); `dry_run` only counts
@@ -497,9 +538,16 @@ The repair tool above fixes a bundle. The **Sync** row in the on-device player's
 options panel (`#lpSyncRow`, gear button) fixes a *playback*, immediately, with no
 re-prep — the bandaid for the case the detector misses or hasn't been run on
 (issue #14; the motivating defect is issue #13, where 8 of 11 *Promised Neverland
-S02* bundles carry **+478 ms** on the English rendition only, and
-`_bundle_introduced_av_offset` probes just the nominal default rendition so it
-reports zero).
+S02* bundles carry **+478 ms** on the English rendition only).
+
+> **Reset a stored offset to 0 after a bundle is repaired.** Since 11.12.0 prep
+> cures that defect at the source (the audio pin above) and the resync tool repairs
+> existing bundles, but a saved per-file offset is **not** cleared by either — it
+> would then double-correct, pushing the audio as far late as it used to be early.
+> The value lives in the library's per-file progress (`audio_offset_ms`, written by
+> `/api/library/.../local-tracks`) *and* in a `localStorage` mirror
+> (`streamlink_audio_offsets`), so clearing it server-side alone would not stick;
+> the reliable move is the row's **Reset** in the player that set it.
 
 - **Range 0–1000 ms, 25 ms steps**, value shown numerically, with a **Reset**.
 - **One-directional, by construction.** The mechanism is a WebAudio `DelayNode`

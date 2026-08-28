@@ -606,7 +606,7 @@ def _marquee_write(text: str) -> None:
 # Keep in sync with the version badge at the bottom of static/index.html.
 # Clients fetch this via /api/version and force a hard reload when the cached
 # page's badge value is older than the server's value.
-UI_VERSION = "11.11.1"
+UI_VERSION = "11.12.0"
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 # Retains references to fire-and-forget background tasks so the event loop's weak
@@ -17955,6 +17955,15 @@ def _track_label(track: dict, fallback: str) -> str:
 # real-world cause (common in `-ss` copies / web-DL / many MP4 muxers).
 EDITLIST_REENCODE_SECS = 0.05
 
+# Upper bound (seconds) on the audio pad target — the video rung's first PTS that
+# each audio rendition is pinned to (`aresample:first_pts`, see
+# _build_hls_ffmpeg_args). Inside this window the pin only ever pads a late audio
+# track with leading silence (or trims a few ms). A source whose VIDEO genuinely
+# starts seconds in would instead have real audio TRIMMED to reach the pin, so
+# past this bound we don't pin at all on the copy path (and fall back to the
+# historical `first_pts=0` on the re-encode path).
+HLS_AUDIO_PAD_MAX_SECS = 1.0
+
 
 def _probe_first_pts(path: str, stream: str, *, ignore_editlist: bool = False) -> Optional[float]:
     """First presentation timestamp (seconds) of one stream of a media file or HLS
@@ -18045,6 +18054,10 @@ def _ffprobe_full(path: str) -> dict:
                 "language": (tags.get("language") or "und").lower(),
                 "title":    tags.get("title", ""),
                 "channels": s.get("channels", 0),
+                # Needed by the HLS audio pin: `aresample:first_pts` counts in
+                # 1/sample_rate units and tracks can differ (48k vs 44.1k), so the
+                # value must be computed per track. 0 ⇒ unknown (caller defaults).
+                "sample_rate": int(s.get("sample_rate") or 0),
                 "default":  bool(disp.get("default")),
             })
             audio_i += 1
@@ -18574,6 +18587,7 @@ def _build_hls_ffmpeg_args(
     ladder_heights: Optional[list[int]] = None,
     force_reencode_original: bool = False,
     hw_decode: bool = True,
+    audio_pad_pts: Optional[float] = None,
 ) -> tuple[list[str], list[dict], list[dict], list[dict]]:
     """Construct the full ffmpeg invocation that emits one HLS bundle.
 
@@ -18751,33 +18765,43 @@ def _build_hls_ffmpeg_args(
     # audio stream (`-filter:a:{i}`) because there's one AAC rendition per source
     # track.
     #
-    # `first_pts=0` (added ONLY on the fully-re-encoded ladder) pads the start of
-    # the audio rendition with real silence up to t=0 when the source audio starts
-    # AFTER the video — its documented purpose. WHY this matters: the source's
-    # intrinsic audio-start delay (e.g. EMBER anime BDRips carry audio first-PTS
-    # ≈ +1.0s vs video 0) is faithfully reproduced by ffmpeg as a cross-rendition
-    # baseMediaDecodeTime gap (the audio rendition's first SAMPLE is real dialog
-    # timestamped ~1s in, with no leading silence). A correct player schedules it
-    # there; but Safari/AVPlayer/hls.js playing SEPARATE audio+video fmp4
-    # renditions ignore that tfdt gap and anchor the audio's first sample to
-    # playback start → the +1s dialog plays ~1s EARLY. Single-program on-demand
-    # (one mpegts, interleaved) and VLC (source direct) never hit this. Baking the
-    # offset as leading silence makes the audio rendition START at t=0 (same zero
-    # as the re-encoded video), so there's no gap for the player to drop and the
-    # dialog still lands at its true time on BOTH faithful and naive players.
+    # `first_pts=<video's first PTS>` (the caller's `audio_pad_pts`) pins EVERY
+    # audio rendition's start to the VIDEO rung's start, padding with real silence
+    # when the source audio starts AFTER the video — the documented purpose of
+    # `first_pts`. WHY this matters: a source's intrinsic audio-start delay (EMBER
+    # anime BDRips carry audio first-PTS ≈ +1.0s vs video 0; a per-track dub delay
+    # like Promised Neverland S02's +0.5s English) is faithfully reproduced by
+    # ffmpeg as a cross-rendition baseMediaDecodeTime gap — the audio rendition's
+    # first SAMPLE is real dialog timestamped ~0.5–1s in, with no leading silence.
+    # A correct player schedules it there; but Safari/AVPlayer/hls.js playing
+    # SEPARATE audio+video fmp4 renditions ignore that tfdt gap and anchor each
+    # rendition's first sample to playback start → the dialog plays that much
+    # EARLY. Single-program on-demand (one mpegts, interleaved) and VLC (source
+    # direct) never hit this. Baking the delay as leading silence makes the audio
+    # rendition START where the video does, so there's no gap for the player to
+    # drop and the dialog still lands at its true time on BOTH faithful and naive
+    # players.
     #
-    # SCOPED to `not copy_original`: when the original rung is stream-COPIED its
-    # video first PTS can be non-zero/arbitrary, and forcing audio to 0 against it
-    # would INTRODUCE a constant offset — so the copy path keeps the old behavior.
-    # Re-encoding routes video through `+genpts` (first PTS ≈ 0), making 0 the
-    # correct shared anchor. (Old escape hatch `-copyts -start_at_zero` preserved
-    # the gap rather than removing it, so it didn't cure the naive-player case.)
+    # The anchor is the VIDEO's first PTS, not a hardcoded 0 — that's what makes
+    # this safe on the stream-COPY path too (issue #13). A copied original rung
+    # keeps its own arbitrary first PTS, so forcing audio to 0 against it would
+    # INTRODUCE an offset; pinning both to the same value can't. The gap left after
+    # the pin is only the muxer residual, where without it the gap is
+    # `source delay + residual` — never worse on either path, and identical to the
+    # historical `first_pts=0` whenever the video starts at ≈0 (nearly always).
+    # `None` ⇒ don't pin at all (probe failed, or the video starts too late for the
+    # pin to pad rather than TRIM real audio — see HLS_AUDIO_PAD_MAX_SECS).
+    # (Old escape hatch `-copyts -start_at_zero` preserved the gap rather than
+    # removing it, so it didn't cure the naive-player case.)
     if audios:
         args += ["-c:a", "aac", "-b:a", "160k", "-ac", "2"]
-        afilter = "aresample=async=1:min_hard_comp=0.100000"
-        if not copy_original:
-            afilter += ":first_pts=0"
-        for i in range(len(audios)):
+        for i, a in enumerate(audios):
+            afilter = "aresample=async=1:min_hard_comp=0.100000"
+            if audio_pad_pts is not None:
+                # first_pts counts in 1/sample_rate units of THIS rendition's
+                # output rate (we don't force -ar, so it's the source track's).
+                sr = int(a.get("sample_rate") or 0) or 48000
+                afilter += f":first_pts={round(audio_pad_pts * sr)}"
             args += [f"-filter:a:{i}", afilter]
 
     args += [
@@ -19151,6 +19175,23 @@ async def _run_offline_job(job_id: str) -> None:
                 hls_log.info("job %s: re-encoding original rung to correct A/V sync "
                              "(repair re-prep)", job_id)
             copy_original = copy_original and not force_reencode
+            # AUDIO PIN TARGET. Every audio rendition is silence-padded to start
+            # at the VIDEO rung's first PTS (`aresample:first_pts`) so the bundle
+            # carries no cross-rendition gap for a naive HLS player to drop — the
+            # cure for issue #13, and applied on the stream-COPY path too now that
+            # the anchor is the video's own start rather than a hardcoded 0.
+            # Guards: probe failure, or a video that starts later than
+            # HLS_AUDIO_PAD_MAX_SECS (where the pin would TRIM real audio instead
+            # of padding silence) ⇒ fall back to the historical behaviour exactly
+            # (no pin when copying; pin to 0 when re-encoding, which `+genpts`
+            # makes the right anchor).
+            _vpts = await asyncio.to_thread(_probe_first_pts, str(src), "v:0")
+            if _vpts is not None:
+                _vpts = max(0.0, _vpts)
+            if _vpts is None or _vpts > HLS_AUDIO_PAD_MAX_SECS:
+                audio_pad_pts = None if copy_original else 0.0
+            else:
+                audio_pad_pts = _vpts
             # All-GPU pipeline (decode→scale_cuda→nvenc resident in VRAM), chosen
             # only when:
             #   • the build has scale_cuda (_has_cuda_scale), and
@@ -19184,6 +19225,7 @@ async def _run_offline_job(job_id: str) -> None:
                     ladder_heights=ladder_heights,
                     force_reencode_original=force_reencode,
                     hw_decode=hw_decode,
+                    audio_pad_pts=audio_pad_pts,
                 )
                 # Record encoder for admin/UI display. The original rung may copy
                 # while the ABR down-rungs (if any) still transcode, so reflect both.
@@ -19446,14 +19488,24 @@ async def _run_offline_job(job_id: str) -> None:
                 "version":      OFFLINE_CACHE_VERSION,
                 "src":          str(src),
                 "duration_sec": duration,
-                # True when the audio renditions were padded with leading silence
-                # to start at t≈0 (the `first_pts=0` on the fully-re-encoded ladder
-                # — see _build_hls_ffmpeg_args). The detector reads this: a padded
-                # bundle's source-offset is baked AS SILENCE, not expressed as a
-                # cross-rendition first-pts gap, so its audio-vs-video first-pts
-                # should be ≈0 (not ≈source offset). Absent/False ⇒ copy path ⇒
-                # faithful-reproduction expectation still applies.
-                "audio_padded_to_zero": bool(kept_audios) and not copy_original,
+                # True when the audio renditions were pinned (silence-padded) to
+                # start at the VIDEO rung's first PTS — `aresample:first_pts`, see
+                # _build_hls_ffmpeg_args. The source's own audio delay is then baked
+                # AS SILENCE rather than left as a cross-rendition first-pts gap, so
+                # the bundle's audio-vs-video gap should read ≈0. Supersedes the old
+                # `audio_padded_to_zero` (which was re-encode-path-only); the resync
+                # detector still reads that key for bundles prepped before v11.12.
+                # False here ⇒ nothing pinned it ⇒ a source delay survives as a gap.
+                "audio_padded_to_video_start": bool(kept_audios) and audio_pad_pts is not None,
+                # The pin target actually used (seconds), for diagnosis. None ⇒ unpinned.
+                "audio_pad_pts_sec": audio_pad_pts,
+                # Whether the ORIGINAL video rung was re-encoded rather than
+                # stream-copied. Drives the detector's offset threshold: a
+                # re-encoded rung carries a frame-reorder residual (first displayed
+                # frame's baseMediaDecodeTime, ~0.125s on B-frame sources) that
+                # re-prepping can't remove, so it needs the looser bound; a copied
+                # rung doesn't (measured residual ≈0.02s) and keeps the tight one.
+                "video_reencoded": not copy_original,
                 # ABR video ladder, master-playlist order (idx 0 = original).
                 # Informational for admin/API — the player builds its quality
                 # menu from hls.js `levels`, not from this ordering.
@@ -23707,18 +23759,24 @@ async def _hls_trim_bundles(keep: set[int], *, dry_run: bool, scope: str = "all"
 #      baseMediaDecodeTime gap and anchors each rendition to playback start. (We do
 #      NOT diff against the source's offset: single-program on-demand + VLC honor
 #      that offset, but the bundle player does not — so a "faithfully reproduced"
-#      source delay is itself the bug here. See _bundle_introduced_av_offset.)
-# A bundle flagged by EITHER is purged and re-prepped from source with
-# `_force_reencode_video=True`, which re-encodes the original rung AND silence-pads
-# the audio to the video's zero (`first_pts=0` → meta `audio_padded_to_zero`),
-# collapsing the gap to ≈0 while preserving any real delay as leading silence.
+#      source delay is itself the bug here. EVERY audio rendition is measured, not
+#      just the nominal default — a per-track dub delay desyncs that track alone.
+#      See _bundle_introduced_av_offset.)
+# A flagged bundle is purged and re-prepped from source. Offset-only on a bundle
+# that was never pinned ⇒ a plain (remux-speed) re-prep, which now silence-pads each
+# audio rendition to the VIDEO rung's first pts on the copy path too
+# (`aresample:first_pts` → meta `audio_padded_to_video_start`). Drift, or an offset
+# that survived a pin, escalates to `_force_reencode_video=True`. Either way the gap
+# collapses to ≈0 while any real delay is preserved as leading silence.
 HLS_SYNC_FLAG_SECS  = 1.0    # drift: flag when |audio_total − video_total| > max(this, 1% of duration)
-AV_OFFSET_FLAG_SECS = 0.12   # gap (unpadded bundle): flag when audio-vs-video first-pts gap exceeds this
-# Padded bundle (audio_padded_to_zero): audio is silence-padded to the video's zero,
-# so a correct bundle reads ≈0 while the bug it targets was ~the full source delay
-# (often ≥0.5–1.0s). The looser bound tolerates the encoder frame-reorder residual
-# (first displayed frame's baseMediaDecodeTime, e.g. ~0.125s on B-frame sources) —
-# which re-prepping can't remove — without missing a failed pad.
+AV_OFFSET_FLAG_SECS = 0.12   # gap: flag when the worst audio-vs-video first-pts gap exceeds this
+# Bundles whose ORIGINAL rung was RE-ENCODED (meta `video_reencoded`; pre-v11.12
+# equivalently `audio_padded_to_zero`) get the looser bound: their audio is pinned to
+# the video's zero while the encoder leaves a frame-reorder residual on the video
+# (first displayed frame's baseMediaDecodeTime, e.g. ~0.125s on B-frame sources) that
+# re-prepping can't remove. A stream-COPIED rung has no such residual (measured
+# ≈0.02s), so it keeps the tight bound even once pinned. Both bounds sit far below
+# the bug they target (~the full source delay, often ≥0.5s).
 AV_OFFSET_PAD_FLAG_SECS = 0.35
 
 
@@ -23796,31 +23854,43 @@ def _probe_rendition_first_pts(playlist: Path) -> Optional[float]:
         return None
 
 
-def _bundle_introduced_av_offset(bdir: Path) -> Optional[float]:
-    """Measure the bundle's audio-vs-video first-pts GAP (seconds) — the amount a
-    naive HLS player will desync by. Returns `apts − vpts` (default-audio rendition
-    first-pts minus video rendition first-pts), or None when it can't be measured
-    (ffprobe missing, renditions absent).
+def _bundle_introduced_av_offset(bdir: Path, *, stop_at: Optional[float] = None
+                                 ) -> Optional[tuple[float, str]]:
+    """Measure the bundle's worst audio-vs-video first-pts GAP (seconds) — the
+    amount a naive HLS player will desync by. Returns `(apts − vpts, label)` for the
+    worst audio rendition (label e.g. "audio_2/eng"), or None when nothing could be
+    measured (ffprobe missing, renditions absent).
+
+    EVERY audio rendition is probed, not just the nominal default — any rendition a
+    viewer can select is a rendition that can desync, and a per-track source delay
+    (a dub authored with a +0.5s offset) shows up on that track ALONE. The earlier
+    default-only scan was structurally blind to it, doubly so because meta `default`
+    flags are copied verbatim from the source disposition and are NOT exclusive: when
+    every track claims default, "the default one" is always audios[0]. See issue #13.
+
+    `stop_at` short-circuits: the first rendition whose |gap| exceeds it is returned
+    immediately (the caller only needs "is this flagged, and which"), so a bad bundle
+    costs fewer ffprobes. A clean bundle still probes them all.
 
     Why the RAW gap, not a diff against the source's intended offset: the bundle's
-    two fmp4 renditions (audio + video) are aligned by the player via each
-    rendition's first `baseMediaDecodeTime`. Safari / iOS AVPlayer / hls.js playing
-    SEPARATE renditions effectively ignore a large initial gap and anchor each
-    rendition's first sample to playback start — so ANY non-trivial gap (whether it
-    came from the source's intrinsic audio delay, a stream-copied edit list, or
-    per-stream skew) plays as audio early/late. We no longer treat "faithful
-    reproduction of the source offset" as correct (single-program on-demand + VLC
-    honor it, but the bundle player does NOT — confirmed with av_probe.py: source
-    A/V +1.0s reproduced as bundle +0.976s, yet the bundle plays audio early).
-    The cure is always the same: re-prep so the audio rendition is silence-padded
-    to the video's zero (`first_pts=0` on the re-encode path → meta
-    `audio_padded_to_zero`), collapsing the gap to ≈0 while preserving the delay as
-    real leading silence. So a correctly-padded bundle reads ≈0 here; an unfixed
-    one reads ≈ its full audio-start gap.
+    fmp4 renditions (audio + video) are aligned by the player via each rendition's
+    first `baseMediaDecodeTime`. Safari / iOS AVPlayer / hls.js playing SEPARATE
+    renditions effectively ignore a large initial gap and anchor each rendition's
+    first sample to playback start — so ANY non-trivial gap (whether it came from the
+    source's intrinsic audio delay, a stream-copied edit list, or per-stream skew)
+    plays as audio early/late. We do not treat "faithful reproduction of the source
+    offset" as correct (single-program on-demand + VLC honor it, but the bundle
+    player does NOT — confirmed with av_probe.py: source A/V +1.0s reproduced as
+    bundle +0.976s, yet the bundle plays audio early). The cure is always the same:
+    re-prep so each audio rendition is silence-padded to the VIDEO's first pts
+    (`aresample:first_pts` → meta `audio_padded_to_video_start`), collapsing the gap
+    to ≈0 while preserving the delay as real leading silence. So a correctly-pinned
+    bundle reads ≈0 here; an unfixed one reads ≈ its full audio-start gap.
 
-    The caller picks the flag threshold by meta `audio_padded_to_zero`: the padded
-    path tolerates the encoder frame-reorder residual (first displayed frame's
-    baseMediaDecodeTime) that re-prepping can't remove. Sync — call via to_thread."""
+    The caller picks the flag threshold by meta `video_reencoded`: a re-encoded
+    original rung carries a frame-reorder residual (first displayed frame's
+    baseMediaDecodeTime) that re-prepping can't remove and needs the looser bound.
+    Sync — call via to_thread."""
     try:
         meta = json.loads((bdir / "meta.json").read_text("utf-8"))
     except Exception:
@@ -23830,12 +23900,23 @@ def _bundle_introduced_av_offset(bdir: Path) -> Optional[float]:
     if not videos or not audios:
         return None
     vname = (videos[0].get("name") or "video")
-    a = next((x for x in audios if x.get("default")), audios[0])   # default audio, else first
     vpts = _probe_rendition_first_pts(bdir / f"{vname}.m3u8")
-    apts = _probe_rendition_first_pts(bdir / (a.get("playlist") or f"audio_{a.get('idx', 0)}.m3u8"))
-    if vpts is None or apts is None:
+    if vpts is None:
         return None
-    return apts - vpts
+    worst: Optional[tuple[float, str]] = None
+    for i, a in enumerate(audios):
+        idx = a.get("idx", i)
+        apts = _probe_rendition_first_pts(
+            bdir / (a.get("playlist") or f"audio_{idx}.m3u8"))
+        if apts is None:
+            continue
+        gap = apts - vpts
+        label = f"audio_{idx}/{a.get('language') or 'und'}"
+        if stop_at is not None and abs(gap) > stop_at:
+            return (gap, label)
+        if worst is None or abs(gap) > abs(worst[0]):
+            worst = (gap, label)
+    return worst
 
 
 def _bundle_sync_flagged(delta: Optional[float], duration_sec: float) -> bool:
@@ -23895,18 +23976,24 @@ async def _hls_resync_bundles(*, dry_run: bool, scope: str = "all") -> dict:
             # Detector #1: duration drift (cheap, no decode).
             delta = await asyncio.to_thread(_bundle_audio_sync_delta, p)
             drift = _bundle_sync_flagged(delta, float(meta.get("duration_sec") or 0.0))
-            # Detector #2: prep-introduced constant offset (ffprobe the bundle's
-            # renditions vs the source's intended A/V offset).
-            offset = await asyncio.to_thread(_bundle_introduced_av_offset, p)
-            off_thresh = (AV_OFFSET_PAD_FLAG_SECS if meta.get("audio_padded_to_zero")
+            # Detector #2: prep-introduced constant offset — the bundle's raw
+            # audio-vs-video first-pts gap, measured on EVERY audio rendition.
+            # Threshold keyed on whether the original rung was re-encoded (it then
+            # carries an irreducible frame-reorder residual); pre-v11.12 bundles
+            # fall back to `audio_padded_to_zero`, which meant exactly that.
+            off_thresh = (AV_OFFSET_PAD_FLAG_SECS
+                          if meta.get("video_reencoded", meta.get("audio_padded_to_zero"))
                           else AV_OFFSET_FLAG_SECS)
+            res = await asyncio.to_thread(_bundle_introduced_av_offset, p,
+                                          stop_at=off_thresh)
+            offset, which = res if res else (None, "")
             off_flag = offset is not None and abs(offset) > off_thresh
             if not (drift or off_flag):
                 await asyncio.sleep(0)
                 continue
             reason = (f"drift={delta:.2f}s" if drift else "") + \
                      (" " if drift and off_flag else "") + \
-                     (f"offset={offset:+.2f}s" if off_flag else "")
+                     (f"offset={offset:+.2f}s on {which}" if off_flag else "")
             flagged += 1
             if dry_run:
                 hls_log.info("hls-resync: bundle %s would repair (%s)", p.name, reason)
@@ -23918,15 +24005,28 @@ async def _hls_resync_bundles(*, dry_run: bool, scope: str = "all") -> dict:
                                 "missing (%s) — skipping repair", p.name, reason, src)
                 await asyncio.sleep(0)
                 continue
-            # Purge the bad bundle, then re-queue a prep that RE-ENCODES the original
-            # rung (force_reencode_video) so the rebuilt bundle can't carry the same
-            # offset. Runs at the usual bulk concurrency/pause semantics.
+            # Purge the bad bundle, then re-queue a prep. Repair mode:
+            #   • OFFSET-only on a bundle that was never pinned to the video's start
+            #     ⇒ a PLAIN re-prep now pins it on either path (the pin is no longer
+            #     re-encode-only — see _build_hls_ffmpeg_args), so a 6 GB remux stays
+            #     a remux instead of paying for a full 1080p re-encode.
+            #   • DRIFT, or an offset that survived a pin ⇒ escalate to
+            #     force_reencode_video, routing both streams through one timestamp
+            #     normalization. Self-limiting at two passes: the cheap re-prep
+            #     writes audio_padded_to_video_start, so a bundle that still flags
+            #     escalates on the next scan.
+            # Edit-list sources are covered either way — _run_offline_job forces the
+            # re-encode itself via _source_has_editlist.
+            already_pinned = bool(meta.get("audio_padded_to_video_start")
+                                  or meta.get("audio_padded_to_zero"))
+            force = bool(drift or already_pinned)
             await asyncio.to_thread(_delete_cache_artifacts, p.name, str(root))
             _invalidate_bundle_index()
             await _maybe_start_prep_job(src_path, src_to_item.get(_norm_path(src), ""),
-                                        force_reencode_video=True)
+                                        force_reencode_video=force)
             repaired += 1
-            hls_log.info("hls-resync: re-prepping %s (%s)", src, reason)
+            hls_log.info("hls-resync: re-prepping %s (%s, %s)", src, reason,
+                         "re-encode" if force else "remux")
             await asyncio.sleep(0)
     if not dry_run and repaired > 0:
         _invalidate_offline_cache_inventory()
