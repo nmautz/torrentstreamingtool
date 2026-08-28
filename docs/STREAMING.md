@@ -518,13 +518,33 @@ reports zero).
   together. The DelayNode works in bundle mode, on-demand mode, device-copy
   playback and Safari-native alike. Revisit only if a negative offset is ever
   actually needed in the field.
-- **Chrome / Edge / Firefox only — the row is hidden on WebKit.** Safari accepts
-  `createMediaElementSource()` on an MSE-backed element and then never taps it (no
-  error, no signal; measured 0.00 analyser RMS against 0.43 for a plain element on
-  Safari 26.5.2), and every playback path here is MSE-backed. `_LP_WEBKIT_ONLY`
-  hides the control rather than presenting an inert one. This also excludes **all
-  of iOS**, app included. Restoring it there means the `timestampOffset` route
-  below, not a WebAudio fix.
+- **Two mechanisms, picked per file by `_lpOffsetMode()`.** WebAudio cannot carry
+  this on WebKit: Safari accepts `createMediaElementSource()` on an MSE-backed
+  element and then never taps it — no error, no signal (measured 0.00 analyser RMS
+  against 0.43 for a plain element, Safari 26.5.2) — and every playback path here
+  is MSE-backed. So:
+  - `"webaudio"` — Chromium/Firefox. Instant, no re-buffer, works in **every** mode
+    including on-demand. Applies live while dragging.
+  - `"buffer"` — WebKit (macOS/iOS Safari, the app's WKWebView, Chrome/Edge for
+    iOS). Biases the **audio** SourceBuffer's `timestampOffset`, which adds to
+    every appended frame's presentation timestamp and so moves audio relative to
+    video. Verified on Safari 26.5.2 *and* Chrome: with a 0.475 bias the audio
+    buffer's `buffered.start(0)` moves to 0.475 while the video buffer stays at 0.
+    Only fresh appends carry a new bias, so a change **commits on release** and
+    re-loads at the current position (`_lpLoadIndex`, the same pattern
+    `lpSetAudio` uses for on-demand) — hence the row's caption changes to warn of
+    the brief re-buffer.
+  - `"none"` — WebKit playing **on-demand**, which muxes one program into a single
+    `video/mp4` SourceBuffer where a shift would move audio and video together.
+    The row is hidden. `_lpAdoptAudioSb` only ever adopts an `audio/…` buffer, so
+    that case also excludes itself structurally.
+
+  The `addSourceBuffer` hook is installed **only once a non-zero offset is in
+  play**, so a viewer who never touches the slider gets a completely untouched
+  media pipeline. The shadow property stores what hls.js *intended* and writes
+  intent+bias through, keeping hls.js's own `p - sb.timestampOffset` delta maths
+  correct; in practice hls.js 1.5.17 only writes `timestampOffset` for
+  `audio/mpeg` containers and our bundles are fMP4, so it never fights us.
 - **The graph is built lazily**, on the first non-zero value only —
   `createMediaElementSource` is irreversible and moves iOS playback onto the
   WebAudio audio session. See [GOTCHAS.md](GOTCHAS.md).

@@ -3397,8 +3397,9 @@
          construction:
          the WebAudio DelayNode behind it can only push the sound LATER, which
          is the direction a dub playing early needs. Not gated on track count —
-         a single-audio file can be desynced too. Hidden entirely on WebKit,
-         which can't tap an MSE-backed element (see _LP_WEBKIT_ONLY). -->
+         a single-audio file can be desynced too. Two mechanisms sit behind it —
+         a WebAudio DelayNode, or an audio-SourceBuffer timestampOffset bias on
+         WebKit, which can't be tapped by WebAudio. See _lpOffsetMode. -->
     <div id="lpSyncRow" class="hidden">
       <div class="flex items-center gap-3">
         <span class="text-[9px] font-black uppercase tracking-widest text-gray-600 flex-shrink-0 w-8">Sync<span
@@ -3414,7 +3415,7 @@
           Reset
         </button>
       </div>
-      <div class="text-[9px] font-bold uppercase tracking-widest text-gray-600 mt-1 pl-11">
+      <div id="lpSyncCap" class="text-[9px] font-bold uppercase tracking-widest text-gray-600 mt-1 pl-11">
         Audio delay — raise if the dub plays early
       </div>
     </div>
@@ -3899,6 +3900,9 @@ let lp = {
   // per-file via /local-tracks + a localStorage mirror. Re-applied on EVERY
   // load, including with 0 — the graph outlives the file. See issue #14.
   audioOffsetMs: 0,
+  _audioSb: null,     // the adopted audio SourceBuffer while in buffer mode (WebKit)
+  _offsetPin: null,   // {key:offKey(itemId,filePath), ms} — a just-committed offset that
+                      // must survive the reload applying it, ahead of the server's copy
   _srvOverride: null, // {key:offKey(itemId,filePath), sel:"auto"|<height>, localRung} —
                       // per-file "stream from server instead of the device copy";
                       // session-only, cleared whenever a different file loads
@@ -15488,13 +15492,20 @@ async function _lpLoadIndex(seekTo) {
   lp.pendingSubtitleIdx = defSubIdx;
   lp.subAutoApplied = _lpKeyIsAiSidecar(defSubIdx) && !(subSel && subSel.ai === true);
   // Manual audio delay for THIS file. Applied unconditionally — including 0 —
-  // because the WebAudio graph hangs off the reused <video> element and would
-  // otherwise carry the previous episode's delay into this one. Offline the
-  // host copy is unreachable, so the localStorage mirror is the only source.
+  // because both mechanisms outlive the file: the WebAudio graph hangs off the
+  // reused <video>, and _lpSbBias seeds whatever SourceBuffers get built next.
+  // Order matters: a pin set by a buffer-mode commit wins, because the reload it
+  // triggers can outrun that commit's own /local-tracks write and would
+  // otherwise read back the previous value. Offline the host copy is
+  // unreachable, so the localStorage mirror is the only source.
+  lp._audioSb = null;
+  const _offPin = (lp._offsetPin && lp._offsetPin.key === offKey(lp.itemId, filePath))
+                  ? lp._offsetPin.ms : null;
   lpSetAudioOffset(
-    (!_appOffline && saved.audio_offset_ms != null)
-      ? saved.audio_offset_ms
-      : _lpOffsetRecall(lp.itemId, filePath),
+    _offPin != null ? _offPin
+      : ((!_appOffline && saved.audio_offset_ms != null)
+          ? saved.audio_offset_ms
+          : _lpOffsetRecall(lp.itemId, filePath)),
     false);
 
   const v = document.getElementById("lpVideo");
@@ -16576,9 +16587,9 @@ let _lpAudioCtx = null, _lpAudioSrc = null, _lpAudioDelay = null;
 // Measured on Safari 26.5.2 — a plain <audio> element taps fine (analyser RMS
 // 0.43) while the identical hls.js/blob: element reads 0.00 with playback
 // running. Every StreamLink playback path is MSE-backed (hls.js in bundle,
-// on-demand and device-copy modes), so on WebKit this control can only ever be
-// a lie — hence it is not offered there rather than silently doing nothing.
-// Covers macOS/iOS Safari, the iOS app's WKWebView, and Chrome/Edge on iOS
+// on-demand and device-copy modes), so WebAudio can never carry this control on
+// WebKit — it uses the SourceBuffer timestampOffset route below instead. This
+// flag covers macOS/iOS Safari, the iOS app's WKWebView, and Chrome/Edge on iOS
 // (CriOS/EdgiOS are WebKit too). See GOTCHAS.md.
 const _LP_WEBKIT_ONLY = /AppleWebKit/.test(navigator.userAgent)
                      && !/Chrome|Chromium|Edg\//.test(navigator.userAgent);
@@ -16607,6 +16618,84 @@ function _lpEnsureAudioGraph() {
     return null;
   }
   return _lpAudioDelay;
+}
+
+// ── Fallback mechanism: bias the audio SourceBuffer's timestampOffset ───────
+// WebKit can't be tapped by WebAudio (above), but it implements MSE fully, and
+// `timestampOffset` is added to every appended frame's presentation timestamp —
+// so shifting it on the AUDIO SourceBuffer moves the audio relative to the
+// video. That is the only lever that works on Safari / iOS.
+//
+// Requirements and limits, all load-bearing:
+//   • Needs audio as its OWN SourceBuffer, i.e. a separate audio rendition.
+//     Prep builds those (ffmpeg `agroup:aud` → audio_<i>.m3u8), so bundle and
+//     device-copy playback qualify. On-demand/JIT muxes ONE program into a
+//     single video/mp4 buffer, where shifting would move audio AND video
+//     together — a no-op. We only ever adopt an `audio/…` buffer, so that case
+//     excludes itself automatically.
+//   • A change only takes effect on freshly appended media, so committing one
+//     re-loads the stream at the current position (same pattern as lpSetAudio's
+//     on-demand path). Hence buffer mode commits on RELEASE, not per drag step.
+//   • hls.js 1.5.17 writes timestampOffset only for `audio/mpeg` containers;
+//     our bundles are fMP4, so it never fights us. The shadow property below
+//     handles the other case anyway: it stores what hls.js INTENDED (so its own
+//     `p - sb.timestampOffset` delta maths stays correct) and writes intent+bias
+//     through to the real buffer.
+// The global hook is installed only once a non-zero offset is actually in play,
+// so a viewer who never touches the slider gets a completely untouched pipeline.
+let _lpSbBias = 0;        // seconds, currently wanted
+let _lpSbApplied = 0;     // seconds, baked into the live buffers
+let _lpSbHooked = false;
+
+function _lpSbSupported() {
+  return !!(window.MediaSource || window.ManagedMediaSource);
+}
+
+function _lpAdoptAudioSb(sb) {
+  const proto = Object.getPrototypeOf(sb);
+  const desc = proto && Object.getOwnPropertyDescriptor(proto, "timestampOffset");
+  if (!desc || !desc.get || !desc.set) return;
+  let intent = 0;
+  const write = () => { try { desc.set.call(sb, intent + _lpSbBias); } catch (_) {} };
+  try {
+    Object.defineProperty(sb, "timestampOffset", {
+      configurable: true,
+      get() { return intent; },
+      set(v) { intent = Number(v) || 0; write(); },
+    });
+  } catch (_) { return; }
+  write();                       // hls.js may never write it (fMP4) — seed it now
+  _lpSbApplied = _lpSbBias;
+  lp._audioSb = sb;
+  _lpRenderSyncRow();            // buffer mode is confirmed available for this file
+}
+
+function _lpInstallSbHook() {
+  if (_lpSbHooked) return;
+  _lpSbHooked = true;
+  for (const C of [window.MediaSource, window.ManagedMediaSource]) {
+    if (!C || !C.prototype || !C.prototype.addSourceBuffer) continue;
+    const orig = C.prototype.addSourceBuffer;
+    C.prototype.addSourceBuffer = function (mime) {
+      const sb = orig.call(this, mime);
+      // Audio-only buffers exclusively — a muxed `video/mp4;codecs="avc1,mp4a"`
+      // buffer carries the video too, and shifting it would move both.
+      try { if (/^audio\//i.test(String(mime || ""))) _lpAdoptAudioSb(sb); } catch (_) {}
+      return sb;
+    };
+  }
+}
+
+// Which mechanism can shift audio for the file currently loaded.
+//   "webaudio" — Chromium/Firefox: instant, works in every mode.
+//   "buffer"   — WebKit with a separate audio rendition: commit-on-release.
+//   "none"     — nothing can (WebKit + on-demand's single muxed buffer).
+function _lpOffsetMode() {
+  if (_lpAudioGraphSupported()) return "webaudio";
+  // Needs audio as a separate rendition: on-demand muxes one program, and a
+  // bundle with no `audios[]` would likewise give hls.js a single buffer.
+  if (_lpSbSupported() && lp.mode !== "ondemand" && (lp.audios || []).length) return "buffer";
+  return "none";
 }
 
 function _lpNormOffset(ms) {
@@ -16647,9 +16736,16 @@ function _lpRenderSyncRow() {
   const row = document.getElementById("lpSyncRow");
   if (!row) return;
   // Shown for any loaded file — a single-audio file can be desynced too — as
-  // long as the browser can actually apply the delay. Hidden outright on
-  // WebKit (see _LP_WEBKIT_ONLY): an inert slider is worse than no slider.
-  row.classList.toggle("hidden", !(lp.filePath && _lpAudioGraphSupported()));
+  // long as SOME mechanism can apply the delay here. Hidden when none can
+  // (WebKit playing on-demand): an inert slider is worse than no slider.
+  const mode = _lpOffsetMode();
+  row.classList.toggle("hidden", !(lp.filePath && mode !== "none"));
+  // Buffer mode re-loads the stream to apply, so say so rather than letting a
+  // one-second re-buffer read as a glitch.
+  const cap = document.getElementById("lpSyncCap");
+  if (cap) cap.textContent = (mode === "buffer")
+    ? "Audio delay — applies on release, brief re-buffer"
+    : "Audio delay — raise if the dub plays early";
   const sl  = document.getElementById("lpSyncSlider");
   const lab = document.getElementById("lpSyncVal");
   // Don't write back the value the user is currently dragging (identical here,
@@ -16661,12 +16757,35 @@ function _lpRenderSyncRow() {
 // `persist` false = live feedback while dragging (and the restore on load);
 // true = the committed value, written to the host and the local mirror.
 function lpSetAudioOffset(ms, persist) {
-  // Nothing to do on an engine that can't tap the element — don't pretend the
-  // value took, and don't write it back over whatever a working browser saved.
-  if (!_lpAudioGraphSupported()) { lp.audioOffsetMs = 0; _lpRenderSyncRow(); return; }
+  const mode = _lpOffsetMode();
+  // Nothing here can shift audio — don't pretend the value took, and don't
+  // write it back over whatever a capable browser saved for this file.
+  if (mode === "none") { lp.audioOffsetMs = 0; _lpSbBias = 0; _lpRenderSyncRow(); return; }
   const val = _lpNormOffset(ms);
   lp.audioOffsetMs = val;
   _lpRenderSyncRow();
+
+  if (mode === "buffer") {
+    _lpSbBias = val / 1000;
+    if (val) _lpInstallSbHook();     // must be in place before the buffers exist
+    // Live buffers already hold audio appended at the OLD bias, and only fresh
+    // appends carry the new one — so a committed change re-loads at the current
+    // position. `persist` is false for the restore-on-load path, where the
+    // buffers don't exist yet and the hook seeds them instead. The pin survives
+    // that reload so it doesn't race the /local-tracks write below.
+    if (persist && _lpSbBias !== _lpSbApplied && lp.itemId && lp.filePath) {
+      lp._offsetPin = { key: offKey(lp.itemId, lp.filePath), ms: val };
+      _lpOffsetRemember(lp.itemId, lp.filePath, val);
+      _lpSaveLocalTracks("offset");
+      const v = _lpV();
+      const t = (v && v.currentTime) || 0;
+      _lpLoadIndex(t > 2 ? t : Math.max(lp.lastKnownT || 0, lp.resumeSec || 0));
+      return;                        // the reload re-enters here with persist=false
+    }
+    if (persist) { _lpOffsetRemember(lp.itemId, lp.filePath, val); _lpSaveLocalTracks("offset"); }
+    return;
+  }
+
   // 0 with no graph yet: nothing to undo, and building one just to apply a
   // no-op would route the element through WebAudio for good (see above).
   if (val || _lpAudioDelay) {
@@ -18619,6 +18738,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.10.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.11.0</div>
 </body>
 </html>
