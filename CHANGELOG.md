@@ -1,5 +1,13 @@
 # Changelog
 
+## [11.11.1] — 2026-08-28
+- **Fix: the audio-sync slider is no longer offered on iOS, where it doesn't work.** The `timestampOffset` mechanism added in 11.11.0 was verified on macOS Safari and Chrome and does work there — but on iPhone/iPad it has no audible effect, in mobile Safari *and* in the app's web view. iOS is the one platform where hls.js runs over **ManagedMediaSource** rather than classic MediaSource, which is the likely reason.
+  - Rather than chase it further, the control is now scoped to where it is proven. This is a **bandaid** for a defect whose real cure is the prep-time fix in [#13](https://github.com/nmautz/torrentstreamingtool/issues/13) — that fixes the desync on every platform at once and needs no viewer-side lever, which is a better outcome for iOS than any amount of player-side patching.
+  - A control that silently does nothing is worse than no control; this is the second time that trap was hit here (WebAudio in 11.10.1), so `_lpSbSupported()` now excludes `_isIOSDevice()` and iOS falls to mode `"none"`: the row is hidden, no value is accepted, and nothing is written that could overwrite what a working browser saved.
+- **Where it stands:** **Windows/Linux Chrome, Edge, Firefox** — live WebAudio adjustment, every playback mode. **macOS Safari** — SourceBuffer bias, commits on release. **iOS (Safari + app), and WebKit on-demand** — not offered.
+- **Frontend:** `static/index.html` — `_lpSbSupported()` iOS gate. **Docs:** [docs/STREAMING.md](docs/STREAMING.md), [docs/GOTCHAS.md](docs/GOTCHAS.md), [docs/FRONTEND.md](docs/FRONTEND.md).
+- (Host-only — **no app rebuild**. Server update + restart required; hard-refresh open dashboards.)
+
 ## [11.11.0] — 2026-08-27
 - **New: the audio-sync slider now works on Safari and iOS too.** 11.10.1 had to hide it there because WebAudio can't carry it on WebKit (Safari accepts `createMediaElementSource()` on a MediaSource-backed element, raises no error, and then never routes the audio through it). WebKit now gets a **second mechanism** instead of no control at all: StreamLink biases the **audio SourceBuffer's `timestampOffset`**, which is added to every appended frame's presentation timestamp and so moves the audio relative to the video.
   - Verified on **Safari 26.5.2 and Chrome** against a purpose-built two-audio-rendition fMP4 bundle: with a 475 ms bias the audio buffer's start moves to 0.475 s while the video buffer stays at 0. Both engines behave identically.

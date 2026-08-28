@@ -525,8 +525,8 @@ reports zero).
   is MSE-backed. So:
   - `"webaudio"` — Chromium/Firefox. Instant, no re-buffer, works in **every** mode
     including on-demand. Applies live while dragging.
-  - `"buffer"` — WebKit (macOS/iOS Safari, the app's WKWebView, Chrome/Edge for
-    iOS). Biases the **audio** SourceBuffer's `timestampOffset`, which adds to
+  - `"buffer"` — **macOS Safari only.** Biases the **audio** SourceBuffer's
+    `timestampOffset`, which adds to
     every appended frame's presentation timestamp and so moves audio relative to
     video. Verified on Safari 26.5.2 *and* Chrome: with a 0.475 bias the audio
     buffer's `buffered.start(0)` moves to 0.475 while the video buffer stays at 0.
@@ -534,10 +534,20 @@ reports zero).
     re-loads at the current position (`_lpLoadIndex`, the same pattern
     `lpSetAudio` uses for on-demand) — hence the row's caption changes to warn of
     the brief re-buffer.
-  - `"none"` — WebKit playing **on-demand**, which muxes one program into a single
-    `video/mp4` SourceBuffer where a shift would move audio and video together.
-    The row is hidden. `_lpAdoptAudioSb` only ever adopts an `audio/…` buffer, so
-    that case also excludes itself structurally.
+  - `"none"` — **all of iOS**, and WebKit playing **on-demand**. The row is hidden
+    and no value is accepted.
+    - **iOS is excluded deliberately** (`_lpSbSupported` → `!_isIOSDevice()`).
+      The identical bias verifiably works on macOS Safari but has no audible
+      effect on iPhone/iPad, in mobile Safari *and* the app's WKWebView — iOS is
+      the one platform where hls.js runs over **ManagedMediaSource** rather than
+      classic MediaSource. Root cause was not chased further: this control is a
+      bandaid, and the prep-time fix in **issue #13** cures the underlying desync
+      on every platform at once with no viewer-side lever. Do not re-enable it
+      there without a measurement on a real device — a control that silently does
+      nothing is the exact mistake this shipped twice already.
+    - On-demand muxes one program into a single `video/mp4` SourceBuffer where a
+      shift would move audio and video together. `_lpAdoptAudioSb` only ever
+      adopts an `audio/…` buffer, so that case also excludes itself structurally.
 
   The `addSourceBuffer` hook is installed **only once a non-zero offset is in
   play**, so a viewer who never touches the slider gets a completely untouched

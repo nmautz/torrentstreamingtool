@@ -16588,8 +16588,9 @@ let _lpAudioCtx = null, _lpAudioSrc = null, _lpAudioDelay = null;
 // 0.43) while the identical hls.js/blob: element reads 0.00 with playback
 // running. Every StreamLink playback path is MSE-backed (hls.js in bundle,
 // on-demand and device-copy modes), so WebAudio can never carry this control on
-// WebKit — it uses the SourceBuffer timestampOffset route below instead. This
-// flag covers macOS/iOS Safari, the iOS app's WKWebView, and Chrome/Edge on iOS
+// WebKit — macOS Safari uses the SourceBuffer timestampOffset route below
+// instead, and iOS gets no control at all (see _lpSbSupported). This flag
+// covers macOS/iOS Safari, the iOS app's WKWebView, and Chrome/Edge on iOS
 // (CriOS/EdgiOS are WebKit too). See GOTCHAS.md.
 const _LP_WEBKIT_ONLY = /AppleWebKit/.test(navigator.userAgent)
                      && !/Chrome|Chromium|Edg\//.test(navigator.userAgent);
@@ -16647,8 +16648,17 @@ let _lpSbBias = 0;        // seconds, currently wanted
 let _lpSbApplied = 0;     // seconds, baked into the live buffers
 let _lpSbHooked = false;
 
+// iOS is excluded deliberately, not incidentally. The bias verifiably works on
+// macOS Safari (audio buffer start moves to the bias, video stays put — same
+// result as Chrome), but on iPhone/iPad — both mobile Safari and the app's
+// WKWebView — it has no audible effect, and iOS is the one platform where
+// hls.js runs over ManagedMediaSource rather than classic MediaSource. Rather
+// than ship a third control that silently does nothing there (WebAudio was the
+// first, an unbiased buffer the second), this is scoped to where it is proven.
+// The real cure for the underlying desync is the prep-time fix in issue #13,
+// which fixes every platform at once and needs no viewer-side lever at all.
 function _lpSbSupported() {
-  return !!(window.MediaSource || window.ManagedMediaSource);
+  return !!(window.MediaSource || window.ManagedMediaSource) && !_isIOSDevice();
 }
 
 function _lpAdoptAudioSb(sb) {
@@ -18738,6 +18748,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.11.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.11.1</div>
 </body>
 </html>
