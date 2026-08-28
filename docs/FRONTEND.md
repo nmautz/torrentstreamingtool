@@ -339,7 +339,7 @@ the engine branch.
 selectors each hidden when they have ≤1 option. **Sync** is the manual audio-delay
 slider (`#lpSyncRow`, `lpSetAudioOffset`); it is deliberately **not** gated on track
 count (a single-audio file can be desynced too), only on the browser having
-WebAudio, and its own state is rendered by `_lpRenderSyncRow` so a live drag doesn't
+WebAudio **and being able to use it** — it is hidden outright on WebKit, which never taps an MSE-backed element (`_LP_WEBKIT_ONLY`; see [GOTCHAS.md](GOTCHAS.md)) — and its own state is rendered by `_lpRenderSyncRow` so a live drag doesn't
 rebuild every dropdown on the panel. Quality is hls.js-only: the Res dropdown is built
 from `lp.hls.levels` (sorted high→low) as `Auto` + each resolution, and
 `lpSetQuality(val)` sets `lp.hls.currentLevel` (`-1` = Auto/ABR; session-only,

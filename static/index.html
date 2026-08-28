@@ -3397,7 +3397,8 @@
          construction:
          the WebAudio DelayNode behind it can only push the sound LATER, which
          is the direction a dub playing early needs. Not gated on track count —
-         a single-audio file can be desynced too. -->
+         a single-audio file can be desynced too. Hidden entirely on WebKit,
+         which can't tap an MSE-backed element (see _LP_WEBKIT_ONLY). -->
     <div id="lpSyncRow" class="hidden">
       <div class="flex items-center gap-3">
         <span class="text-[9px] font-black uppercase tracking-widest text-gray-600 flex-shrink-0 w-8">Sync<span
@@ -16569,8 +16570,21 @@ const LP_AOFF_CAP     = 200;                          // entries kept in the mir
 
 let _lpAudioCtx = null, _lpAudioSrc = null, _lpAudioDelay = null;
 
+// WebKit accepts createMediaElementSource() on an MSE-backed element and then
+// never taps it: the node is wired to silence while the element keeps playing
+// through its own output, so the DelayNode has no effect and nothing throws.
+// Measured on Safari 26.5.2 — a plain <audio> element taps fine (analyser RMS
+// 0.43) while the identical hls.js/blob: element reads 0.00 with playback
+// running. Every StreamLink playback path is MSE-backed (hls.js in bundle,
+// on-demand and device-copy modes), so on WebKit this control can only ever be
+// a lie — hence it is not offered there rather than silently doing nothing.
+// Covers macOS/iOS Safari, the iOS app's WKWebView, and Chrome/Edge on iOS
+// (CriOS/EdgiOS are WebKit too). See GOTCHAS.md.
+const _LP_WEBKIT_ONLY = /AppleWebKit/.test(navigator.userAgent)
+                     && !/Chrome|Chromium|Edg\//.test(navigator.userAgent);
+
 function _lpAudioGraphSupported() {
-  return !!(window.AudioContext || window.webkitAudioContext);
+  return !!(window.AudioContext || window.webkitAudioContext) && !_LP_WEBKIT_ONLY;
 }
 
 // Build (once) <video> → DelayNode → speakers. Returns the DelayNode, or null
@@ -16579,7 +16593,9 @@ function _lpEnsureAudioGraph() {
   if (_lpAudioDelay) return _lpAudioDelay;
   const AC = window.AudioContext || window.webkitAudioContext;
   const v  = _lpV();
-  if (!AC || !v) return null;
+  // Refuse on WebKit rather than building a graph that silently does nothing —
+  // and, worse, permanently routes the element for no benefit.
+  if (!AC || !v || !_lpAudioGraphSupported()) return null;
   try {
     _lpAudioCtx   = new AC();
     _lpAudioSrc   = _lpAudioCtx.createMediaElementSource(v);
@@ -16631,7 +16647,8 @@ function _lpRenderSyncRow() {
   const row = document.getElementById("lpSyncRow");
   if (!row) return;
   // Shown for any loaded file — a single-audio file can be desynced too — as
-  // long as the browser can actually do the delay.
+  // long as the browser can actually apply the delay. Hidden outright on
+  // WebKit (see _LP_WEBKIT_ONLY): an inert slider is worse than no slider.
   row.classList.toggle("hidden", !(lp.filePath && _lpAudioGraphSupported()));
   const sl  = document.getElementById("lpSyncSlider");
   const lab = document.getElementById("lpSyncVal");
@@ -16644,6 +16661,9 @@ function _lpRenderSyncRow() {
 // `persist` false = live feedback while dragging (and the restore on load);
 // true = the committed value, written to the host and the local mirror.
 function lpSetAudioOffset(ms, persist) {
+  // Nothing to do on an engine that can't tap the element — don't pretend the
+  // value took, and don't write it back over whatever a working browser saved.
+  if (!_lpAudioGraphSupported()) { lp.audioOffsetMs = 0; _lpRenderSyncRow(); return; }
   const val = _lpNormOffset(ms);
   lp.audioOffsetMs = val;
   _lpRenderSyncRow();
@@ -18599,6 +18619,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.10.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.10.1</div>
 </body>
 </html>

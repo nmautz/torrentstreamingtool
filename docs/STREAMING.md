@@ -518,6 +518,13 @@ reports zero).
   together. The DelayNode works in bundle mode, on-demand mode, device-copy
   playback and Safari-native alike. Revisit only if a negative offset is ever
   actually needed in the field.
+- **Chrome / Edge / Firefox only — the row is hidden on WebKit.** Safari accepts
+  `createMediaElementSource()` on an MSE-backed element and then never taps it (no
+  error, no signal; measured 0.00 analyser RMS against 0.43 for a plain element on
+  Safari 26.5.2), and every playback path here is MSE-backed. `_LP_WEBKIT_ONLY`
+  hides the control rather than presenting an inert one. This also excludes **all
+  of iOS**, app included. Restoring it there means the `timestampOffset` route
+  below, not a WebAudio fix.
 - **The graph is built lazily**, on the first non-zero value only —
   `createMediaElementSource` is irreversible and moves iOS playback onto the
   WebAudio audio session. See [GOTCHAS.md](GOTCHAS.md).
