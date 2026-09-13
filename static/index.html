@@ -1350,11 +1350,16 @@
   <div class="bg-gray-900 w-full sm:max-w-md fade-in border-t-[3px] border-indigo-600">
     <!-- Header -->
     <div class="px-5 pt-5 pb-4 border-b border-gray-800">
-      <div class="flex items-start justify-between gap-3">
-        <div class="min-w-0">
+      <div class="flex items-start justify-between gap-1.5">
+        <div class="min-w-0 flex-1">
           <h2 class="text-lg font-black uppercase tracking-wide">Add to Library</h2>
           <p id="dlModalTitle" class="text-xs text-gray-500 mt-0.5 truncate font-mono"></p>
         </div>
+        <button id="dlLockBtn" type="button" onclick="toggleDlLock()"
+          class="hidden opacity-60 hover:opacity-100 transition-opacity flex-shrink-0 p-1"
+          aria-pressed="false" title="Not locked">
+          <svg class="ic" aria-hidden="true"><use href="#i-unlock"/></svg>
+        </button>
         <button onclick="closeDownloadModal()"
           class="text-gray-500 hover:text-white transition-colors flex-shrink-0 p-1">
           <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -1441,6 +1446,11 @@
       <div class="text-[11px] text-gray-500 bg-gray-800/50 px-3 py-2.5 border-l-4 border-indigo-900">
         Files download in the background. Track progress in the Library tab.
       </div>
+
+      <p id="dlLockNote" class="hidden text-[11px] text-amber-400 flex items-center gap-1.5">
+        <svg class="ic" aria-hidden="true"><use href="#i-lock"/></svg>
+        Content locked — hidden from profiles without the PIN.
+      </p>
     </div>
 
     <!-- Footer -->
@@ -1825,6 +1835,11 @@
         <h2 id="ssSourceTitle" class="text-sm font-black uppercase tracking-wide truncate">Sources</h2>
         <p class="text-[10px] text-gray-500 uppercase tracking-widest">Pick a torrent to download</p>
       </div>
+      <button id="ssLockBtn" type="button" onclick="toggleSsLock()"
+        class="hidden opacity-60 hover:opacity-100 transition-opacity flex-shrink-0 p-1"
+        aria-pressed="false" title="Not locked">
+        <svg class="ic" aria-hidden="true"><use href="#i-unlock"/></svg>
+      </button>
       <button onclick="ssCloseSourceSheet()" class="p-1 text-gray-500 hover:text-white flex-shrink-0">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
@@ -1840,6 +1855,11 @@
   <div class="bg-gray-900 w-full sm:max-w-lg border-t-[3px] border-indigo-600 max-h-[88vh] flex flex-col">
     <div class="flex items-center justify-between gap-2 px-4 py-3 border-b border-gray-800 flex-shrink-0">
       <h2 id="ssBulkTitle" class="text-sm font-black uppercase tracking-wide">Bulk download</h2>
+      <button id="ssBulkLockBtn" type="button" onclick="toggleSsLock()"
+        class="hidden opacity-60 hover:opacity-100 transition-opacity flex-shrink-0 p-1"
+        aria-pressed="false" title="Not locked">
+        <svg class="ic" aria-hidden="true"><use href="#i-unlock"/></svg>
+      </button>
       <button onclick="ssCloseBulkSheet()" class="p-1 text-gray-500 hover:text-white flex-shrink-0">
         <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
@@ -9406,6 +9426,60 @@ function renderDlPathChips(){
   });
 }
 
+// ── Content lock at download time ──────────────────────────────────────────
+// A profile that can SEE locked content can also start a download already locked,
+// so restricted material never sits in the open library — not even for the minutes
+// between the torrent being added and someone remembering to flip it in the admin
+// Content Lock tab.
+//
+// Deliberately a bare icon in the header rather than a labelled row: this is a
+// rare choice, and a prominent "LOCK THIS" control in everyone's download modal
+// advertises that there is restricted content to find. It is hidden outright for
+// anyone who can't use it, which is the common case.
+//
+// The server re-checks the privilege (`_is_elevated`) — this only decides what to
+// draw. Never treat the button's presence as the authorisation.
+let _dlLocked=false;   // the Add-to-Library / Save-Stream modal
+let _ssLocked=false;   // the show view's source + bulk sheets (one shared choice)
+
+function canLockContent(){
+  if(!profile||!profile.id) return false;
+  // Read `elevated` off the freshly-fetched list, not the possibly-stale copy in
+  // `profile`, and require the server to agree we've PIN-proved this same profile.
+  const p=(allProfiles||[]).find(x=>x.id===profile.id);
+  return !!(p && p.elevated && _verifiedProfileId===p.id);
+}
+
+function _paintLockBtn(id,on){
+  const btn=document.getElementById(id);
+  if(!btn) return;
+  const can=canLockContent();
+  btn.classList.toggle("hidden",!can);
+  if(!can) return;
+  const use=btn.querySelector("use");
+  if(use) use.setAttribute("href",on?"#i-lock":"#i-unlock");
+  btn.classList.toggle("text-amber-400",on);
+  btn.classList.toggle("text-gray-700",!on);
+  btn.setAttribute("aria-pressed",on?"true":"false");
+  btn.title=on?"Content locked — hidden from profiles without the PIN"
+              :"Not locked — everyone will see this";
+}
+
+// Repaint every lock button and drop a lock nobody is allowed to set (profile
+// switched, or the 12 h PIN session expired) so a stale toggle can't ride along
+// into a request the server will 403.
+function syncLockButtons(){
+  if(!canLockContent()){ _dlLocked=false; _ssLocked=false; }
+  _paintLockBtn("dlLockBtn",_dlLocked);
+  _paintLockBtn("ssLockBtn",_ssLocked);
+  _paintLockBtn("ssBulkLockBtn",_ssLocked);
+  const note=document.getElementById("dlLockNote");
+  if(note) note.classList.toggle("hidden",!_dlLocked);
+}
+
+function toggleDlLock(){ _dlLocked=!_dlLocked; syncLockButtons(); }
+function toggleSsLock(){ _ssLocked=!_ssLocked; syncLockButtons(); }
+
 async function openDownloadModal(magnet,title,overrides){
   overrides=overrides||{};
   downloadTarget={magnet,title};
@@ -9436,6 +9510,7 @@ async function openDownloadModal(magnet,title,overrides){
   document.getElementById("dlIdleWarn").classList.toggle("hidden", app.download_idle_configured!==false);
 
   renderDlVisibilityProfiles();
+  _dlLocked=false; syncLockButtons();
   document.getElementById("downloadModal").classList.remove("hidden");
   document.getElementById("dlSeries").focus();
 }
@@ -9500,6 +9575,7 @@ async function openSaveStreamModal(){
     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
       d="M5 5a2 2 0 012-2h7l5 5v11a2 2 0 01-2 2H7a2 2 0 01-2-2V5z"/>
     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 3v5h-5"/></svg>Keep &amp; Save`;
+  _dlLocked=false; syncLockButtons();
   document.getElementById("downloadModal").classList.remove("hidden");
   document.getElementById("dlSeries").focus();
 }
@@ -9671,10 +9747,12 @@ async function submitDownload(){
     if(_saveStreamMode){
       r=await fetch("/api/stream/save-to-library",{
         method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({title,series,season,episode,save_path:savePath}),
+        body:JSON.stringify({title,series,season,episode,save_path:savePath,
+                             profile_id:profile.id,admin_only:_dlLocked}),
       });
     } else {
-      const body={magnet:downloadTarget.magnet,title,series,season,episode,save_path:savePath};
+      const body={magnet:downloadTarget.magnet,title,series,season,episode,save_path:savePath,
+                  profile_id:profile.id,admin_only:_dlLocked};
       if(document.getElementById("dlIdleOnly").checked) body.download_mode="idle";
       // Visibility: empty list = all profiles; non-empty = restricted to those IDs
       const visCbs=document.querySelectorAll(".dl-vis-cb");
@@ -9696,7 +9774,8 @@ async function submitDownload(){
     }
     if(r.ok){
       closeDownloadModal();
-      showAlert(_saveStreamMode?"Stream saved — visible in Library tab.":"Downloading — switch to Library to track progress.","success");
+      showAlert((_saveStreamMode?"Stream saved — visible in Library tab.":"Downloading — switch to Library to track progress.")
+                +(_dlLocked?" Content locked.":""),"success");
       switchTab("library");
     } else {
       const e=await r.json().catch(()=>({detail:"Unknown error"}));
@@ -10961,7 +11040,7 @@ function _ssLoadingBodyHtml(){
 }
 
 async function openSearchShow(group){
-  _ssGroup=group; _ssMeta=null; _ssSearching.clear();
+  _ssGroup=group; _ssMeta=null; _ssSearching.clear(); _ssLocked=false;
   _ssKind=""; _ssBroadResults=null; _ssPacksSearched=(group.results||[]).length>0;
   _ssEpisodesSearched=(group.results||[]).length>0;
   _ssEpisodes=_ssBuildEpisodes(group.results||[]);
@@ -11015,7 +11094,7 @@ async function openSearchShowFromTmdb(cand, opts){
   if(!cand) return;
   const o=opts||{};
   const group={title:cand.title||"", year:cand.year?parseInt(cand.year,10)||null:null, results:[]};
-  _ssGroup=group; _ssMeta=null; _ssSearching.clear();
+  _ssGroup=group; _ssMeta=null; _ssSearching.clear(); _ssLocked=false;
   _ssKind=cand.kind==="movie"?"movie":"tv"; _ssBroadResults=null; _ssPacksSearched=false; _ssEpisodesSearched=false;
   _ssPackHinted=new Set();
   _ssEpisodes=[]; _ssPacks=[];
@@ -11818,6 +11897,7 @@ function ssOpenSourceSheet(season,episode){
       </button>
     </div>`;
   }).join("");
+  syncLockButtons();
   document.getElementById("ssSourceSheet").classList.remove("hidden");
 }
 
@@ -11834,7 +11914,8 @@ function ssPickSource(season,episode,i){
 // of the show cohere into one library entry (Phase 4).
 async function _ssDownloadOne(src, season, episode, opts={}){
   const body={magnet:src.magnet, title:src.title, series:_ssGroup.title,
-              season, episode, save_path:""};
+              season, episode, save_path:"",
+              profile_id:profile.id, admin_only:_ssLocked};
   const r=await fetch("/api/library/download",{
     method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body),
   });
@@ -11843,7 +11924,7 @@ async function _ssDownloadOne(src, season, episode, opts={}){
     if(!opts.silent) showAlert(err.detail||"Download failed.","error");
     return false;
   }
-  if(!opts.silent){ showAlert("Downloading — switch to Library to track progress.","success"); closeSearchShow(); switchTab("library"); }
+  if(!opts.silent){ showAlert("Downloading — switch to Library to track progress."+(_ssLocked?" Content locked.":""),"success"); closeSearchShow(); switchTab("library"); }
   return true;
 }
 
@@ -11856,6 +11937,7 @@ let _ssBulkBusy=false;    // a find-and-download run is in flight
 let _ssBulkCancel=false;  // the user hit Stop mid-run
 function ssOpenBulkSheet(){
   _ssBulkScope=_ssSeason||"all";
+  syncLockButtons();
   document.getElementById("ssBulkSheet").classList.remove("hidden");
   _ssRenderBulkChoose();
   _ssBulkPackHint();
@@ -19626,6 +19708,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.20.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.21.0</div>
 </body>
 </html>

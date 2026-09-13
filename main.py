@@ -8856,6 +8856,8 @@ class DownloadReq(BaseModel):
     selected_file_indices: list[int] = []  # if non-empty, skip all other files
     default_visible_profiles: list[str] = []  # if non-empty, only these profiles see it by default
     download_mode: str = "now"      # "now" = download immediately; "idle" = only during idle/night window
+    profile_id: str = ""            # who is asking — only meaningful alongside admin_only
+    admin_only: bool = False        # start the item content-locked (elevated profiles only)
 
 
 class VisibilityReq(BaseModel):
@@ -10463,10 +10465,17 @@ async def move_library_status(item_id: str, request: Request) -> JSONResponse:
 
 
 @app.post("/api/library/download")
-async def library_download(req: DownloadReq) -> JSONResponse:
+async def library_download(request: Request, req: DownloadReq) -> JSONResponse:
     if not state.vpn_secure:
         raise HTTPException(403, "VPN not connected — download blocked.")
     async with mutate_library() as lib:
+        # Locking at download time carries exactly the privilege of *seeing* locked
+        # content, so it takes the same proof: a PIN-verified elevated profile, or an
+        # admin session. `profile_id` on its own is a claim, not proof — see
+        # _is_elevated. Without this check the lock would be settable by anyone, and
+        # a lock anyone can set is a lock anyone can inspect the shape of.
+        if req.admin_only and not _is_elevated(request, lib, req.profile_id):
+            raise HTTPException(403, "Content lock requires a PIN-verified profile.")
         # Dedup: bulk "download all episodes" can fire the same torrent twice (a double
         # click, a retry, or overlapping season/episode pickers), which used to create
         # two library items backed by one torrent — one of which then errors on the qBit
@@ -10485,6 +10494,13 @@ async def library_download(req: DownloadReq) -> JSONResponse:
                             if (extract_hash((it.get("pending_download") or {}).get("magnet", "")) or "").lower() == want_hash
                             and it.get("status") != "error"), None)
             if dup is not None:
+                # Only ever tighten. A re-download that asks for the lock applies it to
+                # the item already backing this hash; one that doesn't must never
+                # silently *un*lock it — unlocking is the Content Lock tab's job, and
+                # doing it as a side effect of a duplicate download would expose
+                # restricted content with nothing in the UI having said so.
+                if req.admin_only and not dup.get("admin_only"):
+                    dup["admin_only"] = True
                 return JSONResponse({"ok": True, "item_id": dup["id"], "duplicate": True,
                                      "default_save_path": settings.qbit_download_path})
         item: dict = {
@@ -10501,6 +10517,7 @@ async def library_download(req: DownloadReq) -> JSONResponse:
             "progress": {},
             "default_visible_profiles": req.default_visible_profiles,
             "hidden_by_profiles": [],
+            "admin_only": bool(req.admin_only),
             "download": {"mode": req.download_mode if req.download_mode in ("now", "idle") else "now",
                          "files": {}},
             # Persist everything the pipeline needs so an interrupted add (app restart
@@ -10517,9 +10534,10 @@ async def library_download(req: DownloadReq) -> JSONResponse:
         }
         lib["items"].append(item)
     state.downloading_count += 1
-    # A freshly-created download is never admin-locked yet (the lock is toggled
-    # later from the Content Lock tab), so it always counts toward the visible
-    # badge; the monitor re-derives both counts authoritatively each tick.
+    # A download started with the lock on must not show up in the household-visible
+    # badge even for the seconds before the monitor's next tick — "1 downloading"
+    # with nothing in the library to match it is exactly the tell the lock hides.
+    # The monitor re-derives both counts authoritatively each tick.
     if not item.get("admin_only"):
         state.downloading_count_visible += 1
     save_path = req.save_path.strip() or settings.qbit_download_path
@@ -12977,10 +12995,12 @@ class SaveToLibraryReq(BaseModel):
     season: int = 0
     episode: int = 0
     save_path: str = ""
+    profile_id: str = ""            # who is asking — only meaningful alongside admin_only
+    admin_only: bool = False        # adopt the stream already content-locked
 
 
 @app.post("/api/stream/save-to-library")
-async def save_stream_to_library(req: SaveToLibraryReq) -> JSONResponse:
+async def save_stream_to_library(request: Request, req: SaveToLibraryReq) -> JSONResponse:
     """Adopt the currently streaming torrent into the persistent library.
 
     Restores all file priorities to 1 so the full torrent continues downloading,
@@ -13019,8 +13039,14 @@ async def save_stream_to_library(req: SaveToLibraryReq) -> JSONResponse:
     }
 
     async with mutate_library() as lib:
+        # Same gate as /api/library/download — the modal offers the lock in both modes.
+        if req.admin_only and not _is_elevated(request, lib, req.profile_id):
+            raise HTTPException(403, "Content lock requires a PIN-verified profile.")
+        item["admin_only"] = bool(req.admin_only)
         lib["items"].append(item)
     state.downloading_count += 1
+    if not item.get("admin_only"):
+        state.downloading_count_visible += 1
     state.library_item_id = item["id"]  # prevents auto-delete on stop
 
     await broadcast("library_update", {"item_id": item["id"], "status": "downloading"})

@@ -202,7 +202,9 @@ It **is** enforced server-side against the network, though (11.20.0). `verify-pi
   "download": { /* download schedule; see below */ },
   "prep": { /* stream-prep schedule; see below */ },
   "progress": { /* per-profile; see below */ },
-  "admin_only": false,                  // optional; hides from non-elevated profiles — excluded from GET /api/library AND from the global prep bar / download badge (no "content is downloaded" evidence leaks). See ADMIN.md § Content Lock
+  "admin_only": false,                  // optional; hides from non-elevated profiles — excluded from GET /api/library AND from the global prep bar / download badge (no "content is downloaded" evidence leaks).
+                                        // Set either by the admin Content Lock tab (POST /api/library/{id}/admin-lock) or, since 11.21.0, at creation time by POST /api/library/download {admin_only:true}
+                                        // from a PIN-verified elevated profile. See ADMIN.md § Content Lock
   "ondemand_only": false,               // optional; on-device playback uses JIT only — no permanent HLS bundle is built. User- or admin-settable (Storage tab + episode page). VLC unaffected
   "ondemand_only_locked": false,        // optional; admin lock — when true, non-admin dashboard users can't change ondemand_only (server 403s, UI toggle disabled)
   "default_visible_profiles": [],       // optional; if non-empty, only these profile IDs see item by default
