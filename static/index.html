@@ -3647,15 +3647,38 @@ let allProfiles  = [];
 // endpoints — a bare profile_id proves nothing, since /api/profiles hands out
 // every UUID unauthenticated. Sent as X-Profile-Token on same-origin /api calls
 // by the fetch wrapper below, so individual call sites don't have to care.
+// Mirrored into a host cookie as well as localStorage. localStorage is scoped to
+// the ORIGIN, and `http://<host>` and `https://<host>` are different origins — so
+// a PIN entered on one scheme left the other logged in but unelevated, with the
+// admin-locked content silently missing and nothing saying why. A cookie ignores
+// scheme and port, so one PIN entry covers both. The server reads either.
+const PROFILE_TOKEN_KEY = "streamlink_profile_token";
+function _readTokenCookie(){
+  try {
+    const m = document.cookie.match(/(?:^|;\s*)streamlink_profile_token=([^;]*)/);
+    return m ? decodeURIComponent(m[1]) : "";
+  } catch(_) { return ""; }
+}
 let _profileToken = "";
-try { _profileToken = localStorage.getItem("streamlink_profile_token") || ""; } catch(_){}
+try { _profileToken = localStorage.getItem(PROFILE_TOKEN_KEY) || ""; } catch(_){}
+// Seed the cookie from a pre-cookie localStorage token (a session that verified
+// before this version) so it starts covering the other scheme without making the
+// user re-enter the PIN. Deferred until setProfileToken is defined below.
+const _seedTokenCookie = !!_profileToken && !_readTokenCookie();
+if(!_profileToken) _profileToken = _readTokenCookie();
 function setProfileToken(tok){
   _profileToken = tok || "";
   try {
-    if(_profileToken) localStorage.setItem("streamlink_profile_token", _profileToken);
-    else localStorage.removeItem("streamlink_profile_token");
+    if(_profileToken) localStorage.setItem(PROFILE_TOKEN_KEY, _profileToken);
+    else localStorage.removeItem(PROFILE_TOKEN_KEY);
+  } catch(_){}
+  try {
+    document.cookie = _profileToken
+      ? `${PROFILE_TOKEN_KEY}=${encodeURIComponent(_profileToken)};path=/;max-age=43200;samesite=lax`
+      : `${PROFILE_TOKEN_KEY}=;path=/;max-age=0;samesite=lax`;
   } catch(_){}
 }
+if(_seedTokenCookie) setProfileToken(_profileToken);
 (function(){
   const _origFetch = window.fetch.bind(window);
   window.fetch = function(input, init){
@@ -5396,15 +5419,28 @@ function switchTab(tab){
 }
 
 // ── Profiles ───────────────────────────────────────────────────────────────
+let _verifiedProfileId = null;   // profile the SERVER says we've PIN-proved
 async function fetchProfiles(){
   const r=await fetch("/api/profiles");
   const body=await r.json();
   allProfiles=body.profiles||[];
+  _verifiedProfileId = body.verified_profile_id || null;
   // Drop a token the server no longer recognises (expired TTL, host wiped its
   // session file, profile deleted) so the next pick re-prompts for the PIN
   // rather than leaving the user quietly un-elevated.
-  if(_profileToken && !body.verified_profile_id) setProfileToken("");
+  if(_profileToken && !_verifiedProfileId) setProfileToken("");
   return allProfiles;
+}
+// A restored session can be logged in as a PIN-protected profile while holding no
+// valid PIN proof — on first load after the 11.20.0 upgrade (the profile was
+// already in localStorage, so nothing ever asked), on the other scheme's origin,
+// or simply once the 12 h token has expired. The symptom is silent and baffling:
+// you're signed in as yourself and the admin-locked shows are just... gone. Ask
+// for the PIN instead. Dismissing leaves you logged in, minus the locked content.
+function _maybePromptForPin(p){
+  if(!p || !p.has_pin) return;
+  if(_verifiedProfileId === p.id) return;
+  setTimeout(()=>openPinPrompt(p), 300);
 }
 function renderProfileGrid(){
   // Show every profile. PIN-protected ones display a small lock and prompt for
@@ -5524,6 +5560,7 @@ async function submitPinPrompt(){
     const body=await r.json();
     const matched=body.profile;
     setProfileToken(body.token);
+    _verifiedProfileId = (matched && matched.id) || null;   // don't re-prompt
     if(!matched||!matched.id){
       errEl.textContent="Login failed. Try again.";
       errEl.classList.remove("hidden");
@@ -19573,7 +19610,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
       try{
         const profiles=await fetchProfiles();
         const found=profiles.find(x=>x.id===p.id);
-        if(found){ profile=found; renderNavProfile(); applyMaxVolumeToSliders(); loadSearchIndexers(); _appSyncSetProfile(); _appFlushOfflineProgress(); connectSSE(); _appProxiedAutoPlay(); return; }
+        if(found){ profile=found; renderNavProfile(); applyMaxVolumeToSliders(); loadSearchIndexers(); _appSyncSetProfile(); _appFlushOfflineProgress(); connectSSE(); _appProxiedAutoPlay(); _maybePromptForPin(found); return; }
         // Saved profile no longer exists on the server (deleted/renamed id).
         if(window.__appShowError) window.__appShowError("Saved profile id "+p.id+" not found among "+profiles.length+" server profiles.");
       } catch(e){
@@ -19589,6 +19626,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.20.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.20.1</div>
 </body>
 </html>

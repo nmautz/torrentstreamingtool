@@ -620,10 +620,12 @@ On `DOMContentLoaded`:
 
 `POST /api/profiles/{id}/verify-pin` returns a **token** alongside the profile. It is the server's only proof that the PIN was actually entered — a bare `profile_id` proves nothing, since `GET /api/profiles` hands out every UUID unauthenticated. Two things need it: seeing admin-locked ("content lock") items, and the delete endpoints.
 
-- Held in `_profileToken`, mirrored to `localStorage.streamlink_profile_token`, managed only through **`setProfileToken()`**.
+- Held in `_profileToken`, mirrored to **both** `localStorage.streamlink_profile_token` and a host cookie of the same name, managed only through **`setProfileToken()`**. The cookie is what makes it work across schemes: `localStorage` is per-origin, so `http://<host>` and `https://<host>` do not share it — without the cookie, a PIN entered on HTTPS left HTTP logged in but unelevated, with the locked content silently missing.
 - Attached as **`X-Profile-Token`** by a single `window.fetch` wrapper installed next to the `profile` declaration, scoped to same-origin `/api/` URLs so it can never leak to a third party. Individual call sites don't (and shouldn't) know about it — don't start adding the header by hand.
 - **Cleared** when a PIN-less profile is selected (`_doSelectProfile`), otherwise the last PIN entered would keep unlocking content for whoever picks a different profile afterwards.
 - **Revalidated** on every `fetchProfiles()`: the response carries `verified_profile_id`, and a token the server no longer recognises (expired 12 h TTL, deleted profile, wiped session file) is dropped so the next pick re-prompts. Without that, an expired session degrades into "some shows are missing and Delete fails with a 403" and nothing tells the user to re-enter their PIN.
+
+- **Re-prompted on boot** by `_maybePromptForPin()` when the restored profile `has_pin` but the server reports no verified session. The boot path restores a profile from `localStorage` *without* re-verifying, so a login carried across the 11.20.0 upgrade — or one whose 12 h token has expired — is signed in with no PIN proof behind it. Nothing used to ask; the locked shows were just gone. Dismissing the prompt leaves the user logged in, minus that content.
 
 Delete failures surface the server's `detail` rather than a generic message — a 403 here means "no PIN-verified profile", which is actionable in a way "could not delete" isn't.
 

@@ -1127,9 +1127,22 @@ def _new_profile_session(profile_id: str) -> str:
     return token
 
 
+PROFILE_TOKEN_COOKIE = "streamlink_profile_token"
+
+
 def _profile_session_id(request: Request) -> Optional[str]:
-    """The profile id this request has PIN-proved, or None."""
+    """The profile id this request has PIN-proved, or None.
+
+    Read from a cookie as well as the header. The header alone was origin-bound:
+    the dashboard keeps the token in localStorage, and `http://<host>` and
+    `https://<host>` are *different origins* with separate localStorage — so a PIN
+    entered on one scheme left the other unelevated (admin-locked content simply
+    absent, with the profile still logged in and nothing explaining why). A cookie
+    without the `Secure` flag is scoped to the host and ignores both scheme and
+    port, so one PIN entry now covers http and https alike.
+    """
     tok = (request.headers.get("x-profile-token", "").strip()
+           or request.cookies.get(PROFILE_TOKEN_COOKIE, "").strip()
            or request.query_params.get("profile_token", "").strip())
     if not tok:
         return None
@@ -16069,7 +16082,8 @@ async def verify_profile_pin(profile_id: str, req: PinLoginReq) -> JSONResponse:
     # Hand back a session token as PROOF the PIN was entered. The client sends it
     # as X-Profile-Token; it is what actually unlocks admin-locked content and the
     # delete endpoints (see _is_elevated / _require_delete_auth).
-    return JSONResponse({"token": _new_profile_session(profile["id"]),
+    _tok = _new_profile_session(profile["id"])
+    resp = JSONResponse({"token": _tok,
                          "expires_in": PROFILE_SESSION_TTL,
                          "profile": {
         "id": profile["id"],
@@ -16083,6 +16097,12 @@ async def verify_profile_pin(profile_id: str, req: PinLoginReq) -> JSONResponse:
         "subtitles_on":      profile.get("subtitles_on"),
         "allowed_indexers":  list(profile.get("allowed_indexers", [])),
     }})
+    # Deliberately NOT `secure`: this appliance is served over plain HTTP as well
+    # as HTTPS on the same host, and a Secure cookie would be withheld from the
+    # HTTP origin — which is exactly the split this cookie exists to close.
+    resp.set_cookie(PROFILE_TOKEN_COOKIE, _tok, max_age=PROFILE_SESSION_TTL,
+                    path="/", samesite="lax")
+    return resp
 
 
 # ── Routes: Smart Skip ────────────────────────────────────────────────────────

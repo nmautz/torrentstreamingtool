@@ -775,6 +775,10 @@ The rules now:
 
 The tokens are **persisted** (`profile_sessions.json`, gitignored), unlike `_admin_sessions`. This box reboots nightly on a schedule and the auto-updater restarts it too; having the whole household silently lose content access and delete rights every morning — with only a 403 to explain it — is worse than the tokens outliving a process. The TTL is what bounds them.
 
+**The token must not live in `localStorage` alone.** `localStorage` is scoped to the *origin*, and this box serves the same dashboard on `http://<host>` **and** `https://<host>` — two origins. The first cut stored it there only, so entering the PIN on one scheme left the other signed in as the same profile but unelevated, with the admin-locked shows simply absent and no message. It is mirrored into a `streamlink_profile_token` **cookie** (no `Secure` flag, on purpose — a Secure cookie is withheld from the HTTP origin, which is the exact split being closed; cookies also ignore port). The server accepts header or cookie.
+
+**And a restored profile must be re-verified.** Boot restores the active profile straight from `localStorage` without asking for the PIN, so a session that predates this feature — or one whose 12 h token has expired — is logged in with no proof behind it. Left alone that silently drops everyone's locked content once a day. `_maybePromptForPin` asks when `verified_profile_id` doesn't match the restored profile.
+
 Client side: `static/index.html` attaches the header in a single same-origin `fetch` wrapper, so call sites don't have to know. `GET /api/profiles` echoes `verified_profile_id`, and the UI clears a token the server no longer recognises — without that, an expired session degrades into "some content is missing and deletes fail" with no prompt to re-enter the PIN.
 
 ### "Watched" has one rule — the outro window — and client-reported positions must use it too

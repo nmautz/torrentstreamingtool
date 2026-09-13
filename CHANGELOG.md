@@ -1,5 +1,13 @@
 # Changelog
 
+## [11.20.1] — 2026-09-13
+- **Fixed: admin-locked content was invisible over HTTP after 11.20.0, even though you were signed in.** The profile session token that proves the PIN was entered lived only in `localStorage`, which is scoped to the **origin** — and `http://<host>` and `https://<host>` are different origins. Enter the PIN on one scheme and the other stayed logged in as the same profile but unelevated, with the locked shows simply absent and nothing explaining why. The token is now mirrored into a host cookie (no `Secure` flag, so it is deliberately sent on both schemes; cookies ignore port too), and the server reads either the cookie or the header. One PIN entry covers HTTP and HTTPS.
+- **Fixed: a restored session never asked for the PIN at all.** Boot restores the profile straight from `localStorage` without re-verifying, so an existing login carried into 11.20.0 was elevated-on-paper with no token behind it — and nothing prompted. Same silent end state once the 12 h token expired, which would have quietly dropped everyone's access every day. `_maybePromptForPin` now asks when a restored PIN-protected profile has no server-verified session (`verified_profile_id`). Dismissing it leaves you logged in, minus the locked content.
+- A session that verified before this version seeds the cookie from its existing token on next load, so it isn't asked to re-enter a PIN it already gave.
+- **Frontend:** `static/index.html` — `PROFILE_TOKEN_KEY`, `_readTokenCookie`, cookie write in `setProfileToken`, `_verifiedProfileId`, `_maybePromptForPin` (called from the boot restore path), `_seedTokenCookie`. **Backend:** `main.py` — `PROFILE_TOKEN_COOKIE`, cookie read in `_profile_session_id`, `set_cookie` on `verify-pin`. **Docs:** [docs/API.md](docs/API.md), [docs/FRONTEND.md](docs/FRONTEND.md), [docs/GOTCHAS.md](docs/GOTCHAS.md).
+- Known gap, not addressed here: the iOS app still can't reach the host over HTTPS — the generated cert has no SAN for the LAN IP, a 10-year validity, and no `EKU: serverAuth`, so iOS rejects it regardless of what CA you trust on the phone. Backlogged.
+- (Host-only — **no app rebuild**. Server update + restart required.)
+
 ## [11.20.0] — 2026-09-13
 Nine fixes from a bug-hunting pass against the live server. Two of them are the kind that get blamed on something else: playback that never comes back from the end of a film, and library writes that quietly lose each other.
 
