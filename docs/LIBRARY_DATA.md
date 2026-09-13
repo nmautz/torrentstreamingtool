@@ -635,6 +635,10 @@ Not part of `_migrate_item` — it needs a network round trip, so it's **lazy an
 
 A merged series never touches `GET /api/library/{id}/metadata`, so `GET /api/library/series/{key}` fires the same self-heal in the background (`_spawn_metadata_fetch` on the member it served metadata from) without delaying its own response. Until either lands, the frontend tops up from `/api/tmdb/lookup`, so the UI is correct on the very first open.
 
+### Derived view: library coverage (11.22.0)
+
+`GET /api/library/coverage` ([API.md](API.md)) answers "do we already have this, and which episodes" for Search and for the library grid's new-season chip. Nothing is persisted for it — it is computed on every call from fields documented above: `files[].season` / `.episode` / `.bucket` (a bucketed file sits outside the numbered run and never counts as owning an episode), `item["status"]` (`downloading` → `pending`, anything else → `have`), `_series_key` for grouping, and `metadata.all_seasons` for the `missing_seasons` diff — which is why the `all_seasons` self-heal above matters to Search as well as to the episode page.
+
 ## Concurrency
 
 All access goes through `get_library()` / `put_library()` which hold `_lib_lock`. **Don't read raw `LIBRARY_FILE`** outside that lock — concurrent SSE-driven updates can clobber each other. The lock is created in the FastAPI `lifespan` because `asyncio.Lock()` needs an event loop.

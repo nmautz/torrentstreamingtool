@@ -805,6 +805,19 @@ The prep bundle lives in a hidden folder beside the media file and its cache key
 
 `POST /api/admin/auto-prep` used `mode if mode in (...) else "off"`, so a typo'd or stale client value returned **200 OK having quietly disabled automatic prep**. Silent coercion turns a client bug into a config change nobody made. Reject with a 400 instead (its sibling `/prep-validate` always did). Same class: `GET /api/search?limit=-5` reached `shaped[:limit]` → `shaped[:-5]`, returning *almost everything* instead of almost nothing — bound numeric query params with `Query(..., ge=, le=)` rather than trusting them into a slice.
 
+### `/api/library/coverage` groups by `_series_key`, not `tmdb_id` — and trusts item *status*, not qBit
+
+Two decisions in the coverage endpoint that look wrong until you hit the case each one exists for:
+
+- **Grouping by `_series_key`.** A freshly-added episode has no cached metadata yet, so its `tmdb_id` is `0` for as long as the TMDb fetch takes. Keying coverage on `tmdb_id` would drop exactly the newest episodes out of their own show's coverage — the ones a viewer is most likely to go searching for again, and the ones that would then be offered back to them as "missing". Grouping by series key and taking the identity from whichever member *has* resolved metadata fixes it. (On the live box this was visible immediately: three of the ten `Hacks` S04 items carried `tmdb_id: 0`.)
+- **Completeness from `item["status"]`, not `_build_item_files`.** The accurate answer needs a qBit `info` + `files` round trip **per item**, and this endpoint is called on every search render. It is a hint — "you already have this, don't fetch it again" — not a contract, so a `downloading` item's episodes come back under `pending` and are treated as owned. The per-file truth still lives in `/files` and the episode page, which is where it matters.
+
+Also: a file carrying a `bucket` (Specials, Extras, a spin-off folder — outside the numbered run) **never** counts as owning `SxxExx`. Without that, an `Extras/03.mkv` filed under season 3 would mark the real S03E03 owned and hide it from every search surface.
+
+### An episode you own is not "missing a source" — exclude it before sweeping
+
+`_ssMissingEpisodes` originally meant "TMDb lists it, no torrent found". Applied to a show already in the library that reads as a hole: the row renders greyed as **"No source found"**, the season banner counts it, `ssFindMissing` sweeps the indexers for it, and bulk **Auto** queues a fresh download of a file already on disk. The gap set now unions the coverage row's owned episodes into its `have`, and `_ssBulkScopeEpisodes` skips them outright. The per-row **Replace** action is the deliberate way back in — re-downloading is a choice, never a default.
+
 
 ## SSE
 

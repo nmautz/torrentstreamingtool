@@ -9305,6 +9305,112 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
     return JSONResponse({"items": items})
 
 
+@app.get("/api/library/coverage")
+async def library_coverage(request: Request, profile_id: str = "",
+                           tmdb_id: int = 0, kind: str = "") -> JSONResponse:
+    """What this box already holds, per show, keyed by TMDb identity.
+
+    Search knows nothing about the library: the Death Note poster card — and every
+    one of its episode rows — reads identically whether all 37 episodes are on disk
+    or none are. This is the join that fixes that. One in-memory pass over
+    `library.json` answering "do we have this, and which episodes", consumed by the
+    search result cards, the search show page, and the library grid's new-season
+    chip. Optionally narrowed to one title with `tmdb_id` (+ `kind`).
+
+    Grouping is by `_series_key`, **not** by tmdb_id: a just-added episode carries
+    no metadata yet (`tmdb_id` 0) but does carry `series`, so keying on tmdb_id
+    alone would drop the newest episodes out of their own show's coverage —
+    precisely the ones a viewer is most likely to go looking for again.
+
+    Completeness comes from item **status**, not per-file qBit progress: this is
+    called on every search render, and `_build_item_files`' qBit round trip per
+    item would make that far too expensive for what is a hint, not a contract. A
+    downloading item's episodes come back under `pending` rather than `have`;
+    both mean "don't go and fetch this again".
+
+    `missing_seasons` is the TMDb season inventory (`metadata.all_seasons`) minus
+    the seasons with files, honouring `settings.missing_content`. It is computed
+    here rather than client-side because the library grid — unlike the episode
+    page — holds no per-show metadata to diff against.
+    """
+    is_admin = _check_admin(request)
+    lib = await get_library()
+    is_elevated = _is_elevated(request, lib, profile_id)
+    mc = _missing_content_cfg(lib)
+    today = datetime.now(timezone.utc).date().isoformat()
+
+    groups: dict[str, list[dict]] = {}
+    for it in lib["items"]:
+        if it.get("admin_only") and not is_admin and not is_elevated:
+            continue
+        groups.setdefault(_series_key(it), []).append(it)
+
+    shows = []
+    for skey, members in groups.items():
+        meta = next((it["metadata"] for it in members if it.get("metadata")), {}) or {}
+        mkind = meta.get("tmdb_kind") or ""
+        mid = int(meta.get("tmdb_id") or 0)
+        if tmdb_id and (mid != tmdb_id or (kind and mkind != kind)):
+            continue
+
+        have: dict[str, list[int]] = {}
+        pending: dict[str, list[int]] = {}
+        file_count = 0
+        for it in members:
+            bucket = pending if it.get("status") == "downloading" else have
+            for f in it.get("files") or []:
+                file_count += 1
+                s, e = int(f.get("season") or 0), int(f.get("episode") or 0)
+                # A file with a `bucket` sits outside the numbered run (Specials,
+                # a spin-off folder) — counting it as S02E03 would mark a real
+                # episode owned. Season 0 never participates, same as the diff.
+                if s > 0 and e > 0 and not (f.get("bucket") or ""):
+                    bucket.setdefault(str(s), []).append(e)
+        for d in (have, pending):
+            for s in d:
+                d[s] = sorted(set(d[s]))
+
+        seasons_total: dict[str, int] = {}
+        missing_seasons: list[int] = []
+        if mkind == "tv" and mc["enabled"]:
+            owned = {int(s) for s in list(have) + list(pending)}
+            for s in meta.get("all_seasons") or []:
+                sn, cnt = int(s.get("season") or 0), int(s.get("episode_count") or 0)
+                if sn <= 0 or cnt <= 0:
+                    continue
+                seasons_total[str(sn)] = cnt
+                # A season that hasn't started airing isn't missing — there is
+                # nothing to go and get yet. Same opt-in as the episode-level diff.
+                air = (s.get("air_date") or "").strip()
+                unaired = (not air) or air > today
+                if sn not in owned and (mc["show_unaired"] or not unaired):
+                    missing_seasons.append(sn)
+
+        date = meta.get("first_air_date") or meta.get("release_date") or ""
+        year = date[:4]
+        title = (next((it.get("series") for it in members if (it.get("series") or "").strip()), "")
+                 or meta.get("title") or members[0].get("title", ""))
+        shows.append({
+            "key":             f"{mkind}:{mid}" if (mid and mkind) else "",
+            "tmdb_id":         mid,
+            "kind":            mkind,
+            "series_key":      skey,
+            "title":           title,
+            "year":            int(year) if year.isdigit() else 0,
+            "item_ids":        [it["id"] for it in members],
+            "file_count":      file_count,
+            "have":            have,
+            "pending":         pending,
+            "seasons_total":   seasons_total,
+            "missing_seasons": missing_seasons,
+            # A movie has no season/episode numbers to match on — ownership is the
+            # whole answer, so say it plainly rather than making the UI infer it.
+            "movie_status":    ("downloading" if any(it.get("status") == "downloading" for it in members)
+                                else "ready") if mkind == "movie" else "",
+        })
+    return JSONResponse({"shows": shows, "missing_content": mc["enabled"]})
+
+
 async def _build_item_files(item: dict, profile_id: str) -> list[dict]:
     """Build the per-file payload (progress + live download/prep state) for one
     library item. Shared by the single-item `/files` endpoint and the merged

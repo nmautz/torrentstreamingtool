@@ -1774,6 +1774,14 @@
           <svg class="w-4 h-4 flex-shrink-0 text-amber-400 mt-0.5" fill="currentColor" viewBox="0 0 24 24" aria-hidden="true"><use href="#i-warn"/></svg>
           <p data-txt class="text-[10px] sm:text-xs text-amber-200 uppercase tracking-wide font-bold leading-snug"></p>
         </div>
+        <!-- "You already have this" — what the box holds of the open show, so a
+             search never silently offers what is already downstairs. -->
+        <div id="ssLibraryBanner" class="hidden mt-2 flex items-center gap-2 flex-wrap bg-emerald-950/60 border border-emerald-800/70 px-2.5 py-1.5">
+          <span class="w-2 h-2 bg-emerald-400 flex-shrink-0"></span>
+          <p data-txt class="text-[10px] sm:text-xs text-emerald-200 uppercase tracking-wide font-bold leading-snug flex-1 min-w-0"></p>
+          <button data-open onclick="ssOpenInLibrary()"
+            class="text-[10px] px-2 py-1 bg-emerald-800 hover:bg-emerald-700 text-white uppercase tracking-wide transition-colors flex-shrink-0">Open in library</button>
+        </div>
       </div>
     </div>
   </div>
@@ -5966,6 +5974,7 @@ async function loadLibrary(btn){
     const [libRes] = await Promise.all([
       fetch(`/api/library${pid}`),
       loadDiskSpace(),
+      refreshCoverage(),   // new-season chips paint with the first render, not after it
     ]);
     if(!libRes.ok) throw new Error(`GET /api/library ${libRes.status}`);
     const items=(await libRes.json()).items||[];
@@ -6082,6 +6091,108 @@ async function deleteSeries(ids,title,btn){
 // a merged SHOW carries the same visibility/delete actions a single item does.
 // All items in a show tile share one visibility bucket (renderLibrary splits
 // visible vs hidden before grouping), so gItems[0].hidden is authoritative.
+// ── Library coverage: what this box already holds ───────────────────────────
+// One shared answer to "do we already have this?", from GET /api/library/coverage.
+// Three surfaces ask it and until now had no way to: the search result cards, the
+// search show page (episode rows, season tabs, pack headings), and the library
+// grid's new-season chip. Indexed two ways because callers arrive from two
+// directions — a TMDb candidate ("tv:124101") or a library series_key
+// ("series:hacks"). See docs/API.md § Library.
+let _covByKey={}, _covBySeries={}, _covLoaded=false, _covPromise=null;
+
+async function loadCoverage(){
+  if(_covPromise) return _covPromise;
+  _covPromise=(async()=>{
+    try{
+      const pid=profile.id?`?profile_id=${encodeURIComponent(profile.id)}`:"";
+      const r=await fetch(`/api/library/coverage${pid}`);
+      if(!r.ok) return;
+      const rows=(await r.json()).shows||[];
+      const byKey={}, bySeries={};
+      rows.forEach(row=>{
+        if(row.key) byKey[row.key]=row;
+        if(row.series_key) bySeries[row.series_key]=row;
+      });
+      _covByKey=byKey; _covBySeries=bySeries; _covLoaded=true;
+    }catch(_){}
+  })();
+  return _covPromise;
+}
+// The library changed under us — drop the cache and refetch. Cheap (one in-memory
+// pass server-side), so loadLibrary just folds it into its existing Promise.all
+// rather than repainting the grid a second time when it lands.
+function refreshCoverage(){ _covPromise=null; return loadCoverage(); }
+
+const _covFor=(kind,id)=>(kind&&id)?(_covByKey[`${kind}:${id}`]||null):null;
+const _covForSeries=key=>(key&&_covBySeries[key])||null;
+
+// Episodes of `season` this box holds, as a Set. A still-downloading episode
+// counts as held: the question these callers ask is "should I go and get this
+// again?", and the answer for something already queued is no.
+function _covSeasonEps(row,season){
+  const s=String(+season||0);
+  const h=((row&&row.have)||{})[s]||[], p=((row&&row.pending)||{})[s]||[];
+  return new Set([...h,...p]);
+}
+function _covHasEp(row,season,episode){ return _covSeasonEps(row,season).has(+episode); }
+// True while an owned episode is still coming down — rendered as "Downloading",
+// not "Downloaded", so the badge never overstates what's playable.
+function _covEpPending(row,season,episode){
+  return (((row&&row.pending)||{})[String(+season||0)]||[]).includes(+episode);
+}
+function _covEpisodeCount(row){
+  if(!row) return 0;
+  let n=0;
+  [row.have,row.pending].forEach(m=>Object.values(m||{}).forEach(a=>{n+=a.length;}));
+  return n;
+}
+// "S1-S5" / "S2, S4" — the seasons line on an in-library search card.
+function _covSeasonRange(row){
+  const ns=[...new Set([...Object.keys((row&&row.have)||{}),...Object.keys((row&&row.pending)||{})])]
+    .map(Number).filter(n=>n>0).sort((a,b)=>a-b);
+  if(!ns.length) return "";
+  if(ns.length===1) return `S${ns[0]}`;
+  const contiguous=ns.every((n,i)=>i===0||n===ns[i-1]+1);
+  return contiguous?`S${ns[0]}-S${ns[ns.length-1]}`:ns.map(n=>`S${n}`).join(", ");
+}
+// One-line summary for an "In Library" badge subtitle.
+function _covSummary(row){
+  if(!row) return "";
+  if(row.kind==="movie"||row.movie_status)
+    return row.movie_status==="downloading"?"Downloading":"Downloaded";
+  const eps=_covEpisodeCount(row), sr=_covSeasonRange(row);
+  const bits=[];
+  if(eps) bits.push(`${eps} episode${eps===1?"":"s"}`);
+  if(sr)  bits.push(sr);
+  return bits.join(" · ") || `${row.file_count||0} file${row.file_count===1?"":"s"}`;
+}
+
+// Seasons TMDb says the show has that this box holds nothing of. Server-computed
+// (the grid has no per-show metadata of its own) and already honours the admin's
+// missing-content policy, so an empty list here is authoritative.
+function _libNewSeasons(row){ return (row&&row.missing_seasons)||[]; }
+
+// The library grid's "Season 5 available" chip. Tapping it hands straight over to
+// the normal search show page scoped to that season — the library grows no
+// hunting logic of its own (same rule as epFindSeason).
+function _libNewSeasonChip(row){
+  const ms=_libNewSeasons(row);
+  if(!ms.length||TV_MODE||!row.tmdb_id) return "";
+  const label=ms.length===1?`Season ${ms[0]} available`:`${ms.length} new seasons`;
+  const k=escHtml(row.series_key);
+  return `<button onclick="event.stopPropagation();libGetSeason('${k}',${ms[0]})"
+    title="This show has ${ms.length===1?`a season`:`${ms.length} seasons`} you haven't downloaded - search for ${ms.length===1?"it":"them"}"
+    class="text-[10px] px-1.5 py-0.5 bg-emerald-950 text-emerald-300 border border-emerald-800 hover:bg-emerald-800 hover:text-white uppercase tracking-wide transition-colors flex items-center gap-1">
+    ${ic("down")} ${escHtml(label)}</button>`;
+}
+function libGetSeason(seriesKey, season){
+  const row=_covForSeries(seriesKey);
+  if(!row||!row.tmdb_id){ showAlert("No metadata for this show - can't search for it.","warn"); return; }
+  openSearchShowFromTmdb(
+    {id:row.tmdb_id, kind:row.kind||"tv", title:row.title||"", year:row.year||null, overview:""},
+    {season:+season, section:"packs"});
+}
+
 function _libShowIconBtns(gItems){
   const idsAttr=escHtml(JSON.stringify(gItems.map(it=>it.id)));
   const title=gItems[0].series||gItems[0].title||"";
@@ -6137,9 +6248,10 @@ function _libShowTileHtml(seriesTitle, gItems){
   const bits=[`${totalEps} episode${totalEps===1?"":"s"}`];
   if(seasons.length) bits.push(`${seasons.length} season${seasons.length>1?"s":""}`);
   if(doneCount) bits.push(`${doneCount}/${gItems.length} watched`);
-  const badges=anyDownloading
+  const badges=(anyDownloading
     ?`<span class="text-[10px] px-1.5 py-0.5 bg-yellow-900/50 text-yellow-400 border border-yellow-800 blink">↓ Downloading</span>`
-    :anyError?`<span class="text-[10px] px-1.5 py-0.5 bg-red-900/50 text-red-400 border border-red-800">Error</span>`:"";
+    :anyError?`<span class="text-[10px] px-1.5 py-0.5 bg-red-900/50 text-red-400 border border-red-800">Error</span>`:"")
+    +_libNewSeasonChip(_covForSeries(key));
   const kAttr=escHtml(key), tAttr=escHtml(title);
   return `<div class="mb-6"><div class="space-y-2">
     <div class="bg-gray-900 border border-gray-800 border-l-4 ${accent} p-3">
@@ -6416,9 +6528,12 @@ function _libItemChrome(item){
     :`<div id="prep-stat-${item.id}" class="hidden"></div>`;
   const borderAccent=isDownloading?"border-l-yellow-600":isError?"border-l-red-600":"border-l-indigo-800";
   const tileOpen=(isReady||isDownloading);
+  // A show downloaded as one season pack is a single item, so it never reaches
+  // _libShowTileHtml - it still deserves to be told a later season exists.
+  const newSeasonChip=_libNewSeasonChip(_covForSeries(item.series_key));
 
   return {isDownloading,isError,isReady,isMulti,hasProgress,pct,allDone,epPrefix,
-    statusBadge,skipBadge,partialBadge,compressedBadge,buttons,iconBtns,progBar,
+    statusBadge,skipBadge,partialBadge,compressedBadge,newSeasonChip,buttons,iconBtns,progBar,
     meta,dlStat,prepChip,borderAccent,tileOpen};
 }
 
@@ -6434,6 +6549,7 @@ function _libItemListHtml(item){
         ${c.partialBadge}
         ${c.compressedBadge}
         ${c.skipBadge}
+        ${c.newSeasonChip}
       </div>
       <div class="text-[11px] text-gray-600 mt-0.5">${escHtml(c.meta)}</div>
       ${c.dlStat}
@@ -6451,7 +6567,7 @@ function _libItemListHtml(item){
 function _libItemCardHtml(item){
   const c=_libItemChrome(item);
   const title=item.title||"";
-  const badges=`${c.statusBadge}${c.partialBadge}${c.compressedBadge}${c.skipBadge}`;
+  const badges=`${c.statusBadge}${c.partialBadge}${c.compressedBadge}${c.skipBadge}${c.newSeasonChip}`;
   // Both multi-episode shows and single-file movies route through the chooser so
   // the poster Play/Resume always asks "On TV vs On Device" (macOS auto-falls to
   // VLC since there's no device option). resumeLibraryItemWithChooser handles the
@@ -6521,9 +6637,10 @@ function _libShowCardHtml(seriesTitle, gItems){
   const bits=[`${totalEps} ep`];
   if(seasons.length) bits.push(`${seasons.length} season${seasons.length>1?"s":""}`);
   if(doneCount) bits.push(`${doneCount}/${gItems.length} watched`);
-  const badges=anyDownloading
+  const badges=(anyDownloading
     ?`<span class="text-[10px] px-1.5 py-0.5 bg-yellow-900/50 text-yellow-400 border border-yellow-800 blink">↓ Downloading</span>`
-    :anyError?`<span class="text-[10px] px-1.5 py-0.5 bg-red-900/50 text-red-400 border border-red-800">Error</span>`:"";
+    :anyError?`<span class="text-[10px] px-1.5 py-0.5 bg-red-900/50 text-red-400 border border-red-800">Error</span>`:"")
+    +_libNewSeasonChip(_covForSeries(key));
   const kAttr=escHtml(key), tAttr=escHtml(title);
   return `<div class="lib-cardv" data-item-id="${gItems[0].id}">
     <div class="lib-cardv-poster lib-show-open" data-series-key="${kAttr}" data-title="${tAttr}" role="button" tabindex="0" title="View episodes">
@@ -10226,6 +10343,9 @@ function _exBuildLibKeys(){
   (window._libCache||[]).forEach(it=>{
     if(it.tmdb_id&&it.tmdb_kind) _exLibKeys.add(`${it.tmdb_kind}:${it.tmdb_id}`);
   });
+  // Coverage groups by series, so a show whose newest episodes haven't resolved
+  // metadata yet still lands under its show's key. Strictly a superset.
+  Object.keys(_covByKey).forEach(k=>_exLibKeys.add(k));
 }
 async function _exEnsureLib(){
   if(!window._libCache){
@@ -10235,6 +10355,7 @@ async function _exEnsureLib(){
       if(r.ok) window._libCache=(await r.json()).items||[];
     }catch(_){}
   }
+  await loadCoverage();
   _exBuildLibKeys();
 }
 const _exInLib=c=>_exLibKeys.has(`${c.kind}:${c.id}`);
@@ -10636,7 +10757,9 @@ async function doSearch(q){
       const catKind=_searchTmdbKind();
       let turl=`/api/tmdb/search?query=${encodeURIComponent(q)}`;
       if(catKind) turl+=`&kind=${catKind}`;
-      const tr=await fetch(turl);
+      // Coverage rides along with the TMDb call so the cards can say what's
+      // already on this box without a second, serial round trip.
+      const [tr]=await Promise.all([fetch(turl), loadCoverage()]);
       if(tr.ok) tmdb=await tr.json();
     }catch(_){}
     if(tmdb && tmdb.enabled && (tmdb.results||[]).length){
@@ -10676,10 +10799,23 @@ function _renderTmdbResults(q, tmdb, grid, wrap, count){
     const chip=c.kind==="movie"
       ? `<span class="text-[9px] font-black uppercase tracking-widest px-1.5 py-0.5 bg-purple-900/60 text-purple-300">Movie</span>`
       : `<span class="text-[9px] font-black uppercase tracking-widest px-1.5 py-0.5 bg-indigo-900/60 text-indigo-300">TV</span>`;
+    // What this box already holds of the title. Without it every result reads the
+    // same whether the whole show is downstairs or none of it is — the single
+    // most common "wait, do I already have this?" moment in the app.
+    const cov=_covFor(c.kind,c.id);
+    const owned=cov
+      ? `<span class="text-[9px] font-black uppercase tracking-widest px-1.5 py-0.5 bg-emerald-900/60 text-emerald-300 whitespace-nowrap">In Library</span>`
+      : "";
+    const ownedLine=cov
+      ? `<p class="text-[11px] text-emerald-400/90 mt-1 font-bold uppercase tracking-wide truncate">${escHtml(_covSummary(cov))}${
+           _libNewSeasons(cov).length?` · ${_libNewSeasons(cov).length} season${_libNewSeasons(cov).length>1?"s":""} to get`:""}</p>`
+      : "";
+    if(cov) card.classList.add("border-l-4","border-l-emerald-700");
     card.innerHTML=`${poster}
       <div class="min-w-0 flex-1 p-3 flex flex-col">
-        <div class="flex items-center gap-2 mb-1">${chip}${c.year?`<span class="text-[11px] text-gray-500 font-bold">${escHtml(c.year)}</span>`:""}</div>
+        <div class="flex items-center gap-2 mb-1">${chip}${owned}${c.year?`<span class="text-[11px] text-gray-500 font-bold">${escHtml(c.year)}</span>`:""}</div>
         <p class="text-sm font-black uppercase tracking-wide text-gray-100 leading-snug line-clamp-2">${escHtml(c.title)}</p>
+        ${ownedLine}
         <p class="text-[11px] text-gray-500 mt-1 line-clamp-2 flex-1">${escHtml(c.overview||"")}</p>
       </div>`;
     card.dataset.cid=cid;
@@ -10851,6 +10987,50 @@ let _ssBroadResults=null;       // cached shaped /api/search results for the ope
 let _ssPacksSearched=false;     // has the user run "Search packs" yet (distinguishes "not searched" from "none found")
 let _ssEpisodesSearched=false;  // ditto for the single-episodes broad search
 let _ssMetaLoading=false;       // true while the initial TMDb lookup (art + season/episode skeleton) is in flight
+let _ssOwned=null;              // /api/library/coverage row for the open show (null = we hold none of it)
+
+// What this box already holds of the open show. Resolved from the TMDb identity —
+// by candidate id on the TMDb-first path, and only once metadata lands on the
+// Jackett-fallback path (which starts with nothing but a release title).
+function _ssResolveOwned(){
+  const id=(_ssMeta&&_ssMeta.tmdb_id)||0;
+  const kind=(_ssMeta&&_ssMeta.tmdb_kind)||_ssKind;
+  _ssOwned=_covFor(kind,id);
+}
+// Episodes of `season` already on this box — the set every row, tab, gap sweep
+// and bulk scope on this page checks before offering to go and fetch something.
+function _ssOwnedEps(season){ return _covSeasonEps(_ssOwned, season); }
+function _ssOwns(season,episode){ return _covHasEp(_ssOwned, season, episode); }
+// The "Downloaded" / "Downloading" chip shown on an owned episode row.
+function _ssOwnedBadge(season,episode){
+  if(!_ssOwns(season,episode)) return "";
+  return _covEpPending(_ssOwned,season,episode)
+    ? `<span class="text-[9px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-yellow-900/60 text-yellow-300 whitespace-nowrap">Downloading</span>`
+    : `<span class="text-[9px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-emerald-900/70 text-emerald-300 whitespace-nowrap">Downloaded</span>`;
+}
+
+function _ssRenderLibraryBanner(){
+  const b=document.getElementById("ssLibraryBanner");
+  if(!b) return;
+  if(!_ssOwned){ b.classList.add("hidden"); return; }
+  const sum=_covSummary(_ssOwned);
+  b.querySelector("[data-txt]").textContent=`Already in your library${sum?` — ${sum}`:""}`;
+  b.classList.remove("hidden");
+}
+
+// Jump from the search show page to the same show in the library. When the page
+// was opened FROM the library (a missing-season handoff stacks it over the
+// episode page), closing is all that's needed — the library page is underneath.
+function ssOpenInLibrary(){
+  const row=_ssOwned; if(!row) return;
+  const epPage=document.getElementById("episodePage");
+  const stacked=epPage && !epPage.classList.contains("hidden");
+  closeSearchShow();
+  if(stacked) return;
+  switchTab("library");
+  if((row.series_key||"").startsWith("series:")) openSeriesPage(row.series_key, row.title||"");
+  else if((row.item_ids||[]).length)             openEpisodePicker(row.item_ids[0], row.title||"");
+}
 
 // ── Audio-language preference ────────────────────────────────────────────────
 // Anime (and foreign content) results mix audio variants — original+subs
@@ -11040,7 +11220,7 @@ function _ssLoadingBodyHtml(){
 }
 
 async function openSearchShow(group){
-  _ssGroup=group; _ssMeta=null; _ssSearching.clear(); _ssLocked=false;
+  _ssGroup=group; _ssMeta=null; _ssOwned=null; _ssSearching.clear(); _ssLocked=false;
   _ssKind=""; _ssBroadResults=null; _ssPacksSearched=(group.results||[]).length>0;
   _ssEpisodesSearched=(group.results||[]).length>0;
   _ssEpisodes=_ssBuildEpisodes(group.results||[]);
@@ -11059,6 +11239,7 @@ async function openSearchShow(group){
   poster.classList.add("hidden"); poster.removeAttribute("src");
   document.getElementById("ssPosterFallback").classList.remove("hidden");
   document.getElementById("ssTheaterBanner").classList.add("hidden");
+  document.getElementById("ssLibraryBanner").classList.add("hidden");
 
   document.getElementById("searchShowPage").classList.remove("hidden");
   document.body.style.overflow="hidden";
@@ -11067,6 +11248,7 @@ async function openSearchShow(group){
 
   // Lazy TMDb lookup (poster/backdrop/overview/episode titles).
   try{
+    await loadCoverage();
     const kind=(!_ssEpisodes.length && !_ssPacks.some(p=>p.kind!=="movie"))?"movie":"";
     const url=`/api/tmdb/lookup?title=${encodeURIComponent(group.title||"")}`
       +(group.year?`&year=${group.year}`:"")+(kind?`&kind=${kind}`:"");
@@ -11075,6 +11257,7 @@ async function openSearchShow(group){
       const d=await r.json();
       if(_ssGroup===group && d.metadata){   // still the open show
         _ssMeta=d.metadata; _ssImgBase=d.img_base||_ssImgBase;
+        _ssResolveOwned();   // only now is there a TMDb identity to match on
         _ssRenderHero(); _ssRenderBody();
       }
     }
@@ -11096,6 +11279,7 @@ async function openSearchShowFromTmdb(cand, opts){
   const group={title:cand.title||"", year:cand.year?parseInt(cand.year,10)||null:null, results:[]};
   _ssGroup=group; _ssMeta=null; _ssSearching.clear(); _ssLocked=false;
   _ssKind=cand.kind==="movie"?"movie":"tv"; _ssBroadResults=null; _ssPacksSearched=false; _ssEpisodesSearched=false;
+  _ssOwned=_covFor(_ssKind, cand.id);
   _ssPackHinted=new Set();
   _ssEpisodes=[]; _ssPacks=[];
   _ssSection=_ssKind==="movie"?"packs":"episodes";
@@ -11110,11 +11294,19 @@ async function openSearchShowFromTmdb(cand, opts){
   poster.classList.add("hidden"); poster.removeAttribute("src");
   document.getElementById("ssPosterFallback").classList.remove("hidden");
   document.getElementById("ssTheaterBanner").classList.add("hidden");
+  _ssRenderLibraryBanner();
 
   document.getElementById("searchShowPage").classList.remove("hidden");
   document.body.style.overflow="hidden";
   _ssRender();
   _ssSetLoading(true);
+
+  // Coverage may not have been fetched yet (Explore or a deep link can reach this
+  // page without the Search tab ever rendering) — top it up, then re-resolve.
+  if(!_covLoaded){
+    await loadCoverage();
+    if(_ssGroup===group){ _ssOwned=_covFor(_ssKind, cand.id); _ssRenderLibraryBanner(); }
+  }
 
   // Fetch the exact TMDb entry by id (poster/backdrop/overview + season/episode
   // skeleton) so the page shows a full show layout before any indexer is hit.
@@ -11157,7 +11349,7 @@ function closeSearchShow(){
   // scrolling back to the body and drop the library page's position.
   const epPage=document.getElementById("episodePage");
   document.body.style.overflow=(epPage && !epPage.classList.contains("hidden")) ? "hidden" : "";
-  _ssGroup=null; _ssMeta=null; _ssKind=""; _ssBroadResults=null; _ssMetaLoading=false;
+  _ssGroup=null; _ssMeta=null; _ssKind=""; _ssBroadResults=null; _ssMetaLoading=false; _ssOwned=null;
 }
 
 // Alternative titles for the open show (an anime's romaji name, etc.), from the
@@ -11338,6 +11530,7 @@ function _ssRenderHero(){
   if(posterSrc){ poster.src=posterSrc; poster.classList.remove("hidden"); posterFb.classList.add("hidden"); }
   else { poster.classList.add("hidden"); poster.removeAttribute("src"); posterFb.classList.remove("hidden"); }
   _ssRenderTheaterBanner();
+  _ssRenderLibraryBanner();
   _ssUpdateTrailerBtn();
 }
 // "Theaters only" warning: an accurately-flagged movie (no home release yet)
@@ -11476,10 +11669,18 @@ function _ssRenderEpisodes(){
     tabs.classList.remove("hidden");
     tabs.innerHTML=seasons.map(s=>{
       const on=s===_ssSeason;
+      // How much of the season is already downstairs, straight on the tab — the
+      // whole point of the search page is deciding what still needs fetching.
+      const ownedN=_ssOwnedEps(s).size;
+      const totalN=((_ssOwned&&_ssOwned.seasons_total)||{})[String(s)]
+        || _tmdbSeasonEpisodes(_ssMeta,s).length || 0;
+      const cnt=ownedN
+        ? `<span class="ml-1.5 text-[10px] font-mono ${totalN&&ownedN>=totalN?"text-emerald-400":"text-emerald-500/80"}">${ownedN}${totalN?`/${totalN}`:""}</span>`
+        : "";
       return `<button onclick="ssSwitchSeason(${s})"
         class="px-3 py-2 text-xs font-bold uppercase tracking-wide whitespace-nowrap transition-colors
                ${on?"text-white border-b-2 border-indigo-500":"text-gray-500 hover:text-gray-300 border-b-2 border-transparent"}">
-        Season ${s}</button>`;
+        Season ${s}${cnt}</button>`;
     }).join("");
   } else { tabs.classList.add("hidden"); }
   if(seasons.length && !seasons.includes(_ssSeason)) _ssSeason=seasons[0];
@@ -11500,7 +11701,9 @@ function _ssRenderEpisodes(){
     // one renders greyed with a "Find sources" action.
     tmdbEps.forEach(te=>{
       const e=avail.get(te.episode);
-      rows+= e ? _ssEpRowHtml(e) : _ssMissingRowHtml(seasonNo, te.episode, te.name);
+      rows+= e ? _ssEpRowHtml(e)
+           : _ssOwns(seasonNo, te.episode) ? _ssOwnedRowHtml(seasonNo, te.episode, te.name)
+           : _ssMissingRowHtml(seasonNo, te.episode, te.name);
     });
     // Any episodes we have that TMDb doesn't list (specials/extras) go after.
     [...avail.values()].filter(e=>!tmdbEps.some(te=>te.episode===e.episode))
@@ -11509,13 +11712,24 @@ function _ssRenderEpisodes(){
     [...avail.values()].sort((a,b)=>a.episode-b.episode).forEach(e=>rows+=_ssEpRowHtml(e));
   }
 
-  // "Find missing" banner when TMDb shows episodes we have no source for.
-  const banner=missing.length
+  // "Find missing" banner when TMDb shows episodes we have no source for — and,
+  // above it, what this season already has on disk. Both counts exclude each
+  // other: an owned episode is never reported as missing a source.
+  const ownedN=_ssOwnedEps(seasonNo).size;
+  const ownedBanner=ownedN
+    ? `<div class="px-3 sm:px-5 py-2 bg-emerald-950/40 border-b border-emerald-900/50 flex items-center justify-between gap-2 flex-wrap">
+         <span class="text-[11px] text-emerald-300 uppercase tracking-wide flex items-center gap-2">
+           <span class="w-2 h-2 bg-emerald-400 flex-shrink-0"></span>
+           ${ownedN} episode${ownedN>1?"s":""} already in your library</span>
+         <button onclick="ssOpenInLibrary()"
+           class="text-[11px] px-2.5 py-1 bg-emerald-800 hover:bg-emerald-700 text-white uppercase tracking-wide transition-colors">Open in library</button>
+       </div>` : "";
+  const banner=ownedBanner+(missing.length
     ? `<div class="px-3 sm:px-5 py-2 bg-amber-950/40 border-b border-amber-900/50 flex items-center justify-between gap-2">
          <span class="text-[11px] text-amber-300 uppercase tracking-wide">${missing.length} episode${missing.length>1?"s":""} missing a source</span>
          <button id="ssFindMissingBtn" onclick="ssFindMissing(${seasonNo})"
            class="text-[11px] px-2.5 py-1 bg-amber-700 hover:bg-amber-600 text-white uppercase tracking-wide transition-colors">Find sources</button>
-       </div>` : "";
+       </div>` : "");
 
   // Empty: while the initial TMDb skeleton is still loading, show a spinner
   // instead of the search prompt (which reads as "done, nothing here"). Then
@@ -11549,12 +11763,16 @@ function _ssEpRowHtml(e){
   const shealth=_streamHealthBadge(_streamHealth(best.size,best.seeders));
   const miss=(_ssAudioPref!=="any"&&!_ssAudioMatch(best))
     ?`<span class="text-[9px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-red-950/70 text-red-400 whitespace-nowrap">${_ssAudioPref==="eng"?"No Eng audio":"Dub only"}</span>`:"";
-  return `<div class="w-full flex items-stretch">
+  const own=_ssOwnedBadge(e.season,e.episode);
+  return `<div class="w-full flex items-stretch${own?" bg-emerald-950/20 border-l-2 border-l-emerald-800":""}">
     <button onclick="ssOpenSourceSheet(${e.season},${e.episode})"
       class="flex-1 min-w-0 text-left px-3 sm:px-5 py-3 hover:bg-gray-800/50 transition-colors flex items-center gap-3">
       <div class="text-[11px] font-mono font-bold text-indigo-400 w-14 flex-shrink-0">${code}</div>
       <div class="min-w-0 flex-1">
-        <p class="text-sm text-gray-200 truncate">${name?escHtml(name):`Episode ${e.episode}`}</p>
+        <div class="flex items-center gap-2 min-w-0">
+          <p class="text-sm text-gray-200 truncate min-w-0">${name?escHtml(name):`Episode ${e.episode}`}</p>
+          ${own}
+        </div>
         <p class="text-[11px] text-gray-500 flex items-center gap-1.5 flex-wrap">
           <span class="font-mono font-semibold ${sc}">${best.seeders} ↑</span> ·
           ${escHtml(best.size_human)} · ${e.sources.length} source${e.sources.length>1?"s":""}
@@ -11597,6 +11815,26 @@ function ssPlayPack(i,btn){
   openStreamPicker(p.magnet,p.title,btn,{series:_ssGroup&&_ssGroup.title,seeders:p.seeders,size:p.size});
 }
 
+// An episode this box already holds, with no torrent found for it (or none
+// searched for yet). Renders as a settled, positive row — no Find button, since
+// there is nothing to go and get. The whole point of the page is what's still
+// needed, and an owned episode dressed as "No source found" reads as a hole.
+function _ssOwnedRowHtml(season, episode, name){
+  const code=`S${String(season).padStart(2,"0")}E${String(episode).padStart(2,"0")}`;
+  const pending=_covEpPending(_ssOwned,season,episode);
+  return `<div class="w-full text-left px-3 sm:px-5 py-3 flex items-center gap-3 bg-emerald-950/20 border-l-2 border-l-emerald-800">
+    <div class="text-[11px] font-mono font-bold text-emerald-500/80 w-14 flex-shrink-0">${code}</div>
+    <div class="min-w-0 flex-1">
+      <p class="text-sm text-gray-300 truncate">${name?escHtml(name):`Episode ${episode}`}</p>
+      <p class="text-[11px] ${pending?"text-yellow-400":"text-emerald-400"} uppercase tracking-wide flex items-center gap-1.5">
+        <span class="w-1.5 h-1.5 ${pending?"bg-yellow-400":"bg-emerald-400"}"></span>${pending?"Downloading":"In your library"}</p>
+    </div>
+    <button onclick="ssSearchEpisode(${season},${episode})"
+      title="Search anyway - for a different release of an episode you already have"
+      class="text-[11px] px-2.5 py-1.5 flex-shrink-0 bg-gray-900 hover:bg-gray-800 text-gray-500 hover:text-gray-300 uppercase tracking-wide transition-colors">Replace</button>
+  </div>`;
+}
+
 // A missing episode (TMDb lists it, no torrent found) — greyed, with a per-row
 // search that spawns a targeted follow-up query to hunt sources for just it.
 function _ssMissingRowHtml(season, episode, name){
@@ -11615,14 +11853,19 @@ function _ssMissingRowHtml(season, episode, name){
   </div>`;
 }
 
-// Episode numbers TMDb lists for a season that we currently have no source for.
-// The gap set itself lives in _missingTmdbEpisodes (shared with the library
-// page); all that differs here is what "have" means — a found torrent, not a
-// file on disk. Unaired episodes are kept: searching for one costs nothing and
-// fansub releases do show up before TMDb's air date.
+// Episode numbers TMDb lists for a season that we neither found a source for nor
+// already hold. The gap set itself lives in _missingTmdbEpisodes (shared with the
+// library page); all that differs here is what "have" means — a found torrent OR
+// a file on disk, since either answers "do I still need to go and get this?".
+// Unaired episodes are kept: searching for one costs nothing and fansub releases
+// do show up before TMDb's air date.
 function _ssMissingEpisodes(season){
   if(_ssTmdbAbsolute()) return [];   // TMDb season list doesn't map to scene seasons
-  const have=new Set(_ssEpisodes.filter(e=>e.season===season).map(e=>e.episode));
+  // "Have" is a found torrent OR a file already on this box: sweeping the
+  // indexers for an episode sitting downstairs is pure waste, and reporting it
+  // as missing is simply wrong.
+  const have=new Set([...(_ssEpisodes.filter(e=>e.season===season).map(e=>e.episode)),
+                      ..._ssOwnedEps(season)]);
   return _missingTmdbEpisodes(_ssMeta, season, have, true).map(te=>+te.episode);
 }
 
@@ -11754,10 +11997,13 @@ function _ssPackRowHtml(p, i){
     </div>`;
 }
 
-function _ssPackGroupHeader(label, count){
+function _ssPackGroupHeader(label, count, owned){
   return `<div class="px-3 sm:px-5 py-1.5 bg-gray-950 border-y border-gray-800 flex items-center justify-between gap-2">
-    <span class="text-[10px] font-black uppercase tracking-widest text-gray-400">${escHtml(label)}</span>
-    ${count!=null?`<span class="text-[10px] font-mono text-gray-600">${count}</span>`:""}
+    <span class="text-[10px] font-black uppercase tracking-widest text-gray-400 flex items-center gap-2 min-w-0">
+      ${escHtml(label)}
+      ${owned?`<span class="text-[9px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-emerald-900/70 text-emerald-300 whitespace-nowrap">${escHtml(owned)}</span>`:""}
+    </span>
+    ${count!=null?`<span class="text-[10px] font-mono text-gray-600 flex-shrink-0">${count}</span>`:""}
   </div>`;
 }
 
@@ -11777,7 +12023,14 @@ function _ssRenderPacksGrouped(){
   let html="";
   seasons.forEach(sn=>{
     const rows=_ssPacksForSeason(sn);
-    html+=_ssPackGroupHeader(`Season ${sn}`, rows.length||null);
+    // Say what's already held before listing packs for it — a whole season pack
+    // is the easiest thing on this page to download by accident twice.
+    const ownedN=_ssOwnedEps(sn).size;
+    const totalN=((_ssOwned&&_ssOwned.seasons_total)||{})[String(sn)]||0;
+    const ownedLbl=ownedN
+      ? (totalN&&ownedN>=totalN?"Complete in your library":`You have ${ownedN}${totalN?` of ${totalN}`:""}`)
+      : "";
+    html+=_ssPackGroupHeader(`Season ${sn}`, rows.length||null, ownedLbl);
     html+=rows.length
       ? `<div class="divide-y divide-gray-800">${rows.map(p=>_ssPackRowHtml(p,idx(p))).join("")}</div>`
       : `<div class="px-3 sm:px-5 py-3 flex items-center justify-between gap-3">
@@ -11990,7 +12243,12 @@ function _ssBulkScopeEpisodes(){
       const te=(_ssMeta&&_ssMeta.seasons&&_ssMeta.seasons[String(s)]&&_ssMeta.seasons[String(s)].episodes)||[];
       te.forEach(t=>{ if(t.episode>0) nums.add(t.episode); });
     }
+    const owned=_ssOwnedEps(s);
     [...nums].sort((a,b)=>a-b).forEach(ep=>{
+      // Already downstairs (or already downloading) — bulk Auto would otherwise
+      // re-fetch the whole season every time it is run. A single episode can
+      // still be replaced deliberately from its own row.
+      if(owned.has(ep)) return;
       const f=_ssEpisodes.find(e=>e.season===s&&e.episode===ep);
       out.push({season:s, episode:ep, sources:(f&&f.sources)||[]});
     });
@@ -12024,6 +12282,11 @@ function _ssRenderBulkChoose(){
   const scope=_ssBulkScopeEpisodes();
   const n=scope.length;
   const need=scope.filter(e=>!e.sources.length).length;
+  // Episodes the scope skipped because they're already here. Counting them is
+  // the difference between "nothing in scope" reading as a broken sheet and
+  // reading as "you already have the lot".
+  const ownedN=(_ssBulkScope==="all"?seasons:[_ssBulkScope])
+    .reduce((t,s)=>t+_ssOwnedEps(s).size,0);
   const f=_ssBulkFilters;
   // A matching season pack is usually the better grab: one torrent, one
   // consistent release (audio/subs/quality) — recommend it above the per-
@@ -12051,6 +12314,7 @@ function _ssRenderBulkChoose(){
       </div>
     </div>
     <p class="text-xs text-gray-500">${n} episode${n===1?"":"s"} in scope.${
+      ownedN?` <span class="text-emerald-400">${ownedN} already in your library — skipped.</span>`:""}${
       need?` <span class="text-indigo-300">${need} still need${need===1?"s":""} a source — Download will find ${need===1?"it":"them"} first.</span>`:""}</p>
     ${recHtml}
     <div>
@@ -12077,6 +12341,11 @@ function _ssRenderBulkChoose(){
       </div>
       <p class="text-[10px] text-gray-600 mt-1.5">Applies to Auto only. The Audio preference wins over everything (an episode with any matching-language source never falls back to another language); then seeders win over size — if no source fits the size range, the best-seeded one that clears the seeder floor is used anyway; if nothing clears the floor, the best-seeded source is used.</p>
     </div>
+    ${n===0?`
+    <div class="p-3 bg-emerald-950/40 border border-emerald-800">
+      <p class="text-sm font-black uppercase tracking-wide text-emerald-300">Nothing left to download</p>
+      <p class="text-[11px] text-gray-400 mt-0.5">Every episode in this scope is already on this box. To swap one for a different release, use the Replace button on its row.</p>
+    </div>` : `
     <div>
       <p class="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">How should sources be picked?</p>
       <div class="grid grid-cols-1 gap-2">
@@ -12093,7 +12362,7 @@ function _ssRenderBulkChoose(){
           <p class="text-[11px] text-gray-500 mt-0.5">Finds the sources first, then lets you pick which torrent to use for each episode.</p>
         </button>
       </div>
-    </div>`;
+    </div>`}`;
   document.getElementById("ssBulkFooter").innerHTML=`
     <button onclick="ssCloseBulkSheet()" class="w-full bg-gray-800 hover:bg-gray-700 py-3 text-xs font-bold uppercase tracking-wide min-h-[44px]">Cancel</button>`;
 }
@@ -19708,6 +19977,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.21.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.22.0</div>
 </body>
 </html>
