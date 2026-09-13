@@ -277,9 +277,27 @@ Audio fingerprinting (`analyzer.py`) is kicked off by `_ensure_analysis_for` at 
 
 **Analysis coalesces behind prep — don't trigger per file.** Every analysis pass re-fingerprints the *whole* series (new files need peers to match against), so kicking a pass per prepped file made the analyzer restart from episode 1 after every bundle — quadratic work and an admin progress bar that visibly kept restarting. `_schedule_series_analysis_if_eligible` therefore defers while `_series_prep_active` (any `pending`/`processing` prep job for the series); `_watch_prep_then_analyze` backstops prep exit paths that never fire the post-prep hook (crash, sibling-race `done`). `"paused"` prep intentionally does **not** defer (a parked queue can sit for hours).
 
+### `subprocess.run(text=True)` on Windows silently returns EMPTY stdout with rc=0 — always pass `encoding="utf-8"` to a media tool
+
+The most expensive hour in this repo so far. *Hacks S04E06* failed HLS prep every 5 minutes for hours with "no video stream in source", while the same ffprobe read it perfectly from a shell and the file turned out to be a flawless Matroska (H.264 + EAC3 + 29 subtitle tracks).
+
+The chain:
+
+1. The release names its subtitle tracks in their **own scripts** — `Български`, `Ελληνικά`, `ไทย`, `中文（繁體）` — where every other file in the library used ASCII names (`Bulgarian`, `Greek`). ffprobe returns those titles inside its UTF-8 JSON.
+2. `text=True` decodes the child's output with **`locale.getpreferredencoding()`** — the Windows **ANSI code page**, cp1252 here — in **strict** mode. Bytes `0x81 / 0x8D / 0x8F / 0x90 / 0x9D` have no cp1252 mapping, so the decode raises `UnicodeDecodeError`.
+3. On Windows `subprocess` drains the pipes from **reader threads**. The exception is raised *there*, kills that thread, and **never propagates to the caller**. `subprocess.run` returns `returncode=0` with an **empty `stdout`** and an empty `stderr`.
+
+So a healthy 2 GB file is indistinguishable from one with no streams, and every error message downstream is a lie — the API genuinely handed us rc=0 and no output. `-v error` guarantees stderr is empty too, removing the last clue.
+
+**Rule: any subprocess whose output can carry media metadata, a file path, or human text gets `encoding="utf-8", errors="replace"` — never bare `text=True`.** ffprobe, ffmpeg, fpcalc and whisper.cpp all emit UTF-8 regardless of the host locale. This is not hygiene; omitting it is a silent data-loss bug that only fires on non-Latin content, which is exactly the content you will not have in your test library.
+
+Note the asymmetry that hid this for so long: the **async** ffmpeg paths (`create_subprocess_exec` + `out.decode("utf-8", "replace")`) were always correct, because they decode by hand. Only the blocking `subprocess.run(..., text=True)` sites were wrong — which is why encoding worked while probing didn't.
+
+**Deliberately NOT converted:** OS-tool calls (`sc.exe`, `netsh`, `mullvad`, `osascript`, `pactl`, `nvidia-smi`, the reboot commands) in `run.py` / `daemon.py` / `watchdog.py` / `main.py`. Those emit locale-encoded text, so forcing UTF-8 would corrupt them on a non-English Windows. The split is by *what the child writes*, not by convenience.
+
 ### Derive the ffprobe path from ffmpeg's FILENAME — a blanket `str.replace` breaks every Windows install
 
-`ffmpeg_bin()` on Windows returns `toolsfmpegfmpeg-8.1.1-essentials_buildinfmpeg.exe`. `ff.replace("ffmpeg", "ffprobe")` rewrites **all three** segments → `toolsfprobefprobe-…infprobe.exe`, which never exists. That silently demoted every Windows host to the stderr-parsing fallback in `_media_duration`, whose `re.search` then raised `TypeError: expected string or bytes-like object, got 'NoneType'` on a `None` stderr — surfacing as `Analysis crashed` for **every series in the library**, with no hint of the real cause. Use `Path(ff).with_name(Path(ff).name.replace(...))`, and keep the fallback `None`-safe.
+`ffmpeg_bin()` on Windows returns `tools/ffmpeg/ffmpeg-8.1.1-essentials_build/bin/ffmpeg.exe`. `ff.replace("ffmpeg", "ffprobe")` rewrites **all three** segments → `tools/ffprobe/ffprobe-…/bin/ffprobe.exe`, which never exists. That silently demoted every Windows host to the stderr-parsing fallback in `_media_duration`, whose `re.search` then raised `TypeError: expected string or bytes-like object, got 'NoneType'` on a `None` stderr — surfacing as `Analysis crashed` for **every series in the library**, with no hint of the real cause. Use `Path(ff).with_name(Path(ff).name.replace(...))`, and keep the fallback `None`-safe.
 
 ### Smart Skip matcher needs gap tolerance — and uses numpy
 
@@ -619,6 +637,8 @@ The single nastiest failure in this subsystem, because every individual step rep
 3. `_offline_cache_key` is `sha256(version|name|size)[:24]` — and the size is already final — so that bundle lands on **exactly the key the completed file resolves to**. `_maybe_start_prep_job` reports `cached` from then on and it is **never rebuilt**.
 
 So an unlucky 30-second overlap between the encode and the last piece produces a permanently-broken episode. (*Hacks S04E01*: encode finished 16:14:55, download finished 16:15:24. Bundle 1,637 MB; clean rebuild 2,112 MB.)
+
+**And `progress == 1.0` is itself half a step early.** qBit flips it when the last piece *verifies*, then writes to disk asynchronously, so `st_size` settles a beat later. Prepping in that window reads good data but keys the bundle to a size the finished file never has — the bundle is then invisible to every lookup (a wasted encode plus an orphan, on every completed download). Require the on-disk size to match qBit's `size` too, and re-derive the key at encode time since a queued job's key can go stale while it waits.
 
 Gate on qBit's **per-file `progress`**, never on the filesystem: `_incomplete_download_paths` at enqueue time (`_enqueue_library_prep`) and `_src_still_downloading` immediately before the encode (`_run_offline_job`, so play-driven / interactive / admin jobs are covered too). Both fail *closed* — if the item is downloading and qBit can't confirm, everything is treated as incomplete. Existing damage does not self-heal: delete the bundle and re-prep.
 

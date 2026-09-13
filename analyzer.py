@@ -207,7 +207,9 @@ def _fpcalc_raw(file_path: str, length_sec: int, start_sec: int = 0) -> list[int
     if start_sec <= 0:
         proc = subprocess.run(
             _lp([binp, "-raw", "-length", str(length_sec), file_path]),
-            capture_output=True, text=True, timeout=120, **_LOWPRIO_KW,
+            capture_output=True, text=True, timeout=120,
+            encoding="utf-8", errors="replace",   # never the locale code page (see GOTCHAS.md)
+            **_LOWPRIO_KW,
         )
     else:
         ff = ffmpeg_bin()
@@ -267,6 +269,7 @@ def _media_duration(file_path: str) -> Optional[float]:
         # Fall back to parsing ffmpeg's stderr
         proc = subprocess.run(
             _lp([ff, "-i", file_path]), capture_output=True, text=True, timeout=15,
+            encoding="utf-8", errors="replace",   # ffmpeg echoes the path + stream titles
             **_LOWPRIO_KW,
         )
         m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", proc.stderr or "")
@@ -277,7 +280,9 @@ def _media_duration(file_path: str) -> Optional[float]:
     proc = subprocess.run(
         _lp([ffprobe, "-v", "error", "-show_entries", "format=duration",
              "-of", "default=noprint_wrappers=1:nokey=1", file_path]),
-        capture_output=True, text=True, timeout=15, **_LOWPRIO_KW,
+        capture_output=True, text=True, timeout=15,
+        encoding="utf-8", errors="replace",   # never the locale code page (see GOTCHAS.md)
+        **_LOWPRIO_KW,
     )
     try:
         return float(proc.stdout.strip())

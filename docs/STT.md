@@ -209,6 +209,13 @@ children would otherwise inherit it and lag the UI. See [STREAMING.md](STREAMING
 > this, whisper kept saturating the CPU/GPU long after HLS prep "paused" — the box
 > stayed laggy until it finished (or a reboot). See [GOTCHAS.md](GOTCHAS.md).
 
+> **whisper's stderr is read as UTF-8, explicitly.** `_run_whisper` scrapes the
+> detected-language line out of whisper.cpp's stderr, which also carries the
+> transcript itself — non-Latin by definition. `subprocess.Popen(text=True)` would
+> decode it with the Windows ANSI code page in strict mode and raise mid-iteration,
+> aborting the job on exactly the episodes STT exists for. The Popen passes
+> `encoding="utf-8", errors="replace"`; never drop it. See [GOTCHAS.md](GOTCHAS.md).
+
 > **STT is slower than the HLS transcode.** A 45-minute episode is minutes of
 > CPU even on `base`. That's why the default path is preprocess (overnight),
 > with on-demand as an explicit, clearly-progress-indicated fallback — never a

@@ -18108,7 +18108,9 @@ def _probe_first_pts(path: str, stream: str, *, ignore_editlist: bool = False) -
     cmd += ["-select_streams", stream, "-read_intervals", "%+#1",
             "-show_entries", "packet=pts_time", path]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=20)
+        # UTF-8, never the locale code page — see `_ffprobe_full`.
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=20,
+                           encoding="utf-8", errors="replace")
         pkts = (json.loads(r.stdout or "{}").get("packets") or [])
         return float(pkts[0]["pts_time"]) if pkts else None
     except Exception:
@@ -18146,10 +18148,20 @@ def _ffprobe_full(path: str) -> dict:
     if not binp:
         return {}
     try:
+        # `encoding="utf-8"` is LOAD-BEARING on Windows, not tidiness.
+        # ffprobe emits UTF-8 JSON, but bare `text=True` decodes with the
+        # ANSI code page (cp1252 here) in STRICT mode — and a track title in
+        # a non-Latin script ("Български", "ไทย", "中文") contains bytes
+        # (0x81/0x8D/0x8F/0x90/0x9D) that cp1252 has no mapping for. The
+        # UnicodeDecodeError is then raised inside subprocess's Windows pipe
+        # READER THREAD, where it kills the thread and never reaches us: the
+        # call returns rc=0 with an EMPTY stdout, so a perfectly good file
+        # looks like it has no streams. See GOTCHAS.md.
         r = subprocess.run(
             [binp, "-v", "error", "-print_format", "json",
              "-show_streams", "-show_format", path],
             capture_output=True, text=True, timeout=15,
+            encoding="utf-8", errors="replace",
         )
         data = json.loads(r.stdout or "{}")
     except Exception as exc:
@@ -19221,6 +19233,24 @@ async def _run_offline_job(job_id: str) -> None:
             job["status"] = "pending"
             asyncio.create_task(_requeue_offline_job(job_id, delay=15.0))
             return
+        # Re-derive the key from the source as it is NOW. `job["out"]` was
+        # computed when the job was QUEUED, and a job can sit pending for a long
+        # time (the gate above, the pause gate, the priority queue). If the file
+        # changed size in between, encoding into the queue-time directory files
+        # the bundle under a key nothing resolves to — `_maybe_start_prep_job`
+        # then re-preps it forever and the orphan stays on disk. Defence in depth
+        # behind the completeness gate, which is what should prevent the drift.
+        fresh_dir = _offline_cache_dir(src)
+        if fresh_dir != out_dir:
+            hls_log.info("job %s: source changed while queued — retargeting %s -> %s",
+                         job_id, out_dir.name, fresh_dir.name)
+            out_dir = fresh_dir
+            job["out"] = str(out_dir)
+            if (out_dir / "master.m3u8").exists():
+                # Something already built the bundle this file now resolves to.
+                _bundle_index_register(out_dir.name, out_dir)
+                job["status"] = "done"; job["progress"] = 1.0
+                return
         hls_log.info("job %s START src=%s out=%s", job_id, src, out_dir.name)
         tmp_dir = out_dir.with_name(out_dir.name + ".part")
         ffmpeg = analyzer.ffmpeg_bin()
@@ -19969,10 +19999,36 @@ async def _incomplete_download_paths(item: dict) -> set[str]:
     if not info:
         return all_paths
     save_path = info.get("save_path", settings.qbit_download_path)
+    qfiles = await qbit_files(h)
+    return await asyncio.to_thread(_incomplete_paths_sync, qfiles, save_path)
+
+
+def _incomplete_paths_sync(qfiles: list, save_path: str) -> set[str]:
+    """The stat-ing half of `_incomplete_download_paths` (one thread hop for
+    the whole torrent rather than one per file).
+
+    **Per-file `progress == 1.0` is not sufficient.** qBittorrent flips it the
+    moment the last piece *verifies*, then flushes to disk asynchronously — so
+    the sparse file's length reaches its final value a beat later. Prep inside
+    that window reads complete data (the bytes are in qBit's cache) but derives
+    the bundle key from a length the finished file will never have, and the
+    bundle is then invisible to every later lookup — a wasted encode plus an
+    orphan on disk, every time a download completes. qBit's `size` is the
+    authoritative final length, so require the file on disk to match it.
+    """
     incomplete: set[str] = set()
-    for qf in await qbit_files(h):
+    for qf in qfiles:
+        full = Path(save_path) / qf.get("name", "")
         if float(qf.get("progress", 0) or 0) < 1.0:
-            incomplete.add(_norm_path(str(Path(save_path) / qf.get("name", ""))))
+            incomplete.add(_norm_path(str(full)))
+            continue
+        want = int(qf.get("size") or 0)
+        try:
+            have = full.stat().st_size
+        except OSError:
+            have = -1
+        if want and have != want:
+            incomplete.add(_norm_path(str(full)))
     return incomplete
 
 
@@ -24065,6 +24121,7 @@ def _probe_rendition_first_pts(playlist: Path) -> Optional[float]:
              "-show_entries", "packet=pts_time",
              str(playlist)],
             capture_output=True, text=True, timeout=20,
+            encoding="utf-8", errors="replace",   # never the locale code page — see `_ffprobe_full`
         )
         pkts = (json.loads(r.stdout or "{}").get("packets") or [])
         if not pkts:

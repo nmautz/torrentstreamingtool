@@ -48,7 +48,8 @@ def first_pts(target: str, stream: str, ignore_editlist: bool = False):
     cmd += ["-select_streams", stream, "-read_intervals", "%+#1",
             "-show_entries", "packet=pts_time", target]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
+                           encoding="utf-8", errors="replace")
         pkts = (json.loads(r.stdout or "{}").get("packets") or [])
         return float(pkts[0]["pts_time"]) if pkts else None
     except Exception as e:
@@ -67,7 +68,8 @@ def rendition_first_pts(playlist: Path):
            "-read_intervals", "%+#1",
            "-show_entries", "packet=pts_time", str(playlist)]
     try:
-        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
+        r = subprocess.run(cmd, capture_output=True, text=True, timeout=30,
+                           encoding="utf-8", errors="replace")
         pkts = (json.loads(r.stdout or "{}").get("packets") or [])
         return float(pkts[0]["pts_time"]) if pkts else None
     except Exception as e:

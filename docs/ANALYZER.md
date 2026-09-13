@@ -10,6 +10,10 @@ Audio-fingerprint-driven intro/credits detection. Runs per-series; results store
   that fallback's `re.search` then crashed every series. See
   [GOTCHAS.md](GOTCHAS.md#derive-the-ffprobe-path-from-ffmpegs-filename--a-blanket-strreplace-breaks-every-windows-install)
 - **`fpcalc`** (chromaprint) — fingerprinting (`-raw` mode emits integer frames)
+- Every one of these subprocesses is captured with **`encoding="utf-8", errors="replace"`**, never bare
+  `text=True` — on Windows that decodes with the ANSI code page and a non-Latin track title or path makes
+  the call return empty output with `rc=0`, no exception. See
+  [GOTCHAS.md](GOTCHAS.md#subprocessruntexttrue-on-windows-silently-returns-empty-stdout-with-rc0--always-pass-encodingutf-8-to-a-media-tool)
 - Both are detected by `setup.py` and stored as `_FFMPEG_BIN` / `_FPCALC_BIN` in `.env`
 - `analyzer.is_available()` returns False if either is missing — feature degrades to manual entry only (admin editor still works)
 

@@ -1469,6 +1469,22 @@ Two gates, because prep has more than one entry point:
 Both err towards *not* encoding: if the item is downloading and qBit can't
 confirm the files (torrent gone, qBit down), every file is treated as incomplete.
 
+**`progress == 1.0` is not the finish line.** qBit flips a file's per-file
+progress the moment its last piece *verifies*, then flushes to disk
+asynchronously, so the sparse file's length reaches its final value a beat
+later. Prep in that window reads complete data — the bytes are in qBit's cache
+— but `_offline_cache_key` reads `st_size`, so the bundle is filed under a
+length the finished file will never have and no later lookup can find it.
+`_incomplete_paths_sync` therefore also requires the on-disk size to equal
+qBit's authoritative `size` for that file.
+
+**The key is re-derived at encode time.** `job["out"]` is computed when the job
+is *queued*, and a job can sit pending behind this gate, the pause gate and the
+priority queue for a long time. `_run_offline_job` recomputes
+`_offline_cache_dir(src)` after the gate passes and retargets (adopting an
+existing bundle if one already sits at the new key) rather than encoding into a
+directory the source no longer maps to.
+
 > **Existing damage isn't self-healing.** A bundle already built this way keeps
 > the finished file's key. Delete it (**Admin → Offline Cache**, or
 > `DELETE /api/admin/offline-cache/{cache_key}`) and re-prep.
