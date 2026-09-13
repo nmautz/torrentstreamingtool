@@ -317,20 +317,27 @@ Inventory + download for the host's rotating log files in `logs/` (`streamlink_a
 
 Path traversal is blocked server-side: `_safe_log_path` resolves the requested name against `LOG_DIR` and refuses any name containing a slash, `..`, an absolute path, or a resolved location that escapes the directory.
 
+Beyond the app/HLS logs, `LOG_DIR` also carries the diagnostics files — `access.log` (every inbound request, both ports), `uvicorn.log` (server startup/bind errors), `vitals.log` (a 30 s health sample), `stall_<ts>.txt` (asyncio + thread stack dumps taken during a stall) and `faulthandler.log`. They're listed, downloadable and bundled like any other log. **Start here when the server was unreachable** — see [DIAGNOSTICS.md § Reading an incident](DIAGNOSTICS.md).
+
+**Clear Logs** truncates every *live* rotating handler in place (`streamlink_app.log`, `hls.log`, `vitals.log`, `access.log`, `uvicorn.log`) rather than unlinking them — on Windows you can't delete a file the process holds open for writing. Anything else in `LOG_DIR` is unlinked, falling back to truncate.
+
 #### Scheduled Restart
 
-A daily, idle-gated reboot. Config persists under `library.json → settings.scheduled_reboot` (`enabled`, `time` HH:MM, `timezone` IANA name, `idle_minutes`, plus an internal `last_fired` date). Driven by the `scheduled_reboot_loop` background task ([main.py](../main.py), registered in `lifespan`):
+A daily, idle-gated reboot with a bounded catch-up window. Config persists under `library.json → settings.scheduled_reboot` (`enabled`, `time` HH:MM, `timezone` IANA name, `idle_minutes`, `catch_up_hours`, plus an internal `last_fired` date). Driven by the `scheduled_reboot_loop` background task ([main.py](../main.py), registered in `lifespan`):
 
-1. At/after the configured local time (computed via `_now_in_tz`), if it hasn't already fired today, check `_machine_in_use(idle_minutes * 60)` **and** `_prep_in_progress()`.
+1. At/after the configured local time (computed via `_now_in_tz`), if it hasn't already fired today **and** `now < time + catch_up_hours`, check `_machine_in_use(idle_minutes * 60)` **and** `_prep_in_progress()`.
 2. **Idle** → write `last_fired = today` (loop guard), then `_reboot_machine()`.
-3. **In use / prep running** → wait `idle_minutes` and re-check, repeating until idle.
+3. **In use / prep running** → wait `idle_minutes` and re-check, repeating until idle or the window closes.
+4. **Past the window** → stand down until tomorrow's slot.
+
+⚠️ **The catch-up window is what keeps an overnight reboot overnight.** Before it existed the job stayed armed for the rest of the day once its time passed, so a box that was busy (or powered off) at 02:00 would reboot at the *first* idle moment afterwards — potentially mid-afternoon, which is indistinguishable from a crash. See [GOTCHAS.md](GOTCHAS.md).
 
 "In use" = live VLC playback/pause of non-background content, an active stream (`stream_status ∈ buffering|playing`), a running download (`downloading_count > 0`), or a user interaction within the window. User interactions are stamped onto `state.last_activity` by the `track_activity` middleware (mutating verbs + `/api/search`; routine GET polling is ignored). **In-progress stream prep also defers the reboot** via `_prep_in_progress()` — any HLS-prep or STT job actively encoding (any queue), or a user/admin-priority prep queued to start. This matters because idle prep runs exactly when the box looks idle, and HLS prep can't checkpoint, so a reboot mid-encode would discard the work. Jobs parked at the pause gate (`paused`) don't count; a soft-paused file still finishing its current encode does (it's `processing`).
 
 The persisted `last_fired` date is what stops a just-rebooted machine from re-arming and looping (it comes back up past the scheduled time, sees `last_fired == today`, and stands down until tomorrow). Saving new config clears `last_fired` so a freshly-set time can arm the same day.
 
 - `GET /api/admin/scheduled-reboot` → config + `now` (host time in the configured tz, for display).
-- `POST /api/admin/scheduled-reboot` → `{enabled, time, timezone, idle_minutes}`. Validates HH:MM, clamps `idle_minutes` to 1–720, resets `last_fired`.
+- `POST /api/admin/scheduled-reboot` → `{enabled, time, timezone, idle_minutes, catch_up_hours}`. Validates HH:MM, clamps `idle_minutes` to 1–720 and `catch_up_hours` to 1–24, resets `last_fired`. Resetting `last_fired` can't cause an immediate reboot on a late save — the window still bounds it.
 
 #### Automatic Stream Prep
 

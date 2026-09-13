@@ -17,6 +17,7 @@ import shlex
 import shutil
 import signal
 import socket
+import itertools
 import struct
 import subprocess
 import sys
@@ -36,6 +37,7 @@ from urllib.parse import quote, unquote, urlparse
 
 import httpx
 import psutil
+import diagnostics as diag
 from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -190,6 +192,21 @@ def _init_logging() -> logging.Logger:
 
 log     = _init_logging()
 hls_log = logging.getLogger("streamlink.hls")
+
+# Diagnostics: dedicated access/vitals files, quieter httpx, and last-resort
+# exception capture. Wired immediately after the app logger exists so anything
+# that blows up during the rest of import is still recorded somewhere useful.
+# See docs/DIAGNOSTICS.md for what each piece is for and which blind spot from
+# the 2026-09-13 outage it closes.
+# The port this app is served on. run.py owns the real value and exports it
+# (`STREAMLINK_HTTP_PORT`); 80 is the long-standing default and matches the
+# portless `http://127.0.0.1/...` URLs used elsewhere in this file.
+HTTP_PORT = int(os.environ.get("STREAMLINK_HTTP_PORT", "80") or 80)
+
+diag.init(LOG_DIR)
+diag.quiet_noisy_loggers()
+diag.install_exception_hooks()
+diag.enable_faulthandler(LOG_DIR)
 
 
 async def _log_version_banner() -> None:
@@ -629,7 +646,7 @@ def _read_ui_version(default: str = "11.18.0") -> str:
 
 
 UI_VERSION = _read_ui_version()
-_lib_lock: asyncio.Lock  # initialised in lifespan
+_lib_lock: 'diag.InstrumentedLock'  # initialised in lifespan; wraps an asyncio.Lock
 
 # Retains references to fire-and-forget background tasks so the event loop's weak
 # reference doesn't let them be garbage-collected mid-flight. Each task discards
@@ -5144,12 +5161,17 @@ async def _machine_in_use(window_secs: int, ignore_downloads: bool = False,
 def _scheduled_reboot_cfg(lib: dict) -> dict:
     """Read settings.scheduled_reboot with defaults filled in."""
     cfg = (lib.get("settings", {}) or {}).get("scheduled_reboot") or {}
+    try:
+        catch_up = int(cfg.get("catch_up_hours", 4))
+    except (TypeError, ValueError):
+        catch_up = 4
     return {
-        "enabled":      bool(cfg.get("enabled", False)),
-        "time":         str(cfg.get("time", "00:00")),
-        "timezone":     str(cfg.get("timezone", "America/Los_Angeles")),
-        "idle_minutes": int(cfg.get("idle_minutes", 15)),
-        "last_fired":   str(cfg.get("last_fired", "")),
+        "enabled":        bool(cfg.get("enabled", False)),
+        "time":           str(cfg.get("time", "00:00")),
+        "timezone":       str(cfg.get("timezone", "America/Los_Angeles")),
+        "idle_minutes":   int(cfg.get("idle_minutes", 15)),
+        "catch_up_hours": max(1, min(24, catch_up)),
+        "last_fired":     str(cfg.get("last_fired", "")),
     }
 
 
@@ -5787,12 +5809,18 @@ async def cache_autopurge_loop() -> None:
 
 
 async def scheduled_reboot_loop() -> None:
-    """Daily scheduled host reboot with an idle guard.
+    """Daily scheduled host reboot with an idle guard and a bounded window.
 
     At the configured local time, if the machine has been idle for
     `idle_minutes`, reboot it. If it's in use, wait `idle_minutes` and re-check —
-    repeating until the box is idle. A persisted `last_fired` date stops the
-    just-rebooted machine from immediately re-arming and looping.
+    repeating until the box is idle *or* the catch-up window closes. A persisted
+    `last_fired` date stops the just-rebooted machine from immediately re-arming
+    and looping.
+
+    The window (`catch_up_hours` after the scheduled time) is what keeps a
+    deferred overnight reboot overnight. Without it the job stays armed all day
+    and fires whenever the box first goes quiet, which means an unannounced
+    mid-afternoon reboot that looks exactly like a crash.
     """
     next_check = 0.0   # monotonic time of next idle re-check while armed for today
     while True:
@@ -5822,7 +5850,19 @@ async def scheduled_reboot_loop() -> None:
                 next_check = 0.0   # re-arm fresh for the upcoming window
                 continue
 
-            # We're at/past today's scheduled time and haven't fired yet.
+            # Bounded catch-up window. Without this the reboot stays armed for
+            # the whole rest of the day once its time passes, so a box that was
+            # busy (or powered off) at 02:00 gets rebooted at the *first* idle
+            # moment afterwards — 14:44 on a weekday afternoon, mid-session,
+            # which reads to the user as a crash: the dashboard, the TV UI and
+            # every service go away with no warning. Past the window we stand
+            # down and wait for tomorrow's slot instead of chasing today's.
+            deadline = scheduled_today + timedelta(hours=cfg["catch_up_hours"])
+            if now >= deadline:
+                next_check = 0.0
+                continue
+
+            # We're inside today's window and haven't fired yet.
             idle_secs = max(60, cfg["idle_minutes"] * 60)
             if asyncio.get_event_loop().time() < next_check:
                 continue
@@ -8663,11 +8703,19 @@ async def subtitle_upgrade_loop() -> None:
 async def lifespan(app: FastAPI) -> AsyncGenerator:
     global qbit, vlc_client, _lib_lock, _jackett_cookie_lock, _analysis_gate, _MAIN_LOOP
     _MAIN_LOOP = asyncio.get_running_loop()
+    # Route asyncio's own callback errors into the app log (and demote the benign
+    # Windows WinError 10054 disconnect churn that used to flood it at ERROR).
+    diag.install_loop_exception_handler(_MAIN_LOOP)
     # Make StreamLink's request handling the box's top priority before anything
     # else — so controls / UI / VLC-control stay responsive under heavy prep load.
     _raise_own_priority()
     await _log_version_banner()
-    _lib_lock = asyncio.Lock()
+    # Instrumented so contention is visible: `get_library()` holds this lock
+    # across `asyncio.to_thread(_load_lib_raw)`, so a saturated thread pool
+    # stalls every library-touching request while the pure-async VLC/qBit
+    # pollers carry on at full cadence — a box that looks healthy in the logs
+    # and is dead to every client. See docs/DIAGNOSTICS.md.
+    _lib_lock = diag.InstrumentedLock(asyncio.Lock(), "library")
     _jackett_cookie_lock = asyncio.Lock()
     _analysis_gate = asyncio.Semaphore(ANALYSIS_CONCURRENCY)
     _load_device_tokens()   # M5: restore paired-device bearer tokens
@@ -8729,6 +8777,16 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # quickly; the monitor then takes over from qBit.
     await _recover_interrupted_downloads()
 
+    # ── Diagnostics tasks ────────────────────────────────────────────────
+    # Together these answer the question the 2026-09-13 logs couldn't: was the
+    # server still accepting, and if not, what was everything doing?
+    #   loop_lag  — is something blocking the event loop?
+    #   vitals    — periodic health sample; anomalies escalate to the app log
+    #   selfprobe — GET /healthz on 127.0.0.1:80 from inside this process
+    diag_lag    = asyncio.create_task(diag._measure_loop_lag())
+    diag_vitals = asyncio.create_task(diag.vitals_loop())
+    diag_probe  = asyncio.create_task(diag.self_probe_loop(port=HTTP_PORT))
+
     guard       = asyncio.create_task(vpn_guard())
     broadcaster = asyncio.create_task(stat_broadcaster())
     dl_monitor  = asyncio.create_task(library_download_monitor())
@@ -8784,7 +8842,8 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     for t in (guard, broadcaster, dl_monitor, dvbackfill, vlc_tracker, bg_loop,
               jackett_mon, reboot_loop, autoprep_loop, update_loop, dlsched_loop,
               sysmon_loop, cachepurge_loop, subupgrade_loop, od_reaper_loop,
-              maint_loop, tvui_task, rvol_guard):
+              maint_loop, tvui_task, rvol_guard,
+              diag_lag, diag_vitals, diag_probe):
         t.cancel()
     if remote_listener is not None:
         remote_listener.stop()
@@ -8798,6 +8857,48 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
 
 
 app = FastAPI(title="P2P StreamLink", version="2.0", lifespan=lifespan)
+
+
+_req_seq = itertools.count(1)
+
+
+@app.middleware("http")
+async def diag_track_requests(request: Request, call_next):
+    """Record every request in-flight so a wedged one is visible while it's stuck.
+
+    Declared before the other middleware so it wraps them (Starlette applies
+    `@app.middleware` in reverse registration order) — a request that hangs
+    inside the HTTPS redirect or the adapter redirect is still counted.
+
+    This is what the 2026-09-13 outage had no equivalent of: uvicorn's access
+    log only records a request when it *finishes*, so a handler that never
+    returns leaves no line at all. `diag.state.inflight` shows it while it is
+    still hanging, and the stall dump names it.
+    """
+    rid = next(_req_seq)
+    diag.note_request_start(rid, request.method, request.url.path)
+    status = 0
+    try:
+        resp = await call_next(request)
+        status = resp.status_code
+        return resp
+    except Exception:
+        status = 500
+        raise
+    finally:
+        diag.note_request_end(rid, status)
+
+
+@app.get("/healthz")
+async def healthz() -> JSONResponse:
+    """Deliberately trivial liveness endpoint for the in-process self-probe.
+
+    Touches no lock, no disk and no library — so a 200 here means "the socket
+    accepts and the event loop is turning", cleanly separating a networking or
+    accept-queue fault from library-lock or thread-pool starvation. If this
+    answers while real endpoints hang, the fault is downstream of the server.
+    """
+    return JSONResponse({"ok": True, "t": time.time()})
 
 
 @app.middleware("http")
@@ -9002,6 +9103,7 @@ class ScheduledRebootReq(BaseModel):
     time: str = "00:00"                       # local HH:MM in `timezone`
     timezone: str = "America/Los_Angeles"     # IANA name; "" = system local
     idle_minutes: int = 15                     # idle window before a reboot fires
+    catch_up_hours: int = 4                    # how long after `time` the reboot may still fire; clamped 1–24
 
 
 class AutoPrepReq(BaseModel):
@@ -17148,7 +17250,8 @@ async def admin_download_log(request: Request, name: str) -> FileResponse:
 async def admin_clear_logs(request: Request) -> JSONResponse:
     """Clear every file in LOG_DIR.
 
-    Active rotating handlers (`streamlink_app.log`, `hls.log`) are **truncated
+    Active rotating handlers (`streamlink_app.log`, `hls.log`, `vitals.log`,
+    `access.log`, `uvicorn.log`) are **truncated
     in-place via the handler's stream** rather than deleted — on Windows you
     can't unlink a file that the running process has open for writing, and even
     on POSIX a delete would leave the FD valid but disconnected from any
@@ -17169,7 +17272,12 @@ async def admin_clear_logs(request: Request) -> JSONResponse:
 
     # 1) Truncate the live rotating-file handlers via their own streams so we
     #    don't race the logging thread.
-    for logger_name in ("streamlink", "streamlink.hls"):
+    # Every logger that holds a live RotatingFileHandler. The diagnostics
+    # loggers (vitals) and uvicorn's own (access.log, uvicorn.log) must be in
+    # here too: anything left out falls through to the unlink branch below,
+    # which on Windows can't remove a file this process holds open for writing.
+    for logger_name in ("streamlink", "streamlink.hls", "streamlink.vitals",
+                        "uvicorn.access", "uvicorn.error"):
         lg = logging.getLogger(logger_name)
         for h in lg.handlers:
             if not isinstance(h, RotatingFileHandler):
@@ -17229,9 +17337,11 @@ async def admin_get_scheduled_reboot(request: Request) -> JSONResponse:
 async def admin_set_scheduled_reboot(
     request: Request, body: ScheduledRebootReq,
 ) -> JSONResponse:
-    """Save the scheduled-reboot config. Validates the HH:MM time and clamps the
-    idle window. Changing the config clears any prior `last_fired` guard so a
-    newly-set time can arm today."""
+    """Save the scheduled-reboot config. Validates the HH:MM time and clamps both
+    the idle window and the catch-up window. Changing the config clears any prior
+    `last_fired` guard so a newly-set time can arm today — the catch-up window
+    still bounds it, so a save made long after the scheduled time won't trigger
+    an immediate reboot."""
     _require_admin(request)
 
     parts = body.time.split(":")
@@ -17242,14 +17352,16 @@ async def admin_set_scheduled_reboot(
         raise HTTPException(400, "time must be HH:MM (24-hour), e.g. 00:00")
 
     idle = max(1, min(720, int(body.idle_minutes)))
+    catch_up = max(1, min(24, int(body.catch_up_hours)))
 
     async with mutate_library() as lib:
         sr = lib.setdefault("settings", {}).setdefault("scheduled_reboot", {})
-        sr["enabled"]      = bool(body.enabled)
-        sr["time"]         = f"{h:02d}:{m:02d}"
-        sr["timezone"]     = body.timezone.strip()
-        sr["idle_minutes"] = idle
-        sr["last_fired"]   = ""   # reset guard so the new schedule can arm today
+        sr["enabled"]        = bool(body.enabled)
+        sr["time"]           = f"{h:02d}:{m:02d}"
+        sr["timezone"]       = body.timezone.strip()
+        sr["idle_minutes"]   = idle
+        sr["catch_up_hours"] = catch_up
+        sr["last_fired"]     = ""   # reset guard so the new schedule can arm today
 
     cfg = _scheduled_reboot_cfg(lib)
     cfg["now"] = _now_in_tz(cfg["timezone"]).strftime("%Y-%m-%d %H:%M %Z").strip()

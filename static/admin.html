@@ -893,7 +893,7 @@
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
         <div class="min-w-0">
           <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Scheduled Restart<span class="help-tip" tabindex="0" id="srTip" data-tip="Reboots the whole host machine daily at the set time, once idle. In-flight stream prep also defers it — HLS prep can't checkpoint, so a mid-encode reboot would discard the work.">?</span></h2>
-          <p class="text-xs text-gray-500 mt-0.5">Reboots the host daily at a set time — but only when idle. If the box was used in the last <span id="srIdleEcho">15</span> min at the scheduled time, it waits and re-checks every <span id="srIdleEcho2">15</span> min until idle, then reboots.</p>
+          <p class="text-xs text-gray-500 mt-0.5">Reboots the host daily at a set time — but only when idle. If the box was used in the last <span id="srIdleEcho">15</span> min at the scheduled time, it waits and re-checks every <span id="srIdleEcho2">15</span> min until idle, then reboots. If it never goes idle within the catch-up window, it gives up for the day rather than rebooting at some random later hour.</p>
         </div>
         <button id="srEnabledBtn" onclick="toggleScheduledReboot()"
           class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
@@ -926,7 +926,13 @@
           <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Idle Window (min)</label>
           <input id="srIdle" type="number" min="1" max="720" value="15"
             class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none"/>
-          <p class="text-[10px] text-gray-600">No usage for this long ⇒ safe to reboot.</p>
+          <p class="text-[10px] text-gray-600">No usage for this long &rArr; safe to reboot.</p>
+        </div>
+        <div class="space-y-1.5">
+          <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Catch-Up Window (hr)</label>
+          <input id="srCatchUp" type="number" min="1" max="24" value="4"
+            class="w-full bg-black border border-gray-700 px-3 py-2 text-sm font-mono text-gray-200 focus:border-indigo-500 outline-none"/>
+          <p class="text-[10px] text-gray-600">How long after the restart time it may still fire. Keeps a deferred 2 AM reboot from landing mid-afternoon.</p>
         </div>
         <div class="space-y-1.5">
           <label class="text-[10px] font-bold text-gray-500 uppercase tracking-widest block">Host Time Now</label>
@@ -2387,6 +2393,7 @@ async function loadScheduledReboot(){
     _renderSrEnabled();
     document.getElementById("srTime").value     = d.time || "00:00";
     document.getElementById("srIdle").value     = d.idle_minutes ?? 15;
+    document.getElementById("srCatchUp").value  = d.catch_up_hours ?? 4;
     const tzSel = document.getElementById("srTimezone");
     tzSel.value = (d.timezone ?? "America/Los_Angeles");
     // If the saved tz isn't one of the presets, fall back to System local
@@ -2402,7 +2409,7 @@ async function loadScheduledReboot(){
     }
     const tzName = tzSel.options[tzSel.selectedIndex]?.textContent || "system time";
     setTip("srTip", d.enabled
-      ? `Currently ON: reboots the whole host daily at ${d.time || "00:00"} (${tzName}) once it has been idle ${d.idle_minutes ?? 15} min. In-flight stream prep also defers it — HLS prep can't checkpoint, so a mid-encode reboot would discard the work.`
+      ? `Currently ON: reboots the whole host daily at ${d.time || "00:00"} (${tzName}) once it has been idle ${d.idle_minutes ?? 15} min, and only within ${d.catch_up_hours ?? 4} hr of that time — after that it waits for tomorrow instead of rebooting mid-session. In-flight stream prep also defers it — HLS prep can't checkpoint, so a mid-encode reboot would discard the work.`
       : "Currently OFF: the host only reboots via the Reboot Machine card or by hand. Enable and Save to arm the daily idle-gated reboot; in-flight stream prep defers it so encodes aren't discarded.");
   }catch(_){}
 }
@@ -2419,6 +2426,7 @@ async function saveScheduledReboot(){
     time:         document.getElementById("srTime").value || "00:00",
     timezone:     document.getElementById("srTimezone").value,
     idle_minutes: parseInt(document.getElementById("srIdle").value, 10) || 15,
+    catch_up_hours: parseInt(document.getElementById("srCatchUp").value, 10) || 4,
   };
   await withInflight("save_sched_reboot", btn, async () => {
     try{

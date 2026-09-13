@@ -2164,6 +2164,52 @@ So to make any change take effect: `./build-ipa.sh` **with no `--fast`/`--no-syn
 like the code was never changed — or, worse, like only *half* of it was. Quick
 check: `grep <your-new-symbol> ios/App/App/public/index.html`.
 
+## Diagnosing "the server went unreachable"
+
+The **2026-09-13** outage is the worked example, and the lesson is what the logs
+*couldn't* say. Symptoms: dashboard and TV UI dead, operator eventually rebooted
+the host by hand at 14:44. What the logs showed:
+
+- The process was **healthy throughout** — a flat ~168 log lines/min of VLC and
+  qBittorrent polling right up to the manual reboot. No stall, no memory
+  symptom, no traceback anywhere, event loop plainly responsive.
+- Inbound requests **arriving over HTTPS were still being served** as late as
+  14:44:11 (a `200` on `/api/admin/status`), seconds before the reboot.
+
+And what they could **not** say — the blind spots that made it undiagnosable:
+
+1. **Port 80 had no request logging at all.** `run.py` starts both uvicorn
+   servers with `log_level="warning"`, which suppresses uvicorn's access log
+   entirely. Every inbound request to the dashboard and the TV UI was invisible.
+   The only reason *any* inbound traffic showed up is an accident: the HTTPS
+   proxy on :443 forwards to `127.0.0.1:80` with `httpx`, and **httpx's own INFO
+   logging** recorded those hops. Plain-HTTP clients bypass the proxy, so they
+   left no trace whatsoever.
+2. **`print()` output was unreachable.** The updater and reboot paths report via
+   `print()`, not the `streamlink` logger — so `[reboot]`/`[updater]` lines
+   appear nowhere in `streamlink_service.log`.
+3. **Nothing proved reachability from inside the process.** A server that is
+   alive but not accepting looks identical to a healthy one in these logs.
+4. **Signal was buried.** At ~168 lines/min of `httpx` poll chatter, a real event
+   is invisible without `grep`.
+
+`diagnostics.py` exists to close exactly these gaps — see [DIAGNOSTICS.md](DIAGNOSTICS.md).
+When something like this recurs, read `logs/access.log` (did requests arrive?),
+`logs/vitals.log` (was the loop lagging, the thread pool saturated, the library
+lock stuck?), and any `logs/stall_*.txt` (what every task was doing at the time).
+
+**Do not read a `logs_old_<ts>.zip` as evidence of an update-triggered restart.**
+`_archive_old_logs()` only runs when the updater left a `.rotate_pending` marker,
+and that marker can sit unconsumed for hours — it means "an update was applied at
+some point before this start", not "this restart was the update".
+
+**Applying an update without the reboot leaves a split-brain process.** A manual
+`POST /api/admin/updater/apply` with `reboot` off swaps the git checkout *and*
+re-runs `setup.py` under the still-running interpreter: in-memory code is the old
+build, while `static/*.html` and anything imported lazily now come off disk from
+the new one. The 13:50 apply on 2026-09-13 did exactly this ~5 min before the
+trouble started. Unproven as the cause, but reboot promptly after applying.
+
 ## See also
 
 - [BACKEND.md](BACKEND.md) — invariants enforced by `main.py`

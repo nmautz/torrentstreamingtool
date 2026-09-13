@@ -173,14 +173,33 @@ except Exception as exc:
 # log_config suppresses uvicorn\'s default dictConfig which adds StreamHandlers
 # pointing at sys.stderr/stdout — those are None in a Task Scheduler service
 # (no console), causing uvicorn to fail silently on startup.
-_UV_LOG_CFG = {"version": 1, "disable_existing_loggers": False}
+#
+# It used to be a bare stub with NO handlers, which — together with
+# log_level="warning" — meant uvicorn's access log was switched off entirely.
+# During the 2026-09-13 outage that left no record of a single request reaching
+# port 80, so there was no way to tell whether the dashboard and TV UI were even
+# being asked for anything. diagnostics.uvicorn_log_config writes to
+# logs/access.log using RotatingFileHandlers ONLY — no StreamHandler — so it
+# keeps the no-console guarantee above while restoring the access log.
+# This is the SERVICE path (the installed daemon); run.py mirrors it for
+# interactive launches. See docs/DIAGNOSTICS.md.
+try:
+    import diagnostics as _diag
+    _UV_LOG_CFG = _diag.uvicorn_log_config(HERE / "logs")
+    _UV_LOG_LEVEL = "info"        # access lines are INFO; "warning" hides them
+except Exception as _exc:         # never let diagnostics stop the service booting
+    log.warning("diagnostics log config unavailable (%s) — access log disabled", _exc)
+    _UV_LOG_CFG = {"version": 1, "disable_existing_loggers": False}
+    _UV_LOG_LEVEL = "warning"
+
+os.environ["STREAMLINK_HTTP_PORT"] = "80"
 
 async def _launch_servers():
     import uvicorn as _uvicorn
     log.info("Configuring uvicorn servers (HTTP port 80%s)", ", HTTPS proxy port 443" if _has_cert else "")
     http_cfg = _uvicorn.Config(
         "main:app", host="0.0.0.0", port=80,
-        log_level="warning", log_config=_UV_LOG_CFG,
+        log_level=_UV_LOG_LEVEL, log_config=_UV_LOG_CFG,
     )
     http_srv = _uvicorn.Server(http_cfg)
     http_srv.install_signal_handlers = lambda: None
@@ -189,7 +208,7 @@ async def _launch_servers():
         https_cfg = _uvicorn.Config(
             "https_proxy:app", host="0.0.0.0", port=443,
             ssl_certfile=str(_CERT), ssl_keyfile=str(_KEY),
-            log_level="warning", log_config=_UV_LOG_CFG,
+            log_level=_UV_LOG_LEVEL, log_config=_UV_LOG_CFG,
         )
         https_srv = _uvicorn.Server(https_cfg)
         https_srv.install_signal_handlers = lambda: None

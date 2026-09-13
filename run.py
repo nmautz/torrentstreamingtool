@@ -1274,14 +1274,26 @@ def main():
     if str(HERE) not in sys.path:
         sys.path.insert(0, str(HERE))
 
-    _uv_log_cfg = {"version": 1, "disable_existing_loggers": False}
+    # Inbound request logging. The previous stub ({"version": 1,
+    # "disable_existing_loggers": False}) configured no handlers at all, and
+    # combined with log_level="warning" it suppressed uvicorn's access log
+    # entirely — so during the 2026-09-13 outage there was NO record of any
+    # request reaching port 80, the port the dashboard and TV UI use. The only
+    # inbound traffic visible anywhere was an accident: the :443 proxy forwards
+    # via httpx, whose own INFO logging caught those hops. Both servers now
+    # write to logs/access.log. See docs/DIAGNOSTICS.md.
+    import diagnostics as _diag
+    _uv_log_cfg = _diag.uvicorn_log_config(HERE / "logs")
+
+    # Let main.py's self-probe target the right port without hardcoding it.
+    os.environ["STREAMLINK_HTTP_PORT"] = str(PORT)
 
     async def _launch():
         http_cfg = _uvicorn.Config(
             "main:app",
             host="0.0.0.0",
             port=PORT,
-            log_level="warning",
+            log_level="info",      # access lines are INFO; "warning" hides them
             log_config=_uv_log_cfg,
         )
         http_srv = _uvicorn.Server(http_cfg)
@@ -1296,7 +1308,7 @@ def main():
                 port=ADMIN_PORT,
                 ssl_certfile=str(CERT),
                 ssl_keyfile=str(KEY),
-                log_level="warning",
+                log_level="info",  # access lines are INFO; "warning" hides them
                 log_config=_uv_log_cfg,
             )
             https_srv = _uvicorn.Server(https_cfg)
