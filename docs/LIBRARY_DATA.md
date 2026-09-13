@@ -42,6 +42,10 @@ The only persistent server-side state. Lives at the project root. Accessed via `
     "play_prep": {                      // auto on-device prep on VLC play (admin System tab)
       "enabled":  true                  // prep the playing episode + playlist tail (interactive; ignores pause gate + activity). Default ON
     },
+    "missing_content": {                // library shows not-yet-downloaded seasons/episodes (admin System tab)
+      "enabled":      true,             // diff the show's TMDb inventory against what's on disk. Absent ⇒ true
+      "show_unaired": false             // future/undated TMDb episodes render as "Upcoming" instead of being hidden. Absent ⇒ false
+    },
     "prep_validate": {                  // validate-and-repair source files during bulk/idle prep (admin System tab)
       "mode": "off"                     // "off" | "before" | "after" — deep-decode + remux-repair as prep rides through. Default "off"
     },
@@ -510,7 +514,13 @@ The profile-level **`shuffle`** / **`shuffle_scope`** fields are the *persisted*
   "vote_average":  8.7,
   "genres":        ["Drama", "Mystery"],
   "trailer":       "dQw4w9WgXcQ",          // YouTube key (movie/show trailer; "" = none) — _tmdb_pick_trailer
-  "seasons": {                             // tv only
+  "all_seasons": [                         // tv only — the show's FULL season inventory
+    {"season": 0, "name": "Specials", "overview": "…",
+     "episode_count": 4, "air_date": "2005-01-08", "poster_path": "/sp.jpg"},
+    {"season": 1, "name": "Season 1", "overview": "…",
+     "episode_count": 74, "air_date": "2004-04-07", "poster_path": "/s1.jpg"}
+  ],
+  "seasons": {                             // tv only — only the seasons we FETCHED episodes for
     "1": {
       "name":     "Season 1",
       "overview": "...",
@@ -526,6 +536,8 @@ The profile-level **`shuffle`** / **`shuffle_scope`** fields are the *persisted*
   "fetched_at": "2026-05-15T01:23:45+00:00"
 }
 ```
+
+**`all_seasons` vs `seasons`.** `all_seasons` is every season TMDb knows the show has, taken straight off `/tv/{id}` (so it's free — no extra request) and including season 0. `seasons` only holds the seasons someone actually fetched episode lists for: `_fetch_item_metadata` asks for the seasons present *on disk*, so a show can HAVE season 4 while `seasons` covers 1–3. Keeping "this season exists" separate from "we have its episode list" is what lets the library page show a season you own nothing from (count from `episode_count`) and then fill in its real episode rows once the lazy top-up lands. `/api/tmdb/lookup` (by `tmdb_id` or title) fetches **every** season, and is the top-up the frontend uses — see [FRONTEND.md](FRONTEND.md) § missing content.
 
 Populated by `_fetch_item_metadata` ([main.py](../main.py)) on first hit of `GET /api/library/{id}/metadata`, then served from cache. Per-id `asyncio.Lock` coalesces concurrent first-loads. **The first-access fetch never blocks the endpoint**: it runs as a background task (`_spawn_metadata_fetch`) the endpoint waits on for ≤4 s before answering `pending:true`; a `metadata_update` SSE event fires when the fetch lands. Cached entries answer instantly regardless of internet state. Force refresh via `POST /api/library/{id}/metadata/refresh` (admin); the same endpoint accepts an optional `{tmdb_id, kind}` to manually bind the item to a TMDb entry when auto-match picks the wrong show.
 
@@ -548,6 +560,12 @@ When no TMDb API key is configured (env or admin override), the metadata/search/
 - **v2.0 → v2.1**: flat per-profile progress (`position_sec`/`duration_sec` at the top level of the profile entry) → `file_progress` keyed by path
 
 The migration is in-place and silent. No version field on items.
+
+### Metadata cache migration: `all_seasons` (11.18.0)
+
+Not part of `_migrate_item` — it needs a network round trip, so it's **lazy and per-item**, in `_fetch_item_metadata`. A cached entry with `tmdb_kind == "tv"` and a `tmdb_id` but **no `all_seasons` key** is treated as stale: the next access re-fetches it **by the existing `tmdb_id`** (never a fresh auto-match, so a wrong binding can't change under the user) and preserves the existing `source`, so a pinned `manual` entry stays pinned. It then writes `all_seasons` and is never re-fetched again.
+
+A merged series never touches `GET /api/library/{id}/metadata`, so `GET /api/library/series/{key}` fires the same self-heal in the background (`_spawn_metadata_fetch` on the member it served metadata from) without delaying its own response. Until either lands, the frontend tops up from `/api/tmdb/lookup`, so the UI is correct on the very first open.
 
 ## Concurrency
 

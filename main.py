@@ -615,7 +615,7 @@ def _marquee_write(text: str) -> None:
 _UI_VERSION_BADGE_RE = re.compile(r'<div[^>]*\bdata-ui-version\b[^>]*>([^<]*)</div>')
 
 
-def _read_ui_version(default: str = "11.17.0") -> str:
+def _read_ui_version(default: str = "11.18.0") -> str:
     """Parse the UI version out of the shipped `static/index.html` badge."""
     try:
         html = (Path(__file__).resolve().parent / "static" / "index.html").read_text(
@@ -867,6 +867,8 @@ class AppState:
     subtitle_default_language: str = "eng"                # preferred subtitle language (settings.subtitles.default_language; "" = Any), mirrored here for state_snapshot/UI defaults; seeded at lifespan, updated by the admin subtitles POST
     subtitle_upgrade_late: bool = True                    # settings.subtitles.upgrade_late_subs, mirrored for the on-device upgrade poller
     subtitle_single_option: bool = True                   # settings.subtitles.single_option, mirrored for client/UI
+    missing_content_enabled: bool = True                  # settings.missing_content.enabled — library surfaces not-yet-downloaded seasons/episodes; mirrored for state_snapshot
+    missing_content_unaired: bool = False                 # settings.missing_content.show_unaired — render future-dated TMDb episodes as "Upcoming" instead of hiding them
     sub_auto_ai_path: str = ""                            # abs path of the AI sidecar currently auto-applied in VLC ("" = none); the upgrade loop watches this and swaps in a real sub when one arrives
     last_activity: float = 0.0                            # time.time() of last user-initiated interaction (drives scheduled-reboot idle check)
     prep_paused: bool = False                             # True ⇒ bulk stream-prep jobs hold (set by the non-admin Pause control / auto-prep falling edge)
@@ -1093,6 +1095,11 @@ def state_snapshot() -> dict:
         # subtitle-upgrade poller. See docs/STT.md / docs/STREAMING.md.
         "subtitle_upgrade_late": state.subtitle_upgrade_late,
         "subtitle_single_option": state.subtitle_single_option,
+        # Library "missing content" policy (settings.missing_content) — whether the
+        # episode page diffs against TMDb to show seasons/episodes not on disk, and
+        # whether unaired episodes participate. See docs/LIBRARY_DATA.md.
+        "missing_content": state.missing_content_enabled,
+        "missing_unaired": state.missing_content_unaired,
         "library_playlist_count": len(playlist),
         "library_current_index": cur_idx,
         "library_current_file": current,
@@ -2144,6 +2151,21 @@ async def _tmdb_fetch_tv(show_id: int, seasons: list[int]) -> dict:
         f"/tv/{show_id}", {"append_to_response": "alternative_titles,videos"}) or {}
     akas = _tmdb_akas((details.get("alternative_titles") or {}).get("results", []),
                       details.get("name") or "", details.get("original_name") or "")
+    # The show's FULL season inventory, straight off /tv/{id} — every season TMDb
+    # knows about, including ones nothing was fetched (or downloaded) for. This is
+    # what lets the library page show a season the user owns nothing from; the
+    # per-season `episodes` arrays below only cover the seasons we asked for.
+    # Kept separate from `seasons` precisely so "exists" and "we have the episode
+    # list" stay distinguishable. See docs/LIBRARY_DATA.md § metadata cache.
+    all_seasons = [{
+        "season":        int(s.get("season_number", 0) or 0),
+        "name":          s.get("name", "") or "",
+        "overview":      s.get("overview", "") or "",
+        "episode_count": int(s.get("episode_count", 0) or 0),
+        "air_date":      s.get("air_date", "") or "",
+        "poster_path":   s.get("poster_path") or "",
+    } for s in (details.get("seasons") or [])]
+    all_seasons.sort(key=lambda s: s["season"])
     cache_seasons: dict[str, dict] = {}
     # Default to season 1 if no seasons were detected on disk (so a one-off
     # picker that opens before season parsing still gets *something*).
@@ -2186,6 +2208,7 @@ async def _tmdb_fetch_tv(show_id: int, seasons: list[int]) -> dict:
         "genres":        [g.get("name", "") for g in details.get("genres", []) or []],
         "trailer":       _tmdb_pick_trailer(details.get("videos")),
         "seasons":       cache_seasons,
+        "all_seasons":   all_seasons,
         "fetched_at":    _now_iso(),
     }
 
@@ -2232,16 +2255,28 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
         if not item:
             return None
         cached = item.get("metadata") or {}
+        # Cache migration: TV metadata written before the full season inventory
+        # existed has no `all_seasons`, so the library page can't tell which
+        # seasons the show HAS (only which we fetched episodes for) and would
+        # show no missing seasons at all. Treat that as stale and re-fetch once,
+        # keyed off the already-matched tmdb_id so no re-match happens. Only TV,
+        # only when the binding is known. See docs/LIBRARY_DATA.md § migrations.
+        stale_seasons = (cached.get("tmdb_kind") == "tv"
+                         and cached.get("tmdb_id")
+                         and "all_seasons" not in cached)
         # Manual picks / hand-entered custom metadata are pinned — never let a
         # plain (non-forced) access silently re-run the auto-match over them.
         # Custom entries have no tmdb_id, so this is the guard that protects them.
-        if cached.get("source") in ("manual", "custom") and not force:
+        if cached.get("source") in ("manual", "custom") and not force and not stale_seasons:
             return cached
-        if cached.get("tmdb_id") and not force and not override_tmdb_id:
+        if cached.get("tmdb_id") and not force and not override_tmdb_id and not stale_seasons:
             return cached
 
         if override_tmdb_id and override_kind:
             match = {"kind": override_kind, "id": int(override_tmdb_id)}
+        elif stale_seasons:
+            # Season-inventory top-up only — reuse the existing binding verbatim.
+            match = {"kind": "tv", "id": int(cached["tmdb_id"])}
         else:
             match = await _tmdb_match_show(item)
         if not match:
@@ -2259,8 +2294,14 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
 
         # Record how this binding was chosen. A user-forced override is a
         # deliberate "manual" pick and is pinned (see the early-return guard
-        # above and the rename handler); an auto-match is plain "tmdb".
-        data["source"] = "manual" if override_tmdb_id else "tmdb"
+        # above and the rename handler); an auto-match is plain "tmdb". A
+        # season-inventory top-up re-fetches the SAME binding, so it must keep
+        # whatever source that binding already had — demoting a pinned "manual"
+        # to "tmdb" would reopen it to silent auto-rematching.
+        if stale_seasons and not override_tmdb_id:
+            data["source"] = cached.get("source") or "tmdb"
+        else:
+            data["source"] = "manual" if override_tmdb_id else "tmdb"
 
         # Re-read the library before writing — analyzer / progress writers may
         # have updated other fields while we were fetching from TMDb.
@@ -4799,6 +4840,25 @@ def _play_prep_cfg(lib: dict) -> dict:
     them). See `_maybe_start_play_prep` / `_play_prep_chain`."""
     cfg = (lib.get("settings", {}) or {}).get("play_prep") or {}
     return {"enabled": bool(cfg.get("enabled", True))}
+
+
+def _missing_content_cfg(lib: dict) -> dict:
+    """Read settings.missing_content — whether the library surfaces seasons and
+    episodes the show HAS but this box hasn't downloaded.
+
+    `enabled` (default on) turns the whole thing off for viewers who'd rather see
+    only what's on disk. `show_unaired` (default OFF) decides what happens to a
+    TMDb episode whose air date is in the future or absent: hidden by default, so
+    a currently-airing show doesn't read as permanently incomplete; when on they
+    render in their own third state ("Upcoming") rather than as missing.
+
+    Consumed entirely by the frontend (mirrored into `state_snapshot`); the diff
+    against TMDb is computed client-side off the metadata it already has."""
+    cfg = (lib.get("settings", {}) or {}).get("missing_content") or {}
+    return {
+        "enabled":      bool(cfg.get("enabled", True)),
+        "show_unaired": bool(cfg.get("show_unaired", False)),
+    }
 
 
 _PREP_VALIDATE_MODES = ("off", "before", "after")
@@ -7995,6 +8055,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         state.subtitle_default_language = _subs0["default_language"]
         state.subtitle_upgrade_late = _subs0["upgrade_late_subs"]
         state.subtitle_single_option = _subs0["single_option"]
+        _mc0 = _missing_content_cfg(_lib0)
+        state.missing_content_enabled = _mc0["enabled"]
+        state.missing_content_unaired = _mc0["show_unaired"]
         _ks0 = _vpn_killswitch_cfg(_lib0)
         state.vpn_block_ui = _ks0["block_ui"]
         state.vpn_mode = _ks0["mode"]
@@ -8306,6 +8369,11 @@ class AutoPrepReq(BaseModel):
 
 class PlayPrepReq(BaseModel):
     enabled: bool = True                       # auto on-device prep of the playing episode (+ playlist tail) on every VLC play
+
+
+class MissingContentReq(BaseModel):
+    enabled: bool = True                       # library shows seasons/episodes the show has but this box hasn't downloaded
+    show_unaired: bool = False                 # include not-yet-aired TMDb episodes (as "Upcoming") instead of hiding them
 
 
 class PrepValidateReq(BaseModel):
@@ -8797,8 +8865,18 @@ async def get_series_files(request: Request, series_key: str,
     # Title + metadata: prefer a member that already has cached TMDb metadata.
     title = next((it.get("series") for it in members if (it.get("series") or "").strip()),
                  members[0].get("title", ""))
-    meta = next((it.get("metadata") for it in members if it.get("metadata")), None)
+    meta_item = next((it for it in members if it.get("metadata")), None)
+    meta = meta_item.get("metadata") if meta_item else None
     resume = find_series_resume_hint(members, profile_id) if profile_id else None
+
+    # A merged series never touches the per-item /metadata endpoint, so its
+    # members' caches would never pick up the season inventory the missing-
+    # content diff needs. Nudge the one we're serving metadata from in the
+    # background (the fetch self-heals `all_seasons`; see _fetch_item_metadata),
+    # so the NEXT open is complete. This response is not delayed by it — the
+    # client tops up from /api/tmdb/lookup meanwhile.
+    if (meta or {}).get("tmdb_kind") == "tv" and "all_seasons" not in (meta or {}):
+        _spawn_metadata_fetch(meta_item["id"])
 
     # Series-level on-demand-only state so the merged-series episode page can
     # render its toggle: "on" only when EVERY member is on-demand-only; "locked"
@@ -16336,6 +16414,31 @@ async def admin_set_play_prep(request: Request, body: PlayPrepReq) -> JSONRespon
     pp["enabled"] = bool(body.enabled)
     await put_library(lib)
     return JSONResponse({"ok": True, **_play_prep_cfg(lib)})
+
+
+@app.get("/api/admin/missing-content")
+async def admin_get_missing_content(request: Request) -> JSONResponse:
+    """Return the library missing-content policy (show not-yet-downloaded
+    seasons/episodes, and whether unaired episodes participate)."""
+    _require_admin(request)
+    return JSONResponse(_missing_content_cfg(await get_library()))
+
+
+@app.post("/api/admin/missing-content")
+async def admin_set_missing_content(request: Request,
+                                    body: MissingContentReq) -> JSONResponse:
+    """Save the library missing-content policy. Mirrored onto `state` so it rides
+    in every `state` SSE event and open dashboards pick it up without a reload."""
+    _require_admin(request)
+    lib = await get_library()
+    mc = lib.setdefault("settings", {}).setdefault("missing_content", {})
+    mc["enabled"]      = bool(body.enabled)
+    mc["show_unaired"] = bool(body.show_unaired)
+    await put_library(lib)
+    cfg = _missing_content_cfg(lib)
+    state.missing_content_enabled = cfg["enabled"]
+    state.missing_content_unaired = cfg["show_unaired"]
+    return JSONResponse({"ok": True, **cfg})
 
 
 @app.get("/api/admin/prep-validate")

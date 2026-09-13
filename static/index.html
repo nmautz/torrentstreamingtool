@@ -115,6 +115,14 @@
                             transition:color .12s, border-color .12s; flex-shrink:0; }
     .ep-season-tab:hover  { color:#d1d5db; }
     .ep-season-tab.active { color:#fff; border-bottom-color:#4f46e5; }
+    /* "have of total" under a season that isn't fully downloaded, so a partial
+       season is legible from the strip without opening it. `.incomplete` = some
+       episodes missing; `.absent` = we own nothing from it at all. */
+    .ep-season-count      { display:flex; align-items:center; gap:.3rem; margin-top:.2rem;
+                            font-size:.6rem; font-weight:700; letter-spacing:.06em; color:#6b7280; }
+    .ep-season-dot        { width:.375rem; height:.375rem; background:currentColor; flex-shrink:0; }
+    .ep-season-tab.incomplete .ep-season-count { color:#f59e0b; }
+    .ep-season-tab.absent .ep-season-count     { color:#f87171; }
     /* Netflix-style episode card */
     .ep-card { display:flex; gap:.75rem; align-items:stretch; padding:.6rem .25rem;
                border-bottom:1px solid rgba(31,41,55,.6); transition:background .12s; }
@@ -135,6 +143,13 @@
     .ep-prog-bar { position:absolute; left:0; right:0; bottom:0; height:3px;
                    background:rgba(0,0,0,.4); }
     .ep-prog-fill { height:100%; background:#22c55e; }
+    /* An episode/season the show HAS but this box hasn't downloaded. Same card
+       geometry as a real episode so the list reads as one run; drained of colour
+       and with no play affordance so it can't be mistaken for something playable. */
+    .ep-card.ep-missing            { opacity:.72; }
+    .ep-card.ep-missing:hover      { background:rgba(255,255,255,.02); opacity:.92; }
+    .ep-card.ep-missing .ep-still  { border-style:dashed; border-color:#374151; cursor:default; }
+    .ep-card.ep-missing .ep-still img { filter:grayscale(1); opacity:.45; }
     .safe-bottom { padding-bottom: env(safe-area-inset-bottom, 0px); }
     .safe-top    { padding-top:    env(safe-area-inset-top,    0px); }
     /* ── iOS app: safe-area inset — PINNED to a constant, do NOT use live env() ──
@@ -882,6 +897,7 @@
   <symbol id="i-chev-right" viewBox="0 0 24 24"><path d="M15.6 12 8.2 19.4l-1.7-1.7 5.7-5.7-5.7-5.7 1.7-1.7z"/></symbol>
   <symbol id="i-ext" viewBox="0 0 24 24"><path d="M13.5 2.5h8v8h-2.3V6.4l-8.1 8.1-1.6-1.6 8.1-8.1h-4.1zM4 5h6v2.3H6.3v10.4h10.4V13H19v7H4z"/></symbol>
   <symbol id="i-monitor" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M2 3.5h20v13.5H13.2v2.3H17v2.2H7v-2.2h3.8V17H2zm2.2 2.2v9.1h15.6V5.7z"/></symbol>
+  <symbol id="i-search" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M10.5 2a8.5 8.5 0 1 0 5.05 15.34l4.55 4.55 1.7-1.7-4.55-4.55A8.5 8.5 0 0 0 10.5 2zm0 2.3a6.2 6.2 0 1 1 0 12.4 6.2 6.2 0 0 1 0-12.4z"/></symbol>
 </svg>
 
 
@@ -3786,6 +3802,13 @@ let subtitleDefaultLang = "eng";
 // subtitle as the preferred language. Mirrored from /api/state. See docs/STT.md.
 let subtitleUpgradeLate = true;
 let subtitleSingleOption = true;
+// Library missing-content policy (settings.missing_content), mirrored from
+// /api/state and kept live by every `state` SSE event. `missingContentEnabled`
+// gates the whole not-yet-downloaded seasons/episodes diff; `missingUnaired`
+// decides whether TMDb episodes that haven't aired appear as "Upcoming" rows or
+// are dropped. See docs/LIBRARY_DATA.md § settings.
+let missingContentEnabled = true;
+let missingUnaired        = false;
 let activeTab    = "search";
 let libShowHidden = false;   // true = library shows hidden items instead of main list
 let selectedColor = "indigo";
@@ -7165,14 +7188,10 @@ async function openEpisodePicker(itemId, title){
     } catch (_) {}
   })();
 
-  // Build the season tab list — positive seasons sorted ascending. If we have
-  // positive seasons AND season-0 files, append 0 as a trailing "Specials"
-  // tab so those orphans are still reachable.
-  const positiveSeasons=[...new Set(epFiles.map(f=>+f.season||0).filter(s=>s>0))].sort((a,b)=>a-b);
-  const hasZeroSeason=epFiles.some(f=>(+f.season||0)===0);
-  epSeasonList = positiveSeasons.length && hasZeroSeason
-                 ? [...positiveSeasons, 0]
-                 : positiveSeasons;
+  // Build the season tab list (files ∪ the show's TMDb seasons — see
+  // _epRebuildSeasonList). Metadata hasn't landed yet on this first pass, so it
+  // starts as the on-disk seasons and is rebuilt in _epApplyMetadata.
+  _epRebuildSeasonList();
   // Default season: the one containing the resume hint, else the first that
   // has any unwatched episodes, else the first available.
   epCurrentSeason = pickDefaultSeason();
@@ -7227,9 +7246,7 @@ async function openSeriesPage(seriesKey, title){
   epMetadata=d.metadata||null; epMetaImgBase=d.img_base||"";
   _epSeriesResume=d.resume||null;
 
-  const positiveSeasons=[...new Set(epFiles.map(f=>+f.season||0).filter(s=>s>0))].sort((a,b)=>a-b);
-  const hasZeroSeason=epFiles.some(f=>(+f.season||0)===0);
-  epSeasonList = positiveSeasons.length && hasZeroSeason ? [...positiveSeasons,0] : positiveSeasons;
+  _epRebuildSeasonList();
   epCurrentSeason = pickDefaultSeason();
   epIsMovie=false;
   _epApplyMovieChrome(false);
@@ -7243,20 +7260,49 @@ async function openSeriesPage(seriesKey, title){
   renderEpSeasonTabs();
   renderEpList();
 
-  // Enrich with full-series TMDb metadata by title (member items only cache the
-  // seasons they contain; a merged show wants every season's episode names).
-  if(!epMetadata || Object.keys((epMetadata.seasons)||{}).length < epSeasonList.filter(s=>s>0).length){
-    try{
-      const r=await fetch(`/api/tmdb/lookup?title=${encodeURIComponent(epHeroTitle)}`);
-      if(r.ok){
-        const m=await r.json();
-        if(epSeriesKey===seriesKey && m.metadata){
-          epMetadata=m.metadata; epMetaImgBase=m.img_base||epMetaImgBase;
-          renderEpHero(epHeroTitle); renderEpSeasonTabs(); renderEpList();
-        }
-      }
-    }catch(_){}
-  }
+  // Enrich with full-series TMDb metadata (member items only cache the seasons
+  // they contain; a merged show wants every season's episode names — and the
+  // missing-episode rows need the episode list of seasons we own NOTHING from).
+  await _epTopUpSeasons(()=>epSeriesKey===seriesKey, epHeroTitle);
+}
+
+// Fetch every season's episode list for the open show when the cache is short of
+// them, then repaint. "Short" is measured against the show's TMDb season
+// INVENTORY, not the seasons parsed off disk — the parsed count is exactly what's
+// unreliable, and a season we own nothing from has no files to count at all.
+// `stillOpen` guards against the user navigating away mid-request.
+async function _epTopUpSeasons(stillOpen, title){
+  // A movie has no seasons to top up, and a cached non-TV entry must never be
+  // overwritten by the fuzzy title lookup below.
+  if(epMetadata && epMetadata.tmdb_kind!=="tv") return;
+  // What we need episode lists for: the TMDb inventory, floored at the seasons we
+  // actually hold files in (an older cache carries no inventory, and a merged
+  // series' member metadata only ever covered that member's own seasons).
+  const local=new Set(epFiles.map(f=>+f.season||0).filter(n=>n>0));
+  const need=Math.max(_tmdbSeasonNumbers(epMetadata).length, local.size);
+  const have=Object.keys((epMetadata&&epMetadata.seasons)||{}).map(Number).filter(n=>n>0).length;
+  const byId=epMetadata && epMetadata.tmdb_kind==="tv" && epMetadata.tmdb_id;
+  // No inventory at all ⇒ a cache written before `all_seasons` existed. Its
+  // season count is the count of seasons someone once fetched, which says
+  // nothing about how many the show has, so "complete" can't be judged from it.
+  const noInventory = !(epMetadata && Array.isArray(epMetadata.all_seasons));
+  if(epMetadata && !noInventory && need && have>=need) return;   // already complete
+  if(!byId && !(title||"").trim()) return;
+  try{
+    const url=byId
+      ? `/api/tmdb/lookup?tmdb_id=${encodeURIComponent(epMetadata.tmdb_id)}&kind=tv`
+      : `/api/tmdb/lookup?title=${encodeURIComponent(title||"")}`;
+    const r=await fetch(url);
+    if(!r.ok) return;
+    const m=await r.json();
+    if(!stillOpen() || !m.metadata) return;
+    epMetadata=m.metadata; epMetaImgBase=m.img_base||epMetaImgBase;
+    _epRebuildSeasonList();
+    _epReconsiderMovieMode();
+    if(epSeasonList.length && !epSeasonList.includes(epCurrentSeason))
+      epCurrentSeason=pickDefaultSeason();
+    renderEpHero(title); renderEpSeasonTabs(); renderEpList();
+  }catch(_){}
 }
 
 // Representative item id for series-scoped reads/actions (metadata search, and
@@ -7308,9 +7354,18 @@ async function _epApplyMetadata(itemId, title, respPromise){
     epMetaImgBase=m.img_base||"";
   }
   if(epMetadata){
+    // Metadata may have widened the show beyond what's on disk (seasons we own
+    // nothing from), so the season strip is rebuilt before it's repainted.
+    _epRebuildSeasonList();
+    _epReconsiderMovieMode();
+    if(epSeasonList.length && !epSeasonList.includes(epCurrentSeason))
+      epCurrentSeason=pickDefaultSeason();
     renderEpHero(title);
     renderEpSeasonTabs();
     renderEpList();
+    // A single item only ever caches the seasons it contains — pull the rest so
+    // a missing season can list its real episodes rather than just a count.
+    _epTopUpSeasons(()=>epItemId===itemId, title);
     return;
   }
   if(m.pending){
@@ -7339,6 +7394,96 @@ function _epApplyMovieChrome(isMovie){
   if(moviePlay) moviePlay.classList.toggle("hidden", !isMovie);
 }
 
+// ── Library: seasons & episodes the show has but this box hasn't downloaded ──
+// The episode page diffs the show's TMDb inventory against what's on disk so a
+// season you own nothing from, and a one-episode hole in a season you mostly
+// own, both surface as rows instead of the list quietly closing over them.
+// A season you own nothing from is the degenerate "every episode missing" case —
+// same tab, same list, one code path. See docs/GOTCHAS.md § missing content.
+
+// Files whose season/episode never parsed (S0E0 after build_file_list). These
+// are real episodes hiding outside the season model, so while they exist EVERY
+// season looks short and a diff would report the whole show as missing.
+function _epUnattributedFiles(){
+  return epFiles.filter(f=>!(+f.season>0 && +f.episode>0));
+}
+// Above this share of unattributed files the diff is not trustworthy and the
+// whole feature stands down (with a visible note, not silently). A handful of
+// genuine specials/extras in a folder is fine; a release that numbers nothing is
+// not. See GitHub #15 — a non-SxxExx anime batch lands 100% here.
+const EP_MISSING_MAX_UNATTRIBUTED = 0.25;
+
+// Why the missing-content diff can't run for the open show, or "" when it can.
+function _epMissingBlockedReason(){
+  if(!missingContentEnabled)  return "off";
+  // No epIsMovie guard here on purpose: a real movie is already excluded by the
+  // tmdb_kind test below, and a TV show of which this box holds ONE episode
+  // opens in movie mode only because of the file count — it still has a season
+  // full of gaps to report. _epReconsiderMovieMode uses this to switch it back.
+  if(!epMetadata || epMetadata.tmdb_kind!=="tv") return "nometa";
+  if(!_tmdbSeasonNumbers(epMetadata).length)     return "nometa";
+  if(_tmdbAbsoluteNumbered(epMetadata, epFiles.map(f=>+f.season||0).filter(n=>n>0)))
+    return "absolute";
+  if(epFiles.length &&
+     _epUnattributedFiles().length/epFiles.length > EP_MISSING_MAX_UNATTRIBUTED)
+    return "unparsed";
+  return "";
+}
+function _epMissingOn(){ return !_epMissingBlockedReason(); }
+
+// A lone downloaded file opens as a movie panel (epIsMovie) — but one episode of
+// a show that's eleven episodes short is not a movie, and the panel has nowhere
+// to put the other eleven. Re-decide once metadata lands: a TV entry with an
+// actual gap becomes an episode list. A genuine one-episode item (a miniseries,
+// a special) finds no gap and keeps its movie panel.
+function _epReconsiderMovieMode(){
+  if(!epIsMovie || epFiles.length!==1 || !_epMissingOn()) return false;
+  if(!epSeasonList.some(sn=>sn>0 && _epMissingEpisodes(sn).length)) return false;
+  epIsMovie=false;
+  _epApplyMovieChrome(false);
+  return true;
+}
+
+// TMDb episodes of `season` with no file on disk. Unaired episodes are dropped
+// unless the admin opted into the "Upcoming" third state, so a currently-airing
+// show doesn't read as permanently incomplete.
+function _epMissingEpisodes(season){
+  if(!_epMissingOn() || +season<=0) return [];
+  const have=new Set(epFiles.filter(f=>(+f.season||0)===+season).map(f=>+f.episode||0));
+  return _missingTmdbEpisodes(epMetadata, season, have, missingUnaired);
+}
+
+// "have of total" for one season, for the season-strip count. `total` falls back
+// to the inventory's episode_count when that season's episode list hasn't been
+// fetched yet (a season we own nothing from, before the lazy top-up lands), so a
+// brand-new tab can still say "0 of 12" rather than nothing.
+function _epSeasonCounts(season){
+  const have=epFiles.filter(f=>(+f.season||0)===+season).length;
+  if(+season<=0 || !_epMissingOn()) return {have, total:have, missing:0};
+  const eps=_tmdbSeasonEpisodes(epMetadata, season);
+  let total, missing;
+  if(eps.length){
+    total   = eps.filter(te=>missingUnaired||!_tmdbEpUnaired(te)).length;
+    missing = _epMissingEpisodes(season).length;
+  } else {
+    const inv=(epMetadata.all_seasons||[]).find(x=>+x.season===+season);
+    total   = inv ? (+inv.episode_count||0) : have;
+    missing = Math.max(0, total-have);
+  }
+  return {have, total:Math.max(total, have), missing};
+}
+
+// Season tabs: seasons we hold files in, unioned with the seasons TMDb says the
+// show has (when the diff is trustworthy). Season 0 is appended as a trailing
+// "Specials" tab only when season-0 files actually exist — it is never invented.
+function _epRebuildSeasonList(){
+  const seen=new Set(epFiles.map(f=>+f.season||0).filter(n=>n>0));
+  if(_epMissingOn()) _tmdbSeasonNumbers(epMetadata).forEach(n=>seen.add(n));
+  const positive=[...seen].sort((a,b)=>a-b);
+  const hasZero=epFiles.some(f=>(+f.season||0)===0);
+  epSeasonList = positive.length && hasZero ? [...positive, 0] : positive;
+}
+
 function pickDefaultSeason(){
   if(!epSeasonList.length) return 0;
   // 1) season of currently playing file
@@ -7360,6 +7505,11 @@ function pickDefaultSeason(){
   for(const s of epSeasonList){
     const any=epFiles.some(f=>(+f.season||0)===s && !f.progress?.completed);
     if(any) return s;
+  }
+  // 4) first season we actually hold files in — never land on a season we own
+  //    nothing from; a wall of "not downloaded" is a poor way to open a show.
+  for(const s of epSeasonList){
+    if(epFiles.some(f=>(+f.season||0)===s)) return s;
   }
   return epSeasonList[0];
 }
@@ -7734,16 +7884,23 @@ function renderEpSeasonTabs(){
   tabs.classList.add("flex");
   const m=epMetadata;
   tabs.innerHTML=epSeasonList.map(s=>{
-    const cls=s===epCurrentSeason?"ep-season-tab active":"ep-season-tab";
-    let label;
+    let cls=s===epCurrentSeason?"ep-season-tab active":"ep-season-tab";
+    let label, count="";
     if(s===0){
       label="Specials";
     } else {
       const seasonMeta = m?.seasons?.[String(s)];
       label = (seasonMeta && seasonMeta.name && /\S/.test(seasonMeta.name))
                   ? escHtml(seasonMeta.name) : `Season ${s}`;
+      // "8 of 12" under the label, so a season that's quietly short — or one the
+      // box owns nothing from at all — is legible without opening it.
+      const c=_epSeasonCounts(s);
+      if(c.total>c.have){
+        cls += c.have ? " incomplete" : " absent";
+        count = `<span class="ep-season-count"><i class="ep-season-dot"></i>${c.have} of ${c.total}</span>`;
+      }
     }
-    return `<button class="${cls}" onclick="epSwitchSeason(${s})">${label}</button>`;
+    return `<button class="${cls}" onclick="epSwitchSeason(${s})">${label}${count}</button>`;
   }).join("");
   // Centre the active season in the horizontal strip. With many seasons the
   // active one (e.g. the viewer's mid-series spot) is otherwise off-screen,
@@ -7782,6 +7939,64 @@ function closeEpisodePage(){
 }
 // Back-compat alias for existing callers (refreshEpFiles, mark-watched etc).
 function closeEpisodeModal(){ closeEpisodePage(); }
+
+// ── Missing-content diff (shared: search picker + library episode page) ──────
+// TMDb's season/episode inventory is authoritative for what a show HAS. Both the
+// search picker and the library episode page ask the same question of it — "which
+// of these don't we have?" — and differ only in what "have" means (a found
+// torrent source vs. a file on disk), so the gap set lives here once.
+//
+// Season 0 never participates. Specials/OVAs/extras are a bottomless pit: diffing
+// them would leave almost every anime show reading as perpetually short.
+
+// Every season TMDb says the show has, positive only. Prefers `all_seasons` (the
+// full inventory off /tv/{id}) over the `seasons` map, which only covers seasons
+// someone actually asked for episodes for — a show can HAVE season 4 while the
+// cache holds episode lists for 1-3. Older caches have no `all_seasons`; they
+// fall back to the map and simply see fewer seasons until the next refresh.
+function _tmdbSeasonNumbers(meta){
+  if(!meta || meta.tmdb_kind!=="tv") return [];
+  if(Array.isArray(meta.all_seasons) && meta.all_seasons.length)
+    return meta.all_seasons.map(s=>+s.season).filter(n=>n>0).sort((a,b)=>a-b);
+  return Object.keys(meta.seasons||{}).map(Number).filter(n=>n>0).sort((a,b)=>a-b);
+}
+
+// A TMDb entry whose seasons don't map onto the scene's — a long-running anime
+// filed as one 1000-episode "Season 1". Diffing against it invents hundreds of
+// phantom gaps, so every missing-content path bails on it. `seasonsSeen` is
+// whatever seasons the caller actually observed (search hits, or files on disk).
+function _tmdbAbsoluteNumbered(meta, seasonsSeen){
+  if(!meta || meta.tmdb_kind!=="tv" || !meta.seasons) return false;
+  const nums=_tmdbSeasonNumbers(meta);
+  if(nums.length!==1) return false;
+  if(new Set(seasonsSeen).size>1) return true;   // we see more seasons than TMDb lists
+  return ((meta.seasons[String(nums[0])]||{}).episodes||[]).length>26;
+}
+
+// The TMDb episode entries for one season, or [] when that season's episode list
+// hasn't been fetched (or the show isn't a TV entry).
+function _tmdbSeasonEpisodes(meta, season){
+  if(!meta || meta.tmdb_kind!=="tv" || +season<=0) return [];
+  const s=(meta.seasons||{})[String(+season)];
+  return (s && Array.isArray(s.episodes)) ? s.episodes : [];
+}
+
+// True when an episode hasn't aired yet — a future air date, or none at all
+// (TMDb carries announced-but-unscheduled episodes with an empty air_date).
+function _tmdbEpUnaired(te){
+  const d=((te&&te.air_date)||"").trim();
+  if(!d) return true;
+  const t=Date.parse(d+"T00:00:00");
+  return isNaN(t) ? true : t>Date.now();
+}
+
+// TMDb episodes of `season` that `have` (a Set of episode numbers) doesn't cover.
+// Returns the full TMDb entries — callers want the name/overview/still to render
+// a real-looking row, not just a number.
+function _missingTmdbEpisodes(meta, season, have, includeUnaired){
+  return _tmdbSeasonEpisodes(meta, season).filter(te =>
+    +te.episode>0 && !have.has(+te.episode) && (includeUnaired || !_tmdbEpUnaired(te)));
+}
 
 function _tmdbEpisode(file){
   // Look up the TMDb episode entry matching this file's season+episode.
@@ -7978,6 +8193,90 @@ function _epCardHtml(f){
         ${TV_MODE?"":_epCardPrioRow(f, _p, notDownloaded)}
       </div>
     </div>`;
+}
+
+// A season/episode the show HAS that this box hasn't downloaded. Deliberately the
+// same card geometry as a real episode — TMDb number, name, overview and still —
+// so the union reads as one continuous run and a hole sits exactly where the
+// episode belongs. Drained of colour, dashed frame, square status dot, and NO
+// play affordance: it can never be mistaken for something playable. An unaired
+// episode gets its own third state ("Upcoming") with no Find button, since
+// there's nothing to go and look for yet.
+function _epMissingCardHtml(season, te){
+  const epNo=+te.episode||0;
+  const upcoming=_tmdbEpUnaired(te);
+  const label=`S${pad2(season)}E${pad2(epNo)}`;
+  const still=_stillUrl(te.still_path);
+  const air=((te.air_date)||"").trim();
+  const dot=upcoming?"bg-gray-500":"bg-orange-400";
+  const badge=upcoming
+    ? `<span class="text-[10px] text-gray-500 font-bold uppercase tracking-widest flex items-center gap-1"
+             title="TMDb lists this episode but it hasn't aired yet.">
+         <span class="w-1.5 h-1.5 ${dot}"></span>Upcoming${air?` · ${escHtml(air)}`:""}</span>`
+    : `<span class="text-[10px] text-orange-400 font-bold uppercase tracking-widest flex items-center gap-1"
+             title="This episode exists but isn't on this box.">
+         <span class="w-1.5 h-1.5 ${dot}"></span>Not downloaded</span>`;
+  return `<div class="ep-card ep-missing px-2 sm:px-5" data-missing="${season}-${epNo}">
+      <div class="ep-still">
+        ${still
+          ? `<img src="${escHtml(still)}" alt="" loading="lazy"/>`
+          : `<div class="flex items-center justify-center text-gray-700">
+               <span class="text-2xl font-black font-mono">${escHtml(label)}</span>
+             </div>`}
+      </div>
+      <div class="flex-1 min-w-0 flex flex-col">
+        <div class="flex items-center gap-2 flex-wrap">
+          <span class="text-[10px] sm:text-xs font-mono text-gray-500 mr-1">S${pad2(season)}&middot;E${pad2(epNo)}</span>
+          <span class="text-sm sm:text-base font-bold text-gray-400">${te.name?escHtml(te.name):`Episode ${epNo}`}</span>
+          ${badge}
+        </div>
+        ${te.overview
+          ? `<p class="text-[11px] sm:text-xs text-gray-500 mt-1 line-clamp-2">${escHtml(te.overview)}</p>`
+          : ""}
+        ${(TV_MODE||upcoming)?"":`<div class="flex items-center gap-0.5 mt-1.5 -ml-1">
+          <button onclick="epFindEpisode(${season},${epNo})"
+            class="h-9 px-2.5 flex items-center gap-1 text-[11px] font-bold uppercase tracking-wide
+                   text-gray-400 hover:text-white hover:bg-indigo-800/60 transition-colors"
+            title="Search the indexers for this episode and download it">
+            ${ic("search")} Find
+          </button>
+        </div>`}
+      </div>
+    </div>`;
+}
+
+// Hand a missing season/episode off to the NORMAL search + download flow, scoped
+// to it — the library page grows no hunting logic of its own. The Search tab's
+// show screen opens stacked over the episode page (both are z-50 full-screen, it
+// is later in the DOM), so its Back returns here with the library page intact.
+function _epSearchCandidate(){
+  if(!epMetadata || !epMetadata.tmdb_id) return null;
+  const y=(epMetadata.first_air_date||"").slice(0,4);
+  return {
+    id:       epMetadata.tmdb_id,
+    kind:     epMetadata.tmdb_kind||"tv",
+    title:    epHeroTitle || epMetadata.title || "",
+    year:     y?parseInt(y,10):null,
+    overview: epMetadata.overview||"",
+  };
+}
+function epFindEpisode(season, episode){
+  const c=_epSearchCandidate();
+  if(!c){ showAlert("No metadata for this show — can't search for it.","warn"); return; }
+  openSearchShowFromTmdb(c, {season:+season, episode:+episode});
+}
+function epFindSeason(season){
+  const c=_epSearchCandidate();
+  if(!c){ showAlert("No metadata for this show — can't search for it.","warn"); return; }
+  // Hand over the gap set measured against DISK. The show screen only knows
+  // which torrents it has found, so left to itself it would sweep (and offer)
+  // every episode of the season, including the ones already sitting here.
+  const episodes=_epMissingEpisodes(season).map(te=>+te.episode);
+  const owned=epFiles.filter(f=>(+f.season||0)===+season).length;
+  openSearchShowFromTmdb(c, {
+    season:+season, findMissing:true, episodes,
+    section: owned ? "episodes" : "packs",
+  });
 }
 
 // Compact per-episode priority row for the multi-episode card: DOWNLOAD order while
@@ -8330,9 +8629,26 @@ function renderEpList(){
   } else {
     visibleFiles = epFiles;
   }
+  // Episodes this season HAS that aren't on disk. A season we own nothing from
+  // is simply the case where this is the whole list.
+  const missingEps = epSeasonList.length ? _epMissingEpisodes(epCurrentSeason) : [];
 
-  if(!visibleFiles.length){
-    el.innerHTML=`<p class="text-gray-600 text-sm text-center py-12">No episodes in this season.</p>`;
+  if(!visibleFiles.length && !missingEps.length){
+    // A season TMDb says exists but whose episode list isn't cached here (the
+    // lazy top-up hasn't landed, or the internet is down) still deserves better
+    // than "no episodes" — that reads as "this season is empty", not "you own
+    // none of it", and the tab beside it already says "0 of 12".
+    const c=(epCurrentSeason>0 && _epMissingOn()) ? _epSeasonCounts(epCurrentSeason) : null;
+    el.innerHTML = (c && c.total>0)
+      ? `<div class="flex flex-col items-center gap-3 py-12 px-4 text-center">
+           <span class="w-2.5 h-2.5 bg-orange-400"></span>
+           <p class="text-gray-400 text-sm">None of this season's ${c.total} episode${c.total===1?"":"s"} are on this box.</p>
+           ${TV_MODE?"":`<button onclick="epFindSeason(${epCurrentSeason})"
+             class="text-xs px-4 py-2 bg-amber-700 hover:bg-amber-600 text-white uppercase tracking-wide transition-colors flex items-center gap-1.5">
+             ${ic("search")} Find sources
+           </button>`}
+         </div>`
+      : `<p class="text-gray-600 text-sm text-center py-12">No episodes in this season.</p>`;
     updateEpCount(); return;
   }
 
@@ -8349,7 +8665,10 @@ function renderEpList(){
       html += `<div class="px-3 sm:px-5 py-3 border-b border-gray-800">
         ${sMeta.overview ? `<p class="text-xs text-gray-400 line-clamp-3">${escHtml(sMeta.overview)}</p>` : ""}
         <div class="flex items-center justify-between gap-2 mt-2">
-          <span class="text-[10px] font-black text-gray-600 uppercase tracking-widest">${visibleFiles.length} episode${visibleFiles.length===1?"":"s"}</span>
+          <span class="text-[10px] font-black text-gray-600 uppercase tracking-widest">${
+            missingEps.length
+              ? `${visibleFiles.length} of ${visibleFiles.length+missingEps.length} episodes`
+              : `${visibleFiles.length} episode${visibleFiles.length===1?"":"s"}`}</span>
           ${TV_MODE?"":`<button onclick="epDownloadSeason(${epCurrentSeason})"
             class="text-[10px] text-gray-500 hover:text-indigo-300 hover:bg-indigo-950/40 px-2 py-1 flex items-center gap-1 transition-colors uppercase tracking-wide">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -8363,6 +8682,36 @@ function renderEpList(){
     }
   }
 
+  // Missing-content strip: what this season is short, plus a one-click handoff to
+  // the normal search/download flow scoped to it. Not on TV — finding and queuing
+  // downloads is host management, done from a phone (same rule as the scheduling
+  // bar below). When the diff had to stand down because the files aren't reliably
+  // numbered, SAY so: silence there is indistinguishable from "nothing missing".
+  if(!TV_MODE){
+    // The note is NOT gated on the season strip existing. "unparsed" is reached
+    // only for a TMDb-matched TV show, and the worst case — every file parsing to
+    // S0E0 — is precisely the one with no season tabs at all (GitHub #15), so
+    // gating it on epSeasonList would hide it exactly where it's needed.
+    if(_epMissingBlockedReason()==="unparsed"){
+      html += `<div class="px-3 sm:px-5 py-2 border-b border-gray-800 bg-gray-900/40 flex items-start gap-2">
+          <span class="w-2 h-2 mt-1 bg-gray-600 flex-shrink-0"></span>
+          <p class="text-[11px] text-gray-500 leading-snug">Some files here carry no season or episode number, so missing episodes can't be worked out for this show.</p>
+        </div>`;
+    } else if(epSeasonList.length && epCurrentSeason>0 && missingEps.length){
+      const n=missingEps.length;
+      html += `<div class="px-3 sm:px-5 py-2 bg-amber-950/40 border-b border-amber-900/50 flex items-center justify-between gap-2 flex-wrap">
+          <span class="text-[11px] text-amber-300 uppercase tracking-wide flex items-center gap-2">
+            <span class="w-2 h-2 bg-amber-400 flex-shrink-0"></span>
+            ${n} episode${n>1?"s":""} not downloaded
+          </span>
+          <button onclick="epFindSeason(${epCurrentSeason})"
+            class="text-[11px] px-2.5 py-1 bg-amber-700 hover:bg-amber-600 text-white uppercase tracking-wide transition-colors flex items-center gap-1">
+            ${ic("search")} Find sources
+          </button>
+        </div>`;
+    }
+  }
+
   // Scheduling bar — host-side control over what downloads/preps and when, at the
   // current scope (this season, or all files) plus the whole torrent. Shown for any
   // torrent-backed item, with or without TMDb metadata. Three sub-sections:
@@ -8371,7 +8720,7 @@ function renderEpList(){
   //   • Stream-prep (Now/Idle/Never) — the HLS-prep sibling; hidden on macOS (no HLS).
   //   • Recheck — force a piece-hash verify of the checked episodes.
   // Not on TV: download/prep scheduling is host management, done from a phone.
-  if(epHasTorrent && !TV_MODE){
+  if(epHasTorrent && !TV_MODE && visibleFiles.length){
     const scope=epSeasonList.length?`Season ${epCurrentSeason}`:"All files";
     const multi=epSeasonList.length>1;
     const allDownloaded=epFiles.length>0 && epFiles.every(f=>f.complete!==false);
@@ -8426,8 +8775,16 @@ function renderEpList(){
     html += `<div class="px-3 sm:px-5 py-2 border-b border-gray-800 flex flex-col gap-1.5 bg-gray-900/40">${rows}</div>`;
   }
 
+  // Missing episodes ride in the unwatched grid, interleaved by episode number:
+  // the union IS the list, so a gap mid-season reads as a gap instead of the list
+  // closing over it. Only re-sorted when there's something to interleave, so a
+  // fully-downloaded season keeps exactly the order it had before.
+  const rows = unwatched.map(f=>({ep:+f.episode||0, html:_epCardHtml(f)}))
+    .concat(missingEps.map(te=>({ep:+te.episode||0,
+                                 html:_epMissingCardHtml(epCurrentSeason, te)})));
+  if(missingEps.length) rows.sort((a,b)=>a.ep-b.ep);
   html += `<div class="grid grid-cols-1 xl:grid-cols-2 items-start">`;
-  unwatched.forEach(f=>{ html += _epCardHtml(f); });
+  rows.forEach(r=>{ html += r.html; });
   html += `</div>`;
 
   if(watched.length){
@@ -10410,22 +10767,13 @@ function _ssSeasonsWithEpisodes(){
 // "missing" rows under Season 1. Inferred from TMDb structure alone (one season
 // of >26 eps — longer than a normal 2-cour run) so it holds **before** the user
 // searches too; a scene that splits into multiple seasons confirms it outright.
-function _ssTmdbAbsolute(){
-  const ss=(_ssMeta&&_ssMeta.tmdb_kind==="tv"&&_ssMeta.seasons)||null;
-  if(!ss) return false;
-  const nums=Object.keys(ss).map(Number).filter(n=>n>0);
-  if(nums.length!==1) return false;
-  if(new Set(_ssEpisodes.map(e=>e.season)).size>1) return true;
-  return ((ss[String(nums[0])].episodes)||[]).length>26;
-}
+function _ssTmdbAbsolute(){ return _tmdbAbsoluteNumbered(_ssMeta, _ssEpisodes.map(e=>e.season)); }
 // Union of seasons we have episodes for AND seasons TMDb lists — so an entirely
 // missing season still gets a tab (all rows show "Find sources"). When TMDb is
 // absolute-numbered (above), its lone season is ignored — the scene's seasons win.
 function _ssAllSeasons(){
   const s=new Set(_ssEpisodes.map(e=>e.season));
-  if(_ssMeta&&_ssMeta.tmdb_kind==="tv"&&_ssMeta.seasons&&!_ssTmdbAbsolute()){
-    Object.keys(_ssMeta.seasons).forEach(k=>{ const n=+k; if(n>0) s.add(n); });
-  }
+  if(!_ssTmdbAbsolute()) _tmdbSeasonNumbers(_ssMeta).forEach(n=>s.add(n));
   return [...s].sort((a,b)=>a-b);
 }
 let _ssSearching=new Set();   // "<season>-<episode>" keys currently being searched
@@ -10506,8 +10854,13 @@ async function openSearchShow(group){
 // The page opens with NO torrents — Jackett is queried only when the user taps
 // the explicit "Search episodes" / "Search packs" (or per-episode/season Find)
 // buttons. Full metadata is fetched by id (exact entry, no fuzzy re-match).
-async function openSearchShowFromTmdb(cand){
+// `opts` scopes the open (used by the library's missing-season / missing-episode
+// rows): {season} lands on that season's tab, {episode} immediately hunts sources
+// for one episode, {findMissing} hunts every gap in the season. Omitted for the
+// plain TMDb-first search entry, which still opens with nothing searched.
+async function openSearchShowFromTmdb(cand, opts){
   if(!cand) return;
+  const o=opts||{};
   const group={title:cand.title||"", year:cand.year?parseInt(cand.year,10)||null:null, results:[]};
   _ssGroup=group; _ssMeta=null; _ssSearching.clear();
   _ssKind=cand.kind==="movie"?"movie":"tv"; _ssBroadResults=null; _ssPacksSearched=false; _ssEpisodesSearched=false;
@@ -10547,12 +10900,31 @@ async function openSearchShowFromTmdb(cand){
     }
   }catch(_){}
   finally{ if(_ssGroup===group) _ssSetLoading(false); }
+
+  // Scoped entry: land on the asked-for season and start the hunt straight away,
+  // rather than making the user re-press the buttons they just implied. A season
+  // the caller owns NOTHING from opens on Packs — one season pack beats twelve
+  // separate episode downloads — while a partially-owned one opens on Episodes
+  // and sweeps only the numbers the caller says are missing.
+  if(_ssGroup===group && o.season && _ssKind!=="movie"){
+    const seasons=_ssAllSeasons();
+    if(seasons.includes(+o.season)) _ssSeason=+o.season;
+    _ssSection=o.section==="packs"?"packs":"episodes";
+    _ssRender();
+    if(o.episode)                    ssSearchEpisode(+o.season, +o.episode);
+    else if(_ssSection==="packs")    ssSearchSeasonPacks(+o.season);
+    else if(o.findMissing)           ssFindMissing(+o.season, o.episodes);
+  }
 }
 
 function closeSearchShow(){
   document.getElementById("searchShowPage").classList.add("hidden");
   ssCloseSourceSheet(); ssCloseBulkSheet();
-  document.body.style.overflow="";
+  // The episode page may still be open underneath (a missing-episode handoff
+  // stacks this screen over it) — it owns the scroll lock, so don't hand
+  // scrolling back to the body and drop the library page's position.
+  const epPage=document.getElementById("episodePage");
+  document.body.style.overflow=(epPage && !epPage.classList.contains("hidden")) ? "hidden" : "";
   _ssGroup=null; _ssMeta=null; _ssKind=""; _ssBroadResults=null; _ssMetaLoading=false;
 }
 
@@ -11012,12 +11384,14 @@ function _ssMissingRowHtml(season, episode, name){
 }
 
 // Episode numbers TMDb lists for a season that we currently have no source for.
+// The gap set itself lives in _missingTmdbEpisodes (shared with the library
+// page); all that differs here is what "have" means — a found torrent, not a
+// file on disk. Unaired episodes are kept: searching for one costs nothing and
+// fansub releases do show up before TMDb's air date.
 function _ssMissingEpisodes(season){
   if(_ssTmdbAbsolute()) return [];   // TMDb season list doesn't map to scene seasons
-  const tmdbEps=(_ssMeta&&_ssMeta.seasons&&_ssMeta.seasons[String(season)]&&_ssMeta.seasons[String(season)].episodes)||[];
-  if(!tmdbEps.length) return [];
   const have=new Set(_ssEpisodes.filter(e=>e.season===season).map(e=>e.episode));
-  return tmdbEps.map(te=>te.episode).filter(ep=>ep>0 && !have.has(ep));
+  return _missingTmdbEpisodes(_ssMeta, season, have, true).map(te=>+te.episode);
 }
 
 // Spawn a targeted follow-up search for one missing episode, merging any matching
@@ -11060,9 +11434,13 @@ async function ssSearchEpisode(season, episode, opts={}){
 }
 
 // Hunt sources for every missing episode of a season (throttled). Re-renders as
-// each result lands so the list fills in live.
-async function ssFindMissing(season){
-  const missing=_ssMissingEpisodes(season);
+// each result lands so the list fills in live. `only` narrows the sweep to an
+// explicit set of episode numbers — the library's "Find sources" hands over the
+// episodes missing FROM DISK, which this screen (which only knows about torrents
+// it has found) could never work out for itself.
+async function ssFindMissing(season, only){
+  const missing=(only && only.length) ? only.map(Number).filter(n=>n>0)
+                                      : _ssMissingEpisodes(season);
   if(!missing.length){ showAlert("Nothing missing.","success"); return; }
   const btn=document.getElementById("ssFindMissingBtn");
   if(btn){ btn.disabled=true; btn.textContent="Searching…"; }
@@ -18651,6 +19029,22 @@ function connectSSE(){
     if(typeof d.subtitle_default_language === "string") subtitleDefaultLang = d.subtitle_default_language;
     if(typeof d.subtitle_upgrade_late === "boolean") subtitleUpgradeLate = d.subtitle_upgrade_late;
     if(typeof d.subtitle_single_option === "boolean") subtitleSingleOption = d.subtitle_single_option;
+    // Missing-content policy rides in every state event, so flipping it in the
+    // admin panel repaints an already-open episode page without a reload.
+    if(typeof d.missing_content === "boolean" || typeof d.missing_unaired === "boolean"){
+      const was=`${missingContentEnabled}|${missingUnaired}`;
+      if(typeof d.missing_content === "boolean") missingContentEnabled = d.missing_content;
+      if(typeof d.missing_unaired === "boolean") missingUnaired = d.missing_unaired;
+      if(was!==`${missingContentEnabled}|${missingUnaired}` &&
+         !document.getElementById("episodePage").classList.contains("hidden")){
+        try{
+          _epRebuildSeasonList();
+          if(epSeasonList.length && !epSeasonList.includes(epCurrentSeason))
+            epCurrentSeason=pickDefaultSeason();
+          renderEpSeasonTabs(); renderEpList();
+        }catch(_){}
+      }
+    }
     if(typeof d.vpn_block_ui === "boolean") app.vpn_block_ui=d.vpn_block_ui;
     renderVpn(d.vpn_secure,d.vpn_status,app.vpn_block_ui,app.vpn_mode); renderPlayer(app);
     updateDlBadge(d.downloading_count||0);
@@ -18817,6 +19211,10 @@ document.addEventListener("keydown",e=>{
   // one layer via _tvBack(); this bulk close-everything would blow through
   // the whole stack (episode page included) on a single press.
   if(e.key==="Escape" && !TV_MODE){
+    // Stacked pages close top-down: a show screen opened over the episode page
+    // (a missing-season/episode handoff) must not take the library page with it.
+    const ssPage=document.getElementById("searchShowPage");
+    if(ssPage && !ssPage.classList.contains("hidden")){ closeSearchShow(); return; }
     closeFullscreenControls();
     closeDownloadModal(); closeProfileModal(); closeEpisodeModal(); closeStorageModal();
     closeStreamPicker(true);
@@ -19030,6 +19428,8 @@ document.addEventListener("DOMContentLoaded",async()=>{
     if(d && typeof d.subtitle_default_language === "string") subtitleDefaultLang = d.subtitle_default_language;
     if(d && typeof d.subtitle_upgrade_late === "boolean") subtitleUpgradeLate = d.subtitle_upgrade_late;
     if(d && typeof d.subtitle_single_option === "boolean") subtitleSingleOption = d.subtitle_single_option;
+    if(d && typeof d.missing_content === "boolean") missingContentEnabled = d.missing_content;
+    if(d && typeof d.missing_unaired === "boolean") missingUnaired = d.missing_unaired;
   }).catch(()=>{});
 
   // Fetch the global max-volume cap so sliders are clamped correctly
@@ -19073,6 +19473,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.17.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.18.0</div>
 </body>
 </html>

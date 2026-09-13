@@ -215,7 +215,7 @@ For each profile:
 
 ### 7. System
 
-Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Automatic Stream Prep**, **Auto-Prep on Play**, **Force Stream Prep**, **Validate & Repair on Prep**, **File Validator**, **Storage & Compression**, **Network Adapter**, **VPN Kill Switch**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
+Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Automatic Stream Prep**, **Auto-Prep on Play**, **Show Missing Content**, **Force Stream Prep**, **Validate & Repair on Prep**, **File Validator**, **Storage & Compression**, **Network Adapter**, **VPN Kill Switch**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
 
 #### System Health
 
@@ -347,6 +347,20 @@ Panel control: a single enable/disable toggle (saves immediately on click).
 
 - `GET /api/admin/play-prep` → `{enabled}`.
 - `POST /api/admin/play-prep` → `{enabled}`.
+
+#### Show Missing Content
+
+Whether a show's page lists the seasons and episodes TMDb says it has but this box has not downloaded — dimmed rows in episode order, so a season you own nothing from and a single-episode hole mid-season are both visible instead of the list silently closing over them. Each row offers to go and find sources for itself, handing off to the normal Search show screen scoped to that season/episode. Config persists under `library.json -> settings.missing_content` (`_missing_content_cfg`), mirrored onto `state.missing_content_enabled` / `state.missing_content_unaired` so it rides in every `state` SSE event and an already-open dashboard repaints without a reload.
+
+Two toggles:
+
+- **Enabled** (default **on**) — the whole diff. Off means the library shows only what is on disk, exactly as before 11.18.0.
+- **Include Unaired Episodes** (default **off**) — what happens to a TMDb episode whose air date is in the future or absent. Off hides them, so a currently-airing show does not read as permanently incomplete; on gives them their own third state, **Upcoming**, visible but with nothing to download. Disabled in the panel while the feature itself is off.
+
+The diff is computed entirely **client-side** off metadata the page already holds, so neither toggle costs the server anything per request. It stands down on its own where it cannot be trusted — no TMDb match, a show TMDb files as one giant absolute-numbered season, or an item whose files mostly parse to no season/episode at all; the last case says so in the episode list rather than quietly showing nothing. Specials (season 0) never participate. See [FRONTEND.md § Missing content](FRONTEND.md) and [GOTCHAS.md](GOTCHAS.md).
+
+- `GET /api/admin/missing-content` -> `{enabled, show_unaired}`.
+- `POST /api/admin/missing-content` -> `{enabled, show_unaired}`.
 
 #### Validate & Repair on Prep
 

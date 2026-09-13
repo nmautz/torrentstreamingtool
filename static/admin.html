@@ -1017,6 +1017,32 @@
       </div>
     </div>
 
+    <!-- Library: not-yet-downloaded seasons & episodes -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Show Missing Content<span class="help-tip" tabindex="0" data-tip="Needs a TMDb key and correct per-file season/episode numbers. A show whose files don't parse into seasons, or one TMDb files as a single 1000-episode season, is left alone rather than reported as entirely missing. Specials never participate.">?</span></h2>
+          <p class="text-xs text-gray-500 mt-0.5">On a show's page, list the seasons and episodes TMDb says it has but this box hasn't downloaded — dimmed rows in episode order, so a season you own nothing from and a single-episode hole mid-season are both visible. Each one offers to go and find sources for itself.</p>
+        </div>
+        <button id="mcEnabledBtn" onclick="toggleMissingContent()"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+                 bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">
+          &hellip;
+        </button>
+      </div>
+      <div class="px-5 py-4 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h3 class="text-xs font-black uppercase tracking-wide text-gray-200">Include Unaired Episodes</h3>
+          <p class="text-xs text-gray-500 mt-0.5">Off (default): episodes that haven't aired yet are hidden, so a currently-airing show doesn't read as permanently incomplete. On: they appear in their own <strong>Upcoming</strong> state — visible, but with nothing to download.</p>
+        </div>
+        <button id="mcUnairedBtn" onclick="toggleMissingUnaired()"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+                 bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">
+          &hellip;
+        </button>
+      </div>
+    </div>
+
     <!-- Automatic maintenance (idle background fingerprint + validate) -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800">
@@ -1895,7 +1921,7 @@ function switchTab(tab){
   else                   stopCompressionPolling();
   if(tab==="cleanup")    loadCleanup();
   if(tab==="background") loadBackgroundVideo();
-  if(tab==="system")   { loadNetwork(); loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadAutoMaint(); loadPrepValidate(); loadVpnKillswitch(); loadForcePrep(); loadFileValidation(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
+  if(tab==="system")   { loadNetwork(); loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadMissingContent(); loadAutoMaint(); loadPrepValidate(); loadVpnKillswitch(); loadForcePrep(); loadFileValidation(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
   else                 { stopSysHealthPolling(); stopForcePrepPolling(); stopFileValidationPolling(); stopFileRepairPolling(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); if(!_auChangelogLoaded) loadChangelog(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
@@ -2549,6 +2575,71 @@ async function togglePlayPrep(){
   }finally{
     btn.disabled = false;
   }
+}
+
+// ── Library missing content (not-yet-downloaded seasons/episodes) ─────────────
+let _mcCfg = {enabled:true, show_unaired:false};
+
+function _mcRenderBtn(id, on, onLabel, offLabel){
+  const btn = document.getElementById(id);
+  if(!btn) return;
+  btn.textContent = on ? onLabel : offLabel;
+  btn.className = on
+    ? "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-emerald-950 border-emerald-700 text-emerald-300 hover:bg-emerald-900 disabled:opacity-50"
+    : "flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50";
+}
+function _mcRender(){
+  _mcRenderBtn("mcEnabledBtn", _mcCfg.enabled, "Enabled", "Disabled");
+  _mcRenderBtn("mcUnairedBtn", _mcCfg.show_unaired, "On", "Off");
+  // The unaired sub-setting is meaningless while the feature is off.
+  const u = document.getElementById("mcUnairedBtn");
+  if(u) u.disabled = !_mcCfg.enabled;
+}
+
+async function loadMissingContent(){
+  try{
+    const r = await fetch("/api/admin/missing-content", {headers: authHeader()});
+    if(!r.ok) return;
+    const d = await r.json();
+    _mcCfg = {enabled: !!d.enabled, show_unaired: !!d.show_unaired};
+    _mcRender();
+  }catch(_){}
+}
+
+async function _mcSave(next, okMsg){
+  const btns = ["mcEnabledBtn","mcUnairedBtn"].map(id=>document.getElementById(id));
+  btns.forEach(b=>{ if(b) b.disabled = true; });
+  try{
+    const r = await fetch("/api/admin/missing-content",{
+      method:"POST",
+      headers:{...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify(next),
+    });
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      showToast(`Save failed: ${d.detail || r.status}`, true);
+      return;
+    }
+    const d = await r.json();
+    _mcCfg = {enabled: !!d.enabled, show_unaired: !!d.show_unaired};
+    showToast(okMsg);
+  }catch(_){
+    showToast("Save failed.", true);
+  }finally{
+    btns.forEach(b=>{ if(b) b.disabled = false; });
+    _mcRender();
+  }
+}
+
+function toggleMissingContent(){
+  const next = {..._mcCfg, enabled: !_mcCfg.enabled};
+  _mcSave(next, next.enabled ? "Missing content shown in the library."
+                             : "Missing content hidden — the library shows only what's on disk.");
+}
+function toggleMissingUnaired(){
+  const next = {..._mcCfg, show_unaired: !_mcCfg.show_unaired};
+  _mcSave(next, next.show_unaired ? "Unaired episodes shown as Upcoming."
+                                  : "Unaired episodes hidden.");
 }
 
 // ── Automatic Maintenance (idle fingerprint + validate) ───────────────────────

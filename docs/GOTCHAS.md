@@ -1095,9 +1095,24 @@ The metadata cache carries a `source`: `"tmdb"` (auto), `"manual"` (user picked 
 
 Custom metadata art is whatever URL the user pastes, loaded directly by the `<video>` hero's `<img>`/CSS `background-image`. The dashboard is served over **HTTPS** (and the iOS app runs under `capacitor://`), so an `http://` image URL is blocked as insecure mixed content and silently shows the placeholder. The Custom tab warns the user to use `https`. Don't proxy these through the host (that would re-introduce an SSRF surface for no real benefit) — just document the https requirement.
 
-### Season tab uses `f.season` parsed off disk
+### Season tabs are the UNION of disk and TMDb — and the diff fails closed (11.18.0)
 
-The season list in the episode page (`epSeasonList`) is built from `parse_season_episode` on the file paths, not from TMDb. This is intentional — TMDb has the canonical seasons, but the **on-disk** files are what the user can actually play. A file with no parseable `SxxEyy` lands in season `0` and shows up in the no-season fallback branch. If TMDb says season 4 exists but the user only has files for seasons 1–3, season 4 never appears as a tab.
+Before 11.18.0 `epSeasonList` was built purely from `parse_season_episode` on the file paths: if TMDb said season 4 existed but only seasons 1–3 were on disk, season 4 never appeared. It now unions the on-disk seasons with the show's TMDb seasons (`_epRebuildSeasonList`), and `renderEpList` renders the union of files and the season's missing TMDb episodes — that is the whole "show missing content" feature.
+
+The thing to be careful about is **when not to do it**. A diff against TMDb is only as good as the per-file season/episode attribution, and that attribution fails silently and completely on releases that do not use `SxxExx` (see GitHub #15 — every one of Attack on Titan's 131 files parses as `season: 0, episode: 0`). Diffing in that state reports *every episode of every season* as missing, which is far worse than showing nothing. So `_epMissingBlockedReason()` gates the entire feature and returns a reason instead of silently doing nothing:
+
+- **`"unparsed"`** — more than 25% of the item's files (`EP_MISSING_MAX_UNATTRIBUTED`) have no positive season AND episode. Those are real episodes hiding outside the season model, so every season would read as short. The episode list shows an explicit note; do not "fix" this by lowering the threshold — fix the parser (#15) instead.
+- **`"absolute"`** — TMDb files the show as a single 1000-episode "Season 1" (long-running anime). Its season numbers do not map onto the scene's, so a diff invents hundreds of phantom gaps. Detected by `_tmdbAbsoluteNumbered`, shared with the search picker's `_ssTmdbAbsolute`.
+- **`"nometa"`** — no TMDb match, or not a TV entry. **Fail closed**: no metadata means no missing rows, never invented gaps.
+- **`"off"`** — the admin turned it off (`settings.missing_content.enabled`).
+
+Two more deliberate exclusions: **season 0 never participates** (specials/OVAs/extras are a bottomless pit — almost every anime show would read as perpetually short), and **unaired episodes are dropped by default** (`_tmdbEpUnaired`: future or absent `air_date`), because otherwise a currently-airing show looks permanently incomplete. The admin can opt them into a distinct "Upcoming" state instead, but they are never presented as something to download.
+
+### `metadata.seasons` is NOT the show's season list — `all_seasons` is
+
+`_fetch_item_metadata` asks TMDb only for the seasons **present on disk**, so `metadata.seasons` is "seasons whose episode lists we happened to fetch", not "seasons the show has". Reading a show's season count off `Object.keys(metadata.seasons)` therefore under-reports exactly when it matters most — a show you own one season of looks like a one-season show. `_tmdb_fetch_tv` now also stores **`all_seasons`** (the full inventory, taken free from the `/tv/{id}` response it already makes, with `episode_count` per season), and `_tmdbSeasonNumbers()` prefers it. Use `all_seasons` for "does this season exist", `seasons[N].episodes` for "what are its episodes".
+
+Caches written before 11.18.0 have no `all_seasons`, so `_fetch_item_metadata` treats a TV entry missing that key as stale and re-fetches it once — **by its existing `tmdb_id`**, never a fresh auto-match (a re-match could silently re-bind the item to a different show), preserving `source` so pinned `manual`/`custom` entries stay pinned. A merged series never hits `GET /api/library/{id}/metadata`, so `get_series_files` fires the same self-heal in the background; until it lands the frontend tops up from `/api/tmdb/lookup`, which fetches every season. The old merged-series top-up condition compared the cached season count against the **parsed** season count — useless here, since the parsed count is the unreliable number and a season owned nothing of has no files to count; `_epTopUpSeasons` measures against the inventory instead.
 
 ### Episode stills are joined by (season, episode) pair
 
