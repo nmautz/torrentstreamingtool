@@ -608,14 +608,14 @@ def _marquee_write(text: str) -> None:
 #
 # It *was* a hand-maintained literal "kept in sync" with the badge, and it drifted
 # almost immediately — the constant sat at 11.12.1 while the shipped page said
-# 11.14.1. That is not cosmetic: clients fetch this via /api/version and force a
+# 11.15.0. That is not cosmetic: clients fetch this via /api/version and force a
 # hard reload when their cached page's badge is older, so a lagging constant means
 # dashboards silently keep serving a stale frontend after an update. The literal
 # below is only the fallback for a missing/unreadable page.
 _UI_VERSION_BADGE_RE = re.compile(r'<div[^>]*\bdata-ui-version\b[^>]*>([^<]*)</div>')
 
 
-def _read_ui_version(default: str = "11.14.1") -> str:
+def _read_ui_version(default: str = "11.15.0") -> str:
     """Parse the UI version out of the shipped `static/index.html` badge."""
     try:
         html = (Path(__file__).resolve().parent / "static" / "index.html").read_text(
@@ -6108,7 +6108,54 @@ def _release_key(title: str) -> str:
     return re.sub(r"[^a-z0-9]+", "", (title or "").lower())
 
 
-def _retry_candidates(item: dict, shaped: list, tried: set) -> list:
+# Trailing tokens that look like a release group but are format tags. Without
+# this, "… 1080p AMZN WEB-DL" yields the group "dl" for half the library.
+_NOT_A_RELEASE_GROUP = {"dl", "rip", "ray", "web", "hd", "sd", "tv", "dvd",
+                        "bd", "uhd", "hdtv", "remux"}
+
+
+def _release_group(title: str) -> str:
+    """The scene release group from a title or filename, lowercased ("" if none).
+
+    `Hacks.S04E02.1080p.HEVC.x265-MeGusta` → `megusta`, and
+    `hacks.s04e01.1080p.web.h264-successfulcrab[EZTVx.to].mkv` → `successfulcrab`
+    (the tracker tag and extension are stripped first, or the trailing `-token`
+    match would never reach the group).
+    """
+    t = re.sub(r"\.[A-Za-z0-9]{2,4}$", "", (title or "").strip())   # file extension
+    t = re.sub(r"[\[(][^\])]*[\])]\s*$", "", t).strip()             # [EZTVx.to] etc.
+    m = re.search(r"-([A-Za-z0-9]{2,20})$", t)
+    if not m:
+        return ""
+    g = m.group(1).lower()
+    return "" if (g in _NOT_A_RELEASE_GROUP or not re.search(r"[a-z]", g)) else g
+
+
+def _proven_release_groups(lib: dict) -> set:
+    """Release groups that have actually finished downloading on THIS box.
+
+    The retry's ordering signal of last resort — and in practice the best one it
+    has. Indexer seeder counts are advertised, not measured, and have been wrong
+    every time it mattered here: one release claimed 47 seeders with none
+    reachable, the next claimed 50 and sat at zero. "This group's torrents have
+    actually completed on this machine, over this VPN" is evidence rather than a
+    claim, so a proven group outranks a bigger advertised swarm.
+    """
+    proven: set = set()
+    for it in lib.get("items", []):
+        if it.get("status") != "ready":
+            continue
+        names = [it.get("title", "")]
+        names += [f.get("name", "") for f in it.get("files", [])]
+        for n in names:
+            g = _release_group(n)
+            if g:
+                proven.add(g)
+    return proven
+
+
+def _retry_candidates(item: dict, shaped: list, tried: set,
+                      proven: Optional[set] = None) -> list:
     """Alternative releases for `item`, best first, excluding everything tried.
 
     For an episode item the candidate must parse to the **same season+episode** —
@@ -6120,6 +6167,10 @@ def _retry_candidates(item: dict, shaped: list, tried: set) -> list:
 
     `tried` holds both info-hashes and `_release_key` titles; a candidate matching
     either is skipped, and the returned list is itself de-duplicated by title.
+
+    `proven` (from `_proven_release_groups`) outranks the seeder count: a group
+    whose torrents have actually completed on this box beats a stranger with a
+    bigger advertised swarm, because the advertised number keeps being wrong.
     """
     season = int(item.get("season") or 0)
     episode = int(item.get("episode") or 0)
@@ -6143,7 +6194,10 @@ def _retry_candidates(item: dict, shaped: list, tried: set) -> list:
                 continue
         seen.add(rkey)
         out.append((key, r))
-    out.sort(key=lambda kr: int(kr[1].get("seeders", 0) or 0), reverse=True)
+    pg = proven or set()
+    out.sort(key=lambda kr: (_release_group(kr[1].get("title", "")) in pg,
+                             int(kr[1].get("seeders", 0) or 0)),
+             reverse=True)
     return out
 
 
@@ -6177,23 +6231,36 @@ async def _retry_dead_download(item: dict, lib: dict) -> str:
     if cur_hash:
         tried.add(cur_hash)
 
-    if len(attempts) >= _MAX_DOWNLOAD_RETRIES:
-        return _fail_dead_download(item, len(attempts) + 1)
+    # Bank the release being abandoned BEFORE anything overwrites the title.
+    # `tried` is rebuilt from `download_attempts` on every later call, and the
+    # original is only reachable through `item["title"]` — which this function
+    # replaces. Without this the first dead pick is forgotten the moment it is
+    # swapped out, and a later retry can cheerfully choose it again.
+    if not attempts:
+        attempts.append({"key": cur_hash or _release_key(item.get("title", "")),
+                         "title": item.get("title", ""), "at": _now_iso(),
+                         "outcome": "dead"})
+        item["download_attempts"] = attempts
+
+    # `attempts` counts every release tried, the original included, so the budget
+    # is one more than the number of REPLACEMENTS allowed.
+    if len(attempts) > _MAX_DOWNLOAD_RETRIES:
+        return _fail_dead_download(item, len(attempts))
     if not state.vpn_secure:
         return ""   # qBit is stopped anyway — hold the count and wait
 
     query = _retry_query_for(item)
     if not query.strip():
-        return _fail_dead_download(item, len(attempts) + 1)
+        return _fail_dead_download(item, len(attempts))
     try:
         shaped = await _indexer_query(query, lib)
     except Exception as exc:
         log.warning("[download] retry search failed for %s: %s", query, exc)
         return ""   # indexers down — not the release's fault, try again later
 
-    cands = _retry_candidates(item, shaped, tried)
+    cands = _retry_candidates(item, shaped, tried, _proven_release_groups(lib))
     if not cands:
-        return _fail_dead_download(item, len(attempts) + 1)
+        return _fail_dead_download(item, len(attempts))
 
     save_path = ((item.get("download_source") or {}).get("save_path")
                  or settings.qbit_download_path)
@@ -6206,7 +6273,7 @@ async def _retry_dead_download(item: dict, lib: dict) -> str:
     # reject burns the attempt but must never end the call with the item left
     # `downloading` and hash-less — the monitor skips hash-less items, so that
     # would strand it exactly the way the vanished-torrent bug used to.
-    budget = max(0, _MAX_DOWNLOAD_RETRIES - len(attempts))
+    budget = max(0, _MAX_DOWNLOAD_RETRIES + 1 - len(attempts))
     pick: dict = {}
     new_hash = ""
     for key, cand in cands[:budget]:
@@ -6220,7 +6287,7 @@ async def _retry_dead_download(item: dict, lib: dict) -> str:
                     cand.get("title", ""))
     item["download_attempts"] = attempts
     if not new_hash:
-        return _fail_dead_download(item, len(attempts) + 1)
+        return _fail_dead_download(item, len(attempts))
 
     log.warning("[download] %s fetched nothing in %d min — switching to %r (%s seeders)",
                 item.get("title", ""), _DOWNLOAD_STALL_TICKS * 5 // 60,
@@ -8544,6 +8611,8 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
             # How many releases this item has already burned through (the dead-swarm
             # auto-retry swaps the torrent in place, so without this the title would
             # just silently change under the user).
+            # Releases tried so far, the original included — so it reads directly
+            # as the ordinal in the card's "Release N" chip.
             "retry_count": len(it.get("download_attempts") or []),
             "torrent_hash": it.get("torrent_hash", ""),
             "series_key": _series_key(it),   # groups same-series items into one show tile

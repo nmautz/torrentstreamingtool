@@ -6069,7 +6069,7 @@ function _libItemChrome(item){
   // The dead-swarm auto-retry replaces the torrent (and the title) in place, so
   // say that it happened — a card that silently renames itself is alarming.
   const retryBadge=(isDownloading&&item.retry_count>0)
-    ?`<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 border border-gray-700" title="The previous release never sent any data, so StreamLink switched to another one automatically.">${ic("resume")} Release ${item.retry_count+1}</span>`
+    ?`<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 border border-gray-700" title="The previous release never sent any data, so StreamLink switched to another one automatically.">${ic("resume")} Release ${item.retry_count}</span>`
     :"";
   const statusBadge=isDownloading
     ?dlBadge+retryBadge
@@ -18756,6 +18756,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.14.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.15.0</div>
 </body>
 </html>
