@@ -188,7 +188,9 @@ PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "so
   "added_at": "2026-05-13T01:58:59+00:00",
   "status": "downloading|ready|error",
   "torrent_hash": "abc123...",          // empty for uploaded items
+  "error": "",                          // optional; why a status=="error" item failed — shown as the Error badge's tooltip
   "pending_download": { /* optional; restart-recovery params, see below */ },
+  "download_source": { /* optional; magnet + save_path kept while downloading, see below */ },
   "download": { /* download schedule; see below */ },
   "prep": { /* stream-prep schedule; see below */ },
   "progress": { /* per-profile; see below */ },
@@ -224,6 +226,25 @@ a hash would otherwise be a permanent orphan (the monitor skips hash-less items 
 lived only in the now-dead task). On startup `_recover_interrupted_downloads` re-drives the pipeline
 for any `downloading` item still carrying a `pending_download.magnet`. Normal, fully-added items
 **do not** carry this field. See [BACKEND.md](BACKEND.md) and [GOTCHAS.md](GOTCHAS.md).
+
+### `download_source` (re-add params, kept for the life of the download)
+
+```jsonc
+"download_source": {
+  "magnet": "magnet:?xt=...",      // the source magnet, so the torrent can be re-added
+  "save_path": "C:\\Users\\...\\StreamLink"
+}
+```
+
+Written by `library_download_pipeline` alongside `torrent_hash` and cleared when the item flips
+to `ready`. Distinct from `pending_download`, which covers a *restart* mid-add and is dropped as
+soon as the hash lands: this one covers qBittorrent **losing a torrent it had already accepted**.
+qBit keeps no resume data for a magnet whose metadata never arrived, so a kill — which the VPN
+kill-switch performs on every drop — silently loses it, and the item would otherwise sit at
+`downloading` forever polling a hash nothing holds. `library_download_monitor` re-adds from this
+field at 30 s and 90 s, then errors the item at 3 min. Items from before 11.13.0 have no
+`download_source`; recovery falls back to a bare `magnet:?xt=urn:btih:<hash>`.
+See [BACKEND.md](BACKEND.md) and [GOTCHAS.md](GOTCHAS.md).
 
 ### `download` (download schedule)
 

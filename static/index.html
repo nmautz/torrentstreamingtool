@@ -3948,6 +3948,9 @@ function fmtTimeSecs(sec) {
 function avatarBg(c) { return (PROFILE_COLORS[c]||PROFILE_COLORS.indigo).bg; }
 function formatDlStat(d){
   const parts=[];
+  // No file list from the swarm yet — nothing is actually transferring, so don't
+  // dress it up as a download in progress.
+  if(d.awaiting_metadata&&!d.paused) return ic("hourglass")+" Finding peers…";
   if(d.total_bytes>0) parts.push(`${fmtSize(d.downloaded_bytes)} / ${fmtSize(d.total_bytes)} (${d.progress_pct}%)`);
   // Intentionally halted by the scheduler (idle window closed) — say so instead of
   // showing a misleading "↓ 0/s".
@@ -6065,7 +6068,7 @@ function _libItemChrome(item){
   }
   const statusBadge=isDownloading
     ?dlBadge
-    :isError?`<span class="text-[10px] px-1.5 py-0.5 bg-red-900/50 text-red-400 border border-red-800">Error</span>`
+    :isError?`<span class="text-[10px] px-1.5 py-0.5 bg-red-900/50 text-red-400 border border-red-800"${item.error?` title="${escHtml(item.error)}"`:""}>Error</span>`
     :allDone?`<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-500 border border-gray-700"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg> All watched</span>`:"";
 
   let skipBadge = "";
@@ -18748,6 +18751,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.12.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.13.0</div>
 </body>
 </html>

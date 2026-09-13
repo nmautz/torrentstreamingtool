@@ -1437,6 +1437,42 @@ probed. `503` on macOS (`HLS_AVAILABLE` false).
 
 ---
 
+## Never prep an incomplete download
+
+**A bundle built from a half-downloaded file is permanently broken, and looks
+fine while it happens.** qBittorrent writes pieces into a sparse file whose
+reported length reaches its final value long before the last piece lands, so
+`Path.exists()` and `st_size` cannot tell a partial file from a finished one —
+it is simply full of holes. ffmpeg stream-copies straight through those holes,
+emits a full-duration playlist and exits 0. Playback then runs for a few
+seconds and cuts to black.
+
+What makes it unrecoverable is the cache key. `_offline_cache_key` is
+`sha256(version|name|size)[:24]` and the size is *already final*, so the garbage
+bundle lands on exactly the key the finished file will resolve to.
+`_maybe_start_prep_job` then reports `cached` forever and nothing ever rebuilds
+it. (Observed on *Hacks S04E01*: the encode finished 29 s before qBittorrent
+finished the download; the bundle was 1,637 MB where a clean rebuild is 2,112 MB.)
+
+Two gates, because prep has more than one entry point:
+
+- **`_enqueue_library_prep`** calls `_incomplete_download_paths(item)` per item —
+  qBit's **per-file** `progress < 1.0` — and skips those paths, so auto-prep
+  never queues them in the first place. An item that isn't `status="downloading"`
+  costs no qBit call.
+- **`_run_offline_job`** re-checks with `_src_still_downloading(src)` immediately
+  before the encode, so play-driven (`play_prep`), interactive and admin
+  force-prep jobs can't slip one past either. A job that hits this gate parks as
+  `pending` and re-checks every 15 s, mirroring the `_is_compressing` park just
+  above it.
+
+Both err towards *not* encoding: if the item is downloading and qBit can't
+confirm the files (torrent gone, qBit down), every file is treated as incomplete.
+
+> **Existing damage isn't self-healing.** A bundle already built this way keeps
+> the finished file's key. Delete it (**Admin → Offline Cache**, or
+> `DELETE /api/admin/offline-cache/{cache_key}`) and re-prep.
+
 ## Pause / resume + auto-prep
 
 Prep is CPU-heavy enough to make the host laggy, so the work is interruptible

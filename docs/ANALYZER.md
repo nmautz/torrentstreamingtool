@@ -4,7 +4,11 @@ Audio-fingerprint-driven intro/credits detection. Runs per-series; results store
 
 ## Dependencies
 
-- **`ffmpeg`** — audio decode + ffprobe duration
+- **`ffmpeg`** — audio decode. `_media_duration` runs the **ffprobe** sitting next to it, located by swapping
+  only the *filename* (`Path(ff).with_name(...)`): a blanket `str.replace("ffmpeg", "ffprobe")` mangles the
+  bundled Windows path, which silently demoted every Windows host to the brittle ffmpeg-stderr fallback — and
+  that fallback's `re.search` then crashed every series. See
+  [GOTCHAS.md](GOTCHAS.md#derive-the-ffprobe-path-from-ffmpegs-filename--a-blanket-strreplace-breaks-every-windows-install)
 - **`fpcalc`** (chromaprint) — fingerprinting (`-raw` mode emits integer frames)
 - Both are detected by `setup.py` and stored as `_FFMPEG_BIN` / `_FPCALC_BIN` in `.env`
 - `analyzer.is_available()` returns False if either is missing — feature degrades to manual entry only (admin editor still works)

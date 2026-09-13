@@ -251,7 +251,16 @@ def _media_duration(file_path: str) -> Optional[float]:
     ff = ffmpeg_bin()
     if not ff:
         return None
-    ffprobe = ff.replace("ffmpeg", "ffprobe") if "ffmpeg" in ff else None
+    # Swap only the FILENAME, never the whole path: the bundled Windows build
+    # lives at "tools/ffmpeg/ffmpeg-8.1.1-essentials_build/bin/ffmpeg.exe", and a
+    # blanket str.replace rewrote every one of those "ffmpeg" segments — producing
+    # a "tools/ffprobe/ffprobe-…/bin/ffprobe.exe" path that never exists. Every
+    # Windows install therefore fell through to the brittle stderr-parsing branch,
+    # whose re.search then raised on a None stderr and crashed the whole series
+    # ("Analysis crashed: expected string or bytes-like object, got 'NoneType'").
+    ff_path = Path(ff)
+    cand = ff_path.with_name(ff_path.name.replace("ffmpeg", "ffprobe"))
+    ffprobe = str(cand) if cand.name != ff_path.name else None
     if not ffprobe or not Path(ffprobe).exists():
         ffprobe = shutil.which("ffprobe")
     if not ffprobe:
@@ -260,7 +269,7 @@ def _media_duration(file_path: str) -> Optional[float]:
             _lp([ff, "-i", file_path]), capture_output=True, text=True, timeout=15,
             **_LOWPRIO_KW,
         )
-        m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", proc.stderr)
+        m = re.search(r"Duration:\s*(\d+):(\d+):(\d+\.\d+)", proc.stderr or "")
         if m:
             h, mn, s = int(m.group(1)), int(m.group(2)), float(m.group(3))
             return h * 3600 + mn * 60 + s

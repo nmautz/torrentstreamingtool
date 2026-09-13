@@ -277,6 +277,10 @@ Audio fingerprinting (`analyzer.py`) is kicked off by `_ensure_analysis_for` at 
 
 **Analysis coalesces behind prep — don't trigger per file.** Every analysis pass re-fingerprints the *whole* series (new files need peers to match against), so kicking a pass per prepped file made the analyzer restart from episode 1 after every bundle — quadratic work and an admin progress bar that visibly kept restarting. `_schedule_series_analysis_if_eligible` therefore defers while `_series_prep_active` (any `pending`/`processing` prep job for the series); `_watch_prep_then_analyze` backstops prep exit paths that never fire the post-prep hook (crash, sibling-race `done`). `"paused"` prep intentionally does **not** defer (a parked queue can sit for hours).
 
+### Derive the ffprobe path from ffmpeg's FILENAME — a blanket `str.replace` breaks every Windows install
+
+`ffmpeg_bin()` on Windows returns `toolsfmpegfmpeg-8.1.1-essentials_buildinfmpeg.exe`. `ff.replace("ffmpeg", "ffprobe")` rewrites **all three** segments → `toolsfprobefprobe-…infprobe.exe`, which never exists. That silently demoted every Windows host to the stderr-parsing fallback in `_media_duration`, whose `re.search` then raised `TypeError: expected string or bytes-like object, got 'NoneType'` on a `None` stderr — surfacing as `Analysis crashed` for **every series in the library**, with no hint of the real cause. Use `Path(ff).with_name(Path(ff).name.replace(...))`, and keep the fallback `None`-safe.
+
 ### Smart Skip matcher needs gap tolerance — and uses numpy
 
 Each chromaprint frame is computed over a **~2.4 s audio window** (hopped ~0.128 s), so a single second of episode-specific audio inside the theme (title-card voiceover, an SFX) corrupts **~20 consecutive fingerprint frames**. A matcher that demands strictly consecutive matching frames truncates real intros at the first such blip (the "skip ends mid-intro" report) or misses them entirely. `_find_longest_match_np` bridges mismatch gaps up to `MATCH_GAP_FRAMES` (~4 s) requiring `MATCH_MIN_RATIO` (60 %) matched frames overall — safe because a random cross-episode frame match at Hamming ≤ 6/32 is ~0.03 % likely. Don't "tighten" the gap back to zero.
@@ -414,6 +418,16 @@ A skipped file (priority 0) and an idle-deferred file (priority 0 while the wind
 ### qBit keeps `progress=1.0` after a file is deleted out from under it — `delete-files` grounds skip-file completeness in disk existence
 
 `POST /api/library/{id}/delete-files` (the "delete to free space, keep re-downloadable" action) marks files `skip` and `unlink`s their bytes, but qBittorrent's per-file `progress` stays at the cached `1.0` until a full recheck. So `get_item_files`, which derives `complete`/`dl_pct` from that qBit progress, would keep reporting a just-deleted file as complete and playable. The fix: for a file whose effective `mode == "skip"`, completeness is grounded in **`Path(path).exists()`** — `complete = qp>=0.999 and exists`, else `(0.0, False)`. Only skip-mode files are stat-ed (the only ones that can be stale this way), keeping the hot path cheap. Don't move the disk check ahead of the mode test for every file, and don't drop it — without it a freed file masquerades as on-disk and the "⊘ Not downloaded → ⬇ Download" UI never appears.
+
+### A torrent can vanish from qBittorrent — the download monitor must notice, or the item hangs at "Downloading" forever
+
+qBit keeps **no resume data for a magnet whose metadata never arrived**, so killing the process loses those torrents outright — and the VPN kill-switch kills it on every drop (see [§ VPN](#vpn)). `library_download_monitor`'s miss path used to be a bare `continue`, so the item kept polling a hash qBit no longer had, every 5 s, indefinitely: no error, no retry, no UI signal. (Two *Hacks S04* episodes sat like that for an hour.)
+
+The rule: **`qbit_info(h) is None` is ambiguous** — it means "qBit is down" *and* "the torrent is gone". `_handle_missing_torrent` disambiguates with `qbit_info_all()` (which returns `None` only when qBit is unreachable, `[]` when it's up and empty) and counts only the genuinely-gone case, so a qBit restart or VPN blip never trips the error path. Then: re-add from `item["download_source"].magnet` at 30 s and 90 s, error the item at 3 min. Any new code that treats a missing torrent as "skip this tick" needs the same disambiguation.
+
+### A magnet stuck in `metaDL` moves no bytes — don't render it as "Downloading"
+
+A magnet whose swarm is dead parks in qBit's `metaDL` state: no file list, no peers, 0 B, forever. The card read a confident "↓ Downloading" the whole time, which is exactly how two dead releases hid for an hour. The monitor now sets `awaiting_metadata` on the `library_progress` event (`qstate == "metaDL"` or an empty `qbit_files`) — the card reads **"Finding peers…"** — and errors the item after `_METADATA_STALL_TICKS` (30 min). Note that `torrents/add` answering `"Ok."` proves nothing about whether the swarm will ever deliver metadata.
 
 ### Admin Cleanup must never touch an in-use torrent or escape the download folder
 
@@ -595,6 +609,18 @@ level is now derived from the output height in `_encode_video`: `4.1` ≤1080p,
 JIT) takes a `src_height`; `_build_clip` sidesteps it entirely by capping clips
 at 1080p (`scale=-2:'min(1080,ih)'`). If you add a new encode path, don't copy
 the old flat `4.1` — pick the level from the actual output height.
+
+### NEVER prep a file qBittorrent hasn't finished — the corrupt bundle takes the FINISHED file's cache key
+
+The single nastiest failure in this subsystem, because every individual step reports success.
+
+1. qBit writes pieces into a **sparse** file whose reported length reaches its final value long before the last piece lands. `Path.exists()` is true and `st_size` is final while the middle is still holes — the same trap as [§ Play a complete file from a still-downloading torrent](#play-a-complete-file-from-a-still-downloading-torrent--gate-on-complete-not-exists), one layer down.
+2. ffmpeg stream-copies straight through the holes, writes a full-duration playlist and exits **0**. `hls.log` says `DONE`. Playback runs 5–10 s, stalls, cuts to black.
+3. `_offline_cache_key` is `sha256(version|name|size)[:24]` — and the size is already final — so that bundle lands on **exactly the key the completed file resolves to**. `_maybe_start_prep_job` reports `cached` from then on and it is **never rebuilt**.
+
+So an unlucky 30-second overlap between the encode and the last piece produces a permanently-broken episode. (*Hacks S04E01*: encode finished 16:14:55, download finished 16:15:24. Bundle 1,637 MB; clean rebuild 2,112 MB.)
+
+Gate on qBit's **per-file `progress`**, never on the filesystem: `_incomplete_download_paths` at enqueue time (`_enqueue_library_prep`) and `_src_still_downloading` immediately before the encode (`_run_offline_job`, so play-driven / interactive / admin jobs are covered too). Both fail *closed* — if the item is downloading and qBit can't confirm, everything is treated as incomplete. Existing damage does not self-heal: delete the bundle and re-prep.
 
 ### Bundles live BESIDE the media now (v8) — resolve via `_offline_cache_dir`, never `OFFLINE_CACHE / key`
 

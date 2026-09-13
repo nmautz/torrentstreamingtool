@@ -6026,6 +6026,73 @@ async def _sync_state_from_vlc() -> None:
 
 # ── Background Task: Library Download Monitor ─────────────────────────────────
 
+# A tracked torrent that has disappeared from qBittorrent. qBit keeps no resume
+# data for a magnet whose metadata never arrived, so killing it — which the VPN
+# kill-switch does on every drop — silently loses those torrents. The library item
+# kept polling an info-hash qBit no longer had and sat at "downloading" forever
+# with no error and no retry. Counted in 5 s monitor ticks.
+_MISSING_TORRENT_READD_TICKS = 6     # 30 s absent  → re-add the magnet
+_MISSING_TORRENT_RETRY_TICKS = 18    # 90 s absent  → one more re-add attempt
+_MISSING_TORRENT_ERROR_TICKS = 36    # 3 min absent → give up, surface the error
+_missing_torrent_ticks: dict[str, int] = {}
+
+# A magnet stuck in qBit's `metaDL` state — no peer has sent the file list, so the
+# item can never progress past 0 B. 30 min (in 5 s monitor ticks) before we call it.
+_METADATA_STALL_TICKS = 360
+_metadata_stall_ticks: dict[str, int] = {}
+
+
+async def _handle_missing_torrent(item: dict) -> str:
+    """A still-downloading item's torrent isn't in qBit. Re-add it, then error out.
+
+    Returns "" when nothing changed, "changed" when `item` was mutated and must be
+    persisted, or "errored" when it was additionally taken out of the downloading
+    set. Distinguishes "qBit is unreachable" (transient — wait) from "qBit is up
+    and genuinely doesn't have this hash" (the torrent is gone), and only counts
+    the latter, so a qBit restart or VPN blip never trips the error path.
+    """
+    h = (item.get("torrent_hash") or "").lower()
+    item_id = item["id"]
+    torrents = await qbit_info_all()
+    if torrents is None:
+        return ""   # qBit unreachable — say nothing, try again next tick
+    if any((t.get("hash") or "").lower() == h for t in torrents):
+        _missing_torrent_ticks.pop(item_id, None)
+        return ""   # raced the per-hash query; it is there after all
+    n = _missing_torrent_ticks.get(item_id, 0) + 1
+    _missing_torrent_ticks[item_id] = n
+
+    if n in (_MISSING_TORRENT_READD_TICKS, _MISSING_TORRENT_RETRY_TICKS):
+        src = item.get("download_source") or {}
+        # Fall back to a bare info-hash magnet for items downloaded before
+        # download_source was recorded — DHT can still resolve it.
+        magnet = src.get("magnet") or (f"magnet:?xt=urn:btih:{h}" if h else "")
+        if magnet and state.vpn_secure:
+            log.warning("[download] torrent %s vanished from qBittorrent — re-adding %s",
+                        h[:12], item.get("title", ""))
+            got = await qbit_add_magnet(
+                magnet, save_path=src.get("save_path") or settings.qbit_download_path)
+            if got:
+                _missing_torrent_ticks.pop(item_id, None)
+                if got.lower() != h:
+                    item["torrent_hash"] = got
+                    return "changed"
+        return ""
+
+    if n >= _MISSING_TORRENT_ERROR_TICKS:
+        _missing_torrent_ticks.pop(item_id, None)
+        item["status"] = "error"
+        item["error"] = ("qBittorrent no longer has this torrent — it was most likely "
+                         "dropped when qBittorrent restarted before the magnet resolved. "
+                         "Re-adding it failed; download this release again.")
+        log.error("[download] giving up on %s — torrent %s is gone from qBittorrent",
+                  item.get("title", ""), h[:12])
+        await broadcast("library_update", {"item_id": item_id, "status": "error",
+                                           "message": item["error"]})
+        return "errored"
+    return ""
+
+
 async def library_download_monitor() -> None:
     """Poll qBit every 5 s for pending library downloads and mark them complete."""
     while True:
@@ -6046,7 +6113,20 @@ async def library_download_monitor() -> None:
                     continue
                 info = await qbit_info(h)
                 if not info:
+                    # The torrent is not answering. Either qBit is down (transient)
+                    # or it has lost the torrent entirely — in which case nothing
+                    # else in the pipeline would ever notice and the item would sit
+                    # at "downloading" for good. Re-add it, then error it out.
+                    outcome = await _handle_missing_torrent(item)
+                    if outcome:
+                        changed = True
+                    if outcome == "errored":
+                        state.downloading_count = max(0, state.downloading_count - 1)
+                        if not item.get("admin_only"):
+                            state.downloading_count_visible = max(
+                                0, state.downloading_count_visible - 1)
                     continue
+                _missing_torrent_ticks.pop(item["id"], None)
 
                 # Refresh file list now that sizes are final
                 qfiles = await qbit_files(h)
@@ -6078,6 +6158,7 @@ async def library_download_monitor() -> None:
                     await broadcast("library_update", {"item_id": item["id"], "status": "error"})
                 elif nonskip_done:
                     item["status"] = "ready"
+                    item.pop("download_source", None)   # settled — nothing to re-add
                     state.downloading_count = max(0, state.downloading_count - 1)
                     if not item.get("admin_only"):
                         state.downloading_count_visible = max(0, state.downloading_count_visible - 1)
@@ -6097,6 +6178,13 @@ async def library_download_monitor() -> None:
                     # Still downloading — push live stats to the UI
                     eta = info.get("eta", 8640000)
                     cfg = _download_cfg(item)
+                    # A magnet whose metadata never arrives (dead swarm, no peers
+                    # holding the .torrent) parks in qBit's `metaDL` state at 0 B
+                    # with no file list — and the card read a confident
+                    # "↓ Downloading" the whole time, so it was indistinguishable
+                    # from a slow torrent. Flag it to the UI, and give up rather
+                    # than wait forever.
+                    awaiting_meta = (qstate == "metaDL") or not qfiles
                     # "Waiting for idle window": either qBit paused us, or all the
                     # kept-but-incomplete files are idle-deferred and the window is shut
                     # (qBit may be seeding the now-files meanwhile, so check per-file).
@@ -6107,6 +6195,32 @@ async def library_download_monitor() -> None:
                             if _effective_file_mode(cfg, full) == "idle" and qf.get("progress", 0.0) < 0.999:
                                 waiting_idle = True
                                 break
+                    # Only count the stall while the torrent is actually trying — an
+                    # idle-deferred download is paused on purpose and has no file list
+                    # yet either, and must never be errored for it.
+                    if awaiting_meta and not waiting_idle:
+                        m = _metadata_stall_ticks.get(item["id"], 0) + 1
+                        _metadata_stall_ticks[item["id"]] = m
+                        if m >= _METADATA_STALL_TICKS:
+                            _metadata_stall_ticks.pop(item["id"], None)
+                            item["status"] = "error"
+                            item["error"] = (
+                                "No peer ever sent this torrent's metadata — the swarm "
+                                f"looks dead ({_METADATA_STALL_TICKS * 5 // 60} min with no "
+                                "file list). Pick a different release.")
+                            state.downloading_count = max(0, state.downloading_count - 1)
+                            if not item.get("admin_only"):
+                                state.downloading_count_visible = max(
+                                    0, state.downloading_count_visible - 1)
+                            changed = True
+                            log.error("[download] %s: no metadata after %d min — giving up",
+                                      item.get("title", ""), _METADATA_STALL_TICKS * 5 // 60)
+                            await broadcast("library_update", {
+                                "item_id": item["id"], "status": "error",
+                                "message": item["error"]})
+                            continue
+                    else:
+                        _metadata_stall_ticks.pop(item["id"], None)
                     await broadcast("library_progress", {
                         "item_id": item["id"],
                         "speed_bps": info.get("dlspeed", 0),
@@ -6115,6 +6229,9 @@ async def library_download_monitor() -> None:
                         "progress_pct": round(info.get("completed", 0) / max(info.get("size", 1), 1) * 100, 1),
                         "eta_secs": eta if eta < 8640000 else -1,
                         "download_mode": cfg["mode"],   # now | idle
+                        # No file list yet — the UI reads "Finding peers…" rather
+                        # than claiming a download is under way.
+                        "awaiting_metadata": awaiting_meta,
                         # Intentionally halted (idle window closed) — the UI shows
                         # "Waiting for idle window" instead of "Downloading".
                         "paused": waiting_idle,
@@ -7417,6 +7534,15 @@ async def library_download_pipeline(
         for it in lib["items"]:
             if it["id"] == item_id:
                 it["torrent_hash"] = h
+                # Keep the magnet + save path for as long as the download runs, so
+                # `library_download_monitor` can re-add the torrent if qBit loses
+                # it. qBit drops a metadata-less magnet silently when it is killed
+                # (the VPN kill-switch does exactly that), which used to pin the
+                # item at "downloading" forever. Cleared when the item settles.
+                it["download_source"] = {
+                    "magnet": magnet,
+                    "save_path": save_path or settings.qbit_download_path,
+                }
                 # Hash recorded → the monitor can manage this item from qBit even if
                 # metadata is still pending, so it's no longer an orphan to recover.
                 it.pop("pending_download", None)
@@ -8185,6 +8311,9 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
             "size_human": human_size(it.get("size_bytes", 0)),
             "added_at": it.get("added_at", ""),
             "status": it.get("status", "ready"),
+            # Why an errored item failed (e.g. qBit lost the torrent) — the card's
+            # Error badge shows it as a tooltip instead of a bare "Error".
+            "error": it.get("error", "") if it.get("status") == "error" else "",
             "torrent_hash": it.get("torrent_hash", ""),
             "series_key": _series_key(it),   # groups same-series items into one show tile
             "resume": resume,
@@ -18023,8 +18152,17 @@ def _ffprobe_full(path: str) -> dict:
             capture_output=True, text=True, timeout=15,
         )
         data = json.loads(r.stdout or "{}")
-    except Exception:
+    except Exception as exc:
+        hls_log.warning("ffprobe could not run on %s: %s", path, exc)
         return {}
+    # ffprobe writes nothing to stdout when it fails to open or parse the file
+    # (unreadable, truncated, locked, genuinely corrupt). `json.loads("{}")` then
+    # yields an empty document that is indistinguishable from "a valid file with
+    # no streams" — which is how a hard read failure used to surface to the
+    # operator as the misleading "No video stream in source". Log the real cause.
+    if not data.get("streams"):
+        hls_log.warning("ffprobe found no streams in %s (rc=%s) %s",
+                        path, r.returncode, (r.stderr or "").strip()[:400])
     fmt = data.get("format") or {}
     out: dict = {
         "duration_sec": float(fmt.get("duration", 0) or 0),
@@ -19072,6 +19210,17 @@ async def _run_offline_job(job_id: str) -> None:
             job.pop("_compress_block", None)
             asyncio.create_task(_requeue_offline_job(job_id, delay=3.0))
             return
+        # Incomplete-download gate — the backstop behind `_enqueue_library_prep`'s
+        # filter, so play-driven and interactive jobs can't encode a half-fetched
+        # file either. A sparse in-progress file already reports its final length,
+        # so neither `exists()` nor the size tells a partial from a whole one;
+        # encoding it yields a bundle that plays a few seconds then cuts to black,
+        # stamped with the FINISHED file's cache key so it is never rebuilt. Park
+        # as pending and re-check until the torrent completes.
+        if await _src_still_downloading(src):
+            job["status"] = "pending"
+            asyncio.create_task(_requeue_offline_job(job_id, delay=15.0))
+            return
         hls_log.info("job %s START src=%s out=%s", job_id, src, out_dir.name)
         tmp_dir = out_dir.with_name(out_dir.name + ".part")
         ffmpeg = analyzer.ffmpeg_bin()
@@ -19090,10 +19239,18 @@ async def _run_offline_job(job_id: str) -> None:
         info = await asyncio.to_thread(_ffprobe_full, str(src))
         duration = float(info.get("duration_sec", 0) or 0)
         if not info.get("video"):
-            job["status"] = "error"; job["error"] = "No video stream in source."
+            # No streams at all ⇒ ffprobe could not read the file (see
+            # `_ffprobe_full`, which logs ffprobe's own stderr); a stream list
+            # without video is a genuinely video-less source.
+            unreadable = not (info.get("audios") or info.get("subtitles"))
+            job["status"] = "error"
+            job["error"] = ("Source is unreadable — ffprobe found no streams."
+                            if unreadable else "No video stream in source.")
             hls_log.error(
-                "job %s ABORT: no video stream in %s (ffprobe keys: %s)",
-                job_id, src, sorted(info.keys()),
+                "job %s ABORT: %s src=%s (audio=%d sub=%d duration=%.1fs)",
+                job_id, job["error"], src,
+                len(info.get("audios") or []), len(info.get("subtitles") or []),
+                duration,
             )
             return
 
@@ -19781,6 +19938,64 @@ def _activity_kick() -> None:
     print(f"[autoprep] user activity — pausing prep immediately (killed {killed} in-flight)")
 
 
+async def _incomplete_download_paths(item: dict) -> set[str]:
+    """Normalised paths of this item's files qBittorrent has NOT finished yet.
+
+    **Why prep must consult qBit and not the filesystem.** qBittorrent writes
+    pieces into a sparse file whose reported length reaches its final value long
+    before the last piece lands, so a half-downloaded file is indistinguishable
+    from a finished one by `exists()` or `st_size` — it is simply full of holes.
+    That matters twice over:
+
+      * ffmpeg happily stream-copies straight through the holes and reports a
+        clean `DONE`, so the bundle *looks* built while its segments are
+        garbage — playback runs a few seconds, then cuts to black and stalls.
+      * the bundle key is `version|name|size` (`_offline_cache_key`), and the
+        size is already final — so that garbage bundle lands on exactly the key
+        the *finished* file resolves to. `_maybe_start_prep_job` then reports
+        "cached" forever and the bundle is **never** rebuilt.
+
+    Returns an empty set for anything not actively downloading. When the item is
+    downloading but qBit can't confirm the files (torrent gone, qBit down) every
+    file is reported incomplete — we never guess in favour of encoding.
+    """
+    if item.get("status") != "downloading":
+        return set()
+    all_paths = {_norm_path(f["path"]) for f in item.get("files", []) if f.get("path")}
+    h = item.get("torrent_hash") or ""
+    if not h:
+        return all_paths
+    info = await qbit_info(h)
+    if not info:
+        return all_paths
+    save_path = info.get("save_path", settings.qbit_download_path)
+    incomplete: set[str] = set()
+    for qf in await qbit_files(h):
+        if float(qf.get("progress", 0) or 0) < 1.0:
+            incomplete.add(_norm_path(str(Path(save_path) / qf.get("name", ""))))
+    return incomplete
+
+
+async def _src_still_downloading(src: Path) -> bool:
+    """True when `src` belongs to a library item qBit is still filling in.
+
+    The backstop for every prep entry point (`_run_offline_job`), so play-driven
+    and interactive jobs can't slip a half-downloaded file past the enqueue-time
+    gate either. See `_incomplete_download_paths` for why `exists()` isn't enough.
+    """
+    want = _norm_path(str(src))
+    try:
+        lib = await get_library()
+    except Exception:
+        return False
+    for it in lib.get("items", []):
+        if it.get("status") != "downloading":
+            continue
+        if any(_norm_path(f.get("path", "")) == want for f in it.get("files", [])):
+            return want in await _incomplete_download_paths(it)
+    return False
+
+
 async def _enqueue_library_prep() -> int:
     """Queue a bulk HLS-prep job for every un-prepped video file in the library.
 
@@ -19796,10 +20011,15 @@ async def _enqueue_library_prep() -> int:
     for item in lib.get("items", []):
         if item.get("ondemand_only"):
             continue   # on-demand-only shows never get a permanent bundle
+        # Files qBit hasn't finished yet are skipped outright — encoding one
+        # bakes a permanently-corrupt bundle onto the finished file's cache key.
+        incomplete = await _incomplete_download_paths(item)
         prep_cfg = _prep_cfg(item)
         for f in item.get("files", []):
             p = Path(f.get("path", ""))
             if p.suffix.lower() not in VIDEO_EXTS:
+                continue
+            if _norm_path(str(p)) in incomplete:
                 continue
             # Per-file "never" opts a file out of all automatic stream-prep (the
             # episode-picker prep bar). The bundle, if already built, is kept.
