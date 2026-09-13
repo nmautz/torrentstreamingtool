@@ -616,6 +616,17 @@ On `DOMContentLoaded`:
 3. Calls `/api/admin/status`; shows admin link if enabled.
 4. Reads `localStorage.streamlink_profile`. If valid profile is restored, connects SSE and goes straight to the dashboard. Otherwise shows the full-screen profile picker first.
 
+## Profile session token
+
+`POST /api/profiles/{id}/verify-pin` returns a **token** alongside the profile. It is the server's only proof that the PIN was actually entered — a bare `profile_id` proves nothing, since `GET /api/profiles` hands out every UUID unauthenticated. Two things need it: seeing admin-locked ("content lock") items, and the delete endpoints.
+
+- Held in `_profileToken`, mirrored to `localStorage.streamlink_profile_token`, managed only through **`setProfileToken()`**.
+- Attached as **`X-Profile-Token`** by a single `window.fetch` wrapper installed next to the `profile` declaration, scoped to same-origin `/api/` URLs so it can never leak to a third party. Individual call sites don't (and shouldn't) know about it — don't start adding the header by hand.
+- **Cleared** when a PIN-less profile is selected (`_doSelectProfile`), otherwise the last PIN entered would keep unlocking content for whoever picks a different profile afterwards.
+- **Revalidated** on every `fetchProfiles()`: the response carries `verified_profile_id`, and a token the server no longer recognises (expired 12 h TTL, deleted profile, wiped session file) is dropped so the next pick re-prompts. Without that, an expired session degrades into "some shows are missing and Delete fails with a 403" and nothing tells the user to re-enter their PIN.
+
+Delete failures surface the server's `detail` rather than a generic message — a 403 here means "no PIN-verified profile", which is actionable in a way "could not delete" isn't.
+
 ## TV mode (`/?tv=1`)
 
 The same `index.html`, loaded by the backend's TV UI kiosk (a fullscreen Chrome on the host display, driven by the air-mouse remote — see [REMOTE.md](REMOTE.md)). Detected at boot via `const TV_MODE = new URLSearchParams(location.search).get("tv") === "1"` (declared next to `hlsAvailable`):

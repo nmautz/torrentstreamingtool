@@ -3640,6 +3640,38 @@ const downloadFilesData=new Map();   // item_id → files array (cached from /fi
 const libDownloadStats = new Map(); // item_id → latest library_progress payload
 let profile      = { id:"", name:"", color:"indigo" };
 let allProfiles  = [];
+
+// ── Profile session token ───────────────────────────────────────────────────
+// Proof the PIN was actually entered, issued by /verify-pin. The server needs it
+// to unlock admin-locked ("content lock") items and to allow the delete
+// endpoints — a bare profile_id proves nothing, since /api/profiles hands out
+// every UUID unauthenticated. Sent as X-Profile-Token on same-origin /api calls
+// by the fetch wrapper below, so individual call sites don't have to care.
+let _profileToken = "";
+try { _profileToken = localStorage.getItem("streamlink_profile_token") || ""; } catch(_){}
+function setProfileToken(tok){
+  _profileToken = tok || "";
+  try {
+    if(_profileToken) localStorage.setItem("streamlink_profile_token", _profileToken);
+    else localStorage.removeItem("streamlink_profile_token");
+  } catch(_){}
+}
+(function(){
+  const _origFetch = window.fetch.bind(window);
+  window.fetch = function(input, init){
+    try {
+      const url = (typeof input === "string") ? input : (input && input.url) || "";
+      // Same-origin API calls only — never leak the token to a third party.
+      if(_profileToken && (url.startsWith("/api/") || url.startsWith("api/"))){
+        init = Object.assign({}, init);
+        const h = new Headers((init && init.headers) || (typeof input !== "string" && input.headers) || {});
+        if(!h.has("X-Profile-Token")) h.set("X-Profile-Token", _profileToken);
+        init.headers = h;
+      }
+    } catch(_){}
+    return _origFetch(input, init);
+  };
+})();
 let globalMaxVolume = 200;   // global VLC volume cap (0-200); fetched at startup
 // TV mode (?tv=1) — this page IS the host's fullscreen "Firestick" kiosk,
 // driven by the air-mouse remote. Playing "on device" makes no sense (VLC is
@@ -5366,7 +5398,12 @@ function switchTab(tab){
 // ── Profiles ───────────────────────────────────────────────────────────────
 async function fetchProfiles(){
   const r=await fetch("/api/profiles");
-  allProfiles=(await r.json()).profiles||[];
+  const body=await r.json();
+  allProfiles=body.profiles||[];
+  // Drop a token the server no longer recognises (expired TTL, host wiped its
+  // session file, profile deleted) so the next pick re-prompts for the PIN
+  // rather than leaving the user quietly un-elevated.
+  if(_profileToken && !body.verified_profile_id) setProfileToken("");
   return allProfiles;
 }
 function renderProfileGrid(){
@@ -5414,6 +5451,10 @@ function selectProfile(p){
 }
 function _doSelectProfile(p){
   if(!p||!p.id) return;  // never persist an undefined profile (would corrupt localStorage)
+  // Switching to a PIN-less profile drops any token held for the previous one —
+  // otherwise the last PIN entered would keep unlocking content for whoever
+  // picks a different profile afterwards.
+  if(!p.has_pin) setProfileToken("");
   profile=p; localStorage.setItem("streamlink_profile",JSON.stringify(p));
   _pendingPinProfile=null;
   document.getElementById("profilePicker").classList.add("hidden");
@@ -5480,7 +5521,9 @@ async function submitPinPrompt(){
     body:JSON.stringify({pin}),
   });
   if(r.ok){
-    const {profile:matched}=await r.json();
+    const body=await r.json();
+    const matched=body.profile;
+    setProfileToken(body.token);
     if(!matched||!matched.id){
       errEl.textContent="Login failed. Try again.";
       errEl.classList.remove("hidden");
@@ -5767,8 +5810,17 @@ function renderExistingProfilesList(){
     row.querySelector(".pin-btn").onclick=()=>openChangePinModal(p);
     row.querySelector(".del-btn").onclick=async()=>{
       if(!confirm(`Delete profile "${p.name}"? This removes their watch history.`)) return;
-      await fetch(`/api/profiles/${p.id}`,{method:"DELETE"});
-      if(profile.id===p.id){ profile={id:"",name:"",color:"indigo"}; localStorage.removeItem("streamlink_profile"); }
+      const r=await fetch(`/api/profiles/${p.id}`,{method:"DELETE"});
+      if(!r.ok){
+        const e=await r.json().catch(()=>null);
+        showAlert((e&&e.detail)||"Could not delete profile.","error");
+        return;
+      }
+      if(profile.id===p.id){
+        profile={id:"",name:"",color:"indigo"};
+        localStorage.removeItem("streamlink_profile");
+        setProfileToken("");
+      }
       await fetchProfiles(); renderProfileGrid(); renderExistingProfilesList();
     };
     items.appendChild(row);
@@ -5951,16 +6003,21 @@ async function deleteSeries(ids,title,btn){
   const n=ids.length;
   if(!confirm(`Remove "${title||"this show"}" (${n} download${n===1?"":"s"}) from the library and delete the file(s)?`)) return;
   await withInflight(`delseries_${ids.join("_")}`, btn, async () => {
-    let ok=true;
+    let ok=true, why="";
     for(const id of ids){
       const r=await fetch(`/api/library/${id}?delete_file=true`,{method:"DELETE"});
       if(r.ok){
         expandedDownloads.delete(id);
         downloadFilesData.delete(id);
-      } else ok=false;
+      } else {
+        ok=false;
+        // Surface the server's reason — a 403 here means "no PIN-verified
+        // profile", which is actionable in a way "could not delete" isn't.
+        if(!why){ const e=await r.json().catch(()=>null); why=(e&&e.detail)||""; }
+      }
     }
     loadLibrary();
-    if(!ok) showAlert("Some episodes could not be deleted.","error");
+    if(!ok) showAlert(why||"Some episodes could not be deleted.","error");
   });
 }
 
@@ -6747,7 +6804,10 @@ async function deleteLibraryItem(itemId, btn){
       expandedDownloads.delete(itemId);
       downloadFilesData.delete(itemId);
       loadLibrary();
-    } else showAlert("Could not delete item.","error");
+    } else {
+      const e=await r.json().catch(()=>null);
+      showAlert((e&&e.detail)||"Could not delete item.","error");
+    }
   });
 }
 
@@ -19529,6 +19589,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.19.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.20.0</div>
 </body>
 </html>

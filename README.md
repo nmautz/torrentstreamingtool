@@ -271,6 +271,7 @@ Without both, a reboot leaves the dashboard offline until you run `python run.py
 StreamLink is a **trusted-LAN home appliance**. Two things follow:
 
 - **The dashboard has no login.** It binds every network interface (`0.0.0.0`) and the main UI is open to anyone who can reach the host's IP — that's what lets phones and the TV connect with zero setup. **Keep it on your home network. Never port-forward its ports (80/443) to the internet.** Only the `/admin` panel is password-gated (`ADMIN_PASSWORD`).
+- **Two things need a profile PIN**, and they're the two that can lose you content: seeing anything you've marked **Admin only** in the Content Lock tab, and **deleting** (library items, files, profiles, storage paths — deleting a library item takes the media off disk by default). Set a 6-digit PIN on any profile that should be allowed to do either; a profile with no PIN can do neither, no matter what its Elevated toggle says. Entering the PIN gives that browser a 12-hour session. This is a boundary against other people on your network, not against someone sitting at the host — the PIN hashes live in `library.json` and there's no lockout on repeated guesses.
 - **The TLS cert is generated per machine.** `cert.pem` / `key.pem` / `ca.pem` are created locally by `setup.py` and are **git-ignored — never commit them**. Each install gets its own unique private key. (Early builds accidentally shipped a shared cert; re-running `setup.py` detects that one and regenerates a unique cert automatically.)
 
 ## Trusting the HTTPS certificate (optional)

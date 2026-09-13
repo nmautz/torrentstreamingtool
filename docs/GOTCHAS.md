@@ -25,6 +25,20 @@ Two ways the VLC subtitle menu silently diverged from the on-device menu — bot
 
 `status.xml` / `status.json` don't include `<audiotrack>` or `<subtitletrack>` in VLC 3.x. We track it ourselves in `state.current_audio_track` / `state.current_subtitle_track`, reset to `-1` on every new `in_play`. The `POST /api/vlc/track/*` endpoints update this state.
 
+### End-of-media must be detected explicitly — nothing else returns the dashboard to idle
+
+`stream_status` only ever went back to `"idle"` via an explicit `POST /api/stop`, a YouTube close, or the stream pipeline. **Nothing watched for the media simply ending.** So when a movie — or the last episode of a playlist — finished, AppState kept reporting `playing` with the old title while VLC sat on a dead playlist entry, and the dashboard showed `PLAYING <title> — 0:00 / 0:00` indefinitely (VLC reports `time=0` *and* `length=0` at EOF).
+
+It was self-sustaining, which is why it never recovered. `background_video_loop` would have put the idle video back within ~3 s, but `_play_background_video()` refuses to stomp VLC while `_real_playback_active()` is true — and that reads `stream_status` and `library_item_id`, **the very fields only `_play_background_video()` clears**. The loop retried every 3 s forever and could never win. Only a manual Stop (or starting something else) broke it.
+
+`_handle_playback_ended()` ([main.py](../main.py)) is the explicit detector, and there are three things to keep right about it:
+
+1. **It runs before every other guard in `background_video_loop`.** Returning to idle is not a background-video concern — it has to happen with no bg video configured, one disabled, window control paused, or the TV UI holding the screen. Those are exactly the setups with no bg video to recover them, so gating the detector behind the bg-video checks would leave the stall in place for them. Don't move it below them.
+2. **It can't use `_real_playback_active()` to decide it's safe to act** — that would be circular, since the stale fields it must clear are what that function reads. `_play_handoff_in_flight()` is the narrower test: YouTube, `buffering`, or a live `library_play_task` / `stream_task`. Those are genuinely in motion and must never be treated as "ended".
+3. **Two consecutive stopped polls (~6 s) are required.** VLC briefly reports not-playing during an in-playlist auto-advance (the same transition `vlc_progress_tracker` guards against — see [§ A progress save's position and file must come from the same instant](#a-progress-saves-position-and-file-must-come-from-the-same-instant--dont-straddle-an-auto-advance)). One stopped tick is not the end; dropping the counter re-introduces "playback stops itself between episodes".
+
+**Crediting the finished file needs the remembered position, not the live one.** `_finalize_stopped_file` ignores a zero duration, and VLC has already zeroed both by the time EOF is observed — so before this fix nothing was ever marked watched by finishing it normally, only by the 15 s periodic saver happening to land near the outro. `stat_broadcaster` keeps `state.last_play_pos` / `last_play_dur` / `last_play_file` updated whenever VLC is genuinely mid-playback, and the EOF path finalises against those. If you add another playback surface, keep that trio fresh or its files will never complete.
+
 ### Cross-item series playback — the path→item map is the source of truth mid-playlist, not `state.library_item_id`
 
 A show whose episodes were **downloaded individually** is many separate library items (each a 1-file torrent) that share one `series` string. The library collapses them into one tile and plays them as a single playlist that **spans items** — but almost everything in the playback core (progress save, skip offers, track prefs, next/prev natural-order, auto-advance) historically re-derived its context from the single global `state.library_item_id`. Crossing an episode boundary would otherwise write the next episode's progress under the *first* episode's item and rebuild next/prev from the wrong file list.
@@ -614,6 +628,38 @@ FlareSolverr binds via the **`HOST`/`PORT` environment variables**, not CLI flag
 
 ## Library
 
+### Every library mutation goes through `mutate_library()` — `get_library` + `put_library` is a lost-update race
+
+`get_library()` and `put_library()` each take `_lib_lock`, but **neither holds it across your mutation**. So the pattern that was used nearly everywhere —
+
+```python
+lib = await get_library()      # lock taken, released
+...mutate...                   # ← anyone else can read here
+await put_library(lib)         # lock taken, releases a snapshot that predates their write
+```
+
+— silently loses whichever write finishes first. Both callers get a success response, so nothing surfaces it: no error, no log, no conflict. The only evidence is the change you made not being there later.
+
+Measured on the live box before the fix (v11.20.0): three concurrent writes to three **different** profiles landed one change and dropped two. Six concurrent identical `POST /api/library/download`s got past the info-hash dedup guard (its read-check-append is the same race), minting six items from one torrent — and then five of those were clobbered out of `library.json` on write-back, leaving an item pinned at `downloading` with no `torrent_hash`, no `error`, and no recovery path (the admin Cleanup tab classifies it as neither orphan nor missing, so it isn't even visible as broken).
+
+This is not an exotic multi-user scenario. The progress tracker writes every 15 s and the download monitor every 5 s, so **any** user action has a standing chance of landing inside a background writer's read-modify-write window — and the app is explicitly multi-device (phone + TV + iOS app).
+
+**Use `mutate_library()`**, which holds `_lib_lock` across the whole transaction:
+
+```python
+async with mutate_library() as lib:
+    item["status"] = "ready"
+```
+
+Rules that come with it:
+
+- **`get_library()` is still correct for read-only callers.** `put_library()` survives only for the rare caller that builds a library dict from scratch rather than editing the current one. If you are editing, you want `mutate_library()`.
+- **Not reentrant.** `_lib_lock` is a plain `asyncio.Lock`, so never call `get_library()` / `put_library()` / `mutate_library()` inside the block — nor any helper that does. `_all_library_paths()` is the one that bites (and `_item_save_root()`, which calls it): hoist those *before* the transaction opens. `add_library_path` and `admin_cleanup_recover_item` show the shape — read outside, re-check the dynamic part inside.
+- **Keep network and disk IO out of the block.** It is the single global library lock; holding it across a qBit round trip or an N-file delete stalls every other reader and writer, including the 2 s stat broadcaster. Do the IO before or after (`delete_library_item` drops the item under the lock and calls `qbit_delete` after; `delete_item_files` commits the skip marks, then unlinks outside).
+- **A plain `return` inside the block COMMITS.** The context manager sees a clean exit. That's harmless for the usual "bail before mutating" guard — it rewrites what it just read — but it means an early return can no longer be used to *discard* a mutation you already made. Raise `LibraryUnchanged` for that; it's swallowed by the context manager and writes nothing. Any other exception (an `HTTPException` validation guard, say) also aborts the write, exactly as before.
+- **Use `LibraryUnchanged` in hot paths that might find nothing to do.** The 15 s progress saver and the 5 s download monitor open a transaction and only then discover the tick is stale; committing there would rewrite a multi-megabyte `library.json` for nothing.
+- **Long-running loops must not hold the lock across their polling.** `library_download_monitor` reads a snapshot, spends a tick doing qBit IO, then re-reads under the lock and **merges back only the items it touched** — so a concurrent edit to any *other* item survives, and an item deleted mid-tick stays deleted instead of being resurrected by the merge. Copy that shape for any new loop that mutates after slow work.
+
 ### `get_library`/`put_library` MUST keep the disk I/O off the event loop
 
 `get_library()` reads `library.json`, `json.loads`es it, and runs `_migrate_item` over **every** item; `put_library()` `json.dumps(indent=2)`es and writes the whole file. That cost is O(library size) and grows after every download (the analyzer writes per-file audio-fingerprint `skip_data`). These are called from hot loops — `vlc_progress_tracker` (every 2 s while playing), `library_download_monitor` (every 5 s while downloading), `download_scheduler_loop`, plus ~110 request handlers. When this ran **inline on the asyncio loop**, a large library stalled the entire event loop every few seconds: the dashboard went "incredibly laggy" while CPU/RAM and the box itself (RDP) stayed perfectly fine — because a blocked *event loop* is invisible to CPU% and the OS. The tell-tale collateral was a flood of `httpx.ReadError`s from `https_proxy.py` (the HTTPS→HTTP proxy's upstream read timing out while the app loop was blocked). Fixed in v4.26.1: both helpers run the blocking part via `await asyncio.to_thread(...)` **inside** `_lib_lock` (the lock still serialises access; the loop stays free). **Don't** revert these to inline I/O, and **don't** read/parse/serialize `library.json` synchronously anywhere on the request/loop path — route through these helpers.
@@ -703,6 +749,58 @@ This only applies *within* one library item (e.g. a season pack). A series split
 ### Frontend drops saveProgress writes under t=5 s
 
 The server recomputes `completed` on every `/api/library/{id}/progress` write as `pct = position/duration > 0.92`. A save at `t≈0` therefore wipes a previously-watched episode back to unwatched. The local player can fire those near-zero writes from at least three places: the very first `timeupdate` event before the resume seek lands, the `pause` event that browsers fire during initial load, and `lpStop` if the user opens the player and closes immediately. `saveProgress` and `_lpFlushProgress` both early-return when `posSec < 5` to keep watched marks stable. The 5 s threshold matches the resume hint's "meaningful in-progress" cutoff, so dropping these writes also has no resume-UX cost.
+
+### `profile_id` is a claim, not proof — elevation and deletes need a PIN-verified session token
+
+`profile_id` is a plain string the client puts in a query param, and `GET /api/profiles` hands out **every profile UUID unauthenticated**. So any check shaped like
+
+```python
+is_elevated = bool(profile_id) and profile_id in elevated_ids    # WRONG
+```
+
+is satisfied by reading a UUID off a public endpoint and quoting it back. That was the content lock until v11.20.0: the PIN screen was pure client-side decoration, and passing the elevated profile's id returned the admin-locked items with no PIN ever entered.
+
+Two separate holes, both worth remembering:
+
+- **The listing check was bypassable** (above).
+- **The per-item routes had no check at all.** The lock only ever filtered `GET /api/library`. Every route addressed by item id — `/files`, `/metadata`, and friends — served a locked item to anyone who asked, with *no* `profile_id` and *no* auth of any kind. Filtering a list is not access control if the ids are addressable.
+
+The rules now:
+
+- `POST /api/profiles/{id}/verify-pin` mints a **profile session token** (`_new_profile_session`, 12 h). The client sends it as `X-Profile-Token` (or `?profile_token=`).
+- **`_is_elevated(request, lib, profile_id)`** is the only correct elevation test: the profile must be flagged `elevated` **and** the request must carry a valid token for it. An admin session passes on its own.
+- **`_assert_item_visible(request, lib, item, profile_id)`** goes on every per-item route that can return a locked item. It raises **404, not 403** — a 403 confirms the item exists, which is exactly what the lock is hiding.
+- **`_require_delete_auth(request, lib)`** gates the content-destroying non-admin endpoints (`DELETE /api/library/{id}` — whose `delete_file` defaults to **true** — plus `/delete-files`, `DELETE /api/profiles/{id}`, `DELETE /api/settings/library-paths`). Before v11.20.0 these were completely unauthenticated: anyone on the LAN could take the media off disk.
+- **A profile with no PIN can never be elevated and can't delete.** There is nothing to verify, so no token is ever issued for it. That's deliberate — an elevated profile anyone can select by name isn't a lock. Setting a PIN is what grants both.
+
+The tokens are **persisted** (`profile_sessions.json`, gitignored), unlike `_admin_sessions`. This box reboots nightly on a schedule and the auto-updater restarts it too; having the whole household silently lose content access and delete rights every morning — with only a 403 to explain it — is worse than the tokens outliving a process. The TTL is what bounds them.
+
+Client side: `static/index.html` attaches the header in a single same-origin `fetch` wrapper, so call sites don't have to know. `GET /api/profiles` echoes `verified_profile_id`, and the UI clears a token the server no longer recognises — without that, an expired session degrades into "some content is missing and deletes fail" with no prompt to re-enter the PIN.
+
+### "Watched" has one rule — the outro window — and client-reported positions must use it too
+
+Host playback credits a file only when playback reached the **outro**: `_position_is_finished()`, a 10 s window before the detected `credits_start`, or before the real end when no credits were detected. That's deliberate (see the comments on `_finalize_stopped_file`) — an episode stopped in the middle, even well past the old 0.92 mark, stays resumable.
+
+The client-reported paths didn't follow it. `POST /api/library/{id}/progress` (the on-device player), `POST /api/sync/progress` (iOS batch sync) and `POST /api/sync/resolve` all used a flat `pct > 0.92`. Same profile, same file, two different answers: on a 45-minute episode the two rules sit **~3.4 minutes apart**, so finishing on the phone marked it watched while stopping at the same position on the TV left it resumable — and the resume hint then jumped back into an episode the viewer considered done.
+
+All three now go through **`_device_reported_finished(item, file_path, pos, dur)`**, which canonicalises the path (clients key progress by whatever path they were handed, and the `credits_start` lookup needs the stored form) and defers to `_position_is_finished`. If you add another surface that reports a position, use it — don't reintroduce a percentage.
+
+`completed` stays **monotonic** everywhere regardless: a late or out-of-order position must never un-finish an episode.
+
+### `_current_playback_path()` returns None while the idle background video is on screen
+
+It resolves "what is VLC playing", and the idle background video genuinely *is* what VLC is playing — but it is not *content*. Without the guard, the subtitle endpoints treated it as the current movie: a search from an idle dashboard hashed `damn.mp4` against OpenSubtitles, and a download would have written its `.srt` sidecar **next to the background video file** and attached the track to it.
+
+Anything that asks "what is the user watching" must get `None` when the answer is "nothing" — the check is `state.background_playing and not _real_playback_active()`.
+
+### Deleting a library item must purge its HLS bundles first
+
+The prep bundle lives in a hidden folder beside the media file and its cache key is derived from the file's **name + size** (`_offline_cache_dir`) — so once the media is gone, the bundle can no longer be located. `delete_library_item` and `admin_cleanup_delete_item` resolve and remove bundles **before** calling `qbit_delete(delete_files=True)`, via `_purge_offline_bundles()`. Get the order wrong and the bundles are orphaned: hundreds of MB per prepped film, reclaimable only by the admin Cleanup tab's orphan sweep. `delete_item_files` has the same ordering for the same reason.
+
+### Validate enum-ish settings — don't coerce an unknown value to a default
+
+`POST /api/admin/auto-prep` used `mode if mode in (...) else "off"`, so a typo'd or stale client value returned **200 OK having quietly disabled automatic prep**. Silent coercion turns a client bug into a config change nobody made. Reject with a 400 instead (its sibling `/prep-validate` always did). Same class: `GET /api/search?limit=-5` reached `shaped[:limit]` → `shaped[:-5]`, returning *almost everything* instead of almost nothing — bound numeric query params with `Query(..., ge=, le=)` rather than trusting them into a slice.
+
 
 ## SSE
 

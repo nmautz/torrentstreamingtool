@@ -36,7 +36,7 @@ from urllib.parse import quote, unquote, urlparse
 
 import httpx
 import psutil
-from fastapi import FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, Query, Request, UploadFile
 from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.background import BackgroundTask
@@ -745,6 +745,74 @@ async def put_library(data: dict) -> None:
         await asyncio.to_thread(_save_lib_raw, data)
 
 
+class LibraryUnchanged(Exception):
+    """Raise inside `mutate_library()` to leave the transaction without writing.
+
+    Hot callers (the 15 s progress saver, the 5 s download monitor) open a
+    transaction and only then discover there's nothing to store — a stale tick, a
+    mid-transition VLC read, an item that vanished. A plain `return`/`continue`
+    exits the block cleanly, which *commits*; rewriting a multi-megabyte
+    library.json on every no-op tick is pure IO. This aborts the write instead.
+    It is swallowed by the context manager, so it never escapes to the caller.
+    """
+
+
+@asynccontextmanager
+async def mutate_library():
+    """Read → mutate → write library.json as ONE atomic transaction.
+
+    `get_library()` and `put_library()` each take `_lib_lock`, but neither holds
+    it across the caller's mutation — so the near-universal
+
+        lib = await get_library()
+        ...mutate...
+        await put_library(lib)
+
+    is a lost-update race: anything that reads between the two calls writes a
+    snapshot that predates this mutation and silently clobbers it. Both writers
+    return success, so nothing surfaces the loss. Observed live: three concurrent
+    writes to three DIFFERENT profiles landed one change and dropped two, and six
+    concurrent identical downloads defeated the info-hash dedup guard (six items
+    minted from one torrent) and then lost five of them on write-back, stranding
+    a hash-less item stuck in `downloading` forever.
+
+    Background writers make this routine rather than exotic: the progress tracker
+    saves every 15 s and the download monitor every 5 s, so any user action has a
+    standing chance of landing inside someone else's read-modify-write window.
+
+    Use this for every mutation. `get_library()` stays correct for read-only
+    callers; `put_library()` remains for the few places that build a library dict
+    from scratch rather than editing the current one.
+
+        async with mutate_library() as lib:
+            item["status"] = "ready"
+
+    The write happens on clean exit only — any exception aborts with nothing
+    persisted, so an HTTPException validation guard inside the block behaves
+    exactly as it did before. `raise LibraryUnchanged` is the explicit no-write
+    exit for "turns out there was nothing to store" (it's swallowed here).
+
+    Note a plain `return` inside the block COMMITS — the block ran to completion
+    as far as the context manager is concerned. That's harmless for the common
+    "bail before mutating" guard (it rewrites what it just read) but means an
+    early return can no longer be used to discard a mutation already made; raise
+    LibraryUnchanged for that.
+
+    Not reentrant: `_lib_lock` is a plain asyncio.Lock, so never call
+    get_library()/put_library()/mutate_library() — or any helper that does, such
+    as `_all_library_paths()` — inside the block. Keep network and disk IO out of
+    it too: this is the single global library lock, and holding it across a qBit
+    round trip or an N-file delete stalls every other reader and writer.
+    """
+    async with _lib_lock:
+        lib = await asyncio.to_thread(_load_lib_raw)
+        try:
+            yield lib
+        except LibraryUnchanged:
+            return
+        await asyncio.to_thread(_save_lib_raw, lib)
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds")
 
@@ -851,6 +919,18 @@ class AppState:
     library_series_map: dict = field(default_factory=dict)
     library_series_order: list = field(default_factory=list)
     library_current_file: Optional[str] = None            # path VLC is playing now
+    # Last position/duration/file observed while VLC was genuinely mid-playback.
+    # At end-of-media VLC reports time=0 AND length=0, so `vlc_time`/`vlc_duration`
+    # are useless for crediting the file that just finished — `_finalize_stopped_file`
+    # bails on `dur <= 0`. These keep the last good pair so the EOF handler can
+    # finalise what was actually watched. See `_handle_playback_ended`.
+    last_play_pos: float = 0.0
+    last_play_dur: float = 0.0
+    last_play_file: Optional[str] = None
+    # Consecutive `background_video_loop` polls that found VLC stopped while the
+    # app still believed something was playing. Two in a row (~6 s) is the
+    # end-of-media signal; one can be a track change or a seek landing.
+    vlc_stopped_ticks: int = 0
     downloading_count: int = 0                            # active library downloads (ALL, incl. admin-only — drives host-busy/idle gating)
     downloading_count_visible: int = 0                    # active downloads a non-elevated viewer may know about (excludes admin_only) — drives the user-facing badge
     play_when_ready_item_id: Optional[str] = None        # auto-play this item on download complete
@@ -987,6 +1067,79 @@ _MAIN_LOOP: Optional[asyncio.AbstractEventLoop] = None
 qbit: Optional[httpx.AsyncClient] = None
 vlc_client: Optional[httpx.AsyncClient] = None   # persistent keep-alive client for VLC (see _vlc_http)
 _admin_sessions: dict[str, float] = {}   # token → expiry Unix timestamp
+
+# ── Profile session tokens ────────────────────────────────────────────────────
+# Proof that a client actually entered a profile's PIN, issued by
+# POST /api/profiles/{id}/verify-pin. Map: token → {profile_id, expires}.
+#
+# `profile_id` alone was never proof of anything: it is a plain string the client
+# sends, and GET /api/profiles hands out every UUID unauthenticated. The content
+# lock read `is_elevated = profile_id in elevated_ids`, so quoting an elevated
+# profile's UUID revealed admin-locked items with no PIN ever entered — the PIN
+# screen was pure client-side decoration.
+#
+# In-memory and short-lived by design: losing them on restart just means the
+# household re-enters a PIN, which is the correct failure direction.
+#
+# Persisted, unlike _admin_sessions: this box reboots nightly (scheduled restart)
+# and the auto-updater restarts it too, and a viewer silently losing content-lock
+# access and the ability to delete — with only a 403 to explain it — every morning
+# is worse than the tokens outliving a process. The TTL still forces a periodic
+# re-entry, which is what actually bounds them.
+PROFILE_SESSIONS_FILE = Path(__file__).parent / "profile_sessions.json"
+_profile_sessions: dict[str, dict] = {}
+PROFILE_SESSION_TTL = 12 * 3600          # 12 h — a viewing session, not a login
+
+
+def _load_profile_sessions() -> None:
+    global _profile_sessions
+    try:
+        if PROFILE_SESSIONS_FILE.exists():
+            data = json.loads(PROFILE_SESSIONS_FILE.read_text(encoding="utf-8"))
+            now = time.time()
+            if isinstance(data, dict):
+                _profile_sessions = {
+                    k: v for k, v in data.items()
+                    if isinstance(v, dict) and float(v.get("expires", 0)) > now
+                }
+    except Exception as e:      # a corrupt file must not break startup
+        log.warning("Could not load profile sessions: %s", e)
+        _profile_sessions = {}
+
+
+def _save_profile_sessions() -> None:
+    try:
+        PROFILE_SESSIONS_FILE.write_text(
+            json.dumps(_profile_sessions, indent=2), encoding="utf-8")
+    except Exception as e:
+        log.warning("Could not persist profile sessions: %s", e)
+
+
+def _new_profile_session(profile_id: str) -> str:
+    """Mint a PIN-verified session token for `profile_id` (and reap expired ones)."""
+    now = time.time()
+    for t, meta in list(_profile_sessions.items()):
+        if meta["expires"] <= now:
+            _profile_sessions.pop(t, None)
+    token = secrets.token_hex(32)
+    _profile_sessions[token] = {"profile_id": profile_id, "expires": now + PROFILE_SESSION_TTL}
+    _save_profile_sessions()
+    return token
+
+
+def _profile_session_id(request: Request) -> Optional[str]:
+    """The profile id this request has PIN-proved, or None."""
+    tok = (request.headers.get("x-profile-token", "").strip()
+           or request.query_params.get("profile_token", "").strip())
+    if not tok:
+        return None
+    meta = _profile_sessions.get(tok)
+    if not meta:
+        return None
+    if time.time() > meta["expires"]:
+        _profile_sessions.pop(tok, None)
+        return None
+    return meta["profile_id"]
 
 # ── iOS app device-pairing tokens (M5, plan A4) ────────────────────────────────
 # Long-lived bearer tokens issued to paired client apps (POST /api/pair). Unlike
@@ -1245,6 +1398,48 @@ def _check_admin(request: Request) -> bool:
 def _require_admin(request: Request) -> None:
     if not _check_admin(request):
         raise HTTPException(401, "Admin authentication required.")
+
+
+# ── Profile authorisation ─────────────────────────────────────────────────────
+
+def _is_elevated(request: Request, lib: dict, profile_id: str = "") -> bool:
+    """True if this request may see admin-locked ("content lock") items.
+
+    Requires BOTH that the profile is marked `elevated` AND that the request
+    carries a PIN-verified session token for it (`_profile_session_id`). Claiming
+    the id is not enough — see `_profile_sessions` for why. An admin session is a
+    superset and passes on its own.
+
+    A profile with no PIN can never be elevated in practice: there is nothing to
+    verify, so no token is ever issued for it. That is deliberate — an elevated
+    profile anyone can select by name isn't a lock.
+    """
+    if _check_admin(request):
+        return True
+    verified = _profile_session_id(request)
+    if not verified or (profile_id and verified != profile_id):
+        return False
+    prof = next((p for p in lib.get("profiles", []) if p.get("id") == verified), None)
+    return bool(prof and prof.get("elevated"))
+
+
+def _require_delete_auth(request: Request, lib: dict) -> None:
+    """Gate the endpoints that destroy content — library items, their files, a
+    profile (and its watch history), a configured library path.
+
+    All four were completely unauthenticated: anyone who could reach the LAN could
+    `DELETE /api/library/{id}` and, since `delete_file` defaults to true, take the
+    media off disk with it. The dashboard (not just /admin) offers these, so they
+    can't simply be admin-only — a PIN-verified profile is the household's own
+    proof of identity, and an admin session still passes.
+    """
+    if _check_admin(request):
+        return
+    verified = _profile_session_id(request)
+    if verified and any(p.get("id") == verified for p in lib.get("profiles", [])):
+        return
+    raise HTTPException(
+        403, "Deleting requires a PIN-verified profile or the admin password.")
 
 
 def _request_bearer(request: Request) -> Optional[str]:
@@ -1771,7 +1966,16 @@ def _opensubtitles_hash(path: Path) -> Optional[str]:
 
 
 async def _current_playback_path() -> Optional[Path]:
-    """Resolve the file VLC is actually playing, regardless of how it started."""
+    """Resolve the file VLC is actually playing, regardless of how it started.
+
+    Returns None while the idle background video is on screen. It IS what VLC is
+    playing, but it is not *content*: without this guard the subtitle endpoints
+    treated it as the current movie, so a search run from an idle dashboard hashed
+    `damn.mp4` and a download wrote its `.srt` sidecar next to the background video
+    and attached the track to it.
+    """
+    if state.background_playing and not _real_playback_active():
+        return None
     uri = await vlc_playlist_uri()
     if uri and uri.startswith("file:"):
         try:
@@ -2335,13 +2539,21 @@ async def _settle_attribution(lib: dict, item: dict,
     fix if season 2's episode names were never fetched, because the season list
     sent to TMDb was derived from the *uncorrected* numbers.
 
-    `lib`/`item` must already be loaded — this runs on every metadata cache hit,
-    so the common no-op path must cost no extra library I/O. Callers must hold
-    the item's `_tmdb_fetch_locks` entry.
+    `item` must already be loaded — this runs on every metadata cache hit, so the
+    common no-op path must cost no extra library I/O. Callers must hold the item's
+    `_tmdb_fetch_locks` entry.
+
+    `lib` is the caller's snapshot, used only to decide there's work to do; the
+    write re-reads under the lock and re-applies to the fresh item, because by the
+    time we get here that snapshot may predate other writers.
     """
     if not _reattribute_item_files(item, meta):
         return meta
-    await put_library(lib)
+    async with mutate_library() as lib_w:
+        fresh = next((x for x in lib_w["items"] if x["id"] == item.get("id")), None)
+        if fresh is None:
+            raise LibraryUnchanged
+        _reattribute_item_files(fresh, meta)   # pure + idempotent — same result
 
     have = {int(k) for k in (meta or {}).get("seasons", {}) if str(k).isdigit()}
     want = {int(f.get("season", 0) or 0) for f in item.get("files", [])}
@@ -2355,12 +2567,11 @@ async def _settle_attribution(lib: dict, item: dict,
         return meta
     # Re-read: the fetch above was a network round trip, so other writers may
     # have touched the library while it was in flight.
-    lib2 = await get_library()
-    it2 = next((x for x in lib2["items"] if x["id"] == item.get("id")), None)
-    if not it2 or not isinstance(it2.get("metadata"), dict):
-        return meta
-    it2["metadata"].setdefault("seasons", {}).update(extra)
-    await put_library(lib2)
+    async with mutate_library() as lib2:
+        it2 = next((x for x in lib2["items"] if x["id"] == item.get("id")), None)
+        if not it2 or not isinstance(it2.get("metadata"), dict):
+            return meta
+        it2["metadata"].setdefault("seasons", {}).update(extra)
     return it2["metadata"]
 
 
@@ -2435,11 +2646,11 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
 
         # Re-read the library before writing — analyzer / progress writers may
         # have updated other fields while we were fetching from TMDb.
-        lib2 = await get_library()
-        it2 = next((x for x in lib2["items"] if x["id"] == item_id), None)
+        async with mutate_library() as lib2:
+            it2 = next((x for x in lib2["items"] if x["id"] == item_id), None)
+            if it2:
+                it2["metadata"] = data
         if it2:
-            it2["metadata"] = data
-            await put_library(lib2)
             # The season inventory we just fetched is exactly what the
             # absolute-numbering pass needs; settling it here can also reveal
             # seasons whose episode lists the fetch above didn't ask for
@@ -2449,6 +2660,44 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
         # keep rendering for every client even if the internet later drops.
         _tmdb_bg(_prefetch_metadata_images(data))
         return data
+
+
+def _assert_item_visible(request: Request, lib: dict, item: dict,
+                         profile_id: str = "") -> None:
+    """404 an admin-locked item for a requester who isn't allowed to know it exists.
+
+    The content lock only ever filtered the LISTING. Every per-item route addressed
+    by id — /files, /metadata, /subs, skip-data — served a locked item to anyone who
+    asked, with no profile_id and no auth of any kind; the ids themselves leak from
+    the listing the moment someone quotes an elevated profile's UUID. 404 rather
+    than 403 so the response is indistinguishable from a missing item.
+    """
+    if not item.get("admin_only"):
+        return
+    if _is_elevated(request, lib, profile_id):
+        return
+    raise HTTPException(404, "Item not found.")
+
+
+def _nudge_season_inventory(item: dict) -> None:
+    """Background-refresh a TV item whose cached metadata predates `all_seasons`.
+
+    `episodes.resolve_absolute` turns a series-absolute number into a within-season
+    one (an anime batch's `…/Season 2/Show - 26.mkv` is S2E01, not S2E26), but it
+    needs TMDb's season inventory to do it — and metadata cached before
+    `all_seasons` existed has none, so those items keep showing absolute numbers
+    indefinitely. `_fetch_item_metadata` self-heals the cache and
+    `_settle_attribution` then fixes the numbering.
+
+    This nudge used to live only on the merged-series endpoint, so an item opened
+    directly from its own page never triggered it: Attack on Titan listed S2 as
+    E26–E37 until something happened to open the series view. Fires from every
+    entry point now. Cheap and idempotent — `_spawn_metadata_fetch` joins an
+    in-flight task, and the condition stops matching once the cache is healed.
+    """
+    meta = item.get("metadata") or {}
+    if meta.get("tmdb_kind") == "tv" and "all_seasons" not in meta:
+        _spawn_metadata_fetch(item["id"])
 
 
 def _spawn_metadata_fetch(item_id: str) -> "asyncio.Task[Optional[dict]]":
@@ -5576,10 +5825,9 @@ async def scheduled_reboot_loop() -> None:
                 continue
 
             # Idle → record that we've fired for today (loop guard), then reboot.
-            lib2 = await get_library()
-            sr = lib2.setdefault("settings", {}).setdefault("scheduled_reboot", {})
-            sr["last_fired"] = today
-            await put_library(lib2)
+            async with mutate_library() as lib2:
+                sr = lib2.setdefault("settings", {}).setdefault("scheduled_reboot", {})
+                sr["last_fired"] = today
             print(f"[reboot] scheduled restart firing — machine idle for "
                   f"{cfg['idle_minutes']} min")
             await _reboot_machine()
@@ -5692,10 +5940,9 @@ async def _set_updater_phase(phase: str, message: str = "", busy: bool = False) 
 
 async def _persist_updater_state(**fields) -> None:
     """Merge `fields` into library.json → settings.autoupdate, preserving everything else."""
-    lib = await get_library()
-    au = lib.setdefault("settings", {}).setdefault("autoupdate", {})
-    au.update(fields)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        au = lib.setdefault("settings", {}).setdefault("autoupdate", {})
+        au.update(fields)
 
 
 async def _run_check(branch: str, allow_any: bool = False) -> dict:
@@ -5946,6 +6193,12 @@ async def stat_broadcaster() -> None:
             if vs:
                 state.vlc_time = int(vs.get("time", 0))
                 state.vlc_duration = int(vs.get("length", 0))
+                # Remember the last good pair. VLC zeroes both at end-of-media, so
+                # without this the file that just finished can't be credited.
+                if state.vlc_duration > 0 and vs.get("state") in ("playing", "paused"):
+                    state.last_play_pos  = float(state.vlc_time)
+                    state.last_play_dur  = float(state.vlc_duration)
+                    state.last_play_file = state.library_current_file
                 reported = round(int(vs.get("volume", 256)) / 256 * 100)
                 # Self-heal: VLC occasionally snaps volume back to 100 on
                 # playlist advance / track start. If it sits above the user's
@@ -6031,6 +6284,86 @@ def _real_playback_active() -> bool:
             or bool(state.library_item_id)
             or (state.library_play_task is not None and not state.library_play_task.done())
             or (state.stream_task is not None and not state.stream_task.done()))
+
+
+def _play_handoff_in_flight() -> bool:
+    """True when a play is mid-handoff to VLC — the subset of `_real_playback_active`
+    that is genuinely in motion rather than merely *recorded* in AppState.
+
+    `_real_playback_active` also reports True for the stale "we think we're playing"
+    fields, which is exactly what the end-of-media handler has to clear. Testing
+    those there would be circular, so this is the narrower check it uses instead.
+    """
+    return (state.youtube_active
+            or state.stream_status == "buffering"
+            or (state.library_play_task is not None and not state.library_play_task.done())
+            or (state.stream_task is not None and not state.stream_task.done()))
+
+
+async def _handle_playback_ended() -> bool:
+    """VLC reached the end of its playlist — credit the finished file and return the
+    dashboard to idle. Returns True if it actually cleared an active playback.
+
+    Nothing else did this. `stream_status` only went back to "idle" via an explicit
+    /api/stop, a YouTube close, or the stream pipeline, so when a movie (or the last
+    episode of a playlist) simply ended, AppState kept saying `playing` with the old
+    title while VLC sat on a dead playlist entry — the dashboard showed
+    "PLAYING <title> — 0:00 / 0:00" indefinitely.
+
+    Worse, it was self-sustaining: `background_video_loop` would have restarted the
+    idle video within ~3 s, but `_play_background_video()` refuses to stomp VLC while
+    `_real_playback_active()` is True — and that reads `stream_status` and
+    `library_item_id`, the very fields only `_play_background_video()` clears. The
+    loop retried every 3 s forever and never won, so the TV kept a dead VLC on screen
+    and only a manual Stop (or starting something else) broke the cycle.
+
+    Reaching the end of the media counts as watched, so the finalise below uses the
+    last good position/duration pair — VLC zeroes both at EOF, and
+    `_finalize_stopped_file` ignores a zero duration.
+    """
+    if not _real_playback_active() or _play_handoff_in_flight():
+        return False
+
+    item_id = state.library_item_id
+    profile = state.library_profile_id
+    fin_file = state.last_play_file or state.library_current_file
+    fin_pos  = state.last_play_pos
+    fin_dur  = state.last_play_dur
+    if item_id and profile and fin_file and fin_dur > 0:
+        # Credit the outro rather than the last sampled position: the 2 s poll can
+        # sit a couple of seconds short of the end, which is enough to fall outside
+        # STOP_OUTRO_WINDOW_SEC and leave a fully-watched file resumable.
+        await _finalize_stopped_file(item_id, profile, fin_file, fin_dur, fin_dur)
+
+    log.info("Playback ended (VLC idle) — returning to idle surface: %s",
+             state.active_title or fin_file or "?")
+    state.active_hash = None
+    state.active_file = None
+    state.active_title = None
+    state.stream_status = "idle"
+    state.vlc_time = 0
+    state.vlc_duration = 0
+    state.library_item_id = None
+    state.library_profile_id = None
+    state.library_profile_name = ""
+    state.library_profile_color = ""
+    state.library_item_file_count = 0
+    state.library_playlist = []
+    state.library_nav_order = []
+    state.library_shuffle_order = []
+    state.library_series_map = {}
+    state.library_series_order = []
+    state.library_current_file = None
+    state.last_play_pos = 0.0
+    state.last_play_dur = 0.0
+    state.last_play_file = None
+    state.skip_offer = None
+    state.skip_offer_file = None
+    state.resume_offer = None
+    await _cancel_skip_countdown()
+    await broadcast("stream_status", {"status": "idle", "message": "Finished."})
+    await broadcast("state", state_snapshot())
+    return True
 
 
 async def _play_background_video() -> bool:
@@ -6119,6 +6452,28 @@ async def background_video_loop() -> None:
             # stopped. Don't let the idle-background loop start a video over it.
             if state.youtube_active:
                 continue
+
+            # ── End-of-media detection ───────────────────────────────────────
+            # Runs BEFORE every guard below, because returning the dashboard to
+            # idle when the media ends is not a background-video concern: it has
+            # to happen even with no bg video configured, one disabled, window
+            # control paused, or the TV UI holding the screen. Skipping it in
+            # those cases would leave the "PLAYING <title> — 0:00 / 0:00" stall
+            # in place for exactly the setups that have no bg video to recover.
+            if _real_playback_active() and not _play_handoff_in_flight():
+                vs_eof = await vlc_status()
+                if vs_eof is not None and vs_eof.get("state", "") not in ("playing", "paused"):
+                    # Two consecutive stopped polls (~6 s) — one can be a track
+                    # change or a seek landing.
+                    state.vlc_stopped_ticks += 1
+                    if state.vlc_stopped_ticks >= 2:
+                        await _handle_playback_ended()
+                        state.vlc_stopped_ticks = 0
+                else:
+                    state.vlc_stopped_ticks = 0
+            else:
+                state.vlc_stopped_ticks = 0
+
             # Window control paused by the user — leave the desktop alone and
             # don't (re)start the idle background video over their work.
             if window_mgmt_paused():
@@ -6165,6 +6520,10 @@ async def background_video_loop() -> None:
                             await _sync_state_from_vlc()
                             await broadcast("state", state_snapshot())
                 continue
+
+            # VLC is stopped/ended — the end-of-media handler at the top of the
+            # loop has already cleared any stale playback state, so this can now
+            # put the idle video back on screen.
             await _play_background_video()
         except Exception:
             pass
@@ -6769,7 +7128,24 @@ async def library_download_monitor() -> None:
                                 break
 
             if changed:
-                await put_library(lib)
+                # `lib` is a snapshot taken BEFORE this tick's qBit round trips, so
+                # writing it wholesale would roll back anything a user (or another
+                # task) changed while we were polling — the lost-update race this
+                # whole pass exists to close. Holding the lock across the tick isn't
+                # an option either: that would stall every reader for the length of
+                # a qBit poll. So re-read under the lock and merge back only the
+                # items this tick actually touched, leaving every other item — and
+                # profiles, settings, progress — at whatever the fresh copy says.
+                #
+                # An item that vanished mid-tick stays vanished: skipping it is what
+                # stops the monitor resurrecting a download the user just deleted.
+                touched = {it["id"]: it for it in pending}
+                async with mutate_library() as fresh:
+                    by_id = {it["id"]: it for it in fresh["items"]}
+                    for iid, mutated in touched.items():
+                        cur = by_id.get(iid)
+                        if cur is not None:
+                            cur.update(mutated)
         except Exception:
             pass
 
@@ -7025,37 +7401,41 @@ async def _run_series_analysis(series_key: str) -> None:
         # Persist results back into library.json under each item.
         files_updated = 0
         files_failed = 0
-        lib = await get_library()
-        for it in lib["items"]:
-            if _series_key(it) != series_key:
-                continue
-            skip_data = it.setdefault("skip_data", {})
-            changed = False
-            for f in it.get("files", []):
-                p = f.get("path", "")
-                if p in results:
-                    # Manual admin edits are never overwritten — not even by a
-                    # forced re-run (docs/ANALYZER.md). The file still gets
-                    # fingerprinted (its print helps cluster the peers), but
-                    # its stored entry stays as the admin set it.
-                    prev_ana = (skip_data.get(p) or {}).get("analysis") or {}
-                    if prev_ana.get("source") == "manual":
-                        continue
-                    skip_data[p] = results[p]
-                    files_updated += 1
-                    changed = True
-                    ana = results[p].get("analysis") or {}
-                    if ana.get("source") == "failed":
-                        files_failed += 1
-                        _log_analyzer_event(
-                            level="error", series_key=series_key,
-                            item_id=it["id"], file_path=p,
-                            error_code=ana.get("error_code", ""),
-                            message=ana.get("error", "Fingerprinting failed."),
-                        )
-            if changed:
-                await broadcast("library_update", {"item_id": it["id"], "status": it.get("status", "ready")})
-        await put_library(lib)
+        updated_items: list[tuple[str, str]] = []
+        async with mutate_library() as lib:
+            for it in lib["items"]:
+                if _series_key(it) != series_key:
+                    continue
+                skip_data = it.setdefault("skip_data", {})
+                changed = False
+                for f in it.get("files", []):
+                    p = f.get("path", "")
+                    if p in results:
+                        # Manual admin edits are never overwritten — not even by a
+                        # forced re-run (docs/ANALYZER.md). The file still gets
+                        # fingerprinted (its print helps cluster the peers), but
+                        # its stored entry stays as the admin set it.
+                        prev_ana = (skip_data.get(p) or {}).get("analysis") or {}
+                        if prev_ana.get("source") == "manual":
+                            continue
+                        skip_data[p] = results[p]
+                        files_updated += 1
+                        changed = True
+                        ana = results[p].get("analysis") or {}
+                        if ana.get("source") == "failed":
+                            files_failed += 1
+                            _log_analyzer_event(
+                                level="error", series_key=series_key,
+                                item_id=it["id"], file_path=p,
+                                error_code=ana.get("error_code", ""),
+                                message=ana.get("error", "Fingerprinting failed."),
+                            )
+                if changed:
+                    updated_items.append((it["id"], it.get("status", "ready")))
+        # Broadcast outside the transaction — the library lock is global and
+        # shouldn't be held while fanning out to every connected SSE client.
+        for _iid, _st in updated_items:
+            await broadcast("library_update", {"item_id": _iid, "status": _st})
 
         # If the analyze_series call already set the job to "failed" (exception
         # path), don't overwrite it back to complete.
@@ -7295,25 +7675,24 @@ async def _mark_file_watched_internal(
     """Set completed=True for one file/profile (used by the deferred credit-skip
     watch). Preserves any saved track prefs; never clobbers an already-completed
     entry."""
-    lib = await get_library()
-    item = next((it for it in lib["items"] if it["id"] == item_id), None)
-    if not item:
-        return
-    canon = _canonical_item_path(file_path, item)
-    prof_prog = item.setdefault("progress", {}).setdefault(profile_id, {})
-    file_prog = prof_prog.setdefault("file_progress", {})
-    existing = file_prog.get(canon) or file_prog.get(file_path) or {}
-    if existing.get("completed"):
-        return
-    dur = existing.get("duration_sec") or dur_sec or 0
-    file_prog[canon] = {
-        "position_sec": round(dur, 1),
-        "duration_sec": round(dur, 1),
-        "completed": True,
-        "updated_at": _now_iso(),
-        **{k: v for k, v in existing.items() if k in _TRACK_PREF_KEYS},
-    }
-    await put_library(lib)
+    async with mutate_library() as lib:
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        if not item:
+            return
+        canon = _canonical_item_path(file_path, item)
+        prof_prog = item.setdefault("progress", {}).setdefault(profile_id, {})
+        file_prog = prof_prog.setdefault("file_progress", {})
+        existing = file_prog.get(canon) or file_prog.get(file_path) or {}
+        if existing.get("completed"):
+            return
+        dur = existing.get("duration_sec") or dur_sec or 0
+        file_prog[canon] = {
+            "position_sec": round(dur, 1),
+            "duration_sec": round(dur, 1),
+            "completed": True,
+            "updated_at": _now_iso(),
+            **{k: v for k, v in existing.items() if k in _TRACK_PREF_KEYS},
+        }
     await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "ready")})
 
 
@@ -7334,6 +7713,25 @@ def _position_is_finished(item: dict, file_path: str, pos: float, dur: float) ->
     cs = meta.get("credits_start")
     outro = float(cs) if cs else dur
     return pos >= outro - STOP_OUTRO_WINDOW_SEC
+
+
+def _device_reported_finished(item: dict, file_path: str,
+                              pos: float, dur: float) -> bool:
+    """Completion rule for positions reported by a CLIENT (on-device player, iOS
+    batch sync, sync conflict resolution) — the same outro test the host uses.
+
+    These paths used to credit a file at a flat `pct > 0.92`, while VLC playback on
+    the host required reaching the outro (`_position_is_finished`, a 10 s window
+    before `credits_start` or the real end). Same profile, same file, two different
+    answers: stopping a 45-minute episode at 93% marked it watched on the phone and
+    left it resumable on the TV, ~3.4 minutes apart. The host rule is the intended
+    one — see the comments on `_position_is_finished` — so it wins everywhere.
+
+    `file_path` is canonicalised first: clients key progress by the path they were
+    handed, which may not be the exact string stored in `item["files"]`, and the
+    credits lookup needs the stored form.
+    """
+    return _position_is_finished(item, _canonical_item_path(file_path, item), pos, dur)
 
 
 async def _finalize_stopped_file(
@@ -7359,27 +7757,26 @@ async def _finalize_stopped_file(
     end-of-file race that briefly reports the *next* file at t≈0 a no-op."""
     if not (item_id and profile_id and file_path) or dur <= 0 or pos <= 0:
         return
-    lib = await get_library()
-    item = next((it for it in lib["items"] if it["id"] == item_id), None)
-    if not item:
-        return
-    canon = _canonical_item_path(file_path, item)
-    prof_prog = item.setdefault("progress", {}).setdefault(profile_id, {})
-    file_prog = prof_prog.setdefault("file_progress", {})
-    existing = file_prog.get(canon) or file_prog.get(file_path) or {}
-    if existing.get("completed"):
-        return
-    finished = _position_is_finished(item, canon, pos, dur)
-    if not finished and pos <= existing.get("position_sec", 0):
-        return  # older/stale snapshot (or an EOF-race t≈0) — keep what we have
-    file_prog[canon] = {
-        "position_sec": round(dur if finished else pos, 1),
-        "duration_sec": round(dur, 1),
-        "completed": finished,
-        "updated_at": _now_iso(),
-        **{k: v for k, v in existing.items() if k in _TRACK_PREF_KEYS},
-    }
-    await put_library(lib)
+    async with mutate_library() as lib:
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        if not item:
+            return
+        canon = _canonical_item_path(file_path, item)
+        prof_prog = item.setdefault("progress", {}).setdefault(profile_id, {})
+        file_prog = prof_prog.setdefault("file_progress", {})
+        existing = file_prog.get(canon) or file_prog.get(file_path) or {}
+        if existing.get("completed"):
+            return
+        finished = _position_is_finished(item, canon, pos, dur)
+        if not finished and pos <= existing.get("position_sec", 0):
+            return  # older/stale snapshot (or an EOF-race t≈0) — keep what we have
+        file_prog[canon] = {
+            "position_sec": round(dur if finished else pos, 1),
+            "duration_sec": round(dur, 1),
+            "completed": finished,
+            "updated_at": _now_iso(),
+            **{k: v for k, v in existing.items() if k in _TRACK_PREF_KEYS},
+        }
 
 
 async def _series_finalize_and_switch(new_item_id: str,
@@ -7780,11 +8177,6 @@ async def vlc_progress_tracker() -> None:
             if not current_file:
                 continue
 
-            lib = await get_library()
-            item = next((it for it in lib["items"] if it["id"] == state.library_item_id), None)
-            if not item:
-                continue
-
             # Take a FRESH, self-consistent snapshot right before writing. The
             # pos/dur read at the top of this loop iteration come from status.json,
             # but the current file is resolved from a SEPARATE playlist.json call —
@@ -7804,37 +8196,50 @@ async def vlc_progress_tracker() -> None:
             uri_now = await vlc_playlist_uri()
             if not (uri_now and uri_now.startswith("file://")):
                 continue
-            save_file = _canonical_item_path(uri_to_path(uri_now), item)
-            if save_file != current_file:
-                continue  # mid-transition — next tick will be consistent
             save_pos = float(vs2.get("time", 0) or 0)
             save_dur = float(vs2.get("length", 0) or 0)
             if save_dur < 10:
                 continue
 
+            # Everything above is VLC IO and stays OUTSIDE the library lock; the
+            # transaction below is just the JSON edit. `save_file` still has to be
+            # canonicalised against the item, so the mid-transition check lives
+            # inside — it aborts with LibraryUnchanged rather than committing a
+            # pointless rewrite on every inconsistent tick.
+            saved = False
+            async with mutate_library() as lib:
+                item = next((it for it in lib["items"] if it["id"] == state.library_item_id), None)
+                if not item:
+                    raise LibraryUnchanged
+                save_file = _canonical_item_path(uri_to_path(uri_now), item)
+                if save_file != current_file:
+                    raise LibraryUnchanged  # mid-transition — next tick will be consistent
+
+                prof_prog = item.setdefault("progress", {}).setdefault(state.library_profile_id, {})
+                prof_prog["last_file"] = save_file
+                file_prog = prof_prog.setdefault("file_progress", {})
+                existing_fp = file_prog.get(save_file, {})
+                file_prog[save_file] = {
+                    "position_sec": round(save_pos, 1),
+                    "duration_sec": round(save_dur, 1),
+                    # Complete only once playback reaches the outro (never regress an
+                    # already-completed file). Same rule as the stop/supersede
+                    # finalize, so a mid-episode position is never blanket-credited
+                    # at 0.92 and then left un-resumable.
+                    "completed": bool(existing_fp.get("completed"))
+                                 or _position_is_finished(item, save_file, save_pos, save_dur),
+                    "updated_at": _now_iso(),
+                    # Preserve saved track picks — they're sibling keys in the same
+                    # file_progress dict, and this write fires every 15 s (a full
+                    # replacement here silently wiped a subtitle pick made seconds
+                    # earlier, so replays defaulted back to subs-off).
+                    **{k: v for k, v in existing_fp.items() if k in _TRACK_PREF_KEYS},
+                }
+                saved = True
+            if not saved:
+                continue
             last_progress_save = now
             pct = save_pos / save_dur
-            prof_prog = item.setdefault("progress", {}).setdefault(state.library_profile_id, {})
-            prof_prog["last_file"] = save_file
-            file_prog = prof_prog.setdefault("file_progress", {})
-            existing_fp = file_prog.get(save_file, {})
-            file_prog[save_file] = {
-                "position_sec": round(save_pos, 1),
-                "duration_sec": round(save_dur, 1),
-                # Complete only once playback reaches the outro (never regress an
-                # already-completed file). Same rule as the stop/supersede
-                # finalize, so a mid-episode position is never blanket-credited
-                # at 0.92 and then left un-resumable.
-                "completed": bool(existing_fp.get("completed"))
-                             or _position_is_finished(item, save_file, save_pos, save_dur),
-                "updated_at": _now_iso(),
-                # Preserve saved track picks — they're sibling keys in the same
-                # file_progress dict, and this write fires every 15 s (a full
-                # replacement here silently wiped a subtitle pick made seconds
-                # earlier, so replays defaulted back to subs-off).
-                **{k: v for k, v in existing_fp.items() if k in _TRACK_PREF_KEYS},
-            }
-            await put_library(lib)
 
             await broadcast("progress_saved", {
                 "item_id": state.library_item_id,
@@ -8039,34 +8444,37 @@ async def library_download_pipeline(
         else:
             h = await qbit_add_magnet(magnet, save_path=save_path or None)
             if not h:
-                lib = await get_library()
-                for it in lib["items"]:
-                    if it["id"] == item_id:
-                        it["status"] = "error"
-                        it.pop("pending_download", None)   # add failed — don't retry on restart
-                        break
-                await put_library(lib)
+                async with mutate_library() as lib:
+                    for it in lib["items"]:
+                        if it["id"] == item_id:
+                            it["status"] = "error"
+                            it.pop("pending_download", None)   # add failed — don't retry on restart
+                            break
                 await broadcast("library_update", {"item_id": item_id, "status": "error"})
                 return
 
-        lib = await get_library()
-        for it in lib["items"]:
-            if it["id"] == item_id:
-                it["torrent_hash"] = h
-                # Keep the magnet + save path for as long as the download runs, so
-                # `library_download_monitor` can re-add the torrent if qBit loses
-                # it. qBit drops a metadata-less magnet silently when it is killed
-                # (the VPN kill-switch does exactly that), which used to pin the
-                # item at "downloading" forever. Cleared when the item settles.
-                it["download_source"] = {
-                    "magnet": magnet,
-                    "save_path": save_path or settings.qbit_download_path,
-                }
-                # Hash recorded → the monitor can manage this item from qBit even if
-                # metadata is still pending, so it's no longer an orphan to recover.
-                it.pop("pending_download", None)
-                break
-        await put_library(lib)
+        # One transaction, so the hash can't be lost to a concurrent writer. It was:
+        # the magnet add above is a network round trip, and anything that wrote
+        # library.json during it clobbered this write-back — leaving the item stuck
+        # at "downloading" with no torrent_hash, no error, and no recovery path
+        # (the admin Cleanup tab classifies it as neither orphan nor missing).
+        async with mutate_library() as lib:
+            for it in lib["items"]:
+                if it["id"] == item_id:
+                    it["torrent_hash"] = h
+                    # Keep the magnet + save path for as long as the download runs, so
+                    # `library_download_monitor` can re-add the torrent if qBit loses
+                    # it. qBit drops a metadata-less magnet silently when it is killed
+                    # (the VPN kill-switch does exactly that), which used to pin the
+                    # item at "downloading" forever. Cleared when the item settles.
+                    it["download_source"] = {
+                        "magnet": magnet,
+                        "save_path": save_path or settings.qbit_download_path,
+                    }
+                    # Hash recorded → the monitor can manage this item from qBit even if
+                    # metadata is still pending, so it's no longer an orphan to recover.
+                    it.pop("pending_download", None)
+                    break
 
         # Wait for torrent metadata to appear, then build the file list
         for _ in range(30):
@@ -8093,19 +8501,20 @@ async def library_download_pipeline(
                     if qf.get("index", i) not in selected_set:
                         file_modes[full] = "skip"
 
-            lib = await get_library()
             target = None
-            for it in lib["items"]:
-                if it["id"] == item_id:
-                    it["files"] = files
-                    it["size_bytes"] = info.get("size", 0)
-                    it["download"] = {
-                        "mode": download_mode if download_mode in ("now", "idle") else "now",
-                        "files": file_modes,
-                    }
-                    target = it
-                    break
-            await put_library(lib)
+            async with mutate_library() as lib:
+                for it in lib["items"]:
+                    if it["id"] == item_id:
+                        it["files"] = files
+                        it["size_bytes"] = info.get("size", 0)
+                        it["download"] = {
+                            "mode": download_mode if download_mode in ("now", "idle") else "now",
+                            "files": file_modes,
+                        }
+                        target = it
+                        break
+            # `_download_idle_open` only reads settings off the dict it's handed, so
+            # it runs fine (and cheaply) outside the lock on the snapshot above.
             if target is not None:
                 idle_open = await _download_idle_open(lib)
                 await _reconcile_item_downloads(target, idle_open)
@@ -8184,6 +8593,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     _jackett_cookie_lock = asyncio.Lock()
     _analysis_gate = asyncio.Semaphore(ANALYSIS_CONCURRENCY)
     _load_device_tokens()   # M5: restore paired-device bearer tokens
+    _load_profile_sessions()   # PIN-verified profile sessions (survive a restart)
     qbit = httpx.AsyncClient(timeout=10.0)
     _vlc_http()   # build the persistent keep-alive VLC client up front
     await qbit_login()
@@ -8327,7 +8737,12 @@ async def admin_https_redirect(request: Request, call_next):
         if proto == "http":
             host = request.headers.get("x-forwarded-host") or request.url.hostname
             qs   = ("?" + request.url.query) if request.url.query else ""
-            return RedirectResponse(f"https://{host}{path}{qs}", status_code=301)
+            # 308, not 301: a 301/302 lets the client drop the method and body, so
+            # `POST http://…/api/admin/login` arrived at the HTTPS endpoint as a
+            # bodyless request and failed validation with 422 instead of logging in.
+            # 308 preserves both. (Browsers hitting /admin only ever GET, so this is
+            # invisible there — it's non-browser clients that were broken.)
+            return RedirectResponse(f"https://{host}{path}{qs}", status_code=308)
     return await call_next(request)
 
 
@@ -8747,7 +9162,7 @@ class BackgroundEnabledReq(BaseModel):
 # ── Routes: Profiles ─────────────────────────────────────────────────────────
 
 @app.get("/api/profiles")
-async def list_profiles() -> JSONResponse:
+async def list_profiles(request: Request) -> JSONResponse:
     lib = await get_library()
     profiles = [
         {
@@ -8764,33 +9179,41 @@ async def list_profiles() -> JSONResponse:
         }
         for p in lib["profiles"]
     ]
-    return JSONResponse({"profiles": profiles})
+    # Which profile (if any) this caller has PIN-proved. The client clears a token
+    # that comes back null so a session expired by TTL — or dropped because the
+    # profile was deleted — re-prompts for the PIN instead of silently showing
+    # less content and failing deletes with a 403 nobody expected.
+    return JSONResponse({"profiles": profiles,
+                         "verified_profile_id": _profile_session_id(request)})
 
 
 @app.post("/api/profiles")
 async def create_profile(req: ProfileReq) -> JSONResponse:
-    lib = await get_library()
-    if len(lib["profiles"]) >= 6:
-        raise HTTPException(400, "Maximum 6 profiles reached.")
-    profile = {"id": str(uuid.uuid4()), "name": req.name.strip()[:30], "color": req.color}
-    lib["profiles"].append(profile)
-    await put_library(lib)
+    # A blank name was accepted and rendered as an unlabelled, hard-to-identify tile.
+    name = req.name.strip()[:30]
+    if not name:
+        raise HTTPException(400, "Profile name cannot be empty.")
+    async with mutate_library() as lib:
+        if len(lib["profiles"]) >= 6:
+            raise HTTPException(400, "Maximum 6 profiles reached.")
+        profile = {"id": str(uuid.uuid4()), "name": name, "color": req.color}
+        lib["profiles"].append(profile)
     return JSONResponse({"profile": profile})
 
 
 @app.delete("/api/profiles/{profile_id}")
-async def delete_profile(profile_id: str) -> JSONResponse:
-    lib = await get_library()
-    lib["profiles"] = [p for p in lib["profiles"] if p["id"] != profile_id]
-    for item in lib["items"]:
-        item.get("progress", {}).pop(profile_id, None)
-        hvp = item.get("hidden_by_profiles", [])
-        if profile_id in hvp:
-            hvp.remove(profile_id)
-        dvp = item.get("default_visible_profiles", [])
-        if profile_id in dvp:
-            dvp.remove(profile_id)
-    await put_library(lib)
+async def delete_profile(request: Request, profile_id: str) -> JSONResponse:
+    async with mutate_library() as lib:
+        _require_delete_auth(request, lib)
+        lib["profiles"] = [p for p in lib["profiles"] if p["id"] != profile_id]
+        for item in lib["items"]:
+            item.get("progress", {}).pop(profile_id, None)
+            hvp = item.get("hidden_by_profiles", [])
+            if profile_id in hvp:
+                hvp.remove(profile_id)
+            dvp = item.get("default_visible_profiles", [])
+            if profile_id in dvp:
+                dvp.remove(profile_id)
     return JSONResponse({"ok": True})
 
 
@@ -8810,8 +9233,9 @@ def _item_hidden_for_profile(item: dict, profile_id: str) -> bool:
 async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
     is_admin = _check_admin(request)
     lib = await get_library()
-    elevated_ids = {p["id"] for p in lib["profiles"] if p.get("elevated")}
-    is_elevated  = bool(profile_id) and profile_id in elevated_ids
+    # Elevation needs a PIN-verified session, not just the claimed profile_id —
+    # those UUIDs are public (GET /api/profiles is unauthenticated). See _is_elevated.
+    is_elevated  = _is_elevated(request, lib, profile_id)
     items = []
     for it in lib["items"]:
         if it.get("admin_only") and not is_admin and not is_elevated:
@@ -8966,12 +9390,15 @@ async def _build_item_files(item: dict, profile_id: str) -> list[dict]:
 
 
 @app.get("/api/library/{item_id}/files")
-async def get_item_files(item_id: str, profile_id: str = "") -> JSONResponse:
+async def get_item_files(request: Request, item_id: str,
+                         profile_id: str = "") -> JSONResponse:
     """Return the video file list for a library item with per-profile progress."""
     lib = await get_library()
     item = next((it for it in lib["items"] if it["id"] == item_id), None)
     if not item:
         raise HTTPException(404, "Item not found.")
+    _assert_item_visible(request, lib, item, profile_id)
+    _nudge_season_inventory(item)
     cfg = _download_cfg(item)
     prep_cfg = _prep_cfg(item)
     out = await _build_item_files(item, profile_id)
@@ -8999,8 +9426,7 @@ async def get_series_files(request: Request, series_key: str,
     to drive cross-item play/resume. See docs/LIBRARY_DATA.md § merged series."""
     is_admin = _check_admin(request)
     lib = await get_library()
-    elevated_ids = {p["id"] for p in lib["profiles"] if p.get("elevated")}
-    is_elevated  = bool(profile_id) and profile_id in elevated_ids
+    is_elevated  = _is_elevated(request, lib, profile_id)
     members = [it for it in _items_for_series_key(lib, series_key)
                if not (it.get("admin_only") and not is_admin and not is_elevated)]
     if not members:
@@ -9024,8 +9450,8 @@ async def get_series_files(request: Request, series_key: str,
     # background (the fetch self-heals `all_seasons`; see _fetch_item_metadata),
     # so the NEXT open is complete. This response is not delayed by it — the
     # client tops up from /api/tmdb/lookup meanwhile.
-    if (meta or {}).get("tmdb_kind") == "tv" and "all_seasons" not in (meta or {}):
-        _spawn_metadata_fetch(meta_item["id"])
+    if meta_item is not None:
+        _nudge_season_inventory(meta_item)
 
     # Series-level on-demand-only state so the merged-series episode page can
     # render its toggle: "on" only when EVERY member is on-demand-only; "locked"
@@ -9045,7 +9471,8 @@ async def get_series_files(request: Request, series_key: str,
 
 
 @app.get("/api/library/{item_id}/metadata")
-async def get_item_metadata(item_id: str, refresh: int = 0) -> JSONResponse:
+async def get_item_metadata(request: Request, item_id: str,
+                            refresh: int = 0, profile_id: str = "") -> JSONResponse:
     """Return cached TMDb metadata for an item; auto-fetches on first access.
     Response always includes `enabled` so the UI can gracefully fall back to
     filename parsing when no TMDb key is configured.
@@ -9059,6 +9486,7 @@ async def get_item_metadata(item_id: str, refresh: int = 0) -> JSONResponse:
     item = next((it for it in lib["items"] if it["id"] == item_id), None)
     if not item:
         raise HTTPException(404, "Item not found.")
+    _assert_item_visible(request, lib, item, profile_id)
 
     cached = item.get("metadata") or {}
     pending = False
@@ -9074,6 +9502,11 @@ async def get_item_metadata(item_id: str, refresh: int = 0) -> JSONResponse:
             pending = True
     elif refresh and key_present:
         cached = await _fetch_item_metadata(item_id, force=True) or cached
+    elif key_present:
+        # Cached, but possibly from before the season inventory existed — heal it
+        # in the background so absolute episode numbers get corrected. See
+        # _nudge_season_inventory.
+        _nudge_season_inventory(item)
 
     return JSONResponse({
         "enabled":  key_present,
@@ -9670,12 +10103,11 @@ async def set_item_metadata(item_id: str,
         "fetched_at":    _now_iso(),
     }
 
-    lib = await get_library()
-    item = next((it for it in lib["items"] if it["id"] == item_id), None)
-    if not item:
-        raise HTTPException(404, "Item not found.")
-    item["metadata"] = data
-    await put_library(lib)
+    async with mutate_library() as lib:
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        if not item:
+            raise HTTPException(404, "Item not found.")
+        item["metadata"] = data
     return JSONResponse({"ok": True, "metadata": data,
                          "img_base": LOCAL_IMG_BASE})
 
@@ -9735,14 +10167,13 @@ async def set_series_metadata(series_key: str,
         "fetched_at":    _now_iso(),
     }
 
-    lib = await get_library()
-    members = _items_for_series_key(lib, series_key)
-    if not members:
-        raise HTTPException(404, "Series not found.")
-    for it in members:
-        # dict() so each member owns its own copy (they diverge over time, e.g. seasons).
-        it["metadata"] = dict(data)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        members = _items_for_series_key(lib, series_key)
+        if not members:
+            raise HTTPException(404, "Series not found.")
+        for it in members:
+            # dict() so each member owns its own copy (they diverge over time, e.g. seasons).
+            it["metadata"] = dict(data)
     return JSONResponse({"ok": True, "metadata": data,
                          "img_base": LOCAL_IMG_BASE})
 
@@ -9759,42 +10190,41 @@ async def rename_library_item(item_id: str, req: RenameReq) -> JSONResponse:
     if not new_name:
         raise HTTPException(400, "Name cannot be empty.")
 
-    lib = await get_library()
-    item = next((it for it in lib["items"] if it["id"] == item_id), None)
-    if not item:
-        raise HTTPException(404, "Item not found.")
+    async with mutate_library() as lib:
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        if not item:
+            raise HTTPException(404, "Item not found.")
 
-    old_series = (item.get("series") or "").strip()
-    if old_series:
-        if new_name == old_series:
-            raise HTTPException(400, "That's already the series name.")
-        # Rename every entry in the group so the library grouping AND the TMDb
-        # query both move together. Drop each one's cached metadata so it
-        # re-matches against the new name on next access.
-        for it in lib["items"]:
-            if (it.get("series") or "").strip() == old_series:
-                it["series"] = new_name
-                # Keep manual picks / custom metadata — the user chose those on
-                # purpose; only auto-matched art should re-resolve to the new name.
-                if (it.get("metadata") or {}).get("source") not in ("manual", "custom"):
-                    it.pop("metadata", None)
-        # Series subtitle/audio prefs are keyed by the series string — re-key
-        # them so a remembered track choice survives the rename.
-        for prof in lib.get("profiles", []):
-            for key in ("series_subtitle_prefs", "series_audio_prefs"):
-                prefs = prof.get(key)
-                if isinstance(prefs, dict) and old_series in prefs:
-                    prefs[new_name] = prefs.pop(old_series)
-    else:
-        # Movie / one-off: no series group, so rename this item's own title
-        # (which is what its metadata query falls back to).
-        if new_name == (item.get("title") or "").strip():
-            raise HTTPException(400, "That's already the title.")
-        item["title"] = new_name
-        if (item.get("metadata") or {}).get("source") not in ("manual", "custom"):
-            item.pop("metadata", None)
+        old_series = (item.get("series") or "").strip()
+        if old_series:
+            if new_name == old_series:
+                raise HTTPException(400, "That's already the series name.")
+            # Rename every entry in the group so the library grouping AND the TMDb
+            # query both move together. Drop each one's cached metadata so it
+            # re-matches against the new name on next access.
+            for it in lib["items"]:
+                if (it.get("series") or "").strip() == old_series:
+                    it["series"] = new_name
+                    # Keep manual picks / custom metadata — the user chose those on
+                    # purpose; only auto-matched art should re-resolve to the new name.
+                    if (it.get("metadata") or {}).get("source") not in ("manual", "custom"):
+                        it.pop("metadata", None)
+            # Series subtitle/audio prefs are keyed by the series string — re-key
+            # them so a remembered track choice survives the rename.
+            for prof in lib.get("profiles", []):
+                for key in ("series_subtitle_prefs", "series_audio_prefs"):
+                    prefs = prof.get(key)
+                    if isinstance(prefs, dict) and old_series in prefs:
+                        prefs[new_name] = prefs.pop(old_series)
+        else:
+            # Movie / one-off: no series group, so rename this item's own title
+            # (which is what its metadata query falls back to).
+            if new_name == (item.get("title") or "").strip():
+                raise HTTPException(400, "That's already the title.")
+            item["title"] = new_name
+            if (item.get("metadata") or {}).get("source") not in ("manual", "custom"):
+                item.pop("metadata", None)
 
-    await put_library(lib)
 
     # Re-fetch this item's metadata now so the response carries the corrected
     # art/overview (best effort — no TMDb key just returns null and the UI falls
@@ -9873,20 +10303,19 @@ async def _commit_item_move(item_id: str, old_files: list[dict],
     """Move the co-located caches, then rewrite one item's stored file paths to the
     settled `new_files` (carrying over each file's `validation` verdict by name)."""
     await asyncio.to_thread(_move_caches_sync, old_files, new_files)
-    lib = await get_library()
-    it = next((x for x in lib["items"] if x["id"] == item_id), None)
-    if not it:
-        return
-    old_by_name = {f.get("name") or Path(f.get("path", "")).name: f
-                   for f in it.get("files", [])}
-    merged: list[dict] = []
-    for nf in new_files:
-        prev = old_by_name.get(nf["name"])
-        if prev and isinstance(prev.get("validation"), dict):
-            nf = dict(nf, validation=prev["validation"])
-        merged.append(nf)
-    it["files"] = merged
-    await put_library(lib)
+    async with mutate_library() as lib:
+        it = next((x for x in lib["items"] if x["id"] == item_id), None)
+        if not it:
+            return
+        old_by_name = {f.get("name") or Path(f.get("path", "")).name: f
+                       for f in it.get("files", [])}
+        merged: list[dict] = []
+        for nf in new_files:
+            prev = old_by_name.get(nf["name"])
+            if prev and isinstance(prev.get("validation"), dict):
+                nf = dict(nf, validation=prev["validation"])
+            merged.append(nf)
+        it["files"] = merged
 
 
 async def _settle_series_move(primary_id: str, snapshot: list[dict], dest: str) -> None:
@@ -10024,57 +10453,56 @@ async def move_library_status(item_id: str, request: Request) -> JSONResponse:
 async def library_download(req: DownloadReq) -> JSONResponse:
     if not state.vpn_secure:
         raise HTTPException(403, "VPN not connected — download blocked.")
-    lib = await get_library()
-    # Dedup: bulk "download all episodes" can fire the same torrent twice (a double
-    # click, a retry, or overlapping season/episode pickers), which used to create
-    # two library items backed by one torrent — one of which then errors on the qBit
-    # duplicate-add reject. If a still-live item already backs this exact info-hash,
-    # return it instead of minting a duplicate. Errored items are ignored so a real
-    # retry of a failed add still works. Distinct per-episode torrents (different
-    # hashes) never collide, so genuine bulk downloads are unaffected.
-    want_hash = (req.torrent_hash or extract_hash(req.magnet) or "").lower()
-    if want_hash:
-        dup = next((it for it in lib["items"]
-                    if (it.get("torrent_hash") or "").lower() == want_hash
-                    and it.get("status") != "error"), None)
-        if dup is None:
-            # Also match an in-flight add that hasn't recorded its hash yet.
+    async with mutate_library() as lib:
+        # Dedup: bulk "download all episodes" can fire the same torrent twice (a double
+        # click, a retry, or overlapping season/episode pickers), which used to create
+        # two library items backed by one torrent — one of which then errors on the qBit
+        # duplicate-add reject. If a still-live item already backs this exact info-hash,
+        # return it instead of minting a duplicate. Errored items are ignored so a real
+        # retry of a failed add still works. Distinct per-episode torrents (different
+        # hashes) never collide, so genuine bulk downloads are unaffected.
+        want_hash = (req.torrent_hash or extract_hash(req.magnet) or "").lower()
+        if want_hash:
             dup = next((it for it in lib["items"]
-                        if (extract_hash((it.get("pending_download") or {}).get("magnet", "")) or "").lower() == want_hash
+                        if (it.get("torrent_hash") or "").lower() == want_hash
                         and it.get("status") != "error"), None)
-        if dup is not None:
-            return JSONResponse({"ok": True, "item_id": dup["id"], "duplicate": True,
-                                 "default_save_path": settings.qbit_download_path})
-    item: dict = {
-        "id": str(uuid.uuid4()),
-        "title": req.title,
-        "series": req.series,
-        "season": req.season,
-        "episode": req.episode,
-        "files": [],
-        "size_bytes": 0,
-        "added_at": _now_iso(),
-        "status": "downloading",
-        "torrent_hash": "",
-        "progress": {},
-        "default_visible_profiles": req.default_visible_profiles,
-        "hidden_by_profiles": [],
-        "download": {"mode": req.download_mode if req.download_mode in ("now", "idle") else "now",
-                     "files": {}},
-        # Persist everything the pipeline needs so an interrupted add (app restart
-        # before the torrent_hash is recorded) can be re-driven on startup instead
-        # of leaving an orphaned, hash-less item stuck forever in the ongoing list.
-        # Cleared by the pipeline the moment the hash is persisted. See
-        # _recover_interrupted_downloads.
-        "pending_download": {
-            "magnet": req.magnet,
-            "save_path": req.save_path.strip(),
-            "torrent_hash": req.torrent_hash,
-            "selected_file_indices": req.selected_file_indices or [],
-        },
-    }
-    lib["items"].append(item)
-    await put_library(lib)
+            if dup is None:
+                # Also match an in-flight add that hasn't recorded its hash yet.
+                dup = next((it for it in lib["items"]
+                            if (extract_hash((it.get("pending_download") or {}).get("magnet", "")) or "").lower() == want_hash
+                            and it.get("status") != "error"), None)
+            if dup is not None:
+                return JSONResponse({"ok": True, "item_id": dup["id"], "duplicate": True,
+                                     "default_save_path": settings.qbit_download_path})
+        item: dict = {
+            "id": str(uuid.uuid4()),
+            "title": req.title,
+            "series": req.series,
+            "season": req.season,
+            "episode": req.episode,
+            "files": [],
+            "size_bytes": 0,
+            "added_at": _now_iso(),
+            "status": "downloading",
+            "torrent_hash": "",
+            "progress": {},
+            "default_visible_profiles": req.default_visible_profiles,
+            "hidden_by_profiles": [],
+            "download": {"mode": req.download_mode if req.download_mode in ("now", "idle") else "now",
+                         "files": {}},
+            # Persist everything the pipeline needs so an interrupted add (app restart
+            # before the torrent_hash is recorded) can be re-driven on startup instead
+            # of leaving an orphaned, hash-less item stuck forever in the ongoing list.
+            # Cleared by the pipeline the moment the hash is persisted. See
+            # _recover_interrupted_downloads.
+            "pending_download": {
+                "magnet": req.magnet,
+                "save_path": req.save_path.strip(),
+                "torrent_hash": req.torrent_hash,
+                "selected_file_indices": req.selected_file_indices or [],
+            },
+        }
+        lib["items"].append(item)
     state.downloading_count += 1
     # A freshly-created download is never admin-locked yet (the lock is toggled
     # later from the Content Lock tab), so it always counts toward the visible
@@ -10092,17 +10520,59 @@ async def library_download(req: DownloadReq) -> JSONResponse:
                          "default_save_path": settings.qbit_download_path})
 
 
+async def _purge_offline_bundles(paths: list[str]) -> int:
+    """Delete the co-located HLS bundle of each path. Returns how many were removed.
+
+    Call BEFORE the media files themselves are deleted: `_offline_cache_dir` derives
+    its key from the file's name+size, which can't be read once the file is gone.
+
+    Deleting a library item used to leave its bundles behind — a single prepped
+    movie is easily hundreds of MB, and nothing but the admin Cleanup tab's orphan
+    sweep ever reclaimed it.
+    """
+    removed = 0
+    for p_ in paths:
+        try:
+            src = Path(p_)
+            if not src.exists():
+                continue
+            bundle = _offline_cache_dir(src)
+        except OSError:
+            continue
+        try:
+            if bundle.exists():
+                await asyncio.to_thread(shutil.rmtree, bundle, ignore_errors=True)
+                removed += 1
+        except OSError:
+            pass
+    if removed:
+        _invalidate_offline_cache_inventory()
+        _invalidate_bundle_index()
+    return removed
+
+
 @app.delete("/api/library/{item_id}")
-async def delete_library_item(item_id: str, delete_file: bool = True) -> JSONResponse:
-    lib = await get_library()
-    item = next((it for it in lib["items"] if it["id"] == item_id), None)
-    if not item:
-        raise HTTPException(404, "Item not found.")
-    h = item.get("torrent_hash")
+async def delete_library_item(request: Request, item_id: str,
+                              delete_file: bool = True) -> JSONResponse:
+    # Drop the item under the library lock, then talk to qBit OUTSIDE it — a
+    # qBit round trip is network IO, and `mutate_library` holds the single global
+    # library lock for its whole body, so awaiting a delete in there stalls every
+    # other reader/writer (the 2 s stat broadcaster included) for its duration.
+    # A torrent left behind by a failed qBit call surfaces in the admin Cleanup
+    # tab as an orphan, which is the recoverable side of the trade.
+    async with mutate_library() as lib:
+        _require_delete_auth(request, lib)
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        if not item:
+            raise HTTPException(404, "Item not found.")
+        h = item.get("torrent_hash")
+        file_paths = [f.get("path", "") for f in item.get("files", []) if f.get("path")]
+        lib["items"] = [it for it in lib["items"] if it["id"] != item_id]
+    # Bundles first — their cache key needs the media files to still be on disk.
+    if delete_file:
+        await _purge_offline_bundles(file_paths)
     if h:
         await qbit_delete(h, delete_files=delete_file)
-    lib["items"] = [it for it in lib["items"] if it["id"] != item_id]
-    await put_library(lib)
     return JSONResponse({"ok": True})
 
 
@@ -10110,26 +10580,25 @@ async def delete_library_item(item_id: str, delete_file: bool = True) -> JSONRes
 async def set_item_visibility(item_id: str, req: VisibilityReq) -> JSONResponse:
     """Toggle per-profile visibility. hidden=true moves item to the user's hidden tab;
     hidden=false restores it to the main list."""
-    lib = await get_library()
-    item = next((it for it in lib["items"] if it["id"] == item_id), None)
-    if not item:
-        raise HTTPException(404, "Item not found.")
-    pid = req.profile_id
-    hidden_by: list = item.setdefault("hidden_by_profiles", [])
-    default_visible: list = item.setdefault("default_visible_profiles", [])
-    if req.hidden:
-        # Move to hidden: remove from explicit visible list (if present), else add to hidden list
-        if default_visible and pid in default_visible:
-            default_visible.remove(pid)
-        elif pid not in hidden_by:
-            hidden_by.append(pid)
-    else:
-        # Move to visible: remove from hidden list; if still restricted by default, grant access
-        if pid in hidden_by:
-            hidden_by.remove(pid)
-        if default_visible and pid not in default_visible:
-            default_visible.append(pid)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        if not item:
+            raise HTTPException(404, "Item not found.")
+        pid = req.profile_id
+        hidden_by: list = item.setdefault("hidden_by_profiles", [])
+        default_visible: list = item.setdefault("default_visible_profiles", [])
+        if req.hidden:
+            # Move to hidden: remove from explicit visible list (if present), else add to hidden list
+            if default_visible and pid in default_visible:
+                default_visible.remove(pid)
+            elif pid not in hidden_by:
+                hidden_by.append(pid)
+        else:
+            # Move to visible: remove from hidden list; if still restricted by default, grant access
+            if pid in hidden_by:
+                hidden_by.remove(pid)
+            if default_visible and pid not in default_visible:
+                default_visible.append(pid)
     return JSONResponse({"ok": True})
 
 
@@ -10138,29 +10607,28 @@ async def queue_play(item_id: str, profile_id: str = "", file_path: str = "") ->
     """Queue an in-progress download to auto-play when it (or a specific file) finishes."""
     if not profile_id:
         raise HTTPException(400, "profile_id required.")
-    lib = await get_library()
-    item = next((it for it in lib["items"] if it["id"] == item_id), None)
-    if not item:
-        raise HTTPException(404, "Item not found.")
-    if item.get("status") != "downloading":
-        raise HTTPException(400, "Item is not currently downloading.")
-    state.play_when_ready_item_id = item_id
-    state.play_when_ready_profile_id = profile_id
-    state.play_when_ready_file_path = file_path or None
-    # Route the boost through the download model so the scheduler keeps it — a raw
-    # filePrio write would be reverted on the next reconcile. A specific file is
-    # forced "high" (download now, first); a whole-item queue ensures the item isn't
-    # stuck idle (mode→now, sweep idle files→now) + bumps it in qBit's global queue.
-    dl = item.setdefault("download", {"mode": "now", "files": {}})
-    files = dl.setdefault("files", {})
-    if file_path:
-        files[file_path] = "high"
-    else:
-        dl["mode"] = "now"
-        for p, m in list(files.items()):
-            if m == "idle":
-                files[p] = "now"
-    await put_library(lib)
+    async with mutate_library() as lib:
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        if not item:
+            raise HTTPException(404, "Item not found.")
+        if item.get("status") != "downloading":
+            raise HTTPException(400, "Item is not currently downloading.")
+        state.play_when_ready_item_id = item_id
+        state.play_when_ready_profile_id = profile_id
+        state.play_when_ready_file_path = file_path or None
+        # Route the boost through the download model so the scheduler keeps it — a raw
+        # filePrio write would be reverted on the next reconcile. A specific file is
+        # forced "high" (download now, first); a whole-item queue ensures the item isn't
+        # stuck idle (mode→now, sweep idle files→now) + bumps it in qBit's global queue.
+        dl = item.setdefault("download", {"mode": "now", "files": {}})
+        files = dl.setdefault("files", {})
+        if file_path:
+            files[file_path] = "high"
+        else:
+            dl["mode"] = "now"
+            for p, m in list(files.items()):
+                if m == "idle":
+                    files[p] = "now"
     h = item.get("torrent_hash")
     if h:
         idle_open = await _download_idle_open(lib)
@@ -10214,28 +10682,27 @@ async def set_download_schedule(item_id: str, req: DownloadScheduleReq) -> JSONR
     night window, auto-resuming there); "now" = Resume (download immediately). Sweeps
     the per-file overrides too, but leaves explicit "skip" choices alone."""
     mode = req.mode if req.mode in ("now", "idle") else "now"
-    lib = await get_library()
-    item = next((it for it in lib["items"] if it["id"] == item_id), None)
-    if not item:
-        raise HTTPException(404, "Item not found.")
-    dl = item.setdefault("download", {"mode": "now", "files": {}})
-    dl["mode"] = mode
-    files = dl.setdefault("files", {})
-    if req.reset_files:
-        # "Whole torrent now/idle": drop every override so all files (including ones
-        # previously skipped) inherit `mode` — now ⇒ fetch everything, idle ⇒ defer all.
-        files.clear()
-    elif mode == "idle":
-        # Pause: defer the active files, but keep explicit skips skipped.
-        for p, m in list(files.items()):
-            if m in ("now", "low", "mid", "high"):
-                files[p] = "idle"
-    else:
-        for p, m in list(files.items()):
-            if m == "idle":
-                files[p] = "now"
-    idle_open = await _apply_item_schedule(item, lib)   # may flip ready→downloading
-    await put_library(lib)
+    async with mutate_library() as lib:
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        if not item:
+            raise HTTPException(404, "Item not found.")
+        dl = item.setdefault("download", {"mode": "now", "files": {}})
+        dl["mode"] = mode
+        files = dl.setdefault("files", {})
+        if req.reset_files:
+            # "Whole torrent now/idle": drop every override so all files (including ones
+            # previously skipped) inherit `mode` — now ⇒ fetch everything, idle ⇒ defer all.
+            files.clear()
+        elif mode == "idle":
+            # Pause: defer the active files, but keep explicit skips skipped.
+            for p, m in list(files.items()):
+                if m in ("now", "low", "mid", "high"):
+                    files[p] = "idle"
+        else:
+            for p, m in list(files.items()):
+                if m == "idle":
+                    files[p] = "now"
+        idle_open = await _apply_item_schedule(item, lib)   # may flip ready→downloading
     await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "downloading")})
     return JSONResponse({"ok": True, "mode": mode, "idle_open": idle_open})
 
@@ -10248,22 +10715,22 @@ async def set_file_schedule(item_id: str, req: FileScheduleReq) -> JSONResponse:
     mode = req.mode if req.mode in _FILE_MODES else "now"
     if not req.file_paths:
         raise HTTPException(400, "file_paths required.")
-    lib = await get_library()
-    item = next((it for it in lib["items"] if it["id"] == item_id), None)
-    if not item:
-        raise HTTPException(404, "Item not found.")
-    dl = item.setdefault("download", {"mode": "now", "files": {}})
-    files = dl.setdefault("files", {})
-    for p in req.file_paths:
-        files[p] = mode
-    idle_open = await _apply_item_schedule(item, lib)   # may flip ready→downloading (e.g. un-skip)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        if not item:
+            raise HTTPException(404, "Item not found.")
+        dl = item.setdefault("download", {"mode": "now", "files": {}})
+        files = dl.setdefault("files", {})
+        for p in req.file_paths:
+            files[p] = mode
+        idle_open = await _apply_item_schedule(item, lib)   # may flip ready→downloading (e.g. un-skip)
     await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "downloading")})
     return JSONResponse({"ok": True, "updated": len(req.file_paths), "mode": mode})
 
 
 @app.post("/api/library/{item_id}/delete-files")
-async def delete_item_files(item_id: str, req: DeleteFilesReq) -> JSONResponse:
+async def delete_item_files(request: Request, item_id: str,
+                            req: DeleteFilesReq) -> JSONResponse:
     """Delete specific files from disk to reclaim space, keeping them re-downloadable.
     Each file is marked "skip" (so qBit drops it to priority 0 and never refetches),
     its bytes are removed from disk, and its cached HLS bundle is purged. The file's
@@ -10275,28 +10742,35 @@ async def delete_item_files(item_id: str, req: DeleteFilesReq) -> JSONResponse:
     and returned in `blocked`; remove the whole item if you really want them gone."""
     if not req.file_paths:
         raise HTTPException(400, "file_paths required.")
-    lib = await get_library()
-    item = next((it for it in lib["items"] if it["id"] == item_id), None)
-    if not item:
-        raise HTTPException(404, "Item not found.")
+    async with mutate_library() as lib:
+        _require_delete_auth(request, lib)
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        if not item:
+            raise HTTPException(404, "Item not found.")
 
-    # Map paths → declared sizes so we can report how much space was freed.
-    sizes = {f.get("path", ""): f.get("size_bytes", 0) for f in item.get("files", [])}
-    # Refuse compressed files: this endpoint promises re-downloadability, which a
-    # re-encoded file can't honour. Report them back instead of silently dropping them.
-    compressed_paths = {f.get("path", "") for f in item.get("files", []) if _file_is_compressed(f)}
-    blocked = [p for p in req.file_paths if p in compressed_paths]
-    targets = [p for p in req.file_paths if p in sizes and p not in compressed_paths]
+        # Map paths → declared sizes so we can report how much space was freed.
+        sizes = {f.get("path", ""): f.get("size_bytes", 0) for f in item.get("files", [])}
+        # Refuse compressed files: this endpoint promises re-downloadability, which a
+        # re-encoded file can't honour. Report them back instead of silently dropping them.
+        compressed_paths = {f.get("path", "") for f in item.get("files", []) if _file_is_compressed(f)}
+        blocked = [p for p in req.file_paths if p in compressed_paths]
+        targets = [p for p in req.file_paths if p in sizes and p not in compressed_paths]
 
-    # 1) Mark skip + reconcile FIRST, so qBit drops these files to priority 0 and
-    #    stops writing to them before we remove the bytes (no recreate-mid-delete).
-    dl = item.setdefault("download", {"mode": "now", "files": {}})
-    files = dl.setdefault("files", {})
-    for p in targets:
-        files[p] = "skip"
-    await _apply_item_schedule(item, lib)
+        # 1) Mark skip + reconcile FIRST, so qBit drops these files to priority 0 and
+        #    stops writing to them before we remove the bytes (no recreate-mid-delete).
+        dl = item.setdefault("download", {"mode": "now", "files": {}})
+        files = dl.setdefault("files", {})
+        for p in targets:
+            files[p] = "skip"
+        await _apply_item_schedule(item, lib)
+        item_status = item.get("status", "downloading")
 
-    # 2) Remove the bytes from disk + 3) purge the cached HLS bundle.
+    # 2) Remove the bytes from disk + 3) purge the cached HLS bundle — OUTSIDE the
+    #    library lock. Unlinking N files and rmtree-ing N bundle dirs is unbounded
+    #    disk work, and `mutate_library` holds the one global library lock for its
+    #    whole body, so doing it in there froze every other reader/writer for the
+    #    length of the delete. The skip marks above are already committed, so qBit
+    #    has stopped writing to these paths before we get here.
     freed = 0
     deleted = 0
     for p in targets:
@@ -10323,8 +10797,7 @@ async def delete_item_files(item_id: str, req: DeleteFilesReq) -> JSONResponse:
         except OSError:
             pass
 
-    await put_library(lib)
-    await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "downloading")})
+    await broadcast("library_update", {"item_id": item_id, "status": item_status})
     return JSONResponse({
         "ok": True, "deleted": deleted, "freed_bytes": freed,
         # Compressed files we refused to delete (not re-downloadable). The UI surfaces
@@ -10344,15 +10817,14 @@ async def set_prep_schedule(item_id: str, req: PrepScheduleReq) -> JSONResponse:
     mode = req.mode if req.mode in _PREP_MODES else "idle"
     if not req.file_paths:
         raise HTTPException(400, "file_paths required.")
-    lib = await get_library()
-    item = next((it for it in lib["items"] if it["id"] == item_id), None)
-    if not item:
-        raise HTTPException(404, "Item not found.")
-    pr = item.setdefault("prep", {"files": {}})
-    files = pr.setdefault("files", {})
-    for p in req.file_paths:
-        files[p] = mode
-    await put_library(lib)
+    async with mutate_library() as lib:
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        if not item:
+            raise HTTPException(404, "Item not found.")
+        pr = item.setdefault("prep", {"files": {}})
+        files = pr.setdefault("files", {})
+        for p in req.file_paths:
+            files[p] = mode
 
     # "now" kicks off prep right away (bulk queue, like a scoped /prep-all). "idle"
     # and "never" only persist intent — auto_prep_loop / the prep bar act on them.
@@ -10385,19 +10857,18 @@ async def set_prep_priority(item_id: str, req: PrepPriorityReq) -> JSONResponse:
     if not HLS_AVAILABLE:
         raise HTTPException(503, HLS_UNAVAILABLE_MSG)
     prio = req.priority if req.priority in _PREP_PRIORITIES else "mid"
-    lib = await get_library()
-    item = next((it for it in lib["items"] if it["id"] == item_id), None)
-    if not item:
-        raise HTTPException(404, "Item not found.")
-    pr = item.setdefault("prep", {"files": {}})
-    item_scope = req.scope == "item" or not req.file_paths
-    if item_scope:
-        pr["priority_default"] = prio
-    else:
-        prio_map = pr.setdefault("priority", {})
-        for p in req.file_paths:
-            prio_map[p] = prio
-    await put_library(lib)
+    async with mutate_library() as lib:
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        if not item:
+            raise HTTPException(404, "Item not found.")
+        pr = item.setdefault("prep", {"files": {}})
+        item_scope = req.scope == "item" or not req.file_paths
+        if item_scope:
+            pr["priority_default"] = prio
+        else:
+            prio_map = pr.setdefault("priority", {})
+            for p in req.file_paths:
+                prio_map[p] = prio
 
     # Re-stamp any queued/running bulk jobs for the affected files so the new tier
     # orders the queue right away (a running encode isn't preempted — HLS can't
@@ -11026,7 +11497,7 @@ async def _library_stream_file_launch(
 
 
 async def _begin_library_file_stream(
-    item: dict, lib: dict, path: str, profile_id: str,
+    item: dict, path: str, profile_id: str,
 ) -> None:
     """Shared core of the stream-a-library-file flow: force the file to fetch
     now-and-first (schedule → 'high', kept by the scheduler + un-skips a
@@ -11034,15 +11505,22 @@ async def _begin_library_file_stream(
     flip state to buffering, and launch the buffer→VLC task.
 
     Caller has already looked up + validated `item` (with a torrent_hash) and
-    `path`, and holds no lock. Mutates the library and persists it."""
+    `path`, and holds no lock. The schedule mark is re-applied to a freshly read
+    item inside its own transaction — the caller's `item` came from a snapshot
+    taken before its validation round trips, so writing that back wholesale would
+    roll over anything else that landed meanwhile."""
     item_id = item["id"]
     h = item.get("torrent_hash")
 
-    dl = item.setdefault("download", {"mode": "now", "files": {}})
-    dl.setdefault("files", {})[path] = "high"
-    await _apply_item_schedule(item, lib)     # reconcile priorities + resume + reactivate
-    await put_library(lib)
-    await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "downloading")})
+    async with mutate_library() as lib:
+        fresh = next((x for x in lib["items"] if x["id"] == item_id), None)
+        if fresh is None:
+            raise HTTPException(404, "Item not found.")
+        dl = fresh.setdefault("download", {"mode": "now", "files": {}})
+        dl.setdefault("files", {})[path] = "high"
+        await _apply_item_schedule(fresh, lib)   # reconcile priorities + resume + reactivate
+        item_status = fresh.get("status", "downloading")
+    await broadcast("library_update", {"item_id": item_id, "status": item_status})
 
     # Sequential piece order so the beginning of the file arrives first, PLUS
     # first/last-piece priority so a tail-index container (moov-at-end MP4,
@@ -11121,7 +11599,7 @@ async def stream_library_file(item_id: str, req: LibraryStreamFileReq) -> JSONRe
     if not item.get("torrent_hash"):
         raise HTTPException(400, "This item has no torrent backing it.")
     _assert_not_compressing(req.path)
-    await _begin_library_file_stream(item, lib, req.path, req.profile_id)
+    await _begin_library_file_stream(item, req.path, req.profile_id)
     return JSONResponse({"ok": True}, status_code=202)
 
 
@@ -11215,7 +11693,7 @@ async def library_play_now(req: PlayNowReq) -> JSONResponse:
         raise HTTPException(400, "No playable video file in this torrent.")
     target_path = str(Path(save_path) / vid.get("name", ""))
 
-    await _begin_library_file_stream(item, lib, target_path, req.profile_id)
+    await _begin_library_file_stream(item, target_path, req.profile_id)
     return JSONResponse({"ok": True, "item_id": item["id"]}, status_code=202)
 
 
@@ -11238,36 +11716,37 @@ async def set_shuffle_pref(item_id: str, req: ShufflePrefReq) -> JSONResponse:
 
 @app.post("/api/library/{item_id}/progress")
 async def update_progress(item_id: str, req: ProgressReq) -> JSONResponse:
-    lib = await get_library()
-    item = next((it for it in lib["items"] if it["id"] == item_id), None)
-    if not item:
-        raise HTTPException(404, "Item not found.")
-    dur = req.duration_sec
-    pct = req.position_sec / dur if dur else 0
-    prof_prog = item.setdefault("progress", {}).setdefault(req.profile_id, {})
-    prof_prog["last_file"] = req.file_path
-    file_progress = prof_prog.setdefault("file_progress", {})
-    existing = file_progress.get(req.file_path, {})
-    # `completed` is monotonic — a late/out-of-order progress POST (e.g. the
-    # on-device player flushing a stale position after a resume) must never
-    # un-finish an episode, or find_resume_hint jumps back into one already
-    # watched. Matches the batch-sync endpoint's rule.
-    already_done = bool(existing.get("completed"))
-    file_progress[req.file_path] = {
-        # Keep a finished episode pinned at the end rather than stamping the
-        # incoming (older) mid position, so its resume point stays past-the-end.
-        "position_sec": round(req.duration_sec if already_done and not (pct > 0.92)
-                              else req.position_sec, 1),
-        "duration_sec": round(req.duration_sec, 1),
-        "completed": (pct > 0.92) or already_done,
-        "updated_at": _now_iso(),
-        # Preserve VLC + local-player track picks across progress writes —
-        # these are sibling keys in the same file_progress dict. subtitle_sel
-        # is the resolvable descriptor the on-device player restores from;
-        # dropping it here reset subs to off on the next replay.
-        **{k: v for k, v in existing.items() if k in _TRACK_PREF_KEYS},
-    }
-    await put_library(lib)
+    async with mutate_library() as lib:
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        if not item:
+            raise HTTPException(404, "Item not found.")
+        dur = req.duration_sec
+        pct = req.position_sec / dur if dur else 0
+        prof_prog = item.setdefault("progress", {}).setdefault(req.profile_id, {})
+        prof_prog["last_file"] = req.file_path
+        file_progress = prof_prog.setdefault("file_progress", {})
+        existing = file_progress.get(req.file_path, {})
+        # `completed` is monotonic — a late/out-of-order progress POST (e.g. the
+        # on-device player flushing a stale position after a resume) must never
+        # un-finish an episode, or find_resume_hint jumps back into one already
+        # watched. Matches the batch-sync endpoint's rule.
+        already_done = bool(existing.get("completed"))
+        _now_done = _device_reported_finished(item, req.file_path,
+                                              req.position_sec, req.duration_sec)
+        file_progress[req.file_path] = {
+            # Keep a finished episode pinned at the end rather than stamping the
+            # incoming (older) mid position, so its resume point stays past-the-end.
+            "position_sec": round(req.duration_sec if already_done and not _now_done
+                                  else req.position_sec, 1),
+            "duration_sec": round(req.duration_sec, 1),
+            "completed": _now_done or already_done,
+            "updated_at": _now_iso(),
+            # Preserve VLC + local-player track picks across progress writes —
+            # these are sibling keys in the same file_progress dict. subtitle_sel
+            # is the resolvable descriptor the on-device player restores from;
+            # dropping it here reset subs to off on the next replay.
+            **{k: v for k, v in existing.items() if k in _TRACK_PREF_KEYS},
+        }
     return JSONResponse({"ok": True})
 
 
@@ -11350,9 +11829,8 @@ async def sync_progress(req: SyncProgressReq, request: Request) -> JSONResponse:
             file_progress = prof_prog.setdefault("file_progress", {})
             existing = file_progress.get(ev.file_path)
 
-            dur = ev.duration_sec
-            pct = ev.position_sec / dur if dur else 0
-            ev_completed = pct > 0.92
+            ev_completed = _device_reported_finished(item, ev.file_path,
+                                                     ev.position_sec, ev.duration_sec)
 
             def _apply() -> None:
                 prev = existing or {}
@@ -11546,12 +12024,12 @@ async def sync_resolve(req: SyncResolveReq, request: Request) -> JSONResponse:
             if rz.choice == "client":
                 pos = float(rz.position_sec or 0)
                 dur = float(rz.duration_sec or 0)
-                pct = pos / dur if dur else 0
                 merged = {
                     "position_sec": round(pos, 1),
                     "duration_sec": round(dur, 1),
                     # `completed` stays monotonic even when the user keeps the device side.
-                    "completed": (pct > 0.92) or bool(existing.get("completed")),
+                    "completed": _device_reported_finished(item, rz.file_path, pos, dur)
+                                 or bool(existing.get("completed")),
                     "updated_at": now,
                     **{k: v for k, v in existing.items() if k in _TRACK_KEYS},
                 }
@@ -11719,46 +12197,45 @@ async def get_saved_tracks(item_id: str, file_path: str = "", profile_id: str = 
 @app.post("/api/library/{item_id}/mark-watched")
 async def mark_watched(item_id: str, req: MarkWatchedReq) -> JSONResponse:
     """Mark or unmark episodes as watched for a profile."""
-    lib = await get_library()
-    item = next((it for it in lib["items"] if it["id"] == item_id), None)
-    if not item:
-        raise HTTPException(404, "Item not found.")
+    async with mutate_library() as lib:
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        if not item:
+            raise HTTPException(404, "Item not found.")
 
-    files = item.get("files", [])
-    if req.file_paths:
-        targets = {p for p in req.file_paths}
-        target_files = [f for f in files if f.get("path", "") in targets]
-    elif req.season is not None:
-        target_files = [f for f in files if f.get("season", 0) == req.season]
-    else:
-        target_files = files
-
-    prof_prog = item.setdefault("progress", {}).setdefault(req.profile_id, {})
-    file_prog = prof_prog.setdefault("file_progress", {})
-
-    for f in target_files:
-        path = f.get("path", "")
-        if not path:
-            continue
-        existing = file_prog.get(path, {})
-        if req.watched:
-            file_prog[path] = {
-                "position_sec": existing.get("duration_sec", 0),
-                "duration_sec": existing.get("duration_sec", 0),
-                "completed": True,
-                "updated_at": _now_iso(),
-                **{k: v for k, v in existing.items() if k in _TRACK_PREF_KEYS},
-            }
+        files = item.get("files", [])
+        if req.file_paths:
+            targets = {p for p in req.file_paths}
+            target_files = [f for f in files if f.get("path", "") in targets]
+        elif req.season is not None:
+            target_files = [f for f in files if f.get("season", 0) == req.season]
         else:
-            file_prog[path] = {
-                "position_sec": 0,
-                "duration_sec": existing.get("duration_sec", 0),
-                "completed": False,
-                "updated_at": _now_iso(),
-                **{k: v for k, v in existing.items() if k in _TRACK_PREF_KEYS},
-            }
+            target_files = files
 
-    await put_library(lib)
+        prof_prog = item.setdefault("progress", {}).setdefault(req.profile_id, {})
+        file_prog = prof_prog.setdefault("file_progress", {})
+
+        for f in target_files:
+            path = f.get("path", "")
+            if not path:
+                continue
+            existing = file_prog.get(path, {})
+            if req.watched:
+                file_prog[path] = {
+                    "position_sec": existing.get("duration_sec", 0),
+                    "duration_sec": existing.get("duration_sec", 0),
+                    "completed": True,
+                    "updated_at": _now_iso(),
+                    **{k: v for k, v in existing.items() if k in _TRACK_PREF_KEYS},
+                }
+            else:
+                file_prog[path] = {
+                    "position_sec": 0,
+                    "duration_sec": existing.get("duration_sec", 0),
+                    "completed": False,
+                    "updated_at": _now_iso(),
+                    **{k: v for k, v in existing.items() if k in _TRACK_PREF_KEYS},
+                }
+
     await broadcast("library_update", {"item_id": item_id, "status": item.get("status", "ready")})
     return JSONResponse({"ok": True, "updated": len(target_files)})
 
@@ -12117,7 +12594,7 @@ def _group_search_results(shaped: list, query: str,
 
 
 @app.get("/api/search")
-async def search(q: str, limit: int = 30,
+async def search(q: str, limit: int = Query(30, ge=1, le=500),
                  indexers: Optional[str] = None,
                  categories: Optional[str] = None,
                  profile_id: Optional[str] = None,
@@ -12423,9 +12900,8 @@ async def upload_to_library(
         "torrent_hash": "",
         "progress": {},
     }
-    lib = await get_library()
-    lib["items"].append(item)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        lib["items"].append(item)
     await broadcast("library_update", {"item_id": item["id"], "status": "ready"})
     return JSONResponse({"ok": True, "item_id": item["id"], "file_count": len(saved_files)})
 
@@ -12529,9 +13005,8 @@ async def save_stream_to_library(req: SaveToLibraryReq) -> JSONResponse:
         "progress": {},
     }
 
-    lib = await get_library()
-    lib["items"].append(item)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        lib["items"].append(item)
     state.downloading_count += 1
     state.library_item_id = item["id"]  # prevents auto-delete on stop
 
@@ -14740,23 +15215,30 @@ async def add_library_path(path: str) -> JSONResponse:
         raise HTTPException(400, "Path cannot be empty.")
     if not Path(p).is_dir():
         raise HTTPException(400, f"Directory does not exist: {p}")
-    lib = await get_library()
+    # `_all_library_paths()` reads the library itself, so it has to run BEFORE the
+    # transaction opens — `_lib_lock` is a plain asyncio.Lock and would deadlock on
+    # re-entry. It covers the static .env roots, which can't change at runtime; the
+    # dynamic list is re-checked inside the transaction so two concurrent adds of
+    # the same path can't both get past the duplicate guard.
     existing = [info["path"] for info in await _all_library_paths()]
     if p in existing:
         raise HTTPException(400, "Path is already configured.")
-    lib.setdefault("settings", {}).setdefault("library_paths", []).append(p)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        paths = lib.setdefault("settings", {}).setdefault("library_paths", [])
+        if p in paths:
+            raise HTTPException(400, "Path is already configured.")
+        paths.append(p)
     return JSONResponse({"ok": True})
 
 
 @app.delete("/api/settings/library-paths")
-async def remove_library_path(path: str) -> JSONResponse:
-    lib = await get_library()
-    paths: list = lib.get("settings", {}).get("library_paths", [])
-    if path not in paths:
-        raise HTTPException(404, "Path not found in UI-configured paths (static .env paths cannot be removed here).")
-    paths.remove(path)
-    await put_library(lib)
+async def remove_library_path(request: Request, path: str) -> JSONResponse:
+    async with mutate_library() as lib:
+        _require_delete_auth(request, lib)
+        paths: list = lib.get("settings", {}).get("library_paths", [])
+        if path not in paths:
+            raise HTTPException(404, "Path not found in UI-configured paths (static .env paths cannot be removed here).")
+        paths.remove(path)
     return JSONResponse({"ok": True})
 
 
@@ -15429,40 +15911,38 @@ async def admin_get_settings(request: Request) -> JSONResponse:
 @app.post("/api/admin/settings")
 async def admin_update_settings(request: Request, req: AdminSettingsReq) -> JSONResponse:
     _require_admin(request)
-    lib = await get_library()
-    overrides = lib.setdefault("settings", {}).setdefault("admin_overrides", {})
-    if req.indexer_categories is not None:
-        overrides["indexer_categories"] = req.indexer_categories.strip()
-    if req.tmdb_api_key is not None:
-        v = req.tmdb_api_key.strip()
-        if v:
-            overrides["tmdb_api_key"] = v
-        else:
-            overrides.pop("tmdb_api_key", None)
-    if req.hls_ladder is not None:
-        # Keep only valid ladder heights, dedupe, order high→low. Exactly the
-        # built-in default removes the override (cleaner); any other selection —
-        # including an explicit empty list (source-only bundles, a valid
-        # space-saving choice) — is stored verbatim.
-        heights = sorted({int(h) for h in req.hls_ladder if int(h) in HLS_LADDER_HEIGHTS},
-                         reverse=True)
-        if heights == sorted(DEFAULT_HLS_LADDER_HEIGHTS, reverse=True):
-            overrides.pop("hls_ladder", None)
-        else:
-            overrides["hls_ladder"] = heights
-    await put_library(lib)
+    async with mutate_library() as lib:
+        overrides = lib.setdefault("settings", {}).setdefault("admin_overrides", {})
+        if req.indexer_categories is not None:
+            overrides["indexer_categories"] = req.indexer_categories.strip()
+        if req.tmdb_api_key is not None:
+            v = req.tmdb_api_key.strip()
+            if v:
+                overrides["tmdb_api_key"] = v
+            else:
+                overrides.pop("tmdb_api_key", None)
+        if req.hls_ladder is not None:
+            # Keep only valid ladder heights, dedupe, order high→low. Exactly the
+            # built-in default removes the override (cleaner); any other selection —
+            # including an explicit empty list (source-only bundles, a valid
+            # space-saving choice) — is stored verbatim.
+            heights = sorted({int(h) for h in req.hls_ladder if int(h) in HLS_LADDER_HEIGHTS},
+                             reverse=True)
+            if heights == sorted(DEFAULT_HLS_LADDER_HEIGHTS, reverse=True):
+                overrides.pop("hls_ladder", None)
+            else:
+                overrides["hls_ladder"] = heights
     return JSONResponse({"ok": True})
 
 
 @app.post("/api/library/{item_id}/admin-lock")
 async def admin_lock_item(item_id: str, request: Request, req: AdminItemLockReq) -> JSONResponse:
     _require_admin(request)
-    lib = await get_library()
-    item = next((it for it in lib["items"] if it["id"] == item_id), None)
-    if not item:
-        raise HTTPException(404, "Item not found.")
-    item["admin_only"] = req.admin_only
-    await put_library(lib)
+    async with mutate_library() as lib:
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        if not item:
+            raise HTTPException(404, "Item not found.")
+        item["admin_only"] = req.admin_only
     return JSONResponse({"ok": True})
 
 
@@ -15521,21 +16001,20 @@ async def set_profile_pin(profile_id: str, request: Request, req: ProfilePinReq)
     pin = req.pin.strip()
     if pin and (len(pin) != 6 or not pin.isdigit()):
         raise HTTPException(400, "PIN must be exactly 6 digits, or empty to clear.")
-    lib = await get_library()
-    profile = next((p for p in lib["profiles"] if p["id"] == profile_id), None)
-    if not profile:
-        raise HTTPException(404, "Profile not found.")
-    if not is_admin:
-        existing = profile.get("pin_hash", "")
-        if existing:
-            current = req.current_pin.strip()
-            if not current or _pin_hash(current) != existing:
-                raise HTTPException(403, "Current PIN is incorrect.")
-    if pin:
-        profile["pin_hash"] = _pin_hash(pin)
-    else:
-        profile.pop("pin_hash", None)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        profile = next((p for p in lib["profiles"] if p["id"] == profile_id), None)
+        if not profile:
+            raise HTTPException(404, "Profile not found.")
+        if not is_admin:
+            existing = profile.get("pin_hash", "")
+            if existing:
+                current = req.current_pin.strip()
+                if not current or _pin_hash(current) != existing:
+                    raise HTTPException(403, "Current PIN is incorrect.")
+        if pin:
+            profile["pin_hash"] = _pin_hash(pin)
+        else:
+            profile.pop("pin_hash", None)
     return JSONResponse({"ok": True, "has_pin": bool(pin)})
 
 
@@ -15543,15 +16022,14 @@ async def set_profile_pin(profile_id: str, request: Request, req: ProfilePinReq)
 async def set_profile_elevated(profile_id: str, request: Request, req: ProfileElevatedReq) -> JSONResponse:
     """Grant or revoke access to admin-only library items for a profile (admin only)."""
     _require_admin(request)
-    lib = await get_library()
-    profile = next((p for p in lib["profiles"] if p["id"] == profile_id), None)
-    if not profile:
-        raise HTTPException(404, "Profile not found.")
-    if req.elevated:
-        profile["elevated"] = True
-    else:
-        profile.pop("elevated", None)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        profile = next((p for p in lib["profiles"] if p["id"] == profile_id), None)
+        if not profile:
+            raise HTTPException(404, "Profile not found.")
+        if req.elevated:
+            profile["elevated"] = True
+        else:
+            profile.pop("elevated", None)
     return JSONResponse({"ok": True, "elevated": req.elevated})
 
 
@@ -15560,16 +16038,15 @@ async def set_profile_indexers(profile_id: str, request: Request, req: ProfileIn
     """Restrict which Jackett indexers a profile may search (admin only). An empty
     list clears the restriction (profile may search every configured indexer)."""
     _require_admin(request)
-    lib = await get_library()
-    profile = next((p for p in lib["profiles"] if p["id"] == profile_id), None)
-    if not profile:
-        raise HTTPException(404, "Profile not found.")
-    cleaned = [str(x).strip() for x in (req.allowed or []) if str(x).strip()]
-    if cleaned:
-        profile["allowed_indexers"] = cleaned
-    else:
-        profile.pop("allowed_indexers", None)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        profile = next((p for p in lib["profiles"] if p["id"] == profile_id), None)
+        if not profile:
+            raise HTTPException(404, "Profile not found.")
+        cleaned = [str(x).strip() for x in (req.allowed or []) if str(x).strip()]
+        if cleaned:
+            profile["allowed_indexers"] = cleaned
+        else:
+            profile.pop("allowed_indexers", None)
     return JSONResponse({"ok": True, "allowed_indexers": cleaned})
 
 
@@ -15589,7 +16066,12 @@ async def verify_profile_pin(profile_id: str, req: PinLoginReq) -> JSONResponse:
         raise HTTPException(404, "Profile not found.")
     if not profile.get("pin_hash") or profile["pin_hash"] != _pin_hash(pin):
         raise HTTPException(403, "Incorrect PIN.")
-    return JSONResponse({"profile": {
+    # Hand back a session token as PROOF the PIN was entered. The client sends it
+    # as X-Profile-Token; it is what actually unlocks admin-locked content and the
+    # delete endpoints (see _is_elevated / _require_delete_auth).
+    return JSONResponse({"token": _new_profile_session(profile["id"]),
+                         "expires_in": PROFILE_SESSION_TTL,
+                         "profile": {
         "id": profile["id"],
         "name": profile["name"],
         "color": profile.get("color", "indigo"),
@@ -15608,21 +16090,20 @@ async def verify_profile_pin(profile_id: str, req: PinLoginReq) -> JSONResponse:
 @app.post("/api/profiles/{profile_id}/auto-skip")
 async def set_profile_auto_skip(profile_id: str, req: ProfileAutoSkipReq) -> JSONResponse:
     """Toggle the per-profile auto-skip preferences for intro and credits."""
-    lib = await get_library()
-    profile = next((p for p in lib["profiles"] if p["id"] == profile_id), None)
-    if not profile:
-        raise HTTPException(404, "Profile not found.")
-    if req.auto_skip_intro is not None:
-        if req.auto_skip_intro:
-            profile["auto_skip_intro"] = True
-        else:
-            profile.pop("auto_skip_intro", None)
-    if req.auto_skip_credits is not None:
-        if req.auto_skip_credits:
-            profile["auto_skip_credits"] = True
-        else:
-            profile.pop("auto_skip_credits", None)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        profile = next((p for p in lib["profiles"] if p["id"] == profile_id), None)
+        if not profile:
+            raise HTTPException(404, "Profile not found.")
+        if req.auto_skip_intro is not None:
+            if req.auto_skip_intro:
+                profile["auto_skip_intro"] = True
+            else:
+                profile.pop("auto_skip_intro", None)
+        if req.auto_skip_credits is not None:
+            if req.auto_skip_credits:
+                profile["auto_skip_credits"] = True
+            else:
+                profile.pop("auto_skip_credits", None)
     return JSONResponse({
         "ok": True,
         "auto_skip_intro":   bool(profile.get("auto_skip_intro", False)),
@@ -15634,12 +16115,11 @@ async def set_profile_auto_skip(profile_id: str, req: ProfileAutoSkipReq) -> JSO
 async def set_profile_resume_mode(profile_id: str, req: ProfileResumeModeReq) -> JSONResponse:
     if req.resume_mode not in ("auto", "prompt", "off"):
         raise HTTPException(400, "resume_mode must be 'auto', 'prompt', or 'off'.")
-    lib = await get_library()
-    profile = next((p for p in lib.get("profiles", []) if p["id"] == profile_id), None)
-    if not profile:
-        raise HTTPException(404, "Profile not found.")
-    profile["resume_mode"] = req.resume_mode
-    await put_library(lib)
+    async with mutate_library() as lib:
+        profile = next((p for p in lib.get("profiles", []) if p["id"] == profile_id), None)
+        if not profile:
+            raise HTTPException(404, "Profile not found.")
+        profile["resume_mode"] = req.resume_mode
     return JSONResponse({"ok": True, "resume_mode": req.resume_mode})
 
 
@@ -15648,15 +16128,14 @@ async def set_profile_subtitles(profile_id: str, req: ProfileSubsReq) -> JSONRes
     """Per-profile override of the admin subs-on/off default. `subtitles_on` =
     None ⇒ inherit the admin default; True/False ⇒ force on/off for this profile.
     Applied on the next play by `_apply_subtitle_policy`."""
-    lib = await get_library()
-    profile = next((p for p in lib.get("profiles", []) if p["id"] == profile_id), None)
-    if not profile:
-        raise HTTPException(404, "Profile not found.")
-    if req.subtitles_on is None:
-        profile.pop("subtitles_on", None)
-    else:
-        profile["subtitles_on"] = bool(req.subtitles_on)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        profile = next((p for p in lib.get("profiles", []) if p["id"] == profile_id), None)
+        if not profile:
+            raise HTTPException(404, "Profile not found.")
+        if req.subtitles_on is None:
+            profile.pop("subtitles_on", None)
+        else:
+            profile["subtitles_on"] = bool(req.subtitles_on)
     return JSONResponse({"ok": True, "subtitles_on": profile.get("subtitles_on")})
 
 
@@ -15668,9 +16147,8 @@ async def get_max_volume() -> JSONResponse:
 @app.post("/api/settings/max-volume")
 async def set_max_volume(req: MaxVolumeReq) -> JSONResponse:
     capped = max(0, min(200, int(req.max_volume)))
-    lib = await get_library()
-    lib.setdefault("settings", {})["max_volume"] = capped
-    await put_library(lib)
+    async with mutate_library() as lib:
+        lib.setdefault("settings", {})["max_volume"] = capped
     if state.vlc_volume > capped:
         raw = max(0, min(512, round(capped / 100 * 256)))
         await vlc("volume", val=str(raw))
@@ -15687,9 +16165,8 @@ async def get_vlc_start_volume() -> JSONResponse:
 @app.post("/api/settings/vlc-start-volume")
 async def set_vlc_start_volume(req: VlcStartVolumeReq) -> JSONResponse:
     capped = max(0, min(100, int(req.vlc_start_volume)))
-    lib = await get_library()
-    lib.setdefault("settings", {})["vlc_start_volume"] = capped
-    await put_library(lib)
+    async with mutate_library() as lib:
+        lib.setdefault("settings", {})["vlc_start_volume"] = capped
     return JSONResponse({"ok": True, "vlc_start_volume": capped})
 
 
@@ -15719,13 +16196,12 @@ async def set_night_mode(req: NightModeReq) -> JSONResponse:
     stream reports buffering → playing. A preset change while night mode is off,
     or a no-op, just persists without relaunching VLC.
     """
-    lib = await get_library()
-    s = lib.setdefault("settings", {})
-    new_on = bool(s.get("vlc_night_mode", False)) if req.night_mode is None else bool(req.night_mode)
-    new_preset = _night_mode_preset(s.get("vlc_night_mode_preset")) if req.preset is None else _night_mode_preset(req.preset)
-    s["vlc_night_mode"] = new_on
-    s["vlc_night_mode_preset"] = new_preset
-    await put_library(lib)
+    async with mutate_library() as lib:
+        s = lib.setdefault("settings", {})
+        new_on = bool(s.get("vlc_night_mode", False)) if req.night_mode is None else bool(req.night_mode)
+        new_preset = _night_mode_preset(s.get("vlc_night_mode_preset")) if req.preset is None else _night_mode_preset(req.preset)
+        s["vlc_night_mode"] = new_on
+        s["vlc_night_mode_preset"] = new_preset
 
     # Relaunch only when it changes what VLC is currently outputting: on↔off, or
     # a preset change while night mode is on. (state still holds the *old* values.)
@@ -15810,9 +16286,8 @@ async def set_system_volume_default(req: SystemVolumeDefaultReq) -> JSONResponse
     YouTube Stop. See docs/YOUTUBE.md.
     """
     capped = max(0, min(100, int(req.system_volume_default)))
-    lib = await get_library()
-    lib.setdefault("settings", {})["system_volume_default"] = capped
-    await put_library(lib)
+    async with mutate_library() as lib:
+        lib.setdefault("settings", {})["system_volume_default"] = capped
     return JSONResponse({"ok": True, "system_volume_default": capped})
 
 
@@ -15830,9 +16305,8 @@ async def set_youtube_start_volume(req: YouTubeStartVolumeReq) -> JSONResponse:
     YouTube play. See docs/YOUTUBE.md.
     """
     capped = max(0, min(100, int(req.youtube_start_volume)))
-    lib = await get_library()
-    lib.setdefault("settings", {})["youtube_start_volume"] = capped
-    await put_library(lib)
+    async with mutate_library() as lib:
+        lib.setdefault("settings", {})["youtube_start_volume"] = capped
     return JSONResponse({"ok": True, "youtube_start_volume": capped})
 
 
@@ -16029,25 +16503,24 @@ async def admin_get_skip_data(item_id: str, request: Request) -> JSONResponse:
 async def admin_set_skip_data(item_id: str, request: Request, req: AdminSkipDataReq) -> JSONResponse:
     """Manual override: set intro/credits times for one file in an item."""
     _require_admin(request)
-    lib = await get_library()
-    item = next((it for it in lib["items"] if it["id"] == item_id), None)
-    if not item:
-        raise HTTPException(404, "Item not found.")
-    paths = {f.get("path", "") for f in item.get("files", [])}
-    if req.file_path not in paths:
-        raise HTTPException(400, "file_path is not in this item.")
-    skip_data = item.setdefault("skip_data", {})
-    entry = skip_data.setdefault(req.file_path, {})
-    if req.intro_start is not None and req.intro_end is not None and req.intro_end > req.intro_start:
-        entry["intro"] = {"start": round(req.intro_start, 1), "end": round(req.intro_end, 1)}
-    elif req.intro_start is None and req.intro_end is None:
-        entry.pop("intro", None)
-    if req.credits_start is not None:
-        entry["credits_start"] = round(req.credits_start, 1) if req.credits_start > 0 else None
-        if entry["credits_start"] is None:
-            entry.pop("credits_start", None)
-    entry["analysis"] = {"version": analyzer.ANALYZER_VERSION, "source": "manual"}
-    await put_library(lib)
+    async with mutate_library() as lib:
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        if not item:
+            raise HTTPException(404, "Item not found.")
+        paths = {f.get("path", "") for f in item.get("files", [])}
+        if req.file_path not in paths:
+            raise HTTPException(400, "file_path is not in this item.")
+        skip_data = item.setdefault("skip_data", {})
+        entry = skip_data.setdefault(req.file_path, {})
+        if req.intro_start is not None and req.intro_end is not None and req.intro_end > req.intro_start:
+            entry["intro"] = {"start": round(req.intro_start, 1), "end": round(req.intro_end, 1)}
+        elif req.intro_start is None and req.intro_end is None:
+            entry.pop("intro", None)
+        if req.credits_start is not None:
+            entry["credits_start"] = round(req.credits_start, 1) if req.credits_start > 0 else None
+            if entry["credits_start"] is None:
+                entry.pop("credits_start", None)
+        entry["analysis"] = {"version": analyzer.ANALYZER_VERSION, "source": "manual"}
     return JSONResponse({"ok": True})
 
 
@@ -16479,14 +16952,13 @@ async def admin_set_scheduled_reboot(
 
     idle = max(1, min(720, int(body.idle_minutes)))
 
-    lib = await get_library()
-    sr = lib.setdefault("settings", {}).setdefault("scheduled_reboot", {})
-    sr["enabled"]      = bool(body.enabled)
-    sr["time"]         = f"{h:02d}:{m:02d}"
-    sr["timezone"]     = body.timezone.strip()
-    sr["idle_minutes"] = idle
-    sr["last_fired"]   = ""   # reset guard so the new schedule can arm today
-    await put_library(lib)
+    async with mutate_library() as lib:
+        sr = lib.setdefault("settings", {}).setdefault("scheduled_reboot", {})
+        sr["enabled"]      = bool(body.enabled)
+        sr["time"]         = f"{h:02d}:{m:02d}"
+        sr["timezone"]     = body.timezone.strip()
+        sr["idle_minutes"] = idle
+        sr["last_fired"]   = ""   # reset guard so the new schedule can arm today
 
     cfg = _scheduled_reboot_cfg(lib)
     cfg["now"] = _now_in_tz(cfg["timezone"]).strftime("%Y-%m-%d %H:%M %Z").strip()
@@ -16518,16 +16990,22 @@ async def admin_set_auto_prep(request: Request, body: AutoPrepReq) -> JSONRespon
     `on_activity` and clamps `idle_minutes` (1–720). Re-derives the trigger on the
     next scheduler tick by resetting the engagement edge flag."""
     _require_admin(request)
-    mode = body.mode if body.mode in ("always", "idle", "off") else "off"
-    on_activity = body.on_activity if body.on_activity in ("soft", "hard") else "hard"
+    # Reject an unknown mode rather than silently coercing it: falling back to "off"
+    # meant a typo'd value came back 200 OK having quietly DISABLED automatic prep.
+    # (The sibling /prep-validate endpoint already 400s on bad input.)
+    if body.mode not in ("always", "idle", "off"):
+        raise HTTPException(400, "mode must be 'always', 'idle' or 'off'.")
+    if body.on_activity not in ("soft", "hard"):
+        raise HTTPException(400, "on_activity must be 'soft' or 'hard'.")
+    mode = body.mode
+    on_activity = body.on_activity
     idle_minutes = max(1, min(720, int(body.idle_minutes)))
 
-    lib = await get_library()
-    ap = lib.setdefault("settings", {}).setdefault("auto_prep", {})
-    ap["mode"]         = mode
-    ap["idle_minutes"] = idle_minutes
-    ap["on_activity"]  = on_activity
-    await put_library(lib)
+    async with mutate_library() as lib:
+        ap = lib.setdefault("settings", {}).setdefault("auto_prep", {})
+        ap["mode"]         = mode
+        ap["idle_minutes"] = idle_minutes
+        ap["on_activity"]  = on_activity
 
     # Re-derive "want" fresh against the new config on the next loop tick.
     state.auto_prep_engaged = False
@@ -16562,10 +17040,9 @@ async def admin_get_play_prep(request: Request) -> JSONResponse:
 async def admin_set_play_prep(request: Request, body: PlayPrepReq) -> JSONResponse:
     """Enable/disable auto on-device prep on VLC play."""
     _require_admin(request)
-    lib = await get_library()
-    pp = lib.setdefault("settings", {}).setdefault("play_prep", {})
-    pp["enabled"] = bool(body.enabled)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        pp = lib.setdefault("settings", {}).setdefault("play_prep", {})
+        pp["enabled"] = bool(body.enabled)
     return JSONResponse({"ok": True, **_play_prep_cfg(lib)})
 
 
@@ -16583,11 +17060,10 @@ async def admin_set_missing_content(request: Request,
     """Save the library missing-content policy. Mirrored onto `state` so it rides
     in every `state` SSE event and open dashboards pick it up without a reload."""
     _require_admin(request)
-    lib = await get_library()
-    mc = lib.setdefault("settings", {}).setdefault("missing_content", {})
-    mc["enabled"]      = bool(body.enabled)
-    mc["show_unaired"] = bool(body.show_unaired)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        mc = lib.setdefault("settings", {}).setdefault("missing_content", {})
+        mc["enabled"]      = bool(body.enabled)
+        mc["show_unaired"] = bool(body.show_unaired)
     cfg = _missing_content_cfg(lib)
     state.missing_content_enabled = cfg["enabled"]
     state.missing_content_unaired = cfg["show_unaired"]
@@ -16608,10 +17084,9 @@ async def admin_set_prep_validate(request: Request, body: PrepValidateReq) -> JS
     mode = str(body.mode or "off").lower()
     if mode not in _PREP_VALIDATE_MODES:
         return JSONResponse({"error": f"mode must be one of {_PREP_VALIDATE_MODES}"}, status_code=400)
-    lib = await get_library()
-    pv = lib.setdefault("settings", {}).setdefault("prep_validate", {})
-    pv["mode"] = mode
-    await put_library(lib)
+    async with mutate_library() as lib:
+        pv = lib.setdefault("settings", {}).setdefault("prep_validate", {})
+        pv["mode"] = mode
     return JSONResponse({"ok": True, **_prep_validate_cfg(lib)})
 
 
@@ -16955,12 +17430,11 @@ async def _apply_ondemand_only(item_id: str, enabled: bool) -> dict:
     task — doing it inline made the request hold the event loop long enough that
     other users couldn't load the page or act on it. Space is reclaimed shortly
     after the response returns. Raises HTTPException(404) if the item is gone."""
-    lib = await get_library()
-    item = next((it for it in lib["items"] if it.get("id") == item_id), None)
-    if not item:
-        raise HTTPException(404, "Item not found.")
-    item["ondemand_only"] = bool(enabled)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        item = next((it for it in lib["items"] if it.get("id") == item_id), None)
+        if not item:
+            raise HTTPException(404, "Item not found.")
+        item["ondemand_only"] = bool(enabled)
     _rebuild_ondemand_only_items(lib)
 
     cancelled = 0
@@ -17011,12 +17485,11 @@ async def admin_set_ondemand_only_lock(request: Request, body: OndemandOnlyLockR
     can't change it** from the episode page. Admin keeps full control either way.
     Persisted as `item["ondemand_only_locked"]`."""
     _require_admin(request)
-    lib = await get_library()
-    item = next((it for it in lib["items"] if it.get("id") == body.item_id), None)
-    if not item:
-        raise HTTPException(404, "Item not found.")
-    item["ondemand_only_locked"] = bool(body.locked)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        item = next((it for it in lib["items"] if it.get("id") == body.item_id), None)
+        if not item:
+            raise HTTPException(404, "Item not found.")
+        item["ondemand_only_locked"] = bool(body.locked)
     return JSONResponse({"ok": True, "ondemand_only_locked": bool(body.locked)})
 
 
@@ -17029,13 +17502,12 @@ async def admin_set_series_ondemand_only_lock(series_key: str, body: SeriesLockR
     A season pack / untagged item is its own single-member series (`item:<id>` key),
     so this also drives the single-row case. Returns the count applied."""
     _require_admin(request)
-    lib = await get_library()
-    members = _items_for_series_key(lib, series_key)
-    if not members:
-        raise HTTPException(404, "Series not found.")
-    for it in members:
-        it["ondemand_only_locked"] = bool(body.locked)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        members = _items_for_series_key(lib, series_key)
+        if not members:
+            raise HTTPException(404, "Series not found.")
+        for it in members:
+            it["ondemand_only_locked"] = bool(body.locked)
     return JSONResponse({"ok": True, "ondemand_only_locked": bool(body.locked),
                          "applied": len(members)})
 
@@ -17101,11 +17573,10 @@ async def admin_set_cache_autopurge(request: Request, body: CacheAutopurgeReq) -
     _require_admin(request)
     max_gb = max(1.0, min(10000.0, float(body.max_gb)))
 
-    lib = await get_library()
-    cp = lib.setdefault("settings", {}).setdefault("cache_autopurge", {})
-    cp["enabled"] = bool(body.enabled)
-    cp["max_gb"]  = max_gb
-    await put_library(lib)
+    async with mutate_library() as lib:
+        cp = lib.setdefault("settings", {}).setdefault("cache_autopurge", {})
+        cp["enabled"] = bool(body.enabled)
+        cp["max_gb"]  = max_gb
 
     cfg = _cache_autopurge_cfg(lib)
     cfg["last"] = state.cache_autopurge_last or None
@@ -17136,11 +17607,10 @@ async def admin_set_auto_maintenance(request: Request, body: AutoMaintReq) -> JS
     its in-flight run: the next `background_maintenance_loop` tick won't restart
     it, and auto-validation checks the stop flag between files."""
     _require_admin(request)
-    lib = await get_library()
-    am = lib.setdefault("settings", {}).setdefault("auto_maintenance", {})
-    am["fingerprint"] = bool(body.fingerprint)
-    am["validate"]    = bool(body.validate_files)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        am = lib.setdefault("settings", {}).setdefault("auto_maintenance", {})
+        am["fingerprint"] = bool(body.fingerprint)
+        am["validate"]    = bool(body.validate_files)
     if not body.validate_files:
         state.auto_validate_stop = True   # halt an in-flight auto-validation pass
     cfg = _auto_maint_cfg(lib)
@@ -17441,11 +17911,10 @@ async def admin_set_stt(request: Request, body: SttConfigReq) -> JSONResponse:
     """Save the STT config (enabled + translate). The preferred language is owned
     by the unified subtitle policy (`POST /api/admin/subtitles`), not here."""
     _require_admin(request)
-    lib = await get_library()
-    s = lib.setdefault("settings", {}).setdefault("stt", {})
-    s["enabled"]   = bool(body.enabled)
-    s["translate"] = bool(body.translate)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        s = lib.setdefault("settings", {}).setdefault("stt", {})
+        s["enabled"]   = bool(body.enabled)
+        s["translate"] = bool(body.translate)
     cfg = _stt_cfg(lib)
     cfg["available"] = _stt_available()
     return JSONResponse({"ok": True, **cfg})
@@ -17467,14 +17936,13 @@ async def admin_set_subtitles(request: Request, body: SubsConfigReq) -> JSONResp
     3-letter code; "" means "Any" (no preferred language). This same language
     also drives AI generation (`_stt_cfg` reads it) and the search default."""
     _require_admin(request)
-    lib = await get_library()
-    s = lib.setdefault("settings", {}).setdefault("subtitles", {})
-    s["default_language"] = _canon_lang(body.default_language) if body.default_language.strip() else ""
-    s["on_by_default"]    = bool(body.on_by_default)
-    s["auto_search"]      = bool(body.auto_search)
-    s["upgrade_late_subs"] = bool(body.upgrade_late_subs)
-    s["single_option"]     = bool(body.single_option)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        s = lib.setdefault("settings", {}).setdefault("subtitles", {})
+        s["default_language"] = _canon_lang(body.default_language) if body.default_language.strip() else ""
+        s["on_by_default"]    = bool(body.on_by_default)
+        s["auto_search"]      = bool(body.auto_search)
+        s["upgrade_late_subs"] = bool(body.upgrade_late_subs)
+        s["single_option"]     = bool(body.single_option)
     cfg = _subs_cfg(lib)
     state.subtitle_default_language = cfg["default_language"]
     state.subtitle_upgrade_late = cfg["upgrade_late_subs"]
@@ -17507,15 +17975,14 @@ async def admin_set_vpn_killswitch(request: Request, body: VpnKillswitchReq) -> 
     overlay updates live (e.g. the overlay clears the moment block_ui is turned
     off while the VPN happens to be down)."""
     _require_admin(request)
-    lib = await get_library()
-    s = lib.setdefault("settings", {}).setdefault("vpn_killswitch", {})
-    s["block_ui"] = bool(body.block_ui)
-    if body.mode is not None:
-        m = str(body.mode).strip().lower()
-        if m not in vpncheck.VALID_MODES:
-            raise HTTPException(400, f"mode must be one of {vpncheck.VALID_MODES}")
-        s["mode"] = m
-    await put_library(lib)
+    async with mutate_library() as lib:
+        s = lib.setdefault("settings", {}).setdefault("vpn_killswitch", {})
+        s["block_ui"] = bool(body.block_ui)
+        if body.mode is not None:
+            m = str(body.mode).strip().lower()
+            if m not in vpncheck.VALID_MODES:
+                raise HTTPException(400, f"mode must be one of {vpncheck.VALID_MODES}")
+            s["mode"] = m
     cfg = _vpn_killswitch_cfg(lib)
     state.vpn_block_ui = cfg["block_ui"]
     state.vpn_mode = cfg["mode"]
@@ -17577,10 +18044,9 @@ async def admin_set_network(request: Request, body: NetworkReq) -> JSONResponse:
     if name and name not in {a["name"] for a in adapters}:
         names = ", ".join(a["name"] for a in adapters) or "(none detected)"
         raise HTTPException(400, f"Unknown network adapter '{name}'. Available: {names}")
-    lib = await get_library()
-    net = lib.setdefault("settings", {}).setdefault("network", {})
-    net["preferred_adapter"] = name
-    await put_library(lib)
+    async with mutate_library() as lib:
+        net = lib.setdefault("settings", {}).setdefault("network", {})
+        net["preferred_adapter"] = name
     state.preferred_adapter = name
     return JSONResponse({"ok": True, **_network_status(lib)})
 
@@ -17780,28 +18246,27 @@ async def admin_set_updater_config(request: Request, body: UpdaterConfigReq) -> 
     (or, when dev_mode is on, any structurally-valid branch name);
     interval_hours is clamped to [1, 168]."""
     _require_admin(request)
-    lib = await get_library()
-    au = lib.setdefault("settings", {}).setdefault("autoupdate", {})
-    # Apply dev_mode first so the branch validation below uses the new value.
-    if body.dev_mode is not None:
-        au["dev_mode"] = bool(body.dev_mode)
-    allow_any = bool(au.get("dev_mode", False))
-    if body.branch is not None:
-        ok, err = updater.branch_allowed(body.branch, allow_any=allow_any)
-        if not ok:
-            raise HTTPException(400, err)
-        au["branch"] = body.branch
-    if body.interval_hours is not None:
-        try:
-            ih = int(body.interval_hours)
-        except (TypeError, ValueError):
-            raise HTTPException(400, "interval_hours must be an integer.")
-        au["interval_hours"] = max(1, min(168, ih))
-    if body.enabled is not None:
-        au["enabled"] = bool(body.enabled)
-    if body.auto_apply is not None:
-        au["auto_apply"] = bool(body.auto_apply)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        au = lib.setdefault("settings", {}).setdefault("autoupdate", {})
+        # Apply dev_mode first so the branch validation below uses the new value.
+        if body.dev_mode is not None:
+            au["dev_mode"] = bool(body.dev_mode)
+        allow_any = bool(au.get("dev_mode", False))
+        if body.branch is not None:
+            ok, err = updater.branch_allowed(body.branch, allow_any=allow_any)
+            if not ok:
+                raise HTTPException(400, err)
+            au["branch"] = body.branch
+        if body.interval_hours is not None:
+            try:
+                ih = int(body.interval_hours)
+            except (TypeError, ValueError):
+                raise HTTPException(400, "interval_hours must be an integer.")
+            au["interval_hours"] = max(1, min(168, ih))
+        if body.enabled is not None:
+            au["enabled"] = bool(body.enabled)
+        if body.auto_apply is not None:
+            au["auto_apply"] = bool(body.auto_apply)
     return JSONResponse({"ok": True, "cfg": _autoupdate_cfg(lib)})
 
 
@@ -17899,12 +18364,11 @@ async def admin_switch_branch(request: Request, body: UpdaterConfigReq) -> JSONR
 
         # Persist the new branch (+ the dev-mode preference) as the default for
         # future auto-checks.
-        lib = await get_library()
-        au = lib.setdefault("settings", {}).setdefault("autoupdate", {})
-        au["branch"] = body.branch
-        if body.dev_mode is not None:
-            au["dev_mode"] = bool(body.dev_mode)
-        await put_library(lib)
+        async with mutate_library() as lib:
+            au = lib.setdefault("settings", {}).setdefault("autoupdate", {})
+            au["branch"] = body.branch
+            if body.dev_mode is not None:
+                au["dev_mode"] = bool(body.dev_mode)
 
         await _set_updater_phase("idle",
                                 f"Switched to {body.branch} ({res['commit']}).",
@@ -17953,10 +18417,9 @@ async def admin_switch_commit(request: Request, body: UpdaterCommitReq) -> JSONR
         # a detached HEAD has none, and the saved branch is what Switch Branch
         # restores onto).
         if body.dev_mode is not None:
-            lib = await get_library()
-            au = lib.setdefault("settings", {}).setdefault("autoupdate", {})
-            au["dev_mode"] = bool(body.dev_mode)
-            await put_library(lib)
+            async with mutate_library() as lib:
+                au = lib.setdefault("settings", {}).setdefault("autoupdate", {})
+                au["dev_mode"] = bool(body.dev_mode)
 
         await _set_updater_phase(
             "idle",
@@ -18113,13 +18576,12 @@ async def admin_upload_background_video(
     with open(dest, "wb") as f:
         while chunk := await file.read(1024 * 1024):
             f.write(chunk)
-    lib = await get_library()
-    bg_settings = lib.setdefault("settings", {}).setdefault("background_video", {})
-    bg_settings["path"]    = str(dest.resolve())
-    bg_settings["name"]    = dest.name
-    bg_settings.setdefault("volume", 50)
-    bg_settings.setdefault("enabled", True)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        bg_settings = lib.setdefault("settings", {}).setdefault("background_video", {})
+        bg_settings["path"]    = str(dest.resolve())
+        bg_settings["name"]    = dest.name
+        bg_settings.setdefault("volume", 50)
+        bg_settings.setdefault("enabled", True)
     # If bg was already on screen, swap in the new file immediately
     if state.background_playing:
         asyncio.create_task(_play_background_video())
@@ -18133,17 +18595,15 @@ async def admin_upload_background_video(
 @app.delete("/api/admin/background-video")
 async def admin_delete_background_video(request: Request) -> JSONResponse:
     _require_admin(request)
-    lib = await get_library()
-    bg = lib.get("settings", {}).get("background_video") or {}
-    path = bg.get("path", "")
+    async with mutate_library() as lib:
+        bg = lib.get("settings", {}).get("background_video") or {}
+        path = bg.get("path", "")
+        lib.get("settings", {}).pop("background_video", None)
     if path:
         try:
             Path(path).unlink()
         except Exception:
             pass
-    if "background_video" in lib.get("settings", {}):
-        lib["settings"].pop("background_video", None)
-        await put_library(lib)
     if state.background_playing:
         state.background_playing = False
         state.vlc_volume = state.user_volume_before_bg
@@ -18155,10 +18615,9 @@ async def admin_delete_background_video(request: Request) -> JSONResponse:
 async def admin_set_background_volume(request: Request, req: BackgroundVolumeReq) -> JSONResponse:
     _require_admin(request)
     capped = max(0, min(200, int(req.volume)))
-    lib = await get_library()
-    bg_settings = lib.setdefault("settings", {}).setdefault("background_video", {})
-    bg_settings["volume"] = capped
-    await put_library(lib)
+    async with mutate_library() as lib:
+        bg_settings = lib.setdefault("settings", {}).setdefault("background_video", {})
+        bg_settings["volume"] = capped
     # Apply the new volume live if bg is on screen right now
     if state.background_playing:
         cap = await _global_max_volume()
@@ -18173,10 +18632,9 @@ async def admin_set_background_volume(request: Request, req: BackgroundVolumeReq
 @app.post("/api/admin/background-video/enabled")
 async def admin_set_background_enabled(request: Request, req: BackgroundEnabledReq) -> JSONResponse:
     _require_admin(request)
-    lib = await get_library()
-    bg_settings = lib.setdefault("settings", {}).setdefault("background_video", {})
-    bg_settings["enabled"] = bool(req.enabled)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        bg_settings = lib.setdefault("settings", {}).setdefault("background_video", {})
+        bg_settings["enabled"] = bool(req.enabled)
     if not req.enabled and state.background_playing:
         state.background_playing = False
         state.vlc_volume = state.user_volume_before_bg
@@ -21040,16 +21498,12 @@ async def _persist_validations(verdicts: dict) -> None:
     """Write a batch of {path → verdict} into the matching `files[].validation`."""
     if not verdicts:
         return
-    lib = await get_library()
-    changed = False
-    for it in lib.get("items", []):
-        for f in it.get("files", []):
-            v = verdicts.get(f.get("path", ""))
-            if v is not None:
-                f["validation"] = v
-                changed = True
-    if changed:
-        await put_library(lib)
+    async with mutate_library() as lib:
+        for it in lib.get("items", []):
+            for f in it.get("files", []):
+                v = verdicts.get(f.get("path", ""))
+                if v is not None:
+                    f["validation"] = v
 
 
 def _validation_backlog(lib: dict) -> int:
@@ -21790,13 +22244,12 @@ async def _run_file_compression(scope: str, crf: int, codec: str,
             # it. Only torrent-backed files need the marker — an uploaded file already
             # has no hash. Re-fetch under the lock so we don't clobber concurrent edits.
             if status == "compressed" and torrent:
-                lib2 = await get_library()
-                for it in lib2.get("items", []):
-                    for ff in it.get("files", []):
-                        if ff.get("path") == path:
-                            ff["compressed"] = True
-                            ff["compressed_at"] = _now_iso()
-                await put_library(lib2)
+                async with mutate_library() as lib2:
+                    for it in lib2.get("items", []):
+                        for ff in it.get("files", []):
+                            if ff.get("path") == path:
+                                ff["compressed"] = True
+                                ff["compressed_at"] = _now_iso()
             fc["results"].append({
                 "path": path, "name": name, "item_title": title, "torrent": torrent,
                 "status": status, "detail": detail, "before": before, "after": after,
@@ -22728,8 +23181,7 @@ async def offline_active(request: Request, profile_id: str = "") -> JSONResponse
                              "total_jobs": 0, "items": []})
     lib = await get_library()
     is_admin = _check_admin(request)
-    elevated_ids = {p["id"] for p in lib.get("profiles", []) if p.get("elevated")}
-    is_elevated = bool(profile_id) and profile_id in elevated_ids
+    is_elevated = _is_elevated(request, lib, profile_id)
     items_by_id = {it["id"]: it for it in lib.get("items", [])}
     # Drop every job the requester isn't allowed to know about. A job with no
     # resolvable item (untagged / deleted) can't be admin-locked, so it stays.
@@ -25219,23 +25671,22 @@ async def _adopt_torrent_to_library(h: str) -> Optional[str]:
     if not files:
         return None
     complete = float(info.get("progress", 0) or 0) >= 0.999
-    lib = await get_library()
-    item = {
-        "id":         str(uuid.uuid4()),
-        "title":      info.get("name", "") or files[0]["name"],
-        "series":     "",
-        "season":     files[0].get("season", 0),
-        "episode":    files[0].get("episode", 0),
-        "files":      files,
-        "size_bytes": info.get("size", 0) or sum(f.get("size_bytes", 0) for f in files),
-        "added_at":   _now_iso(),
-        "status":     "ready" if complete else "downloading",
-        "torrent_hash": h,
-        "progress":   {},
-        "download":   {"mode": "now", "files": {}},
-    }
-    lib["items"].append(item)
-    await put_library(lib)
+    async with mutate_library() as lib:
+        item = {
+            "id":         str(uuid.uuid4()),
+            "title":      info.get("name", "") or files[0]["name"],
+            "series":     "",
+            "season":     files[0].get("season", 0),
+            "episode":    files[0].get("episode", 0),
+            "files":      files,
+            "size_bytes": info.get("size", 0) or sum(f.get("size_bytes", 0) for f in files),
+            "added_at":   _now_iso(),
+            "status":     "ready" if complete else "downloading",
+            "torrent_hash": h,
+            "progress":   {},
+            "download":   {"mode": "now", "files": {}},
+        }
+        lib["items"].append(item)
     return item["id"]
 
 
@@ -25279,16 +25730,16 @@ async def admin_cleanup_delete_torrent(torrent_hash: str, request: Request,
     library item, drop that item too. 409 if the torrent is currently in use."""
     _require_admin(request)
     h = torrent_hash.lower()
-    lib = await get_library()
-    if h in _cleanup_in_use_hashes(lib):
-        raise HTTPException(409, "That torrent is currently in use.")
+    # Drop the backing items under the lock, then hit qBit outside it (network IO
+    # must not hold the global library lock — see delete_library_item).
+    async with mutate_library() as lib:
+        if h in _cleanup_in_use_hashes(lib):
+            raise HTTPException(409, "That torrent is currently in use.")
+        before = len(lib["items"])
+        lib["items"] = [it for it in lib["items"]
+                        if (it.get("torrent_hash") or "").lower() != h]
+        dropped = before - len(lib["items"])
     await qbit_delete(h, delete_files=delete_files)
-    before = len(lib["items"])
-    lib["items"] = [it for it in lib["items"]
-                    if (it.get("torrent_hash") or "").lower() != h]
-    dropped = before - len(lib["items"])
-    if dropped:
-        await put_library(lib)
     _invalidate_cleanup_inventory()
     return JSONResponse({"ok": True, "items_removed": dropped})
 
@@ -25365,10 +25816,19 @@ async def admin_cleanup_recover_item(item_id: str, request: Request) -> JSONResp
     else:
         await qbit_recheck(h)
         await qbit_resume(h)
-    item["status"] = "downloading"
-    item.pop("stalled_since", None)   # new torrent — new clock
-    await _apply_item_schedule(item, lib)   # reconcile file priorities/pause state
-    await put_library(lib)
+    # The qBit recovery above runs outside the library transaction — `_item_save_root`
+    # reads the library (via `_all_library_paths`) and would deadlock on the
+    # non-reentrant `_lib_lock`, and the add/recheck round trips shouldn't hold the
+    # global lock anyway. Re-find the item inside the transaction: the read above is
+    # a stale snapshot by now, so mutating it would write back over anything that
+    # landed in between.
+    async with mutate_library() as lib:
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        if not item:
+            raise HTTPException(404, "Item not found.")
+        item["status"] = "downloading"
+        item.pop("stalled_since", None)   # new torrent — new clock
+        await _apply_item_schedule(item, lib)   # reconcile file priorities/pause state
     _invalidate_cleanup_inventory()
     return JSONResponse({"ok": True, "readded": readded})
 
@@ -25378,15 +25838,18 @@ async def admin_cleanup_delete_item(item_id: str, request: Request,
                                     delete_files: bool = True) -> JSONResponse:
     """Remove a library item (and its torrent + files by default)."""
     _require_admin(request)
-    lib = await get_library()
-    item = next((it for it in lib["items"] if it["id"] == item_id), None)
-    if not item:
-        raise HTTPException(404, "Item not found.")
-    h = item.get("torrent_hash")
+    # qBit call outside the library lock — see delete_library_item.
+    async with mutate_library() as lib:
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        if not item:
+            raise HTTPException(404, "Item not found.")
+        h = item.get("torrent_hash")
+        file_paths = [f.get("path", "") for f in item.get("files", []) if f.get("path")]
+        lib["items"] = [it for it in lib["items"] if it["id"] != item_id]
+    if delete_files:
+        await _purge_offline_bundles(file_paths)
     if h:
         await qbit_delete(h, delete_files=delete_files)
-    lib["items"] = [it for it in lib["items"] if it["id"] != item_id]
-    await put_library(lib)
     _invalidate_cleanup_inventory()
     return JSONResponse({"ok": True})
 
