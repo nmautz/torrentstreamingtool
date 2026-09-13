@@ -10511,6 +10511,7 @@ async function openSearchShowFromTmdb(cand){
   const group={title:cand.title||"", year:cand.year?parseInt(cand.year,10)||null:null, results:[]};
   _ssGroup=group; _ssMeta=null; _ssSearching.clear();
   _ssKind=cand.kind==="movie"?"movie":"tv"; _ssBroadResults=null; _ssPacksSearched=false; _ssEpisodesSearched=false;
+  _ssPackHinted=new Set();
   _ssEpisodes=[]; _ssPacks=[];
   _ssSection=_ssKind==="movie"?"packs":"episodes";
   _ssSeason=0;
@@ -10637,22 +10638,71 @@ async function ssSearchShowEpisodes(btn){
   }
 }
 
-// Explicit "Search packs" — reuse the broad query, keep the non-episode results
-// (season / multi-season / movie) into _ssPacks.
+// Merge freshly-found non-episode results into _ssPacks, deduped by magnet.
+function _ssMergePacks(results){
+  const found=results.filter(r=>r.kind!=="episode");
+  const have=new Set(_ssPacks.map(p=>p.magnet));
+  found.forEach(p=>{ if(!have.has(p.magnet)){ _ssPacks.push(p); have.add(p.magnet); } });
+  _ssPacks.sort(_ssPackCmp);
+  return found.length;
+}
+
+// Targeted "<title> S04"-style query for one season's packs.
+//
+// The broad show-title query does NOT surface these reliably: a search for
+// "Hacks" returned season packs for S01-S03 and none at all for S04, while
+// "Hacks S04" returned four — the best of them with 182 seeders, more than any
+// pack the broad query found. A show's own title is a weak query for its later
+// seasons, because every episode, every franchise sibling and every unrelated
+// film sharing the word competes for the same result budget.
+async function ssSearchSeasonPacks(season, opts={}){
+  const grp=_ssGroup;
+  const q=`${grp.title} S${String(season).padStart(2,"0")}`;
+  let got=0;
+  try{
+    let url=`/api/search?q=${encodeURIComponent(q)}`;
+    if(profile.id) url+=`&profile_id=${encodeURIComponent(profile.id)}`;
+    const r=await fetch(url);
+    if(r.ok && _ssGroup===grp){
+      const data=await r.json();
+      const out=[];
+      (data.groups||[]).forEach(g=>(g.results||[]).forEach(res=>out.push(res)));
+      got=_ssMergePacks(out);
+    }
+  }catch(_){}
+  if(_ssGroup===grp && !opts.silent){ _ssPacksSearched=true; _ssRender(); }
+  return got;
+}
+
+// Explicit "Search packs" — the broad query, then a targeted sweep for every
+// season that still has no season pack, so a season the broad query missed
+// (routinely the most recent ones) still shows up.
 async function ssSearchPacks(btn){
   if(btn){ btn.disabled=true; _markLoading(btn,true); }
   const grp=_ssGroup;
+  const label=document.getElementById("ssSearchPacksLabel");
+  const setLabel=t=>{ if(label) label.textContent=t; };
   try{
+    setLabel("Searching…");
     const results=await _ssBroadSearch();
     if(_ssGroup!==grp) return;
-    const packs=results.filter(r=>r.kind!=="episode");
-    const have=new Set(_ssPacks.map(p=>p.magnet));
-    packs.forEach(p=>{ if(!have.has(p.magnet)){ _ssPacks.push(p); have.add(p.magnet); } });
-    _ssPacks.sort(_ssPackCmp);
+    const n=_ssMergePacks(results);
     _ssPacksSearched=true;
     _ssRender();
-    if(!packs.length) showAlert("No packs found for this show.","warn");
+    // Sweep the seasons the broad query left bare. Movies have no seasons.
+    if(_ssKind!=="movie" && !_ssTmdbAbsolute()){
+      const gaps=_ssAllSeasons().filter(sn=>!_ssPacksForSeason(sn).length);
+      for(let i=0;i<gaps.length;i++){
+        if(_ssGroup!==grp) return;
+        setLabel(`Season ${gaps[i]}… ${i+1}/${gaps.length}`);
+        await ssSearchSeasonPacks(gaps[i],{silent:true});
+        _ssRender();
+        await new Promise(r=>setTimeout(r,250));
+      }
+    }
+    if(_ssGroup===grp && !_ssPacks.length) showAlert("No packs found for this show.","warn");
   } finally {
+    setLabel("Search packs");
     if(btn){ btn.disabled=false; _markLoading(btn,false); }
   }
 }
@@ -11057,9 +11107,99 @@ function _ssPackCmp(a,b){
   return (b.seeders||0)-(a.seeders||0);
 }
 
+// Packs belonging to one season. `kind==="season"` with a matching number is the
+// whole test — a multiseason pack lives in its own group even when it spans this
+// season, because "Seasons 1-5" is a different proposition from "Season 4".
+function _ssPacksForSeason(season){
+  return _ssPacks.filter(p=>p.kind==="season" && p.season===season).sort(_ssPackCmp);
+}
+
+// One pack row. `i` indexes into _ssPacks — NOT into the rendered order, which is
+// grouped by season — because ssDownloadPack/ssPlayPack look the pack up by it.
+function _ssPackRowHtml(p, i){
+  const sc=p.seeders>30?"text-green-400":p.seeders>8?"text-yellow-400":"text-red-400";
+  const dim=(_ssAudioPref!=="any"&&!_ssAudioMatch(p))?" opacity-50":"";
+  return `<div class="w-full flex items-stretch${dim}">
+      <button onclick="ssDownloadPack(${i})"
+        class="flex-1 min-w-0 text-left px-3 sm:px-5 py-3 hover:bg-gray-800/50 transition-colors flex items-center gap-3">
+        <div class="min-w-0 flex-1">
+          <div class="flex items-center gap-2 mb-0.5 flex-wrap">
+            <span class="text-[10px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-indigo-900/60 text-indigo-300">${escHtml(_ssPackLabel(p))}</span>
+            ${_ssAudioBadgeHtml(p)}
+          </div>
+          <p class="text-sm text-gray-200 truncate">${escHtml(p.title)}</p>
+          <p class="text-[11px] text-gray-500">
+            <span class="font-mono font-semibold ${sc}">${p.seeders} ↑</span> · ${escHtml(p.size_human)}
+            ${p.tracker?` · <span class="text-gray-600">${escHtml(p.tracker)}</span>`:""}
+          </p>
+        </div>
+        <svg class="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5l7 7-7 7"/>
+        </svg>
+      </button>
+      <button onclick="ssPlayPack(${i},this)" title="Stream now — plays on the TV without saving to the library"
+        class="play-btn flex-shrink-0 w-12 sm:w-14 flex items-center justify-center text-indigo-400 hover:text-white hover:bg-indigo-700 border-l border-gray-800/60 transition-colors disabled:opacity-40">
+        <svg class="w-5 h-5" fill="currentColor" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+      </button>
+    </div>`;
+}
+
+function _ssPackGroupHeader(label, count){
+  return `<div class="px-3 sm:px-5 py-1.5 bg-gray-950 border-y border-gray-800 flex items-center justify-between gap-2">
+    <span class="text-[10px] font-black uppercase tracking-widest text-gray-400">${escHtml(label)}</span>
+    ${count!=null?`<span class="text-[10px] font-mono text-gray-600">${count}</span>`:""}
+  </div>`;
+}
+
+// Grouped by season, ascending, with every season the show HAS getting a heading
+// — including the ones nothing was found for, which get their own Find button.
+//
+// The flat list this replaced was sorted by relevance-then-seeders across the
+// whole result set, which for Hacks meant ten real season packs scattered through
+// 144 unrelated `movie` rows ("Hackers", "The Great Hack", a dozen YTS films that
+// merely share the word). The S04 pack was not hard to spot so much as absent —
+// and what was there was unfindable.
+function _ssRenderPacksGrouped(){
+  const seasons=_ssAllSeasons();
+  const idx=p=>_ssPacks.indexOf(p);
+  const multi=_ssPacks.filter(p=>p.kind==="multiseason").sort(_ssPackCmp);
+  const other=_ssPacks.filter(p=>p.kind!=="season"&&p.kind!=="multiseason").sort(_ssPackCmp);
+  let html="";
+  seasons.forEach(sn=>{
+    const rows=_ssPacksForSeason(sn);
+    html+=_ssPackGroupHeader(`Season ${sn}`, rows.length||null);
+    html+=rows.length
+      ? `<div class="divide-y divide-gray-800">${rows.map(p=>_ssPackRowHtml(p,idx(p))).join("")}</div>`
+      : `<div class="px-3 sm:px-5 py-3 flex items-center justify-between gap-3">
+           <span class="text-xs text-gray-600 italic">No season pack found</span>
+           <button onclick="ssSearchSeasonPacks(${sn})"
+             class="text-[10px] px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 uppercase tracking-wide flex-shrink-0">Find</button>
+         </div>`;
+  });
+  if(multi.length){
+    html+=_ssPackGroupHeader("Multi-season / complete", multi.length);
+    html+=`<div class="divide-y divide-gray-800">${multi.map(p=>_ssPackRowHtml(p,idx(p))).join("")}</div>`;
+  }
+  if(other.length){
+    // Kept, but pushed to the bottom behind a disclosure: these are the franchise
+    // siblings and same-word films, and they outnumber the real packs 14:1.
+    html+=`<details class="border-t border-gray-800">
+      <summary class="px-3 sm:px-5 py-2 cursor-pointer text-[10px] font-black uppercase tracking-widest text-gray-500 hover:text-gray-300">
+        Other results (${other.length})</summary>
+      <div class="divide-y divide-gray-800">${other.map(p=>_ssPackRowHtml(p,idx(p))).join("")}</div>
+    </details>`;
+  }
+  return html;
+}
+
 function _ssRenderPacks(){
   document.getElementById("ssSeasonTabs").classList.add("hidden");
   const body=document.getElementById("ssBody");
+  // A movie has no seasons to group by — keep the flat, relevance-sorted list.
+  if(_ssKind!=="movie" && !_ssTmdbAbsolute() && _ssAllSeasons().length){
+    body.innerHTML=_ssRenderPacksGrouped();
+    if(_ssPacks.length||_ssPacksSearched) return;
+  }
   body.innerHTML=`<div class="divide-y divide-gray-800">`+_ssPacks.map((p,i)=>{
     const sc=p.seeders>30?"text-green-400":p.seeders>8?"text-yellow-400":"text-red-400";
     const dim=(_ssAudioPref!=="any"&&!_ssAudioMatch(p))?" opacity-50":"";
@@ -11187,6 +11327,31 @@ function ssOpenBulkSheet(){
   _ssBulkScope=_ssSeason||"all";
   document.getElementById("ssBulkSheet").classList.remove("hidden");
   _ssRenderBulkChoose();
+  _ssBulkPackHint();
+}
+
+// Seasons whose packs we have already gone looking for, so re-rendering the
+// choose screen (scope chips, filter inputs) cannot re-fire the query.
+let _ssPackHinted=new Set();
+
+// Fire a one-shot season-pack lookup for the current scope, in the background.
+// A pack is usually the better grab — one torrent, one consistent release — but
+// the card can only recommend what has been found, and the broad show-title
+// query misses later seasons routinely (Hacks S04: zero packs from "Hacks",
+// four from "Hacks S04", the best at 182 seeders). Deliberately not awaited:
+// the sheet must open instantly.
+function _ssBulkPackHint(){
+  if(_ssBulkScope==="all"||_ssKind==="movie"||_ssTmdbAbsolute()) return;
+  const sn=_ssBulkScope;
+  if(_ssPackHinted.has(sn)||_ssPacksForSeason(sn).length) return;
+  _ssPackHinted.add(sn);
+  const grp=_ssGroup;
+  ssSearchSeasonPacks(sn,{silent:true}).then(()=>{
+    // Only redraw if the user is still sitting on the same sheet and scope.
+    const sheet=document.getElementById("ssBulkSheet");
+    if(_ssGroup===grp && sheet && !sheet.classList.contains("hidden")
+       && _ssBulkScope===sn && !_ssBulkBusy) _ssRenderBulkChoose();
+  });
 }
 function ssCloseBulkSheet(){ document.getElementById("ssBulkSheet").classList.add("hidden"); }
 
@@ -11319,7 +11484,11 @@ function _ssRenderBulkChoose(){
   document.getElementById("ssBulkFooter").innerHTML=`
     <button onclick="ssCloseBulkSheet()" class="w-full bg-gray-800 hover:bg-gray-700 py-3 text-xs font-bold uppercase tracking-wide min-h-[44px]">Cancel</button>`;
 }
-function _ssSetBulkScope(v){ _ssBulkScope=(v==="all")?"all":parseInt(v); _ssRenderBulkChoose(); }
+function _ssSetBulkScope(v){
+  _ssBulkScope=(v==="all")?"all":parseInt(v);
+  _ssRenderBulkChoose();
+  _ssBulkPackHint();
+}
 
 // Best season/multi-season pack covering the current bulk scope — the "one
 // download beats N episode grabs" recommendation. Only plausibly-relevant packs
@@ -18904,6 +19073,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.16.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.17.0</div>
 </body>
 </html>

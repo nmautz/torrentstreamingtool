@@ -457,6 +457,26 @@ Finally: the swap is **in place** (same item id), which keeps the user's progres
 
 **Don't rank candidates by the indexer's seeder count alone.** That number is advertised, not measured, and it was wrong every time it mattered here: one release claimed 47 seeders with none reachable, its replacement claimed 50 and sat at zero. Sorting by it means working down a list ordered by a figure that doesn't predict success, and with a 3-retry cap you can exhaust the budget before reaching a release that would have worked. `_proven_release_groups` — the groups of every `ready` item, i.e. torrents that actually completed on this box over this VPN — outranks it; seeders stay the tiebreaker. When parsing the group, strip the tracker tag and extension first (`…-successfulcrab[EZTVx.to].mkv`) and deny-list format tags, or half the library's group is "dl" from `WEB-DL`.
 
+### A show's own title is a weak query for its later seasons
+
+The Packs tab was filled purely from the broad `?q=<show title>` search, and it simply did
+not contain what the user wanted. `q=Hacks` returned season packs for S01-S03 and none for
+S04. `q=Hacks S04` returned four, the best at 182 seeders — more than any pack the broad
+query found. Nothing was broken; the title is just a bad query for a specific season,
+because every episode, franchise sibling and same-word film competes for the same result
+budget, and the newest seasons lose.
+
+**Anything that needs per-season coverage must ask per season.** `ssSearchSeasonPacks`
+does for packs what `ssSearchEpisode` does for episodes — and both exist for the same
+reason, which is worth noticing as a pattern rather than two coincidences.
+
+The second half of the problem was presentation: that query also returned 154 non-episode
+rows, ~144 of them `movie`-kind noise, against 10 real season packs. A flat
+relevance-then-seeders list buries a 14:1 minority no matter how it is sorted — group by
+the axis the user is actually choosing along (season), and give the noise its own
+collapsed section. Render a heading for every season the show HAS, not just the ones with
+results, or "no pack exists" and "nobody looked" are indistinguishable.
+
 ### Never let a batch count itself against the subset it managed to build
 
 Bulk season download derived its scope from `_ssEpisodes` — the episodes that searching

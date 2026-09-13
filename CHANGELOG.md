@@ -1,5 +1,15 @@
 # Changelog
 
+## [11.17.0] — 2026-09-12
+- **Fixed: season packs for later seasons never showed up, and the ones that did were unfindable.** The Packs tab was populated purely from the broad `?q=<show title>` query and rendered as one flat list sorted by relevance-then-seeders.
+  - **They were missing.** A show's own title is a weak query for its later seasons — every episode, franchise sibling and unrelated film sharing the word competes for the same result budget. Searching `Hacks` returned season packs for S01, S02 and S03 and **none at all** for S04; searching `Hacks S04` returned **four**, the best of them at **182 seeders** — more than any pack the broad query found.
+  - **And they were buried.** That same query returned 154 non-episode rows, of which ~144 were `kind=movie` noise (*Hackers*, *The Great Hack*, a dozen YTS films), swamping the 10 real season packs 14:1.
+- **Search packs now sweeps per season.** After the broad query it runs a targeted `<title> S<NN>` lookup for every season that still has no pack, updating the button label as it goes (`ssSearchSeasonPacks` / `_ssMergePacks`).
+- **The Packs tab is grouped by season, ordered by season.** Every season the show has gets a heading — including seasons nothing was found for, which get their own **Find** button, so a missing pack is visibly missing instead of silently absent. Multi-season / complete packs get their own group, and the unrelated `movie`-kind results are pushed to the bottom behind an **Other results (N)** disclosure. Movies and absolute-numbered anime keep the flat list (no seasons to group by).
+- **The bulk sheet's "Season pack available" card can finally fire.** Opening the sheet (or switching scope) kicks off a one-shot background lookup for the scoped season (`_ssBulkPackHint`, guarded by `_ssPackHinted`) and redraws if it finds one — never awaited, so the sheet still opens instantly.
+- **Frontend:** `static/index.html` — `ssSearchSeasonPacks`, `_ssMergePacks`, `_ssPacksForSeason`, `_ssPackRowHtml`, `_ssPackGroupHeader`, `_ssRenderPacksGrouped`, `_ssBulkPackHint`, rewritten `ssSearchPacks` / `_ssRenderPacks`. **Docs:** [docs/FRONTEND.md](docs/FRONTEND.md), [docs/GOTCHAS.md](docs/GOTCHAS.md).
+- (Host-only — **no app rebuild**. Frontend-only: a browser reload picks it up.)
+
 ## [11.16.0] — 2026-09-12
 - **Fixed: bulk season download silently skipped episodes it had no source for.** The scope was `_ssEpisodes.filter(...)`, and `_ssEpisodes` only ever holds episodes some search actually turned up — so an episode nobody had found a torrent for wasn't merely un-downloadable, it was **invisible**. Auto filtered those phantoms out and then counted the survivors as the total, reporting *"Queued 8/8 — success"* for a ten-episode season.
   - Seen on *Hacks S05*: the 21:19 run searched all ten episodes, E09 and E10 came back bare from that indexer pass, and only eight `torrents/add` calls were made. The toast claimed success; the gap surfaced later at the point of sitting down to watch. A targeted retry 90 seconds later found both immediately — the sources were there the whole time.
