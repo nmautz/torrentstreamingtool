@@ -191,6 +191,7 @@ PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "so
   "error": "",                          // optional; why a status=="error" item failed — shown as the Error badge's tooltip
   "pending_download": { /* optional; restart-recovery params, see below */ },
   "download_source": { /* optional; magnet + save_path kept while downloading, see below */ },
+  "download_attempts": [],              // optional; releases the dead-swarm retry has already tried, see below
   "download": { /* download schedule; see below */ },
   "prep": { /* stream-prep schedule; see below */ },
   "progress": { /* per-profile; see below */ },
@@ -245,6 +246,27 @@ kill-switch performs on every drop — silently loses it, and the item would oth
 field at 30 s and 90 s, then errors the item at 3 min. Items from before 11.13.0 have no
 `download_source`; recovery falls back to a bare `magnet:?xt=urn:btih:<hash>`.
 See [BACKEND.md](BACKEND.md) and [GOTCHAS.md](GOTCHAS.md).
+
+### `download_attempts` (dead-swarm retry history)
+
+```jsonc
+"download_attempts": [
+  {"key": "<info-hash or release key>", "title": "Hacks S04E02 …-STC",
+   "at": "2026-09-12T17:08:26+00:00", "outcome": "added"}    // or "add_failed"
+]
+```
+
+Appended by `_retry_dead_download` each time a release is abandoned for fetching
+zero bytes in 10 minutes. Two jobs: it caps the retries at `_MAX_DOWNLOAD_RETRIES`
+(3), and it is the exclusion list for the next search — matched on **both** the
+info-hash and `_release_key(title)`, because the same release is routinely indexed
+under two hashes by two trackers and re-downloading its twin would waste an attempt
+on identical, identically-dead content. Persisted, so a restart mid-retry does not
+start the cycle over. `len()` of it is surfaced as `retry_count` on `/api/library`.
+
+Note the item is swapped **in place** — same `id`, same `progress`, same position in
+the library — so `title`, `torrent_hash`, `download_source`, `files` and `size_bytes`
+all change together while everything the user had set up survives.
 
 ### `download` (download schedule)
 

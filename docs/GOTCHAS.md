@@ -443,9 +443,21 @@ qBit keeps **no resume data for a magnet whose metadata never arrived**, so kill
 
 The rule: **`qbit_info(h) is None` is ambiguous** — it means "qBit is down" *and* "the torrent is gone". `_handle_missing_torrent` disambiguates with `qbit_info_all()` (which returns `None` only when qBit is unreachable, `[]` when it's up and empty) and counts only the genuinely-gone case, so a qBit restart or VPN blip never trips the error path. Then: re-add from `item["download_source"].magnet` at 30 s and 90 s, error the item at 3 min. Any new code that treats a missing torrent as "skip this tick" needs the same disambiguation.
 
+### Auto-retrying a dead release: gate on BYTES, match the episode, and de-dupe by release identity
+
+Three traps in `_retry_dead_download`, each of which turns a helpful feature into a destructive one:
+
+1. **Gate on bytes fetched, not on qBit's peer counts.** "0 seeders" is what the user sees, but `num_seeds` is connected seeds — qBit reports a seed that never serves a piece, and a perfectly healthy torrent can be mid-handshake with none. `_note_download_stall` counts ticks with `completed == 0` and resets on *any* progress, so a slow-but-live download is never abandoned.
+2. **Zero-progress only.** A torrent that stalls half-downloaded has bytes worth keeping and seeders that may come back. The retry deletes the old torrent *with its files*, which is only safe because it can't fire above 0 B. Don't relax the trigger without revisiting that delete.
+3. **An episode item must only ever be offered the same episode.** A search for `Hacks S04E02` returns the season pack too, and a retry that silently pulled eight episodes would be far worse than the stalled card it fixed.
+
+And the one that only shows up against real data: **de-duplicate candidates by release identity, not just info-hash.** The same release is routinely indexed under two hashes by two trackers, so a hash-only exclusion list hands back the dead release's twin on the very next attempt and burns a retry on identical content. `_release_key` collapses the title to bare alphanumerics for that comparison, and `download_attempts` stores both keys.
+
+Finally: the swap is **in place** (same item id), which keeps the user's progress and library position — but it also silently rewrites the card's title. Surface it (`retry_count` → the "Release N" chip) or the UI looks haunted.
+
 ### A magnet stuck in `metaDL` moves no bytes — don't render it as "Downloading"
 
-A magnet whose swarm is dead parks in qBit's `metaDL` state: no file list, no peers, 0 B, forever. The card read a confident "↓ Downloading" the whole time, which is exactly how two dead releases hid for an hour. The monitor now sets `awaiting_metadata` on the `library_progress` event (`qstate == "metaDL"` or an empty `qbit_files`) — the card reads **"Finding peers…"** — and errors the item after `_METADATA_STALL_TICKS` (30 min). Note that `torrents/add` answering `"Ok."` proves nothing about whether the swarm will ever deliver metadata.
+A magnet whose swarm is dead parks in qBit's `metaDL` state: no file list, no peers, 0 B, forever. The card read a confident "↓ Downloading" the whole time, which is exactly how two dead releases hid for an hour. The monitor now sets `awaiting_metadata` on the `library_progress` event (`qstate == "metaDL"` or an empty `qbit_files`) — the card reads **"Finding peers…"** — and, once it has fetched nothing for `_DOWNLOAD_STALL_TICKS` (10 min), switches to a different release rather than waiting it out (see the entry above). Note that `torrents/add` answering `"Ok."` proves nothing about whether the swarm will ever deliver metadata.
 
 ### Admin Cleanup must never touch an in-use torrent or escape the download folder
 

@@ -6066,8 +6066,13 @@ function _libItemChrome(item){
   } else {
     dlBadge=`<span class="text-[10px] px-1.5 py-0.5 bg-yellow-900/50 text-yellow-400 border border-yellow-800 blink">↓ Downloading</span>`;
   }
+  // The dead-swarm auto-retry replaces the torrent (and the title) in place, so
+  // say that it happened — a card that silently renames itself is alarming.
+  const retryBadge=(isDownloading&&item.retry_count>0)
+    ?`<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 border border-gray-700" title="The previous release never sent any data, so StreamLink switched to another one automatically.">${ic("resume")} Release ${item.retry_count+1}</span>`
+    :"";
   const statusBadge=isDownloading
-    ?dlBadge
+    ?dlBadge+retryBadge
     :isError?`<span class="text-[10px] px-1.5 py-0.5 bg-red-900/50 text-red-400 border border-red-800"${item.error?` title="${escHtml(item.error)}"`:""}>Error</span>`
     :allDone?`<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-500 border border-gray-700"><svg class="ic" aria-hidden="true"><use href="#i-check"/></svg> All watched</span>`:"";
 
@@ -18751,6 +18756,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.13.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.14.0</div>
 </body>
 </html>

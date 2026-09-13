@@ -6036,10 +6036,201 @@ _MISSING_TORRENT_RETRY_TICKS = 18    # 90 s absent  → one more re-add attempt
 _MISSING_TORRENT_ERROR_TICKS = 36    # 3 min absent → give up, surface the error
 _missing_torrent_ticks: dict[str, int] = {}
 
-# A magnet stuck in qBit's `metaDL` state — no peer has sent the file list, so the
-# item can never progress past 0 B. 30 min (in 5 s monitor ticks) before we call it.
-_METADATA_STALL_TICKS = 360
-_metadata_stall_ticks: dict[str, int] = {}
+# A download that has fetched **zero bytes** — either no peer ever sent the file
+# list (qBit parks it in `metaDL`) or the swarm has metadata but nobody is
+# actually serving it. Either way the release is dead and no amount of waiting
+# fixes it, so after this many 5 s monitor ticks StreamLink stops waiting and
+# tries a DIFFERENT release for the same episode (`_retry_dead_download`).
+# 10 minutes is long enough for DHT to resolve a live magnet (usually well under
+# two) and short enough that a dead pick doesn't cost the user their evening.
+_DOWNLOAD_STALL_TICKS = 120
+# How many alternative releases to work through before giving up and erroring.
+_MAX_DOWNLOAD_RETRIES = 3
+_download_stall_ticks: dict[str, int] = {}
+
+
+def _note_download_stall(item: dict, info: dict) -> bool:
+    """Count consecutive ticks in which this download has fetched nothing at all.
+
+    Deliberately keyed on **bytes**, not on qBit's peer counts: "0 seeders" is
+    what the user sees, but qBit can report a connected seed that never actually
+    serves a piece, and conversely a torrent can be mid-handshake with none. Any
+    real progress resets the counter, so a slow-but-live torrent is never touched.
+    """
+    iid = item["id"]
+    if int(info.get("completed", 0) or 0) > 0:
+        _download_stall_ticks.pop(iid, None)
+        return False
+    n = _download_stall_ticks.get(iid, 0) + 1
+    _download_stall_ticks[iid] = n
+    return n >= _DOWNLOAD_STALL_TICKS
+
+
+def _retry_query_for(item: dict) -> str:
+    """The indexer query that finds other releases of this same content."""
+    series = (item.get("series") or "").strip()
+    season = int(item.get("season") or 0)
+    episode = int(item.get("episode") or 0)
+    if series and season and episode:
+        return f"{series} S{season:02d}E{episode:02d}"
+    if series:
+        return series
+    return parse_torrent_title(item.get("title", ""))["show"] or item.get("title", "")
+
+
+def _release_key(title: str) -> str:
+    """A release title collapsed to bare alphanumerics, for identity comparison.
+
+    The SAME release is routinely indexed under two info-hashes by two trackers,
+    so de-duplicating retries by hash alone would burn an attempt re-downloading
+    identical (and identically dead) content from a different tracker.
+    """
+    return re.sub(r"[^a-z0-9]+", "", (title or "").lower())
+
+
+def _retry_candidates(item: dict, shaped: list, tried: set) -> list:
+    """Alternative releases for `item`, best first, excluding everything tried.
+
+    For an episode item the candidate must parse to the **same season+episode** —
+    without that a search for one episode happily returns the season pack, and a
+    retry would quietly download eight episodes the user never asked for. Ordered
+    by the indexer's seeder count, which is a weak signal (a release advertising
+    47 seeders turned out to have none reachable) but the only one available
+    before adding the torrent.
+
+    `tried` holds both info-hashes and `_release_key` titles; a candidate matching
+    either is skipped, and the returned list is itself de-duplicated by title.
+    """
+    season = int(item.get("season") or 0)
+    episode = int(item.get("episode") or 0)
+    out: list = []
+    seen: set = set()
+    for r in shaped:
+        mag = (r.get("magnet") or "").strip()
+        if not mag:
+            continue
+        title = r.get("title", "")
+        rkey = _release_key(title)
+        # Link-style results (no info-hash in the URI) fall back to the title key,
+        # so they can still be recorded and de-duplicated across attempts.
+        key = (extract_hash(mag) or rkey).lower()
+        if not key or key in tried or not rkey or rkey in tried or rkey in seen:
+            continue
+        if season and episode:
+            pt = parse_torrent_title(title)
+            if (pt["kind"] != "episode" or pt["season"] != season
+                    or pt["episode"] != episode):
+                continue
+        seen.add(rkey)
+        out.append((key, r))
+    out.sort(key=lambda kr: int(kr[1].get("seeders", 0) or 0), reverse=True)
+    return out
+
+
+async def _retry_dead_download(item: dict, lib: dict) -> str:
+    """Swap a dead release for the next-best one, in place, with no user input.
+
+    A download that never fetched a byte is a dead pick, not a slow one, and the
+    user already expressed what they wanted when they started it — making them
+    come back to a stalled card and choose again is work the server can do. So
+    the item keeps its identity (same id, same progress history, same place in
+    the library) and only the torrent behind it changes.
+
+    Returns "retried" (a new torrent is now downloading — caller persists),
+    "exhausted" (out of attempts / nothing else to try — item is now `error`),
+    or "" (couldn't decide yet: VPN down, indexers unreachable — try next tick).
+
+    **Zero-progress only.** `_note_download_stall` gates on having fetched
+    nothing, so there is never partial data to throw away here. A torrent that
+    stalls half-downloaded is a different problem — its bytes are worth keeping
+    and its seeders may come back — and is deliberately left alone.
+    """
+    iid = item["id"]
+    attempts = item.get("download_attempts") or []
+    cur_hash = (item.get("torrent_hash") or "").lower()
+    # Exclude by info-hash AND by release identity — the same release is often
+    # indexed twice under different hashes, and it is just as dead either way.
+    tried = {a.get("key", "") for a in attempts if a.get("key")}
+    tried |= {_release_key(a.get("title", "")) for a in attempts if a.get("title")}
+    tried.add(_release_key(item.get("title", "")))
+    tried.discard("")
+    if cur_hash:
+        tried.add(cur_hash)
+
+    if len(attempts) >= _MAX_DOWNLOAD_RETRIES:
+        return _fail_dead_download(item, len(attempts) + 1)
+    if not state.vpn_secure:
+        return ""   # qBit is stopped anyway — hold the count and wait
+
+    query = _retry_query_for(item)
+    if not query.strip():
+        return _fail_dead_download(item, len(attempts) + 1)
+    try:
+        shaped = await _indexer_query(query, lib)
+    except Exception as exc:
+        log.warning("[download] retry search failed for %s: %s", query, exc)
+        return ""   # indexers down — not the release's fault, try again later
+
+    cands = _retry_candidates(item, shaped, tried)
+    if not cands:
+        return _fail_dead_download(item, len(attempts) + 1)
+
+    save_path = ((item.get("download_source") or {}).get("save_path")
+                 or settings.qbit_download_path)
+    # Drop the dead torrent first so it stops occupying a queue slot. Safe to take
+    # its files with it: we only get here at zero bytes.
+    if cur_hash:
+        await qbit_delete(cur_hash, delete_files=True)
+
+    # Work down the candidate list within this item's remaining budget. A qBit
+    # reject burns the attempt but must never end the call with the item left
+    # `downloading` and hash-less — the monitor skips hash-less items, so that
+    # would strand it exactly the way the vanished-torrent bug used to.
+    budget = max(0, _MAX_DOWNLOAD_RETRIES - len(attempts))
+    pick: dict = {}
+    new_hash = ""
+    for key, cand in cands[:budget]:
+        attempts.append({"key": key, "title": cand.get("title", ""), "at": _now_iso()})
+        new_hash = await qbit_add_magnet(cand["magnet"], save_path=save_path) or ""
+        attempts[-1]["outcome"] = "added" if new_hash else "add_failed"
+        if new_hash:
+            pick = cand
+            break
+        log.warning("[download] qBittorrent rejected %r — trying the next release",
+                    cand.get("title", ""))
+    item["download_attempts"] = attempts
+    if not new_hash:
+        return _fail_dead_download(item, len(attempts) + 1)
+
+    log.warning("[download] %s fetched nothing in %d min — switching to %r (%s seeders)",
+                item.get("title", ""), _DOWNLOAD_STALL_TICKS * 5 // 60,
+                pick.get("title", ""), pick.get("seeders", 0))
+    item["torrent_hash"] = new_hash
+    item["title"] = pick.get("title", "") or item.get("title", "")
+    item["download_source"] = {"magnet": pick["magnet"], "save_path": save_path}
+    # The old release's file list / size describe a torrent we just deleted.
+    item["files"] = []
+    item["size_bytes"] = 0
+    item.pop("error", None)
+    item["status"] = "downloading"
+    _download_stall_ticks.pop(iid, None)
+    _missing_torrent_ticks.pop(iid, None)
+    await broadcast("library_update", {"item_id": iid, "status": "downloading",
+                                       "message": f"Switched to {item['title']}"})
+    return "retried"
+
+
+def _fail_dead_download(item: dict, tried_count: int) -> str:
+    """Give up on an item whose release(s) all turned out to be dead."""
+    _download_stall_ticks.pop(item["id"], None)
+    item["status"] = "error"
+    item["error"] = (
+        f"Tried {tried_count} release{'' if tried_count == 1 else 's'} and none of them "
+        "sent a single byte — nobody appears to be seeding this episode. "
+        "Try again later, or pick a release by hand from Search.")
+    log.error("[download] giving up on %s after %d dead release(s)",
+              item.get("title", ""), tried_count)
+    return "exhausted"
 
 
 async def _handle_missing_torrent(item: dict) -> str:
@@ -6081,6 +6272,24 @@ async def _handle_missing_torrent(item: dict) -> str:
 
     if n >= _MISSING_TORRENT_ERROR_TICKS:
         _missing_torrent_ticks.pop(item_id, None)
+        # qBit lost it and won't take it back — that release is a dead end, so try
+        # a different one rather than dumping the problem on the user.
+        lib = await get_library()
+        live = next((it for it in lib["items"] if it["id"] == item_id), None)
+        if live is not None:
+            outcome = await _retry_dead_download(live, lib)
+            if outcome:
+                # `_retry_dead_download` mutated this freshly-read copy, not the
+                # caller's item. Mirror it onto `item` — which IS the monitor's
+                # library object — and let the monitor's single end-of-tick
+                # put_library persist it, rather than writing twice.
+                item.update(live)
+                if outcome == "exhausted":
+                    await broadcast("library_update", {"item_id": item_id,
+                                                       "status": "error",
+                                                       "message": item["error"]})
+                    return "errored"
+                return "changed"
         item["status"] = "error"
         item["error"] = ("qBittorrent no longer has this torrent — it was most likely "
                          "dropped when qBittorrent restarted before the magnet resolved. "
@@ -6182,8 +6391,8 @@ async def library_download_monitor() -> None:
                     # holding the .torrent) parks in qBit's `metaDL` state at 0 B
                     # with no file list — and the card read a confident
                     # "↓ Downloading" the whole time, so it was indistinguishable
-                    # from a slow torrent. Flag it to the UI, and give up rather
-                    # than wait forever.
+                    # from a slow torrent. Flag it to the UI so it reads
+                    # "Finding peers…" instead.
                     awaiting_meta = (qstate == "metaDL") or not qfiles
                     # "Waiting for idle window": either qBit paused us, or all the
                     # kept-but-incomplete files are idle-deferred and the window is shut
@@ -6195,32 +6404,30 @@ async def library_download_monitor() -> None:
                             if _effective_file_mode(cfg, full) == "idle" and qf.get("progress", 0.0) < 0.999:
                                 waiting_idle = True
                                 break
-                    # Only count the stall while the torrent is actually trying — an
-                    # idle-deferred download is paused on purpose and has no file list
-                    # yet either, and must never be errored for it.
-                    if awaiting_meta and not waiting_idle:
-                        m = _metadata_stall_ticks.get(item["id"], 0) + 1
-                        _metadata_stall_ticks[item["id"]] = m
-                        if m >= _METADATA_STALL_TICKS:
-                            _metadata_stall_ticks.pop(item["id"], None)
-                            item["status"] = "error"
-                            item["error"] = (
-                                "No peer ever sent this torrent's metadata — the swarm "
-                                f"looks dead ({_METADATA_STALL_TICKS * 5 // 60} min with no "
-                                "file list). Pick a different release.")
-                            state.downloading_count = max(0, state.downloading_count - 1)
-                            if not item.get("admin_only"):
-                                state.downloading_count_visible = max(
-                                    0, state.downloading_count_visible - 1)
+                    # Dead-swarm auto-retry. Only count the stall while the torrent
+                    # is actually trying — an idle-deferred download is paused on
+                    # purpose, has no file list either, and must never be judged for
+                    # it. A download that has fetched nothing at all is a dead pick
+                    # rather than a slow one, so rather than stranding the user with
+                    # a card that never moves, swap in the next-best release for the
+                    # same episode. See `_retry_dead_download`.
+                    if waiting_idle:
+                        _download_stall_ticks.pop(item["id"], None)
+                    elif _note_download_stall(item, info):
+                        outcome = await _retry_dead_download(item, lib)
+                        if outcome:
                             changed = True
-                            log.error("[download] %s: no metadata after %d min — giving up",
-                                      item.get("title", ""), _METADATA_STALL_TICKS * 5 // 60)
-                            await broadcast("library_update", {
-                                "item_id": item["id"], "status": "error",
-                                "message": item["error"]})
+                            if outcome == "exhausted":
+                                state.downloading_count = max(0, state.downloading_count - 1)
+                                if not item.get("admin_only"):
+                                    state.downloading_count_visible = max(
+                                        0, state.downloading_count_visible - 1)
+                                await broadcast("library_update", {
+                                    "item_id": item["id"], "status": "error",
+                                    "message": item["error"]})
                             continue
-                    else:
-                        _metadata_stall_ticks.pop(item["id"], None)
+                        # Empty outcome ⇒ undecidable this tick (VPN down,
+                        # indexers unreachable). Fall through and keep reporting.
                     await broadcast("library_progress", {
                         "item_id": item["id"],
                         "speed_bps": info.get("dlspeed", 0),
@@ -8314,6 +8521,10 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
             # Why an errored item failed (e.g. qBit lost the torrent) — the card's
             # Error badge shows it as a tooltip instead of a bare "Error".
             "error": it.get("error", "") if it.get("status") == "error" else "",
+            # How many releases this item has already burned through (the dead-swarm
+            # auto-retry swaps the torrent in place, so without this the title would
+            # just silently change under the user).
+            "retry_count": len(it.get("download_attempts") or []),
             "torrent_hash": it.get("torrent_hash", ""),
             "series_key": _series_key(it),   # groups same-series items into one show tile
             "resume": resume,
@@ -11596,6 +11807,23 @@ async def search(q: str, limit: int = 30,
     year_hint = year or None
 
     lib = await get_library()
+    shaped = await _indexer_query(q, lib, profile_id=profile_id or "",
+                                  categories=categories, indexers=indexers)
+    return JSONResponse({"results": shaped[:limit],
+                         "groups": _group_search_results(shaped, q, akas, year_hint)})
+
+
+async def _indexer_query(q: str, lib: dict, *, profile_id: str = "",
+                         categories: Optional[str] = None,
+                         indexers: Optional[str] = None) -> list:
+    """Query every permitted indexer for `q` → shaped, de-duped, seeder-sorted.
+
+    The engine behind `GET /api/search`, factored out so server-side callers can
+    search without a round trip through HTTP — currently the dead-swarm retry in
+    `library_download_monitor` (see `_retry_dead_download`). Returns `[]` when
+    nothing is permitted to be searched; raises `HTTPException(502)` only for the
+    Jackett-unreachable / every-indexer-failed cases the endpoint surfaces.
+    """
     cats_override = lib.get("settings", {}).get("admin_overrides", {}).get("indexer_categories")
     cats = (cats_override if cats_override is not None else settings.indexer_categories).strip()
     # Admin base restriction ∩ the user's category-picker selection → Category[] filter.
@@ -11603,7 +11831,7 @@ async def search(q: str, limit: int = 30,
     if cat_filter == []:
         # Explicit empty selection (user unticked every category, or it's disjoint
         # from the admin restriction) — nothing to search, don't query everything.
-        return JSONResponse({"results": [], "groups": []})
+        return []
     params: dict = {"apikey": settings.indexer_api_key, "Query": q}
     if cat_filter:
         params["Category[]"] = cat_filter
@@ -11629,9 +11857,7 @@ async def search(q: str, limit: int = 30,
         except Exception as e:
             raise HTTPException(502, f"Indexer unreachable: {e}")
         await _record_indexer_health(data.get("Indexers", []))
-        shaped = _shape_search_results(data.get("Results", []), 10000)
-        return JSONResponse({"results": shaped[:limit],
-                             "groups": _group_search_results(shaped, q, akas, year_hint)})
+        return _shape_search_results(data.get("Results", []), 10000)
 
     # Profile allowlist (admin-enforced) ∩ user selection (UI-chosen subset).
     allowed = _profile_allowed_indexers(lib, profile_id or "")
@@ -11643,7 +11869,7 @@ async def search(q: str, limit: int = 30,
     if not configured:
         # Profile blocks every indexer, or the selection is empty/disjoint — nothing
         # to query, so don't fall through to the aggregate (which queries them all).
-        return JSONResponse({"results": [], "groups": []})
+        return []
 
     indexers = configured
     PER_INDEXER_TIMEOUT = 12.0
@@ -11680,9 +11906,7 @@ async def search(q: str, limit: int = 30,
     if health and all(not h["ok"] for h in health):
         raise HTTPException(502, "All indexers failed to respond. Check Jackett / your VPN.")
 
-    shaped = _shape_search_results(items, 10000)
-    return JSONResponse({"results": shaped[:limit],
-                         "groups": _group_search_results(shaped, q, akas, year_hint)})
+    return _shape_search_results(items, 10000)
 
 
 @app.get("/api/search/indexers")
