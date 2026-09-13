@@ -11181,6 +11181,8 @@ let _ssBulkScope="all";   // "all" or a season number
 // Auto-pick constraints (persist across re-renders / scope changes). Blank = no
 // limit. Seeders win over size — see _ssAutoPick.
 let _ssBulkFilters={minSeed:"",minGB:"",maxGB:""};
+let _ssBulkBusy=false;    // a find-and-download run is in flight
+let _ssBulkCancel=false;  // the user hit Stop mid-run
 function ssOpenBulkSheet(){
   _ssBulkScope=_ssSeason||"all";
   document.getElementById("ssBulkSheet").classList.remove("hidden");
@@ -11188,14 +11190,52 @@ function ssOpenBulkSheet(){
 }
 function ssCloseBulkSheet(){ document.getElementById("ssBulkSheet").classList.add("hidden"); }
 
-function _ssBulkEpisodesInScope(){
-  return _ssEpisodes.filter(e=>_ssBulkScope==="all"||e.season===_ssBulkScope);
+// Every episode the current scope COVERS — TMDb's episode list unioned with
+// whatever the searches have turned up — each carrying its sources, which may
+// legitimately be an empty array.
+//
+// The distinction is the entire bug this replaced. Scope used to be
+// `_ssEpisodes.filter(...)`, and `_ssEpisodes` only ever contains episodes some
+// search found a torrent for, so an episode nobody had a source for was not
+// merely un-downloadable — it was invisible. Auto then filtered those phantoms
+// out and reported "Queued 8/8" over a ten-episode season. Observed on Hacks S05:
+// E09 and E10 came back bare from one flaky indexer pass, the run declared
+// success, and the gap was only discovered at the point of sitting down to watch.
+function _ssBulkScopeEpisodes(){
+  const seasons=(_ssBulkScope==="all")?_ssAllSeasons():[_ssBulkScope];
+  const out=[];
+  seasons.forEach(s=>{
+    const nums=new Set(_ssEpisodes.filter(e=>e.season===s).map(e=>e.episode));
+    // Absolute-numbered anime: TMDb's single mega-season says nothing about the
+    // scene's seasons, so the torrents we found are the only truth available.
+    if(!_ssTmdbAbsolute()){
+      const te=(_ssMeta&&_ssMeta.seasons&&_ssMeta.seasons[String(s)]&&_ssMeta.seasons[String(s)].episodes)||[];
+      te.forEach(t=>{ if(t.episode>0) nums.add(t.episode); });
+    }
+    [...nums].sort((a,b)=>a-b).forEach(ep=>{
+      const f=_ssEpisodes.find(e=>e.season===s&&e.episode===ep);
+      out.push({season:s, episode:ep, sources:(f&&f.sources)||[]});
+    });
+  });
+  return out;
+}
+
+function _ssEpCode(season,episode){
+  return `S${String(season).padStart(2,"0")}E${String(episode).padStart(2,"0")}`;
+}
+
+// "S05E09, S05E10" — capped so a wholesale miss doesn't produce a wall of text.
+function _ssEpList(codes){
+  if(codes.length<=6) return codes.join(", ");
+  return codes.slice(0,6).join(", ")+` +${codes.length-6} more`;
 }
 
 // Step 1: choose scope + Auto/Manual mode.
 function _ssRenderBulkChoose(){
   document.getElementById("ssBulkTitle").textContent="Bulk download";
-  const seasons=_ssSeasonsWithEpisodes();
+  // Every season the show HAS — a season nobody has searched yet still needs a
+  // chip, or the sheet can only ever offer what a previous search happened to find.
+  const seasons=_ssAllSeasons();
   const body=document.getElementById("ssBulkBody");
   const chip=(label,val)=>{
     const on=String(_ssBulkScope)===String(val);
@@ -11203,7 +11243,9 @@ function _ssRenderBulkChoose(){
       class="text-xs px-3 py-1.5 uppercase tracking-wide transition-colors
              ${on?"bg-indigo-600 text-white":"bg-gray-800 text-gray-400 hover:bg-gray-700"}">${label}</button>`;
   };
-  const n=_ssBulkEpisodesInScope().length;
+  const scope=_ssBulkScopeEpisodes();
+  const n=scope.length;
+  const need=scope.filter(e=>!e.sources.length).length;
   const f=_ssBulkFilters;
   // A matching season pack is usually the better grab: one torrent, one
   // consistent release (audio/subs/quality) — recommend it above the per-
@@ -11230,7 +11272,8 @@ function _ssRenderBulkChoose(){
         ${seasons.map(s=>chip("Season "+s,s)).join("")}
       </div>
     </div>
-    <p class="text-xs text-gray-500">${n} episode${n===1?"":"s"} in scope.</p>
+    <p class="text-xs text-gray-500">${n} episode${n===1?"":"s"} in scope.${
+      need?` <span class="text-indigo-300">${need} still need${need===1?"s":""} a source — Download will find ${need===1?"it":"them"} first.</span>`:""}</p>
     ${recHtml}
     <div>
       <p class="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Auto-pick limits (optional)</p>
@@ -11260,14 +11303,16 @@ function _ssRenderBulkChoose(){
       <p class="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">How should sources be picked?</p>
       <div class="grid grid-cols-1 gap-2">
         <button onclick="ssBulkAuto()"
-          class="text-left p-3 bg-gray-950 border border-gray-800 hover:border-indigo-700 hover:bg-gray-800 transition-colors">
-          <p class="text-sm font-black uppercase tracking-wide text-indigo-300">Auto — best seeded within limits</p>
-          <p class="text-[11px] text-gray-500 mt-0.5">Honours the Audio preference first, then grabs the best-seeded torrent that fits the limits above for every episode.</p>
+          class="text-left p-3 bg-indigo-950/40 border border-indigo-800 hover:border-indigo-600 hover:bg-indigo-900/40 transition-colors">
+          <p class="text-sm font-black uppercase tracking-wide text-indigo-300">${need?"Find sources &amp; download":"Auto — best seeded within limits"}</p>
+          <p class="text-[11px] text-gray-500 mt-0.5">${need
+            ?"Looks up whatever is still missing, then starts every episode — one click, no waiting around for a separate search."
+            :"Honours the Audio preference first, then grabs the best-seeded torrent that fits the limits above for every episode."}</p>
         </button>
-        <button onclick="_ssRenderBulkManual()"
+        <button onclick="ssBulkManualStart()"
           class="text-left p-3 bg-gray-950 border border-gray-800 hover:border-indigo-700 hover:bg-gray-800 transition-colors">
           <p class="text-sm font-black uppercase tracking-wide text-gray-200">Choose per episode</p>
-          <p class="text-[11px] text-gray-500 mt-0.5">Pick which torrent to use for each episode.</p>
+          <p class="text-[11px] text-gray-500 mt-0.5">Finds the sources first, then lets you pick which torrent to use for each episode.</p>
         </button>
       </div>
     </div>`;
@@ -11311,12 +11356,23 @@ function ssBulkUsePack(){
 // Step 2 (manual): a <select> of sources per episode, defaulting to best.
 function _ssRenderBulkManual(){
   document.getElementById("ssBulkTitle").textContent="Choose per episode";
-  const eps=_ssBulkEpisodesInScope();
+  const eps=_ssBulkScopeEpisodes();
   const body=document.getElementById("ssBulkBody");
   const filt=_ssParseBulkFilters();
   body.innerHTML=eps.map((e,idx)=>{
-    const code=`S${String(e.season).padStart(2,"0")}E${String(e.episode).padStart(2,"0")}`;
+    const code=_ssEpCode(e.season,e.episode);
     const name=_ssEpName(e.season,e.episode);
+    // An episode with no source still gets a row. Dropping it silently is what
+    // let a ten-episode season report a clean eight-episode success.
+    if(!e.sources.length){
+      return `<div class="flex items-center gap-2 opacity-60">
+        <span class="w-4 h-4 flex-shrink-0"></span>
+        <span class="text-[11px] font-mono font-bold text-gray-600 w-14">${code}</span>
+        <span class="flex-1 min-w-0 text-xs text-gray-500 italic">No source found</span>
+        <button onclick="ssSearchEpisode(${e.season},${e.episode}).then(()=>_ssRenderBulkManual())"
+          class="text-[10px] px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-300 uppercase tracking-wide flex-shrink-0">Find</button>
+      </div>`;
+    }
     // Default each dropdown to what Auto would pick (audio-pref aware), and
     // label options with their audio class so the language is visible in-list.
     const def=e.sources.indexOf(_ssAutoPick(e.sources,filt));
@@ -11378,52 +11434,144 @@ function _ssAutoPickFrom(sources, filt){
   return [...sources].sort(bySeed)[0];
 }
 
-function ssBulkAuto(){
-  const filt=_ssParseBulkFilters();
-  const eps=_ssBulkEpisodesInScope();
-  const jobs=eps.map(e=>({src:_ssAutoPick(e.sources,filt), season:e.season, episode:e.episode}))
-                .filter(j=>j.src);
-  // Be honest about episodes where no source satisfies the audio preference —
-  // silent fallback is exactly the "mixed languages" surprise this exists to kill.
-  let note="";
-  if(_ssAudioPref!=="any"){
-    const off=jobs.filter(j=>!_ssAudioMatch(j.src)).length;
-    if(off) note=`${off} had no ${_ssAudioPref==="eng"?"English-audio":"original-audio"} source — best available used.`;
+// In-sheet progress for a find-and-download run. The whole point of the
+// one-click flow is that the user never has to run a search, watch it finish,
+// and then come back to press Download — so the sheet has to show its own work.
+function _ssRenderBulkProgress(title, detail, frac){
+  const sheet=document.getElementById("ssBulkSheet");
+  if(!sheet||sheet.classList.contains("hidden")) return;
+  const pct=(typeof frac==="number")?Math.max(0,Math.min(100,Math.round(frac*100))):null;
+  document.getElementById("ssBulkTitle").textContent="Bulk download";
+  document.getElementById("ssBulkBody").innerHTML=`
+    <div class="py-6 space-y-3">
+      <p class="text-sm font-black uppercase tracking-wide text-gray-200 text-center">${escHtml(title)}</p>
+      <div class="h-1 bg-gray-800 overflow-hidden">
+        <div class="h-full bg-indigo-500 transition-all" style="width:${pct===null?100:pct}%"></div>
+      </div>
+      <p class="text-[11px] text-gray-500 text-center">${escHtml(detail||"")}</p>
+    </div>`;
+  document.getElementById("ssBulkFooter").innerHTML=`
+    <button onclick="_ssBulkStop()" class="w-full bg-gray-800 hover:bg-gray-700 py-3 text-xs font-bold uppercase tracking-wide min-h-[44px]">Stop</button>`;
+}
+function _ssBulkStop(){ _ssBulkCancel=true; }
+
+// Make sure every episode in scope has had a genuine chance at a source, then
+// hand back the scope list. Returns null when the run was cancelled or the user
+// navigated to another show mid-flight.
+//
+// The per-episode second pass is not belt-and-braces: indexers return an empty
+// result far more often than a wrong one, and the same query a minute later
+// routinely succeeds where the first came back bare. That is exactly how Hacks
+// S05E09/E10 were missed — both were searched, both returned nothing that pass,
+// and a targeted retry 90 s later found them immediately.
+async function _ssEnsureBulkSources(report){
+  const grp=_ssGroup;
+  if(!_ssEpisodesSearched){
+    report("Searching for sources…","One broad query across every indexer.",0.05);
+    await ssSearchShowEpisodes(null);
+    if(_ssGroup!==grp||_ssBulkCancel) return null;
   }
-  _ssRunBulk(jobs, note);
+  const gaps=_ssBulkScopeEpisodes().filter(e=>!e.sources.length);
+  for(let i=0;i<gaps.length;i++){
+    if(_ssBulkCancel||_ssGroup!==grp) return null;
+    const g=gaps[i];
+    report(`Finding sources — ${i+1}/${gaps.length}`,
+           `Looking up ${_ssEpCode(g.season,g.episode)}.`, (i+1)/(gaps.length+1));
+    await ssSearchEpisode(g.season,g.episode,{silent:true});
+    await new Promise(r=>setTimeout(r,250));
+  }
+  return _ssBulkScopeEpisodes();
+}
+
+// One click: find whatever sources are still missing, then start every download.
+async function ssBulkAuto(){
+  if(_ssBulkBusy) return;
+  _ssBulkBusy=true; _ssBulkCancel=false;
+  try{
+    const eps=await _ssEnsureBulkSources(_ssRenderBulkProgress);
+    if(!eps){ ssCloseBulkSheet(); return; }
+    const filt=_ssParseBulkFilters();
+    const jobs=[], unsourced=[];
+    eps.forEach(e=>{
+      const src=e.sources.length?_ssAutoPick(e.sources,filt):null;
+      if(src) jobs.push({src, season:e.season, episode:e.episode});
+      else unsourced.push(_ssEpCode(e.season,e.episode));
+    });
+    // Be honest about episodes where no source satisfies the audio preference —
+    // silent fallback is exactly the "mixed languages" surprise this exists to kill.
+    let note="";
+    if(_ssAudioPref!=="any"){
+      const off=jobs.filter(j=>!_ssAudioMatch(j.src)).length;
+      if(off) note=`${off} had no ${_ssAudioPref==="eng"?"English-audio":"original-audio"} source — best available used.`;
+    }
+    await _ssRunBulk(jobs, note, {total:eps.length, unsourced});
+  } finally { _ssBulkBusy=false; }
+}
+
+// "Choose per episode" needs sources before it can show a list, so it runs the
+// same find pass first rather than rendering an empty sheet.
+async function ssBulkManualStart(){
+  if(_ssBulkBusy) return;
+  _ssBulkBusy=true; _ssBulkCancel=false;
+  try{
+    const eps=await _ssEnsureBulkSources(_ssRenderBulkProgress);
+    if(!eps){ _ssRenderBulkChoose(); return; }
+    _ssRenderBulkManual();
+  } finally { _ssBulkBusy=false; }
 }
 
 function ssBulkManual(){
-  const eps=_ssBulkEpisodesInScope();
+  const eps=_ssBulkScopeEpisodes();
   const cbs=[...document.querySelectorAll(".ss-bulk-cb")];
   const sels=[...document.querySelectorAll(".ss-bulk-sel")];
-  const jobs=[];
+  const jobs=[], skipped=[];
   cbs.forEach(cb=>{
     if(!cb.checked) return;
     const idx=parseInt(cb.dataset.idx);
     const e=eps[idx]; if(!e) return;
+    if(!e.sources.length){ skipped.push(_ssEpCode(e.season,e.episode)); return; }
     const sel=sels.find(s=>parseInt(s.dataset.idx)===idx);
     const si=sel?parseInt(sel.value):0;
     jobs.push({src:e.sources[si]||e.sources[0], season:e.season, episode:e.episode});
   });
-  _ssRunBulk(jobs);
+  _ssRunBulk(jobs, "", {total:jobs.length+skipped.length, unsourced:skipped});
 }
 
 // Fire the batch sequentially (throttled) so qBit isn't hammered; every episode
 // shares the show's series string → one cohesive library entry.
-async function _ssRunBulk(jobs, note=""){
-  if(!jobs.length){ showAlert("Nothing selected.","warn"); return; }
-  ssCloseBulkSheet();
-  const total=jobs.length; let ok=0;
-  showAlert(`Queuing ${total} episode${total>1?"s":""}…`,"success");
-  for(const j of jobs){
+//
+// `opts.total` is the size of the SCOPE and `opts.unsourced` the episodes that
+// never got a candidate. Both exist so the closing toast can count against what
+// the user asked for rather than against the subset we managed to find — the old
+// version reported "Queued 8/8 — success" for a ten-episode season.
+async function _ssRunBulk(jobs, note="", opts={}){
+  const unsourced=opts.unsourced||[];
+  const scopeTotal=opts.total||jobs.length;
+  if(!jobs.length){
+    ssCloseBulkSheet();
+    showAlert(unsourced.length
+      ? `No sources found for ${_ssEpList(unsourced)} — try again in a minute, indexers come and go.`
+      : "Nothing selected.", "warn");
+    return;
+  }
+  let ok=0; const failed=[];
+  for(let i=0;i<jobs.length;i++){
+    if(_ssBulkCancel) break;
+    const j=jobs[i];
+    _ssRenderBulkProgress(`Starting downloads — ${i+1}/${jobs.length}`,
+                          _ssEpCode(j.season,j.episode), (i+1)/jobs.length);
     const done=await _ssDownloadOne(j.src, j.season, j.episode, {silent:true});
-    if(done) ok++;
+    if(done) ok++; else failed.push(_ssEpCode(j.season,j.episode));
     await new Promise(r=>setTimeout(r,250));
   }
-  // `note` rides the final toast (e.g. the audio-preference fallback count) —
-  // an earlier separate alert would be clobbered by the "Queuing…" one.
-  showAlert(`Queued ${ok}/${total} episode${total>1?"s":""}${note?` — ${note}`:" — switch to Library to track progress."}`, ok?(note?"warn":"success"):"error");
+  ssCloseBulkSheet();
+  const bits=[];
+  if(unsourced.length) bits.push(`no source found for ${_ssEpList(unsourced)}`);
+  if(failed.length) bits.push(`could not start ${_ssEpList(failed)}`);
+  if(note) bits.push(note);
+  showAlert(`Queued ${ok}/${scopeTotal} episode${scopeTotal===1?"":"s"}`+
+            (bits.length?` — ${bits.join("; ")}.`:" — switch to Library to track progress."),
+            bits.length?(ok?"warn":"error"):"success");
   closeSearchShow(); switchTab("library");
 }
 
@@ -18756,6 +18904,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.15.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.16.0</div>
 </body>
 </html>

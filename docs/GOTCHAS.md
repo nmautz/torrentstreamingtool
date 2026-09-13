@@ -457,6 +457,25 @@ Finally: the swap is **in place** (same item id), which keeps the user's progres
 
 **Don't rank candidates by the indexer's seeder count alone.** That number is advertised, not measured, and it was wrong every time it mattered here: one release claimed 47 seeders with none reachable, its replacement claimed 50 and sat at zero. Sorting by it means working down a list ordered by a figure that doesn't predict success, and with a 3-retry cap you can exhaust the budget before reaching a release that would have worked. `_proven_release_groups` — the groups of every `ready` item, i.e. torrents that actually completed on this box over this VPN — outranks it; seeders stay the tiebreaker. When parsing the group, strip the tracker tag and extension first (`…-successfulcrab[EZTVx.to].mkv`) and deny-list format tags, or half the library's group is "dl" from `WEB-DL`.
 
+### Never let a batch count itself against the subset it managed to build
+
+Bulk season download derived its scope from `_ssEpisodes` — the episodes that searching
+had found a torrent for. So an episode with no source was not merely un-downloadable, it
+was **invisible**: filtered out of the job list, and then absent from the denominator too.
+A ten-episode season with two unsourced episodes reported *"Queued 8/8 — success"*.
+
+**The denominator must come from what the user asked for, not from what the code managed
+to resolve.** Scope is now TMDb’s episode list unioned with found episodes
+(`_ssBulkScopeEpisodes`), so a sourceless episode is still counted and named in the toast.
+The same applies to a download that fails to start — name it, don’t drop it from the tally.
+
+The trigger was environmental and worth knowing on its own: **an indexer returning zero
+results is not evidence that none exist.** Jackett fans out to five indexers and returns
+200 with whatever came back; a bare pass is common and usually transient. Hacks S05E09/E10
+came back empty at 21:19:23 and were found by the identical query at 21:20:50. Anything
+that treats one empty search as “no such release” will be wrong regularly — retry the gaps
+before concluding anything, which is what `_ssEnsureBulkSources` does.
+
 ### A timeout that lives in memory never expires on a box that restarts
 
 The dead-swarm retry shipped with its 10-minute clock as an in-memory tick counter, and
