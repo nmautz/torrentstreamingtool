@@ -35,6 +35,8 @@ The fix keeps `state.library_item_id` pointed at the item that owns **the file V
 
 **Remaining device gap:** the iOS-app *offline bundle* prefetch-ahead (`_appAutoManage`, `_cap.dl`) stays **per-item** — it pre-caches only same-item ahead episodes for airplane mode (foreign-item ahead paths are skipped, pre-cached by that item's own pass). Streaming auto-advance is unaffected; only pre-download-for-offline doesn't span items.
 
+**Never gate cross-item UI on `library_item_file_count`.** It is the *current item's* file count, which for a show downloaded one episode per torrent is **1** — for every episode of a twenty-episode run. That is what hid the dashboard's Prev/Next episode buttons on exactly the shows that need them most (11.19.1): the backend navigation was correct the whole time, the button's visibility test was asking the wrong field. Ask `library_nav_count` (published by `state_snapshot` from the same shuffle → series → `library_nav_order` precedence `_nav_order` uses) instead. For the same reason, don't take a position from `library_playlist` / `library_current_index`: `vlc_next_file` rebuilds `library_playlist` as `all_paths[idx:]`, so the current index is permanently `0` and the count falls by one per episode — use `library_nav_index` / `library_nav_count`.
+
 Clearing: `library_series_map`/`library_series_order` are set fresh on every play (empty for a normal single-item play, and by Shuffle Play which owns navigation) and cleared in every full playback-state reset — but **not** in `library_unshuffle` (leaving shuffle keeps the series active).
 
 ### Search-result grouping keys on the show name *before* the first S/E marker
@@ -625,6 +627,56 @@ The `library.json` stall above is the canonical case, but the rule is general: *
 ### `asyncio.to_thread` does NOT help pure-Python CPU work — use a process
 
 `to_thread` only frees the event loop when the offloaded call **releases the GIL** — which subprocesses (ffmpeg/fpcalc/ffprobe) and most C-extension I/O do, but **pure-Python CPU loops do not**. A long pure-Python computation in a worker thread still holds the GIL for seconds at a stretch, and on multi-core hosts the **GIL convoy effect** starves the event-loop thread far worse than the 5 ms switch interval suggests — the dashboard freezes for seconds-to-a-minute while CPU%/RAM/RDP all look perfectly healthy (identical symptom to the `library.json` stall above, different cause). This bit Smart Skip: the intro/credits **matcher** (`analyzer._find_longest_match`, ~10-20 s of tight Python per episode pair) was dispatched with `asyncio.to_thread`, so the UI went unresponsive for a minute or two once a fingerprint pass reached the matching stage. The fix is a separate **process**, not a thread: `analyze_series` runs the matcher in a one-worker `ProcessPoolExecutor` (`_new_match_executor`, dropped to BELOW_NORMAL via `_match_worker_init`), with a `to_thread` fallback only if the host can't fork a pool. Rule of thumb: **subprocess or GIL-releasing C call → `to_thread` is fine; heavy pure-Python → run it in a process.** (The pool is created inside the `analyzer` module and its worker imports only `analyzer`, so Windows `spawn` re-importing the worker never touches the guarded `run.py`/uvicorn entrypoint — no risk of re-launching the server.)
+
+### Season/episode attribution: the season is often in the *folder*, and the number is often *absolute*
+
+Two traps, both from GitHub #15 (*Attack on Titan*: 131 files, every one of them `S0E0`).
+
+**1. Only reading the basename loses whole shows.** A large slice of what lands on disk — anime
+batches above all — states no `SxxExx` per file. The season is the directory
+(`…/Attack on Titan Season 2/…`). `episodes.parse_slot` reads the enclosing directory, but the read
+is **nearest-first and stops at the first component that resolves**, because the release *root* is
+full of lies: `[Anime Time] Attack On Titan (Complete Collection) (S01-S04+OVA+Movies+Junior High) [BD]…`
+names four seasons, an OVA folder and a Movies folder, none of which describe the file under it. Two
+rules keep it honest, and **both must survive any edit to the patterns**:
+* A component naming a season **range** (`S01-S04`, `Seasons 1-5`, `S1+S2`) or two different seasons
+  is rejected — it is not one season.
+* Bucket words (`Specials`, `Movies`, `OVA`, `OAD`…) match only at the **end** of a component, so
+  `Attack On Titan OAD` is a bucket and that release root is not.
+
+Directory reads are also bounded to the **item-relative** path (below the deepest shared directory),
+which is what stops a file in an unrecognised subfolder — `Attack On Titan Junior High` — from
+walking up into the root and inheriting its lies. That shared-root computation deliberately **backs
+out of a trailing season/bucket component**: an item whose files all sit in one `Season 2` folder
+would otherwise have the only statement of its season stripped as "the release root".
+
+**2. The episode number is frequently series-absolute, and no filename parser can tell.**
+`…/Attack on Titan Season 2/[Anime Time] Attack on Titan - 26.mkv` is **S02E01**. Reading it as
+S02E26 is worse than not parsing at all: the season looks 25 episodes short *and* every episode
+misses its TMDb name. This can only be resolved against the show's real per-season episode counts, so
+it is a **second pass** (`episodes.resolve_absolute`) run once `all_seasons` is cached — never at
+download time. Three invariants:
+* Only files flagged `abs_episode` are eligible. A number read off an `SxxExx`, or corrected by hand,
+  is never touched. The flag is cleared on resolve, so the pass is idempotent.
+* The absolute-vs-within-season decision is made **per season, not per file** — a whole season's run
+  either fits `1..count` or fits the absolute window, and one outlier must not split a season across
+  both readings.
+* The "no season anywhere, walk every number against cumulative counts" case is **skipped the moment
+  any file in the item carries a real season**. Without that guard, AoT's `Junior High/… - 01.mkv`
+  through `- 12.mkv` would map onto S01E01–E12 and overwrite the main run.
+
+**Anything that persists `season`/`episode` must go through this.** They're stored in `library.json`,
+so a parser improvement alone fixes nothing for existing rows — it needs the `_migrate_item` backfill
+(which only touches `(0, 0)` files, preserving hand-corrections). See
+[LIBRARY_DATA.md](LIBRARY_DATA.md) § Season/episode attribution.
+
+### Bucketed files are not parse failures
+
+A file with a non-empty `bucket` was deliberately placed outside the numbered run (a `Specials`,
+`Movies` or `OAD` folder, or a spin-off's own). Anything reasoning about "how much of this item
+failed to parse" must exclude them — the frontend's `_epUnattributedFiles` does. Counting them as
+failures tripped the missing-content diff's 25% unattributed threshold on AoT (42 of 131 files) and
+stood the feature down on exactly the well-organised batches it handles best.
 
 ### `library_item_id` is the "don't auto-delete" flag
 

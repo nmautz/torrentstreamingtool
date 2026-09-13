@@ -3611,6 +3611,7 @@ let app = {
   dl_speed_bps:0, ul_speed_bps:0,
   vlc_time:0, vlc_duration:0, vlc_volume:100, vlc_night_mode:false, vlc_night_mode_preset:"medium",
   library_playlist_count:0, library_current_index:-1, library_current_file:null,
+  library_nav_count:0, library_nav_index:-1,
   library_playlist:[], library_series_map:{}, library_item_file_count:0, is_library_playback:false,
   library_item_id:null,
   play_when_ready_item_id:null,
@@ -4375,12 +4376,17 @@ function renderPlayer(s){
   const fvl=document.getElementById("fcVolumeLabel");
   if(fvl) fvl.textContent=`${vol}%`;
 
-  // Episode nav state — computed once, used in both fullscreen and footer blocks
-  // Use library_item_file_count (total files in item) so nav shows even when
-  // the active playlist was built from a single-episode play or Restart.
-  const hasList=isPlaying&&s.is_library_playback&&(s.library_item_file_count||0)>1;
-  const curIdx=s.library_current_index??-1;
-  const total=s.library_playlist_count||0;
+  // Episode nav state — computed once, used in both fullscreen and footer blocks.
+  // library_nav_count/index describe the whole run being navigated: they survive
+  // an advance (library_playlist is only the remaining VLC tail) and they span
+  // items, so a series downloaded one episode per library item still gets its
+  // prev/next controls — library_item_file_count reports 1 for every episode of
+  // such a show, which hid the buttons outright. Falls back to the old fields for
+  // a server that predates them.
+  const navKnown=(s.library_nav_count||0)>0;
+  const total  = navKnown ? s.library_nav_count       : (s.library_playlist_count||0);
+  const curIdx = navKnown ? (s.library_nav_index??-1) : (s.library_current_index??-1);
+  const hasList=isPlaying&&s.is_library_playback&&total>1;
 
   // Fullscreen controls live sync (only pays the DOM cost when overlay is open)
   const fc=document.getElementById("fullscreenControls");
@@ -7404,8 +7410,12 @@ function _epApplyMovieChrome(isMovie){
 // Files whose season/episode never parsed (S0E0 after build_file_list). These
 // are real episodes hiding outside the season model, so while they exist EVERY
 // season looks short and a diff would report the whole show as missing.
+// A file carrying a `bucket` is NOT one of these: the backend placed it outside
+// the numbered run on purpose (Specials, Movies, an OVA folder, a spin-off), so
+// counting it as a parse failure would stand the diff down on exactly the
+// well-organised batches it handles best.
 function _epUnattributedFiles(){
-  return epFiles.filter(f=>!(+f.season>0 && +f.episode>0));
+  return epFiles.filter(f=>!(f.bucket||"") && !(+f.season>0 && +f.episode>0));
 }
 // Above this share of unattributed files the diff is not trustworthy and the
 // whole feature stands down (with a visible note, not silently). A handful of
@@ -7870,6 +7880,25 @@ async function toggleEpOndemandOnly(btn){
   }
 }
 
+// Distinct bucket labels among the season-0 files, in list order. A bucket names
+// the folder a file came from ("Specials", "Movies", "OAD", a spin-off's own
+// name) — see episodes.py.
+function _epSeason0Buckets(){
+  const seen=[];
+  for(const f of epFiles){
+    if((+f.season||0)!==0) continue;
+    const b=f.bucket||"";
+    if(b && !seen.includes(b)) seen.push(b);
+  }
+  return seen;
+}
+// What to call the season-0 tab. One bucket ⇒ call it what it is; several ⇒
+// "Extras", with the individual folders as headings inside the list.
+function _epSeason0Label(){
+  const b=_epSeason0Buckets();
+  return b.length===1 ? b[0] : (b.length ? "Extras" : "Specials");
+}
+
 function renderEpSeasonTabs(){
   const tabs=document.getElementById("epSeasonTabs");
   // The "± Season" bulk chip only makes sense when the item is split into seasons.
@@ -7887,7 +7916,7 @@ function renderEpSeasonTabs(){
     let cls=s===epCurrentSeason?"ep-season-tab active":"ep-season-tab";
     let label, count="";
     if(s===0){
-      label="Specials";
+      label=escHtml(_epSeason0Label());
     } else {
       const seasonMeta = m?.seasons?.[String(s)];
       label = (seasonMeta && seasonMeta.name && /\S/.test(seasonMeta.name))
@@ -8624,8 +8653,19 @@ function renderEpList(){
   let visibleFiles;
   if(epSeasonList.length){
     visibleFiles = epFiles.filter(f=>(+f.season||0)===epCurrentSeason);
-    // Sort by episode number within season for predictable ordering
-    visibleFiles.sort((a,b)=>(+a.episode||0)-(+b.episode||0));
+    if(epCurrentSeason===0){
+      // Season 0 is a grab-bag — specials, OVAs, movies, a spin-off's own run —
+      // so keep each source folder together and ordered within itself, rather
+      // than interleaving four unrelated runs that all start at 1.
+      const order=_epSeason0Buckets();
+      visibleFiles.sort((a,b)=>
+        order.indexOf(a.bucket||"")-order.indexOf(b.bucket||"") ||
+        (+a.episode||0)-(+b.episode||0) ||
+        (a.name||"").localeCompare(b.name||""));
+    } else {
+      // Sort by episode number within season for predictable ordering
+      visibleFiles.sort((a,b)=>(+a.episode||0)-(+b.episode||0));
+    }
   } else {
     visibleFiles = epFiles;
   }
@@ -8775,16 +8815,32 @@ function renderEpList(){
     html += `<div class="px-3 sm:px-5 py-2 border-b border-gray-800 flex flex-col gap-1.5 bg-gray-900/40">${rows}</div>`;
   }
 
-  // Missing episodes ride in the unwatched grid, interleaved by episode number:
-  // the union IS the list, so a gap mid-season reads as a gap instead of the list
-  // closing over it. Only re-sorted when there's something to interleave, so a
-  // fully-downloaded season keeps exactly the order it had before.
-  const rows = unwatched.map(f=>({ep:+f.episode||0, html:_epCardHtml(f)}))
-    .concat(missingEps.map(te=>({ep:+te.episode||0,
-                                 html:_epMissingCardHtml(epCurrentSeason, te)})));
-  if(missingEps.length) rows.sort((a,b)=>a.ep-b.ep);
   html += `<div class="grid grid-cols-1 xl:grid-cols-2 items-start">`;
-  rows.forEach(r=>{ html += r.html; });
+  if(epCurrentSeason===0 && _epSeason0Buckets().length>1){
+    // Several folders share the season-0 tab: label each run so it reads as a
+    // set of named groups instead of one undifferentiated scroll (GitHub #15).
+    // The heading spans both columns so the grid stays aligned. No missing-row
+    // interleave here — a diff only ever runs on a real season.
+    let lastBucket=null;
+    unwatched.forEach(f=>{
+      const b=f.bucket||"";
+      if(b!==lastBucket){
+        html += `<h3 class="xl:col-span-2 px-3 sm:px-5 pt-4 pb-2 text-[10px] font-black text-gray-500 uppercase tracking-widest border-b border-gray-800">${escHtml(b||"Other")}</h3>`;
+        lastBucket=b;
+      }
+      html += _epCardHtml(f);
+    });
+  } else {
+    // Missing episodes ride in the unwatched grid, interleaved by episode number:
+    // the union IS the list, so a gap mid-season reads as a gap instead of the list
+    // closing over it. Only re-sorted when there's something to interleave, so a
+    // fully-downloaded season keeps exactly the order it had before.
+    const rows = unwatched.map(f=>({ep:+f.episode||0, html:_epCardHtml(f)}))
+      .concat(missingEps.map(te=>({ep:+te.episode||0,
+                                   html:_epMissingCardHtml(epCurrentSeason, te)})));
+    if(missingEps.length) rows.sort((a,b)=>a.ep-b.ep);
+    rows.forEach(r=>{ html += r.html; });
+  }
   html += `</div>`;
 
   if(watched.length){
@@ -19473,6 +19529,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.18.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.19.1</div>
 </body>
 </html>

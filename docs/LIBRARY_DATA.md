@@ -399,6 +399,8 @@ in the `/files` response. See [STREAMING.md](STREAMING.md).
   "size_bytes": 1329062039,
   "season": 1,
   "episode": 1,
+  "bucket": "Extras",                    // optional; set only on season-0 files that sit OUTSIDE the numbered run — the folder they came from ("Specials"/"Movies"/"OAD"/a spin-off's own name). Groups + labels them in the UI
+  "abs_episode": true,                   // optional; transient — "this episode number may be series-absolute". Cleared by the TMDb-aware pass, see below
   "compressed": true,                    // optional; set true when this file was re-encoded IN PLACE by the compression tool — see below
   "compressed_at": "2026-06-25T18:00:00Z", // optional; when the in-place re-encode replaced the original
   "validation": {                        // optional; written by the file validator
@@ -410,7 +412,59 @@ in the `/files` response. See [STREAMING.md](STREAMING.md).
 }
 ```
 
-Season/episode are extracted by `parse_season_episode()` ([main.py:807](../main.py#L807)) — matches `S01E03`, `s2e5`, `1x03`. Returns `(0, 0)` if no match.
+### Season/episode attribution
+
+Attribution lives in **[episodes.py](../episodes.py)** (dependency-free, unit-testable on its own) and
+runs in **two passes**. `parse_season_episode()` in [main.py](../main.py) is a thin wrapper over pass 1,
+kept for the callers that only ever see a bare filename (uploads, non-torrent moves).
+
+**Pass 1 — structural** (`episodes.attribute_paths`, offline, no network). Called by
+`build_file_list()` at download time and by the load-time migration below. It is an **item-level**
+call, not per-file: the release root has to be identified (deepest directory shared by every path,
+minus any trailing season/bucket component) before a directory can be read as meaningful.
+
+Per file, in priority order:
+
+| Read | Yields | Example |
+|------|--------|---------|
+| `SxxExx` / `NxNN` on the basename | season + episode, **authoritative** | `Hacks.S05E01.…mkv`, `Death Note - 01x02 - …mkv` |
+| Nearest enclosing directory naming a season, + an episode marker on the basename (`- 07`, `E07`, `Ep07`, `#07`, or a guarded bare number) | season + episode, possibly **absolute** | `…/Attack on Titan Season 2/[Anime Time] Attack on Titan - 26.mkv` |
+| Nearest enclosing directory naming a **bucket** (`Specials`, `Extras`, `Movies`, `OVA`, `OAD`, `ONA`, `NCOP`/`NCED`…) | season 0 + `bucket` label + a bucket-local index | `…/Attack On Titan OAD/… - 03.mkv` |
+| No season and no known bucket, but the file sits in its **own subfolder** | season 0 + `bucket` = that folder's name | `…/Attack On Titan Junior High/… - 04.mkv` |
+| No season anywhere, strong episode marker only | season 0 + episode, flagged `abs_episode` | `[Grp] One Piece - 1068.mkv` |
+| Nothing | `(0, 0)` | `The Matrix (1999) 1080p.mkv` |
+
+The directory read is **nearest-first and stops at the first match**, so a release root that mentions
+other seasons or buckets in its blurb can never override the real folder. A folder naming a *range*
+(`…(S01-S04+OVA+Movies+Junior High)…`) or two different seasons is rejected outright — it is not one
+season. Bucket words match only at the **end** of a component, so that same root isn't read as
+"Movies" either. See [GOTCHAS.md](GOTCHAS.md) § season/episode attribution.
+
+**Pass 2 — TMDb-aware** (`episodes.resolve_absolute`, via `_reattribute_item_files` /
+`_settle_attribution` in [main.py](../main.py)). Anime batches number episodes across the whole run:
+`…/Season 2/Show - 26.mkv` is **S02E01**, not S02E26, and nothing in the filename says so. Once the
+show's `all_seasons` inventory is known, this pass compares each season's numbers against that
+season's real `episode_count`:
+
+* **Case A** — the season came from a folder but the numbers exceed its episode count. If the whole
+  season's run falls inside the cumulative absolute window `(offset, offset+count]`, the offset is
+  subtracted. Decided **per season, not per file**, so one outlier can't split a season across both
+  readings.
+* **Case B** — *no* file in the item carries a season at all, so every number is absolute: each is
+  walked against the cumulative counts to find its season. Skipped the moment any file has a real
+  season, which is what stops a spin-off folder from overwriting the main run.
+
+Only files flagged `abs_episode` are ever touched, so a number read off an `SxxExx` — or corrected by
+hand — is safe. The flag is cleared once resolved, making the pass a no-op on every later call.
+
+`_settle_attribution` also **tops up the episode lists for any season the correction reveals**: the
+season list sent to TMDb is derived from the files, so correcting the files can surface seasons whose
+episodes were never fetched (they'd gain a tab but no titles or stills). Bounded to 12 extra seasons
+per call.
+
+Canonical file order is `episodes.sort_key` — seasons ascending, season-0 buckets last and grouped by
+label, then episode, then name. Used by `build_file_list`, the migration, `/files` and
+`/series/{key}`.
 
 `compressed` marks a file the Storage & Compression tool re-encoded **in place**. Because the new
 bytes no longer match the torrent's pieces, the file is **no longer torrent-backed** even though the
@@ -558,6 +612,14 @@ When no TMDb API key is configured (env or admin override), the metadata/search/
 `_migrate_item` runs on every load. Two migrations:
 - **v2.0 → v2.1**: flat `file_path` → `files` list
 - **v2.0 → v2.1**: flat per-profile progress (`position_sec`/`duration_sec` at the top level of the profile entry) → `file_progress` keyed by path
+
+- **11.19.0 — season/episode backfill**: any file still sitting at `S0E0` is re-attributed through
+  `episodes.attribute_paths` (pass 1 above). Only `(0, 0)` files are touched, so a value the old
+  parser got right — or one corrected by hand — is never overwritten. The item's files are re-sorted
+  into canonical order afterwards. This is what fixes an existing library **without re-downloading**;
+  the absolute-numbering correction (pass 2) then settles on the next metadata access. Because
+  `_migrate_item` runs on *every* load (hot loops re-read every few seconds), the check is a plain
+  O(n) scan and the regex work only happens while something is actually still unattributed.
 
 The migration is in-place and silent. No version field on items.
 

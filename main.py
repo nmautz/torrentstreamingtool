@@ -44,6 +44,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 import analyzer
+import episodes
 import stt
 import updater
 import vpncheck
@@ -682,6 +683,25 @@ def _migrate_item(item: dict) -> dict:
                         }
                     },
                 }
+    # 11.19.0: re-attribute files an older parser left at S0E0. That parser only
+    # read SxxExx / NxNN off the basename, so every release that carries its
+    # season in a FOLDER (the anime-batch norm) landed entirely in S0E0 — no
+    # season tabs, no TMDb episode names, no stills. Only (0, 0) files are
+    # touched, so a hand-corrected or already-parsed number is never overwritten.
+    # Numbers that turn out to be series-absolute are fixed later, by
+    # `_reattribute_item_files`, which needs TMDb's season inventory.
+    # `_migrate_item` runs on every library load (hot loops re-read every few
+    # seconds), so the scan below stays a plain O(n) test and the regex work only
+    # happens while something is actually still unattributed.
+    files = item.get("files") or []
+    blank = [not int(f.get("season", 0) or 0) and not int(f.get("episode", 0) or 0)
+             for f in files]
+    if any(blank):
+        slots = episodes.attribute_paths([f.get("path", "") for f in files])
+        for f, slot, is_blank in zip(files, slots, blank):
+            if is_blank:
+                episodes.apply_slot(f, slot)
+        files.sort(key=episodes.sort_key)
     return item
 
 
@@ -799,6 +819,16 @@ class AppState:
     library_profile_color: str = ""
     library_item_file_count: int = 0                     # total files in the playing item
     library_playlist: list = field(default_factory=list)  # ordered file paths
+    # The playing item's FULL natural file order — the same list `_nav_order` and
+    # `_item_all_paths` already fall back to, cached in state so `state_snapshot`
+    # can report it without a library read. Deliberately the whole ITEM, not the
+    # played `playlist`: playing one episode of a season pack still navigates the
+    # whole pack (long-standing behaviour). `library_playlist` can't serve this —
+    # it's the remaining VLC tail and is rebuilt as `all_paths[idx:]` on every
+    # advance, so its index is permanently 0 and its length falls by one per
+    # episode. Set at play time, never shrunk, cleared on stop; the shuffle and
+    # merged-series orders below outrank it (see `_nav_order`).
+    library_nav_order: list = field(default_factory=list)
     # Shuffle Play: the full temp random order of file paths for the active item.
     # Empty when not shuffling. When set, next/prev (and the credit "skip to next"
     # auto-advance) navigate this order instead of the item's natural file order —
@@ -1041,6 +1071,18 @@ def state_snapshot() -> dict:
         cur_idx = playlist.index(current) if (current and current in playlist) else -1
     except (ValueError, AttributeError):
         cur_idx = -1
+    # The prev/next navigation order — the same precedence `_nav_order` applies,
+    # minus its item-file fallback (state_snapshot holds no library read). Unlike
+    # `playlist` this never shrinks, so "which of how many" stays truthful after
+    # an advance, and a merged series (one item per episode) reports the length of
+    # the WHOLE run rather than its current item's single file.
+    nav_order = (state.library_shuffle_order or state.library_series_order
+                 or state.library_nav_order)
+    nav_count = len(nav_order) or state.library_item_file_count
+    try:
+        nav_idx = nav_order.index(current) if (current and current in nav_order) else -1
+    except (ValueError, AttributeError):
+        nav_idx = -1
     # Window control pause: compute the live remaining seconds for the UI.
     # window_mgmt_paused() auto-expires a finished timed pause — and can slide
     # the deadline of one still in use — so read the deadline AFTER calling it.
@@ -1102,6 +1144,12 @@ def state_snapshot() -> dict:
         "missing_unaired": state.missing_content_unaired,
         "library_playlist_count": len(playlist),
         "library_current_index": cur_idx,
+        # Prev/next navigation: total episodes in the run and where we are in it.
+        # Drives whether the footer/fullscreen prev-next controls appear at all —
+        # `library_item_file_count` can't, because a show downloaded one episode
+        # per item reports 1 for every episode of a twenty-episode series.
+        "library_nav_count": nav_count,
+        "library_nav_index": nav_idx,
         "library_current_file": current,
         "library_playlist": list(playlist),
         # Merged-series playback: path→owning-item map (empty for a normal play).
@@ -2144,6 +2192,37 @@ def _movie_release_flags(details: dict) -> dict:
     }
 
 
+async def _tmdb_fetch_seasons(show_id: int, seasons: list[int]) -> dict[str, dict]:
+    """Fetch the episode list for each requested season, cache-shaped and keyed
+    by season number as a string. Split out of `_tmdb_fetch_tv` so a later pass
+    can top up seasons that only became known after the files were re-attributed
+    (see `_settle_attribution`)."""
+    out: dict[str, dict] = {}
+    for sn in seasons:
+        s = await _tmdb_get(f"/tv/{show_id}/season/{sn}",
+                            {"append_to_response": "videos"}) or {}
+        eps = []
+        for ep in s.get("episodes", []) or []:
+            eps.append({
+                "season":      ep.get("season_number", sn),
+                "episode":     ep.get("episode_number", 0),
+                "name":        ep.get("name", "") or "",
+                "overview":    ep.get("overview", "") or "",
+                "still_path":  ep.get("still_path") or "",
+                "air_date":    ep.get("air_date", "") or "",
+                "runtime":     ep.get("runtime") or 0,
+            })
+        if eps or s.get("name"):
+            out[str(sn)] = {
+                "name":     s.get("name", f"Season {sn}"),
+                "overview": s.get("overview", "") or "",
+                "poster_path": s.get("poster_path") or "",
+                "trailer":  _tmdb_pick_trailer(s.get("videos")),
+                "episodes": eps,
+            }
+    return out
+
+
 async def _tmdb_fetch_tv(show_id: int, seasons: list[int]) -> dict:
     """Fetch show details + each requested season's episodes. Returns the
     cache-shaped dict (see _build_metadata_cache)."""
@@ -2166,33 +2245,9 @@ async def _tmdb_fetch_tv(show_id: int, seasons: list[int]) -> dict:
         "poster_path":   s.get("poster_path") or "",
     } for s in (details.get("seasons") or [])]
     all_seasons.sort(key=lambda s: s["season"])
-    cache_seasons: dict[str, dict] = {}
     # Default to season 1 if no seasons were detected on disk (so a one-off
     # picker that opens before season parsing still gets *something*).
-    if not seasons:
-        seasons = [1]
-    for sn in seasons:
-        s = await _tmdb_get(f"/tv/{show_id}/season/{sn}",
-                            {"append_to_response": "videos"}) or {}
-        eps = []
-        for ep in s.get("episodes", []) or []:
-            eps.append({
-                "season":      ep.get("season_number", sn),
-                "episode":     ep.get("episode_number", 0),
-                "name":        ep.get("name", "") or "",
-                "overview":    ep.get("overview", "") or "",
-                "still_path":  ep.get("still_path") or "",
-                "air_date":    ep.get("air_date", "") or "",
-                "runtime":     ep.get("runtime") or 0,
-            })
-        if eps or s.get("name"):
-            cache_seasons[str(sn)] = {
-                "name":     s.get("name", f"Season {sn}"),
-                "overview": s.get("overview", "") or "",
-                "poster_path": s.get("poster_path") or "",
-                "trailer":  _tmdb_pick_trailer(s.get("videos")),
-                "episodes": eps,
-            }
+    cache_seasons = await _tmdb_fetch_seasons(show_id, seasons or [1])
     return {
         "tmdb_id":       show_id,
         "tmdb_kind":     "tv",
@@ -2240,6 +2295,75 @@ async def _tmdb_fetch_movie(movie_id: int) -> dict:
     }
 
 
+def _reattribute_item_files(item: dict, metadata: Optional[dict]) -> bool:
+    """Second attribution pass: turn series-absolute episode numbers into
+    within-season ones now that TMDb's season inventory is known. In place;
+    returns True if anything changed.
+
+    Anime batches number episodes across the whole run — `…/Season 2/Show - 26.mkv`
+    is S2E01, not S2E26 — which no amount of filename parsing can resolve on its
+    own. Only files the structural pass flagged `abs_episode` are eligible, so a
+    number read off an `SxxExx` (or corrected by hand) is never touched.
+    """
+    if not metadata or metadata.get("tmdb_kind") != "tv":
+        return False
+    all_seasons = metadata.get("all_seasons")
+    if not isinstance(all_seasons, list) or not all_seasons:
+        return False
+    files = item.get("files") or []
+    slots = [{"season": int(f.get("season", 0) or 0),
+              "episode": int(f.get("episode", 0) or 0),
+              "bucket": f.get("bucket", "") or "",
+              "abs": bool(f.get("abs_episode"))} for f in files]
+    if not episodes.resolve_absolute(slots, all_seasons):
+        return False
+    changed = False
+    for f, slot in zip(files, slots):
+        changed |= episodes.apply_slot(f, slot)
+    if changed:
+        files.sort(key=episodes.sort_key)
+    return changed
+
+
+async def _settle_attribution(lib: dict, item: dict,
+                              meta: Optional[dict]) -> Optional[dict]:
+    """Run the absolute-numbering pass against `meta`, persist it, and top up the
+    episode lists for any season the correction just revealed. Returns the
+    (possibly extended) metadata.
+
+    Both matter together: correcting `Show - 26.mkv` to S2E01 is only half the
+    fix if season 2's episode names were never fetched, because the season list
+    sent to TMDb was derived from the *uncorrected* numbers.
+
+    `lib`/`item` must already be loaded — this runs on every metadata cache hit,
+    so the common no-op path must cost no extra library I/O. Callers must hold
+    the item's `_tmdb_fetch_locks` entry.
+    """
+    if not _reattribute_item_files(item, meta):
+        return meta
+    await put_library(lib)
+
+    have = {int(k) for k in (meta or {}).get("seasons", {}) if str(k).isdigit()}
+    want = {int(f.get("season", 0) or 0) for f in item.get("files", [])}
+    missing = sorted(s for s in want - have if s > 0)
+    # Bounded: a correction shouldn't turn into an unbounded crawl of a
+    # 20-season show on a single page open.
+    if not missing or not (meta or {}).get("tmdb_id"):
+        return meta
+    extra = await _tmdb_fetch_seasons(int(meta["tmdb_id"]), missing[:12])
+    if not extra:
+        return meta
+    # Re-read: the fetch above was a network round trip, so other writers may
+    # have touched the library while it was in flight.
+    lib2 = await get_library()
+    it2 = next((x for x in lib2["items"] if x["id"] == item.get("id")), None)
+    if not it2 or not isinstance(it2.get("metadata"), dict):
+        return meta
+    it2["metadata"].setdefault("seasons", {}).update(extra)
+    await put_library(lib2)
+    return it2["metadata"]
+
+
 async def _fetch_item_metadata(item_id: str, force: bool = False,
                                 override_tmdb_id: Optional[int] = None,
                                 override_kind: Optional[str] = None) -> Optional[dict]:
@@ -2264,13 +2388,19 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
         stale_seasons = (cached.get("tmdb_kind") == "tv"
                          and cached.get("tmdb_id")
                          and "all_seasons" not in cached)
+        # Both early returns below go through `_settle_attribution`: a cache hit
+        # still has to run the absolute-numbering pass, because the item's files
+        # may have only just been re-attributed by the load-time migration and
+        # the season inventory that finishes the job is right here in the cache.
+        # It's a no-op once resolved (nothing stays flagged `abs_episode`).
+
         # Manual picks / hand-entered custom metadata are pinned — never let a
         # plain (non-forced) access silently re-run the auto-match over them.
         # Custom entries have no tmdb_id, so this is the guard that protects them.
         if cached.get("source") in ("manual", "custom") and not force and not stale_seasons:
-            return cached
+            return await _settle_attribution(lib, item, cached)
         if cached.get("tmdb_id") and not force and not override_tmdb_id and not stale_seasons:
-            return cached
+            return await _settle_attribution(lib, item, cached)
 
         if override_tmdb_id and override_kind:
             match = {"kind": override_kind, "id": int(override_tmdb_id)}
@@ -2310,6 +2440,11 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
         if it2:
             it2["metadata"] = data
             await put_library(lib2)
+            # The season inventory we just fetched is exactly what the
+            # absolute-numbering pass needs; settling it here can also reveal
+            # seasons whose episode lists the fetch above didn't ask for
+            # (the season list was derived from the uncorrected numbers).
+            data = await _settle_attribution(lib2, it2, data) or data
         # Warm the artwork cache in the background so posters/backdrops/stills
         # keep rendering for every client even if the internet later drops.
         _tmdb_bg(_prefetch_metadata_images(data))
@@ -2935,14 +3070,16 @@ def extract_hash(magnet: str) -> Optional[str]:
 
 
 def parse_season_episode(name: str) -> tuple[int, int]:
-    """Extract (season, episode) from filenames like S01E03, s2e5, 1x03, etc."""
-    m = re.search(r"[Ss](\d{1,2})[Ee](\d{1,2})", name)
-    if m:
-        return int(m.group(1)), int(m.group(2))
-    m = re.search(r"\b(\d{1,2})x(\d{2})\b", name)
-    if m:
-        return int(m.group(1)), int(m.group(2))
-    return 0, 0
+    """Extract (season, episode) from one file name or relative path.
+
+    Thin wrapper over `episodes.parse_slot` for the callers that only ever see a
+    bare filename (uploads, non-torrent moves). Anything holding a whole item's
+    file list should use `episodes.attribute_paths` instead — the release root
+    has to be identified before a directory can be read as a season, and that
+    takes every path. See docs/LIBRARY_DATA.md § Season/episode attribution.
+    """
+    slot = episodes.parse_slot(name)
+    return slot["season"], slot["episode"]
 
 
 # ── Search-result title parsing (show grouping) ──────────────────────────────
@@ -3244,21 +3381,27 @@ VIDEO_EXTS = {".mkv", ".mp4", ".avi", ".mov", ".wmv", ".m4v", ".ts", ".m2ts", ".
 
 
 def build_file_list(qbit_file_list: list, save_path: str) -> list[dict]:
-    """Build a sorted video-file list from qBittorrent's files API response."""
-    result = []
-    for f in qbit_file_list:
-        rel = f.get("name", "")
-        if Path(rel).suffix.lower() not in VIDEO_EXTS:
-            continue
-        season, episode = parse_season_episode(rel)
-        result.append({
-            "name": Path(rel).name,
-            "path": str(Path(save_path) / rel),
-            "size_bytes": f.get("size", 0),
-            "season": season,
-            "episode": episode,
-        })
-    result.sort(key=lambda x: (x["season"] or 9999, x["episode"] or 9999, x["name"]))
+    """Build a sorted video-file list from qBittorrent's files API response.
+
+    Season/episode attribution is done over the whole list at once (qBit's
+    `name` is relative to the save path, so the torrent's own folder structure
+    is intact here — that's where an anime batch keeps its seasons). Numbers
+    that turn out to be series-absolute are corrected later, once TMDb's season
+    inventory is known; see `_reattribute_item_files`.
+    """
+    videos = [f for f in qbit_file_list
+              if Path(f.get("name", "")).suffix.lower() in VIDEO_EXTS]
+    rels = [f.get("name", "") for f in videos]
+    result = [{
+        "name": Path(rel).name,
+        "path": str(Path(save_path) / rel),
+        "size_bytes": f.get("size", 0),
+        "season": 0,
+        "episode": 0,
+    } for rel, f in zip(rels, videos)]
+    for entry, slot in zip(result, episodes.attribute_paths(rels)):
+        episodes.apply_slot(entry, slot)
+    result.sort(key=episodes.sort_key)
     return result
 
 
@@ -3597,8 +3740,7 @@ def _merged_series_files(items: list[dict]) -> list[dict]:
             g = dict(f)
             g["item_id"] = iid
             out.append(g)
-    out.sort(key=lambda f: (f.get("season", 0) or 9999,
-                            f.get("episode", 0) or 9999, f.get("name", "")))
+    out.sort(key=episodes.sort_key)
     return out
 
 
@@ -5863,6 +6005,7 @@ async def _auto_play_item(item: dict, profile_id: str, file_path: str = "") -> N
         await _set_playback_owner(profile_id)
         state.library_item_file_count = len(item.get("files", []))
         state.library_playlist = playlist
+        state.library_nav_order = [f.get("path", "") for f in item.get("files", []) if f.get("path")]
         state.library_shuffle_order = []   # auto-play is always natural order
         state.library_series_map = {}
         state.library_series_order = []
@@ -5929,6 +6072,7 @@ async def _play_background_video() -> bool:
     state.library_profile_color = ""
     state.library_item_file_count = 0
     state.library_playlist = []
+    state.library_nav_order = []
     state.library_shuffle_order = []
     state.library_series_map = {}
     state.library_series_order = []
@@ -6091,6 +6235,7 @@ async def _sync_state_from_vlc() -> None:
             state.library_playlist = [
                 f.get("path", "") for f in matched_item.get("files", []) if f.get("path")
             ]
+            state.library_nav_order = list(state.library_playlist)
             state.library_current_file = matched_path
         else:
             state.active_title = Path(cur_path).stem
@@ -6687,6 +6832,8 @@ def _nav_order(item: dict) -> list[str]:
         return list(state.library_shuffle_order)
     if state.library_series_order:
         return list(state.library_series_order)
+    if state.library_nav_order:
+        return list(state.library_nav_order)
     return [f.get("path", "") for f in item.get("files", [])]
 
 
@@ -8803,6 +8950,9 @@ async def _build_item_files(item: dict, profile_id: str) -> list[dict]:
             "size_human": human_size(f.get("size_bytes", 0)),
             "season": f.get("season", 0),
             "episode": f.get("episode", 0),
+            # Non-empty ⇒ the file sits outside the numbered run (Specials,
+            # Movies, a spin-off folder); the label to group it under.
+            "bucket": f.get("bucket", "") or "",
             "progress": progress,
             "mode": mode,                               # now | low | mid | high | idle | skip
             "dl_priority": _dl_priority_of(mode),       # low | mid | high — download-order tier (mid default)
@@ -8859,8 +9009,7 @@ async def get_series_files(request: Request, series_key: str,
     files: list[dict] = []
     for it in members:
         files.extend(await _build_item_files(it, profile_id))
-    files.sort(key=lambda f: (f.get("season", 0) or 9999,
-                              f.get("episode", 0) or 9999, f.get("name", "")))
+    files.sort(key=episodes.sort_key)
 
     # Title + metadata: prefer a member that already has cached TMDb metadata.
     title = next((it.get("series") for it in members if (it.get("series") or "").strip()),
@@ -10594,6 +10743,7 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     state.library_profile_color = (prof_obj or {}).get("color", "") or ""
     state.library_item_file_count = len(item.get("files", []))
     state.library_playlist = playlist
+    state.library_nav_order = [f.get("path", "") for f in item.get("files", []) if f.get("path")]
     # Shuffle Play: remember the full random order (the filtered, on-disk playlist)
     # so next/prev walk it. Any normal play clears it back to natural order.
     state.library_shuffle_order = list(playlist) if req.shuffle else []
@@ -12308,6 +12458,7 @@ async def stream_now(req: StreamReq) -> JSONResponse:
     state.library_profile_color = ""
     state.library_item_file_count = 0
     state.library_playlist = []
+    state.library_nav_order = []
     state.library_shuffle_order = []
     state.library_series_map = {}
     state.library_series_order = []
@@ -13191,6 +13342,7 @@ async def youtube_play(req: YouTubeReq) -> JSONResponse:
     state.library_profile_color = ""
     state.library_item_file_count = 0
     state.library_playlist = []
+    state.library_nav_order = []
     state.library_shuffle_order = []
     state.library_series_map = {}
     state.library_series_order = []
@@ -13404,6 +13556,7 @@ async def stop() -> JSONResponse:
     state.library_profile_color = ""
     state.library_item_file_count = 0
     state.library_playlist = []
+    state.library_nav_order = []
     state.library_shuffle_order = []
     state.library_series_map = {}
     state.library_series_order = []
