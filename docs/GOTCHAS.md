@@ -818,6 +818,33 @@ Also: a file carrying a `bucket` (Specials, Extras, a spin-off folder — outsid
 
 `_ssMissingEpisodes` originally meant "TMDb lists it, no torrent found". Applied to a show already in the library that reads as a hole: the row renders greyed as **"No source found"**, the season banner counts it, `ssFindMissing` sweeps the indexers for it, and bulk **Auto** queues a fresh download of a file already on disk. The gap set now unions the coverage row's owned episodes into its `have`, and `_ssBulkScopeEpisodes` skips them outright. The per-row **Replace** action is the deliberate way back in — re-downloading is a choice, never a default.
 
+### A green picture is Dolby Vision Profile 5 — and nothing here can decode it
+
+A release that plays with a lurid **green** cast in VLC *and* in the prepped HLS bundle is Dolby Vision **Profile 5**, every time. P5 is single-layer and stores the picture in **IPT-PQ-c2**, not YCbCr, with the mapping back to something displayable carried in a per-frame RPU. Its `bl_signal_compatibility_id` is **0**: there is deliberately no HDR10 or SDR fallback baked into the base layer. Any decoder that ignores the RPU reads IPT chroma planes as if they were Cb/Cr, and green is what that looks like.
+
+Do **not** generalise this to "Dolby Vision is broken". Every other profile carries a usable base layer — 8.1 → HDR10, 8.2 → SDR, 8.4 → HLG, 7 → an HDR10 BL — and plays fine. `dvprobe.is_green` therefore flags **only** `dv_profile == 5 && dv_compat == 0`; widening it would condemn a large slice of perfectly good releases and turn the warning into noise.
+
+Distinguish it from plain HDR10 by the symptom: un-tone-mapped HDR10 looks **washed out / flat**, never green. (The prep pipeline does no colour conversion at all — `scale` → `yuv420p` — so HDR10 sources do come out flat. Separate, milder, still open.)
+
+**Why we don't fix it in ffmpeg.** Applying a DV RPU needs the `libplacebo` filter. `setup.py` installs gyan.dev's `ffmpeg-release-essentials.zip`, which doesn't carry it. Even with the full build it would only fix the *prepped* path: VLC plays the raw file on the TV and would still be green unless DV items were forced to on-demand-only and tone-mapped ahead of every watch. Swapping the release fixes it everywhere, instantly, at no CPU cost — which is why the feature detects and routes around P5 rather than trying to render it.
+
+### Release titles are not evidence of Dolby Vision — probe the file
+
+Of the DV files observed here, the only one that announced itself did so as a bare `DV`, while plenty of healthy **P8.1** releases advertise `DV` just as loudly (usually beside `HDR10`). A title filter therefore both misses real P5 files and rejects good ones.
+
+So there are two separate mechanisms and they are not interchangeable:
+
+- **`dvprobe.probe_path`** reads the actual `DOVIDecoderConfigurationRecord` out of the container header. This is the authority, and the only thing the **Green — Dolby Vision** badge is allowed to reflect. It needs no ffmpeg (the record is a fixed 5-byte layout in the MKV `BlockAdditionMapping` / MP4 `dvcC` box), which matters because `analyzer.ffmpeg_bin()` can legitimately be absent.
+- **`dvprobe.title_dv_risk`** is a title heuristic used **only** to rank search results, where no file exists yet. It sorts a suspect release to the back of every tier in `_ssAutoPickFrom` and `_retry_candidates` and renders an advisory "May play green" chip — it never removes a release, because a green episode still beats no episode when it is the only source.
+
+A corollary for the MP4 path: `moov` is not always at the front. `_probe_mp4` checks the **tail** as well, or a non-faststart mux probes to "unknown" and is silently never flagged.
+
+### Replacing a green file must not delete the old one for you
+
+The **Find a replacement** action starts a download and stops there. The green copy stays in the library until the user removes it, and the toast says so. Deleting media on the strength of a header byte is not a call to make silently, and a replacement that fails or turns out to be *also* P5 would otherwise leave them with nothing. (Contrast `_retry_dead_download`, which *does* swap in place — it only ever runs at **zero bytes fetched**, so there is nothing to lose.)
+
+One non-obvious consequence: 11.22.0 taught the search show page to suppress episodes you already own, which would make a replacement search show "already in your library" and offer nothing. `epReplaceGreen` passes `replace:true`, and `_ssOwns` / `_ssOwnedEps` exempt exactly that one episode — not the whole show.
+
 
 ## SSE
 

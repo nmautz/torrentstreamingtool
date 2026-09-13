@@ -44,6 +44,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 import analyzer
+import dvprobe
 import episodes
 import stt
 import updater
@@ -6764,6 +6765,11 @@ def _retry_candidates(item: dict, shaped: list, tried: set,
     `proven` (from `_proven_release_groups`) outranks the seeder count: a group
     whose torrents have actually completed on this box beats a stranger with a
     bigger advertised swarm, because the advertised number keeps being wrong.
+
+    A title advertising Dolby Vision with no compatible base layer sorts to the
+    BOTTOM but is never dropped: an unattended retry should not pick a release
+    that will play green when a plain one is right there, but a green episode
+    still beats no episode when it is the only thing left. See `dvprobe`.
     """
     season = int(item.get("season") or 0)
     episode = int(item.get("episode") or 0)
@@ -6788,7 +6794,8 @@ def _retry_candidates(item: dict, shaped: list, tried: set,
         seen.add(rkey)
         out.append((key, r))
     pg = proven or set()
-    out.sort(key=lambda kr: (_release_group(kr[1].get("title", "")) in pg,
+    out.sort(key=lambda kr: (not dvprobe.title_dv_risk(kr[1].get("title", "")),
+                             _release_group(kr[1].get("title", "")) in pg,
                              int(kr[1].get("seeders", 0) or 0)),
              reverse=True)
     return out
@@ -6982,6 +6989,58 @@ async def _handle_missing_torrent(item: dict) -> str:
     return ""
 
 
+# Pace the one-time colour-signalling backfill. Each probe is a 1 MiB header read
+# (two for a trailing-moov MP4), which is trivial on its own — but an existing
+# library is hundreds of files, and firing them back to back on a box that is
+# also transcoding turns a diagnostic into a disk-thrash. One item per tick is
+# slow and completely invisible, which is the right trade for a one-off sweep.
+VIDEO_BACKFILL_INTERVAL = 20.0     # seconds between items
+VIDEO_BACKFILL_START_DELAY = 90.0  # let boot, qBit login and any auto-play settle
+
+
+async def video_probe_backfill() -> None:
+    """Probe colour signalling for library files that predate the feature.
+
+    New downloads are probed on the ready transition, but an existing library has
+    none of it, and the whole point is to tell the viewer that the episode they
+    already own is the broken one. Walks the library once, slowly, filling in any
+    file without a `video` record, then exits — `_probe_item_video` skips files
+    that already have one, so a restart mid-sweep simply resumes.
+
+    Deliberately never re-probes: a file's header doesn't change, and a record of
+    `{}` (unreadable / exotic container) is a valid answer, not a retry prompt.
+    """
+    await asyncio.sleep(VIDEO_BACKFILL_START_DELAY)
+    try:
+        lib = await get_library()
+        pending = [it["id"] for it in lib["items"]
+                   if any("video" not in f for f in (it.get("files") or []))]
+        if not pending:
+            return
+        log.info("Colour-signalling backfill: %d item(s) to probe.", len(pending))
+        green = 0
+        for item_id in pending:
+            await asyncio.sleep(VIDEO_BACKFILL_INTERVAL)
+            # Back further off while something is actually playing — the probe is
+            # never urgent, and the box is the TV.
+            if state.stream_status in ("playing", "buffering"):
+                await asyncio.sleep(VIDEO_BACKFILL_INTERVAL * 3)
+            try:
+                await _probe_item_video_async(item_id)
+            except Exception as exc:
+                log.warning("Colour probe failed for %s: %s", item_id, exc)
+        lib = await get_library()
+        for it in lib["items"]:
+            green += sum(1 for f in (it.get("files") or [])
+                         if (f.get("video") or {}).get("green"))
+        log.info("Colour-signalling backfill complete — %d file(s) flagged "
+                 "Dolby Vision Profile 5.", green)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.warning("Colour-signalling backfill aborted: %s", exc)
+
+
 async def library_download_monitor() -> None:
     """Poll qBit every 5 s for pending library downloads and mark them complete."""
     while True:
@@ -7055,6 +7114,12 @@ async def library_download_monitor() -> None:
                         state.downloading_count_visible = max(0, state.downloading_count_visible - 1)
                     changed = True
                     await broadcast("library_update", {"item_id": item["id"], "status": "ready"})
+                    # Read each finished file's colour signalling now that the bytes
+                    # are actually on disk, so a Dolby Vision Profile 5 release is
+                    # flagged the moment it lands rather than when someone sits down
+                    # to watch it and finds it green. Off-thread; never blocks the
+                    # monitor tick. See docs/GOTCHAS.md § Dolby Vision Profile 5.
+                    _spawn_bg(_probe_item_video_async(item["id"]))
                     # Smart Skip fingerprinting is NOT triggered here anymore — it
                     # rides along with stream prep instead (`_ensure_analysis_for`
                     # in `_run_offline_job`). See docs/ANALYZER.md § Trigger flow.
@@ -8667,6 +8732,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     guard       = asyncio.create_task(vpn_guard())
     broadcaster = asyncio.create_task(stat_broadcaster())
     dl_monitor  = asyncio.create_task(library_download_monitor())
+    dvbackfill  = asyncio.create_task(video_probe_backfill())
     vlc_tracker = asyncio.create_task(vlc_progress_tracker())
     bg_loop     = asyncio.create_task(background_video_loop())
     jackett_mon = asyncio.create_task(jackett_health_monitor())
@@ -8715,10 +8781,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
 
     yield
 
-    for t in (guard, broadcaster, dl_monitor, vlc_tracker, bg_loop, jackett_mon,
-              reboot_loop, autoprep_loop, update_loop, dlsched_loop, sysmon_loop,
-              cachepurge_loop, subupgrade_loop, od_reaper_loop, maint_loop,
-              tvui_task, rvol_guard):
+    for t in (guard, broadcaster, dl_monitor, dvbackfill, vlc_tracker, bg_loop,
+              jackett_mon, reboot_loop, autoprep_loop, update_loop, dlsched_loop,
+              sysmon_loop, cachepurge_loop, subupgrade_loop, od_reaper_loop,
+              maint_loop, tvui_task, rvol_guard):
         t.cancel()
     if remote_listener is not None:
         remote_listener.stop()
@@ -9295,6 +9361,9 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
             "download_mode": _download_cfg(it)["mode"],   # now | idle — drives the card's Pause/Resume control
             "download_partial": any(m == "skip" for m in _download_cfg(it)["files"].values()),  # some files deselected → "Partial" badge
             "compressed": _item_has_compressed(it),       # any file re-encoded in place → "Compressed" badge (local-only)
+            # Files that will render with the Dolby Vision green cast (Profile 5,
+            # no compatible base layer). 0 until the file has been probed.
+            "green_files": sum(1 for f in files if (f.get("video") or {}).get("green")),
         })
     items.sort(key=lambda x: (
         x["series"] or "\xff" + x["title"],
@@ -9411,6 +9480,63 @@ async def library_coverage(request: Request, profile_id: str = "",
     return JSONResponse({"shows": shows, "missing_content": mc["enabled"]})
 
 
+def _probe_item_video(item: dict) -> bool:
+    """Fill in `file["video"]` for every file of `item` that lacks it. In place;
+    returns True if anything changed.
+
+    Blocking disk I/O (a 1 MiB header read per file), so callers must push this
+    to a thread — see `_probe_item_video_async`.
+
+    Files that probe to nothing still get a record (`{}` plus `green: False`), so
+    an unreadable or exotic container is asked once and then left alone instead
+    of being re-probed on every sweep forever.
+    """
+    changed = False
+    for f in item.get("files") or []:
+        if "video" in f:
+            continue
+        path = f.get("path") or ""
+        if not path or not Path(path).exists():
+            continue
+        info = dvprobe.probe_path(path)
+        f["video"] = info if info else {"green": False}
+        changed = True
+        if info and info.get("green"):
+            log.warning("Dolby Vision Profile 5 (no fallback) — will play green: %s",
+                        Path(path).name)
+    return changed
+
+
+async def _probe_item_video_async(item_id: str) -> None:
+    """Probe one item's files off-thread and persist the result.
+
+    Re-reads the item under the lock after the probe rather than holding it
+    across the disk I/O — the library lock is held by the SSE broadcasters and a
+    multi-file pack would stall them for the length of the scan.
+    """
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        return
+    snapshot = {"files": [dict(f) for f in item.get("files") or []]}
+    if not await asyncio.to_thread(_probe_item_video, snapshot):
+        return
+    probed = {f.get("path"): f.get("video") for f in snapshot["files"] if "video" in f}
+    async with mutate_library() as lib2:
+        it2 = next((it for it in lib2["items"] if it["id"] == item_id), None)
+        if not it2:
+            raise LibraryUnchanged
+        wrote = False
+        for f in it2.get("files") or []:
+            if "video" not in f and f.get("path") in probed:
+                f["video"] = probed[f["path"]]
+                wrote = True
+        if not wrote:
+            raise LibraryUnchanged
+    if any((v or {}).get("green") for v in probed.values()):
+        await broadcast("library_update", {"item_id": item_id})
+
+
 async def _build_item_files(item: dict, profile_id: str) -> list[dict]:
     """Build the per-file payload (progress + live download/prep state) for one
     library item. Shared by the single-item `/files` endpoint and the merged
@@ -9487,6 +9613,7 @@ async def _build_item_files(item: dict, profile_id: str) -> list[dict]:
             # No live qBit data at all (uploaded item, or torrent gone): trust status.
             complete = is_ready or not has_torrent
             dl_pct = 100.0 if complete else None
+        video = f.get("video") or {}
         out.append({
             "item_id": item.get("id", ""),              # owning item (join key for merged-series)
             "name": f.get("name", Path(path).name),
@@ -9506,6 +9633,12 @@ async def _build_item_files(item: dict, profile_id: str) -> list[dict]:
             "dl_pct": dl_pct,                           # download % (None if unknown)
             "complete": complete,                       # file fully downloaded → playable
             "compressed": compressed,                   # re-encoded in place → local-only, not torrent-backed
+            # Colour signalling read from the file header (dvprobe). `green` is the
+            # only field the UI acts on: Dolby Vision Profile 5 with no compatible
+            # base layer, which renders with a heavy green cast in VLC AND on
+            # device. Absent until the file has been probed.
+            "dv_profile": video.get("dv_profile"),
+            "green": bool(video.get("green")),
         })
     return out
 
@@ -12575,6 +12708,12 @@ def _shape_search_results(items: list, limit: int) -> list:
             "peers": it.get("Peers", 0),
             "magnet": mag,
             "tracker": it.get("Tracker", ""),
+            # Advisory only — a title claiming Dolby Vision with no HDR10/SDR
+            # layer alongside it. Used to break ties in the auto-pickers and to
+            # badge the row; never to hide a release, because the title is a poor
+            # witness either way (dvprobe's module note has the detail). The file
+            # itself is re-checked for real once it lands.
+            "dv_risk": dvprobe.title_dv_risk(it.get("Title", "")),
         }
         h = extract_hash(mag) if mag.startswith("magnet:") else None
         key = h or (row["title"].lower(), row["size"])

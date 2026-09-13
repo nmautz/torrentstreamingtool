@@ -483,6 +483,24 @@ which can't be recovered). The marker survives the download monitor's `build_fil
 
 `validation` is the persisted verdict from the source-file validator (the manual admin scan **and** the idle `background_maintenance_loop` auto-validator both write it). It lets the validator skip already-checked files, drives the Activity tab's "never-validated" backlog count, and makes auto-validation **resume after a restart**. A file is re-validated only when its `sig` (mtime:size) changes — i.e. it was re-downloaded, repaired, or re-encoded — or, for a `missing` verdict, once the file exists again. See [BACKEND.md](BACKEND.md) and [ADMIN.md § Automatic Maintenance](ADMIN.md).
 
+### `video` (colour signalling, per file, optional)
+
+Written by `dvprobe.probe_path` (see [GOTCHAS.md](GOTCHAS.md) § Dolby Vision Profile 5) on the download-ready transition, and backfilled for older files by `video_probe_backfill`. Small and JSON-safe:
+
+```json
+"video": {
+  "container": "mkv", "codec": "V_MPEGH/ISO/HEVC",
+  "width": 3840, "height": 2160, "bit_depth": 10,
+  "matrix": 9, "transfer": 16, "primaries": 9,
+  "dv_profile": 5, "dv_level": 6, "dv_compat": 0, "dv_el": 0,
+  "green": true
+}
+```
+
+`green` is the only field any caller acts on: Dolby Vision Profile 5 with no compatible base layer, which renders with a heavy green cast in VLC and on device. Everything else is diagnostic.
+
+**Presence is the "already asked" marker.** A file that probes to nothing still gets a record (`{"green": false}`), so an unreadable or exotic container is asked once and then left alone — `_probe_item_video` skips any file that already has the key, which is also what lets the backfill resume after a restart without redoing work. A file header doesn't change, so there is no refresh path; a *replaced* file arrives as a new item with no record and is probed normally.
+
 ### Progress (per profile)
 
 ```jsonc

@@ -6355,6 +6355,17 @@ function _libItemChrome(item){
     ? `<span class="text-[10px] px-1.5 py-0.5 bg-gray-800 text-gray-400 border border-gray-700" title="A file here was compressed to save space — this copy was shrunk to save space, so it can no longer be shared with others or re-downloaded.">⤓ Compressed</span>`
     : "";
 
+  // Dolby Vision Profile 5 somewhere in this item — it will play green. Surfaced
+  // on the tile as well as the episode card so a one-file item (the common case
+  // for a single episode) says so without having to be opened.
+  const greenBadge = (item.green_files > 0)
+    ? `<span class="text-[10px] px-1.5 py-0.5 bg-red-950 text-red-300 border border-red-900" title="${
+        item.green_files===1 && item.file_count===1
+          ? "This release is Dolby Vision Profile 5 - it plays with a heavy green tint on the TV and on your phone. Open it and use Find a replacement."
+          : `${item.green_files} file(s) here are Dolby Vision Profile 5 - they play with a heavy green tint. Open the episode list to replace them.`
+      }">${ic("warn")} ${item.green_files===1&&item.file_count===1?"Green - Dolby Vision":`${item.green_files} green`}</span>`
+    : "";
+
   // Buttons — multi-episode vs single. Primary actions go in `buttons`; icon-only
   // buttons (download / prep / hide / delete) collect in `iconBtns`.
   let buttons="";
@@ -6538,7 +6549,7 @@ function _libItemChrome(item){
   const newSeasonChip=_libNewSeasonChip(_covForSeries(item.series_key));
 
   return {isDownloading,isError,isReady,isMulti,hasProgress,pct,allDone,epPrefix,
-    statusBadge,skipBadge,partialBadge,compressedBadge,newSeasonChip,buttons,iconBtns,progBar,
+    statusBadge,skipBadge,partialBadge,compressedBadge,greenBadge,newSeasonChip,buttons,iconBtns,progBar,
     meta,dlStat,prepChip,borderAccent,tileOpen};
 }
 
@@ -6553,6 +6564,7 @@ function _libItemListHtml(item){
         ${c.statusBadge}
         ${c.partialBadge}
         ${c.compressedBadge}
+        ${c.greenBadge}
         ${c.skipBadge}
         ${c.newSeasonChip}
       </div>
@@ -6572,7 +6584,7 @@ function _libItemListHtml(item){
 function _libItemCardHtml(item){
   const c=_libItemChrome(item);
   const title=item.title||"";
-  const badges=`${c.statusBadge}${c.partialBadge}${c.compressedBadge}${c.skipBadge}${c.newSeasonChip}`;
+  const badges=`${c.statusBadge}${c.partialBadge}${c.compressedBadge}${c.greenBadge}${c.skipBadge}${c.newSeasonChip}`;
   // Both multi-episode shows and single-file movies route through the chooser so
   // the poster Play/Resume always asks "On TV vs On Device" (macOS auto-falls to
   // VLC since there's no device option). resumeLibraryItemWithChooser handles the
@@ -8329,6 +8341,14 @@ function _epCardHtml(f){
       : f.mode==="idle"
       ? `<span class="text-[10px] text-sky-400 font-bold uppercase tracking-widest" title="Deferred to the idle/night window."><svg class="ic" aria-hidden="true"><use href="#i-moon"/></svg> Idle — deferred</span>`
       : `<span class="text-[10px] text-sky-400 font-bold uppercase tracking-widest" title="Downloading now…"><svg class="ic" aria-hidden="true"><use href="#i-down"/></svg> ${epDlPct!=null?epDlPct.toFixed(0)+'%':'Downloading…'}</span>`;
+  // Dolby Vision Profile 5: the file renders with a heavy green cast in VLC AND
+  // on device, and nothing in the pipeline can correct it (applying the DV RPU
+  // needs a decoder we don't have). Say so plainly where the episode is, and put
+  // the one action that actually fixes it right next to the badge.
+  const greenBadge = f.green
+    ? `<span class="text-[10px] px-1.5 py-0.5 bg-red-950 text-red-300 border border-red-900 uppercase tracking-widest font-bold"
+             title="Dolby Vision Profile 5 - this release has no standard fallback, so it plays with a heavy green tint here and on your phone. Swapping it for a non-Dolby-Vision release is the only fix.">${ic("warn")} Green - Dolby Vision</span>`
+    : "";
   // Re-encoded in place to save space → no longer torrent-backed: won't seed, can't be
   // re-downloaded, and recheck/recover/delete-to-free-space refuse it (server-enforced).
   const compressedBadge = f.compressed
@@ -8410,9 +8430,18 @@ function _epCardHtml(f){
               ${watchedBadge}
               ${notDlBadge}
               ${compressedBadge}
+              ${greenBadge}
               ${(isReady&&!notDownloaded)?'<span class="text-[10px] text-emerald-500 font-bold uppercase tracking-widest">● Stream Ready</span>':''}
             </div>
             ${subOverview}
+            ${(f.green&&!TV_MODE&&f.season&&f.episode)?`<div class="flex items-center gap-0.5 mt-1.5 -ml-1">
+              <button onclick="event.stopPropagation();epReplaceGreen(${+f.season},${+f.episode})"
+                class="h-8 px-2.5 flex items-center gap-1 text-[11px] font-bold uppercase tracking-wide
+                       text-red-300 hover:text-white hover:bg-red-800/60 transition-colors"
+                title="Search for a release that isn't Dolby Vision and download it in place of this one">
+                ${ic("search")} Find a replacement
+              </button>
+            </div>`:""}
             <div class="text-[10px] text-gray-700 mt-1 font-mono">${escHtml(f.size_human)}${dur?` · ${fmtTime(dur)}`:""}</div>
           </div>
           <!-- Checkbox (top-right) — not on TV: selection drives the bulk/download
@@ -8532,6 +8561,15 @@ function epFindEpisode(season, episode){
   const c=_epSearchCandidate();
   if(!c){ showAlert("No metadata for this show — can't search for it.","warn"); return; }
   openSearchShowFromTmdb(c, {season:+season, episode:+episode});
+}
+// A Dolby Vision P5 episode we already hold: go find a release that isn't.
+// Routes through the same scoped search handoff as a missing episode, with
+// `replace` set so the show screen offers sources for an episode the coverage
+// join would otherwise (correctly) mark "already in your library".
+function epReplaceGreen(season, episode){
+  const c=_epSearchCandidate();
+  if(!c){ showAlert("No metadata for this show - can't search for it.","warn"); return; }
+  openSearchShowFromTmdb(c, {season:+season, episode:+episode, replace:true});
 }
 function epFindSeason(season){
   const c=_epSearchCandidate();
@@ -10869,7 +10907,7 @@ async function doClassicSearch(q, grid, wrap, empty, count){
         <span class="text-xs font-mono font-semibold ${sc}">${item.seeders} ↑</span>
         ${item.peers?`<span class="text-gray-700">·</span><span class="text-xs text-gray-700">${item.peers} peers</span>`:""}
         ${item.tracker?`<span class="text-gray-700">·</span><span class="text-[11px] text-gray-700 truncate max-w-[120px]">${escHtml(item.tracker)}</span>`:""}
-        ${shealth}
+        ${shealth}${_dvRiskBadge(item)}
       </div>
       <div class="flex gap-2">
         <button class="dl-btn vpn-gated flex-1 flex items-center justify-center gap-1.5
@@ -10993,6 +11031,7 @@ let _ssPacksSearched=false;     // has the user run "Search packs" yet (distingu
 let _ssEpisodesSearched=false;  // ditto for the single-episodes broad search
 let _ssMetaLoading=false;       // true while the initial TMDb lookup (art + season/episode skeleton) is in flight
 let _ssOwned=null;              // /api/library/coverage row for the open show (null = we hold none of it)
+let _ssReplace="";              // "S-E" the user explicitly came here to REPLACE — exempt from the owned filter
 
 // What this box already holds of the open show. Resolved from the TMDb identity —
 // by candidate id on the TMDb-first path, and only once metadata lands on the
@@ -11004,8 +11043,18 @@ function _ssResolveOwned(){
 }
 // Episodes of `season` already on this box — the set every row, tab, gap sweep
 // and bulk scope on this page checks before offering to go and fetch something.
-function _ssOwnedEps(season){ return _covSeasonEps(_ssOwned, season); }
-function _ssOwns(season,episode){ return _covHasEp(_ssOwned, season, episode); }
+function _ssOwnedEps(season){
+  const eps=_covSeasonEps(_ssOwned, season);
+  if(_ssReplace){
+    const [s,e]=_ssReplace.split("-").map(Number);
+    if(s===+season) eps.delete(e);
+  }
+  return eps;
+}
+function _ssOwns(season,episode){
+  if(_ssReplace===`${+season}-${+episode}`) return false;
+  return _covHasEp(_ssOwned, season, episode);
+}
 // The "Downloaded" / "Downloading" chip shown on an owned episode row.
 function _ssOwnedBadge(season,episode){
   if(!_ssOwns(season,episode)) return "";
@@ -11225,7 +11274,7 @@ function _ssLoadingBodyHtml(){
 }
 
 async function openSearchShow(group){
-  _ssGroup=group; _ssMeta=null; _ssOwned=null; _ssSearching.clear(); _ssLocked=false;
+  _ssGroup=group; _ssMeta=null; _ssOwned=null; _ssReplace=""; _ssSearching.clear(); _ssLocked=false;
   _ssKind=""; _ssBroadResults=null; _ssPacksSearched=(group.results||[]).length>0;
   _ssEpisodesSearched=(group.results||[]).length>0;
   _ssEpisodes=_ssBuildEpisodes(group.results||[]);
@@ -11286,6 +11335,10 @@ async function openSearchShowFromTmdb(cand, opts){
   _ssKind=cand.kind==="movie"?"movie":"tv"; _ssBroadResults=null; _ssPacksSearched=false; _ssEpisodesSearched=false;
   _ssOwned=_covFor(_ssKind, cand.id);
   _ssPackHinted=new Set();
+  // A deliberate replace (a green Dolby Vision episode being swapped out) asks
+  // for sources the ownership join would otherwise suppress as "already have
+  // it". Exempt exactly that one episode, not the whole show.
+  _ssReplace=(o.replace && o.season && o.episode) ? `${+o.season}-${+o.episode}` : "";
   _ssEpisodes=[]; _ssPacks=[];
   _ssSection=_ssKind==="movie"?"packs":"episodes";
   _ssSeason=0;
@@ -11354,7 +11407,7 @@ function closeSearchShow(){
   // scrolling back to the body and drop the library page's position.
   const epPage=document.getElementById("episodePage");
   document.body.style.overflow=(epPage && !epPage.classList.contains("hidden")) ? "hidden" : "";
-  _ssGroup=null; _ssMeta=null; _ssKind=""; _ssBroadResults=null; _ssMetaLoading=false; _ssOwned=null;
+  _ssGroup=null; _ssMeta=null; _ssKind=""; _ssBroadResults=null; _ssMetaLoading=false; _ssOwned=null; _ssReplace="";
 }
 
 // Alternative titles for the open show (an anime's romaji name, etc.), from the
@@ -11781,7 +11834,7 @@ function _ssEpRowHtml(e){
         <p class="text-[11px] text-gray-500 flex items-center gap-1.5 flex-wrap">
           <span class="font-mono font-semibold ${sc}">${best.seeders} ↑</span> ·
           ${escHtml(best.size_human)} · ${e.sources.length} source${e.sources.length>1?"s":""}
-          ${shealth}${badge}${miss}
+          ${shealth}${badge}${miss}${_dvRiskBadge(best)}
         </p>
       </div>
       <svg class="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -11989,6 +12042,7 @@ function _ssPackRowHtml(p, i){
           <p class="text-[11px] text-gray-500">
             <span class="font-mono font-semibold ${sc}">${p.seeders} ↑</span> · ${escHtml(p.size_human)}
             ${p.tracker?` · <span class="text-gray-600">${escHtml(p.tracker)}</span>`:""}
+            ${_dvRiskBadge(p)}
           </p>
         </div>
         <svg class="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -12083,6 +12137,7 @@ function _ssRenderPacks(){
           <p class="text-[11px] text-gray-500">
             <span class="font-mono font-semibold ${sc}">${p.seeders} ↑</span> · ${escHtml(p.size_human)}
             ${p.tracker?` · <span class="text-gray-600">${escHtml(p.tracker)}</span>`:""}
+            ${_dvRiskBadge(p)}
           </p>
         </div>
         <svg class="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -12146,7 +12201,7 @@ function ssOpenSourceSheet(season,episode){
         <p class="text-[11px] text-gray-500 flex items-center gap-1.5 flex-wrap">
           <span class="font-mono font-semibold ${sc}">${s.seeders} ↑</span> · ${escHtml(s.size_human)}
           ${s.tracker?` · <span class="text-gray-600">${escHtml(s.tracker)}</span>`:""}
-          ${shealth}${badge}
+          ${shealth}${badge}${_dvRiskBadge(s)}
         </p>
       </button>
       <button onclick="ssPlaySource(${season},${episode},${i},this)" title="Stream now — plays on the TV without saving to the library"
@@ -12182,7 +12237,14 @@ async function _ssDownloadOne(src, season, episode, opts={}){
     if(!opts.silent) showAlert(err.detail||"Download failed.","error");
     return false;
   }
-  if(!opts.silent){ showAlert("Downloading — switch to Library to track progress."+(_ssLocked?" Content locked.":""),"success"); closeSearchShow(); switchTab("library"); }
+  if(!opts.silent){
+    const replacing=_ssReplace===`${+season}-${+episode}`;
+    showAlert(replacing
+      ? "Downloading the replacement. The green Dolby Vision copy is still in your library — delete it from the episode page once this finishes."
+      : "Downloading — switch to Library to track progress."+(_ssLocked?" Content locked.":""),
+      "success");
+    closeSearchShow(); switchTab("library");
+  }
   return true;
 }
 
@@ -12480,7 +12542,12 @@ function _ssAutoPick(sources, filt){
   return _ssAutoPickFrom(pref.length?pref:sources, filt);
 }
 function _ssAutoPickFrom(sources, filt){
-  const bySeed=(a,b)=>(b.seeders||0)-(a.seeders||0);
+  // Releases whose titles claim Dolby Vision with no compatible base layer go to
+  // the back of every tier rather than being removed: unattended Auto shouldn't
+  // hand you a green episode when a plain one is sitting right there, but a
+  // green episode still beats no episode when it is the only source. The title
+  // is a weak witness (see dvprobe) — the file is re-checked once it lands.
+  const bySeed=(a,b)=>((a.dv_risk?1:0)-(b.dv_risk?1:0))||((b.seeders||0)-(a.seeders||0));
   const okSeed=s=>(s.seeders||0)>=filt.minSeed;
   const okSize=s=>{ const z=s.size||0; return z>=filt.minBytes && z<=filt.maxBytes; };
   let c=sources.filter(s=>okSeed(s)&&okSize(s)).sort(bySeed);
@@ -12488,6 +12555,15 @@ function _ssAutoPickFrom(sources, filt){
   c=sources.filter(okSeed).sort(bySeed);
   if(c.length) return c[0];
   return [...sources].sort(bySeed)[0];
+}
+
+// Warning chip for a release whose title claims Dolby Vision with no HDR10/SDR
+// layer beside it — the shape that plays green. Advisory, hence the wording.
+function _dvRiskBadge(s){
+  return (s && s.dv_risk)
+    ? `<span class="text-[9px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-red-950/70 text-red-400 whitespace-nowrap"
+             title="This release advertises Dolby Vision with no HDR10 or SDR layer. If it is Profile 5 it will play with a heavy green tint - pick another if one is available.">May play green</span>`
+    : "";
 }
 
 // In-sheet progress for a find-and-download run. The whole point of the
@@ -19982,6 +20058,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.22.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.23.0</div>
 </body>
 </html>
