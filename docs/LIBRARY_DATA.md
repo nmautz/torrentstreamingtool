@@ -192,6 +192,7 @@ PIN hash is plain SHA-256 of the 6-digit string (no salt). PIN protection is "so
   "pending_download": { /* optional; restart-recovery params, see below */ },
   "download_source": { /* optional; magnet + save_path kept while downloading, see below */ },
   "download_attempts": [],              // optional; releases the dead-swarm retry has already tried, see below
+  "stalled_since": "2026-09-12T20:54:53+00:00",   // optional; when this download was first seen at zero bytes — the dead-swarm clock, see below
   "download": { /* download schedule; see below */ },
   "prep": { /* stream-prep schedule; see below */ },
   "progress": { /* per-profile; see below */ },
@@ -267,6 +268,22 @@ start the cycle over. `len()` of it is surfaced as `retry_count` on `/api/librar
 Note the item is swapped **in place** — same `id`, same `progress`, same position in
 the library — so `title`, `torrent_hash`, `download_source`, `files` and `size_bytes`
 all change together while everything the user had set up survives.
+
+### `stalled_since` (dead-swarm clock)
+
+Set by `_note_download_stall` the first tick a `downloading` item is seen having
+fetched **zero bytes**, and cleared the moment it fetches any — and on every exit
+from `downloading` (ready, error, retry, manual re-add), so a replacement torrent
+never inherits its predecessor's clock. Once it is `_DOWNLOAD_STALL_SECS`
+(10 min) old, `_retry_dead_download` swaps the release.
+
+It is **persisted deliberately**. This was an in-memory tick counter until 11.15.1,
+which meant every service restart reset the clock — and between auto-updates, the
+scheduled reboot and the VPN watchdog, a dead download could restart the clock
+forever and never reach 10 minutes. Because it now outlives the process, the
+monitor additionally ignores it for `_DOWNLOAD_STALL_BOOT_GRACE` (3 min) after
+startup: qBit restarts with the service and deserves a moment to find peers before
+being judged on a stamp written before the reboot.
 
 ### `download` (download schedule)
 

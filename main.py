@@ -608,14 +608,14 @@ def _marquee_write(text: str) -> None:
 #
 # It *was* a hand-maintained literal "kept in sync" with the badge, and it drifted
 # almost immediately — the constant sat at 11.12.1 while the shipped page said
-# 11.15.0. That is not cosmetic: clients fetch this via /api/version and force a
+# 11.15.1. That is not cosmetic: clients fetch this via /api/version and force a
 # hard reload when their cached page's badge is older, so a lagging constant means
 # dashboards silently keep serving a stale frontend after an update. The literal
 # below is only the fallback for a missing/unreadable page.
 _UI_VERSION_BADGE_RE = re.compile(r'<div[^>]*\bdata-ui-version\b[^>]*>([^<]*)</div>')
 
 
-def _read_ui_version(default: str = "11.15.0") -> str:
+def _read_ui_version(default: str = "11.15.1") -> str:
     """Parse the UI version out of the shipped `static/index.html` badge."""
     try:
         html = (Path(__file__).resolve().parent / "static" / "index.html").read_text(
@@ -6059,31 +6059,47 @@ _missing_torrent_ticks: dict[str, int] = {}
 # A download that has fetched **zero bytes** — either no peer ever sent the file
 # list (qBit parks it in `metaDL`) or the swarm has metadata but nobody is
 # actually serving it. Either way the release is dead and no amount of waiting
-# fixes it, so after this many 5 s monitor ticks StreamLink stops waiting and
-# tries a DIFFERENT release for the same episode (`_retry_dead_download`).
-# 10 minutes is long enough for DHT to resolve a live magnet (usually well under
-# two) and short enough that a dead pick doesn't cost the user their evening.
-_DOWNLOAD_STALL_TICKS = 120
+# fixes it, so after this long StreamLink stops waiting and tries a DIFFERENT
+# release for the same episode (`_retry_dead_download`). 10 minutes is long
+# enough for DHT to resolve a live magnet (usually well under two) and short
+# enough that a dead pick doesn't cost the user their evening.
+_DOWNLOAD_STALL_SECS = 600
+# Uptime below which no download is judged dead, however old its stall stamp.
+# The stamp survives restarts (that is the point of it), but qBit restarts with
+# the service and needs a moment to re-resolve DHT — so time that passed while
+# StreamLink was down must not count against the torrent, or every stalled item
+# would be retried within 5 s of boot without being given a chance to move.
+_DOWNLOAD_STALL_BOOT_GRACE = 180
+_PROCESS_START = time.monotonic()
 # How many alternative releases to work through before giving up and erroring.
 _MAX_DOWNLOAD_RETRIES = 3
-_download_stall_ticks: dict[str, int] = {}
 
 
 def _note_download_stall(item: dict, info: dict) -> bool:
-    """Count consecutive ticks in which this download has fetched nothing at all.
+    """True once this download has gone `_DOWNLOAD_STALL_SECS` without a byte.
 
     Deliberately keyed on **bytes**, not on qBit's peer counts: "0 seeders" is
     what the user sees, but qBit can report a connected seed that never actually
     serves a piece, and conversely a torrent can be mid-handshake with none. Any
-    real progress resets the counter, so a slow-but-live torrent is never touched.
+    real progress clears the stamp, so a slow-but-live torrent is never touched.
+
+    The stamp lives **on the item** (`stalled_since`, persisted in library.json)
+    rather than in an in-memory tick counter, because the counter reset on every
+    service restart — and this box restarts often (auto-update, scheduled reboot,
+    the VPN watchdog). A genuinely dead download could therefore sit at zero bytes
+    for days and never once reach the threshold: observed on Hacks S04E02, which
+    survived three restarts in one evening without the retry ever firing.
     """
-    iid = item["id"]
     if int(info.get("completed", 0) or 0) > 0:
-        _download_stall_ticks.pop(iid, None)
+        item.pop("stalled_since", None)
         return False
-    n = _download_stall_ticks.get(iid, 0) + 1
-    _download_stall_ticks[iid] = n
-    return n >= _DOWNLOAD_STALL_TICKS
+    started = _parse_iso_dt(item.get("stalled_since"))
+    if started is None:
+        item["stalled_since"] = _now_iso()
+        return False
+    if time.monotonic() - _PROCESS_START < _DOWNLOAD_STALL_BOOT_GRACE:
+        return False   # see _DOWNLOAD_STALL_BOOT_GRACE
+    return (datetime.now(timezone.utc) - started).total_seconds() >= _DOWNLOAD_STALL_SECS
 
 
 def _retry_query_for(item: dict) -> str:
@@ -6290,7 +6306,7 @@ async def _retry_dead_download(item: dict, lib: dict) -> str:
         return _fail_dead_download(item, len(attempts))
 
     log.warning("[download] %s fetched nothing in %d min — switching to %r (%s seeders)",
-                item.get("title", ""), _DOWNLOAD_STALL_TICKS * 5 // 60,
+                item.get("title", ""), _DOWNLOAD_STALL_SECS // 60,
                 pick.get("title", ""), pick.get("seeders", 0))
     item["torrent_hash"] = new_hash
     item["title"] = pick.get("title", "") or item.get("title", "")
@@ -6300,7 +6316,7 @@ async def _retry_dead_download(item: dict, lib: dict) -> str:
     item["size_bytes"] = 0
     item.pop("error", None)
     item["status"] = "downloading"
-    _download_stall_ticks.pop(iid, None)
+    item.pop("stalled_since", None)
     _missing_torrent_ticks.pop(iid, None)
     await broadcast("library_update", {"item_id": iid, "status": "downloading",
                                        "message": f"Switched to {item['title']}"})
@@ -6309,7 +6325,7 @@ async def _retry_dead_download(item: dict, lib: dict) -> str:
 
 def _fail_dead_download(item: dict, tried_count: int) -> str:
     """Give up on an item whose release(s) all turned out to be dead."""
-    _download_stall_ticks.pop(item["id"], None)
+    item.pop("stalled_since", None)
     item["status"] = "error"
     item["error"] = (
         f"Tried {tried_count} release{'' if tried_count == 1 else 's'} and none of them "
@@ -6447,6 +6463,7 @@ async def library_download_monitor() -> None:
                 nonskip_done = _all_nonskip_complete(item, qfiles, save_path)
                 if qstate in ("error", "missingFiles"):
                     item["status"] = "error"
+                    item.pop("stalled_since", None)
                     state.downloading_count = max(0, state.downloading_count - 1)
                     if not item.get("admin_only"):
                         state.downloading_count_visible = max(0, state.downloading_count_visible - 1)
@@ -6455,6 +6472,7 @@ async def library_download_monitor() -> None:
                 elif nonskip_done:
                     item["status"] = "ready"
                     item.pop("download_source", None)   # settled — nothing to re-add
+                    item.pop("stalled_since", None)
                     state.downloading_count = max(0, state.downloading_count - 1)
                     if not item.get("admin_only"):
                         state.downloading_count_visible = max(0, state.downloading_count_visible - 1)
@@ -6499,7 +6517,7 @@ async def library_download_monitor() -> None:
                     # a card that never moves, swap in the next-best release for the
                     # same episode. See `_retry_dead_download`.
                     if waiting_idle:
-                        _download_stall_ticks.pop(item["id"], None)
+                        item.pop("stalled_since", None)
                     elif _note_download_stall(item, info):
                         outcome = await _retry_dead_download(item, lib)
                         if outcome:
@@ -25092,6 +25110,7 @@ async def admin_cleanup_recover_item(item_id: str, request: Request) -> JSONResp
         await qbit_recheck(h)
         await qbit_resume(h)
     item["status"] = "downloading"
+    item.pop("stalled_since", None)   # new torrent — new clock
     await _apply_item_schedule(item, lib)   # reconcile file priorities/pause state
     await put_library(lib)
     _invalidate_cleanup_inventory()

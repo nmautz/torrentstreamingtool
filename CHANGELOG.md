@@ -1,5 +1,13 @@
 # Changelog
 
+## [11.15.1] — 2026-09-12
+- **Fixed: the dead-release retry could never fire on a box that restarts.** The 10-minute stall clock was an in-memory tick counter (`_download_stall_ticks`), so every service restart silently reset it to zero. Between auto-updates, the scheduled reboot and the VPN watchdog, this machine restarts often enough that a genuinely dead download could sit at zero bytes indefinitely and never once reach the threshold.
+  - Seen on *Hacks S04E02*: parked in qBit's `metaDL` at 0 B with no reachable peer, it survived three restarts in a single evening (17:15, 20:35, 20:54) with the retry never firing — the feature was working exactly as written and still never got to run.
+  - The clock is now a timestamp on the item (`stalled_since`, persisted in `library.json`) measuring real elapsed time, so it survives restarts. Any progress clears it, as before.
+  - Restart-survival cuts both ways, so `_DOWNLOAD_STALL_BOOT_GRACE` (3 min) holds off judgement right after boot: qBit restarts with the service and needs a moment to re-resolve DHT, and time that passed while StreamLink was *down* must not count against the torrent. Without it, an item carrying an old stamp would be retried within 5 s of every boot. The stamp is also cleared on every exit from `downloading` (ready, error, retry, manual re-add), so a fresh torrent is never judged on its predecessor's clock.
+- **Backend:** `main.py` — `_note_download_stall`, `_DOWNLOAD_STALL_SECS`, `_DOWNLOAD_STALL_BOOT_GRACE`, `_PROCESS_START`. **Docs:** [docs/GOTCHAS.md](docs/GOTCHAS.md), [docs/BACKEND.md](docs/BACKEND.md), [docs/LIBRARY_DATA.md](docs/LIBRARY_DATA.md).
+- (Host-only — **no app rebuild**. Server update + restart required.)
+
 ## [11.15.0] — 2026-09-12
 - **New: the dead-release retry now prefers release groups that have actually worked on this box.** 11.14.0 ranked replacement candidates purely by the indexer's seeder count, and watching it run live showed why that isn't good enough: the count is *advertised*, not measured, and it was wrong every time it mattered. One release claimed 47 seeders with none reachable; the retry then switched to one claiming 50, which sat at zero too.
   - Ordering by that number means working down a list sorted by a figure that doesn't predict success. Concretely for *Hacks S04E02*: MeGusta (50) → STC (47) → PSA (43) → SKYFiRE (36) → MeGusta 720p (21) → **SuccessfulCrab (15)**. With a cap of three retries, SuccessfulCrab is never reached — and that is the group behind S04E01, E04, E05 and E07, every one of which downloaded fine on this machine. The strongest available signal was ranked last and cut off.

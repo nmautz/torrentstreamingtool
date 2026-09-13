@@ -447,7 +447,7 @@ The rule: **`qbit_info(h) is None` is ambiguous** — it means "qBit is down" *a
 
 Three traps in `_retry_dead_download`, each of which turns a helpful feature into a destructive one:
 
-1. **Gate on bytes fetched, not on qBit's peer counts.** "0 seeders" is what the user sees, but `num_seeds` is connected seeds — qBit reports a seed that never serves a piece, and a perfectly healthy torrent can be mid-handshake with none. `_note_download_stall` counts ticks with `completed == 0` and resets on *any* progress, so a slow-but-live download is never abandoned.
+1. **Gate on bytes fetched, not on qBit's peer counts.** "0 seeders" is what the user sees, but `num_seeds` is connected seeds — qBit reports a seed that never serves a piece, and a perfectly healthy torrent can be mid-handshake with none. `_note_download_stall` gates on `completed == 0` and resets on *any* progress, so a slow-but-live download is never abandoned.
 2. **Zero-progress only.** A torrent that stalls half-downloaded has bytes worth keeping and seeders that may come back. The retry deletes the old torrent *with its files*, which is only safe because it can't fire above 0 B. Don't relax the trigger without revisiting that delete.
 3. **An episode item must only ever be offered the same episode.** A search for `Hacks S04E02` returns the season pack too, and a retry that silently pulled eight episodes would be far worse than the stalled card it fixed.
 
@@ -456,6 +456,26 @@ And the one that only shows up against real data: **de-duplicate candidates by r
 Finally: the swap is **in place** (same item id), which keeps the user's progress and library position — but it also silently rewrites the card's title. Surface it (`retry_count` → the "Release N" chip) or the UI looks haunted.
 
 **Don't rank candidates by the indexer's seeder count alone.** That number is advertised, not measured, and it was wrong every time it mattered here: one release claimed 47 seeders with none reachable, its replacement claimed 50 and sat at zero. Sorting by it means working down a list ordered by a figure that doesn't predict success, and with a 3-retry cap you can exhaust the budget before reaching a release that would have worked. `_proven_release_groups` — the groups of every `ready` item, i.e. torrents that actually completed on this box over this VPN — outranks it; seeders stay the tiebreaker. When parsing the group, strip the tracker tag and extension first (`…-successfulcrab[EZTVx.to].mkv`) and deny-list format tags, or half the library's group is "dl" from `WEB-DL`.
+
+### A timeout that lives in memory never expires on a box that restarts
+
+The dead-swarm retry shipped with its 10-minute clock as an in-memory tick counter, and
+on this machine it never once fired. The logic was correct; it simply never got to run.
+StreamLink restarts for auto-updates, the scheduled reboot and every VPN watchdog bounce,
+and each restart reset the counter to zero. *Hacks S04E02* sat in `metaDL` at 0 B through
+three restarts in one evening, each one wiping the clock well before 120 ticks.
+
+**Any countdown measured in monitor ticks is really measuring uptime, not elapsed time.**
+If the threshold is longer than the gaps between restarts, it is unreachable. Persist the
+start (`stalled_since` on the item) and compare wall-clock instead.
+
+Then mind the other edge: a stamp that outlives the process can condemn a torrent for time
+it was never given. qBit restarts alongside StreamLink and needs a moment to re-resolve
+DHT, so an item carrying yesterday's stamp would be retried within 5 s of boot.
+`_DOWNLOAD_STALL_BOOT_GRACE` (3 min of uptime) covers that, and the stamp is cleared on
+every exit from `downloading` so a replacement torrent starts with a clean clock. The same
+reasoning applies to `_missing_torrent_ticks`, which is still tick-based — deliberately, as
+its thresholds (30 s / 90 s / 3 min) are short enough to complete inside one uptime.
 
 ### A magnet stuck in `metaDL` moves no bytes — don't render it as "Downloading"
 
