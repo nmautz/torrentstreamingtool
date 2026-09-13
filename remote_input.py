@@ -327,6 +327,25 @@ class PowerButtonListener:
             user32.DefWindowProcW.restype = LRESULT
             user32.DefWindowProcW.argtypes = (
                 wintypes.HWND, wintypes.UINT, wintypes.WPARAM, wintypes.LPARAM)
+            # Declare EVERY prototype that returns or takes a handle. ctypes
+            # defaults `restype` to c_int (32-bit signed), so an undeclared
+            # GetModuleHandleW TRUNCATES the 64-bit HMODULE it returns. The
+            # truncated value then goes into WNDCLASSW.hInstance and on to
+            # CreateWindowExW, and Windows faults dereferencing it:
+            #
+            #   Windows fatal exception: access violation
+            #     File "remote_input.py", line 410 in _thread_main   <- RegisterClassW
+            #     File "remote_input.py", line 412 in _thread_main   <- CreateWindowExW
+            #
+            # Three of those were caught by faulthandler within seconds of a
+            # boot on 2026-09-13 — invisible before diagnostics.py enabled it,
+            # because ctypes converts the SEH fault into a Python exception that
+            # this function's `except BaseException` then swallowed, leaving the
+            # power-button listener silently dead. See docs/GOTCHAS.md.
+            kernel32.GetModuleHandleW.restype = wintypes.HMODULE
+            kernel32.GetModuleHandleW.argtypes = (wintypes.LPCWSTR,)
+            kernel32.GetCurrentThreadId.restype = wintypes.DWORD
+            kernel32.GetCurrentThreadId.argtypes = ()
             user32.CreateWindowExW.restype = wintypes.HWND
             user32.GetRawInputData.restype = wintypes.UINT
             user32.GetRawInputData.argtypes = (
@@ -362,6 +381,27 @@ class PowerButtonListener:
                     ("hDevice", wintypes.HANDLE),
                     ("wParam",  wintypes.WPARAM),
                 ]
+
+            # Declared after the structs so POINTER(WNDCLASSW) is available.
+            # Without argtypes ctypes marshals each Python int as a C int, which
+            # truncates hInstance/hwnd a second time on the way in.
+            user32.RegisterClassW.restype = wintypes.ATOM
+            user32.RegisterClassW.argtypes = (ctypes.POINTER(WNDCLASSW),)
+            user32.CreateWindowExW.argtypes = (
+                wintypes.DWORD, wintypes.LPCWSTR, wintypes.LPCWSTR,
+                wintypes.DWORD, ctypes.c_int, ctypes.c_int, ctypes.c_int,
+                ctypes.c_int, wintypes.HWND, wintypes.HMENU,
+                wintypes.HINSTANCE, wintypes.LPVOID)
+            user32.RegisterRawInputDevices.restype = wintypes.BOOL
+            user32.RegisterRawInputDevices.argtypes = (
+                ctypes.POINTER(RAWINPUTDEVICE), wintypes.UINT, wintypes.UINT)
+            user32.GetMessageW.restype = wintypes.BOOL
+            user32.GetMessageW.argtypes = (
+                ctypes.POINTER(wintypes.MSG), wintypes.HWND,
+                wintypes.UINT, wintypes.UINT)
+            user32.TranslateMessage.argtypes = (ctypes.POINTER(wintypes.MSG),)
+            user32.DispatchMessageW.restype = LRESULT
+            user32.DispatchMessageW.argtypes = (ctypes.POINTER(wintypes.MSG),)
 
             header_sz = ctypes.sizeof(RAWINPUTHEADER)
 

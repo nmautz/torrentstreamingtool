@@ -2210,6 +2210,54 @@ build, while `static/*.html` and anything imported lazily now come off disk from
 the new one. The 13:50 apply on 2026-09-13 did exactly this ~5 min before the
 trouble started. Unproven as the cause, but reboot promptly after applying.
 
+## ctypes on 64-bit Windows: always declare `restype`
+
+`ctypes` defaults every foreign function's `restype` to **`c_int`** — 32-bit
+signed. On 64-bit Windows any undeclared call that returns a **handle or
+pointer** therefore silently **truncates** it, and the corrupt value faults the
+moment something dereferences it.
+
+`remote_input.py` had exactly this: `kernel32.GetModuleHandleW` with no
+`restype`, its truncated `HMODULE` stored in `WNDCLASSW.hInstance` and passed to
+`CreateWindowExW`. The result, three times within seconds of a boot:
+
+```
+Windows fatal exception: access violation
+Current thread 0x00002bf4 (most recent call first):
+  File "F:	orrentstreamingtoolemote_input.py", line 410 in _thread_main
+```
+
+**Why nobody noticed for so long:** ctypes wraps foreign calls in an SEH handler
+and converts the access violation into an ordinary Python exception, which
+`_thread_main`'s broad `except BaseException` swallowed into `self._error`. No
+traceback, no log line, a listener that just quietly didn't work. It only became
+visible once `diagnostics.enable_faulthandler()` started writing
+`logs/faulthandler.log` — `faulthandler` sees the fault *before* ctypes converts
+it.
+
+So: declare `restype` **and** `argtypes` for every Win32 call, without
+exception. And when a Windows feature "just doesn't do anything", check
+`logs/faulthandler.log` before assuming the logic is wrong.
+
+## A stale `streamlink_service.py` silently ignores your `daemon.py` change
+
+`daemon.py` only **generates** the wrapper. `updater.refresh_service_wrapper()`
+regenerates it from `daemon._WRAPPER_CONTENT` — but `updater.service_is_installed()`
+imports `daemon` during the routine updater status poll (the admin UI hits it
+every few seconds), so `daemon` is nearly always already in `sys.modules`
+holding the **pre-update** template. A plain `import` hands back that stale
+module, the refresh compares old-against-old, reports **"Wrapper already up to
+date"**, and writes nothing — while reporting success.
+
+Fixed in 11.24.1 with `importlib.reload`. Two lessons that outlive the fix:
+
+1. **Never trust a launcher to carry a critical setting.** Access logging now
+   attaches from `main.py` (`diag.attach_access_log`), which uvicorn imports
+   fresh every boot, precisely so an old wrapper can't disable it.
+2. **Verify a deploy by its effect, not its response.** The apply returned
+   `"ok": true, "service_reinstalled": true`. The thing that proved it hadn't
+   worked was `logs/access.log` simply not existing.
+
 ## See also
 
 - [BACKEND.md](BACKEND.md) — invariants enforced by `main.py`

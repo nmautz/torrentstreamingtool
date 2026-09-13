@@ -204,6 +204,10 @@ hls_log = logging.getLogger("streamlink.hls")
 HTTP_PORT = int(os.environ.get("STREAMLINK_HTTP_PORT", "80") or 80)
 
 diag.init(LOG_DIR)
+# Attach the access log here rather than trusting the launcher's uvicorn
+# log config: main.py is imported fresh on every boot, whereas a stale
+# streamlink_service.py can silently leave the box with no access log.
+diag.attach_access_log(LOG_DIR)
 diag.quiet_noisy_loggers()
 diag.install_exception_hooks()
 diag.enable_faulthandler(LOG_DIR)

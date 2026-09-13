@@ -168,6 +168,58 @@ def init(log_dir: Path) -> None:
                                     max_bytes=4_000_000, backups=3)
 
 
+def attach_access_log(log_dir: Path) -> None:
+    """Attach the access/error file handlers to uvicorn's loggers directly.
+
+    Belt and braces for `uvicorn_log_config`, and the thing that actually makes
+    access logging reliable. The log config lives in the *launcher*
+    (`daemon.py`'s generated `streamlink_service.py`, or `run.py`), and a
+    launcher can easily be out of date — `streamlink_service.py` is only
+    rewritten when the service wrapper is refreshed, which on 2026-09-13
+    silently failed and left the box with no access log at all despite the
+    update reporting success.
+
+    `main.py` is never stale: uvicorn imports it fresh on every boot, and both
+    the :80 app server and the :443 proxy share one process, so one logger
+    covers both. Calling this from main.py means the single most important
+    diagnostic cannot be switched off by an old launcher.
+
+    Two things make it safe to run alongside `uvicorn_log_config`:
+
+    * It skips a file that already has a handler, so the same log never ends up
+      with two `RotatingFileHandler`s — on Windows the second one's rotation
+      renames the file out from under the first and raises `PermissionError`.
+    * It re-asserts INFO on the uvicorn loggers. uvicorn applies
+      `log_level="warning"` to them when it configures logging, which is what
+      suppressed access lines in the first place; this runs afterwards (uvicorn
+      configures logging, *then* imports the app), so INFO wins.
+    """
+    log_dir.mkdir(parents=True, exist_ok=True)
+    for logger_name, filename, max_bytes, backups in (
+        ("uvicorn.access", "access.log",  8_000_000, 5),
+        ("uvicorn.error",  "uvicorn.log", 2_000_000, 3),
+    ):
+        lg = logging.getLogger(logger_name)
+        target = str((log_dir / filename).resolve())
+        already = any(
+            getattr(h, "baseFilename", None)
+            and os.path.normcase(h.baseFilename) == os.path.normcase(target)
+            for h in lg.handlers
+        )
+        if not already:
+            try:
+                fh = RotatingFileHandler(log_dir / filename, maxBytes=max_bytes,
+                                         backupCount=backups, encoding="utf-8")
+                fh.setFormatter(logging.Formatter(
+                    "%(asctime)s %(message)s", datefmt="%Y-%m-%d %H:%M:%S"))
+                lg.addHandler(fh)
+            except OSError as exc:
+                log.warning("Could not attach %s handler: %s", filename, exc)
+                continue
+        lg.setLevel(logging.INFO)
+        lg.propagate = False
+
+
 def quiet_noisy_loggers() -> None:
     """Silence httpx's per-request INFO chatter.
 

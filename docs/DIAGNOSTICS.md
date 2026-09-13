@@ -199,6 +199,13 @@ in-flight ≥ 60 s.
 
 ## Deploying a change to this subsystem
 
+> **Access logging does not depend on any of this.** `main.py` calls
+> `diag.attach_access_log()` at import, and uvicorn imports `main.py` fresh on
+> every boot, so `access.log` works even from a stale launcher. The configs
+> below remain the belt to that pair of braces; `attach_access_log` skips a file
+> that already has a handler, so the two never collide.
+
+
 The uvicorn log config lives in **three** places that must stay in step:
 
 | Path | Used by |
