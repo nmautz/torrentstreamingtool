@@ -6158,9 +6158,14 @@ function _covSeasonRange(row){
 // One-line summary for an "In Library" badge subtitle.
 function _covSummary(row){
   if(!row) return "";
-  if(row.kind==="movie"||row.movie_status)
-    return row.movie_status==="downloading"?"Downloading":"Downloaded";
+  // Episodes win over the movie label whenever we actually know of any. A TV
+  // season pack that auto-matched a *movie* TMDb entry is common enough to matter
+  // (on the live box, both "Futurama" and "South Park" are bound to movie ids),
+  // and "Downloaded" over nine known episodes is strictly less true than
+  // "9 episodes · S1". Genuine movies have no episodes and fall through.
   const eps=_covEpisodeCount(row), sr=_covSeasonRange(row);
+  if(!eps && (row.kind==="movie"||row.movie_status))
+    return row.movie_status==="downloading"?"Downloading":"Downloaded";
   const bits=[];
   if(eps) bits.push(`${eps} episode${eps===1?"":"s"}`);
   if(sr)  bits.push(sr);
@@ -19977,6 +19982,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.22.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.22.1</div>
 </body>
 </html>

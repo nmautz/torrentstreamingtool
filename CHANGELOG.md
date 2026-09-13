@@ -1,5 +1,10 @@
 # Changelog
 
+## [11.22.1] — 2026-09-13
+- **Fixed: an in-library TV season pack bound to a *movie* TMDb entry reported "Downloaded" instead of its episode count.** `_covSummary` checked `kind` before it checked what it actually knew, so a show whose metadata auto-matched a film lost its "9 episodes · S1" line on the search card and the show-page hero strip. Episodes now win whenever any are known; genuine movies (which have none) fall through to the old label unchanged. Found on the live library, where both **Futurama** (bound to `movie:1214811`) and **South Park** (`movie:9473`) hit it — the underlying mis-match is a metadata problem, fixable per item with **Fix Metadata** on the episode page, but the summary should not have overstated what it knew either way.
+- Frontend-only (`static/index.html`) — no backend change.
+- (Host-only — **no app rebuild**.)
+
 ## [11.22.0] — 2026-09-13
 - **New: search now tells you what you already own.** Until now the Death Note poster card — and every one of its episode rows — read exactly the same whether all 37 episodes were downstairs or none were. Search had no way to ask the library the question. It does now, and the answer shows up on every surface that offers something to download:
   - **Result cards** carry a green **In Library** badge with a one-line summary ("37 episodes · S1", "Downloaded" for a movie), plus a green left edge. The Explore tab's existing badge now shares the same source, so a show whose newest episodes haven't resolved TMDb metadata yet no longer reads as un-owned.
