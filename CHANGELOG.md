@@ -1,5 +1,12 @@
 # Changelog
 
+## [11.14.1] — 2026-09-12
+- **Fix: the server reported the wrong UI version, so cached dashboards never hard-reloaded after an update.** `UI_VERSION` was a hand-maintained literal "kept in sync" with the badge at the bottom of `static/index.html`, and it had drifted three releases — the constant said **11.12.1** while the shipped page said 11.14.0. Clients fetch it from `/api/version` and force a cache-busting reload when their cached page is older, so while it lagged, a browser sitting on an old build compared its *newer* badge against the server's stale number and concluded it was up to date. Frontend changes simply didn't arrive. It now reads the badge instead of duplicating it.
+- **Fix: that badge was being parsed out of a source comment.** `_UI_BADGE_RE` was `data-ui-version[^>]*>([^<]+)<`, which matches the JS comment `// <div data-ui-version>) and compares against /api/version` some 15,000 lines *before* the real element — and first-match-wins meant `/api/player-manifest` was handing the iOS app a slice of JavaScript where the version should be. Both patterns are now anchored on the `<div>` itself.
+- Found while verifying 11.14.0 on the live host: the admin panel reported `ui_version: 11.12.1` against commit `b84cb81`.
+- **Backend:** `main.py` — `_read_ui_version`, `_UI_VERSION_BADGE_RE`, `_UI_BADGE_RE`.
+- (Host-only — **no app rebuild**. Server update + restart required.)
+
 ## [11.14.0] — 2026-09-12
 - **New: a download that never gets a single byte now switches itself to a different release.** Picking a torrent is a guess — seeder counts are advertised by the indexer and routinely wrong (*Hacks S04E02* claimed 47 seeders and had none reachable, twice). Until now that guess landing badly meant a card that sat at 0 B until someone noticed, went back to Search and chose again. The server can do that itself, so it does.
   - **Trigger:** ten minutes with **zero bytes fetched**. Deliberately keyed on bytes rather than qBit's peer counts — "no seeders" is what the user sees, but qBit will report a connected seed that never serves a piece, and a healthy torrent can be mid-handshake with none. Any real progress resets the counter, so a slow-but-live download is never touched.

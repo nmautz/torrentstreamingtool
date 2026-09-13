@@ -603,10 +603,30 @@ def _marquee_write(text: str) -> None:
     except Exception:
         pass
 
-# Keep in sync with the version badge at the bottom of static/index.html.
-# Clients fetch this via /api/version and force a hard reload when the cached
-# page's badge value is older than the server's value.
-UI_VERSION = "11.12.1"
+# The version badge at the bottom of `static/index.html` is the single source of
+# truth for the UI version; this reads it rather than duplicating it.
+#
+# It *was* a hand-maintained literal "kept in sync" with the badge, and it drifted
+# almost immediately — the constant sat at 11.12.1 while the shipped page said
+# 11.14.1. That is not cosmetic: clients fetch this via /api/version and force a
+# hard reload when their cached page's badge is older, so a lagging constant means
+# dashboards silently keep serving a stale frontend after an update. The literal
+# below is only the fallback for a missing/unreadable page.
+_UI_VERSION_BADGE_RE = re.compile(r'<div[^>]*\bdata-ui-version\b[^>]*>([^<]*)</div>')
+
+
+def _read_ui_version(default: str = "11.14.1") -> str:
+    """Parse the UI version out of the shipped `static/index.html` badge."""
+    try:
+        html = (Path(__file__).resolve().parent / "static" / "index.html").read_text(
+            encoding="utf-8", errors="replace")
+    except OSError:
+        return default
+    m = _UI_VERSION_BADGE_RE.search(html)
+    return m.group(1).strip() if m else default
+
+
+UI_VERSION = _read_ui_version()
 _lib_lock: asyncio.Lock  # initialised in lifespan
 
 # Retains references to fire-and-forget background tasks so the event loop's weak
@@ -14327,7 +14347,10 @@ _PLAYER_SNAPSHOT_FILES = [
     "vendor/subtitles-octopus-worker.wasm",
     "vendor/libass-fallback-font.ttf",
 ]
-_UI_BADGE_RE = re.compile(r"data-ui-version[^>]*>([^<]+)<")
+# Anchored on the <div> element: a looser pattern also matches the JS comment
+# "// <div data-ui-version>) and compares against /api/version" much earlier in
+# the page, and first-match-wins made the reported version a slice of source.
+_UI_BADGE_RE = re.compile(r'<div[^>]*\bdata-ui-version\b[^>]*>([^<]*)</div>')
 
 
 @app.get("/api/player-manifest")
