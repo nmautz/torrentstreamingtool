@@ -83,6 +83,11 @@ up=3612s lag=0.01s tasks=47 tp=12/20+q0 inflight=1 oldest=0.3s
 lock_held=0.0s waiters=0 probe=4ms fails=0 rss=412MB thr=31 fds=612 conns=48
 ```
 
+If the sampler *itself* throws, that is reported at **ERROR** with a traceback on
+the 1st, 2nd, 4th, 8th … consecutive failure (geometric backoff), and recovery is
+logged too. It is never swallowed at DEBUG: a diagnostics loop that dies quietly
+just stops growing `vitals.log`, which reads exactly like a healthy idle box.
+
 If any threshold is breached, the same line is **also** logged at WARNING to
 `streamlink_app.log`, prefixed `VITALS ANOMALY` — so the onset of trouble shows
 up in the file an operator opens first. Thresholds (all in `diagnostics.py`):

@@ -625,8 +625,17 @@ async def _measure_loop_lag() -> None:
         state.loop_lag_max_s = max(state.loop_lag_max_s, lag)
 
 
+def _is_power_of_two(n: int) -> bool:
+    return n > 0 and (n & (n - 1)) == 0
+
+
 async def vitals_loop() -> None:
-    """Sample health every `VITALS_INTERVAL_S`; escalate anomalies to the app log."""
+    """Sample health every `VITALS_INTERVAL_S`; escalate anomalies to the app log.
+
+    Failures of the sampler ITSELF are reported at ERROR with a backoff, never
+    swallowed — see the handler below for why that distinction matters.
+    """
+    consecutive_failures = 0
     while True:
         await asyncio.sleep(VITALS_INTERVAL_S)
         try:
@@ -640,8 +649,23 @@ async def vitals_loop() -> None:
                 if s["loop_lag_s"] >= LOOP_LAG_WARN_S * 5 or \
                    s["oldest_req_s"] >= REQUEST_STUCK_S * 2:
                     dump_stalled_state("vitals anomaly: " + "; ".join(bad))
+            if consecutive_failures:
+                log.warning("VITALS recovered after %d failed sample(s)",
+                            consecutive_failures)
+                consecutive_failures = 0
+        except asyncio.CancelledError:
+            raise
         except Exception as exc:
-            log.debug("vitals sample failed: %s", exc)
+            # Never DEBUG. A diagnostics loop that dies quietly is worse than no
+            # diagnostics at all: vitals.log simply stops growing, which looks
+            # exactly like a healthy idle box. Shout on the first failure, then
+            # back off geometrically so a permanently broken sampler doesn't
+            # itself become the noise problem this module exists to remove.
+            consecutive_failures += 1
+            if _is_power_of_two(consecutive_failures):
+                log.error("VITALS SAMPLE FAILED (%d in a row) — health "
+                          "monitoring is degraded: %s: %s", consecutive_failures,
+                          type(exc).__name__, exc, exc_info=True)
 
 
 # ── Self-probe ───────────────────────────────────────────────────────────────

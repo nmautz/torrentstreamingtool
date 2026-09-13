@@ -19447,6 +19447,79 @@ def _hls_ladder_heights(lib: dict) -> list[int]:
     return heights
 
 
+def _parse_fps(rate: str) -> float:
+    """Parse an ffprobe frame rate ("24000/1001") into fps. 0.0 if unknown."""
+    try:
+        num, _, den = str(rate).partition("/")
+        n, d = float(num), float(den or 1)
+        return n / d if d else 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+# (level, MaxFS in macroblocks, MaxMBPS macroblocks/sec) from H.264 Annex A,
+# ascending. Only levels a consumer decoder actually implements are listed.
+_H264_LEVELS: tuple[tuple[str, int, int], ...] = (
+    ("3.0",   1620,    40500),
+    ("3.1",   3600,   108000),
+    ("3.2",   5120,   216000),
+    ("4.0",   8192,   245760),
+    ("4.1",   8192,   245760),
+    ("4.2",   8704,   522240),
+    ("5.0",  22080,   589824),
+    ("5.1",  36864,   983040),
+    ("5.2",  36864,  2073600),
+    ("6.0", 139264,  4177920),
+    ("6.1", 139264,  8355840),
+    ("6.2", 139264, 16711680),
+)
+
+
+def _h264_level_for(width: int, height: int, fps: float) -> str:
+    """Lowest H.264 level that can encode width x height @ fps.
+
+    Levels constrain BOTH frame size (MaxFS) and throughput (MaxMBPS =
+    macroblocks per second). The previous height-only rule (`4.1` for anything
+    <= 1080p) ignored throughput, so a 1080p50/60 source was handed level 4.1
+    when it needs 4.2: 1920x1080 is 8160 macroblocks, and at 50fps that's
+    408,000 MB/s against level 4.1's ceiling of 245,760. NVENC refuses outright
+    rather than bumping the level itself:
+
+        InitializeEncoder failed: invalid param (8): Invalid Level.
+        [vost#0:0/h264_nvenc] Task finished with error code: -22
+
+    which killed the whole job — and, because prep retries on a timer, retried
+    forever. Observed live on Hacks.S05E10.
+
+    This only ever raises the level, never lowers it: the result is the HIGHER
+    of the legacy height-based pick and what throughput actually requires. That
+    is deliberate. A level also caps bitrate (MaxBR — level 3.0 allows 10 Mbps,
+    4.1 allows 50), so "correctly" dropping a 480p rung from 4.1 to 3.0 would
+    tighten a constraint that has been slack for years and risk rejecting
+    encodes that currently work. Widening the ceiling is safe; narrowing it is
+    not, and nothing here is worth a playback regression.
+
+    Unknown fps falls back to 30, the highest rate the old rule implicitly
+    assumed; unknown dimensions fall back to level 4.1 as before.
+    """
+    legacy = "4.1" if height <= 1080 else ("5.0" if height <= 1440 else "5.2")
+    if width <= 0 or height <= 0:
+        return "4.1"
+    mbs = ((width + 15) // 16) * ((height + 15) // 16)
+    rate = fps if fps and fps > 0 else 30.0
+    mbps = mbs * rate
+    needed = "6.2"
+    for name, max_fs, max_mbps in _H264_LEVELS:
+        if mbs <= max_fs and mbps <= max_mbps:
+            needed = name
+            break
+    order = [lv for lv, _, _ in _H264_LEVELS]
+    try:
+        return needed if order.index(needed) > order.index(legacy) else legacy
+    except ValueError:
+        return needed
+
+
 def _hls_video_variants(info: dict, heights: Optional[list[int]] = None) -> list[dict]:
     """Video renditions to emit for this source, capped at its height.
 
@@ -19651,6 +19724,11 @@ def _ffprobe_full(path: str) -> dict:
                 "pix_fmt": (s.get("pix_fmt", "") or "").lower(),
                 "width":   s.get("width", 0),
                 "height":  s.get("height", 0),
+                # Needed to pick a valid H.264 level: levels cap macroblocks per
+                # SECOND, not per frame, so 1080p50/60 needs a higher level than
+                # the same frame size at 24fps. avg_frame_rate is "num/den".
+                "fps":     _parse_fps(s.get("avg_frame_rate")
+                                      or s.get("r_frame_rate") or ""),
             }
         elif kind == "audio":
             out["audios"].append({
@@ -20192,6 +20270,7 @@ def _build_hls_ffmpeg_args(
     ladder_heights: Optional[list[int]] = None,
     force_reencode_original: bool = False,
     hw_decode: bool = True,
+    omit_level: bool = False,
     audio_pad_pts: Optional[float] = None,
 ) -> tuple[list[str], list[dict], list[dict], list[dict]]:
     """Construct the full ffmpeg invocation that emits one HLS bundle.
@@ -20341,14 +20420,28 @@ def _build_hls_ffmpeg_args(
         if v.get("maxrate"):
             a += [f"-maxrate:v:{i}", f"{v['maxrate']}k",
                   f"-bufsize:v:{i}", f"{v['bufsize']}k"]
-        # H.264 level must be high enough for the OUTPUT resolution or the
-        # encoder refuses to init ("Invalid Level" → NVENC/x264 error -22 →
-        # whole job dies). Level 4.1 caps at ~1080p (2.1 MP frame); a 4K/2160p
-        # rung needs 5.x. `-2:<h>` keeps 16:9-ish widths, so height alone is a
-        # safe proxy: 5.2 covers 4K up to 60fps with room to spare.
-        out_h = int(v.get("height") or 0)
-        level = "4.1" if out_h <= 1080 else ("5.0" if out_h <= 1440 else "5.2")
-        a += [f"-profile:v:{i}", "high", f"-level:v:{i}", level]
+        # H.264 level must satisfy the OUTPUT frame size AND throughput, or the
+        # encoder refuses to init ("Invalid Level" → NVENC/x264 error -22 → the
+        # whole job dies, and prep then retries it forever).
+        #
+        # This used to key off height alone ("4.1" for anything <= 1080p), which
+        # ignores frame RATE — and levels cap macroblocks per second. A 1080p50
+        # source needs 4.2, not 4.1. See `_h264_level_for`.
+        #
+        # `omit_level` is the last-ditch retry rung: if ffmpeg still rejects the
+        # level we computed, we re-run with no `-level` at all and let the
+        # encoder choose, so a level mismatch can never permanently wedge a file.
+        a += [f"-profile:v:{i}", "high"]
+        if not omit_level:
+            src_v  = (info.get("video") or {})
+            src_w  = int(src_v.get("width") or 0)
+            src_h  = int(src_v.get("height") or 0)
+            out_h  = int(v.get("height") or 0) or src_h
+            # `-2:<h>` preserves aspect, so scale the width by the same factor.
+            out_w  = (round(src_w * out_h / src_h) if src_w and src_h and out_h
+                      else src_w)
+            a += [f"-level:v:{i}",
+                  _h264_level_for(out_w, out_h, float(src_v.get("fps") or 0.0))]
         return a
 
     for i, v in enumerate(videos):
@@ -21077,6 +21170,25 @@ async def _run_offline_job(job_id: str) -> None:
                         "-hwaccel path.\n  stderr tail:\n%s",
                         job_id, reason, tail[-800:] or "(no stderr captured)",
                     )
+                    full_gpu = False
+                    await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
+                    tmp_dir.mkdir(parents=True, exist_ok=True)
+                    job["progress"] = 0.0
+                    continue
+
+                # The encoder rejected our H.264 level. `_h264_level_for` should
+                # make this unreachable, but an exotic source (odd fps metadata,
+                # a rate ffprobe reports as 0, a driver with tighter limits) must
+                # not leave a file permanently unpreppable — prep retries on a
+                # timer, so a hard failure here becomes an endless loop. Re-run
+                # once with no `-level` and let the encoder decide.
+                if not omit_level and any("Invalid Level" in t for t in stderr_tail):
+                    hls_log.warning(
+                        "job %s rejected our H.264 level — retrying with no "
+                        "explicit -level (encoder picks).",
+                        job_id,
+                    )
+                    omit_level = True
                     full_gpu = False
                     await asyncio.to_thread(shutil.rmtree, tmp_dir, ignore_errors=True)
                     tmp_dir.mkdir(parents=True, exist_ok=True)

@@ -2224,7 +2224,8 @@ moment something dereferences it.
 ```
 Windows fatal exception: access violation
 Current thread 0x00002bf4 (most recent call first):
-  File "F:	orrentstreamingtoolemote_input.py", line 410 in _thread_main
+  File "F:	orrentstreamingtool
+emote_input.py", line 410 in _thread_main
 ```
 
 **Why nobody noticed for so long:** ctypes wraps foreign calls in an SEH handler
@@ -2257,6 +2258,43 @@ Fixed in 11.24.1 with `importlib.reload`. Two lessons that outlive the fix:
 2. **Verify a deploy by its effect, not its response.** The apply returned
    `"ok": true, "service_reinstalled": true`. The thing that proved it hadn't
    worked was `logs/access.log` simply not existing.
+
+## H.264 levels cap macroblocks per SECOND, not per frame
+
+The HLS ladder used to pick its level from output height alone — `4.1` for
+anything at or below 1080p. That silently assumes ≤30 fps. Level 4.1 allows
+**245,760 macroblocks/second**; 1920×1080 is 8,160 macroblocks, so:
+
+| fps | MB/s | fits 4.1? |
+|---|---|---|
+| 23.976 | 195,644 | yes |
+| 30 | 244,800 | only just |
+| 50 | 408,000 | **no** — needs 4.2 |
+| 60 | 489,600 | **no** — needs 4.2 |
+
+NVENC does not quietly raise the level for you. It refuses:
+
+```
+InitializeEncoder failed: invalid param (8): Invalid Level.
+[vost#0:0/h264_nvenc] Task finished with error code: -22 (Invalid argument)
+```
+
+which fails the whole job — and because prep re-queues on a timer, **the same
+file retries forever**. One file did exactly that every ~5 minutes, and the
+error was invisible until 11.24.0 started capturing ffmpeg's stderr tail.
+
+`_h264_level_for(width, height, fps)` now uses the real Annex-A table. Two
+things worth keeping in mind if you touch it:
+
+- **Only ever raise the level.** A level also caps *bitrate* (MaxBR: 3.0 allows
+  10 Mbps, 4.1 allows 50). Dropping a 480p rung from 4.1 to "correct" 3.0
+  tightens a constraint that has been slack for years, and risks rejecting
+  encodes that currently work. The function returns the higher of the legacy
+  pick and the throughput requirement, deliberately.
+- **`fps` can be absent or nonsense.** ffprobe reports `0/0` for some streams.
+  Unknown fps falls back to 30 (what the old rule implicitly assumed), and the
+  `omit_level` retry rung re-runs with no `-level` if the encoder still objects
+  — so a bad probe can't permanently wedge a file.
 
 ## See also
 

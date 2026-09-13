@@ -213,6 +213,15 @@ ffmpeg -y -progress pipe:1 -nostats \
   -map 0:s:1 -c:s webvtt -f webvtt "sub_1.vtt"
 ```
 
+**`-level:v:N` is computed, not fixed.** `_h264_level_for(width, height, fps)`
+picks the lowest H.264 level whose MaxFS *and* MaxMBPS cover that rung, floored
+at the legacy height-based value so it can only ever go **up**. It matters
+because levels cap macroblocks per second, not per frame: 1080p50 needs 4.2, and
+handing NVENC 4.1 makes it refuse with `Invalid Level` and fail the whole job
+(which prep then retried forever). If the encoder rejects the level anyway, the
+job retries once with no `-level` at all. See [GOTCHAS.md](GOTCHAS.md).
+
+
 Note the two output groups: the HLS bundle (video variants + audio) comes
 first, then one extra WebVTT output file per text subtitle. Both are produced in
 the **single** ffmpeg pass — no second invocation. The ladder rungs come from
