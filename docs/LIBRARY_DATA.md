@@ -224,7 +224,7 @@ It **is** enforced server-side against the network, though (11.20.0). `verify-pi
 ```jsonc
 "pending_download": {
   "magnet": "magnet:?xt=...",      // the source magnet, so the add can be replayed
-  "save_path": "",                 // optional override; "" ⇒ settings.qbit_download_path
+  "save_path": "C:\Media2",       // the RESOLVED folder (user pick, else `_auto_save_path()` — emptiest configured root)
   "torrent_hash": "",              // pre-added hash from /api/library/prepare, if any
   "selected_file_indices": []      // file-index subset; [] ⇒ all files
 }

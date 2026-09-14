@@ -1,5 +1,17 @@
 # Changelog
 
+## [12.1.0] — 2026-09-13
+**A download nobody gave a folder now goes to the drive with the most room — not always the same one, until it's full.**
+
+Every add path fell back to `settings.qbit_download_path`, so a box with `LIBRARY_PATH_2..4` configured still put *everything* on the primary drive. It filled to 100% — stalling downloads, breaking HLS prep and playback — while a second, empty drive sat idle.
+
+- **`_auto_save_path()`** ranks every configured root from `_all_library_paths()` by free space and returns the emptiest. Free space is compared at **GB granularity**, then ties break on the configured primary and then on configuration order, so several folders on one physical drive behave exactly as before and two near-equal drives don't flap. A root that can't be stat'd (unplugged drive, deleted path) is not a candidate; if none are usable it falls back to `QBIT_DOWNLOAD_PATH` rather than to an empty path.
+- **Wired into every add that has no explicit folder**: `POST /api/library/download` (resolved *before* the library transaction, since `_auto_save_path` reads the library and `_lib_lock` isn't re-entrant), `library_download_pipeline`, `/api/library/upload`, `/api/library/prepare`, `/api/stream/prepare`, `/api/library/play-now` and the stream-now pipeline — transient streams write to disk like anything else. The resolved path is **persisted** (`pending_download.save_path`, `download_source.save_path`), so a restart-recovery re-drive resumes to the same drive instead of re-rolling.
+- **Fix: the file picker silently ignored the Save Location.** `/api/library/prepare` adds the torrent early, just to read its file list, and `library_download_pipeline` skips the add entirely when handed that `torrent_hash` — so the folder chosen in the modal was never applied and the download landed in qBit's default. The pipeline now `qbit_set_location`s a pre-added torrent onto the resolved path before real data is written. If qBit refuses (unwritable path), it logs and keeps the torrent's actual path, because the recorded file paths must describe where the files really are.
+- **The modal tells you what it picked.** `GET /api/settings/download-path` now returns the auto-pick (`{path, configured, auto, label, free_bytes, free_human}`); the download modal pre-fills from it, **re-fetches on every open** (a cached answer would keep aiming at a drive that has since filled), highlights the matching destination chip, and shows an `AUTO — MOST FREE SPACE (n TB FREE)` hint. Typing a path or tapping another chip clears the hint and moves the highlight; picking a folder by hand still wins over the auto-pick, exactly as before.
+
+See [docs/GOTCHAS.md](docs/GOTCHAS.md), [docs/API.md](docs/API.md), [docs/BACKEND.md](docs/BACKEND.md), [docs/LIBRARY_DATA.md](docs/LIBRARY_DATA.md).
+
 ## [12.0.1] — 2026-09-13
 **Fix the two compile errors that stopped 12.0.0 from building.**
 

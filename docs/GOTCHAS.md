@@ -381,6 +381,40 @@ The three exposed download-priority levels map onto qBit's file-priority tiers i
 
 `setup.py` writes `WebUI\LocalHostAuth=false` to qBit's ini. Localhost requests never need a cookie. `qbit_login` is still called on startup and `qreq` retries on 403 for safety, but the cookie is mostly cosmetic.
 
+### An unchosen save path must be the emptiest drive, not always `QBIT_DOWNLOAD_PATH`
+
+Every add path used to fall back to `settings.qbit_download_path`, so a box with
+`LIBRARY_PATH_2..4` configured still put **everything** on the primary drive: it filled to
+100% (stalling downloads, breaking prep and playback) while a second, empty drive sat idle.
+When no folder is picked, `_auto_save_path()` now ranks every root from `_all_library_paths()`
+by `shutil.disk_usage(...).free` and returns the emptiest. Details that matter if you touch it:
+
+- **Free space is compared at GB granularity**, then ties break on the configured primary and
+  then on configuration order — so several folders on *one* physical drive (identical free
+  space) behave exactly as before, and two near-equal drives don't flap on a few bytes.
+- **A root that can't be stat'd is not a candidate** (unplugged USB drive, a path deleted after
+  it was configured); if none are usable it falls back to `settings.qbit_download_path`, never
+  to an empty string.
+- **It reads the library** (via `_all_library_paths`), so it must never be called while
+  `_lib_lock` is held — `library_download` resolves the path *before* opening its transaction.
+- **It is resolved once, at add time, and persisted** (`pending_download.save_path`,
+  `download_source.save_path`), so a restart-recovery re-drive resumes to the same drive rather
+  than re-rolling the dice on whatever is emptiest now.
+- The dashboard pre-fills its Save Location from `GET /api/settings/download-path`, which
+  returns the same auto-pick, and re-fetches it **every time the modal opens** — a cached value
+  would keep aiming downloads at a drive that has since filled up.
+
+### A pre-added torrent ignores the save path unless you `setLocation` it
+
+`/api/library/prepare` adds the magnet just to read its file list, long before the user presses
+Download — so it cannot know the destination, and the torrent lands in qBit's default folder.
+`library_download_pipeline` then skips `qbit_add_magnet` entirely when a `torrent_hash` is passed,
+which meant **any download made through the file picker silently ignored the chosen Save
+Location** — including the auto-picked one. The pipeline now `qbit_set_location`s a pre-added
+torrent onto the resolved path before real data is written (cheap then; a full content move
+later). If qBit refuses (409 — unwritable path), it logs and keeps the torrent's *current* path
+as `save_path`, because `build_file_list` must describe where the files really are.
+
 ### Sequential vs library downloads
 
 Stream-now uses sequential. Library downloads do NOT — they should download normally so all files arrive. See [BACKEND.md](BACKEND.md#pipelines).

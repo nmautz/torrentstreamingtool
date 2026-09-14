@@ -1382,10 +1382,11 @@
             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
               d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/>
           </svg>
-          <input id="dlSavePath" type="text"
+          <input id="dlSavePath" type="text" oninput="syncDlPathChips();renderDlPathHint();"
             class="flex-1 bg-transparent text-xs text-gray-300 focus:outline-none min-w-0 font-mono py-2.5" />
         </div>
         <div id="dlPathChips" class="hidden flex-wrap gap-1.5 mt-2"></div>
+        <div id="dlPathHint" class="hidden text-[10px] text-gray-600 uppercase tracking-wider mt-1.5"></div>
       </div>
 
       <div class="border-t border-gray-800/60"></div>
@@ -9562,12 +9563,35 @@ let _uploadXHR=null;
 
 let _libraryPaths=null;   // [{path,label}] — cached from /api/settings/library-paths
 
-async function ensureDefaultSavePath(){
-  if(_defaultSavePath) return;
+// The server picks the emptiest configured drive, so this must be re-fetched
+// every time the modal opens — free space moves, and a cached answer would keep
+// aiming new downloads at a drive that has since filled up.
+let _defaultSavePathInfo=null;   // {path, configured, auto, label, free_human}
+
+async function ensureDefaultSavePath(refresh){
+  if(_defaultSavePath && !refresh) return;
   try{
     const r=await fetch("/api/settings/download-path");
-    if(r.ok){ const d=await r.json(); _defaultSavePath=d.path||""; }
+    if(r.ok){
+      const d=await r.json();
+      _defaultSavePath=d.path||"";
+      _defaultSavePathInfo=d;
+    }
   } catch(_){}
+}
+
+// Shows WHY this folder — an auto-pick the user never made should say so, or it
+// looks like the box quietly ignored the configured download path.
+function renderDlPathHint(){
+  const el=document.getElementById("dlPathHint");
+  if(!el) return;
+  const d=_defaultSavePathInfo;
+  const cur=(document.getElementById("dlSavePath")||{}).value||"";
+  if(!d||!d.path||cur!==d.path){ el.classList.add("hidden"); return; }
+  el.textContent=d.auto
+    ? `Auto — most free space${d.free_human?` (${d.free_human} free)`:""}`
+    : (d.free_human?`${d.free_human} free`:"");
+  el.classList.toggle("hidden", !el.textContent);
 }
 
 async function ensureLibraryPaths(){
@@ -9592,7 +9616,25 @@ function renderDlPathChips(){
   wrap.classList.remove("hidden");
   wrap.classList.add("flex");
   wrap.querySelectorAll(".dl-path-chip").forEach(btn=>{
-    btn.addEventListener("click",()=>{ document.getElementById("dlSavePath").value=btn.dataset.path; });
+    btn.addEventListener("click",()=>{
+      document.getElementById("dlSavePath").value=btn.dataset.path;
+      syncDlPathChips();
+      renderDlPathHint();
+    });
+  });
+  syncDlPathChips();
+}
+
+function syncDlPathChips(){
+  const cur=(document.getElementById("dlSavePath")||{}).value||"";
+  document.querySelectorAll("#dlPathChips .dl-path-chip").forEach(btn=>{
+    const on=btn.dataset.path===cur;
+    btn.classList.toggle("bg-indigo-900/50",on);
+    btn.classList.toggle("text-indigo-300",on);
+    btn.classList.toggle("border-indigo-700",on);
+    btn.classList.toggle("bg-gray-800",!on);
+    btn.classList.toggle("text-gray-500",!on);
+    btn.classList.toggle("border-gray-700",!on);
   });
 }
 
@@ -9654,13 +9696,14 @@ async function openDownloadModal(magnet,title,overrides){
   overrides=overrides||{};
   downloadTarget={magnet,title};
   document.getElementById("dlFilePickerRow").classList.remove("hidden");
-  await Promise.all([ensureDefaultSavePath(), ensureLibraryPaths()]);
-  renderDlPathChips();
+  await Promise.all([ensureDefaultSavePath(true), ensureLibraryPaths()]);
 
   document.getElementById("dlModalTitle").textContent=title;
 
-  // Save path
+  // Save path — the server's auto-pick (emptiest drive) unless the user overrides
   document.getElementById("dlSavePath").value=_defaultSavePath;
+  renderDlPathChips();
+  renderDlPathHint();
 
   // Auto-detect series/episode from title
   const epMatch=title.match(/[Ss](\d{1,2})[Ee](\d{1,2})/);
@@ -9725,12 +9768,12 @@ function closeDownloadModal(){
 async function openSaveStreamModal(){
   _saveStreamMode=true;
   document.getElementById("dlFilePickerRow").classList.add("hidden");
-  await Promise.all([ensureDefaultSavePath(), ensureLibraryPaths()]);
-  renderDlPathChips();
-  await ensureDefaultSavePath();
+  await Promise.all([ensureDefaultSavePath(true), ensureLibraryPaths()]);
   const title=app.active_title||"";
   document.getElementById("dlModalTitle").textContent=title;
   document.getElementById("dlSavePath").value=_defaultSavePath;
+  renderDlPathChips();
+  renderDlPathHint();
   const epMatch=title.match(/[Ss](\d{1,2})[Ee](\d{1,2})/);
   document.getElementById("dlEpisode").value=epMatch?epMatch[0].toUpperCase():"";
   const seriesGuess=title
@@ -9752,6 +9795,8 @@ async function openSaveStreamModal(){
 
 function resetSavePath(){
   document.getElementById("dlSavePath").value=_defaultSavePath;
+  syncDlPathChips();
+  renderDlPathHint();
 }
 
 // ── Library File Picker (M3.4) ─────────────────────────────────────────────
@@ -20461,6 +20506,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">12.0.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">12.1.0</div>
 </body>
 </html>

@@ -8396,7 +8396,8 @@ async def stream_pipeline(
             h = torrent_hash
             state.active_hash = h
         else:
-            h = await qbit_add_magnet(magnet, sequential=True)
+            h = await qbit_add_magnet(magnet, save_path=await _auto_save_path(),
+                                      sequential=True)
             if not h:
                 raise RuntimeError("qBittorrent rejected the magnet (is it running on port 8081?)")
             state.active_hash = h
@@ -8541,7 +8542,7 @@ async def _recover_interrupted_downloads() -> None:
             continue   # no params to replay (legacy item or already started) — leave to the monitor
         asyncio.create_task(library_download_pipeline(
             it["id"], magnet,
-            pend.get("save_path", "") or settings.qbit_download_path,
+            pend.get("save_path", ""),
             torrent_hash=it.get("torrent_hash") or pend.get("torrent_hash", ""),
             selected_file_indices=pend.get("selected_file_indices") or None,
             download_mode=_download_cfg(it)["mode"],
@@ -8561,8 +8562,23 @@ async def library_download_pipeline(
 ) -> None:
     """Add magnet to qBit for a full download; no streaming mode, never auto-deleted."""
     try:
+        # No explicit choice ⇒ the emptiest configured drive, not always the
+        # primary (which otherwise fills to 100% while a second drive sits idle).
+        if not save_path:
+            save_path = await _auto_save_path()
         if torrent_hash:
             h = torrent_hash
+            # The torrent was already added by /api/library/prepare (file picker),
+            # which had no idea where this download should land — so it sits in
+            # qBit's default folder. Relocate it now, before any real data is
+            # written, or the save path chosen here is silently ignored.
+            info = await qbit_info(h)
+            cur = (info or {}).get("save_path") or ""
+            if cur and Path(cur) != Path(save_path):
+                if not await qbit_set_location(h, save_path):
+                    log.warning("Could not move torrent %s to %s — leaving it at %s",
+                                h, save_path, cur)
+                    save_path = cur
         else:
             h = await qbit_add_magnet(magnet, save_path=save_path or None)
             if not h:
@@ -8591,7 +8607,7 @@ async def library_download_pipeline(
                     # item at "downloading" forever. Cleared when the item settles.
                     it["download_source"] = {
                         "magnet": magnet,
-                        "save_path": save_path or settings.qbit_download_path,
+                        "save_path": save_path,
                     }
                     # Hash recorded → the monitor can manage this item from qBit even if
                     # metadata is still pending, so it's no longer an orphan to recover.
@@ -10813,6 +10829,10 @@ async def move_library_status(item_id: str, request: Request) -> JSONResponse:
 async def library_download(request: Request, req: DownloadReq) -> JSONResponse:
     if not state.vpn_secure:
         raise HTTPException(403, "VPN not connected — download blocked.")
+    # Resolved BEFORE the transaction (`_auto_save_path` reads the library, and
+    # `_lib_lock` is not re-entrant) so the chosen folder is what gets persisted
+    # in `pending_download` — an interrupted add then resumes to the same drive.
+    save_path = req.save_path.strip() or await _auto_save_path()
     async with mutate_library() as lib:
         # Locking at download time carries exactly the privilege of *seeing* locked
         # content, so it takes the same proof: a PIN-verified elevated profile, or an
@@ -10847,7 +10867,7 @@ async def library_download(request: Request, req: DownloadReq) -> JSONResponse:
                 if req.admin_only and not dup.get("admin_only"):
                     dup["admin_only"] = True
                 return JSONResponse({"ok": True, "item_id": dup["id"], "duplicate": True,
-                                     "default_save_path": settings.qbit_download_path})
+                                     "default_save_path": save_path})
         item: dict = {
             "id": str(uuid.uuid4()),
             "title": req.title,
@@ -10872,7 +10892,7 @@ async def library_download(request: Request, req: DownloadReq) -> JSONResponse:
             # _recover_interrupted_downloads.
             "pending_download": {
                 "magnet": req.magnet,
-                "save_path": req.save_path.strip(),
+                "save_path": save_path,
                 "torrent_hash": req.torrent_hash,
                 "selected_file_indices": req.selected_file_indices or [],
             },
@@ -10885,7 +10905,6 @@ async def library_download(request: Request, req: DownloadReq) -> JSONResponse:
     # The monitor re-derives both counts authoritatively each tick.
     if not item.get("admin_only"):
         state.downloading_count_visible += 1
-    save_path = req.save_path.strip() or settings.qbit_download_path
     asyncio.create_task(library_download_pipeline(
         item["id"], req.magnet, save_path,
         torrent_hash=req.torrent_hash,
@@ -10893,7 +10912,7 @@ async def library_download(request: Request, req: DownloadReq) -> JSONResponse:
         download_mode=item["download"]["mode"],
     ))
     return JSONResponse({"ok": True, "item_id": item["id"],
-                         "default_save_path": settings.qbit_download_path})
+                         "default_save_path": save_path})
 
 
 async def _purge_offline_bundles(paths: list[str]) -> int:
@@ -12005,14 +12024,14 @@ async def library_play_now(req: PlayNowReq) -> JSONResponse:
     if not h:
         # No pre-added hash and an un-hashable (link-style) magnet — add it now
         # and resolve the hash via the same diff path as qbit_add_magnet.
-        h = (await qbit_add_magnet(req.magnet) or "").lower()
+        h = (await qbit_add_magnet(req.magnet, save_path=await _auto_save_path()) or "").lower()
         if not h:
             raise HTTPException(500, "qBittorrent rejected the magnet.")
 
     info = await qbit_info(h)
     if not info:
         # Prepared torrent vanished (or was never added) — add and wait for metadata.
-        if not await qbit_add_magnet(req.magnet):
+        if not await qbit_add_magnet(req.magnet, save_path=await _auto_save_path()):
             raise HTTPException(500, "qBittorrent rejected the magnet.")
         for _ in range(30):
             await asyncio.sleep(1)
@@ -13133,7 +13152,7 @@ async def stream_prepare(req: StreamPrepareReq) -> JSONResponse:
         await _qbit_delete_transient(state.prepare_hash, "stale prepare")
         state.prepare_hash = None
 
-    h = await qbit_add_magnet(req.magnet)
+    h = await qbit_add_magnet(req.magnet, save_path=await _auto_save_path())
     if not h:
         raise HTTPException(500, "qBittorrent rejected the magnet.")
 
@@ -13192,7 +13211,7 @@ async def library_prepare(req: StreamPrepareReq) -> JSONResponse:
     if not state.vpn_secure:
         raise HTTPException(403, "VPN not connected — download blocked.")
 
-    h = await qbit_add_magnet(req.magnet)
+    h = await qbit_add_magnet(req.magnet, save_path=await _auto_save_path())
     if not h:
         raise HTTPException(500, "qBittorrent rejected the magnet.")
 
@@ -13237,7 +13256,7 @@ async def upload_to_library(
     """Accept one or more local video files and add them directly to the library."""
     if not files:
         raise HTTPException(400, "No files provided.")
-    dest_dir = Path(save_path.strip() or settings.qbit_download_path)
+    dest_dir = Path(save_path.strip() or await _auto_save_path())
     try:
         dest_dir.mkdir(parents=True, exist_ok=True)
     except Exception as e:
@@ -13372,7 +13391,8 @@ async def save_stream_to_library(request: Request, req: SaveToLibraryReq) -> JSO
         await qbit_set_file_priority(h, all_ids, 1)
 
     info = await qbit_info(h)
-    save_path = req.save_path.strip() or (info.get("save_path") if info else None) or settings.qbit_download_path
+    save_path = (req.save_path.strip() or (info.get("save_path") if info else None)
+                 or await _auto_save_path())
     files = build_file_list(all_files, save_path) if all_files else []
 
     item: dict = {
@@ -13402,7 +13422,7 @@ async def save_stream_to_library(request: Request, req: SaveToLibraryReq) -> JSO
 
     await broadcast("library_update", {"item_id": item["id"], "status": "downloading"})
     return JSONResponse({"ok": True, "item_id": item["id"],
-                         "default_save_path": settings.qbit_download_path})
+                         "default_save_path": save_path})
 
 
 # ── YouTube on TV ───────────────────────────────────────────────────────────
@@ -15588,9 +15608,80 @@ async def _all_library_paths() -> list[dict]:
     return result
 
 
+# Ties are compared at GB granularity so several folders on the SAME physical
+# drive (which report identical free space) fall through to the tie-breaks below
+# instead of flapping on a few bytes of noise between two near-equal drives.
+_FREE_SPACE_BUCKET = 1024 ** 3
+
+
+async def _auto_save_path() -> str:
+    """Pick a download folder when the caller didn't choose one: the configured
+    library root with the **most free space**.
+
+    Defaulting to `settings.qbit_download_path` fills that one drive to 100% —
+    stalling downloads and breaking playback — while a second, empty library
+    drive sits idle. With no explicit choice from the user, spread the load.
+
+    Never raises: any path that can't be stat'd (unmounted drive, a root that was
+    configured then unplugged) is simply not a candidate, and if nothing is
+    usable we fall back to the configured primary so behaviour degrades to the
+    old default rather than to an empty path.
+    """
+    fallback = settings.qbit_download_path
+    try:
+        infos = await _all_library_paths()
+    except Exception:
+        return fallback
+    if len(infos) <= 1:
+        return (infos[0]["path"] if infos else "") or fallback
+
+    def _probe(paths: list[str]) -> list[tuple[str, int]]:
+        out = []
+        for path in paths:
+            try:
+                out.append((path, shutil.disk_usage(path).free))
+            except OSError:
+                continue   # missing / unmounted root — never a candidate
+        return out
+
+    usable = await asyncio.to_thread(_probe, [i["path"] for i in infos])
+    if not usable:
+        return fallback
+    order = {info["path"]: n for n, info in enumerate(infos)}
+    # Most free space wins. On a tie (same drive), prefer the configured primary,
+    # then earliest in configuration order — so a single-drive setup keeps
+    # behaving exactly as it did before.
+    best, free = max(usable, key=lambda it: (it[1] // _FREE_SPACE_BUCKET,
+                                             it[0] == fallback,
+                                             -order.get(it[0], len(order))))
+    if best != fallback:
+        log.info("Auto save path: %s (%s free) — more room than %s",
+                 best, human_size(free), fallback)
+    return best
+
+
 @app.get("/api/settings/download-path")
 async def get_download_path() -> JSONResponse:
-    return JSONResponse({"path": settings.qbit_download_path})
+    """The folder a new download lands in when nobody picks one.
+
+    This is the **auto-selected** root (most free space), not blindly
+    `QBIT_DOWNLOAD_PATH` — the dashboard pre-fills its Save Location field from
+    here, so what the modal shows is what the server would choose anyway.
+    """
+    chosen = await _auto_save_path()
+    free = None
+    try:
+        free = (await asyncio.to_thread(shutil.disk_usage, chosen)).free
+    except OSError:
+        pass
+    return JSONResponse({
+        "path":       chosen,
+        "configured": settings.qbit_download_path,
+        "auto":       chosen != settings.qbit_download_path,
+        "label":      Path(chosen).name or chosen,
+        "free_bytes": free,
+        "free_human": human_size(free) if free is not None else "",
+    })
 
 
 @app.get("/api/settings/library-paths")
