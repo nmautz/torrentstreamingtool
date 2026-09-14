@@ -283,6 +283,27 @@ Four traps:
 - **The marquee file path must resolve identically across processes.** It's anchored to the repo root via `Path(__file__).parent` (all three modules live there) — *not* `tempfile.gettempdir()`, which can differ between the system-Python `run.py`, the venv `main.py`, and a service-launched `watchdog.py`. Create it empty before launch so `marq` has something to open.
 - **Don't add `--freetype-background-*` for an opaque box.** The freetype background opacity/color is a *global* text-renderer setting — turning it on to box the marquee also boxes every regular subtitle line. The countdown is intentionally text-only (opaque white + VLC's default outline). `--marq-position=10` is natively Bottom-Right; `--marq-x`/`--marq-y` add the corner padding.
 
+### The three intro-seek sites must stay in sync — and none of them may re-add padding
+
+An intro skip lands from three independent places: the auto-skip countdown
+(`_run_skip_countdown`), the manual **Skip intro** button (`POST /api/skip-now`), and the
+on-device HLS player (`lpAcceptSkipOffer` in `static/index.html`). Same hazard class as
+the marquee launch args — three copies of one number, and nothing fails loudly when they
+drift.
+
+All three used `int(end_at) + 1`: floor, then add a whole second, so the real landing
+point was +1.00 to +1.99 s past the detected boundary. That was deliberate padding for a
+boundary nobody trusted. It is obsolete now that boundaries come from chapter markers
+(exact) or from the silence between theme and dialogue (measured +1.33 s mean error, i.e.
+already at or just past the first content audio) — stacking the old fudge on a corrected
+boundary simply skips one to two seconds of the episode.
+
+The server side now goes through `_intro_seek_target()` (`SKIP_INTRO_PAD_SEC = 0.5`,
+round-to-nearest because VLC's HTTP `seek` takes whole seconds); the device player uses
+`LP_SKIP_INTRO_PAD = 0.25` because it seeks with sub-second precision. **If a skip ever
+looks like it lands slightly early, fix the detection, not the pad** — a bigger pad hides
+a detection bug on every show in the library to paper over one.
+
 ### Smart Skip fingerprinting triggers on stream prep, not on download — and failures are sticky
 
 Audio fingerprinting (`analyzer.py`) is kicked off by `_ensure_analysis_for` at the end of `_run_offline_job` (a successful HLS bundle), **not** by `library_download_monitor`'s ready-flip — that call was deliberately removed. Two consequences to keep in mind: (a) **content that is never stream-prepped never gets `skip_data`** — fine because auto-prep is on by default, but don't "restore" a download-ready trigger expecting both. (b) The hook is **fire-and-forget**: awaited only to schedule (one `get_library` + `create_task`), never to run the pass, so it must never block the prep job or fail the bundle — keep it wrapped in try/except like the STT hook. A `/prep-all` fires the hook once per file; `_schedule_series_analysis_if_eligible` has a running-guard (skip if the series job is already `running`) so they don't stack.

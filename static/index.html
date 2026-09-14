@@ -19279,9 +19279,14 @@ function _lpHideSkipOffer() {
   lp.skipOfferType = null;
   document.getElementById("lpSkipOffer").classList.add("hidden");
 }
+// Landing offset for an intro skip. Mirrors SKIP_INTRO_PAD_SEC in main.py — the two
+// must stay in step. Smaller than the server's 0.5 because this player seeks with
+// sub-second precision, where the server is clamped to whole seconds by VLC.
+// Was a flat +1 s, a fudge for boundaries that used to be several seconds out.
+const LP_SKIP_INTRO_PAD = 0.25;
 function lpAcceptSkipOffer() {
   if (lp.skipOfferType === "intro") {
-    _lpCommitSeek(Math.max(0, lp.skipOfferEnd + 1));
+    _lpCommitSeek(Math.max(0, lp.skipOfferEnd + LP_SKIP_INTRO_PAD));
     lp.skipDoneFor.add(lp.filePath + "#intro");
   } else if (lp.skipOfferType === "credits") {
     lp.skipDoneFor.add(lp.filePath + "#credits");
@@ -20540,6 +20545,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">12.3.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">12.3.1</div>
 </body>
 </html>

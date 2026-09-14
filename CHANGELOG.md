@@ -1,5 +1,18 @@
 # Changelog
 
+## [12.3.1] — 2026-09-13
+**Stop skipping a second into the episode.**
+
+All three intro-skip paths — the auto-skip countdown, the manual Skip intro button, and the on-device player — seeked to `int(end_at) + 1`: floor the boundary, then add a whole second, landing anywhere from 1.00 to 1.99 s past it. That was deliberate padding from when Smart Skip's intro end could be several seconds out, and an extra second was cheap insurance against landing back inside the theme.
+
+12.2.1 and 12.3.0 removed the reason for it. Boundaries now come from a chapter marker (exact) or from the silence between the theme and the dialogue (measured +1.33 s mean error — already at or just past the first content audio). Stacking the old fudge on top of a corrected boundary just skips the first second of the episode.
+
+- **Worst-case overshoot drops from 1.00 s to 0.40 s**, and the landing point can now fall slightly *before* the boundary rather than always past it — at worst you catch the tail of the title card instead of losing a second of the show.
+- **One shared `_intro_seek_target()`** for both server paths, with `LP_SKIP_INTRO_PAD` mirroring it in the device player. Three copies of one constant is the same hazard as the VLC marquee launch args, and nothing fails loudly when they drift.
+- VLC's HTTP `seek` takes whole seconds, so the server rounds to nearest; the device player seeks with sub-second precision and uses a smaller pad.
+
+No re-analysis — this is playback-side only, and existing `skip_data` is unchanged.
+
 ## [12.3.0] — 2026-09-13
 **Smart Skip now lands on the first frame of the episode, not six seconds of dead air before it.**
 

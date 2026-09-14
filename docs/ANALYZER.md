@@ -177,7 +177,7 @@ The `SKIP_PREROLL_SEC = 2.0` ([main.py:1352](../main.py#L1352)) gives the user 2
 
 ## Auto-skip countdown (on-TV marquee)
 
-When auto-skip is enabled, Smart Skip does **not** cut instantly — it counts down on the TV over the `lead` seconds *before* the skip point, then acts the moment playback reaches it, so the intro/credits is skipped in full. Leads: `SKIP_COUNTDOWN_INTRO_SEC = 5`, `SKIP_COUNTDOWN_CREDITS_SEC = 10`. The skip **point** (`target`) is the **intro start** (skip → `seek` to intro end+1) and the **credits start** (skip → `vlc_next_file`, else `pl_stop`). So an intro at 1:30 counts 5→1 from 1:25 and seeks at 1:30.
+When auto-skip is enabled, Smart Skip does **not** cut instantly — it counts down on the TV over the `lead` seconds *before* the skip point, then acts the moment playback reaches it, so the intro/credits is skipped in full. Leads: `SKIP_COUNTDOWN_INTRO_SEC = 5`, `SKIP_COUNTDOWN_CREDITS_SEC = 10`. The skip **point** (`target`) is the **intro start** (skip → `seek` to intro end+1) and the **credits start** (skip → `vlc_next_file`, else `pl_stop`). So an intro at 1:30 counts 5→1 from 1:25 and seeks at 1:30. The landing position comes from `_intro_seek_target()` — see [GOTCHAS.md](GOTCHAS.md) on why all three seek sites share it and why the old `+1 s` pad was removed.
 
 - `_maybe_emit_skip_offer` calls `_start_skip_countdown(kind, item, file_path, end_at, target, lead)` once the position enters `[target − lead, …)`. While `state.skip_countdown_task` is alive, the helper early-returns so the tracker doesn't fight it. (The manual, auto-skip-off button still uses the narrower `[target − SKIP_PREROLL_SEC, …)` window.)
 - `_run_skip_countdown` is a dedicated coroutine that is **position-driven** (polls `vlc_status` every 0.5 s). The displayed number is `ceil(target − pos)` clamped to `[1, lead]`, so it tracks real playback — it **freezes while paused** (pos is frozen) and grows/shrinks as the viewer seeks; updates marquee + broadcasts `state` (`state.skip_countdown = {type, file_path, n}`) only when the number changes. It **fires** when `pos ≥ target` and **aborts** (clearing the popup) if the file changes, the viewer seeks back so `target − pos > lead + preroll`, or — for an intro — seeks past the intro end (`pos ≥ end_at`). On fire it re-checks the live playlist URI, performs the skip, and sets the `#…-done` marker. The `finally` always clears the marquee file.
@@ -194,7 +194,7 @@ The popup is a VLC **`marq` sub-source**, not dashboard UI — it draws on the v
 ## Endpoints
 
 User-facing:
-- `POST /api/skip-now {type}` — execute. Intro = seek to `end_at + 1`. Credits = `vlc_next_file` (or `pl_stop`)
+- `POST /api/skip-now {type}` — execute. Intro = seek to `_intro_seek_target(end_at)` (`end_at + SKIP_INTRO_PAD_SEC`, rounded to VLC's whole-second granularity). Credits = `vlc_next_file` (or `pl_stop`)
 - `DELETE /api/skip-now` — dismiss without acting
 
 Admin:

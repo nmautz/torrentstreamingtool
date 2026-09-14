@@ -7701,6 +7701,31 @@ SKIP_PREROLL_SEC = 2.0
 SKIP_COUNTDOWN_INTRO_SEC = 5
 SKIP_COUNTDOWN_CREDITS_SEC = 10
 
+# Where an intro skip actually lands, relative to the detected intro end.
+#
+# This used to be `int(end_at) + 1` — floor, then add a whole second, so the real landing
+# point was anywhere from +1.00 s to +1.99 s past the boundary. That was a deliberate
+# fudge for a boundary nobody trusted: Smart Skip's intro end could be several seconds
+# out, so an extra second of slop was cheap insurance against landing back inside the
+# theme.
+#
+# It isn't needed any more. Boundaries now come from a chapter marker (exact) or from the
+# silence between the theme and the dialogue (measured +1.33 s mean error, i.e. already
+# at or just past the first content audio). Keeping the old fudge on top of a corrected
+# boundary just skips one to two seconds of the episode.
+#
+# VLC's HTTP `seek` takes whole seconds, so `int(end_at + 0.5)` is round-to-nearest —
+# landing within half a second either side instead of always overshooting. The on-device
+# HLS player seeks with sub-second precision and uses LP_SKIP_INTRO_PAD in
+# static/index.html; the two must stay in step. Both callers below go through
+# `_intro_seek_target` so a future edit can't change one and miss the other.
+SKIP_INTRO_PAD_SEC = 0.5
+
+
+def _intro_seek_target(end_at: float) -> int:
+    """Whole-second landing position for an intro skip (VLC's seek granularity)."""
+    return max(0, int(end_at + SKIP_INTRO_PAD_SEC))
+
 # Deferred "mark watched" on skip-to-next-episode. When the viewer advances to
 # the next episode, treat the current one as finished — regardless of how far in
 # they were when they skipped. We arm a grace timer instead of marking
@@ -8023,7 +8048,7 @@ async def _run_skip_countdown(
 
         if kind == "intro":
             state.skip_offer_file = f"{file_path}#intro-done"
-            await vlc("seek", val=str(int(end_at) + 1))
+            await vlc("seek", val=str(_intro_seek_target(end_at)))
         else:
             state.skip_offer_file = f"{file_path}#credits-done"
             next_path = _next_file_in_item(item, file_path)
@@ -16942,7 +16967,7 @@ async def skip_now(req: SkipNowReq) -> JSONResponse:
         end_at = float(offer.get("end_at", 0))
         if end_at <= 0:
             raise HTTPException(400, "Invalid intro end position.")
-        await vlc("seek", val=str(int(end_at) + 1))
+        await vlc("seek", val=str(_intro_seek_target(end_at)))
         # Mark this file's intro as handled so the offer doesn't re-show
         if state.skip_offer_file:
             state.skip_offer_file = f"{state.skip_offer_file}#intro-done"
