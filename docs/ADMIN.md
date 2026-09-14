@@ -136,6 +136,7 @@ For each item:
 - If an analysis job is running for the series, shows a live progress bar (driven by `analysis_status` SSE events)
 - **Analyze** button → `POST /api/admin/library/{id}/analyze` — force re-run for the entire series
 - **Edit** button → opens inline editor with three numeric fields per file (intro start, intro end, credits start). Empty → clear. Save calls `PATCH /api/admin/library/{id}/skip-data`. Manual edits set `analysis.source="manual"` so they survive future analyzer runs
+- **Boundary evidence block** (12.4.1) — under each file, the pre-refinement fingerprint value beside the final one plus how the final one was chosen: `chapter` (a marker in the file), `silence_end` (the gap between theme and dialogue), `structural` (a measured credit roll), or `chapter+silence_end` when two independent kinds of evidence agreed, with the confidence. Rendered by `_skipProvenance()` from the endpoint's `method` + `refine` fields; absent for files that were never refined. **A manual edit clears it** — the stored provenance described the automatic value, not the hand-entered one. See [ANALYZER.md](ANALYZER.md)
 
 Admin SSE: `ensureAdminSSE()` opens `/api/events?admin_token=…` so the progress bars live-update.
 

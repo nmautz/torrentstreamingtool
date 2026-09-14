@@ -198,7 +198,7 @@ User-facing:
 - `DELETE /api/skip-now` — dismiss without acting
 
 Admin:
-- `GET /api/admin/library/{id}/skip-data` — per-file editor data (now also returns `error_code` / `error` for failed files)
+- `GET /api/admin/library/{id}/skip-data` — per-file editor data (now also returns `error_code` / `error` for failed files); plus `method` (`fingerprint` / `chapters` / `fingerprint+silence` / `structural`) and the `refine` block (pre-refinement audio values + per-boundary confidence and source)
 - `PATCH /api/admin/library/{id}/skip-data` — manual override (sets `analysis.source="manual"`)
 - `POST /api/admin/library/{id}/analyze` — force re-run for the item's series
 - `GET /api/admin/analyzer-status` — `{available, ffmpeg, fpcalc}`
