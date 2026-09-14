@@ -43,7 +43,7 @@ except Exception:           # pragma: no cover - numpy missing
     _np = None
     _POP16 = None
 
-ANALYZER_VERSION = 6
+ANALYZER_VERSION = 7
 
 # Per-file failure codes recorded in skip_data[path].analysis when fingerprinting
 # could not produce usable skip points. The user-facing UI shows a "Skip
@@ -932,6 +932,12 @@ def _refine_one(path: str, intro: Optional[dict], credits_start: Optional[float]
 
 REFINER_VERSION = 1
 
+# Don't run the structural credits pass when the fingerprint already found credits for
+# more than this fraction of the series. Broad fingerprint success means the credits DO
+# repeat, so the stragglers are specials without a credit roll — and inventing one for
+# them is exactly the regression greedy clustering was built to avoid.
+STRUCT_CREDITS_VETO = 0.40
+
 
 async def analyze_series(items: list[dict], progress_cb=None) -> dict:
     """Analyze a series of items, returning per-file intro/credits ranges.
@@ -1147,6 +1153,13 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
     # `result` already carries per-path failure entries for missing files. Now
     # add per-episode entries — success for files that produced intro/credits,
     # failure for files that produced nothing usable.
+    # Episodes the fingerprint could not give credits to. Some shows use a different
+    # song over every credit roll (Hacks, WandaVision, One Tree Hill S8), so the tail
+    # matcher correctly finds nothing and the whole series gets no credits skip. Those
+    # get a second, song-independent pass below.
+    no_credits: list[int] = []
+    got_credits = 0
+
     for idx, ep in enumerate(episodes):
         path = ep["path"]
         dur = durations[idx]
@@ -1178,6 +1191,10 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
             ce = tail_start + frames_to_seconds(offset_fr + length_fr, tail_rates[idx])
             if cs >= dur * MIN_CREDITS_PCT and ce >= dur - OUTRO_END_MARGIN_SEC:
                 credits_start = round(cs, 1)
+        if credits_start is None and dur:
+            no_credits.append(idx)
+        elif credits_start is not None:
+            got_credits += 1
 
         # Pin the coarse boundaries to something physical (chapter marker / silence).
         # Off-loop: this spawns ffprobe + ffmpeg. Never allowed to fail the episode.
@@ -1218,6 +1235,51 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
                     "transition could be located in this file."
                 )
             result[path] = _failed_entry(code, msg)
+
+    # ── Structural credits pass ──────────────────────────────────────────────
+    # Only for episodes the fingerprint gave no credits, and only when the tail matcher
+    # broadly failed for this series. The veto matters: partial coverage usually means
+    # specials/OVAs that genuinely have no credit roll, and running this on them would
+    # invent one — regressing the exact case the greedy clustering exists to protect.
+    if no_credits and got_credits <= (got_credits + len(no_credits)) * STRUCT_CREDITS_VETO:
+        await _emit(stage="finalizing", current=total_eps, total=total_eps,
+                    message=f"Looking for credit rolls in {len(no_credits)} episode(s)")
+        cands: dict[int, tuple[float, float]] = {}
+        for idx in no_credits:
+            dur = durations[idx]
+            if not dur:
+                continue
+            try:
+                c = await _fp_thread(refiner.credits_candidate, episodes[idx]["path"],
+                                     dur, MIN_CREDITS_PCT, OUTRO_END_MARGIN_SEC)
+            except Exception:
+                c = None
+            if c:
+                cands[idx] = c
+
+        keep = refiner.credits_consensus(cands, len(no_credits)) if cands else set()
+        for idx in sorted(keep):
+            path = episodes[idx]["path"]
+            cs = cands[idx][0]
+            entry = result.get(path) or {}
+            prev = (entry.get("analysis") or {})
+            if prev.get("source") == "failed" and not entry.get("intro"):
+                # The file had nothing at all; promote it from failed to a credits-only
+                # success rather than leaving the "Skip unavailable" chip up.
+                entry = {"intro": None, "analysis": {"version": ANALYZER_VERSION,
+                                                     "source": "auto"}}
+            entry["credits_start"] = cs
+            ana = entry.setdefault("analysis", {})
+            ana["version"] = ANALYZER_VERSION
+            ana["source"] = "auto"
+            ana["method"] = (ana.get("method") or "fingerprint")
+            ana["method"] = "structural" if ana["method"] == "fingerprint"                 else ana["method"] + "+structural"
+            ana.pop("error_code", None)
+            ana.pop("error", None)
+            ref = entry.setdefault("refine", {"version": REFINER_VERSION,
+                                              "audio": {"credits_start": None}})
+            ref["credits_start"] = {"t": cs, "conf": 0.6, "src": "structural"}
+            result[path] = entry
 
     return result
 

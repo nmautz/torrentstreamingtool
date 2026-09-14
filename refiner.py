@@ -268,6 +268,96 @@ def silence_cuts(runs: list[tuple[float, float, float]]) -> list[Cut]:
     return cuts
 
 
+# ── Structural credits detection ─────────────────────────────────────────────
+#
+# For the fingerprint to find credits, the credits music has to REPEAT across episodes.
+# Plenty of shows use a different song every episode — Hacks, WandaVision, One Tree Hill
+# season 8 — and for those the tail matcher correctly finds nothing, so the whole series
+# gets no credits skip at all.
+#
+# But the credits are still acoustically obvious, and in a way that does not depend on
+# the song at all. Measured on a real episode:
+#
+#     … dialogue, punctuated by sub-second pauses every few seconds …
+#     1654.2 -> 1740.2   85.9 s of CONTINUOUS sound, no gap anywhere
+#     1740.2 -> 1742.0   silence
+#     1742.6             end of file
+#
+# Speech has gaps; a music bed does not. So the credits are the last long GAP-FREE block
+# that runs to the end of the file.
+#
+# This is a new SOURCE for credits, and docs/GOTCHAS.md is emphatic that credits must
+# never be fabricated. The distinction matters and is deliberate: the fallbacks that were
+# removed invented a timestamp from a formula (duration * 0.92) or from a single frame
+# being dark. This measures an actual acoustic boundary in the file, applies the same two
+# acceptance gates a fingerprint match must pass, AND requires peer episodes to agree on
+# its shape. A lone episode can never produce one.
+CREDITS_MIN_SEC        = 40.0   # shorter than this is a music cue, not a credit roll
+CREDITS_MAX_SEC        = 300.0
+CREDITS_BLOCK_GAP      = 0.25   # a gap this long or longer ends a "continuous" block
+CREDITS_CONSENSUS_TOL  = 25.0   # peers must agree on duration to within this
+CREDITS_MIN_AGREE      = 3      # absolute floor on peers, regardless of series size
+CREDITS_MIN_AGREE_PCT  = 0.50
+
+
+def continuous_blocks(runs: list[tuple[float, float, float]],
+                      t0: float, t1: float) -> list[tuple[float, float]]:
+    """Invert silence runs into spans of uninterrupted sound within [t0, t1]."""
+    blocks: list[tuple[float, float]] = []
+    prev = t0
+    for s, e, _d in runs:
+        if s > prev:
+            blocks.append((prev, s))
+        prev = max(prev, e)
+    if t1 > prev:
+        blocks.append((prev, t1))
+    return blocks
+
+
+def credits_candidate(path: str, duration: float, min_pct: float, end_margin: float,
+                      search_sec: float = 300.0) -> Optional[tuple[float, float]]:
+    """The last gap-free sound block that runs to the end of the file.
+
+    Returns (start, length) or None. Applies the same two correctness tests the
+    fingerprint path applies — start late enough, run to near the end — so a mid-episode
+    music cue can never qualify.
+    """
+    if not duration or duration <= 0:
+        return None
+    t0 = max(0.0, duration - search_sec)
+    runs = detect_silence(path, t0, duration - t0,
+                          noise_db=SILENCE_DB, min_sec=CREDITS_BLOCK_GAP)
+    if not runs:
+        return None
+    best: Optional[tuple[float, float]] = None
+    for s, e in continuous_blocks(runs, t0, duration):
+        length = e - s
+        if not (CREDITS_MIN_SEC <= length <= CREDITS_MAX_SEC):
+            continue
+        if s < duration * min_pct:
+            continue
+        if e < duration - end_margin:
+            continue
+        best = (round(s, 1), round(length, 1))   # keep the LAST qualifying block
+    return best
+
+
+def credits_consensus(candidates: dict[int, tuple[float, float]],
+                      total_eps: int) -> set[int]:
+    """Which episodes' candidates agree with their peers on credit-roll LENGTH.
+
+    Duration is the consensus axis rather than absolute position, because a credit roll
+    is a fixed-length asset while the episode in front of it varies. An episode whose
+    block length disagrees with the group median is discarded: it found something else.
+    """
+    if len(candidates) < max(CREDITS_MIN_AGREE, int(total_eps * CREDITS_MIN_AGREE_PCT)):
+        return set()
+    lengths = sorted(l for _s, l in candidates.values())
+    median = lengths[len(lengths) // 2]
+    return {idx for idx, (_s, l) in candidates.items()
+            if abs(l - median) <= CREDITS_CONSENSUS_TOL}
+
+
 # ── The snapper ──────────────────────────────────────────────────────────────
 
 def snap_boundary(coarse: float, cuts: list[Cut], *, radius: float,

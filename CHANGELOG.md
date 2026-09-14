@@ -1,5 +1,29 @@
 # Changelog
 
+## [12.4.0] — 2026-09-13
+**Skip the credits on shows that use a different song every episode.**
+
+Smart Skip finds credits by locating audio that repeats across episodes. Plenty of shows don't repeat it — Hacks, WandaVision, One Tree Hill's eighth season all put a different song over every credit roll — so the tail matcher correctly finds nothing and the entire series gets no credits skip at all. That was 46 of 47 Hacks files in the test library.
+
+The credits are still acoustically obvious, in a way that has nothing to do with which song is playing. Measured on a real episode:
+
+```
+… dialogue, punctuated by sub-second pauses every few seconds …
+1654.2 → 1740.2   85.9 s of CONTINUOUS sound, no gap anywhere
+1740.2 → 1742.0   silence
+1742.6            end of file
+```
+
+Speech has gaps. A music bed does not. So the credits are the **last long gap-free block that runs to the end of the file**.
+
+- **It must still pass the same two gates a fingerprint match does** — start after `MIN_CREDITS_PCT` of runtime, and run to within `OUTRO_END_MARGIN_SEC` of the end. A mid-episode music cue can never qualify.
+- **And peers must agree on the length of the roll.** Duration is the consensus axis rather than position, because a credit roll is a fixed-length asset while the episode in front of it varies. This is what stops a bad read: one test episode ended on a three-minute musical montage and produced a 201.5 s block against its peers' 85.9 s and 83.8 s — consensus rejected it rather than cutting three minutes off the show. A lone file can never confirm itself.
+- **Vetoed when the fingerprint already worked.** If more than 40% of a series got credits from the tail matcher, the credits clearly do repeat, so the stragglers are specials with no credit roll — and inventing one for them is the exact regression greedy clustering exists to prevent.
+
+**On `docs/GOTCHAS.md`'s "credits are fingerprint-only, no fabricated outro, ever":** this is a new source and the distinction is deliberate. The fallbacks that were removed invented a timestamp from a formula (`duration × 0.92`) or from one dark frame. This measures an actual acoustic boundary in the file, applies the same acceptance gates, and requires peer episodes to agree on its shape. Results are marked `analysis.method = "structural"` so they stay attributable.
+
+`ANALYZER_VERSION` → 7.
+
 ## [12.3.1] — 2026-09-13
 **Stop skipping a second into the episode.**
 
