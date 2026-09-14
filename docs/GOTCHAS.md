@@ -403,6 +403,15 @@ by `shutil.disk_usage(...).free` and returns the emptiest. Details that matter i
 - The dashboard pre-fills its Save Location from `GET /api/settings/download-path`, which
   returns the same auto-pick, and re-fetches it **every time the modal opens** — a cached value
   would keep aiming downloads at a drive that has since filled up.
+- **A root can opt out** (`settings.library_paths_no_auto[]`, toggled per path in the Storage
+  modal): it stays a library path, a destination chip and a valid explicit `save_path`, but the
+  automatic pick skips it. That's the NAS / archive-drive / read-only-disc case — being a good
+  place to *keep* media doesn't make it a good place to *dump downloads*. Two things to preserve
+  if you touch this: the flag covers **static .env roots too** (it lives in `library.json`, not
+  .env, so `QBIT_DOWNLOAD_PATH` itself can be opted out), and **opting everything out ignores the
+  opt-outs** rather than failing — a download has to land somewhere, and a config that says
+  "nowhere" is a mistake, not an instruction. Removing a path drops its opt-out with it, or
+  re-adding that path later would come back silently excluded.
 
 ### A pre-added torrent ignores the save path unless you `setLocation` it
 

@@ -10,6 +10,9 @@ The only persistent server-side state. Lives at the project root. Accessed via `
   "items":    [ … ],   // library entries
   "settings": {
     "library_paths": [ … ],            // UI-added paths (POST /api/settings/library-paths)
+    "library_paths_no_auto": [ … ],    // paths opted out of the automatic save-path pick (POST /api/settings/library-paths/auto).
+                                       // Holds STATIC .env roots too — the flag is ours, not .env's. Still valid as an explicit
+                                       // save_path and still shown as a destination chip; only `_auto_save_path()` skips them
     "max_volume": 200,                  // global VLC volume cap 0–200; default 200 (no cap)
     "vlc_start_volume": 50,             // VLC startup volume as % of max_volume; default 50 (half max)
     "vlc_night_mode": false,            // VLC dynamic-range compressor (night mode) on/off; default off

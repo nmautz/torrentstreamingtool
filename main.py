@@ -15589,9 +15589,18 @@ async def player_manifest(request: Request) -> JSONResponse:
 
 
 async def _all_library_paths() -> list[dict]:
-    """All configured library paths: static (.env) + dynamic (UI-added via library.json)."""
+    """All configured library paths: static (.env) + dynamic (UI-added via library.json).
+
+    Each entry carries `auto`: whether `_auto_save_path()` may pick this root for a
+    download nobody gave a folder to. Opted-out roots (a NAS, an archive drive, a
+    disc the box only *reads* from) stay fully usable — they're still library
+    paths, still one-tap destination chips, still valid in an explicit
+    `save_path` — they just never win the automatic pick.
+    """
     lib = await get_library()
-    dynamic: list[str] = lib.get("settings", {}).get("library_paths", [])
+    st = lib.get("settings", {})
+    dynamic: list[str] = st.get("library_paths", [])
+    no_auto = set(st.get("library_paths_no_auto", []))
     seen: set[str] = set()
     result = []
     for raw, is_static in [
@@ -15604,7 +15613,8 @@ async def _all_library_paths() -> list[dict]:
         p = (raw or "").strip()
         if p and p not in seen:
             seen.add(p)
-            result.append({"path": p, "label": Path(p).name or p, "static": is_static})
+            result.append({"path": p, "label": Path(p).name or p,
+                           "static": is_static, "auto": p not in no_auto})
     return result
 
 
@@ -15622,6 +15632,11 @@ async def _auto_save_path() -> str:
     stalling downloads and breaking playback — while a second, empty library
     drive sits idle. With no explicit choice from the user, spread the load.
 
+    Roots the user opted out of (`auto: false` — a NAS, an archive drive) are
+    never picked here, though they stay valid as an explicit `save_path`. If the
+    opt-outs would leave nothing to choose from, they're ignored rather than
+    failing the download: a download has to land somewhere.
+
     Never raises: any path that can't be stat'd (unmounted drive, a root that was
     configured then unplugged) is simply not a candidate, and if nothing is
     usable we fall back to the configured primary so behaviour degrades to the
@@ -15632,8 +15647,14 @@ async def _auto_save_path() -> str:
         infos = await _all_library_paths()
     except Exception:
         return fallback
-    if len(infos) <= 1:
-        return (infos[0]["path"] if infos else "") or fallback
+    eligible = [i for i in infos if i.get("auto", True)]
+    if not eligible:
+        log.warning("Every library path is opted out of auto-select — ignoring the "
+                    "opt-outs for this pick; a download has to land somewhere.")
+        eligible = infos
+    if len(eligible) <= 1:
+        return (eligible[0]["path"] if eligible else "") or fallback
+    infos = eligible
 
     def _probe(paths: list[str]) -> list[tuple[str, int]]:
         out = []
@@ -15650,7 +15671,8 @@ async def _auto_save_path() -> str:
     order = {info["path"]: n for n, info in enumerate(infos)}
     # Most free space wins. On a tie (same drive), prefer the configured primary,
     # then earliest in configuration order — so a single-drive setup keeps
-    # behaving exactly as it did before.
+    # behaving exactly as it did before. (When the primary is itself opted out it
+    # isn't in `infos` at all, so the tie-break simply never matches it.)
     best, free = max(usable, key=lambda it: (it[1] // _FREE_SPACE_BUCKET,
                                              it[0] == fallback,
                                              -order.get(it[0], len(order))))
@@ -15716,11 +15738,47 @@ async def add_library_path(path: str) -> JSONResponse:
 async def remove_library_path(request: Request, path: str) -> JSONResponse:
     async with mutate_library() as lib:
         _require_delete_auth(request, lib)
-        paths: list = lib.get("settings", {}).get("library_paths", [])
+        st = lib.setdefault("settings", {})
+        paths: list = st.get("library_paths", [])
         if path not in paths:
             raise HTTPException(404, "Path not found in UI-configured paths (static .env paths cannot be removed here).")
         paths.remove(path)
+        # Housekeeping: a removed path must not leave its opt-out behind, or
+        # re-adding it later would come back silently excluded from auto-select.
+        no_auto: list = st.get("library_paths_no_auto", [])
+        if path in no_auto:
+            no_auto.remove(path)
     return JSONResponse({"ok": True})
+
+
+@app.post("/api/settings/library-paths/auto")
+async def set_library_path_auto(request: Request, path: str, auto: bool) -> JSONResponse:
+    """Opt a configured root in or out of the automatic save-path pick.
+
+    `auto=false` means "this is a library path, but never send a download here on
+    its own" — the NAS / archive-drive case. It stays a one-tap destination chip
+    and a valid explicit `save_path`; only `_auto_save_path()` skips it.
+
+    Gated like path removal (admin session or PIN-verified profile): it decides
+    where the household's downloads land, which is the same class of decision.
+    """
+    p = path.strip()
+    if not p:
+        raise HTTPException(400, "Path cannot be empty.")
+    # Read the configured set BEFORE the transaction — `_all_library_paths`
+    # takes `_lib_lock` and it is not re-entrant.
+    known = [i["path"] for i in await _all_library_paths()]
+    if p not in known:
+        raise HTTPException(404, "Path is not configured.")
+    async with mutate_library() as lib:
+        _require_delete_auth(request, lib)
+        no_auto: list = lib.setdefault("settings", {}).setdefault("library_paths_no_auto", [])
+        if auto and p in no_auto:
+            no_auto.remove(p)
+        elif not auto and p not in no_auto:
+            no_auto.append(p)
+    return JSONResponse({"ok": True, "path": p, "auto": auto,
+                         "resolved_save_path": await _auto_save_path()})
 
 
 @app.get("/api/settings/disk-space")
@@ -15732,6 +15790,7 @@ async def get_disk_space() -> JSONResponse:
             disks.append({
                 "path":        info["path"],
                 "label":       info["label"],
+                "auto":        info.get("auto", True),
                 "total_bytes": usage.total,
                 "free_bytes":  usage.free,
                 "total_human": human_size(usage.total),
@@ -15739,7 +15798,8 @@ async def get_disk_space() -> JSONResponse:
                 "free_pct":    round(usage.free / usage.total * 100, 1) if usage.total else 0,
             })
         except Exception as e:
-            disks.append({"path": info["path"], "label": info["label"], "error": str(e)})
+            disks.append({"path": info["path"], "label": info["label"],
+                          "auto": info.get("auto", True), "error": str(e)})
     primary = disks[0] if disks else {}
     return JSONResponse({**primary, "disks": disks})
 

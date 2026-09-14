@@ -1,5 +1,19 @@
 # Changelog
 
+## [12.2.0] — 2026-09-13
+**A folder can be a good place to keep media and a bad place to dump downloads. Now you can say so.**
+
+12.1.0 made every configured library root a candidate for the automatic save-path pick. That's right for a second media drive and wrong for a NAS, an archive drive, or anything the box should only ever *read* from — nobody had a way to say "keep indexing this, just never download into it."
+
+- **Per-path opt-out.** `POST /api/settings/library-paths/auto?path=…&auto=false` marks a root as never-auto-picked, persisted as `settings.library_paths_no_auto[]`. It stays a library path, stays a one-tap destination chip in the download modal, and stays valid as an explicit `save_path` — only `_auto_save_path()` skips it. **Static `.env` roots can be opted out too** (the flag lives in `library.json`, not `.env`), so even `QBIT_DOWNLOAD_PATH` can be excluded from the automatic pick.
+- **Opting everything out ignores the opt-outs** rather than failing the download, with a warning logged. A download has to land somewhere; a configuration that says "nowhere" is a mistake, not an instruction.
+- **Gated like path removal** (admin session or PIN-verified profile) — it decides where the household's downloads land, which is the same class of decision. The response carries `resolved_save_path` so the UI can say where downloads will go *now*, rather than leaving you to guess.
+- **Storage modal toggle.** Each path row gains an **Auto** / **Auto off** button with a tooltip explaining exactly what the state means. Flipping it invalidates the download modal's cached path list and pre-picked save path, and reports the new destination in the toast.
+- **Removing a path drops its opt-out with it** — otherwise re-adding that path later would come back silently excluded from auto-select, with nothing in the UI having said so.
+- `GET /api/settings/library-paths` and `/api/settings/disk-space` now carry `auto` per path.
+
+See [docs/API.md](docs/API.md), [docs/GOTCHAS.md](docs/GOTCHAS.md), [docs/LIBRARY_DATA.md](docs/LIBRARY_DATA.md).
+
 ## [12.1.0] — 2026-09-13
 **A download nobody gave a folder now goes to the drive with the most room — not always the same one, until it's full.**
 

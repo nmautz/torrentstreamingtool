@@ -7069,6 +7069,18 @@ async function refreshStoragePathList(){
       const spaceTxt=sp&&!sp.error?`${sp.free_human} free of ${sp.total_human}`:"inaccessible";
       const usedPct=sp&&!sp.error?Math.min(100,100-sp.free_pct):0;
       const barColor=usedPct>90?"bg-red-500":usedPct>70?"bg-yellow-500":"bg-indigo-600";
+      // Auto-select opt-out. A path can be a perfectly good library root and still
+      // be a bad place to dump downloads (a NAS, an archive drive) — so this is a
+      // separate switch from removing the path, and it never hides the path from
+      // the download modal's chips.
+      const autoOn=p.auto!==false;
+      const autoBtn=`<button class="storage-auto-btn text-[10px] font-bold uppercase tracking-wider px-1.5 py-1 border transition-colors flex-shrink-0
+              ${autoOn?"border-indigo-800 text-indigo-400 hover:bg-indigo-900/40":"border-gray-700 text-gray-600 hover:text-gray-400"}"
+              data-path="${escHtml(p.path)}" data-auto="${autoOn?"1":"0"}"
+              title="${autoOn?"Downloads with no folder chosen can land here (whichever configured path has the most free space wins). Click to opt this path out."
+                            :"Never chosen automatically. You can still pick it by hand in the download modal. Click to opt it back in."}">
+          ${autoOn?"Auto":"Auto off"}
+        </button>`;
       const removeBtn=p.static
         ?`<span class="text-[10px] text-gray-700 flex-shrink-0">env</span>`
         :`<button class="storage-remove-btn text-gray-600 hover:text-red-400 transition-colors flex-shrink-0 p-1"
@@ -7083,6 +7095,7 @@ async function refreshStoragePathList(){
             <div class="text-xs font-medium text-gray-200 truncate">${escHtml(p.label)}</div>
             <div class="text-[11px] text-gray-600 font-mono truncate">${escHtml(p.path)}</div>
           </div>
+          ${autoBtn}
           ${removeBtn}
         </div>
         <div class="flex items-center gap-2 mt-1.5">
@@ -7095,6 +7108,9 @@ async function refreshStoragePathList(){
     }).join("");
     list.querySelectorAll(".storage-remove-btn").forEach(btn=>{
       btn.addEventListener("click",()=>removeStoragePath(btn.dataset.path, btn));
+    });
+    list.querySelectorAll(".storage-auto-btn").forEach(btn=>{
+      btn.addEventListener("click",()=>setStoragePathAuto(btn.dataset.path, btn.dataset.auto!=="1", btn));
     });
   }catch(err){
     list.innerHTML=`<p class="text-xs text-red-400 text-center py-3">${escHtml(err.message)}</p>`;
@@ -7110,6 +7126,24 @@ async function addStoragePath(btn){
       document.getElementById("storageNewPath").value="";
       await Promise.all([refreshStoragePathList(), loadDiskSpace()]);
       _libraryPaths=null;
+    } else {
+      const e=await r.json().catch(()=>({detail:"Failed."}));
+      showAlert(e.detail||"Failed.","error");
+    }
+  });
+}
+
+async function setStoragePathAuto(path, auto, btn){
+  await withInflight(`storage_auto_${path}`, btn, async () => {
+    const r=await fetch(`/api/settings/library-paths/auto?path=${encodeURIComponent(path)}&auto=${auto?"true":"false"}`,
+                        {method:"POST"});
+    if(r.ok){
+      const d=await r.json().catch(()=>({}));
+      await refreshStoragePathList();
+      _libraryPaths=null;          // the download modal re-reads flags with the paths
+      _defaultSavePath=""; _defaultSavePathInfo=null;   // and must re-pick, not reuse the old one
+      showAlert(auto ? "Downloads can be sent here automatically again."
+                     : `Opted out — downloads now default to ${d.resolved_save_path||"another path"}.`,"success");
     } else {
       const e=await r.json().catch(()=>({detail:"Failed."}));
       showAlert(e.detail||"Failed.","error");
@@ -20506,6 +20540,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">12.1.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">12.2.0</div>
 </body>
 </html>
