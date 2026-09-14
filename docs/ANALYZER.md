@@ -31,7 +31,7 @@ Chromaprint emits ~7.8 32-bit hash frames per second of audio.
 
 | Name | Value | Meaning |
 |------|-------|---------|
-| `ANALYZER_VERSION` | 8 | Bumped to force re-analysis when the algorithm changes (8 = credits from subtitles, structural audio pass removed; 7 = structural credits + boundary refinement; 5 = correct frame rate + consensus projection + edge trim; 4 = fingerprint-only credits + consensus filtering; 3 = gap-tolerant matcher) |
+| `ANALYZER_VERSION` | 9 | Bumped to force re-analysis when the algorithm changes (9 = chapters outrank the subtitle credits estimate; 8 = credits from subtitles, structural audio pass removed; 7 = structural credits + boundary refinement; 5 = correct frame rate + consensus projection + edge trim; 4 = fingerprint-only credits + consensus filtering; 3 = gap-tolerant matcher) |
 | `FP_FRAMES_PER_SEC` | 8.0768 | Chromaprint's emission rate. **Was 7.8, which was wrong** — see §Frame timing |
 | `FP_FRAME_LEADIN` | 21.43 | Constant frame shortfall; makes `_rate_for` affine |
 | `FP_RATE_SANITY` | (7.5, 8.6) | Self-calibration outside this band is rejected |
@@ -114,6 +114,13 @@ first thing to check.
 - **The pure-Python matcher (`_find_longest_match`) runs in a separate low-priority *process***, not a thread. It's CPU-bound Python that holds the GIL for seconds per pair; a worker thread would still starve the event loop via the GIL convoy effect (dashboard freezes for seconds while the host looks healthy — the "UI laggy but RDP fine" report). `analyze_series` spins up a one-worker `ProcessPoolExecutor` (`_new_match_executor`, dropped to BELOW_NORMAL by `_match_worker_init`) for both matching stages and tears it down in `finally`; `_run_match` falls back to `asyncio.to_thread` if the host can't create a pool. See [GOTCHAS.md](GOTCHAS.md).
 
 ## Credits from subtitles
+
+**Precedence: chapters > fingerprint > subtitles.** The pass runs only for episodes that
+still have no `credits_start` *after* refinement — not merely those the fingerprint
+missed. Those two sets differ, because refinement can supply an exact time from a chapter
+marker, and the list of fingerprint misses is built before it runs. Check the entry, never
+the stale list (12.5.1; it moved one file 106.9 s).
+
 
 For episodes the fingerprint gave no credits, `refiner.credits_from_subtitles` asks a
 different question: not "where does the recurring audio start?" but **"where does the

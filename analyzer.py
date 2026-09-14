@@ -43,7 +43,7 @@ except Exception:           # pragma: no cover - numpy missing
     _np = None
     _POP16 = None
 
-ANALYZER_VERSION = 8
+ANALYZER_VERSION = 9
 
 # Per-file failure codes recorded in skip_data[path].analysis when fingerprinting
 # could not produce usable skip points. The user-facing UI shows a "Skip
@@ -1253,6 +1253,13 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
             if not dur:
                 continue
             path = episodes[idx]["path"]
+            # `no_credits` was built from the FINGERPRINT result, before refinement ran —
+            # and refinement can supply credits from a chapter marker, which is exact and
+            # outranks anything measured here. Re-check the entry rather than the list, or
+            # a chapter-derived time gets overwritten by a ~2 s estimate (observed moving
+            # one file 106.9 s).
+            if (result.get(path) or {}).get("credits_start") is not None:
+                continue
             await _emit(stage="finalizing", current=total_eps, total=total_eps,
                         message=f"Looking for credit rolls — {n} of {len(no_credits)}",
                         episode_name=Path(path).name)

@@ -1,5 +1,16 @@
 # Changelog
 
+## [12.5.1] — 2026-09-14
+**A chapter marker's credits time is no longer overwritten by the subtitle estimate.**
+
+The subtitle pass decided which episodes to work on from a list built off the *fingerprint* result — computed before boundary refinement runs. Refinement can itself supply a credits time from a chapter marker, which is exact, so those episodes stayed on the list and got their chapter value replaced by a ~2 s estimate.
+
+Three files in the test library were affected. Two moved 13 s earlier; Attack on Titan ep25 moved **106.9 s later**. Caught by diffing the library against the pre-release snapshot rather than by anything failing.
+
+The pass now re-checks the entry it is about to write instead of trusting the stale list, so the precedence is what it always should have been: **chapters > fingerprint > subtitles**.
+
+`ANALYZER_VERSION` → 9.
+
 ## [12.5.0] — 2026-09-14
 **Credits now come from the subtitles, and the audio-only credit detector added in 12.4.0 is gone.**
 
