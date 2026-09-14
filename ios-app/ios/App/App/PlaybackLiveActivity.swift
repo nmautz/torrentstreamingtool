@@ -65,7 +65,9 @@ final class PlaybackLiveActivity {
     /// nothing is playing yet, so a live playback activity can only be a
     /// leftover whose stop() never reached us.
     func reapStrays() {
-        guard #available(iOS 16.1, *) else { return }
+        // 16.2, not 16.1: `end(_:dismissalPolicy:)` is 16.2+, and start() is
+        // gated the same way, so 16.1 can never have created one of ours.
+        guard #available(iOS 16.2, *) else { return }
         let strays = Activity<PlaybackAttributes>.activities
         guard !strays.isEmpty else { return }
         Task { for a in strays { await a.end(nil, dismissalPolicy: .immediate) } }
@@ -113,7 +115,7 @@ final class PlaybackLiveActivity {
     }
 
     func end() {
-        guard #available(iOS 16.1, *) else { return }
+        guard #available(iOS 16.2, *) else { return }
         let live = Activity<PlaybackAttributes>.activities
         _activity = nil
         lastKey = ""

@@ -1,5 +1,12 @@
 # Changelog
 
+## [12.0.1] — 2026-09-13
+**Fix the two compile errors that stopped 12.0.0 from building.**
+
+12.0.0's Swift shipped uncompiled (no Xcode on the Windows host it was written on). The first real `xcodebuild` run failed on `PlaybackLiveActivity.reapStrays()` and `.end()`: both were gated `#available(iOS 16.1, *)`, but `Activity.end(_:dismissalPolicy:)` is iOS **16.2**+. Both guards are now 16.2, which costs nothing — `start()` is already 16.2-gated, so iOS 16.1 can never have created one of our activities to reap or end.
+
+Verified in the same pass: the hand-edited `project.pbxproj` target membership is correct — `NativePlayback.o`, `PlaybackLiveActivity.o` and `PlaybackIntents.o` build into the App target, `PlaybackWidget.o` plus the shared `PlaybackIntents.o` into the widget extension, and `StreamLinkLiveActivities.appex` is embedded in the `.app` with `UIBackgroundModes: [audio]` and `NSSupportsLiveActivities` present in the built `Info.plist`.
+
 ## [12.0.0] — 2026-09-13
 **On-device playback no longer stops when you lock the phone — and keeps playing on a connected monitor.**
 
