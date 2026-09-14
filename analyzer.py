@@ -25,6 +25,14 @@ import subprocess
 from pathlib import Path
 from typing import Optional
 
+import refiner
+# Binary discovery + low-priority spawning live in mediabin so refiner can use them
+# without importing analyzer (analyzer imports refiner). Re-exported below so the ~38
+# `analyzer.ffmpeg_bin()` / `analyzer.fpcalc_bin()` call sites in main.py keep working.
+from mediabin import (  # noqa: F401  (re-exported for main.py)
+    _LOWPRIO_KW, _lp, _env_bin, ffmpeg_bin, ffprobe_bin, fpcalc_bin,
+)
+
 # numpy powers the vectorized matcher fast path (~50-100x the pure-Python
 # loop). Optional: a venv that predates the dependency still analyzes via the
 # pure-Python fallback, just slower.
@@ -35,7 +43,7 @@ except Exception:           # pragma: no cover - numpy missing
     _np = None
     _POP16 = None
 
-ANALYZER_VERSION = 5
+ANALYZER_VERSION = 6
 
 # Per-file failure codes recorded in skip_data[path].analysis when fingerprinting
 # could not produce usable skip points. The user-facing UI shows a "Skip
@@ -54,16 +62,7 @@ ERR_EXCEPTION    = "exception"      # raised inside analyze_series — message c
 # analysis would run at HIGH and lag the controls/UI — exactly what we're trying
 # to avoid. Windows: BELOW_NORMAL_PRIORITY_CLASS via creationflags. POSIX:
 # prepend `nice -n 10` (no-op when `nice` isn't on PATH). Mirrors main.py's prep.
-_LOWPRIO_KW: dict = {}
-if os.name == "nt":
-    _LOWPRIO_KW["creationflags"] = 0x00004000  # BELOW_NORMAL_PRIORITY_CLASS
-
-
-def _lp(cmd: list[str]) -> list[str]:
-    """Prefix `nice -n 10` on POSIX (when available) so the child de-prioritizes."""
-    if os.name == "posix" and shutil.which("nice"):
-        return ["nice", "-n", "10", *cmd]
-    return cmd
+# (_LOWPRIO_KW and _lp now live in mediabin — imported above.)
 
 # Chromaprint's raw fingerprint emission rate. Each frame is one 32-bit integer.
 #
@@ -204,27 +203,6 @@ _STAGE_SPAN = {
 }
 
 
-def _env_bin(env_key: str) -> Optional[str]:
-    """Read a binary path from the .env file. Falls back to PATH lookup."""
-    env_file = Path(__file__).parent / ".env"
-    if env_file.exists():
-        for line in env_file.read_text(encoding="utf-8", errors="replace").splitlines():
-            line = line.strip()
-            if line.startswith(f"{env_key}="):
-                val = line.split("=", 1)[1].strip()
-                if val and Path(val).exists():
-                    return val
-    return shutil.which(env_key.replace("_BIN", "").replace("_", "").lower())
-
-
-def fpcalc_bin() -> Optional[str]:
-    return _env_bin("_FPCALC_BIN") or shutil.which("fpcalc")
-
-
-def ffmpeg_bin() -> Optional[str]:
-    return _env_bin("_FFMPEG_BIN") or shutil.which("ffmpeg")
-
-
 def is_available() -> bool:
     return bool(fpcalc_bin() and ffmpeg_bin())
 
@@ -299,18 +277,13 @@ def _media_duration(file_path: str) -> Optional[float]:
     ff = ffmpeg_bin()
     if not ff:
         return None
-    # Swap only the FILENAME, never the whole path: the bundled Windows build
-    # lives at "tools/ffmpeg/ffmpeg-8.1.1-essentials_build/bin/ffmpeg.exe", and a
-    # blanket str.replace rewrote every one of those "ffmpeg" segments — producing
-    # a "tools/ffprobe/ffprobe-…/bin/ffprobe.exe" path that never exists. Every
-    # Windows install therefore fell through to the brittle stderr-parsing branch,
-    # whose re.search then raised on a None stderr and crashed the whole series
-    # ("Analysis crashed: expected string or bytes-like object, got 'NoneType'").
-    ff_path = Path(ff)
-    cand = ff_path.with_name(ff_path.name.replace("ffmpeg", "ffprobe"))
-    ffprobe = str(cand) if cand.name != ff_path.name else None
-    if not ffprobe or not Path(ffprobe).exists():
-        ffprobe = shutil.which("ffprobe")
+    # mediabin.ffprobe_bin() swaps only the FILENAME of the ffmpeg path. A blanket
+    # str.replace rewrites EVERY "ffmpeg" segment of the bundled Windows path
+    # ("tools/ffmpeg/ffmpeg-8.1.1-essentials_build/bin/ffmpeg.exe") and yields a path
+    # that never exists - which silently demoted every Windows host to the brittle
+    # stderr branch below, whose re.search then raised on a None stderr and crashed the
+    # whole series. See docs/GOTCHAS.md.
+    ffprobe = ffprobe_bin()
     if not ffprobe:
         # Fall back to parsing ffmpeg's stderr
         proc = subprocess.run(
@@ -854,6 +827,112 @@ async def _build_clusters_async(
     return clusters
 
 
+# Boundary refinement radii. The fingerprint finds where episodes STOP SHARING audio,
+# which is several seconds short of where the intro actually ends — the matcher
+# legitimately refuses the theme's fade-out, where the mix differs per episode. Measured
+# on real episodes the residual is ~6 s, so the intro-end radius has to be wider than
+# that or the correct candidate falls outside the window and nothing snaps.
+#
+# NOTE the direction: before the FP_FRAMES_PER_SEC fix the fingerprint OVER-shot the
+# intro end; now it UNDER-shoots. The bias is forward for that reason, and it is a soft
+# preference rather than a one-sided window precisely because that sign has moved once.
+REFINE_INTRO_END_RADIUS   = 10.0
+REFINE_INTRO_START_RADIUS = 4.0
+REFINE_MIN_CONF           = 0.45
+
+
+def _refine_one(path: str, intro: Optional[dict], credits_start: Optional[float],
+                dur: Optional[float]) -> tuple[Optional[dict], Optional[float], str, Optional[dict]]:
+    """Pin a coarse fingerprint boundary to a chapter marker or a silence edge.
+
+    Returns (intro, credits_start, method, refine_block). Never raises and never returns
+    a boundary it did not find evidence for: with no chapters and no silence in range the
+    inputs come back unchanged with method "fingerprint".
+    """
+    audio_base = {
+        "intro_start":   intro["start"] if intro else None,
+        "intro_end":     intro["end"] if intro else None,
+        "credits_start": credits_start,
+    }
+    prov: dict = {}
+    method = "fingerprint"
+    try:
+        chapters = refiner.probe_chapters(path)
+    except Exception:
+        chapters = []
+
+    # 1. A named, plausible intro chapter is authoritative — it was written from the
+    #    master, not inferred. But it still loses to a confirmed audio match it flatly
+    #    contradicts: a disagreement that large means they are describing different
+    #    things, and the fingerprint is the one with cross-episode evidence behind it.
+    ch_intro = refiner.chapter_intro(chapters) if chapters else None
+    if ch_intro and intro and abs(ch_intro["end"] - intro["end"]) > refiner.CHAPTER_VETO_SEC:
+        ch_intro = None
+    if ch_intro:
+        intro = ch_intro
+        method = "chapters"
+        prov["intro_start"] = {"t": intro["start"], "conf": 1.0, "src": "chapter"}
+        prov["intro_end"]   = {"t": intro["end"],   "conf": 1.0, "src": "chapter"}
+    elif intro:
+        # 2. No usable chapter — snap the audio boundary onto the silence that separates
+        #    the theme from the first line of dialogue.
+        cuts = list(refiner.chapter_cuts(chapters)) if chapters else []
+        win_start = max(0.0, intro["start"] - 12.0)
+        win_len = (intro["end"] + REFINE_INTRO_END_RADIUS + 4.0) - win_start
+        runs = refiner.merge_silence(refiner.detect_silence(path, win_start, win_len))
+        if not runs:
+            runs = refiner.merge_silence(refiner.detect_silence(
+                path, win_start, win_len,
+                noise_db=refiner.SILENCE_DB_LOOSE, min_sec=refiner.SILENCE_MIN_SEC_LOOSE))
+        cuts += refiner.silence_cuts(runs)
+
+        # An intro END must never land on a silence START — that is the instant the theme
+        # stopped, not the instant content resumes, and snapping there parks the viewer
+        # in several seconds of dead air.
+        t, conf, src = refiner.snap_boundary(
+            intro["end"], cuts, radius=REFINE_INTRO_END_RADIUS, bias="fwd",
+            prefer=("chapter", "silence_end"), allow=("chapter", "silence_end"),
+            min_conf=REFINE_MIN_CONF,
+            floor=intro["start"] + MIN_INTRO_SEC, ceil=intro["end"] + REFINE_INTRO_END_RADIUS,
+        )
+        if conf > 0:
+            intro = dict(intro, end=round(t, 1))
+            prov["intro_end"] = {"t": round(t, 1), "conf": conf, "src": src}
+            method = "fingerprint+silence"
+
+        # The intro START moves symmetrically: the theme begins where the silence before
+        # it ends. Tighter radius and a higher bar, because a start error eats content.
+        t, conf, src = refiner.snap_boundary(
+            intro["start"], cuts, radius=REFINE_INTRO_START_RADIUS, bias="back",
+            prefer=("chapter", "silence_end"), allow=("chapter", "silence_end"),
+            min_conf=0.55, floor=0.0, ceil=intro["end"] - MIN_INTRO_SEC,
+        )
+        if conf > 0:
+            intro = dict(intro, start=round(t, 1))
+            prov["intro_start"] = {"t": round(t, 1), "conf": conf, "src": src}
+
+    # 3. Credits. A named chapter is used when present; otherwise the fingerprint value
+    #    stands untouched. Measured against chapter ground truth, the corrected
+    #    fingerprint already lands within ~0.1 s, so there is nothing to gain from
+    #    snapping it — and moving credits EARLY truncates real content, which is the
+    #    most user-hostile error available here.
+    if chapters and dur:
+        cc = refiner.chapter_credits(chapters, dur, MIN_CREDITS_PCT, OUTRO_END_MARGIN_SEC)
+        if cc is not None and (credits_start is None
+                               or abs(cc - credits_start) <= refiner.CHAPTER_VETO_SEC):
+            credits_start = cc
+            prov["credits_start"] = {"t": cc, "conf": 1.0, "src": "chapter"}
+            if method == "fingerprint":
+                method = "chapters"
+
+    if not prov:
+        return intro, credits_start, method, None
+    return intro, credits_start, method, {"version": REFINER_VERSION, "audio": audio_base, **prov}
+
+
+REFINER_VERSION = 1
+
+
 async def analyze_series(items: list[dict], progress_cb=None) -> dict:
     """Analyze a series of items, returning per-file intro/credits ranges.
 
@@ -1100,12 +1179,24 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
             if cs >= dur * MIN_CREDITS_PCT and ce >= dur - OUTRO_END_MARGIN_SEC:
                 credits_start = round(cs, 1)
 
+        # Pin the coarse boundaries to something physical (chapter marker / silence).
+        # Off-loop: this spawns ffprobe + ffmpeg. Never allowed to fail the episode.
+        method, refine_block = "fingerprint", None
+        if intro or credits_start is not None:
+            try:
+                intro, credits_start, method, refine_block = await _fp_thread(
+                    _refine_one, path, intro, credits_start, dur)
+            except Exception:
+                method, refine_block = "fingerprint", None
+
         if intro or credits_start is not None:
             result[path] = {
                 "intro": intro,
                 "credits_start": credits_start,
+                **({"refine": refine_block} if refine_block else {}),
                 "analysis": {
                     "version": ANALYZER_VERSION,
+                    "method":  method,
                     "source": "auto",
                 },
             }

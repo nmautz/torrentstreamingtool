@@ -1,5 +1,19 @@
 # Changelog
 
+## [12.3.0] — 2026-09-13
+**Smart Skip now lands on the first frame of the episode, not six seconds of dead air before it.**
+
+12.2.1 corrected *how* fingerprint frames are converted to seconds. This corrects *what* the fingerprint is measuring. The matcher finds where episodes stop sharing audio — which is not the same instant the intro ends, because the theme's fade-out is mixed differently in every episode and the matcher rightly refuses it. Measured against chapter markers on real episodes, the corrected fingerprint lands **6.25 s short** of the true boundary. So the skip was accurate and still dropped you into several seconds of silence.
+
+- **Chapter markers are now the first source of truth.** Many rips carry them, and where they exist they are exact: measured across six Death Note episodes, chapter-derived intro ends were within **0.04 s** of truth. Named `Opening` / `Intro` / `OP` / `Avant` / `Ending` / `Credits` / `ED` chapters are read with `ffprobe`, and generic `Chapter 4` ones are kept as corroborating snap candidates because rippers often place one exactly on the boundary.
+- **A mislabelled chapter can't hijack the skip.** A film in the test library has a DVD scene list whose first chapter is literally titled **"Opening" and runs 0 → 631.92 s**. Without a guard, that instructs Smart Skip to skip the first ten and a half minutes of the movie. An intro chapter must be 15-180 s long and start within the first 6 minutes, a credits chapter must pass the same start-late/run-to-the-end tests a fingerprint match does, and any chapter disagreeing with a confirmed audio match by more than 20 s is discarded — the audio has cross-episode evidence behind it, the label is just a string.
+- **Without chapters, the boundary snaps to the silence between the theme and the dialogue.** Measured error falls from −6.25 s to **+1.33 s**. The transition is really `theme → silence → brief stinger → silence → content`, so brief silences are merged before the end is taken; otherwise the nearest-candidate rule picks the *first* silence's start and parks you in the dead air it was supposed to skip.
+- **An intro end can never snap onto a silence *start*.** That is the instant the theme stopped, not the instant content resumes. Kind filtering is a hard rule now, not a ranking preference.
+- **Provenance is recorded per boundary** in a new top-level `refine` block — the pre-refinement audio values, plus the confidence and source for each boundary (`chapter`, `silence_end`, or `chapter+silence_end` when two independent kinds agree). It sits at the top level rather than under `analysis` because a manual admin edit replaces that dict wholesale. `analysis.method` says which path produced the result.
+- **New `mediabin.py` and `refiner.py`**, both leaf modules. Binary discovery and low-priority spawning moved to `mediabin` so `refiner` can use them without a circular import; `analyzer` re-exports them so existing call sites are unchanged.
+
+`ANALYZER_VERSION` → 6.
+
 ## [12.2.1] — 2026-09-13
 **Smart Skip was measuring time with a ruler that was 3.55% too long.**
 
