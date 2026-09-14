@@ -304,6 +304,27 @@ round-to-nearest because VLC's HTTP `seek` takes whole seconds); the device play
 looks like it lands slightly early, fix the detection, not the pad** — a bigger pad hides
 a detection bug on every show in the library to paper over one.
 
+**The START pad is a separate number and follows the opposite rule.** Don't read the
+paragraph above as "keep every pad at zero": it is about where a skip *lands* (intro
+end). Where a skip *fires* (intro start) is governed by `SKIP_INTRO_START_PAD_SEC = 1.5`
+in `main.py`, mirrored by `LP_SKIP_INTRO_START_PAD` in `static/index.html` — a fourth
+copy of a shared number, same drift hazard as the three above.
+
+The two ends are not symmetric in cost, which is why they get opposite treatment:
+
+| | firing late | firing early |
+|---|---|---|
+| **intro start** | a second of theme the viewer was skipping anyway | **cuts the last moment of the preceding scene — real content, silently gone** |
+| **intro end** | lands inside the episode, skipping content | lands back in the theme, obvious and self-correcting |
+
+So the start deliberately errs late and the end deliberately errs tight. Both auto-skip
+paths used to fire at exactly `intro.start`, which handed the viewer every bit of the
+marker's authoring slack: chapter markers are placed by hand and routinely sit a beat
+before the first frame of the opening (on the outgoing scene's fade rather than the cut).
+Reported on Attack on Titan S4 as about a second of the pre-OP scene disappearing. Go
+through `_intro_skip_at()` rather than comparing against `intro.start` directly, and
+don't "fix" a late-feeling intro skip by driving this back to zero.
+
 ### Smart Skip fingerprinting triggers on stream prep, not on download — and failures are sticky
 
 Audio fingerprinting (`analyzer.py`) is kicked off by `_ensure_analysis_for` at the end of `_run_offline_job` (a successful HLS bundle), **not** by `library_download_monitor`'s ready-flip — that call was deliberately removed. Two consequences to keep in mind: (a) **content that is never stream-prepped never gets `skip_data`** — fine because auto-prep is on by default, but don't "restore" a download-ready trigger expecting both. (b) The hook is **fire-and-forget**: awaited only to schedule (one `get_library` + `create_task`), never to run the pass, so it must never block the prep job or fail the bundle — keep it wrapped in try/except like the STT hook. A `/prep-all` fires the hook once per file; `_schedule_series_analysis_if_eligible` has a running-guard (skip if the series job is already `running`) so they don't stack.

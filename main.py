@@ -7726,6 +7726,30 @@ def _intro_seek_target(end_at: float) -> int:
     """Whole-second landing position for an intro skip (VLC's seek granularity)."""
     return max(0, int(end_at + SKIP_INTRO_PAD_SEC))
 
+
+# How long after the detected intro START the skip actually fires.
+#
+# The two ends of an intro are NOT symmetric in cost. Firing late costs a second or two
+# of theme music the viewer was going to skip anyway; firing early cuts the last moment
+# of the scene before it — real content, gone, with no way to know it was missed. So the
+# error budget is spent deliberately on the late side.
+#
+# It needs to be non-zero because `intro.start` is only as good as its evidence, and the
+# best evidence still has placement error: a chapter marker is authored by hand and often
+# sits a beat before the first frame of the opening (on the outgoing scene's fade rather
+# than the cut). Both auto-skip paths fired at exactly `intro.start`, so that authoring
+# slack came straight off the end of the preceding scene — reported on Attack on Titan
+# S4 as roughly a second of the pre-OP scene disappearing.
+#
+# Clamped to the intro end so a short opening can't have its skip point pushed past it.
+# Mirrored by LP_SKIP_INTRO_START_PAD in static/index.html — keep the two in step.
+SKIP_INTRO_START_PAD_SEC = 1.5
+
+
+def _intro_skip_at(start: float, end: float) -> float:
+    """Playback position at which an intro skip should fire."""
+    return min(start + SKIP_INTRO_START_PAD_SEC, end)
+
 # Deferred "mark watched" on skip-to-next-episode. When the viewer advances to
 # the next episode, treat the current one as finished — regardless of how far in
 # they were when they skipped. We arm a grace timer instead of marking
@@ -8091,19 +8115,23 @@ async def _maybe_emit_skip_offer(
     if intro and intro.get("end", 0) > intro.get("start", 0):
         start = float(intro.get("start", 0))
         end   = float(intro.get("end",   0))
+        # Fire a beat AFTER the detected start — see SKIP_INTRO_START_PAD_SEC. Both the
+        # auto countdown and the manual button hang off this, so an eager tap can't cut
+        # into the scene before the opening either.
+        skip_at = _intro_skip_at(start, end)
         if prefs.get("auto_skip_intro"):
             # Auto path: run the countdown over the `lead` seconds *before* the
             # intro and skip the whole intro the moment it starts. Trigger once
             # per file; the countdown task owns the screen from there.
-            if ((start - SKIP_COUNTDOWN_INTRO_SEC) <= pos_sec < end
+            if ((skip_at - SKIP_COUNTDOWN_INTRO_SEC) <= pos_sec < end
                     and state.skip_offer_file != f"{file_path}#intro-done"):
                 state.skip_offer = None
                 _start_skip_countdown(
-                    "intro", item, file_path, end, start, SKIP_COUNTDOWN_INTRO_SEC,
+                    "intro", item, file_path, end, skip_at, SKIP_COUNTDOWN_INTRO_SEC,
                 )
                 await broadcast("state", state_snapshot())
                 return
-        elif ((start - SKIP_PREROLL_SEC) <= pos_sec < end
+        elif ((skip_at - SKIP_PREROLL_SEC) <= pos_sec < end
                 and state.skip_offer_file != f"{file_path}#intro-done"):
             # Manual path: show the Skip button across [start - PREROLL, end].
             # The done-marker guard mirrors the auto path so a dismissed offer

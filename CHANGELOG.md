@@ -1,5 +1,16 @@
 # Changelog
 
+## [12.4.3] — 2026-09-14
+**An intro skip no longer clips the last second of the scene before the opening.**
+
+Both auto-skip paths fired at exactly the detected `intro.start`. That looks right and isn't, because the detected start carries the placement error of whatever produced it — and the best source, a chapter marker, is authored by hand and routinely sits a beat *before* the first frame of the opening, on the outgoing scene's fade rather than the cut. All of that slack came straight off the end of the preceding scene. Reported on Attack on Titan S4 as roughly a second of the pre-OP scene vanishing.
+
+The skip now fires 1.5 s after the detected start (`SKIP_INTRO_START_PAD_SEC`, mirrored by `LP_SKIP_INTRO_START_PAD` in the device player), clamped so a short opening can't have its skip point pushed past its own end. The manual **Skip intro** button moves with it, so tapping the moment it appears can't cut into the scene either.
+
+The two ends of an intro are not symmetric and are now treated that way: firing late costs a second of theme the viewer was skipping anyway, while firing early destroys content with no signal that anything was missed. The landing pad at the intro *end* is unchanged and stays tight.
+
+No re-analysis — no detected boundary changed, only when the skip acts on one.
+
 ## [12.4.2] — 2026-09-14
 **Stop the credit-roll search from looking like a hung analysis.**
 

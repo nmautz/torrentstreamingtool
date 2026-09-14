@@ -19225,6 +19225,9 @@ function _lpAutoSkipPrefs() {
 // skip point and fires automatically when playback reaches it (the user can still
 // tap Skip to act early, or Hide to cancel). When auto-skip is off, it's the
 // manual button only, exactly as before.
+// How long after the detected intro START the skip fires. Mirrors
+// SKIP_INTRO_START_PAD_SEC in main.py — the two must stay in step.
+const LP_SKIP_INTRO_START_PAD = 1.5;
 function lpEvaluateSkipOffer(t) {
   // No skip points (yet) for this file — clear any leftover tile from a prior
   // file rather than returning with it still on screen.
@@ -19237,15 +19240,18 @@ function lpEvaluateSkipOffer(t) {
   // Intro window
   if (intro && intro.start != null && intro.end != null
       && !lp.skipDoneFor.has(fileKey + "#intro")) {
+    // Fire a beat AFTER the detected start. Mirrors SKIP_INTRO_START_PAD_SEC in main.py
+    // (see there for why): late costs a moment of theme, early cuts real content.
+    const introAt = Math.min(intro.start + LP_SKIP_INTRO_START_PAD, intro.end);
     // Auto-skip only while there's still intro left to skip (>1 s), matching VLC.
     if (prefs.intro && (intro.end - t) > 1) {
-      if (t >= intro.start - LP_SKIP_LEAD_INTRO) {
+      if (t >= introAt - LP_SKIP_LEAD_INTRO) {
         lp.skipOfferType = "intro"; lp.skipOfferEnd = intro.end;
-        if (t >= intro.start) { lpAcceptSkipOffer(); return; }
-        const n = Math.min(LP_SKIP_LEAD_INTRO, Math.max(1, Math.ceil(intro.start - t)));
+        if (t >= introAt) { lpAcceptSkipOffer(); return; }
+        const n = Math.min(LP_SKIP_LEAD_INTRO, Math.max(1, Math.ceil(introAt - t)));
         _lpShowSkipOffer("Skipping Intro in " + n); return;
       }
-    } else if (t >= intro.start - 2 && t < intro.end - 2) {
+    } else if (t >= introAt - 2 && t < intro.end - 2) {
       lp.skipOfferType = "intro"; lp.skipOfferEnd = intro.end;
       _lpShowSkipOffer("Skip Intro"); return;
     }
@@ -20545,6 +20551,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">12.4.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">12.4.3</div>
 </body>
 </html>
