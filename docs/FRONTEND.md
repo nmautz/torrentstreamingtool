@@ -506,6 +506,23 @@ window starts at load, giving the resume seek time to land before any save
 can fire. There is no offline outbox — a single best-effort POST is the
 entire write path.
 
+**iOS background playback (`_np*`, app only).** A block next to the other native
+glue pre-arms the `NativePlayback` plugin so playback survives a lock:
+`_appPlaybackPrefs()` reads the two Settings toggles (`streamlink_app_bgplay`,
+`streamlink_app_tvmode`; default on); `_npOk()` gates everything on the app + plugin
++ a `lp._nativeMaster` for the current file; `_npPayload()` builds the state (using
+the project's trusted-playhead rule — `currentTime > 2 ? currentTime : lp.lastKnownT`);
+`_npArm()` pushes it on load, play, pause, seeked, and every `_lpSaveLocalTracks`
+track pick; `_npTick()` refreshes position at 1 Hz from `_lpClockTick`; `_npDisarm()`
+runs in `lpUnloadCurrent`/`lpStop`. `_npHandBack()` reclaims the playhead on
+foreground — **the `visibilitychange`→visible branch now chains
+`_lpRecoverActiveSub` / `_lpRecoverMediaPipeline` after it** instead of racing them on
+independent timers, because those probes read the playhead and the frame-counting one
+would misfire against a mid-seek element. `_npSetTvMode()` / `_npOnDisplayChange()`
+drive TV Mode (the `#lpTvVeil` blackout + the `#lpTvBtn` control, shown only while a
+display is connected). All of it is inert in a browser. See
+[STREAMING.md § 2b](STREAMING.md) and [GOTCHAS.md](GOTCHAS.md).
+
 Per-file Prep state for the picker rows lives in `prepFileState:
 Map<offKey, "prepping"|"ready">`. `prepForStreaming(itemId, filePath, fileName)`
 first awaits `confirmStreamPrepWarning()` (the once-per-session lag warning),

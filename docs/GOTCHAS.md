@@ -1229,6 +1229,68 @@ ffmpeg's `-c:s webvtt` strips karaoke, positioning, custom fonts, and animations
 - **Offline iOS player (`ios-app/www/downloads.html`) has its own libass copy.** The offline player is a bare native `<video>` served from the app bundle (the host dashboard can't load offline), so it can't reuse `static/index.html`'s overlay. It ships a parallel implementation (`_setupOfflineSubs`/`_applyStyledOfflineSub`) with the octopus assets **vendored into `ios-app/www/`** (they bundle via `cap sync`; not the host's `/vendor/`). The raw `sub_<i>.ass` + `font_<n>` files download with the bundle (they aren't rung-specific, so `_bundle_select_rung` keeps them) and are served by the native `LocalMediaServer` — whose MIME map mirrors `_HLS_MIME` (add new suffixes there too) and which sends `Access-Control-Allow-Origin: *`. The `<video>` needs `crossorigin="anonymous"` or the out-of-band VTT `<track>` fetch is CORS-blocked. Any native `www/` or `.swift` change needs a full `./build-ipa.sh` rebuild.
 - **The octopus WORKER must never fetch from the loopback `LocalMediaServer` — prefetch on the main thread (fixed 7.17.1).** When the ASS/fonts live at `http://127.0.0.1:<port>` (a downloaded bundle — both the offline player and the dashboard's device-copy playback), passing their URLs to SubtitlesOctopus makes the **worker** fetch them with synchronous XHR — a cross-origin request from a host-/`capacitor://`-origin worker that WKWebView doesn't reliably allow, and its failure surfaces only as `onError` → the silent VTT fallback, i.e. "styled subs quietly render unstyled". The *page's* loopback fetches provably work (`meta.json`/`master.m3u8` load that way), so both players prefetch the `.ass` as text and every font as a Blob on the main thread, then hand octopus `subContent` + same-origin `blob:` font URLs (revoked on teardown — the worker copies them into its FS at init). Host-bundle playback keeps plain `subUrl`/font URLs (same-origin for the worker, proven path). Also fixed 7.17.1: the dashboard's synthesized local prep omitted `meta.fonts`, so even a working overlay lost the embedded fansub typefaces on the device copy.
 
+### iOS background playback — the rules that make it work at all
+
+Nine constraints, each of which independently breaks the feature. See
+[STREAMING.md § 2b](STREAMING.md) for the design and `NativePlayback.swift`.
+
+- **`UIBackgroundModes: audio` does NOT keep a WKWebView `<video>` playing.** WebKit
+  interrupts any media session with a *video* track when the app backgrounds — the
+  background mode keeps the *process* alive, not the web element. That's the whole
+  reason a native `AVPlayer` exists here. Don't "simplify" this away by deleting the
+  plugin and just adding the plist key; it will look right and play nothing.
+- **A backgrounded app cannot draw — so libass on an external display is impossible.**
+  No CADisplayLink ticks, no CoreAnimation commits, no rendering to a second
+  `UIScreen`. Styled ASS therefore cannot survive a true lock by any route. TV Mode
+  (screen blanked, app *foreground*, mirroring alive) is the answer, and is also the
+  fallback if wired external playback disappoints.
+- **`AVVideoComposition` is unsupported for HLS assets**, so the "burn the subtitles
+  into the frames inside AVFoundation" idea is a dead end. Every StreamLink playback
+  path is HLS.
+- **`Activity.request` from a background handler is unreliable.** The playback Live
+  Activity is therefore started on the first `arm()` — while foreground — not at
+  handoff time. iOS surfaces it in the Island on minimise, the same behaviour
+  `TVRemote.swift` already relies on.
+- **Never push a Live Activity's clock at 1 Hz.** ActivityKit budgets updates and
+  starts dropping them, which freezes the very clock the pushes were meant to drive.
+  Seed SwiftUI's self-advancing `ProgressView(timerInterval:)` / `Text(timerInterval:)`
+  from a sampled `(position, stamp)` pair — they count up with *no* pushes — and push
+  only on real state changes plus a slow heartbeat. `PlaybackLiveActivity.changeKey()`
+  deliberately excludes `position` for this reason.
+- **`Shared/` compiles into BOTH targets, so its intents can't name App-target types.**
+  Referencing `NativePlaybackManager` from `PlaybackIntents.swift` fails the widget
+  extension build with "cannot find in scope". The seam is `PlaybackCommandBus`: the
+  shared file declares only a protocol + weak static sink, the App target registers
+  the real player, and the intent — which runs in the *app's* process — finds it at
+  tap time. A command arriving with no sink (app was killed, activity still on screen)
+  is parked in the App Group and drained on `didBecomeActive`.
+- **`AVAudioSession.setCategory(.playback)` is PROCESS-WIDE.** Activating it at launch
+  would make every WKWebView sound ignore the ringer switch from boot. It's set
+  lazily, at the moment of handoff, and deactivated with
+  `.notifyOthersOnDeactivation` on hand-back so WebKit gets its session back.
+- **TV Mode must restore brightness on every exit path, including a crash.** iOS does
+  **not** put brightness back after a force-quit, so a crash while dimmed leaves the
+  user with an apparently dead phone and no clue why. Covered: explicit exit,
+  `willResignActive` (call / Control Centre / power button), `willTerminate`, and a
+  `strandedBrightness` value in the App Group restored on the next `load()`. If you
+  add a new path into TV Mode, add its exit too.
+- **`AVMediaSelectionGroup` ordering is not guaranteed to match `meta.json`.** Match
+  audio/subtitle options by `displayName` then `locale.languageCode` — never by index,
+  or some bundles silently play the wrong language.
+
+Two more, on the JS side:
+
+- **`visibilitychange`→hidden cannot be trusted to complete before suspension.** It is
+  a best-effort freshness push only; the native side extrapolates the playhead from
+  the last arm using wall-clock elapsed time, with a 0.3 s rewind so error always
+  lands *behind* the true position. Don't make the handoff depend on that event.
+- **The prefs live in host-origin `localStorage`, and proxied playback has its own
+  empty origin.** `streamlink_app_bgplay` / `streamlink_app_tvmode` must be seeded
+  through the `am=` param in `_appTryLocalHandoff` **and** read back in
+  `_appProxiedSeedStorage` — otherwise background playback reads as "off" in exactly
+  the common case (playing a *downloaded* episode online, which always routes through
+  a proxied session). Same trap as the auto-manage prefs.
+
 ### iOS drops a showing `<track>`'s cues when the WKWebView is suspended — re-showing won't re-fetch, recreate the element
 
 On iOS (Safari and the Capacitor app), backgrounding the app / opening another app while a subtitle `<track>` is set to `mode="showing"` makes WebKit discard that track's parsed cues. On return the element reports `readyState === 2` (LOADED) but `track.cues` is empty (or `readyState === 3` ERROR) — and setting `mode="showing"` again does **not** trigger a re-fetch, because WebKit considers the resource already loaded. The active subtitle therefore renders nothing while every other track still works: tracks that weren't showing at suspend time are untouched (they fetch fresh on first selection), which is exactly why "switch to the AI track and it appears" and "stop + resume fixes it" (a full reload rebuilds every `<track>`). The only reliable recovery is to **remove the `<track>` element and append a fresh one** so the browser re-fetches the VTT — re-assigning `.src` or toggling `.mode` is not enough. `_lpSubTrackBroken` / `_lpRecreateSubTrack` / `_lpRecoverActiveSub` in `static/index.html` do this for the active track on `visibilitychange`→visible (and when the user re-selects a dropped track); they guard on cues actually being empty so healthy tracks never flicker. See [STREAMING.md](STREAMING.md).

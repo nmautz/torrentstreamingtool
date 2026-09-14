@@ -1001,6 +1001,102 @@ Two ways to populate the cache:
    Full detail in [FRONTEND.md](FRONTEND.md); the iOS/fullscreen footgun is
    in [GOTCHAS.md](GOTCHAS.md).
 
+### 2b. Native background playback (iOS app only)
+
+**The problem.** The player is a `<video>` inside a WKWebView. WebKit **pauses any
+video-bearing `<video>` the moment the app backgrounds**, regardless of audio-session
+configuration — so locking the phone used to stop playback dead. Screen *mirroring* to
+an external monitor dies at lock for the same reason (the lock screen replaces it).
+
+**The shape of the fix.** Two complementary paths, both armed at once, both
+switchable off in ☰ App → Settings → Playback (`streamlink_app_bgplay`,
+`streamlink_app_tvmode`; default on):
+
+| Path | Trigger | Monitor | Styled ASS | Phone screen |
+|---|---|---|---|---|
+| **TV Mode** | a display connects, app stays foreground | mirroring | **yes** (libass + custom UI) | black, never auto-locks |
+| **Native handoff** | app backgrounds (lock / app switch) | `AVPlayer` external playback | no — plain VTT | locked |
+
+They're orthogonal: TV Mode doesn't disable the handoff, it just prevents the
+*auto-lock* that would trigger it. Pressing the power button in TV Mode still hands
+off. TV Mode is also the **fallback** if wired external playback turns out not to
+survive lock, which is why it defaults on whenever a display is present.
+
+**Why pre-arm instead of "hand off on `visibilitychange`".** That event is not
+guaranteed to run — nor to finish its bridge round-trip — before the process is
+suspended. So JS continuously *pre-arms* the native plugin (`_npArm` on every
+material change, `_npTick` at 1 Hz from `_lpClockTick`) and the **native side owns
+the transition**, firing from `didEnterBackgroundNotification`. It reconstructs the
+playhead as `armedPosition + wallClockElapsed × rate − 0.3 s`; the deliberate rewind
+keeps residual error *behind* the true position, because repeating a third of a
+second is invisible and skipping content is not.
+
+**Hand-back.** On foreground, `_npHandBack()` calls `resume()` and then, in strict
+order: sets `lp.lastKnownT` **first** (every recovery path reads it, and a
+`currentTime` of 0 from an element iOS reset while suspended would restart the
+episode), arms `lp.resumeSec`, pushes `lp.lastSaveAt` forward so the first tick can't
+clobber the native writer, and seeks via **`_lpCommitSeek`** — a multi-minute jump is
+exactly the swallowed-seek case `_lpVerifySeek` exists for. The two recovery probes
+(`_lpRecoverActiveSub`, `_lpRecoverMediaPipeline`) are **chained after** the
+hand-back rather than racing it on independent timers; pointed at a torn-down or
+mid-seek element, the frame-counting probe would misfire.
+
+**Progress while locked.** The webview's JS timers are frozen, so `_lpClockTick`'s
+15 s save never fires. The plugin POSTs `/api/library/{id}/progress` itself every
+15 s (and on pause/stop/end), reusing the same near-zero `position < 5` guard. Without
+this, an episode watched with the phone locked would record nothing.
+
+**Subtitles — the synthesized playlists.** `AVPlayer` renders only subtitles that are
+real media tracks, but prep emits standalone `sub_<i>.vtt` sidecars (ffmpeg's HLS
+muxer cannot package multi-track WebVTT — see [GOTCHAS.md](GOTCHAS.md)). That limit is
+on ffmpeg *writing* them, so the server generates two extra playlists **on read,
+never on disk**:
+
+```
+GET /api/library/offline-cache/<key>/master-native.m3u8
+    → master.m3u8 + one #EXT-X-MEDIA:TYPE=SUBTITLES per meta.json subtitle,
+      and SUBTITLES="subs" appended to every #EXT-X-STREAM-INF
+
+GET /api/library/offline-cache/<key>/sub_<i>.m3u8
+    #EXTM3U
+    #EXT-X-VERSION:3
+    #EXT-X-TARGETDURATION:1426
+    #EXT-X-MEDIA-SEQUENCE:0
+    #EXT-X-PLAYLIST-TYPE:VOD
+    #EXTINF:1425.600,
+    sub_0.vtt
+    #EXT-X-ENDLIST
+```
+
+`master.m3u8` on disk is untouched, so the web player is byte-for-byte unaffected and
+**`OFFLINE_CACHE_VERSION` does not move** — no bundle is invalidated, no re-prep. The
+subtitle *number* is read back out of each `meta.subtitles[i].file` rather than taken
+from array position, because the serving route maps `sub_<n>.m3u8` straight onto
+`sub_<n>.vtt` and a mismatch would silently serve the wrong language. Clients get the
+URL from the additive `native_master_url` field on `/offline-prepare`,
+`/offline-job/{id}` and `/stream-ondemand`.
+
+**On-demand (JIT) is deliberately reduced**: its `master-native.m3u8` is identical to
+`master.m3u8` (video + audio only). OD segments are MPEG-TS, and AVPlayer needs an
+`X-TIMESTAMP-MAP` in the WebVTT to anchor cues to segment PTS — the JIT timeline isn't
+zero-based per segment, so a naive wrapper would render subtitles at the wrong times,
+which is worse than none. Handoff still works on a not-yet-prepped file.
+
+**What cannot be done** (don't re-attempt): burning styled ASS into the stream during
+playback — `AVVideoComposition` is unsupported for HLS assets — and rendering the
+libass overlay to an external `UIScreen` while backgrounded, because a backgrounded
+app cannot draw at all. TV Mode is the answer to both.
+
+**Verification sequence** (on-device; each is a go/no-go gate): bare background audio
+→ position fidelity across a lock/unlock → wired HDMI unlocked → **wired HDMI locked**
+(the load-bearing assumption) → TV Mode incl. brightness restore after a force-quit →
+Live Activity clock advancing between pushes → native subs in sync → progress written
+while locked → the same against an LMS-served bundle in Airplane Mode → no-regression
+in a desktop browser.
+
+Native side: `ios-app/ios/App/App/NativePlayback.swift` (+ `PlaybackLiveActivity.swift`,
+`Shared/PlaybackIntents.swift`, `StreamLinkLiveActivities/PlaybackWidget.swift`).
+
 ### 3. Skip-intro / credits
 
 `lpEvaluateSkipOffer(t)` runs on every `_lpClockTick` — the `timeupdate`

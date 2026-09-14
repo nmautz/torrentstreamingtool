@@ -3387,6 +3387,16 @@
               <path stroke-linecap="round" stroke-linejoin="round" d="M11 5L6 9H2v6h4l5 4V5zM16 9l6 6M22 9l-6 6"/>
             </svg>
           </button>
+          <!-- TV Mode: blanks the phone's screen while the app stays foreground,
+               so mirroring keeps driving a connected monitor with the full player
+               and styled subtitles. Shown only in the app, only while a display
+               is actually connected (_npOnDisplayChange toggles it). -->
+          <button id="lpTvBtn" class="lp-ctl-sm" onclick="_npSetTvMode(!_npTvMode)"
+                  title="TV Mode — blank this screen" style="display:none">
+            <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
+              <path stroke-linecap="round" stroke-linejoin="round" d="M3 5h18v11H3zM8 20h8"/>
+            </svg>
+          </button>
           <button id="lpFsBtn" class="lp-ctl-sm" onclick="lpToggleFullscreen()" title="Fullscreen">
             <svg class="lp-ic-fs w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" d="M4 9V4h5M20 9V4h-5M4 15v5h5M20 15v5h-5"/>
@@ -13447,7 +13457,11 @@ const _cap = (() => {
   // TVRemote (Live Activities) is best-effort too — an older shell without it
   // just won't surface the Dynamic Island remote.
   let tv = null; try { tv = get("TVRemote"); } catch (_) {}
-  return { lms, dl, os, tv };
+  // NativePlayback (background + external-display playback) — best-effort for
+  // the same reason: an older shell just keeps today's behaviour, where locking
+  // the phone stops playback.
+  let np = null; try { np = get("NativePlayback"); } catch (_) {}
+  return { lms, dl, os, tv, np };
 })();
 const isApp = !!_cap;
 
@@ -13516,6 +13530,9 @@ function _appProxiedSeedStorage() {
         if (o.on   != null) localStorage.setItem("streamlink_app_automanage", o.on ? "1" : "0");
         if (o.ahead != null) localStorage.setItem("streamlink_app_automanage_ahead", String(o.ahead));
         if (o.q    != null) localStorage.setItem("streamlink_app_automanage_autoq", String(o.q));
+        // Background playback / TV Mode — see the producer in _appTryLocalHandoff.
+        if (o.bg   != null) localStorage.setItem(_APP_BGPLAY_KEY, o.bg ? "1" : "0");
+        if (o.tvm  != null) localStorage.setItem(_APP_TVMODE_KEY, o.tvm ? "1" : "0");
       }
     }
   } catch (_) {}
@@ -13603,6 +13620,266 @@ async function _tvRemoteSync() {
   } catch (_) {}
 }
 
+// ── iOS app: background + external-display playback (NativePlayback) ─────────
+//
+// WebKit pauses a video-bearing <video> the moment the app backgrounds, so
+// locking the phone stops on-device playback dead. The native plugin keeps an
+// AVPlayer ready to take over under the `audio` background mode; this block is
+// the JS half — it PRE-ARMS that plugin with the live playback state so the
+// native side can perform the handoff itself, without needing JS to run at the
+// moment of suspension (`visibilitychange` is not guaranteed to complete its
+// bridge round-trip first). See docs/STREAMING.md and NativePlayback.swift.
+//
+// Inert outside the app: every entry point returns early unless `isApp`, the
+// plugin is present, and the user hasn't switched the feature off.
+const _APP_BGPLAY_KEY = "streamlink_app_bgplay";   // "0" = off (default ON)
+const _APP_TVMODE_KEY = "streamlink_app_tvmode";   // "0" = off (default ON)
+
+function _appPlaybackPrefs() {
+  let bg = true, tv = true;
+  try {
+    bg = localStorage.getItem(_APP_BGPLAY_KEY) !== "0";
+    tv = localStorage.getItem(_APP_TVMODE_KEY) !== "0";
+  } catch (_) {}
+  return { bg, tv };
+}
+
+// True when the native background player is usable for the CURRENT file.
+function _npOk() {
+  return !!(isApp && _cap.np && lp.itemId && lp._nativeMaster
+            && _appPlaybackPrefs().bg);
+}
+
+let _npExternal = false;     // an external display / AirPlay route is present
+let _npArmed = false;        // we've told native a session is live
+let _npLastTick = 0;
+
+// Resolve a native master URL against the origin the MEDIA is served from.
+// In proxied/offline mode the page origin is the loopback server, and that's
+// exactly where the bundle lives, so a relative URL is already correct.
+function _npAbs(u) {
+  try { return new URL(u, location.origin).href; } catch (_) { return ""; }
+}
+
+// The host to POST progress to while backgrounded. In a proxied session the
+// page origin is the loopback proxy; writing through it would work but adds a
+// hop that can outlive the proxy, so prefer the real host when we know it.
+function _npServerUrl() {
+  return (typeof _appProxyHost !== "undefined" && _appProxyHost)
+    ? _appProxyHost : location.origin;
+}
+
+// Series name for the Now Playing / Live Activity subtitle line. `lp` carries
+// only the file name, so resolve the owning item out of the library cache
+// (merged-series playback re-points lp.itemId per file, so this follows along).
+function _npSeriesName() {
+  try {
+    const it = (window._libCache || []).find((x) => x && x.id === lp.itemId);
+    if (!it) return "";
+    return (it.series || "").trim() || (it.title || "").trim();
+  } catch (_) { return ""; }
+}
+
+function _npPayload() {
+  const v = _lpV();
+  // The project's trusted-playhead rule: currentTime reads 0 after iOS resets
+  // a suspended media element, so fall back to the last known good value.
+  const t = (v && v.currentTime > 2) ? v.currentTime : (lp.lastKnownT || 0);
+  const sub = (typeof lp.pendingSubtitleIdx === "number" && lp.pendingSubtitleIdx >= 0)
+    ? lp.pendingSubtitleIdx : -1;
+  const aud = lp.audios && lp.audios[lp.pendingAudioIdx || 0];
+  const sMeta = (sub >= 0 && lp.subtitles) ? lp.subtitles[sub] : null;
+  const nx = lp._nextNative || null;
+  return {
+    active: true,
+    url: _npAbs(lp._nativeMaster),
+    position: t,
+    duration: (v && v.duration > 0) ? v.duration : (lp.duration || 0),
+    paused: !!(v && v.paused),
+    rate: (v && v.playbackRate) || 1,
+    title: lp.name || "",
+    series: _npSeriesName(),
+    audioName: "audio_" + (lp.pendingAudioIdx || 0),
+    audioLang: (aud && aud.language) || "",
+    subIndex: sub,
+    subLang: (sMeta && sMeta.language) || "",
+    itemId: lp.itemId || "",
+    filePath: lp.filePath || "",
+    profileId: (profile && profile.id) || "",
+    serverUrl: _npServerUrl(),
+    token: _appPairingToken() || "",
+    canPrev: (lp.pi || 0) > 0,
+    canNext: (lp.playlist || []).length > (lp.pi || 0) + 1,
+    nextUrl: nx ? _npAbs(nx.url) : "",
+    nextTitle: nx ? (nx.title || "") : "",
+    nextFilePath: nx ? (nx.filePath || "") : "",
+    nextItemId: nx ? (nx.itemId || "") : "",
+    handoffEnabled: true,
+  };
+}
+
+// Full state push. Cheap on the native side (a struct assignment), so it's fine
+// to call on every material change.
+function _npArm() {
+  if (!_npOk()) { _npDisarm(); return; }
+  try { _cap.np.arm(_npPayload()); _npArmed = true; } catch (_) {}
+}
+
+// Position-only refresh, throttled to ~1 Hz. Driven from _lpClockTick, which
+// already runs at 500 ms via _lpClockPump.
+function _npTick() {
+  if (!_npArmed || !_npOk()) return;
+  const now = Date.now();
+  if (now - _npLastTick < 1000) return;
+  _npLastTick = now;
+  const v = _lpV(); if (!v) return;
+  try {
+    _cap.np.tick({
+      position: (v.currentTime > 2) ? v.currentTime : (lp.lastKnownT || 0),
+      paused: !!v.paused,
+      duration: v.duration > 0 ? v.duration : (lp.duration || 0),
+    });
+  } catch (_) {}
+}
+
+function _npDisarm() {
+  if (!isApp || !_cap.np || !_npArmed) return;
+  _npArmed = false;
+  try { _cap.np.disarm(); } catch (_) {}
+}
+
+// Foreground hand-back. Adopts the native player's playhead and returns control
+// to the web element, reusing the existing resume/recovery machinery rather than
+// fighting it. Ordering here is load-bearing — see the comments inline.
+async function _npHandBack() {
+  if (!isApp || !_cap.np || !_npArmed) return;
+  let r = null;
+  try { r = await _cap.np.resume(); } catch (_) { return; }
+  if (!r || !r.active) return;
+  const v = _lpV(); if (!v) return;
+
+  // Native auto-advanced into the next episode while we were away — resync the
+  // playlist cursor and load that file instead of the one we left on.
+  if (r.filePath && lp.filePath && r.filePath !== lp.filePath) {
+    const i = (lp.playlist || []).indexOf(r.filePath);
+    if (i >= 0) { lp.pi = i; await _lpLoadIndex(r.position || 0); return; }
+  }
+  if (r.ended) { _lpAdvanceOrEnd(); return; }
+
+  const t = Math.max(r.position || 0, 0);
+  // lastKnownT FIRST: every recovery path reads it, and a currentTime of 0 from
+  // an element iOS reset while suspended would otherwise restart the episode.
+  lp.lastKnownT = t;
+  lp.resumeSec = t;            // arms the loadedmetadata seek if the element reset
+  lp.resumeApplied = false;
+  lp.lastSaveAt = Date.now();  // native already wrote progress; don't double-write
+
+  // A multi-minute jump after a background stint is exactly the "swallowed seek"
+  // case _lpCommitSeek/_lpVerifySeek exist for. Never write currentTime directly
+  // for a jump this size. (It early-returns under 5 s, so short stints are free.)
+  try { _lpCommitSeek(t); } catch (_) { v.currentTime = t; }
+  if (!r.paused) { v.play().catch(() => {}); }
+  if (v.readyState < 2 || !(v.currentTime > 0)) {
+    try { _lpArmColdStartKick(); } catch (_) {}
+  }
+  try { _lpCtlSync(); _lpCtlShow(); } catch (_) {}
+}
+
+// Native events: the player finished a file, advanced, or a display appeared.
+function _npBindEvents() {
+  if (!isApp || !_cap.np || !_cap.np.addListener) return;
+  try {
+    _cap.np.addListener("nativeEnded", () => {
+      // Only meaningful if we're still backgrounded; on return _npHandBack's
+      // `ended` branch handles it. Harmless to record either way.
+      lp._nativeEnded = true;
+    });
+    _cap.np.addListener("nativeAdvanced", (e) => {
+      if (e && e.request === "next") { _npDisarm(); lpNextEp(); }
+      else if (e && e.request === "prev") { _npDisarm(); lpPrevEp(); }
+      else if (e && e.filePath) { lp._nativeAdvancedTo = e.filePath; }
+    });
+    _cap.np.addListener("displayChanged", (e) => {
+      const was = _npExternal;
+      _npExternal = !!(e && e.connected);
+      if (_npExternal !== was) _npOnDisplayChange(_npExternal);
+    });
+  } catch (_) {}
+}
+
+// ── TV Mode ──────────────────────────────────────────────────────────────────
+// Blanks the PHONE's screen while the app stays foreground, so mirroring keeps
+// driving the monitor with the full custom player AND the libass styled-subtitle
+// overlay — neither of which can survive a real lock (a backgrounded app cannot
+// draw). Double-tap to exit so a pocket brush can't wake it.
+let _npTvMode = false;
+
+function _npTvVeil() {
+  let el = document.getElementById("lpTvVeil");
+  if (el) return el;
+  el = document.createElement("div");
+  el.id = "lpTvVeil";
+  el.style.cssText = "position:fixed;inset:0;z-index:10050;background:#000;"
+    + "display:flex;align-items:center;justify-content:center;"
+    + "color:rgba(255,255,255,0.10);font-size:11px;letter-spacing:0.18em;"
+    + "font-weight:700;text-transform:uppercase;-webkit-user-select:none;user-select:none;";
+  el.textContent = "TV Mode · double-tap to exit";
+  let last = 0;
+  el.addEventListener("click", () => {
+    const now = Date.now();
+    if (now - last < 400) { _npSetTvMode(false); last = 0; } else { last = now; }
+  });
+  document.body.appendChild(el);
+  return el;
+}
+
+function _npSetTvMode(on) {
+  if (!isApp || !_cap.np) return;
+  _npTvMode = !!on;
+  const el = _npTvVeil();
+  el.style.display = on ? "flex" : "none";
+  try { _cap.np.setTvMode({ on: !!on }); } catch (_) {}
+  const btn = document.getElementById("lpTvBtn");
+  if (btn) btn.classList.toggle("on", !!on);
+}
+
+// Offer TV Mode when a display appears mid-playback; withdraw it on unplug.
+let _npTvOfferTimer = null;
+function _npOnDisplayChange(connected) {
+  const btn = document.getElementById("lpTvBtn");
+  if (btn) btn.style.display = connected ? "" : "none";
+  if (!connected) {
+    if (_npTvOfferTimer) { clearTimeout(_npTvOfferTimer); _npTvOfferTimer = null; }
+    if (_npTvMode) _npSetTvMode(false);
+    return;
+  }
+  if (!lp.itemId || !_appPlaybackPrefs().tv || _npTvMode) return;
+  if (_npTvOfferTimer) return;
+
+  // Self-contained countdown chip — the player has no generic toast, and TV Mode
+  // blanking the screen unannounced would read as a crash.
+  const chip = document.createElement("div");
+  chip.id = "lpTvOffer";
+  chip.style.cssText = "position:fixed;left:50%;transform:translateX(-50%);"
+    + "bottom:calc(env(safe-area-inset-bottom) + 24px);z-index:10049;"
+    + "background:#0b0b0d;border:1px solid #2a2a30;color:#f2f2f4;"
+    + "font-size:12px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;"
+    + "padding:12px 16px;max-width:calc(100vw - 32px);text-align:center;";
+  chip.textContent = "Display connected — dimming phone · tap to cancel";
+  const cancel = () => {
+    if (_npTvOfferTimer) { clearTimeout(_npTvOfferTimer); _npTvOfferTimer = null; }
+    chip.remove();
+  };
+  chip.addEventListener("click", cancel);
+  document.body.appendChild(chip);
+
+  _npTvOfferTimer = setTimeout(() => {
+    _npTvOfferTimer = null;
+    chip.remove();
+    if (lp.itemId && !_npTvMode) _npSetTvMode(true);
+  }, 3000);
+}
+
 // Native getLocal is authoritative across page loads (the map may be unpopulated
 // right after a navigation); used by the player to decide offline playback.
 async function _appLocalBundle(itemId, filePath) {
@@ -13652,6 +13929,12 @@ async function _appTryLocalHandoff(itemId, filePath, seekTo) {
         on:    localStorage.getItem("streamlink_app_automanage") === "1",
         ahead: parseInt(localStorage.getItem("streamlink_app_automanage_ahead") || "", 10) || undefined,
         q:     localStorage.getItem("streamlink_app_automanage_autoq") || undefined,
+        // Background-playback prefs must ride along too: playing a DOWNLOADED
+        // episode online routes through this proxied session, so without these
+        // the loopback origin's empty localStorage would read as "off" and
+        // background playback would silently stop working in the common case.
+        bg:    localStorage.getItem(_APP_BGPLAY_KEY) !== "0",
+        tvm:   localStorage.getItem(_APP_TVMODE_KEY) !== "0",
       });
     } catch (_) {}
     const q = new URLSearchParams({
@@ -15011,6 +15294,31 @@ function _appOpenAppSettings() {
         padding:8px 14px;font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;">Close</button>
     </div>
 
+    <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;margin:2px 0 8px;">Playback</div>
+    <div style="border:1px solid #2a2a30;background:#141417;padding:13px 14px;margin-bottom:18px;">
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
+        <div style="font-size:14px;font-weight:700;">Keep playing when locked</div>
+        <button id="appSetBgTgl" style="all:unset;cursor:pointer;min-width:52px;text-align:center;padding:8px 12px;
+          font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;"></button>
+      </div>
+      <div style="font-size:12px;color:#8a8a92;margin-top:8px;line-height:1.45;">
+        Locking the phone or switching apps hands playback to the system player instead
+        of stopping it — audio keeps going, the lock-screen and Dynamic Island controls
+        stay live, and video keeps playing on a connected monitor. Styled subtitles fall
+        back to plain text while locked.
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;">
+        <div style="font-size:14px;font-weight:700;">Dim the screen for TV playback</div>
+        <button id="appSetTvTgl" style="all:unset;cursor:pointer;min-width:52px;text-align:center;padding:8px 12px;
+          font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;"></button>
+      </div>
+      <div style="font-size:12px;color:#8a8a92;margin-top:8px;line-height:1.45;">
+        When a monitor is connected, the phone's own screen goes black but the app stays
+        awake — so the monitor keeps the full player with styled subtitles, and the phone
+        never auto-locks mid-episode. Double-tap the black screen to come back.
+      </div>
+    </div>
+
     <div style="font-size:11px;font-weight:700;letter-spacing:.1em;text-transform:uppercase;color:#8a8a92;margin:2px 0 8px;">Auto-manage downloads</div>
     <div style="border:1px solid #2a2a30;background:#141417;padding:13px 14px;">
       <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;">
@@ -15047,6 +15355,32 @@ function _appOpenAppSettings() {
     t.style.color = on ? "#fff" : "#8a8a92";
     t.style.border = on ? "1px solid #3a7afe" : "1px solid #2a2a30";
     ov.querySelector("#appSetAutoOpts").style.opacity = on ? "1" : ".45";
+  };
+  // Background-playback toggles. Same visual language as the auto-manage switch.
+  const paintPlaybackTgls = () => {
+    const p = _appPlaybackPrefs();
+    [["#appSetBgTgl", p.bg], ["#appSetTvTgl", p.tv]].forEach(([sel, on]) => {
+      const t = ov.querySelector(sel);
+      if (!t) return;
+      t.textContent = on ? "On" : "Off";
+      t.style.background = on ? "#3a7afe" : "transparent";
+      t.style.color = on ? "#fff" : "#8a8a92";
+      t.style.border = on ? "1px solid #3a7afe" : "1px solid #2a2a30";
+    });
+  };
+  paintPlaybackTgls();
+  ov.querySelector("#appSetBgTgl").onclick = () => {
+    const next = !_appPlaybackPrefs().bg;
+    try { localStorage.setItem(_APP_BGPLAY_KEY, next ? "1" : "0"); } catch (_) {}
+    paintPlaybackTgls();
+    // Take effect immediately for the file already playing.
+    if (next) _npArm(); else _npDisarm();
+  };
+  ov.querySelector("#appSetTvTgl").onclick = () => {
+    const next = !_appPlaybackPrefs().tv;
+    try { localStorage.setItem(_APP_TVMODE_KEY, next ? "1" : "0"); } catch (_) {}
+    paintPlaybackTgls();
+    if (!next && _npTvMode) _npSetTvMode(false);
   };
   // Heading above the show picker changes meaning with the scope mode: in
   // all_except the picked shows are the exemptions; in none_except they're the
@@ -16573,6 +16907,11 @@ async function _lpLoadIndex(seekTo) {
   // doesn't fire saveProgress before the resume seek has landed (otherwise we'd
   // overwrite the server's watched state with t≈0).
   lp.lastSaveAt = Date.now();
+  // Clear the background player's target FIRST. Until the prep below resolves,
+  // the old value still points at the PREVIOUS episode — backgrounding in that
+  // window would hand off to the wrong file. `_npOk()` goes false meanwhile, so
+  // a lock mid-load simply doesn't hand off.
+  lp._nativeMaster = null; lp._nextNative = null;
 
   document.getElementById("lpTitle").textContent = lp.name;
 
@@ -16677,6 +17016,10 @@ async function _lpLoadIndex(seekTo) {
       prep.subtitles  = od.subtitles || [];
       prep.subs       = od.subs || prep.subs || [];
       prep.saved_tracks = od.saved_tracks || prep.saved_tracks || {};
+      // On-demand's native master is video+audio only (TS segments can't carry
+      // correctly-timed WebVTT without X-TIMESTAMP-MAP — see ondemand_file), so
+      // background handoff works here but without subtitles.
+      prep.native_master_url = od.native_master_url || null;
     } catch (err) {
       if (_lpFallBackToLocal(filePath, seekTo)) return;
       _lpHidePreparing();
@@ -16686,6 +17029,13 @@ async function _lpLoadIndex(seekTo) {
   }
   if (lp.filePath !== filePath) return;  // raced with a stop/advance
   _lpHidePreparing();
+
+  // iOS background playback: the master a native AVPlayer should use. It differs
+  // from `masterUrl` only in declaring the sidecar subs as HLS renditions (the
+  // web player keeps consuming the plain master). Absent on an older host ⇒ no
+  // handoff for this file, which simply means today's behaviour.
+  lp._nativeMaster = prep.native_master_url || null;
+  lp._nextNative = null;
 
   // Mark the cache hit in prepFileState so per-row buttons reflect "Stream Ready"
   // — only in bundle mode. On-demand playback doesn't mean the full bundle exists
@@ -16986,6 +17336,13 @@ async function _lpLoadIndex(seekTo) {
   _lpArmColdStartKick();      // iOS/MMS may never start fetching until a real seek nudges it
   _lpCtlSync(); _lpCtlTick(); _lpCtlShow();   // fresh custom-controls state for the new file
   _lpStartSubUpgradePoll();   // watch for late-downloaded real subs to upgrade off AI
+  // iOS: arm the background player for THIS file. From here on, locking the
+  // phone hands off instead of stopping playback.
+  _npArm();
+  try { if (_cap && _cap.np) _cap.np.displays().then((d) => {
+    _npExternal = !!(d && d.connected);
+    if (_npExternal) _npOnDisplayChange(true);
+  }).catch(() => {}); } catch (_) {}
 }
 
 // Populate the audio + subtitle dropdowns once the manifest has parsed.
@@ -18174,6 +18531,9 @@ function _lpIndicateSubLoading(idx) {
 //                it must not re-stamp the audio/subtitle picks on its way past.
 function _lpSaveLocalTracks(what) {
   what = what || "sub";
+  // Single funnel for every deliberate audio/subtitle pick — re-arm so a handoff
+  // while locked carries the viewer's choice into the native player.
+  _npArm();
   if (!lp.itemId || !lp.filePath) return;
   if (!profile.id && !_appOffline) return;
   // Fully offline: the audio delay lives in the localStorage mirror, which
@@ -18700,6 +19060,10 @@ function lpMinimize() {
 
 async function lpUnloadCurrent() {
   const v = document.getElementById("lpVideo");
+  // Disarm FIRST: past this point there's no valid file to hand off, and a
+  // background transition landing mid-teardown would start the native player on
+  // a torn-down source.
+  _npDisarm();
   try { v.pause(); } catch (_) {}
   _lpTeardownOctopus();   // drop any styled-sub libass overlay before the src changes
   _lpDestroyHls();
@@ -18709,6 +19073,11 @@ async function lpUnloadCurrent() {
 
 async function lpStop() {
   const v = document.getElementById("lpVideo");
+  // Playback is over: no handoff, and drop TV Mode so the phone's screen comes
+  // back (setTvMode(false) is idempotent and restores brightness).
+  _npDisarm();
+  if (_npTvMode) _npSetTvMode(false);
+  lp._nativeMaster = null; lp._nextNative = null;
   const t = v.currentTime || 0; const d = v.duration || lp.duration || 0;
   // Guard t≥5 (same near-zero guard _lpFlushProgress / lpNavEp / the timeupdate
   // saver already use): stopping before the resume seek has landed — or in the
@@ -18938,17 +19307,30 @@ function _lpWarmNextEp() {
       });
       if (!r.ok) throw new Error();
       const prep = await r.json();
+      // Whichever response ends up carrying the ready bundle's URLs — the
+      // prepare call itself when it was already built, or the job's `done`
+      // payload when we had to wait for the encode.
+      let ready = prep;
       if (!prep.ready && prep.job_id) {
         while (true) {
           await new Promise(res => setTimeout(res, 2500));
           const sr = await fetch(`/api/library/offline-job/${prep.job_id}`);
           if (!sr.ok) throw new Error();
           const s = await sr.json();
-          if (s.status === "done") break;
+          if (s.status === "done") { ready = s; break; }
           if (s.status === "error" || s.status === "paused") throw new Error();
         }
       }
       prepFileState.set(k, "ready");
+      // Hand the warmed next episode to the background player so it can advance
+      // in place while the phone is locked. This prep already happened for the
+      // Next button, so arming costs nothing extra. Guard on the playlist not
+      // having moved under us while we awaited.
+      if (ready.native_master_url && lp.playlist[lp.pi + 1] === nextPath) {
+        lp._nextNative = { url: ready.native_master_url, filePath: nextPath, itemId,
+                           title: nextPath.split(/[/\\]/).pop() };
+        _npArm();
+      }
     } catch (_) {
       // Leave it un-prepped; the Next hold / auto-advance will prep on demand.
       if (prepFileState.get(k) === "prepping") prepFileState.delete(k);
@@ -19014,6 +19396,8 @@ function _lpClockTick(v) {
     lp.lastSaveAt = now;
     saveProgress(lp.itemId, lp.filePath, t, v.duration);
   }
+  // Keep the background player's playhead sample fresh (self-throttled to 1 Hz).
+  _npTick();
 }
 
 // Steady fallback clock driving _lpClockTick when `timeupdate` gaps (iOS MMS).
@@ -19062,8 +19446,8 @@ function _lpAttachVideoEvents() {
   // The un-throttled keepalive check on resume heals an OD session the reaper
   // took while the page's timers were frozen (sleep/backgrounded pause) before
   // the drained buffer can force a visible mid-watch reload.
-  v.addEventListener("play",  () => { _lpCtlSync(); _lpCtlShow(); _lpOdKeepAlive(true); });
-  v.addEventListener("pause", () => { _lpCtlSync(); _lpCtlShow(); _lpFlushProgress(false); });
+  v.addEventListener("play",  () => { _lpCtlSync(); _lpCtlShow(); _lpOdKeepAlive(true); _npArm(); });
+  v.addEventListener("pause", () => { _lpCtlSync(); _lpCtlShow(); _lpFlushProgress(false); _npArm(); });
   v.addEventListener("volumechange",   () => _lpCtlSync());
   v.addEventListener("durationchange", () => _lpCtlTick());
   v.addEventListener("progress",       () => _lpCtlTick());
@@ -19073,7 +19457,7 @@ function _lpAttachVideoEvents() {
   // An iOS suspend reset never fires `seeked`, so it can't sneak in here.
   // _lpCtlTick here repaints the bar at the landed position immediately — during
   // an MMS timeupdate gap the next natural repaint could otherwise be seconds out.
-  v.addEventListener("seeked", () => { lp.lastKnownT = v.currentTime || 0; _lpCtlTick(); _lpFlushProgress(false); });
+  v.addEventListener("seeked", () => { lp.lastKnownT = v.currentTime || 0; _lpCtlTick(); _lpFlushProgress(false); _npArm(); });
   v.addEventListener("ended", () => { _lpAdvanceOrEnd(); });
   // On-demand: when playback stalls waiting for data (initial start, or a seek
   // into a not-yet-generated region) the segment request is being held open
@@ -19119,12 +19503,28 @@ function _lpAttachVideoEvents() {
   // probe for a dead media decoder (subs render but video/audio don't — see
   // _lpRecoverMediaPipeline).
   document.addEventListener("visibilitychange", () => {
-    if (document.visibilityState === "hidden") _lpFlushProgress(false);
-    else {
-      _lpOdKeepAlive(true);   // heal a reaped OD session the moment we're back
+    if (document.visibilityState === "hidden") {
+      // Opportunistic freshness for the background player. Not load-bearing —
+      // this event isn't guaranteed to finish before the process is suspended,
+      // which is exactly why the native side extrapolates from the last arm.
+      _npArm();
+      _lpFlushProgress(false);
+      return;
+    }
+    _lpOdKeepAlive(true);   // heal a reaped OD session the moment we're back
+    // The hand-back MUST settle before the two recovery probes run: they each
+    // read the playhead, and _lpRecoverMediaPipeline samples decoded frames over
+    // 1.5 s — pointed at a torn-down or mid-seek element it would misfire and
+    // rebuild at the wrong position. Chaining also makes the order deterministic
+    // instead of three timers racing. (_npHandBack resolves immediately when the
+    // native player was never armed, so the browser path is unchanged.)
+    _npHandBack().then(() => {
       setTimeout(_lpRecoverActiveSub, 400);
       setTimeout(_lpRecoverMediaPipeline, 600);
-    }
+    }, () => {
+      setTimeout(_lpRecoverActiveSub, 400);
+      setTimeout(_lpRecoverMediaPipeline, 600);
+    });
   });
   // Tab/window close, browser back, BFCache eviction → use sendBeacon since
   // any in-flight fetch is liable to be cancelled mid-request.
@@ -19958,6 +20358,9 @@ document.addEventListener("DOMContentLoaded",async()=>{
   await _appInitPairToken();
   _appInitNav();
   _appInitOfflineBundles();
+  // iOS: subscribe to the background player's events (ended / advanced / a
+  // display appearing or going away). No-op in a plain browser.
+  _npBindEvents();
   // Keep the offline player snapshot fresh (fire-and-forget; no-op in a browser).
   _appRefreshPlayerSnapshot();
   // M3: when the browser regains connectivity, drain any offline progress the
@@ -20058,6 +20461,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">11.24.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">12.0.0</div>
 </body>
 </html>

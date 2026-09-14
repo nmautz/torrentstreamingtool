@@ -30,6 +30,11 @@
 		ABCD000000000000000000C4 /* LiveActivitiesBundle.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCD000000000000000000A7 /* LiveActivitiesBundle.swift */; };
 		ABCD000000000000000000C5 /* DownloadActivityWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCD000000000000000000A8 /* DownloadActivityWidget.swift */; };
 		ABCD000000000000000000C6 /* TVRemoteWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCD000000000000000000A9 /* TVRemoteWidget.swift */; };
+		ABCD000000000000000000B6 /* NativePlayback.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCD000000000000000000AD /* NativePlayback.swift */; };
+		ABCD000000000000000000B7 /* PlaybackLiveActivity.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCD000000000000000000AE /* PlaybackLiveActivity.swift */; };
+		ABCD000000000000000000B8 /* PlaybackIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCD000000000000000000AF /* PlaybackIntents.swift */; };
+		ABCD000000000000000000C7 /* PlaybackIntents.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCD000000000000000000AF /* PlaybackIntents.swift */; };
+		ABCD000000000000000000C8 /* PlaybackWidget.swift in Sources */ = {isa = PBXBuildFile; fileRef = ABCD000000000000000000BA /* PlaybackWidget.swift */; };
 		ABCD000000000000000000D1 /* StreamLinkLiveActivities.appex in Embed Foundation Extensions */ = {isa = PBXBuildFile; fileRef = ABCD000000000000000000AC /* StreamLinkLiveActivities.appex */; settings = {ATTRIBUTES = (RemoveHeadersOnCopy, ); }; };
 /* End PBXBuildFile section */
 
@@ -60,6 +65,10 @@
 		ABCD000000000000000000AA /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
 		ABCD000000000000000000AB /* StreamLinkLiveActivities.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = StreamLinkLiveActivities.entitlements; sourceTree = "<group>"; };
 		ABCD000000000000000000AC /* StreamLinkLiveActivities.appex */ = {isa = PBXFileReference; explicitFileType = "wrapper.app-extension"; includeInIndex = 0; path = StreamLinkLiveActivities.appex; sourceTree = BUILT_PRODUCTS_DIR; };
+		ABCD000000000000000000AD /* NativePlayback.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = NativePlayback.swift; sourceTree = "<group>"; };
+		ABCD000000000000000000AE /* PlaybackLiveActivity.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackLiveActivity.swift; sourceTree = "<group>"; };
+		ABCD000000000000000000AF /* PlaybackIntents.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackIntents.swift; sourceTree = "<group>"; };
+		ABCD000000000000000000BA /* PlaybackWidget.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PlaybackWidget.swift; sourceTree = "<group>"; };
 /* End PBXFileReference section */
 
 /* Begin PBXFrameworksBuildPhase section */
@@ -144,6 +153,8 @@
 				AB1000001000000000000003 /* MainViewController.swift */,
 				ABCD000000000000000000A4 /* DownloadLiveActivity.swift */,
 				ABCD000000000000000000A5 /* TVRemote.swift */,
+				ABCD000000000000000000AD /* NativePlayback.swift */,
+				ABCD000000000000000000AE /* PlaybackLiveActivity.swift */,
 				ABCD000000000000000000A6 /* App.entitlements */,
 				504EC30B1FED79650016851F /* Main.storyboard */,
 				504EC30E1FED79650016851F /* Assets.xcassets */,
@@ -161,6 +172,7 @@
 				ABCD000000000000000000A1 /* LiveActivityAttributes.swift */,
 				ABCD000000000000000000A2 /* AppGroupConfig.swift */,
 				ABCD000000000000000000A3 /* TVRemoteIntents.swift */,
+				ABCD000000000000000000AF /* PlaybackIntents.swift */,
 			);
 			path = Shared;
 			sourceTree = "<group>";
@@ -171,6 +183,7 @@
 				ABCD000000000000000000A7 /* LiveActivitiesBundle.swift */,
 				ABCD000000000000000000A8 /* DownloadActivityWidget.swift */,
 				ABCD000000000000000000A9 /* TVRemoteWidget.swift */,
+				ABCD000000000000000000BA /* PlaybackWidget.swift */,
 				ABCD000000000000000000AA /* Info.plist */,
 				ABCD000000000000000000AB /* StreamLinkLiveActivities.entitlements */,
 			);
@@ -291,6 +304,9 @@
 				ABCD000000000000000000B3 /* TVRemoteIntents.swift in Sources */,
 				ABCD000000000000000000B4 /* DownloadLiveActivity.swift in Sources */,
 				ABCD000000000000000000B5 /* TVRemote.swift in Sources */,
+				ABCD000000000000000000B6 /* NativePlayback.swift in Sources */,
+				ABCD000000000000000000B7 /* PlaybackLiveActivity.swift in Sources */,
+				ABCD000000000000000000B8 /* PlaybackIntents.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -304,6 +320,8 @@
 				ABCD000000000000000000C1 /* LiveActivityAttributes.swift in Sources */,
 				ABCD000000000000000000C2 /* AppGroupConfig.swift in Sources */,
 				ABCD000000000000000000C3 /* TVRemoteIntents.swift in Sources */,
+				ABCD000000000000000000C7 /* PlaybackIntents.swift in Sources */,
+				ABCD000000000000000000C8 /* PlaybackWidget.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};

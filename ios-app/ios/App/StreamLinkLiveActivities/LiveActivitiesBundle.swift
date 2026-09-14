@@ -2,9 +2,11 @@
 //  LiveActivitiesBundle.swift
 //  StreamLinkLiveActivities — widget extension entry point.
 //
-//  Hosts both Live Activity widgets: download progress (display only) and the
-//  TV remote (interactive buttons). The whole extension is iOS 16.1+; the
-//  individual configurations gate themselves further where needed.
+//  Hosts all three Live Activity widgets: download progress (display only), the
+//  TV remote (interactive, drives the host's player) and local background
+//  playback (interactive, drives the phone's own AVPlayer). The whole extension
+//  is iOS 16.1+; the individual configurations gate themselves further where
+//  needed.
 //
 
 import WidgetKit
@@ -17,5 +19,6 @@ struct StreamLinkLiveActivitiesBundle: WidgetBundle {
     var body: some Widget {
         DownloadActivityWidget()
         TVRemoteWidget()
+        PlaybackWidget()
     }
 }

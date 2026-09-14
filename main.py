@@ -23376,6 +23376,10 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
             "ready":             True,
             "needs_processing":  False,
             "master_url":        f"/api/library/offline-cache/{key}/master.m3u8",
+            # Same bundle, with the sidecar subs declared as HLS renditions, for
+            # the iOS native-AVPlayer background/external-display path. Purely
+            # additive — the web player ignores it. See _native_master.
+            "native_master_url": f"/api/library/offline-cache/{key}/{_NATIVE_MASTER_NAME}",
             "duration_sec":      meta.get("duration_sec", 0),
             "videos":            meta.get("videos", []),
             "audios":            meta.get("audios", []),
@@ -23783,6 +23787,8 @@ async def offline_job_status(job_id: str) -> JSONResponse:
         key = out_dir.name
         meta = _read_meta(out_dir)
         out["master_url"]        = f"/api/library/offline-cache/{key}/master.m3u8"
+        # Native-AVPlayer view (subs as HLS renditions) — see offline_prepare.
+        out["native_master_url"] = f"/api/library/offline-cache/{key}/{_NATIVE_MASTER_NAME}"
         out["duration_sec"]      = meta.get("duration_sec", 0)
         out["videos"]            = meta.get("videos", [])
         out["audios"]            = meta.get("audios", [])
@@ -23888,8 +23894,88 @@ _HLS_MIME = {
 }
 
 
+# ── Native (AVPlayer) playlists — synthesized, never written to disk ─────────
+# iOS background / external-display playback hands the stream to a native
+# AVPlayer, which can only render subtitles that are REAL media tracks. Prep
+# emits standalone `sub_<i>.vtt` sidecars with no manifest entry, because
+# ffmpeg's HLS muxer cannot package multi-track WebVTT (see GOTCHAS.md
+# "Subtitles can NOT live in the HLS manifest"). That limitation is on ffmpeg
+# *writing* them — nothing stops us generating the two extra playlists ourselves
+# at serve time:
+#
+#   master-native.m3u8  — master.m3u8 + #EXT-X-MEDIA:TYPE=SUBTITLES renditions
+#   sub_<i>.m3u8        — a VOD playlist wrapping the existing sub_<i>.vtt
+#
+# Neither is ever written to disk, so `master.m3u8` stays byte-identical for the
+# web player (which never requests these names) and OFFLINE_CACHE_VERSION does
+# NOT move — the bundle's contents are unchanged; only the serving layer gained
+# two derived views. Don't "simplify" this by teaching ffmpeg to emit them.
+_NATIVE_MASTER_NAME = "master-native.m3u8"
+_SUB_PLAYLIST_RE = re.compile(r"^sub_(\d+)\.m3u8$")
+_SUB_VTT_RE = re.compile(r"^sub_(\d+)\.vtt$")
+
+
+def _m3u8_attr(value: str) -> str:
+    """Escape a value for an HLS quoted-string attribute. A double quote can't
+    be represented inside one, so it degrades to a single quote; a newline would
+    break the line-oriented format outright."""
+    return (value or "").replace('"', "'").replace("\r", " ").replace("\n", " ")
+
+
+def _sub_wrapper_playlist(vtt_name: str, duration: float) -> str:
+    """A WebVTT rendition playlist wrapping one sidecar `.vtt` as a single
+    whole-asset segment — the minimum legal playlist that turns a plain sidecar
+    into something AVPlayer can select from a subtitle group."""
+    d = max(float(duration or 0.0), 1.0)
+    return (
+        "#EXTM3U\n"
+        "#EXT-X-VERSION:3\n"
+        f"#EXT-X-TARGETDURATION:{int(d) + 1}\n"
+        "#EXT-X-MEDIA-SEQUENCE:0\n"
+        "#EXT-X-PLAYLIST-TYPE:VOD\n"
+        f"#EXTINF:{d:.3f},\n"
+        f"{vtt_name}\n"
+        "#EXT-X-ENDLIST\n"
+    )
+
+
+def _native_master(master_text: str, meta: dict) -> str:
+    """`master.m3u8` with the bundle's sidecar subtitles declared as renditions.
+
+    The subtitle NUMBER is read back out of each entry's `file` (`sub_<n>.vtt`)
+    rather than taken from enumerate position — the two agree today, but a
+    mismatch would silently serve the WRONG subtitle, since the serving route
+    maps `sub_<n>.m3u8` straight onto `sub_<n>.vtt`.
+
+    Every emitted URI is a BARE relative filename, matching how the rest of the
+    bundle references itself (the ffmpeg invocation is already constrained to
+    bare names with cwd=<bundle dir> for the Windows backslash reason).
+    """
+    subs = meta.get("subtitles") or []
+    if not subs:
+        return master_text
+    media: list[str] = []
+    for i, s in enumerate(subs):
+        m = _SUB_VTT_RE.match(str(s.get("file") or ""))
+        n = m.group(1) if m else str(i)
+        name = _m3u8_attr(s.get("label") or f"Subtitles {i + 1}")
+        lang = _m3u8_attr(s.get("language") or "und")
+        media.append(
+            '#EXT-X-MEDIA:TYPE=SUBTITLES,GROUP-ID="subs",'
+            f'NAME="{name}",LANGUAGE="{lang}",'
+            f'DEFAULT=NO,AUTOSELECT=NO,FORCED=NO,URI="sub_{n}.m3u8"')
+    out: list[str] = []
+    for line in master_text.splitlines():   # also normalises any CRLF to LF
+        if line.startswith("#EXT-X-STREAM-INF:") and "SUBTITLES=" not in line:
+            line += ',SUBTITLES="subs"'
+        out.append(line)
+        if line.startswith("#EXTM3U"):
+            out.extend(media)
+    return "\n".join(out) + "\n"
+
+
 @app.get("/api/library/offline-cache/{cache_key}/{filename}")
-async def offline_cache_bundle_file(cache_key: str, filename: str) -> FileResponse:
+async def offline_cache_bundle_file(cache_key: str, filename: str) -> Response:
     """Serve one file from an HLS bundle directory.
 
     Bundles live beside the media (`<file_dir>/.streamlink_cache/<key>/`), so the
@@ -23905,6 +23991,30 @@ async def offline_cache_bundle_file(cache_key: str, filename: str) -> FileRespon
     bundle_dir = await _resolve_bundle_dir(cache_key)
     if bundle_dir is None:
         raise HTTPException(404, "Cached file not found.")
+
+    # Native-AVPlayer views of the bundle. Both are generated on read and never
+    # exist on disk, so they're resolved BEFORE the file lookup below. Only the
+    # iOS background/external-display path requests these names; the web player
+    # keeps consuming the untouched `master.m3u8`. See _native_master above.
+    if filename == _NATIVE_MASTER_NAME:
+        src = bundle_dir / "master.m3u8"
+        if not src.is_file():
+            raise HTTPException(404, "Cached file not found.")
+        txt = await asyncio.to_thread(src.read_text, encoding="utf-8", errors="replace")
+        meta = await asyncio.to_thread(_read_meta, bundle_dir)
+        return Response(content=_native_master(txt, meta),
+                        media_type=_HLS_MIME[".m3u8"])
+
+    sm = _SUB_PLAYLIST_RE.match(filename)
+    if sm:
+        vtt = bundle_dir / f"sub_{sm.group(1)}.vtt"
+        if not vtt.is_file():
+            raise HTTPException(404, "No such subtitle.")
+        meta = await asyncio.to_thread(_read_meta, bundle_dir)
+        return Response(content=_sub_wrapper_playlist(vtt.name,
+                                                      meta.get("duration_sec", 0)),
+                        media_type=_HLS_MIME[".m3u8"])
+
     p = bundle_dir / filename
     if not p.exists() or not p.is_file():
         raise HTTPException(404, "Cached file not found.")
@@ -24748,6 +24858,10 @@ async def stream_ondemand(item_id: str, req: OnDemandReq) -> JSONResponse:
         "ready":             True,
         "mode":              "ondemand",
         "master_url":        f"/api/library/ondemand/{key}/master.m3u8",
+        # Native-AVPlayer view. In on-demand mode this is the SAME playlist (no
+        # subtitle renditions — see ondemand_file), but the client still needs a
+        # URL here or it can't hand off to the background player at all.
+        "native_master_url": f"/api/library/ondemand/{key}/{_NATIVE_MASTER_NAME}",
         "duration_sec":      duration,
         "audios":            audios_meta,
         "subtitles":         _od_subs_meta(info),   # embedded text subs, served as sub_<i>.vtt
@@ -24794,7 +24908,15 @@ async def ondemand_file(session_key: str, filename: str):
         raise HTTPException(410, "Streaming session expired.")
     session["last_access"] = time.time()
 
-    if filename == "master.m3u8":
+    if filename in ("master.m3u8", _NATIVE_MASTER_NAME):
+        # `master-native.m3u8` is deliberately IDENTICAL here — video+audio only,
+        # no subtitle renditions. On-demand segments are MPEG-TS, and AVPlayer
+        # requires an `X-TIMESTAMP-MAP` header in WebVTT paired with TS segments
+        # to anchor cue times to the segment PTS. The JIT segment timeline is not
+        # zero-based per segment, so a naive wrapper playlist would render subs at
+        # the wrong times — worse than none. Background handoff still works on a
+        # not-yet-prepped file; it just has no native subtitles until the bundle
+        # is prepped. See docs/STREAMING.md.
         master = ("#EXTM3U\n"
                   "#EXT-X-STREAM-INF:BANDWIDTH=4000000\n"
                   "media.m3u8\n")

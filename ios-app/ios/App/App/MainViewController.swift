@@ -24,6 +24,7 @@ class MainViewController: CAPBridgeViewController {
         bridge?.registerPluginInstance(BundleDownloader())
         bridge?.registerPluginInstance(OfflineStore())
         bridge?.registerPluginInstance(TVRemote())
+        bridge?.registerPluginInstance(NativePlayback())
         injectCapacitorRuntime()
         injectViewportLock()
     }

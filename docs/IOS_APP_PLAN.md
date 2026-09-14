@@ -1,5 +1,33 @@
 # iOS Client App — Plan for v6.0.0
 
+> **Background + external-display playback (`12.0.0`, code).** On-device playback
+> no longer dies when the phone locks, and keeps video on a connected monitor.
+> New **`NativePlayback`** plugin (`AVPlayer` under `UIBackgroundModes: audio`) is
+> a relief pitcher for the WKWebView player: JS **pre-arms** it ~1 Hz and the
+> *native* side performs the handoff from `didEnterBackgroundNotification`,
+> extrapolating the playhead from the last sample (`visibilitychange` can't be
+> trusted to finish its bridge round-trip before suspension). `resume()` hands the
+> position back through the existing `_lpCommitSeek` / `lp.lastKnownT` machinery.
+> Adds **TV Mode** (phone screen blanked, app *foreground*, so mirroring keeps the
+> custom player **and** libass styled subs — impossible under a real lock, since a
+> backgrounded app cannot draw), lock-screen/Dynamic Island transport via
+> `MPNowPlayingInfoCenter` + a new **`PlaybackWidget`** Live Activity whose clock is
+> self-advancing (`timerInterval` views, no 1 Hz pushes — that blows ActivityKit's
+> budget), and **native progress POSTing** (JS timers are frozen while backgrounded,
+> so nothing would otherwise be recorded). Server side: `master-native.m3u8` +
+> `sub_<i>.m3u8` synthesized on read so AVPlayer gets real subtitle renditions —
+> no ffmpeg change, no `OFFLINE_CACHE_VERSION` bump. New files:
+> `App/NativePlayback.swift`, `App/PlaybackLiveActivity.swift`,
+> `Shared/PlaybackIntents.swift`,
+> `StreamLinkLiveActivities/PlaybackWidget.swift`; `project.pbxproj` hand-edited for
+> target membership (`cap sync` never touches targets) — note `PlaybackIntents.swift`
+> is in **both** targets and must not name App-target types (hence
+> `PlaybackCommandBus`). `www/` untouched ⇒ **no `cap sync` needed**, but Swift +
+> pbxproj changed ⇒ **rebuild from Xcode**. **On-device verification pending** — the
+> load-bearing unknown is whether wired-HDMI external playback survives lock; TV Mode
+> is the fallback and ships working either way. See
+> [STREAMING.md § 2b](STREAMING.md) / [GOTCHAS.md](GOTCHAS.md).
+
 > **Settings screen + auto-managed downloads (`8.3.0`).** The ☰ App menu gained a
 > **Settings** overlay (`_appOpenAppSettings()` in `static/index.html` — an overlay
 > ON the live host page, same pattern as Downloads/Change Server, so it never

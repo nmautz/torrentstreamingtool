@@ -26,6 +26,16 @@
 	<true/>
 	<key>NSSupportsLiveActivities</key>
 	<true/>
+	<!-- Background playback (NativePlayback.swift). `audio` is what keeps the
+	     process alive so an AVPlayer can keep playing with the phone locked,
+	     and what lets AVPlayer's external-playback route keep feeding a
+	     connected monitor. It is a plain Info.plist capability — NO entitlement
+	     and no paid account — so free-Apple-ID sideloading via build-ipa.sh is
+	     unaffected. Do not add other modes here; nothing else is needed. -->
+	<key>UIBackgroundModes</key>
+	<array>
+		<string>audio</string>
+	</array>
 	<key>UILaunchStoryboardName</key>
 	<string>LaunchScreen</string>
 	<key>UIMainStoryboardFile</key>

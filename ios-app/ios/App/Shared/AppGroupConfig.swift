@@ -23,6 +23,8 @@ public enum AppGroupConfig {
         static let serverUrl   = "tvremote.serverUrl"
         static let deviceToken = "tvremote.deviceToken"
         static let isYouTube   = "tvremote.isYouTube"
+        static let pendingCmd  = "playback.pendingCommand"
+        static let strandedBri = "playback.strandedBrightness"
     }
 
     public static var serverUrl: String? {
@@ -38,6 +40,32 @@ public enum AppGroupConfig {
     public static var isYouTube: Bool {
         get { defaults?.bool(forKey: Key.isYouTube) ?? false }
         set { defaults?.set(newValue, forKey: Key.isYouTube) }
+    }
+
+    /// A Live Activity transport command that arrived with no live player to
+    /// take it (the app process had been killed while the activity stayed on
+    /// screen). NativePlayback drains this once it's ready. See
+    /// PlaybackCommandBus.send.
+    public static var pendingPlaybackCommand: String? {
+        get { defaults?.string(forKey: Key.pendingCmd) }
+        set { defaults?.set(newValue, forKey: Key.pendingCmd) }
+    }
+
+    /// Screen brightness captured before TV Mode blanked the display.
+    ///
+    /// iOS does NOT restore brightness after a crash, so a force-quit or crash
+    /// while dimmed would otherwise leave the user with a black phone and no
+    /// obvious cause. Persisting it OUTSIDE the process means the next launch
+    /// can put it back. `nil`/absent ⇒ nothing to restore.
+    public static var strandedBrightness: Double? {
+        get {
+            guard let d = defaults, d.object(forKey: Key.strandedBri) != nil else { return nil }
+            return d.double(forKey: Key.strandedBri)
+        }
+        set {
+            guard let v = newValue else { defaults?.removeObject(forKey: Key.strandedBri); return }
+            defaults?.set(v, forKey: Key.strandedBri)
+        }
     }
 
     /// Write all remote-control config at once (called by the TVRemote plugin).
