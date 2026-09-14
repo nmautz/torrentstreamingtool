@@ -1242,10 +1242,17 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
     # specials/OVAs that genuinely have no credit roll, and running this on them would
     # invent one — regressing the exact case the greedy clustering exists to protect.
     if no_credits and got_credits <= (got_credits + len(no_credits)) * STRUCT_CREDITS_VETO:
-        await _emit(stage="finalizing", current=total_eps, total=total_eps,
-                    message=f"Looking for credit rolls in {len(no_credits)} episode(s)")
         cands: dict[int, tuple[float, float]] = {}
-        for idx in no_credits:
+        # Emit per episode, not once for the whole pass. Each call decodes a 5-minute
+        # audio window, so on a long series under load this stage runs for HOURS; a
+        # single up-front message leaves the Activity tab frozen on one line and the
+        # pass is indistinguishable from a hang. `progress` is already pinned at the
+        # top of the finalizing band and _emit clamps it monotonic, so these move the
+        # message only — which is exactly the part that shows the pass is alive.
+        for n, idx in enumerate(no_credits, 1):
+            await _emit(stage="finalizing", current=total_eps, total=total_eps,
+                        message=f"Looking for credit rolls — {n} of {len(no_credits)}",
+                        episode_name=Path(episodes[idx]["path"]).name)
             dur = durations[idx]
             if not dur:
                 continue
@@ -1273,7 +1280,8 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
             ana["version"] = ANALYZER_VERSION
             ana["source"] = "auto"
             ana["method"] = (ana.get("method") or "fingerprint")
-            ana["method"] = "structural" if ana["method"] == "fingerprint"                 else ana["method"] + "+structural"
+            ana["method"] = ("structural" if ana["method"] == "fingerprint"
+                             else ana["method"] + "+structural")
             ana.pop("error_code", None)
             ana.pop("error", None)
             ref = entry.setdefault("refine", {"version": REFINER_VERSION,

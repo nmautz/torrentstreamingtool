@@ -119,6 +119,8 @@ first thing to check.
 
 `progress` is a **monotonic 0..1 fraction across the whole run** (stage spans in `_STAGE_SPAN`) — progress bars must use it, not `current/total`: `current/total` resets at every stage boundary, and the matching stages' `total` is a *growing estimate* (greedy clustering can't know its pair count up front), both of which read as the bar "restarting"/jumping backward. The admin Smart Skip badge and the Activity tab both consume `job.progress`.
 
+**`finalizing` covers two very different amounts of work.** The per-episode refine loop advances `progress` across the 0.95–1.00 band normally. The structural credits pass that can follow it (§ Structural credits) sits at the **top** of that band and cannot advance the bar at all — `_emit` clamps `progress` monotonic, so anything it emits is already pinned at 1.0. It therefore reports by **message** instead, counting through the episodes it is checking. Keep that per-episode emit: each iteration decodes a five-minute audio window, so the pass can run for hours, and without it the Activity tab freezes on a single line that is indistinguishable from a hang.
+
 ## Trigger flow (in `main.py`)
 
 Fingerprinting **rides along with stream prep**, not with the download. When a

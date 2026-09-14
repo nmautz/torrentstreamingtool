@@ -1,5 +1,14 @@
 # Changelog
 
+## [12.4.2] — 2026-09-14
+**Stop the credit-roll search from looking like a hung analysis.**
+
+The structural credits pass (12.4.0) announced itself once — "Looking for credit rolls in 45 episode(s)" — and then ran silently to completion. Each episode in that pass decodes a five-minute audio window, so on a long series while the box is busy it runs for **hours** behind that one frozen line, which is indistinguishable from a hang. Measured on the 45-episode Hacks set: over two hours on a single unchanging message.
+
+It now names the episode it is on and counts through the set. The progress *bar* is unchanged — this stage sits at the top of the finalizing band and the emitted value is clamped monotonic — so this moves the message only, which is the part that shows the pass is alive.
+
+No re-analysis and no change to any boundary: the detected times are identical.
+
 ## [12.4.1] — 2026-09-13
 **Show why Smart Skip picked a boundary, so a wrong one can be diagnosed instead of re-guessed.**
 
