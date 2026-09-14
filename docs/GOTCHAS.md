@@ -503,6 +503,31 @@ add another detector that shells out over a path that might not be local, rememb
 "empty result" and "timed out" are indistinguishable to every caller downstream — the same
 hazard as the `-loglevel error` trap documented above.
 
+### The shot-boundary credit scan must stay OUT of `analyze_series`
+
+`shot_scan_loop` is a separate worker, and the temptation to fold it in as another
+`_STAGE_SPAN` stage should be resisted every time. Inside the analysis pass it would:
+persist nothing until the whole series returned (so a 3-minute-per-file pass would show
+no result for hours), hold one of the two `_analysis_gate` slots, keep the series
+`status="running"` — which blocks `_any_analysis_running()` and the maintenance loop's
+idle checks, the exact opposite of "runs last" — and park the progress bar where users
+read it as a hang. That last one is not hypothetical: the 12.4.0 structural pass did it
+and cost a real debugging cycle (see the 12.4.2 entry).
+
+The ordering it enforces is the point, and all three conditions matter:
+`_any_analysis_running()` false, `_fingerprint_backlog(lib) == 0` (no audio work left
+*anywhere* in the library, not just this series), and `_machine_in_use(120)` false. Then
+ONE file per tick.
+
+It also calls `analyzer.run_offloaded()`, **not** `asyncio.to_thread`. A multi-minute
+video decode on the event loop's default pool would queue `get_library()`/`put_library()`
+behind it and stall the dashboard — the same failure documented above for fingerprinting.
+
+The write-back re-checks every premise under the library lock and **discards** its result
+rather than merging when anything changed underneath it: a re-analysis, a manual edit, or
+a cheaper detector landing credits while the scan ran. Audio and chapters outrank it; a
+hand edit outranks everything.
+
 ### Night mode toggles by relaunching VLC — there's no runtime audio-filter command
 
 Night mode is VLC's `compressor` audio filter (dynamic-range compression: pull loud peaks down, lift quiet dialogue up), with three user-selectable intensity presets (`light`/`medium`/`max`). VLC's Lua HTTP interface has **no command to add or remove an audio filter on a running instance** — `--audio-filter` is read only at launch. So changing night mode (`POST /api/settings/night-mode`) cannot be a live VLC command; `_apply_night_mode` snapshots the current file + position, calls `_restart_vlc_process` (which appends `NIGHT_MODE_PRESETS[state.vlc_night_mode_preset]` when `state.vlc_night_mode` is set), then replays the file + playlist tail and seeks back so it's seamless mid-movie. A no-op (already in the requested state), **or a preset change while night mode is off**, persists the setting but skips the relaunch — so the user isn't kicked out of playback for nothing.

@@ -46,6 +46,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 import analyzer
+import refiner
 import dvprobe
 import episodes
 import stt
@@ -1001,6 +1002,7 @@ class AppState:
     subtitle_single_option: bool = True                   # settings.subtitles.single_option, mirrored for client/UI
     missing_content_enabled: bool = True                  # settings.missing_content.enabled — library surfaces not-yet-downloaded seasons/episodes; mirrored for state_snapshot
     missing_content_unaired: bool = False                 # settings.missing_content.show_unaired — render future-dated TMDb episodes as "Upcoming" instead of hiding them
+    shotscan_current: str = ""                            # basename of the file the shot-boundary credit scan is decoding ("" = idle); surfaced in the admin Activity tab so the most expensive pass in the app is never invisible
     sub_auto_ai_path: str = ""                            # abs path of the AI sidecar currently auto-applied in VLC ("" = none); the upgrade loop watches this and swaps in a real sub when one arrives
     last_activity: float = 0.0                            # time.time() of last user-initiated interaction (drives scheduled-reboot idle check)
     prep_paused: bool = False                             # True ⇒ bulk stream-prep jobs hold (set by the non-admin Pause control / auto-prep falling edge)
@@ -8876,6 +8878,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     subupgrade_loop = asyncio.create_task(subtitle_upgrade_loop())
     od_reaper_loop  = asyncio.create_task(_od_reaper())
     maint_loop      = asyncio.create_task(background_maintenance_loop())
+    shotscan_task   = asyncio.create_task(shot_scan_loop())
     tvui_task       = asyncio.create_task(tv_ui_loop())
     rvol_guard      = asyncio.create_task(remote_volume_guard())   # opt-in: no-op unless REMOTE_VOLUME_GUARD=1 (Windows)
 
@@ -8915,7 +8918,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     for t in (guard, broadcaster, dl_monitor, dvbackfill, vlc_tracker, bg_loop,
               jackett_mon, reboot_loop, autoprep_loop, update_loop, dlsched_loop,
               sysmon_loop, cachepurge_loop, subupgrade_loop, od_reaper_loop,
-              maint_loop, tvui_task, rvol_guard,
+              maint_loop, shotscan_task, tvui_task, rvol_guard,
               diag_lag, diag_vitals, diag_probe):
         t.cancel()
     if remote_listener is not None:
@@ -18419,6 +18422,19 @@ async def _activity_snapshot() -> dict:
             progress=(job.get("progress") if job.get("progress") is not None
                       else (cur / total if total else None)))
 
+    # 6b. Shot-boundary credit scan (the lowest-priority pass in the app)
+    if state.shotscan_current:
+        add(category="Smart Skip",
+            title="Credit scan (picture)",
+            status="running",
+            detail=state.shotscan_current,
+            reason=("Looking for the credit roll by finding where the picture stops "
+                    "cutting, for a file with no chapters, no matching theme and no "
+                    "subtitles. Runs only when nothing else needs the box."),
+            resumes=False,
+            restart_note="Safe to interrupt — the scan restarts from scratch and only runs while the box is idle.",
+            progress=None)
+
     # 7. On-demand transcode sessions (live just-in-time streaming)
     try:
         od_n = len(_od_sessions)
@@ -22273,6 +22289,137 @@ def _fingerprint_backlog(lib: dict) -> int:
 def _any_analysis_running() -> bool:
     return any((j or {}).get("status") == "running"
                for j in state.analysis_jobs.values())
+
+
+# ── Shot-boundary credit scan ────────────────────────────────────────────────
+# The last resort for credits, and the most expensive thing this app does: it decodes
+# video (~3 min per file at 160 px) to find where the picture stops cutting. See
+# `refiner.credits_from_shots`.
+#
+# It is a SEPARATE worker rather than a stage inside `analyze_series`, deliberately.
+# Inside the analysis pass it would persist nothing until the whole series finished,
+# hold one of the two `_analysis_gate` slots, keep the series `status="running"` (which
+# blocks the maintenance loop's own idle checks — the exact opposite of "runs last"), and
+# park the progress bar where users read it as a hang. The 12.4.0 structural pass did the
+# last of those and cost a real debugging cycle.
+#
+# Ordering is the whole point: it waits for every audio analysis in the library, then for
+# the box to be idle, and processes ONE file per tick.
+SHOTSCAN_VERSION      = 1
+SHOTSCAN_START_DELAY  = 300     # let boot settle before considering any of this
+SHOTSCAN_TICK_SEC     = 90
+SHOTSCAN_IDLE_SEC     = 120     # box must have been unused this long
+
+
+def _needs_shot_scan(entry: dict) -> bool:
+    """Whether a skip_data entry is a candidate for the picture-based credit scan.
+
+    Only files that everything cheaper has already failed on, and only once each: the
+    `shot_scan` marker records the attempt so a negative result isn't retried forever.
+    A re-analysis wipes the whole entry (including this marker), which is correct — the
+    audio verdict changed, so the scan's premise did too.
+    """
+    ana = entry.get("analysis") or {}
+    if ana.get("source") == "manual":
+        return False                                  # never touch a hand-edited entry
+    if ana.get("version") != analyzer.ANALYZER_VERSION:
+        return False                                  # stale; re-analysis comes first
+    if entry.get("credits_start") is not None:
+        return False                                  # something cheaper already won
+    return (entry.get("shot_scan") or {}).get("version") != SHOTSCAN_VERSION
+
+
+def _find_shot_scan_candidate(lib: dict) -> Optional[tuple[str, str]]:
+    """First (item_id, file_path) needing the scan, or None."""
+    for it in lib.get("items", []):
+        if it.get("status") != "ready":
+            continue
+        sk = it.get("skip_data") or {}
+        for f in _analyzable_files(it):
+            path = f.get("path", "")
+            entry = sk.get(path)
+            if entry and _needs_shot_scan(entry):
+                return it["id"], path
+    return None
+
+
+async def _record_shot_scan(item_id: str, path: str, found: Optional[float]) -> bool:
+    """Write the scan result back, re-checking every premise under the library lock.
+
+    The scan runs for minutes off-lock, so the entry can have changed underneath it — a
+    re-analysis, a manual edit, or a cheaper detector landing credits. In all of those the
+    scan's answer is stale and is DISCARDED rather than merged: audio and chapters
+    outrank it, and a hand edit outranks everything.
+    """
+    async with mutate_library() as lib:
+        it = next((x for x in lib.get("items", []) if x.get("id") == item_id), None)
+        if not it:
+            return False
+        entry = (it.get("skip_data") or {}).get(path)
+        if not entry or not _needs_shot_scan(entry):
+            return False
+        entry["shot_scan"] = {"version": SHOTSCAN_VERSION,
+                              "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+                              "found": found}
+        if found is None:
+            return False
+        entry["credits_start"] = found
+        ana = entry.setdefault("analysis", {})
+        ana["source"] = "auto"
+        base = ana.get("method") or "fingerprint"
+        ana["method"] = "shots" if base in ("fingerprint", "") else f"{base}+shots"
+        ana.pop("error_code", None)
+        ana.pop("error", None)
+        ref = entry.setdefault("refine", {"version": analyzer.REFINER_VERSION,
+                                          "audio": {"credits_start": None}})
+        ref["credits_start"] = {"t": found, "conf": 0.7, "src": "shots"}
+        return True
+
+
+async def shot_scan_loop():
+    """Lowest-priority background pass: picture-based credits, one file at a time."""
+    await asyncio.sleep(SHOTSCAN_START_DELAY)
+    while True:
+        try:
+            await asyncio.sleep(SHOTSCAN_TICK_SEC)
+            if not analyzer.is_available():
+                continue
+            lib = await get_library()
+            if not _auto_maint_cfg(lib)["fingerprint"]:
+                continue
+            # STRICTLY LAST: nothing analyzing, and no audio work left anywhere.
+            if _any_analysis_running() or _fingerprint_backlog(lib) > 0:
+                continue
+            cand = _find_shot_scan_candidate(lib)
+            if not cand:
+                continue
+            if await _machine_in_use(SHOTSCAN_IDLE_SEC):
+                continue
+            item_id, path = cand
+            dur = await analyzer.run_offloaded(analyzer._media_duration, path)
+            if not dur:
+                await _record_shot_scan(item_id, path, None)
+                continue
+            state.shotscan_current = Path(path).name
+            try:
+                found = await analyzer.run_offloaded(
+                    refiner.credits_from_shots, path, dur, analyzer.MIN_CREDITS_PCT)
+            finally:
+                state.shotscan_current = ""
+            cs = found[0] if found else None
+            wrote = await _record_shot_scan(item_id, path, cs)
+            _log_analyzer_event(
+                level="info" if wrote else "warn",
+                item_id=item_id, file_path=path,
+                error_code="" if wrote else analyzer.ERR_NO_SKIP,
+                message=(f"Credit scan (picture): credits at {cs:.1f}s" if wrote
+                         else "Credit scan (picture): no credit roll found"))
+        except asyncio.CancelledError:
+            state.shotscan_current = ""
+            raise
+        except Exception:
+            state.shotscan_current = ""
+            log.exception("shot_scan_loop tick failed")
 
 
 def _find_unfingerprinted_series(lib: dict) -> Optional[str]:

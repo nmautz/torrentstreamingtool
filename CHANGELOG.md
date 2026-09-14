@@ -1,5 +1,25 @@
 # Changelog
 
+## [12.6.0] — 2026-09-14
+**Credits for files with no chapters, no matching theme and no subtitles — found by watching the picture.**
+
+Three detectors already cover most of the library, but they all need something the file might not have. What every file does have is the picture, and a credit roll looks unmistakable there: content cuts every few seconds, a credit roll is one static or slowly-scrolling shot. So the credits begin at the last shot boundary that opens a long cut-free run to the end of the file.
+
+```
+Hacks S05E05:  ... 2122.2  2124.0  2127.4  2132.7  2139.7  <- cut into credits
+                                                   |__ 75.1 s, no cuts __|
+```
+
+It deliberately does **not** look for black frames. That was the first thing I tried and it fired 52 s early on S01E03 by latching onto a fade-to-black inside the final scene — blackness means the picture went dark, which happens mid-episode all the time. Cut density means the picture stopped changing, which is what a credit roll actually is. It also means this works on credits over a background or a slow scroll, not just on black.
+
+Measured on five files: it fired on two and was **+1.0 s on both**, and returned nothing on the other three. Correct-or-silent is the intended profile — this is a last resort for files that currently get no credits at all, so a miss costs nothing while an early hit costs content.
+
+**It runs in its own worker, never inline with analysis.** It is the most expensive thing the app does (30–190 s of video decode per file), so it waits for every audio analysis in the *whole library* to finish, then for the box to be idle for two minutes, then does one file per tick at below-normal priority. It appears in the admin Activity tab while running, because the one thing worse than a slow pass is an invisible one.
+
+Credits precedence is now **chapters > fingerprint > subtitles > shots**.
+
+Also recorded, because it caught me out while validating: a *fingerprint* credits time can be **late** on a rotating-theme show. With a different song every episode the matcher can only latch onto a short recurring end-tag, which begins part-way into the roll. It is safe (late, never early) but it is not ground truth.
+
 ## [12.5.1] — 2026-09-14
 **A chapter marker's credits time is no longer overwritten by the subtitle estimate.**
 

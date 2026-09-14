@@ -490,3 +490,114 @@ def credits_from_subtitles(path: str, duration: float, min_pct: float,
         cs = min(last_end + SUB_LATE_PAD, duration - SUB_MIN_ROLL / 2.0)
         return round(cs, 1), "subtitles"
     return None
+
+
+# ── Credits from shot boundaries ─────────────────────────────────────────────
+#
+# The last resort, for files nothing else reached: no chapters, no fingerprint match, no
+# text subtitle track. It measures the PICTURE, which is the one place the boundary is
+# always present — a credit roll is a single static or slowly scrolling shot, while
+# content cuts every few seconds. So the credits begin at the last shot boundary that
+# opens a long cut-free run to the end of the file.
+#
+# Measured on Hacks S05E05, whose credits start at a verified 2139.7:
+#
+#     cuts ... 2122.2  2124.0  2127.4  2132.7  2139.7  <- cut into credits
+#                                              |___ 75.1 s, no cuts ___|  2214.8
+#
+# Validated on five files: it fired on two and was +1.0 s on both (S05E05 2140.7 vs
+# 2139.7; S01E01 1666.4 vs a cut-into-black at 1665.4), and returned nothing on the rest.
+# Correct-or-silent is the intended profile — this is a last resort for files that
+# currently get no credits at all, so a miss costs nothing and an early hit costs content.
+#
+# One finding from that run is worth keeping: a FINGERPRINT credits time can be LATE on a
+# rotating-theme show. S01E05's fingerprint says 1778.2, but the picture shows content
+# cutting until 1752.96 and then black — the real roll starts there. With a different song
+# every episode the matcher can only latch onto a short recurring end-tag, which begins
+# part-way INTO the credits. Don't treat a fingerprint credits time as ground truth when
+# validating a detector against this class of show; it is safe (late) but not exact.
+#
+# Note what this does NOT use. "The first long black run" is the obvious idea and it is
+# wrong: it fired 52 s early on S01E03 by latching onto a fade-to-black inside the final
+# scene. Blackness says "the picture went dark", which happens mid-episode all the time;
+# cut density says "the picture stopped changing", which is what a credit roll is. It
+# also means this works on credits over a background or a slow scroll, not just on black.
+#
+# This is by far the most expensive detector here — it decodes video, ~187 s for a 420 s
+# window at 160 px — so it must never run inline with analysis. See the shot-scan worker
+# in main.py, which runs it strictly last and only on an idle box.
+SHOT_SEARCH_SEC = 420.0
+SHOT_SCALE      = 160     # decode is the cost; scdet on a thumbnail is as good
+SHOT_THRESHOLD  = 10      # deliberately loose: these are candidates, not decisions
+SHOT_MIN_ROLL   = 25.0
+SHOT_MAX_ROLL   = 300.0
+SHOT_MIN_CUTS   = 5       # the tail must actually be cutting (see below)
+SHOT_DOMINANCE  = 1.5     # winner must beat the runner-up run by this factor
+SHOT_END_SLACK  = 8.0     # the run has to reach ~the end of the file
+SHOT_LATE_PAD   = 1.0     # err late, as everywhere else in credits detection
+SHOT_TIMEOUT    = 1800
+
+_RE_SCD_TIME = re.compile(r"lavfi\.scd\.time:\s*([0-9.]+)")
+
+
+def shot_cuts(path: str, t0: float, span: float,
+              timeout: int = SHOT_TIMEOUT) -> list[float]:
+    """Shot-boundary times in ABSOLUTE seconds, or [] if the scan fails.
+
+    `scdet` logs at AV_LOG_INFO like the other detectors here, so `-loglevel info` is
+    mandatory — see docs/GOTCHAS.md. `lavfi.scd.time` can be NOPTS, hence the float
+    regex rather than a bare capture.
+    """
+    ff = ffmpeg_bin()
+    if not ff or span <= 0:
+        return []
+    t0 = max(0.0, t0)
+    try:
+        proc = run_capture([
+            ff, "-hide_banner", "-nostats",
+            "-loglevel", "info",          # MANDATORY: scdet logs at INFO (GOTCHAS)
+            "-ss", f"{t0:.3f}", "-t", f"{span:.3f}", "-i", path,
+            "-map", "0:v:0", "-an", "-sn", "-dn",
+            "-vf", f"scale={SHOT_SCALE}:-2,scdet=threshold={SHOT_THRESHOLD}",
+            "-f", "null", "-",
+        ], timeout=timeout)
+    except Exception:
+        return []
+    return sorted(t0 + float(m.group(1))
+                  for m in _RE_SCD_TIME.finditer(proc.stderr or ""))
+
+
+def credits_from_shots(path: str, duration: float, min_pct: float,
+                       ) -> Optional[tuple[float, str]]:
+    """Credits start = the last shot boundary opening a long cut-free run to EOF.
+
+    Returns (start, source_label) or None. Fails closed, like every other detector here.
+    """
+    if not duration or duration <= 0:
+        return None
+    t0 = max(0.0, duration - SHOT_SEARCH_SEC)
+    cuts = shot_cuts(path, t0, duration - t0)
+    # Too few cuts and "the longest gap" is measuring nothing — a mostly static source
+    # (a lecture capture, a concert single-cam) would hand back an arbitrary early time.
+    if len(cuts) < SHOT_MIN_CUTS:
+        return None
+
+    marks = [t0] + cuts + [duration]
+    runs = [(b - a, a, b) for a, b in zip(marks, marks[1:])]
+    ending = [r for r in runs if duration - r[2] <= SHOT_END_SLACK]
+    if not ending:
+        return None
+    best = max(ending, key=lambda r: r[0])
+    length, start, _end = best
+
+    if not (SHOT_MIN_ROLL <= duration - start <= SHOT_MAX_ROLL):
+        return None
+    if start < duration * min_pct:
+        return None
+    # Dominance. In real content the tail's runs are all short and similar; a credit roll
+    # stands out. Without this, an ordinary slightly-longer-than-average shot could win by
+    # a hair and put the skip inside the episode.
+    others = [r[0] for r in runs if r is not best]
+    if others and length < SHOT_DOMINANCE * max(others):
+        return None
+    return round(min(start + SHOT_LATE_PAD, duration - SHOT_MIN_ROLL / 2.0), 1), "shots"

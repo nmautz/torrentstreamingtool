@@ -115,7 +115,7 @@ first thing to check.
 
 ## Credits from subtitles
 
-**Precedence: chapters > fingerprint > subtitles.** The pass runs only for episodes that
+**Precedence: chapters > fingerprint > subtitles > shots.** The pass runs only for episodes that
 still have no `credits_start` *after* refinement — not merely those the fingerprint
 missed. Those two sets differ, because refinement can supply an exact time from a chapter
 marker, and the list of fingerprint misses is built before it runs. Check the entry, never
@@ -163,6 +163,32 @@ Coverage is release-dependent, not show-dependent: two rips of the same episode 
 Measured on this library, 309 of 370 files carry an English text track; the gaps are
 bitmap-subtitle rips (Chernobyl, Steins;Gate) and a couple of RARBG encodes with no
 subtitle streams at all.
+
+## Credits from shot boundaries (the last resort)
+
+For files nothing cheaper reached — no chapters, no fingerprint match, no text subtitles —
+`refiner.credits_from_shots` measures the **picture**, which is the one place the boundary
+is always present. A credit roll is a single static or slowly-scrolling shot; content cuts
+every few seconds. So credits start at the last shot boundary opening a long cut-free run
+to the end of the file.
+
+**It deliberately does not use blackness.** "The first long black run" is the obvious idea
+and it is wrong — it fired 52 s early on Hacks S01E03 by latching onto a fade-to-black
+*inside* the final scene. Blackness says the picture went dark, which happens mid-episode
+constantly; cut density says the picture stopped changing, which is what a credit roll is.
+It also means this works for credits over a background or a slow scroll, not only on black.
+
+Guards: `SHOT_MIN_CUTS` (a tail that isn't cutting at all makes "longest run" meaningless),
+`SHOT_DOMINANCE` (the winner must beat the runner-up run by 1.5×, so an ordinary long shot
+can't win by a hair), roll bounds, the 75 % floor, and a late pad. Measured profile:
+correct or silent — it fired on 2 of 5 test files, +1.0 s on both, and returned nothing on
+the rest.
+
+**This is the most expensive thing the app does** (~30–190 s of video decode per file), so
+it runs in its own worker (`shot_scan_loop` in `main.py`), never inline with analysis —
+see [ARCHITECTURE.md](ARCHITECTURE.md) and the ordering rules in [GOTCHAS.md](GOTCHAS.md).
+
+Full credits precedence: **chapters > fingerprint > subtitles > shots.**
 
 ## Progress reporting
 

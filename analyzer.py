@@ -182,6 +182,17 @@ def _fp_executor() -> concurrent.futures.ThreadPoolExecutor:
     return _FP_EXECUTOR
 
 
+async def run_offloaded(fn, *args):
+    """Public entry to the analyzer's dedicated subprocess thread pool.
+
+    For callers OUTSIDE this module (the shot-scan worker in main.py) that need to run a
+    blocking media subprocess. It must not go through `asyncio.to_thread`: that is the
+    event loop's default pool, which `get_library()`/`put_library()` also ride, and a
+    multi-minute decode parked there stalls the whole dashboard. See docs/GOTCHAS.md.
+    """
+    return await _fp_thread(fn, *args)
+
+
 async def _fp_thread(fn, *args):
     """Run a blocking analyzer subprocess call off the loop on the analyzer's OWN
     thread pool — never the shared default pool get_library()/put_library() use.
