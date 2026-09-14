@@ -141,6 +141,17 @@ Guards, all failing closed to "no credits":
 proves precision rather than accuracy. It would also reject single-episode library items,
 which is how most rotating-theme content is filed.
 
+**Known residual risk: a wordless ending.** This detector equates "the dialogue stopped"
+with "the content ended". Those come apart when an episode closes on a long silent
+sequence — a montage, a wordless action beat, a lingering final shot — and the skip would
+then fire at the last line of dialogue and cut it. `SUB_MIN_ROLL`/`SUB_MAX_ROLL` bound the
+damage (a silent stretch over 300 s is rejected outright) but do not eliminate it, and
+nothing else in the pipeline can currently corroborate the boundary for a file that has no
+chapters and no fingerprint match. This is the same class of error as the 12.4.0 failure —
+confidently early — so treat any "skipped the ending" report on a subtitle-derived credits
+value as this, and prefer the shot-boundary pass (which measures the picture, not the
+dialogue) over loosening the guards here.
+
 Coverage is release-dependent, not show-dependent: two rips of the same episode differ.
 Measured on this library, 309 of 370 files carry an English text track; the gaps are
 bitmap-subtitle rips (Chernobyl, Steins;Gate) and a couple of RARBG encodes with no
