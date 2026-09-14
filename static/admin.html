@@ -4978,6 +4978,37 @@ async function analyzeSkipForItem(itemId, btn){
 
 let _skipEditorItemId = null;
 
+// Per-boundary provenance for the Smart Skip editor.
+//
+// A boundary that looks wrong is only fixable if you can see WHAT set it. This shows
+// the pre-refinement fingerprint value beside the final one, plus how the final one was
+// chosen: `chapter` (a marker in the file), `silence_end` (the gap between theme and
+// dialogue), `structural` (a measured credit roll), or `chapter+silence_end` when two
+// independent kinds of evidence agreed. Absent for files that were never refined.
+function _skipProvenance(f){
+  const r = f.refine;
+  if(!r) return '';
+  const rows = [
+    ["Intro start", r.intro_start,   r.audio && r.audio.intro_start],
+    ["Intro end",   r.intro_end,     r.audio && r.audio.intro_end],
+    ["Credits",     r.credits_start, r.audio && r.audio.credits_start],
+  ].filter(x => x[1]);
+  if(!rows.length) return '';
+  return `<div class="text-[11px] px-2 py-1.5 border bg-gray-900 border-gray-800 space-y-0.5">
+    <div class="font-bold uppercase tracking-widest text-[10px] text-gray-500">Boundary evidence</div>
+    ${rows.map(([label, b, base]) => `
+      <div class="flex items-baseline gap-2 text-gray-400">
+        <span class="w-20 shrink-0 text-gray-600">${label}</span>
+        ${base != null && Math.abs(base - b.t) > 0.05
+          ? `<span class="font-mono text-gray-600 line-through">${base.toFixed(1)}</span><span class="text-gray-700">&rarr;</span>`
+          : ''}
+        <span class="font-mono text-gray-200">${b.t.toFixed(1)}s</span>
+        <span class="text-gray-600">${escHtml(b.src)}</span>
+        <span class="text-gray-700">${Math.round((b.conf||0)*100)}%</span>
+      </div>`).join('')}
+  </div>`;
+}
+
 async function openSkipEditor(itemId, title){
   _skipEditorItemId = itemId;
   document.getElementById("skipEditorTitle").textContent = `Edit Skip Times — ${title}`;
@@ -5005,7 +5036,8 @@ async function openSkipEditor(itemId, title){
     return `
     <div class="px-5 py-4 space-y-2">
       <div class="text-sm font-bold text-gray-200 truncate">${escHtml(f.name)}</div>
-      ${f.source ? `<div class="text-[10px] text-gray-600 uppercase tracking-widest">Source: ${escHtml(f.source)}</div>` : ''}
+      ${f.source ? `<div class="text-[10px] text-gray-600 uppercase tracking-widest">Source: ${escHtml(f.source)}${f.method?` · ${escHtml(f.method)}`:''}</div>` : ''}
+      ${_skipProvenance(f)}
       ${errBlock}
       <div class="grid grid-cols-3 gap-2 pt-1">
         <label class="block">

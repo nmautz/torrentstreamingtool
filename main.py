@@ -17068,6 +17068,12 @@ async def admin_get_skip_data(item_id: str, request: Request) -> JSONResponse:
             # editor + Smart Skip log panel so the operator can see why.
             "error_code":    analysis.get("error_code", ""),
             "error":         analysis.get("error", ""),
+            # Provenance (12.3.0+). `method` says which path produced the times;
+            # `refine` carries the pre-refinement audio values and a per-boundary
+            # confidence + source, so a boundary that looks wrong in the editor can be
+            # traced to the evidence that set it instead of being re-guessed by hand.
+            "method":        analysis.get("method", ""),
+            "refine":        entry.get("refine") or None,
         })
     return JSONResponse({"files": files_out, "series_key": _series_key(item)})
 
@@ -17093,6 +17099,9 @@ async def admin_set_skip_data(item_id: str, request: Request, req: AdminSkipData
             entry["credits_start"] = round(req.credits_start, 1) if req.credits_start > 0 else None
             if entry["credits_start"] is None:
                 entry.pop("credits_start", None)
+        # A hand-edited boundary invalidates the recorded provenance — the stored
+        # confidence/source described the automatic value, not this one.
+        entry.pop("refine", None)
         entry["analysis"] = {"version": analyzer.ANALYZER_VERSION, "source": "manual"}
     return JSONResponse({"ok": True})
 

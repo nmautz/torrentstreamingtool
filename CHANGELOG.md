@@ -1,5 +1,15 @@
 # Changelog
 
+## [12.4.1] — 2026-09-13
+**Show why Smart Skip picked a boundary, so a wrong one can be diagnosed instead of re-guessed.**
+
+12.3.0 and 12.4.0 record per-boundary provenance but nothing displayed it. The Smart Skip editor now shows, per file, the pre-refinement fingerprint value beside the final one and how the final one was chosen — `chapter` (a marker in the file), `silence_end` (the gap between theme and dialogue), `structural` (a measured credit roll), or `chapter+silence_end` when two independent kinds of evidence agreed — with the confidence behind it.
+
+- `GET /api/admin/library/{id}/skip-data` gains `method` and `refine` (both optional and additive; no existing key changed).
+- **A manual edit now clears the stored provenance.** It described the automatic value, not the one you just typed, so leaving it would attribute your number to evidence that never produced it.
+
+No re-analysis — display and API only.
+
 ## [12.4.0] — 2026-09-13
 **Skip the credits on shows that use a different song every episode.**
 
