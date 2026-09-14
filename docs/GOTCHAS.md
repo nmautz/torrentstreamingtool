@@ -435,22 +435,47 @@ The fast path needs **numpy** (vectorized XOR + popcount LUT, ~50-100× the pure
 
 The analyzer's blocking calls (`_media_duration`, `_fpcalc_raw`) go through `analyzer._fp_thread` → a **dedicated** `_FP_EXECUTOR` thread pool — *not* `asyncio.to_thread`. This is load-bearing: `asyncio.to_thread` runs on the event loop's single default `ThreadPoolExecutor`, and `get_library()` / `put_library()` ride that **same** pool. Each fingerprint parks its worker for the entire decode (head 6 min, tail 10 min of audio → seconds each), so fingerprinting several series at once flooded the default pool; library reads/writes — which the progress tracker (every 2 s), the download monitor, and essentially every HTTP handler depend on — then queued behind the decodes and the **whole dashboard stalled while the host (and RDP) stayed responsive** ("fingerprinting many shows stalls the server"). The event loop was never blocked; its only thread pool was. A separate pool for analyzer subprocess work keeps the default pool free. Don't "simplify" `_fp_thread` back to `asyncio.to_thread`. Belt-and-suspenders: `main.py`'s `_analysis_gate` semaphore (`ANALYSIS_CONCURRENCY=2`) also caps how many series fingerprint at once so a bulk **Analyze** can't oversubscribe CPU with match processes either.
 
-### Smart Skip credits: never fabricated — but a MEASURED credit roll is not a fabrication
+### Smart Skip credits: never fabricated — and cross-episode agreement is NOT proof
 
-**Amended in 12.4.0.** The rule below still stands and the two removed fallbacks must
-stay removed. But "fingerprint-only" was the implementation, not the principle — the
-principle is *never state a credits time you have no evidence for*. A structural pass
-(`refiner.credits_candidate`) now supplies credits for shows that use a different song
-every episode (Hacks, WandaVision, One Tree Hill S8), where the tail matcher correctly
-finds nothing and the whole series would otherwise get no credits skip.
+**Rewritten in 12.5.0, after the 12.4.0 version of this entry was proved wrong in the
+field.** The rule below still stands and the two removed fallbacks must stay removed.
+What follows is why the first attempt to relax it failed, because the reasoning error is
+much easier to repeat than the code.
 
-What makes it evidence rather than a guess, and what any future change here must keep:
-it measures an actual acoustic boundary (the last gap-free sound block — speech has
-sub-second pauses, a music bed does not); it passes the SAME two acceptance gates a
-fingerprint match must pass; and it requires peer episodes to agree on the **length** of
-the roll, so a lone file can never confirm itself. It is also vetoed entirely when the
-fingerprint already found credits for >40% of the series, because then the credits
-demonstrably do repeat and the stragglers are specials with no credit roll.
+12.4.0 added a structural pass (`refiner.credits_candidate`) for shows that use a
+different song every episode. It took the last **gap-free block of sound** running to the
+end of the file, on the theory that speech has sub-second pauses and a music bed does
+not. It was vetoed unless the fingerprint had broadly failed, it passed the same two
+acceptance gates a fingerprint match must pass, and it required peer episodes to agree on
+the roll **length**. That sounded like evidence. It was not.
+
+It shipped, and a viewer reported the Hacks credits skip firing about a minute early.
+Measured across 11 episodes it was early **every single time**, by 6.6 s to 69.1 s.
+
+Two lessons, both worth more than the deleted code:
+
+1. **The boundary was not in the audio at all.** These shows run a song across the seam
+   from the last scene into the credit roll. On Hacks S05E05 the music starts ~6 s before
+   the cut and never drops below −40 dB again, so "the last gap-free block" begins
+   wherever the dialogue's last pause happened to be — 19 s inside real content. No
+   threshold tuning fixes a boundary that leaves no trace in the signal being measured.
+2. **Cross-episode consensus validates PRECISION, NOT ACCURACY.** Every episode was wrong
+   in the same direction, so they agreed with each other and the consensus check ratified
+   the bias. Median detected roll was 111.6 s; the episodes whose credits came from the
+   trustworthy fingerprint path showed 24.8 s and 52.0 s. **Agreement among estimates
+   that share a systematic error is not corroboration.** If a new detector's only
+   safeguard is "the peers agree", it has no safeguard.
+
+The replacement (`refiner.credits_from_subtitles`) measures a different thing entirely:
+where the **dialogue** stops. A subtitle track states that directly, costs nothing to
+read (no decoding — the cues are demuxed as text), and on the same episode lands within
+0.1 s of the true cut. It is self-validating per episode rather than by committee, which
+is also why it works on single-episode library items where a peer-agreement rule would
+reject everything.
+
+Getting credits EARLY destroys content the viewer can never get back; getting them LATE
+costs a few seconds of credits. Those are not equivalent, so the detector errs late
+(`SUB_LATE_PAD`) and every guard fails closed to "no credits" rather than to a guess.
 
 The removed fallbacks had none of those properties — `duration * 0.92` and "this frame is
 dark" are formulas, not measurements. Don't re-add those.
@@ -458,6 +483,25 @@ dark" are formulas, not measurements. Don't re-add those.
 
 
 The matcher finds **any** recurring audio in the tail window, not specifically credits. So when an episode's real credits are absent/short/different, it used to latch onto whatever else recurs — a stinger, a repeated gag (the "credits kick in early and cut off the end of the show" report, e.g. an American Dad tag line) — and the old black-frame / flat-`duration*0.92` fallbacks **fabricated** a `credits_start` when nothing matched. Both are gone. Credits time now comes **only** from a confirmed cross-episode match that passes two correctness tests in the finalize loop: it must **start late enough** (`credits_start ≥ duration × MIN_CREDITS_PCT`) **and run to ~the end** (`credits_end ≥ duration − OUTRO_END_MARGIN_SEC`) — real credits reach the file end; a recurring mid/late cue is followed by more content, so its run ends early and is rejected. `_filter_cluster_consensus` additionally prunes a cluster member whose anchor-side offset disagrees with the cluster median (it matched a *different* region than the real credits). Consequences to keep in mind: a single file with no peers gets **no** credit skip (nothing to match), and an episode whose credits genuinely don't recur gets **no** skip rather than a guess. Don't re-add a `%`-of-duration or black-frame fallback — "no outro unless matched" is the intended behaviour.
+
+### A subtitle/media subprocess timeout is a SILENT wrong answer, not an error
+
+`refiner.subtitle_cues` extracts cues with `-ss … -i <file> -map 0:<n> -f srt -`. ffmpeg
+reads the container from the seek point to EOF, so the wall clock tracks **how fast the
+file can be read**, not how much subtitle text there is. Local disk: seconds. A remote or
+slow mount: minutes — measured at 240 s for a single 2.2 GB episode over a LAN HTTP mount.
+
+The failure is silent and looks exactly like a correct negative. `run_capture` raises
+`TimeoutExpired`, the `except Exception: return []` swallows it, zero cues come back, and
+the detector concludes "this file has no usable subtitles" and returns no credits. No
+error, no log line, no chip. It cost a debugging cycle here: the shipped function returned
+`None` on the very file the prototype had just resolved correctly, and the only difference
+was a 180 s timeout vs 600 s.
+
+`SUB_CUES_TIMEOUT = 600` is sized for a slow mount on purpose. If you ever tighten it, or
+add another detector that shells out over a path that might not be local, remember that
+"empty result" and "timed out" are indistinguishable to every caller downstream — the same
+hazard as the `-loglevel error` trap documented above.
 
 ### Night mode toggles by relaunching VLC — there's no runtime audio-filter command
 

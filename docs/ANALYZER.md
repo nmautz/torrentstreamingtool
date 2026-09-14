@@ -25,13 +25,13 @@ Chromaprint emits ~7.8 32-bit hash frames per second of audio.
 2. **Greedy clustering** ([analyzer.py:307](../analyzer.py#L307)): pick first un-clustered episode as anchor; pairwise `_find_longest_match` against every other. The longest run ≥ `MIN_MATCH_FRAMES` (~15 s) with Hamming distance ≤ 6 bits per frame is kept — **bridging mismatch gaps** up to `MATCH_GAP_FRAMES` (~4 s) as long as the merged run stays ≥ `MATCH_MIN_RATIO` matched (each chromaprint frame spans ~2.4 s of audio, so 1 s of episode-specific audio inside the theme smears across ~20 frames; a strict-consecutive matcher truncated real intros). A match only counts where the frame is **informative** (`MIN_FRAME_DELTA_BITS` vs its predecessor, in both episodes) — stationary audio (silence/drones/tones) emits runs of near-identical hashes that bogus-match for tens of seconds otherwise. Matching is numpy-vectorized (`_find_longest_match_np`, XOR + 16-bit popcount LUT, ~50-100× the pure-Python `_find_longest_match_py` fallback used when numpy is missing — the fallback is strict: no gap bridging, no informative mask). Unmatched episodes recurse on the next pass (new anchor)
 3. **Consensus window + projection**: within a cluster, the anchor-side range is a **trimmed-quantile** intersection of the pair windows (`_intersect_match`) — the worst `CLUSTER_TRIM_Q` at each edge is ignored so one short match can't truncate a whole season. `int(n * 0.2)` is 0 for n < 5, so small clusters are bit-identical to the old hard intersection. That single window is then **projected into every member's own frame coordinates** (`_project`) through its pair alignment, clamped to that member's matched evidence and fingerprint length, so every episode in a cluster reports the same intro duration. A member the projection can't place keeps its raw pair match rather than losing its skip point. When the intersection collapses entirely, `_medoid_window` picks the real member interval with the greatest total overlap (the old fallback took the median offset and median length *independently*, which could synthesise a window matching no actual pair)
 4. **Consensus filtering** (`_filter_cluster_consensus`): real shared intro/credits make every cluster member match the **same** anchor region, so their anchor-side offsets agree. An outlier episode whose real intro/credits is absent can still pairwise-match the anchor on some *other* recurring audio (a stinger, a repeated gag, a transition sting) at a different anchor offset — left in, it produces a bogus skip point (the "credits kick in early, cut off the end" bug). Members whose `offset_in_anchor` deviates from the cluster median by more than `CLUSTER_OFFSET_TOL_FRAMES` (~8 s) are pruned (the median member always survives, so genuine clusters are untouched). Applied to **both** intro and outro clusters
-5. **Credits acceptance — fingerprint-only, no fabricated fallback** (finalize loop): credits time comes **only** from a confirmed cross-episode match. A matched outro run is accepted as `source="auto"` only when it both **starts late enough** (`credits_start ≥ duration × MIN_CREDITS_PCT`) **and runs to ~the end** (`credits_end ≥ duration − OUTRO_END_MARGIN_SEC`). Rationale: real credits run to the end of the file; a recurring non-credits cue near the end is followed by more content, so its run ends well before the end → rejected. If nothing qualifies, `credits_start = None` and the file records an `ERR_NO_SKIP` failure (the "Skip unavailable" chip) — there is **no** black-frame detector and **no** flat-92% guess. A single file with no peer episodes likewise gets no credits (nothing to match against)
+5. **Credits acceptance — fingerprint-only, no fabricated fallback** (finalize loop): credits time comes **only** from a confirmed cross-episode match. A matched outro run is accepted as `source="auto"` only when it both **starts late enough** (`credits_start ≥ duration × MIN_CREDITS_PCT`) **and runs to ~the end** (`credits_end ≥ duration − OUTRO_END_MARGIN_SEC`). Rationale: real credits run to the end of the file; a recurring non-credits cue near the end is followed by more content, so its run ends well before the end → rejected. If nothing qualifies the **subtitle pass** (§ Credits from subtitles) gets a turn; failing that, `credits_start = None` and the file records an `ERR_NO_SKIP` failure (the "Skip unavailable" chip) — there is **no** black-frame detector and **no** flat-92% guess
 
 ## Constants ([analyzer.py:22](../analyzer.py#L22))
 
 | Name | Value | Meaning |
 |------|-------|---------|
-| `ANALYZER_VERSION` | 5 | Bumped to force re-analysis when the algorithm changes (5 = correct frame rate + consensus projection + edge trim; 4 = fingerprint-only credits + consensus filtering; 3 = gap-tolerant matcher) |
+| `ANALYZER_VERSION` | 8 | Bumped to force re-analysis when the algorithm changes (8 = credits from subtitles, structural audio pass removed; 7 = structural credits + boundary refinement; 5 = correct frame rate + consensus projection + edge trim; 4 = fingerprint-only credits + consensus filtering; 3 = gap-tolerant matcher) |
 | `FP_FRAMES_PER_SEC` | 8.0768 | Chromaprint's emission rate. **Was 7.8, which was wrong** — see §Frame timing |
 | `FP_FRAME_LEADIN` | 21.43 | Constant frame shortfall; makes `_rate_for` affine |
 | `FP_RATE_SANITY` | (7.5, 8.6) | Self-calibration outside this band is rejected |
@@ -113,13 +113,46 @@ first thing to check.
 - **Subprocess work** (ffmpeg / fpcalc / ffprobe via `_media_duration`, `_fpcalc_raw`) runs off the loop on the analyzer's **own** `ThreadPoolExecutor` (`_FP_EXECUTOR`, via `_fp_thread`), **not** `asyncio.to_thread`. The default loop executor is shared process-wide and `get_library()` / `put_library()` ride it; each fingerprint parks its worker for the whole decode (head 6 min / tail 10 min of audio), so several series at once flooded the default pool and starved library I/O — every hot loop and HTTP handler queued behind the decodes and the dashboard froze while the host (and RDP) stayed healthy. A private pool keeps the default pool free for library I/O. Fingerprinting still runs `FP_CONCURRENCY` (2) episodes at a time behind a semaphore
 - **The pure-Python matcher (`_find_longest_match`) runs in a separate low-priority *process***, not a thread. It's CPU-bound Python that holds the GIL for seconds per pair; a worker thread would still starve the event loop via the GIL convoy effect (dashboard freezes for seconds while the host looks healthy — the "UI laggy but RDP fine" report). `analyze_series` spins up a one-worker `ProcessPoolExecutor` (`_new_match_executor`, dropped to BELOW_NORMAL by `_match_worker_init`) for both matching stages and tears it down in `finally`; `_run_match` falls back to `asyncio.to_thread` if the host can't create a pool. See [GOTCHAS.md](GOTCHAS.md).
 
+## Credits from subtitles
+
+For episodes the fingerprint gave no credits, `refiner.credits_from_subtitles` asks a
+different question: not "where does the recurring audio start?" but **"where does the
+dialogue stop for good?"** — which is what "the content is over" actually means.
+
+It reads the last `SUB_SEARCH_SEC` (420 s) of the best text subtitle track, classifies
+each cue as speech or not (song lyrics `♪ … ♪` and bracketed annotations like
+`[MUSIC PLAYING]` are not), and takes the end of the last speech cue. Nothing is decoded
+— cues are demuxed as text — so this is the cheapest detector in the pipeline by two
+orders of magnitude and, measured, the most accurate: **2139.6 s against a true cut at
+2139.7 s** on Hacks S05E05, where the audio-only detector it replaced said 2120.5.
+
+Guards, all failing closed to "no credits":
+
+| guard | why |
+|---|---|
+| text codecs only (`subrip`/`ass`/`mov_text`/…) | `hdmv_pgs_subtitle` and `dvd_subtitle` are pictures; they'd need OCR |
+| ≥ `SUB_MIN_SPEECH` (10) speech cues in the window | a forced/signs-only track's last cue is just its last cue, not the end of the dialogue — this is the one failure mode that could land EARLY |
+| `SUB_MIN_ROLL` ≤ roll ≤ `SUB_MAX_ROLL` | 25–300 s; outside that it found something else |
+| `≥ duration × MIN_CREDITS_PCT` | same 75 % floor the fingerprint path uses |
+| `+ SUB_LATE_PAD` (1.5 s) | the closing song often starts under the final shot; late costs seconds of credits, early destroys content |
+
+**No cross-episode consensus, deliberately.** That is what failed in 12.4.0 — see
+[GOTCHAS.md](GOTCHAS.md) on why agreement among estimates sharing a systematic error
+proves precision rather than accuracy. It would also reject single-episode library items,
+which is how most rotating-theme content is filed.
+
+Coverage is release-dependent, not show-dependent: two rips of the same episode differ.
+Measured on this library, 309 of 370 files carry an English text track; the gaps are
+bitmap-subtitle rips (Chernobyl, Steins;Gate) and a couple of RARBG encodes with no
+subtitle streams at all.
+
 ## Progress reporting
 
 `analyze_series(items, progress_cb)` invokes `progress_cb(stage, current, total, message, episode_name, progress)` at each step. `main.py`'s `_set_analysis_status` broadcasts these as SSE `analysis_status` events. Stages: `starting` → `fingerprinting` → `matching-intros` → `matching-outros` → `finalizing` → `done`.
 
 `progress` is a **monotonic 0..1 fraction across the whole run** (stage spans in `_STAGE_SPAN`) — progress bars must use it, not `current/total`: `current/total` resets at every stage boundary, and the matching stages' `total` is a *growing estimate* (greedy clustering can't know its pair count up front), both of which read as the bar "restarting"/jumping backward. The admin Smart Skip badge and the Activity tab both consume `job.progress`.
 
-**`finalizing` covers two very different amounts of work.** The per-episode refine loop advances `progress` across the 0.95–1.00 band normally. The structural credits pass that can follow it (§ Structural credits) sits at the **top** of that band and cannot advance the bar at all — `_emit` clamps `progress` monotonic, so anything it emits is already pinned at 1.0. It therefore reports by **message** instead, counting through the episodes it is checking. Keep that per-episode emit: each iteration decodes a five-minute audio window, so the pass can run for hours, and without it the Activity tab freezes on a single line that is indistinguishable from a hang.
+**`finalizing` covers two very different amounts of work.** The per-episode refine loop advances `progress` across the 0.95–1.00 band normally. The subtitle credits pass that can follow it sits at the **top** of that band and cannot advance the bar at all — `_emit` clamps `progress` monotonic, so anything it emits is already pinned at 1.0. It therefore reports by **message** instead, counting through the episodes it is checking. Keep that per-episode emit: an iteration can block for minutes on a slow mount, and without it the Activity tab freezes on a single line that is indistinguishable from a hang.
 
 ## Trigger flow (in `main.py`)
 
@@ -200,7 +233,7 @@ User-facing:
 - `DELETE /api/skip-now` — dismiss without acting
 
 Admin:
-- `GET /api/admin/library/{id}/skip-data` — per-file editor data (now also returns `error_code` / `error` for failed files); plus `method` (`fingerprint` / `chapters` / `fingerprint+silence` / `structural`) and the `refine` block (pre-refinement audio values + per-boundary confidence and source)
+- `GET /api/admin/library/{id}/skip-data` — per-file editor data (now also returns `error_code` / `error` for failed files); plus `method` (`fingerprint` / `chapters` / `fingerprint+silence` / `subtitles`) and the `refine` block (pre-refinement audio values + per-boundary confidence and source)
 - `PATCH /api/admin/library/{id}/skip-data` — manual override (sets `analysis.source="manual"`)
 - `POST /api/admin/library/{id}/analyze` — force re-run for the item's series
 - `GET /api/admin/analyzer-status` — `{available, ffmpeg, fpcalc}`

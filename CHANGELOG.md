@@ -1,5 +1,31 @@
 # Changelog
 
+## [12.5.0] — 2026-09-14
+**Credits now come from the subtitles, and the audio-only credit detector added in 12.4.0 is gone.**
+
+A viewer reported the Hacks credits skip firing about a minute early. It was: measured across 11 episodes, 12.4.0's structural detector was early **every single time**, by 6.6 s to 69.1 s — on S05E05 it cut 19 s of the closing scene, on S03E02 it cut 69 s.
+
+It could not have worked on the shows it was built for. Those shows run a song across the seam from the last scene into the credit roll, so there is no acoustic event at the boundary at all — on S05E05 the music starts ~6 s before the cut and never drops below −40 dB again. "The last gap-free block of sound" therefore begins wherever the dialogue's last pause happened to fall, which is somewhere in the middle of the episode's final scene. No threshold would have fixed that.
+
+Worse, its safeguard endorsed the error. Requiring peer episodes to agree on the roll length can only catch an episode that is wrong *differently* from its peers; every Hacks episode was wrong in the same direction, so they corroborated each other. Detected median roll was 111.6 s against 24.8 s and 52.0 s for the episodes whose credits came from the trustworthy fingerprint path.
+
+The replacement asks a different question — not "where does the recurring audio start?" but "where does the dialogue stop for good?", which is what "the content is over" actually means. A subtitle track answers that directly:
+
+| detector | S05E05 credits | error |
+|---|---|---|
+| structural audio (12.4.0) | 2120.5 | −19.2 s |
+| **subtitles (this release)** | **2139.6** | **−0.1 s** |
+| true cut (shot boundary + black) | 2139.7 | — |
+
+It is also the cheapest detector in the pipeline: subtitle cues are demuxed as text, nothing is decoded, where the pass it replaces decoded a five-minute audio window per episode.
+
+- Coverage is release-dependent rather than show-dependent — two rips of the same episode differ. 309 of 370 files in the test library carry an English text track; the rest are bitmap-subtitle rips or encodes with no subtitle stream.
+- **No cross-episode consensus**, deliberately: it is what failed above, and it would reject single-episode library items, which is how most rotating-theme content is filed.
+- A forced/signs-only subtitle track is the one way this could land early, so a density floor (≥10 speech cues in the window) rejects those rather than trusting them. Every other guard fails closed to "no credits".
+- Credits err **late** by 1.5 s. Early destroys content the viewer can't get back; late costs a few seconds of credits. Same asymmetry as the intro start pad in 12.4.3.
+
+`ANALYZER_VERSION` → 8, so every stored credits value is recomputed — which is also what clears the bad values 12.4.0 wrote.
+
 ## [12.4.3] — 2026-09-14
 **An intro skip no longer clips the last second of the scene before the opening.**
 

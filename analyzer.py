@@ -43,7 +43,7 @@ except Exception:           # pragma: no cover - numpy missing
     _np = None
     _POP16 = None
 
-ANALYZER_VERSION = 7
+ANALYZER_VERSION = 8
 
 # Per-file failure codes recorded in skip_data[path].analysis when fingerprinting
 # could not produce usable skip points. The user-facing UI shows a "Skip
@@ -932,12 +932,6 @@ def _refine_one(path: str, intro: Optional[dict], credits_start: Optional[float]
 
 REFINER_VERSION = 1
 
-# Don't run the structural credits pass when the fingerprint already found credits for
-# more than this fraction of the series. Broad fingerprint success means the credits DO
-# repeat, so the stragglers are specials without a credit roll — and inventing one for
-# them is exactly the regression greedy clustering was built to avoid.
-STRUCT_CREDITS_VETO = 0.40
-
 
 async def analyze_series(items: list[dict], progress_cb=None) -> dict:
     """Analyze a series of items, returning per-file intro/credits ranges.
@@ -1236,57 +1230,58 @@ async def analyze_series(items: list[dict], progress_cb=None) -> dict:
                 )
             result[path] = _failed_entry(code, msg)
 
-    # ── Structural credits pass ──────────────────────────────────────────────
-    # Only for episodes the fingerprint gave no credits, and only when the tail matcher
-    # broadly failed for this series. The veto matters: partial coverage usually means
-    # specials/OVAs that genuinely have no credit roll, and running this on them would
-    # invent one — regressing the exact case the greedy clustering exists to protect.
-    if no_credits and got_credits <= (got_credits + len(no_credits)) * STRUCT_CREDITS_VETO:
-        cands: dict[int, tuple[float, float]] = {}
-        # Emit per episode, not once for the whole pass. Each call decodes a 5-minute
-        # audio window, so on a long series under load this stage runs for HOURS; a
-        # single up-front message leaves the Activity tab frozen on one line and the
-        # pass is indistinguishable from a hang. `progress` is already pinned at the
-        # top of the finalizing band and _emit clamps it monotonic, so these move the
-        # message only — which is exactly the part that shows the pass is alive.
+    # ── Subtitle credits pass ────────────────────────────────────────────────
+    # Only for episodes the fingerprint gave no credits. "Have the credits started?" is
+    # really "has the dialogue ended for good?", and a subtitle track answers that
+    # directly, for free, without decoding anything.
+    #
+    # This replaced an audio-only structural detector that could not work on the shows it
+    # was built for. Those shows run a song across the seam from the last scene into the
+    # credit roll, so there is NO acoustic event at the boundary: the detector took the
+    # last gap-free block of sound and landed deep inside real content — measured at 19 s
+    # on Hacks S05E05 and 69 s on S03E02. Its cross-episode consensus check endorsed the
+    # error rather than catching it, because every episode was wrong in the same
+    # direction, and agreement only ever proves precision, not accuracy.
+    #
+    # No consensus requirement here, deliberately. The signal is self-validating per
+    # episode (dialogue stops, only music or nothing follows), and requiring peers would
+    # reject exactly the files this is for — single-episode library items, which is how
+    # most of the rotating-theme content in the wild is filed.
+    if no_credits:
         for n, idx in enumerate(no_credits, 1):
-            await _emit(stage="finalizing", current=total_eps, total=total_eps,
-                        message=f"Looking for credit rolls — {n} of {len(no_credits)}",
-                        episode_name=Path(episodes[idx]["path"]).name)
             dur = durations[idx]
             if not dur:
                 continue
-            try:
-                c = await _fp_thread(refiner.credits_candidate, episodes[idx]["path"],
-                                     dur, MIN_CREDITS_PCT, OUTRO_END_MARGIN_SEC)
-            except Exception:
-                c = None
-            if c:
-                cands[idx] = c
-
-        keep = refiner.credits_consensus(cands, len(no_credits)) if cands else set()
-        for idx in sorted(keep):
             path = episodes[idx]["path"]
-            cs = cands[idx][0]
+            await _emit(stage="finalizing", current=total_eps, total=total_eps,
+                        message=f"Looking for credit rolls — {n} of {len(no_credits)}",
+                        episode_name=Path(path).name)
+            try:
+                found = await _fp_thread(refiner.credits_from_subtitles,
+                                         path, dur, MIN_CREDITS_PCT)
+            except Exception:
+                found = None
+            if not found:
+                continue
+            cs, src = found
             entry = result.get(path) or {}
-            prev = (entry.get("analysis") or {})
+            prev = entry.get("analysis") or {}
             if prev.get("source") == "failed" and not entry.get("intro"):
-                # The file had nothing at all; promote it from failed to a credits-only
-                # success rather than leaving the "Skip unavailable" chip up.
+                # Nothing at all before: promote to a credits-only success rather than
+                # leaving the "Skip unavailable" chip up.
                 entry = {"intro": None, "analysis": {"version": ANALYZER_VERSION,
                                                      "source": "auto"}}
             entry["credits_start"] = cs
             ana = entry.setdefault("analysis", {})
             ana["version"] = ANALYZER_VERSION
             ana["source"] = "auto"
-            ana["method"] = (ana.get("method") or "fingerprint")
-            ana["method"] = ("structural" if ana["method"] == "fingerprint"
-                             else ana["method"] + "+structural")
+            base = ana.get("method") or "fingerprint"
+            ana["method"] = src if base == "fingerprint" else f"{base}+{src}"
             ana.pop("error_code", None)
             ana.pop("error", None)
             ref = entry.setdefault("refine", {"version": REFINER_VERSION,
                                               "audio": {"credits_start": None}})
-            ref["credits_start"] = {"t": cs, "conf": 0.6, "src": "structural"}
+            ref["credits_start"] = {"t": cs, "conf": 0.8, "src": src}
             result[path] = entry
 
     return result

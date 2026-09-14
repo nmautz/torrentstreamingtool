@@ -268,96 +268,6 @@ def silence_cuts(runs: list[tuple[float, float, float]]) -> list[Cut]:
     return cuts
 
 
-# ── Structural credits detection ─────────────────────────────────────────────
-#
-# For the fingerprint to find credits, the credits music has to REPEAT across episodes.
-# Plenty of shows use a different song every episode — Hacks, WandaVision, One Tree Hill
-# season 8 — and for those the tail matcher correctly finds nothing, so the whole series
-# gets no credits skip at all.
-#
-# But the credits are still acoustically obvious, and in a way that does not depend on
-# the song at all. Measured on a real episode:
-#
-#     … dialogue, punctuated by sub-second pauses every few seconds …
-#     1654.2 -> 1740.2   85.9 s of CONTINUOUS sound, no gap anywhere
-#     1740.2 -> 1742.0   silence
-#     1742.6             end of file
-#
-# Speech has gaps; a music bed does not. So the credits are the last long GAP-FREE block
-# that runs to the end of the file.
-#
-# This is a new SOURCE for credits, and docs/GOTCHAS.md is emphatic that credits must
-# never be fabricated. The distinction matters and is deliberate: the fallbacks that were
-# removed invented a timestamp from a formula (duration * 0.92) or from a single frame
-# being dark. This measures an actual acoustic boundary in the file, applies the same two
-# acceptance gates a fingerprint match must pass, AND requires peer episodes to agree on
-# its shape. A lone episode can never produce one.
-CREDITS_MIN_SEC        = 40.0   # shorter than this is a music cue, not a credit roll
-CREDITS_MAX_SEC        = 300.0
-CREDITS_BLOCK_GAP      = 0.25   # a gap this long or longer ends a "continuous" block
-CREDITS_CONSENSUS_TOL  = 25.0   # peers must agree on duration to within this
-CREDITS_MIN_AGREE      = 3      # absolute floor on peers, regardless of series size
-CREDITS_MIN_AGREE_PCT  = 0.50
-
-
-def continuous_blocks(runs: list[tuple[float, float, float]],
-                      t0: float, t1: float) -> list[tuple[float, float]]:
-    """Invert silence runs into spans of uninterrupted sound within [t0, t1]."""
-    blocks: list[tuple[float, float]] = []
-    prev = t0
-    for s, e, _d in runs:
-        if s > prev:
-            blocks.append((prev, s))
-        prev = max(prev, e)
-    if t1 > prev:
-        blocks.append((prev, t1))
-    return blocks
-
-
-def credits_candidate(path: str, duration: float, min_pct: float, end_margin: float,
-                      search_sec: float = 300.0) -> Optional[tuple[float, float]]:
-    """The last gap-free sound block that runs to the end of the file.
-
-    Returns (start, length) or None. Applies the same two correctness tests the
-    fingerprint path applies — start late enough, run to near the end — so a mid-episode
-    music cue can never qualify.
-    """
-    if not duration or duration <= 0:
-        return None
-    t0 = max(0.0, duration - search_sec)
-    runs = detect_silence(path, t0, duration - t0,
-                          noise_db=SILENCE_DB, min_sec=CREDITS_BLOCK_GAP)
-    if not runs:
-        return None
-    best: Optional[tuple[float, float]] = None
-    for s, e in continuous_blocks(runs, t0, duration):
-        length = e - s
-        if not (CREDITS_MIN_SEC <= length <= CREDITS_MAX_SEC):
-            continue
-        if s < duration * min_pct:
-            continue
-        if e < duration - end_margin:
-            continue
-        best = (round(s, 1), round(length, 1))   # keep the LAST qualifying block
-    return best
-
-
-def credits_consensus(candidates: dict[int, tuple[float, float]],
-                      total_eps: int) -> set[int]:
-    """Which episodes' candidates agree with their peers on credit-roll LENGTH.
-
-    Duration is the consensus axis rather than absolute position, because a credit roll
-    is a fixed-length asset while the episode in front of it varies. An episode whose
-    block length disagrees with the group median is discarded: it found something else.
-    """
-    if len(candidates) < max(CREDITS_MIN_AGREE, int(total_eps * CREDITS_MIN_AGREE_PCT)):
-        return set()
-    lengths = sorted(l for _s, l in candidates.values())
-    median = lengths[len(lengths) // 2]
-    return {idx for idx, (_s, l) in candidates.items()
-            if abs(l - median) <= CREDITS_CONSENSUS_TOL}
-
-
 # ── The snapper ──────────────────────────────────────────────────────────────
 
 def snap_boundary(coarse: float, cuts: list[Cut], *, radius: float,
@@ -432,3 +342,151 @@ def snap_boundary(coarse: float, cuts: list[Cut], *, radius: float,
     if best_score < min_conf:
         return (coarse, 0.0, "audio")
     return (round(best.t, 2), round(best_score, 3), source)
+
+
+# ── Credits from subtitles ───────────────────────────────────────────────────
+#
+# The question "have the credits started?" is really "has the dialogue ended for good?",
+# and a subtitle track answers that directly. Nothing is decoded — the cues are demuxed
+# as text — so this is the cheapest detector in the module by two orders of magnitude,
+# and on measured episodes the most accurate.
+#
+# It exists because the audio-only structural detector it replaces could not work on the
+# shows it was built for. Those shows run a song across the seam between the last scene
+# and the credit roll, so there is no acoustic event at the boundary at all: on Hacks
+# S05E05 the music starts ~6 s before the cut and runs unbroken to EOF, and the detector
+# landed 19 s inside real content. Subtitles put the same boundary within ~2 s.
+#
+# Language barely matters — any dialogue track marks where dialogue stops — so an
+# English track is preferred but any text track is usable.
+SUB_TEXT_CODECS = {"subrip", "srt", "ass", "ssa", "mov_text", "webvtt", "text"}
+SUB_LANGS       = ("eng", "en")
+SUB_SEARCH_SEC  = 420.0   # how much of the tail to read
+SUB_MIN_SPEECH  = 10      # speech cues needed IN THE WINDOW (see below)
+SUB_MIN_ROLL    = 25.0    # a credit roll is at least this long
+SUB_MAX_ROLL    = 300.0
+SUB_LATE_PAD    = 1.5     # err late: the song often starts under the final shot
+# Extraction reads the container from the seek point to EOF, so the wall clock tracks
+# how fast the file can be READ, not how much subtitle text there is. Local disk is
+# seconds; a slow/remote mount is minutes. Measured at 240 s for one episode over a LAN
+# HTTP mount, where the old 180 s default silently produced zero cues and no credits.
+SUB_CUES_TIMEOUT = 600
+
+# Bitmap subtitles (hdmv_pgs_subtitle, dvd_subtitle) carry pictures, not text, and are
+# deliberately absent from SUB_TEXT_CODECS — they would need OCR.
+
+_RE_SRT_TIME = re.compile(
+    r"(\d\d):(\d\d):(\d\d),(\d+)\s*-->\s*(\d\d):(\d\d):(\d\d),(\d+)")
+_RE_TAG      = re.compile(r"<[^>]+>|\{[^}]*\}")      # HTML tags + ASS override blocks
+_RE_MUSIC    = re.compile(r"^[\s\-\u2013\u2014>]*[\u266a\u266b\u266c#]")
+_RE_BRACKET  = re.compile(r"^[\s\-\u2013\u2014]*[\[(][^\])]*[\])][\s.!?]*$")
+
+
+def probe_sub_streams(path: str, timeout: int = 30) -> list[dict]:
+    """Text subtitle streams as [{index, codec, lang, title}], best candidate first."""
+    ffprobe = ffprobe_bin()
+    if not ffprobe:
+        return []
+    try:
+        proc = run_capture([
+            ffprobe, "-v", "error", "-print_format", "json",
+            "-select_streams", "s", "-show_streams",
+            "-show_entries", "stream=index,codec_name:stream_tags=language,title",
+            path,
+        ], timeout=timeout)
+        streams = (json.loads(proc.stdout or "{}") or {}).get("streams") or []
+    except Exception:
+        return []
+    out = []
+    for s in streams:
+        codec = (s.get("codec_name") or "").lower()
+        if codec not in SUB_TEXT_CODECS:
+            continue
+        tags = s.get("tags") or {}
+        lang = (tags.get("language") or "").lower()
+        title = (tags.get("title") or "")
+        out.append({"index": s.get("index"), "codec": codec,
+                    "lang": lang, "title": title})
+    # English first; among those, prefer a non-SDH track (SDH adds music lyrics, which
+    # we filter anyway, but its cue text is otherwise identical — either works).
+    out.sort(key=lambda d: (d["lang"] not in SUB_LANGS, "sdh" in d["title"].lower()))
+    return out
+
+
+def _is_speech(body: str) -> bool:
+    """True when a cue is spoken dialogue rather than a music or sound annotation."""
+    t = _RE_TAG.sub("", body).strip()
+    if not t:
+        return False
+    if _RE_MUSIC.match(t):          # "♪ lyrics ♪" — SDH song text
+        return False
+    if _RE_BRACKET.match(t):        # "[MUSIC PLAYING]", "(theme swells)"
+        return False
+    return True
+
+
+def subtitle_cues(path: str, index: int, t0: float, span: float,
+                  timeout: int = SUB_CUES_TIMEOUT) -> list[tuple[float, float, str]]:
+    """Cues as (start, end, text) in ABSOLUTE seconds, converted to SRT text.
+
+    `-ss` before `-i` shifts the cue timestamps to the seek point, exactly as it does
+    for the audio filters above, so `t0` is added back here too.
+    """
+    ff = ffmpeg_bin()
+    if not ff or span <= 0:
+        return []
+    try:
+        proc = run_capture([
+            ff, "-hide_banner", "-nostats", "-loglevel", "error",
+            "-ss", f"{max(0.0, t0):.3f}", "-t", f"{span:.3f}", "-i", path,
+            "-map", f"0:{index}", "-vn", "-an", "-dn",
+            "-c:s", "text", "-f", "srt", "-",
+        ], timeout=timeout)
+    except Exception:
+        return []
+    cues: list[tuple[float, float, str]] = []
+    text = proc.stdout or ""
+    for block in re.split(r"\n\s*\n", text.strip()):
+        m = _RE_SRT_TIME.search(block)
+        if not m:
+            continue
+        g = [int(x) for x in m.groups()]
+        s = g[0] * 3600 + g[1] * 60 + g[2] + g[3] / 1000.0
+        e = g[4] * 3600 + g[5] * 60 + g[6] + g[7] / 1000.0
+        body = block[m.end():].strip().replace("\n", " ")
+        if body:
+            cues.append((t0 + s, t0 + e, body))
+    return cues
+
+
+def credits_from_subtitles(path: str, duration: float, min_pct: float,
+                           ) -> Optional[tuple[float, str]]:
+    """Credits start = the end of the last spoken cue, when only music/nothing follows.
+
+    Returns (start, source_label) or None. Every guard below fails CLOSED — a file that
+    doesn't clearly show dialogue stopping gets no credits rather than a guess.
+    """
+    if not duration or duration <= 0:
+        return None
+    streams = probe_sub_streams(path)
+    if not streams:
+        return None
+    t0 = max(0.0, duration - SUB_SEARCH_SEC)
+    for st in streams[:2]:                      # try the two best tracks, then give up
+        cues = subtitle_cues(path, st["index"], t0, duration - t0)
+        speech = [c for c in cues if _is_speech(c[2])]
+        # Density guard. A "forced"/signs-only track has a handful of cues scattered
+        # anywhere, and its last one is not the end of the dialogue — it just happens to
+        # be last. Requiring real conversational density in the tail window rejects
+        # those instead of trusting them.
+        if len(speech) < SUB_MIN_SPEECH:
+            continue
+        last_end = speech[-1][1]
+        roll = duration - last_end
+        if not (SUB_MIN_ROLL <= roll <= SUB_MAX_ROLL):
+            continue
+        if last_end < duration * min_pct:
+            continue
+        cs = min(last_end + SUB_LATE_PAD, duration - SUB_MIN_ROLL / 2.0)
+        return round(cs, 1), "subtitles"
+    return None
