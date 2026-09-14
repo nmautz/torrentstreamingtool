@@ -23,7 +23,7 @@ Chromaprint emits ~7.8 32-bit hash frames per second of audio.
 
 1. **Fingerprint** ([analyzer.py:69](../analyzer.py#L69)): For each episode, call `fpcalc -raw -length 360 <path>` for the head (first 6 min) and `ffmpeg -ss <tail_start> -t 600 | fpcalc -raw -length 600 -` for the tail (last 10 min). Episodes are fingerprinted `FP_CONCURRENCY` (2) at a time
 2. **Greedy clustering** ([analyzer.py:307](../analyzer.py#L307)): pick first un-clustered episode as anchor; pairwise `_find_longest_match` against every other. The longest run ≥ `MIN_MATCH_FRAMES` (~15 s) with Hamming distance ≤ 6 bits per frame is kept — **bridging mismatch gaps** up to `MATCH_GAP_FRAMES` (~4 s) as long as the merged run stays ≥ `MATCH_MIN_RATIO` matched (each chromaprint frame spans ~2.4 s of audio, so 1 s of episode-specific audio inside the theme smears across ~20 frames; a strict-consecutive matcher truncated real intros). A match only counts where the frame is **informative** (`MIN_FRAME_DELTA_BITS` vs its predecessor, in both episodes) — stationary audio (silence/drones/tones) emits runs of near-identical hashes that bogus-match for tens of seconds otherwise. Matching is numpy-vectorized (`_find_longest_match_np`, XOR + 16-bit popcount LUT, ~50-100× the pure-Python `_find_longest_match_py` fallback used when numpy is missing — the fallback is strict: no gap bridging, no informative mask). Unmatched episodes recurse on the next pass (new anchor)
-3. **Intersection** ([analyzer.py:209](../analyzer.py#L209)): within a cluster, the anchor's intro/outro range is the intersection of anchor-side windows across all pair matches. Per-non-anchor episodes use the `offset_in_other` from their pair match — so cold opens of different lengths still align correctly
+3. **Consensus window + projection**: within a cluster, the anchor-side range is a **trimmed-quantile** intersection of the pair windows (`_intersect_match`) — the worst `CLUSTER_TRIM_Q` at each edge is ignored so one short match can't truncate a whole season. `int(n * 0.2)` is 0 for n < 5, so small clusters are bit-identical to the old hard intersection. That single window is then **projected into every member's own frame coordinates** (`_project`) through its pair alignment, clamped to that member's matched evidence and fingerprint length, so every episode in a cluster reports the same intro duration. A member the projection can't place keeps its raw pair match rather than losing its skip point. When the intersection collapses entirely, `_medoid_window` picks the real member interval with the greatest total overlap (the old fallback took the median offset and median length *independently*, which could synthesise a window matching no actual pair)
 4. **Consensus filtering** (`_filter_cluster_consensus`): real shared intro/credits make every cluster member match the **same** anchor region, so their anchor-side offsets agree. An outlier episode whose real intro/credits is absent can still pairwise-match the anchor on some *other* recurring audio (a stinger, a repeated gag, a transition sting) at a different anchor offset — left in, it produces a bogus skip point (the "credits kick in early, cut off the end" bug). Members whose `offset_in_anchor` deviates from the cluster median by more than `CLUSTER_OFFSET_TOL_FRAMES` (~8 s) are pruned (the median member always survives, so genuine clusters are untouched). Applied to **both** intro and outro clusters
 5. **Credits acceptance — fingerprint-only, no fabricated fallback** (finalize loop): credits time comes **only** from a confirmed cross-episode match. A matched outro run is accepted as `source="auto"` only when it both **starts late enough** (`credits_start ≥ duration × MIN_CREDITS_PCT`) **and runs to ~the end** (`credits_end ≥ duration − OUTRO_END_MARGIN_SEC`). Rationale: real credits run to the end of the file; a recurring non-credits cue near the end is followed by more content, so its run ends well before the end → rejected. If nothing qualifies, `credits_start = None` and the file records an `ERR_NO_SKIP` failure (the "Skip unavailable" chip) — there is **no** black-frame detector and **no** flat-92% guess. A single file with no peer episodes likewise gets no credits (nothing to match against)
 
@@ -31,8 +31,10 @@ Chromaprint emits ~7.8 32-bit hash frames per second of audio.
 
 | Name | Value | Meaning |
 |------|-------|---------|
-| `ANALYZER_VERSION` | 4 | Bumped to force re-analysis when the algorithm changes (4 = fingerprint-only credits + consensus filtering; 3 = gap-tolerant matcher) |
-| `FP_FRAMES_PER_SEC` | 7.8 | Chromaprint's emission rate |
+| `ANALYZER_VERSION` | 5 | Bumped to force re-analysis when the algorithm changes (5 = correct frame rate + consensus projection + edge trim; 4 = fingerprint-only credits + consensus filtering; 3 = gap-tolerant matcher) |
+| `FP_FRAMES_PER_SEC` | 8.0768 | Chromaprint's emission rate. **Was 7.8, which was wrong** — see §Frame timing |
+| `FP_FRAME_LEADIN` | 21.43 | Constant frame shortfall; makes `_rate_for` affine |
+| `FP_RATE_SANITY` | (7.5, 8.6) | Self-calibration outside this band is rejected |
 | `INTRO_SEARCH_SECS` | 360 | Look for intro in first 6 min |
 | `OUTRO_SEARCH_SECS` | 600 | Look for outro in last 10 min |
 | `MIN_INTRO_SEC` | 15 | Smallest segment we'll call an intro |
@@ -43,11 +45,45 @@ Chromaprint emits ~7.8 32-bit hash frames per second of audio.
 | `MIN_MATCH_FRAMES` | int(15 × 7.8) | Minimum frames (span) for a match |
 | `MATCH_GAP_FRAMES` | int(4 × 7.8) | Mismatch gap the matcher bridges inside a run (chromaprint frame smear — see §Algorithm) |
 | `MATCH_MIN_RATIO` | 0.6 | Min fraction of matched frames in a gap-bridged run |
+| `MATCH_EDGE_MIN_FRAMES` | int(1.5 × 8.0768) | A terminal segment shorter than this is trim-eligible |
+| `MATCH_EDGE_GAP_FRAMES` | int(2.0 × 8.0768) | ...if the gap separating it is at least this |
+| `CLUSTER_TRIM_Q` | 0.2 | Members ignored at each edge of the consensus window (0 for n < 5) |
 | `MIN_FRAME_DELTA_BITS` | 2 | Frame must differ ≥ this from its predecessor to count as match evidence (stationary-audio guard) |
 | `FP_CONCURRENCY` | 2 | Episodes fingerprinted in parallel |
 | `MIN_CREDITS_PCT` | 0.75 | A matched outro must start no earlier than this fraction of runtime |
 | `OUTRO_END_MARGIN_SEC` | 120 | A matched outro must reach within this many seconds of the file end |
 | `CLUSTER_OFFSET_TOL_FRAMES` | int(8 × 7.8) | Max anchor-offset deviation before a cluster member is pruned as an outlier |
+
+## Frame timing — the thing that was wrong for a long time
+
+Chromaprint emits **8.0768** raw frames/s, not the 7.8 this module assumed for most of its life.
+Measured against the fpcalc 1.5.1 build `setup.py` installs, on synthetic clips of exactly known
+length: `frames = 8.07677 × seconds − 21.43`, stable from a 30 s window to a 360 s one.
+
+Because 7.8 was a **scale** error, the damage grew with the timestamp — which is why it read as a
+matcher bug for so long:
+
+| boundary | reported under 7.8 | true | error |
+|---|---|---|---|
+| `intro.start` ≈ 12 s | 12.4 | 12.0 | +0.4 s (invisible) |
+| `intro.end` ≈ 105 s | 108.7 | 105.0 | **+3.7 s** |
+| credits 480 s into the tail window | — | — | **+17 s** |
+
+`frames_to_seconds(frames, rate)` now takes a per-fingerprint rate. `_rate_for(fp_len, window_sec)`
+recovers it from the window actually requested — **affinely**, adding `FP_FRAME_LEADIN` before
+dividing, because the classifier's 16-frame window plus FFT fill leaves a constant ~21.4 frame
+shortfall. A naive `fp_len / window_sec` reads 7.37 at 30 s and 8.02 at 360 s and would
+under-correct badly. Outside `FP_RATE_SANITY` the constant wins (that's the truncated-fingerprint
+case).
+
+Two rules that follow, both in [GOTCHAS.md](GOTCHAS.md):
+
+- **Don't add window compensation.** A frame index is the start of a ~2.23 s window, but a frame
+  only matches while its window is *mostly* shared audio, so the last matching frame already sits
+  ~1 s *before* the true boundary. Compensating pushes boundaries later — the wrong direction.
+- **A seeked fingerprint must return its own time base.** `_fingerprint_one` carries `tail_start`
+  through to `tail_starts[]`; never re-derive it in the finalize loop. Doing so made every
+  `credits_start` late by `frac(duration)`.
 
 ## Greedy clustering ([analyzer.py:307](../analyzer.py#L307))
 
@@ -55,6 +91,20 @@ The greedy approach handles three failure modes the original single-anchor appro
 - **Specials/OVAs** mixed into the torrent — they match nothing, form no cluster, get no false intro skip
 - **Mid-season intro changes** — eps with the new opening drop out of the first cluster and form their own on the second pass
 - **Episode 0 is a special** — first pass finds an empty cluster and moves on; the real intro group still gets detected from ep 1+
+
+## Known limitation: a recurring in-head segment longer than the intro
+
+With the consensus projection in place, "longest span wins" ([analyzer.py `_find_longest_match_np`](../analyzer.py))
+is mostly harmless — an over-extended bridged run and the true intro share one alignment, so the
+consensus window trims the divergent tails. It still bites in exactly one shape: a show with a
+recurring segment in the first 6 minutes that is **longer than the intro itself** — a fixed
+next-episode preview, a long recurring eyecatch, a sponsor card. Every pair then agrees on the
+wrong region, consensus filtering endorses it, and the projection endorses it too.
+
+The structural fix is for `_best_gap_run` to return the top-K runs and let the cluster stage pick
+the one with the best cross-pair support. That's a much larger change and isn't done. If a show
+reports a confident but plainly wrong intro that is *consistent across every episode*, this is the
+first thing to check.
 
 ## Concurrency
 
@@ -162,7 +212,7 @@ Admin:
     "intro": { "start": 12.0, "end": 105.0 },     // or null
     "credits_start": 2940.0,                       // or null
     "analysis": {
-      "version": 4,
+      "version": 5,
       "source": "auto" | "manual" | "failed",   // credits time is fingerprint-only ("auto")
       // Only present when source == "failed":
       "error_code": "no_binary" | "file_missing" | "no_duration" |

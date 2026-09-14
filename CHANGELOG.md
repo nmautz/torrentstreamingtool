@@ -1,5 +1,26 @@
 # Changelog
 
+## [12.2.1] — 2026-09-13
+**Smart Skip was measuring time with a ruler that was 3.55% too long.**
+
+`FP_FRAMES_PER_SEC` had been `7.8` since the analyzer was written. Chromaprint actually emits **8.0768** raw frames per second — measured directly against the fpcalc build `setup.py` installs, on synthetic clips of exactly known length: `frames = 8.07677 × seconds − 21.43` across seven windows from 30 s to 360 s. The old comment beside the constant claimed "8192 samples @ 11025 Hz", which works out to 1.35 frames/s, so the number never followed from its own arithmetic.
+
+Because it was a **scale** error rather than an offset, it grew with the timestamp — which is exactly why this went unnoticed for so long and why it looked like a matcher bug:
+
+- an intro **start** at ~12 s was off by **+0.4 s** — invisible
+- an intro **end** at ~105 s was off by **+3.7 s** — "it skips too far past the intro"
+- a **credits** point 480 s into the tail search window was off by **+17 s**, which nobody reports because you just watch a few more seconds of credits
+
+- **Every episode in a cluster now reports the same intro.** `_resolve_offset_in_cluster` gave the anchor episode the consensus window and every *other* episode its own raw pairwise match, so one over-long pair became that episode's intro end directly. Measured on a real library: 101 Attack on Titan episodes sharing one fixed 90 s opening reported durations from 25.6 s to 102.8 s — a **77-second spread**, with 93 of them longer than the opening actually is. The consensus window is now projected into each member's own frame coordinates through its pair alignment, clamped to that member's own matched evidence and to its fingerprint length. A member the projection can't place keeps its raw match rather than losing its skip point.
+- **One short match no longer truncates a whole season.** The anchor window was a hard intersection, so a single episode whose match ran 5 s short cut the reported intro for all 24. It now ignores the worst 20% at each edge — and for clusters smaller than 5 that is *bit-identical* to the old hard intersection, so the least-evidenced cases don't change at all.
+- **Trailing silence no longer drags the boundary out with it.** Gap bridging stays exactly as tuned (a 1 s blip inside a theme corrupts ~20 frames, and a strict matcher truncates real intros — see `docs/GOTCHAS.md`), but at the *ends* of a run it was letting post-intro silence through and then annexing whatever coincidentally matched within 4 s on the far side. A run's outermost segment is now dropped when it is both too short to be evidence and separated by a real gap. Interior structure is untouched.
+- **The collapsed-intersection fallback could invent a window that didn't exist** — it took the median offset and the median length *independently*, so the pair need not correspond to any real match, and its end could run past the anchor's fingerprint. It now picks the real member interval with the greatest total overlap against the others.
+- **`credits_start` was late by `frac(duration)` on every file**, because the tail was seeked with `int(duration − 600)` but converted back using the float. The seek value is now carried through instead of re-derived, and passed to ffmpeg at millisecond precision.
+
+On a synthetic reproduction of the reported case — a 90 s theme, 3 s of silence, then a 1 s shared sting — the reported intro end moved from **+8.18 s past the true boundary to +0.12 s**.
+
+`ANALYZER_VERSION` → 5, so every series re-analyses. Existing skip data stays live and in use until each series is overwritten, so there is no gap; it drains one series per 30 s idle tick in the background. Expect credits points to move **earlier** across the library — up to ~20 s on long episodes — which is the correction, not a regression.
+
 ## [12.2.0] — 2026-09-13
 **A folder can be a good place to keep media and a bad place to dump downloads. Now you can say so.**
 

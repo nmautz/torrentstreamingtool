@@ -315,6 +315,72 @@ Note the asymmetry that hid this for so long: the **async** ffmpeg paths (`creat
 
 `ffmpeg_bin()` on Windows returns `tools/ffmpeg/ffmpeg-8.1.1-essentials_build/bin/ffmpeg.exe`. `ff.replace("ffmpeg", "ffprobe")` rewrites **all three** segments → `tools/ffprobe/ffprobe-…/bin/ffprobe.exe`, which never exists. That silently demoted every Windows host to the stderr-parsing fallback in `_media_duration`, whose `re.search` then raised `TypeError: expected string or bytes-like object, got 'NoneType'` on a `None` stderr — surfacing as `Analysis crashed` for **every series in the library**, with no hint of the real cause. Use `Path(ff).with_name(Path(ff).name.replace(...))`, and keep the fallback `None`-safe.
 
+### A chromaprint frame index is a window START, and the rate is 8.0768 — not 7.8
+
+`FP_FRAMES_PER_SEC` was `7.8` for the analyzer's whole life and it was simply wrong. fpcalc
+resamples to 11025 Hz and hops 4096/3 ≈ 1365.33 samples per chroma frame → **8.0775 frames/s**.
+Measured against the fpcalc 1.5.1 build `setup.py` installs, on synthetic clips of exactly known
+length: `frames = 8.07677 × seconds − 21.43`, stable across 30 s → 360 s. (The old comment beside
+the constant said "8192 samples @ 11025 Hz", which computes to 1.35 frames/s — the number never
+followed from its own arithmetic, which is the tell.)
+
+Three things follow, and each has bitten:
+
+1. **It was a SCALE error, not an offset, so it grew with the timestamp.** An intro *start* at
+   12 s was off by +0.4 s (invisible); the *end* at 105 s by +3.7 s (the "skips too far past the
+   intro" report); a credits point 480 s into the tail window by +17 s (never reported — you just
+   watch more credits). If a Smart Skip bug ever presents as "the start is fine but the end is
+   wrong", suspect a scale error before you suspect the matcher.
+2. **Self-calibration must be AFFINE.** The classifier needs a 16-chroma-frame window and the
+   first FFT frame must fill, so a fingerprint is short by a constant ~21.4 frames regardless of
+   window length. A naive `len(fp) / window_sec` reads 7.37 at a 30 s window and 8.02 at 360 s —
+   it would under-correct by 8.8% on short windows. `_rate_for()` adds `FP_FRAME_LEADIN` before
+   dividing, and falls back to the constant outside `FP_RATE_SANITY`.
+3. **A frame index is the START of its ~2.23 s analysis window, not a point in time — and you must
+   NOT compensate for that.** It's tempting to add half a window, or a whole one. Don't: a frame
+   only matches cross-episode while its window is *mostly* shared audio, so the last matching frame
+   already sits ~1 s **before** the true boundary. Compensating pushes boundaries later, which is
+   the wrong direction for the bug this all exists to fix. Treat the coarse value as ±3 s uncertain
+   in both directions and resolve it against a measured silence edge instead.
+
+### The tail fingerprint's time base must be the `-ss` value you actually used
+
+`_fingerprint_one` seeked the outro window at `int(duration − OUTRO_SEARCH_SECS)` and the finalize
+loop converted the matched offsets back using the **float** `duration − OUTRO_SEARCH_SECS`. Those
+are different numbers, so every `credits_start` was late by `frac(duration)` — always late, never
+early, and invisible because it's sub-second next to a 17 s scale error. The seek value is now
+carried through `_fingerprint_one`'s return into `tail_starts[]` rather than re-derived, and
+`_fpcalc_raw` formats `-ss` at millisecond precision. **Any future window that seeks before
+fingerprinting must return its own base the same way** — never recompute it at the other end.
+
+### Trim a gap-bridged run's ENDS, never its middle — and never tighten the gap
+
+Gap bridging is load-bearing (see the entry below) but it cuts both ways at the *ends* of a run.
+Post-intro silence is correctly refused as match evidence by `_informative_mask` — and then bridged
+over anyway, so whatever coincidentally matches within 4 s on the far side (a shared sting, a stock
+transition) drags the reported boundary out with it. The run still legitimately "ends on a true
+match", so `_best_gap_run`'s own construction can't catch it. `_trim_weak_edges` drops a run's
+**outermost** segment when it is both shorter than `MATCH_EDGE_MIN_FRAMES` and separated by a gap
+of at least `MATCH_EDGE_GAP_FRAMES`. Interior structure is deliberately untouched — that's what
+keeps a "theme, 2 s voiceover, 30 s more theme" match whole. Don't "simplify" this into a smaller
+`MATCH_GAP_FRAMES`.
+
+### Every cluster member must be expressed through the SAME consensus window
+
+`_resolve_offset_in_cluster` used to give the anchor the intersected window and every *other*
+episode its raw pairwise `(offset_in_ep, length)`. So a single pair that bridged too far became
+that episode's intro end directly, with nothing to check it. Measured on a real library before the
+fix: 101 Attack on Titan episodes sharing one fixed 90 s opening reported intro durations from
+25.6 s to 102.8 s — a 77 s spread, 93 of them longer than the opening actually is. `_project()`
+now maps the anchor consensus window into each member's own frame coordinates through its pair
+alignment (a constant shift), clamped to that member's matched evidence and fingerprint length.
+
+Two things to preserve if you touch it: (a) a member the projection can't place falls back to its
+raw match — **never** drop it, because a missing "skip intro" button is a worse regression than a
+loose one; (b) `_intersect_match`'s quantile trim uses `int(n * CLUSTER_TRIM_Q)`, which is 0 for
+n < 5, so small clusters stay bit-identical to the old hard intersection. That's deliberate: the
+least-evidenced clusters are the ones you least want to change.
+
 ### Smart Skip matcher needs gap tolerance — and uses numpy
 
 Each chromaprint frame is computed over a **~2.4 s audio window** (hopped ~0.128 s), so a single second of episode-specific audio inside the theme (title-card voiceover, an SFX) corrupts **~20 consecutive fingerprint frames**. A matcher that demands strictly consecutive matching frames truncates real intros at the first such blip (the "skip ends mid-intro" report) or misses them entirely. `_find_longest_match_np` bridges mismatch gaps up to `MATCH_GAP_FRAMES` (~4 s) requiring `MATCH_MIN_RATIO` (60 %) matched frames overall — safe because a random cross-episode frame match at Hamming ≤ 6/32 is ~0.03 % likely. Don't "tighten" the gap back to zero.
