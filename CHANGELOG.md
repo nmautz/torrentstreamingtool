@@ -1,5 +1,61 @@
 # Changelog
 
+## [12.7.5] — 2026-09-14
+**The controls that answered a press by doing nothing visible.**
+
+A pass over the app from the position of someone who does *not* know where to click.
+Every finding here is the same shape: the press worked, the screen didn't say so, and
+the natural response — press it again — sent the action a second time.
+
+**Tapping an episode to stream it looked like a missed tap.**
+`streamLibraryFile` was the only play entry point with neither an in-flight guard nor
+optimistic feedback, while its siblings `continueLibraryItem` / `playLibraryFiles` had
+both. `/stream-file` does several qBit round trips (schedule override, sequential mode,
+first/last-piece priority) before it answers — **294 ms measured on an idle box** — and
+in that window nothing changed on screen: the player still showed the *previous* title
+as "playing". Measured on the live box, a realistic double-tap sent **two requests, both
+202**, and the second superseded the first mid-setup, cancelling its buffer task to redo
+the work. Now guarded on the same `play_${itemId}` key the other two use — so Play and
+Stream can't race each other either — and it paints the buffering state before the round
+trip, rolling it back if the start fails.
+
+**"Play now" from search could sit silent for up to 30 seconds.**
+`/api/library/play-now` re-adds the magnet and waits up to 30 s for metadata when the
+picker's torrent has gone stale. The only thing the user saw in that window was the
+picker closing, which reads as "my tap dismissed the dialog and did nothing" — so they
+go back and pick again, adding the torrent twice. Now paints buffering immediately.
+
+**The PIN pad checked eight times if you tapped eight times.**
+The sixth digit auto-submits, so the usual way to reach `submitPinPrompt` is a tap with
+no visible response while the request flies. Measured: **8 rapid taps → 8 verify-pin
+requests**, each checked in earnest. Now single-flight, says "Checking…" while it runs,
+and finally reports an unreachable server instead of silently doing nothing.
+
+**…and the server checked them all, as fast as they arrived.**
+`verify-pin` is unauthenticated, on the LAN, over a 6-digit space, and had no throttle —
+the client bug above was a free brute-force multiplier. Added a per-(profile, client)
+backoff: five attempts free, then 5s/10s/20s/30s/60s, reset after 15 min. Deliberately
+gentle and never a hard lockout — the failure mode that matters here is a child mashing
+the pad, and a PIN you cannot retry is a television the family cannot use. Returns
+**429**, not 403, so the screen can say "slow down" instead of repeating "Incorrect PIN"
+while silently refusing to check.
+
+**The busy-state guard did not cover the person with a remote.**
+`_markLoading` marked a control with `pointer-events:none`, which blocks a mouse and
+nothing else: the button kept `disabled === false`, stayed focusable, and still fired
+its onclick from a native Enter press. On the `?tv=1` kiosk the remote's OK button *is*
+Enter on the focused element — so the one user with no cursor and the least feedback of
+anyone was the one the guard did not protect. Verified in a live page: pointer hit-test
+blocked, `disabled` still false, `.click()` still fired the handler. `_markLoading` now
+genuinely disables, remembering any prior disabled state so clearing busy restores it
+rather than silently enabling something that was greyed for its own reasons. Three
+callers that duplicated the `disabled` bookkeeping were simplified to let it own that.
+
+**Hide/unhide reversed itself when double-tapped.**
+`toggleItemVisibility` had no guard and its only feedback was the card vanishing once
+`loadLibrary()` returned — and a second tap sends the *opposite* intent, so an impatient
+double-tap landed the item back where it started. Now guarded, with the button spinning.
+
 ## [12.7.4] — 2026-09-14
 **Security: the HTTPS proxy was laundering logins between everyone on the network.**
 

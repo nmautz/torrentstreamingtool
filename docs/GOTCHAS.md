@@ -2805,6 +2805,48 @@ things worth keeping in mind if you touch it:
 
 ## See also
 
+### `pointer-events:none` is not a guard — it only stops a mouse
+
+`.ctrl-loading` (the busy-spinner class behind `_markLoading`) sets
+`pointer-events:none`. That blocks a click *and nothing else*: the element keeps
+`disabled === false`, stays focusable and in the tab order, and still fires its
+`onclick` from a native **Enter** press on a focused `<button>` or from a scripted
+`.click()`.
+
+This mattered most exactly where it was least visible. On the `?tv=1` kiosk the
+remote's OK button *is* Enter on `document.activeElement` (`_tvNavKey`), so the user
+with no cursor and the weakest feedback was the only one the guard never covered —
+hold OK on a "busy" Download and it fires again each press. `_tvCandidates` already
+filters out `disabled` **and** `pointer-events:none`, so you cannot *navigate* to a
+busy control; but a control that was already focused when it went busy keeps focus.
+
+Since 12.7.5 `_markLoading` sets real `disabled` too, saving the previous value in
+`dataset.wasDisabled` so clearing busy restores it rather than enabling something
+that was greyed for its own reasons. **Corollary:** don't manage `disabled` by hand
+around a `_markLoading` call. Three callers used to do `btn.disabled=false;
+_markLoading(btn,false)` — with state-saving that ordering captures `true` as the
+prior state and the button sticks disabled forever. They now let `_markLoading` own it.
+
+Verify a busy state with `el.disabled`, never with the class or the computed
+`pointer-events`.
+
+### Profile PINs are unsalted SHA-256 — the throttle is the real control
+
+`_pin_hash` is a bare `sha256(pin)`, and a PIN is exactly 6 digits. The whole
+keyspace is a million entries: a rainbow table for it is trivial, so `pin_hash` in
+`library.json` should be treated as **reversible**, not as a protected secret. It is
+not worth "fixing" in place — rehashing with a salt/KDF invalidates every existing
+PIN unless paired with a migration, and anyone who can read `library.json` already
+has the box.
+
+What actually bounds guessing is the `verify-pin` throttle added in 12.7.5
+(`PIN_BACKOFF`, per profile+client, 429 over the limit). It is deliberately gentle —
+five free attempts, then seconds, never a lockout — because this is a television and
+the realistic offender is a child mashing the pad, not an attacker with a LAN
+foothold. If you ever tighten it, keep it un-lockable: a PIN that cannot be retried
+is a TV the household cannot use.
+
+
 - [BACKEND.md](BACKEND.md) — invariants enforced by `main.py`
 - [DAEMON_WATCHDOG.md](DAEMON_WATCHDOG.md) — VPN guard at the process level
 - [ANALYZER.md](ANALYZER.md) — Smart Skip algorithm details and fallback chain

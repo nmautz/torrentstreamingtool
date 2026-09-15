@@ -16811,19 +16811,96 @@ async def set_profile_indexers(profile_id: str, request: Request, req: ProfileIn
 class PinLoginReq(BaseModel):
     pin: str
 
+# ── PIN attempt throttling ────────────────────────────────────────────────────
+# A 6-digit PIN is a 1,000,000-key space and verify-pin is an unauthenticated
+# LAN endpoint, so without a throttle it is an open guessing oracle — and the
+# dashboard made that worse by auto-submitting on the sixth digit with no
+# in-flight guard, so a single impatient user could fire eight checks in a
+# second (measured, 12.7.5).
+#
+# Deliberately gentle, because this is a television in a house and the failure
+# mode that matters is a child mashing the pad, not a determined attacker with a
+# LAN foothold: a short burst is free, and only sustained wrong guesses start
+# costing time. Never a hard lockout — a PIN you cannot retry is a TV the family
+# cannot use, which is a worse outcome than a slow guess.
+#
+# Keyed per (profile, client) so one device mashing cannot lock a different room
+# out of the same profile. In-memory by design: the window is seconds, and a
+# process restart clearing it is harmless.
+PIN_FAIL_FREE = 5            # attempts before any delay kicks in
+PIN_FAIL_WINDOW = 900        # 15 min with no attempts resets the counter
+PIN_BACKOFF = (0, 0, 0, 0, 0, 5, 10, 20, 30, 60)   # seconds, by failure count
+_pin_attempts: dict[tuple[str, str], dict] = {}
+
+
+def _pin_client_key(request: Request, profile_id: str) -> tuple[str, str]:
+    return (profile_id, (request.client.host if request.client else "?"))
+
+
+def _pin_retry_after(key: tuple[str, str]) -> int:
+    """Seconds the caller must wait, or 0 if it may try now."""
+    rec = _pin_attempts.get(key)
+    if not rec:
+        return 0
+    now = time.time()
+    if now - rec["last"] > PIN_FAIL_WINDOW:
+        _pin_attempts.pop(key, None)
+        return 0
+    fails = rec["fails"]
+    if fails < PIN_FAIL_FREE:
+        return 0
+    idx = min(fails, len(PIN_BACKOFF) - 1)
+    wait = PIN_BACKOFF[idx]
+    elapsed = now - rec["last"]
+    return max(0, int(round(wait - elapsed)))
+
+
+def _pin_note_failure(key: tuple[str, str]) -> None:
+    now = time.time()
+    rec = _pin_attempts.get(key)
+    if not rec or now - rec["last"] > PIN_FAIL_WINDOW:
+        rec = {"fails": 0, "last": now}
+    rec["fails"] += 1
+    rec["last"] = now
+    _pin_attempts[key] = rec
+    # Bound the table: a scan across many profile ids must not grow it forever.
+    if len(_pin_attempts) > 512:
+        cutoff = now - PIN_FAIL_WINDOW
+        for k in [k for k, v in _pin_attempts.items() if v["last"] < cutoff]:
+            _pin_attempts.pop(k, None)
+
+
+def _pin_clear(key: tuple[str, str]) -> None:
+    _pin_attempts.pop(key, None)
+
+
 @app.post("/api/profiles/{profile_id}/verify-pin")
-async def verify_profile_pin(profile_id: str, req: PinLoginReq) -> JSONResponse:
+async def verify_profile_pin(
+    profile_id: str, req: PinLoginReq, request: Request,
+) -> JSONResponse:
     """Verify the PIN for a single profile (the one the user picked in the lock screen).
-    Returns the full profile object (same shape as /api/profiles) on success, 403 otherwise."""
+    Returns the full profile object (same shape as /api/profiles) on success, 403 otherwise.
+    Throttled per (profile, client) after a burst of wrong guesses — see PIN_BACKOFF."""
     pin = req.pin.strip()
     if not pin or len(pin) != 6 or not pin.isdigit():
         raise HTTPException(400, "PIN must be exactly 6 digits.")
+    _key = _pin_client_key(request, profile_id)
+    _wait = _pin_retry_after(_key)
+    if _wait > 0:
+        # 429 (not 403) so the dashboard can tell "wrong PIN" from "slow down"
+        # and say so — a screen that just repeats "Incorrect PIN" while silently
+        # refusing to check is the confusing version of a throttle.
+        raise HTTPException(
+            429, f"Too many attempts. Try again in {_wait}s.",
+            headers={"Retry-After": str(_wait)})
     lib = await get_library()
     profile = next((p for p in lib["profiles"] if p["id"] == profile_id), None)
     if not profile:
         raise HTTPException(404, "Profile not found.")
     if not profile.get("pin_hash") or profile["pin_hash"] != _pin_hash(pin):
+        _pin_note_failure(_key)
         raise HTTPException(403, "Incorrect PIN.")
+    _pin_clear(_key)
     # Hand back a session token as PROOF the PIN was entered. The client sends it
     # as X-Profile-Token; it is what actually unlocks admin-locked content and the
     # delete endpoints (see _is_elevated / _require_delete_auth).

@@ -5613,16 +5613,51 @@ function updatePinDots(){
     dot.className=`pin-dot w-4 h-4 border-2 ${i<v.length?"bg-indigo-500 border-indigo-500":"border-gray-600"}`;
   });
 }
+// One verification at a time, and say so while it runs.
+//
+// The sixth digit auto-submits (see pinDigit), so the usual way to reach this is
+// a tap that produces no visible change at all while the request is in flight —
+// and the usual response to that is to tap again. Measured on the live box: 8
+// rapid taps produced 8 verify-pin requests, all of them checked in earnest.
+// That is both a confusing screen and a free brute-force multiplier, so the
+// guard is paired with a rate limit server-side.
+let _pinChecking = false;
 async function submitPinPrompt(){
   const pin=document.getElementById("pinPromptInput").value;
   const errEl=document.getElementById("pinPromptError");
+  const subEl=document.getElementById("pinPromptSub");
   errEl.classList.add("hidden");
   if(pin.length!==6){ errEl.textContent="Enter all 6 digits."; errEl.classList.remove("hidden"); return; }
   if(!_pendingPinProfile){ closePinPrompt(); return; }
-  const r=await fetch(`/api/profiles/${encodeURIComponent(_pendingPinProfile.id)}/verify-pin`,{
-    method:"POST", headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({pin}),
-  });
+  if(_pinChecking) return;
+  _pinChecking = true;
+  const _subWas = subEl ? subEl.textContent : "";
+  if(subEl) subEl.textContent = "Checking…";
+  let r;
+  try{
+    r=await fetch(`/api/profiles/${encodeURIComponent(_pendingPinProfile.id)}/verify-pin`,{
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({pin}),
+    });
+  }catch(_){
+    // A PIN screen that silently does nothing when the box is unreachable is the
+    // worst version of this bug, not the mildest — say it plainly.
+    errEl.textContent="Can't reach the server. Try again.";
+    errEl.classList.remove("hidden");
+    document.getElementById("pinPromptInput").value=""; updatePinDots();
+    if(subEl) subEl.textContent=_subWas;
+    _pinChecking=false;
+    return;
+  }
+  if(subEl) subEl.textContent=_subWas;
+  _pinChecking=false;
+  if(r.status===429){
+    const e=await r.json().catch(()=>({}));
+    errEl.textContent=e.detail||"Too many attempts. Wait a moment.";
+    errEl.classList.remove("hidden");
+    document.getElementById("pinPromptInput").value=""; updatePinDots();
+    return;
+  }
   if(r.ok){
     const body=await r.json();
     const matched=body.profile;
@@ -6069,14 +6104,20 @@ async function loadDiskSpace(){
 
 function watchPctOf(prog){ return (!prog||!prog.duration_sec)?0:Math.round(prog.position_sec/prog.duration_sec*100); }
 
-async function toggleItemVisibility(itemId,makeHidden){
+// Hide / unhide for this profile. Guarded because the only feedback is the card
+// disappearing once loadLibrary() comes back — until then the button looks
+// ignored, and a second tap sends the OPPOSITE intent (hide, then unhide), so an
+// impatient double-tap used to land the item back where it started.
+async function toggleItemVisibility(itemId,makeHidden,btn){
   if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
-  const r=await fetch(`/api/library/${itemId}/visibility`,{
-    method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({profile_id:profile.id,hidden:makeHidden}),
+  await withInflight(`vis_${itemId}`, btn||null, async () => {
+    const r=await fetch(`/api/library/${itemId}/visibility`,{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({profile_id:profile.id,hidden:makeHidden}),
+    });
+    if(r.ok) await loadLibrary();
+    else showAlert("Could not update visibility.","error");
   });
-  if(r.ok) loadLibrary();
-  else showAlert("Could not update visibility.","error");
 }
 
 function toggleLibHiddenView(){
@@ -6534,7 +6575,7 @@ function _libItemChrome(item){
 
   if(profile.id){
     if(item.hidden){
-      iconBtns+=`<button onclick="toggleItemVisibility('${item.id}',false)"
+      iconBtns+=`<button onclick="toggleItemVisibility('${item.id}',false,this)"
         title="Show in main list"
         class="text-gray-500 hover:text-indigo-300 p-2.5 hover:bg-indigo-950/40 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -6545,7 +6586,7 @@ function _libItemChrome(item){
         </svg>
       </button>`;
     } else {
-      iconBtns+=`<button onclick="toggleItemVisibility('${item.id}',true)"
+      iconBtns+=`<button onclick="toggleItemVisibility('${item.id}',true,this)"
         title="Hide for me"
         class="text-gray-600 hover:text-gray-400 p-2.5 hover:bg-gray-800/60 transition-colors min-h-[44px] w-11 flex items-center justify-center flex-shrink-0">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -7423,19 +7464,45 @@ async function epDownloadSkipped(itemId, filePath, btn){
 // Stream a still-downloading library file NOW: the server forces the file to
 // fetch first (schedule → "high"), flips the torrent sequential, and starts VLC
 // once the beginning is buffered (same threshold as Search-tab stream-now).
+// Stream a library file that may still be downloading. Sibling of
+// continueLibraryItem / playLibraryFiles, and it now behaves like them.
+//
+// Until 12.7.5 this was the one play entry point with neither an in-flight
+// guard nor optimistic feedback, and the gap was measurable: /stream-file does
+// several qBit round trips (schedule override, sequential mode, first/last
+// piece priority) before it answers — ~300 ms on an idle box, longer under
+// load. In that window NOTHING on screen changed; the player still showed the
+// PREVIOUS title as "playing". So tapping an episode looked like it had missed,
+// and the natural response — tap it again — sent a second request that
+// superseded the first mid-setup, cancelling its buffer task to redo the work.
+//
+// The `play_${itemId}` key is deliberately the same one continueLibraryItem and
+// playLibraryFiles use: "play this item" is one action however the user reached
+// it, so Play and Stream can't race each other either.
 async function streamLibraryFile(itemId,filePath){
   if(!app.vpn_secure){ showAlert("VPN not connected — downloading blocked.","error"); return false; }
-  const r=await fetch(`/api/library/${itemId}/stream-file`,{
-    method:"POST",headers:{"Content-Type":"application/json"},
-    body:JSON.stringify({path:filePath,profile_id:profile.id||""}),
+  if(!app._connected){ showAlert("Reconnecting — try again in a moment.","warn"); return false; }
+  const out = await withInflight(`play_${itemId}`, null, async () => {
+    _optimisticBuffering(_libraryLabel(itemId), itemId);
+    const r=await fetch(`/api/library/${itemId}/stream-file`,{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({path:filePath,profile_id:profile.id||""}),
+    });
+    if(r.ok){
+      showAlert("Buffering on the TV — plays as soon as the beginning is downloaded.","success");
+      return true;
+    }
+    // The optimistic paint has to come back off, or a failed start leaves the
+    // player stuck on a "buffering" screen that will never resolve.
+    _revertOptimistic();
+    const e=await r.json().catch(()=>({detail:"Could not start."}));
+    showAlert(e.detail||"Could not start.","error");
+    return false;
   });
-  if(r.ok){
-    showAlert("Buffering on the TV — plays as soon as the beginning is downloaded.","success");
-    return true;
-  }
-  const e=await r.json().catch(()=>({detail:"Could not start."}));
-  showAlert(e.detail||"Could not start.","error");
-  return false;
+  // withInflight returns undefined when it suppressed a duplicate; callers use
+  // the boolean to decide whether to refresh, and a suppressed call has nothing
+  // new to show — the call that IS running will refresh.
+  return out === true;
 }
 
 // Episode-card tap on a not-yet-downloaded episode: stream it now (see above).
@@ -10219,6 +10286,12 @@ async function selectStreamFile(fileIndex){
     if(!ok) return;
   }
   closeStreamPicker(false); // close without cancelling — we're using this torrent
+  // Paint "buffering" before the round trip. /api/library/play-now can block for
+  // a LONG time when the picker's torrent has gone stale: it re-adds the magnet
+  // and waits up to 30 s for metadata. The picker closing is the only thing the
+  // user saw for that whole window, which reads as "my tap closed the dialog and
+  // did nothing" — so they go back and pick again, adding the torrent twice.
+  _optimisticBuffering(d.title || "", null);
   // Play NOW but PERSIST: /api/library/play-now adopts the torrent into the
   // library and streams it, so Stop no longer deletes the torrent + files — it
   // stays in the library until manually deleted. (The old transient /api/stream
@@ -10233,6 +10306,7 @@ async function selectStreamFile(fileIndex){
     }),
   });
   if(!r.ok){
+    _revertOptimistic();   // never strand the player on a buffering screen
     const e=await r.json().catch(()=>({detail:"Stream failed"}));
     showAlert(e.detail||"Could not start stream.","error");
     return;
@@ -10971,7 +11045,7 @@ async function doSearch(q){
   const grid=document.getElementById("resultsGrid");
   const wrap=document.getElementById("resultsWrap"),empty=document.getElementById("emptyState");
   const count=document.getElementById("resultCount");
-  btn.disabled=true; btn.textContent="…"; _markLoading(btn, true);
+  btn.textContent="…"; _markLoading(btn, true);
   grid.innerHTML=""; wrap.classList.add("hidden"); empty.classList.add("hidden"); hideAlert();
   try{
     // Classic mode: the pre-9.0 flat indexer list — one card per raw torrent,
@@ -11001,7 +11075,7 @@ async function doSearch(q){
   } catch(err){
     showAlert(err.message,"error"); empty.classList.remove("hidden");
   } finally {
-    btn.disabled=false; btn.textContent="Search"; _markLoading(btn, false);
+    btn.textContent="Search"; _markLoading(btn, false);
   }
 }
 
@@ -11658,7 +11732,7 @@ async function _ssBroadSearch(){
 // Explicit "Search episodes" — one broad Jackett query, bucket episode-kind
 // results into _ssEpisodes. Per-season/per-episode Find fills any gaps after.
 async function ssSearchShowEpisodes(btn, opts={}){
-  if(btn){ btn.disabled=true; _markLoading(btn,true); }
+  if(btn){ _markLoading(btn,true); }
   const grp=_ssGroup;
   try{
     const results=await _ssBroadSearch();
@@ -11690,7 +11764,7 @@ async function ssSearchShowEpisodes(btn, opts={}){
     // season pass and must not race this one for the single background slot.)
     if(!opts.noSweep) _ssSweepBareSeasons();
   } finally {
-    if(btn){ btn.disabled=false; _markLoading(btn,false); }
+    if(btn){ _markLoading(btn,false); }
   }
 }
 
@@ -11771,7 +11845,7 @@ function _ssMergeEpisodes(results){
 // season that still has no season pack, so a season the broad query missed
 // (routinely the most recent ones) still shows up.
 async function ssSearchPacks(btn){
-  if(btn){ btn.disabled=true; _markLoading(btn,true); }
+  if(btn){ _markLoading(btn,true); }
   const grp=_ssGroup;
   const label=document.getElementById("ssSearchPacksLabel");
   const setLabel=t=>{ if(label) label.textContent=t; };
@@ -11803,7 +11877,7 @@ async function ssSearchPacks(btn){
     if(_ssGroup===grp && !_ssPacks.length) showAlert("No packs found yet — still looking season by season.","warn");
   } finally {
     setLabel("Search packs");
-    if(btn){ btn.disabled=false; _markLoading(btn,false); }
+    if(btn){ _markLoading(btn,false); }
   }
 }
 
@@ -13235,18 +13309,41 @@ function ssBulkManual(){
 // While `key` is in flight, repeat clicks on the same control are dropped and
 // the element is dimmed with a spinner overlay (or disabled, for form ctls).
 const _inflightActions = new Set();
+// Mark a control busy: spinner + aria-busy, and genuinely disable it.
+//
+// The `ctrl-loading` class sets `pointer-events:none`, which blocks a MOUSE but
+// nothing else — a <button> so marked keeps `disabled === false`, stays
+// focusable, and still fires its onclick from a native Enter press or a
+// scripted .click(). That is not a hypothetical: on the ?tv=1 kiosk the remote's
+// OK button is Enter on the focused element, so every control guarded only by
+// _markLoading could be re-fired by holding OK — the remote user, who has no
+// cursor and the least feedback of anyone, was the one person the guard did not
+// cover. `disabled` closes that path (and _tvCandidates already skips disabled
+// controls, so focus never lands back on one).
+//
+// The previous disabled state is remembered, because some callers mark a control
+// that was ALREADY disabled for its own reasons (a Play button greyed during
+// stream prepare); clearing the busy state must put it back as it was, not
+// silently enable it.
 function _markLoading(el, on){
   if(!el) return;
   const isFormCtl = (el.tagName === "SELECT" || el.tagName === "INPUT");
   const cls = isFormCtl ? "ctrl-loading-form" : "ctrl-loading";
+  const canDisable = ("disabled" in el);
   if(on){
     el.classList.add(cls);
     el.setAttribute("aria-busy","true");
-    if(isFormCtl) el.disabled = true;
+    if(canDisable){
+      if(el.dataset.wasDisabled === undefined) el.dataset.wasDisabled = el.disabled ? "1" : "0";
+      el.disabled = true;
+    }
   } else {
     el.classList.remove(cls);
     el.removeAttribute("aria-busy");
-    if(isFormCtl) el.disabled = false;
+    if(canDisable){
+      el.disabled = (el.dataset.wasDisabled === "1");
+      delete el.dataset.wasDisabled;
+    }
   }
 }
 async function withInflight(key, el, fn){
@@ -21037,6 +21134,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">12.7.4</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">12.7.5</div>
 </body>
 </html>
