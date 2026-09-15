@@ -601,6 +601,21 @@ def _night_mode_preset(name: Optional[str]) -> str:
     return name if name in NIGHT_MODE_PRESETS else NIGHT_MODE_DEFAULT_PRESET
 
 
+# Which surface a TV (host-display) library play opens on.
+TV_PLAYBACK_MODES = ("device", "vlc")
+TV_PLAYBACK_MODE_DEFAULT = "device"
+
+
+def _tv_playback_mode(name: Optional[str]) -> str:
+    """Normalise settings.tv_playback_mode to a known surface.
+
+    "device" — the kiosk's own <video> (HLS, remote-driven); "vlc" — the classic
+    VLC window. Anything unrecognised (or unset, on a library.json written before
+    this setting existed) reads as the default.
+    """
+    return name if name in TV_PLAYBACK_MODES else TV_PLAYBACK_MODE_DEFAULT
+
+
 def _vlc_audio_filter_args(night_mode: bool, preset: Optional[str] = None) -> list:
     """VLC CLI args for the night-mode compressor at `preset`, or [] when off.
 
@@ -1110,6 +1125,21 @@ class AppState:
     tv_ui_active: bool = False                            # True while the dashboard kiosk should hold the screen; gates every VLC focus assertion (see docs/REMOTE.md)
     tv_input_last: float = 0.0                            # time.time() of the last HID input (key/click/move) — drives the TV UI idle hand-back
     host_volume_expected: Optional[int] = None            # last OS volume WE set/accepted (0-100). Only consumed by the OPT-IN remote_volume_guard (REMOTE_VOLUME_GUARD=1, Windows) which reverts any other change
+    # ── On-device TV playback (the kiosk's own <video>, host display) ──
+    # The THIRD playback surface, alongside VLC and YouTube-on-TV. Deliberately a
+    # SEPARATE AXIS from tv_ui_active rather than a replacement for it: the kiosk
+    # must keep holding the screen while its player runs, so tv_ui_active STAYS
+    # TRUE throughout (it is what makes vlc_focus_and_fullscreen and
+    # background_video_loop stand down). See docs/GOTCHAS.md.
+    tv_local_active: bool = False                         # True while the kiosk's <video> is the active TV playback
+    tv_local_playback: str = ""                           # last player state from the kiosk: playing|paused|buffering|ended
+    tv_local_seen_at: float = 0.0                         # time.time() of the last /api/tv-local/state heartbeat (stale ⇒ the page died)
+    tv_local_item_id: Optional[str] = None                # library item currently on the kiosk player
+    tv_local_file_path: Optional[str] = None              # and which file of it
+    # Which surface a TV library play uses: "device" (kiosk <video>) | "vlc".
+    # Persisted in library.json → settings.tv_playback_mode, seeded at lifespan.
+    # VLC stays the automatic fallback whichever way this is set.
+    tv_playback_mode: str = "device"
     # ── Auto-updater (transient view of the current update operation) ──
     # All persisted updater state lives in library.json → settings.autoupdate.
     # These fields just expose the live state of an in-flight check/apply so
@@ -1433,6 +1463,18 @@ def state_snapshot() -> dict:
         # populated from the /tv page's heartbeat (see /api/youtube/tv-state).
         "youtube_active": state.youtube_active,
         "youtube_video_id": state.youtube_video_id,
+        # On-device TV playback: the kiosk's own <video> is the active surface.
+        # Like YouTube, active_title / vlc_time / vlc_duration are reused for
+        # display and populated from the kiosk heartbeat (/api/tv-local/state),
+        # so the dashboard's fullscreen controls render against the same fields
+        # whichever surface is playing.
+        "tv_local_active": state.tv_local_active,
+        "tv_local_item_id": state.tv_local_item_id,
+        "tv_local_file_path": state.tv_local_file_path,
+        "tv_local_playback": state.tv_local_playback,
+        # "device" | "vlc" — which surface a TV play opens on. Mirrored here (the
+        # night-mode precedent) so the More-panel toggle stays in sync everywhere.
+        "tv_playback_mode": state.tv_playback_mode,
         # Env keys whose absence disables features. The non-admin UI shows a
         # passive banner ("server needs admin attention") when this is non-empty
         # AND any entry has `required=True`; the admin Updates tab renders the
@@ -1913,6 +1955,14 @@ async def vlc(command: str, **params) -> None:
             # run their first tv_ui_active check. (The bg video bypasses vlc()
             # and posts in_play directly, so it never trips this.)
             state.tv_ui_active = False
+            # The on-device surface loses it too — VLC and the kiosk player must
+            # never both be sounding. Tell the page to flush its position and
+            # close, then release the claim so the remote's keys go back to VLC.
+            # This covers the switch-to-VLC paths (More-panel toggle, automatic
+            # fallback) as well as an ordinary VLC play landing on a busy kiosk.
+            if state.tv_local_active:
+                await broadcast("tv_command", {"action": "stop"})
+                await _tv_local_clear("VLC took the screen", reset_status=False)
             # User content is taking over from the idle background video —
             # restore the volume the user had before bg took the floor.
             if state.background_playing:
@@ -6405,7 +6455,12 @@ async def stat_broadcaster() -> None:
                 state.total_mb = total / 1_048_576
                 state.dl_speed_bps = info.get("dlspeed", 0)
                 state.ul_speed_bps = info.get("upspeed", 0)
-        if state.stream_status == "playing" and not state.youtube_active:
+        # `not youtube_active` / `not tv_local_active`: on those surfaces VLC is
+        # idle (or sitting on the background video) by design, so polling it would
+        # overwrite the position the page's own heartbeat just reported — with
+        # zeros, or worse, with the background video's playhead.
+        if (state.stream_status == "playing"
+                and not state.youtube_active and not state.tv_local_active):
             vs = await vlc_status()
             if vs:
                 state.vlc_time = int(vs.get("time", 0))
@@ -6538,6 +6593,10 @@ async def _handle_playback_ended() -> bool:
     last good position/duration pair — VLC zeroes both at EOF, and
     `_finalize_stopped_file` ignores a zero duration.
     """
+    # On-device TV playback deliberately leaves VLC idle, so "VLC stopped" says
+    # nothing about whether the episode ended. The page reports its own end.
+    if state.tv_local_active:
+        return False
     if not _real_playback_active() or _play_handoff_in_flight():
         return False
 
@@ -6667,7 +6726,11 @@ async def background_video_loop() -> None:
         try:
             # YouTube is playing in the browser on the TV — VLC is intentionally
             # stopped. Don't let the idle-background loop start a video over it.
-            if state.youtube_active:
+            # Same for on-device TV playback (the kiosk's own <video>): VLC is
+            # idle by design there, so without this skip the end-of-media
+            # detector below would see "playing" + a stopped VLC and declare the
+            # film over every ~6 s — wiping the surface claim mid-episode.
+            if state.youtube_active or state.tv_local_active:
                 continue
 
             # ── End-of-media detection ───────────────────────────────────────
@@ -8978,6 +9041,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         state.vpn_mode = _ks0["mode"]
         _rebuild_ondemand_only_items(_lib0)
         state.preferred_adapter = _network_cfg(_lib0)["preferred_adapter"]
+        state.tv_playback_mode = _tv_playback_mode(_nm.get("tv_playback_mode"))
     except Exception:
         state.vlc_night_mode = False
         state.vlc_night_mode_preset = NIGHT_MODE_DEFAULT_PRESET
@@ -9295,6 +9359,32 @@ class YouTubeTvStateReq(BaseModel):
     duration: Optional[float] = None
     volume: Optional[float] = None
     playback: Optional[str] = None
+
+
+class TvLocalStateReq(BaseModel):
+    # Heartbeat + playback report posted by the ?tv=1 kiosk while ITS OWN <video>
+    # is the active TV playback. The on-device twin of YouTubeTvStateReq; all
+    # optional so an early beat (player constructed, metadata not in yet) is valid.
+    active: bool = True
+    item_id: Optional[str] = None
+    file_path: Optional[str] = None
+    title: Optional[str] = None
+    time: Optional[float] = None
+    duration: Optional[float] = None
+    playback: Optional[str] = None
+
+
+class TvPlaybackModeReq(BaseModel):
+    mode: str
+
+
+class TvLocalOpenReq(BaseModel):
+    # Push a file onto the kiosk's own player — the VLC → on-device half of the
+    # fullscreen More-panel switch.
+    item_id: str
+    file_path: str
+    profile_id: str = ""
+    seek: float = 0.0
 
 
 class LibraryPlayReq(BaseModel):
@@ -14396,10 +14486,14 @@ def _tv_input_event(kind: str) -> None:
     there's no double-toggle)."""
     global _tv_click_pause_last
     state.tv_input_last = time.time()
-    playing = state.youtube_active or state.stream_status in ("playing", "buffering")
+    playing = (state.youtube_active or state.tv_local_active
+               or state.stream_status in ("playing", "buffering"))
     if kind == "click" and playing:
-        if (not state.youtube_active and not state.tv_ui_active
-                and not window_mgmt_paused()):
+        # On-device playback is excluded for the same reason as YouTube: the
+        # kiosk is a real browser window and the page already toggles on its own
+        # click, so claiming it here would double-toggle straight back.
+        if (not state.youtube_active and not state.tv_local_active
+                and not state.tv_ui_active and not window_mgmt_paused()):
             now = time.monotonic()
             if now - _tv_click_pause_last >= 0.4:
                 _tv_click_pause_last = now
@@ -14438,10 +14532,26 @@ async def tv_ui_loop() -> None:
     - No input for `tv_ui_idle_secs` while idle → hand the screen back to the
       background video. If no background video is configured, the dashboard
       stays up — a black VLC window is worse than the UI.
+    - On-device playback running → the kiosk IS the player: hold the screen and
+      never idle-hide (a two-hour film gets no keypresses). Reap the surface if
+      the page stops beating.
     """
     while True:
         await asyncio.sleep(5)
         try:
+            # Checked before the tv_ui_active guard so a surface left claimed by
+            # a kiosk that died can always be released.
+            if state.tv_local_active:
+                if time.time() - state.tv_local_seen_at > TV_LOCAL_STALE_SECS:
+                    await _tv_local_clear("heartbeat stale")
+                    await broadcast("state", state_snapshot())
+                else:
+                    # LOAD-BEARING `continue`: falling through would let the idle
+                    # hand-back below drop the background video over a playing
+                    # film, and would clear tv_ui_active — which is the only
+                    # thing keeping vlc_focus_and_fullscreen and
+                    # background_video_loop off the display. See docs/GOTCHAS.md.
+                    continue
             if not settings.tv_ui or not state.tv_ui_active:
                 continue
             if window_mgmt_paused():
@@ -14687,6 +14797,144 @@ async def youtube_tv_state(req: YouTubeTvStateReq) -> JSONResponse:
     return JSONResponse({"ok": True, "active": True})
 
 
+# A kiosk heartbeat older than this means the page is gone (crash, reload,
+# navigation) and its <video> is not playing anything. Generous next to the ~2 s
+# beat because a JIT rebuffer can stall the page's timers briefly.
+TV_LOCAL_STALE_SECS = 15.0
+
+
+async def _tv_local_clear(reason: str, reset_status: bool = True) -> None:
+    """Release the on-device TV surface. Does NOT touch tv_ui_active — the kiosk
+    keeps holding the screen (it is showing its own grid again).
+
+    `reset_status=False` when the caller is a surface that is CLAIMING now-playing
+    for itself (the `vlc("in_play")` path): dropping stream_status to "idle" there
+    would stomp the "playing" the incoming play is about to set.
+    """
+    if not state.tv_local_active:
+        return
+    log.info("tv-local: releasing surface (%s)", reason)
+    state.tv_local_active = False
+    state.tv_local_playback = ""
+    state.tv_local_item_id = None
+    state.tv_local_file_path = None
+    if reset_status:
+        state.active_title = None
+        state.stream_status = "idle"
+        state.vlc_time = 0
+        state.vlc_duration = 0
+
+
+@app.post("/api/tv-local/state")
+async def tv_local_state(req: TvLocalStateReq) -> JSONResponse:
+    """Heartbeat + playback report from the ?tv=1 kiosk's own <video>.
+
+    The on-device twin of /api/youtube/tv-state: it claims the TV playback
+    surface (so the remote's transport keys are relayed to the page instead of
+    VLC) and mirrors position/duration/title onto the shared display fields, so
+    every dashboard's fullscreen controls reflect the TV instantly.
+
+    `active: false` is the page saying it has stopped — sent on ended/stop/unload.
+    """
+    state.tv_local_seen_at = time.time()
+    if not req.active:
+        await _tv_local_clear("page reported inactive")
+        await broadcast("state", state_snapshot())
+        return JSONResponse({"ok": True, "active": False})
+
+    # Claiming the surface also refreshes the idle timer: a film playing with
+    # nobody touching the remote must not look like an idle kiosk to tv_ui_loop.
+    state.tv_input_last = time.time()
+    if not state.tv_local_active:
+        log.info("tv-local: claiming surface (item=%s)", req.item_id)
+    state.tv_local_active = True
+    # Take over now-playing, the same way youtube_play does. Without this the
+    # dashboard is blind to on-device TV playback — every phone-side player
+    # affordance keys off `stream_status === "playing"`, so the footer player,
+    # the fullscreen button and the More-panel surface switch would never appear
+    # while the TV is playing. Paused counts as "playing" here, matching VLC.
+    state.stream_status = "buffering" if req.playback == "buffering" else "playing"
+    if req.item_id:
+        state.tv_local_item_id = req.item_id
+    if req.file_path:
+        state.tv_local_file_path = req.file_path
+    if req.title and req.title.strip():
+        state.active_title = req.title.strip()
+    if req.time is not None:
+        state.vlc_time = int(req.time)
+    if req.duration is not None:
+        state.vlc_duration = int(req.duration)
+    if req.playback:
+        state.tv_local_playback = req.playback
+    await broadcast("state", state_snapshot())
+    return JSONResponse({"ok": True, "active": True})
+
+
+@app.post("/api/tv-local/open")
+async def tv_local_open(req: TvLocalOpenReq) -> JSONResponse:
+    """Switch the TV to on-device playback of `file_path` at `seek` seconds.
+
+    The VLC → kiosk half of the fullscreen More-panel toggle (the other half is
+    an ordinary `/api/library/{id}/play` with `seek_first_to`, which releases
+    this surface from `vlc("in_play")`).
+
+    Order matters and mirrors the 🏠 Home key: bring the kiosk up FIRST so
+    `tv_ui_active` is set before `stop()` kicks off its focus/background churn,
+    otherwise `background_video_loop` grabs the display in the gap.
+    """
+    if not settings.tv_ui:
+        raise HTTPException(409, "The TV dashboard kiosk is disabled on this host.")
+    if not HLS_AVAILABLE:
+        raise HTTPException(503, HLS_UNAVAILABLE_MSG)
+    await _tv_ui_show("switch to on-device playback")
+    if not state.tv_ui_active:
+        raise HTTPException(503, "Couldn't put the TV dashboard on the screen.")
+    if _tv_anything_playing():
+        await stop()
+    # Claim the surface up front so the remote's keys route to the page from the
+    # first press, rather than only once its first heartbeat lands (~2 s).
+    state.tv_local_active = True
+    state.tv_local_seen_at = time.time()
+    state.tv_local_item_id = req.item_id
+    state.tv_local_file_path = req.file_path
+    state.tv_local_playback = "buffering"
+    await broadcast("tv_command", {
+        "action":     "open",
+        "item_id":    req.item_id,
+        "file_path":  req.file_path,
+        "profile_id": req.profile_id,
+        "seek":       float(req.seek or 0),
+    })
+    await broadcast("state", state_snapshot())
+    return JSONResponse({"ok": True})
+
+
+@app.get("/api/settings/tv-playback-mode")
+async def get_tv_playback_mode() -> JSONResponse:
+    s_ = (await get_library()).get("settings", {})
+    return JSONResponse({
+        "tv_playback_mode": _tv_playback_mode(s_.get("tv_playback_mode")),
+        "modes": list(TV_PLAYBACK_MODES),
+        "hls_available": HLS_AVAILABLE,
+    })
+
+
+@app.post("/api/settings/tv-playback-mode")
+async def set_tv_playback_mode(req: TvPlaybackModeReq) -> JSONResponse:
+    """Choose the surface a TV library play opens on: "device" or "vlc".
+
+    Only affects where the NEXT play opens — playback already on screen is
+    switched by the fullscreen More-panel toggle, not by this. VLC remains the
+    automatic fallback in "device" mode when prep/JIT can't serve a file.
+    """
+    mode = _tv_playback_mode(req.mode)
+    async with mutate_library() as lib:
+        lib.setdefault("settings", {})["tv_playback_mode"] = mode
+    state.tv_playback_mode = mode
+    await broadcast("state", state_snapshot())
+    return JSONResponse({"ok": True, "tv_playback_mode": mode})
+
+
 @app.post("/api/stop")
 async def stop() -> JSONResponse:
     # Cancel any in-flight pipelines first so a buffering stream doesn't race the teardown
@@ -14702,6 +14950,7 @@ async def stop() -> JSONResponse:
     library_item_id = state.library_item_id
     prepare_hash = state.prepare_hash
     was_youtube = state.youtube_active
+    was_tv_local = state.tv_local_active
 
     # Flush the outgoing episode's final position before we clear state — stopping
     # near the end otherwise leaves it un-completed and resumable (see
@@ -14724,6 +14973,10 @@ async def stop() -> JSONResponse:
     state.youtube_active = False
     state.youtube_video_id = None
     state.youtube_playback = ""
+    state.tv_local_active = False
+    state.tv_local_playback = ""
+    state.tv_local_item_id = None
+    state.tv_local_file_path = None
     state.vlc_time = 0
     state.vlc_duration = 0
     state.library_item_id = None
@@ -14752,6 +15005,13 @@ async def stop() -> JSONResponse:
     # so a YouTube play doesn't linger on the TV after Stop.
     if was_youtube:
         await broadcast("yt_command", {"action": "close"})
+
+    # On-device TV playback: tell the kiosk to flush its final position and close
+    # its player, dropping it back to the grid. Unlike YouTube there is no browser
+    # to kill — it is the same kiosk window that shows the dashboard, and
+    # tv_ui_active is deliberately left alone so it keeps the screen.
+    if was_tv_local:
+        await broadcast("tv_command", {"action": "stop"})
 
     await broadcast("stream_status", {"status": "idle", "message": "Stopped."})
     await broadcast("state", state_snapshot())
@@ -14982,21 +15242,25 @@ def _remote_should_handle(action: str = "") -> bool:
     - `volume_up`/`volume_down` are **always** claimed: the remote's volume
       must never reach the host OS mixer (no Windows volume overlay, no
       changed system volume after a session) — it drives VLC's amp (or the
-      YouTube player's own gain) instead, whatever the playback state.
+      YouTube / on-device player's own gain) instead, whatever the playback state.
     - `power` (⏻, VK_SLEEP) is **always** claimed: unsuppressed, Windows
       sleeps/hibernates the media box — never desirable from the couch. It
       toggles between the two idle surfaces instead (background video ⇄
       TV UI; during playback: stop, back to the background video).
-    - `ok` (Enter) is claimed only during real playback while the TV UI is
-      NOT up — it acts as ⏯; with the dashboard kiosk foreground it must keep
-      activating the focused element (D-pad navigation).
+    - `ok` (Enter) is claimed during real playback while the TV UI is NOT up —
+      it acts as ⏯; with the dashboard kiosk foreground it must keep activating
+      the focused element (D-pad navigation). **On-device TV playback is the
+      exception**: there the kiosk IS the player, so tv_ui_active stays true
+      throughout and OK must mean ⏯ again — hence the explicit tv_local_active
+      arm rather than a `not tv_ui_active` test.
     - The remaining media keys are claimed while real playback is up (VLC
-      stream / library play, incl. paused, or YouTube-on-TV); when idle they
-      pass through to the OS untouched.
+      stream / library play, incl. paused, YouTube-on-TV, or the kiosk's own
+      <video>); when idle they pass through to the OS untouched.
     """
     if window_mgmt_paused():
         return False
-    playing = state.youtube_active or state.stream_status in ("playing", "buffering")
+    playing = (state.youtube_active or state.tv_local_active
+               or state.stream_status in ("playing", "buffering"))
     if action == "home":
         return bool(settings.tv_ui) or playing
     if action == "back":
@@ -15004,8 +15268,18 @@ def _remote_should_handle(action: str = "") -> bool:
     if action in ("volume_up", "volume_down", "power"):
         return True
     if action == "ok":
-        return playing and not state.tv_ui_active
+        return state.tv_local_active or (playing and not state.tv_ui_active)
     return playing
+
+
+def _tv_anything_playing() -> bool:
+    """True when ANY of the three TV surfaces has content up — VLC (stream or
+    library play, incl. paused/preparing), YouTube-on-TV, or the kiosk's own
+    <video>. The gate Home / Back / ⏻ Power use to decide "end what's playing"
+    vs "toggle the idle surfaces"."""
+    return bool(state.youtube_active or state.tv_local_active
+                or state.stream_status != "idle"
+                or state.library_item_id or state.active_hash)
 
 
 async def _remote_key_action(action: str) -> None:
@@ -15015,8 +15289,11 @@ async def _remote_key_action(action: str) -> None:
     home, back, power}. Routes like the dashboard footer with one deliberate exception:
     the remote's **volume never touches the host OS mixer** — VLC playback and
     idle adjust VLC's amp (capped by settings.max_volume); YouTube-on-TV
-    adjusts the IFrame player's own gain via a `player_volume_step` yt_command
-    (NOT the dashboard slider's server-side OS-volume path). `home` (🏠) is
+    adjusts the IFrame player's own gain via a `player_volume_step` yt_command,
+    and on-device TV playback does the same via a `player_volume_step`
+    tv_command (NOT the dashboard slider's server-side OS-volume path).
+    While the kiosk's own <video> is the active surface every transport key is
+    relayed to the page over `tv_command` rather than driving VLC. `home` (🏠) is
     the Firestick Home equivalent: end whatever is playing and put the
     dashboard kiosk on the screen. `back` (←) is the Firestick Back
     equivalent: during playback it exits the player to the dashboard (same
@@ -15036,13 +15313,11 @@ async def _remote_key_action(action: str) -> None:
             # churn that stop() kicks off, then end the active playback.
             if settings.tv_ui:
                 await _tv_ui_show("home key")
-            if state.youtube_active or state.stream_status != "idle" \
-                    or state.library_item_id or state.active_hash:
+            if _tv_anything_playing():
                 await stop()
             return
         if action == "back":
-            if state.youtube_active or state.stream_status != "idle" \
-                    or state.library_item_id or state.active_hash:
+            if _tv_anything_playing():
                 # Exit the player back to the dashboard — UI first so
                 # tv_ui_active gates the focus churn, exactly like Home.
                 if settings.tv_ui:
@@ -15069,8 +15344,7 @@ async def _remote_key_action(action: str) -> None:
                      state.tv_ui_active, state.background_playing)
             # Standby toggle between the two idle surfaces — never the OS
             # sleep the key means to Windows (suppressed / neutered while claimed).
-            if state.youtube_active or state.stream_status != "idle" \
-                    or state.library_item_id or state.active_hash:
+            if _tv_anything_playing():
                 # "Screen off": end playback. background_video_loop brings the
                 # idle video back within ~3 s — starting it here directly would
                 # race stop()'s async VLC teardown (pl_stop/pl_empty would kill
@@ -15099,9 +15373,31 @@ async def _remote_key_action(action: str) -> None:
                 # `player_volume_step` case); the host mixer stays put.
                 await broadcast("yt_command",
                                 {"action": "player_volume_step", "value": float(delta)})
+            elif state.tv_local_active:
+                # Same rule for the kiosk's own <video>: adjust the ELEMENT's
+                # gain, never the host mixer. This is also the only volume
+                # control the local player has — #lpControls ships a mute button
+                # and nothing else, so without this the remote's Vol± would be
+                # dead on the surface we just made primary.
+                await broadcast("tv_command",
+                                {"action": "player_volume_step", "value": float(delta)})
             else:
                 await volume("up" if delta > 0 else "down", step=REMOTE_VOLUME_STEP)
                 await broadcast("state", state_snapshot())
+            return
+        if state.tv_local_active:
+            # The kiosk's own <video> owns the screen. The key was suppressed on
+            # the host (it must not reach Chrome as a media key and get handled
+            # twice), so relay it over the SSE channel the ?tv=1 page listens on.
+            # Checked BEFORE YouTube: the two surfaces are mutually exclusive,
+            # but a stale youtube_active during a handoff must not steal the key.
+            if action == "playpause":
+                await broadcast("tv_command", {"action": "playpause"})
+            elif action in ("seek_forward", "seek_back"):
+                step = (REMOTE_SEEK_STEP_SECS if action == "seek_forward"
+                        else -REMOTE_SEEK_STEP_SECS)
+                await broadcast("tv_command",
+                                {"action": "seek", "value": float(step)})
             return
         if state.youtube_active:
             yt_action, yt_value = {
@@ -15202,6 +15498,13 @@ async def remote_volume_guard() -> None:
             step = min(50, presses * REMOTE_VOLUME_STEP)
             if state.youtube_active:
                 await broadcast("yt_command", {
+                    "action": "player_volume_step",
+                    "value": float(step if delta > 0 else -step)})
+            elif state.tv_local_active:
+                # Same routing as the hook path: the kiosk player's own gain, so
+                # a remote whose volume bypasses the keyboard hook still lands on
+                # the surface that is actually making the sound.
+                await broadcast("tv_command", {
                     "action": "player_volume_step",
                     "value": float(step if delta > 0 else -step)})
             else:

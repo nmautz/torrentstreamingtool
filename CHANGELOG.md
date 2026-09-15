@@ -1,5 +1,60 @@
 # Changelog
 
+## [13.0.0] — 2026-09-15
+**The TV stopped needing VLC.**
+
+On the TV the remote is the only input, so every control that lived solely in the
+dashboard's full-screen overlay was unreachable from the couch (issue #8). Rather than
+rebuild each one as a remote-driven overlay on top of VLC, the kiosk now plays library
+content in **its own player** — the same `#localPlayer` the phone uses, in the same
+`?tv=1` document that was already on screen. It arrives with the full control surface
+already built: transport, seek, audio and subtitle tracks, Smart Skip offers, styled ASS
+subtitles via libass, progress sync, next-episode auto-advance, and an ABR quality menu
+VLC never had. VLC is now the fallback.
+
+This was one line away from working — `hlsAvailable = !TV_MODE` — because the browser
+path never direct-plays. Everything is transcoded to H.264/AAC HLS on the host, so the
+library's makeup (395 of 442 files MKV, 298 HEVC, 247 10-bit, 86 AV1) carries no codec
+risk at all. A cold just-in-time start on a 1080p HEVC 10-bit MKV with no pre-built
+bundle reaches first picture in **4.5 s** and then encodes at **2.4× realtime** on NVENC.
+
+**The real work was arbitration.** The remote gated every transport key on
+`playing = youtube_active or stream_status in (playing, buffering)`, and a `<video>` in
+the kiosk is neither — so ⏯, OK and seek would all have been swallowed. There is now a
+third playback surface (`tv_local_*`) alongside VLC and YouTube-on-TV, fed by a heartbeat
+from the page and relayed back to it over the existing `tv_command` SSE channel.
+Deliberately a *separate axis* from `tv_ui_active`: the kiosk must keep holding the
+screen while its player runs, because that flag is the only thing keeping
+`vlc_focus_and_fullscreen` and `background_video_loop` off the display.
+
+**A two-hour film would have been interrupted by its own idle timer.** `tv_ui_loop` hands
+the screen back to the background video after 120 s with no HID input when "nothing is
+playing" — and nobody touches the remote during a movie. The on-device surface now
+suppresses the hand-back, and a kiosk that stops beating for 15 s is reaped instead.
+
+**Volume, which the local player never had.** `#lpControls` shipped a mute button and
+nothing else — fine on a phone with hardware volume keys, useless on a TV. The remote's
+Vol± now steps the media element's own gain (never the host mixer, matching the
+YouTube-on-TV rule) with an on-screen readout, and ↑/↓ do the same from the D-pad. ←/→
+seek ±10 s; those keys were never claimed by the host hook, so they arrive as ordinary
+DOM events and needed no relay.
+
+**VLC is the fallback, automatically.** Prep failing, the on-demand stream refusing to
+start, a terminal hls.js error after recovery is exhausted, or a second consecutive stall
+on the same file all hand the episode to VLC at its current position. One shot per file,
+so a VLC-side failure can't bounce it back.
+
+**Switching on purpose, both directions.** User Settings gains "Always Use VLC on the TV"
+(off by default), and the full-screen More sheet gains a live switch that moves whatever
+the TV is playing between VLC and on-device without losing the position — useful for the
+cases the browser path genuinely degrades: surround sound (prep downmixes to AAC stereo)
+and HDR (no tone mapping, so HDR10 comes out flat).
+
+**Also:** the subtitle menu now says when a release's only subtitles were PGS/VOBSUB. The
+server has reported `skipped_image_subs` on three endpoints since bundles existed and the
+client never rendered it, so a Blu-ray remux presented a menu reading only "Off" with no
+explanation.
+
 ## [12.7.6] — 2026-09-14
 **A seek to nowhere jumped to the end, and deleting what you were watching pulled the file out from under the player.**
 

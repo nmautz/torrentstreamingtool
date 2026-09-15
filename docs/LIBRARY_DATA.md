@@ -143,6 +143,20 @@ It **is** enforced server-side against the network, though (11.20.0). `verify-pi
 
 `settings.vlc_night_mode` / `settings.vlc_night_mode_preset`: night mode — VLC's `compressor` audio filter, which narrows the gap between the quietest and loudest sounds so dialogue stays clear at low room volume. `vlc_night_mode` is the on/off flag (default off); `vlc_night_mode_preset` is the intensity (`light` / `medium` / `max`, default `medium`) and is **remembered independently** of the on/off toggle — turning night mode off and back on reuses the same intensity. The on/off toggle is reachable from both the fullscreen-controls moon button and the profile-settings panel; the **intensity picker is settings-menu only** (`POST /api/settings/night-mode` accepts `night_mode` and/or `preset`, merged). Both are global host settings, not per-viewer. **There is no VLC HTTP command to add/remove an audio filter at runtime**, so the compressor is a launch arg (`NIGHT_MODE_PRESETS[preset]`) and changing it relaunches VLC — `_apply_night_mode` snapshots the current file + position, relaunches via `_restart_vlc_process` (which reads `state.vlc_night_mode` + `state.vlc_night_mode_preset`), then replays and seeks back. A preset change *while night mode is off* just persists (no relaunch). `run.py` (`start_vlc`) and `watchdog.py` (`vlc_spec`) read these same settings independently when they launch VLC (boot / crash recovery), so the three `NIGHT_MODE_PRESETS` dicts must stay in sync. Seeded into `state` at lifespan startup and exposed in `state_snapshot`. See [GOTCHAS.md](GOTCHAS.md).
 
+`settings.tv_playback_mode`: which surface a library play opens on **at the host's TV**
+— `"device"` (the `?tv=1` kiosk's own `<video>`, HLS, driven by the remote) or `"vlc"`
+(the classic VLC window). Default `"device"` since 13.0.0. Deliberately **global, not
+per-profile**: the TV is one physical screen, so a per-viewer value would mean the same
+TV behaved differently depending on who last picked a profile on it. Normalised on read
+by `_tv_playback_mode()` — anything unrecognised (including a `library.json` written
+before this key existed) reads as the default. Seeded into `state.tv_playback_mode` at
+lifespan startup and exposed in `state_snapshot` so the User Settings toggle and the
+fullscreen More-panel switch stay in sync across clients. It only decides where the
+**next** play opens; VLC remains the automatic fallback when prep or the just-in-time
+stream can't serve a file, whichever way this is set. Turn it to `"vlc"` for a 5.1 setup
+or HDR content — the browser path downmixes to AAC stereo and does no tone mapping. See
+[STREAMING.md § On-device as the TV surface](STREAMING.md) and [REMOTE.md](REMOTE.md).
+
 `settings.system_volume_default`: the host's OS mixer volume (0–100) restored when a YouTube-on-TV play stops. Headphones at 100 % can blow eardrums and a movie session shouldn't leave the room loud, so on Stop `_stop_cleanup` calls `set_system_volume(target)` (pycaw on Windows / `osascript` on macOS / `pactl`/`amixer` on Linux). Default 70. Edited via **System Volume After YouTube** in the profile-settings panel (`POST /api/settings/system-volume-default`). **Global** (lives under `settings`, not per-profile). See [YOUTUBE.md](YOUTUBE.md).
 
 `settings.youtube_start_volume`: the host's OS mixer volume (0–100) pre-set the *moment* a YouTube play starts — `youtube_play` calls `set_system_volume(target)` before the `yt_command:load` broadcast and before Chrome paints the kiosk, so the IFrame player can never produce a first audio frame at system max. Default 30. Edited via **YouTube Starting Volume** in the profile-settings panel (`POST /api/settings/youtube-start-volume`). **Global** (lives under `settings`, not per-profile). See [YOUTUBE.md](YOUTUBE.md).

@@ -172,6 +172,103 @@ purge).
 
 ---
 
+## On-device as the TV surface
+
+Since **13.0.0** a library play on the host's TV kiosk opens in the kiosk's **own**
+`<video>` — the same `#localPlayer` a phone uses, in the same `?tv=1` document that
+was already on screen. VLC is the fallback. This exists because the dashboard's
+full-screen controls were unreachable from the couch (issue #8); playing in the page
+inherits the whole control surface instead of re-plumbing it key by key.
+
+### Why this is safe for any library
+
+The browser path **never direct-plays** — every byte goes through ffmpeg to
+H.264/AAC HLS (see § ffmpeg invocation). Container and codec are therefore not a
+variable: MKV, HEVC, AV1, 10-bit, DTS, TrueHD all arrive at Chrome as the same
+normalised stream. Measured on the reference host (NVENC), cold JIT on a 1080p
+HEVC 10-bit MKV with no bundle: **4.5 s to first picture, 2.4× realtime sustained**.
+A CPU-only host is a much weaker story — `OD_CPU_MAX_HEIGHT` caps libx264 JIT at
+720p precisely so it keeps up.
+
+### Accepted regressions vs VLC
+
+Surface these when deciding whether a given household wants the default:
+
+| | On-device | VLC |
+|---|---|---|
+| Audio | **AAC 160k stereo, always** (`-ac 2`) | native 5.1/7.1 bitstream |
+| HDR10 | **flattened** — prep is `scale` → `yuv420p`, no tone mapping | handed to the display |
+| Seek precision | **±6 s** (snaps to the fmp4 segment boundary) | frame-accurate |
+| Image subs (PGS/VOBSUB) | dropped (now *stated* in the menu) | rendered natively |
+| Quality menu (ABR) | yes | n/a |
+| Per-file A/V sync slider | yes | n/a |
+
+The reference household runs stereo TV speakers, which is why "device" is the
+default. A 5.1 setup should turn on **User Settings → Always Use VLC on the TV**.
+
+### State model
+
+`state.tv_local_*` is the **third playback surface**, alongside VLC and
+YouTube-on-TV (see [REMOTE.md](REMOTE.md) § The three playback surfaces).
+
+- `tv_local_active` — the kiosk's `<video>` is the active TV playback.
+- `tv_local_playback` / `tv_local_item_id` / `tv_local_file_path` / `tv_local_seen_at`.
+- `active_title` / `vlc_time` / `vlc_duration` are **reused for display**, exactly as
+  the YouTube path reuses them, so every dashboard's full-screen controls render
+  against the same fields whichever surface is playing.
+
+**`tv_ui_active` stays TRUE the whole time.** It is a separate axis, not a
+replacement — it is the only thing making `vlc_focus_and_fullscreen` and
+`background_video_loop` stand down, so clearing it would let VLC or the idle video
+steal the display mid-film. `tv_ui_loop` also skips its idle hand-back while
+`tv_local_active`, because a film produces no HID input.
+
+### Lifecycle
+
+```
+POST /api/tv-local/state {active:true, …}   ← page, every 2 s: claim + mirror position
+POST /api/tv-local/state {active:false}     ← page, on stop/ended: release
+tv_command {playpause|seek|player_volume_step|stop}  → page (remote relay)
+tv_command {open, item_id, file_path, seek}          → page (VLC → device switch)
+```
+
+Released by: the page's own `active:false`; `/api/stop`; `vlc("in_play")` (VLC taking
+the screen also tells the page to close its player); and `tv_ui_loop` reaping a
+heartbeat older than `TV_LOCAL_STALE_SECS` (15 s — a crashed or reloaded kiosk).
+
+### Fallback to VLC
+
+`tvFallbackToVlc(reason)` in `static/index.html`, **one shot per file** (the guard
+clears in `_lpLoadIndex`, so a new episode gets a fresh budget). Without the guard a
+VLC-side failure would bounce playback straight back. Triggers:
+
+1. `/offline-prepare` fails (or the host can't prep at all)
+2. `/stream-ondemand` fails
+3. a terminal hls.js fatal — after `recoverMediaError()` was tried or didn't apply
+4. a **second** consecutive `_lpStallWatch` kick on the same file (`_lpStallKicks`);
+   one kick is a normal recovered dead request, and counting avoids tripping on a
+   single cold on-demand seek
+
+It captures the position (preferring `lp.lastKnownT` when `currentTime` reads ~0 — a
+dying pipeline reports 0 and VLC would restart the episode), releases the surface,
+then POSTs an ordinary `/api/library/{id}/play` with `seek_first_to`.
+
+### Switching on purpose
+
+- **User Settings → Always Use VLC on the TV** → `settings.tv_playback_mode`
+  (`"device"` | `"vlc"`, default `"device"`). Global, not per-profile — the TV is one
+  physical screen. Only affects where the *next* play opens.
+- **Full-screen controls → More → Play on Device / Play on VLC** (`fcSwitchTvSurface`)
+  moves what the TV is playing *right now*, keeping position. Hidden in TV mode with
+  the rest of `#fullscreenControls` — this tile is how a **phone** moves the TV
+  between surfaces. Device → VLC is an ordinary `/api/library/{id}/play`; VLC →
+  device is `POST /api/tv-local/open`.
+
+Distinct from `handoffToDevice` / `lpHandoffToVlc`, which move playback between the TV
+and *this browser*. Both of these stay on the host.
+
+---
+
 ## ffmpeg invocation
 
 `_build_hls_ffmpeg_args` in `main.py` constructs the command. The shape:
@@ -630,10 +727,13 @@ S02* bundles carry **+478 ms** on the English rendition only).
   `<video id="lpVideo">` for the whole page, so the graph outlives the file; without
   the unconditional re-apply an episode advance would inherit the previous
   episode's delay.
-- **Not applicable to the TV kiosk.** `?tv=1` forces the `no-hls` + `tv-mode`
-  classes, so the on-device player never opens there; the kiosk plays through VLC,
-  which honours the source's track delay correctly (which is exactly why the defect
-  is bundle-only).
+- **Applies to the TV kiosk too, since 13.0.0.** `?tv=1` used to force `no-hls`,
+  so the on-device player never opened there and the kiosk always played through
+  VLC (which honours the source's track delay correctly — exactly why the defect
+  is bundle-only). Now that the kiosk plays bundles itself, a desynced bundle is
+  audible on the TV as well. The Sync slider lives in `#fullscreenControls`, which
+  is hidden in TV mode, so from the couch the fix is the admin Detect & Repair
+  tool, or the More-panel switch to VLC from a phone.
 
 ## Source-file compression
 

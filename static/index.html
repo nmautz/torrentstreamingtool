@@ -442,6 +442,19 @@
       flex-direction: column;
     }
     #localPlayer.lp-active { display: flex; }
+    /* Volume readout — flat Metro tile, no radius, matches the transport chrome. */
+    #lpVolPill {
+      position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%);
+      z-index: 60; display: flex; align-items: center; gap: 12px;
+      padding: 14px 18px; background: rgba(0,0,0,.82); border: 1px solid #3f3f46;
+      font-weight: 700; letter-spacing: .06em; color: #fff; pointer-events: none;
+    }
+    #lpVolPill.hidden { display: none; }
+    #lpVolPillBar { display: block; width: 220px; height: 10px; background: #3f3f46; }
+    #lpVolPillBar::after {
+      content: ""; display: block; height: 100%; width: var(--lp-vol, 100%); background: #818cf8;
+    }
+    #lpVolPillNum { min-width: 3ch; text-align: right; font-variant-numeric: tabular-nums; }
     /* macOS host: stream-to-device is unavailable (ffmpeg can't read TCC-
        protected media). Hide every Prep / On-Device affordance, matched by the
        onclick handler name so new render sites stay covered automatically. */
@@ -1251,6 +1264,15 @@
           oninput="document.getElementById('psSysVolumeLabel').textContent=this.value+'%'"
           onchange="saveSystemVolumeDefault()"/>
       </div>
+
+      <label id="psTvVlcRow" class="flex items-center justify-between gap-3 bg-gray-800/60 px-4 py-3 cursor-pointer hover:bg-gray-800 transition-colors">
+        <div class="min-w-0">
+          <div class="text-sm font-bold text-gray-200 uppercase tracking-wide">Always Use VLC on the TV</div>
+          <div class="text-[11px] text-gray-500 mt-0.5">By default the TV plays in its own browser player, which the remote drives directly. Turn this on to open every TV play in VLC instead — better for surround sound and HDR. VLC is still used automatically if a file can't be streamed.</div>
+        </div>
+        <input id="psTvVlc" type="checkbox" onchange="saveTvPlaybackMode(this)"
+          class="w-5 h-5 accent-indigo-500 cursor-pointer flex-shrink-0"/>
+      </label>
 
       <!-- Divider: settings below this point are DEVICE-LOCAL (stored in this
            browser's localStorage — not on the server, not per-profile). -->
@@ -3075,6 +3097,20 @@
         <span class="text-sm font-black uppercase tracking-wide">Night Mode</span>
       </button>
 
+      <!-- TV surface switch — move the CURRENT playback between VLC and the TV
+           kiosk's own player, keeping position. Shown only while something is
+           playing on the TV and the host can prep (renderTvSurface toggles it). -->
+      <button id="fcTvSurfaceBtn" onclick="fcSwitchTvSurface(this)"
+        title="Switch the TV between VLC and on-device playback"
+        class="hidden fc-tile flex-1 border-b border-gray-800 hover:bg-gray-800/60
+               active:bg-gray-700/80 text-gray-400 transition-colors">
+        <svg class="w-7 h-7 mb-1" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round"
+            d="M3 6.5h18v10H3zM8 20.5h8M12 16.5v4M7 11.5h4m0 0L9 9.5m2 2L9 13.5"/>
+        </svg>
+        <span id="fcTvSurfaceLabel" class="text-sm font-black uppercase tracking-wide">Play on Device</span>
+      </button>
+
       <!-- Exit Shuffle — back to natural episode order without interrupting the
            current episode. Shown only while shuffling (renderPlayer toggles it). -->
       <button id="fcExitShuffleBtn" onclick="fcExitShuffle(this)"
@@ -3352,6 +3388,10 @@
     <!-- Square Metro buffering spinner — shown via .lp-buffering on #localPlayer,
          independent of overlay visibility (like YouTube's). -->
     <div id="lpBuffSpin"></div>
+    <!-- Transient volume readout. The on-screen controls carry only a mute
+         button, so on the TV — where the remote's Vol± is relayed in over
+         `tv_command` — this pill is the ONLY feedback that the press landed. -->
+    <div id="lpVolPill" class="hidden"><span id="lpVolPillBar"></span><span id="lpVolPillNum">100</span></div>
     <!-- Dev-mode diagnostics HUD (Settings → Dev Mode, device-local) — engine,
          active quality rung, bandwidth estimate, last-segment speed, buffer
          ahead, dropped frames, stalls. Painted 1 Hz by _lpDevHudTick. -->
@@ -3848,6 +3888,19 @@ function _tvNavKey(e){
   const cur = (document.activeElement && document.activeElement !== document.body)
     ? document.activeElement : null;
   const tag = cur ? cur.tagName : "";
+  // ── On-device playback owns the arrows ────────────────────────────────────
+  // While the kiosk's own player is up there is nothing to D-pad around, and a
+  // film is exactly when ←/→ must mean "seek". These keys are deliberately NOT
+  // claimed by the host hook (only the media keys are), so they arrive here as
+  // ordinary DOM events — no backend relay needed. ↑/↓ are volume, matching
+  // every TV remote. Enter/Escape fall through to the normal handling below so
+  // OK still toggles play (via the relay) and Back still exits.
+  if (_tvLocalLive() && tag !== "INPUT" && tag !== "TEXTAREA" && tag !== "SELECT"){
+    if (e.key === "ArrowLeft"){  e.preventDefault(); lpSeekBy(-10); return; }
+    if (e.key === "ArrowRight"){ e.preventDefault(); lpSeekBy(10);  return; }
+    if (e.key === "ArrowUp"){    e.preventDefault(); lpVolumeStep(5);  return; }
+    if (e.key === "ArrowDown"){  e.preventDefault(); lpVolumeStep(-5); return; }
+  }
   // Back for remotes that emit Escape/Backspace instead of VK_BROWSER_BACK.
   // Backspace still deletes inside text fields.
   if (e.key === "Escape" ||
@@ -3912,8 +3965,19 @@ if (TV_MODE) document.addEventListener("keydown", _tvNavKey);
 // Stream-to-device availability — false when the host runs macOS (ffmpeg can't
 // read TCC-protected media). Fetched from /api/state at startup; toggles the
 // `no-hls` body class which hides every Prep / On-Device affordance via CSS.
-// Forced off in TV mode (see above).
-let hlsAvailable = !TV_MODE;
+// NO LONGER forced off in TV mode: since 13.0.0 the kiosk's own <video> is the
+// primary TV surface, with VLC as the fallback. See docs/STREAMING.md.
+let hlsAvailable = true;
+// Which surface a TV (?tv=1 kiosk) library play opens on: "device" = this page's
+// own <video> (remote-driven), "vlc" = the classic VLC window. Mirrored from
+// /api/state (persisted as settings.tv_playback_mode) and kept live by the SSE
+// `state` handler, so the User Settings toggle and the fullscreen More-panel
+// switch agree across every client.
+let tvPlaybackMode = "device";
+// One-shot guard for the automatic VLC fallback, keyed on the file that failed.
+// Without it a VLC-side failure could bounce straight back to the device and
+// ping-pong; the key is cleared by _lpLoadIndex whenever a new file starts.
+let _tvFallbackDoneFor = "";
 // Auto-subtitle (whisper.cpp STT) availability — fetched from /api/state at
 // startup; gates the "Generate with AI" affordances in the subtitle menus.
 let sttAvailable = false;
@@ -4629,6 +4693,24 @@ function renderPlayer(s){
     fcExitShuf.classList.toggle("flex",shuffling);
   }
 
+  // TV surface switch (fullscreen More sheet) — only for library playback on the
+  // TV, and only where the host can actually prep (no HLS ⇒ VLC is the only
+  // surface there is). Hidden in TV mode with the rest of #fullscreenControls:
+  // this tile is how a PHONE moves what the TV is playing between the two.
+  const fcSurf=document.getElementById("fcTvSurfaceBtn");
+  if(fcSurf){
+    const onDevice=!!s.tv_local_active;
+    const canSwitch=hlsAvailable && !s.youtube_active &&
+                    (onDevice || (isPlaying && s.is_library_playback));
+    fcSurf.classList.toggle("hidden",!canSwitch);
+    fcSurf.classList.toggle("flex",canSwitch);
+    const lbl=document.getElementById("fcTvSurfaceLabel");
+    if(lbl) lbl.textContent=onDevice?"Play on VLC":"Play on Device";
+    fcSurf.title=onDevice
+      ? "Switch the TV back to VLC (native audio, keeps position)"
+      : "Switch the TV to on-device playback (keeps position)";
+  }
+
   // Prev / Next episode buttons (footer) — show whenever library item has multiple files
   const prevBtn=document.getElementById("prevEpBtn");
   const nextBtn=document.getElementById("nextEpBtn");
@@ -5065,6 +5147,47 @@ async function fcExitShuffle(btn){
       fcCloseMore();
     }
   }catch(_){ showAlert("Couldn't leave shuffle.","error"); }
+  finally{ if(btn) btn.disabled=false; }
+}
+
+// Move the TV's CURRENT playback between VLC and the kiosk's own player,
+// keeping the position. Both directions are server-side handoffs on the host —
+// distinct from handoffToDevice / lpHandoffToVlc, which move playback between
+// the TV and THIS browser. See docs/STREAMING.md § On-device as the TV surface.
+async function fcSwitchTvSurface(btn){
+  const onDevice=!!app.tv_local_active;
+  const itemId=onDevice?app.tv_local_item_id:app.library_item_id;
+  const filePath=onDevice?app.tv_local_file_path:app.library_current_file;
+  if(!itemId||!filePath){ showAlert("Nothing is playing on the TV.","warn"); return; }
+  // vlc_time is the shared display field — both surfaces keep it fresh (VLC via
+  // stat_broadcaster, on-device via its heartbeat), so it is the position either
+  // way. Below 5 s, start from the top rather than persisting a half-landed seek.
+  const at=Math.max(0,Number(app.vlc_time)||0);
+  const seek=at>=5?at:0;
+  if(btn) btn.disabled=true;
+  try{
+    if(onDevice){
+      // → VLC. An ordinary library play; vlc("in_play") releases the on-device
+      // surface server-side and tells the kiosk to close its player.
+      const r=await fetch(`/api/library/${itemId}/play`,{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({profile_id:(profile&&profile.id)||"",files:[filePath],
+                             seek_first_to:seek,shuffle:!!app.library_shuffle,
+                             shuffle_scope:app.library_shuffle_scope||""}),
+      });
+      if(!r.ok){ const e=await r.json().catch(()=>({})); showAlert(e.detail||"Couldn't switch to VLC.","error"); }
+      else { showAlert("Switched the TV to VLC.","info"); fcCloseMore(); }
+    } else {
+      // → on-device. Brings the kiosk forward, stops VLC, pushes the file to it.
+      const r=await fetch("/api/tv-local/open",{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({item_id:itemId,file_path:filePath,
+                             profile_id:(profile&&profile.id)||"",seek:seek}),
+      });
+      if(!r.ok){ const e=await r.json().catch(()=>({})); showAlert(e.detail||"Couldn't switch to on-device playback.","error"); }
+      else { showAlert("Switched the TV to on-device playback.","info"); fcCloseMore(); }
+    }
+  }catch(_){ showAlert("Couldn't switch TV playback.","error"); }
   finally{ if(btn) btn.disabled=false; }
 }
 
@@ -5728,7 +5851,7 @@ function renderNavProfile(){
 // Controls (per id) that get dimmed + pulsed while their fetch is in flight.
 const _PS_CONTROLS = ["psAutoSkipIntro","psAutoSkipCredits","psResumeMode","psSubtitles",
   "psNightMode","psNightModePreset","psMaxVolume","psVlcStartVolume","psHostVolume",
-  "psYtStartVolume","psSysVolume"];
+  "psYtStartVolume","psSysVolume","psTvVlc"];
 const _PS_VALUE_LABELS = ["psMaxVolumeLabel","psVlcStartVolumeLabel","psHostVolumeLabel",
   "psYtStartVolumeLabel","psSysVolumeLabel"];
 
@@ -5763,6 +5886,7 @@ function openProfileSettings(){
   _psLoadYtStartVolume();
   _psLoadHostVolume();
   _psLoadNightMode();
+  _psLoadTvPlaybackMode();
   // Window control pause state rides the SSE `state` event (already in `app`).
   renderWindowControl();
 }
@@ -5855,6 +5979,41 @@ async function _psLoadVlcStartVolume(){
     document.getElementById("psVlcStartVolumeLabel").textContent = "50%";
   }
   _psReady("psVlcStartVolume");
+}
+
+// TV playback surface (server-side, global — the TV is one physical screen, so
+// this is deliberately NOT per-profile). Checked = "vlc"; unchecked = "device".
+// The row hides itself on a host that can't prep, where VLC is the only surface.
+async function _psLoadTvPlaybackMode(){
+  const row=document.getElementById("psTvVlcRow");
+  const cb=document.getElementById("psTvVlc");
+  try{
+    const r = await fetch("/api/settings/tv-playback-mode");
+    const d = r.ok ? await r.json() : {};
+    if(d && d.hls_available === false){ if(row) row.style.display="none"; }
+    else if(row) row.style.display="";
+    if(typeof d.tv_playback_mode==="string") tvPlaybackMode=d.tv_playback_mode;
+    if(cb) cb.checked = tvPlaybackMode === "vlc";
+  }catch(_){
+    if(cb) cb.checked = tvPlaybackMode === "vlc";
+  }
+  _psReady("psTvVlc");
+}
+
+async function saveTvPlaybackMode(el){
+  const mode = el && el.checked ? "vlc" : "device";
+  try{
+    const r = await fetch("/api/settings/tv-playback-mode",{
+      method:"POST",headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({mode:mode}),
+    });
+    if(!r.ok) throw new Error();
+    tvPlaybackMode = mode;
+    showAlert(mode==="vlc"?"TV plays in VLC.":"TV plays on the TV's own player.","success");
+  }catch(_){
+    if(el) el.checked = tvPlaybackMode === "vlc";   // revert the switch
+    showAlert("Couldn't save the TV playback setting.","error");
+  }
 }
 
 async function _psLoadSysVolume(){
@@ -16418,6 +16577,10 @@ function _resumeNormal(itemId) {
   pcCtx = { itemId, files: resumeFile ? [resumeFile] : [], seekTo, label, _continueMode: true };
   // macOS host: no device option — go straight to VLC instead of a 1-item modal.
   if (!hlsAvailable) return pcChoose("vlc");
+  // TV kiosk: BOTH options are the TV, so a chooser would be nonsense. Route
+  // straight to the configured surface. "device" plays on this page's own
+  // <video>; VLC remains the automatic fallback if that can't serve the file.
+  if (TV_MODE) return pcChoose(tvPlaybackMode === "vlc" ? "vlc" : "local");
   document.getElementById("pcSubtitle").textContent = label;
   document.getElementById("pcLocalSub").textContent = "Stream to this device's browser";
   document.getElementById("pcLocalBtn").disabled = false;
@@ -16492,6 +16655,10 @@ async function playLibraryWithChooser(itemId, files, seekTo, label, shuffle, shu
   pcCtx = { itemId, files, seekTo, label, shuffle: !!shuffle, shuffleScope: shuffleScope || "", items: items || null };
   // macOS host: no device option — go straight to VLC instead of a 1-item modal.
   if (!hlsAvailable) return pcChoose("vlc");
+  // TV kiosk: BOTH options are the TV, so a chooser would be nonsense. Route
+  // straight to the configured surface. "device" plays on this page's own
+  // <video>; VLC remains the automatic fallback if that can't serve the file.
+  if (TV_MODE) return pcChoose(tvPlaybackMode === "vlc" ? "vlc" : "local");
   document.getElementById("pcSubtitle").textContent = label || "";
   document.getElementById("pcLocalSub").textContent = "Stream to this device's browser";
   document.getElementById("pcLocalBtn").disabled = false;
@@ -17408,6 +17575,9 @@ function _lpKickIfStalled() {
 // buffering / first-segment encode is never mistaken for a stall).
 let _lpStallLastT = 0;
 let _lpStallSince = 0;
+// Consecutive stall kicks on the current file — reset the moment the playhead
+// advances. Drives the TV's stall-based VLC fallback (see _lpStallWatch).
+let _lpStallKicks = 0;
 function _lpStallWatch() {
   // Keep the on-demand session warm even while paused / fully buffered (the
   // branches below early-return), so the reaper doesn't delete it mid-watch.
@@ -17420,7 +17590,7 @@ function _lpStallWatch() {
   const t = v.currentTime || 0;
   const now = Date.now();
   if (t > _lpStallLastT + 0.25) {          // playhead advanced → not stalled
-    _lpStallLastT = t; _lpStallSince = 0;
+    _lpStallLastT = t; _lpStallSince = 0; _lpStallKicks = 0;
     return;
   }
   if (v.readyState >= 3) { _lpStallSince = 0; return; }  // buffered, just paused-ish
@@ -17434,6 +17604,11 @@ function _lpStallWatch() {
   if (now - _lpStallSince >= threshold) {
     _lpKickLoader();
     _lpStallSince = now;                   // re-arm; don't spam every tick
+    // TV kiosk: one kick is normal (a dead request, recovered). A SECOND
+    // consecutive kick on the same file means the pipeline isn't coming back —
+    // fall back to VLC rather than leaving a frozen picture on the TV. Counted,
+    // not immediate, so a single cold on-demand seek never trips it.
+    if (++_lpStallKicks >= 2 && tvFallbackToVlc("the stream kept stalling")) return;
   }
 }
 
@@ -17553,12 +17728,16 @@ async function _lpLoadIndex(seekTo) {
   // as playback crosses episode-torrent boundaries. No-op for single-item plays.
   if (lp.playlistItems && lp.playlistItems[lp.pi]) lp.itemId = lp.playlistItems[lp.pi];
   lp.name = filePath.split(/[/\\]/).pop();
+  // A new file gets a fresh fallback budget — the guard exists to stop ONE
+  // failing file ping-ponging, not to disable fallback for the rest of the run.
+  _tvFallbackDoneFor = "";
   lp.skipData = null;
   _lpHideSkipOffer(); lp.skipOfferEnd = 0;
   lp.resumeApplied = false; lp.resumeSec = seekTo || 0;
   lp.lastKnownT = seekTo || 0;
   _lpCancelSeekVerify();   // a rebuild/advance invalidates any in-flight seek verdict
   lp.audios = []; lp.subtitles = []; lp.sidecarSubs = []; lp.subTracks = []; lp._sttBusy = false;
+  lp.skippedImageSubs = [];
   lp.fonts = []; lp.subBase = null; _lpTeardownOctopus();   // drop prior file's styled-sub overlay
   // Push the throttle window forward so the first `timeupdate` after this load
   // doesn't fire saveProgress before the resume seek has landed (otherwise we'd
@@ -17636,6 +17815,9 @@ async function _lpLoadIndex(seekTo) {
       prep = await r.json();
     } catch (err) {
       if (_lpFallBackToLocal(filePath, seekTo)) return;
+      // TV kiosk: no prep means no on-device playback for this file — hand it to
+      // VLC rather than leaving the couch with an error and a black screen.
+      if (tvFallbackToVlc("this file can't be prepared")) return;
       _lpHidePreparing();
       showAlert(err.message || "Could not prepare this file for streaming.", "error");
       lpStop(); return;
@@ -17679,6 +17861,7 @@ async function _lpLoadIndex(seekTo) {
       prep.native_master_url = od.native_master_url || null;
     } catch (err) {
       if (_lpFallBackToLocal(filePath, seekTo)) return;
+      if (tvFallbackToVlc("the stream wouldn't start")) return;
       _lpHidePreparing();
       showAlert(err.message || "Could not start stream.", "error");
       lpStop(); return;
@@ -17725,6 +17908,12 @@ async function _lpLoadIndex(seekTo) {
   lp.audios     = prep.audios || [];
   lp.subtitles  = prep.subtitles || [];
   lp.sidecarSubs = prep.subs || [];
+  // Image subtitles (PGS / VOBSUB / DVB) the prep dropped — <video> can't render
+  // bitmap subs through <track> and ffmpeg can't transmux them to WebVTT without
+  // OCR. The server has always reported these; nothing ever showed them, so a
+  // Blu-ray remux whose ONLY subs are PGS presented an empty menu with no
+  // explanation. _lpRenderTrackRows now says so in the dropdown.
+  lp.skippedImageSubs = prep.skipped_image_subs || [];
   // Embedded fonts for styled ASS subs (libass-wasm overlay). Bundle AND
   // on-demand both serve sub_<i>.ass + font_* under lp.subBase, so both carry
   // fonts; only the iOS device-copy path (no bundle dir) falls back to the VTT
@@ -17924,6 +18113,10 @@ async function _lpLoadIndex(seekTo) {
         if (t > 2) { lp.resumeSec = t; lp.resumeApplied = false; }
         try { hls.recoverMediaError(); return; } catch (_) {}
       }
+      // Terminal: recovery was tried (or didn't apply) and playback is dead.
+      // On the TV that means the couch is looking at a stalled picture — hand
+      // the file to VLC instead of only logging it.
+      if (tvFallbackToVlc("playback stopped unexpectedly")) return;
       // Surface a code + filename so a "won't play" report is self-diagnosing.
       const where = url ? (" (" + url.split("/").pop() + (code ? " → HTTP " + code : "") + ")") : "";
       showAlert("Playback error: " + (data.details || data.type) + where, "error");
@@ -18026,6 +18219,14 @@ function _lpRenderTrackRows() {
     subSel.insertAdjacentHTML("beforeend",
       `<option value="sidecar:${i}">${escHtml(label)}</option>`);
   });
+  // Nothing selectable, but the source DID carry subtitles we can't render —
+  // say so in place of a menu that just reads "Off". Disabled: it's a note.
+  if (!(lp.subtitles || []).length && !(lp.sidecarSubs || []).length
+      && (lp.skippedImageSubs || []).length) {
+    const n = lp.skippedImageSubs.length;
+    subSel.insertAdjacentHTML("beforeend",
+      `<option value="-1" disabled>${n} image subtitle${n > 1 ? "s" : ""} — can't be shown here</option>`);
+  }
   subSel.value = String(lp.pendingSubtitleIdx ?? -1);
 
   // Quality (ABR). Server playback: levels come straight from hls.js's
@@ -19465,6 +19666,123 @@ function lpToggleMute() {
   _lpCtlSync(); _lpCtlShow();
 }
 
+// ── On-device TV playback (?tv=1 kiosk) ─────────────────────────────────────
+// The kiosk's own <video> is the primary TV surface since 13.0.0. The host
+// SUPPRESSES the remote's transport keys and relays them here over the
+// `tv_command` SSE channel (see _remote_key_action), so these are driven by the
+// remote, not by pointer input. See docs/REMOTE.md and docs/STREAMING.md.
+
+function _tvLocalLive() {
+  // True only when THIS page is the kiosk AND its player is actually up. Guards
+  // every relayed command so a stale `tv_command` can't poke a torn-down player.
+  if (!TV_MODE) return false;
+  const el = document.getElementById("localPlayer");
+  return !!(el && el.classList.contains("lp-active") && lp.itemId);
+}
+
+let _tvVolPillTimer = null;
+function _lpVolPill(frac, muted) {
+  const pill = document.getElementById("lpVolPill");
+  if (!pill) return;
+  const pct = Math.round(Math.max(0, Math.min(1, frac)) * 100);
+  document.getElementById("lpVolPillBar").style.setProperty("--lp-vol", pct + "%");
+  document.getElementById("lpVolPillNum").textContent = muted ? "MUTE" : String(pct);
+  pill.classList.remove("hidden");
+  clearTimeout(_tvVolPillTimer);
+  _tvVolPillTimer = setTimeout(() => pill.classList.add("hidden"), 1400);
+}
+
+function lpVolumeStep(deltaPct) {
+  // `deltaPct` arrives on the remote's 0-100 scale (REMOTE_VOLUME_STEP); the
+  // media element's volume is 0..1. Stepping always unmutes — on a remote,
+  // pressing Vol+ while muted means "I want to hear it".
+  const v = _lpV();
+  const next = Math.max(0, Math.min(1, (v.muted ? 0 : (v.volume || 0)) + (deltaPct / 100)));
+  v.muted = false;
+  v.volume = next;
+  _lpCtlSync();
+  _lpVolPill(next, false);
+}
+
+// Heartbeat: claims the TV playback surface server-side so the remote's keys are
+// relayed here instead of driving VLC, and mirrors position/title onto the
+// shared display fields every dashboard renders. Stops being sent the moment the
+// player goes away — the server reaps a stale claim after TV_LOCAL_STALE_SECS.
+let _tvBeatAt = 0, _tvBeatWasLive = false;
+function _tvLocalBeat(force) {
+  if (!TV_MODE) return;
+  const live = _tvLocalLive();
+  if (!live) {
+    // One release beat on the way down so the surface frees immediately rather
+    // than waiting out the server's staleness timer.
+    if (_tvBeatWasLive) {
+      _tvBeatWasLive = false;
+      fetch("/api/tv-local/state", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({active: false}),
+      }).catch(() => {});
+    }
+    return;
+  }
+  const now = Date.now();
+  if (!force && now - _tvBeatAt < 2000) return;
+  _tvBeatAt = now;
+  _tvBeatWasLive = true;
+  const v = document.getElementById("lpVideo");
+  fetch("/api/tv-local/state", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      active:    true,
+      item_id:   lp.itemId || "",
+      file_path: lp.filePath || "",
+      title:     lp.name || "",
+      time:      v ? (v.currentTime || 0) : 0,
+      duration:  (v && v.duration) || lp.duration || 0,
+      playback:  !v ? "buffering" : (v.ended ? "ended" : (v.paused ? "paused" : "playing")),
+    }),
+  }).catch(() => {});
+}
+
+function _tvLocalOpen(d) {
+  // VLC → on-device switch, pushed by POST /api/tv-local/open (the fullscreen
+  // More-panel toggle). VLC has already been stopped server-side.
+  if (!TV_MODE || !d || !d.item_id || !d.file_path) return;
+  _tvFallbackDoneFor = "";
+  lpPlay(d.item_id, [d.file_path], Number(d.seek) || 0, "");
+}
+
+function tvFallbackToVlc(reason) {
+  // Automatic on-device → VLC fallback. ONE SHOT per file: without the guard a
+  // VLC-side failure (or a second error from the same dying pipeline) would
+  // bounce playback back and forth. Cleared whenever a new file starts loading.
+  if (!TV_MODE) return false;
+  const key = lp.filePath || "";
+  if (!key || _tvFallbackDoneFor === key) return false;
+  _tvFallbackDoneFor = key;
+  const v = document.getElementById("lpVideo");
+  // lastKnownT over currentTime: a pipeline that just died can read 0, and
+  // handing VLC a 0 would restart the episode from the top.
+  const at = Math.max(0, (v && v.currentTime > 2 ? v.currentTime : 0)
+                         || lp.lastKnownT || lp.resumeSec || 0);
+  const itemId = lp.itemId, filePath = lp.filePath;
+  const shuffle = !!lp.shuffle, scope = lp.shuffleScope || "";
+  console.warn("[tv] on-device playback failed (" + reason + ") — falling back to VLC");
+  showAlert("Switching to VLC — " + reason, "warn");
+  Promise.resolve(lpStop()).catch(() => {}).then(() => {
+    _tvLocalBeat(true);   // release the surface before VLC claims the screen
+    return fetch(`/api/library/${itemId}/play`, {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({
+        profile_id: (profile && profile.id) || "",
+        files: [filePath], seek_first_to: at,
+        shuffle: shuffle, shuffle_scope: scope,
+      }),
+    });
+  }).then(r => { if (r && !r.ok) showAlert("VLC couldn't play this file either.", "error"); })
+    .catch(() => showAlert("VLC couldn't play this file either.", "error"));
+  return true;
+}
+
 // OS fullscreen on the whole #localPlayer container (not the <video>), so the
 // custom chrome — header, transport, track selectors — stays visible inside
 // fullscreen. iPhone Safari can't fullscreen a non-<video> element, and the
@@ -20085,6 +20403,11 @@ function _lpAttachVideoEvents() {
   // Fallback playback clock — keeps the seek bar / skip offers / progress saves
   // alive through iOS MMS timeupdate gaps. See _lpClockTick.
   setInterval(_lpClockPump, 500);
+  // TV kiosk: claim/refresh the on-device playback surface. Its own interval
+  // rather than a _lpClockTick hook because the claim must survive a PAUSE —
+  // _lpClockPump returns early when paused, and a paused film that stopped
+  // beating would be reaped and hand the screen to the background video.
+  setInterval(() => _tvLocalBeat(false), 2000);
   v.addEventListener("loadedmetadata", () => {
     lp.duration = v.duration || 0;
     if (!lp.resumeApplied && lp.resumeSec > 0 && lp.resumeSec < (v.duration||0) - 5) {
@@ -20703,6 +21026,10 @@ function connectSSE(){
     const idleWas=app.download_idle_open;
     const tvFileWas=app.library_current_file, tvPlayWas=app.is_library_playback;
     Object.assign(app,d);
+    // Which surface a TV play opens on — changed from any client (User Settings
+    // or the fullscreen More-panel switch), so pick it up live rather than at
+    // page load only.
+    if(typeof d.tv_playback_mode==="string") tvPlaybackMode=d.tv_playback_mode;
     // When the idle/night download window opens or closes, the library cards'
     // "Idle — waiting" ↔ "Idle download" chips need to flip. Re-render if visible.
     if(typeof d.download_idle_open==="boolean" && d.download_idle_open!==idleWas
@@ -20841,7 +21168,16 @@ function connectSSE(){
     if(!TV_MODE) return;
     try{
       const d=JSON.parse(e.data||"{}");
-      if(d.action==="back") _tvBack();
+      if(d.action==="back"){ _tvBack(); return; }
+      // Remote transport for on-device TV playback. The host SUPPRESSED these
+      // keys (they must not also reach Chrome as media keys and act twice), so
+      // this relay is the only way they arrive. Each maps onto the same function
+      // the on-screen control drives, so the two surfaces can't drift.
+      if(d.action==="playpause"){ if(_tvLocalLive()) lpTogglePlay(); return; }
+      if(d.action==="seek"){ if(_tvLocalLive()) lpSeekBy(Number(d.value)||0); return; }
+      if(d.action==="player_volume_step"){ if(_tvLocalLive()) lpVolumeStep(Number(d.value)||0); return; }
+      if(d.action==="stop"){ if(_tvLocalLive()) lpStop(); return; }
+      if(d.action==="open"){ _tvLocalOpen(d); return; }
     }catch(_){}
   });
   es.addEventListener("subtitle_upgraded",e=>{
@@ -21117,10 +21453,11 @@ document.addEventListener("DOMContentLoaded",async()=>{
   }).catch(()=>{});
 
   // Stream-to-device availability (false on macOS hosts). Toggles the `no-hls`
-  // body class which hides Prep / On-Device affordances via CSS. TV mode
-  // forces it off regardless — the kiosk IS the TV; VLC is "on device".
+  // body class which hides Prep / On-Device affordances via CSS. TV mode no
+  // longer forces it off — the kiosk plays on its own <video> by default.
   fetch("/api/state").then(r=>r.ok?r.json():null).then(d=>{
-    hlsAvailable = !TV_MODE && !(d && d.hls_available === false);
+    hlsAvailable = !(d && d.hls_available === false);
+    if (d && typeof d.tv_playback_mode === "string") tvPlaybackMode = d.tv_playback_mode;
     document.body.classList.toggle("no-hls", !hlsAvailable);
     sttAvailable = !!(d && d.stt_available === true);
     if(d && typeof d.subtitle_default_language === "string") subtitleDefaultLang = d.subtitle_default_language;
@@ -21171,6 +21508,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">12.7.6</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">13.0.0</div>
 </body>
 </html>

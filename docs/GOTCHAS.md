@@ -2895,6 +2895,58 @@ Bulk delete on the episode page reaches this by accident: select-all includes th
 episode currently open.
 
 
+### On-device TV playback must NOT clear `tv_ui_active`
+
+When the kiosk plays library content in its own `<video>` (13.0.0), the obvious move is
+to treat it like VLC and release the kiosk's screen claim. Do not. `tv_ui_active` is the
+**only** thing that makes `vlc_focus_and_fullscreen` bail, keeps `background_video_loop`
+from restarting the idle video underneath, and stops `_play_background_video` calling
+focus. Clear it and the idle background video comes up over the film within ~3 s.
+
+The two flags are **separate axes**:
+
+* `tv_ui_active` — "the kiosk owns the display" (true whether it is showing the grid **or**
+  playing).
+* `tv_local_active` — "the kiosk's `<video>` is the active playback" (so transport keys mean
+  playback, not D-pad navigation).
+
+This is why `_remote_should_handle`'s `ok` arm reads
+`state.tv_local_active or (playing and not state.tv_ui_active)` rather than the simpler
+`not tv_ui_active` — during on-device playback the kiosk IS foreground, and OK still has
+to mean ⏯.
+
+### …and the 120 s idle hand-back will interrupt a film
+
+`tv_ui_loop` hands the screen back to the background video after
+`max(TV_UI_MIN_IDLE_SECS, settings.tv_ui_idle_secs)` (default 120 s) with no HID input,
+when "nothing is playing". A two-hour film generates **no keypresses at all**, so before
+13.0.0's guard this would have dropped the idle video over it, twice an hour.
+
+Two halves, both needed: `tv_ui_loop` skips the hand-back entirely while `tv_local_active`
+(the `continue` there is load-bearing — falling through also clears `tv_ui_active`), and
+the page's heartbeat refreshes `state.tv_input_last` on every beat.
+
+The heartbeat is also what makes the claim safe: a kiosk that crashes, reloads, or
+navigates away stops beating, and `tv_ui_loop` reaps the surface after
+`TV_LOCAL_STALE_SECS` (15 s). Without that reaper a dead page would hold the TV hostage —
+no idle video, and every remote key relayed into the void.
+
+### The on-device → VLC fallback needs a one-shot guard
+
+`tvFallbackToVlc` fires from four places (prep failure, on-demand failure, terminal
+hls.js fatal, repeated stalls). More than one can fire for the same dying pipeline, and
+a VLC-side failure is perfectly capable of bouncing playback back at the device. The
+guard is keyed on `lp.filePath` and cleared in `_lpLoadIndex`, so **one** fallback per
+file and a fresh budget on the next episode.
+
+Two details that look optional and aren't:
+
+* It prefers `lp.lastKnownT` over `v.currentTime` when the latter reads ≲2 s. A pipeline
+  that just died reports 0, and handing VLC a 0 restarts the episode from the top — then
+  the next progress save writes that 0 over the real position.
+* The stall trigger counts **two** consecutive kicks (`_lpStallKicks`), not one. A single
+  kick is the normal recovery for a dead request, and a cold on-demand seek legitimately
+  waits tens of seconds.
 
 - [BACKEND.md](BACKEND.md) — invariants enforced by `main.py`
 - [DAEMON_WATCHDOG.md](DAEMON_WATCHDOG.md) — VPN guard at the process level

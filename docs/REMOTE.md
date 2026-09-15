@@ -75,16 +75,48 @@ plain attribute reads only:
   see "⏻ Power interception" below), so during "Use My Computer" a press does
   nothing (the OS actions are neutered machine-wide by
   `_neuter_power_buttons`, so it can't fall through to sleep either).
-- **`ok`** (Enter): claimed only during real playback while the TV UI is not
-  up → acts as ⏯. Otherwise it passes through so it activates the focused
-  element in the kiosk. Its pointer-mode twin (left click) is handled off the
+- **`ok`** (Enter): claimed during real playback while the TV UI is not up →
+  acts as ⏯. Otherwise it passes through so it activates the focused element
+  in the kiosk. **On-device TV playback is the explicit exception**: there the
+  kiosk *is* the player, so `tv_ui_active` stays true throughout and OK must
+  mean ⏯ again — hence the `state.tv_local_active or (playing and not
+  state.tv_ui_active)` shape rather than a plain `not tv_ui_active` test. Its pointer-mode twin (left click) is handled off the
   activity feed: a click during VLC playback (the kiosk is behind fullscreen
   VLC, so every click lands on the video) fires ⏯ too, 0.4 s debounced;
   YouTube is excluded because the IFrame player already toggles on clicks.
 - **Remaining media keys**: claimed only while real playback is up (VLC
-  stream/library play incl. paused, or YouTube-on-TV). When idle — incl. the
-  idle background video — they pass through untouched (and count as generic
-  input, so they wake the TV UI like any other button).
+  stream/library play incl. paused, YouTube-on-TV, **or the kiosk's own
+  `<video>`** — `state.tv_local_active`). When idle — incl. the idle
+  background video — they pass through untouched (and count as generic input,
+  so they wake the TV UI like any other button).
+- **Arrow keys are never claimed**, and that is load-bearing for on-device
+  playback. They reach the focused kiosk as ordinary DOM keyevents, so
+  `_tvNavKey` routes them itself: D-pad focus while browsing, and while the
+  local player is up ←/→ seek ±10 s and ↑/↓ step the player's volume. No
+  backend relay is involved.
+
+### The three playback surfaces
+
+`_remote_should_handle` and `_remote_key_action` triage between three surfaces.
+They are mutually exclusive; `_tv_anything_playing()` is the shared "something
+is on the TV" predicate the Home / Back / ⏻ gates use.
+
+| Surface | Flag | Transport goes to | Volume goes to |
+|---|---|---|---|
+| VLC | `stream_status in (playing, buffering)` | `vlc()` HTTP commands | VLC's amp (capped by `settings.max_volume`) |
+| YouTube-on-TV | `state.youtube_active` | `youtube_control(...)` | IFrame player gain (`yt_command player_volume_step`) |
+| **On-device (kiosk `<video>`)** | `state.tv_local_active` | `tv_command` SSE relay to `?tv=1` | media-element gain (`tv_command player_volume_step`) |
+
+The host **suppresses** the media keys on all three, so the relay is the only
+way a press reaches the kiosk page — it must never also arrive at Chrome as a
+media key and be handled twice. The on-device branch is checked **before**
+YouTube so a stale `youtube_active` during a handoff can't steal the key.
+
+`tv_local_active` is a **separate axis from `tv_ui_active`, not a replacement**:
+the kiosk keeps holding the screen while its player runs, because `tv_ui_active`
+is the only thing that makes `vlc_focus_and_fullscreen` and
+`background_video_loop` stand down. See
+[GOTCHAS.md](GOTCHAS.md) for what happens if you clear it.
 
 ## Dispatch
 
@@ -123,6 +155,17 @@ remote button ──HID──▶ host input events
   (only if `_bg_video_ready()` — otherwise the UI stays, same rule as the
   idle hand-back); with the background video showing it `_tv_ui_show`s; fully
   idle it tries `_play_background_video()` first, kiosk as fallback.
+- **On-device TV playback** (`state.tv_local_active`) relays every transport
+  key to the kiosk page over `tv_command` instead of driving VLC:
+  `{action:"playpause"}`, `{action:"seek", value:±10}`,
+  `{action:"player_volume_step", value:±5}`, `{action:"stop"}`. The page runs
+  the same `lpTogglePlay` / `lpSeekBy` / `lpVolumeStep` / `lpStop` functions its
+  on-screen controls call, so the two surfaces can't drift. `Home` / `Back` /
+  `⏻` behave exactly as on the other surfaces — `_tv_anything_playing()`
+  includes this one, so they end playback and return to the grid.
+  `{action:"open", item_id, file_path, profile_id, seek}` is the one command the
+  remote never sends: it is the VLC → on-device switch, pushed by
+  `POST /api/tv-local/open`.
 - **Debounce** (`_MIN_INTERVAL`): play/pause and the seeks fire once per press
   (0.30–0.35 s), Back 0.4 s, Home and Power once per second; volume repeats while held but is
   throttled to ~10 Hz. The activity feed has its own throttle
@@ -183,11 +226,18 @@ and buttons. The host display cycles between three surfaces:
 ```
 idle background video ──any remote button/click──▶ TV UI (dashboard kiosk)
 TV UI ── no input for TV_UI_IDLE_SECS (120 s) ───▶ background video
-TV UI ── user plays something ───────────────────▶ VLC / YouTube fullscreen
+TV UI ── user plays something ───────────────────▶ on-device player (default),
+                                                   VLC / YouTube fullscreen
 playback ── 🏠 Home or ← Back ───────────────────▶ stop + TV UI
 playback ── ⏻ Power ─────────────────────────────▶ stop + background video
 background video ⇄ TV UI ────── ⏻ Power ────────▶ toggle between the two
 ```
+
+Since **13.0.0** a library play on the TV opens by default in the kiosk's **own**
+`<video>` (`settings.tv_playback_mode = "device"`), not VLC — the kiosk never
+leaves the screen, it just starts playing. VLC remains the fallback (automatic on
+failure, or chosen). See [STREAMING.md](STREAMING.md) § On-device as the TV
+surface.
 
 Mechanics (`main.py`):
 
@@ -200,6 +250,14 @@ Mechanics (`main.py`):
   paths regain the screen; `tv_ui_loop` also clears it as a janitor, but only
   when the last input is >10 s old (a just-pressed Home must not be robbed of
   the screen it claimed while `stop()` is still tearing down).
+- **`state.tv_local_active`** = "the kiosk's own `<video>` is the active TV
+  playback". Set by the page's `/api/tv-local/state` heartbeat (~2 s), cleared
+  by `/api/stop`, by `vlc("in_play")` (VLC taking the screen also tells the page
+  to close its player), and by `tv_ui_loop` when the heartbeat goes stale for
+  `TV_LOCAL_STALE_SECS` (15 s — a crashed or reloaded kiosk). While it is set,
+  `tv_ui_loop` **skips the idle hand-back entirely**: a film gets no keypresses,
+  so the 120 s timer would otherwise drop the background video over it. The
+  heartbeat also refreshes `tv_input_last` for the same reason.
 - **Wake** (`_tv_input_event`, called from the hook threads): every input
   stamps `state.tv_input_last`; only a **key or click** wakes the UI, and only
   while nothing is playing. Pointer **motion never wakes** (gyro drift would
@@ -251,8 +309,9 @@ Mechanics (`main.py`):
 ### `?tv=1` frontend mode (`static/index.html`)
 
 - Sets `document.title = "StreamLink TV Dashboard"` (the window marker — keep
-  in sync with `_TVUI_WINDOW_MARKER`) and adds the `tv-mode` + `no-hls` body
-  classes.
+  in sync with `_TVUI_WINDOW_MARKER`) and adds the `tv-mode` body class.
+  `no-hls` is **no longer** forced here — since 13.0.0 it reflects the host's
+  real capability, because the kiosk plays on its own `<video>` by default.
 - **D-pad spatial navigation** (`_tvNavKey`, TV mode only): arrow keys move
   focus to the geometrically nearest actionable element in that direction
   (distance + off-axis-penalty scoring inside a forgiving cone; the target is
@@ -286,9 +345,19 @@ Mechanics (`main.py`):
   stop Enter/Space + click propagation so OK on Play can't also fire the
   poster's open handler — **Enter/Space only**, an unconditional keydown
   stop would swallow the arrows and freeze navigation on the buttons.
-- Forces `hlsAvailable = false`: VLC *is* "on device" on the TV, so every
-  Prep / On-Device / play-chooser affordance is hidden and the play chooser
-  collapses straight to VLC (the same path a no-HLS macOS host uses).
+- **Plays on its own player by default.** `hlsAvailable` now reflects the host
+  (`/api/state.hls_available`) instead of being forced false. The play chooser
+  is still never *shown* on the TV — both of its options are the TV — so
+  `_resumeNormal` / `playLibraryWithChooser` route straight to one surface:
+  `pcChoose(tvPlaybackMode === "vlc" ? "vlc" : "local")`. `tvPlaybackMode`
+  mirrors `settings.tv_playback_mode` off the SSE `state` stream. A host that
+  can't prep (`hls_available: false`, macOS) still collapses to VLC.
+- **While its player is up** the page heartbeats `POST /api/tv-local/state`
+  every 2 s (claiming the TV playback surface so the remote's keys are relayed
+  to it) and acts on `tv_command` `playpause` / `seek` / `player_volume_step` /
+  `stop` / `open`. `_tvLocalLive()` guards every one, so a stale command can't
+  poke a torn-down player. On-device failures hand the file to VLC via
+  `tvFallbackToVlc` — one shot per file, so it can't ping-pong.
 - Additionally hides the hand-off-to-this-device buttons (`#handoffBtn`,
   `#fcHandoffBtn`) via `.tv-mode` CSS and the download-to-device buttons via a
   `TV_MODE` guard in the library-card renderer.
