@@ -1,5 +1,87 @@
 # Changelog
 
+## [14.0.0] — 2026-09-15
+**Simple mode: the household gets an interface built for watching things.**
+
+StreamLink grew as a tool for someone who knows what a torrent is, and that assumption
+leaked into every screen — seeder counts, season packs vs single episodes, download and
+stream-prep priority tiers, piece-hash rechecks, storage roots. To anyone else that is
+noise, and noise in a UI reads as "I am not allowed to touch this". Reported by a
+household member who could not work out how to download a show.
+
+**Per-profile Simple mode, on by default for everyone who isn't elevated.** A new
+`simple_ui` flag on each profile (`GET /api/profiles`, set via
+`POST /api/profiles/{id}/simple-ui`, gated like the delete endpoints so nobody can
+promote themselves). Defaults to "simple" for every non-elevated profile and "full" for
+elevated ones; an explicit value overrides either way. Flip it from the profile
+management sheet — each row now carries a **Simple / Full** toggle. It is presentation
+only, never an authorisation check; the endpoints behind these controls keep their own.
+
+**One button per season instead of a source hunt.** The search show page in Simple mode
+drops the Episodes / Whole Seasons tabs, the two separate "search" buttons and the raw
+release picker. What's left is the show, its seasons, and what you have of each — with
+**Get this season** beside the ones you don't. Pressing it runs the search itself, prefers
+a single whole-season copy when you own none of that season (one download, consistent
+audio and quality across every episode — the advice the advanced UI already gave, now
+simply what the button does), and otherwise falls back to the per-episode auto-picker for
+just the gaps. Movies get **Add to my library**. Everything runs detached in the
+background pill, so nothing holds you on the page.
+
+**Advanced controls moved out of the way.** For Simple profiles the episode page no
+longer shows the download/stream-prep scheduling bars, the priority tiers, the hash
+recheck, the bulk-select chip row or the per-episode checkboxes; the library header no
+longer shows storage roots or per-drive free space. All of it stays exactly where it was
+for full profiles — same markup, same handlers, one CSS class.
+
+**"Watch Season 1 again".** Resetting a show for a rewatch used to mean "Select all" then
+"Unwatched" — both of them chips that Simple mode hides, which would have left someone
+un-ticking thirty episodes by hand. Simple profiles get one scoped button instead, on the
+season (or show) they're looking at. Nothing is deleted.
+
+**Plain words instead of BitTorrent vocabulary.** Raw seeder counts are gone from every
+result, pack and source row in favour of **Excellent / Good / Low / Unavailable** (the
+exact count moved to the tooltip) — a number can't tell you whether something will play
+smoothly unless you already know what a good number looks like. "Season Packs" are
+"Whole Seasons", "Search packs" is "Find whole seasons", "Pick a torrent to download" is
+"Pick a copy to download", and the seeder/indexer explanations were rewritten. This
+applies to both modes: there is one vocabulary, not two.
+
+### A "Regular Show" season pack bound "Regular Show: The Movie"
+
+Reported: a show downloaded through Smart search showed the wrong artwork and
+description in the library, and the *first* entry in the swap dialog was the right one.
+
+*The movie branch had no scoring.* The TV side has ranked its candidates by title-match
+tier since the "Big Brother" fix; movies still took `results[0]` verbatim, and TMDb's raw
+movie ranking is popularity-shaped, not title-shaped — searching "Regular Show" returns
+**"Regular Show: The Movie"** ahead of the movie actually called "Regular Show". A season
+pack reaches that branch because it is matched the instant it is added, when qBittorrent
+has resolved no files yet, so it looks exactly like a one-shot movie. New
+`_tmdb_pick_movie` applies the same tiering as `_tmdb_pick_tv`.
+
+*Hard title evidence now outranks the movie-vs-TV guess.* When that guess is made from an
+empty file list and a TV show is named **exactly** what we searched for while the best
+movie only extends the query, the show wins.
+
+*And the answer was in hand the whole time.* Smart search opens a show page **from** a
+TMDb candidate — the user has already said which show this is — and then
+`/api/library/download` threw the id away and re-guessed from the release name.
+`DownloadReq` now carries `tmdb_id` / `tmdb_kind`, every download started from that page
+sends them, and `_fetch_item_metadata` binds them directly instead of matching. Recorded
+as `source: "picked"` and pinned like a manual correction, so nothing re-matches over it.
+Classic search and pasted magnets still fall back to the guess.
+
+### Storage paths: the ✕ that quietly un-configured a drive
+
+`F:\StreamLink` vanished from the configured storage paths on 2026-09-14. The access log
+shows a `DELETE /api/settings/library-paths` and, one second later, the `Auto` toggle the
+user had actually been aiming for returning 404 because the path was already gone. The
+remove ✕ sat flush against the Auto toggle with **no confirmation**, and un-configuring a
+root is invisible afterwards — the files stay put and the library keeps playing them
+(items hold absolute paths), so nothing breaks until you go looking for the folder weeks
+later. The ✕ is now separated by a divider and asks first, in words that say what does
+and doesn't happen to the files.
+
 ## [13.2.1] — 2026-09-15
 **The audio track you were told you were hearing, and three more VLC assumptions.**
 

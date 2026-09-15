@@ -709,6 +709,60 @@ On `DOMContentLoaded`:
 
 Delete failures surface the server's `detail` rather than a generic message — a 403 here means "no PIN-verified profile", which is actionable in a way "could not delete" isn't.
 
+## Simple mode (per-profile, 14.0.0)
+
+StreamLink's controls were built for someone who knows what a torrent is, and that
+assumption leaked into every screen. Simple mode is the interface for everyone else, and
+it is the **default**: `_profile_simple_ui` (main.py) returns `not elevated` unless the
+profile carries an explicit `simple_ui`. It is presentation only — never an authorisation
+check; the endpoints behind every hidden control keep their own auth.
+
+- **Plumbing.** `let SIMPLE` + `applySimpleUi()` (declared beside `TV_MODE`) read
+  `profile.simple_ui` and toggle a `simple-ui` body class. Called from `_doSelectProfile`
+  (so the PIN path and the picker are both covered) and from the boot restore. Nothing is
+  removed from the DOM, so flipping a profile needs no reload.
+- **Hiding.** Same pattern as `tv-mode`: a CSS block hides `.adv-only` plus the named
+  advanced regions — `#srcWrap`, `#catWrap`, `#searchModeWrap`, `#diskSpaceContainer`, the
+  storage gear, `#epBulkChips`, `#epDownloadSelBtn`, and the show page's
+  `#ssSectionToggle` / `#ssEpisodesTools` / `#ssPacksTools`. Render-time guards cover what
+  CSS can't: the episode page's scheduling bar (`if(epHasTorrent && !TV_MODE && !SIMPLE
+  …)`) and the per-episode selection checkbox (everything it feeds is hidden, so it would
+  tick and do nothing).
+- **Classic search is forced off.** `applySimpleUi()` calls `setSearchMode("smart")` when a
+  Simple profile has a stored `classic` — its toggle is hidden, so it would otherwise be a
+  one-way trap into the raw indexer list.
+- **The show page is replaced, not trimmed.** `_ssRenderBody()` routes to
+  `_ssRenderSimple()`, which renders the seasons and what you own of each, with **Get this
+  season** / **Get the rest** beside the ones you don't (or **Add to my library** for a
+  movie). No tabs, no search buttons, no release names, no seeder columns.
+- **`ssSimpleGetSeason(season, btn)`** does the work in the order a person would want it.
+  Owning none of the season it runs the targeted `ssSearchSeason(sn)` query and takes
+  `_ssBestPackForScope(sn)` — one whole-season copy, consistent audio and quality, which is
+  the advice the advanced UI already gave but made you find another tab to act on. Owning
+  part of it (or with no whole-season copy available) it falls through to
+  `ssBulkAuto(sn)`, the existing detached auto-picker, which fetches only the gaps.
+  `ssBulkAuto` and `_ssBestPackForScope` both gained an optional explicit scope for this;
+  everything else is reused unchanged.
+- **`epStartOver(btn)`** is Simple mode's only bulk control, rendered where the scheduling
+  bar would be. Resetting a show for a rewatch is "Select all" + "Unwatched" in the
+  advanced UI — both chips Simple hides — so without it someone would be un-ticking thirty
+  episodes by hand. Scoped to the visible season (or the whole show when it has none) so
+  resetting Season 2 doesn't wipe Season 1.
+- **Switching a profile** is a `Simple` / `Full` button per row in the profile management
+  sheet (`renderExistingProfilesList`) → `POST /api/profiles/{id}/simple-ui`. Gated
+  server-side like the deletes, and it refreshes the signed-in profile's `localStorage`
+  snapshot so the change lands without a reload.
+
+### Vocabulary (applies to BOTH modes)
+
+There is one vocabulary, not two. Raw seeder counts are gone from every result, pack and
+source row: `_availLabel(seeders)` / `_availHtml(seeders)` render **Excellent / Good / Low
+/ Unavailable** on the thresholds the colour coding always used, with the exact count in
+the tooltip. A bare number can't tell a reader whether something will play smoothly unless
+they already know what a good number looks like. Likewise "Season Packs" → **Whole
+Seasons**, "Search packs" → **Find whole seasons**, "Pick a torrent to download" → **Pick a
+copy to download**, and the seeder/indexer help tips were rewritten in plain words.
+
 ## TV mode (`/?tv=1`)
 
 The same `index.html`, loaded by the backend's TV UI kiosk (a fullscreen Chrome on the host display, driven by the air-mouse remote — see [REMOTE.md](REMOTE.md)). Detected at boot via `const TV_MODE = new URLSearchParams(location.search).get("tv") === "1"` (declared next to `hlsAvailable`):

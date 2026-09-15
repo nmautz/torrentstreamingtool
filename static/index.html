@@ -507,6 +507,30 @@
     body.tv-mode #epBulkChips,
     body.tv-mode #epDownloadSelBtn,
     body.tv-mode #epPlaySelBtn { display: none !important; }
+    /* ── Simple mode (per-profile `simple_ui`) ────────────────────────────
+       StreamLink's controls were built for someone who knows what a torrent
+       is. Everything that assumption leaked into the UI — seeder counts,
+       season packs vs single episodes, download/stream-prep priority tiers,
+       piece-hash rechecks, storage roots — is noise to the rest of the
+       household, and noise reads as "don't touch this".
+
+       Simple is the DEFAULT for every non-elevated profile (see
+       `_profile_simple_ui` in main.py). Mark anything advanced with
+       `.adv-only` and it disappears for them; the markup and the handlers
+       stay put, so switching a profile back to the full UI needs no reload
+       and no second code path. This is presentation only — never a security
+       boundary; the endpoints keep their own auth. */
+    body.simple-ui .adv-only { display: none !important; }
+    body.simple-ui #srcWrap,
+    body.simple-ui #catWrap,
+    body.simple-ui #searchModeWrap,
+    body.simple-ui #diskSpaceContainer,
+    body.simple-ui [onclick="openStorageModal()"],
+    body.simple-ui #epBulkChips,
+    body.simple-ui #epDownloadSelBtn,
+    body.simple-ui #ssSectionToggle,
+    body.simple-ui #ssEpisodesTools,
+    body.simple-ui #ssPacksTools { display: none !important; }
     /* 10-foot readability: uniform upscale (the kiosk is Chrome-only, so
        `zoom` is safe) and reclaim the padding that cleared the now-hidden
        fixed footer. */
@@ -1840,9 +1864,9 @@
   <!-- Section toggle -->
   <div id="ssSectionToggle" class="flex gap-3 px-3 sm:px-5 border-b border-gray-800 flex-shrink-0">
     <button id="ssTabEpisodes" onclick="ssSwitchSection('episodes')"
-      class="py-2.5 text-xs font-black uppercase tracking-wide tab-inactive">Single Episodes</button>
+      class="py-2.5 text-xs font-black uppercase tracking-wide tab-inactive">Episodes</button>
     <button id="ssTabPacks" onclick="ssSwitchSection('packs')"
-      class="py-2.5 text-xs font-black uppercase tracking-wide tab-inactive">Season Packs</button>
+      class="py-2.5 text-xs font-black uppercase tracking-wide tab-inactive">Whole Seasons</button>
   </div>
 
   <!-- Audio-language preference (shown only when the results mix audio variants
@@ -1856,13 +1880,13 @@
         class="text-[11px] px-2.5 py-1.5 bg-indigo-700 hover:bg-indigo-600 text-white uppercase tracking-wide transition-colors flex items-center gap-1 min-h-[34px]">
         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
-        </svg>Search episodes
+        </svg>Find episodes
       </button>
       <button onclick="ssOpenBulkSheet()"
         class="text-[11px] px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-200 uppercase tracking-wide transition-colors flex items-center gap-1 min-h-[34px]">
         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
-        </svg>Bulk download season
+        </svg>Download a whole season
       </button>
     </div>
     <div id="ssSeasonTabs"
@@ -1877,7 +1901,7 @@
         class="text-[11px] px-2.5 py-1.5 bg-indigo-700 hover:bg-indigo-600 text-white uppercase tracking-wide transition-colors flex items-center gap-1 min-h-[34px]">
         <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
-        </svg><span id="ssSearchPacksLabel">Search packs</span>
+        </svg><span id="ssSearchPacksLabel">Find whole seasons</span>
       </button>
     </div>
   </div>
@@ -1892,7 +1916,7 @@
     <div class="flex items-center justify-between gap-2 px-4 py-3 border-b border-gray-800 flex-shrink-0">
       <div class="min-w-0">
         <h2 id="ssSourceTitle" class="text-sm font-black uppercase tracking-wide truncate">Sources</h2>
-        <p class="text-[10px] text-gray-500 uppercase tracking-widest">Pick a torrent to download</p>
+        <p class="text-[10px] text-gray-500 uppercase tracking-widest">Pick a copy to download</p>
       </div>
       <button id="ssLockBtn" type="button" onclick="toggleSsLock()"
         class="hidden opacity-60 hover:opacity-100 transition-opacity flex-shrink-0 p-1"
@@ -2367,7 +2391,7 @@
           </button>
           <div id="srcPanel" class="hidden mt-2 bg-gray-900 border border-gray-800">
             <div class="flex items-center justify-between px-3 py-2 border-b border-gray-800">
-              <span class="text-[11px] font-black uppercase tracking-widest text-gray-500">Search Sources<span class="help-tip" tabindex="0" data-tip="The sites StreamLink searches for a download (your configured indexers). Tick the ones to include in this search; leave them all on if you're not sure.">?</span></span>
+              <span class="text-[11px] font-black uppercase tracking-widest text-gray-500">Search Sources<span class="help-tip" tabindex="0" data-tip="The sites StreamLink searches when you look for something. Tick the ones to include in this search; leave them all on if you're not sure.">?</span></span>
               <div class="flex gap-2">
                 <button type="button" onclick="setAllSources(true)"
                   class="text-[10px] font-bold uppercase tracking-wide text-gray-400 hover:text-white">All</button>
@@ -2408,17 +2432,17 @@
         </div>
         <!-- Search mode: TMDb-first "Smart" poster browse vs the legacy indexer-first list -->
         <div id="searchModeWrap" class="mt-2 px-1 flex items-center gap-2">
-          <span class="text-[11px] font-bold uppercase tracking-wide text-gray-500">Search<span class="help-tip" tabindex="0" data-tip="Smart: pick a real show or movie by its poster first (uses TMDb artwork), then choose a download. Classic: skip that and see the raw download list grouped by title. Smart is easier; use Classic if a title has no TMDb match.">?</span></span>
+          <span class="text-[11px] font-bold uppercase tracking-wide text-gray-500">Search<span class="help-tip" tabindex="0" data-tip="Smart: pick the show or movie by its poster first, then get it. Classic: skip that and see the raw list of copies grouped by title. Smart is easier; use Classic if a title has no poster match.">?</span></span>
           <div class="inline-flex border border-gray-800">
             <button id="searchModeSmart" type="button" onclick="setSearchMode('smart')"
-              title="Browse real shows/movies by poster (uses TMDb)">Smart</button>
+              title="Browse shows and movies by poster">Smart</button>
             <button id="searchModeClassic" type="button" onclick="setSearchMode('classic')"
-              title="Classic search: list raw indexer results grouped by show (no TMDb)">Classic</button>
+              title="Classic search: list raw results grouped by show, with no poster matching">Classic</button>
           </div>
         </div>
         <div class="flex justify-between mt-2 px-1">
           <span id="resultCount" class="text-[11px] text-gray-600 uppercase tracking-wide"></span>
-          <span class="text-[11px] text-gray-700 uppercase tracking-wide">sorted by seeders<span class="help-tip" tabindex="0" data-tip="Seeders = how many people are currently sharing a file. More seeders usually means a faster, smoother download that's more likely to play without buffering.">?</span></span>
+          <span class="text-[11px] text-gray-700 uppercase tracking-wide">sorted by availability<span class="help-tip" tabindex="0" data-tip="Availability is how many people are sharing a copy right now. Excellent or Good usually means a fast download that plays without buffering; Low or Unavailable may stall or never finish.">?</span></span>
         </div>
       </div>
       <div id="alert" class="hidden mb-4 px-4 py-3 border-l-4 text-sm"></div>
@@ -3810,6 +3834,29 @@ let globalMaxVolume = 200;   // global VLC volume cap (0-200); fetched at startu
 // document.title below is the window marker the backend's kiosk focus code
 // looks for (main.py _TVUI_WINDOW_MARKER) — keep the two in sync.
 const TV_MODE = new URLSearchParams(location.search).get("tv") === "1";
+
+// ── Simple mode ───────────────────────────────────────────────────────────────
+// Whether the signed-in profile gets the simplified interface. The server
+// decides (`simple_ui` on /api/profiles, default: every non-elevated profile),
+// so the answer travels with the profile and is the same on every device that
+// profile signs in on. Everything it hides is tagged `.adv-only` in CSS or
+// guarded by this flag in a render function — nothing is removed from the DOM,
+// so flipping a profile back to the full UI needs no reload.
+//
+// Presentation only. It is NOT an authorisation check: the endpoints behind
+// these controls do their own (see _require_delete_auth / _is_elevated).
+let SIMPLE = false;
+function applySimpleUi(){
+  SIMPLE = !!(profile && profile.simple_ui);
+  document.body.classList.toggle("simple-ui", SIMPLE);
+  // Classic search is the raw indexer list — release names, seeder columns, no
+  // posters. Its toggle is hidden in Simple mode, so a profile that inherited a
+  // stored "classic" (this device was last used by someone else, or the profile
+  // was switched over) would be stuck in the very view Simple exists to avoid,
+  // with no visible way out. Force the poster-first path.
+  // (Both callers run after load, so `searchMode` is always initialised here.)
+  try{ if(SIMPLE && searchMode==="classic") setSearchMode("smart"); }catch(_){}
+}
 if (TV_MODE) {
   document.title = "StreamLink TV Dashboard";
   document.body.classList.add("tv-mode", "no-hls");
@@ -5741,6 +5788,7 @@ function _doSelectProfile(p){
   // picks a different profile afterwards.
   if(!p.has_pin) setProfileToken("");
   profile=p; localStorage.setItem("streamlink_profile",JSON.stringify(p));
+  applySimpleUi();
   _pendingPinProfile=null;
   document.getElementById("profilePicker").classList.add("hidden");
   document.getElementById("pinPromptModal").classList.add("hidden");
@@ -6159,12 +6207,43 @@ function renderExistingProfilesList(){
         </div>
       </div>
       <div class="flex items-center gap-2 flex-shrink-0">
+        <button class="ui-btn text-xs transition-colors ${p.simple_ui?'text-gray-500 hover:text-gray-300':'text-amber-400 hover:text-amber-300'}"
+          title="${p.simple_ui
+            ? 'Simple: the everyday interface — find something, press get, press play. Tap to give this profile the full set of download, priority and storage controls.'
+            : 'Full: every advanced control is visible for this profile. Tap to switch it back to the simple interface.'}">
+          ${p.simple_ui?'Simple':'Full'}
+        </button>
         <button class="pin-btn text-xs text-indigo-400 hover:text-indigo-300 transition-colors" data-id="${escHtml(p.id)}" data-name="${escHtml(p.name)}" data-haspin="${p.has_pin?'1':'0'}">
           ${p.has_pin?'Change PIN':'Set PIN'}
         </button>
         <button class="del-btn text-xs text-red-500 hover:text-red-300 transition-colors" data-id="${escHtml(p.id)}">Delete</button>
       </div>`;
     row.querySelector(".pin-btn").onclick=()=>openChangePinModal(p);
+    // Simple ⇄ Full. Server-gated (admin session or a PIN-verified profile), so
+    // the people on Simple profiles can't promote themselves out of it.
+    row.querySelector(".ui-btn").onclick=async()=>{
+      const next=!p.simple_ui;
+      const r=await fetch(`/api/profiles/${p.id}/simple-ui`,{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({simple_ui:next}),
+      });
+      if(!r.ok){
+        const e=await r.json().catch(()=>null);
+        showAlert((e&&e.detail)||"Could not change this profile's interface.","error");
+        return;
+      }
+      showAlert(`${p.name} now uses the ${next?"simple":"full"} interface.`,"success");
+      await fetchProfiles();
+      // The signed-in profile's own copy is a snapshot in localStorage — refresh
+      // it so the change takes effect on this device without a reload.
+      if(profile.id===p.id){
+        const fresh=allProfiles.find(x=>x.id===p.id);
+        if(fresh){ profile={...profile, simple_ui:fresh.simple_ui};
+                   try{ localStorage.setItem("streamlink_profile",JSON.stringify(profile)); }catch(_){}
+                   applySimpleUi(); }
+      }
+      renderProfileGrid(); renderExistingProfilesList();
+    };
     row.querySelector(".del-btn").onclick=async()=>{
       if(!confirm(`Delete profile "${p.name}"? This removes their watch history.`)) return;
       const r=await fetch(`/api/profiles/${p.id}`,{method:"DELETE"});
@@ -6646,7 +6725,7 @@ function _libItemChrome(item){
   }
 
   const partialBadge = item.download_partial
-    ? `<span class="text-[10px] px-1.5 py-0.5 bg-orange-950 text-orange-300 border border-orange-900" title="Some files in this torrent were skipped — not everything is downloaded."><svg class="ic" aria-hidden="true"><use href="#i-ban"/></svg> Partial</span>`
+    ? `<span class="text-[10px] px-1.5 py-0.5 bg-orange-950 text-orange-300 border border-orange-900" title="Some files in this download were skipped — not everything is here."><svg class="ic" aria-hidden="true"><use href="#i-ban"/></svg> Partial</span>`
     : "";
 
   const compressedBadge = item.compressed
@@ -7368,10 +7447,17 @@ async function refreshStoragePathList(){
                             :"Never chosen automatically. You can still pick it by hand in the download modal. Click to opt it back in."}">
           ${autoOn?"Auto":"Auto off"}
         </button>`;
+      // The ✕ used to sit flush against the Auto toggle with no confirmation, so
+      // one mis-tap silently un-configured a drive — which is exactly how
+      // F:\StreamLink disappeared on 2026-09-14 (the access log shows the DELETE
+      // and, one second later, the Auto toggle the user had actually been aiming
+      // for 404ing because the path was already gone). Separated by a divider
+      // and confirmed in removeStoragePath().
       const removeBtn=p.static
         ?`<span class="text-[10px] text-gray-700 flex-shrink-0">env</span>`
-        :`<button class="storage-remove-btn text-gray-600 hover:text-red-400 transition-colors flex-shrink-0 p-1"
-                 data-path="${escHtml(p.path)}" title="Remove path">
+        :`<span class="w-px self-stretch bg-gray-700/70 flex-shrink-0 mx-1"></span>
+          <button class="storage-remove-btn text-gray-600 hover:text-red-400 transition-colors flex-shrink-0 p-1"
+                 data-path="${escHtml(p.path)}" title="Stop using this folder (nothing on disk is deleted)">
             <svg class="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
             </svg>
@@ -7439,6 +7525,13 @@ async function setStoragePathAuto(path, auto, btn){
 }
 
 async function removeStoragePath(path, btn){
+  // Un-configuring a root is quiet and easy to miss afterwards: the files stay
+  // exactly where they are and the library keeps playing them (items hold
+  // absolute paths), so nothing visibly breaks — the drive simply stops being
+  // offered, stops showing free space, and stops receiving new downloads. That
+  // is precisely why it needs a prompt: the damage is invisible until you go
+  // looking for the folder weeks later.
+  if(!confirm(`Stop using "${path}" as a storage folder?\n\nNothing on disk is deleted and anything already downloaded there keeps playing — StreamLink just stops saving new downloads to it and stops showing its free space.`)) return;
   await withInflight(`storage_rm_${path}`, btn, async () => {
     const r=await fetch(`/api/settings/library-paths?path=${encodeURIComponent(path)}`,{method:"DELETE"});
     if(r.ok){
@@ -8803,8 +8896,10 @@ function _epCardHtml(f){
             <div class="text-[10px] text-gray-700 mt-1 font-mono">${escHtml(f.size_human)}${dur?` · ${fmtTime(dur)}`:""}</div>
           </div>
           <!-- Checkbox (top-right) — not on TV: selection drives the bulk/download
-               controls, which are touchscreen chrome (hidden in TV mode) -->
-          ${TV_MODE?"":`<label class="flex-shrink-0 p-1 cursor-pointer">
+               controls, which are touchscreen chrome (hidden in TV mode). Also
+               not in Simple mode: every control the selection feeds is hidden
+               there, so the box would tick and do nothing. -->
+          ${(TV_MODE||SIMPLE)?"":`<label class="flex-shrink-0 p-1 cursor-pointer">
             <input type="checkbox" class="ep-check accent-indigo-500 w-5 h-5"
               ${checked?"checked":""} data-path="${escHtml(f.path)}" onchange="epToggle(this)"/>
           </label>`}
@@ -9394,6 +9489,22 @@ function renderEpList(){
     }
   }
 
+  // Simple mode's only bulk control. The advanced UI resets a show by tapping
+  // "Select all" then "Unwatched" — both of those chips are hidden here, which
+  // would otherwise leave someone who wants to rewatch a series un-ticking
+  // thirty episodes one at a time. One button, scoped to whatever the page is
+  // showing (this season, or the whole show when it has no seasons).
+  if(SIMPLE && !TV_MODE && visibleFiles.length && visibleFiles.some(f=>f.progress?.completed)){
+    const scopeLbl=epSeasonList.length?`Season ${epCurrentSeason}`:"this show";
+    html += `<div class="px-3 sm:px-5 py-2 border-b border-gray-800 flex justify-end bg-gray-900/40">
+      <button onclick="epStartOver(this)"
+        title="Mark every episode here unwatched so it plays from the start again. Nothing is deleted."
+        class="text-[11px] font-bold uppercase tracking-wide px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 transition-colors flex items-center gap-1.5 min-h-[34px]">
+        ${ic("resume")} Watch ${escHtml(scopeLbl)} again
+      </button>
+    </div>`;
+  }
+
   // Scheduling bar — host-side control over what downloads/preps and when, at the
   // current scope (this season, or all files) plus the whole torrent. Shown for any
   // torrent-backed item, with or without TMDb metadata. Three sub-sections:
@@ -9402,7 +9513,7 @@ function renderEpList(){
   //   • Stream-prep (Now/Idle/Never) — the HLS-prep sibling; hidden on macOS (no HLS).
   //   • Recheck — force a piece-hash verify of the checked episodes.
   // Not on TV: download/prep scheduling is host management, done from a phone.
-  if(epHasTorrent && !TV_MODE && visibleFiles.length){
+  if(epHasTorrent && !TV_MODE && !SIMPLE && visibleFiles.length){
     const scope=epSeasonList.length?`Season ${epCurrentSeason}`:"All files";
     const multi=epSeasonList.length>1;
     const allDownloaded=epFiles.length>0 && epFiles.every(f=>f.complete!==false);
@@ -9769,6 +9880,34 @@ async function epMarkWatched(watched, btn){
   });
 }
 
+// "Watch this again" — Simple mode's replacement for select-all + Unwatched.
+// Resets progress for the visible scope only, for the signed-in profile only;
+// no files are touched. Scoped rather than always whole-show so resetting
+// Season 2 doesn't wipe the record of Season 1.
+async function epStartOver(btn){
+  if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
+  const files=_visibleSeasonFiles();
+  if(!files.length) return;
+  const scopeLbl=epSeasonList.length?`Season ${epCurrentSeason}`:"this show";
+  if(!confirm(`Watch ${scopeLbl} again?\n\nEvery episode goes back to unwatched for ${profile.name}, so it starts from the beginning. Nothing is deleted.`)) return;
+  const paths=files.map(f=>f.path);
+  const byItem=_epGroupByItem(paths);
+  if(!byItem.size) return;
+  await withInflight("ep_start_over", btn, async () => {
+    let ok=true;
+    for(const [itemId,ps] of byItem){
+      const r=await fetch(`/api/library/${itemId}/mark-watched`,{
+        method:"POST",headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({profile_id:profile.id,watched:false,file_paths:ps}),
+      });
+      if(!r.ok) ok=false;
+    }
+    showAlert(ok?`${scopeLbl} is ready to watch again.`:"Some episodes couldn't be reset.",ok?"success":"error");
+    await refreshEpFiles();
+    loadLibrary();
+  });
+}
+
 async function epToggleWatched(btn){
   if(!profile.id) return;
   const path=btn?.dataset?.path;
@@ -10100,12 +10239,16 @@ function syncLockButtons(){
   if(note) note.classList.toggle("hidden",!_dlLocked);
 }
 
+let _dlTmdb={};   // {tmdb_id, tmdb_kind} for the open Add-to-Library modal
 function toggleDlLock(){ _dlLocked=!_dlLocked; syncLockButtons(); }
 function toggleSsLock(){ _ssLocked=!_ssLocked; syncLockButtons(); }
 
 async function openDownloadModal(magnet,title,overrides){
   overrides=overrides||{};
   downloadTarget={magnet,title};
+  // The TMDb entry the caller already resolved (the search show page). Pinned
+  // onto the item at download time so the server never re-guesses the show.
+  _dlTmdb=overrides.tmdb||{};
   document.getElementById("dlFilePickerRow").classList.remove("hidden");
   await Promise.all([ensureDefaultSavePath(true), ensureLibraryPaths()]);
 
@@ -10158,7 +10301,7 @@ function renderDlVisibilityProfiles(){
 }
 
 function closeDownloadModal(){
-  downloadTarget=null; _saveStreamMode=false;
+  downloadTarget=null; _saveStreamMode=false; _dlTmdb={};
   // Cancel any in-flight library prepare
   if(_libPrepAbort){ _libPrepAbort.abort(); _libPrepAbort=null; }
   if(_libPrepData?.hash){
@@ -10243,7 +10386,7 @@ async function toggleDlFilePicker(){
     _libPrepData=d;
     const videoFiles=d.files.filter(f=>isVideoFile(f.name));
     if(!videoFiles.length){
-      list.innerHTML=`<p class="text-xs text-gray-500 text-center py-4">No video files found in this torrent.</p>`;
+      list.innerHTML=`<p class="text-xs text-gray-500 text-center py-4">No video files found in this download.</p>`;
       return;
     }
     list.innerHTML=videoFiles.map(f=>{
@@ -10378,7 +10521,7 @@ async function submitDownload(){
       });
     } else {
       const body={magnet:downloadTarget.magnet,title,series,season,episode,save_path:savePath,
-                  profile_id:profile.id,admin_only:_dlLocked};
+                  profile_id:profile.id,admin_only:_dlLocked,..._dlTmdb};
       if(document.getElementById("dlIdleOnly").checked) body.download_mode="idle";
       // Visibility: empty list = all profiles; non-empty = restricted to those IDs
       const visCbs=document.querySelectorAll(".dl-vis-cb");
@@ -10403,7 +10546,7 @@ async function submitDownload(){
       const duplicate=!!(res&&res.duplicate);
       closeDownloadModal();
       showAlert(duplicate
-        ? "Already in your library — this torrent was queued before, so nothing new was started."
+        ? "Already in your library — this was queued before, so nothing new was started."
         : (_saveStreamMode?"Stream saved — visible in Library tab.":"Downloading — switch to Library to track progress.")
           +(_dlLocked?" Content locked.":""),
         duplicate?"warn":"success");
@@ -10586,7 +10729,7 @@ async function openStreamPicker(magnet, title, btn, ctx){
 
     if(videoFiles.length===0){
       closeStreamPicker(true);
-      showAlert("No video files found in this torrent.","error");
+      showAlert("No video files found in this download.","error");
       return;
     }
 
@@ -11382,7 +11525,7 @@ async function doClassicSearch(q, grid, wrap, empty, count){
       <div class="flex items-center gap-2 mb-3 flex-wrap">
         <span class="text-xs text-gray-500">${escHtml(item.size_human)}</span>
         <span class="text-gray-700">·</span>
-        <span class="text-xs font-mono font-semibold ${sc}">${item.seeders} ↑</span>
+        ${_availHtml(item.seeders,"text-xs")}
         ${item.peers?`<span class="text-gray-700">·</span><span class="text-xs text-gray-700">${item.peers} peers</span>`:""}
         ${item.tracker?`<span class="text-gray-700">·</span><span class="text-[11px] text-gray-700 truncate max-w-[120px]">${escHtml(item.tracker)}</span>`:""}
         ${shealth}${_dvRiskBadge(item)}
@@ -11457,7 +11600,7 @@ async function doJackettSearch(q, grid, wrap, empty, count){
       const nEp=g.kinds?.episode||0, nSe=g.kinds?.season||0, nMs=g.kinds?.multiseason||0, nMv=g.kinds?.movie||0;
       if((g.seasons||[]).length) bits.push(`${g.seasons.length} season${g.seasons.length>1?"s":""}`);
       if(nEp) bits.push(`${nEp} episode${nEp>1?"s":""}`);
-      if(nSe+nMs) bits.push(`${nSe+nMs} pack${(nSe+nMs)>1?"s":""}`);
+      if(nSe+nMs) bits.push(`${nSe+nMs} whole season${(nSe+nMs)>1?"s":""}`);
       if(!nEp && !nSe && !nMs && nMv) bits.push(nMv>1?`${nMv} sources`:"movie");
       const movieOnly=(nEp+nSe+nMs===0);
       card.dataset.gid=gid;
@@ -11631,6 +11774,26 @@ function _streamHealth(bytes, seeders){
   else if(sd<need)     level="fair";   // may buffer
   else                 level="good";   // streams smoothly
   return {level, seeders:sd, gb, need};
+}
+
+// Plain-language stand-in for a raw seeder count.
+//
+// "Seeders" is a BitTorrent implementation detail. What a reader actually wants
+// to know is whether this copy will arrive quickly and play without stalling —
+// and a bare number can't answer that unless you already know what a good
+// number looks like. Same thresholds the colour coding always used, said in
+// words; the exact count stays in the tooltip for anyone who wants it.
+function _availLabel(seeders){
+  const n=seeders||0;
+  if(n<=0)  return {txt:"Unavailable", cls:"text-red-400"};
+  if(n<=8)  return {txt:"Low",         cls:"text-red-400"};
+  if(n<=30) return {txt:"Good",        cls:"text-yellow-400"};
+  return    {txt:"Excellent",          cls:"text-green-400"};
+}
+function _availHtml(seeders, extraCls){
+  const a=_availLabel(seeders);
+  return `<span class="font-bold ${a.cls} ${extraCls||""}"
+    title="How many people are sharing this copy right now (${seeders||0}). More sharers means a faster download that is less likely to stall.">${a.txt}</span>`;
 }
 
 // Square Metro badge for a source's streamability (null → no badge).
@@ -12092,9 +12255,9 @@ async function ssSearchPacks(btn){
         },{quiet:true});
       }
     }
-    if(_ssGroup===grp && !_ssPacks.length) showAlert("No packs found yet — still looking season by season.","warn");
+    if(_ssGroup===grp && !_ssPacks.length) showAlert("No whole seasons found yet — still looking season by season.","warn");
   } finally {
-    setLabel("Search packs");
+    setLabel("Find whole seasons");
     if(btn){ _markLoading(btn,false); }
   }
 }
@@ -12224,7 +12387,7 @@ function _ssRender(){
   tabPk.classList.toggle("hidden", !showPk);
   document.getElementById("ssTabPacks").textContent=
     (_ssKind==="movie") ? "Downloads"
-      : (_ssPacks.some(p=>p.kind==="season"||p.kind==="multiseason")||_ssKind==="tv") ? "Season Packs"
+      : (_ssPacks.some(p=>p.kind==="season"||p.kind==="multiseason")||_ssKind==="tv") ? "Whole Seasons"
       : "Downloads";
   // A section that's hidden can't stay selected.
   if(_ssSection==="episodes" && !showEp) _ssSection="packs";
@@ -12241,7 +12404,7 @@ function _ssRender(){
   document.getElementById("ssPacksTools").classList.toggle("hidden", _ssSection!=="packs");
   // The pack Search button doubles as a re-search once packs exist.
   const pl=document.getElementById("ssSearchPacksLabel");
-  if(pl) pl.textContent=_ssPacks.length?"Search again":"Search packs";
+  if(pl) pl.textContent=_ssPacks.length?"Search again":"Find whole seasons";
   _ssRenderBody();
 }
 
@@ -12252,8 +12415,129 @@ function ssSwitchSeason(s){ _ssSeason=s; _ssRenderBody(); }
 function _ssRenderBody(){
   _ssRenderAudioChips();
   _ssUpdateTrailerBtn();   // the hero trailer follows the selected season tab
+  // Simple mode replaces this entire screen. The advanced page asks the reader
+  // to understand the difference between a season pack and twelve single
+  // episodes, to run two separate searches, and then to choose between raw
+  // release names on seeder count. None of that is a decision a viewer wants to
+  // make — it is a decision the tool should make. One button per season; the
+  // background auto-picker (the same one behind "Bulk download") does the rest.
+  if(SIMPLE){ _ssRenderSimple(); return; }
   if(_ssSection==="packs"){ _ssRenderPacks(); return; }
   _ssRenderEpisodes();
+}
+
+// ── Simple mode: the whole show page as a short list of "get this" buttons ───
+function _ssRenderSimple(){
+  const body=document.getElementById("ssBody");
+  document.getElementById("ssSeasonTabs").classList.add("hidden");
+  if(_ssMetaLoading && !_ssMeta){ body.innerHTML=_ssLoadingBodyHtml(); return; }
+
+  const wrap=inner=>`<div class="p-3 sm:p-5 space-y-2">${inner}</div>`;
+  const btn=(label,onclick,tone)=>`<button onclick="${onclick}"
+      class="flex-shrink-0 px-4 py-2.5 text-xs font-black uppercase tracking-wide transition-colors min-h-[44px]
+             ${tone||"bg-indigo-600 hover:bg-indigo-500 text-white"}">${label}</button>`;
+
+  // A movie is one decision: do you want it or not.
+  if(_ssKind==="movie" || (!_ssAllSeasons().length && !_ssEpisodes.length)){
+    const owned=!!_ssOwned;
+    body.innerHTML=wrap(owned
+      ? `<div class="bg-gray-900 border border-gray-800 p-4 flex items-center justify-between gap-3 flex-wrap">
+           <p class="text-sm text-emerald-300 font-bold uppercase tracking-wide flex items-center gap-2">
+             <span class="w-2 h-2 bg-emerald-400 flex-shrink-0"></span>Already in your library</p>
+           ${btn("Watch it","ssOpenInLibrary()","bg-gray-800 hover:bg-gray-700 text-gray-200")}
+         </div>`
+      : `<div class="bg-gray-900 border border-gray-800 p-4 flex items-center justify-between gap-3 flex-wrap">
+           <p class="text-sm text-gray-300">Not in your library yet.</p>
+           ${btn("Add to my library","ssSimpleGetMovie(this)")}
+         </div>`);
+    return;
+  }
+
+  const seasons=_ssAllSeasons();
+  if(!seasons.length){
+    body.innerHTML=wrap(`<p class="text-gray-600 text-sm text-center py-10">No seasons listed for this show.</p>`);
+    return;
+  }
+
+  body.innerHTML=wrap(seasons.map(sn=>{
+    const have=_ssOwnedEps(sn).size;
+    // Same precedence as the advanced season tabs, plus TMDb's own
+    // `episode_count` — which is present for every season without having to
+    // have fetched that season's episode list.
+    const total=((_ssOwned&&_ssOwned.seasons_total)||{})[String(sn)]
+              || _tmdbSeasonEpisodes(_ssMeta,sn).length
+              || (((_ssMeta&&_ssMeta.all_seasons)||[]).find(x=>+x.season===+sn)||{}).episode_count
+              || 0;
+    const complete=total>0 && have>=total;
+    // Never promise a count we don't have: "3 episodes" beats "3 of 0".
+    const status=complete ? "You have the whole season"
+      : have>0 ? `You have ${have}${total?` of ${total}`:""} episode${have===1?"":"s"}`
+      : "Not downloaded yet";
+    const action=complete
+      ? `<span class="flex-shrink-0 px-4 py-2.5 text-xs font-black uppercase tracking-wide text-emerald-400">Complete</span>`
+      : btn(have>0?"Get the rest":"Get this season", `ssSimpleGetSeason(${sn},this)`);
+    return `<div class="bg-gray-900 border border-gray-800 p-3 sm:p-4 flex items-center justify-between gap-3 flex-wrap">
+        <div class="min-w-0">
+          <p class="text-sm font-black uppercase tracking-wide text-gray-100">Season ${sn}</p>
+          <p class="text-[11px] text-gray-500 uppercase tracking-wide mt-0.5">${escHtml(status)}</p>
+        </div>
+        ${action}
+      </div>`;
+  }).join(""));
+}
+
+// Simple mode: get whatever is missing from one season, in the order a person
+// would actually want it.
+//
+// Owning none of the season, a single whole-season copy is the better buy and
+// the advanced UI already says so ("one download, consistent quality and audio
+// across every episode") — it just makes you find the other tab, run a second
+// search and read release names to act on it. Here it is simply what the button
+// does. Owning part of it, a whole-season copy would re-fetch what is already
+// downstairs, so fall through to the per-episode run, which takes only the gaps.
+async function ssSimpleGetSeason(season, btn){
+  const sn=+season, grp=_ssGroup;
+  const ownsNone=_ssOwnedEps(sn).size===0;
+  await withInflight(`ss_simple_${sn}`, btn, async () => {
+    if(ownsNone){
+      // One targeted "<title> S0N" query — the broad show-title query misses
+      // later seasons of long-running shows entirely (see ssSearchSeason).
+      if(!_ssPacksForSeason(sn).length){
+        await ssSearchSeason(sn);
+        if(_ssGroup!==grp) return;
+      }
+      const pack=_ssBestPackForScope(sn);
+      if(pack){
+        // season on the request (not 0) so the item is series-shaped from the
+        // moment it is created, whatever the release name looks like.
+        await _ssDownloadOne(pack, sn, 0);
+        return;
+      }
+    }
+    ssBulkAuto(sn);
+  });
+}
+
+// Simple mode: one movie. There is no episode machinery to reuse, so this is
+// the short version — make sure a search has run, take the best release the
+// auto-picker offers, queue it.
+async function ssSimpleGetMovie(btn){
+  const grp=_ssGroup;
+  await withInflight("ss_simple_movie", btn, async () => {
+    if(!_ssPacksSearched || !_ssPacks.length){
+      const results=await _ssBroadSearch();
+      if(_ssGroup!==grp) return;
+      _ssMergePacks(results);
+      _ssPacksSearched=true;
+    }
+    if(!_ssPacks.length){
+      showAlert("Couldn't find this anywhere right now — try again in a few minutes.","warn");
+      return;
+    }
+    const src=_ssAutoPick(_ssPacks, _ssParseBulkFilters());
+    if(!src){ showAlert("Couldn't find a usable copy right now.","warn"); return; }
+    await _ssDownloadOne(src, 0, 0);
+  });
 }
 
 function _ssRenderEpisodes(){
@@ -12373,7 +12657,7 @@ function _ssEpRowHtml(e){
           ${own}
         </div>
         <p class="text-[11px] text-gray-500 flex items-center gap-1.5 flex-wrap">
-          <span class="font-mono font-semibold ${sc}">${best.seeders} ↑</span> ·
+          ${_availHtml(best.seeders)} ·
           ${escHtml(best.size_human)} · ${e.sources.length} source${e.sources.length>1?"s":""}
           ${shealth}${badge}${miss}${_dvRiskBadge(best)}
         </p>
@@ -12581,7 +12865,7 @@ function _ssPackRowHtml(p, i){
           </div>
           <p class="text-sm text-gray-200 truncate">${escHtml(p.title)}</p>
           <p class="text-[11px] text-gray-500">
-            <span class="font-mono font-semibold ${sc}">${p.seeders} ↑</span> · ${escHtml(p.size_human)}
+            ${_availHtml(p.seeders)} · ${escHtml(p.size_human)}
             ${p.tracker?` · <span class="text-gray-600">${escHtml(p.tracker)}</span>`:""}
             ${_dvRiskBadge(p)}
           </p>
@@ -12634,13 +12918,13 @@ function _ssRenderPacksGrouped(){
     html+=rows.length
       ? `<div class="divide-y divide-gray-800">${rows.map(p=>_ssPackRowHtml(p,idx(p))).join("")}</div>`
       : `<div class="px-3 sm:px-5 py-3 flex items-center justify-between gap-3">
-           <span class="text-xs text-gray-600 italic">No season pack found</span>
+           <span class="text-xs text-gray-600 italic">No whole-season copy found</span>
            <button onclick="ssSearchSeasonPacks(${sn})"
              class="text-[10px] px-2.5 py-1.5 bg-gray-800 hover:bg-gray-700 text-gray-300 uppercase tracking-wide flex-shrink-0">Find</button>
          </div>`;
   });
   if(multi.length){
-    html+=_ssPackGroupHeader("Multi-season / complete", multi.length);
+    html+=_ssPackGroupHeader("Several seasons at once", multi.length);
     html+=`<div class="divide-y divide-gray-800">${multi.map(p=>_ssPackRowHtml(p,idx(p))).join("")}</div>`;
   }
   if(other.length){
@@ -12676,7 +12960,7 @@ function _ssRenderPacks(){
           </div>
           <p class="text-sm text-gray-200 truncate">${escHtml(p.title)}</p>
           <p class="text-[11px] text-gray-500">
-            <span class="font-mono font-semibold ${sc}">${p.seeders} ↑</span> · ${escHtml(p.size_human)}
+            ${_availHtml(p.seeders)} · ${escHtml(p.size_human)}
             ${p.tracker?` · <span class="text-gray-600">${escHtml(p.tracker)}</span>`:""}
             ${_dvRiskBadge(p)}
           </p>
@@ -12710,11 +12994,22 @@ function _ssRenderPacks(){
   }
 }
 
+// The TMDb entry this page is *about*, in the shape /api/library/download wants.
+// Every download started from this screen carries it, so the server binds the
+// show the user actually picked instead of re-guessing it from a release name.
+// Empty until the TMDb lookup lands (and always empty on the Classic/Jackett
+// path, which has no TMDb identity) — the server falls back to matching then.
+function _ssTmdbBinding(){
+  const m=_ssMeta;
+  if(!m||!m.tmdb_id||!m.tmdb_kind) return {};
+  return {tmdb_id:m.tmdb_id, tmdb_kind:m.tmdb_kind};
+}
+
 // A pack opens the full Add-to-Library modal (save path, file selection,
 // visibility) prefilled with the show's series so it coheres in the library.
 function ssDownloadPack(i){
   const p=_ssPacks[i]; if(!p) return;
-  openDownloadModal(p.magnet, p.title, {series:_ssGroup.title});
+  openDownloadModal(p.magnet, p.title, {series:_ssGroup.title, tmdb:_ssTmdbBinding()});
 }
 
 // ── Per-episode source picker ────────────────────────────────────────────────
@@ -12736,11 +13031,11 @@ function ssOpenSourceSheet(season,episode){
     const badge=_ssAudioBadgeHtml(s);
     const shealth=_streamHealthBadge(_streamHealth(s.size,s.seeders));
     return `<div class="w-full flex items-stretch bg-gray-950 border border-gray-800 hover:border-indigo-700 transition-colors${dim}">
-      <button onclick="ssPickSource(${season},${episode},${i})" title="Save to library (download)"
+      <button onclick="ssPickSource(${season},${episode},${i})" title="Add this copy to your library"
         class="flex-1 min-w-0 text-left p-3 hover:bg-gray-800 transition-colors">
         <p class="text-xs text-gray-200 line-clamp-2 mb-1">${escHtml(s.title)}</p>
         <p class="text-[11px] text-gray-500 flex items-center gap-1.5 flex-wrap">
-          <span class="font-mono font-semibold ${sc}">${s.seeders} ↑</span> · ${escHtml(s.size_human)}
+          ${_availHtml(s.seeders)} · ${escHtml(s.size_human)}
           ${s.tracker?` · <span class="text-gray-600">${escHtml(s.tracker)}</span>`:""}
           ${shealth}${badge}${_dvRiskBadge(s)}
         </p>
@@ -12774,7 +13069,10 @@ async function _ssDownloadOne(src, season, episode, opts={}){
               series:(opts.series!==undefined)?opts.series:(_ssGroup&&_ssGroup.title)||"",
               season, episode, save_path:"",
               profile_id:profile.id,
-              admin_only:(opts.locked!==undefined)?opts.locked:_ssLocked};
+              admin_only:(opts.locked!==undefined)?opts.locked:_ssLocked,
+              // The show the user picked. A detached background run may outlive
+              // the open page, so the caller can pass its own snapshot.
+              ...((opts.tmdb!==undefined)?opts.tmdb:_ssTmdbBinding())};
   const r=await fetch("/api/library/download",{
     method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body),
   });
@@ -12885,6 +13183,9 @@ function _bgCtx(scope){
     absolute:_ssTmdbAbsolute(),
     origEnglish:_ssOrigEnglish(),
     audioPref:_ssAudioPref,
+    // Snapshot, not a live read: a detached run keeps queueing after the user
+    // closes the show page, and `_ssMeta` is null by then.
+    tmdb:_ssTmdbBinding(),
     searched:_ssEpisodesSearched,
     scope:(scope===undefined)?_ssBulkScope:scope,
     seasons:_ssAllSeasons(),
@@ -13183,16 +13484,16 @@ function _ssRenderBulkChoose(){
   const rec=_ssBestPackForScope();
   const recHtml=rec?`
     <div class="p-3 bg-indigo-950/50 border border-indigo-800">
-      <p class="text-[10px] font-black uppercase tracking-widest text-indigo-300 mb-1">Season pack available</p>
+      <p class="text-[10px] font-black uppercase tracking-widest text-indigo-300 mb-1">Whole season available</p>
       <p class="text-xs text-gray-200 line-clamp-2">${escHtml(rec.title)}</p>
       <p class="text-[11px] text-gray-500 mt-1 flex items-center gap-1.5 flex-wrap">
         <span class="text-[10px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-indigo-900/60 text-indigo-300">${escHtml(_ssPackLabel(rec))}</span>
         ${_ssAudioBadgeHtml(rec)}
-        <span class="font-mono font-semibold ${rec.seeders>30?"text-green-400":rec.seeders>8?"text-yellow-400":"text-red-400"}">${rec.seeders} ↑</span> · ${escHtml(rec.size_human)}
+        ${_availHtml(rec.seeders)} · ${escHtml(rec.size_human)}
       </p>
       <p class="text-[10px] text-gray-500 mt-1.5">One download, consistent quality and audio across every episode — usually better than grabbing episodes one by one.</p>
       <button onclick="ssBulkUsePack()"
-        class="mt-2 w-full bg-indigo-600 hover:bg-indigo-500 py-2.5 text-xs font-black uppercase tracking-wide min-h-[40px]">Download the pack instead</button>
+        class="mt-2 w-full bg-indigo-600 hover:bg-indigo-500 py-2.5 text-xs font-black uppercase tracking-wide min-h-[40px]">Get the whole season instead</button>
     </div>`:"";
   body.innerHTML=`
     <div>
@@ -13266,8 +13567,10 @@ function _ssSetBulkScope(v){
 // (rel ≥ 0.7 — the downloads list carries every group from the broad search,
 // including franchise siblings) qualify; preference-matching packs win, then
 // _ssPackCmp (relevance bucket → audio pref → seeders) picks the best.
-function _ssBestPackForScope(){
-  const want=_ssBulkScope;
+// `want` defaults to the bulk sheet's scope; pass a season number to ask
+// directly (Simple mode, which never opens that sheet).
+function _ssBestPackForScope(want){
+  if(want===undefined) want=_ssBulkScope;
   const seasons=_ssSeasonsWithEpisodes();
   const cand=_ssPacks.filter(p=>{
     if(typeof p.rel==="number"&&p.rel<0.7) return false;
@@ -13395,8 +13698,11 @@ function _dvRiskBadge(s){
 // tab, or goes off to watch something. Finding sources for a season is minutes
 // of indexer round trips and there is nothing for the user to decide while it
 // happens, so there is no reason to hold them there.
-function ssBulkAuto(){
-  const ctx=_bgCtx();
+// `scope` is optional: omitted it uses the bulk sheet's chosen scope (the
+// advanced path), passed it scopes the run directly — which is how Simple
+// mode's one-button "Get this season" reuses this whole machine unchanged.
+function ssBulkAuto(scope){
+  const ctx=_bgCtx(scope);
   const filt=_ssParseBulkFilters();
   const scopeLbl=(ctx.scope==="all")?"all seasons":`Season ${ctx.scope}`;
   const started=_bgRun(`${ctx.title} — ${scopeLbl}`, async(ctl,report)=>{
@@ -13447,7 +13753,8 @@ async function _bgStartDownloads(ctx, ctl, report, jobs, note="", opts={}){
     report(`Starting downloads — ${i+1}/${jobs.length}`,
            _ssEpCode(j.season,j.episode), (i+1)/jobs.length);
     const done=await _ssDownloadOne(j.src, j.season, j.episode,
-                                    {silent:true, series:ctx.title, locked:ctx.locked});
+                                    {silent:true, series:ctx.title, locked:ctx.locked,
+                                     tmdb:ctx.tmdb});
     if(!done) failed.push(_ssEpCode(j.season,j.episode));
     else if(done.duplicate) dup++;
     else started++;
@@ -21715,7 +22022,7 @@ document.addEventListener("DOMContentLoaded",async()=>{
       try{
         const profiles=await fetchProfiles();
         const found=profiles.find(x=>x.id===p.id);
-        if(found){ profile=found; renderNavProfile(); applyMaxVolumeToSliders(); loadSearchIndexers(); _appSyncSetProfile(); _appFlushOfflineProgress(); connectSSE(); _appProxiedAutoPlay(); _maybePromptForPin(found); return; }
+        if(found){ profile=found; applySimpleUi(); renderNavProfile(); applyMaxVolumeToSliders(); loadSearchIndexers(); _appSyncSetProfile(); _appFlushOfflineProgress(); connectSSE(); _appProxiedAutoPlay(); _maybePromptForPin(found); return; }
         // Saved profile no longer exists on the server (deleted/renamed id).
         if(window.__appShowError) window.__appShowError("Saved profile id "+p.id+" not found among "+profiles.length+" server profiles.");
       } catch(e){
@@ -21731,6 +22038,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">13.2.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">14.0.0</div>
 </body>
 </html>

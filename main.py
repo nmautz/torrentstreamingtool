@@ -2433,6 +2433,47 @@ def _tmdb_pick_tv(query: str, results: list[dict]) -> Optional[dict]:
     return max(results, key=score)
 
 
+def _tmdb_pick_movie(query: str, results: list[dict]) -> Optional[dict]:
+    """Choose the best movie match from a TMDb /search/movie result set.
+
+    The TV side has scored its candidates since the "Big Brother" fix; the movie
+    side took `results[0]` verbatim, and TMDb's raw movie ranking is popularity-
+    shaped, not title-shaped. `query="Regular Show"` returns **"Regular Show:
+    The Movie"** ahead of the movie actually called "Regular Show" — so a season
+    pack that reached the movie branch bound the show's spin-off film and cached
+    it forever (reported 2026-09-15).
+
+    Same tiering as `_tmdb_pick_tv` so both kinds are comparable: an exact title
+    beats a title that merely extends the query, and popularity only breaks ties
+    inside a tier.
+    """
+    if not results:
+        return None
+    q = _tmdb_norm_title(query)
+
+    def score(r: dict) -> tuple[int, float]:
+        name = _tmdb_norm_title(r.get("title") or r.get("original_title") or "")
+        if name == q:                       tier = 3   # exact
+        elif q and name.startswith(q):      tier = 2   # candidate extends the query
+        elif q and q in name:               tier = 1   # query appears inside candidate
+        elif name and q.startswith(name):   tier = 1   # candidate is a prefix of query
+        else:                               tier = 0
+        return (tier, float(r.get("popularity") or 0))
+
+    return max(results, key=score)
+
+
+def _tmdb_match_tier(query: str, name: str) -> int:
+    """The title-match tier `_tmdb_pick_tv` / `_tmdb_pick_movie` assign, exposed
+    so a TV candidate and a movie candidate can be compared against each other."""
+    q, n = _tmdb_norm_title(query), _tmdb_norm_title(name)
+    if n == q:                      return 3
+    if q and n.startswith(q):       return 2
+    if q and q in n:                return 1
+    if n and q.startswith(n):       return 1
+    return 0
+
+
 def _title_says_series(item: dict) -> bool:
     """Does this item's *name* carry a season/episode marker (S01E02, 1x02, S01,
     "Season 1", "2nd Season")?
@@ -2524,7 +2565,21 @@ async def _tmdb_match_show(item: dict) -> Optional[dict]:
         )
         mv_results = (movie or {}).get("results", []) or []
         if mv_results:
-            r = mv_results[0]
+            r = _tmdb_pick_movie(query, mv_results)
+            # `is_movieish` is a guess made from an EMPTY file list — a torrent
+            # added a second ago has resolved nothing, so a season pack looks
+            # exactly like a one-shot movie. Hard title evidence outranks that
+            # guess: if a TV show is named exactly what we searched for and the
+            # best movie only *extends* the query, take the show. This is the
+            # "Regular Show" pack that bound "Regular Show: The Movie".
+            if tv_results:
+                tv_best = _tmdb_pick_tv(query, tv_results)
+                tv_tier = _tmdb_match_tier(
+                    query, tv_best.get("name") or tv_best.get("original_name") or "")
+                mv_tier = _tmdb_match_tier(
+                    query, r.get("title") or r.get("original_title") or "")
+                if tv_tier == 3 and mv_tier < 3:
+                    return {"kind": "tv", "id": tv_best["id"], "raw": tv_best}
             return {"kind": "movie", "id": r["id"], "raw": r}
 
     # Fall back to the TV result for series-shaped items even if movieish failed
@@ -2846,7 +2901,7 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
         # Manual picks / hand-entered custom metadata are pinned — never let a
         # plain (non-forced) access silently re-run the auto-match over them.
         # Custom entries have no tmdb_id, so this is the guard that protects them.
-        if cached.get("source") in ("manual", "custom") and not force and not stale_seasons:
+        if cached.get("source") in ("manual", "custom", "picked") and not force and not stale_seasons:
             return await _settle_attribution(lib, item, cached)
         # `stale_kind` is only ever set on a `source == "tmdb"` binding, so the
         # manual/custom guard above needs no matching clause — a deliberate
@@ -2855,11 +2910,19 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
                 and not stale_seasons and not stale_kind):
             return await _settle_attribution(lib, item, cached)
 
+        # The binding the user picked in Smart search, carried through the
+        # download. There is nothing to infer when the answer was handed to us —
+        # skip the fuzzy match entirely (see DownloadReq.tmdb_id).
+        pick = item.get("tmdb_pick") or {}
+        picked = (int(pick.get("id") or 0) > 0
+                  and pick.get("kind") in ("tv", "movie"))
         if override_tmdb_id and override_kind:
             match = {"kind": override_kind, "id": int(override_tmdb_id)}
         elif stale_seasons:
             # Season-inventory top-up only — reuse the existing binding verbatim.
             match = {"kind": "tv", "id": int(cached["tmdb_id"])}
+        elif picked:
+            match = {"kind": pick["kind"], "id": int(pick["id"])}
         else:
             match = await _tmdb_match_show(item)
         if not match:
@@ -2881,10 +2944,16 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
         # season-inventory top-up re-fetches the SAME binding, so it must keep
         # whatever source that binding already had — demoting a pinned "manual"
         # to "tmdb" would reopen it to silent auto-rematching.
+        # `picked` is the user's own choice from the search page, so it is pinned
+        # exactly like a manual correction — never silently re-matched, and never
+        # reopened by the movie-binding repair below (a deliberate movie stays a
+        # movie).
         if stale_seasons and not override_tmdb_id:
             data["source"] = cached.get("source") or "tmdb"
+        elif override_tmdb_id:
+            data["source"] = "manual"
         else:
-            data["source"] = "manual" if override_tmdb_id else "tmdb"
+            data["source"] = "picked" if picked else "tmdb"
 
         # The kind re-check gets exactly one shot. If TMDb still has no TV show
         # for this name, stamp the binding so `_movie_binding_is_stale` stops
@@ -9380,6 +9449,14 @@ class DownloadReq(BaseModel):
     download_mode: str = "now"      # "now" = download immediately; "idle" = only during idle/night window
     profile_id: str = ""            # who is asking — only meaningful alongside admin_only
     admin_only: bool = False        # start the item content-locked (elevated profiles only)
+    # The TMDb entry the user actually picked, when the caller knows it. Smart
+    # search opens a show page FROM a TMDb candidate, so the right answer is in
+    # hand at download time — and throwing it away meant the server re-guessed
+    # the show from the release name and could land somewhere else entirely
+    # (a "Regular Show" season pack bound "Regular Show: The Movie"). Empty from
+    # Classic search / a pasted magnet, which still fall back to the guess.
+    tmdb_id: int = 0
+    tmdb_kind: str = ""             # "tv" | "movie"
 
 
 class VisibilityReq(BaseModel):
@@ -9741,6 +9818,33 @@ class BackgroundEnabledReq(BaseModel):
     enabled: bool
 
 
+def _profile_simple_ui(p: dict) -> bool:
+    """Does this profile get the simplified UI?
+
+    StreamLink grew as a tool for someone who knows what a torrent is. Everything
+    that decision leaked into the interface — seeder counts, season packs vs
+    single episodes, download and stream-prep priority tiers, piece-hash
+    rechecks — is noise to the rest of the household, and noise in a UI reads as
+    "I am not allowed to touch this".
+
+    Simple is therefore the DEFAULT, and `elevated` (the PIN-verified household
+    admin flag that already gates content locks and deletes) is what opts a
+    profile out. An explicit `simple_ui` on the profile overrides both
+    directions, so an elevated profile can still choose the quiet interface.
+
+    Nothing here is a security boundary — Simple hides controls, it does not
+    protect them. The endpoints keep their own auth.
+    """
+    v = p.get("simple_ui")
+    if v is None:
+        return not bool(p.get("elevated", False))
+    return bool(v)
+
+
+class ProfileSimpleUiReq(BaseModel):
+    simple_ui: Optional[bool] = None   # None clears the override (back to the default)
+
+
 # ── Routes: Profiles ─────────────────────────────────────────────────────────
 
 @app.get("/api/profiles")
@@ -9758,6 +9862,7 @@ async def list_profiles(request: Request) -> JSONResponse:
             "resume_mode":       p.get("resume_mode", "auto"),
             "subtitles_on":      p.get("subtitles_on"),
             "allowed_indexers":  list(p.get("allowed_indexers", [])),
+            "simple_ui":         _profile_simple_ui(p),
         }
         for p in lib["profiles"]
     ]
@@ -10383,7 +10488,8 @@ async def _tmdb_lookup_by_title(title: str, year: Optional[int],
                                   **({"year": year} if year else {})})
             mv_results = (mv or {}).get("results", []) or []
             if mv_results:
-                match = {"kind": "movie", "id": mv_results[0]["id"]}
+                best = _tmdb_pick_movie(query, mv_results)
+                match = {"kind": "movie", "id": best["id"]}
         if match is None:
             return None
 
@@ -11297,6 +11403,11 @@ async def library_download(request: Request, req: DownloadReq) -> JSONResponse:
             "admin_only": bool(req.admin_only),
             "download": {"mode": req.download_mode if req.download_mode in ("now", "idle") else "now",
                          "files": {}},
+            # Pinned TMDb binding from the search page the user came from. Read
+            # by _fetch_item_metadata INSTEAD of running the fuzzy match. See
+            # DownloadReq.tmdb_id.
+            **({"tmdb_pick": {"id": int(req.tmdb_id), "kind": req.tmdb_kind}}
+               if req.tmdb_id > 0 and req.tmdb_kind in ("tv", "movie") else {}),
             # Persist everything the pipeline needs so an interrupted add (app restart
             # before the torrent_hash is recorded) can be re-driven on startup instead
             # of leaving an orphaned, hash-less item stuck forever in the ongoing list.
@@ -12563,7 +12674,7 @@ async def library_play_now(req: PlayNowReq) -> JSONResponse:
     # Resolve the file the user picked (or the main video for a single-file torrent).
     vid = _file_by_index(qfiles, req.file_index) if req.file_index >= 0 else largest_video(qfiles)
     if not vid:
-        raise HTTPException(400, "No playable video file in this torrent.")
+        raise HTTPException(400, "No playable video file in this download.")
     target_path = str(Path(save_path) / vid.get("name", ""))
 
     await _begin_library_file_stream(item, target_path, req.profile_id)
@@ -17654,6 +17765,7 @@ async def verify_profile_pin(
         "resume_mode":       profile.get("resume_mode", "auto"),
         "subtitles_on":      profile.get("subtitles_on"),
         "allowed_indexers":  list(profile.get("allowed_indexers", [])),
+        "simple_ui":         _profile_simple_ui(profile),
     }})
     # Deliberately NOT `secure`: this appliance is served over plain HTTP as well
     # as HTTPS on the same host, and a Secure cookie would be withheld from the
@@ -17687,6 +17799,29 @@ async def set_profile_auto_skip(profile_id: str, req: ProfileAutoSkipReq) -> JSO
         "auto_skip_intro":   bool(profile.get("auto_skip_intro", False)),
         "auto_skip_credits": bool(profile.get("auto_skip_credits", False)),
     })
+
+
+@app.post("/api/profiles/{profile_id}/simple-ui")
+async def set_profile_simple_ui(profile_id: str, request: Request,
+                                req: ProfileSimpleUiReq) -> JSONResponse:
+    """Switch a profile between the simplified and the full interface.
+
+    Gated like the other household-shaping endpoints (admin session or a
+    PIN-verified profile): the whole point is that the people on Simple profiles
+    aren't handed the advanced controls, so they must not be able to hand them
+    to themselves. `simple_ui: null` drops the override and returns the profile
+    to the default (see `_profile_simple_ui`).
+    """
+    async with mutate_library() as lib:
+        _require_delete_auth(request, lib)
+        profile = next((p for p in lib.get("profiles", []) if p["id"] == profile_id), None)
+        if not profile:
+            raise HTTPException(404, "Profile not found.")
+        if req.simple_ui is None:
+            profile.pop("simple_ui", None)
+        else:
+            profile["simple_ui"] = bool(req.simple_ui)
+    return JSONResponse({"ok": True, "simple_ui": _profile_simple_ui(profile)})
 
 
 @app.post("/api/profiles/{profile_id}/resume-mode")

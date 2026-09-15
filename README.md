@@ -122,6 +122,28 @@ Press **Ctrl+C** to stop the dashboard. VLC, qBittorrent, and Jackett keep runni
 
 ---
 
+## Profiles: Simple vs Full
+
+Everyone who watches gets a profile, and each profile gets one of two interfaces.
+
+- **Simple** — the default for every profile. Search for a show, pick it by its poster,
+  press **Get this season**; StreamLink finds the best copy and downloads it. No seeder
+  counts, no season-packs-versus-episodes decision, no download or stream-prep priority
+  controls, no storage settings. This is the one to leave the household on.
+- **Full** — everything above plus the advanced controls: per-episode source pickers,
+  download/stream-prep schedules and priorities, hash rechecks, bulk selection, storage
+  paths and per-drive free space.
+
+Profiles marked **elevated** (the ones that can see content-locked items) default to Full;
+every other profile defaults to Simple. To change one, open the profile menu → **Manage
+profiles** and use the **Simple / Full** button on that profile's row. Changing it needs
+either the admin password or a PIN-verified profile, so nobody can promote themselves.
+
+Simple mode only hides controls — it is not a permission system. Use a **PIN** plus the
+content lock (see the admin panel) for anything that needs to actually be restricted.
+
+---
+
 ## Ports & credentials (you choose these)
 
 StreamLink does not invent ports or passwords for you — **you pick them in `setup.py`, and the exact same values must be set inside each app and in `.env`.** A mismatch is the most common reason a fresh install "doesn't work."

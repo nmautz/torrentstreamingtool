@@ -94,6 +94,12 @@ The only persistent server-side state. Lives at the project root. Accessed via `
   "color": "indigo|purple|green|red|orange|pink",
   "pin_hash": "sha256(pin)",            // optional; 6-digit pin
   "elevated": true,                     // optional; can view admin_only items
+  "simple_ui": false,                   // optional (14.0.0). Does this profile get the SIMPLIFIED interface?
+                                        //   absent  = default: `not elevated` (so the household is Simple, the admin is Full)
+                                        //   true/false = explicit override in either direction
+                                        // Set via POST /api/profiles/{id}/simple-ui (admin or PIN-verified).
+                                        // Presentation only — it hides controls, it does not protect them;
+                                        // every endpoint behind those controls keeps its own auth.
   "auto_skip_intro":   true,            // optional; default false
   "auto_skip_credits": true,            // optional; default false
   "resume_mode": "auto|prompt|off",     // default "auto"
@@ -228,6 +234,12 @@ or HDR content — the browser path downmixes to AAC stereo and does no tone map
   "default_visible_profiles": [],       // optional; if non-empty, only these profile IDs see item by default
   "hidden_by_profiles": [],            // optional; profile IDs that personally hid this item
   "skip_data": { /* per-file; see below */ },
+  "tmdb_pick": {"id": 31132, "kind": "tv"},  // optional (14.0.0). The TMDb entry the CALLER resolved, sent as
+                                        // {tmdb_id, tmdb_kind} on POST /api/library/download. Smart search opens a show
+                                        // page from a TMDb candidate, so the right answer exists before the download
+                                        // starts; `_fetch_item_metadata` binds it directly INSTEAD of running the fuzzy
+                                        // match, and stamps the result `source: "picked"` (pinned). Absent for Classic
+                                        // search and pasted magnets, which still fall back to matching.
   "metadata": { /* optional; TMDb cache — see below */ }
 }
 ```
@@ -596,7 +608,7 @@ The profile-level **`shuffle`** / **`shuffle_scope`** fields are the *persisted*
 
 ```jsonc
 "metadata": {
-  "source":        "tmdb" | "manual" | "custom",  // see "pinning" below
+  "source":        "tmdb" | "picked" | "manual" | "custom",  // see "pinning" below
   "tmdb_id":       12345,                  // absent on custom entries
   "tmdb_kind":     "tv" | "movie",
   "title":         "Monster",
@@ -639,7 +651,7 @@ Populated by `_fetch_item_metadata` ([main.py](../main.py)) on first hit of `GET
 
 Each successful fetch also **pre-warms the on-disk artwork cache** (`.tmdb_img_cache/`, `_prefetch_metadata_images`): poster w342, backdrop w1280, season posters w342, episode stills w300 — served to clients via the `/api/metadata/img` proxy (the `img_base` all metadata endpoints now return), so artwork keeps rendering on the LAN when the internet is down.
 
-**`source` and pinning.** Every cached entry records how it was chosen: `"tmdb"` (auto-matched — the first search result), `"manual"` (a user force-bound a specific TMDb entry), or `"custom"` (a user hand-entered the fields). `manual` and `custom` are **pinned**: `_fetch_item_metadata` returns them unchanged on any non-forced access, and `rename` leaves them intact (see below). Only `tmdb` (or missing-`source`) entries are re-resolved. `custom` entries have **no `tmdb_id`** and use `poster_url`/`backdrop_url` (absolute) instead of TMDb paths; `seasons` is `{}` so episode titles/stills fall back to filename parsing.
+**`source` and pinning.** Every cached entry records how it was chosen: `"tmdb"` (auto-matched from the release name), `"picked"` (14.0.0 — the caller supplied the binding at download time via `tmdb_pick`, i.e. the user chose this show from the Smart-search poster list), `"manual"` (a user force-bound a specific TMDb entry after the fact), or `"custom"` (a user hand-entered the fields). `picked`, `manual` and `custom` are **pinned**: `_fetch_item_metadata` returns them unchanged on any non-forced access, and `rename` leaves them intact (see below). Only `tmdb` (or missing-`source`) entries are re-resolved. `custom` entries have **no `tmdb_id`** and use `poster_url`/`backdrop_url` (absolute) instead of TMDb paths; `seasons` is `{}` so episode titles/stills fall back to filename parsing.
 
 **User-facing correction (any profile — not admin-gated, unlike `/refresh`).** Two endpoints back the "Fix metadata" control on the episode-page hero (`openMetaFix()`):
 - `GET /api/library/{id}/metadata/search?query=&kind=` — returns TMDb candidate matches (`{id, kind, title, year, overview, poster_path}`) so the user can pick the correct one. Empty `query` derives from the item name; `kind` (`tv`/`movie`/empty=both) filters.
