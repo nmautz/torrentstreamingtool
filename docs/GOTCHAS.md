@@ -3020,11 +3020,26 @@ the TV still opens VLC" survived the build that fixed it — a stale page still 
 `hlsAvailable = !TV_MODE`, which routes every TV play to VLC.
 
 The `no_heuristic_html_cache` middleware sets `Cache-Control: no-cache, must-revalidate`
-on any `text/html` response. Middleware, not a `StaticFiles` subclass: the hook a
-subclass would override (`file_response`) is a Starlette internal whose name and shape
-vary by version, and overriding it silently did nothing (13.1.1 shipped that and the
-header was still absent on the live box). Content-type is the stable contract, and it
-covers `/tv` and `/admin` too — both bare `FileResponse`s with the same gap. `no-cache`
+on any `text/html` response. Middleware, not a `StaticFiles` subclass: `file_response` is a
+Starlette internal whose name and shape are not a stable contract across versions, and a
+subclass of the static mount cannot cover `/tv` and `/admin` — both bare `FileResponse`s
+with the same gap. Content-type covers all of them.
+
+### Measuring a deploy against the process you just replaced
+
+`apply` with `reboot:true` responds **before** the host goes down (~1.5 s later), so a
+readiness loop that starts polling immediately can get its first 200 from the **old**
+process and declare the box "back" without a reboot having happened. Anything measured in
+that window describes the previous build. This produced a confident, wrong "the fix
+didn't apply" — the fix was fine.
+
+Wait for `/api/version` to **change**, not for the server to answer:
+
+```bash
+before=$(curl -s http://HOST/api/version | python -c "import sys,json;print(json.load(sys.stdin)['version'])")
+# …apply…
+until [ "$(curl -s --max-time 4 http://HOST/api/version 2>/dev/null | python -c "import sys,json;print(json.load(sys.stdin)['version'])" 2>/dev/null)" != "$before" ]; do sleep 5; done
+``` `no-cache`
 does **not** mean "don't cache" — it means "cache, but revalidate every time", which on a
 LAN is one conditional request answered 304 with no body. `checkUiVersion` (badge vs
 `/api/version`, then a cache-busting hard reload) is the second line of defence, but it

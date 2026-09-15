@@ -1,15 +1,21 @@
 # Changelog
 
 ## [13.1.2] — 2026-09-15
-**13.1.1's cache fix didn't actually apply.**
+**Hardened the cache header, and corrected a misdiagnosis.**
 
-It overrode `StaticFiles.file_response`, and verifying against the live box showed the
-header still absent — that hook is a Starlette internal whose name and shape vary by
-version, so the override silently did nothing. Moved to middleware keyed on
-`content-type: text/html`, which is the stable contract and also covers `/tv` and
-`/admin` (served by a bare `FileResponse`, which has the same missing-header problem).
+13.1.1's `StaticFiles.file_response` override **does** work — the live box serves
+`Cache-Control: no-cache, must-revalidate` on `/` and `/?tv=1` with it. An earlier draft
+of this entry claimed it didn't; that reading was taken against the *old* process still
+answering during the reboot window (the readiness loop's first probe can succeed before
+the host actually goes down), not against the new build. Measurement error, not a code
+failure. The lesson is in GOTCHAS: after an apply-with-reboot, wait for `/api/version` to
+*change* before believing anything you measure.
 
-Verified on the box this time, not assumed.
+The mechanism moved to middleware anyway, for two real reasons: `file_response` is a
+Starlette internal whose name and shape are not a stable contract across versions, and a
+subclass of the static mount can't cover `/tv` and `/admin`, which are served by a bare
+`FileResponse` and have exactly the same missing-header gap. Keying on
+`content-type: text/html` covers all of them.
 
 ## [13.1.1] — 2026-09-15
 **The TV could keep running the previous build's JavaScript.**
