@@ -17187,6 +17187,16 @@ async function lpPlay(itemId, files, seekTo, label, shuffle, shuffleScope, items
   if (!navigator.onLine && !_appOffline) {
     showAlert("Disconnected — streaming needs the host to be reachable.", "error"); return;
   }
+  // TV kiosk: claim the playback surface from the moment a play STARTS, not from
+  // when the picture appears. Prep/probe can take a while (much longer on a cold
+  // just-in-time transcode), and until the surface is claimed the remote's Back
+  // and Home don't reach this playback — there'd be no way to cancel a slow
+  // start from the couch. See _tvLocalBeat.
+  if (TV_MODE) {
+    _tvOpenItemId = itemId; _tvOpenFilePath = (files && files[0]) || "";
+    _tvOpenPendingUntil = Date.now() + TV_OPEN_PENDING_MS;
+    _tvLocalBeat(true);
+  }
   // Online play-time handoff: if this single-file play is fully downloaded, hand
   // off to the same-origin cached player so it plays from the on-device bundle
   // instead of streaming from the host (the loopback copy can only load
@@ -19709,10 +19719,33 @@ function lpVolumeStep(deltaPct) {
 // shared display fields every dashboard renders. Stops being sent the moment the
 // player goes away — the server reaps a stale claim after TV_LOCAL_STALE_SECS.
 let _tvBeatAt = 0, _tvBeatWasLive = false;
+// While an `open` is starting up, the player is NOT live yet — lpPlay has to
+// prep/probe the file before #localPlayer gets `lp-active`, which is seconds on
+// a bundle and much longer on a cold just-in-time transcode. Until this expires
+// a not-live beat reports "buffering" instead of releasing the surface.
+let _tvOpenPendingUntil = 0;
+const TV_OPEN_PENDING_MS = 90000;
 function _tvLocalBeat(force) {
   if (!TV_MODE) return;
   const live = _tvLocalLive();
+  if (live) _tvOpenPendingUntil = 0;   // up and running — the grace window is done
   if (!live) {
+    // Still starting up: hold the claim rather than dropping it. Releasing here
+    // was a real bug — the ack beat arms _tvBeatWasLive before lpPlay finishes,
+    // so the next tick posted `active:false` and handed the remote back to VLC
+    // for several seconds mid-launch, flapping stream_status to idle (which can
+    // let background_video_loop put the idle video over the launching player).
+    if (Date.now() < _tvOpenPendingUntil) {
+      _tvBeatAt = Date.now();
+      fetch("/api/tv-local/state", {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({
+          active: true, item_id: lp.itemId || _tvOpenItemId || "",
+          file_path: lp.filePath || _tvOpenFilePath || "", playback: "buffering",
+        }),
+      }).catch(() => {});
+      return;
+    }
     // One release beat on the way down so the surface frees immediately rather
     // than waiting out the server's staleness timer.
     if (_tvBeatWasLive) {
@@ -19748,7 +19781,7 @@ function _tvLocalBeat(force) {
 // fire-and-forget, and a cold kiosk isn't connected yet — see
 // _tv_local_open_pump). Without this guard the retry that crosses with our page
 // coming up would call lpPlay twice and restart the episode.
-let _tvOpenKey = "", _tvOpenAt = 0;
+let _tvOpenKey = "", _tvOpenAt = 0, _tvOpenItemId = "", _tvOpenFilePath = "";
 
 function _tvLocalOpen(d) {
   // VLC → on-device switch, pushed by POST /api/tv-local/open (the fullscreen
@@ -19757,6 +19790,9 @@ function _tvLocalOpen(d) {
   const key = d.item_id + " " + d.file_path;
   if (key === _tvOpenKey && Date.now() - _tvOpenAt < 60000) return;   // duplicate
   _tvOpenKey = key; _tvOpenAt = Date.now();
+  _tvOpenItemId = d.item_id; _tvOpenFilePath = d.file_path;
+  // Hold the surface through lpPlay's prep/probe — see _tvLocalBeat.
+  _tvOpenPendingUntil = Date.now() + TV_OPEN_PENDING_MS;
   _tvFallbackDoneFor = "";
   // Acknowledge straight away so the server's retry pump stops re-sending.
   // Deliberately NOT _tvLocalBeat(): the player isn't up yet, so _tvLocalLive()
@@ -20072,6 +20108,10 @@ async function lpUnloadCurrent() {
 }
 
 async function lpStop() {
+  // TV kiosk: end the startup grace window FIRST, or the next heartbeat would go
+  // on claiming "buffering" for the rest of it instead of releasing the surface —
+  // holding the TV on a stopped player and keeping the idle video away.
+  _tvOpenPendingUntil = 0; _tvOpenKey = "";
   const v = document.getElementById("lpVideo");
   // Playback is over: no handoff, and drop TV Mode so the phone's screen comes
   // back (setTvMode(false) is idempotent and restores brightness).
@@ -21533,6 +21573,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">13.0.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">13.0.2</div>
 </body>
 </html>

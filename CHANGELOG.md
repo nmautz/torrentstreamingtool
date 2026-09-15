@@ -1,5 +1,30 @@
 # Changelog
 
+## [13.0.2] — 2026-09-15
+**The TV handed the remote back to VLC for six seconds every time it started playing.**
+
+13.0.1 got an episode onto the TV, and the live state stream showed a flap on the way
+there: surface claimed → **released** → claimed again, `stream_status` going
+`buffering → idle → playing`. The server log named it: `releasing surface (page reported
+inactive)`.
+
+Self-inflicted. The page's acknowledgement beat arms `_tvBeatWasLive`, but the player
+isn't live until `lpPlay` has finished prepping and `#localPlayer` gets `lp-active` —
+seconds on a ready bundle, much longer on a cold just-in-time transcode. The 2 s
+heartbeat fired in that gap, saw `_tvLocalLive()` false, and took the "playback ended"
+branch: `{active:false}`.
+
+Not cosmetic. For those seconds the remote's transport keys routed to **VLC** instead of
+the launching player, and `stream_status` sat at `idle` — which is exactly the condition
+`background_video_loop` uses to decide it may put the idle video on screen.
+
+A not-live beat now reports `buffering` and holds the claim while a start is in flight,
+rather than releasing. The same window is armed by `lpPlay` on the TV, so the surface is
+claimed from the moment a play *starts* — previously nothing was claimed during a slow
+prep, which left the couch with no way to cancel it (Back and Home are gated on
+`_tv_anything_playing()`). `lpStop` clears the window first, so a stop still releases
+immediately instead of claiming "buffering" for the remainder of it.
+
 ## [13.0.1] — 2026-09-15
 **Three things 13.0.0 only found once it ran on the real TV.**
 

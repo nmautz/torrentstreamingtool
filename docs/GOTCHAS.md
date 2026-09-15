@@ -2984,6 +2984,29 @@ Two traps inside the fix:
   `_tvLocalOpen` posts a hand-rolled claim beat instead, and ignores a duplicate `open`
   for the same file within 60 s so a crossing retry can't restart the episode.
 
+### "Not playing yet" and "stopped playing" look identical to a heartbeat
+
+The kiosk's `/api/tv-local/state` beat decides claim-vs-release from `_tvLocalLive()`,
+which needs `#localPlayer.lp-active` — and `lpPlay` only sets that once prep has
+resolved. Between the play starting and the picture appearing the beat sees exactly what
+it sees after a stop, and the naive version released the surface mid-launch.
+
+Observed as a flap on the live state stream: claimed → released → claimed, with
+`stream_status` going `buffering → idle → playing` and the log saying
+`releasing surface (page reported inactive)`. It is not cosmetic — for those seconds the
+remote's transport keys route to **VLC** instead of the launching player, and
+`stream_status: idle` is the condition `background_video_loop` uses to decide it may put
+the idle video on screen.
+
+`_tvOpenPendingUntil` is the disambiguator: while a start is in flight a not-live beat
+reports `buffering` and holds the claim. Armed by both `_tvLocalOpen` and `lpPlay` (TV
+only) and cleared by `lpStop` — that last one matters, or a stop keeps claiming
+"buffering" for the rest of the window and holds the TV on a dead player.
+
+Claiming from the *start* of a play, not from first picture, is also what makes a slow
+start cancellable: Back and Home are gated on `_tv_anything_playing()`, so with nothing
+claimed the couch has no way to abandon a cold transcode.
+
 - [BACKEND.md](BACKEND.md) — invariants enforced by `main.py`
 - [DAEMON_WATCHDOG.md](DAEMON_WATCHDOG.md) — VPN guard at the process level
 - [ANALYZER.md](ANALYZER.md) — Smart Skip algorithm details and fallback chain
