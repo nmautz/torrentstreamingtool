@@ -709,6 +709,47 @@ On `DOMContentLoaded`:
 
 Delete failures surface the server's `detail` rather than a generic message — a 403 here means "no PIN-verified profile", which is actionable in a way "could not delete" isn't.
 
+### One-press Get, from the library (14.1.0)
+
+The missing-episode rows and the "none of this season is here" banner used to offer **Find
+sources**, which opened the search show screen scoped to the gap — leaving the user to run
+a search and pick a release. They now offer **Get**, which finds *and* downloads in one
+press, without the search screen opening.
+
+- `_epOwnedRow()` builds a `{have, pending}` coverage row from `epFiles` (not the
+  `/coverage` snapshot — the episode page already holds the authoritative per-file truth,
+  and files still downloading must count as owned so a second press can't re-queue them).
+- `_epBgCtx(scope, only)` builds the detached-run context from the **library** item in the
+  same shape `_bgCtx` builds from the search screen, so `_bgEnsureSources` /
+  `_bgAutoPick` / `_bgStartDownloads` are reused unchanged. `searched: true` skips the
+  broad show-title query — no search page is open to inherit one, and the per-season
+  targeted query the sweep runs is the better one anyway (see `ssSearchSeason`).
+- `only` narrows a run to a single episode by marking that season's **other** episodes as
+  owned, rather than filtering afterwards: the gap set is what the sweep searches, so this
+  is the difference between one indexer query and one per episode in the season.
+- `epGetSeason` / `epGetEpisode` are the entry points; `epFindSeason` / `epFindEpisode`
+  (the old handoff) survive behind a **Choose** button rendered only for Full profiles.
+
+### Live download readouts on library cards (14.1.0)
+
+Two gaps closed. `POST /api/library/download` now broadcasts `library_update` on creation
+— the grid is only repainted by that event, so a download started from the library page
+was previously invisible until `library_download_monitor`'s next tick. And a **merged
+show** tile never reported progress at all: a show fetched episode by episode is many
+items behind one card, while the `library_progress` handler only knew `dl-stat-<id>` on a
+single-item card.
+
+Both card shapes now tag their stat line and progress bar with `data-dl-items` (a
+space-separated id list). `_libDlAgg(ids)` rolls several items' stats into one — summed
+bytes and speed, the slowest ETA, "finding peers" only while *nothing* has a size yet —
+and `_libRefreshDlStats(itemId)` repaints every readout covering the item that moved. One
+pass serves both shapes.
+
+**Use `innerHTML`, not `textContent`, for `formatDlStat` output.** It embeds an icon for
+the "Finding peers…" and "waiting for idle window" states; the old handler assigned it as
+text and printed a literal `<svg …>` into the card on every update after the first paint.
+Every value in that string is ours (byte counts and fixed labels), never user input.
+
 ## Simple mode (per-profile, 14.0.0)
 
 StreamLink's controls were built for someone who knows what a torrent is, and that

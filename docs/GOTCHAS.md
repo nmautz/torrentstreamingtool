@@ -105,6 +105,50 @@ TMDb's text search sometimes floats a low-signal partial above the obvious show:
 
 Note the deliberate split from the grouping rule above: `_tmdb_norm_title` **strips** a trailing country suffix (`US`/`UK`/`AU`/`CA`/`NZ`/…) for *scoring only* (so `Big Brother US` scores an exact match against TMDb's `Big Brother`), while the search **grouping key keeps** country tags (so `The Office US` stays a distinct card from a bare `The Office`). Two different layers — don't unify them. The country strip never touches the query we actually send to `/search/tv`; the right candidate is already in the result set, we just have to pick it.
 
+### A release that spaces its channel layout donates an episode number
+
+`Futurama-1999-S03 1080p WEBRip 10bit EAC3 2 0 x265-iVy.mkv` parsed as **episode 0**, and
+its season-1 sibling (`… EAC3 5 1 …`) parsed as **episode 1**. Neither number came from
+anything to do with episodes: both came from the **audio channel layout**.
+
+Season packs routinely name their first file after the RELEASE rather than the episode, so
+that one file carries no `SxxEyy` and falls through to `_episode_from_name`'s bare-number
+fallback, which takes the last number in the cleaned stem. `_NOISE_RE` stripped only the
+**glued** audio spellings (`AAC2.0`, `DDP5.1`) — a release that spaces or dots the layout
+apart left `2 0` / `5 1` standing. 2.0 audio gave episode 0; 5.1 audio gave episode 1. The
+5.1 seasons therefore looked *correct*, which is the worst possible outcome: it hid the
+bug until someone compared seasons. `_AUDIO_CH_RE` now strips a separated layout, anchored
+on the codec word and limited to real layouts (`<1-8> <0-1>`) so it can never eat a real
+episode number. The same applies to the video codec: `[xh]\.?26[45]` allowed only a dot,
+so an indexer that normalises separators to spaces left `H 264` → **264** behind.
+
+**The general rule: anything left standing after the noise strip becomes a candidate
+episode number.** When adding a release tag to `_NOISE_RE`, cover every separator the
+indexers produce (`.`, ` `, `-`, `_`), not just the one in the release you are looking at.
+
+### An unnumbered file in an otherwise complete season is deducible — but only just
+
+The other half of the same bug: nothing ever recovered the file that had no number. It sat
+at episode 0, first in the season, nameless, while the TMDb diff reported episode 1
+MISSING on a season the box holds complete — and offered to go and download it again.
+
+`_fill_season_gaps` (run at the end of `attribute_paths`) fills it: when a season holds
+exactly **one** numberless file and the numbered ones leave exactly **one** hole in the run
+`1..N` (N = how many files that season has), the hole is the answer. Every one of those
+conditions is load-bearing, so resist widening it:
+
+- **two numberless files** could go either way round — path order is not evidence;
+- **numbers past N** (2, 3, 17) mean this isn't a clean run, so a lone hole proves nothing;
+- **`abs`-flagged siblings** are series-absolute anime numbering, which `resolve_absolute`
+  rewrites once TMDb's counts are known — arithmetic run *before* that would fight it.
+
+Matching migration trap: the 11.19.0 re-attribution pass keyed on "no season **AND** no
+episode", so a file that got its season from the folder and nothing from its basename
+(season 3, episode 0) was never re-examined. The test is now "no episode, not bucketed",
+and the result is stamped `attrib_v` on the item so the regex work is once per item, not
+once per library load (`_load_lib_raw` runs on every load). Bucketed files are exempt:
+`Specials/Behind the Scenes.mkv` has no episode number because there isn't one.
+
 ### `/search/movie` needs the same scoring — and an empty file list is not evidence of a movie
 
 Two halves of the same 2026-09-15 report ("I downloaded Regular Show and the library showed *Regular Show: The Movie*; the first option in the swap dialog was the right one").

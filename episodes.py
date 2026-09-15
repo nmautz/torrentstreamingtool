@@ -53,8 +53,26 @@ _EP_DASH_RE  = re.compile(r"\s-\s+(\d{1,4})(?!\d)")
 # hold the fansub tag ("[Anime Time]"), the tracker stamp ("[eztv.re]") and the
 # quality block ("[1080p][HEVC 10bit x265]") — none of which carry the episode.
 _BRACKETS_RE = re.compile(r"[\[({][^\[\](){}]*[\])}]")
+# A channel layout that is SEPARATED from its codec ("EAC3 2 0", "AAC.5.1",
+# "DD+ 7 1"). `_NOISE_RE` below only ever caught the glued spellings
+# ("AAC2.0", "DDP5.1"), so a release that spaces or dots the layout apart left
+# "2 0" / "5 1" standing in the cleaned stem — and the bare-number fallback
+# then read the LAST of those as the episode number.
+#
+# That is not a theoretical tidy-up. The iVy Futurama packs name their first
+# file after the release itself, so it reaches the bare-number scan:
+#   "…S03 1080p WEBRip 10bit EAC3 2 0 x265-iVy"  ->  episode 0   (from "2 0")
+#   "…S01 1080p WEBRip 10bit EAC3 5 1 x265-iVy"  ->  episode 1   (from "5 1")
+# The 5.1 season looked correct purely by coincidence and the 2.0 seasons
+# collapsed to episode 0. Anchored on the codec word and limited to real
+# layouts (<1-8> <0-1>), so it cannot swallow an episode number.
+_AUDIO_CH_RE = re.compile(
+    r"\b(?:aac|ac-?3|eac-?3|dd\+?|ddp|dts(?:[\s._-]?hd)?(?:[\s._-]?ma)?|"
+    r"truehd|atmos|opus|flac|mp3)[\s._-]+[1-8][\s._-]+[01]\b",
+    re.IGNORECASE,
+)
 _NOISE_RE = re.compile(
-    r"\b(?:\d{3,4}[pi]|[xh]\.?26[45]|hevc|avc|av1|xvid|divx|10bit|8bit|"
+    r"\b(?:\d{3,4}[pi]|[xh][\s._-]?26[45]|hevc|avc|av1|xvid|divx|10bit|8bit|"
     r"bluray|blu-ray|bdrip|brrip|webrip|web-?dl|hdtv|dvdrip|remux|"
     r"aac\d?(?:\.\d)?|ac3|eac3|dts(?:-hd)?|ddp?\d(?:\.\d)?|flac|opus|truehd|"
     r"\d+(?:\.\d+)?\s*(?:[gmkt]i?b)|\d+ch|dual[\s._-]?audio|multi|repack|proper)\b",
@@ -113,6 +131,7 @@ def _clean(stem: str) -> str:
     """Strip bracketed groups and release noise so only title-ish text and the
     episode number survive."""
     s = _BRACKETS_RE.sub(" ", stem)
+    s = _AUDIO_CH_RE.sub(" ", s)      # before _NOISE_RE: it eats the codec word
     s = _NOISE_RE.sub(" ", s)
     return re.sub(r"\s+", " ", s).strip()
 
@@ -261,6 +280,49 @@ def parse_slot(rel_path: str) -> dict:
     return {"season": 0, "episode": ep, "bucket": "", "abs": bool(ep)}
 
 
+def _fill_season_gaps(slots: list[dict]) -> None:
+    """Give a number to the one file in a season that states none.
+
+    Season packs routinely name their first file after the RELEASE instead of
+    the episode: `Futurama-1999-S03 1080p WEBRip … x265-iVy.mkv` sits beside
+    `Futurama.S03E02…` through `…E15`. The season is known (the folder says
+    S03) but the basename carries no episode, so the file lands at episode 0 —
+    it sorts to the top of the season as a nameless row, and the TMDb diff then
+    reports episode 1 MISSING on a season the box holds complete.
+
+    When a season has exactly ONE such file and the numbered ones leave exactly
+    one hole in the run 1..N (N = how many files that season has), the hole is
+    the answer and there is nothing to guess.
+
+    Everything less clear-cut is deliberately left alone:
+      * two numberless files could go either way round;
+      * a season whose siblings are flagged `abs` is series-absolute numbering,
+        which belongs to `resolve_absolute` once TMDb counts are known — not to
+        an arithmetic guess made before that runs;
+      * numbers reaching past N (2, 3, 17) mean this isn't a clean run, so the
+        single hole isn't trustworthy.
+    """
+    by_season: dict[int, list[int]] = {}
+    for i, slot in enumerate(slots):
+        if slot["bucket"] or slot["season"] <= 0:
+            continue
+        by_season.setdefault(slot["season"], []).append(i)
+
+    for idxs in by_season.values():
+        blanks = [i for i in idxs if slots[i]["episode"] <= 0]
+        if len(blanks) != 1:
+            continue
+        if any(slots[i]["abs"] for i in idxs):
+            continue
+        nums = {slots[i]["episode"] for i in idxs if slots[i]["episode"] > 0}
+        if not nums:
+            continue
+        holes = [n for n in range(1, len(idxs) + 1) if n not in nums]
+        if len(holes) != 1:
+            continue
+        slots[blanks[0]]["episode"] = holes[0]
+
+
 def attribute_paths(paths: list[str]) -> list[dict]:
     """Structural attribution for a whole item's file list (pass 1).
 
@@ -280,6 +342,7 @@ def attribute_paths(paths: list[str]) -> list[dict]:
             if rel.startswith(".."):      # outside the shared root — use as-is
                 rel = norm
         out.append(parse_slot(rel))
+    _fill_season_gaps(out)
     return out
 
 

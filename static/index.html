@@ -4227,6 +4227,55 @@ function formatDlStat(d){
   }
   return parts.join(" · ");
 }
+// Roll several items' download stats into one, so a MERGED SHOW card can report
+// progress the same way a single-item card does. A show downloaded episode by
+// episode is many items behind one tile, and until now that tile showed only a
+// blinking "Downloading" badge — no size, no percentage, no speed — and even
+// that only appeared on a full library repaint.
+function _libDlAgg(ids){
+  let total=0, done=0, speed=0, eta=0, any=false, allPaused=true, awaiting=false;
+  ids.forEach(id=>{
+    const d=libDownloadStats.get(id);
+    if(!d) return;
+    any=true;
+    total+=d.total_bytes||0; done+=d.downloaded_bytes||0; speed+=d.speed_bps||0;
+    eta=Math.max(eta, d.eta_secs||0);          // the show is done when the slowest is
+    if(!d.paused) allPaused=false;
+    if(d.awaiting_metadata) awaiting=true;
+  });
+  if(!any) return null;
+  return {
+    total_bytes: total, downloaded_bytes: done, speed_bps: speed, eta_secs: eta,
+    progress_pct: total>0?Math.round(done/total*100):0,
+    paused: allPaused,
+    // Only claim "finding peers" while nothing at all has a size yet — one
+    // stalled member of a six-episode show must not hide the other five.
+    awaiting_metadata: awaiting && total<=0,
+  };
+}
+
+// Repaint every live download readout that covers `itemId`. Both card shapes
+// tag their stat line and bar with `data-dl-items`, so one pass serves the
+// single-item card and the merged show tile alike.
+function _libRefreshDlStats(itemId){
+  document.querySelectorAll("[data-dl-items]").forEach(el=>{
+    const ids=(el.getAttribute("data-dl-items")||"").split(" ").filter(Boolean);
+    if(itemId && !ids.includes(itemId)) return;
+    const agg=_libDlAgg(ids);
+    if(!agg) return;
+    if(el.classList.contains("lib-dl-bar")){
+      const fill=el.firstElementChild;
+      if(fill) fill.style.width=agg.progress_pct+"%";
+    } else {
+      // innerHTML, not textContent: formatDlStat embeds an icon for the
+      // "Finding peers…" / "waiting for idle window" states, and assigning that
+      // as text printed the raw <svg> markup into the card. Every value in it is
+      // ours (byte counts and fixed labels), never user input.
+      el.innerHTML=formatDlStat(agg);
+    }
+  });
+}
+
 function pad2(n)      { return String(n).padStart(2,"0"); }
 function epLabel(f)   {
   if(f.season && f.episode) return `S${pad2(f.season)}E${pad2(f.episode)}`;
@@ -6912,9 +6961,13 @@ function _libItemChrome(item){
     item.size_bytes>0?item.size_human:"",
   ].filter(Boolean).join(" · ");
 
-  const dlStat=isDownloading&&libDownloadStats.has(item.id)
-    ?`<div id="dl-stat-${item.id}" class="text-[11px] text-gray-500 font-mono mt-0.5">${formatDlStat(libDownloadStats.get(item.id))}</div>`
-    :isDownloading?`<div id="dl-stat-${item.id}" class="text-[11px] text-gray-500 font-mono mt-0.5"></div>`
+  const dlSelf=isDownloading?_libDlAgg([item.id]):null;
+  const dlStat=isDownloading
+    ?`<div id="dl-stat-${item.id}" data-dl-items="${item.id}"
+          class="lib-dl-stat text-[11px] text-gray-500 font-mono mt-0.5">${dlSelf?formatDlStat(dlSelf):""}</div>`
+     +`<div class="lib-dl-bar w-full bg-gray-800 h-0.5 mt-1" data-dl-items="${item.id}">
+         <div class="bg-yellow-500 h-0.5 transition-[width] duration-500" style="width:${dlSelf?dlSelf.progress_pct:0}%"></div>
+       </div>`
     :"";
   const prepChip=prepStats.has(item.id)
     ?`<div id="prep-stat-${item.id}" class="text-[11px] mt-0.5">${prepChipHtml(prepStats.get(item.id))}</div>`
@@ -7031,6 +7084,15 @@ function _libShowCardHtml(seriesTitle, gItems){
   const bits=[`${totalEps} ep`];
   if(seasons.length) bits.push(`${seasons.length} season${seasons.length>1?"s":""}`);
   if(doneCount) bits.push(`${doneCount}/${gItems.length} watched`);
+  // Live download readout for however many of this show's items are fetching.
+  const dlIds=gItems.filter(it=>it.status==="downloading").map(it=>it.id);
+  const dlAgg=dlIds.length?_libDlAgg(dlIds):null;
+  const dlBlock=dlIds.length
+    ?`<div class="lib-dl-stat text-[10px] text-gray-500 font-mono mt-0.5" data-dl-items="${escHtml(dlIds.join(" "))}">${dlAgg?formatDlStat(dlAgg):""}</div>`
+     +`<div class="lib-dl-bar w-full bg-gray-800 h-0.5 mt-1" data-dl-items="${escHtml(dlIds.join(" "))}">
+         <div class="bg-yellow-500 h-0.5 transition-[width] duration-500" style="width:${dlAgg?dlAgg.progress_pct:0}%"></div>
+       </div>`
+    :"";
   const badges=(anyDownloading
     ?`<span class="text-[10px] px-1.5 py-0.5 bg-yellow-900/50 text-yellow-400 border border-yellow-800 blink">↓ Downloading</span>`
     :anyError?`<span class="text-[10px] px-1.5 py-0.5 bg-red-900/50 text-red-400 border border-red-800">Error</span>`:"")
@@ -7053,6 +7115,7 @@ function _libShowCardHtml(seriesTitle, gItems){
     <div class="lib-cardv-info">
       <div class="text-xs font-medium text-gray-200 leading-snug" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${escHtml(title)}</div>
       <div class="text-[10px] text-gray-600 mt-0.5">${escHtml(bits.join(" · "))}</div>
+      ${dlBlock}
     </div>
     <div class="lib-cardv-drawer hidden">
       <div class="lib-card-actions flex items-center gap-2 flex-wrap">
@@ -8984,12 +9047,18 @@ function _epMissingCardHtml(season, te){
           ? `<p class="text-[11px] sm:text-xs text-gray-500 mt-1 line-clamp-2">${escHtml(te.overview)}</p>`
           : ""}
         ${(TV_MODE||upcoming)?"":`<div class="flex items-center gap-0.5 mt-1.5 -ml-1">
-          <button onclick="epFindEpisode(${season},${epNo})"
+          <button onclick="epGetEpisode(${season},${epNo},this)"
             class="h-9 px-2.5 flex items-center gap-1 text-[11px] font-bold uppercase tracking-wide
-                   text-gray-400 hover:text-white hover:bg-indigo-800/60 transition-colors"
-            title="Search the indexers for this episode and download it">
-            ${ic("search")} Find
+                   text-indigo-300 hover:text-white hover:bg-indigo-800/60 transition-colors"
+            title="Find the best copy of this episode and start downloading it">
+            ${ic("down")} Get
           </button>
+          ${SIMPLE?"":`<button onclick="epFindEpisode(${season},${epNo})"
+            class="h-9 px-2.5 flex items-center gap-1 text-[11px] font-bold uppercase tracking-wide
+                   text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
+            title="Browse the available copies and choose one yourself">
+            ${ic("search")} Choose
+          </button>`}
         </div>`}
       </div>
     </div>`;
@@ -9017,6 +9086,108 @@ function _epSearchCandidate(){
     overview: epMetadata.overview||"",
   };
 }
+// What this box actually holds of the open show, in the shape the background
+// runner's gap maths expects (`_covSeasonEps`). Built from `epFiles` rather than
+// the /coverage snapshot because the episode page already holds the
+// authoritative per-file truth — including the files still coming down, which
+// must count as owned so a second press can't queue them all over again.
+function _epOwnedRow(){
+  const have={}, pending={};
+  (epFiles||[]).forEach(f=>{
+    const sn=+f.season||0, ep=+f.episode||0;
+    if(sn<=0 || ep<=0 || (f.bucket||"")) return;
+    const m=(f.complete===false)?pending:have;
+    (m[String(sn)]=m[String(sn)]||[]).push(ep);
+  });
+  return {have, pending};
+}
+
+// A detached-run context for the show the LIBRARY page has open — the same shape
+// `_bgCtx` builds from the search screen, so every piece of the existing
+// machinery (`_bgEnsureSources` / `_bgAutoPick` / `_bgStartDownloads`) works
+// unchanged without the search screen ever being opened.
+//
+// `only` narrows the run to a single episode, and does it by marking every OTHER
+// episode of that season as already-owned rather than by filtering afterwards:
+// the gap set is what `_bgEnsureSources` sweeps, so narrowing it here is the
+// difference between one indexer query and one per episode in the season.
+function _epBgCtx(scope, only){
+  const c=_epSearchCandidate();
+  if(!c) return null;
+  const owned=_epOwnedRow();
+  if(only){
+    const sn=String(+only.season);
+    const all=_tmdbSeasonEpisodes(epMetadata, +only.season).map(t=>+t.episode);
+    owned.have[sn]=[...new Set((owned.have[sn]||[]).concat(
+      all.filter(n=>n>0 && n!==+only.episode)))];
+  }
+  const seasons=_tmdbSeasonNumbers(epMetadata);
+  return {
+    title: c.title,
+    query: c.title,
+    kind:  c.kind,
+    meta:  epMetadata,
+    owned: owned,
+    locked: false,
+    absolute: _tmdbAbsoluteNumbered(epMetadata, epSeasonList||[]),
+    origEnglish: (epMetadata && epMetadata.original_language)
+      ? (epMetadata.original_language==="en") : null,
+    audioPref: _ssAudioPref,
+    tmdb: {tmdb_id:c.id, tmdb_kind:c.kind},
+    // No search screen is open, so there is no broad query to inherit. The
+    // per-season sweep inside _bgEnsureSources does the finding, and its
+    // targeted "<title> S0N" query is the better one anyway (see ssSearchSeason).
+    searched: true,
+    scope: scope,
+    seasons: seasons.length?seasons:(epSeasonList||[]),
+    episodes: [],
+  };
+}
+
+// One press: find sources for what's missing and start downloading them, right
+// from the library, without the search screen opening at all.
+//
+// The old buttons handed off to the search show page, which then wanted a search
+// run and a release picked — three more decisions standing between the user and
+// the thing they had already asked for by pressing "Find". The hunting and the
+// picking are the same detached run the bulk auto-picker uses; what changed is
+// that nothing now sits between the press and the download.
+function _epGetMissing(scope, label, btn, only){
+  const ctx=_epBgCtx(scope, only);
+  if(!ctx){ showAlert("No metadata for this show — can't search for it.","warn"); return; }
+  const filt=_ssParseBulkFilters();
+  const started=_bgRun(`${ctx.title} — ${label}`, async(ctl,report)=>{
+    const eps=await _bgEnsureSources(ctx,ctl,report);
+    if(!eps) return;
+    const jobs=[], unsourced=[];
+    eps.forEach(e=>{
+      const src=e.sources.length?_bgAutoPick(ctx,e.sources,filt):null;
+      if(src) jobs.push({src, season:e.season, episode:e.episode});
+      else unsourced.push(_ssEpCode(e.season,e.episode));
+    });
+    await _bgStartDownloads(ctx, ctl, report, jobs, "",
+                            {total:eps.length, unsourced});
+  });
+  if(!started) return;
+  if(btn){ _markLoading(btn, true); setTimeout(()=>_markLoading(btn,false), 800); }
+  showAlert(`Finding ${label} and starting the download — carry on using the app, `
+           +`the library updates itself as it goes.`,"success");
+}
+
+// Every episode of this season that isn't on the box.
+function epGetSeason(season, btn){
+  const n=_epMissingEpisodes(season).length;
+  _epGetMissing(+season,
+    n===1 ? `the missing episode of Season ${+season}`
+          : `${n||""}${n?" ":""}missing episode${n===1?"":"s"} of Season ${+season}`.trim(),
+    btn);
+}
+// Exactly one episode.
+function epGetEpisode(season, episode, btn){
+  _epGetMissing(+season, _ssEpCode(+season,+episode), btn,
+                {season:+season, episode:+episode});
+}
+
 function epFindEpisode(season, episode){
   const c=_epSearchCandidate();
   if(!c){ showAlert("No metadata for this show — can't search for it.","warn"); return; }
@@ -9420,10 +9591,18 @@ function renderEpList(){
       ? `<div class="flex flex-col items-center gap-3 py-12 px-4 text-center">
            <span class="w-2.5 h-2.5 bg-orange-400"></span>
            <p class="text-gray-400 text-sm">None of this season's ${c.total} episode${c.total===1?"":"s"} are on this box.</p>
-           ${TV_MODE?"":`<button onclick="epFindSeason(${epCurrentSeason})"
-             class="text-xs px-4 py-2 bg-amber-700 hover:bg-amber-600 text-white uppercase tracking-wide transition-colors flex items-center gap-1.5">
-             ${ic("search")} Find sources
-           </button>`}
+           ${TV_MODE?"":`<div class="flex items-center gap-1.5">
+             <button onclick="epGetSeason(${epCurrentSeason},this)"
+               class="text-xs px-4 py-2 bg-amber-700 hover:bg-amber-600 text-white uppercase tracking-wide transition-colors flex items-center gap-1.5"
+               title="Find the best copy of each episode and start downloading them">
+               ${ic("down")} Get this season
+             </button>
+             ${SIMPLE?"":`<button onclick="epFindSeason(${epCurrentSeason})"
+               class="text-xs px-3 py-2 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 uppercase tracking-wide transition-colors flex items-center gap-1.5"
+               title="Browse the available copies and choose them yourself">
+               ${ic("search")} Choose
+             </button>`}
+           </div>`}
          </div>`
       : `<p class="text-gray-600 text-sm text-center py-12">No episodes in this season.</p>`;
     updateEpCount(); return;
@@ -9481,10 +9660,18 @@ function renderEpList(){
             <span class="w-2 h-2 bg-amber-400 flex-shrink-0"></span>
             ${n} episode${n>1?"s":""} not downloaded
           </span>
-          <button onclick="epFindSeason(${epCurrentSeason})"
-            class="text-[11px] px-2.5 py-1 bg-amber-700 hover:bg-amber-600 text-white uppercase tracking-wide transition-colors flex items-center gap-1">
-            ${ic("search")} Find sources
-          </button>
+          <div class="flex items-center gap-1.5 flex-shrink-0">
+            <button onclick="epGetSeason(${epCurrentSeason},this)"
+              class="text-[11px] px-2.5 py-1 bg-amber-700 hover:bg-amber-600 text-white uppercase tracking-wide transition-colors flex items-center gap-1"
+              title="Find the best copy of each missing episode and start downloading them">
+              ${ic("down")} Get ${n>1?"them":"it"}
+            </button>
+            ${SIMPLE?"":`<button onclick="epFindSeason(${epCurrentSeason})"
+              class="text-[11px] px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 uppercase tracking-wide transition-colors flex items-center gap-1"
+              title="Browse the available copies and choose them yourself">
+              ${ic("search")} Choose
+            </button>`}
+          </div>
         </div>`;
     }
   }
@@ -21610,8 +21797,8 @@ function connectSSE(){
     const d=JSON.parse(e.data||"{}");
     if(!d.item_id) return;
     libDownloadStats.set(d.item_id, d);
-    const el=document.getElementById(`dl-stat-${d.item_id}`);
-    if(el) el.textContent=formatDlStat(d);
+    // Repaints the item's own card AND the merged show tile it belongs to.
+    _libRefreshDlStats(d.item_id);
     // Keep an expanded per-file list's progress bars + complete badges live.
     refreshDownloadFiles(d.item_id);
     // ...and the episode page, if the user is watching the download from there.
@@ -22038,6 +22225,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">14.0.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">14.1.0</div>
 </body>
 </html>

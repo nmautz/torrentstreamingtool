@@ -234,6 +234,12 @@ or HDR content — the browser path downmixes to AAC stereo and does no tone map
   "default_visible_profiles": [],       // optional; if non-empty, only these profile IDs see item by default
   "hidden_by_profiles": [],            // optional; profile IDs that personally hid this item
   "skip_data": { /* per-file; see below */ },
+  "attrib_v": 2,                        // optional (14.1.0). Which structural-attribution pass this item has
+                                        // been through. `_migrate_item` re-runs `episodes.attribute_paths`
+                                        // over any item below `_ATTRIB_VERSION` that still has a non-bucketed
+                                        // file with no episode number, then stamps it — so the regex work
+                                        // costs one run per item, not one per library load. Bump the constant
+                                        // to re-run the pass over every existing item.
   "tmdb_pick": {"id": 31132, "kind": "tv"},  // optional (14.0.0). The TMDb entry the CALLER resolved, sent as
                                         // {tmdb_id, tmdb_kind} on POST /api/library/download. Smart search opens a show
                                         // page from a TMDb candidate, so the right answer exists before the download

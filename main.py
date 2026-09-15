@@ -694,6 +694,23 @@ _analysis_gate: asyncio.Semaphore  # initialised in lifespan
 
 # ── Library Storage ───────────────────────────────────────────────────────────
 
+# Bump to re-run the structural attribution pass over every existing item once.
+# Stamped onto the item as `attrib_v` so the (regex-heavy) pass costs one run per
+# item rather than one per library load — and `_load_lib_raw` runs on every load.
+_ATTRIB_VERSION = 2
+
+
+def _needs_attrib(f: dict) -> bool:
+    """A file the structural pass failed to place: no episode number, and not
+    parked in a bucket.
+
+    Bucketed files are exempt on purpose — "Specials/Behind the Scenes.mkv" has
+    no episode number because there is none to have, which is a correct end
+    state, not a failure to retry.
+    """
+    return not int(f.get("episode", 0) or 0) and not (f.get("bucket") or "")
+
+
 def _migrate_item(item: dict) -> dict:
     """Upgrade items written by older versions of the server in-place."""
     # v2.0 → v2.1: flat file_path → files list
@@ -724,22 +741,34 @@ def _migrate_item(item: dict) -> dict:
     # 11.19.0: re-attribute files an older parser left at S0E0. That parser only
     # read SxxExx / NxNN off the basename, so every release that carries its
     # season in a FOLDER (the anime-batch norm) landed entirely in S0E0 — no
-    # season tabs, no TMDb episode names, no stills. Only (0, 0) files are
-    # touched, so a hand-corrected or already-parsed number is never overwritten.
-    # Numbers that turn out to be series-absolute are fixed later, by
-    # `_reattribute_item_files`, which needs TMDb's season inventory.
+    # season tabs, no TMDb episode names, no stills.
+    #
+    # 14.0.1 widens the target from "no season AND no episode" to "no episode":
+    # a season pack whose first file is named after the RELEASE
+    # ("Futurama-1999-S03 1080p WEBRip 10bit EAC3 2 0 x265-iVy.mkv") reads its
+    # season off the folder and nothing off the basename, so it settled at
+    # season 3 / episode 0 — which the old test, requiring season 0 too, never
+    # looked at. It sat first in the season as a nameless row while TMDb
+    # reported episode 1 MISSING on a season the box holds complete.
+    #
+    # Only files that still have no episode number are written, so a number
+    # already parsed (or corrected by `_reattribute_item_files`) is never
+    # overwritten. Numbers that turn out to be series-absolute are fixed later
+    # by that same function, which needs TMDb's season inventory.
+    #
     # `_migrate_item` runs on every library load (hot loops re-read every few
-    # seconds), so the scan below stays a plain O(n) test and the regex work only
-    # happens while something is actually still unattributed.
+    # seconds), so the result is stamped with `attrib_v`: the regex work happens
+    # once per item, not once per load, and an item whose files genuinely can't
+    # be numbered stops being retried forever.
     files = item.get("files") or []
-    blank = [not int(f.get("season", 0) or 0) and not int(f.get("episode", 0) or 0)
-             for f in files]
-    if any(blank):
-        slots = episodes.attribute_paths([f.get("path", "") for f in files])
-        for f, slot, is_blank in zip(files, slots, blank):
-            if is_blank:
-                episodes.apply_slot(f, slot)
-        files.sort(key=episodes.sort_key)
+    if files and int(item.get("attrib_v", 0) or 0) < _ATTRIB_VERSION:
+        if any(_needs_attrib(f) for f in files):
+            slots = episodes.attribute_paths([f.get("path", "") for f in files])
+            for f, slot in zip(files, slots):
+                if _needs_attrib(f):
+                    episodes.apply_slot(f, slot)
+            files.sort(key=episodes.sort_key)
+        item["attrib_v"] = _ATTRIB_VERSION
     return item
 
 
@@ -11434,6 +11463,13 @@ async def library_download(request: Request, req: DownloadReq) -> JSONResponse:
         selected_file_indices=req.selected_file_indices or None,
         download_mode=item["download"]["mode"],
     ))
+    # Tell every open dashboard the moment the row exists, rather than leaving
+    # them to find out on `library_download_monitor`'s next tick. Starting a
+    # download from the library page (14.1.0's one-press Get) otherwise looked
+    # like nothing had happened at all: the grid is only repainted by this
+    # event, so the new card — and the "Downloading" state of the show it joins —
+    # appeared seconds later, or not until the user pulled to refresh.
+    await broadcast("library_update", {"item_id": item["id"], "status": "downloading"})
     return JSONResponse({"ok": True, "item_id": item["id"],
                          "default_save_path": save_path})
 

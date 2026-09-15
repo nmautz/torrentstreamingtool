@@ -1,5 +1,74 @@
 # Changelog
 
+## [14.1.0] — 2026-09-15
+**Get it from where you noticed it was missing.**
+
+**One press downloads it.** The library's missing-episode rows and the "none of this
+season is here" banner offered **Find sources**, which opened the search screen, where you
+then ran a search and picked a release off a list — three more decisions standing between
+you and the thing you had already asked for. They now read **Get**, and they do it: the
+same detached run the bulk auto-picker uses finds sources for exactly what's missing,
+picks the best copy of each, and queues them, without the search screen opening at all.
+Full profiles keep a **Choose** button beside it for the old browse-and-pick route; Simple
+profiles never see it. `_epBgCtx` builds the background context from the library item
+instead of the search page, so `_bgEnsureSources` / `_bgAutoPick` / `_bgStartDownloads`
+are reused unchanged. A single-episode Get narrows the run by marking the season's other
+episodes as owned — one indexer query rather than one per episode.
+
+**Cards now show the download without a refresh.** Two gaps, both fixed:
+
+*A new download was invisible until the monitor's next tick.* `POST /api/library/download`
+created the item and said nothing; the grid is only repainted by `library_update`, so
+pressing Get looked like it had done nothing at all. It now broadcasts on creation.
+
+*A merged show never showed progress at all.* A show downloaded episode by episode is many
+items behind one tile, and the live `library_progress` handler only knew how to update a
+single-item card (`dl-stat-<id>`). The show tile had a blinking "Downloading" badge and
+nothing else — no size, no percentage, no speed. Both card shapes now tag their readout
+with `data-dl-items`, `_libDlAgg` rolls several items' stats into one, and
+`_libRefreshDlStats` repaints whichever cards cover the item that moved. Both shapes also
+gained a download progress bar.
+
+*And the live update printed raw markup.* `formatDlStat` embeds an icon for the "Finding
+peers…" and "waiting for idle window" states, but the SSE handler assigned it with
+`textContent` — so those two states rendered a literal `<svg …>` string into the card on
+every update after the first paint. Now `innerHTML` (every value in it is ours — byte
+counts and fixed labels, never user input).
+
+### Futurama S3E1, S4E1 and S5E1 were episode 0
+
+Reported: something wrong with the first episode of Futurama seasons 3, 4 and 5.
+
+Each of those seasons held 15 / 12 / 16 files numbered **2..N**, plus one file at
+**episode 0** — and TMDb's diff then reported episode 1 MISSING on a season the box holds
+complete, with the real episode sitting at the top of the list as a nameless row. The iVy
+packs name their first file after the **release** rather than the episode
+(`Futurama-1999-S03 1080p WEBRip 10bit EAC3 2 0 x265-iVy.mkv`), so it carries no `SxxEyy`
+and falls through to the bare-number fallback. Two independent faults:
+
+*The channel layout was read as the episode number.* `_NOISE_RE` only ever stripped the
+**glued** audio spellings (`AAC2.0`, `DDP5.1`); a release that spaces or dots the layout
+apart left `2 0` / `5 1` standing, and the fallback takes the last number in the stem. So
+`EAC3 2 0` produced **episode 0** and `EAC3 5 1` produced **episode 1** — which is why
+season 1 looked correct and seasons 3–5 did not. It was luck, not correctness. New
+`_AUDIO_CH_RE` strips a separated layout, anchored on the codec word and limited to real
+layouts (`<1-8> <0-1>`) so it can't swallow an episode number. `H 264` / `x 265` are
+stripped the same way now — `_NOISE_RE` previously allowed only a dot between the letter
+and the digits, so an indexer that normalises separators to spaces left `264` behind as a
+bare number too.
+
+*Nothing recovered the file that had no number.* New `_fill_season_gaps` (in
+`attribute_paths`): when a season holds exactly one numberless file and the numbered ones
+leave exactly one hole in the run `1..N`, the hole is the answer. Deliberately narrow —
+two numberless files are ambiguous, numbers reaching past N mean it isn't a clean run, and
+a season with series-absolute siblings belongs to `resolve_absolute`, not to arithmetic
+run before it.
+
+*Existing libraries are repaired on load.* The 11.19.0 migration only re-attributed files
+with **no season AND no episode**, so these — season 3, episode 0 — were never looked at.
+It now targets any non-bucketed file with no episode number, and stamps the item with
+`attrib_v` so the regex pass costs one run per item rather than one per library load.
+
 ## [14.0.0] — 2026-09-15
 **Simple mode: the household gets an interface built for watching things.**
 
