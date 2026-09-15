@@ -1,5 +1,45 @@
 # Changelog
 
+## [12.7.2] — 2026-09-14
+**The episode page stopped being a photograph.**
+
+Start a download, stay on the episode list to watch it, and nothing moved. The percentage
+on the row was whatever it had been when the page opened. Backing out to the library and
+walking back in "fixed" it — which is the exact shape of a bug nobody reports, because it
+reads as a **stuck download** rather than a stale screen, and the natural response is to
+press Download again.
+
+Every one of those events was already arriving over SSE. None of them reached this screen:
+
+| event | repainted | did **not** repaint |
+|---|---|---|
+| `library_progress` | library grid, library card's file expander | the open episode page |
+| `library_update` | library grid (and only on the Library tab) | the open episode page |
+| `progress_saved` | library grid, episode page — *single-item mode only* | a show opened as a **merged series** (`epItemId` is null there, so it was skipped outright) |
+
+All three now repaint the open page. Two details matter more than the wiring:
+
+- **Scroll position is carried across the repaint.** `renderEpList` rebuilds
+  `#epList.innerHTML` and `#epList` *is* the scroll container, so a live repaint would
+  otherwise yank the list back to the top every few seconds while you were reading it —
+  a worse screen than one that never updates.
+- **One coalescing timer for the whole burst.** `library_progress` fires per downloading
+  item, so a season with eight episodes coming down is eight events a tick; they collapse
+  into a single refresh.
+
+A status change (`downloading` → `ready`, or a brand-new episode joining an open series)
+repaints on any update, because the event carries no series and a new member is by
+definition not in the list yet.
+
+**Repeat downloads now say what they did.** The server has always deduped by info-hash and
+handed back the item already backing it rather than minting a second one — clicking
+Download twice never broke anything. But it answered both cases with "Downloading…",
+which tells someone who clicked again *because nothing looked like it was happening* that
+they have now started a second copy. The single-download toast and the Add-to-Library
+modal now distinguish the two, and a bulk run counts them separately: re-running a season
+that is already coming down reports **"Queued 0/20 — 20 were already downloading"**
+instead of "Queued 20/20", which was twenty no-ops reported as twenty successes.
+
 ## [12.7.1] — 2026-09-14
 **A show opened from your library searched the indexers for its own filename.**
 

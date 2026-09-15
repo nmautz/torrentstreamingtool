@@ -754,6 +754,43 @@ the axis the user is actually choosing along (season), and give the noise its ow
 collapsed section. Render a heading for every season the show HAS, not just the ones with
 results, or "no pack exists" and "nobody looked" are indistinguishable.
 
+### A screen that never updates reads as a broken feature, not a stale screen
+
+Downloads reported their progress over SSE to the library grid and to the library card's
+file expander. The **episode page** — the screen you are actually on after tapping into a
+show, and the obvious place to watch a download you just started — got none of it. The
+percentage sat at whatever it was when the page opened. Leaving and re-entering fixed it.
+
+Nobody reports that. They report "the download is stuck", or they press Download again,
+which is how a refresh bug turns into a duplicate-download bug. **Ask, for any screen that
+can be open while its subject changes: what repaints it?** A screen with no answer is a
+photograph.
+
+Two traps in the fix, both of which make it worse than the bug:
+
+1. **The repaint must preserve where the user is.** `renderEpList` rebuilds
+   `#epList.innerHTML` and `#epList` is the scroll container, so repainting resets
+   `scrollTop` to 0. A list that jumps to the top every few seconds while you read it is a
+   worse screen than one that never moves. `_epLiveRefresh` carries `scrollTop` across.
+2. **Per-item events arrive per item.** `library_progress` fires for every downloading
+   item every few seconds; a season coming down eight episodes at a time is eight events a
+   tick. Coalesce behind one trailing timer, or the "fix" is a fetch storm.
+
+### Making a repeat action safe is only half of it — say what happened
+
+`/api/library/download` dedupes by info-hash and returns the existing item with
+`duplicate:true`, so double-clicking Download has never created two torrents. The client
+ignored the flag and said "Downloading — switch to Library" either way. That is the wrong
+half of the problem solved: the person clicking twice is doing it *because nothing looked
+like it was happening*, and the reply tells them they have now started a second copy.
+
+Worse at bulk scale — a re-run of a season already coming down reported "Queued 20/20"
+for twenty no-ops, because the run counted HTTP successes. It now counts `duplicate`
+separately and says "Queued 0/20 — 20 were already downloading".
+
+**An idempotent endpoint still owes the caller the difference between "done" and "already
+done".** Silent idempotency is indistinguishable from a UI that ignored the click.
+
 ### A display name is not a search query
 
 The library’s "find the rest of this season" handoff built its TMDb candidate as

@@ -9513,6 +9513,63 @@ async function epToggleWatched(btn){
 // Re-fetch the current episode picker's file list from the server and re-render.
 // Used after a watched-toggle, and from the progress_saved SSE handler so the
 // open picker never displays stale watch data once the server has new state.
+// ── Keeping the episode page live ────────────────────────────────────────────
+// Everything that happens to a download arrives over SSE, and until 12.7.2 none
+// of it reached this screen. `library_progress` repainted the library grid and
+// the library card's file expander; `library_update` repainted the grid;
+// `progress_saved` refreshed the picker only in single-item mode. So a user who
+// started a download and then stayed on the episode list — the obvious place to
+// watch it — saw a bar that never moved. Backing out to the library and coming
+// back "fixed" it, which is the exact shape of a bug nobody reports: it reads as
+// a stuck download, not as a stale screen.
+//
+// Two things make the naive fix worse than the bug it replaces:
+//   * `renderEpList` rebuilds `#epList.innerHTML`, and `#epList` is the scroll
+//     container — repainting on every event would yank the list back to the top
+//     while the user is reading it.
+//   * `library_progress` fires per downloading item every few seconds, so a
+//     season with eight episodes coming down means eight events per tick.
+// Hence: one coalescing timer for the whole burst, and the scroll position is
+// carried across the repaint.
+let _epLiveTimer=null;
+const EP_LIVE_MS=1500;   // coalescing window for bursty SSE traffic
+
+function _epPageOpen(){
+  const p=document.getElementById("episodePage");
+  return !!p && !p.classList.contains("hidden") && !!(epItemId||epSeriesKey);
+}
+
+// Does this item's news concern the page that's open?
+//   * single-item mode answers exactly;
+//   * merged-series mode can only answer for items it already lists, so a caller
+//     that might be reporting a BRAND NEW member (a fresh download joining the
+//     show) passes `loose` — that event is precisely the one that makes the new
+//     row appear, so it must not be filtered out by a list that predates it;
+//   * an event with no item_id is unaddressed news; assume it is ours.
+function _epConcerns(itemId, loose){
+  if(!_epPageOpen()) return false;
+  if(!itemId) return true;
+  if(epItemId) return itemId===epItemId;
+  if(loose) return true;
+  for(const k in epFileItem){ if(epFileItem[k]===itemId) return true; }
+  return false;
+}
+
+// Repaint the open episode page from the server, putting the reader back where
+// they were. A list that jumps to the top every few seconds is a worse screen
+// than one that never updates, so the scroll restore is not a nicety.
+function _epLiveRefresh(){
+  if(_epLiveTimer) return;                 // a repaint is already queued
+  _epLiveTimer=setTimeout(async()=>{
+    _epLiveTimer=null;
+    if(!_epPageOpen()) return;
+    const list=document.getElementById("epList");
+    const top=list?list.scrollTop:0;
+    await refreshEpFiles();
+    if(list) list.scrollTop=top;
+  }, EP_LIVE_MS);
+}
+
 async function refreshEpFiles(){
   const pid=profile.id?`?profile_id=${profile.id}`:"";
   // Merged-series view: re-pull the merged, item-tagged file list.
@@ -10057,9 +10114,14 @@ async function submitDownload(){
       });
     }
     if(r.ok){
+      const res=await r.json().catch(()=>({}));
+      const duplicate=!!(res&&res.duplicate);
       closeDownloadModal();
-      showAlert((_saveStreamMode?"Stream saved — visible in Library tab.":"Downloading — switch to Library to track progress.")
-                +(_dlLocked?" Content locked.":""),"success");
+      showAlert(duplicate
+        ? "Already in your library — this torrent was queued before, so nothing new was started."
+        : (_saveStreamMode?"Stream saved — visible in Library tab.":"Downloading — switch to Library to track progress.")
+          +(_dlLocked?" Content locked.":""),
+        duplicate?"warn":"success");
       switchTab("library");
     } else {
       const e=await r.json().catch(()=>({detail:"Unknown error"}));
@@ -12429,15 +12491,25 @@ async function _ssDownloadOne(src, season, episode, opts={}){
     if(!opts.silent) showAlert(err.detail||"Download failed.","error");
     return false;
   }
+  // The server dedupes by info-hash and hands back the item already backing it
+  // (`duplicate:true`) rather than minting a second one — so tapping Download
+  // twice has never broken anything. It did, however, answer both cases with
+  // "Downloading…", which tells someone who clicked again because nothing
+  // looked like it was happening that they have now started a second copy. Say
+  // which of the two actually occurred.
+  const res=await r.json().catch(()=>({}));
+  const duplicate=!!(res&&res.duplicate);
   if(!opts.silent){
     const replacing=_ssReplace===`${+season}-${+episode}`;
-    showAlert(replacing
+    showAlert(duplicate
+      ? "Already in your library — this one was queued before, so nothing new was started."
+      : replacing
       ? "Downloading the replacement. The green Dolby Vision copy is still in your library — delete it from the episode page once this finishes."
       : "Downloading — switch to Library to track progress."+(_ssLocked?" Content locked.":""),
-      "success");
+      duplicate?"warn":"success");
     closeSearchShow(); switchTab("library");
   }
-  return true;
+  return {duplicate};
 }
 
 // ── Background source-finding ────────────────────────────────────────────────
@@ -13076,7 +13148,7 @@ async function _bgStartDownloads(ctx, ctl, report, jobs, note="", opts={}){
       unsourced.length?"warn":"success");
     return;
   }
-  let ok=0; const failed=[];
+  let started=0, dup=0; const failed=[];
   for(let i=0;i<jobs.length;i++){
     if(ctl.cancel) break;
     const j=jobs[i];
@@ -13084,16 +13156,24 @@ async function _bgStartDownloads(ctx, ctl, report, jobs, note="", opts={}){
            _ssEpCode(j.season,j.episode), (i+1)/jobs.length);
     const done=await _ssDownloadOne(j.src, j.season, j.episode,
                                     {silent:true, series:ctx.title, locked:ctx.locked});
-    if(done) ok++; else failed.push(_ssEpCode(j.season,j.episode));
+    if(!done) failed.push(_ssEpCode(j.season,j.episode));
+    else if(done.duplicate) dup++;
+    else started++;
     await new Promise(r=>setTimeout(r,250));
   }
   const bits=[];
+  // Re-running a season that is already coming down is the single most likely
+  // repeat action here — the coverage snapshot this run was planned against can
+  // predate the episodes it queued a minute ago. The server hands each one back
+  // as a duplicate and nothing breaks, but "Queued 20/20" for twenty no-ops is a
+  // lie the user will only catch by counting rows in the library.
+  if(dup) bits.push(`${dup} ${dup===1?"was":"were"} already downloading`);
   if(unsourced.length) bits.push(`no source found for ${_ssEpList(unsourced)}`);
   if(failed.length) bits.push(`could not start ${_ssEpList(failed)}`);
   if(note) bits.push(note);
-  showAlert(`Queued ${ok}/${scopeTotal} episode${scopeTotal===1?"":"s"}`+
+  showAlert(`Queued ${started}/${scopeTotal} episode${scopeTotal===1?"":"s"}`+
             (bits.length?` — ${bits.join("; ")}.`:" — switch to Library to track progress."),
-            bits.length?(ok?"warn":"error"):"success");
+            bits.length?((started||dup)?"warn":"error"):"success");
   // Only take the user somewhere if they're still standing on the page this came
   // from; a background run must never yank the screen out from under them.
   if(_bgLive(ctx)){ closeSearchShow(); switchTab("library"); }
@@ -20514,6 +20594,8 @@ function connectSSE(){
     if(el) el.textContent=formatDlStat(d);
     // Keep an expanded per-file list's progress bars + complete badges live.
     refreshDownloadFiles(d.item_id);
+    // ...and the episode page, if the user is watching the download from there.
+    if(_epConcerns(d.item_id)) _epLiveRefresh();
   });
   es.addEventListener("library_update",e=>{
     _noteSSEMsg();
@@ -20536,19 +20618,23 @@ function connectSSE(){
     if(d.item_id&&app.play_when_ready_item_id===d.item_id&&d.status==="ready"){
       app.play_when_ready_item_id=null;
     }
+    // A status flip changes the SHAPE of an episode row (downloading → ready,
+    // or a brand-new episode joining an open series), so the page repaints on
+    // any update while it is open — `loose`, because the event carries no
+    // series and a new member is by definition not in the list yet.
+    if(_epConcerns(d.item_id, true)) _epLiveRefresh();
   });
   es.addEventListener("progress_saved",e=>{
     _noteSSEMsg();
     // Re-render library silently when episode progress is saved
     if(activeTab==="library") loadLibrary();
-    // Keep the open episode picker in sync with the server's authoritative state
+    // Keep the open episode page in sync with the server's authoritative state
     // so previously-watched marks don't appear stale after a progress write.
-    if(epItemId){
-      try{
-        const d=JSON.parse(e.data||"{}");
-        if(!d.item_id||d.item_id===epItemId) refreshEpFiles();
-      } catch(_){ refreshEpFiles(); }
-    }
+    // Merged-series mode used to be skipped outright (`epItemId` is null there),
+    // so a show opened as a series never refreshed at all.
+    let _pid="";
+    try{ _pid=(JSON.parse(e.data||"{}")||{}).item_id||""; }catch(_){}
+    if(_epConcerns(_pid, true)) _epLiveRefresh();
   });
   es.addEventListener("metadata_update",e=>{
     _noteSSEMsg();
@@ -20899,6 +20985,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">12.7.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">12.7.2</div>
 </body>
 </html>
