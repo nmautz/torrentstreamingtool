@@ -739,6 +739,22 @@ def _load_lib_raw() -> dict:
     return {"profiles": [], "items": []}
 
 
+# A transient Windows file-lock costs one library write. Retry rather than lose it.
+#
+# `os.replace` onto an open file fails on Windows with ERROR_ACCESS_DENIED (5) or
+# ERROR_SHARING_VIOLATION (32) whenever *anything* holds a handle without
+# FILE_SHARE_DELETE — Defender scanning the file we just wrote, the Search
+# indexer, a backup/sync agent. It clears in milliseconds. POSIX rename has no
+# such failure mode, which is exactly why this went unnoticed on the dev Mac.
+#
+# The logs say it is not rare: **584** library writes died this way, 564 of them
+# `update_progress` — one silently discarded "where I was in this episode"
+# apiece, every one of which reads to the viewer as the app forgetting their
+# place. library.json is rewritten every ~15 s during playback, so the hot path
+# is also the exposed one.
+_SAVE_RETRY_DELAYS = (0.05, 0.12, 0.25, 0.5, 1.0)   # ~1.9 s total, then give up
+
+
 def _save_lib_raw(data: dict) -> None:
     # Atomic write (temp file + os.replace, same directory ⇒ same volume, so
     # the replace is atomic on Windows/NTFS and POSIX alike). library.json is
@@ -747,8 +763,30 @@ def _save_lib_raw(data: dict) -> None:
     # JSON — and _load_lib_raw's fallback then started an EMPTY library,
     # losing every profile, watch position, and subtitle pick.
     tmp = LIBRARY_FILE.with_name(LIBRARY_FILE.name + ".tmp")
-    tmp.write_text(json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8")
-    os.replace(tmp, LIBRARY_FILE)
+    blob = json.dumps(data, indent=2, ensure_ascii=False)
+    last: Optional[OSError] = None
+    for attempt in range(len(_SAVE_RETRY_DELAYS) + 1):
+        try:
+            # The temp write is retried too: the previous tick's .tmp can still be
+            # held by the same scanner, and failing there loses the write just as
+            # completely as failing on the replace.
+            tmp.write_text(blob, encoding="utf-8")
+            os.replace(tmp, LIBRARY_FILE)
+            if attempt:
+                log.info("library.json write succeeded on attempt %d", attempt + 1)
+            return
+        except PermissionError as exc:      # WinError 5 / 32 both surface here
+            last = exc
+        except OSError as exc:
+            # Anything else (disk full, path gone) is not a lock; don't spin on it.
+            raise
+        if attempt < len(_SAVE_RETRY_DELAYS):
+            time.sleep(_SAVE_RETRY_DELAYS[attempt])
+    # Out of retries. Raise — the caller's 500 is the honest answer, and the
+    # client now treats it as a failed save rather than a successful one.
+    log.error("library.json write failed after %d attempts: %s",
+              len(_SAVE_RETRY_DELAYS) + 1, last)
+    raise last if last is not None else OSError("library.json write failed")
 
 
 async def get_library() -> dict:
@@ -10995,6 +11033,19 @@ async def move_library_status(item_id: str, request: Request) -> JSONResponse:
 async def library_download(request: Request, req: DownloadReq) -> JSONResponse:
     if not state.vpn_secure:
         raise HTTPException(403, "VPN not connected — download blocked.")
+    # Refuse a link that cannot possibly be added, rather than minting a library
+    # item for it. A junk `magnet` used to sail through and become a permanent
+    # row stuck in `status: "error"` with an EMPTY error string — a broken entry
+    # the user can only delete, with nothing saying why it is broken.
+    #
+    # The test is deliberately loose: `extract_hash` returning None is NORMAL
+    # here, because indexers without magnets hand out a Jackett `/dl/` .torrent
+    # proxy URL that carries no info-hash (see qbit_add_magnet). So accept
+    # anything link-shaped and reject only what is not a link at all.
+    _link = (req.magnet or "").strip()
+    if not req.torrent_hash.strip() and not (
+            _link.lower().startswith(("magnet:", "http://", "https://"))):
+        raise HTTPException(400, "That isn't a usable torrent link or magnet.")
     # Resolved BEFORE the transaction (`_auto_save_path` reads the library, and
     # `_lib_lock` is not re-entrant) so the chosen folder is what gets persisted
     # in `pending_download` — an interrupted add then resumes to the same drive.

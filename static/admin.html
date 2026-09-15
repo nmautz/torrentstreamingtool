@@ -1755,6 +1755,64 @@
 // Emoji / dingbat glyphs are banned in the UI; use ${ic("name")} instead.
 function ic(name,cls){ return `<svg class="ic${cls?" "+cls:""}" aria-hidden="true"><use href="#i-${name}"/></svg>`; }
 // ── State ─────────────────────────────────────────────────────────────────────
+// ── Session expiry — caught once, at the transport ─────────────────────
+// Nearly every panel on this page is a poller — activity and system health every
+// 4 s, the updater every 4 s, components every 1.5 s, force-prep every 3 s — and
+// each one sends `authHeader()` and treats a non-OK reply as "try again later".
+// So the moment the token stops being valid, the whole dashboard quietly becomes
+// a 401 generator. The access log caught it: /api/admin/updater alone answering
+// **401 every minute from 15:18 to 23:04** — nearly eight hours — with nothing on
+// screen ever saying the session had ended. The operator just sees numbers that
+// stopped moving.
+//
+// `checkAuth()` already handles a dead token correctly, but only at page load.
+// Rather than edit ~100 call sites, catch it once at the transport: any 401 from
+// /api/admin/ means this session is over. Every interval is registered on the way
+// in so they can all be stopped together.
+const _adminTimers = new Set();
+(function(){
+  const si = window.setInterval;
+  window.setInterval = function(){
+    const id = si.apply(this, arguments);
+    _adminTimers.add(id);
+    return id;
+  };
+  const nativeFetch = window.fetch;
+  window.fetch = function(input, init){
+    return nativeFetch.call(this, input, init).then(function(r){
+      try{
+        const url = (typeof input === "string") ? input : ((input && input.url) || "");
+        if(r.status === 401 && url.indexOf("/api/admin/") >= 0) _onSessionExpired();
+      }catch(_){}
+      return r;
+    });
+  };
+})();
+
+let _sessionEnded = false;
+function _onSessionExpired(){
+  if(_sessionEnded) return;
+  // Not an expiry if there was never a session — that is just the login page
+  // doing its job, and "session expired" would be a lie on a first visit.
+  if(!adminToken) return;
+  _sessionEnded = true;
+  adminToken = "";
+  try{ localStorage.removeItem("streamlink_admin_token"); }catch(_){}
+  _adminTimers.forEach(function(id){ try{ clearInterval(id); }catch(_){} });
+  _adminTimers.clear();
+  const dash = document.getElementById("dashboard");
+  const overlay = document.getElementById("loginOverlay");
+  if(dash) dash.classList.add("hidden");
+  if(overlay) overlay.classList.remove("hidden");
+  const err = document.getElementById("loginError");
+  if(err){
+    err.textContent = "Session expired — sign in again.";
+    err.classList.remove("hidden");
+  }
+  const pw = document.getElementById("loginPassword");
+  if(pw){ pw.value = ""; try{ pw.focus(); }catch(_){} }
+}
+
 let adminToken = localStorage.getItem("streamlink_admin_token") || "";
 let activeTab  = "activity";
 let pinTarget  = null;   // { id, name } of profile being PIN-edited

@@ -529,7 +529,7 @@ Map<offKey, "prepping"|"ready">`. `prepForStreaming(itemId, filePath, fileName)`
 first awaits `confirmStreamPrepWarning()` (the once-per-session lag warning),
 then POSTs `/offline-prepare` **with `bulk:true`** (so the job honors the global
 pause gate), polls `/offline-job/{id}` to completion, and flips the row to
-"Stream Ready". The map is also hydrated from `/api/library/{id}/prep-status`
+"Stream Ready". `_startPrepPolling(itemId)` polls every 3 s and, since 12.7.3, **knows how to give up**: 404/410 (item deleted) and 401/403 (no longer visible to this profile) are terminal and call `_stopPrepPolling`, while transient failures get a budget of `PREP_POLL_MAX_TRANSIENT` (20) rather than retrying forever — deleting an item used to leave every client that had it on screen polling a dead id every 3 s indefinitely (see [GOTCHAS.md](GOTCHAS.md) § a poll loop needs to know what "never" looks like). The map is also hydrated from `/api/library/{id}/prep-status`
 whenever the picker opens or `/prep-all` runs on the library card.
 
 `#globalPrepBar` (the persistent top-right indicator) is now interactive:

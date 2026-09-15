@@ -8,7 +8,7 @@
 |------:|---------|
 | 1–35    | Imports |
 | 41–73   | `Settings` (pydantic-settings reading `.env`) |
-| 77–134  | Library storage helpers: `_migrate_item`, `get_library`, `put_library`, **`mutate_library`** / `LibraryUnchanged`, `_lib_lock` |
+| 77–134  | Library storage helpers: `_migrate_item`, `get_library`, `put_library`, **`mutate_library`** / `LibraryUnchanged`, `_lib_lock`, **`_save_lib_raw`** (atomic temp-file + `os.replace`, with a bounded Windows retry — `_SAVE_RETRY_DELAYS`; see [GOTCHAS.md](GOTCHAS.md) § `os.replace` is not atomic-on-demand on Windows) |
 | 138–177 | `AppState` dataclass + module globals (`state`, `qbit`, `_admin_sessions`) |
 | 179–212 | Jackett session cookie helpers (`_jackett_login`, `_jackett_admin`) |
 | 215–260 | SSE broadcast + `state_snapshot()` |

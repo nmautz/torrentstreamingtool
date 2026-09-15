@@ -12,6 +12,7 @@ Only `/admin` and admin API routes are gated (`_check_admin`). **The main dashbo
 2. `POST /api/admin/login {password}` → returns `{token}` (32 hex chars, `secrets.token_hex(32)`)
 3. Token stored client-side in `sessionStorage.admin_token`. Sent on every request via `Authorization: Bearer <token>`
 4. Server-side store: `_admin_sessions: dict[str, float]` — token → Unix-timestamp expiry. TTL is 24 h ([main.py:3184](../main.py#L3184))
+5. **Expiry is handled once, at the transport** (12.7.3). Every tab here is a 1.5–4 s poller sending `authHeader()`, and each treated a non-OK reply as "try again later" — so a dead token turned the whole dashboard into a 401 generator with nothing on screen saying so (`/api/admin/updater` answered 401 every minute for ~8 h in the logs). `checkAuth()` only ever ran at page load. `admin.html` now wraps `window.fetch`: any **401 from an `/api/admin/` URL** calls `_onSessionExpired()`, which clears the token, stops every registered interval (`_adminTimers`, populated by a `setInterval` wrapper) and restores the login overlay with "Session expired — sign in again." It no-ops when `adminToken` is empty, so a first visit never claims a session expired.
 5. `_check_admin(request)` accepts token from `Authorization: Bearer`, `X-Admin-Token` header, or `?admin_token=` query param. The query-param form is needed for SSE because EventSource can't set headers
 
 ## HTTPS redirect ([main.py:1772](../main.py#L1772))

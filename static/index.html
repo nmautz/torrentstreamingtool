@@ -13592,13 +13592,22 @@ async function saveProgress(itemId, filePath, posSec, durSec) {
     }
     return;
   }
+  // A REJECTED SAVE IS NOT A SAVE. `fetch` throws only on a network failure, so
+  // a 500 — which is exactly what a library write that lost a file-lock race
+  // returns — resolved here and was treated as success. The logs carry 564 of
+  // them, each one a silently discarded resume position; to the viewer the app
+  // simply forgot where they were. The `_appOffline` branch above already spells
+  // out this trap for its own 404 case; it applies to every non-OK status.
+  let saved = false;
   try {
-    await fetch(`/api/library/${itemId}/progress`, {
+    const r = await fetch(`/api/library/${itemId}/progress`, {
       method: "POST", headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ profile_id: profile.id, file_path: filePath,
                              position_sec: posSec, duration_sec: durSec }),
     });
-  } catch (_) {
+    saved = r.ok;
+  } catch (_) { saved = false; }
+  if (!saved) {
     // Offline inside the app: stash to the native OfflineStore so it syncs back
     // on reconnect (M3). No-op in a plain browser or when the plugin is absent.
     if (isApp && _cap.os) {
@@ -13608,6 +13617,7 @@ async function saveProgress(itemId, filePath, posSec, durSec) {
       } catch (_) {}
     }
   }
+  return saved;
 }
 
 // ── M3 offline-progress sync (app only) ──────────────────────────────────────
@@ -20279,14 +20289,47 @@ async function prepItemForStreaming(itemId) {
   }
 }
 
+// Poll /prep-status until the item is done — and, crucially, know when to give up.
+//
+// The only exit used to be `r.ok` plus "nothing processing"; every other outcome
+// fell through to the unconditional `setTimeout(tick, 3000)`. So the ordinary
+// act of DELETING a library item left every client that had it on screen polling
+// a dead id forever. The logs caught it exactly: two items deleted at 19:18:21,
+// then 675 requests each — one every three seconds for 76 minutes, from two
+// different devices, all 404 — until the pages happened to be reloaded. The
+// device that did the deleting and the device that merely had the library open
+// were equally stuck, because nothing tells a poller its subject is gone.
+//
+// A 404/410 is the server saying "this will never succeed"; 401/403 is "not for
+// you" (an item locked out from under this profile). Both are terminal. Anything
+// else — a 500, a dropped connection — is genuinely transient, but it still gets
+// a budget, because a poll loop with no failure ceiling is how a blip becomes a
+// permanent background request every three seconds.
+const PREP_POLL_MAX_TRANSIENT = 20;   // ~1 min of blips before we stop
+
+function _stopPrepPolling(itemId) {
+  prepPolling.delete(itemId);
+  prepStats.delete(itemId);
+  try { _renderPrepChip(itemId); } catch (_) {}
+}
+
 function _startPrepPolling(itemId) {
   if (prepPolling.has(itemId)) return;
   prepPolling.add(itemId);
+  let transient = 0;
   const tick = async () => {
     if (!prepPolling.has(itemId)) return;
     try {
       const r = await fetch(`/api/library/${itemId}/prep-status`);
+      if (r.status === 404 || r.status === 410 || r.status === 401 || r.status === 403) {
+        _stopPrepPolling(itemId);          // gone, or no longer ours — stop asking
+        return;
+      }
+      if (!r.ok) {
+        if (++transient > PREP_POLL_MAX_TRANSIENT) { _stopPrepPolling(itemId); return; }
+      }
       if (r.ok) {
+        transient = 0;
         const s = await r.json();
         prepStats.set(itemId, s);
         _ingestPrepStatusFiles(itemId, s.files);
@@ -20304,7 +20347,10 @@ function _startPrepPolling(itemId) {
           return;
         }
       }
-    } catch (_) { /* network blip; keep polling */ }
+    } catch (_) {
+      // Network blip — genuinely worth retrying, but not indefinitely.
+      if (++transient > PREP_POLL_MAX_TRANSIENT) { _stopPrepPolling(itemId); return; }
+    }
     setTimeout(tick, 3000);
   };
   setTimeout(tick, 3000);
@@ -20991,6 +21037,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">12.7.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">12.7.3</div>
 </body>
 </html>

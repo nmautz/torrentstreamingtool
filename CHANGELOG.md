@@ -1,5 +1,57 @@
 # Changelog
 
+## [12.7.3] — 2026-09-14
+**Four bugs the logs had been recording for months, all the same mistake: treating a
+definitive "no" as a temporary one.**
+
+Read back through every archived log on the box — 206 prior-run bundles, 59,347 requests,
+16 MB of app log. The interesting things were not the errors; they were the *repetitions*.
+
+**1. 584 library writes were silently thrown away — 564 of them your watch position.**
+`_save_lib_raw` writes a temp file and `os.replace`s it over `library.json`. On Windows
+that fails with `ERROR_ACCESS_DENIED` whenever anything holds a handle without
+`FILE_SHARE_DELETE` — Defender scanning the file we just wrote, the Search indexer, a
+backup agent. It clears in milliseconds. POSIX `rename` has no such failure mode, which is
+exactly why it went unnoticed on a dev Mac.
+
+There was no retry. `library.json` is rewritten every ~15 s during playback, so the hot
+path was also the exposed one: each loss is one discarded "where I was in this episode",
+and to the viewer the app simply forgot their place. The write now retries five times over
+~1.9 s before giving up.
+
+**2. …and the client called a rejected save a successful one.** `fetch` throws only on a
+network failure, so the 500 those failures returned *resolved*, and the offline-stash
+fallback never fired. The `_appOffline` branch right above it already spelled out this
+exact trap for its own 404 case; nobody generalised it. `saveProgress` now checks `r.ok`.
+
+**3. Deleting an item left every open client polling it forever.** The prep-status poll's
+only exit was `r.ok` plus "nothing processing" — every other outcome fell through to an
+unconditional 3-second retry. The log has it precisely: two items deleted at 19:18:21,
+then **675 requests each, one every three seconds for 76 minutes, from two different
+devices**, all 404, until the pages happened to be reloaded. The device that did the
+deleting and the device that merely had the library open were equally stuck. 404/410 (gone)
+and 401/403 (not yours any more) are now terminal, and genuinely transient failures get a
+budget of 20 instead of infinity.
+
+**4. The admin panel became a 401 generator when its session ended.** Every panel there is
+a poller — activity and system health every 4 s, updater every 4 s, components every
+1.5 s — and each treated a non-OK reply as "try again later". `/api/admin/updater` alone
+answered **401 every minute from 15:18 to 23:04**, nearly eight hours, with nothing on
+screen saying the session had ended; the operator just sees numbers that stopped moving.
+`checkAuth()` handled this correctly, but only at page load. A 401 from any `/api/admin/`
+call now ends the session once, centrally: timers stopped, token cleared, login overlay
+back with "Session expired — sign in again."
+
+**Also, from probing the API the way a confused user would:** a `magnet` that was not a
+link at all was accepted and turned into a permanent library row stuck in `status: error`
+with an *empty* error string — a broken entry you could only delete, with nothing saying
+why. It is now refused up front. The check is deliberately loose (link-shaped, not
+"has an info-hash"), because indexers without magnets legitimately hand out a Jackett
+`/dl/` .torrent URL that carries no hash.
+
+Path traversal, malformed bodies, absurd numbers, wrong types and 8 KB queries were all
+probed against the live box and are handled correctly — no 500s, no hangs.
+
 ## [12.7.2] — 2026-09-14
 **The episode page stopped being a photograph.**
 

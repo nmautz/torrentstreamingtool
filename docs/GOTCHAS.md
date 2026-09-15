@@ -754,6 +754,68 @@ the axis the user is actually choosing along (season), and give the noise its ow
 collapsed section. Render a heading for every season the show HAS, not just the ones with
 results, or "no pack exists" and "nobody looked" are indistinguishable.
 
+### `os.replace` is not atomic-on-demand on Windows — it needs a retry
+
+`_save_lib_raw` writes `library.json.tmp` and `os.replace`s it into place. On Windows that
+raises `PermissionError` — `ERROR_ACCESS_DENIED` (5) or `ERROR_SHARING_VIOLATION` (32) —
+whenever **any** process holds a handle on the target without `FILE_SHARE_DELETE`:
+Defender scanning the file we just wrote, the Search indexer, a backup/sync agent. It
+clears in milliseconds. POSIX `rename` has no equivalent failure, so this is invisible on
+a dev Mac and routine on the deployment target.
+
+It is not rare. The archived logs carry **584** of them, **564 from `update_progress`** —
+`library.json` is rewritten every ~15 s during playback, so the hot path is the exposed
+one, and every failure is one silently discarded resume position.
+
+**Any Windows atomic-write needs a bounded retry** (`_SAVE_RETRY_DELAYS`, ~1.9 s), and the
+retry must cover the *temp write* as well as the replace — the previous tick's `.tmp` can
+still be held by the same scanner, and failing there loses the write just as completely.
+Other `os.replace` sites in the tree (marquee, metadata cache, HLS repair) have the same
+exposure; the marquee one swallows all exceptions, which is fine for a cosmetic file and
+would not be for anything the user owns.
+
+### `fetch` does not throw on 4xx/5xx — `try/catch` is not error handling
+
+The watch-progress save wrapped its POST in `try/catch` and put the offline-stash fallback
+in the `catch`. `fetch` rejects only on a *network* failure, so the 500 returned by a lost
+library-write race **resolved normally** and was treated as a successful save: no stash, no
+retry, position gone. 564 of them.
+
+The same file already documented this trap two lines above, for the offline case:
+*"the POST below would RESOLVE as a 404 (not throw), so the catch-based fallback never
+fires"*. It was never generalised. **Check `r.ok`. A `catch` block is not an error path.**
+
+### A poll loop needs to know what "never" looks like
+
+Two instances, both found by counting repeated log lines rather than reading errors:
+
+- **prep-status.** The only exit was `r.ok` + "nothing processing"; everything else fell
+  through to an unconditional `setTimeout(tick, 3000)`. Deleting a library item therefore
+  left every client that had it on screen polling a dead id forever — **675 requests each
+  for two items, one every 3 s for 76 minutes, from two devices**, all 404.
+- **The whole admin panel.** Every tab is a 1.5–4 s poller sending `authHeader()`, each
+  treating non-OK as "try again later". When the token died, `/api/admin/updater` alone
+  answered 401 every minute for **nearly eight hours**, with nothing on screen saying the
+  session had ended.
+
+**Classify the failure before deciding to retry.** 404/410 = gone, 401/403 = not yours:
+terminal, stop. Everything else is transient and gets a *budget*, never infinity — a poll
+loop with no failure ceiling is how one blip becomes a permanent background request. For a
+page with ~100 call sites, catch it once at the transport (wrap `window.fetch`) rather than
+editing every caller.
+
+### Reject the impossible request; don't persist it as a broken row
+
+`POST /api/library/download` accepted `{"magnet": "not-a-magnet"}` and minted a library
+item, which then failed and settled into `status: "error"` with an **empty** error string —
+a permanent row the user can only delete, with nothing saying why.
+
+The guard has to be loose, though: `extract_hash` returning `None` is **normal**, because
+indexers without magnets hand out a Jackett `/dl/` .torrent proxy URL that carries no
+info-hash (`qbit_add_magnet` snapshots qBit's torrent set to find the new hash afterwards).
+So the check is "link-shaped" (`magnet:` / `http://` / `https://`), not "has a hash" —
+rejecting on the hash would have broken every hashless indexer.
+
 ### A screen that never updates reads as a broken feature, not a stale screen
 
 Downloads reported their progress over SSE to the library grid and to the library card's
