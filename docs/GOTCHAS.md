@@ -1581,7 +1581,23 @@ All metadata endpoints hand out `img_base = "/api/metadata/img"`; the route serv
 
 ### Auto-match grabs the most-popular result
 
-`_tmdb_match_show` ([main.py](../main.py)) calls `/search/tv` (or `/search/movie` for single-file no-season items) and takes the **first** result. TMDb's search ranks by popularity, so for ambiguous titles ("Monster", "The Office", "It") the match may be the wrong show. Recovery paths: an admin POSTs `/api/library/{id}/metadata/refresh` with `{tmdb_id: <correct>, kind: "tv"|"movie"}`, OR **any user** uses the episode-page "Fix Metadata" control (`/metadata/search` → `/metadata/set`) to pick the right entry or hand-enter custom fields. The result is cached on `item["metadata"]`.
+`_tmdb_match_show` ([main.py](../main.py)) calls `/search/tv` (or `/search/movie` for single-file no-season items **whose name carries no season/episode marker** — see the movie-misbinding rule above) and takes the **first** result. TMDb's search ranks by popularity, so for ambiguous titles ("Monster", "The Office", "It") the match may be the wrong show. Recovery paths: an admin POSTs `/api/library/{id}/metadata/refresh` with `{tmdb_id: <correct>, kind: "tv"|"movie"}`, OR **any user** uses the episode-page "Fix Metadata" control (`/metadata/search` → `/metadata/set`) to pick the right entry or hand-enter custom fields. The result is cached on `item["metadata"]`.
+
+### A show can be matched as a MOVIE — and that silently kills the missing-seasons diff (12.6.1)
+
+`_tmdb_match_show` decides movie-vs-TV with `is_movieish = len(files) <= 1 and not item.get("season")`. That file list comes from qBit, and **an item is matched the moment it's added — usually before the torrent's file list has resolved at all.** A season pack with zero files therefore looks exactly like a one-shot movie, goes to `/search/movie`, and gets a movie binding cached forever.
+
+This is not hypothetical, and it is worse than a wrong *id*: TMDb files several pilots as standalone films, so the movie search **succeeds**. `Futurama-1999-S01` bound to `Futurama: Welcome to the World of Tomorrow` (a real 1999 movie entry) and `South.Park.S28` to `South Park: Bigger, Longer & Uncut`.
+
+The damage is entirely downstream. Every missing-content path is gated on `tmdb_kind == "tv"` — `library_coverage` skips the `missing_seasons` block, `_epMissingBlockedReason()` returns `"nometa"`, `all_seasons` is never even fetched. **The show reads as complete.** Futurama showed season 1 and nothing else, with no "Season 2 available" chip and no hint anything was absent, which is the failure mode you cannot spot by looking — the UI is identical to a genuinely complete show.
+
+Three guards now, and understand which does what before touching any of them:
+
+- `_title_says_series(item)` — a name carrying `S01E02` / `1x02` / `S01` / `Season 1` / `2nd Season` overrules the empty-file-list guess. This is the only signal available *before* files resolve.
+- `_movie_binding_is_stale(item, cached)` — after the fact: an **auto** (`source == "tmdb"`) movie binding on an item whose files hold ≥2 distinct numbered episode slots is re-matched from scratch. Bucketed files (Specials/Extras) never count, and a **`manual`/`custom` pick is never re-opened** (see the pinning rule below — a deliberate "this is a movie" must stand).
+- `kind_recheck` — stamped when the re-match *still* returns a movie. Without it, a name TMDb genuinely has no TV show for would re-query TMDb on every single page open, forever.
+
+Repair fires from `_nudge_metadata_health` (`/files`, `/metadata`, the series endpoint) **and from `/api/library/coverage`**, capped at `COVERAGE_NUDGE_PER_CALL`. The coverage hook is the one that matters: a show that looks complete is precisely the show nobody opens, so the three per-item endpoints would never run for it.
 
 ### Manual/custom metadata is PINNED — auto-refetch and rename must not clobber it
 

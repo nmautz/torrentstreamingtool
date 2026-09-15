@@ -659,7 +659,7 @@ A merged series never touches `GET /api/library/{id}/metadata`, so `GET /api/lib
 
 ### Derived view: library coverage (11.22.0)
 
-`GET /api/library/coverage` ([API.md](API.md)) answers "do we already have this, and which episodes" for Search and for the library grid's new-season chip. Nothing is persisted for it — it is computed on every call from fields documented above: `files[].season` / `.episode` / `.bucket` (a bucketed file sits outside the numbered run and never counts as owning an episode), `item["status"]` (`downloading` → `pending`, anything else → `have`), `_series_key` for grouping, and `metadata.all_seasons` for the `missing_seasons` diff — which is why the `all_seasons` self-heal above matters to Search as well as to the episode page.
+`GET /api/library/coverage` ([API.md](API.md)) answers "do we already have this, and which episodes" for Search and for the library grid's new-season chip. Nothing is persisted for it — it is computed on every call from fields documented above: `files[].season` / `.episode` / `.bucket` (a bucketed file sits outside the numbered run and never counts as owning an episode), `item["status"]` (`downloading` → `pending`, anything else → `have`), `_series_key` for grouping, `metadata.tmdb_kind` (a `movie` binding switches the diff off entirely — see [GOTCHAS.md](GOTCHAS.md) § A show can be matched as a MOVIE, and the `_movie_binding_is_stale` repair that re-opens one), and `metadata.all_seasons` for the `missing_seasons` diff — which is why the `all_seasons` self-heal above matters to Search as well as to the episode page.
 
 ## Concurrency
 

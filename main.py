@@ -2300,6 +2300,64 @@ def _tmdb_pick_tv(query: str, results: list[dict]) -> Optional[dict]:
     return max(results, key=score)
 
 
+def _title_says_series(item: dict) -> bool:
+    """Does this item's *name* carry a season/episode marker (S01E02, 1x02, S01,
+    "Season 1", "2nd Season")?
+
+    The movie-vs-TV guess below leans on the item's file list, but an item is
+    matched against TMDb as soon as it's added — often before qBit has resolved
+    the torrent's file list at all. A season pack with no files yet then looks
+    exactly like a one-shot movie, and the binding that mistake produces is
+    cached forever. The release name is the one signal available that early, and
+    it is usually explicit: "Futurama-1999-S01 1080p WEBRip…" is not a movie.
+
+    Regexes are the search-title ones defined further down the file — resolved at
+    call time, so the forward reference is fine.
+    """
+    text = f"{item.get('series') or ''} {item.get('title') or ''}"
+    return any(rx.search(text) for rx in (
+        _TT_EP_RE, _TT_EP_X_RE, _TT_SEASON_WORD_RE,
+        _TT_ORDINAL_SEASON_RE, _TT_SEASON_RE))
+
+
+def _files_say_series(item: dict) -> bool:
+    """Do this item's files prove it's a series — two or more distinct numbered
+    episode slots, outside any `bucket`?
+
+    This is the after-the-fact counterpart to `_title_says_series`: once qBit has
+    resolved the file list and `build_file_list` has attributed it, S01E01…S01E09
+    is not something a movie can be. Used to re-open an auto-matched *movie*
+    binding that the early guess got wrong (see `_fetch_item_metadata`).
+
+    Deliberately strict — two distinct slots, and bucketed files (Specials,
+    Extras, a spin-off folder) never count — because the cost of a false positive
+    is re-binding a genuine movie to some unrelated TV show.
+    """
+    slots = {(int(f.get("season") or 0), int(f.get("episode") or 0))
+             for f in (item.get("files") or [])
+             if not (f.get("bucket") or "")
+             and int(f.get("season") or 0) > 0 and int(f.get("episode") or 0) > 0}
+    return len(slots) >= 2
+
+
+def _movie_binding_is_stale(item: dict, cached: dict) -> bool:
+    """An auto-matched `movie` binding on an item whose files say series.
+
+    TMDb lists some pilots as standalone movies ("Futurama: Welcome to the World
+    of Tomorrow"), so a season pack matched before its files resolved doesn't
+    just get the wrong id — it gets the wrong *kind*, and `tmdb_kind != "tv"`
+    switches off the entire missing-seasons diff for that show. Nothing re-opened
+    that binding, so the show stayed a "movie" with nine episodes in it forever.
+
+    A **manual/custom** pick is never stale: if someone deliberately said movie,
+    that's the answer. Only `source == "tmdb"` (our own guess) is reconsidered.
+    """
+    return (cached.get("tmdb_kind") == "movie"
+            and (cached.get("source") or "tmdb") == "tmdb"
+            and not cached.get("kind_recheck")   # already re-asked; still a movie
+            and _files_say_series(item))
+
+
 async def _tmdb_match_show(item: dict) -> Optional[dict]:
     """Find the most plausible TMDb TV show for this library item. Movies are
     treated as one-shot items and matched via /search/movie when there's only
@@ -2309,7 +2367,12 @@ async def _tmdb_match_show(item: dict) -> Optional[dict]:
         return None
 
     files = item.get("files", [])
-    is_movieish = len(files) <= 1 and not item.get("season")
+    # "One file and no season" is a guess made from whatever qBit has resolved so
+    # far, which for a freshly-added torrent is usually nothing. A name that says
+    # S01 / Season 1 / S01E02 overrules it — otherwise a season pack matched a
+    # second after it was added goes to /search/movie and sticks there.
+    is_movieish = (len(files) <= 1 and not item.get("season")
+                   and not _title_says_series(item))
 
     # TV first — most of our library is series.
     tv = await _tmdb_get("/search/tv", {"query": query, "include_adult": "false"})
@@ -2633,6 +2696,11 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
         # show no missing seasons at all. Treat that as stale and re-fetch once,
         # keyed off the already-matched tmdb_id so no re-match happens. Only TV,
         # only when the binding is known. See docs/LIBRARY_DATA.md § migrations.
+        # Cache repair: an auto-matched `movie` binding on an item whose files
+        # turned out to be a numbered run. Re-runs the match from scratch — by
+        # now the file list has resolved, so `is_movieish` is false and the TV
+        # branch wins. See `_movie_binding_is_stale`.
+        stale_kind = _movie_binding_is_stale(item, cached)
         stale_seasons = (cached.get("tmdb_kind") == "tv"
                          and cached.get("tmdb_id")
                          and "all_seasons" not in cached)
@@ -2647,7 +2715,11 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
         # Custom entries have no tmdb_id, so this is the guard that protects them.
         if cached.get("source") in ("manual", "custom") and not force and not stale_seasons:
             return await _settle_attribution(lib, item, cached)
-        if cached.get("tmdb_id") and not force and not override_tmdb_id and not stale_seasons:
+        # `stale_kind` is only ever set on a `source == "tmdb"` binding, so the
+        # manual/custom guard above needs no matching clause — a deliberate
+        # "this is a movie" pick stays pinned.
+        if (cached.get("tmdb_id") and not force and not override_tmdb_id
+                and not stale_seasons and not stale_kind):
             return await _settle_attribution(lib, item, cached)
 
         if override_tmdb_id and override_kind:
@@ -2680,6 +2752,13 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
             data["source"] = cached.get("source") or "tmdb"
         else:
             data["source"] = "manual" if override_tmdb_id else "tmdb"
+
+        # The kind re-check gets exactly one shot. If TMDb still has no TV show
+        # for this name, stamp the binding so `_movie_binding_is_stale` stops
+        # matching — otherwise every page open would re-query TMDb forever.
+        # A later forced refresh writes a fresh dict, clearing the stamp.
+        if stale_kind and data.get("tmdb_kind") == "movie":
+            data["kind_recheck"] = _now_iso()
 
         # Re-read the library before writing — analyzer / progress writers may
         # have updated other fields while we were fetching from TMDb.
@@ -2716,9 +2795,11 @@ def _assert_item_visible(request: Request, lib: dict, item: dict,
     raise HTTPException(404, "Item not found.")
 
 
-def _nudge_season_inventory(item: dict) -> None:
-    """Background-refresh a TV item whose cached metadata predates `all_seasons`.
+def _nudge_metadata_health(item: dict) -> None:
+    """Background-repair an item whose cached TMDb binding can't answer "what is
+    this show missing?". Two conditions, both self-healing and both idempotent.
 
+    **1 — TV metadata predating `all_seasons`.**
     `episodes.resolve_absolute` turns a series-absolute number into a within-season
     one (an anime batch's `…/Season 2/Show - 26.mkv` is S2E01, not S2E26), but it
     needs TMDb's season inventory to do it — and metadata cached before
@@ -2731,9 +2812,18 @@ def _nudge_season_inventory(item: dict) -> None:
     E26–E37 until something happened to open the series view. Fires from every
     entry point now. Cheap and idempotent — `_spawn_metadata_fetch` joins an
     in-flight task, and the condition stops matching once the cache is healed.
+
+    **2 — a `movie` binding on an item whose files are a numbered run.**
+    Matched before qBit resolved the file list, a season pack looks like a
+    one-shot and TMDb happily returns a movie for it (Futurama's pilot is filed
+    as one). `tmdb_kind != "tv"` then switches off the whole missing-seasons
+    diff, so the show reads as complete no matter how many seasons are absent.
+    See `_movie_binding_is_stale` — manual picks are never touched, and the
+    re-check is stamped so it can't loop.
     """
     meta = item.get("metadata") or {}
-    if meta.get("tmdb_kind") == "tv" and "all_seasons" not in meta:
+    if ((meta.get("tmdb_kind") == "tv" and "all_seasons" not in meta)
+            or _movie_binding_is_stale(item, meta)):
         _spawn_metadata_fetch(item["id"])
 
 
@@ -9552,6 +9642,10 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
     return JSONResponse({"items": items})
 
 
+# How many mis-bound items one /coverage call may hand to the metadata repair.
+COVERAGE_NUDGE_PER_CALL = 4
+
+
 @app.get("/api/library/coverage")
 async def library_coverage(request: Request, profile_id: str = "",
                            tmdb_id: int = 0, kind: str = "") -> JSONResponse:
@@ -9591,6 +9685,22 @@ async def library_coverage(request: Request, profile_id: str = "",
         if it.get("admin_only") and not is_admin and not is_elevated:
             continue
         groups.setdefault(_series_key(it), []).append(it)
+
+    # The grid's "Season N available" chip is computed here, so this is the one
+    # endpoint guaranteed to run for a show nobody has opened — and a show whose
+    # binding is a mis-matched movie is exactly the show that never gets opened,
+    # because it looks complete. Nudge the repair from here too. Bounded per
+    # call: the condition is rare, self-clearing and joins in-flight fetches, but
+    # a library that somehow held fifty of them shouldn't fire fifty at once.
+    nudged = 0
+    for members in groups.values():
+        if nudged >= COVERAGE_NUDGE_PER_CALL:
+            break
+        for it in members:
+            if _movie_binding_is_stale(it, it.get("metadata") or {}):
+                _nudge_metadata_health(it)
+                nudged += 1
+                break
 
     shows = []
     for skey, members in groups.items():
@@ -9830,7 +9940,7 @@ async def get_item_files(request: Request, item_id: str,
     if not item:
         raise HTTPException(404, "Item not found.")
     _assert_item_visible(request, lib, item, profile_id)
-    _nudge_season_inventory(item)
+    _nudge_metadata_health(item)
     cfg = _download_cfg(item)
     prep_cfg = _prep_cfg(item)
     out = await _build_item_files(item, profile_id)
@@ -9883,7 +9993,7 @@ async def get_series_files(request: Request, series_key: str,
     # so the NEXT open is complete. This response is not delayed by it — the
     # client tops up from /api/tmdb/lookup meanwhile.
     if meta_item is not None:
-        _nudge_season_inventory(meta_item)
+        _nudge_metadata_health(meta_item)
 
     # Series-level on-demand-only state so the merged-series episode page can
     # render its toggle: "on" only when EVERY member is on-demand-only; "locked"
@@ -9937,8 +10047,8 @@ async def get_item_metadata(request: Request, item_id: str,
     elif key_present:
         # Cached, but possibly from before the season inventory existed — heal it
         # in the background so absolute episode numbers get corrected. See
-        # _nudge_season_inventory.
-        _nudge_season_inventory(item)
+        # _nudge_metadata_health.
+        _nudge_metadata_health(item)
 
     return JSONResponse({
         "enabled":  key_present,

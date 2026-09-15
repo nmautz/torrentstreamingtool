@@ -1,5 +1,20 @@
 # Changelog
 
+## [12.6.1] — 2026-09-14
+**A show TMDb filed as a movie can now be told it's a show — which is what switched off "you're missing 7 seasons" for Futurama and South Park.**
+
+The library already diffs a show's TMDb season inventory against what's on disk and offers a **"Season N available"** chip on the grid (plus dimmed missing-episode rows on the show page). It just never ran for Futurama: the whole diff is gated on `tmdb_kind == "tv"`, and Futurama's binding said **movie**.
+
+It said movie for a reason. TMDb files some pilots as standalone films — `Futurama: Welcome to the World of Tomorrow` is a real movie entry — and an item is matched against TMDb the moment it's added, while qBit is still resolving the torrent's file list. With no files yet, the matcher's "one file and no season ⇒ probably a movie" test fired, sent `Futurama` to `/search/movie`, and cached the result. Nothing ever re-opened that binding, so a nine-episode season pack stayed a "movie" indefinitely, looking complete. South Park S28 landed on `South Park: Bigger, Longer & Uncut` the same way.
+
+Three changes:
+
+- **The name overrules the empty file list.** `_title_says_series` — a release called `Futurama-1999-S01 1080p WEBRip…` is not a movie no matter how few files have resolved. Recognises `S01E02`, `1x02`, `S01`, `Season 1`, `2nd Season`.
+- **The files re-open a wrong guess.** `_movie_binding_is_stale` — an *auto*-matched movie binding on an item whose files are two or more distinct numbered episode slots gets re-matched, this time with the file list resolved. A **manual** "this is a movie" pick is never touched, and bucketed Specials/Extras never count as episodes.
+- **It repairs itself without being visited.** `_nudge_season_inventory` is now `_nudge_metadata_health` and covers both cache repairs; `/api/library/coverage` nudges too (up to `COVERAGE_NUDGE_PER_CALL` per call), because a show that looks complete is exactly the one nobody opens. The re-check is stamped `kind_recheck` so a name TMDb genuinely has no show for can't re-query on every page open.
+
+No migration and nothing to click — open the library and the affected shows repair in the background.
+
 ## [12.6.0] — 2026-09-14
 **Credits for files with no chapters, no matching theme and no subtitles — found by watching the picture.**
 
