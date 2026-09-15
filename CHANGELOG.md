@@ -1,5 +1,36 @@
 # Changelog
 
+## [13.2.0] — 2026-09-15
+**"On TV" from a phone always meant VLC — the setting was never consulted.**
+
+The whole 13.0.x line made the TV kiosk play on its own player *when you press Play on
+the kiosk*. Nobody does that. The way this household actually starts something on the TV
+is from a phone — web or app — tapping **On the TV**, and that posts
+`/api/library/{id}/play`, which hardcoded VLC and never looked at
+`settings.tv_playback_mode` at all. So the setting said "device", the kiosk was ready, and
+every real play still went to VLC. Reported after closing and reopening both clients
+repeatedly, which of course changed nothing: the clients were never the problem.
+
+`/api/library/{id}/play` means **"play this on the TV"**, not "play this on VLC". It now
+picks the surface, after the playlist and seek are resolved so both surfaces play the same
+run from the same position, and before any VLC state is touched. Deciding it server-side
+is what makes it reach the iOS app — the app loads the dashboard from the host, but even a
+client that didn't would get this for free.
+
+**Three ways it stays safe:**
+
+- A kiosk that won't come up, or never acknowledges the open within 45 s, **falls the
+  whole play back to VLC** rather than leaving the viewer with a dead TV.
+- `force_vlc` opts out, and is load-bearing on both switch-to-VLC paths — the More-panel
+  surface toggle and the automatic on-device fallback. Without it the server routes them
+  straight back to the surface they are trying to leave, which is an infinite bounce.
+- The `open` command now carries the server-resolved **playlist** (resume point, on-disk
+  filtering, shuffle order, merged-series item ids), so episode nav and auto-advance match
+  VLC instead of the page re-deriving them.
+
+**The chooser stopped lying.** "On the TV" described itself as "(via VLC)"; it now says
+that only when VLC is actually the configured surface.
+
 ## [13.1.2] — 2026-09-15
 **Hardened the cache header, and corrected a misdiagnosis.**
 

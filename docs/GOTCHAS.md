@@ -3058,6 +3058,36 @@ const picked=[]; const real=window.pcChoose; window.pcChoose=t=>picked.push(t);
 _resumeNormal("<item-id>"); window.pcChoose=real; picked;   // ["local"] or ["vlc"]
 ```
 
+### Every "switch to VLC" must send `force_vlc`, or it bounces forever
+
+`POST /api/library/{id}/play` now picks the TV surface from
+`settings.tv_playback_mode`. That makes it the wrong call to use, unqualified, for
+*leaving* the on-device surface — the server routes it straight back to the player you are
+trying to escape, which then fails or falls back and asks again.
+
+Two callers must always set `force_vlc:true`:
+
+* `fcSwitchTvSurface`'s device→VLC half — the More-panel toggle IS "switch to VLC".
+* `tvFallbackToVlc` — the automatic fallback. Without the flag a file the on-device player
+  cannot handle is handed to VLC, routed back to on-device, fails again… The one-shot
+  `_tvFallbackDoneFor` guard limits the damage to one round trip per file, but the flag is
+  what makes it correct.
+
+The mirror-image trap: **the surface decision belongs after playlist/seek resolution and
+before any VLC state is touched.** Decide it earlier and the two surfaces disagree about
+what plays and from where; later and you have already half-started VLC.
+
+### Fixing the surface nobody actually uses
+
+13.0.0–13.1.2 made the TV kiosk play on its own player *when you press Play on the kiosk*,
+and shipped a setting for it. Nobody presses Play on the kiosk — the household starts
+things from a phone, which posts `/api/library/{id}/play`, which hardcoded VLC. The
+setting read "device", the kiosk was ready, and every real play still went to VLC.
+
+Worth remembering when a feature "works" in testing but not in use: **check which entry
+point the user actually touches.** `?tv=1` has its own play path, and it is not the one
+that matters.
+
 - [BACKEND.md](BACKEND.md) — invariants enforced by `main.py`
 - [DAEMON_WATCHDOG.md](DAEMON_WATCHDOG.md) — VPN guard at the process level
 - [ANALYZER.md](ANALYZER.md) — Smart Skip algorithm details and fallback chain

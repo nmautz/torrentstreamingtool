@@ -9473,6 +9473,11 @@ class LibraryPlayReq(BaseModel):
     items: list[str] = []         # merged-series play: the owning item id for each entry in
                                   # `files` (same length/order). When set, playback spans
                                   # these items and the tracker re-targets library_item_id.
+    force_vlc: bool = False       # ignore settings.tv_playback_mode and play on VLC. Set by
+                                  # every "switch to VLC" path — the More-panel surface
+                                  # toggle and the automatic on-device fallback — which
+                                  # would otherwise be routed straight back to the surface
+                                  # they are trying to leave (an infinite bounce).
 
 
 class MarkWatchedReq(BaseModel):
@@ -12015,6 +12020,32 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
             seek_sec = hint["position_sec"]
     prof_obj = next((p for p in lib.get("profiles", []) if p["id"] == req.profile_id), {})
     resume_mode = prof_obj.get("resume_mode", "auto")
+
+    # ── Which TV surface? ────────────────────────────────────────────────────
+    # This endpoint means "play this on the TV", not "play this on VLC" — the
+    # surface is `settings.tv_playback_mode`. Decided here, after the playlist and
+    # seek are resolved (so both surfaces play exactly the same thing from the
+    # same position) and before any VLC state is touched.
+    #
+    # This is the path that actually matters: from a phone, "On TV" posts here.
+    # Routing it in the client instead would have missed the iOS app entirely.
+    # `force_vlc` is how the switch-to-VLC paths get past it without bouncing
+    # straight back, and a kiosk that can't be brought up (or never acknowledges)
+    # falls through to VLC rather than leaving the viewer with a dead TV.
+    if not req.force_vlc and _tv_wants_device_surface():
+        async def _fall_back_to_vlc() -> None:
+            # Re-enter with the same resolved request, VLC forced. Mutating the
+            # model rather than copying it keeps this off any Pydantic-version
+            # API (`model_copy` is v2-only) — `req` is not read again on this path.
+            req.force_vlc = True
+            await play_library_item(item_id, req)
+        if await _tv_local_start_play(item, playlist, seek_sec, req,
+                                      on_give_up=_fall_back_to_vlc):
+            return JSONResponse(
+                {"ok": True, "playlist_count": len(playlist),
+                 "seek_to": seek_sec, "surface": "device"},
+                status_code=202,
+            )
 
     # Starting a different episode supersedes whatever was playing — flush the
     # outgoing episode's final position first, so jumping to another episode from
@@ -14872,6 +14903,21 @@ async def youtube_tv_state(req: YouTubeTvStateReq) -> JSONResponse:
     return JSONResponse({"ok": True, "active": True})
 
 
+def _tv_wants_device_surface() -> bool:
+    """True when a "play on the TV" should open on the kiosk's own player.
+
+    This is what makes the setting mean anything for the way the household
+    actually plays things: from a phone, choosing **On TV**. That posts
+    `/api/library/{id}/play`, which hardcoded VLC — so until 13.2.0 the setting
+    only applied when someone pressed Play on the kiosk itself, which nobody
+    does. Deciding it HERE covers the web dashboard, the iOS app and anything
+    else, with no client change and no app rebuild.
+    """
+    return (state.tv_playback_mode == "device"
+            and HLS_AVAILABLE
+            and bool(settings.tv_ui))
+
+
 # A kiosk heartbeat older than this means the page is gone (crash, reload,
 # navigation) and its <video> is not playing anything. Generous next to the ~2 s
 # beat because a JIT rebuffer can stall the page's timers briefly.
@@ -14978,7 +15024,7 @@ TV_LOCAL_OPEN_WAIT_SECS = 45.0
 TV_LOCAL_OPEN_RETRY_SECS = 2.0
 
 
-async def _tv_local_open_pump(payload: dict) -> None:
+async def _tv_local_open_pump(payload: dict, on_give_up=None) -> None:
     """Re-broadcast an `open` until the kiosk page acts on it.
 
     **SSE is fire-and-forget.** A single broadcast only reaches pages that are
@@ -15015,6 +15061,57 @@ async def _tv_local_open_pump(payload: dict) -> None:
                     TV_LOCAL_OPEN_WAIT_SECS)
         await _tv_local_clear("kiosk never acknowledged open")
         await broadcast("state", state_snapshot())
+        # A kiosk that never came up must not mean "nothing happened" — the
+        # viewer asked for this on the TV. Fall the whole play back to VLC.
+        if on_give_up is not None:
+            try:
+                await on_give_up()
+            except Exception:
+                log.warning("tv-local: VLC fallback after failed open also failed",
+                            exc_info=True)
+
+
+async def _tv_local_start_play(item: dict, playlist: list, seek_sec, req,
+                               on_give_up=None) -> bool:
+    """Open a "play on the TV" on the kiosk's own player. False ⇒ couldn't, use VLC.
+
+    Shares the caller's already-resolved playlist and seek, so the on-device and
+    VLC surfaces agree on WHAT plays and from where — only where it comes out
+    differs. Bringing the kiosk up FIRST mirrors the 🏠 Home key: `tv_ui_active`
+    has to be set before `stop()` kicks off its focus/background churn, or
+    `background_video_loop` takes the display in the gap.
+    """
+    await _tv_ui_show("play on the TV (on-device surface)")
+    if not state.tv_ui_active:
+        log.warning("tv-local: kiosk wouldn't come up — playing on VLC instead")
+        return False
+    if _tv_anything_playing():
+        await stop()
+    state.tv_local_active = True
+    state.tv_local_seen_at = time.time()
+    state.tv_local_item_id = item["id"]
+    state.tv_local_file_path = playlist[0]
+    state.tv_local_playback = "buffering"
+    state.stream_status = "buffering"
+    state.active_title = item.get("title") or Path(playlist[0]).name
+    state.library_item_id = item["id"]
+    state.library_current_file = playlist[0]
+    state.library_profile_id = req.profile_id
+    asyncio.create_task(_tv_local_open_pump({
+        "action":        "open",
+        "item_id":       item["id"],
+        "file_path":     playlist[0],
+        "files":         playlist,
+        "items":         list(req.items) if req.items else [],
+        "profile_id":    req.profile_id,
+        "seek":          float(seek_sec or 0),
+        "shuffle":       bool(req.shuffle),
+        "shuffle_scope": req.shuffle_scope or "",
+    }, on_give_up=on_give_up))
+    await broadcast("stream_status", {"status": "buffering",
+                                      "message": f"Starting on the TV: {Path(playlist[0]).name}"})
+    await broadcast("state", state_snapshot())
+    return True
 
 
 @app.post("/api/tv-local/open")

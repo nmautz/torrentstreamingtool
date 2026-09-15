@@ -282,6 +282,30 @@ Two things behave differently by necessity:
   would relaunch VLC *over* the film to add a filter nobody could hear.
   `_apply_night_mode` persists the setting and returns early instead.
 
+### How a play reaches this surface
+
+**`POST /api/library/{id}/play` is "play on the TV", not "play on VLC".** It picks the
+surface from `settings.tv_playback_mode` — after the playlist and seek are resolved, so
+both surfaces play the same run from the same position, and before any VLC state is
+touched.
+
+That endpoint is the one that matters, because it is what a phone's **On the TV** button
+posts. Until 13.2.0 it hardcoded VLC, so the setting only applied when somebody pressed
+Play on the kiosk itself — which nobody does, and the whole feature looked broken from a
+phone. Deciding it server-side is also what carries it to the iOS app.
+
+Safety rails, all three load-bearing:
+
+- A kiosk that won't come up (`_tv_ui_show` leaves `tv_ui_active` false), or never
+  acknowledges the open within `TV_LOCAL_OPEN_WAIT_SECS`, **falls the whole play back to
+  VLC**. "On the TV" must never mean "nothing happened".
+- **`force_vlc:true` opts out**, and every switch-to-VLC path must send it — the
+  More-panel toggle and `tvFallbackToVlc`. Without it the server routes them straight back
+  to the surface they are trying to leave. See [GOTCHAS.md](GOTCHAS.md).
+- The `open` command carries the **server-resolved playlist** (`files`, `items`,
+  `shuffle`, `shuffle_scope`), so episode nav and auto-advance match VLC rather than the
+  page re-deriving them from a single path.
+
 ### Switching on purpose
 
 - **User Settings → Always Use VLC on the TV** → `settings.tv_playback_mode`

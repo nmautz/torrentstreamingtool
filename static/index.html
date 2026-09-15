@@ -3232,7 +3232,7 @@
         </svg>
         <div class="min-w-0">
           <div class="text-sm font-black uppercase tracking-wide">On the TV</div>
-          <div class="text-[11px] text-gray-500 mt-0.5">Play on the big screen connected to StreamLink (via VLC)</div>
+          <div id="pcVlcSub" class="text-[11px] text-gray-500 mt-0.5">Play on the big screen connected to StreamLink</div>
         </div>
       </button>
       <button id="pcLocalBtn" onclick="pcChoose('local')"
@@ -5182,7 +5182,11 @@ async function fcSwitchTvSurface(btn){
         method:"POST",headers:{"Content-Type":"application/json"},
         body:JSON.stringify({profile_id:(profile&&profile.id)||"",files:[filePath],
                              seek_first_to:seek,shuffle:!!app.library_shuffle,
-                             shuffle_scope:app.library_shuffle_scope||""}),
+                             shuffle_scope:app.library_shuffle_scope||"",
+                             // Same reason as the automatic fallback: this IS the
+                             // "switch to VLC" button, so it must opt out of the
+                             // surface routing or it lands back on-device.
+                             force_vlc:true}),
       });
       if(!r.ok){ const e=await r.json().catch(()=>({})); showAlert(e.detail||"Couldn't switch to VLC.","error"); }
       else { showAlert("Switched the TV to VLC.","info"); fcCloseMore(); }
@@ -16592,6 +16596,7 @@ function _resumeNormal(itemId) {
   if (TV_MODE) return pcChoose(tvPlaybackMode === "vlc" ? "vlc" : "local");
   document.getElementById("pcSubtitle").textContent = label;
   document.getElementById("pcLocalSub").textContent = "Stream to this device's browser";
+  _pcSyncTvSub();
   document.getElementById("pcLocalBtn").disabled = false;
   document.getElementById("playChooserModal").classList.remove("hidden");
 }
@@ -16670,8 +16675,20 @@ async function playLibraryWithChooser(itemId, files, seekTo, label, shuffle, shu
   if (TV_MODE) return pcChoose(tvPlaybackMode === "vlc" ? "vlc" : "local");
   document.getElementById("pcSubtitle").textContent = label || "";
   document.getElementById("pcLocalSub").textContent = "Stream to this device's browser";
+  _pcSyncTvSub();
   document.getElementById("pcLocalBtn").disabled = false;
   document.getElementById("playChooserModal").classList.remove("hidden");
+}
+
+// "On the TV" no longer implies VLC — the surface is settings.tv_playback_mode,
+// honoured server-side by /api/library/{id}/play. Say which one it will use, so
+// the button isn't quietly lying about where the picture comes from.
+function _pcSyncTvSub() {
+  const el = document.getElementById("pcVlcSub");
+  if (!el) return;
+  el.textContent = tvPlaybackMode === "vlc"
+    ? "Play on the big screen connected to StreamLink (via VLC)"
+    : "Play on the big screen connected to StreamLink";
 }
 
 function pcChoose(target) {
@@ -19900,6 +19917,10 @@ function tvFallbackToVlc(reason) {
         profile_id: (profile && profile.id) || "",
         files: [filePath], seek_first_to: at,
         shuffle: shuffle, shuffle_scope: scope,
+        // LOAD-BEARING: /api/library/{id}/play now honours the TV surface
+        // setting, so without this the fallback is routed straight back to the
+        // on-device player that just failed — an infinite bounce.
+        force_vlc: true,
       }),
     });
   }).then(r => { if (r && !r.ok) showAlert("VLC couldn't play this file either.", "error"); })
@@ -21659,6 +21680,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">13.1.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">13.2.0</div>
 </body>
 </html>
