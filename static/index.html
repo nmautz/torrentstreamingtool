@@ -21306,6 +21306,14 @@ function connectSSE(){
       if(d.action==="player_volume_step"){ if(_tvLocalLive()) lpVolumeStep(Number(d.value)||0); return; }
       if(d.action==="stop"){ if(_tvLocalLive()) lpStop(); return; }
       if(d.action==="open"){ _tvLocalOpen(d); return; }
+      if(d.action==="reload"){
+        // A frontend-only update landed. The kiosk stays open for days, so
+        // without this it would keep running the previous build's JavaScript.
+        // Never mid-playback — an auto-update must not interrupt a film; the
+        // next idle reload (or a reboot) picks it up instead.
+        if(!_tvLocalLive()) location.reload();
+        return;
+      }
       // The rest come from the dashboard's fullscreen controls, relayed by the
       // /api/vlc/* endpoints so both TV surfaces answer the same buttons.
       if(d.action==="seek_to"){ if(_tvLocalLive()) _tvLocalSeekPct(Number(d.value)||0); return; }
@@ -21651,6 +21659,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">13.1.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">13.1.1</div>
 </body>
 </html>

@@ -6330,6 +6330,16 @@ async def _run_apply(branch: str, reboot: bool = True, allow_any: bool = False) 
             log.warning("Could not write log-rotate marker: %s", exc)
 
         if not reboot:
+            # The TV kiosk is a browser that stays open for days, so a
+            # frontend-only apply (`reboot:false` — static/ is read from disk per
+            # request) would leave the TV running the PREVIOUS build's JavaScript
+            # indefinitely, while every other client picks it up on its next load.
+            # Tell it to reload. Harmless when nothing is playing; the page skips
+            # it mid-playback so an auto-update can't interrupt a film.
+            try:
+                await broadcast("tv_command", {"action": "reload"})
+            except Exception:
+                pass
             await _set_updater_phase("idle",
                                     f"Updated to {new_commit}. Reboot pending.",
                                     busy=False)
@@ -27798,4 +27808,34 @@ async def get_skip_data_for_play(item_id: str, file_path: str = "") -> JSONRespo
 
 
 # Static files must be mounted last so API routes take priority
-app.mount("/", StaticFiles(directory="static", html=True), name="static")
+class _RevalidatingStatic(StaticFiles):
+    """StaticFiles that forbids *heuristic* caching of the HTML pages.
+
+    Starlette sends `etag` + `last-modified` but no `Cache-Control`. With no
+    explicit freshness a browser falls back to HEURISTIC caching — roughly 10% of
+    the age of the document — and serves the page from disk **without
+    revalidating**. On the TV kiosk that means a browser relaunched after an
+    update can render the PREVIOUS build's `index.html`, and the symptom is
+    baffling: the page looks fine, but it is running last version's JavaScript.
+    That is how on-device TV playback could still route to VLC after the build
+    that fixed it shipped (a stale page has the old `hlsAvailable = !TV_MODE`).
+
+    `no-cache` does NOT mean "don't cache" — it means "cache, but revalidate
+    every time". The conditional request costs one round trip on a LAN and
+    answers 304 with no body when nothing changed, so this is close to free and
+    removes the whole class of stale-page bug. Assets (vendor JS/wasm/fonts) keep
+    normal caching; they are refetched by the version check's cache-busting hard
+    reload when the build actually changes.
+    """
+
+    def file_response(self, *args, **kwargs):
+        resp = super().file_response(*args, **kwargs)
+        try:
+            if (resp.media_type or "").startswith("text/html"):
+                resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+        except Exception:
+            pass
+        return resp
+
+
+app.mount("/", _RevalidatingStatic(directory="static", html=True), name="static")

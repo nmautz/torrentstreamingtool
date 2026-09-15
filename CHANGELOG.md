@@ -1,5 +1,35 @@
 # Changelog
 
+## [13.1.1] — 2026-09-15
+**The TV could keep running the previous build's JavaScript.**
+
+Reported: Play on the TV still opened VLC. On the current build it doesn't — intercepting
+the decision on the live kiosk page shows both entry points (`_resumeNormal` and
+`playLibraryWithChooser`) picking `local`, with `TV_MODE: true`, `hlsAvailable: true`,
+`tvPlaybackMode: "device"`. But there was a real mechanism that produces exactly that
+symptom, and it is now closed.
+
+**The dashboard HTML was served with no `Cache-Control`.** Starlette's `StaticFiles`
+sends `etag` and `last-modified` only, and with no explicit freshness a browser falls
+back to *heuristic* caching — roughly 10% of the document's age — and serves the page
+from disk **without revalidating**. A kiosk browser relaunched after an update could
+therefore render the previous build's `index.html`. The failure is maximally confusing
+because the page looks completely normal; it is just running last version's code. A stale
+page still has the old `hlsAvailable = !TV_MODE`, which routes every TV play straight to
+VLC — the reported symptom exactly, and it would equally explain "every full-screen
+control does nothing but Stop" persisting after the build that fixed it.
+
+`no-cache` doesn't mean "don't cache" — it means "cache, but revalidate every time". One
+conditional request per load on a LAN, answered 304 with no body when nothing changed. It
+removes the whole class of bug for a rounding error in cost.
+
+**And a frontend-only update never reached the TV at all.** `static/` is read from disk
+per request, so an apply with `reboot:false` goes live instantly for every client that
+loads a page afterwards — but the kiosk is a browser that stays open for days and never
+reloads. It kept running the old build until the next reboot. The updater now broadcasts
+`tv_command:reload` on a no-reboot apply; the page ignores it while something is playing,
+so an auto-update can't interrupt a film.
+
 ## [13.1.0] — 2026-09-15
 **The full-screen controls now drive the TV whichever surface is playing.**
 

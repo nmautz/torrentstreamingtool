@@ -3007,6 +3007,37 @@ Claiming from the *start* of a play, not from first picture, is also what makes 
 start cancellable: Back and Home are gated on `_tv_anything_playing()`, so with nothing
 claimed the couch has no way to abandon a cold transcode.
 
+### A kiosk that looks fine but runs the previous build's JavaScript
+
+Starlette's `StaticFiles` sends `etag` and `last-modified` but **no `Cache-Control`**.
+With no explicit freshness a browser falls back to *heuristic* caching — roughly 10% of
+the document's age — and serves the page from disk **without revalidating**. So a TV
+kiosk relaunched after an update can render the previous build's `index.html`.
+
+The symptom gives you nothing: the page looks completely normal, the version badge reads
+whatever that old build baked in, and only the behaviour is wrong. This is how "Play on
+the TV still opens VLC" survived the build that fixed it — a stale page still has the old
+`hlsAvailable = !TV_MODE`, which routes every TV play to VLC.
+
+`_RevalidatingStatic` sets `Cache-Control: no-cache, must-revalidate` on HTML. `no-cache`
+does **not** mean "don't cache" — it means "cache, but revalidate every time", which on a
+LAN is one conditional request answered 304 with no body. `checkUiVersion` (badge vs
+`/api/version`, then a cache-busting hard reload) is the second line of defence, but it
+only runs **on page load** — useless for a kiosk that has been open for three days.
+
+Which is the other half: `static/` is read from disk per request, so an updater apply
+with `reboot:false` is live for every client that loads a page afterwards — except the
+kiosk, which never reloads on its own. The updater broadcasts `tv_command:reload` for it,
+and the page ignores that while `_tvLocalLive()` so an auto-update can't interrupt a film.
+
+**When a frontend change "didn't work" on the TV, check the running page before you check
+your code** — drive the kiosk over CDP and read the variable, or intercept the decision:
+
+```js
+const picked=[]; const real=window.pcChoose; window.pcChoose=t=>picked.push(t);
+_resumeNormal("<item-id>"); window.pcChoose=real; picked;   // ["local"] or ["vlc"]
+```
+
 - [BACKEND.md](BACKEND.md) — invariants enforced by `main.py`
 - [DAEMON_WATCHDOG.md](DAEMON_WATCHDOG.md) — VPN guard at the process level
 - [ANALYZER.md](ANALYZER.md) — Smart Skip algorithm details and fallback chain
