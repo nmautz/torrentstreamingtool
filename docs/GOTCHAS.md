@@ -722,9 +722,30 @@ query found. Nothing was broken; the title is just a bad query for a specific se
 because every episode, franchise sibling and same-word film competes for the same result
 budget, and the newest seasons lose.
 
-**Anything that needs per-season coverage must ask per season.** `ssSearchSeasonPacks`
-does for packs what `ssSearchEpisode` does for episodes — and both exist for the same
-reason, which is worth noticing as a pattern rather than two coincidences.
+**Anything that needs per-season coverage must ask per season.** `ssSearchSeason`
+does for a season what `ssSearchEpisode` does for an episode — and both exist for the
+same reason, which is worth noticing as a pattern rather than two coincidences.
+
+**12.7.0 — on a long-running show the budget doesn’t skew, it excludes, and it takes the
+episodes with it.** Hacks was the mild version: the packs were missing but the episodes
+were there. `q=Futurama` returns episodes for seasons 1, 5 and 7–14 — and *nothing at all*
+for S02, S03, S04 and S06, because the 2023–2026 revival’s releases fill the result budget
+on their own. Four entire seasons of a show whose every season is sitting on the indexers
+read as “No source found”, on the one screen whose job is to say what you can still get.
+`q=Futurama S02` returns them instantly.
+
+So the targeted per-season query now buckets its **episodes** as well as its packs
+(`ssSearchSeason` → `_ssMergeEpisodes` + `_ssMergePacks`), and it is fired in three places
+rather than waiting to be clicked: after the broad "Search episodes" pass, for every season
+that came back bare (`_ssSweepBareSeasons`, detached); when the user lands on an empty
+season tab (`_ssEpisodeSeasonHint`); and as the first phase of the bulk run
+(`_bgEnsureSources`). One query per season, not twenty per season — the per-episode sweep
+is the mop-up, not the mechanism.
+
+**Don’t diagnose this from the flat `results[]`.** `/api/search` de-duplicates into ~30 flat
+rows but the group carries the lot (192 for Futurama), so a shallow look at the response
+suggests a truncation that isn’t there. Count per season inside `groups[].results` — that is
+where the hole is visible.
 
 The second half of the problem was presentation: that query also returned 154 non-episode
 rows, ~144 of them `movie`-kind noise, against 10 real season packs. A flat
@@ -750,7 +771,7 @@ results is not evidence that none exist.** Jackett fans out to five indexers and
 200 with whatever came back; a bare pass is common and usually transient. Hacks S05E09/E10
 came back empty at 21:19:23 and were found by the identical query at 21:20:50. Anything
 that treats one empty search as “no such release” will be wrong regularly — retry the gaps
-before concluding anything, which is what `_ssEnsureBulkSources` does.
+before concluding anything, which is what `_bgEnsureSources`’ second pass does.
 
 ### A timeout that lives in memory never expires on a box that restarts
 

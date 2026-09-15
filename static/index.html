@@ -943,6 +943,34 @@
   </div>
 </div>
 
+<!-- ── Background source-finder pill ───────────────────────────────
+     Hunting sources for a whole season is minutes of sequential indexer
+     queries. It used to run inside the bulk sheet, which pinned the user to a
+     modal for the duration; it now runs detached and reports here. Sits above
+     the show page (z-50) and its sheets (z-55) so it stays visible wherever the
+     user wanders, and below the download modal (z-60). Bottom-left keeps it
+     clear of the prep pill (top-right) and the footer nav.
+-->
+<div id="globalFindBar"
+  class="hidden fixed bottom-20 left-3 z-[58] bg-indigo-950/95 border border-indigo-700
+         text-indigo-200 text-xs px-3 py-2 min-w-[240px] max-w-[340px] shadow-lg
+         font-mono select-none"
+  aria-live="polite">
+  <div class="flex items-center gap-2">
+    <span class="inline-block w-2 h-2 bg-indigo-400 animate-pulse flex-shrink-0"></span>
+    <span id="globalFindText" class="font-bold uppercase tracking-wide truncate min-w-0 flex-1">Finding sources…</span>
+    <button type="button" onclick="bgFindStop()" aria-label="Stop finding sources"
+      class="flex-shrink-0 -my-1 -mr-1 p-1 text-indigo-300 hover:text-white">
+      <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor"
+           stroke-width="3" stroke-linecap="square"><path d="M5 5l14 14M19 5L5 19"/></svg>
+    </button>
+  </div>
+  <div class="w-full bg-indigo-900/60 h-1 mt-1.5">
+    <div id="globalFindFill" class="bg-indigo-400 h-1 transition-all duration-300" style="width:0%"></div>
+  </div>
+  <div id="globalFindDetail" class="text-[10px] text-indigo-300/80 mt-1 truncate"></div>
+</div>
+
 <!-- ── VPN Disconnected Overlay ───────────────────────────────────────────── -->
 <div id="vpnOverlay"
   class="hidden fixed inset-0 z-50 bg-red-950
@@ -11364,7 +11392,8 @@ function _ssLoadingBodyHtml(){
 
 async function openSearchShow(group){
   _ssGroup=group; _ssMeta=null; _ssOwned=null; _ssReplace=""; _ssSearching.clear(); _ssLocked=false;
-  _ssKind=""; _ssBroadResults=null; _ssPacksSearched=(group.results||[]).length>0;
+  _ssKind=""; _ssBroadResults=null; _ssSeasonHinted=new Set();
+  _ssPacksSearched=(group.results||[]).length>0;
   _ssEpisodesSearched=(group.results||[]).length>0;
   _ssEpisodes=_ssBuildEpisodes(group.results||[]);
   _ssPacks=(group.results||[]).filter(r=>r.kind!=="episode").sort(_ssPackCmp);
@@ -11423,7 +11452,7 @@ async function openSearchShowFromTmdb(cand, opts){
   _ssGroup=group; _ssMeta=null; _ssSearching.clear(); _ssLocked=false;
   _ssKind=cand.kind==="movie"?"movie":"tv"; _ssBroadResults=null; _ssPacksSearched=false; _ssEpisodesSearched=false;
   _ssOwned=_covFor(_ssKind, cand.id);
-  _ssPackHinted=new Set();
+  _ssSeasonHinted=new Set();
   // A deliberate replace (a green Dolby Vision episode being swapped out) asks
   // for sources the ownership join would otherwise suppress as "already have
   // it". Exempt exactly that one episode, not the whole show.
@@ -11549,7 +11578,7 @@ async function _ssBroadSearch(){
 
 // Explicit "Search episodes" — one broad Jackett query, bucket episode-kind
 // results into _ssEpisodes. Per-season/per-episode Find fills any gaps after.
-async function ssSearchShowEpisodes(btn){
+async function ssSearchShowEpisodes(btn, opts={}){
   if(btn){ btn.disabled=true; _markLoading(btn,true); }
   const grp=_ssGroup;
   try{
@@ -11576,6 +11605,11 @@ async function ssSearchShowEpisodes(btn){
     _ssEpisodesSearched=true;
     _ssRender();
     if(!eps.length) showAlert("No single episodes found for this show.","warn");
+    // One query cannot hold a long-running show. Whatever seasons it left bare
+    // get their own targeted query, detached, so the button returns now and the
+    // tabs fill in behind it. (`noSweep` is for the bulk run, which does its own
+    // season pass and must not race this one for the single background slot.)
+    if(!opts.noSweep) _ssSweepBareSeasons();
   } finally {
     if(btn){ btn.disabled=false; _markLoading(btn,false); }
   }
@@ -11590,18 +11624,31 @@ function _ssMergePacks(results){
   return found.length;
 }
 
-// Targeted "<title> S04"-style query for one season's packs.
+// One targeted "<title> S04"-style query, feeding BOTH tabs.
 //
-// The broad show-title query does NOT surface these reliably: a search for
+// The broad show-title query does not surface a season reliably: a search for
 // "Hacks" returned season packs for S01-S03 and none at all for S04, while
 // "Hacks S04" returned four — the best of them with 182 seeders, more than any
 // pack the broad query found. A show's own title is a weak query for its later
 // seasons, because every episode, every franchise sibling and every unrelated
 // film sharing the word competes for the same result budget.
-async function ssSearchSeasonPacks(season, opts={}){
+//
+// On a long-running show the budget doesn't just skew — it excludes. "Futurama"
+// comes back holding seasons 1, 5 and 7-14 only: every episode of S02-S04 and
+// S06 is crowded out by the newest season's hundred-odd releases, so four whole
+// seasons read as "no source found" on a show every one of whose seasons is
+// sitting right there. "Futurama S02" returns them instantly. So the targeted
+// query buckets its EPISODES too, not just its packs — the same one request
+// answers both tabs, and a season is one query away from being complete rather
+// than twenty.
+//
+// Episodes are taken only for the season that was asked for: the query is
+// precise by construction, and a strict season match is what keeps a
+// same-franchise sibling out of the buckets without needing a relevance cutoff.
+async function ssSearchSeason(season, opts={}){
   const grp=_ssGroup;
   const q=`${grp.title} S${String(season).padStart(2,"0")}`;
-  let got=0;
+  let packs=0, eps=0;
   try{
     let url=`/api/search?q=${encodeURIComponent(q)}`;
     if(profile.id) url+=`&profile_id=${encodeURIComponent(profile.id)}`;
@@ -11610,11 +11657,35 @@ async function ssSearchSeasonPacks(season, opts={}){
       const data=await r.json();
       const out=[];
       (data.groups||[]).forEach(g=>(g.results||[]).forEach(res=>out.push(res)));
-      got=_ssMergePacks(out);
+      packs=_ssMergePacks(out);
+      eps=_ssMergeEpisodes(out.filter(r2=>r2.kind==="episode" && r2.season===season));
     }
   }catch(_){}
   if(_ssGroup===grp && !opts.silent){ _ssPacksSearched=true; _ssRender(); }
-  return got;
+  return {packs, eps};
+}
+
+// Back-compat name: every pack-side caller wants exactly this query, and now
+// gets the episodes for free.
+async function ssSearchSeasonPacks(season, opts={}){
+  return (await ssSearchSeason(season, opts)).packs;
+}
+
+// Merge episode-kind results into _ssEpisodes, deduped by magnet. Returns the
+// number of NEW sources taken on.
+function _ssMergeEpisodes(results){
+  let added=0;
+  results.forEach(res=>{
+    let e=_ssEpisodes.find(x=>x.season===res.season&&x.episode===res.episode);
+    if(!e){ e={season:res.season,episode:res.episode,sources:[]}; _ssEpisodes.push(e); }
+    if(e.sources.some(s=>s.magnet===res.magnet)) return;
+    e.sources.push(res); added++;
+  });
+  if(added){
+    _ssEpisodes.forEach(e=>e.sources.sort((a,b)=>b.seeders-a.seeders));
+    _ssEpisodes.sort((a,b)=>(a.season-b.season)||(a.episode-b.episode));
+  }
+  return added;
 }
 
 // Explicit "Search packs" — the broad query, then a targeted sweep for every
@@ -11632,18 +11703,25 @@ async function ssSearchPacks(btn){
     const n=_ssMergePacks(results);
     _ssPacksSearched=true;
     _ssRender();
-    // Sweep the seasons the broad query left bare. Movies have no seasons.
+    // Sweep the seasons the broad query left bare — detached, so the button
+    // comes back at once and the list fills in behind it. Movies have no seasons.
     if(_ssKind!=="movie" && !_ssTmdbAbsolute()){
       const gaps=_ssAllSeasons().filter(sn=>!_ssPacksForSeason(sn).length);
-      for(let i=0;i<gaps.length;i++){
-        if(_ssGroup!==grp) return;
-        setLabel(`Season ${gaps[i]}… ${i+1}/${gaps.length}`);
-        await ssSearchSeasonPacks(gaps[i],{silent:true});
-        _ssRender();
-        await new Promise(r=>setTimeout(r,250));
+      if(gaps.length){
+        gaps.forEach(sn=>_ssSeasonHinted.add(sn));
+        const ctx=_bgCtx();
+        _bgRun(`Finding packs — ${ctx.title}`, async(ctl,report)=>{
+          for(let i=0;i<gaps.length;i++){
+            if(ctl.cancel) break;
+            report(`Finding packs — Season ${gaps[i]}`,
+                   `Season ${i+1} of ${gaps.length}`, (i+1)/gaps.length);
+            await _bgSeasonSearch(ctx,gaps[i]);
+            await new Promise(r=>setTimeout(r,250));
+          }
+        },{quiet:true});
       }
     }
-    if(_ssGroup===grp && !_ssPacks.length) showAlert("No packs found for this show.","warn");
+    if(_ssGroup===grp && !_ssPacks.length) showAlert("No packs found yet — still looking season by season.","warn");
   } finally {
     setLabel("Search packs");
     if(btn){ btn.disabled=false; _markLoading(btn,false); }
@@ -11810,6 +11888,9 @@ function _ssRenderBody(){
 function _ssRenderEpisodes(){
   const body=document.getElementById("ssBody");
   const seasons=_ssAllSeasons();
+  // A season the broad query never reached fills itself in rather than sitting
+  // there claiming the show has no sources for it.
+  _ssEpisodeSeasonHint(_ssSeason);
   // Season tabs
   const tabs=document.getElementById("ssSeasonTabs");
   if(seasons.length>1){
@@ -12315,9 +12396,14 @@ function ssPickSource(season,episode,i){
 // Fire a single-episode download tagged with the show's series so all episodes
 // of the show cohere into one library entry (Phase 4).
 async function _ssDownloadOne(src, season, episode, opts={}){
-  const body={magnet:src.magnet, title:src.title, series:_ssGroup.title,
+  // `series`/`locked` are overridable so a detached background run can queue
+  // downloads for a show the user has since navigated away from (_ssGroup is
+  // null by then, and _ssLocked belongs to whatever page is open now).
+  const body={magnet:src.magnet, title:src.title,
+              series:(opts.series!==undefined)?opts.series:(_ssGroup&&_ssGroup.title)||"",
               season, episode, save_path:"",
-              profile_id:profile.id, admin_only:_ssLocked};
+              profile_id:profile.id,
+              admin_only:(opts.locked!==undefined)?opts.locked:_ssLocked};
   const r=await fetch("/api/library/download",{
     method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body),
   });
@@ -12337,13 +12423,247 @@ async function _ssDownloadOne(src, season, episode, opts={}){
   return true;
 }
 
+// ── Background source-finding ────────────────────────────────────────────────
+// Hunting sources for a season is a sequence of indexer round trips — one per
+// season, then one per episode the season queries still left bare. On a show
+// like Futurama that is minutes of work, and it used to run inside the bulk
+// sheet behind a progress bar and a Stop button, which is to say it pinned the
+// user to a modal for the whole of it.
+//
+// It now runs detached, reporting into the corner pill, and it must therefore
+// survive the user walking away: closeSearchShow() clears _ssGroup, _ssEpisodes,
+// _ssMeta and _ssOwned out from under it. So a run takes a SNAPSHOT of
+// everything it needs up front and works only against that; the live page is
+// merely mirrored into, and only while it is still showing the same show.
+let _bgFind=null;    // the live run's control object, or null
+
+function _bgFindRender(label, detail, frac){
+  const bar=document.getElementById("globalFindBar"); if(!bar) return;
+  const pct=(typeof frac==="number")?Math.max(0,Math.min(100,Math.round(frac*100))):100;
+  document.getElementById("globalFindText").textContent=label||"Finding sources…";
+  document.getElementById("globalFindDetail").textContent=detail||"";
+  document.getElementById("globalFindFill").style.width=pct+"%";
+  bar.classList.remove("hidden");
+}
+function _bgFindHide(){
+  const bar=document.getElementById("globalFindBar");
+  if(bar) bar.classList.add("hidden");
+}
+function bgFindStop(){
+  if(!_bgFind) return;
+  _bgFind.cancel=true;
+  _bgFindRender(_bgFind.label,"Stopping…",null);
+}
+
+// Start a detached run. Returns false (having started nothing) when one is
+// already in flight — the indexers are a shared, rate-limited resource and two
+// concurrent sweeps would halve both. `quiet` suppresses the "already busy"
+// toast for runs the user did not explicitly ask for.
+function _bgRun(label, fn, opts={}){
+  if(_bgFind){
+    // An explicit request preempts the automatic sweep — a user asking for one
+    // specific season outranks the page quietly filling itself in. Cancellation
+    // is cooperative, so the new run starts as soon as the old one's current
+    // query returns (a second or two), not instantly.
+    if(_bgFind.auto && !opts.quiet){
+      const prev=_bgFind;
+      prev.cancel=true;
+      (prev.done||Promise.resolve()).then(()=>_bgRun(label,fn,opts));
+      return true;
+    }
+    if(!opts.quiet) showAlert("Already finding sources in the background — let that finish first.","warn");
+    return false;
+  }
+  const ctl={cancel:false, label, auto:!!opts.quiet};
+  _bgFind=ctl;
+  _bgFindRender(label,"Starting…",0);
+  ctl.done=(async()=>{
+    try{
+      await fn(ctl,(t,d,f)=>{ if(_bgFind===ctl){ ctl.label=t; _bgFindRender(t,d,f); } });
+    }catch(_){
+      showAlert("Background source search stopped unexpectedly.","error");
+    }finally{
+      if(_bgFind===ctl){ _bgFind=null; _bgFindHide(); }
+    }
+  })();
+  return true;
+}
+
+// Everything a detached run needs, frozen at the moment it starts.
+function _bgCtx(scope){
+  return {
+    title:(_ssGroup&&_ssGroup.title)||"",
+    kind:_ssKind,
+    meta:_ssMeta,
+    owned:_ssOwned,
+    locked:_ssLocked,
+    absolute:_ssTmdbAbsolute(),
+    origEnglish:_ssOrigEnglish(),
+    audioPref:_ssAudioPref,
+    searched:_ssEpisodesSearched,
+    scope:(scope===undefined)?_ssBulkScope:scope,
+    seasons:_ssAllSeasons(),
+    // Its own copy of the episode buckets: the page's array is emptied on close.
+    episodes:_ssEpisodes.map(e=>({season:e.season,episode:e.episode,sources:e.sources.slice()})),
+  };
+}
+// Is the user still looking at the show this run belongs to?
+function _bgLive(ctx){ return !!_ssGroup && _ssGroup.title===ctx.title; }
+
+async function _bgQuery(q){
+  try{
+    let url=`/api/search?q=${encodeURIComponent(q)}`;
+    if(profile.id) url+=`&profile_id=${encodeURIComponent(profile.id)}`;
+    const r=await fetch(url);
+    if(!r.ok) return [];
+    const data=await r.json();
+    const out=[];
+    (data.groups||[]).forEach(g=>(g.results||[]).forEach(res=>out.push(res)));
+    return out;
+  }catch(_){ return []; }
+}
+
+// Fold results into the run's own buckets, and into the page's when it's still
+// up — so a user who stays put watches the seasons fill in live.
+function _bgIngest(ctx, results){
+  const eps=results.filter(r=>r.kind==="episode");
+  eps.forEach(r=>{
+    let e=ctx.episodes.find(x=>x.season===r.season&&x.episode===r.episode);
+    if(!e){ e={season:r.season,episode:r.episode,sources:[]}; ctx.episodes.push(e); }
+    if(e.sources.some(x=>x.magnet===r.magnet)) return;
+    e.sources.push(r);
+    e.sources.sort((a,b)=>b.seeders-a.seeders);
+  });
+  if(_bgLive(ctx)){
+    _ssMergeEpisodes(eps);
+    _ssMergePacks(results);
+    _ssRenderBody();
+  }
+}
+
+// One "<title> S04" query. Episodes are taken only for the season asked for —
+// see ssSearchSeason for why the targeted query is the one that finds anything
+// on a long-running show.
+async function _bgSeasonSearch(ctx, sn){
+  const out=await _bgQuery(`${ctx.title} S${String(sn).padStart(2,"0")}`);
+  _bgIngest(ctx, out.filter(r=>r.kind!=="episode" || r.season===sn));
+}
+// One "<title> S04E09" query (bare episode number for absolute-numbered anime).
+async function _bgEpisodeSearch(ctx, season, episode){
+  const abs=(season<=1 && episode>=100);
+  const code=`S${String(season).padStart(2,"0")}E${String(episode).padStart(2,"0")}`;
+  const out=await _bgQuery(`${ctx.title} ${abs?episode:code}`);
+  _bgIngest(ctx, out.filter(r=>r.kind==="episode" && r.season===season && r.episode===episode));
+}
+
+// _ssBulkScopeEpisodes against a snapshot instead of the live page. `scope`
+// overrides ctx.scope so one season can be interrogated on its own.
+function _bgScopeEpisodes(ctx, scope){
+  const sc=(scope===undefined)?ctx.scope:scope;
+  const seasons=(sc==="all")?ctx.seasons:[sc];
+  const out=[];
+  seasons.forEach(s=>{
+    const nums=new Set(ctx.episodes.filter(e=>e.season===s).map(e=>e.episode));
+    if(!ctx.absolute){
+      const te=(ctx.meta&&ctx.meta.seasons&&ctx.meta.seasons[String(s)]&&ctx.meta.seasons[String(s)].episodes)||[];
+      te.forEach(t=>{ if(t.episode>0) nums.add(t.episode); });
+    }
+    const owned=_covSeasonEps(ctx.owned,s);
+    [...nums].sort((a,b)=>a-b).forEach(ep=>{
+      if(owned.has(ep)) return;
+      const f=ctx.episodes.find(e=>e.season===s&&e.episode===ep);
+      out.push({season:s, episode:ep, sources:(f&&f.sources)||[]});
+    });
+  });
+  return out;
+}
+
+function _bgAudioMatch(ctx, s){
+  const a=(s&&s.audio)||"";
+  if(ctx.audioPref==="any") return true;
+  if(ctx.audioPref==="eng")
+    return a==="dual"||a==="dub"||((a===""||a==="sub")&&ctx.origEnglish!==false);
+  return a==="dual"||a==="sub"||a==="";
+}
+function _bgAutoPick(ctx, sources, filt){
+  if(!sources||!sources.length) return null;
+  const pref=sources.filter(s=>_bgAudioMatch(ctx,s));
+  return _ssAutoPickFrom(pref.length?pref:sources, filt);
+}
+
+// Make sure every episode in scope has had a genuine chance at a source.
+// Returns null when the run was stopped.
+//
+// Two passes, and the order matters. The SEASON pass does the work: a single
+// "<title> S02" query returns that season's packs and most of its episodes at
+// once, where the broad show-title query the page opened with may not have
+// reached the season at all (search "Futurama" and you get S01, S05 and
+// S07-S14 — S02-S04 and S06 are crowded out entirely by the newest season's
+// releases, on a show every season of which is sitting right there).
+//
+// The per-EPISODE pass then mops up. It is not belt-and-braces: indexers return
+// an empty result far more often than a wrong one, and the same query a minute
+// later routinely succeeds where the first came back bare. That is exactly how
+// Hacks S05E09/E10 were missed — both were searched, both returned nothing that
+// pass, and a targeted retry 90 s later found them immediately.
+async function _bgEnsureSources(ctx, ctl, report){
+  // One broad query first when the page never ran one: a single round trip that
+  // can settle several seasons at once, shortening the sweep below.
+  if(!ctx.searched && _bgLive(ctx)){
+    report("Finding sources…","One broad query across every indexer.",0.02);
+    await ssSearchShowEpisodes(null,{noSweep:true});
+    if(ctl.cancel) return null;
+    if(_bgLive(ctx)) ctx.episodes=_ssEpisodes.map(e=>({season:e.season,episode:e.episode,sources:e.sources.slice()}));
+  }
+  const seasons=(ctx.scope==="all")?ctx.seasons:[ctx.scope];
+  const bare=ctx.absolute ? []
+    : seasons.filter(sn=>_bgScopeEpisodes(ctx,sn).some(e=>!e.sources.length));
+  for(let i=0;i<bare.length;i++){
+    if(ctl.cancel) return null;
+    report(`Finding sources — Season ${bare[i]}`,
+           `Season ${i+1} of ${bare.length}`, 0.05+0.45*(i+1)/bare.length);
+    _ssSeasonHinted.add(bare[i]);   // the page needn't re-ask for what this just fetched
+    await _bgSeasonSearch(ctx,bare[i]);
+    await new Promise(r=>setTimeout(r,250));
+  }
+  const gaps=_bgScopeEpisodes(ctx).filter(e=>!e.sources.length);
+  for(let i=0;i<gaps.length;i++){
+    if(ctl.cancel) return null;
+    const g=gaps[i];
+    report(`Finding sources — ${_ssEpCode(g.season,g.episode)}`,
+           `Episode ${i+1} of ${gaps.length}`, 0.5+0.5*(i+1)/gaps.length);
+    await _bgEpisodeSearch(ctx,g.season,g.episode);
+    await new Promise(r=>setTimeout(r,250));
+  }
+  return _bgScopeEpisodes(ctx);
+}
+
+// Sweep every season the broad query came back empty-handed for, detached. This
+// is what turns "Search episodes" on a long-running show from "here are the few
+// seasons that fit in the result budget" into the whole show.
+function _ssSweepBareSeasons(){
+  if(_ssKind==="movie"||_ssTmdbAbsolute()) return;
+  const bare=_ssAllSeasons().filter(sn=>!_ssSeasonHinted.has(sn)
+                                     && !_ssEpisodes.some(e=>e.season===sn));
+  if(!bare.length) return;
+  bare.forEach(sn=>_ssSeasonHinted.add(sn));
+  const ctx=_bgCtx();
+  _bgRun(`Finding sources — ${ctx.title}`, async(ctl,report)=>{
+    for(let i=0;i<bare.length;i++){
+      if(ctl.cancel) break;
+      report(`Finding sources — Season ${bare[i]}`,
+             `Season ${i+1} of ${bare.length}`, (i+1)/bare.length);
+      await _bgSeasonSearch(ctx,bare[i]);
+      await new Promise(r=>setTimeout(r,250));
+    }
+  },{quiet:true});
+}
+
 // ── Bulk season download (Phase 3) ───────────────────────────────────────────
 let _ssBulkScope="all";   // "all" or a season number
 // Auto-pick constraints (persist across re-renders / scope changes). Blank = no
 // limit. Seeders win over size — see _ssAutoPick.
 let _ssBulkFilters={minSeed:"",minGB:"",maxGB:""};
-let _ssBulkBusy=false;    // a find-and-download run is in flight
-let _ssBulkCancel=false;  // the user hit Stop mid-run
 function ssOpenBulkSheet(){
   _ssBulkScope=_ssSeason||"all";
   syncLockButtons();
@@ -12352,28 +12672,49 @@ function ssOpenBulkSheet(){
   _ssBulkPackHint();
 }
 
-// Seasons whose packs we have already gone looking for, so re-rendering the
-// choose screen (scope chips, filter inputs) cannot re-fire the query.
-let _ssPackHinted=new Set();
+// Seasons we have already fired the targeted query for, so a re-render (scope
+// chips, filter inputs, a season tab redraw) cannot re-fire it.
+let _ssSeasonHinted=new Set();
 
-// Fire a one-shot season-pack lookup for the current scope, in the background.
-// A pack is usually the better grab — one torrent, one consistent release — but
-// the card can only recommend what has been found, and the broad show-title
-// query misses later seasons routinely (Hacks S04: zero packs from "Hacks",
-// four from "Hacks S04", the best at 182 seeders). Deliberately not awaited:
-// the sheet must open instantly.
-function _ssBulkPackHint(){
-  if(_ssBulkScope==="all"||_ssKind==="movie"||_ssTmdbAbsolute()) return;
-  const sn=_ssBulkScope;
-  if(_ssPackHinted.has(sn)||_ssPacksForSeason(sn).length) return;
-  _ssPackHinted.add(sn);
+// Fire a one-shot targeted lookup for one season, detached. Both the episode
+// tab and the bulk sheet lean on it: a season the broad query never reached
+// otherwise reads as "this show has no season 2", which is the opposite of the
+// truth (see ssSearchSeason). Deliberately not awaited — the tab and the sheet
+// must paint instantly.
+//
+// `onDone` re-renders whatever the caller owns, but only when the user is still
+// looking at it.
+function _ssSeasonHint(season, onDone){
+  if(!season||_ssKind==="movie"||_ssTmdbAbsolute()) return;
+  if(_ssSeasonHinted.has(season)) return;
+  _ssSeasonHinted.add(season);
   const grp=_ssGroup;
-  ssSearchSeasonPacks(sn,{silent:true}).then(()=>{
+  ssSearchSeason(season,{silent:true}).then(()=>{
+    if(_ssGroup===grp && onDone) onDone();
+  });
+}
+
+// The bulk sheet's hint: only worth a query when nothing has been found for the
+// scope yet, and only for a single-season scope ("all" is what the sweep is for).
+function _ssBulkPackHint(){
+  if(_ssBulkScope==="all") return;
+  const sn=_ssBulkScope;
+  if(_ssPacksForSeason(sn).length && _ssEpisodes.some(e=>e.season===sn)) return;
+  _ssSeasonHint(sn,()=>{
     // Only redraw if the user is still sitting on the same sheet and scope.
     const sheet=document.getElementById("ssBulkSheet");
-    if(_ssGroup===grp && sheet && !sheet.classList.contains("hidden")
-       && _ssBulkScope===sn && !_ssBulkBusy) _ssRenderBulkChoose();
+    if(sheet && !sheet.classList.contains("hidden")
+       && _ssBulkScope===sn && !_bgFind) _ssRenderBulkChoose();
   });
+}
+
+// The episode tab's hint: the user has already asked this show to be searched
+// (so an indexer round trip is expected), landed on a season, and the season is
+// empty. That is precisely the Futurama S02 case, and the fix is one query.
+function _ssEpisodeSeasonHint(season){
+  if(!_ssEpisodesSearched) return;                    // nothing searched yet — respect that
+  if(_ssEpisodes.some(e=>e.season===season)) return;  // already have sources here
+  _ssSeasonHint(season,()=>{ if(_ssSeason===season && _ssSection==="episodes") _ssRenderBody(); });
 }
 function ssCloseBulkSheet(){ document.getElementById("ssBulkSheet").classList.add("hidden"); }
 
@@ -12471,7 +12812,7 @@ function _ssRenderBulkChoose(){
     </div>
     <p class="text-xs text-gray-500">${n} episode${n===1?"":"s"} in scope.${
       ownedN?` <span class="text-emerald-400">${ownedN} already in your library — skipped.</span>`:""}${
-      need?` <span class="text-indigo-300">${need} still need${need===1?"s":""} a source — Download will find ${need===1?"it":"them"} first.</span>`:""}</p>
+      need?` <span class="text-indigo-300">${need} still need${need===1?"s":""} a source — that hunt runs in the background, you don't have to wait here.</span>`:""}</p>
     ${recHtml}
     <div>
       <p class="text-[10px] font-bold uppercase tracking-widest text-gray-500 mb-1.5">Auto-pick limits (optional)</p>
@@ -12509,13 +12850,13 @@ function _ssRenderBulkChoose(){
           class="text-left p-3 bg-indigo-950/40 border border-indigo-800 hover:border-indigo-600 hover:bg-indigo-900/40 transition-colors">
           <p class="text-sm font-black uppercase tracking-wide text-indigo-300">${need?"Find sources &amp; download":"Auto — best seeded within limits"}</p>
           <p class="text-[11px] text-gray-500 mt-0.5">${need
-            ?"Looks up whatever is still missing, then starts every episode — one click, no waiting around for a separate search."
+            ?"Closes this sheet and goes looking in the background, starting each episode as its source turns up. Track it in the corner — or leave the page, it keeps going."
             :"Honours the Audio preference first, then grabs the best-seeded torrent that fits the limits above for every episode."}</p>
         </button>
         <button onclick="ssBulkManualStart()"
           class="text-left p-3 bg-gray-950 border border-gray-800 hover:border-indigo-700 hover:bg-gray-800 transition-colors">
           <p class="text-sm font-black uppercase tracking-wide text-gray-200">Choose per episode</p>
-          <p class="text-[11px] text-gray-500 mt-0.5">Finds the sources first, then lets you pick which torrent to use for each episode.</p>
+          <p class="text-[11px] text-gray-500 mt-0.5">Finds the sources in the background and reopens this sheet with the picker when they land — nothing to sit and watch.</p>
         </button>
       </div>
     </div>`}`;
@@ -12655,92 +12996,104 @@ function _dvRiskBadge(s){
     : "";
 }
 
-// In-sheet progress for a find-and-download run. The whole point of the
-// one-click flow is that the user never has to run a search, watch it finish,
-// and then come back to press Download — so the sheet has to show its own work.
-function _ssRenderBulkProgress(title, detail, frac){
-  const sheet=document.getElementById("ssBulkSheet");
-  if(!sheet||sheet.classList.contains("hidden")) return;
-  const pct=(typeof frac==="number")?Math.max(0,Math.min(100,Math.round(frac*100))):null;
-  document.getElementById("ssBulkTitle").textContent="Bulk download";
-  document.getElementById("ssBulkBody").innerHTML=`
-    <div class="py-6 space-y-3">
-      <p class="text-sm font-black uppercase tracking-wide text-gray-200 text-center">${escHtml(title)}</p>
-      <div class="h-1 bg-gray-800 overflow-hidden">
-        <div class="h-full bg-indigo-500 transition-all" style="width:${pct===null?100:pct}%"></div>
-      </div>
-      <p class="text-[11px] text-gray-500 text-center">${escHtml(detail||"")}</p>
-    </div>`;
-  document.getElementById("ssBulkFooter").innerHTML=`
-    <button onclick="_ssBulkStop()" class="w-full bg-gray-800 hover:bg-gray-700 py-3 text-xs font-bold uppercase tracking-wide min-h-[44px]">Stop</button>`;
-}
-function _ssBulkStop(){ _ssBulkCancel=true; }
 
-// Make sure every episode in scope has had a genuine chance at a source, then
-// hand back the scope list. Returns null when the run was cancelled or the user
-// navigated to another show mid-flight.
-//
-// The per-episode second pass is not belt-and-braces: indexers return an empty
-// result far more often than a wrong one, and the same query a minute later
-// routinely succeeds where the first came back bare. That is exactly how Hacks
-// S05E09/E10 were missed — both were searched, both returned nothing that pass,
-// and a targeted retry 90 s later found them immediately.
-async function _ssEnsureBulkSources(report){
-  const grp=_ssGroup;
-  if(!_ssEpisodesSearched){
-    report("Searching for sources…","One broad query across every indexer.",0.05);
-    await ssSearchShowEpisodes(null);
-    if(_ssGroup!==grp||_ssBulkCancel) return null;
-  }
-  const gaps=_ssBulkScopeEpisodes().filter(e=>!e.sources.length);
-  for(let i=0;i<gaps.length;i++){
-    if(_ssBulkCancel||_ssGroup!==grp) return null;
-    const g=gaps[i];
-    report(`Finding sources — ${i+1}/${gaps.length}`,
-           `Looking up ${_ssEpCode(g.season,g.episode)}.`, (i+1)/(gaps.length+1));
-    await ssSearchEpisode(g.season,g.episode,{silent:true});
-    await new Promise(r=>setTimeout(r,250));
-  }
-  return _ssBulkScopeEpisodes();
-}
-
-// One click: find whatever sources are still missing, then start every download.
-async function ssBulkAuto(){
-  if(_ssBulkBusy) return;
-  _ssBulkBusy=true; _ssBulkCancel=false;
-  try{
-    const eps=await _ssEnsureBulkSources(_ssRenderBulkProgress);
-    if(!eps){ ssCloseBulkSheet(); return; }
-    const filt=_ssParseBulkFilters();
+// One click: find whatever sources are still missing, then start every
+// download — all of it detached. The sheet closes on the spot; the run reports
+// into the corner pill and carries on if the user closes the show page, changes
+// tab, or goes off to watch something. Finding sources for a season is minutes
+// of indexer round trips and there is nothing for the user to decide while it
+// happens, so there is no reason to hold them there.
+function ssBulkAuto(){
+  const ctx=_bgCtx();
+  const filt=_ssParseBulkFilters();
+  const scopeLbl=(ctx.scope==="all")?"all seasons":`Season ${ctx.scope}`;
+  const started=_bgRun(`${ctx.title} — ${scopeLbl}`, async(ctl,report)=>{
+    const eps=await _bgEnsureSources(ctx,ctl,report);
+    if(!eps) return;
     const jobs=[], unsourced=[];
     eps.forEach(e=>{
-      const src=e.sources.length?_ssAutoPick(e.sources,filt):null;
+      const src=e.sources.length?_bgAutoPick(ctx,e.sources,filt):null;
       if(src) jobs.push({src, season:e.season, episode:e.episode});
       else unsourced.push(_ssEpCode(e.season,e.episode));
     });
     // Be honest about episodes where no source satisfies the audio preference —
     // silent fallback is exactly the "mixed languages" surprise this exists to kill.
     let note="";
-    if(_ssAudioPref!=="any"){
-      const off=jobs.filter(j=>!_ssAudioMatch(j.src)).length;
-      if(off) note=`${off} had no ${_ssAudioPref==="eng"?"English-audio":"original-audio"} source — best available used.`;
+    if(ctx.audioPref!=="any"){
+      const off=jobs.filter(j=>!_bgAudioMatch(ctx,j.src)).length;
+      if(off) note=`${off} had no ${ctx.audioPref==="eng"?"English-audio":"original-audio"} source — best available used.`;
     }
-    await _ssRunBulk(jobs, note, {total:eps.length, unsourced});
-  } finally { _ssBulkBusy=false; }
+    await _bgStartDownloads(ctx, ctl, report, jobs, note,
+                            {total:eps.length, unsourced});
+  });
+  if(!started) return;
+  ssCloseBulkSheet();
+  showAlert(`Finding sources for ${scopeLbl} in the background — downloads start on their own. Carry on using the app.`,"success");
 }
 
-// "Choose per episode" needs sources before it can show a list, so it runs the
-// same find pass first rather than rendering an empty sheet.
-async function ssBulkManualStart(){
-  if(_ssBulkBusy) return;
-  _ssBulkBusy=true; _ssBulkCancel=false;
-  try{
-    const eps=await _ssEnsureBulkSources(_ssRenderBulkProgress);
-    if(!eps){ _ssRenderBulkChoose(); return; }
-    _ssRenderBulkManual();
-  } finally { _ssBulkBusy=false; }
+// Fire the batch sequentially (throttled) so qBit isn't hammered; every episode
+// carries the show's series string → one cohesive library entry.
+//
+// `opts.total` is the size of the SCOPE and `opts.unsourced` the episodes that
+// never got a candidate. Both exist so the closing toast can count against what
+// the user asked for rather than against the subset we managed to find — an
+// older version reported "Queued 8/8 — success" for a ten-episode season.
+async function _bgStartDownloads(ctx, ctl, report, jobs, note="", opts={}){
+  const unsourced=opts.unsourced||[];
+  const scopeTotal=opts.total||jobs.length;
+  if(!jobs.length){
+    showAlert(unsourced.length
+      ? `No sources found for ${_ssEpList(unsourced)} — try again in a minute, indexers come and go.`
+      : "Nothing to download — everything in scope is already in your library.",
+      unsourced.length?"warn":"success");
+    return;
+  }
+  let ok=0; const failed=[];
+  for(let i=0;i<jobs.length;i++){
+    if(ctl.cancel) break;
+    const j=jobs[i];
+    report(`Starting downloads — ${i+1}/${jobs.length}`,
+           _ssEpCode(j.season,j.episode), (i+1)/jobs.length);
+    const done=await _ssDownloadOne(j.src, j.season, j.episode,
+                                    {silent:true, series:ctx.title, locked:ctx.locked});
+    if(done) ok++; else failed.push(_ssEpCode(j.season,j.episode));
+    await new Promise(r=>setTimeout(r,250));
+  }
+  const bits=[];
+  if(unsourced.length) bits.push(`no source found for ${_ssEpList(unsourced)}`);
+  if(failed.length) bits.push(`could not start ${_ssEpList(failed)}`);
+  if(note) bits.push(note);
+  showAlert(`Queued ${ok}/${scopeTotal} episode${scopeTotal===1?"":"s"}`+
+            (bits.length?` — ${bits.join("; ")}.`:" — switch to Library to track progress."),
+            bits.length?(ok?"warn":"error"):"success");
+  // Only take the user somewhere if they're still standing on the page this came
+  // from; a background run must never yank the screen out from under them.
+  if(_bgLive(ctx)){ closeSearchShow(); switchTab("library"); }
 }
 
+// "Choose per episode" needs sources before it can show a list. The find runs in
+// the background like Auto's; the picker opens by itself when it lands, if the
+// user is still on the show.
+function ssBulkManualStart(){
+  const ctx=_bgCtx();
+  const started=_bgRun(`${ctx.title} — choose per episode`, async(ctl,report)=>{
+    const eps=await _bgEnsureSources(ctx,ctl,report);
+    if(!eps||ctl.cancel) return;
+    if(_bgLive(ctx)){
+      _ssBulkScope=ctx.scope;
+      document.getElementById("ssBulkSheet").classList.remove("hidden");
+      _ssRenderBulkManual();
+    }else{
+      showAlert("Sources found — reopen the show and tap Bulk download to choose.","success");
+    }
+  });
+  if(!started) return;
+  ssCloseBulkSheet();
+  showAlert("Finding sources in the background — the picker opens when it's done.","success");
+}
+
+// The per-episode picker's Download: the sources are already in hand, so this is
+// just queueing and stays in the sheet.
 function ssBulkManual(){
   const eps=_ssBulkScopeEpisodes();
   const cbs=[...document.querySelectorAll(".ss-bulk-cb")];
@@ -12755,45 +13108,12 @@ function ssBulkManual(){
     const si=sel?parseInt(sel.value):0;
     jobs.push({src:e.sources[si]||e.sources[0], season:e.season, episode:e.episode});
   });
-  _ssRunBulk(jobs, "", {total:jobs.length+skipped.length, unsourced:skipped});
-}
-
-// Fire the batch sequentially (throttled) so qBit isn't hammered; every episode
-// shares the show's series string → one cohesive library entry.
-//
-// `opts.total` is the size of the SCOPE and `opts.unsourced` the episodes that
-// never got a candidate. Both exist so the closing toast can count against what
-// the user asked for rather than against the subset we managed to find — the old
-// version reported "Queued 8/8 — success" for a ten-episode season.
-async function _ssRunBulk(jobs, note="", opts={}){
-  const unsourced=opts.unsourced||[];
-  const scopeTotal=opts.total||jobs.length;
-  if(!jobs.length){
-    ssCloseBulkSheet();
-    showAlert(unsourced.length
-      ? `No sources found for ${_ssEpList(unsourced)} — try again in a minute, indexers come and go.`
-      : "Nothing selected.", "warn");
-    return;
-  }
-  let ok=0; const failed=[];
-  for(let i=0;i<jobs.length;i++){
-    if(_ssBulkCancel) break;
-    const j=jobs[i];
-    _ssRenderBulkProgress(`Starting downloads — ${i+1}/${jobs.length}`,
-                          _ssEpCode(j.season,j.episode), (i+1)/jobs.length);
-    const done=await _ssDownloadOne(j.src, j.season, j.episode, {silent:true});
-    if(done) ok++; else failed.push(_ssEpCode(j.season,j.episode));
-    await new Promise(r=>setTimeout(r,250));
-  }
-  ssCloseBulkSheet();
-  const bits=[];
-  if(unsourced.length) bits.push(`no source found for ${_ssEpList(unsourced)}`);
-  if(failed.length) bits.push(`could not start ${_ssEpList(failed)}`);
-  if(note) bits.push(note);
-  showAlert(`Queued ${ok}/${scopeTotal} episode${scopeTotal===1?"":"s"}`+
-            (bits.length?` — ${bits.join("; ")}.`:" — switch to Library to track progress."),
-            bits.length?(ok?"warn":"error"):"success");
-  closeSearchShow(); switchTab("library");
+  const ctx=_bgCtx();
+  const started=_bgRun(`${ctx.title} — downloading`, async(ctl,report)=>{
+    await _bgStartDownloads(ctx, ctl, report, jobs, "",
+                            {total:jobs.length+skipped.length, unsourced:skipped});
+  });
+  if(started) ssCloseBulkSheet();
 }
 
 // ── VLC Controls ───────────────────────────────────────────────────────────
@@ -20551,6 +20871,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">12.6.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">12.7.0</div>
 </body>
 </html>

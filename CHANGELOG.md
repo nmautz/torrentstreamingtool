@@ -1,5 +1,42 @@
 # Changelog
 
+## [12.7.0] — 2026-09-14
+**Finding sources no longer holds you hostage — and Futurama has more than one season.**
+
+Two problems, one cause: the show page leaned on a single broad `?q=<show title>` query,
+and then made you sit and watch while it patched up the holes that query left.
+
+**The holes.** Search `Futurama` and the indexers come back with seasons 1, 5 and 7–14 —
+and nothing whatsoever for S02, S03, S04 or S06. Nothing is broken; the 2023–2026 revival
+simply fills the entire result budget on its own. But the page believed it, so four whole
+seasons of a show every season of which is sitting right there read as **"No source
+found"**, and the Packs tab offered six seasons out of fourteen. `Futurama S02` returns
+that season's episodes and two season packs immediately.
+
+So the targeted per-season query now collects **episodes** as well as packs — one request
+answers both tabs — and it fires by itself in three places instead of waiting to be
+clicked:
+
+- after **Search episodes**, for every season the broad query came back empty-handed for;
+- when you land on a season tab that has nothing in it;
+- as the **first** phase of a bulk download, before anything is picked.
+
+One query per season, rather than twenty. The per-episode retry sweep is still there, but
+it is now the mop-up rather than the mechanism.
+
+**The waiting.** Bulk download used to run the whole hunt inside its own sheet, behind a
+progress bar and a Stop button — minutes of sequential indexer round trips during which
+the only thing you could do was watch it. It now closes the sheet on the spot and runs
+detached, reporting into a small pill in the bottom-left corner. Change tab, open another
+show, close the page entirely: it keeps going, starts each download as its source turns
+up, and tells you what it queued when it's done. If you stay on the show, the seasons fill
+in underneath you as they land.
+
+The run holds its own snapshot of the show rather than reading the page, which is what
+lets it survive you leaving — and `×` on the pill stops it. **Search packs** and the
+new bare-season sweep run through the same pill; asking for something explicitly preempts
+whatever the page was quietly doing for itself.
+
 ## [12.6.1] — 2026-09-14
 **A show TMDb filed as a movie can now be told it's a show — which is what switched off "you're missing 7 seasons" for Futurama and South Park.**
 
