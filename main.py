@@ -1133,7 +1133,8 @@ class AppState:
     # background_video_loop stand down). See docs/GOTCHAS.md.
     tv_local_active: bool = False                         # True while the kiosk's <video> is the active TV playback
     tv_local_playback: str = ""                           # last player state from the kiosk: playing|paused|buffering|ended
-    tv_local_seen_at: float = 0.0                         # time.time() of the last /api/tv-local/state heartbeat (stale ⇒ the page died)
+    tv_local_seen_at: float = 0.0                         # time.time() of the last /api/tv-local/state heartbeat (stale ⇒ the page died). ALSO refreshed by _tv_local_open_pump to hold the reaper off during a cold kiosk launch — so it does NOT mean "the page replied"
+    tv_local_ack_at: float = 0.0                          # time.time() of the last beat that genuinely came FROM the page — the only thing _tv_local_open_pump treats as acknowledgement
     tv_local_item_id: Optional[str] = None                # library item currently on the kiosk player
     tv_local_file_path: Optional[str] = None              # and which file of it
     # Which surface a TV library play uses: "device" (kiosk <video>) | "vlc".
@@ -14837,6 +14838,7 @@ async def tv_local_state(req: TvLocalStateReq) -> JSONResponse:
     `active: false` is the page saying it has stopped — sent on ended/stop/unload.
     """
     state.tv_local_seen_at = time.time()
+    state.tv_local_ack_at = state.tv_local_seen_at   # this beat is from the page
     if not req.active:
         await _tv_local_clear("page reported inactive")
         await broadcast("state", state_snapshot())
@@ -14870,6 +14872,53 @@ async def tv_local_state(req: TvLocalStateReq) -> JSONResponse:
     return JSONResponse({"ok": True, "active": True})
 
 
+# How long to keep re-sending an `open` while waiting for the kiosk page to come
+# up, and how often. A COLD kiosk (browser not running) needs Edge/Chrome to
+# launch, paint, load the dashboard and connect SSE — comfortably 10-20 s on this
+# hardware.
+TV_LOCAL_OPEN_WAIT_SECS = 45.0
+TV_LOCAL_OPEN_RETRY_SECS = 2.0
+
+
+async def _tv_local_open_pump(payload: dict) -> None:
+    """Re-broadcast an `open` until the kiosk page acts on it.
+
+    **SSE is fire-and-forget.** A single broadcast only reaches pages that are
+    ALREADY connected, so when `_tv_ui_show` had to *launch* the kiosk the
+    command went out into a browser that did not exist yet — the surface was
+    claimed, nothing played, and the staleness reaper released it ~15 s later
+    (the exact failure this function exists to fix). YouTube-on-TV dodges it by
+    checking `youtube_tv_seen_at` before deciding relaunch-vs-hotswap; the
+    dashboard kiosk has no such page heartbeat until it starts playing, so
+    instead we keep offering the command until its first `/api/tv-local/state`
+    beat proves it arrived.
+
+    The page ignores a duplicate `open` for the file it is already loading, so a
+    retry that crosses with the page coming up is harmless.
+    """
+    started = time.time()
+    # Hold the reaper off while we wait — the page legitimately isn't beating yet.
+    deadline = started + TV_LOCAL_OPEN_WAIT_SECS
+    while time.time() < deadline:
+        if not state.tv_local_active:
+            return                      # stopped / switched away mid-wait
+        if state.tv_local_ack_at > started:
+            return                      # the page beat — it got the command
+        # Hold the staleness reaper off while we wait; the page legitimately
+        # isn't beating yet. Deliberately NOT the ack field.
+        state.tv_local_seen_at = time.time()
+        try:
+            await broadcast("tv_command", payload)
+        except Exception:
+            pass
+        await asyncio.sleep(TV_LOCAL_OPEN_RETRY_SECS)
+    if state.tv_local_active and state.tv_local_ack_at <= started:
+        log.warning("tv-local: kiosk never acknowledged open after %.0fs — releasing",
+                    TV_LOCAL_OPEN_WAIT_SECS)
+        await _tv_local_clear("kiosk never acknowledged open")
+        await broadcast("state", state_snapshot())
+
+
 @app.post("/api/tv-local/open")
 async def tv_local_open(req: TvLocalOpenReq) -> JSONResponse:
     """Switch the TV to on-device playback of `file_path` at `seek` seconds.
@@ -14898,13 +14947,14 @@ async def tv_local_open(req: TvLocalOpenReq) -> JSONResponse:
     state.tv_local_item_id = req.item_id
     state.tv_local_file_path = req.file_path
     state.tv_local_playback = "buffering"
-    await broadcast("tv_command", {
+    state.stream_status = "buffering"
+    asyncio.create_task(_tv_local_open_pump({
         "action":     "open",
         "item_id":    req.item_id,
         "file_path":  req.file_path,
         "profile_id": req.profile_id,
         "seek":       float(req.seek or 0),
-    })
+    }))
     await broadcast("state", state_snapshot())
     return JSONResponse({"ok": True})
 
@@ -15349,7 +15399,16 @@ async def _remote_key_action(action: str) -> None:
                 # idle video back within ~3 s — starting it here directly would
                 # race stop()'s async VLC teardown (pl_stop/pl_empty would kill
                 # the just-started video).
+                was_local = state.tv_local_active
                 await stop()
+                # On-device playback is the exception: the kiosk never lost the
+                # screen (tv_ui_active stayed true throughout), so the usual
+                # hand-back can't happen on its own — background_video_loop and
+                # _play_background_video both stand down while the kiosk holds
+                # it, and ⏻ would land on the grid instead of "screen off",
+                # taking a second press to finish the job VLC does in one.
+                if was_local and await _bg_video_ready():
+                    await _tv_ui_hide("power key")
             elif state.tv_ui_active:
                 # Kiosk showing → hand back to the background video. With no
                 # video configured keep the dashboard — a black VLC window is

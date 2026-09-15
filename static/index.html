@@ -19743,11 +19743,36 @@ function _tvLocalBeat(force) {
   }).catch(() => {});
 }
 
+// Last `open` this page acted on, and when. The server RE-SENDS `open` every
+// couple of seconds until our first heartbeat proves we got it (SSE is
+// fire-and-forget, and a cold kiosk isn't connected yet — see
+// _tv_local_open_pump). Without this guard the retry that crosses with our page
+// coming up would call lpPlay twice and restart the episode.
+let _tvOpenKey = "", _tvOpenAt = 0;
+
 function _tvLocalOpen(d) {
   // VLC → on-device switch, pushed by POST /api/tv-local/open (the fullscreen
   // More-panel toggle). VLC has already been stopped server-side.
   if (!TV_MODE || !d || !d.item_id || !d.file_path) return;
+  const key = d.item_id + " " + d.file_path;
+  if (key === _tvOpenKey && Date.now() - _tvOpenAt < 60000) return;   // duplicate
+  _tvOpenKey = key; _tvOpenAt = Date.now();
   _tvFallbackDoneFor = "";
+  // Acknowledge straight away so the server's retry pump stops re-sending.
+  // Deliberately NOT _tvLocalBeat(): the player isn't up yet, so _tvLocalLive()
+  // is false and that would either no-op (leaving the pump firing) or post
+  // `active:false` and release the surface out from under the play we're about
+  // to start. This is a hand-rolled claim beat instead.
+  _tvBeatWasLive = true; _tvBeatAt = Date.now();
+  fetch("/api/tv-local/state", {
+    method: "POST", headers: {"Content-Type": "application/json"},
+    body: JSON.stringify({
+      // No title — lp.name isn't set until lpPlay runs. The normal 2 s
+      // heartbeat fills it in a moment later.
+      active: true, item_id: d.item_id, file_path: d.file_path,
+      time: Number(d.seek) || 0, duration: 0, playback: "buffering",
+    }),
+  }).catch(() => {});
   lpPlay(d.item_id, [d.file_path], Number(d.seek) || 0, "");
 }
 
@@ -21508,6 +21533,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">13.0.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">13.0.1</div>
 </body>
 </html>

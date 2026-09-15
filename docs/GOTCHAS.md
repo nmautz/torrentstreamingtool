@@ -2948,6 +2948,42 @@ Two details that look optional and aren't:
   kick is the normal recovery for a dead request, and a cold on-demand seek legitimately
   waits tens of seconds.
 
+### SSE is fire-and-forget — you cannot "send" a command to a page that is still launching
+
+`POST /api/tv-local/open` brings the kiosk up with `_tv_ui_show` and then broadcasts
+`tv_command:open`. When the kiosk browser was **already running** that works. When it
+wasn't, `_tv_ui_show` *launches* Edge/Chrome — and the broadcast goes out into a browser
+that does not exist yet. There is no queue and no replay: only pages connected at that
+instant receive an SSE event.
+
+The symptom is maximally confusing, because the server side all succeeds: the endpoint
+returns `{ok:true}`, the surface is claimed, `tv_ui_active` is true — and nothing plays,
+until the staleness reaper quietly releases it ~15 s later. From the live log:
+
+```
+00:24:14  TV UI: showing dashboard kiosk (switch to on-device playback)
+00:24:14  TV UI: launched kiosk (msedge.exe) at http://127.0.0.1/?tv=1
+00:24:31  tv-local: releasing surface (heartbeat stale)
+```
+
+`_tv_local_open_pump` re-offers the command every 2 s for up to 45 s and stops on the
+page's first acknowledgement. YouTube-on-TV dodges the same trap differently — it checks
+`youtube_tv_seen_at` to decide relaunch-vs-hotswap — so if you add a third kiosk command
+path, pick one of the two patterns deliberately.
+
+Two traps inside the fix:
+
+* **The reaper-hold field cannot double as the ack field.** The pump refreshes
+  `tv_local_seen_at` each iteration (the page legitimately isn't beating yet), so testing
+  `tv_local_seen_at > started` makes the pump satisfy its own exit condition on iteration
+  two and send exactly one retry. `tv_local_ack_at` is written **only** by a real
+  `/api/tv-local/state` beat.
+* **The page cannot acknowledge with `_tvLocalBeat()`.** At that moment `lpPlay` hasn't
+  run, so `_tvLocalLive()` is false — the beat either no-ops (pump keeps firing) or posts
+  `active:false` and releases the surface out from under the play it is about to start.
+  `_tvLocalOpen` posts a hand-rolled claim beat instead, and ignores a duplicate `open`
+  for the same file within 60 s so a crossing retry can't restart the episode.
+
 - [BACKEND.md](BACKEND.md) — invariants enforced by `main.py`
 - [DAEMON_WATCHDOG.md](DAEMON_WATCHDOG.md) — VPN guard at the process level
 - [ANALYZER.md](ANALYZER.md) — Smart Skip algorithm details and fallback chain

@@ -1,5 +1,37 @@
 # Changelog
 
+## [13.0.1] — 2026-09-15
+**Three things 13.0.0 only found once it ran on the real TV.**
+
+**A cold kiosk never got the command to start playing.** `POST /api/tv-local/open`
+called `_tv_ui_show` and then broadcast `tv_command:open` — but **SSE is
+fire-and-forget**. When the kiosk browser wasn't already running, `_tv_ui_show`
+*launched* it, and the command went out into a browser that did not exist yet.
+Confirmed live from the log: kiosk launched at 00:24:14, surface released as stale at
+00:24:31, nothing ever played. `_tv_local_open_pump` now re-offers the command every
+2 s for up to 45 s — enough for Edge to launch, paint, load the dashboard and connect
+SSE — and stops on the page's first acknowledgement.
+
+That needed a **separate ack timestamp**. The pump also has to refresh
+`tv_local_seen_at` to hold the staleness reaper off while it waits, so that field
+cannot double as "the page replied" — as written it would have satisfied its own exit
+condition on the second iteration and sent exactly one retry. `tv_local_ack_at` is
+written only by a real heartbeat.
+
+And the page acknowledges with a **hand-rolled claim beat**, not `_tvLocalBeat()`:
+at that moment the player isn't up, so `_tvLocalLive()` is false and the normal beat
+would either no-op (leaving the pump firing) or post `active:false` and release the
+surface out from under the play about to start. A duplicate `open` for the same file
+within 60 s is ignored, so a retry crossing with the page coming up can't restart the
+episode.
+
+**⏻ Power took two presses instead of one.** During VLC playback one press means
+"screen off" — stop, back to the background video — because stopping VLC frees the
+display. On-device playback never took the display *from* the kiosk (`tv_ui_active`
+stays true throughout, by design), so `background_video_loop` and
+`_play_background_video` both stood down and the first press landed on the grid. It
+now hands the screen back explicitly when a background video is configured.
+
 ## [13.0.0] — 2026-09-15
 **The TV stopped needing VLC.**
 
