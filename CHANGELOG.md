@@ -1,5 +1,46 @@
 # Changelog
 
+## [12.7.4] — 2026-09-14
+**Security: the HTTPS proxy was laundering logins between everyone on the network.**
+
+Found while setting up a test profile, by noticing that the same unauthenticated request
+gave different answers on :80 and :443.
+
+```
+GET /api/library        (port 80, straight to the app)  → 34 items   ✓ lock enforced
+GET /api/library        (port 443, via https_proxy.py)  → 37 items   ✗ lock bypassed
+GET /api/profiles       (port 443, no credentials)      → verified_profile_id = <a real profile>
+GET /api/profiles       (port 80,  no credentials)      → verified_profile_id = null
+```
+
+`https_proxy.py` forwards every request through **one shared `httpx.AsyncClient`**, and an
+`httpx.AsyncClient` keeps a cookie jar by default. `POST /api/profiles/{id}/verify-pin`
+sets `streamlink_profile_token` as a cookie (deliberately not `Secure`, so one PIN entry
+covers the http and https origins of the same host). So the first time anyone entered
+their PIN over HTTPS, the proxy stored their session cookie and **attached it to every
+subsequent request from every device on the LAN**.
+
+That token is what gates the two things a `profile_id` alone is explicitly not trusted for:
+**viewing admin-locked ("Content Lock") items**, and **the delete endpoints**. So any
+device on the network could see locked content and delete library items, for as long as
+the proxy process stayed up.
+
+The fix is a cookie jar that stores and sends nothing. Subclassing
+`http.cookiejar.CookieJar` rather than `httpx.Cookies` is load-bearing:
+`httpx.Cookies.__init__` rebuilds its state from whatever you pass it, so a `Cookies`
+subclass is silently discarded and the leak survives — which the first attempt at this fix
+did, and a test caught. Only a raw `CookieJar` is kept verbatim. The client's *own*
+forwarded `Cookie` header is untouched, which is what a proxy should do.
+
+Also fixed alongside it: the response path collapsed headers through a `dict`, so repeated
+`Set-Cookie` headers lost all but the last. The comment there claimed the auth flow never
+sets cookies — true when written, untrue since `verify-pin` started doing exactly that.
+
+**This one does not take effect until the box restarts** — the proxy is a separate
+long-lived process, and its in-memory jar is only emptied by restarting it.
+
+Doc fix: `/api/profiles/{id}/set-pin` requires **6** digits; API.md said 4.
+
 ## [12.7.3] — 2026-09-14
 **Four bugs the logs had been recording for months, all the same mistake: treating a
 definitive "no" as a temporary one.**

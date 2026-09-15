@@ -754,6 +754,47 @@ the axis the user is actually choosing along (season), and give the noise its ow
 collapsed section. Render a heading for every season the show HAS, not just the ones with
 results, or "no pack exists" and "nobody looked" are indistinguishable.
 
+### A shared HTTP client in a proxy is a session-laundering machine
+
+`https_proxy.py` sends every request through one long-lived `httpx.AsyncClient`. An
+`httpx.AsyncClient` **keeps a cookie jar by default**, and a jar on a shared client is not
+a cache — it is a credential shared between every caller the proxy serves.
+
+`verify-pin` sets `streamlink_profile_token` as a cookie (not `Secure`, so one PIN entry
+covers the http and https origins of the same host). So one PIN entry over HTTPS made the
+proxy replay that session for **every device on the LAN**, handing out the two things a
+bare `profile_id` is explicitly not trusted for: admin-locked items, and the delete
+endpoints.
+
+**The tell was a difference between ports, not an error.** Nothing failed; the same
+unauthenticated request simply answered differently:
+
+```
+GET /api/library   :80  (direct)  → 34 items,  verified_profile_id = null
+GET /api/library   :443 (proxied) → 37 items,  verified_profile_id = <someone>
+```
+
+When a proxy sits in front of an app, **compare the two ports before trusting either**.
+
+Two traps in the fix:
+
+1. **Subclass `http.cookiejar.CookieJar`, not `httpx.Cookies`.** `Cookies.__init__`
+   rebuilds its state from what you hand it — a `Cookies` instance is copied
+   cookie-by-cookie into a fresh jar, so a `Cookies` subclass is silently discarded and
+   the leak survives. Only the `else` branch keeps the object verbatim (`self.jar =
+   cookies`), and it wants a raw `CookieJar`. The first attempt at this fix did it the
+   wrong way and looked right until it was tested against a real `Set-Cookie`.
+2. **Don't collapse response headers through a `dict`.** `Set-Cookie` legally repeats, and
+   a dict keeps only the last. It survived unnoticed because the app only ever sets one at
+   a time — exactly the kind of latent bug that surfaces the day something sets two.
+
+A proxy must be transparent about credentials: forward what the client sent, remember
+nothing of its own. Its state must never outlive a single request.
+
+**Related, not fixed:** changing a profile's PIN does **not** invalidate that profile's
+existing session tokens (12 h TTL, persisted). Deleting the profile does neutralise them —
+both `_is_elevated` and `_require_delete_auth` require the profile to still exist.
+
 ### `os.replace` is not atomic-on-demand on Windows — it needs a retry
 
 `_save_lib_raw` writes `library.json.tmp` and `os.replace`s it into place. On Windows that
