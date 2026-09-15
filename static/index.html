@@ -4070,6 +4070,15 @@ let lp = {
   // them, used when the file isn't fully prepped yet). See STREAMING.md.
   mode: "bundle",
   odKey: null,            // on-demand session key (for the close beacon), null in bundle mode
+  // An explicit audio pick to send with the NEXT on-demand session request:
+  // {file, idx}. On-demand muxes one audio track, so switching audio re-enters
+  // _lpLoadIndex — and the server used to have to read the pick back out of
+  // library.json, which _lpSaveLocalTracks writes fire-and-forget. That is a
+  // race the reload usually LOSES, so the new session re-muxed the OLD track and
+  // the switch appeared to do nothing until you picked again. Sending the index
+  // on the request removes the round trip (and `audio_idx` outranks everything
+  // server-side). Keyed by file so an episode advance can't inherit it.
+  _odAudioPick: null,
   // HLS bundle state — set by _lpLoadIndex from /offline-prepare's meta.json
   hls: null,              // active hls.js instance, null on Safari native
   audios: [],             // [{idx,label,language,default}] from meta.json
@@ -17872,9 +17881,18 @@ async function _lpLoadIndex(seekTo) {
     // See STREAMING.md § On-Demand.
     _lpShowPreparing("Starting stream…");
     try {
+      // Consume an explicit audio pick made for THIS file (see lp._odAudioPick).
+      // Cleared whether or not it applies, so it can never leak into a later load.
+      const _pick = lp._odAudioPick;
+      lp._odAudioPick = null;
+      const _odBody = { file_path: filePath, profile_id: profile.id || "" };
+      if (_pick && _pick.file === filePath && Number.isFinite(_pick.idx)) {
+        const _t = (lp.audios || [])[_pick.idx];
+        _odBody.audio_idx = (_t && Number.isInteger(_t.idx)) ? _t.idx : _pick.idx;
+      }
       const r2 = await fetch(`/api/library/${lp.itemId}/stream-ondemand`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ file_path: filePath, profile_id: profile.id || "" }),
+        body: JSON.stringify(_odBody),
       });
       if (!r2.ok) {
         const e = await r2.json().catch(() => ({ detail: "Could not start stream." }));
@@ -17891,6 +17909,10 @@ async function _lpLoadIndex(seekTo) {
       prep.subtitles  = od.subtitles || [];
       prep.subs       = od.subs || prep.subs || [];
       prep.saved_tracks = od.saved_tracks || prep.saved_tracks || {};
+      // Which audio the JIT encoder actually muxed. On-demand carries exactly
+      // ONE audio track, so this is not a hint — it is the only audio in the
+      // stream, and the dropdown has to agree with it.
+      prep.default_audio_idx = od.default_audio_idx;
       // On-demand's native master is video+audio only (TS segments can't carry
       // correctly-timed WebVTT without X-TIMESTAMP-MAP — see ondemand_file), so
       // background handoff works here but without subtitles.
@@ -17984,6 +18006,17 @@ async function _lpLoadIndex(seekTo) {
   if (defAudioIdx == null && saved.audio_idx != null) defAudioIdx = saved.audio_idx;
   if (defAudioIdx == null) defAudioIdx = (lp.audios.findIndex(a => a.default) >= 0
                                           ? lp.audios.findIndex(a => a.default) : 0);
+  // On-demand: the stream physically contains only the track the server muxed,
+  // so the selection MUST be that one — anything else and the dropdown names a
+  // track you are not hearing, and the first switch "does nothing" because it is
+  // what finally sends an explicit audio_idx. The server resolves the same
+  // remembered chain (_resolve_saved_audio_idx), so this normally agrees with
+  // the preference; when it can't, showing the truth beats showing the wish.
+  // Bundle mode keeps every rendition, so the client's richer resolution wins there.
+  if (lp.mode === "ondemand" && Number.isInteger(prep.default_audio_idx)
+      && prep.default_audio_idx >= 0 && prep.default_audio_idx < lp.audios.length) {
+    defAudioIdx = prep.default_audio_idx;
+  }
   // Subtitle default: a remembered descriptor wins — NEWEST intent first
   // between the per-file pick (`at`) and the per-series pick (`updated_at`), so
   // a series-wide choice made later on another episode/device beats a stale
@@ -19076,9 +19109,11 @@ function lpSetAudio(idx) {
   lp.pendingAudioIdx = Number(idx);
   if (lp.mode === "ondemand") {
     // On-demand muxes a single audio track per session, so switching audio means
-    // re-encoding from a new session. Persist the pick, then re-enter _lpLoadIndex
-    // at the current time — stream-ondemand picks up the saved audio_idx (or the
-    // background full prep may have finished, promoting us to the bundle path).
+    // re-encoding from a new session. Send the pick ON the request rather than
+    // relying on the fire-and-forget save below landing first — that race is why
+    // a switch used to re-mux the previous track and appear to do nothing.
+    // (The save still happens, so the pick survives a later replay.)
+    lp._odAudioPick = { file: lp.filePath, idx: Number(idx) };
     _lpSaveLocalTracks("audio");
     const v = document.getElementById("lpVideo");
     // A pick made while the resume seek hasn't landed yet (cold OD start) or
@@ -19788,6 +19823,17 @@ function _tvLocalTrackList() {
   };
 }
 
+// Cheap change detector for the beat's playlist field — identity plus the ends,
+// which is enough to catch a new run, a shuffle, or an episode-list rebuild.
+let _tvPlaylistKey = "";
+function _tvPlaylistChanged() {
+  const pl = lp.playlist || [];
+  const key = pl.length + "|" + (pl[0] || "") + "|" + (pl[pl.length - 1] || "");
+  if (key === _tvPlaylistKey) return false;
+  _tvPlaylistKey = key;
+  return true;
+}
+
 let _tvBeatAt = 0, _tvBeatWasLive = false;
 // While an `open` is starting up, the player is NOT live yet — lpPlay has to
 // prep/probe the file before #localPlayer gets `lp-active`, which is seconds on
@@ -19820,6 +19866,7 @@ function _tvLocalBeat(force) {
     // than waiting out the server's staleness timer.
     if (_tvBeatWasLive) {
       _tvBeatWasLive = false;
+      _tvPlaylistKey = "";        // next run re-sends its playlist
       fetch("/api/tv-local/state", {
         method: "POST", headers: {"Content-Type": "application/json"},
         body: JSON.stringify({active: false}),
@@ -19852,6 +19899,10 @@ function _tvLocalBeat(force) {
       // controls and its "3 / 25" counter read these back off the state snapshot.
       nav_count: (lp.playlist || []).length,
       nav_index: lp.pi == null ? -1 : lp.pi,
+      // Only when the run actually changed — this can be 100+ paths and the beat
+      // is every 2 s. The server mirrors it onto state.library_playlist, which is
+      // what a TV→phone handoff slices to build its tail.
+      ...(_tvPlaylistChanged() ? { playlist: lp.playlist || [] } : {}),
     }),
   }).catch(() => {});
 }
@@ -21680,6 +21731,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">13.2.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">13.2.1</div>
 </body>
 </html>

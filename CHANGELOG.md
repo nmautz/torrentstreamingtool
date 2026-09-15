@@ -1,5 +1,55 @@
 # Changelog
 
+## [13.2.1] — 2026-09-15
+**The audio track you were told you were hearing, and three more VLC assumptions.**
+
+**On-demand played one track and the dropdown named another.** Reported: playback often
+starts on the wrong audio, then switching "switches to the same audio" but needs a reload,
+and only switching *again* lands on the right one. Two independent causes, both fixed.
+
+*The server and the client resolved the preference differently.* On-demand muxes exactly
+ONE audio track — the stream physically contains no other — and the server picked it using
+only the legacy per-file `audio_idx`, while the client picked the label using the full
+chain (per-file descriptor, per-series descriptor, profile language preference, legacy
+index). On the **first** play of an episode there is no per-file index yet, so the server
+muxed the source default while the dropdown displayed your remembered language. The
+dropdown was describing a track that was not in the stream. `_resolve_saved_audio_idx`
+now mirrors the client's precedence exactly — including "newest intent wins" between the
+per-file and per-series descriptors — and the client, in on-demand mode only, takes its
+selection from the track the server reports it actually muxed. The UI can no longer name
+a track you are not hearing.
+
+*And the switch raced its own save.* Switching audio in on-demand mode re-enters
+`_lpLoadIndex`, and the server was expected to read the new pick back out of
+`library.json` — written by a **fire-and-forget** `_lpSaveLocalTracks`. The reload usually
+won that race, so the new session re-muxed the *previous* track and the switch appeared to
+do nothing until you picked again. The pick now rides on the `stream-ondemand` request
+itself (`audio_idx` already outranks everything server-side), so there is no round trip to
+lose. Keyed by file, so an episode advance can't inherit it.
+
+**Three more places still assumed VLC is what plays on the TV:**
+
+- **Auto-prep was skipped on the device path.** 13.2.0 returned before
+  `_maybe_start_play_prep`, stripping it from the one surface it exists for — the next
+  episode fell back to the slower just-in-time path, with no ABR quality menu and no
+  gapless audio switching.
+- **YouTube didn't take the TV cleanly.** `youtube_play` cleared `tv_ui_active` but left
+  `tv_local_active` set, and `_remote_key_action` checks that one *first* — so every remote
+  press would have driven the backgrounded dashboard player instead of YouTube, with its
+  audio still playing underneath.
+- **A TV→phone handoff lost its tail.** It slices `state.library_playlist` to build the
+  remaining episodes, which on-device never populated, so the handoff carried a single file
+  and auto-advance died at the end of it. The heartbeat now reports the playlist — only
+  when it changes, since it can be a hundred-plus paths.
+- **"Play when the download finishes" always went to VLC.** `_auto_play_item` drove `vlc()`
+  directly with its own partial copy of the play path. It now delegates to
+  `/api/library/{id}/play`, inheriting the surface choice, resume resolution, track prefs
+  and auto-prep.
+
+Checked and deliberately left alone: stream-while-downloading (`/play-now`, `/stream-file`)
+stays on VLC — an incomplete file must never be prepped — and "Use My Computer" minimises
+the kiosk exactly as it minimises VLC, both of which keep playing.
+
 ## [13.2.0] — 2026-09-15
 **"On TV" from a phone always meant VLC — the setting was never consulted.**
 

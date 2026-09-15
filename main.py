@@ -6547,31 +6547,21 @@ async def _auto_play_item(item: dict, profile_id: str, file_path: str = "") -> N
                 break
             await asyncio.sleep(1)
 
-        first = Path(playlist[0])
-        await vlc("in_play", input=vlc_file_uri(first))
-        for p in playlist[1:]:
-            await vlc("in_enqueue", input=vlc_file_uri(Path(p)))
-        asyncio.create_task(vlc_focus_and_fullscreen())
-
-        state.stream_status = "playing"
-        state.active_title = item["title"]
-        state.active_file = first
-        state.current_audio_track = -1
-        state.current_subtitle_track = -1
-        state.active_hash = item.get("torrent_hash") or None
-        state.library_item_id = item["id"]
-        await _set_playback_owner(profile_id)
-        state.library_item_file_count = len(item.get("files", []))
-        state.library_playlist = playlist
-        state.library_nav_order = [f.get("path", "") for f in item.get("files", []) if f.get("path")]
-        state.library_shuffle_order = []   # auto-play is always natural order
-        state.library_series_map = {}
-        state.library_series_order = []
-        state.library_current_file = playlist[0]
-
-        await broadcast("stream_status", {"status": "playing", "message": f"Auto-playing: {first.name}"})
+        # Route through the normal play path instead of driving VLC here. That
+        # is what makes "play when the download finishes" honour the TV surface
+        # setting — it used to call vlc() directly, so it always landed on VLC
+        # even with the TV set to on-device playback. It also inherits the same
+        # resume/seek resolution, track prefs, shuffle clearing and auto-prep as
+        # a play started by hand, instead of this partial re-implementation.
+        await play_library_item(item["id"], LibraryPlayReq(
+            profile_id=profile_id, files=playlist,
+        ))
+        await broadcast("stream_status", {
+            "status": "playing",
+            "message": f"Auto-playing: {Path(playlist[0]).name}",
+        })
     except Exception:
-        pass
+        log.warning("auto-play of %s failed", item.get("title", "?"), exc_info=True)
 
 
 # ── Idle Background Video ─────────────────────────────────────────────────────
@@ -9444,6 +9434,12 @@ class TvLocalStateReq(BaseModel):
     tracks: Optional[dict] = None
     nav_count: Optional[int] = None      # length of the page's playlist
     nav_index: Optional[int] = None      # its position in it
+    # The page's ordered playlist, sent only when it CHANGES (a new run), not on
+    # every 2 s beat — it can be a hundred-plus paths. Mirrored onto
+    # state.library_playlist because that is what a TV→phone handoff slices to
+    # build its tail; without it the handoff carries one file and auto-advance
+    # dies at the end of the episode.
+    playlist: Optional[list[str]] = None
     # The media element's own gain as 0-100, so the dashboard's volume slider
     # reflects the surface actually making the sound.
     volume: Optional[float] = None
@@ -12041,6 +12037,16 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
             await play_library_item(item_id, req)
         if await _tv_local_start_play(item, playlist, seek_sec, req,
                                       on_give_up=_fall_back_to_vlc):
+            # Auto-prep the rest of the playlist — the SAME call the VLC path
+            # makes below. Returning before it (as 13.2.0 did) stripped it from
+            # exactly the surface it exists for: without a bundle the next
+            # episode starts on the slower just-in-time path, and the ABR quality
+            # menu and gapless audio switching never appear.
+            _prep_playlist = playlist
+            if req.items and len(req.items) == len(req.files):
+                _own = {f.get("path", "") for f in item.get("files", [])}
+                _prep_playlist = [p_ for p_ in playlist if p_ in _own] or playlist[:1]
+            await _maybe_start_play_prep(lib, item, req.profile_id, _prep_playlist, seek_sec)
             return JSONResponse(
                 {"ok": True, "playlist_count": len(playlist),
                  "seek_to": seek_sec, "surface": "device"},
@@ -14739,6 +14745,14 @@ async def youtube_play(req: YouTubeReq) -> JSONResponse:
     state.library_series_map = {}
     state.library_series_order = []
     state.library_current_file = None
+    # YouTube is taking the TV — release the on-device surface first. Without
+    # this both surfaces read "active": _remote_key_action checks tv_local_active
+    # BEFORE youtube_active, so every remote press would drive the backgrounded
+    # dashboard player instead of YouTube, and its audio would keep playing
+    # underneath. (tv_ui_active is cleared just below for the same reason.)
+    if state.tv_local_active:
+        await broadcast("tv_command", {"action": "stop"})
+        await _tv_local_clear("YouTube took the TV", reset_status=False)
     state.youtube_active = True
     state.youtube_video_id = video_id
     state.youtube_playback = "buffering"
@@ -14997,6 +15011,8 @@ async def tv_local_state(req: TvLocalStateReq) -> JSONResponse:
     if req.nav_count is not None:
         state.tv_local_nav = {"count": max(0, int(req.nav_count)),
                               "index": int(req.nav_index if req.nav_index is not None else -1)}
+    if req.playlist is not None:
+        state.library_playlist = list(req.playlist)
     # Report as library playback. The dashboard gates its episode nav, Clip and
     # Exit-Shuffle tiles on `is_library_playback` + `library_item_id`, and hides
     # Save on it — without these the fullscreen controls come up half-empty (and
@@ -25789,6 +25805,67 @@ def _od_wipe_segments(d: Path) -> None:
         pass
 
 
+def _resolve_saved_audio_idx(saved: dict, tracks: list[dict]) -> Optional[int]:
+    """Which audio track this profile wants, as an index into `tracks`.
+
+    **Mirrors the on-device client's precedence exactly** (`_lpLoadIndex`):
+    per-file descriptor vs per-series descriptor with the NEWEST intent winning,
+    then the profile language preference, then the legacy per-file index.
+    Returns None when nothing is remembered — the caller applies the source's
+    own default.
+
+    This exists because **on-demand muxes ONE audio track**: the JIT encoder
+    picks a track up front and the stream then physically contains only that one.
+    The server used to resolve with the legacy `audio_idx` alone while the client
+    resolved with the full descriptor chain, so on the FIRST play of an episode
+    (no per-file index yet, but a remembered series/language pick) the server
+    muxed the source default while the dropdown displayed the remembered
+    preference — the UI stated one track and you heard the other. Switching then
+    "did nothing" audibly, because the first switch is what finally sent an
+    explicit `audio_idx`. Keep this in step with `_lpResolveAudioSel` /
+    `_lpResolveAudioPref`.
+    """
+    if not tracks:
+        return None
+
+    def _pos(track: Optional[dict]) -> Optional[int]:
+        if not track:
+            return None
+        for i, t in enumerate(tracks):
+            if t is track:
+                return i
+        return None
+
+    file_sel = saved.get("audio_sel") if isinstance(saved.get("audio_sel"), dict) else None
+    ser_sel = (saved.get("series_audio_sel")
+               if isinstance(saved.get("series_audio_sel"), dict) else None)
+    sel = file_sel or ser_sel
+    if file_sel and ser_sel:
+        # Newest intent wins, so a series-wide choice made later on another
+        # episode or device beats a stale per-file pick (the client compares the
+        # same two timestamps). Undated picks count as oldest.
+        _fa = _parse_iso_dt(file_sel.get("at"))
+        _sa = _parse_iso_dt(ser_sel.get("updated_at"))
+        fa = _fa.timestamp() if _fa else 0.0
+        sa = _sa.timestamp() if _sa else 0.0
+        sel = ser_sel if sa > fa else file_sel
+        if sel is file_sel and ser_sel.get("groups"):
+            sel = {**file_sel, "groups": ser_sel["groups"]}
+    if sel:
+        got = _pos(_resolve_audio_descriptor(sel, tracks))
+        if got is not None:
+            return got
+    pref = saved.get("audio_language_pref")
+    if isinstance(pref, dict):
+        got = _pos(_resolve_profile_audio_pref(pref, tracks))
+        if got is not None:
+            return got
+    legacy = saved.get("audio_idx")
+    if isinstance(legacy, int) and 0 <= legacy < len(tracks):
+        return legacy
+    return None
+
+
 def _od_text_subs(info: dict) -> list[dict]:
     """The source's text (non-image) subtitle streams — the ones we can serve as
     WebVTT alongside an on-demand session, same set the bundle extracts."""
@@ -26111,10 +26188,15 @@ async def stream_ondemand(item_id: str, req: OnDemandReq) -> JSONResponse:
              if req.profile_id else {})
 
     valid_idxs = {a["idx"] for a in src_audios}
+    _saved_pos = _resolve_saved_audio_idx(saved, src_audios)
     if req.audio_idx is not None and req.audio_idx in valid_idxs:
         aidx = req.audio_idx
-    elif isinstance(saved.get("audio_idx"), int) and saved["audio_idx"] in valid_idxs:
-        aidx = saved["audio_idx"]
+    elif _saved_pos is not None and src_audios[_saved_pos]["idx"] in valid_idxs:
+        # Resolve the FULL remembered chain, not just the legacy per-file index.
+        # On-demand muxes one track, so picking the wrong one here means the
+        # dropdown and the audio disagree for the whole episode — see
+        # _resolve_saved_audio_idx.
+        aidx = src_audios[_saved_pos]["idx"]
     elif src_audios:
         aidx = next((a["idx"] for a in src_audios if a.get("default")), src_audios[0]["idx"])
     else:

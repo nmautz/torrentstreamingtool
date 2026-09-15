@@ -3088,6 +3088,55 @@ Worth remembering when a feature "works" in testing but not in use: **check whic
 point the user actually touches.** `?tv=1` has its own play path, and it is not the one
 that matters.
 
+### On-demand carries ONE audio track — so the server's pick *is* the UI's selection
+
+The just-in-time encoder muxes a single audio stream (`-map 0:a:<idx>`); the stream
+physically contains no other. So in on-demand mode the client cannot "select" audio at
+all — whatever the server muxed is what plays, and anything else the dropdown shows is a
+lie.
+
+It lied because the two sides resolved the preference differently: the server used only
+the legacy per-file `audio_idx`, the client used the full chain (per-file descriptor →
+per-series descriptor, newest intent winning → profile language preference → legacy
+index → source default). On a **first** play there is no per-file index, so the server
+muxed the source default while the dropdown showed the remembered language.
+
+Two rules keep this honest, and both are needed:
+
+* `_resolve_saved_audio_idx` mirrors `_lpResolveAudioSel` / `_lpResolveAudioPref` exactly.
+  **Keep the three in step** — they are one algorithm in two languages.
+* In on-demand mode the client takes `pendingAudioIdx` from the response's
+  `default_audio_idx`. Bundle mode keeps every rendition, so the client's richer
+  resolution wins there instead.
+
+### …and switching audio raced the save it depended on
+
+`lpSetAudio` in on-demand mode re-enters `_lpLoadIndex`, and the server was expected to
+read the new pick out of `library.json` — written by a **fire-and-forget**
+`_lpSaveLocalTracks`. The reload usually won that race, so the new session re-muxed the
+*previous* track and the switch looked like it did nothing until you picked again. The
+pick now rides on the `stream-ondemand` request (`lp._odAudioPick`, keyed by file so an
+episode advance can't inherit it); `req.audio_idx` already outranks everything else
+server-side. **Never depend on a fire-and-forget write being visible to the very next
+request you make.**
+
+### Which surfaces a "play" can land on
+
+Making the TV surface configurable means any code path that starts playback by calling
+`vlc()` directly now silently ignores the setting. When adding one, route it through
+`/api/library/{id}/play` instead — that is where the surface is decided, and it also
+carries resume resolution, track prefs, shuffle persistence and auto-prep.
+
+`_auto_play_item` ("play when the download finishes") was exactly this: its own partial
+copy of the play path, hardcoded to VLC. Deliberate exceptions that must stay on VLC:
+`/api/library/play-now` and `/stream-file` stream a **still-downloading** file, and an
+incomplete file must never be HLS-prepped (see the prep gates above).
+
+Also check, whenever a second surface can own the TV, that taking it over **releases the
+first**. `youtube_play` cleared `tv_ui_active` but not `tv_local_active`, and
+`_remote_key_action` tests the latter first — so the remote would have driven the
+backgrounded dashboard player while YouTube was on screen, with two audio streams running.
+
 - [BACKEND.md](BACKEND.md) — invariants enforced by `main.py`
 - [DAEMON_WATCHDOG.md](DAEMON_WATCHDOG.md) — VPN guard at the process level
 - [ANALYZER.md](ANALYZER.md) — Smart Skip algorithm details and fallback chain

@@ -450,6 +450,20 @@ Key decisions:
   re-encoded at 160 kbps. Multi-channel preservation is not implemented;
   for 5.1 playback on TV, use VLC's path which reads the source MKV
   directly.
+- **On-demand carries exactly ONE audio track**, so there is nothing to select at
+  playback time — the track the JIT encoder muxed (`-map 0:a:<idx>`) is the only
+  audio in the stream. The server therefore resolves the viewer's remembered
+  preference itself (`_resolve_saved_audio_idx`, mirroring the client's
+  `_lpResolveAudioSel` / `_lpResolveAudioPref` — keep the three in step), reports
+  it back as `default_audio_idx`, and the client takes its dropdown selection
+  from that rather than from its own resolution. Before 13.2.1 the server used
+  only the legacy per-file index, so a **first** play muxed the source default
+  while the menu showed the remembered language: the UI named a track that was
+  not in the stream. Switching is a session restart, and the pick rides on the
+  `stream-ondemand` request — relying on the fire-and-forget `_lpSaveLocalTracks`
+  landing first lost the race and re-muxed the previous track. Bundle mode keeps
+  every rendition, so the client's richer resolution wins there.
+  See [GOTCHAS.md](GOTCHAS.md).
 - **Audio is timestamp-locked to the video clock** (`+genpts` on the input,
   `aresample=async=1` on each audio output). The original video rung is
   stream-*copied* while audio is *re-encoded*, and the two are **separate HLS
