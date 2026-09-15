@@ -38,7 +38,9 @@ which tells someone who clicked again *because nothing looked like it was happen
 they have now started a second copy. The single-download toast and the Add-to-Library
 modal now distinguish the two, and a bulk run counts them separately: re-running a season
 that is already coming down reports **"Queued 0/20 — 20 were already downloading"**
-instead of "Queued 20/20", which was twenty no-ops reported as twenty successes.
+instead of "Queued 20/20", which was twenty no-ops reported as twenty successes. A
+finished background run also re-reads coverage, so the *next* run correctly **skips** what
+the last one queued rather than re-picking it and reporting duplicates.
 
 ## [12.7.1] — 2026-09-14
 **A show opened from your library searched the indexers for its own filename.**

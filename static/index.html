@@ -13174,6 +13174,12 @@ async function _bgStartDownloads(ctx, ctl, report, jobs, note="", opts={}){
   showAlert(`Queued ${started}/${scopeTotal} episode${scopeTotal===1?"":"s"}`+
             (bits.length?` — ${bits.join("; ")}.`:" — switch to Library to track progress."),
             bits.length?((started||dup)?"warn":"error"):"success");
+  // Re-read what this box now holds. The scope of a run is planned against the
+  // coverage snapshot, so without this a second run started from a page the user
+  // never left would re-pick every episode the first one just queued — harmless
+  // (the server dedupes) but twenty pointless round trips reported as duplicates
+  // rather than correctly skipped.
+  refreshCoverage();
   // Only take the user somewhere if they're still standing on the page this came
   // from; a background run must never yank the screen out from under them.
   if(_bgLive(ctx)){ closeSearchShow(); switchTab("library"); }
