@@ -1,5 +1,37 @@
 # Changelog
 
+## [12.7.1] — 2026-09-14
+**A show opened from your library searched the indexers for its own filename.**
+
+Bulk-downloading Futurama S02 from the library reported every one of the twenty episodes
+as sourceless. The access log said why — this is what the box was asked, twenty times:
+
+```
+/api/search?q=Futurama-1999-S01 1080p WEBRip 10bit EAC3 5 1 x265-iVy S02E01
+/api/search?q=Futurama-1999-S01 1080p WEBRip 10bit EAC3 5 1 x265-iVy S02E02
+...
+```
+
+`_epSearchCandidate` builds the TMDb candidate that the library hands to the search show
+page, and it titled it `epHeroTitle || epMetadata.title` — the item’s **display name**
+ahead of TMDb’s. For an unrenamed season pack the display name *is* the release name, and
+that title is what every query on the show page is built by appending to. So the search
+was not degraded, it was twenty guaranteed misses, reported honestly as "no source found"
+and indistinguishable from a season that genuinely isn’t out there.
+
+Opening the same show from the Search tab was always fine, which is why this survived: the
+group’s title there is a parsed show name. Only the library handoff carried the filename.
+
+- `_epSearchCandidate` now prefers `epMetadata.title`. It is holding the TMDb id; the
+  title that comes with it is the authoritative show name.
+- **`_ssQueryTitle()`** is now the single place that decides what string goes to an
+  indexer — TMDb’s title, falling back to whoever opened the page — and the broad search,
+  the per-season search, the per-episode search and the background runner all go through
+  it. The identity used to *tag* a download (`series`) is deliberately left alone, so
+  episodes still land in the library series you started from.
+- A bulk run with no resolved show name now says so and stops, instead of spending twenty
+  indexer round trips proving that `" S02E01"` matches nothing.
+
 ## [12.7.0] — 2026-09-14
 **Finding sources no longer holds you hostage — and Futurama has more than one season.**
 

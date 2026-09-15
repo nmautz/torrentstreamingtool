@@ -754,6 +754,34 @@ the axis the user is actually choosing along (season), and give the noise its ow
 collapsed section. Render a heading for every season the show HAS, not just the ones with
 results, or "no pack exists" and "nobody looked" are indistinguishable.
 
+### A display name is not a search query
+
+The library’s "find the rest of this season" handoff built its TMDb candidate as
+`title: epHeroTitle || epMetadata.title`, and `epHeroTitle` is what **this box** calls the
+item. For anything the user never renamed that is the release name, so the search show
+page opened believing the show was called
+`Futurama-1999-S01 1080p WEBRip 10bit EAC3 5 1 x265-iVy`, and every query it then built —
+`<title> S02`, `<title> S02E01`, … — was a guaranteed miss. Twenty of them, reported as
+"no source found for S02E01…S02E20", which is indistinguishable from a season that really
+has no releases.
+
+**The tell is in `access.log`, not in the UI.** The screen can only say "nothing found";
+`grep -o '/api/search?q=[^ "]*' access.log` says *what was asked*, and the bad title is
+obvious the moment you look. Reach for it before theorising about indexers — an empty
+result and a nonsense query look identical from the client.
+
+Two names, two jobs, and they are only usually the same string:
+
+- **`_ssQueryTitle()`** — what an indexer is asked. TMDb’s title wins; every query builder
+  on the show page (`_ssBroadSearch`, `ssSearchSeason`, `ssSearchEpisode`, `_bgCtx().query`)
+  goes through it.
+- **`_ssGroup.title`** — the show’s identity in the library, used as the `series` tag on a
+  queued download. Left as the caller’s name deliberately: episodes fetched from a series
+  page must land back in *that* series, whatever it is called.
+
+Anything that derives a query from a title the user could have renamed needs the same
+split.
+
 ### Never let a batch count itself against the subset it managed to build
 
 Bulk season download derived its scope from `_ssEpisodes` — the episodes that searching

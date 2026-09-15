@@ -8623,9 +8623,16 @@ function _epSearchCandidate(){
   if(!epMetadata || !epMetadata.tmdb_id) return null;
   const y=(epMetadata.first_air_date||"").slice(0,4);
   return {
+    // TMDb's title, NOT the library item's display name. `epHeroTitle` is
+    // whatever this box calls the item, which for an unrenamed season pack is
+    // the raw release name — and this candidate's title becomes every indexer
+    // query the show page then makes. Getting it backwards asked Jackett for
+    // "Futurama-1999-S01 1080p WEBRip 10bit EAC3 5 1 x265-iVy S02E01" twenty
+    // times over and reported the whole season as sourceless. We are holding
+    // the TMDb id right here; its title is the authoritative show name.
     id:       epMetadata.tmdb_id,
     kind:     epMetadata.tmdb_kind||"tv",
-    title:    epHeroTitle || epMetadata.title || "",
+    title:    epMetadata.title || epHeroTitle || "",
     year:     y?parseInt(y,10):null,
     overview: epMetadata.overview||"",
   };
@@ -11528,6 +11535,16 @@ function closeSearchShow(){
   _ssGroup=null; _ssMeta=null; _ssKind=""; _ssBroadResults=null; _ssMetaLoading=false; _ssOwned=null; _ssReplace="";
 }
 
+// The title to hand an indexer for the open show. TMDb's wins over whatever
+// opened the page: `_ssGroup.title` is the caller's name for the show, and on
+// the library handoff path that is the item's display name — a raw release
+// name for anything unrenamed. A query is only ever as good as its title, and
+// every query this screen makes is built by appending to this one, so a bad
+// title is not a degraded search, it is twenty empty ones.
+function _ssQueryTitle(){
+  return (((_ssMeta&&_ssMeta.title)||(_ssGroup&&_ssGroup.title))||"").trim();
+}
+
 // Alternative titles for the open show (an anime's romaji name, etc.), from the
 // TMDb metadata — drop the primary title + case-insensitive dupes.
 function _ssAkaTitles(){
@@ -11555,7 +11572,7 @@ async function _ssBroadSearch(){
   const akaParam=akas.length?`&aka=${encodeURIComponent(akas.join(","))}`:"";
   const yearParam=(grp.year&&_ssKind==="movie")?`&year=${grp.year}`:"";
   const pidParam=profile.id?`&profile_id=${encodeURIComponent(profile.id)}`:"";
-  const queries=[grp.title, ...akas.slice(0,2)].filter(Boolean);
+  const queries=[_ssQueryTitle(), ...akas.slice(0,2)].filter(Boolean);
   const bundles=await Promise.all(queries.map(async(qt)=>{
     try{
       const r=await fetch(`/api/search?q=${encodeURIComponent(qt)}${yearParam}${akaParam}${pidParam}`);
@@ -11647,7 +11664,7 @@ function _ssMergePacks(results){
 // same-franchise sibling out of the buckets without needing a relevance cutoff.
 async function ssSearchSeason(season, opts={}){
   const grp=_ssGroup;
-  const q=`${grp.title} S${String(season).padStart(2,"0")}`;
+  const q=`${_ssQueryTitle()} S${String(season).padStart(2,"0")}`;
   let packs=0, eps=0;
   try{
     let url=`/api/search?q=${encodeURIComponent(q)}`;
@@ -12108,7 +12125,7 @@ async function ssSearchEpisode(season, episode, opts={}){
   const grp=_ssGroup;
   const code=`S${String(season).padStart(2,"0")}E${String(episode).padStart(2,"0")}`;
   const abs=(season<=1 && episode>=100);   // absolute-numbered anime
-  const q=`${grp.title} ${abs?episode:code}`;
+  const q=`${_ssQueryTitle()} ${abs?episode:code}`;
   let found=[];
   try{
     let url=`/api/search?q=${encodeURIComponent(q)}`;
@@ -12492,7 +12509,11 @@ function _bgRun(label, fn, opts={}){
 // Everything a detached run needs, frozen at the moment it starts.
 function _bgCtx(scope){
   return {
+    // `title` is the show's identity for the library (the `series` every queued
+    // download is tagged with); `query` is what goes to the indexers. They are
+    // usually the same string and occasionally must not be — see _ssQueryTitle.
     title:(_ssGroup&&_ssGroup.title)||"",
+    query:_ssQueryTitle(),
     kind:_ssKind,
     meta:_ssMeta,
     owned:_ssOwned,
@@ -12545,14 +12566,14 @@ function _bgIngest(ctx, results){
 // see ssSearchSeason for why the targeted query is the one that finds anything
 // on a long-running show.
 async function _bgSeasonSearch(ctx, sn){
-  const out=await _bgQuery(`${ctx.title} S${String(sn).padStart(2,"0")}`);
+  const out=await _bgQuery(`${ctx.query} S${String(sn).padStart(2,"0")}`);
   _bgIngest(ctx, out.filter(r=>r.kind!=="episode" || r.season===sn));
 }
 // One "<title> S04E09" query (bare episode number for absolute-numbered anime).
 async function _bgEpisodeSearch(ctx, season, episode){
   const abs=(season<=1 && episode>=100);
   const code=`S${String(season).padStart(2,"0")}E${String(episode).padStart(2,"0")}`;
-  const out=await _bgQuery(`${ctx.title} ${abs?episode:code}`);
+  const out=await _bgQuery(`${ctx.query} ${abs?episode:code}`);
   _bgIngest(ctx, out.filter(r=>r.kind==="episode" && r.season===season && r.episode===episode));
 }
 
@@ -12607,6 +12628,13 @@ function _bgAutoPick(ctx, sources, filt){
 // Hacks S05E09/E10 were missed — both were searched, both returned nothing that
 // pass, and a targeted retry 90 s later found them immediately.
 async function _bgEnsureSources(ctx, ctl, report){
+  // No title, no search. Twenty queries of " S02E01" cost the indexers real
+  // work and come back with exactly nothing, which then reads as "this season
+  // does not exist" rather than as the bug it is.
+  if(!ctx.query){
+    showAlert("Can't search — no show name resolved for this title.","error");
+    return null;
+  }
   // One broad query first when the page never ran one: a single round trip that
   // can settle several seasons at once, shortening the sweep below.
   if(!ctx.searched && _bgLive(ctx)){
@@ -20871,6 +20899,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">12.7.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">12.7.1</div>
 </body>
 </html>
