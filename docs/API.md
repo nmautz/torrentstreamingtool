@@ -152,6 +152,22 @@ Per-item download scheduling persists in `library.json → item.download` (`{mod
 
 ## VLC controls
 
+> **These are the TV control surface, not "talk to VLC".** When the kiosk's own
+> `<video>` is the active surface (`state.tv_local_active`), every endpoint below
+> relays to it over `tv_command` instead of driving VLC — so one set of calls
+> controls whichever surface is playing, and the dashboard, the iOS app and the
+> physical remote all get on-device control with no client-side branching. The
+> naming is historical; it matches `vlc_time` / `vlc_duration` / `vlc_volume`,
+> which have always been the shared display fields. See
+> [STREAMING.md](STREAMING.md) and [REMOTE.md](REMOTE.md).
+>
+> Surface-specific notes: `volume/set` and `volume/{direction}` clamp to **100**
+> on-device (a media element has no amplification above 1.0, unlike VLC's 0-200);
+> `prev`/`next` let the page step its own playlist (which can be a cross-item
+> merged-series run); `tracks` answers from the list the page reports on its
+> heartbeat, in the identical response shape; and `track/subtitle/{id}` accepts a
+> **string** id because the on-device key space includes `sidecar:N`.
+
 | Method | Path | Notes |
 |--------|------|-------|
 | POST | `/api/vlc/pause` | Toggle |

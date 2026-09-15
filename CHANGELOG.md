@@ -1,5 +1,45 @@
 # Changelog
 
+## [13.1.0] — 2026-09-15
+**The full-screen controls now drive the TV whichever surface is playing.**
+
+Reported from the couch: with on-device playback up, **every** button in the dashboard's
+full-screen controls did nothing — except Stop. Exactly right, and the reason is
+structural: every one of those controls posts to `/api/vlc/*`, and VLC is idle during
+on-device playback. Stop worked only because `/api/stop` was already surface-agnostic.
+
+The fix routes **in the backend**, not in the dashboard. `/api/vlc/*` is the *TV control
+surface*, not "talk to VLC" — the same way `active_title` / `vlc_time` / `vlc_duration` /
+`vlc_volume` have always been the shared display fields whichever surface is playing.
+Each control endpoint now relays to the kiosk player over `tv_command` when
+`tv_local_active`. Doing it here rather than branching per-button in the UI (the way the
+YouTube controls do) means the phone, the iOS app and anything else get on-device control
+with no changes and no opportunity to drift — which is what issue #8 asked for: *"route
+each selection through the same backend paths the dashboard already uses."*
+
+Covered: play/pause, ±10/±30 seek, seek-bar scrub, volume slider and ± steps, prev/next
+episode, audio track, subtitle track, Stop.
+
+**The track dropdowns needed the data to flow the other way.** `GET /api/vlc/tracks` now
+answers from the player's own track list, reported on its heartbeat in VLC's exact
+response shape — so `loadTracks()` populates, the current selections highlight, and
+`fcClip` gets its timestamp, all unchanged. `POST /api/vlc/track/subtitle/{id}` takes a
+**string** id now, because the on-device subtitle key space includes sidecar files
+(`sidecar:0`) alongside the numeric indices; VLC's ids are still validated as integers.
+
+**Half the overlay was hidden, and Save was wrongly offered.** The episode-nav row, Clip
+and Exit Shuffle all gate on `is_library_playback` + `library_item_id`, and Save gates on
+the *absence* of it — none of which were set, because on-device playback never touched
+VLC's playlist state. The heartbeat now reports them, along with its playlist length and
+index (which can be a cross-item merged-series run, so the page's pair overrides the
+VLC-derived one in the snapshot). This also brings the surface under `stop()`'s progress
+finalise and the delete-while-playing guard.
+
+**Night Mode is hidden while on-device is playing.** It is a VLC audio filter applied at
+launch, so applying it would have relaunched VLC *over* the film to add a filter nobody
+could hear. `_apply_night_mode` now persists the setting without relaunching when the
+kiosk owns the TV.
+
 ## [13.0.2] — 2026-09-15
 **The TV handed the remote back to VLC for six seconds every time it started playing.**
 

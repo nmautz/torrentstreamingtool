@@ -253,6 +253,34 @@ It captures the position (preferring `lp.lastKnownT` when `currentTime` reads ~0
 dying pipeline reports 0 and VLC would restart the episode), releases the surface,
 then POSTs an ordinary `/api/library/{id}/play` with `seek_first_to`.
 
+### The dashboard's full-screen controls
+
+They drive this surface too, and the routing is **server-side**: every `/api/vlc/*`
+control endpoint relays to the kiosk player over `tv_command` when `tv_local_active`.
+Branching there rather than per-button in the UI is deliberate — it is the one place
+every client already goes, so the phone, the iOS app and the physical remote all get
+on-device control with no changes and no room to drift (issue #8: *"route each selection
+through the same backend paths the dashboard already uses"*).
+
+Data flows back the same way. The heartbeat carries the player's **track list** (in
+`/api/vlc/tracks`' exact response shape, so `loadTracks()` needs no branching), its
+**volume** (the element's own gain — the real amp on this surface, unlike YouTube where
+the OS mixer is), and its **playlist length + index** (which can be a cross-item
+merged-series run, so it overrides the VLC-derived nav pair in `state_snapshot`).
+
+The heartbeat also sets `library_item_id` / `library_current_file`. Those aren't
+cosmetic: the episode-nav row, Clip and Exit Shuffle gate on `is_library_playback`, Save
+gates on its absence, and `stop()`'s progress finalise plus the delete-while-playing
+guard both key off `library_item_id`.
+
+Two things behave differently by necessity:
+
+- **Volume clamps at 100.** A media element has no gain above 1.0; VLC's scale runs to
+  200. The slider still reads 0-200 but on-device stops at 100.
+- **Night Mode is hidden.** It is a VLC audio filter applied at launch, so honouring it
+  would relaunch VLC *over* the film to add a filter nobody could hear.
+  `_apply_night_mode` persists the setting and returns early instead.
+
 ### Switching on purpose
 
 - **User Settings → Always Use VLC on the TV** → `settings.tv_playback_mode`

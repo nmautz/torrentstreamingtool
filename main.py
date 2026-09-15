@@ -1135,6 +1135,16 @@ class AppState:
     tv_local_playback: str = ""                           # last player state from the kiosk: playing|paused|buffering|ended
     tv_local_seen_at: float = 0.0                         # time.time() of the last /api/tv-local/state heartbeat (stale ⇒ the page died). ALSO refreshed by _tv_local_open_pump to hold the reaper off during a cold kiosk launch — so it does NOT mean "the page replied"
     tv_local_ack_at: float = 0.0                          # time.time() of the last beat that genuinely came FROM the page — the only thing _tv_local_open_pump treats as acknowledgement
+    # The kiosk player's audio/subtitle tracks + current picks, reported on the
+    # heartbeat. Lets GET /api/vlc/tracks answer for the on-device surface in the
+    # SAME shape VLC uses, so the dashboard's track dropdowns (and the Clip
+    # timestamp) work against either surface with no client-side branching.
+    tv_local_tracks: dict = field(default_factory=dict)
+    # {"count": N, "index": i} — the kiosk player's OWN playlist position, which
+    # can be a cross-item merged-series run. Overrides the VLC-derived nav pair in
+    # state_snapshot while this surface is active, so the dashboard's prev/next
+    # episode controls and "3 / 25" counter work against it.
+    tv_local_nav: dict = field(default_factory=dict)
     tv_local_item_id: Optional[str] = None                # library item currently on the kiosk player
     tv_local_file_path: Optional[str] = None              # and which file of it
     # Which surface a TV library play uses: "device" (kiosk <video>) | "vlc".
@@ -1342,6 +1352,11 @@ def state_snapshot() -> dict:
         nav_idx = nav_order.index(current) if (current and current in nav_order) else -1
     except (ValueError, AttributeError):
         nav_idx = -1
+    # On-device TV playback keeps its playlist in the page, not in VLC's — take
+    # the pair it reports so prev/next and the "3 / 25" counter are truthful.
+    if state.tv_local_active and state.tv_local_nav:
+        nav_count = state.tv_local_nav.get("count", 0) or 0
+        nav_idx   = state.tv_local_nav.get("index", -1)
     # Window control pause: compute the live remaining seconds for the UI.
     # window_mgmt_paused() auto-expires a finished timed pause — and can slide
     # the deadline of one still in use — so read the deadline AFTER calling it.
@@ -3448,6 +3463,11 @@ async def _apply_night_mode(enabled: bool) -> None:
     VLC's HTTP interface has no command to add/remove an audio filter at runtime,
     so the compressor can only be switched by relaunching VLC — it's a launch arg
     (`NIGHT_MODE_ARGS`, read off `state.vlc_night_mode` in `_restart_vlc_process`).
+
+    **Never relaunches while the kiosk's own player owns the TV.** Night mode is a
+    VLC audio filter and does nothing for a browser `<video>`, so relaunching
+    would put a VLC window over the film to apply a filter nobody can hear. The
+    setting still persists and takes effect the next time VLC actually plays.
     To make the toggle seamless mid-playback we snapshot the current file +
     position, relaunch, replay the file (and any remaining playlist tail), and
     seek back. When only the idle background video (or nothing) is on screen we
@@ -3455,6 +3475,8 @@ async def _apply_night_mode(enabled: bool) -> None:
     new filter applied.
     """
     state.vlc_night_mode = enabled
+    if state.tv_local_active:
+        return
 
     # Snapshot what's playing *before* killing VLC. Skip the bg video — the loop
     # restarts it on its own.
@@ -9373,6 +9395,13 @@ class TvLocalStateReq(BaseModel):
     time: Optional[float] = None
     duration: Optional[float] = None
     playback: Optional[str] = None
+    # {"audio":[{id,label}], "subtitle":[{id,label}], current_audio, current_subtitle}
+    tracks: Optional[dict] = None
+    nav_count: Optional[int] = None      # length of the page's playlist
+    nav_index: Optional[int] = None      # its position in it
+    # The media element's own gain as 0-100, so the dashboard's volume slider
+    # reflects the surface actually making the sound.
+    volume: Optional[float] = None
 
 
 class TvPlaybackModeReq(BaseModel):
@@ -14819,7 +14848,11 @@ async def _tv_local_clear(reason: str, reset_status: bool = True) -> None:
     state.tv_local_playback = ""
     state.tv_local_item_id = None
     state.tv_local_file_path = None
+    state.tv_local_tracks = {}
+    state.tv_local_nav = {}
     if reset_status:
+        state.library_item_id = None
+        state.library_current_file = None
         state.active_title = None
         state.stream_status = "idle"
         state.vlc_time = 0
@@ -14868,6 +14901,26 @@ async def tv_local_state(req: TvLocalStateReq) -> JSONResponse:
         state.vlc_duration = int(req.duration)
     if req.playback:
         state.tv_local_playback = req.playback
+    if isinstance(req.tracks, dict):
+        state.tv_local_tracks = req.tracks
+    if req.nav_count is not None:
+        state.tv_local_nav = {"count": max(0, int(req.nav_count)),
+                              "index": int(req.nav_index if req.nav_index is not None else -1)}
+    # Report as library playback. The dashboard gates its episode nav, Clip and
+    # Exit-Shuffle tiles on `is_library_playback` + `library_item_id`, and hides
+    # Save on it — without these the fullscreen controls come up half-empty (and
+    # with the wrong Save button) for a surface that IS library playback.
+    # It also means stop()'s progress finalise and the delete-while-playing guard
+    # cover this surface like any other.
+    if req.item_id:
+        state.library_item_id = req.item_id
+    if req.file_path:
+        state.library_current_file = req.file_path
+    if req.volume is not None:
+        # Unlike the YouTube path (where the OS mixer is the real amp and the
+        # IFrame gain is pinned at 100), the kiosk player's own gain IS the amp —
+        # so it is authoritative here and the dashboard slider should show it.
+        state.vlc_volume = max(0, min(200, int(req.volume)))
     await broadcast("state", state_snapshot())
     return JSONResponse({"ok": True, "active": True})
 
@@ -15139,8 +15192,27 @@ async def retry_playback() -> JSONResponse:
     return JSONResponse({"ok": True})
 
 
+# ── Surface routing for the shared TV control endpoints ──────────────────────
+# Everything under /api/vlc/* is the DASHBOARD'S TV CONTROL SURFACE, not "talk to
+# VLC" — the same way active_title / vlc_time / vlc_duration / vlc_volume are the
+# shared display fields whichever surface is playing. When the kiosk's own
+# <video> is the active surface these relay to it over `tv_command` instead.
+#
+# Routing here rather than branching in the dashboard (the way the YouTube
+# controls do) is deliberate: it is the one place every client already goes, so
+# the phone, the iOS app and anything else get on-device control with no changes
+# and no opportunity to drift. Issue #8 asked for exactly this — "route each
+# selection through the same backend paths the dashboard already uses".
+async def _tv_local_relay(action: str, **payload) -> None:
+    """Send one control command to the kiosk player."""
+    await broadcast("tv_command", {"action": action, **payload})
+
+
 @app.post("/api/vlc/pause")
 async def pause() -> JSONResponse:
+    if state.tv_local_active:
+        await _tv_local_relay("playpause")
+        return JSONResponse({"ok": True})
     await vlc("pl_pause")
     return JSONResponse({"ok": True})
 
@@ -15167,6 +15239,14 @@ async def volume_set(volume: int) -> JSONResponse:
     # volume is 0-200 (100 = normal); VLC uses 0-512 (256 = 100%)
     cap = await _global_max_volume()
     capped = max(0, min(cap, max(0, min(200, volume))))
+    if state.tv_local_active:
+        # A media element's gain has no headroom above 1.0, so the 0-200 scale
+        # (VLC amplifies past 100) clamps to 100 here rather than pretending.
+        target = max(0, min(100, capped))
+        await _tv_local_relay("player_volume_set", value=float(target))
+        state.vlc_volume = target
+        await broadcast("state", state_snapshot())
+        return JSONResponse({"ok": True, "volume": target, "max_volume": cap})
     raw = max(0, min(512, round(capped / 100 * 256)))
     await vlc("volume", val=str(raw))
     state.vlc_volume = capped
@@ -15183,6 +15263,12 @@ async def volume(direction: str, step: int = 10) -> JSONResponse:
     magnitude = max(0, min(200, abs(int(step))))
     delta = magnitude if direction == "up" else -magnitude
     cap = await _global_max_volume()
+    if state.tv_local_active:
+        next_local = max(0, min(100, state.vlc_volume + delta))
+        await _tv_local_relay("player_volume_step", value=float(delta))
+        state.vlc_volume = next_local
+        await broadcast("state", state_snapshot())
+        return JSONResponse({"ok": True, "volume": next_local, "max_volume": cap})
     next_vol = max(0, min(cap, state.vlc_volume + delta))
     raw = max(0, min(512, round(next_vol / 100 * 256)))
     await vlc("volume", val=str(raw))
@@ -15197,6 +15283,9 @@ async def seek(delta: float) -> JSONResponse:
     Clamped to a sane step: `int(nan)` / `int(inf)` raise, which surfaced as a
     bare 500 on a control the user was merely holding down."""
     step = max(-86400.0, min(86400.0, _finite(delta, 0.0)))
+    if state.tv_local_active:
+        await _tv_local_relay("seek", value=float(step))
+        return JSONResponse({"ok": True})
     sign = "+" if step >= 0 else ""
     await vlc("seek", val=f"{sign}{int(step)}s")
     return JSONResponse({"ok": True})
@@ -15209,6 +15298,9 @@ async def seek_to(position_pct: float) -> JSONResponse:
     `_finite` first: NaN survives `max(0.0, min(100.0, x))` as **100.0**, so a
     NaN here used to seek to the end of the episode — see _finite."""
     pct = max(0.0, min(100.0, _finite(position_pct, 0.0)))
+    if state.tv_local_active:
+        await _tv_local_relay("seek_to", value=pct)
+        return JSONResponse({"ok": True})
     await vlc("seek", val=f"{pct:.2f}%")
     return JSONResponse({"ok": True})
 
@@ -15692,6 +15784,11 @@ async def _vlc_relaunch_playlist(playlist: list[str], target_name: str) -> None:
 @app.post("/api/vlc/prev")
 async def vlc_prev() -> JSONResponse:
     """Jump to the previous episode (shuffle order when shuffling, else series order)."""
+    if state.tv_local_active:
+        # The kiosk player owns its own playlist (lp.playlist / lp.pi), which can
+        # be a cross-item merged-series run — so it does the stepping, not us.
+        await _tv_local_relay("prev")
+        return JSONResponse({"ok": True}, status_code=202)
     current = state.library_current_file
     if not current:
         raise HTTPException(400, "No active playback.")
@@ -15749,6 +15846,9 @@ async def vlc_prev() -> JSONResponse:
 @app.post("/api/vlc/next")
 async def vlc_next() -> JSONResponse:
     """Jump to the next episode (shuffle order when shuffling, else series order)."""
+    if state.tv_local_active:
+        await _tv_local_relay("next")
+        return JSONResponse({"ok": True}, status_code=202)
     current = state.library_current_file
     if not current:
         raise HTTPException(400, "No active playback.")
@@ -15941,6 +16041,21 @@ async def get_tracks() -> JSONResponse:
     <audiotrack> / <subtitletrack> XML values are also ES IDs, so they must be
     compared against the same ES IDs for the 'current' highlight to work.
     """
+    if state.tv_local_active:
+        # Answer for the kiosk player from its heartbeat, in VLC's exact shape so
+        # the dashboard's dropdowns (and fcClip's timestamp read) need no
+        # branching. Ids here are the local player's own track keys — numeric
+        # audio indices, and -1 / numeric / "sidecar:N" for subtitles — and they
+        # round-trip back through /api/vlc/track/*.
+        t = state.tv_local_tracks or {}
+        return JSONResponse({
+            "audio":    t.get("audio") or [],
+            "subtitle": t.get("subtitle") or [{"id": -1, "label": "Off", "language": ""}],
+            "current_audio":    t.get("current_audio", -1),
+            "current_subtitle": t.get("current_subtitle", -1),
+            "time":   state.vlc_time,
+            "length": state.vlc_duration,
+        })
     vs = await vlc_status()
     audio, subs = _parse_track_streams(vs)
     subtitle = [{"id": -1, "label": "Off", "language": ""}] + subs
@@ -15959,6 +16074,12 @@ async def get_tracks() -> JSONResponse:
 
 @app.post("/api/vlc/track/audio/{track_id}")
 async def set_audio_track(track_id: int) -> JSONResponse:
+    if state.tv_local_active:
+        # The page persists its own pick (_lpSaveLocalTracks) in the resolvable
+        # descriptor format, so don't also write the raw-ES-ID prefs below —
+        # those are VLC's track-id space and mean nothing to the local player.
+        await _tv_local_relay("audio_track", value=track_id)
+        return JSONResponse({"ok": True})
     state.current_audio_track = track_id
     await vlc("audio_track", val=str(track_id))
     if state.library_item_id and state.library_profile_id and state.library_current_file:
@@ -16002,7 +16123,21 @@ async def _remember_vlc_audio_pick(track_id: int) -> None:
 
 
 @app.post("/api/vlc/track/subtitle/{track_id}")
-async def set_subtitle_track(track_id: int) -> JSONResponse:
+async def set_subtitle_track(track_id: str) -> JSONResponse:
+    """Select a subtitle track on whichever surface is playing.
+
+    `track_id` is a **string** path param, not an int, because the on-device
+    player's subtitle key space includes sidecar files — `"sidecar:0"` — next to
+    the numeric bundle indices and -1 for Off. VLC's own ids are always ints and
+    are still validated as such below, so its behaviour is unchanged.
+    """
+    if state.tv_local_active:
+        await _tv_local_relay("subtitle_track", value=track_id)
+        return JSONResponse({"ok": True})
+    try:
+        track_id = int(track_id)
+    except (TypeError, ValueError):
+        raise HTTPException(400, "VLC subtitle track ids are integers.")
     state.current_subtitle_track = track_id
     state.sub_auto_ai_path = ""                    # explicit pick → not auto-AI
     await vlc("subtitle_track", val=str(track_id))

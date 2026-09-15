@@ -4711,6 +4711,15 @@ function renderPlayer(s){
       : "Switch the TV to on-device playback (keeps position)";
   }
 
+  // Night Mode is a VLC audio filter applied at launch — it does nothing for a
+  // browser <video>, and the backend deliberately won't relaunch VLC over the
+  // kiosk player to apply it. Hide it rather than offer a control that can't work.
+  const fcNight=document.getElementById("fcNightBtn");
+  if(fcNight){
+    fcNight.classList.toggle("hidden",!!s.tv_local_active);
+    fcNight.classList.toggle("flex",!s.tv_local_active);
+  }
+
   // Prev / Next episode buttons (footer) — show whenever library item has multiple files
   const prevBtn=document.getElementById("prevEpBtn");
   const nextBtn=document.getElementById("nextEpBtn");
@@ -19702,6 +19711,25 @@ function _lpVolPill(frac, muted) {
   _tvVolPillTimer = setTimeout(() => pill.classList.add("hidden"), 1400);
 }
 
+function _tvLocalSeekPct(pct) {
+  // The dashboard's seek bar speaks percent (VLC's native unit); the element
+  // seeks in seconds.
+  const v = _lpV();
+  const d = v.duration || lp.duration || 0;
+  if (!d) return;
+  _lpCommitSeek(Math.min(Math.max(d * (pct / 100), 0), d - 0.5));
+  _lpCtlShow(); _lpCtlTick();
+}
+
+function lpVolumeSet(pct) {
+  const v = _lpV();
+  const frac = Math.max(0, Math.min(1, (Number(pct) || 0) / 100));
+  v.muted = false;
+  v.volume = frac;
+  _lpCtlSync();
+  _lpVolPill(frac, false);
+}
+
 function lpVolumeStep(deltaPct) {
   // `deltaPct` arrives on the remote's 0-100 scale (REMOTE_VOLUME_STEP); the
   // media element's volume is 0..1. Stepping always unmutes — on a remote,
@@ -19718,6 +19746,31 @@ function lpVolumeStep(deltaPct) {
 // relayed here instead of driving VLC, and mirrors position/title onto the
 // shared display fields every dashboard renders. Stops being sent the moment the
 // player goes away — the server reaps a stale claim after TV_LOCAL_STALE_SECS.
+// The player's tracks in VLC's /api/vlc/tracks shape, so the dashboard's
+// existing dropdowns work against either surface with no branching. Ids are the
+// local player's own keys: numeric audio indices, and -1 / numeric /
+// "sidecar:N" for subtitles — they round-trip back via /api/vlc/track/*.
+function _tvLocalTrackList() {
+  const subs = [{id: -1, label: "Off", language: ""}];
+  (lp.subtitles || []).forEach((t, i) => subs.push({
+    id: i, label: t.label || ("Subtitles " + (i + 1)), language: t.language || "",
+  }));
+  (lp.sidecarSubs || []).forEach((t, i) => subs.push({
+    id: "sidecar:" + i,
+    label: (t.lang ? t.lang.toUpperCase() + " — " : "") + (t.name || "sub")
+           + (t.ai ? " (AI" + (t.model ? " · " + t.model : "") + ")" : ""),
+    language: t.lang || "",
+  }));
+  return {
+    audio: (lp.audios || []).map((a, i) => ({
+      id: i, label: a.label || ("Audio " + (i + 1)), language: a.language || "",
+    })),
+    subtitle: subs,
+    current_audio: lp.pendingAudioIdx == null ? 0 : lp.pendingAudioIdx,
+    current_subtitle: lp.pendingSubtitleIdx == null ? -1 : lp.pendingSubtitleIdx,
+  };
+}
+
 let _tvBeatAt = 0, _tvBeatWasLive = false;
 // While an `open` is starting up, the player is NOT live yet — lpPlay has to
 // prep/probe the file before #localPlayer gets `lp-active`, which is seconds on
@@ -19772,6 +19825,16 @@ function _tvLocalBeat(force) {
       time:      v ? (v.currentTime || 0) : 0,
       duration:  (v && v.duration) || lp.duration || 0,
       playback:  !v ? "buffering" : (v.ended ? "ended" : (v.paused ? "paused" : "playing")),
+      // The media element's gain is the real amp on this surface, so the
+      // dashboard's volume slider should show it (not the host mixer).
+      volume:    v ? Math.round((v.muted ? 0 : (v.volume || 0)) * 100) : 0,
+      // Mirrored into GET /api/vlc/tracks so the dashboard's audio/subtitle
+      // dropdowns populate from the surface that's actually playing.
+      tracks:    _tvLocalTrackList(),
+      // The playlist lives here, not in VLC — the dashboard's prev/next episode
+      // controls and its "3 / 25" counter read these back off the state snapshot.
+      nav_count: (lp.playlist || []).length,
+      nav_index: lp.pi == null ? -1 : lp.pi,
     }),
   }).catch(() => {});
 }
@@ -21243,6 +21306,21 @@ function connectSSE(){
       if(d.action==="player_volume_step"){ if(_tvLocalLive()) lpVolumeStep(Number(d.value)||0); return; }
       if(d.action==="stop"){ if(_tvLocalLive()) lpStop(); return; }
       if(d.action==="open"){ _tvLocalOpen(d); return; }
+      // The rest come from the dashboard's fullscreen controls, relayed by the
+      // /api/vlc/* endpoints so both TV surfaces answer the same buttons.
+      if(d.action==="seek_to"){ if(_tvLocalLive()) _tvLocalSeekPct(Number(d.value)||0); return; }
+      if(d.action==="player_volume_set"){ if(_tvLocalLive()) lpVolumeSet(Number(d.value)||0); return; }
+      if(d.action==="prev"){ if(_tvLocalLive()) lpPrevEp(); return; }
+      if(d.action==="next"){ if(_tvLocalLive()) lpNextEp(); return; }
+      if(d.action==="audio_track"){ if(_tvLocalLive()) lpSetAudio(Number(d.value)); return; }
+      if(d.action==="subtitle_track"){
+        if(!_tvLocalLive()) return;
+        // Keys are numeric ("0") or sidecar ("sidecar:0") — keep sidecar as a
+        // string, coerce the rest to Number so lpSetSubtitle's -1 Off works.
+        const raw=String(d.value==null?-1:d.value);
+        lpSetSubtitle(raw.indexOf("sidecar:")===0?raw:Number(raw));
+        return;
+      }
     }catch(_){}
   });
   es.addEventListener("subtitle_upgraded",e=>{
@@ -21573,6 +21651,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">13.0.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">13.1.0</div>
 </body>
 </html>
