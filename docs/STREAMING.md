@@ -276,7 +276,8 @@ guard both key off `library_item_id`.
 Two things behave differently by necessity:
 
 - **Volume clamps at 100.** A media element has no gain above 1.0; VLC's scale runs to
-  200. The slider still reads 0-200 but on-device stops at 100.
+  200 (it amplifies). The effective ceiling is `min(settings.max_volume, 100)` — the
+  admin cap is applied first and still holds, exactly as it does for VLC.
 - **Night Mode is hidden.** It is a VLC audio filter applied at launch, so honouring it
   would relaunch VLC *over* the film to add a filter nobody could hear.
   `_apply_night_mode` persists the setting and returns early instead.

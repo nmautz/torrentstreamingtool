@@ -161,8 +161,9 @@ Per-item download scheduling persists in `library.json → item.download` (`{mod
 > which have always been the shared display fields. See
 > [STREAMING.md](STREAMING.md) and [REMOTE.md](REMOTE.md).
 >
-> Surface-specific notes: `volume/set` and `volume/{direction}` clamp to **100**
-> on-device (a media element has no amplification above 1.0, unlike VLC's 0-200);
+> Surface-specific notes: `volume/set` and `volume/{direction}` clamp to
+> `min(settings.max_volume, 100)` on-device — a media element has no amplification
+> above 1.0, unlike VLC's 0-200, and the admin cap still applies first;
 > `prev`/`next` let the page step its own playlist (which can be a cross-item
 > merged-series run); `tracks` answers from the list the page reports on its
 > heartbeat, in the identical response shape; and `track/subtitle/{id}` accepts a
