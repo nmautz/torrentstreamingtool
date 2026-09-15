@@ -1,5 +1,50 @@
 # Changelog
 
+## [12.7.6] — 2026-09-14
+**A seek to nowhere jumped to the end, and deleting what you were watching pulled the file out from under the player.**
+
+**`NaN` seeked to the end of the episode.**
+`seek_to` clamped with `max(0.0, min(100.0, position_pct))`, and NaN defeats
+comparison-based clamping: `nan < 100.0` is False, so `min` keeps **100.0**. A seek
+to NaN therefore went to the *end* of the episode — which also marks it watched and
+rolls on to the next one. Confirmed live: `?position_pct=NaN`, `Infinity` and `1e400`
+all returned `200 OK`, because Pydantic accepts non-finite floats for a `float` field.
+And the dashboard could mint one by itself — the bar computes
+`(clientX - rect.left) / rect.width`, which divides by zero on a bar that has no width
+yet. Found by accident when a test harness produced exactly that NaN.
+
+Fixed at both ends: a new `_finite()` on the server coerces non-finite input before any
+clamping (`seek_to`, relative `seek`, whose `int(nan)` was a bare 500), and `_doSeek`
+refuses to send a position it cannot locate.
+
+**The same hole reached `library.json`, where it would have been permanent.**
+`POST /progress` and the iOS batch `/api/sync/progress` write `position_sec` /
+`duration_sec` straight through `round()` into the library with no finite check.
+`json.dumps` emits a bare `NaN` token, which is not valid JSON, and Starlette's
+`JSONResponse` sets `allow_nan=False` and raises on it — so a single bad progress POST
+could have made `/api/library` fail for **every** client until the value was edited out
+by hand. Both paths now sanitise (and reject negative positions) before storing. Not
+reproduced destructively on the live box on purpose; the validator link was proved on
+`seek_to`, which accepts NaN through the identical code path.
+
+**Seeks were dropped instead of coalesced.**
+`_doSeek` painted the progress bar optimistically and *then* called
+`withInflight("seek_to", …)`, which drops a call whose key is already in flight. Tapping
+twice while hunting for a scene left the bar showing where you tapped and the player
+where it was, until the next SSE state snapped it back. Now a single-flight pump with a
+latest-target slot — the same shape as the host-volume pump — so the newest position
+always goes out and intermediate ones are skipped rather than replayed.
+
+**Deleting the episode you were watching.**
+Neither `DELETE /api/library/{id}` nor `/delete-files` checked whether the target was on
+screen. The file was unlinked under a live VLC (an unexplained freeze for whoever was
+watching), and `state.library_item_id` kept pointing at an item that no longer existed —
+which is where the runs of progress 404s in the logs come from. On the primary target it
+also meant the delete silently *failed*: Windows will not unlink a file another process
+holds open, so the media stayed on disk with its library row gone, i.e. an orphan. Both
+endpoints now stop playback first when the target is what's playing. Bulk-delete on the
+episode page makes this easy to hit by accident — select-all includes the one you have open.
+
 ## [12.7.5] — 2026-09-14
 **The controls that answered a press by doing nothing visible.**
 

@@ -1553,6 +1553,35 @@ def _require_device_auth(request: Request) -> None:
     raise HTTPException(401, "Device pairing required — pair this app with the host first.")
 
 
+def _finite(value: float, default: float = 0.0) -> float:
+    """Coerce a float that reached us from the network into a usable number.
+
+    Pydantic accepts NaN and ±Infinity for a plain `float` field (`allow_inf_nan`
+    defaults on), and neither survives contact with the rest of the system:
+
+    * NaN defeats comparison-based clamping. `max(0.0, min(100.0, nan))` is
+      **100.0**, not 0 — `nan < 100.0` is False, so min keeps its first argument.
+      A seek to NaN therefore clamped to *the end of the episode*, which also
+      marks it watched and rolls on to the next one. The dashboard could produce
+      exactly that on its own: the seek bar computes
+      `(clientX - rect.left) / rect.width`, and a zero-width bar (tapped before
+      layout settles) divides by zero.
+    * A non-finite number that reaches `library.json` is worse, because it is
+      persistent. `json.dumps` writes a bare `NaN` token, which is not valid JSON;
+      Starlette's JSONResponse sets `allow_nan=False` and raises on it. One bad
+      progress POST could therefore make `/api/library` fail for everyone, every
+      time, until the value was edited out by hand.
+
+    Anything not finite becomes `default`. Callers still clamp for range — this
+    only guarantees the value is a real number first.
+    """
+    try:
+        v = float(value)
+    except (TypeError, ValueError):
+        return default
+    return v if math.isfinite(v) else default
+
+
 def _pin_hash(pin: str) -> str:
     return hashlib.sha256(pin.encode()).hexdigest()
 
@@ -11180,6 +11209,23 @@ async def delete_library_item(request: Request, item_id: str,
         h = item.get("torrent_hash")
         file_paths = [f.get("path", "") for f in item.get("files", []) if f.get("path")]
         lib["items"] = [it for it in lib["items"] if it["id"] != item_id]
+    # Deleting what is on screen: stop first, outside the library lock.
+    #
+    # Nothing used to check, so "delete the thing I am watching" pulled the file
+    # out from under VLC — it wedged or errored with no explanation, and
+    # state.library_item_id went on pointing at an item that no longer exists,
+    # which is why the logs carry runs of 404s from the player still trying to
+    # save progress for it.
+    #
+    # It also makes the delete WORK on the primary target: Windows refuses to
+    # unlink a file another process holds open, so deleting the playing episode
+    # failed on the file itself and left the media behind with the library row
+    # gone — the one combination the Cleanup tab calls an orphan.
+    if state.library_item_id == item_id:
+        try:
+            await stop()
+        except Exception as exc:              # never let teardown block the delete
+            log.warning("stop() before delete of %s failed: %s", item_id, exc)
     # Bundles first — their cache key needs the media files to still be on disk.
     if delete_file:
         await _purge_offline_bundles(file_paths)
@@ -11376,6 +11422,19 @@ async def delete_item_files(request: Request, item_id: str,
             files[p] = "skip"
         await _apply_item_schedule(item, lib)
         item_status = item.get("status", "downloading")
+
+    # 1.5) If one of the targets is the file currently on screen, stop playback
+    #      before unlinking it. Same reasoning as delete_library_item: VLC holding
+    #      the handle makes the unlink fail outright on Windows (the primary
+    #      target), and pulling the bytes from under a live player is an
+    #      unexplained freeze for whoever is watching. Bulk-delete on the episode
+    #      page makes this easy to do by accident — select-all includes the
+    #      episode you have playing.
+    if state.library_current_file and state.library_current_file in targets:
+        try:
+            await stop()
+        except Exception as exc:
+            log.warning("stop() before file delete failed: %s", exc)
 
     # 2) Remove the bytes from disk + 3) purge the cached HLS bundle — OUTSIDE the
     #    library lock. Unlinking N files and rmtree-ing N bundle dirs is unbounded
@@ -12332,6 +12391,12 @@ async def update_progress(item_id: str, req: ProgressReq) -> JSONResponse:
         item = next((it for it in lib["items"] if it["id"] == item_id), None)
         if not item:
             raise HTTPException(404, "Item not found.")
+        # Sanitise BEFORE anything reads them: these two are the only numbers in
+        # the app that get written to library.json straight off the wire, and a
+        # non-finite value there breaks /api/library for every client (see
+        # _finite). Negative positions are equally meaningless.
+        req.position_sec = max(0.0, _finite(req.position_sec, 0.0))
+        req.duration_sec = max(0.0, _finite(req.duration_sec, 0.0))
         dur = req.duration_sec
         pct = req.position_sec / dur if dur else 0
         prof_prog = item.setdefault("progress", {}).setdefault(req.profile_id, {})
@@ -12436,6 +12501,15 @@ async def sync_progress(req: SyncProgressReq, request: Request) -> JSONResponse:
                 applied.append({"item_id": ev.item_id, "file_path": ev.file_path,
                                 "server_updated_at": now, "skipped": "item_not_found"})
                 continue
+
+            # Same sanitising as update_progress, and for the same reason: these
+            # land in library.json verbatim, and a non-finite value there breaks
+            # /api/library for every client. This path is the likelier source of
+            # one, since the numbers come from a device that accumulated them
+            # offline — a duration of 0 seen as `position/duration` on the client
+            # is exactly how a NaN gets minted.
+            ev.position_sec = max(0.0, _finite(ev.position_sec, 0.0))
+            ev.duration_sec = max(0.0, _finite(ev.duration_sec, 0.0))
 
             prof_prog = item.setdefault("progress", {}).setdefault(req.profile_id, {})
             file_progress = prof_prog.setdefault("file_progress", {})
@@ -14808,16 +14882,23 @@ async def volume(direction: str, step: int = 10) -> JSONResponse:
 
 @app.post("/api/vlc/seek")
 async def seek(delta: float) -> JSONResponse:
-    """Seek relative to current position.  delta is seconds; negative = rewind."""
-    sign = "+" if delta >= 0 else ""
-    await vlc("seek", val=f"{sign}{int(delta)}s")
+    """Seek relative to current position.  delta is seconds; negative = rewind.
+
+    Clamped to a sane step: `int(nan)` / `int(inf)` raise, which surfaced as a
+    bare 500 on a control the user was merely holding down."""
+    step = max(-86400.0, min(86400.0, _finite(delta, 0.0)))
+    sign = "+" if step >= 0 else ""
+    await vlc("seek", val=f"{sign}{int(step)}s")
     return JSONResponse({"ok": True})
 
 
 @app.post("/api/vlc/seek/to")
 async def seek_to(position_pct: float) -> JSONResponse:
-    """Seek to an absolute position (0–100 %)."""
-    pct = max(0.0, min(100.0, position_pct))
+    """Seek to an absolute position (0–100 %).
+
+    `_finite` first: NaN survives `max(0.0, min(100.0, x))` as **100.0**, so a
+    NaN here used to seek to the end of the episode — see _finite."""
+    pct = max(0.0, min(100.0, _finite(position_pct, 0.0)))
     await vlc("seek", val=f"{pct:.2f}%")
     return JSONResponse({"ok": True})
 

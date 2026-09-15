@@ -2846,6 +2846,55 @@ the realistic offender is a child mashing the pad, not an attacker with a LAN
 foothold. If you ever tighten it, keep it un-lockable: a PIN that cannot be retried
 is a TV the household cannot use.
 
+### Non-finite floats: `NaN` defeats `max(0, min(cap, x))`
+
+Pydantic accepts `NaN` and `±Infinity` for a plain `float` field (`allow_inf_nan`
+defaults on), so any float that arrives over the wire can be non-finite — query
+param or body alike. Verified live: `POST /api/vlc/seek/to?position_pct=NaN`
+returned `200 OK`.
+
+The trap is that the usual clamp does **not** save you:
+
+```python
+max(0.0, min(100.0, float("nan")))   # -> 100.0, not 0.0
+```
+
+`min` compares `nan < 100.0`, gets False, and keeps its first argument. So NaN
+clamps to the **top** of the range: a NaN seek went to the end of the episode
+(marking it watched and advancing). `int(nan)` / `int(inf)` raise instead, which
+surfaces as a bare 500.
+
+Use `_finite(value, default)` (in `main.py`, next to `_pin_hash`) *before* clamping
+on anything that arrives as a float.
+
+**Worst case is the persistent one.** `position_sec` / `duration_sec` on
+`POST /api/library/{id}/progress` and the iOS batch `/api/sync/progress` are written
+into `library.json` verbatim. `json.dumps` emits a bare `NaN` token — not valid JSON
+— and Starlette's `JSONResponse` uses `allow_nan=False`, so it *raises*. One bad
+progress POST would make `/api/library` fail for every client on every request until
+the value was hand-edited out. Python's own `json.loads` accepts `NaN` on the way
+back in, so the file would keep loading internally and hide the cause.
+
+The client can generate these without malice: the seek bar computes
+`(clientX - rect.left) / rect.width`, and a bar with no width yet divides by zero.
+
+### Deleting the file that is currently playing
+
+Both delete paths (`DELETE /api/library/{id}` and `POST /{id}/delete-files`) now call
+`stop()` first when the target is `state.library_item_id` / `state.library_current_file`.
+Two separate reasons, and the Windows one is the sharper:
+
+* **Windows will not unlink a file another process holds open.** With VLC playing it,
+  the unlink failed, the bytes stayed on disk, and the library row was already gone —
+  producing exactly the orphan the admin Cleanup tab exists to find.
+* Pulling the bytes from under a live player is an unexplained freeze for whoever is
+  watching, and `state.library_item_id` kept referencing a deleted item, so the player
+  went on POSTing progress for it — the runs of progress 404s in the access logs.
+
+Bulk delete on the episode page reaches this by accident: select-all includes the
+episode currently open.
+
+
 
 - [BACKEND.md](BACKEND.md) — invariants enforced by `main.py`
 - [DAEMON_WATCHDOG.md](DAEMON_WATCHDOG.md) — VPN guard at the process level

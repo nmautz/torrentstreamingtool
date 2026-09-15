@@ -4785,14 +4785,51 @@ function handleSeekPointerLeave(e, el){
 
 async function _doSeek(e, el){
   const rect=el.getBoundingClientRect();
+  // A zero-width bar (tapped before layout settles, or while its container is
+  // collapsed) makes this a divide by zero, and Math.max/min pass NaN straight
+  // through — `Math.min(100, NaN)` is NaN. That NaN used to reach the server and
+  // clamp to 100 %, i.e. skip to the end of the episode. Bail instead: a seek we
+  // cannot locate is not a seek to anywhere.
+  if(!(rect.width > 0)) return;
   const pct=Math.max(0,Math.min(100,((e.clientX-rect.left)/rect.width)*100));
+  if(!isFinite(pct)) return;
   document.getElementById("progressBar").style.width=pct+"%";
   const fcpb=document.getElementById("fcProgressBar");
   if(fcpb) fcpb.style.width=pct+"%";
-  if(app.youtube_active){ await withInflight("seek_to", el, ()=>ytControl("seek_to", +pct.toFixed(1))); return; }
-  await withInflight("seek_to", el, async () => {
-    await fetch(`/api/vlc/seek/to?position_pct=${pct.toFixed(1)}`,{method:"POST"}).catch(()=>{});
-  });
+  _seekPending = pct;
+  _seekPump();
+}
+
+// Seeks coalesce, they do not queue and they must not be dropped.
+//
+// withInflight() drops a call whose key is already in flight, which is right for
+// "start this download" and wrong for "go here": the bar is painted optimistically
+// one line above, so a dropped seek left the bar showing position B while the
+// player stayed at A, until the next SSE state snapped it back. Tapping twice
+// while hunting for a scene is the normal way to hit that.
+//
+// So: single-flight with a latest-target slot, the same shape as the host-volume
+// pump. At most one request is in the air; the newest position the user asked for
+// is the one that goes out next, and intermediate ones are skipped rather than
+// replayed — nobody wants to watch the player walk through them.
+let _seekPending = null;
+let _seekInflight = false;
+async function _seekPump(){
+  if(_seekInflight) return;
+  _seekInflight = true;
+  try{
+    while(_seekPending != null){
+      const pct = _seekPending;
+      _seekPending = null;
+      if(app.youtube_active){
+        await ytControl("seek_to", +pct.toFixed(1));
+      }else{
+        await fetch(`/api/vlc/seek/to?position_pct=${pct.toFixed(1)}`,{method:"POST"}).catch(()=>{});
+      }
+    }
+  } finally {
+    _seekInflight = false;
+  }
 }
 
 function _seekTooltipPct(e, el){
@@ -21134,6 +21171,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">12.7.5</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">12.7.6</div>
 </body>
 </html>
