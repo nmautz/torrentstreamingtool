@@ -1,5 +1,16 @@
 # Changelog
 
+## [13.1.2] — 2026-09-15
+**13.1.1's cache fix didn't actually apply.**
+
+It overrode `StaticFiles.file_response`, and verifying against the live box showed the
+header still absent — that hook is a Starlette internal whose name and shape vary by
+version, so the override silently did nothing. Moved to middleware keyed on
+`content-type: text/html`, which is the stable contract and also covers `/tv` and
+`/admin` (served by a bare `FileResponse`, which has the same missing-header problem).
+
+Verified on the box this time, not assumed.
+
 ## [13.1.1] — 2026-09-15
 **The TV could keep running the previous build's JavaScript.**
 

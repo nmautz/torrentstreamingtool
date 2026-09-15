@@ -9296,6 +9296,41 @@ _IPV4_HOST_RE = re.compile(r"^(\d{1,3}(?:\.\d{1,3}){3})(?::\d+)?$")
 
 
 @app.middleware("http")
+async def no_heuristic_html_cache(request: Request, call_next):
+    """Forbid *heuristic* caching of the HTML pages.
+
+    Starlette's `StaticFiles` (and a bare `FileResponse`, which is how /tv and
+    /admin are served) sends `etag` + `last-modified` but **no `Cache-Control`**.
+    With no explicit freshness a browser falls back to HEURISTIC caching —
+    roughly 10% of the document's age — and serves the page from disk **without
+    revalidating**. On the TV kiosk that means a browser relaunched after an
+    update can render the PREVIOUS build's `index.html`, and the symptom gives
+    you nothing: the page looks completely normal, it is just running last
+    version's JavaScript. A stale page still has the old
+    `hlsAvailable = !TV_MODE`, which routes every TV play to VLC.
+
+    `no-cache` does NOT mean "don't cache" — it means "cache, but revalidate
+    every time". On a LAN that is one conditional request per load, answered 304
+    with no body when nothing changed, and it removes the whole class of bug.
+
+    Done as middleware rather than a `StaticFiles` subclass deliberately: the
+    hook a subclass would override (`file_response`) is a Starlette internal
+    whose name and shape vary between versions, and overriding it silently did
+    nothing here. Content-type is the stable contract. Assets (vendor JS / wasm /
+    fonts) keep normal caching — the version check's cache-busting hard reload
+    refetches them when the build actually changes.
+    """
+    resp = await call_next(request)
+    try:
+        if (resp.headers.get("content-type", "").startswith("text/html")
+                and "cache-control" not in resp.headers):
+            resp.headers["Cache-Control"] = "no-cache, must-revalidate"
+    except Exception:
+        pass
+    return resp
+
+
+@app.middleware("http")
 async def network_adapter_redirect(request: Request, call_next):
     """Bounce a client that connected on a non-preferred adapter to the chosen one.
 
@@ -27808,34 +27843,4 @@ async def get_skip_data_for_play(item_id: str, file_path: str = "") -> JSONRespo
 
 
 # Static files must be mounted last so API routes take priority
-class _RevalidatingStatic(StaticFiles):
-    """StaticFiles that forbids *heuristic* caching of the HTML pages.
-
-    Starlette sends `etag` + `last-modified` but no `Cache-Control`. With no
-    explicit freshness a browser falls back to HEURISTIC caching — roughly 10% of
-    the age of the document — and serves the page from disk **without
-    revalidating**. On the TV kiosk that means a browser relaunched after an
-    update can render the PREVIOUS build's `index.html`, and the symptom is
-    baffling: the page looks fine, but it is running last version's JavaScript.
-    That is how on-device TV playback could still route to VLC after the build
-    that fixed it shipped (a stale page has the old `hlsAvailable = !TV_MODE`).
-
-    `no-cache` does NOT mean "don't cache" — it means "cache, but revalidate
-    every time". The conditional request costs one round trip on a LAN and
-    answers 304 with no body when nothing changed, so this is close to free and
-    removes the whole class of stale-page bug. Assets (vendor JS/wasm/fonts) keep
-    normal caching; they are refetched by the version check's cache-busting hard
-    reload when the build actually changes.
-    """
-
-    def file_response(self, *args, **kwargs):
-        resp = super().file_response(*args, **kwargs)
-        try:
-            if (resp.media_type or "").startswith("text/html"):
-                resp.headers["Cache-Control"] = "no-cache, must-revalidate"
-        except Exception:
-            pass
-        return resp
-
-
-app.mount("/", _RevalidatingStatic(directory="static", html=True), name="static")
+app.mount("/", StaticFiles(directory="static", html=True), name="static")

@@ -3019,7 +3019,12 @@ whatever that old build baked in, and only the behaviour is wrong. This is how "
 the TV still opens VLC" survived the build that fixed it — a stale page still has the old
 `hlsAvailable = !TV_MODE`, which routes every TV play to VLC.
 
-`_RevalidatingStatic` sets `Cache-Control: no-cache, must-revalidate` on HTML. `no-cache`
+The `no_heuristic_html_cache` middleware sets `Cache-Control: no-cache, must-revalidate`
+on any `text/html` response. Middleware, not a `StaticFiles` subclass: the hook a
+subclass would override (`file_response`) is a Starlette internal whose name and shape
+vary by version, and overriding it silently did nothing (13.1.1 shipped that and the
+header was still absent on the live box). Content-type is the stable contract, and it
+covers `/tv` and `/admin` too — both bare `FileResponse`s with the same gap. `no-cache`
 does **not** mean "don't cache" — it means "cache, but revalidate every time", which on a
 LAN is one conditional request answered 304 with no body. `checkUiVersion` (badge vs
 `/api/version`, then a cache-busting hard reload) is the second line of defence, but it
