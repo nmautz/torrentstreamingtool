@@ -7613,7 +7613,9 @@ function renderGroupPage(){
   el.querySelectorAll(".grp-play").forEach(n=>{
     n.addEventListener("click",e=>{ e.stopPropagation(); _grpPlayRow(byId.get(n.dataset.row)); });
   });
-  el.querySelectorAll(".grp-order").forEach(n=>{
+  // The order toggle lives in the HERO (#grpActions), not in the list — wiring it
+  // from `el` found nothing, so the buttons rendered but never responded.
+  act.querySelectorAll(".grp-order").forEach(n=>{
     n.addEventListener("click",()=>setGroupOrder(n.dataset.order));
   });
 }
@@ -23353,6 +23355,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">15.0.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">15.0.1</div>
 </body>
 </html>

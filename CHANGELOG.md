@@ -1,5 +1,13 @@
 # Changelog
 
+## [15.0.1] — 2026-09-16
+**The Story / Release order toggle on a collection page did nothing.**
+
+The two buttons are rendered into the page hero (`#grpActions`), but their click
+handlers were attached by searching the member list (`#grpList`), which doesn't contain
+them — so the buttons drew correctly and never responded. The order endpoint and the
+server-side sort were fine; only the wiring was wrong. Now wired from the hero.
+
 ## [15.0.0] — 2026-09-16
 **A show is not one flat list, and Resume had been treating it as one.**
 
