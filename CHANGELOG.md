@@ -23,6 +23,8 @@ only what is downloaded.
 * A film queued from the shelf counts as owned and joins the shelf immediately, before its
   metadata is fetched: its queued TMDb id is checked, and the cached collection list places
   it. Previously the film would have read as missing (offering Get again) until opened.
+  Until its own metadata lands, its row borrows the collection's cached entry — so it shows
+  its real title and poster in its saga position rather than the raw release name at the end.
 
 ## [15.0.1] — 2026-09-16
 **The Story / Release order toggle on a collection page did nothing.**

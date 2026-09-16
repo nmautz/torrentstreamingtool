@@ -3562,6 +3562,17 @@ def _group_member_entry(items: list, profile_id: str) -> dict:
     or movie-details page."""
     head = items[0]
     meta = next((i.get("metadata") for i in items if i.get("metadata")), None) or {}
+    if not meta:
+        # Queued a moment ago from the shelf's "not downloaded" list: its metadata
+        # has not been fetched yet, but the collection's cached film list already
+        # holds everything the row needs. Without this the film showed its raw
+        # release name and sorted to the end of the films until someone opened it.
+        mid = _item_movie_tmdb_id(head)
+        cid = _cached_collection_for_movie(mid)
+        part = next((pt for pt in _collection_parts_cache.get(cid, {}).get("parts", [])
+                     if pt["tmdb_id"] == mid), None) if cid else None
+        if part:
+            meta = {**part, "tmdb_kind": "movie"}
     files = _merged_series_files(items) if len(items) > 1 else (head.get("files") or [])
     title = (head.get("series") or "").strip() or head.get("title", "")
     secs = _section_hints(items, files, profile_id, title)
