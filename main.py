@@ -2830,6 +2830,38 @@ async def _tmdb_fetch_tv(show_id: int, seasons: list[int]) -> dict:
     }
 
 
+_ROMAN = {"i": 1, "ii": 2, "iii": 3, "iv": 4, "v": 5, "vi": 6, "vii": 7,
+          "viii": 8, "ix": 9, "x": 10, "xi": 11, "xii": 12}
+_EPISODE_TITLE_RE = re.compile(
+    r"\b(?:episode|chapter|part)\s+([ivx]{1,4}|\d{1,2})\b", re.IGNORECASE)
+
+
+def _story_index(*titles: str) -> int:
+    """A film's position in its saga's STORY, or 0 when nothing says.
+
+    TMDb has no story-order field, and its primary titles are maddeningly
+    inconsistent about it: the Star Wars prequels are titled "Star Wars: Episode
+    I - The Phantom Menace" while the originals are plain "Star Wars" and "The
+    Empire Strikes Back". Ordering on the primary title alone would put Phantom
+    Menace first and then fall back to release dates for the very films the
+    numbering exists to place — worse than not trying.
+
+    The numbers do exist, in `alternative_titles` ("Star Wars: Episode IV - A New
+    Hope"), which the details call already appends. So every title we know gets
+    scanned, and the first episode number found wins. Harry Potter has none
+    anywhere, so it keeps release order — which for Harry Potter is story order.
+    """
+    for t in titles:
+        m = _EPISODE_TITLE_RE.search(t or "")
+        if not m:
+            continue
+        tok = m.group(1).lower()
+        n = _ROMAN.get(tok) if not tok.isdigit() else int(tok)
+        if n:
+            return n
+    return 0
+
+
 async def _tmdb_fetch_movie(movie_id: int) -> dict:
     details = await _tmdb_get(
         f"/movie/{movie_id}",
@@ -2841,7 +2873,12 @@ async def _tmdb_fetch_movie(movie_id: int) -> dict:
     # it comes free on the details call we already make. TV has no equivalent
     # field, which is why a show joins a group by hand. See _collection_key.
     coll = details.get("belongs_to_collection") or {}
+    alt_titles = [a.get("title") or "" for a in
+                  (details.get("alternative_titles") or {}).get("titles", []) or []]
     return {
+        "story_index":   _story_index(details.get("title") or "",
+                                      details.get("original_title") or "",
+                                      *alt_titles),
         "tmdb_id":       movie_id,
         "tmdb_kind":     "movie",
         **_movie_release_flags(details),
@@ -3308,6 +3345,163 @@ def _spawn_section_fetch(item_id: str) -> None:
         except Exception:
             log.exception("section metadata fetch failed for %s", item_id)
     _tmdb_bg(_run())
+
+
+# ── Franchise groups ────────────────────────────────────────────────────
+# Star Wars is nine saga films, two standalone films and half a dozen series.
+# Harry Potter is eight films. Each one still wants its own episode picker or
+# movie page — what was missing was the shelf they all sit on.
+#
+# Two ways a group forms, and they compose:
+#   * AUTOMATIC, from TMDb's `belongs_to_collection`. Free (it rides the details
+#     call we already make) and exactly right for a film set: Harry Potter's
+#     eight, the Star Wars saga's nine. Needs no configuration and no curation.
+#   * MANUAL, from `settings.groups`. TV has no `belongs_to_collection` and no
+#     equivalent — nothing in TMDb links Andor or The Mandalorian to the films,
+#     and their titles share no words with them either — so a show (or a
+#     standalone film like Rogue One) joins by hand.
+#
+# A manual group that names a collection ABSORBS it, so "Star Wars" ends up one
+# shelf rather than an auto film group sitting beside a manual one.
+
+GROUP_ORDER_MODES = ("story", "release")
+
+
+def _collection_of(item: dict) -> dict:
+    """TMDb collection this item's film belongs to, or {}."""
+    meta = item.get("metadata") or {}
+    if meta.get("tmdb_kind") != "movie":
+        return {}
+    coll = meta.get("collection") or {}
+    return coll if int(coll.get("id") or 0) > 0 else {}
+
+
+def _member_key(item: dict) -> str:
+    """How a group names one of its members. Reuses the series cohesion key, so a
+    show that spans many single-episode items joins as ONE member."""
+    return _series_key(item)
+
+
+def _group_settings(lib: dict) -> list:
+    g = (lib.get("settings") or {}).get("groups")
+    return g if isinstance(g, list) else []
+
+
+def _auto_group_id(collection_id: int) -> str:
+    return f"coll:{int(collection_id)}"
+
+
+def _build_groups(lib: dict, visible: list) -> list:
+    """Every group that applies to the visible items, auto and manual merged.
+
+    Returns ``[{id, name, source, poster_path, backdrop_path, order, members:
+    [member_key], collection_id}]``. Member keys are resolved against `visible`
+    only, so an admin-locked item never reveals itself through a group's count.
+    """
+    by_key: dict = {}
+    for it in visible:
+        by_key.setdefault(_member_key(it), []).append(it)
+
+    manual = []
+    claimed_colls = set()
+    claimed_members = set()
+    for g in _group_settings(lib):
+        members = [k for k in (g.get("members") or []) if k in by_key]
+        cid = int(g.get("collection_id") or 0)
+        # A manual group absorbs the auto group for its collection, and any item
+        # of that collection joins it without having to be listed by hand.
+        if cid:
+            for k, items in by_key.items():
+                if any(int(_collection_of(i).get("id") or 0) == cid for i in items):
+                    if k not in members:
+                        members.append(k)
+            claimed_colls.add(cid)
+        if not members:
+            continue
+        claimed_members.update(members)
+        manual.append({
+            "id":            g.get("id") or "",
+            "name":          g.get("name") or "",
+            "source":        "manual",
+            "collection_id": cid,
+            "poster_path":   g.get("poster_path") or "",
+            "backdrop_path": g.get("backdrop_path") or "",
+            "order":         g.get("order") if g.get("order") in GROUP_ORDER_MODES else "story",
+            "members":       members,
+        })
+
+    # Automatic: any TMDb collection with two or more members present that no
+    # manual group has already claimed. One film alone is not a shelf.
+    auto: dict = {}
+    for key, items in by_key.items():
+        if key in claimed_members:
+            continue
+        coll = next((c for c in (_collection_of(i) for i in items) if c), {})
+        cid = int(coll.get("id") or 0)
+        if not cid or cid in claimed_colls:
+            continue
+        g = auto.setdefault(cid, {
+            "id":            _auto_group_id(cid),
+            "name":          coll.get("name") or "",
+            "source":        "tmdb_collection",
+            "collection_id": cid,
+            "poster_path":   coll.get("poster_path") or "",
+            "backdrop_path": coll.get("backdrop_path") or "",
+            "order":         "story",
+            "members":       [],
+        })
+        g["members"].append(key)
+
+    out = manual + [g for g in auto.values() if len(g["members"]) >= 2]
+    out.sort(key=lambda g: (g["name"] or "").lower())
+    return out
+
+
+def _member_sort_key(entry: dict, mode: str) -> tuple:
+    """Order one group's members. Films first, in the requested order; shows
+    after them by first air date. See _story_index for why "story" is only
+    honoured for the films that actually carry a number."""
+    is_movie = 1 if entry.get("kind") == "movie" else 2
+    story = int(entry.get("story_index") or 0)
+    date = entry.get("date") or "9999"
+    if mode == "story" and story:
+        return (is_movie, 0, story, date)
+    # No story number (or release mode): date, behind anything that has one.
+    return (is_movie, 1, 0, date)
+
+
+def _group_member_entry(items: list, profile_id: str) -> dict:
+    """One row of a group page: a show or a film, with the sections, counts and
+    resume it needs to render — and to be opened into its normal episode picker
+    or movie-details page."""
+    head = items[0]
+    meta = next((i.get("metadata") for i in items if i.get("metadata")), None) or {}
+    files = _merged_series_files(items) if len(items) > 1 else (head.get("files") or [])
+    title = (head.get("series") or "").strip() or head.get("title", "")
+    secs = _section_hints(items, files, profile_id, title)
+    sec_meta = meta.get("sections") or {}
+    kind = meta.get("tmdb_kind") or ("movie" if len(files) == 1 else "tv")
+    counted = [s for s in secs if s["counted"]]
+    return {
+        "key":         _member_key(head),
+        "item_ids":    [i["id"] for i in items],
+        "title":       meta.get("title") or title,
+        "kind":        kind,
+        "tmdb_id":     meta.get("tmdb_id") or 0,
+        "poster_path": meta.get("poster_path") or "",
+        "backdrop_path": meta.get("backdrop_path") or "",
+        "overview":    meta.get("overview") or "",
+        "date":        meta.get("release_date") or meta.get("first_air_date") or "",
+        "story_index": int(meta.get("story_index") or 0),
+        "runtime":     meta.get("runtime") or 0,
+        "vote_average": meta.get("vote_average") or 0,
+        "file_count":  len(files),
+        "count":       sum(s["count"] for s in counted),
+        "watched":     sum(s["watched"] for s in counted),
+        "sections":    [_section_summary(s, sec_meta) for s in secs] if len(secs) > 1 else [],
+        "resume":      (_pick_active_section(secs) or {}).get("resume") if profile_id else None,
+        "status":      head.get("status", "ready"),
+    }
 
 
 def _assert_item_visible(request: Request, lib: dict, item: dict,
@@ -10761,6 +10955,176 @@ async def get_item_files(request: Request, item_id: str,
         "ondemand_only_locked": bool(item.get("ondemand_only_locked")),  # admin-locked → toggle disabled
         "hls_available": HLS_AVAILABLE,                  # JIT/prep unavailable on macOS → hide the toggle
     })
+
+
+class GroupReq(BaseModel):
+    name: str = ""
+    order: str = ""
+    members: Optional[list] = None      # full replacement, in display order
+    add: Optional[list] = None          # member keys to attach
+    remove: Optional[list] = None       # member keys to detach
+    collection_id: int = 0              # absorb this TMDb collection
+
+
+def _visible_items(request: Request, lib: dict, profile_id: str) -> list:
+    """Items this caller is allowed to know exist. Groups are built only from
+    these, so a locked item can't reveal itself through a group's member count."""
+    is_admin = _check_admin(request)
+    is_elevated = _is_elevated(request, lib, profile_id)
+    return [it for it in lib["items"]
+            if not (it.get("admin_only") and not is_admin and not is_elevated)]
+
+
+def _group_payload(lib: dict, group: dict, visible: list, profile_id: str) -> dict:
+    """A group with its members resolved, ordered and summarised."""
+    by_key: dict = {}
+    for it in visible:
+        by_key.setdefault(_member_key(it), []).append(it)
+    entries = [_group_member_entry(by_key[k], profile_id)
+               for k in group["members"] if k in by_key]
+    mode = group.get("order") or "story"
+    # An explicit member list the user dragged into shape is their order, full
+    # stop — only an auto group (or one never reordered) is sorted for them.
+    if group.get("source") != "manual" or not group.get("member_order_pinned"):
+        entries.sort(key=lambda e: _member_sort_key(e, mode))
+    # Story order is only OFFERED when the films actually carry episode numbers;
+    # Harry Potter has none, so its toggle would be a lie. See _story_index.
+    has_story = any(e["story_index"] for e in entries)
+    return {
+        **{k: group[k] for k in
+           ("id", "name", "source", "collection_id", "poster_path", "backdrop_path")},
+        "order":        mode,
+        "has_story_order": has_story,
+        "members":      entries,
+        "member_count": len(entries),
+        "count":        sum(e["count"] for e in entries),
+        "watched":      sum(e["watched"] for e in entries),
+    }
+
+
+@app.get("/api/library/groups")
+async def get_library_groups(request: Request, profile_id: str = "") -> JSONResponse:
+    """Every franchise group that applies to this caller's library — TMDb film
+    collections found automatically, plus the hand-built ones. See _build_groups."""
+    lib = await get_library()
+    visible = _visible_items(request, lib, profile_id)
+    groups = [_group_payload(lib, g, visible, profile_id)
+              for g in _build_groups(lib, visible)]
+    return JSONResponse({
+        "groups": groups,
+        "img_base": LOCAL_IMG_BASE,
+        # Every member key that belongs to SOME group, so the library grid can
+        # drop those tiles in favour of the group's own tile in one pass.
+        "grouped_keys": sorted({m["key"] for g in groups for m in g["members"]}),
+    })
+
+
+@app.get("/api/library/group/{group_id:path}")
+async def get_library_group(request: Request, group_id: str,
+                            profile_id: str = "") -> JSONResponse:
+    """One group, with every member resolved — what the group page renders."""
+    lib = await get_library()
+    visible = _visible_items(request, lib, profile_id)
+    group = next((g for g in _build_groups(lib, visible) if g["id"] == group_id), None)
+    if not group:
+        raise HTTPException(404, "Group not found.")
+    return JSONResponse({**_group_payload(lib, group, visible, profile_id),
+                         "img_base": LOCAL_IMG_BASE})
+
+
+@app.post("/api/library/groups")
+async def create_library_group(req: GroupReq) -> JSONResponse:
+    """Create a hand-built group. This is how a show joins a franchise: TMDb has
+    no `belongs_to_collection` for TV and nothing else links Andor or The
+    Mandalorian to the Star Wars films."""
+    name = (req.name or "").strip()[:60]
+    if not name:
+        raise HTTPException(400, "Group needs a name.")
+    gid = uuid.uuid4().hex[:12]
+    async with mutate_library() as lib:
+        groups = lib.setdefault("settings", {}).setdefault("groups", [])
+        groups.append({
+            "id":            gid,
+            "name":          name,
+            "collection_id": int(req.collection_id or 0),
+            "order":         req.order if req.order in GROUP_ORDER_MODES else "story",
+            "members":       [str(m) for m in (req.members or [])],
+            "member_order_pinned": bool(req.members),
+            "created_at":    _now_iso(),
+        })
+    return JSONResponse({"ok": True, "id": gid})
+
+
+@app.post("/api/library/groups/{group_id}")
+async def update_library_group(group_id: str, req: GroupReq) -> JSONResponse:
+    """Rename a group, flip its sort mode, or attach/detach members.
+
+    An AUTO group has no stored record, so the first edit to one materialises it
+    as a manual group that absorbs its collection — which is exactly how "Star
+    Wars Collection" (nine films, found for free) becomes "Star Wars" (plus
+    Rogue One, plus The Mandalorian) without the user having to rebuild it."""
+    async with mutate_library() as lib:
+        groups = lib.setdefault("settings", {}).setdefault("groups", [])
+        g = next((x for x in groups if x.get("id") == group_id), None)
+        if g is None:
+            if not group_id.startswith("coll:"):
+                raise HTTPException(404, "Group not found.")
+            visible = [it for it in lib["items"]]
+            auto = next((x for x in _build_groups(lib, visible) if x["id"] == group_id), None)
+            if auto is None:
+                raise HTTPException(404, "Group not found.")
+            g = {
+                "id":            group_id,
+                "name":          auto["name"],
+                "collection_id": auto["collection_id"],
+                "order":         auto["order"],
+                # Members stay implied by the collection — listing them would
+                # freeze the group, so a film added later would not join it.
+                "members":       [],
+                "member_order_pinned": False,
+                "created_at":    _now_iso(),
+            }
+            groups.append(g)
+        if req.name.strip():
+            g["name"] = req.name.strip()[:60]
+        if req.order in GROUP_ORDER_MODES:
+            g["order"] = req.order
+        if req.collection_id:
+            g["collection_id"] = int(req.collection_id)
+        if req.members is not None:
+            g["members"] = [str(m) for m in req.members]
+            g["member_order_pinned"] = True
+        for k in (req.add or []):
+            if str(k) not in g["members"]:
+                g["members"].append(str(k))
+        if req.remove:
+            drop = {str(k) for k in req.remove}
+            cid = int(g.get("collection_id") or 0)
+            # Removing a film that is in the group only because the group absorbs
+            # its TMDb collection needs the absorption dropped as well — listing
+            # it in `members` would achieve nothing, since _build_groups re-adds
+            # every collection member on the next read. So: stop absorbing, and
+            # pin the collection's OTHER films explicitly so they stay put.
+            coll_keys = {_member_key(it) for it in lib["items"]
+                         if cid and int(_collection_of(it).get("id") or 0) == cid}
+            if coll_keys & drop:
+                g["collection_id"] = 0
+                for k in sorted(coll_keys - drop):
+                    if k not in g["members"]:
+                        g["members"].append(k)
+            g["members"] = [m for m in g["members"] if m not in drop]
+    return JSONResponse({"ok": True})
+
+
+@app.delete("/api/library/groups/{group_id}")
+async def delete_library_group(group_id: str) -> JSONResponse:
+    """Dissolve a hand-built group. Its members go back to being their own tiles
+    (and an absorbed TMDb collection re-forms as an auto group, which is the
+    point — deleting a group is never meant to hide anything)."""
+    async with mutate_library() as lib:
+        groups = lib.setdefault("settings", {}).setdefault("groups", [])
+        lib["settings"]["groups"] = [g for g in groups if g.get("id") != group_id]
+    return JSONResponse({"ok": True})
 
 
 @app.get("/api/library/series/{series_key}")
