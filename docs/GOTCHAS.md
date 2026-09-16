@@ -3388,6 +3388,41 @@ Three rules for any delete on this platform:
 
 The same instinct applies to `shutil.rmtree` and to anything that renames over a live file.
 
+### A freed file survives a qBit restart badly — and `error` is a terminal status
+
+Observed on the live box (2026-09-15) while verifying the delete fix above. Freeing an
+episode with `/delete-files` leaves qBittorrent running happily — it has the file at
+priority 0 and never asks for it again. **Restart qBittorrent, though** (a host reboot, an
+updater `apply` with `reboot:true`), and it re-reads its resume data, finds a file it has
+recorded as complete missing from disk, and drops the whole torrent into `missingFiles` —
+all 25 episodes reporting 0 %, not just the freed one.
+
+`library_download_monitor` then flips the item to `status: "error"`, and that is where it
+stays, because **the monitor only polls items whose status is `downloading`**:
+
+```python
+pending = [it for it in lib["items"] if it.get("status") == "downloading"]
+```
+
+Nothing ever re-examines an `error` item, so it cannot recover on its own no matter how
+healthy qBit becomes. It takes `POST /api/admin/cleanup/item/{id}/recover` (the admin
+Cleanup tab's Recover button), which rechecks + resumes and sets the status back to
+`downloading` so the monitor picks it up again.
+
+Two traps when recovering:
+
+- **Recover races the monitor.** `recover` sets `downloading` and starts the recheck, but
+  qBit still reports `missingFiles` for the first several seconds — and the monitor,
+  ticking every 5 s, sees that and flips the item straight back to `error`. The recheck
+  finishes correctly and the item is left wrongly errored. Run recover **again** once the
+  recheck has completed and it sticks.
+- **The recheck is the whole torrent.** ~10 minutes for a 48 GB season; per-file
+  completeness climbs from 0 as it verifies. Don't mistake the early `0/25` for data loss.
+
+So a `reboot:true` deploy shortly after anyone has freed disk space can leave a show
+looking broken on the dashboard. Check the admin Cleanup tab for `missingFiles` after a
+reboot, and prefer `reboot:false` for frontend-only changes.
+
 - [BACKEND.md](BACKEND.md) — invariants enforced by `main.py`
 - [DAEMON_WATCHDOG.md](DAEMON_WATCHDOG.md) — VPN guard at the process level
 - [ANALYZER.md](ANALYZER.md) — Smart Skip algorithm details and fallback chain
