@@ -368,6 +368,30 @@ Returns `{enabled, img_base, metadata, pending}`. When `enabled=false` (no TMDb 
 
 Admin sets the key under **Admin → Indexers → TMDb Metadata** (`POST /api/admin/settings { tmdb_api_key }`).
 
+### Group page (`#groupPage`) and sections (15.0.0)
+
+One full-screen "shelf" serves two shapes: a **franchise** (`openGroupPage({kind:"group", id})`
+→ `/api/library/group/{id}`) and a **multi-section show** (`{kind:"show", seriesKey, itemId}`
+→ `/api/library/series/{key}`). Rows (`_grpRowHtml`) open the member's or section's own normal
+page (`_grpOpenRow`) or play it (`_grpPlayRow`); the shelf never renders episodes itself.
+Franchise-only chrome: Story/Release toggle (`setGroupOrder`, shown only when
+`has_story_order`), rename (`renameGroup`), and "+ Add title" (`openGroupAdd` →
+`#groupEditModal`, `_grpEditMembers`).
+
+Library grid: `loadLibrary` also calls `_libFetchGroups` (`libGroups`, `libGroupedKeys`);
+`renderLibrary` drops claimed tiles and emits `_libGroupTileHtml` per group (not in the Hidden
+view). Tile routing goes through `_libOpenItem` / `_libOpenSeries`: **more than one section →
+shelf, otherwise the episode picker exactly as before** (Hacks, Futurama never see a shelf).
+
+Sections reuse the episode page unchanged. `openEpisodePicker(itemId, title, section, filePath)`
+and `openSeriesPage(key, title, section, filePath)` call `_applySection`, which narrows `epFiles`
+to the section (`_fileSection` mirrors `episodes.section_key`) and swaps `epMetadata` for the
+section binding (`_sectionMetaAsShow` mounts its episodes at season `"0"`, where `_tmdbEpisode`
+looks for them). A Movies section hangs each file's film binding on `f.film` and renders
+`_epFilmListHtml` poster rows; `_epOpenFilm` reopens the page narrowed to that one file, which
+makes it `epIsMovie`. **Guards:** `_epApplyMetadata` and `_epTopUpSeasons` must not overwrite
+`epMetadata` while `epSection` is set — see GOTCHAS.
+
 ### Stream to Device
 
 All Play surfaces (`epPlay`, `epPlayFrom`, the `lib-restart-btn` listener, and —

@@ -1227,15 +1227,80 @@ stood the feature down on exactly the well-organised batches it handles best.
 
 VLC plays `Path(p).resolve().as_uri()` (resolved). The stored item file path may not be resolved. `_canonical_item_path` ([main.py:868](../main.py#L868)) compares both as resolved Paths and returns the stored path — so progress and skip-data lookups key correctly against `item.files[].path`.
 
-### Resume hint continues *forward* from the last-watched episode
+### Resume is ONE algorithm, scoped per section (15.0.0)
 
-`find_resume_hint` ([main.py](../main.py)) resolves the show-card Play target. The key rule is **never go backwards to an episode the viewer skipped** — it continues forward from whatever they last played:
-1. If `last_file` is **in-progress** (>5 s, not completed) → resume it.
-2. If `last_file` is present, scan **from `last_file` onward** and return the first not-completed file (skipping `last_file` itself only when it's completed). So watching ep6 and skipping ep5 resumes ep6; finishing ep6 advances to ep7 — **not** back to the still-unwatched ep5.
-3. Only if nothing ahead of `last_file` is unwatched does it fall through to the global walk: first not-completed file anywhere (this is also the cold-start path with no `last_file`, and is what finally surfaces a genuinely-skipped earlier episode once the rest of the series is done).
-4. If all completed → return file[0] with `all_completed: true` (UI lets user rewatch from start).
+There used to be two resume implementations and they disagreed: `find_resume_hint`
+followed `last_file` forward through an item, while `find_series_resume_hint` ignored
+`last_file` and took the most-recently-touched unfinished file anywhere in the show. So the
+Resume button could offer one episode and play another, and a merged series that had just
+finished an episode cleanly fell back to the earliest gap in its history. Neither knew about
+sections either: live, Attack on Titan's Resume pointed at **Junior High ep 2**.
 
-This only applies *within* one library item (e.g. a season pack). A series split into one item per episode has an independent per-item hint each.
+Both are now thin wrappers over `_section_hints` → `_resume_from_files` ([main.py](../main.py)):
+
+1. Files are split into **sections** (`episodes.sections_for`). Resume is computed per
+   section and **never crosses into another section** — finishing S04 does not roll into
+   the creditless openings.
+2. Within a section, the **anchor** is the file with the newest `updated_at` (a stored
+   `last_file` is only a fallback for a file with no progress yet). Anchor mid-episode (>5 s,
+   not completed) → resume it; else the first not-completed file **at/after** it (skipping it
+   only when completed) — so skipping ep5 and finishing ep6 resumes ep7, not ep5; else the
+   first not-completed file anywhere; else file[0] with `all_completed: true`.
+3. The show-level hint is its **most-recently-played section's** hint (`_pick_active_section`),
+   so the tile's label and the play it triggers are one computation.
+4. Playlists stop at the section edge too: `/play` slices `_files_in_section`, and the
+   frontend `playSeries(key, mode, section)` / `playSectionOrItem` filter the same way.
+
+### `updated_at` has one-second resolution, so ties are the NORMAL case
+
+`_now_iso()` uses `timespec="seconds"`, and `mark_watched` stamps every file it touches. "Mark
+season watched" therefore gives 25 episodes the identical timestamp, and a resume in that same
+second sees a flat field — picking the first match sent the viewer back to **episode 1**
+straight after marking the season off. The same tie happens between sections.
+
+Break ties by engagement, never by list position. `_resume_anchor`: last **completed** tied
+file, else last tied file with `position_sec > 5`, else the **first** (a batch reset). And
+`_pick_active_section` ranks `(last_at, mid-episode, watched)`. We did not raise the clock
+resolution: `updated_at` is also the iOS offline-sync watermark (`base_synced_at`), and a
+format change there has a much bigger blast radius than a local tie-break. A live test that
+fails *differently on every run* is what this bug looks like from the outside.
+
+### TMDb season 0 is a grab-bag — never caption specials by position
+
+A `Specials`/`OAD`/`OVA` folder binds to the parent show's season 0, but Attack on Titan's
+season 0 holds **37** entries (OADs, recaps, Junior High shorts) against 8 OAD files on disk.
+Index-matching would put a wrong title on every row. `_resolve_specials_section` attaches
+episode titles only when the whole season, or the entries whose names contain the bucket word,
+count exactly the files on disk; otherwise the section gets the parent's artwork and no
+per-episode text. A wrong title is worse than no title.
+
+### TMDb primary titles don't carry saga numbers consistently
+
+`Star Wars: Episode I - The Phantom Menace` has its number in the primary title; `Star Wars`
+(1977) and `The Empire Strikes Back` do not. Ordering by primary title alone puts Phantom
+Menace first and then falls back to release dates for exactly the films the numbering exists
+to place. `_story_index` scans the title, original title **and every `alternative_titles`
+entry** (already appended on the details call) for `Episode|Chapter|Part <roman|arabic>`.
+Harry Potter carries none anywhere and keeps release order, which is also its story order;
+the group page only offers the Story/Release toggle when some film has a number.
+
+### Late metadata must not overwrite an open section
+
+The episode page renders a section by narrowing `epFiles` and swapping `epMetadata` for the
+section's own binding. Two show-level fetches finish **after** that and assign straight over
+`epMetadata`: `_epApplyMetadata` (the item's binding) and `_epTopUpSeasons` (a full-show TMDb
+lookup). Unguarded, Junior High kept its hero title but lost every episode title to Attack on
+Titan's. Both now check `epSection` — the top-up returns, and `_epApplyMetadata` re-applies the
+section over the fresh `metadata.sections` map instead.
+
+### TV has no `belongs_to_collection` — shows join a franchise by hand
+
+Films auto-group from TMDb's `belongs_to_collection`. Nothing in TMDb links *Andor* or *The
+Mandalorian* to the Star Wars films, and their titles share no words, so don't try to infer it.
+Shows are attached through the group page's "+ Add title" (`POST /api/library/groups/{id}`
+`{add:[...]}`). Editing an auto group (`coll:<id>`) materialises it as a manual record **with
+the same id** that still absorbs the collection, so a film added later still joins; removing a
+collection film drops the absorption and pins the remaining films explicitly.
 
 ### Frontend drops saveProgress writes under t=5 s
 

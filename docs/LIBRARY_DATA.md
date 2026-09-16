@@ -72,6 +72,17 @@ The only persistent server-side state. Lives at the project root. Accessed via `
       "translate":        true          // add an English track for non-English audio
       // default_language is UNIFIED — sourced from settings.subtitles, not stored here
     },
+    "groups": [                         // franchise shelves (15.0.0) — see "Groups" below
+      {
+        "id": "coll:10",                // "coll:<tmdb collection id>" for a materialised auto group, else a hex id
+        "name": "Star Wars",
+        "collection_id": 10,            // absorb every film of this TMDb collection; 0 = none
+        "order": "story",               // "story" | "release"
+        "members": ["series:obi-wan kenobi"],  // _series_key values, in addition to the collection's films
+        "member_order_pinned": false,   // true once a caller sends a full `members` list (their order wins)
+        "created_at": "..."
+      }
+    ],
     "autoupdate": {                     // dashboard auto-updater (admin Updates tab)
       "enabled":        false,
       "branch":         "main",         // main/beta/alpha — or any branch when dev_mode
@@ -502,6 +513,17 @@ season list sent to TMDb is derived from the files, so correcting the files can 
 episodes were never fetched (they'd gain a tab but no titles or stills). Bounded to 12 extra seasons
 per call.
 
+**Sections (15.0.0).** A `bucket` promoted to a first-class unit by
+`episodes.sections_for(files, show_title)` — derived, never persisted, so no migration.
+`section_key(f)` is `"main"` for a file with no bucket (including season-0 absolute-numbered
+anime, which *is* the main run) and the lowercased bucket otherwise. `section_kind`:
+`Specials`/`OVA`/`OAD`/`ONA` → `specials`, `Movies` → `movies`, `Extras` → `extras`, any other
+folder name → `spinoff`. Order is main, specials, movies, spin-off, **extras last**. Every kind
+except `extras` is `counted` into a show's watched total. Each section carries its own resume
+hint and watched count (`_section_hints`); progress storage itself is unchanged — sections scope
+how it is *read*. A show with more than one section opens a group page ("shelf") instead of the
+episode picker.
+
 Canonical file order is `episodes.sort_key` — seasons ascending, season-0 buckets last and grouped by
 label, then episode, then name. Used by `build_file_list`, the migration, `/files` and
 `/series/{key}`.
@@ -647,9 +669,48 @@ The profile-level **`shuffle`** / **`shuffle_scope`** fields are the *persisted*
       ]
     }
   },
+  "collection":   {"id": 10, "name": "Star Wars Collection",   // movie only (15.0.0): TMDb belongs_to_collection;
+                   "poster_path": "…", "backdrop_path": "…"}, //   {} when none. Drives automatic groups
+  "story_index":  4,                       // movie only (15.0.0): saga number mined from every title (_story_index); 0 = unknown
+  "sections": {                            // 15.0.0 — per-section bindings, _fetch_section_metadata
+    "attack on titan junior high": {       // spin-off: its OWN show
+      "source": "tmdb", "kind": "spinoff", "tmdb_id": 63510, "tmdb_kind": "tv",
+      "title": "Attack on Titan: Junior High", "overview": "…", "poster_path": "…",
+      "backdrop_path": "…", "first_air_date": "…", "vote_average": 0, "genres": [], "trailer": "",
+      "episodes": [ {"episode": 1, "name": "Starting School! …", "still_path": "…", …} ]
+    },
+    "oad":    {"source": "tmdb", "kind": "specials", "tmdb_id": 1429, "parent_season": 0,
+               "title": "OAD", "poster_path": "…", "episodes": []},   // titles only when counts line up
+    "movies": {"source": "tmdb", "kind": "movies", "title": "Movies",
+               "files": {"<abs path>": {"tmdb_id": 379088, "tmdb_kind": "movie", "title": "…",
+                                        "poster_path": "…", "release_date": "…", "runtime": 0,
+                                        "vote_average": 0, "genres": [], "overview": "…",
+                                        "trailer": "", "collection": {}}}},
+    "extras": {"source": "none", "kind": "extras", "title": "Extras"} // stamped so it is never searched again
+  },
   "fetched_at": "2026-05-15T01:23:45+00:00"
 }
 ```
+
+**Section bindings** are resolved in the background (`_spawn_section_fetch`, fired by
+`/files`, `/metadata` and `/series/{key}` for any multi-section item) and cached under
+`metadata.sections[<section key>]`. A miss is stamped `source: "none"` so it is not re-searched
+on every open; `manual`/`custom` entries are pinned. The main section *is* the item's own
+metadata and has no entry. `metadata/refresh` replaces `metadata` wholesale, so a forced refresh
+re-resolves sections on the next open.
+
+### Groups (franchise shelves, 15.0.0)
+
+`_build_groups(lib, visible_items)` merges two sources, computed on every read:
+* **automatic** — any TMDb `collection.id` shared by **two or more** visible movie items
+  becomes `{id: "coll:<id>", source: "tmdb_collection"}`;
+* **manual** — `settings.groups`. A record with `collection_id` absorbs that collection (so an
+  edited auto group stays one shelf), plus its listed `members`.
+
+Members are `_series_key` values, so a show spanning many single-episode items joins once.
+Built only from items the caller may see, so a content-locked item never shows in a count.
+Ordering (`_member_sort_key`): films first — by `story_index` in story mode (unnumbered films
+after the numbered ones, by date), by date in release mode — then shows by first air date.
 
 **`all_seasons` vs `seasons`.** `all_seasons` is every season TMDb knows the show has, taken straight off `/tv/{id}` (so it's free — no extra request) and including season 0. `seasons` only holds the seasons someone actually fetched episode lists for: `_fetch_item_metadata` asks for the seasons present *on disk*, so a show can HAVE season 4 while `seasons` covers 1–3. Keeping "this season exists" separate from "we have its episode list" is what lets the library page show a season you own nothing from (count from `episode_count`) and then fill in its real episode rows once the lazy top-up lands. `/api/tmdb/lookup` (by `tmdb_id` or title) fetches **every** season, and is the top-up the frontend uses — see [FRONTEND.md](FRONTEND.md) § missing content.
 

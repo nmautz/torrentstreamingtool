@@ -58,9 +58,23 @@ looking unfinished.
 Bindings are cached under `metadata.sections`, resolved in the background, and pinned once a
 user corrects one — the same rules the item-level cache already follows.
 
-**Movie collections.** `_tmdb_fetch_movie` now keeps TMDb's `belongs_to_collection`, which
-comes free on a call we already make. It is what auto-groups a film set with no
-configuration at all.
+**Group pages ("shelves").** A franchise (Star Wars) or a multi-section show (Attack on
+Titan) now opens a shelf whose rows lead to each member's or section's own normal episode
+picker or movie page. Plain one-run shows (Hacks, Futurama) still open straight to the episode
+picker. Film sets group automatically from TMDb's `belongs_to_collection` (the four Star Wars
+films formed "Star Wars Collection" with no configuration); shows join by hand via **+ Add
+title**, because TMDb has no equivalent field for TV. Films list in **story order** when any
+title TMDb knows carries an episode number — mined from `alternative_titles`, since *Star Wars*
+(1977) and *The Empire Strikes Back* carry none in their primary titles — with a Release order
+toggle; otherwise release order.
+
+A Movies section lists posters, and each film opens the full movie-details page.
+
+**Two resume fixes found while testing live.** `updated_at` has one-second resolution, so
+"mark season watched" stamps 25 episodes identically and an immediate Resume picked episode 1.
+Ties are now broken by engagement (last completed, else last part-watched, else first) within a
+section, and between sections. And the late item-metadata and full-show top-up fetches were
+overwriting an open section's binding — Junior High kept its hero but lost every episode title.
 
 ## [14.3.1] — 2026-09-15
 **A delete that Windows refused reported success anyway.**
