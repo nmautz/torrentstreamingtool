@@ -11773,33 +11773,38 @@ async def set_file_schedule(item_id: str, req: FileScheduleReq) -> JSONResponse:
     return JSONResponse({"ok": True, "updated": len(req.file_paths), "mode": mode})
 
 
-def _file_holders(src: Path) -> list[str]:
-    """Name the processes holding `src` open, for a delete that Windows refused.
+def _file_holders(paths: set[str]) -> dict[str, list[str]]:
+    """Map each of `paths` to the names of the processes holding it open.
 
     Windows will not unlink a file another process has open, and the error it
     raises (WinError 32) names no culprit — which left "delete did nothing" with
     no way to find out why. psutil can answer it, so a failed delete tells the
     user *which* program to close instead of failing silently.
 
-    Best-effort by design: `open_files()` raises on processes we can't inspect,
-    and is slow enough that this is only ever called on the failure path.
+    Takes the whole set at once and answers it in **one** `process_iter` sweep:
+    walking every process's open files costs seconds on a busy box, so doing it
+    per file turned a bulk delete of locked episodes into a minutes-long request.
+    Best-effort by design — `open_files()` raises on processes we can't inspect —
+    and only ever called on the failure path.
     """
-    target = str(src).casefold()
-    names: list[str] = []
+    wanted = {p.casefold(): p for p in paths}
+    found: dict[str, list[str]] = {}
+    if not wanted:
+        return found
     for proc in psutil.process_iter(["name"]):
         try:
-            for of in proc.open_files():
-                if of.path.casefold() == target:
-                    nm = proc.info.get("name") or f"pid {proc.pid}"
-                    if nm not in names:
-                        names.append(nm)
-                    break
+            open_paths = {of.path.casefold() for of in proc.open_files()}
         except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
             continue
-    return names
+        for key in wanted.keys() & open_paths:
+            nm = proc.info.get("name") or f"pid {proc.pid}"
+            names = found.setdefault(wanted[key], [])
+            if nm not in names:
+                names.append(nm)
+    return found
 
 
-async def _unlink_resilient(src: Path, attempts: int = 5) -> Optional[str]:
+async def _unlink_resilient(src: Path, attempts: int = 4) -> Optional[str]:
     """Delete one file, riding out the window where Windows still refuses to.
 
     Returns None once the file is gone, else a human-readable reason.
@@ -11809,6 +11814,9 @@ async def _unlink_resilient(src: Path, attempts: int = 5) -> Optional[str]:
         ffmpeg do release theirs shortly after we drop the file to priority 0 /
         tear a prep job down, so a short backoff usually wins.
       * **WinError 5** — the read-only attribute, which is ours to clear.
+
+    Backs off ~1.75 s in total. Naming the process still holding the file is the
+    caller's job (`_file_holders`), so one sweep can answer a whole bulk delete.
 
     Anything still failing after the backoff is reported, never swallowed: a
     silent `except OSError: pass` here is what made a failed delete look like a
@@ -11834,9 +11842,6 @@ async def _unlink_resilient(src: Path, attempts: int = 5) -> Optional[str]:
         if attempt < attempts - 1:
             await asyncio.sleep(delay)
             delay *= 2
-    holders = await asyncio.to_thread(_file_holders, src)
-    if holders:
-        last = f"{last} (open in {', '.join(holders)})" if last else f"open in {', '.join(holders)}"
     return last or "unknown error"
 
 
@@ -11927,7 +11932,6 @@ async def delete_item_files(request: Request, item_id: str,
             # refused to unlink (held open by qBittorrent, VLC or an ffmpeg prep
             # job) left the row marked deleted in the UI with the bytes still on
             # disk — a bulk delete would drop one episode and silently keep another.
-            log.warning("delete-files: could not remove %s — %s", p, err)
             failed.append({"name": src.name, "path": p, "reason": err})
             continue
         freed += sizes.get(p, 0)
@@ -11939,6 +11943,16 @@ async def delete_item_files(request: Request, item_id: str,
                 await asyncio.to_thread(shutil.rmtree, bundle_dir, ignore_errors=True)
         except OSError:
             pass
+
+    # Name the holders for everything that failed — one sweep for the whole
+    # request, appended to each reason so the UI can say what to close.
+    if failed:
+        holders = await asyncio.to_thread(_file_holders, {e["path"] for e in failed})
+        for entry in failed:
+            who = holders.get(entry["path"])
+            if who:
+                entry["reason"] = f"{entry['reason']} (open in {', '.join(who)})"
+            log.warning("delete-files: could not remove %s — %s", entry["path"], entry["reason"])
 
     # Put back the schedule of everything we failed to delete, so the library
     # stops claiming a file is gone while it is still on disk.

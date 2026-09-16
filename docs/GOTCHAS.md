@@ -3376,7 +3376,9 @@ Three rules for any delete on this platform:
 
 1. **Report the failure.** Return which paths failed and why. `psutil.Process.open_files()`
    can name the process still holding the handle, which turns "delete did nothing" into
-   "still open in qbittorrent.exe" — worth the cost, since it only runs on the failure path.
+   "still open in qbittorrent.exe". Sweeping every process's open handles takes **seconds**,
+   so resolve the whole failed set in one pass on the failure path — doing it per file turns
+   a bulk delete into a minutes-long request.
 2. **Retry before giving up.** qBittorrent and ffmpeg release handles shortly after a
    priority drop or a job teardown, so a short backoff wins most races. Clear the read-only
    attribute once while you are there.

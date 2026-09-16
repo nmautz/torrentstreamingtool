@@ -22,9 +22,10 @@ Three things changed:
   a new `failed[]` on the response, each entry carrying the reason. When `psutil` can
   identify the process still holding the handle, the reason names it, so "delete did
   nothing" becomes "still open in qbittorrent.exe".
-- **It retries before giving up.** `_unlink_resilient` backs off over ~4 s and clears a
+- **It retries before giving up.** `_unlink_resilient` backs off over ~1.75 s and clears a
   read-only attribute once — enough for qBittorrent or an ffmpeg prep job to release a
-  handle it was about to drop anyway.
+  handle it was about to drop anyway. Naming the holder costs a full process sweep, so it
+  runs **once per request** over every path that failed, not once per file.
 - **A failed delete no longer lies about the file.** The prior download schedule is
   captured up front and restored for every path that survived, so a file still on disk
   stops being marked `skip`. Its HLS bundle is now purged only when its source is actually
