@@ -7321,11 +7321,14 @@ function _sectionMetaAsShow(sec){
 
 // Narrow the loaded page to one section. Called by both openers once their file
 // list has landed.
-function _applySection(sections, sectionKey){
+function _applySection(sections, sectionKey, filePath){
   epSection = sectionKey || "";
   if(!epSection) return;
   const sec=(sections||[]).find(x=>x.key===epSection);
   epFiles = epFiles.filter(f=>_fileSection(f)===epSection);
+  // One film picked out of a Movies folder: the page becomes that film alone,
+  // which is what makes epIsMovie true and the full movie panel render.
+  if(filePath) epFiles = epFiles.filter(f=>f.path===filePath);
   if(!sec) return;
   const asShow=_sectionMetaAsShow(sec);
   if(asShow){ epMetadata=asShow; }
@@ -7336,6 +7339,11 @@ function _applySection(sections, sectionKey){
     epFiles.forEach(f=>{ if(byPath[f.path]) f.film=byPath[f.path]; });
     // One film selected out of the folder → it IS a movie page.
     if(epFiles.length===1 && epFiles[0].film) epMetadata={...epFiles[0].film, seasons:{}};
+    // The folder itself: headed by the folder, not captioned as the parent show
+    // (the parent's artwork stays as the backdrop — the films are part of it).
+    else if(epFiles.length>1) epMetadata={...(epMetadata||{}), title:sec.label,
+                                          overview:"", genres:[], tmdb_kind:"collection",
+                                          seasons:{}, all_seasons:[]};
   }
   epHeroTitle = sec.label || epHeroTitle;
 }
@@ -8590,7 +8598,7 @@ async function queuePlayFile(itemId,filePath){
 }
 
 // ── Episode Page (full-screen Netflix-style) ───────────────────────────────
-async function openEpisodePicker(itemId, title, section){
+async function openEpisodePicker(itemId, title, section, filePath){
   // Backwards-compatible name; under the hood we render the full-screen page.
   epItemId=itemId;
   epSeriesKey=null; epFileItem={};   // single-item open — clear any series mode
@@ -8630,7 +8638,7 @@ async function openEpisodePicker(itemId, title, section){
   epHlsAvailable=d.hls_available!==false;
   // Narrow to one section BEFORE anything reads epFiles — the season tabs, the
   // default-season pick and the movie/list decision all derive from it.
-  if(section) _applySection(d.sections, section);
+  if(section) _applySection(d.sections, section, filePath);
   epFiles.forEach(f=>{ if(!f.progress?.completed) epChecked.add(f.path); });
 
   // Stream-prep status: tells the per-row Prep buttons which files are
@@ -8676,7 +8684,7 @@ async function openEpisodePicker(itemId, title, section){
 // several single-episode items). Reuses the same renderers as a single item —
 // they're file-list-driven — but sources a merged, item-tagged file list from
 // /api/library/series/{key} so play/resume/next can span the items.
-async function openSeriesPage(seriesKey, title, section){
+async function openSeriesPage(seriesKey, title, section, filePath){
   epItemId=null; epSeriesKey=seriesKey; epFileItem={};
   epFiles=[]; epChecked=new Set();
   epMetadata=null; epMetaImgBase=""; epCurrentSeason=0; epSeasonList=[]; epIsMovie=false;
@@ -8709,7 +8717,7 @@ async function openSeriesPage(seriesKey, title, section){
   epMetadata=d.metadata||null; epMetaImgBase=d.img_base||"";
   _epSeriesResume=d.resume||null;
   // One section of the merged show (its spin-off, its films, its specials).
-  if(section){ _applySection(d.sections, section); _epSeriesResume=null; }
+  if(section){ _applySection(d.sections, section, filePath); _epSeriesResume=null; }
 
   _epRebuildSeasonList();
   epCurrentSeason = pickDefaultSeason();
@@ -8829,7 +8837,10 @@ async function _epApplyMetadata(itemId, title, respPromise){
       epMetaImgBase=m.img_base||epMetaImgBase;
       const secs=((m.metadata||{}).sections)||{};
       const sec=secs[epSection];
-      if(sec){ _applySection([{key:epSection, label:sec.title||"", meta:sec}], epSection); }
+      if(sec){
+        _applySection([{key:epSection, label:sec.title||"", meta:sec}], epSection,
+                      epFiles.length===1 ? epFiles[0].path : "");
+      }
       renderEpHero(epHeroTitle||title); renderEpSeasonTabs(); renderEpList();
       return;
     }
@@ -9517,7 +9528,40 @@ function _stillUrl(stillPath){
   return `${epMetaImgBase}/w300${stillPath}`;
 }
 
+function _epFilmListHtml(){
+  return `<div class="p-2 sm:p-4 space-y-2">${epFiles.map(f=>{
+    const m=f.film||{};
+    const poster=(m.poster_path&&epMetaImgBase)?`${epMetaImgBase}/w342${m.poster_path}`:"";
+    const prog=f.progress||{};
+    const done=!!prog.completed;
+    const pct=prog.duration_sec?Math.round((prog.position_sec||0)/prog.duration_sec*100):0;
+    const bits=[(m.release_date||"").slice(0,4), m.runtime?`${m.runtime} min`:"",
+                (typeof m.vote_average==="number"&&m.vote_average>0)?`\u2605 ${m.vote_average.toFixed(1)}`:"",
+                done?"Watched":(pct>2?`${pct}%`:"")].filter(Boolean).join(" \u00b7 ");
+    return `<div class="ep-film-open cursor-pointer flex items-stretch gap-3 p-2 sm:p-3 bg-gray-900 border border-gray-800
+                 border-l-4 ${done?"border-l-green-800":pct>2?"border-l-indigo-700":"border-l-gray-800"} hover:bg-gray-800 transition-colors"
+                 role="button" tabindex="0" data-path="${escHtml(f.path)}">
+      <div class="flex-shrink-0 w-16 sm:w-20 aspect-[2/3] bg-gray-950 border border-gray-800 overflow-hidden">
+        ${poster?`<img src="${escHtml(poster)}" alt="" class="w-full h-full object-cover" loading="lazy"/>`:""}
+      </div>
+      <div class="min-w-0 flex-1">
+        <p class="text-sm font-black uppercase tracking-wide text-gray-100 leading-snug">${escHtml(_epDisplayTitle(f))}</p>
+        ${bits?`<div class="text-[11px] text-gray-500 uppercase tracking-wide mt-0.5">${escHtml(bits)}</div>`:""}
+        ${m.overview?`<div class="text-[11px] text-gray-600 mt-1 leading-snug" style="display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical;overflow:hidden;">${escHtml(m.overview)}</div>`:""}
+      </div>
+    </div>`;
+  }).join("")}</div>`;
+}
+
+function _epOpenFilm(path){
+  const title=epHeroTitle||"";
+  if(epSeriesKey) openSeriesPage(epSeriesKey, title, epSection, path);
+  else openEpisodePicker(epItemId, title, epSection, path);
+}
+
 function _epDisplayTitle(file){
+  // A file inside a Movies folder is a film with its own binding.
+  if(file.film && file.film.title) return file.film.title;
   // Priority: TMDb episode name → parsed filename name → bare label
   const ep=_tmdbEpisode(file);
   if(ep?.name) return ep.name;
@@ -10266,6 +10310,18 @@ function renderEpList(){
   // Movie / single-episode item: render the detail panel instead of an episode list.
   if(epIsMovie){
     el.innerHTML=_epMoviePanel(epFiles[0]);
+    return;
+  }
+
+  // A Movies section is separate films, not episodes of anything: list them as
+  // posters, each opening the same full movie page a standalone film gets.
+  if(epSection && epFiles.some(f=>f.film)){
+    el.innerHTML=_epFilmListHtml();
+    el.querySelectorAll(".ep-film-open").forEach(n=>{
+      const go=()=>_epOpenFilm(n.dataset.path);
+      n.addEventListener("click",go);
+      n.addEventListener("keydown",e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); go(); }});
+    });
     return;
   }
 
