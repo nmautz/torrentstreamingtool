@@ -4799,17 +4799,32 @@ def _resume_anchor(files: list, fp_for, last_file: str = "") -> Optional[int]:
     progress write already produces, and the only signal available across a
     merged series whose members each keep their own ``last_file``. A stored
     ``last_file`` still wins when it names a file in this list that has no
-    progress yet (started, then stopped inside the 5 s save window)."""
-    best, best_at = None, ""
-    for i, f in enumerate(files):
+    progress yet (started, then stopped inside the 5 s save window).
+
+    **Ties are the normal case, not an edge case.** `_now_iso()` has one-second
+    resolution and `mark_watched` stamps every file it touches, so "mark the
+    season watched" gives twenty-five episodes the identical timestamp — and any
+    resume in that same second sees a flat field. Picking the first match there
+    sent the viewer back to episode 1 immediately after they marked the season
+    watched. So among the files sharing the newest timestamp: take the LAST
+    completed one (a batch mark-watched — the anchor is the furthest point
+    reached), else the FIRST (a batch reset — the anchor is the beginning).
+    """
+    best_at = ""
+    for f in files:
         at = (fp_for(f) or {}).get("updated_at", "")
-        if at and at > best_at:
-            best, best_at = i, at
-    if best is None and last_file:
+        if at > best_at:
+            best_at = at
+    if best_at:
+        tied = [i for i, f in enumerate(files)
+                if (fp_for(f) or {}).get("updated_at", "") == best_at]
+        done = [i for i in tied if (fp_for(files[i]) or {}).get("completed")]
+        return done[-1] if done else tied[0]
+    if last_file:
         for i, f in enumerate(files):
             if f.get("path", "") == last_file:
                 return i
-    return best
+    return None
 
 
 def _resume_from_files(files: list, fp_for, last_file: str = "",
