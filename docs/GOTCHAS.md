@@ -1458,6 +1458,48 @@ The `-c:s webvtt` conversion above (and the on-demand `_sub_to_vtt` ffmpeg path 
 
 `_clean_webvtt(text)` fixes all three: it drops drawing-blob cues (`_is_ass_drawing`: body is only path commands `m/n/l/b/s/p/c` + ≥6 coordinate numbers), **de-duplicates** cues sharing the *same timing and text*, converts `\h`→space / `\N`→newline, and strips stray `{…}` blocks. It is **idempotent**, which is load-bearing: it runs at three points without churn — at prep finalize (born-clean `sub_<i>.vtt`), inside `_sub_to_vtt` (sidecar path), and **in-place when serving a `.vtt`** from `offline_cache_bundle_file`, so bundles built before the fix self-heal on the next fetch (and the iOS download path, which pulls bundle files through that same route, gets the cleaned copy). Styling is still lost — that's the unrelated libass.js deferral — but the track is now *readable*. Don't "simplify" the dedup to text-only or timing-only: two genuinely different lines can share text (different times) or share a timestamp (different text); only same-both is a real duplicate.
 
+### Subtitle image packs: two ffmpeg defaults that fail SILENTLY and look like success
+
+`subpack.py` pre-renders styled ASS (and bitmap PGS/VOBSUB) to transparent PNGs so a
+client that can't run libass — the native iOS `AVPlayer`, which renders only real media
+tracks — can still show them. Both traps below produce a plausible-looking result and no
+error, which is exactly why they cost a debugging cycle each.
+
+**1 — `ass`/`subtitles` filter: `alpha` defaults to FALSE.** The filter blends glyphs into
+RGB and leaves the alpha channel *exactly as it found it*. Over a transparent base that
+means alpha stays 0 everywhere, so every PNG in the pack carries the text in RGB and is
+100% transparent. Nothing reports a problem: the files are the right size, and every
+**luma**-based tool agrees there is ink — `cropdetect` happily returns correct bounding
+boxes for glyphs no client will ever see. It only shows up when you composite one over a
+background and get nothing. **Always pass `alpha=1`.**
+
+**2 — `-dump_attachment:t ""` stops at the first filename it can't write, and says
+nothing.** The bulk form names each output from the attachment's `filename` tag; a space
+(`ObeliskMdITC TT.ttf`) was enough to abandon a 9-font release after 3, with a zero exit
+status. Missing fonts don't fail a render either — libass substitutes, so you get a pack
+that is *subtly in the wrong typeface*. Dump **per index** (`-dump_attachment:t:<n> <our
+own name>`) and count what landed; libass matches on the font's internal family name, so
+renaming the file costs nothing. The manifest records `fonts` for exactly this reason.
+
+**Corollary — `-f null -` after an attachment dump decodes the WHOLE file.** Attachments
+are written when the input is opened, but the null muxer then dutifully decodes every
+frame; doing that once per attachment turned a ~1 s job into minutes on a 1.4 GB HEVC
+source. Disable the streams you don't want (`-vn -an -sn`) and it drops to ~0.1 s each.
+
+### The pre-render is per SUBTITLE STREAM index, and a pack is additive — never re-prep for one
+
+`subpack_<i>/` lives *inside* the existing bundle dir and nothing else is touched: no
+segment is rewritten, `meta.json` is unchanged, and **`OFFLINE_CACHE_VERSION` does not
+move**, so no existing bundle is invalidated and nothing re-preps. That property is the
+whole reason this approach was chosen over burning subtitles into the video (which would
+re-encode every file). If you ever find yourself bumping the cache version to ship a
+subtitle feature, you've lost the plot.
+
+`sub_idx` is the index among **subtitle streams** (`0:s:<i>`), matching `meta.json`'s
+`subtitles[]` ordering — never the absolute stream index. The serving route whitelists
+filenames to `manifest.json` / `c_<n>.png` so the extracted `sub.ass` and the dumped fonts
+inside the pack dir stay off the network.
+
 ### The fmp4 init filename MUST be templated, or playback dies with `fragLoadError`
 
 Symptom: prep "succeeds", the manifest parses (the audio/subtitle dropdowns populate, so `MANIFEST_PARSED` / `loadedmetadata` already fired), then playback never starts and hls.js throws a fatal `fragLoadError` (black player). It is **not** a server bug — `offline_cache_bundle_file` serves every real file fine (200 for `.m3u8`/`.m4s`, 206 for Range). The failing fetch is the **fmp4 init segment**: the variant playlist's `#EXT-X-MAP:URI="…"` points at an init file ffmpeg never wrote under that name, so it 404s, hls.js exhausts its frag retries, and the error goes fatal *before any frame decodes*.
@@ -1722,7 +1764,7 @@ ffmpeg's `-c:s webvtt` strips karaoke, positioning, custom fonts, and animations
 
 ### iOS background playback — the rules that make it work at all
 
-Nine constraints, each of which independently breaks the feature. See
+Eleven constraints, each of which independently breaks the feature. See
 [STREAMING.md § 2b](STREAMING.md) for the design and `NativePlayback.swift`.
 
 - **`UIBackgroundModes: audio` does NOT keep a WKWebView `<video>` playing.** WebKit
@@ -1731,10 +1773,13 @@ Nine constraints, each of which independently breaks the feature. See
   reason a native `AVPlayer` exists here. Don't "simplify" this away by deleting the
   plugin and just adding the plist key; it will look right and play nothing.
 - **A backgrounded app cannot draw — so libass on an external display is impossible.**
-  No CADisplayLink ticks, no CoreAnimation commits, no rendering to a second
+  No CADisplayLink ticks, no CoreAnimation commits, no *app-drawn* content on a second
   `UIScreen`. Styled ASS therefore cannot survive a true lock by any route. TV Mode
-  (screen blanked, app *foreground*, mirroring alive) is the answer, and is also the
-  fallback if wired external playback disappoints.
+  (backlight down, app *foreground*, mirroring alive) is the answer, and is also the
+  fallback if wired external playback disappoints. **This does not extend to an
+  `AVPlayerLayer`**: its frames come from the media server, not the app's render loop,
+  which is what lets the backgrounded handoff put video on an external window at all.
+  Don't read this bullet as "nothing can appear on the monitor while locked".
 - **`AVVideoComposition` is unsupported for HLS assets**, so the "burn the subtitles
   into the frames inside AVFoundation" idea is a dead end. Every StreamLink playback
   path is HLS.
@@ -1768,6 +1813,34 @@ Nine constraints, each of which independently breaks the feature. See
 - **`AVMediaSelectionGroup` ordering is not guaranteed to match `meta.json`.** Match
   audio/subtitle options by `displayName` then `locale.languageCode` — never by index,
   or some bundles silently play the wrong language.
+- **An `AVPlayer` with no `AVPlayerLayer` is AUDIO-ONLY — the routing flags alone do
+  nothing** (fixed 14.1.1). `allowsExternalPlayback` /
+  `usesExternalPlaybackWhileExternalScreenIsActive` describe how an already-*presented*
+  video is routed; they do not conjure a presentation. The handoff built a bare
+  `AVPlayer`, so locking the phone with a monitor attached kept the audio and lost the
+  picture: `isExternalPlaybackActive` never flipped and the monitor went on mirroring,
+  which at lock means mirroring the **lock screen**. `attachVideoSurface()` gives the
+  player a layer on every path — either a `UIWindow` of our own on the external
+  `UIScreen` (**Direct**, the default; creating it replaces mirroring, and it must be
+  built at `willResignActive`, the last guaranteed composite pass, not inside
+  `didEnterBackground`) or a layer at the back of the app's own window behind the
+  opaque webview (**Mirrored**, leaving AVFoundation's route to take over). Which one a
+  given adapter honours through a lock isn't decidable from the host, so it's the
+  `streamlink_app_extmode` setting. The flip side: **attach no layer at all when no
+  display is connected.** A main-screen `AVPlayerLayer` is the classic way to make
+  AVFoundation *suspend* video on background (the documented cure for background audio
+  is `playerLayer.player = nil`), so an unconditional attach would trade the plain
+  locked-phone-listening case for a monitor that isn't there. Layerless is wrong with a
+  display and right without one — `attachVideoSurface()` gates on exactly that.
+- **TV Mode may not draw ANYTHING opaque — the monitor is mirroring that framebuffer**
+  (fixed 14.1.1). `#lpTvVeil` was a full-screen black `<div>`, so "blank the phone"
+  blanked the TV as well and the episode disappeared from both screens at once. The
+  only lever that darkens the phone without touching a mirrored pixel is the
+  **backlight** (`UIScreen.main.brightness = 0`), which the native side already pulls;
+  the veil is now a *transparent* touch shield that exists solely to swallow taps and
+  carry the double-tap exit. Anything else TV Mode puts on screen — the `#lpTvHint`
+  chip — must retire itself. Same rule for the transport bar, which is why entering TV
+  Mode adds `lp-idle`.
 
 Two more, on the JS side:
 
@@ -1776,7 +1849,8 @@ Two more, on the JS side:
   the last arm using wall-clock elapsed time, with a 0.3 s rewind so error always
   lands *behind* the true position. Don't make the handoff depend on that event.
 - **The prefs live in host-origin `localStorage`, and proxied playback has its own
-  empty origin.** `streamlink_app_bgplay` / `streamlink_app_tvmode` must be seeded
+  empty origin.** `streamlink_app_bgplay` / `streamlink_app_tvmode` /
+  `streamlink_app_extmode` must be seeded
   through the `am=` param in `_appTryLocalHandoff` **and** read back in
   `_appProxiedSeedStorage` — otherwise background playback reads as "off" in exactly
   the common case (playing a *downloaded* episode online, which always routes through

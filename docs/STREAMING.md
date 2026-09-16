@@ -1181,13 +1181,51 @@ switchable off in ☰ App → Settings → Playback (`streamlink_app_bgplay`,
 
 | Path | Trigger | Monitor | Styled ASS | Phone screen |
 |---|---|---|---|---|
-| **TV Mode** | a display connects, app stays foreground | mirroring | **yes** (libass + custom UI) | black, never auto-locks |
-| **Native handoff** | app backgrounds (lock / app switch) | `AVPlayer` external playback | no — plain VTT | locked |
+| **TV Mode** | a display connects, app stays foreground | mirroring | **yes** (libass + custom UI) | backlight at minimum, never auto-locks |
+| **Native handoff** | app backgrounds (lock / app switch) | `AVPlayer` on a surface of its own | no — plain VTT | locked |
 
 They're orthogonal: TV Mode doesn't disable the handoff, it just prevents the
 *auto-lock* that would trigger it. Pressing the power button in TV Mode still hands
 off. TV Mode is also the **fallback** if wired external playback turns out not to
 survive lock, which is why it defaults on whenever a display is present.
+
+**Two rules follow from mirroring, and 14.1.1 fixed a violation of each.**
+
+*TV Mode may not draw anything opaque.* The monitor receives the phone's
+**framebuffer**, so a black curtain over the player blanks the monitor with it — which
+is exactly what `#lpTvVeil` used to be, and why the episode vanished from both screens
+at once. The only lever that darkens the phone without touching a mirrored pixel is
+the **backlight** (`UIScreen.main.brightness = 0`, native `applyBlank`). `#lpTvVeil` is
+therefore a *transparent* touch shield: it swallows stray taps and carries the
+double-tap-to-exit gesture, nothing more. The transport bar is retired (`lp-idle`) on
+entry for the same reason, and the confirmation chip (`#lpTvHint`) fades itself out
+after ~3.5 s rather than sitting on the TV.
+
+*The handoff needs a video surface, not just routing flags.* `allowsExternalPlayback`
+and `usesExternalPlaybackWhileExternalScreenIsActive` describe how an
+already-**presented** video is routed. The handoff built a bare `AVPlayer` with no
+`AVPlayerLayer` anywhere, so it presented nothing: audio kept playing,
+`isExternalPlaybackActive` never flipped, and the monitor went on mirroring — i.e.
+showed the lock screen. `attachVideoSurface()` now gives the player a real layer on
+every path, in one of two modes (☰ App → Settings → Playback → **Monitor feed while
+locked**, `streamlink_app_extmode`, passed through `arm()` as `extMode`):
+
+| Mode | What it does | When to pick it |
+|---|---|---|
+| **Direct** (`window`, default) | a `UIWindow` of our own on the external `UIScreen` with an `AVPlayerLayer` in it. Creating it **replaces mirroring** for that screen, so the lock screen never reaches the monitor. Built at `willResignActive` — the last moment the app is guaranteed a composite pass — and destroyed at `didBecomeActive`, so foreground/TV Mode still get their mirror. | most wired adapters |
+| **Mirrored** (`route`) | leaves mirroring up and gives the player a full-screen `AVPlayerLayer` at the back of the app's own window (invisible behind the opaque webview), so AVFoundation's external-screen route has something to take over. | if Direct leaves the monitor blank |
+
+**With no display connected, neither layer is attached** — deliberately. A main-screen
+`AVPlayerLayer` is the classic way to get AVFoundation to *suspend* video on background
+(the documented cure for background audio is `playerLayer.player = nil`), so attaching
+one unconditionally would risk the plain lock-the-phone-and-listen case to serve a
+monitor that isn't there. Layerless = audio-only is the bug with a monitor and the
+correct behaviour without one.
+
+Which of the two an adapter + iOS version honours through a lock is not decidable from
+the host, hence a setting rather than a guess. Like the other playback prefs it must be
+seeded across the proxied loopback origin (`am=` in `_appTryLocalHandoff` ↔
+`_appProxiedSeedStorage`) or a downloaded episode reads the default.
 
 **Why pre-arm instead of "hand off on `visibilitychange`".** That event is not
 guaranteed to run — nor to finish its bridge round-trip — before the process is
@@ -1252,17 +1290,98 @@ which is worse than none. Handoff still works on a not-yet-prepped file.
 **What cannot be done** (don't re-attempt): burning styled ASS into the stream during
 playback — `AVVideoComposition` is unsupported for HLS assets — and rendering the
 libass overlay to an external `UIScreen` while backgrounded, because a backgrounded
-app cannot draw at all. TV Mode is the answer to both.
+app cannot **draw** at all. (That limit is about app-drawn content; an
+`AVPlayerLayer` is fed by the media server, which is why the Direct mode above can
+still show video there.) TV Mode is the answer to both.
 
 **Verification sequence** (on-device; each is a go/no-go gate): bare background audio
 → position fidelity across a lock/unlock → wired HDMI unlocked → **wired HDMI locked**
-(the load-bearing assumption) → TV Mode incl. brightness restore after a force-quit →
+(the load-bearing assumption — try **Direct** first, then flip the setting to
+**Mirrored** and repeat; `nativeStarted` carries `extMode` / `extWindow` and
+`displays()` carries `ownWindow` / `externalPlayback` to say which path actually ran)
+→ TV Mode incl. brightness restore after a force-quit, **with the episode still visible
+on the monitor** →
 Live Activity clock advancing between pushes → native subs in sync → progress written
 while locked → the same against an LMS-served bundle in Airplane Mode → no-regression
 in a desktop browser.
 
 Native side: `ios-app/ios/App/App/NativePlayback.swift` (+ `PlaybackLiveActivity.swift`,
 `Shared/PlaybackIntents.swift`, `StreamLinkLiveActivities/PlaybackWidget.swift`).
+
+### 2c. Subtitle image packs (styled ASS + PGS/VOBSUB)
+
+**The problem.** An HLS subtitle rendition may carry WebVTT or IMSC1 and nothing else, so
+every sign, font, colour and karaoke effect is flattened on the way into `sub_<i>.vtt`.
+The web player dodges that by running libass-wasm over the video — but that is a canvas
+the *app* draws, so it cannot exist on a locked phone, where the native `AVPlayer` owns
+the picture and renders only real media tracks. Separately, HLS has no bitmap subtitle
+track type at all, so PGS/VOBSUB are dropped at prep (`skipped_image_subs`) and are
+currently unplayable on **every** on-device surface.
+
+**The approach.** Stop making the renderer the player's problem. `subpack.py` renders the
+subtitles once, server-side, with real libass — fonts, `\move`/`	` transforms, `\p1`
+vector drawings, karaoke — and emits a **display list of transparent PNGs**. A client then
+only has to composite one image at a time: a `CALayer` can do that from the render server
+while the app is backgrounded, and a `<canvas>` can do it in any browser.
+
+The alternative — burning subtitles into the picture with `-vf ass=` — was rejected
+because it re-encodes the video for every file, which throws away the prepped bundle
+entirely. This is **purely additive**: the pack lives in `<bundle>/subpack_<i>/`, no
+segment is rewritten, `OFFLINE_CACHE_VERSION` does not move, and no existing bundle is
+invalidated or re-prepped.
+
+```
+<bundle>/subpack_<i>/
+  manifest.json      display list: [{t, file, x, y, w, h} | {t, clear}]
+  c_<frame>.png      one image per VISUAL CHANGE, PTS-named
+  sub.ass            extracted source subtitle (text kinds)
+  fonts/             attachments, so libass uses the intended typefaces
+```
+
+`cues` is time-ordered and gap-free: the image named at `t` stays up until the next cue's
+`t`; a `clear` cue means show nothing. `x/y/w/h` is the ink bounding box, so a client can
+crop rather than decode a full 1920×1080 RGBA frame per cue.
+
+**How the frames are produced.** libass draws over a transparent canvas at the video's own
+geometry; `mpdecimate` collapses every frame where nothing changed, so a normal dialogue
+track costs one image per cue boundary rather than one per sampled frame. A `split` feeds
+the surviving frames to both the PNG writer and `cropdetect`, whose per-frame metadata
+becomes the bounding boxes — no second pass and no image library (there is no Pillow in
+the venv, by design). `-frame_pts 1` names each file by presentation time, so the
+timestamps are exact and need no sidecar. Two ffmpeg defaults will silently ruin this;
+both are in [GOTCHAS.md](GOTCHAS.md) and neither surfaces as an error.
+
+**Cost, measured** (1080p, 25-min episodes, NVENC host, no video decode involved):
+
+| Track | Images | Size | Time |
+|---|---|---|---|
+| AoT dialogue (incl. OP/ED karaoke) | 954 | 80 MB | 82 s (18.9× RT) |
+| AoT Signs & Songs | 685 | 68 MB | 60 s (25.8× RT) |
+| Code Geass dialogue | 433 | 20 MB | 95 s |
+
+Size is dominated by animated typesetting (OP/ED karaoke), where every sampled frame
+differs and `mpdecimate` saves nothing — plain dialogue is a few hundred KB. `DEFAULT_FPS`
+(5) is the lever, and `MAX_FRAMES` (6000) is the guard: a track that blows through it is
+marked `truncated`, and the caller must fall back to the plain VTT rather than serve a
+pack that silently stops partway.
+
+**For streaming this is not a transfer concern** — the client fetches each PNG as the cue
+changes (~20–60 KB every few seconds), not the pack as a whole. It only matters for
+offline bundle downloads.
+
+**Endpoints** (built lazily on first request, mirroring `_od_extract_ass`; the source is
+resolved from the bundle's own `meta.json["src"]`, so the cache key is all a caller needs):
+
+```
+GET  /api/library/offline-cache/<key>/subpack/<i>/status   → {state: missing|building|ready|error, …}
+POST /api/library/offline-cache/<key>/subpack/<i>          → start (idempotent)
+GET  /api/library/offline-cache/<key>/subpack/<i>/manifest.json
+GET  /api/library/offline-cache/<key>/subpack/<i>/c_<n>.png
+```
+
+**Not yet wired to any client.** The renderer, the storage layout and the endpoints are
+done and verified; the iOS `AVSynchronizedLayer` overlay and the web `<canvas>` path are
+the remaining work. See [GOTCHAS.md](GOTCHAS.md).
 
 ### 3. Skip-intro / credits
 

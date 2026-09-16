@@ -50,6 +50,7 @@ import refiner
 import dvprobe
 import episodes
 import stt
+import subpack
 import updater
 import vpncheck
 import winaccept_patch
@@ -25542,6 +25543,139 @@ async def offline_cache_bundle_file(cache_key: str, filename: str) -> Response:
                 pass
         return Response(content=cleaned, media_type=media)
     return FileResponse(str(p), media_type=media, filename=p.name)
+
+
+# ── Subtitle image packs (styled ASS + PGS/VOBSUB) ───────────────────────────
+#
+# A pack is a pre-rendered display list of transparent PNGs (see `subpack.py`)
+# that lets a client show subtitles it could otherwise never draw: styled ASS on
+# the native iOS AVPlayer (which renders only real media tracks, so the libass
+# canvas the web player uses cannot exist there), and bitmap subs anywhere at
+# all (HLS has no bitmap subtitle track type, so prep drops them —
+# `skipped_image_subs`).
+#
+# Packs are ADDITIVE and live in `<bundle>/subpack_<i>/`. No segment is touched,
+# no `meta.json` is rewritten and `OFFLINE_CACHE_VERSION` does not move, so every
+# already-prepped bundle keeps working untouched and nothing re-preps. The source
+# media is resolved from the bundle's own `meta.json["src"]`, so the cache key is
+# the only thing a caller needs to know.
+#
+# Built lazily on first request (a full episode is ~60-90 s of libass), mirroring
+# how `_od_extract_ass` defers its work. See docs/STREAMING.md.
+
+_SUBPACK_FILE_RE = re.compile(r"^(manifest\.json|c_\d+\.png)$")
+_SUBPACK_MIME = {".json": "application/json", ".png": "image/png"}
+
+# key "<cache_key>:<sub_idx>" -> {"state", "stage", "error", "started"}.
+# In-process only: a pack that finished is discoverable on disk, so losing this
+# across a restart costs nothing but an "unknown" that the next status call
+# resolves by looking for the manifest.
+_subpack_jobs: dict[str, dict] = {}
+
+
+def _subpack_dir(bundle_dir: Path, sub_idx: int) -> Path:
+    return bundle_dir / f"subpack_{sub_idx}"
+
+
+def _subpack_state(bundle_dir: Path, cache_key: str, sub_idx: int) -> dict:
+    """Disk is the source of truth; the job table only adds live progress."""
+    d = _subpack_dir(bundle_dir, sub_idx)
+    man = d / subpack.MANIFEST_NAME
+    job = _subpack_jobs.get(f"{cache_key}:{sub_idx}") or {}
+    if man.is_file():
+        try:
+            m = json.loads(man.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            m = {}
+        return {"state": "ready", "images": m.get("images", 0),
+                "cues": len(m.get("cues") or []), "bytes": m.get("bytes", 0),
+                "fonts": m.get("fonts", 0), "truncated": bool(m.get("truncated")),
+                "kind": m.get("kind", ""), "fps": m.get("fps", 0)}
+    if job.get("state") == "building":
+        return {"state": "building", "stage": job.get("stage", "")}
+    if job.get("state") == "error":
+        return {"state": "error", "error": job.get("error", "")}
+    return {"state": "missing"}
+
+
+async def _subpack_build(cache_key: str, bundle_dir: Path, sub_idx: int) -> None:
+    """Render one pack in a worker thread.
+
+    `subpack.render_pack` is a blocking ffmpeg pipeline, so it goes through
+    `asyncio.to_thread` — the same rule every other media job in this file
+    follows. It also runs at BELOW_NORMAL priority (via `mediabin`), so a build
+    can't starve playback on the host.
+    """
+    jkey = f"{cache_key}:{sub_idx}"
+    job = {"state": "building", "stage": "starting", "started": time.time()}
+    _subpack_jobs[jkey] = job
+    meta = await asyncio.to_thread(_read_meta, bundle_dir)
+    src = meta.get("src") or ""
+    if not src or not await asyncio.to_thread(os.path.exists, src):
+        job.update(state="error", error="Source file is no longer available.")
+        return
+    try:
+        def _go() -> dict:
+            return subpack.render_pack(
+                src, sub_idx, _subpack_dir(bundle_dir, sub_idx),
+                on_progress=lambda st: job.update(stage=st))
+        m = await asyncio.to_thread(_go)
+        job.update(state="ready", stage="done", images=m.get("images", 0))
+        log.info("subpack %s[%d]: %d images, %.1f MB",
+                 cache_key, sub_idx, m.get("images", 0), m.get("bytes", 0) / 1048576)
+    except Exception as e:                                  # noqa: BLE001
+        job.update(state="error", error=str(e)[:300])
+        log.exception("subpack build failed for %s[%d]", cache_key, sub_idx)
+
+
+@app.get("/api/library/offline-cache/{cache_key}/subpack/{sub_idx}/status")
+async def subpack_status(cache_key: str, sub_idx: int) -> JSONResponse:
+    """Is a styled-subtitle pack available for this bundle's subtitle `sub_idx`?"""
+    if not _CACHE_KEY_RE.match(cache_key) or not (0 <= sub_idx < 64):
+        raise HTTPException(400, "Invalid path.")
+    bundle_dir = await _resolve_bundle_dir(cache_key)
+    if bundle_dir is None:
+        raise HTTPException(404, "No such bundle.")
+    return JSONResponse(await asyncio.to_thread(
+        _subpack_state, bundle_dir, cache_key, sub_idx))
+
+
+@app.post("/api/library/offline-cache/{cache_key}/subpack/{sub_idx}")
+async def subpack_build(cache_key: str, sub_idx: int) -> JSONResponse:
+    """Start (or report) the pack build for one subtitle stream. Idempotent."""
+    if not _CACHE_KEY_RE.match(cache_key) or not (0 <= sub_idx < 64):
+        raise HTTPException(400, "Invalid path.")
+    bundle_dir = await _resolve_bundle_dir(cache_key)
+    if bundle_dir is None:
+        raise HTTPException(404, "No such bundle.")
+    st = await asyncio.to_thread(_subpack_state, bundle_dir, cache_key, sub_idx)
+    if st["state"] in ("ready", "building"):
+        return JSONResponse(st)
+    _spawn_bg(_subpack_build(cache_key, bundle_dir, sub_idx))
+    return JSONResponse({"state": "building", "stage": "starting"})
+
+
+@app.get("/api/library/offline-cache/{cache_key}/subpack/{sub_idx}/{filename}")
+async def subpack_file(cache_key: str, sub_idx: int, filename: str) -> Response:
+    """Serve `manifest.json` or one `c_<n>.png` out of a pack.
+
+    Same traversal guard as the bundle route — the filename is whitelisted to the
+    two shapes the renderer actually emits, so nothing else in the pack directory
+    (the extracted `sub.ass`, the dumped fonts) is reachable from the network.
+    """
+    if (not _CACHE_KEY_RE.match(cache_key) or not (0 <= sub_idx < 64)
+            or not _SUBPACK_FILE_RE.match(filename)):
+        raise HTTPException(400, "Invalid path.")
+    bundle_dir = await _resolve_bundle_dir(cache_key)
+    if bundle_dir is None:
+        raise HTTPException(404, "No such bundle.")
+    p = _subpack_dir(bundle_dir, sub_idx) / filename
+    if not await asyncio.to_thread(p.is_file):
+        raise HTTPException(404, "No such pack file.")
+    return FileResponse(str(p),
+                        media_type=_SUBPACK_MIME.get(p.suffix.lower(),
+                                                     "application/octet-stream"),
+                        filename=p.name)
 
 
 def _enumerate_bundle_files(out_dir: Path) -> tuple[list[dict], int]:

@@ -520,8 +520,11 @@ foreground — **the `visibilitychange`→visible branch now chains
 `_lpRecoverActiveSub` / `_lpRecoverMediaPipeline` after it** instead of racing them on
 independent timers, because those probes read the playhead and the frame-counting one
 would misfire against a mid-seek element. `_npSetTvMode()` / `_npOnDisplayChange()`
-drive TV Mode (the `#lpTvVeil` blackout + the `#lpTvBtn` control, shown only while a
-display is connected). All of it is inert in a browser. See
+drive TV Mode (the `#lpTvVeil` touch shield + the self-retiring `#lpTvHint` chip + the
+`#lpTvBtn` control, shown only while a display is connected). **`#lpTvVeil` is
+transparent and must stay that way** — the monitor is mirroring this framebuffer, so
+an opaque veil blanks the TV too (the 14.1.1 bug); the phone is darkened by the native
+backlight lever alone. All of it is inert in a browser. See
 [STREAMING.md § 2b](STREAMING.md) and [GOTCHAS.md](GOTCHAS.md).
 
 Per-file Prep state for the picker rows lives in `prepFileState:

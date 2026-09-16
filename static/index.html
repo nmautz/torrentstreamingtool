@@ -3480,12 +3480,13 @@
               <path stroke-linecap="round" stroke-linejoin="round" d="M11 5L6 9H2v6h4l5 4V5zM16 9l6 6M22 9l-6 6"/>
             </svg>
           </button>
-          <!-- TV Mode: blanks the phone's screen while the app stays foreground,
+          <!-- TV Mode: drops the phone's BACKLIGHT while the app stays foreground,
                so mirroring keeps driving a connected monitor with the full player
-               and styled subtitles. Shown only in the app, only while a display
-               is actually connected (_npOnDisplayChange toggles it). -->
+               and styled subtitles. It must never draw anything over the player —
+               the monitor gets the same framebuffer. Shown only in the app, only
+               while a display is connected (_npOnDisplayChange toggles it). -->
           <button id="lpTvBtn" class="lp-ctl-sm" onclick="_npSetTvMode(!_npTvMode)"
-                  title="TV Mode — blank this screen" style="display:none">
+                  title="TV Mode — dim this screen, keep the monitor" style="display:none">
             <svg class="w-5 h-5" fill="none" stroke="currentColor" stroke-width="2" viewBox="0 0 24 24">
               <path stroke-linecap="round" stroke-linejoin="round" d="M3 5h18v11H3zM8 20h8"/>
             </svg>
@@ -14865,6 +14866,7 @@ function _appProxiedSeedStorage() {
         // Background playback / TV Mode — see the producer in _appTryLocalHandoff.
         if (o.bg   != null) localStorage.setItem(_APP_BGPLAY_KEY, o.bg ? "1" : "0");
         if (o.tvm  != null) localStorage.setItem(_APP_TVMODE_KEY, o.tvm ? "1" : "0");
+        if (o.ext  != null) localStorage.setItem(_APP_EXTMODE_KEY, String(o.ext));
       }
     }
   } catch (_) {}
@@ -14966,14 +14968,24 @@ async function _tvRemoteSync() {
 // plugin is present, and the user hasn't switched the feature off.
 const _APP_BGPLAY_KEY = "streamlink_app_bgplay";   // "0" = off (default ON)
 const _APP_TVMODE_KEY = "streamlink_app_tvmode";   // "0" = off (default ON)
+// How the native player reaches a WIRED monitor once the phone is locked:
+//   "window" (default) - our own UIWindow on the external UIScreen, which
+//                        REPLACES mirroring (mirroring shows the lock screen)
+//   "route"            - leave mirroring up and let AVFoundation's external-screen
+//                        route take the picture over
+// Both are legitimate AVFoundation routes and which one a given adapter + iOS
+// version honours through a lock is not knowable from here, so it is a setting
+// rather than a guess. See docs/GOTCHAS.md.
+const _APP_EXTMODE_KEY = "streamlink_app_extmode";
 
 function _appPlaybackPrefs() {
-  let bg = true, tv = true;
+  let bg = true, tv = true, ext = "window";
   try {
     bg = localStorage.getItem(_APP_BGPLAY_KEY) !== "0";
     tv = localStorage.getItem(_APP_TVMODE_KEY) !== "0";
+    ext = localStorage.getItem(_APP_EXTMODE_KEY) === "route" ? "route" : "window";
   } catch (_) {}
-  return { bg, tv };
+  return { bg, tv, ext };
 }
 
 // True when the native background player is usable for the CURRENT file.
@@ -15047,6 +15059,7 @@ function _npPayload() {
     nextFilePath: nx ? (nx.filePath || "") : "",
     nextItemId: nx ? (nx.itemId || "") : "",
     handoffEnabled: true,
+    extMode: _appPlaybackPrefs().ext,
   };
 }
 
@@ -15145,17 +15158,23 @@ function _npBindEvents() {
 // overlay — neither of which can survive a real lock (a backgrounded app cannot
 // draw). Double-tap to exit so a pocket brush can't wake it.
 let _npTvMode = false;
+let _npTvHintTimer = null;
 
+// TRANSPARENT touch shield — NOT a black curtain.
+//
+// The monitor is fed by screen MIRRORING: it receives the phone's framebuffer.
+// So anything we draw to blank the phone blanks the monitor with it — which is
+// exactly what the old opaque veil did, hiding the episode on both screens. The
+// one lever that darkens the phone WITHOUT touching a mirrored pixel is the
+// backlight, and the native side already pulls that to 0 (applyBlank). All this
+// layer does is swallow stray taps and carry the double-tap-to-exit gesture.
 function _npTvVeil() {
   let el = document.getElementById("lpTvVeil");
   if (el) return el;
   el = document.createElement("div");
   el.id = "lpTvVeil";
-  el.style.cssText = "position:fixed;inset:0;z-index:10050;background:#000;"
-    + "display:flex;align-items:center;justify-content:center;"
-    + "color:rgba(255,255,255,0.10);font-size:11px;letter-spacing:0.18em;"
-    + "font-weight:700;text-transform:uppercase;-webkit-user-select:none;user-select:none;";
-  el.textContent = "TV Mode · double-tap to exit";
+  el.style.cssText = "position:fixed;inset:0;z-index:10050;background:transparent;"
+    + "-webkit-user-select:none;user-select:none;";
   let last = 0;
   el.addEventListener("click", () => {
     const now = Date.now();
@@ -15165,11 +15184,48 @@ function _npTvVeil() {
   return el;
 }
 
+// Brief confirmation that TV Mode engaged. It is mirrored to the monitor like
+// everything else, which is precisely why it retires itself after a few seconds
+// instead of sitting over the episode the way the old permanent label did.
+function _npTvHint(show) {
+  if (_npTvHintTimer) { clearTimeout(_npTvHintTimer); _npTvHintTimer = null; }
+  let el = document.getElementById("lpTvHint");
+  if (!show) { if (el) el.remove(); return; }
+  if (!el) {
+    el = document.createElement("div");
+    el.id = "lpTvHint";
+    el.style.cssText = "position:fixed;left:50%;transform:translateX(-50%);"
+      + "top:calc(env(safe-area-inset-top) + 18px);z-index:10051;pointer-events:none;"
+      + "background:#0b0b0d;border:1px solid #2a2a30;color:#f2f2f4;"
+      + "font-size:11px;font-weight:800;letter-spacing:.1em;text-transform:uppercase;"
+      + "padding:9px 14px;transition:opacity .6s linear;";
+    el.textContent = "TV Mode · double-tap phone to exit";
+    document.body.appendChild(el);
+  }
+  el.style.opacity = "1";
+  _npTvHintTimer = setTimeout(() => {
+    _npTvHintTimer = null;
+    el.style.opacity = "0";
+    setTimeout(() => { if (el && el.style.opacity === "0") el.remove(); }, 700);
+  }, 3500);
+}
+
 function _npSetTvMode(on) {
   if (!isApp || !_cap.np) return;
   _npTvMode = !!on;
   const el = _npTvVeil();
-  el.style.display = on ? "flex" : "none";
+  el.style.display = on ? "block" : "none";
+  _npTvHint(!!on);
+  // The transport bar is mirrored too, so retire it — the monitor should be
+  // showing the episode, not the controls. The veil eats taps, so nothing can
+  // bring them back until TV Mode ends.
+  try {
+    const c = document.getElementById("localPlayer");
+    if (c) {
+      if (on) c.classList.add("lp-idle");
+      else { c.classList.remove("lp-idle"); _lpCtlShow(); }
+    }
+  } catch (_) {}
   try { _cap.np.setTvMode({ on: !!on }); } catch (_) {}
   const btn = document.getElementById("lpTvBtn");
   if (btn) btn.classList.toggle("on", !!on);
@@ -15197,7 +15253,7 @@ function _npOnDisplayChange(connected) {
     + "background:#0b0b0d;border:1px solid #2a2a30;color:#f2f2f4;"
     + "font-size:12px;font-weight:700;letter-spacing:0.06em;text-transform:uppercase;"
     + "padding:12px 16px;max-width:calc(100vw - 32px);text-align:center;";
-  chip.textContent = "Display connected — dimming phone · tap to cancel";
+  chip.textContent = "Display connected — dimming phone screen · tap to cancel";
   const cancel = () => {
     if (_npTvOfferTimer) { clearTimeout(_npTvOfferTimer); _npTvOfferTimer = null; }
     chip.remove();
@@ -15267,6 +15323,7 @@ async function _appTryLocalHandoff(itemId, filePath, seekTo) {
         // background playback would silently stop working in the common case.
         bg:    localStorage.getItem(_APP_BGPLAY_KEY) !== "0",
         tvm:   localStorage.getItem(_APP_TVMODE_KEY) !== "0",
+        ext:   localStorage.getItem(_APP_EXTMODE_KEY) === "route" ? "route" : "window",
       });
     } catch (_) {}
     const q = new URLSearchParams({
@@ -16636,8 +16693,9 @@ function _appOpenAppSettings() {
       <div style="font-size:12px;color:#8a8a92;margin-top:8px;line-height:1.45;">
         Locking the phone or switching apps hands playback to the system player instead
         of stopping it — audio keeps going, the lock-screen and Dynamic Island controls
-        stay live, and video keeps playing on a connected monitor. Styled subtitles fall
-        back to plain text while locked.
+        stay live, and a connected monitor switches from mirroring to a direct video feed
+        so the picture survives the lock. Styled subtitles fall back to plain text while
+        locked.
       </div>
       <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;">
         <div style="font-size:14px;font-weight:700;">Dim the screen for TV playback</div>
@@ -16645,9 +16703,20 @@ function _appOpenAppSettings() {
           font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;"></button>
       </div>
       <div style="font-size:12px;color:#8a8a92;margin-top:8px;line-height:1.45;">
-        When a monitor is connected, the phone's own screen goes black but the app stays
-        awake — so the monitor keeps the full player with styled subtitles, and the phone
-        never auto-locks mid-episode. Double-tap the black screen to come back.
+        When a monitor is connected, the phone's backlight drops to its minimum but the
+        app stays awake — so the monitor keeps the full player with styled subtitles, and
+        the phone never auto-locks mid-episode. Double-tap the phone to come back.
+      </div>
+      <div style="display:flex;align-items:center;justify-content:space-between;gap:12px;margin-top:16px;">
+        <div style="font-size:14px;font-weight:700;">Monitor feed while locked</div>
+        <button id="appSetExtTgl" style="all:unset;cursor:pointer;min-width:74px;text-align:center;padding:8px 12px;
+          font-size:12px;font-weight:800;letter-spacing:.06em;text-transform:uppercase;"></button>
+      </div>
+      <div style="font-size:12px;color:#8a8a92;margin-top:8px;line-height:1.45;">
+        <b style="color:#c9c9cf;">Direct</b> sends the picture straight to the monitor and stops mirroring —
+        the right answer for most adapters, since a mirrored screen shows the lock screen.
+        <b style="color:#c9c9cf;">Mirrored</b> keeps mirroring and lets iOS route the video instead. If the
+        monitor goes blank when you lock the phone, switch to the other one.
       </div>
     </div>
 
@@ -16700,7 +16769,24 @@ function _appOpenAppSettings() {
       t.style.border = on ? "1px solid #3a7afe" : "1px solid #2a2a30";
     });
   };
+  // Not a boolean — two named routes to the monitor, same visual language.
+  const paintExtTgl = () => {
+    const t = ov.querySelector("#appSetExtTgl");
+    if (!t) return;
+    const direct = _appPlaybackPrefs().ext !== "route";
+    t.textContent = direct ? "Direct" : "Mirrored";
+    t.style.background = "transparent";
+    t.style.color = "#f2f2f4";
+    t.style.border = "1px solid #3a7afe";
+  };
   paintPlaybackTgls();
+  paintExtTgl();
+  ov.querySelector("#appSetExtTgl").onclick = () => {
+    const next = _appPlaybackPrefs().ext === "route" ? "window" : "route";
+    try { localStorage.setItem(_APP_EXTMODE_KEY, next); } catch (_) {}
+    paintExtTgl();
+    _npArm();   // the native side reads this at handoff, so re-push it now
+  };
   ov.querySelector("#appSetBgTgl").onclick = () => {
     const next = !_appPlaybackPrefs().bg;
     try { localStorage.setItem(_APP_BGPLAY_KEY, next ? "1" : "0"); } catch (_) {}
@@ -22225,6 +22311,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">14.1.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">14.2.0</div>
 </body>
 </html>

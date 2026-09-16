@@ -9,9 +9,13 @@
 //  so locking the phone kills playback. The only way to keep going is a native
 //  AVPlayer under the `audio` background mode (Info.plist UIBackgroundModes).
 //
-//  It also solves the external monitor: screen MIRRORING dies at lock, but
-//  AVPlayer's external-playback route (`usesExternalPlaybackWhileExternalScreen‐
-//  IsActive`) is decoupled from app rendering and keeps feeding the display.
+//  It also solves the external monitor: screen MIRRORING dies at lock (the
+//  monitor gets the lock screen). The fix is to stop mirroring and give the
+//  player a surface of our own — a UIWindow on the external UIScreen carrying an
+//  AVPlayerLayer. Built on the way out, destroyed on the way back in, so the
+//  foreground/TV-Mode story (which NEEDS mirroring) is untouched. See
+//  "External display surface" below for why the routing flags alone are not
+//  enough.
 //
 //  THE RELIEF-PITCHER MODEL
 //  The web player stays primary. This plugin is armed continuously with the
@@ -32,9 +36,10 @@
 //    disarm()          -> {}      playback stopped; never take over
 //    takeover()        -> {started}   hand off NOW (explicit button / spike test)
 //    resume()          -> { active, position, paused, ended, itemId, filePath }
-//    state()           -> { active, native, position, paused, external, tvMode }
+//    state()           -> { active, native, position, paused, external, extWindow,
+//                            tvMode }
 //    setTvMode({on})   -> { on }
-//    displays()        -> { connected, name }
+//    displays()        -> { connected, name, externalPlayback, ownWindow }
 //  Events: nativeStarted, nativeEnded, nativeAdvanced, displayChanged
 //
 //  See docs/STREAMING.md and docs/GOTCHAS.md ("iOS background playback").
@@ -75,6 +80,10 @@ struct ArmedPlayback {
     var nextFilePath = ""
     var nextItemId = ""
     var handoffEnabled = true
+    /// How to reach a wired monitor once locked: "window" (our own UIWindow on the
+    /// external UIScreen, replacing mirroring) or "route" (leave mirroring up and
+    /// let AVFoundation take the picture over). See "External display surface".
+    var extMode = "window"
     /// When `position` was sampled. Handoff extrapolates from this.
     var armedAt = Date()
 }
@@ -163,6 +172,13 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     private var timeObserver: Any?
     private var statusObs: NSKeyValueObservation?
     private var externalObs: NSKeyValueObservation?
+    /// Our own window on the external display, and the layer inside it. See
+    /// "External display surface".
+    private var extWindow: UIWindow?
+    private var extLayer: AVPlayerLayer?
+    /// Presentation of last resort when there is no wired screen — AirPlay will
+    /// not route video for a player that presents nowhere.
+    private var mainLayer: AVPlayerLayer?
     private var bgTask: UIBackgroundTaskIdentifier = .invalid
     private var lastProgressPost = Date.distantPast
     private var sessionActivated = false
@@ -230,6 +246,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         a.nextFilePath   = call.getString("nextFilePath") ?? ""
         a.nextItemId     = call.getString("nextItemId") ?? ""
         a.handoffEnabled = call.getBool("handoffEnabled") ?? true
+        a.extMode        = call.getString("extMode") ?? "window"
         a.armedAt        = Date()
 
         let wasActive = armed.active
@@ -307,6 +324,11 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         item = it
         player = p
 
+        // A player with no layer anywhere is AUDIO-ONLY: it never enters external
+        // playback, and a connected monitor just keeps mirroring — which, once the
+        // phone is locked, means mirroring the lock screen. Give it a surface.
+        attachVideoSurface()
+
         statusObs = it.observe(\.status, options: [.new]) { [weak self] obs, _ in
             guard let self = self, obs.status == .readyToPlay else { return }
             self.applyTrackSelection(on: obs)
@@ -323,7 +345,10 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             name: .AVPlayerItemDidPlayToEndTime, object: it)
 
         installTimeObserver(on: p)
-        emit("nativeStarted", ["reason": reason, "position": startAt])
+        emit("nativeStarted", ["reason": reason, "position": startAt,
+                               "extMode": armed.extMode,
+                               "extWindow": extWindow != nil,
+                               "display": externalScreen != nil])
         PlaybackLiveActivity.shared.update(state: liveActivityState(), force: true)
     }
 
@@ -496,6 +521,10 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
     @objc private func appDidBecomeActive() {
         restoreStrandedBrightness()
         drainPendingCommand()
+        // Hand the external display back to mirroring: the web player is about to
+        // become primary again, and TV Mode's whole premise is that the monitor
+        // mirrors it. Safe when nothing was ever claimed.
+        detachExternalWindow()
         if tvModeOn { applyBlank(true) }   // re-dim after a transient interruption
         guard isNativeActive else { return }
 
@@ -541,6 +570,8 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             NotificationCenter.default.removeObserver(
                 self, name: .AVPlayerItemDidPlayToEndTime, object: old)
         }
+        detachExternalWindow()      // mirroring resumes; TV Mode gets its screen back
+        detachFallbackLayer()
         player?.pause()
         player?.replaceCurrentItem(with: nil)
         player = nil
@@ -677,6 +708,15 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         // A call, Control Centre, or the power button. Put the brightness back
         // immediately — `tvModeOn` is kept so didBecomeActive can re-dim.
         if tvModeOn { applyBlank(false); tvModeOn = true }
+
+        // Claim the external display NOW, while the app can still draw. A window
+        // created inside didEnterBackground may never get its first composite
+        // pass, and the monitor would sit on the mirrored lock screen for the rest
+        // of the episode. If this turns out to be a transient resign (Control
+        // Centre, a banner) didBecomeActive hands the screen straight back.
+        if armed.active, armed.handoffEnabled, wantsOwnExternalWindow {
+            onMain { [weak self] in self?.ensureExternalWindow() }
+        }
     }
 
     @objc private func appWillTerminate() {
@@ -688,18 +728,154 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
         maybePostProgress(armed.position, force: true)
     }
 
+    // MARK: External display surface
+
+    // WHY A WINDOW OF OUR OWN
+    // `allowsExternalPlayback` / `usesExternalPlaybackWhileExternalScreenIsActive`
+    // only describe how an already-PRESENTED video is ROUTED. An AVPlayer with no
+    // AVPlayerLayer anywhere presents nothing: it decodes audio, its
+    // `isExternalPlaybackActive` never flips, and a wired monitor goes on
+    // mirroring — so at lock it shows the lock screen. That was the bug: the
+    // handoff kept the audio and lost the picture.
+    //
+    // A UIWindow on the external UIScreen is a real surface AND it REPLACES
+    // mirroring for that screen. Replacing mirroring is exactly right once the
+    // phone is locked, and exactly wrong while TV Mode is running (TV Mode needs
+    // mirroring to carry the custom player + the libass overlay). So the window is
+    // built on the way OUT (willResignActive, one composite pass before we lose
+    // the ability to draw) and destroyed on the way BACK IN.
+
+    private var externalScreen: UIScreen? { UIScreen.screens.first { $0 !== UIScreen.main } }
+
+    /// UIKit from wherever we are called. Capacitor delivers plugin methods off
+    /// the main thread (`takeover`, `resume`), the lifecycle notifications on it —
+    /// and every window/layer touch below must run on main either way. Synchronous
+    /// when already on main, because `ensureExternalWindow` is racing the last
+    /// composite pass before the app loses the ability to draw.
+    private func onMain(_ work: @escaping () -> Void) {
+        if Thread.isMainThread { work() } else { DispatchQueue.main.async(execute: work) }
+    }
+
+    /// True when we should claim the external screen with a window of our own,
+    /// rather than leaving mirroring up for AVFoundation's route to take over.
+    private var wantsOwnExternalWindow: Bool {
+        externalScreen != nil && armed.extMode != "route"
+    }
+
+    /// Give the player a video surface when — and ONLY when — there is a monitor to
+    /// put it on. A layerless AVPlayer is audio-only, which is the bug with a
+    /// display attached and exactly the behaviour we want without one: attaching an
+    /// AVPlayerLayer on the PHONE's own screen is the classic way to make
+    /// AVFoundation suspend video on background (the documented cure for
+    /// background audio is `playerLayer.player = nil`), so doing it unconditionally
+    /// would risk the plain locked-phone-listening case to serve a monitor that
+    /// isn't there.
+    private func attachVideoSurface() {
+        onMain { [weak self] in
+            guard let self = self else { return }
+            if self.wantsOwnExternalWindow {
+                self.ensureExternalWindow()
+                self.attachExternalLayer()
+            } else if self.externalScreen != nil {
+                self.attachFallbackLayer()     // "Mirrored" mode
+            }
+        }
+    }
+
+    /// Black window on the external display. Deliberately separate from
+    /// `attachExternalLayer` — at resign-active time there is no player yet, but
+    /// that is the last moment the app is guaranteed a composite pass.
+    private func ensureExternalWindow() {
+        guard extWindow == nil, let screen = externalScreen else { return }
+        let vc = UIViewController()
+        vc.view.backgroundColor = .black
+        let w = UIWindow(frame: screen.bounds)
+        w.screen = screen                 // deprecated in iOS 13, but this app is
+                                          // non-scene-based, so it is still the path
+        w.backgroundColor = .black
+        w.rootViewController = vc
+        w.isHidden = false
+        extWindow = w
+    }
+
+    private func attachExternalLayer() {
+        guard extLayer == nil, let p = player,
+              let root = extWindow?.rootViewController?.view else { return }
+        let l = AVPlayerLayer(player: p)
+        l.videoGravity = .resizeAspect
+        l.backgroundColor = UIColor.black.cgColor
+        l.frame = root.bounds
+        root.layer.addSublayer(l)
+        extLayer = l
+        // Our window IS the external presentation. Letting AVFoundation also try
+        // to seize the screen would have the two fighting over it.
+        p.usesExternalPlaybackWhileExternalScreenIsActive = false
+    }
+
+    private func detachExternalWindow() {
+        onMain { [weak self] in
+            guard let self = self else { return }
+            self.extLayer?.player = nil
+            self.extLayer?.removeFromSuperlayer()
+            self.extLayer = nil
+            self.extWindow?.isHidden = true
+            self.extWindow?.rootViewController = nil
+            self.extWindow = nil
+            self.player?.usesExternalPlaybackWhileExternalScreenIsActive = true
+        }
+    }
+
+    /// "Mirrored" mode's surface: mirroring stays up and AVFoundation's
+    /// external-screen route takes the picture over — but it will only do that for
+    /// a player that presents somewhere. The layer sits at the BACK of the app's
+    /// own window, behind the opaque webview, so it is never visible locally.
+    /// Only ever attached while a display is actually connected (see
+    /// `attachVideoSurface`).
+    private func attachFallbackLayer() {
+        guard mainLayer == nil, let p = player,
+              let root = (UIApplication.shared.delegate?.window ?? nil)?
+                  .rootViewController?.view else { return }
+        let l = AVPlayerLayer(player: p)
+        l.videoGravity = .resizeAspect
+        l.frame = root.bounds
+        root.layer.insertSublayer(l, at: 0)
+        mainLayer = l
+        // This layer exists to BE the route's presentation, so make sure the route
+        // is open (attachExternalLayer closes it for the window mode).
+        p.allowsExternalPlayback = true
+        p.usesExternalPlaybackWhileExternalScreenIsActive = true
+    }
+
+    private func detachFallbackLayer() {
+        onMain { [weak self] in
+            guard let self = self else { return }
+            self.mainLayer?.player = nil
+            self.mainLayer?.removeFromSuperlayer()
+            self.mainLayer = nil
+        }
+    }
+
     // MARK: Displays
 
     @objc private func screenDidChange() {
+        // A display that appears or vanishes mid-handoff has to be picked up or
+        // dropped right away — otherwise we keep a window on a screen that is gone,
+        // or leave a freshly-plugged monitor mirroring a locked phone.
+        if isNativeActive {
+            if wantsOwnExternalWindow { attachVideoSurface() } else { detachExternalWindow() }
+        } else if externalScreen == nil {
+            detachExternalWindow()
+        }
         emit("displayChanged", displayInfo())
     }
 
     func displayInfo() -> [String: Any] {
-        let external = UIScreen.screens.first { $0 !== UIScreen.main }
+        let external = externalScreen
         return [
             "connected": external != nil || (player?.isExternalPlaybackActive ?? false),
             "name": external.map { "\(Int($0.bounds.width))x\(Int($0.bounds.height))" } ?? "",
             "externalPlayback": player?.isExternalPlaybackActive ?? false,
+            "ownWindow": extWindow != nil,
         ]
     }
 
@@ -710,6 +886,7 @@ final class NativePlaybackManager: NSObject, PlaybackCommandSink {
             "position": armed.position,
             "paused":   armed.paused,
             "external": player?.isExternalPlaybackActive ?? false,
+            "extWindow": extWindow != nil,
             "tvMode":   tvModeOn,
         ]
     }
