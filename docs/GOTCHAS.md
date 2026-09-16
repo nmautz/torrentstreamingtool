@@ -3273,6 +3273,90 @@ first**. `youtube_play` cleared `tv_ui_active` but not `tv_local_active`, and
 `_remote_key_action` tests the latter first — so the remote would have driven the
 backgrounded dashboard player while YouTube was on screen, with two audio streams running.
 
+### The kiosk is signed in as somebody — that is not who is watching
+
+The TV kiosk keeps one household profile in its `localStorage` forever. Every play it
+runs therefore *looks* like that profile's, and any code in the page that reaches for
+`profile.id` will credit it. But a play pushed from a phone ("On the TV") belongs to
+whoever pressed it there, and `/api/library/{id}/play` says so — it puts the requesting
+`profile_id` in the `open` command.
+
+`_tvLocalOpen` dropped that field for three releases. The symptom was not "wrong name on a
+chip": the viewer's **progress silently went to the kiosk's profile**, so their own resume
+position never moved and their next Play restarted the episode from the beginning. It
+reads exactly like a broken progress save, and it only reproduces when the play was pushed
+from a phone — start the same episode from the TV itself and everything works.
+
+The rule for anything the kiosk player does on the server's behalf: read `_lpProfileId()`,
+never `profile.id`. `lp.profileId` holds the override, `lpPlay` sets it from the `open`
+payload before anything else runs, `lpStop` clears it, and the heartbeat reports it so
+`state.library_profile_id` agrees. `saveProgress` takes it as a 5th argument for the same
+reason. Note that `/api/library/{id}/play` **is** the profile-aware path — when it routes
+to VLC nothing is lost, because VLC playback is attributed server-side. Only this surface
+has a client that can disagree with the server about who is watching.
+
+### A surface with no VLC gets no VLC-derived state — and the poller will lie about it
+
+`vlc_progress_tracker` polls `vlc_status()` and `vlc_playlist_uri()` every 2 s. During
+on-device TV playback there is nothing meaningful for it to read — VLC is idle under the
+kiosk — so anything it derives is either absent or stale:
+
+- **`state.skip_offer` stayed null**, so the dashboard's Skip Intro / Skip Credits tile
+  never appeared on any phone while the TV played on-device. The TV drew its own tile, so
+  from the couch the feature looked fine; only a phone revealed it was missing.
+- **`vlc_playlist_uri()` could stomp `library_current_file`** with whatever VLC last held.
+
+Both are fixed by the same move: the surface that owns the playhead owns the state. The
+kiosk page reports its live skip offer (and its shuffled-ness) on the heartbeat, and the
+tracker now `continue`s immediately while `tv_local_active`.
+
+The general shape to watch for: **a second surface doesn't just need the control endpoints
+relayed to it — everything the server *derived* from the first surface has to come back
+the other way, or it quietly reads as "off".** The Exit-Shuffle tile was the same bug in
+miniature (`library_shuffle_order` is empty when shuffle lives in the page).
+
+### A media element has no launch-time settings — the ones VLC gets at startup will be missed
+
+`settings.vlc_start_volume` is applied once, to VLC, at host startup. A `<video>` just
+comes up at `volume = 1.0`. On a host configured for 35% of a 75 cap, the kiosk played
+every film about **four times louder** than the same file through VLC — and the setting
+gave no clue it wasn't being honoured, because it *was* being honoured, on a surface that
+wasn't playing. Night mode was the same class of problem, admitted rather than hidden.
+
+When you add a second playback surface, audit the *launch arguments* of the first, not
+just its runtime API. Anything VLC is configured with at spawn (`--audio-filter`,
+`--volume`, `--sub-*`) is a setting a user believes is global.
+
+### Routing a `<video>` through Web Audio is a one-way door
+
+`AudioContext.createMediaElementSource(v)` permanently redirects that element's audio into
+the graph. There is no un-capture: disconnect the graph and the film goes silent; let the
+context suspend and the film goes silent. So the on-device night-mode compressor
+(`_lpNightSync`):
+
+- builds the graph **only when night mode is switched on** — an element that never needs
+  the compressor is never captured at all;
+- builds it only after `ctx.resume()` and a confirmed `ctx.state === "running"`, and
+  closes the context and gives up if that fails (leaving the element untouched is always
+  better than muting it);
+- treats "off" as a **bypass** (`source → destination`), never a teardown;
+- re-resumes on `statechange`, because an OS audio-route change can suspend it later;
+- is skipped inside the iOS app entirely, where playback can hand off to a native
+  `AVPlayer` that the WKWebView element's graph has no part in.
+
+The compressor numbers are **derived from `NIGHT_MODE_PRESETS` server-side**
+(`_night_mode_webaudio`, served on `GET /api/settings/night-mode`) rather than restated in
+JS. That dict is already mirrored by hand into `run.py` and `watchdog.py`; a fourth copy
+in another language would have drifted within a release.
+
+### Mirroring state to a second client means the first can render it twice
+
+Once the kiosk's skip offer reaches `state.skip_offer`, the kiosk — which is a dashboard
+like any other — renders `#skipOffer` *as well as* its own in-player `#lpSkipOffer`, two
+tiles stacked over the film. `renderSkipOffer` no-ops in `TV_MODE` for that reason. Same
+family as the "To TV" button the kiosk was offering itself: **the page that is the TV must
+opt out of the affordances aimed at the TV.**
+
 - [BACKEND.md](BACKEND.md) — invariants enforced by `main.py`
 - [DAEMON_WATCHDOG.md](DAEMON_WATCHDOG.md) — VPN guard at the process level
 - [ANALYZER.md](ANALYZER.md) — Smart Skip algorithm details and fallback chain

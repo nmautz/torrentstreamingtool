@@ -1,5 +1,64 @@
 # Changelog
 
+## [14.3.0] — 2026-09-15
+**On-device playback became the TV, but it never learned who was watching.**
+
+Since 13.0.0 a library play on the TV opens in the kiosk's own `<video>`. Six things that
+were true of the VLC surface quietly stopped being true of this one.
+
+**A pushed play was credited to the wrong person.** `/api/library/{id}/play` puts the
+requesting `profile_id` in the `open` command; `_tvLocalOpen` dropped it and played as
+whoever the kiosk is permanently signed in as. So every "On the TV" press from a phone
+wrote its progress onto the kiosk's household profile — the viewer's own resume position
+never moved, and their next Play restarted the episode from the top. The page now carries
+the owning profile (`lp.profileId` / `_lpProfileId()`) through every profile-scoped call it
+makes — progress, saved tracks and their lookup, the auto-skip toggles, the playlist
+expansion, and the VLC fallback — and reports it on the heartbeat so the server pins
+`state.library_profile_id` to it. `stop()`'s final progress flush and the "who's watching"
+chip follow from that; both were inert on this surface before, because when a play started
+on the kiosk itself the server never learned the profile at all.
+
+The same `open` command also carries the server-resolved playlist (`files`, `items`,
+`shuffle`), which `_tvLocalOpen` was also discarding in favour of the single file — so a
+selected-episode queue, a merged-series run or a shuffled run pushed from a phone became a
+plain natural-order tail on the TV. It now plays what the server resolved, as documented.
+
+**Smart Skip was invisible from a phone.** `vlc_progress_tracker` finds skip windows by
+polling VLC, and there is no VLC to poll here — so `state.skip_offer` stayed null and the
+dashboard's Skip Intro / Skip Credits tile never appeared while the TV played on-device.
+The only way to skip was to walk over and use the remote. The page owns the playhead, so
+the page reports: each beat mirrors its live offer (including the literal countdown text,
+so "Next Episode in 4" reads identically on both) onto `state.skip_offer`, `POST`/`DELETE
+/api/skip-now` relay the accept/dismiss back to it, and the offer clears when the surface
+does. While the tracker was under the knife it now stands down entirely on this surface —
+its `vlc_playlist_uri()` read could stomp `library_current_file` with whatever VLC happened
+to still be holding.
+
+**Exit Shuffle was invisible for the same reason:** the shuffled order lives in the page's
+own playlist, so `library_shuffle_order` was empty. The heartbeat reports it and
+`/api/library/unshuffle` relays.
+
+**It started at full volume.** `settings.vlc_start_volume` (a % of the admin cap) is
+applied to VLC at startup; a media element just comes up at 1.0. On a host configured for
+35% of a 75 cap, the same film came out of the kiosk four times louder than through VLC.
+Applied now at the start of each TV playback session — cap first, then clamped to 100,
+exactly as the volume endpoints already do.
+
+**Night mode came back.** It was hidden on this surface because it is a VLC launch-time
+audio filter, and relaunching VLC would have put a window over the film to apply it. The
+on-device player now builds the equivalent itself — `<video>` → `DynamicsCompressor` →
+makeup gain — with settings *derived from* `NIGHT_MODE_PRESETS` server-side
+(`_night_mode_webaudio`), so Medium sounds like Medium on both surfaces and there is no
+second set of numbers to keep in step. The graph is built only once night mode is switched
+on and only once its `AudioContext` is confirmed running (`createMediaElementSource`
+captures an element's audio permanently; a silent graph would be a silent film), and off is
+a bypass rather than a teardown. Skipped inside the iOS app, where playback can hand off to
+a native `AVPlayer`. Works for phone on-device playback too, not just the kiosk.
+
+**And the kiosk offered to hand off to the TV**, from the TV. `#lpToTvBtn` is hidden in TV
+mode alongside the other hand-off-to-this-device controls, and the kiosk no longer draws
+the phone's `#skipOffer` banner over its own in-player tile.
+
 ## [14.2.0] — 2026-09-15
 **Styled subtitles, without re-encoding a single frame.**
 

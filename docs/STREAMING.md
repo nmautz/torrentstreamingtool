@@ -268,19 +268,100 @@ Data flows back the same way. The heartbeat carries the player's **track list** 
 the OS mixer is), and its **playlist length + index** (which can be a cross-item
 merged-series run, so it overrides the VLC-derived nav pair in `state_snapshot`).
 
-The heartbeat also sets `library_item_id` / `library_current_file`. Those aren't
-cosmetic: the episode-nav row, Clip and Exit Shuffle gate on `is_library_playback`, Save
-gates on its absence, and `stop()`'s progress finalise plus the delete-while-playing
-guard both key off `library_item_id`.
+The heartbeat also sets `library_item_id` / `library_current_file` / `library_profile_id`.
+Those aren't cosmetic: the episode-nav row, Clip and Exit Shuffle gate on
+`is_library_playback`, Save gates on its absence, `stop()`'s progress finalise plus the
+delete-while-playing guard both key off `library_item_id`, and the finalise *also* needs
+the profile (see **Who a play belongs to** below).
 
-Two things behave differently by necessity:
+It carries two more things the page is the only source of, because they exist only in the
+page: its live **Smart Skip offer** and whether its run is **shuffled**. See
+[Smart Skip on this surface](#smart-skip-on-this-surface).
+
+One thing behaves differently by necessity:
 
 - **Volume clamps at 100.** A media element has no gain above 1.0; VLC's scale runs to
   200 (it amplifies). The effective ceiling is `min(settings.max_volume, 100)` — the
   admin cap is applied first and still holds, exactly as it does for VLC.
-- **Night Mode is hidden.** It is a VLC audio filter applied at launch, so honouring it
-  would relaunch VLC *over* the film to add a filter nobody could hear.
-  `_apply_night_mode` persists the setting and returns early instead.
+
+Two more are implemented differently but reach the same place:
+
+- **Starting volume.** `settings.vlc_start_volume` (a % of the admin cap) is applied to
+  VLC once at host startup; a media element just comes up at 1.0, so before 14.3.0 the
+  kiosk played every film at full gain regardless of the setting. `_tvApplyStartVolume()`
+  applies it at the start of each TV playback *session* — `lpPlay` only, never a
+  within-run episode advance, which would undo a mid-film adjustment. Cap first, then
+  clamped to 100, matching the rule above.
+- **Night Mode.** A VLC audio filter can't reach a `<video>`, so the page builds the
+  equivalent in Web Audio: `<video>` → `MediaElementAudioSource` → `DynamicsCompressor` →
+  makeup `Gain` → out, with a bypass path for off (`_lpNightSync` in
+  `static/index.html`). The compressor settings are **derived from** `NIGHT_MODE_PRESETS`
+  server-side by `_night_mode_webaudio` and served on `GET /api/settings/night-mode` as
+  `webaudio`, so Medium sounds like Medium on both surfaces and there is exactly one set
+  of numbers. On/off and the preset ride the normal `state` broadcast, so the fullscreen
+  moon button drives whichever surface is playing. `_apply_night_mode` still refuses to
+  relaunch VLC while the kiosk player owns the TV — it now broadcasts `state` on that
+  path so the page picks the change up immediately.
+
+  Two constraints shape the implementation. `createMediaElementSource()` captures an
+  element's audio **permanently** and a silent graph is a silent film, so the graph is
+  built lazily — only once night mode is actually switched on, and only once its
+  `AudioContext` is confirmed `running` (a context that won't resume leaves the element
+  untouched instead of muting it) — and "off" is a bypass, never a teardown. Skipped
+  inside the iOS app, where playback can hand off to a native `AVPlayer` that a Web Audio
+  graph on the WKWebView element has no part in. It applies to **any** on-device
+  playback, phones included, not only the kiosk.
+
+### Who a play belongs to
+
+The kiosk is permanently signed in as one household profile, but a play pushed from a
+phone belongs to whoever pressed **On the TV** there. `POST /api/library/{id}/play` puts
+that `profile_id` in the `open` command; until 14.3.0 `_tvLocalOpen` dropped it, so every
+pushed play wrote its progress onto the kiosk's profile — **the viewer's own resume
+position never moved, and their next Play restarted the episode from the top.**
+
+`lp.profileId` holds the override (empty ⇒ the signed-in profile owns the session) and
+`_lpProfileId()` is what every profile-scoped call in the player reads — progress
+(`saveProgress` takes it as a 5th argument), `/local-tracks`, `/saved-tracks`, the
+`/files` playlist expansion, `_lpAutoSkipPrefs`, and the `force_vlc` fallback. The
+heartbeat reports it so the server pins `state.library_profile_id` via
+`_set_playback_owner`; `stop()`'s final flush and the "who's watching" chip follow from
+that. It is cleared by `lpStop`, so a play started *on* this browser is always the
+signed-in profile's.
+
+The same `open` command carries the **server-resolved playlist** (`files`, `items`,
+`shuffle`, `shuffle_scope`) — also discarded before 14.3.0, which turned a
+selected-episode queue, a merged-series run or a shuffled run pushed from a phone into a
+plain natural-order tail. `POST /api/tv-local/open` (the VLC → device switch) carries only
+the one file and still falls back to expanding it.
+
+### Smart Skip on this surface
+
+`vlc_progress_tracker` finds intro/credits windows by polling VLC, and there is no VLC to
+poll here — so `state.skip_offer` stayed null and the dashboard's Skip tile never appeared
+while the TV played on-device. Walking over to the remote was the only way to skip.
+
+The page owns the playhead, so the page is the source of truth:
+
+- `lpEvaluateSkipOffer` runs as before against its own `<video>`, drawing `#lpSkipOffer`.
+- `_tvSkipOffer()` packages the live offer in `state.skip_offer`'s existing shape — plus
+  `label`, the tile's literal text, so an auto-skip countdown ("Next Episode in 4") reads
+  identically on the phone. Sent on **every** beat, `null` included, so a cleared offer
+  clears server-side rather than sticking.
+- `POST /api/skip-now` relays `skip_accept` and `DELETE` relays `skip_dismiss` to the page
+  (which marks the file done in `lp.skipDoneFor`, so the next beat can't re-show it).
+- `renderSkipOffer` prefers `offer.label`, and no-ops entirely in `TV_MODE` — the kiosk
+  already draws its own in-player tile and would otherwise stack a second one over the film.
+
+**`vlc_progress_tracker` stands down entirely while `tv_local_active`.** Besides having
+nothing useful to compute, its `vlc_playlist_uri()` read would stomp `library_current_file`
+with whatever VLC happened to still be holding.
+
+Shuffle rides along for the same reason: the shuffled order is the page's own
+`lp.playlist`, so `library_shuffle_order` is empty and the fullscreen **Exit Shuffle**
+tile had no way to know. The heartbeat reports `shuffle`, `state_snapshot`'s
+`library_shuffle` ORs it in, and `POST /api/library/unshuffle` relays `unshuffle` to the
+page (`lpExitShuffle` rebuilds the natural-order tail itself).
 
 ### How a play reaches this surface
 
@@ -303,8 +384,10 @@ Safety rails, all three load-bearing:
   More-panel toggle and `tvFallbackToVlc`. Without it the server routes them straight back
   to the surface they are trying to leave. See [GOTCHAS.md](GOTCHAS.md).
 - The `open` command carries the **server-resolved playlist** (`files`, `items`,
-  `shuffle`, `shuffle_scope`), so episode nav and auto-advance match VLC rather than the
-  page re-deriving them from a single path.
+  `shuffle`, `shuffle_scope`) and the requesting **`profile_id`**, so episode nav,
+  auto-advance and progress attribution match VLC rather than the page re-deriving a tail
+  from a single path and crediting its own signed-in profile. `_tvLocalOpen` ignored all
+  five fields until 14.3.0 — see [Who a play belongs to](#who-a-play-belongs-to).
 
 ### Switching on purpose
 

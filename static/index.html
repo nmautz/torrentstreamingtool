@@ -467,7 +467,12 @@
        class above already hides Prep / On-Device play; additionally hide the
        hand-off-to-this-device buttons (the "device" is the TV itself). */
     body.tv-mode #handoffBtn,
-    body.tv-mode #fcHandoffBtn { display: none !important; }
+    body.tv-mode #fcHandoffBtn,
+    /* ...and the local player's "To TV" hand-off: on the kiosk this player IS
+       the TV, so the button offered to send the picture where it already is.
+       (Switching this surface to VLC is the fullscreen More panel's job, from a
+       phone — see fcSwitchTvSurface.) */
+    body.tv-mode #lpToTvBtn { display: none !important; }
     /* D-pad navigation focus ring: a plain :focus rule (not :focus-visible) so
        programmatic focus from the arrow-key handler always shows it. Inset so
        the flat Metro tiles don't shift layout. */
@@ -3389,7 +3394,7 @@
         <div id="lpTitle" class="text-xs font-bold text-gray-200 truncate">—</div>
         <div class="text-[10px] uppercase tracking-widest text-emerald-500 font-bold">On Device</div>
       </div>
-      <button onclick="lpHandoffToVlc(this)" title="Hand off to the TV (VLC) — resume there at the same time"
+      <button id="lpToTvBtn" onclick="lpHandoffToVlc(this)" title="Hand off to the TV (VLC) — resume there at the same time"
         class="h-full px-4 flex items-center gap-1.5 text-indigo-400 hover:text-indigo-200 hover:bg-indigo-950/40 active:bg-indigo-950/70 transition-colors text-xs font-bold uppercase tracking-wide">
         <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.5" viewBox="0 0 24 24">
           <rect x="2" y="4" width="20" height="14" rx="0"/><path stroke-linecap="round" d="M8 20h8M12 18v2"/>
@@ -4093,12 +4098,24 @@ let lp = {
   // progress, saved tracks, skip-data) targets the right item as playback
   // auto-advances across episode-torrents. Empty ⇒ single-item (itemId used).
   playlistItems: [],
+  // Profile this playback is ATTRIBUTED to, when that isn't the signed-in one.
+  // Only ever set on the TV kiosk: it stays permanently signed in as one
+  // household profile, but a play pushed from a phone ("On the TV") belongs to
+  // whoever pressed it there — the `open` command carries their profile_id.
+  // Everything profile-scoped in this player reads _lpProfileId(), never
+  // profile.id directly, so progress, saved tracks and auto-skip prefs all land
+  // on the right person. Empty ⇒ the signed-in profile owns this session.
+  // (Before 14.3.0 this was dropped on the floor: every phone-pushed TV play was
+  // credited to the kiosk's profile, so the viewer's own resume position never
+  // moved and their next Play restarted the episode from the top.)
+  profileId: "",
   shuffle: false,         // device Shuffle Play: playlist is a random order (not natural)
   shuffleScope: "",       // "all" | "unwatched" — pool the random order was drawn from
   // Skip-offer logic (mirrors backend _maybe_emit_skip_offer)
   skipData: null,         // {intro:{start,end}, credits_start} for current file
   skipOfferType: null,    // "intro"|"credits"|null
   skipOfferEnd: 0,
+  skipOfferLabel: "",     // the tile's literal text, mirrored to phones by _tvSkipOffer
   skipDoneFor: new Set(),  // "<filePath>#intro" / "#credits" markers for dismissed offers
   // Progress save throttling
   lastSaveAt: 0,
@@ -4817,14 +4834,14 @@ function renderPlayer(s){
       : "Switch the TV to on-device playback (keeps position)";
   }
 
-  // Night Mode is a VLC audio filter applied at launch — it does nothing for a
-  // browser <video>, and the backend deliberately won't relaunch VLC over the
-  // kiosk player to apply it. Hide it rather than offer a control that can't work.
+  // Night Mode works on BOTH surfaces now: VLC gets its compressor filter at
+  // launch, and the on-device player builds an equivalent Web Audio compressor
+  // from the same presets (_lpNightSync). It used to be hidden while the kiosk
+  // player held the TV, because the setting genuinely did nothing there.
   const fcNight=document.getElementById("fcNightBtn");
-  if(fcNight){
-    fcNight.classList.toggle("hidden",!!s.tv_local_active);
-    fcNight.classList.toggle("flex",!s.tv_local_active);
-  }
+  if(fcNight){ fcNight.classList.remove("hidden"); fcNight.classList.add("flex"); }
+  // Pick up an on/off or preset change on whichever device is playing locally.
+  _lpNightSync();
 
   // Prev / Next episode buttons (footer) — show whenever library item has multiple files
   const prevBtn=document.getElementById("prevEpBtn");
@@ -5314,12 +5331,21 @@ async function fcSwitchTvSurface(btn){
 function renderSkipOffer(offer){
   const el = document.getElementById("skipOffer");
   if(!el) return;
+  // The TV kiosk draws its own tile inside the player (#lpSkipOffer) and now
+  // mirrors it up to state.skip_offer for the phones — so on the kiosk this
+  // banner would be the SAME offer a second time, stacked over the film.
+  if(TV_MODE){ el.classList.add("hidden"); return; }
   if(!offer || !offer.type){
     el.classList.add("hidden");
     return;
   }
   const lbl = document.getElementById("skipOfferLabel");
-  if(offer.type === "intro"){
+  // On-device TV playback mirrors the kiosk tile's literal text (see
+  // _tvSkipOffer), so an auto-skip countdown — "Next Episode in 4" — reads the
+  // same here as on the TV. VLC offers carry no label; derive one from the type.
+  if(offer.label){
+    lbl.textContent = offer.label;
+  } else if(offer.type === "intro"){
     lbl.textContent = "Skip Intro";
   } else if(offer.type === "credits"){
     lbl.textContent = offer.has_next ? "Skip to Next Episode" : "Skip Credits";
@@ -5474,7 +5500,10 @@ async function toggleNightMode(el){
   renderNightMode();
   const s = document.getElementById("psStatus");
   if(s){
-    s.textContent = next ? "Night mode on — restarting VLC…" : "Night mode off — restarting VLC…";
+    // On-device playback applies it instantly; only VLC has to relaunch for it.
+    const onDevice = !!app.tv_local_active || !!lp.itemId;
+    s.textContent = (next ? "Night mode on" : "Night mode off")
+                  + (onDevice ? "." : " — restarting VLC…");
     s.className = "text-[10px] text-indigo-400 uppercase tracking-widest pt-1";
   }
   const r = await fetch("/api/settings/night-mode",{
@@ -14381,8 +14410,13 @@ function offKey(itemId, filePath) { return `${itemId}|${filePath}`; }
 // POST a watch-progress update. Best-effort: a single failed POST is fine —
 // the next 15-second tick (or the `pause`/`visibilitychange`/`pagehide` flush)
 // will overwrite it, and the server's last persisted value is still authoritative.
-async function saveProgress(itemId, filePath, posSec, durSec) {
-  if (!profile.id && !_appOffline) return;
+// `profileId` names the profile this write belongs to. It defaults to the
+// signed-in one; the local player passes _lpProfileId() so a play PUSHED to the
+// TV kiosk from someone's phone is credited to them, not to whichever household
+// profile the kiosk is permanently signed in as.
+async function saveProgress(itemId, filePath, posSec, durSec, profileId) {
+  const pid = profileId || profile.id || "";
+  if (!pid && !_appOffline) return;
   // Drop saves at or near t=0. The server treats `pct = position/duration` as
   // the source of truth for `completed`, so a t≈0 write would wipe a fully-
   // watched episode back to unwatched. The resume offer also ignores anything
@@ -14397,7 +14431,7 @@ async function saveProgress(itemId, filePath, posSec, durSec) {
     if (isApp && _cap.os) {
       try {
         await _cap.os.saveProgress({ itemId, filePath,
-          positionSec: posSec, durationSec: durSec, profileId: profile.id || "" });
+          positionSec: posSec, durationSec: durSec, profileId: pid });
       } catch (_) {}
     }
     return;
@@ -14412,7 +14446,7 @@ async function saveProgress(itemId, filePath, posSec, durSec) {
   try {
     const r = await fetch(`/api/library/${itemId}/progress`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ profile_id: profile.id, file_path: filePath,
+      body: JSON.stringify({ profile_id: pid, file_path: filePath,
                              position_sec: posSec, duration_sec: durSec }),
     });
     saved = r.ok;
@@ -14423,7 +14457,7 @@ async function saveProgress(itemId, filePath, posSec, durSec) {
     if (isApp && _cap.os) {
       try {
         await _cap.os.saveProgress({ itemId, filePath,
-          positionSec: posSec, durationSec: durSec, profileId: profile.id });
+          positionSec: posSec, durationSec: durSec, profileId: pid });
       } catch (_) {}
     }
   }
@@ -15416,10 +15450,11 @@ async function _appStartLocalPlayback(local) {
 // Airplane-Mode playback starts without waiting on a timeout.
 async function _appFetchSavedTracks(itemId, filePath) {
   if (_appOffline) return _appOfflineSavedTracks(itemId, filePath);
-  if (!navigator.onLine || !profile.id) return {};
+  const pid = _lpProfileId();
+  if (!navigator.onLine || !pid) return {};
   try {
     const u = `/api/library/${itemId}/saved-tracks?file_path=${encodeURIComponent(filePath)}`
-            + `&profile_id=${encodeURIComponent(profile.id)}`;
+            + `&profile_id=${encodeURIComponent(pid)}`;
     const r = await _appFetchT(u, { headers: _appAuthHeaders() }, 4000);
     if (!r.ok) return {};
     return (await r.json()).saved_tracks || {};
@@ -17792,7 +17827,14 @@ function _ensureLibassLib() {
   return _libassLibPromise;
 }
 
-async function lpPlay(itemId, files, seekTo, label, shuffle, shuffleScope, items) {
+// `profileId` (last) names the profile this playback BELONGS to when that isn't
+// the signed-in one — only the TV kiosk passes it, carrying the profile_id the
+// server put in the `open` command (i.e. whoever pressed "On the TV" on their
+// phone). See lp.profileId / _lpProfileId.
+async function lpPlay(itemId, files, seekTo, label, shuffle, shuffleScope, items, profileId) {
+  // Set FIRST: everything below — the guards, the /files expansion, the prep and
+  // the first progress write — reads the owner through _lpProfileId().
+  lp.profileId = (profileId && profileId !== profile.id) ? profileId : "";
   // Offline cached-player mode: both guards below are host-centric — playback
   // comes from on-device bundles, so neither HLS-on-host nor connectivity matter.
   if (!hlsAvailable && !_appOffline) { showAlert("Stream-to-device isn’t available on this host.", "warn"); return; }
@@ -17811,6 +17853,7 @@ async function lpPlay(itemId, files, seekTo, label, shuffle, shuffleScope, items
     _tvOpenItemId = itemId; _tvOpenFilePath = (files && files[0]) || "";
     _tvOpenPendingUntil = Date.now() + TV_OPEN_PENDING_MS;
     _tvLocalBeat(true);
+    _tvApplyStartVolume();
   }
   // Online play-time handoff: if this single-file play is fully downloaded, hand
   // off to the same-origin cached player so it plays from the on-device bundle
@@ -17855,7 +17898,7 @@ async function lpPlay(itemId, files, seekTo, label, shuffle, shuffleScope, items
       } catch (_) {}
     } else {
       try {
-        const r = await fetch(`/api/library/${itemId}/files?profile_id=${encodeURIComponent(profile.id || "")}`);
+        const r = await fetch(`/api/library/${itemId}/files?profile_id=${encodeURIComponent(_lpProfileId())}`);
         if (r.ok) {
           const all = ((await r.json()).files || []).map(f => f.path).filter(Boolean);
           const idx = all.indexOf(playlist[0]);
@@ -18132,7 +18175,7 @@ async function _lpOdResurrect() {
   try {
     const r = await fetch(`/api/library/${lp.itemId}/stream-ondemand`, {
       method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ file_path: filePath, profile_id: (profile && profile.id) || "" }),
+      body: JSON.stringify({ file_path: filePath, profile_id: _lpProfileId() }),
     });
     if (!r.ok) return;
     const od = await r.json();
@@ -18431,7 +18474,7 @@ async function _lpLoadIndex(seekTo) {
     try {
       const r = await fetch(`/api/library/${lp.itemId}/offline-prepare`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ file_path: filePath, profile_id: profile.id || "" }),
+        body: JSON.stringify({ file_path: filePath, profile_id: _lpProfileId() }),
       });
       if (!r.ok) {
         const e = await r.json().catch(() => ({ detail: "Prepare failed." }));
@@ -18465,7 +18508,7 @@ async function _lpLoadIndex(seekTo) {
       // Cleared whether or not it applies, so it can never leak into a later load.
       const _pick = lp._odAudioPick;
       lp._odAudioPick = null;
-      const _odBody = { file_path: filePath, profile_id: profile.id || "" };
+      const _odBody = { file_path: filePath, profile_id: _lpProfileId() };
       if (_pick && _pick.file === filePath && Number.isFinite(_pick.idx)) {
         const _t = (lp.audios || [])[_pick.idx];
         _odBody.audio_idx = (_t && Number.isInteger(_t.idx)) ? _t.idx : _pick.idx;
@@ -19287,7 +19330,7 @@ function _lpStopSubUpgradePoll() {
 // While an auto-applied AI sub is showing, re-check for a real preferred-language
 // sidecar that finished downloading after playback started, and switch to it.
 async function _lpSubUpgradePoll() {
-  if (!subtitleUpgradeLate || !lp.subAutoApplied || !lp.itemId || !lp.filePath || !profile.id) return;
+  if (!subtitleUpgradeLate || !lp.subAutoApplied || !lp.itemId || !lp.filePath || !_lpProfileId()) return;
   const fileAtStart = lp.filePath;
   let subs;
   try {
@@ -20044,7 +20087,7 @@ function _lpSaveLocalTracks(what) {
   // while locked carries the viewer's choice into the native player.
   _npArm();
   if (!lp.itemId || !lp.filePath) return;
-  if (!profile.id && !_appOffline) return;
+  if (!_lpProfileId() && !_appOffline) return;
   // Fully offline: the audio delay lives in the localStorage mirror, which
   // lpSetAudioOffset already wrote — the native store has no field for it.
   if (what === "offset" && _appOffline) return;
@@ -20077,14 +20120,14 @@ function _lpSaveLocalTracks(what) {
         // must not clobber the stored resume position — keep the old one.
         if (pos < 5) {
           try {
-            const p = await _cap.os.getProgress({ itemId, filePath, profileId: profile.id || "" });
+            const p = await _cap.os.getProgress({ itemId, filePath, profileId: _lpProfileId() });
             if (p && p.found) { pos = p.positionSec || pos; dur = p.durationSec || dur; }
           } catch (_) {}
         }
         try {
           await _cap.os.saveProgress({
             itemId, filePath, positionSec: pos, durationSec: dur,
-            profileId: profile.id || "",
+            profileId: _lpProfileId(),
             localAudioIdx: audioIdx == null ? undefined : audioIdx,
             audioSel: audioSel || undefined,
             // Subtitle fields only for subtitle-triggered saves — an audio
@@ -20098,7 +20141,7 @@ function _lpSaveLocalTracks(what) {
     return;
   }
   const payload = {
-    profile_id: profile.id,
+    profile_id: _lpProfileId(),
     file_path:  lp.filePath,
     audio_idx:  audioIdx,
     ...(audioSel ? { audio_sel: audioSel } : {}),
@@ -20158,7 +20201,7 @@ async function lpExitShuffle(btn) {
   try {
     let natural = [];
     try {
-      const r = await fetch(`/api/library/${lp.itemId}/files?profile_id=${encodeURIComponent(profile.id || "")}`);
+      const r = await fetch(`/api/library/${lp.itemId}/files?profile_id=${encodeURIComponent(_lpProfileId())}`);
       if (r.ok) natural = ((await r.json()).files || []).map(f => f.path).filter(Boolean);
     } catch (_) {}
     const cur = lp.playlist[lp.pi];
@@ -20317,11 +20360,150 @@ function lpToggleMute() {
   _lpCtlSync(); _lpCtlShow();
 }
 
+// ── Night mode on the on-device player ──────────────────────────────────────
+// Night mode narrows the gap between whispered dialogue and explosions. On VLC
+// it is the `compressor` audio filter, set at launch. A browser <video> can't
+// take a VLC filter, so this surface builds the equivalent in Web Audio:
+//
+//     <video> ──▶ MediaElementAudioSource ──▶ DynamicsCompressor ──▶ makeup Gain ──▶ out
+//                                          └────────── bypass ──────────────────┘
+//
+// The compressor settings are DERIVED FROM THE VLC PRESETS server-side
+// (_night_mode_webaudio in main.py) and fetched from /api/settings/night-mode, so
+// "Medium" sounds like Medium on both surfaces and there is no second set of
+// numbers to keep in step. The on/off state and the chosen preset ride the normal
+// `state` broadcast, so the fullscreen moon button works against whichever
+// surface is playing — and the backend no longer relaunches VLC over the kiosk
+// player to apply a filter nobody could hear (_apply_night_mode).
+//
+// Two hard constraints shape the code:
+//   • createMediaElementSource() PERMANENTLY captures the element's audio — it
+//     can't be undone, and if the graph is silent so is the film. So the graph is
+//     built lazily, only when night mode is actually turned on, and only once the
+//     AudioContext is confirmed `running`. Off is then a bypass, not a teardown.
+//   • A suspended context means no sound at all. We resume before connecting and
+//     again on any statechange, and never build if the resume didn't take.
+// Skipped inside the iOS app: playback there can hand off to a native AVPlayer
+// (background / external display), which a Web Audio graph on the WKWebView
+// element has no part in. See docs/STREAMING.md § 2b.
+let _lpNightCtx = null, _lpNightSrc = null, _lpNightComp = null, _lpNightGain = null;
+let _lpNightPresets = null;   // {preset: {threshold, ratio, knee, attack, release, makeup_gain}}
+let _lpNightRouted = null;    // true = through the compressor, false = bypassed, null = not built
+let _lpNightSyncing = false;  // re-entrancy guard — _lpNightSync awaits, and its callers are frequent
+
+function _lpNightAvailable() {
+  return !isApp && !!(window.AudioContext || window.webkitAudioContext);
+}
+
+// One cold read of the preset table (shared by every preset; the active one comes
+// off the state broadcast). Resolves to null if the host can't answer.
+function _lpNightLoadPresets() {
+  if (_lpNightPresets) return Promise.resolve(_lpNightPresets);
+  return fetch("/api/settings/night-mode")
+    .then(r => r.ok ? r.json() : null)
+    .then(d => { _lpNightPresets = (d && d.webaudio) || null; return _lpNightPresets; })
+    .catch(() => null);
+}
+
+function _lpNightParams() {
+  const t = _lpNightPresets || {};
+  return t[app.vlc_night_mode_preset] || t.medium || null;
+}
+
+// Build the graph. Returns true only once audio is genuinely flowing through it —
+// a context that won't resume leaves the element untouched rather than mute.
+async function _lpNightBuild() {
+  if (_lpNightCtx) return true;
+  const v = document.getElementById("lpVideo");
+  const AC = window.AudioContext || window.webkitAudioContext;
+  if (!v || !AC) return false;
+  let ctx;
+  try {
+    ctx = new AC();
+    if (ctx.state !== "running") { try { await ctx.resume(); } catch (_) {} }
+    if (ctx.state !== "running") { try { ctx.close(); } catch (_) {} return false; }
+    _lpNightSrc  = ctx.createMediaElementSource(v);
+    _lpNightComp = ctx.createDynamicsCompressor();
+    _lpNightGain = ctx.createGain();
+    _lpNightComp.connect(_lpNightGain);
+    _lpNightCtx  = ctx;
+  } catch (e) {
+    console.warn("[night] Web Audio unavailable — night mode stays off on this device", e);
+    try { if (ctx) ctx.close(); } catch (_) {}
+    _lpNightCtx = _lpNightSrc = _lpNightComp = _lpNightGain = null;
+    return false;
+  }
+  // A context that suspends later (tab throttling, an OS audio-route change)
+  // would take the film's audio with it, since the element now plays through it.
+  _lpNightCtx.addEventListener("statechange", () => {
+    if (_lpNightCtx && _lpNightCtx.state === "suspended") {
+      _lpNightCtx.resume().catch(() => {});
+    }
+  });
+  return true;
+}
+
+function _lpNightRoute(through) {
+  if (!_lpNightCtx) return;
+  try { _lpNightSrc.disconnect(); } catch (_) {}
+  try { _lpNightGain.disconnect(); } catch (_) {}
+  if (through) {
+    _lpNightSrc.connect(_lpNightComp);
+    _lpNightGain.connect(_lpNightCtx.destination);
+  } else {
+    _lpNightSrc.connect(_lpNightCtx.destination);
+  }
+  _lpNightRouted = !!through;
+}
+
+// Bring the graph in line with app.vlc_night_mode / app.vlc_night_mode_preset.
+// Safe to call at any time and as often as you like: it only touches the graph
+// when something actually differs. Called when playback starts, on every SSE
+// state event, and on stop.
+async function _lpNightSync() {
+  const want = !!app.vlc_night_mode && !!lp.itemId && _lpNightAvailable();
+  if (!want) { if (_lpNightRouted) _lpNightRoute(false); return; }
+  // Both awaits below yield, and the callers (every SSE state event, plus `play`)
+  // overlap easily — a second pass entering _lpNightBuild would call
+  // createMediaElementSource on an element that already has one, which throws and
+  // would tear down the graph the first pass had just built.
+  if (_lpNightSyncing) return;
+  _lpNightSyncing = true;
+  try {
+    if (!_lpNightPresets) await _lpNightLoadPresets();
+    const prm = _lpNightParams();
+    if (!prm) return;                       // host didn't answer — leave audio alone
+    if (!_lpNightCtx && !(await _lpNightBuild())) return;
+    const now = _lpNightCtx.currentTime;
+    const c = _lpNightComp;
+    c.threshold.setValueAtTime(prm.threshold, now);
+    c.knee.setValueAtTime(prm.knee, now);
+    c.ratio.setValueAtTime(prm.ratio, now);
+    c.attack.setValueAtTime(prm.attack, now);
+    c.release.setValueAtTime(prm.release, now);
+    // Ramp the makeup gain rather than stepping it — a preset change mid-scene
+    // should not click.
+    _lpNightGain.gain.setTargetAtTime(prm.makeup_gain, now, 0.05);
+    if (_lpNightRouted !== true) _lpNightRoute(true);
+  } finally {
+    _lpNightSyncing = false;
+  }
+}
+
 // ── On-device TV playback (?tv=1 kiosk) ─────────────────────────────────────
 // The kiosk's own <video> is the primary TV surface since 13.0.0. The host
 // SUPPRESSES the remote's transport keys and relays them here over the
 // `tv_command` SSE channel (see _remote_key_action), so these are driven by the
 // remote, not by pointer input. See docs/REMOTE.md and docs/STREAMING.md.
+
+// The profile the ACTIVE on-device session belongs to. Normally whoever is
+// signed in on this browser; on the TV kiosk it is instead whoever pushed the
+// play from their phone (see lp.profileId). Every profile-scoped call the local
+// player makes — progress, saved tracks, skip prefs, the resume hint — goes
+// through here so a pushed play can't be credited to the wrong person.
+function _lpProfileId() {
+  return lp.profileId || profile.id || "";
+}
 
 function _tvLocalLive() {
   // True only when THIS page is the kiosk AND its player is actually up. Guards
@@ -20329,6 +20511,40 @@ function _tvLocalLive() {
   if (!TV_MODE) return false;
   const el = document.getElementById("localPlayer");
   return !!(el && el.classList.contains("lp-active") && lp.itemId);
+}
+
+// ── Starting volume (TV on-device playback) ─────────────────────────────────
+// The host applies settings.vlc_start_volume — a % of the admin max-volume cap —
+// to VLC at startup. A media element has no such notion: it comes up at 1.0, so
+// the same film that plays at 26% through VLC came out of the kiosk player at
+// four times that. Apply the configured level at the start of each TV playback
+// SESSION (lpPlay; never on a within-run episode advance, which would undo a
+// mid-film adjustment). The cap is applied first, exactly as it is for VLC, and
+// then clamped to 100 — an element's gain has no headroom above 1.0.
+let _tvStartVolPct = null;   // cached settings.vlc_start_volume (0-100), null until fetched
+function _tvRefreshStartVolume() {
+  if (!TV_MODE) return Promise.resolve();
+  return fetch("/api/settings/vlc-start-volume")
+    .then(r => r.ok ? r.json() : null)
+    .then(d => { if (d && d.vlc_start_volume != null) _tvStartVolPct = Number(d.vlc_start_volume); })
+    .catch(() => {});
+}
+function _tvApplyStartVolume() {
+  // Always re-read: the setting can be changed between plays, and on the very
+  // first play after a kiosk relaunch nothing is cached yet — that is precisely
+  // the case this exists for, so apply AFTER the fetch rather than skipping it.
+  // Landing a beat late is harmless: lpPlay's prep/probe runs for seconds before
+  // there is any sound to be too loud.
+  _tvRefreshStartVolume().then(() => {
+    if (_tvStartVolPct == null) return;
+    const cap = Math.max(0, Math.min(100, parseInt(globalMaxVolume, 10) || 100));
+    const target = Math.max(0, Math.min(100, Math.round(cap * _tvStartVolPct / 100)));
+    const v = document.getElementById("lpVideo");
+    if (!v) return;
+    v.muted = false;
+    v.volume = target / 100;
+    _lpCtlSync();
+  });
 }
 
 let _tvVolPillTimer = null;
@@ -20438,6 +20654,7 @@ function _tvLocalBeat(force) {
         body: JSON.stringify({
           active: true, item_id: lp.itemId || _tvOpenItemId || "",
           file_path: lp.filePath || _tvOpenFilePath || "", playback: "buffering",
+          profile_id: _lpProfileId(),
         }),
       }).catch(() => {});
       return;
@@ -20465,6 +20682,11 @@ function _tvLocalBeat(force) {
       active:    true,
       item_id:   lp.itemId || "",
       file_path: lp.filePath || "",
+      // Whose playback this is. The kiosk stays signed in as one household
+      // profile, but a play pushed from a phone belongs to whoever pressed it
+      // there — the server pins state.library_profile_id to this, so its final
+      // progress flush and the "who's watching" chip name the right person.
+      profile_id: _lpProfileId(),
       title:     lp.name || "",
       time:      v ? (v.currentTime || 0) : 0,
       duration:  (v && v.duration) || lp.duration || 0,
@@ -20479,6 +20701,15 @@ function _tvLocalBeat(force) {
       // controls and its "3 / 25" counter read these back off the state snapshot.
       nav_count: (lp.playlist || []).length,
       nav_index: lp.pi == null ? -1 : lp.pi,
+      // Smart Skip: this page owns detection on this surface (it has the
+      // playhead), so its live offer is mirrored onto state.skip_offer and every
+      // dashboard's fullscreen controls render the same tile — with the same
+      // countdown text — as the TV. Sent on EVERY beat, null included, so a
+      // cleared offer clears server-side instead of sticking. See _tvSkipOffer.
+      skip_offer: _tvSkipOffer(),
+      // Shuffle lives only in this page's playlist order, so the fullscreen
+      // Exit-Shuffle tile has no other way to know.
+      shuffle:   !!lp.shuffle,
       // Only when the run actually changed — this can be 100+ paths and the beat
       // is every 2 s. The server mirrors it onto state.library_playlist, which is
       // what a TV→phone handoff slices to build its tail.
@@ -20517,10 +20748,24 @@ function _tvLocalOpen(d) {
       // No title — lp.name isn't set until lpPlay runs. The normal 2 s
       // heartbeat fills it in a moment later.
       active: true, item_id: d.item_id, file_path: d.file_path,
+      profile_id: d.profile_id || "",
       time: Number(d.seek) || 0, duration: 0, playback: "buffering",
     }),
   }).catch(() => {});
-  lpPlay(d.item_id, [d.file_path], Number(d.seek) || 0, "");
+  // Play the SERVER-RESOLVED run, not just the one file: `files` / `items` /
+  // `shuffle` are already resolved by /api/library/{id}/play (they are what VLC
+  // would have been handed), so episode nav, auto-advance and a shuffled run
+  // match VLC instead of the page re-deriving a natural-order tail from one
+  // path. The VLC→device switch (POST /api/tv-local/open) carries only the one
+  // file, and falls back to that.
+  const files = (Array.isArray(d.files) && d.files.length) ? d.files : [d.file_path];
+  const items = (Array.isArray(d.items) && d.items.length === files.length) ? d.items : null;
+  // profile_id is LOAD-BEARING: the kiosk is signed in as one household profile,
+  // but this play belongs to whoever pressed it on their phone. Without it every
+  // pushed play's progress landed on the kiosk's profile, so the viewer's own
+  // resume never moved and their next Play restarted the episode.
+  lpPlay(d.item_id, files, Number(d.seek) || 0, "",
+         !!d.shuffle, d.shuffle_scope || "", items, d.profile_id || "");
 }
 
 function tvFallbackToVlc(reason) {
@@ -20537,6 +20782,7 @@ function tvFallbackToVlc(reason) {
   const at = Math.max(0, (v && v.currentTime > 2 ? v.currentTime : 0)
                          || lp.lastKnownT || lp.resumeSec || 0);
   const itemId = lp.itemId, filePath = lp.filePath;
+  const ownerPid = _lpProfileId();
   const shuffle = !!lp.shuffle, scope = lp.shuffleScope || "";
   console.warn("[tv] on-device playback failed (" + reason + ") — falling back to VLC");
   showAlert("Switching to VLC — " + reason, "warn");
@@ -20545,7 +20791,9 @@ function tvFallbackToVlc(reason) {
     return fetch(`/api/library/${itemId}/play`, {
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({
-        profile_id: (profile && profile.id) || "",
+        // The session's owning profile, not the kiosk's — a pushed play that
+        // falls back to VLC must keep being credited to whoever started it.
+        profile_id: ownerPid,
         files: [filePath], seek_first_to: at,
         shuffle: shuffle, shuffle_scope: scope,
         // LOAD-BEARING: /api/library/{id}/play now honours the TV surface
@@ -20844,8 +21092,8 @@ async function lpStop() {
     // AWAIT the final write (a POST /api/progress through the proxy), otherwise
     // location.replace can cut off the fire-and-forget call and the server never
     // learns this session's final position.
-    if (_appProxied) { await saveProgress(lp.itemId, lp.filePath, t, d); }
-    else saveProgress(lp.itemId, lp.filePath, t, d);
+    if (_appProxied) { await saveProgress(lp.itemId, lp.filePath, t, d, _lpProfileId()); }
+    else saveProgress(lp.itemId, lp.filePath, t, d, _lpProfileId());
   }
   // Tear down any on-demand session promptly (the server-side reaper is the
   // backstop if this beacon never lands). sendBeacon survives an unload.
@@ -20873,6 +21121,12 @@ async function lpStop() {
   _lpHidePreparing();
   _lpDevHudStop();
   lp.itemId = null; lp.filePath = null; lp.playlist = []; lp.playlistItems = []; lp.pi = 0;
+  // Drop the pushed-play attribution — the next play started ON this browser
+  // belongs to whoever is signed in here.
+  lp.profileId = "";
+  // Nothing playing → bypass the night-mode compressor (the graph itself stays;
+  // createMediaElementSource can't be undone — see _lpNightBuild).
+  _lpNightSync();
   // Proxied playback session: playback is done, so leave the loopback player and
   // return to the direct host dashboard (no-op in a normal/offline session).
   _appProxiedReturnHost();
@@ -20883,13 +21137,16 @@ async function lpStop() {
 const LP_SKIP_LEAD_INTRO = 5;
 const LP_SKIP_LEAD_CREDITS = 10;
 
-// Resolve the current profile's auto-skip toggles. Prefer the freshly-fetched
-// allProfiles entry (the profile-settings modal can update it mid-session),
-// falling back to the stored `profile` object.
+// Resolve the auto-skip toggles of the profile this SESSION belongs to (see
+// _lpProfileId — on the TV kiosk that is whoever pushed the play, not the
+// profile the kiosk is signed in as). Prefer the freshly-fetched allProfiles
+// entry (the profile-settings modal can update it mid-session), falling back to
+// the stored `profile` object when the owner is the signed-in one.
 function _lpAutoSkipPrefs() {
-  let me = profile;
+  const pid = _lpProfileId();
+  let me = (pid && pid === profile.id) ? profile : null;
   if (Array.isArray(allProfiles) && allProfiles.length) {
-    const f = allProfiles.find(p => p.id === profile.id);
+    const f = allProfiles.find(p => p.id === pid);
     if (f) me = f;
   }
   return { intro: !!(me && me.auto_skip_intro), credits: !!(me && me.auto_skip_credits) };
@@ -20952,6 +21209,10 @@ function lpEvaluateSkipOffer(t) {
 function _lpShowSkipOffer(label) {
   document.getElementById("lpSkipLabel").textContent = label;
   document.getElementById("lpSkipOffer").classList.remove("hidden");
+  // Remembered so the TV heartbeat can mirror the EXACT text onto every phone's
+  // fullscreen controls — including a live auto-skip countdown, which no
+  // type-derived label could reproduce. See _tvSkipOffer.
+  lp.skipOfferLabel = label;
 }
 function _lpHideSkipOffer() {
   // Unconditional: the DOM tile and lp.skipOfferType can fall out of sync (e.g.
@@ -20959,7 +21220,25 @@ function _lpHideSkipOffer() {
   // trailing hide runs), so guarding on skipOfferType could leave a stale tile
   // ("Next Episode in N") frozen on the next episode. Always clear both.
   lp.skipOfferType = null;
+  lp.skipOfferLabel = "";
   document.getElementById("lpSkipOffer").classList.add("hidden");
+}
+
+// The kiosk player's live skip offer in the shape state.skip_offer already has,
+// so the dashboard's renderSkipOffer / triggerSkip need no branching for this
+// surface. `label` is the extra: the tile's literal text, so a countdown
+// ("Next Episode in 4") reads the same on the phone as on the TV. Null when
+// there is no offer — the beat sends that too, so a cleared offer clears
+// server-side rather than sticking until the next one.
+function _tvSkipOffer() {
+  if (!lp.skipOfferType) return null;
+  return {
+    type: lp.skipOfferType,
+    label: lp.skipOfferLabel || "",
+    file_path: lp.filePath || "",
+    has_next: lp.pi < (lp.playlist || []).length - 1,
+    end_at: lp.skipOfferEnd || 0,
+  };
 }
 // Landing offset for an intro skip. Mirrors SKIP_INTRO_PAD_SEC in main.py — the two
 // must stay in step. Smaller than the server's 0.5 because this player seeks with
@@ -20984,7 +21263,7 @@ function lpDismissSkipOffer() {
 async function _lpAdvanceOrEnd() {
   const v = document.getElementById("lpVideo");
   const d = v.duration || lp.duration || 0;
-  if (d > 0) saveProgress(lp.itemId, lp.filePath, d, d);
+  if (d > 0) saveProgress(lp.itemId, lp.filePath, d, d, _lpProfileId());
   const next = lp.pi + 1;
   if (next < lp.playlist.length) {
     lp.pi = next;
@@ -21004,7 +21283,7 @@ async function lpNavEp(delta) {
   if (target < 0 || target >= lp.playlist.length) return;
   const v = document.getElementById("lpVideo");
   const t = v.currentTime || 0, d = v.duration || lp.duration || 0;
-  if (lp.itemId && lp.filePath && d > 0 && t >= 5) saveProgress(lp.itemId, lp.filePath, t, d);
+  if (lp.itemId && lp.filePath && d > 0 && t >= 5) saveProgress(lp.itemId, lp.filePath, t, d, _lpProfileId());
   lp.pi = target;
   await _lpLoadIndex(0);
 }
@@ -21069,7 +21348,7 @@ function _lpWarmNextEp() {
     try {
       const r = await fetch(`/api/library/${itemId}/offline-prepare`, {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ file_path: nextPath, profile_id: profile.id || "" }),
+        body: JSON.stringify({ file_path: nextPath, profile_id: _lpProfileId() }),
       });
       if (!r.ok) throw new Error();
       const prep = await r.json();
@@ -21115,7 +21394,7 @@ function _lpWarmNextEp() {
 // aborted by the browser.
 function _lpFlushProgress(useBeacon) {
   if (!lp.itemId || !lp.filePath) return;
-  if (!profile.id && !_appOffline) return;
+  if (!_lpProfileId() && !_appOffline) return;
   const v = document.getElementById("lpVideo");
   const t = v.currentTime || 0;
   const d = v.duration || lp.duration || 0;
@@ -21130,14 +21409,14 @@ function _lpFlushProgress(useBeacon) {
   if (useBeacon && navigator.sendBeacon && !_appOffline) {
     try {
       const body = JSON.stringify({
-        profile_id: profile.id, file_path: lp.filePath,
+        profile_id: _lpProfileId(), file_path: lp.filePath,
         position_sec: t, duration_sec: d,
       });
       const blob = new Blob([body], { type: "application/json" });
       if (navigator.sendBeacon(`/api/library/${lp.itemId}/progress`, blob)) return;
     } catch (_) {}
   }
-  saveProgress(lp.itemId, lp.filePath, t, d);
+  saveProgress(lp.itemId, lp.filePath, t, d, _lpProfileId());
 }
 
 // One tick of playback-clock housekeeping: last-known playhead, skip-offer
@@ -21160,7 +21439,7 @@ function _lpClockTick(v) {
   const now = Date.now();
   if (now - lp.lastSaveAt > 15000 && (v.duration||0) > 0 && lp.itemId && lp.filePath) {
     lp.lastSaveAt = now;
-    saveProgress(lp.itemId, lp.filePath, t, v.duration);
+    saveProgress(lp.itemId, lp.filePath, t, v.duration, _lpProfileId());
   }
   // Keep the background player's playhead sample fresh (self-throttled to 1 Hz).
   _npTick();
@@ -21217,7 +21496,10 @@ function _lpAttachVideoEvents() {
   // The un-throttled keepalive check on resume heals an OD session the reaper
   // took while the page's timers were frozen (sleep/backgrounded pause) before
   // the drained buffer can force a visible mid-watch reload.
-  v.addEventListener("play",  () => { _lpCtlSync(); _lpCtlShow(); _lpOdKeepAlive(true); _npArm(); });
+  // `play` is the closest thing to a user gesture the night-mode AudioContext
+  // gets (a phone won't resume one outside of that window), so sync here as well
+  // as from renderPlayer.
+  v.addEventListener("play",  () => { _lpCtlSync(); _lpCtlShow(); _lpOdKeepAlive(true); _npArm(); _lpNightSync(); });
   v.addEventListener("pause", () => { _lpCtlSync(); _lpCtlShow(); _lpFlushProgress(false); _npArm(); });
   v.addEventListener("volumechange",   () => _lpCtlSync());
   v.addEventListener("durationchange", () => _lpCtlTick());
@@ -21972,6 +22254,14 @@ function connectSSE(){
       if(d.action==="player_volume_set"){ if(_tvLocalLive()) lpVolumeSet(Number(d.value)||0); return; }
       if(d.action==="prev"){ if(_tvLocalLive()) lpPrevEp(); return; }
       if(d.action==="next"){ if(_tvLocalLive()) lpNextEp(); return; }
+      // Smart Skip driven from a phone's fullscreen controls. The offer that
+      // produced these was OURS (mirrored up by the heartbeat), so acting on it
+      // here is the same code path the on-screen tile uses — including marking
+      // the file done, so the next tick can't re-show what was just handled.
+      if(d.action==="skip_accept"){ if(_tvLocalLive()) lpAcceptSkipOffer(); return; }
+      if(d.action==="skip_dismiss"){ if(_tvLocalLive()) lpDismissSkipOffer(); return; }
+      // Exit Shuffle from a phone — the shuffled order is this page's playlist.
+      if(d.action==="unshuffle"){ if(_tvLocalLive()) lpExitShuffle(); return; }
       if(d.action==="audio_track"){ if(_tvLocalLive()) lpSetAudio(Number(d.value)); return; }
       if(d.action==="subtitle_track"){
         if(!_tvLocalLive()) return;
@@ -22277,6 +22567,10 @@ document.addEventListener("DOMContentLoaded",async()=>{
       applyMaxVolumeToSliders();
     }
   }).catch(()=>{});
+  // TV kiosk: warm the configured starting volume so the FIRST on-device play
+  // after a kiosk relaunch comes up at the same level VLC would (see
+  // _tvApplyStartVolume). No-op everywhere else.
+  _tvRefreshStartVolume();
 
   // Restore profile from localStorage
   let saved=localStorage.getItem("streamlink_profile");
@@ -22311,6 +22605,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">14.2.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">14.3.0</div>
 </body>
 </html>

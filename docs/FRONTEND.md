@@ -170,13 +170,15 @@ Per episode, `_epCardHtml` shows the device-download `<a>` **only when `complete
 
 VLC's volume slider is debounced — `oninput="updateVolumeDisplay"` updates label only, `onmouseup`/`ontouchend="vlcSetVolume"` sends the actual request. This was a fix for VLC lag when scrubbing the slider. Hard cap is the global `settings.max_volume` (fetched once at startup into `globalMaxVolume`, also refreshed when the profile-settings modal opens); `applyMaxVolumeToSliders` enforces it on the slider `max` attribute.
 
-### Night mode (VLC dynamic-range compression)
+### Night mode (dynamic-range compression)
 
 A global on/off toggle reachable from **two** controls: the moon tile inside the fullscreen **More** sheet (`#fcNightBtn`, in `#fcMorePanel` — relocated there in 7.10.0 from the header, which now holds the **More** button) and a checkbox in the **Global** section of profile settings (`#psNightMode`). Both call `toggleNightMode(el)`, which flips `app.vlc_night_mode` optimistically, `renderNightMode()`s the controls, then `POST`s `/api/settings/night-mode` with `{night_mode}`.
 
 The **intensity picker** (`#psNightModePreset`, Light/Medium/Max) is **settings-menu only** — deliberately not in the fullscreen UI. `setNightModePreset(preset)` POSTs `{preset}` only (so it never clobbers the on/off state) and persists independently of the toggle, so the chosen intensity is remembered the next time night mode is switched on. `NIGHT_PRESET_DESC` drives the one-line blurb under the picker.
 
 `renderNightMode()` (also called from the `state` SSE handler, since every snapshot carries `vlc_night_mode`) recolors the moon + fills its icon when active, checks the checkbox, and syncs the preset `<select>` + blurb. The server relaunches VLC to apply the filter (see [GOTCHAS.md](GOTCHAS.md)), so playback briefly re-buffers — these are intentionally low-prominence controls, not hot-path tiles (a preset change *while off* doesn't relaunch). `openProfileSettings` fetches the fresh `night_mode` + `preset` so both controls are correct even before the first SSE state event.
+
+**It applies to on-device playback too** (14.3.0). A VLC launch argument can't reach a browser `<video>`, so the local player builds the equivalent in Web Audio — `<video>` → `DynamicsCompressor` → makeup `Gain`, with a bypass path for off (`_lpNightSync`, driven from `renderPlayer` and the video's `play` event). The compressor settings are *derived from* the VLC presets server-side and served as `webaudio` on `GET /api/settings/night-mode`, so there is one set of numbers, not two. The moon tile is therefore no longer hidden while the TV plays on-device, and `toggleNightMode`'s status line drops the “restarting VLC” wording when a local player is what will apply it. Skipped inside the iOS app (native `AVPlayer` handoff). See [STREAMING.md](STREAMING.md) and [GOTCHAS.md](GOTCHAS.md).
 
 ### Profile Settings modal — progressive load
 
@@ -414,6 +416,8 @@ at `/api/library/{id}/subtitle` — server converts SRT→VTT on the fly). Skip-
 is fetched in parallel from `/api/library/{id}/skip-data?file_path=…` and
 assigned to `lp.skipData` for the skip-intro / skip-credits logic in
 `lpEvaluateSkipOffer`.
+
+On the TV kiosk that offer is also **mirrored to every phone**: `_tvSkipOffer()` packages it (with the tile's literal text, so an auto-skip countdown reads the same on both) into the `/api/tv-local/state` heartbeat → `state.skip_offer`, and `POST` / `DELETE /api/skip-now` relay `skip_accept` / `skip_dismiss` back. `renderSkipOffer` prefers `offer.label` and no-ops in `TV_MODE` so the kiosk doesn't stack the phone banner over its own tile. See [STREAMING.md § Smart Skip on this surface](STREAMING.md).
 
 There is **one** `<video id="lpVideo">` inside `#localPlayer`, wrapped in
 `#lpStage`. In full mode the stage is `absolute inset:0` — **the video takes

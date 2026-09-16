@@ -602,6 +602,40 @@ def _night_mode_preset(name: Optional[str]) -> str:
     return name if name in NIGHT_MODE_PRESETS else NIGHT_MODE_DEFAULT_PRESET
 
 
+def _night_mode_webaudio(name: Optional[str]) -> dict:
+    """The same preset expressed for a browser `DynamicsCompressorNode`.
+
+    On-device playback (the kiosk's own `<video>`, and any phone streaming from
+    this host) can't use a VLC filter, so it builds an equivalent Web Audio graph:
+    source → compressor → makeup gain → destination. DERIVED from NIGHT_MODE_PRESETS
+    rather than restated, so the two surfaces can't drift — tune the dict above and
+    both move together.
+
+    Unit translation: VLC takes attack/release in ms and makeup gain in dB;
+    DynamicsCompressorNode takes seconds, and a GainNode wants a linear multiplier.
+    Ranges are clamped to what the node accepts (ratio ≤ 20, knee ≤ 40 dB).
+    """
+    args = NIGHT_MODE_PRESETS[_night_mode_preset(name)]
+    vals: dict[str, float] = {}
+    for a in args:
+        if not a.startswith("--compressor-"):
+            continue
+        key, _, raw = a[len("--compressor-"):].partition("=")
+        try:
+            vals[key] = float(raw)
+        except ValueError:
+            continue
+    return {
+        "threshold":   max(-100.0, min(0.0,  vals.get("threshold", -24.0))),
+        "ratio":       max(1.0,    min(20.0, vals.get("ratio", 6.0))),
+        "knee":        max(0.0,    min(40.0, vals.get("knee", 3.0))),
+        "attack":      max(0.0,    min(1.0,  vals.get("attack", 25.0) / 1000.0)),
+        "release":     max(0.0,    min(1.0,  vals.get("release", 250.0) / 1000.0)),
+        # dB → linear multiplier for the makeup GainNode.
+        "makeup_gain": round(10.0 ** (vals.get("makeup-gain", 10.0) / 20.0), 4),
+    }
+
+
 # Which surface a TV (host-display) library play opens on.
 TV_PLAYBACK_MODES = ("device", "vlc")
 TV_PLAYBACK_MODE_DEFAULT = "device"
@@ -1175,6 +1209,7 @@ class AppState:
     # state_snapshot while this surface is active, so the dashboard's prev/next
     # episode controls and "3 / 25" counter work against it.
     tv_local_nav: dict = field(default_factory=dict)
+    tv_local_shuffle: bool = False                        # the kiosk player's run is shuffled (shuffle lives in the page, not in library_shuffle_order)
     tv_local_item_id: Optional[str] = None                # library item currently on the kiosk player
     tv_local_file_path: Optional[str] = None              # and which file of it
     # Which surface a TV library play uses: "device" (kiosk <video>) | "vlc".
@@ -1462,7 +1497,11 @@ def state_snapshot() -> dict:
         "library_series_map": dict(state.library_series_map),
         # True while Shuffle Play is active (random episode order). Lets the UI
         # surface a "shuffle" badge; next/prev already follow the random order.
-        "library_shuffle": bool(state.library_shuffle_order),
+        # On-device TV playback keeps its shuffle order in the page, so ask that
+        # surface directly — otherwise Exit Shuffle is invisible while the TV is
+        # shuffling on its own player.
+        "library_shuffle": bool(state.library_shuffle_order)
+                           or (state.tv_local_active and state.tv_local_shuffle),
         # Scope of the live shuffle ("all" | "unwatched"), masked to "" when not
         # shuffling so a stale value can never leak. Lets a VLC→device handoff carry
         # the scope so the device's persisted Resume-on-shuffle pref stays accurate.
@@ -3563,10 +3602,11 @@ async def _apply_night_mode(enabled: bool) -> None:
     so the compressor can only be switched by relaunching VLC — it's a launch arg
     (`NIGHT_MODE_ARGS`, read off `state.vlc_night_mode` in `_restart_vlc_process`).
 
-    **Never relaunches while the kiosk's own player owns the TV.** Night mode is a
-    VLC audio filter and does nothing for a browser `<video>`, so relaunching
-    would put a VLC window over the film to apply a filter nobody can hear. The
-    setting still persists and takes effect the next time VLC actually plays.
+    **Never relaunches while the kiosk's own player owns the TV.** This filter is
+    VLC's, and relaunching would put a VLC window over the film to apply it. The
+    on-device surface implements night mode itself — a Web Audio compressor on the
+    `<video>`, built from the same presets — and picks the change up from the
+    `state` broadcast below, so the toggle still takes effect immediately there.
     To make the toggle seamless mid-playback we snapshot the current file +
     position, relaunch, replay the file (and any remaining playlist tail), and
     seek back. When only the idle background video (or nothing) is on screen we
@@ -3575,6 +3615,9 @@ async def _apply_night_mode(enabled: bool) -> None:
     """
     state.vlc_night_mode = enabled
     if state.tv_local_active:
+        # Broadcast rather than return silently: the kiosk applies/removes its own
+        # compressor off this field, and every dashboard repaints the moon tile.
+        await broadcast("state", state_snapshot())
         return
 
     # Snapshot what's playing *before* killing VLC. Skip the bg video — the loop
@@ -8596,6 +8639,16 @@ async def vlc_progress_tracker() -> None:
             if changed:
                 await broadcast("state", state_snapshot())
             continue
+        # On-device TV playback: the kiosk's own <video> is the playhead, and the
+        # page saves progress and evaluates skip windows against it. VLC is idle
+        # under it, so everything below would be read from the WRONG player —
+        # including vlc_playlist_uri(), which would stomp library_current_file
+        # with whatever VLC last held. Stand down entirely on this surface.
+        if state.tv_local_active:
+            series_prev_file = None
+            prev_item_id = None
+            prev_pos = prev_dur = 0.0
+            continue
         try:
             vs = await vlc_status()
             if not vs:
@@ -9533,10 +9586,29 @@ class TvLocalStateReq(BaseModel):
     active: bool = True
     item_id: Optional[str] = None
     file_path: Optional[str] = None
+    # Who this playback belongs to. LOAD-BEARING: the kiosk is signed in as one
+    # household profile but a play pushed from a phone belongs to whoever pressed
+    # it there, so the page reports the owning profile and the server pins
+    # state.library_profile_id to it (see _set_playback_owner). Without this every
+    # phone-pushed TV play was credited to the kiosk's own profile — the viewer's
+    # own resume position never moved, so their next Play restarted the episode.
+    profile_id: Optional[str] = None
     title: Optional[str] = None
     time: Optional[float] = None
     duration: Optional[float] = None
     playback: Optional[str] = None
+    # The page's live Smart Skip offer, mirrored onto state.skip_offer so every
+    # dashboard's fullscreen controls can show (and act on) it — the skip window
+    # is evaluated by the page against its own <video>, not by vlc_progress_tracker
+    # which has no VLC to poll on this surface. Shape matches what the dashboard
+    # already renders, plus `label` so an auto-skip countdown reads identically on
+    # the phone and on the TV. Sent on EVERY beat (null when there is no offer),
+    # so a cleared offer clears server-side too.
+    skip_offer: Optional[dict] = None
+    # True while the page's playlist is a shuffled run. Shuffle on this surface
+    # lives only in the page (lp.playlist order), so state.library_shuffle_order
+    # is empty and the fullscreen Exit-Shuffle tile would never appear.
+    shuffle: Optional[bool] = None
     # {"audio":[{id,label}], "subtitle":[{id,label}], current_audio, current_subtitle}
     tracks: Optional[dict] = None
     nav_count: Optional[int] = None      # length of the page's playlist
@@ -15103,6 +15175,10 @@ async def _tv_local_clear(reason: str, reset_status: bool = True) -> None:
     state.tv_local_file_path = None
     state.tv_local_tracks = {}
     state.tv_local_nav = {}
+    state.tv_local_shuffle = False
+    # The offer was the page's, mirrored here — it dies with the surface.
+    state.skip_offer = None
+    state.skip_offer_file = None
     if reset_status:
         state.library_item_id = None
         state.library_current_file = None
@@ -15171,6 +15247,21 @@ async def tv_local_state(req: TvLocalStateReq) -> JSONResponse:
         state.library_item_id = req.item_id
     if req.file_path:
         state.library_current_file = req.file_path
+    # Pin the playback owner. The kiosk is permanently signed in as one household
+    # profile, but a play pushed from a phone belongs to the profile that pressed
+    # it — the page reports that one. Everything server-side that attributes
+    # playback reads this: stop()'s final progress flush, the "who's watching"
+    # chip, and the resume hint the NEXT play resolves from.
+    if req.profile_id and req.profile_id != state.library_profile_id:
+        await _set_playback_owner(req.profile_id)
+    # Smart Skip: the page owns detection on this surface (it has the playhead;
+    # vlc_progress_tracker has no VLC to poll here), so its offer is authoritative
+    # and mirrors straight onto state for every dashboard to render. Sent on every
+    # beat, so `None` genuinely means "no offer" and clears a stale one.
+    if state.skip_offer != req.skip_offer:
+        state.skip_offer = req.skip_offer or None
+    if req.shuffle is not None:
+        state.tv_local_shuffle = bool(req.shuffle)
     if req.volume is not None:
         # Unlike the YouTube path (where the OS mixer is the real amp and the
         # IFrame gain is pinned at 100), the kiosk player's own gain IS the amp —
@@ -15386,6 +15477,7 @@ async def stop() -> JSONResponse:
     state.tv_local_playback = ""
     state.tv_local_item_id = None
     state.tv_local_file_path = None
+    state.tv_local_shuffle = False
     state.vlc_time = 0
     state.vlc_duration = 0
     state.library_item_id = None
@@ -16224,6 +16316,13 @@ async def library_unshuffle() -> JSONResponse:
     The currently-playing file keeps going; only the *upcoming* queue flips from
     the random tail to sequential. Clears the persisted shuffle pref too so a later
     Resume won't offer to keep shuffling."""
+    if state.tv_local_active:
+        # The shuffled order is the page's own lp.playlist — it rebuilds the tail
+        # in natural order itself (lpExitShuffle) and clears the stored pref.
+        await _tv_local_relay("unshuffle")
+        state.tv_local_shuffle = False
+        await broadcast("state", state_snapshot())
+        return JSONResponse({"ok": True}, status_code=202)
     if not state.library_shuffle_order:
         raise HTTPException(400, "Not shuffling.")
     current = state.library_current_file
@@ -17927,6 +18026,11 @@ async def get_night_mode() -> JSONResponse:
         "night_mode": bool(s.get("vlc_night_mode", False)),
         "preset": _night_mode_preset(s.get("vlc_night_mode_preset")),
         "presets": NIGHT_MODE_PRESET_META,
+        # Web Audio equivalents of every preset, for the on-device player's own
+        # compressor (see _night_mode_webaudio). Fetched once by the client and
+        # indexed by the preset name the `state` stream reports, so the setting
+        # travels on the existing broadcast and this endpoint stays a cold read.
+        "webaudio": {p["id"]: _night_mode_webaudio(p["id"]) for p in NIGHT_MODE_PRESET_META},
     })
 
 
@@ -18140,6 +18244,16 @@ async def skip_now(req: SkipNowReq) -> JSONResponse:
     if not offer or offer.get("type") != req.type:
         raise HTTPException(400, "No matching skip offer is active.")
 
+    if state.tv_local_active:
+        # The kiosk player owns the playhead and the offer that produced this
+        # (mirrored here from its heartbeat), so it performs the skip — seeking
+        # past the intro, or stepping its own playlist for credits. Routing it
+        # back through VLC would seek a player that isn't the one on screen.
+        await _tv_local_relay("skip_accept", value=req.type)
+        state.skip_offer = None
+        await broadcast("state", state_snapshot())
+        return JSONResponse({"ok": True, "action": "tv_local"})
+
     if req.type == "intro":
         end_at = float(offer.get("end_at", 0))
         if end_at <= 0:
@@ -18188,6 +18302,14 @@ async def dismiss_skip_offer() -> JSONResponse:
     Marks the offer as handled for the current file so it doesn't re-show on
     the next progress tick. The user can still hit Next/Stop manually.
     """
+    if state.tv_local_active:
+        # The page keeps its own per-file dismissed set (lp.skipDoneFor), so tell
+        # it to dismiss rather than marking a file here — its next beat would
+        # otherwise re-mirror the still-showing offer straight back.
+        await _tv_local_relay("skip_dismiss")
+        state.skip_offer = None
+        await broadcast("state", state_snapshot())
+        return JSONResponse({"ok": True})
     if state.skip_offer_file and not state.skip_offer_file.endswith("#dismissed"):
         offer_type = (state.skip_offer or {}).get("type", "intro")
         state.skip_offer_file = f"{state.skip_offer_file}#{offer_type}-done"
