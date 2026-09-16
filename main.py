@@ -10943,8 +10943,16 @@ async def get_item_files(request: Request, item_id: str,
     cfg = _download_cfg(item)
     prep_cfg = _prep_cfg(item)
     out = await _build_item_files(item, profile_id)
+    # Sections, with each one's own resume — what lets the page open a spin-off
+    # (or the films folder) as a unit rather than as part of one flat list.
+    secs = _section_hints([item], item.get("files") or [], profile_id,
+                          item.get("series", ""))
+    sec_meta = (item.get("metadata") or {}).get("sections") or {}
+    if len(secs) > 1:
+        _spawn_section_fetch(item_id)
     return JSONResponse({
         "files": out,
+        "sections": [_section_summary(s, sec_meta) for s in secs] if len(secs) > 1 else [],
         "item_status": item.get("status", "ready"),
         "has_torrent": bool(item.get("torrent_hash")),  # gates the download-scheduling controls
         "download_mode": cfg["mode"],

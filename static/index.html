@@ -1662,6 +1662,46 @@
 <!-- ── Episode Page (full-screen, Netflix-style) ───────────────────────────── -->
 <!-- Backdrop hero collapses on scroll. One season visible at a time when the
      item has season-tagged files. Falls back to a plain file list otherwise. -->
+<!-- Group page — the shelf a franchise (Star Wars) or a multi-part show
+     (Attack on Titan + Junior High + Movies + OAD) sits on. Every row opens the
+     member's or section's OWN episode picker / movie page; this page never plays
+     anything itself beyond handing off a Resume. -->
+<div id="groupPage"
+  class="hidden fixed inset-0 z-50 bg-gray-950 flex flex-col fade-in">
+  <div id="grpHero" class="relative flex-shrink-0 overflow-hidden">
+    <div id="grpBackdrop"
+      class="absolute inset-0 bg-cover bg-center opacity-40 transition-opacity duration-300"></div>
+    <div class="absolute inset-0 bg-gradient-to-t from-gray-950 via-gray-950/85 to-gray-950/40"></div>
+    <div class="relative flex items-center justify-between gap-2 px-2 sm:px-4 py-2 safe-top">
+      <button onclick="closeGroupPage()"
+        class="flex items-center gap-1.5 px-2 py-1.5 text-gray-300 hover:text-white hover:bg-white/10 transition-colors">
+        <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 19l-7-7 7-7"/>
+        </svg>
+        <span class="text-[11px] font-bold uppercase tracking-widest">Back</span>
+      </button>
+      <div id="grpHeaderTitle"
+        class="text-[10px] sm:text-xs font-bold text-gray-400 uppercase tracking-widest truncate text-center flex-1 min-w-0"></div>
+      <div class="w-12 flex-shrink-0"></div>
+    </div>
+    <div class="relative px-3 sm:px-6 pb-4 pt-1">
+      <div class="flex items-start gap-2 min-w-0">
+        <h1 id="grpTitle" class="text-lg sm:text-2xl font-black uppercase tracking-wide leading-tight min-w-0"></h1>
+        <button id="grpRenameBtn" onclick="renameGroup()" title="Rename this group"
+          class="hidden flex-shrink-0 mt-1 p-1 text-gray-500 hover:text-white hover:bg-white/10 transition-colors">
+          <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+              d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+          </svg>
+        </button>
+      </div>
+      <div id="grpMetaLine" class="text-[11px] text-gray-500 uppercase tracking-wide mt-1"></div>
+      <div id="grpActions" class="flex items-center gap-2 flex-wrap mt-3"></div>
+    </div>
+  </div>
+  <div id="grpList" class="flex-1 overflow-y-auto"></div>
+</div>
+
 <div id="episodePage"
   class="hidden fixed inset-0 z-50 bg-gray-950 flex flex-col fade-in">
   <!-- Hero (poster + title + overview, painted on backdrop image) -->
@@ -2147,6 +2187,27 @@
 <!-- Correct a wrong auto-matched show/movie: pick the right TMDb entry from a
      search list, or hand-enter custom metadata. z-[60] to sit above the z-50
      episode page. Any profile may use this (matches the Rename control). -->
+<!-- Collection editor — attaching a show to a franchise. Films in a TMDb
+     collection group themselves; television has no such field, so this is the
+     only route by which Andor reaches the Star Wars shelf. -->
+<div id="groupEditModal"
+  class="hidden fixed inset-0 z-[60] bg-black/60
+         flex items-end sm:items-center justify-center sm:px-4 sm:py-6">
+  <div class="bg-gray-900 w-full sm:max-w-lg flex flex-col max-h-[92vh] sm:max-h-[88vh] fade-in border-t-[3px] border-indigo-600">
+    <div class="px-5 pt-5 pb-3 border-b border-gray-800 flex-shrink-0">
+      <h3 id="grpEditTitle" class="text-sm font-black uppercase tracking-widest text-gray-100"></h3>
+      <p class="text-[11px] text-gray-600 mt-0.5">Films in a TMDb collection join on their own. Add shows here.</p>
+    </div>
+    <div id="grpEditBody" class="flex-1 overflow-y-auto min-h-0"></div>
+    <div class="flex items-center justify-end gap-2 px-5 py-3 border-t border-gray-800 flex-shrink-0">
+      <button onclick="closeGroupEdit()"
+        class="px-3 py-2 text-[11px] font-black uppercase tracking-widest text-gray-400 hover:text-white transition-colors">Cancel</button>
+      <button id="grpAddApply"
+        class="px-4 py-2 bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-black uppercase tracking-widest transition-colors">Add selected</button>
+    </div>
+  </div>
+</div>
+
 <div id="metaFixModal"
   class="hidden fixed inset-0 z-[60] bg-black/60
          flex items-end sm:items-center justify-center sm:px-4 sm:py-6">
@@ -6425,6 +6486,7 @@ async function loadLibrary(btn){
       fetch(`/api/library${pid}`),
       loadDiskSpace(),
       refreshCoverage(),   // new-season chips paint with the first render, not after it
+      _libFetchGroups(),   // franchise shelves, so the grid knows which tiles to fold away
     ]);
     if(!libRes.ok) throw new Error(`GET /api/library ${libRes.status}`);
     const items=(await libRes.json()).items||[];
@@ -6735,21 +6797,31 @@ function _libShowTileHtml(seriesTitle, gItems){
 // Play (or resume) a merged series on the TV/device — fetches the authoritative
 // merged file list + series resume, then hands the cross-item playlist to the
 // player chooser.
-async function playSeries(seriesKey, mode){
+async function playSeries(seriesKey, mode, section){
   if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
   let d;
   try{
     const r=await fetch(`/api/library/series/${encodeURIComponent(seriesKey)}?profile_id=${encodeURIComponent(profile.id)}`);
     if(!r.ok) throw 0; d=await r.json();
   }catch(_){ showAlert("Could not load show.","error"); return; }
-  const files=(d.files||[]).map(f=>f.path);
-  const items=(d.files||[]).map(f=>f.item_id);
+  // Scope to one section when asked — continuing a spin-off must not queue the
+  // rest of the show behind it (the backend applies the same rule to its own
+  // playlist builder; see _files_in_section).
+  let srcFiles=(d.files||[]);
+  let resume=d.resume;
+  if(section){
+    srcFiles=srcFiles.filter(f=>_fileSection(f)===section);
+    const sec=(d.sections||[]).find(x=>x.key===section);
+    resume=sec?sec.resume:null;
+  }
+  const files=srcFiles.map(f=>f.path);
+  const items=srcFiles.map(f=>f.item_id);
   if(!files.length){ showAlert("Nothing to play.","warn"); return; }
-  let startPath=(mode!=="all" && d.resume)?d.resume.file_path:files[0];
+  let startPath=(mode!=="all" && resume)?resume.file_path:files[0];
   let idx=files.indexOf(startPath); if(idx<0) idx=0;
   const ordered=files.slice(idx), orderedItems=items.slice(idx);
-  const seekTo=(mode!=="all" && d.resume && !d.resume.all_completed && (d.resume.position_sec||0)>5)?d.resume.position_sec:null;
-  const rf=(d.files||[])[idx];
+  const seekTo=(mode!=="all" && resume && !resume.all_completed && (resume.position_sec||0)>5)?resume.position_sec:null;
+  const rf=srcFiles[idx];
   const label=(rf&&rf.name)||d.title||"";
   await playLibraryWithChooser(orderedItems[0]||items[0], ordered, seekTo, label, false, "", orderedItems);
 }
@@ -7213,6 +7285,546 @@ function _libWirePosters(el){
   posters.forEach(p=>_libPosterObs.observe(p));
 }
 
+// ══ SECTIONS ══════════════════════════════════════════════════════════════
+// Opening a SECTION reuses the whole episode page unchanged — the renderers are
+// file-list-driven, so narrowing `epFiles` to one section and swapping
+// `epMetadata` for that section's own binding is the entire mechanism. That is
+// why Junior High gets its real poster, overview and twelve episode titles
+// without a second episode-list renderer existing anywhere.
+
+let epSection = "";          // "" = the whole item; else a section key
+let libGroups = [];          // franchise groups that apply to this library
+let libGroupedKeys = new Set();   // member keys a group has claimed
+
+// Mirror of episodes.section_key() — must agree with the backend, because the
+// key it returns is what scopes progress and playlists.
+function _fileSection(f){
+  const b=(f.bucket||"").trim();
+  return b ? b.toLowerCase() : "main";
+}
+
+// Reshape a section's TMDb blob into the shape the episode renderers expect.
+// A section's files are season 0 carrying a bucket, so its episode list is
+// mounted at season "0" — that is where _tmdbEpisode() will look for them.
+function _sectionMetaAsShow(sec){
+  const m=sec&&sec.meta;
+  if(!m || !m.tmdb_id) return null;
+  if(m.kind==="movies") return null;      // per-FILE bindings, not one show
+  const eps=m.episodes||[];
+  return {
+    ...m,
+    tmdb_kind: "tv",
+    seasons: eps.length ? {"0": {name: sec.label, episodes: eps}} : {},
+    all_seasons: [],
+  };
+}
+
+// Narrow the loaded page to one section. Called by both openers once their file
+// list has landed.
+function _applySection(sections, sectionKey){
+  epSection = sectionKey || "";
+  if(!epSection) return;
+  const sec=(sections||[]).find(x=>x.key===epSection);
+  epFiles = epFiles.filter(f=>_fileSection(f)===epSection);
+  if(!sec) return;
+  const asShow=_sectionMetaAsShow(sec);
+  if(asShow){ epMetadata=asShow; }
+  // A Movies section is a list of separate films, so each row carries its OWN
+  // binding rather than one show's. Hang them off the files for the renderers.
+  if(sec.meta && sec.meta.files){
+    const byPath=sec.meta.files;
+    epFiles.forEach(f=>{ if(byPath[f.path]) f.film=byPath[f.path]; });
+    // One film selected out of the folder → it IS a movie page.
+    if(epFiles.length===1 && epFiles[0].film) epMetadata={...epFiles[0].film, seasons:{}};
+  }
+  epHeroTitle = sec.label || epHeroTitle;
+}
+
+async function _libFetchGroups(){
+  const pid=profile.id?`?profile_id=${encodeURIComponent(profile.id)}`:"";
+  try{
+    const r=await fetch(`/api/library/groups${pid}`);
+    if(!r.ok) return {groups:[],grouped_keys:[]};
+    const d=await r.json();
+    libGroups=d.groups||[];
+    libGroupedKeys=new Set(d.grouped_keys||[]);
+    libGroupsImgBase=d.img_base||libGroupsImgBase;
+    return d;
+  }catch(_){ return {groups:[],grouped_keys:[]}; }
+}
+
+// Play one section of a single-item show (or a whole item when section is "").
+// The server scopes the playlist to the section itself — see _files_in_section.
+async function playSectionOrItem(itemId, section, mode, label){
+  if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
+  let files=[], seek=null;
+  try{
+    const pid=profile.id?`?profile_id=${encodeURIComponent(profile.id)}`:"";
+    const r=await fetch(`/api/library/${itemId}/files${pid}`);
+    if(!r.ok) throw 0;
+    const d=await r.json();
+    let fs=(d.files||[]);
+    if(section) fs=fs.filter(f=>_fileSection(f)===section);
+    if(!fs.length){ showAlert("Nothing to play.","warn"); return; }
+    const sec=(d.sections||[]).find(x=>x.key===section);
+    const hint=(mode!=="all" && sec) ? sec.resume : null;
+    let idx=0;
+    if(hint&&hint.file_path){
+      const i=fs.findIndex(f=>f.path===hint.file_path);
+      if(i>=0){ idx=i; if(!hint.all_completed && (hint.position_sec||0)>5) seek=hint.position_sec; }
+    }
+    files=fs.slice(idx).map(f=>f.path);
+  }catch(_){ showAlert("Could not load that section.","error"); return; }
+  await playLibraryWithChooser(itemId, files, seek, label||"");
+}
+
+// ══ GROUP PAGE ═════════════════════════════════════════════════════════════
+// Two things share this page because they are the same shape: a FRANCHISE (Star
+// Wars — nine films plus the series) and a multi-part SHOW (Attack on Titan —
+// the main run plus Junior High, the films and the OADs). Both are "a shelf of
+// things, each of which opens its own normal page". Neither replaces the episode
+// picker or the movie panel — they lead to them.
+//
+// Plain one-run shows (Hacks, Futurama) never come here: with a single section
+// and no franchise, their tile still opens the episode picker directly.
+
+let grpCtx = null;          // {kind:"group"|"show", id|seriesKey, itemId}
+let grpData = null;         // last payload rendered
+
+function closeGroupPage(){
+  document.getElementById("groupPage").classList.add("hidden");
+  // The episode page may be open underneath (a member was opened from here);
+  // only release the scroll lock when nothing else is covering the library.
+  if(document.getElementById("episodePage").classList.contains("hidden")){
+    document.body.style.overflow="";
+  }
+  grpCtx=null; grpData=null;
+}
+
+// Open the shelf. `spec` is either {kind:"group", id} for a franchise or
+// {kind:"show", seriesKey, itemId, title} for a multi-section show.
+async function openGroupPage(spec){
+  grpCtx=spec; grpData=null;
+  document.getElementById("groupPage").classList.remove("hidden");
+  document.body.style.overflow="hidden";
+  document.getElementById("grpTitle").textContent = spec.title || "Loading…";
+  document.getElementById("grpHeaderTitle").textContent = spec.title || "";
+  document.getElementById("grpMetaLine").textContent = "";
+  document.getElementById("grpActions").innerHTML = "";
+  document.getElementById("grpBackdrop").style.backgroundImage = "";
+  document.getElementById("grpList").innerHTML =
+    `<p class="text-gray-600 text-sm text-center py-12">Loading…</p>`;
+
+  const pid = profile.id ? `profile_id=${encodeURIComponent(profile.id)}` : "";
+  const url = spec.kind==="group"
+    ? `/api/library/group/${encodeURIComponent(spec.id)}?${pid}`
+    : `/api/library/series/${encodeURIComponent(spec.seriesKey)}?${pid}`;
+  let d=null;
+  try{ const r=await fetch(url); if(r.ok) d=await r.json(); }catch(_){}
+  if(!grpCtx || grpCtx!==spec) return;             // navigated away
+  if(!d){
+    document.getElementById("grpList").innerHTML =
+      `<p class="text-red-400 text-sm text-center py-12">Could not load this.</p>`;
+    return;
+  }
+  grpData=d;
+  renderGroupPage();
+}
+
+// Re-pull the open shelf in place (after a metadata_update, or an order flip).
+async function refreshGroupPage(){
+  if(grpCtx) await openGroupPage(grpCtx);
+}
+
+function _grpImg(base, path, size){
+  return (path && base) ? `${base}/${size}${path}` : "";
+}
+
+// One row: a franchise member (a film or a show) or a section of a show. Both
+// carry a poster, a name, a progress line and a resume state, so they render
+// through the same template.
+function _grpRowHtml(row){
+  const base = (grpData && grpData.img_base) || "";
+  const poster = _grpImg(base, row.poster_path, "w342");
+  const done = row.count>0 && row.watched>=row.count;
+  const started = row.watched>0 && !done;
+  const pct = row.count ? Math.round(row.watched/row.count*100) : 0;
+  const bits=[];
+  if(row.year) bits.push(row.year);
+  if(row.kindLabel) bits.push(row.kindLabel);
+  if(row.count>1) bits.push(`${row.count} episode${row.count===1?"":"s"}`);
+  else if(row.runtime) bits.push(`${row.runtime} min`);
+  if(row.count>0) bits.push(done?"Watched":(started?`${row.watched}/${row.count} watched`:""));
+  const meta = bits.filter(Boolean).join(" \u00b7 ");
+  const resumeLabel = row.resume && !row.resume.all_completed && (row.resume.pct||0)>3
+    ? "Resume" : (started||done ? "Play" : "Play");
+  return `<div class="grp-row flex items-stretch gap-3 p-2 sm:p-3 bg-gray-900 border border-gray-800
+                       border-l-4 ${done?"border-l-green-800":started?"border-l-indigo-700":"border-l-gray-800"}
+                       hover:bg-gray-850 transition-colors">
+    <div class="grp-open cursor-pointer flex-shrink-0 w-16 sm:w-20 bg-gray-950 border border-gray-800
+                overflow-hidden flex items-center justify-center" role="button" tabindex="0"
+         data-row="${escHtml(row.id)}">
+      ${poster
+        ? `<img src="${escHtml(poster)}" alt="" class="w-full h-full object-cover" loading="lazy"/>`
+        : `<svg class="w-7 h-7 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+             <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5"
+               d="M4 16l4.586-4.586a2 2 0 012.828 0L16 16m-2-2l1.586-1.586a2 2 0 012.828 0L20 14m-6-6h.01M6 20h12a2 2 0 002-2V6a2 2 0 00-2-2H6a2 2 0 00-2 2v12a2 2 0 002 2z"/>
+           </svg>`}
+    </div>
+    <div class="min-w-0 flex-1 flex flex-col">
+      <div class="grp-open cursor-pointer min-w-0" role="button" tabindex="0" data-row="${escHtml(row.id)}">
+        <div class="flex items-center gap-2 min-w-0">
+          ${row.badge?`<span class="text-[9px] px-1 py-0.5 bg-indigo-900/60 text-indigo-300 border border-indigo-800 uppercase tracking-widest flex-shrink-0">${escHtml(row.badge)}</span>`:""}
+          <p class="text-sm font-black uppercase tracking-wide text-gray-100 leading-snug truncate">${escHtml(row.title)}</p>
+        </div>
+        ${meta?`<div class="text-[11px] text-gray-500 uppercase tracking-wide mt-0.5">${escHtml(meta)}</div>`:""}
+        ${row.overview?`<div class="text-[11px] text-gray-600 mt-1 leading-snug" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${escHtml(row.overview)}</div>`:""}
+      </div>
+      ${row.count>0?`<div class="w-full bg-gray-800 h-0.5 mt-1.5">
+          <div class="${done?"bg-green-600":"bg-indigo-500"} h-0.5" style="width:${pct}%"></div>
+        </div>`:""}
+      <div class="flex items-center gap-2 mt-2">
+        <button class="grp-open flex-1 min-h-[34px] bg-gray-800 hover:bg-gray-700 border border-gray-700
+                       text-gray-300 hover:text-white text-[11px] font-black uppercase tracking-wide px-2 transition-colors"
+                data-row="${escHtml(row.id)}">${escHtml(row.openLabel||"Episodes")}</button>
+        ${row.playable?`<button class="grp-play flex-[1.2] min-h-[34px] bg-indigo-600 hover:bg-indigo-500 text-white
+                       text-[11px] font-black uppercase tracking-wide px-2 transition-colors"
+                data-row="${escHtml(row.id)}"><svg class="ic" aria-hidden="true"><use href="#i-play"/></svg> ${escHtml(resumeLabel)}</button>`:""}
+      </div>
+    </div>
+  </div>`;
+}
+
+// Franchise members → rows.
+function _grpMemberRows(){
+  return (grpData.members||[]).map(m=>({
+    id: m.key,
+    title: m.title,
+    poster_path: m.poster_path,
+    overview: m.overview,
+    year: (m.date||"").slice(0,4),
+    kindLabel: m.kind==="movie" ? "Film" : "Series",
+    badge: m.story_index ? `EP ${_roman(m.story_index)}` : "",
+    count: m.count, watched: m.watched, runtime: m.runtime,
+    openLabel: m.kind==="movie" ? "Details" : "Episodes",
+    playable: m.file_count>0,
+    resume: m.resume,
+    _member: m,
+  }));
+}
+
+// Sections of one show → rows. The main run is always first (the backend orders
+// them); Extras is last and is never counted into the show's total.
+function _grpSectionRows(){
+  const base=(grpData&&grpData.img_base)||"";
+  return (grpData.sections||[]).map(sec=>{
+    const m=sec.meta||{};
+    const isMovies=sec.kind==="movies";
+    return {
+      id: sec.key,
+      title: sec.label,
+      poster_path: m.poster_path || (sec.kind==="main" ? (grpData.metadata||{}).poster_path : ""),
+      overview: m.overview||"",
+      year: (m.first_air_date||m.release_date||"").slice(0,4),
+      kindLabel: sec.kind==="main" ? "Main series"
+               : sec.kind==="spinoff" ? "Spin-off"
+               : sec.kind==="movies" ? "Films"
+               : sec.kind==="specials" ? "Specials" : "Extras",
+      badge: sec.kind==="main" ? "Main" : "",
+      count: sec.counted ? sec.count : 0,
+      watched: sec.counted ? sec.watched : 0,
+      runtime: 0,
+      openLabel: isMovies ? "Films" : "Episodes",
+      playable: sec.count>0,
+      resume: sec.resume,
+      _section: sec,
+    };
+  });
+}
+
+function _roman(n){
+  const map=["","I","II","III","IV","V","VI","VII","VIII","IX","X","XI","XII"];
+  return map[n]||String(n);
+}
+
+function renderGroupPage(){
+  if(!grpData) return;
+  const isGroup = grpCtx.kind==="group";
+  const title = isGroup ? (grpData.name||"") : (grpData.title||grpCtx.title||"");
+  document.getElementById("grpTitle").textContent = title;
+  document.getElementById("grpHeaderTitle").textContent = title;
+
+  const base = grpData.img_base||"";
+  const rows = isGroup ? _grpMemberRows() : _grpSectionRows();
+  const backdrop = _grpImg(base,
+    grpData.backdrop_path || (grpData.metadata||{}).backdrop_path
+      || (rows.find(r=>r.poster_path)||{}).backdrop_path || "", "w1280");
+  document.getElementById("grpBackdrop").style.backgroundImage =
+    backdrop?`url("${backdrop}")`:"";
+
+  // Meta line: how much there is, and how much of it has been seen.
+  const count = rows.reduce((n,r)=>n+r.count,0);
+  const watched = rows.reduce((n,r)=>n+r.watched,0);
+  const bits=[`${rows.length} ${isGroup?"title":"section"}${rows.length===1?"":"s"}`];
+  if(count) bits.push(`${count} episode${count===1?"":"s"}`);
+  if(watched) bits.push(`${watched}/${count} watched`);
+  document.getElementById("grpMetaLine").textContent = bits.join(" \u00b7 ");
+
+  // Actions. A franchise whose films carry story numbers gets the order toggle;
+  // Harry Potter has none, so offering it there would be a lie (see _story_index).
+  const act=document.getElementById("grpActions");
+  let actions="";
+  if(isGroup && grpData.has_story_order){
+    const mode=grpData.order||"story";
+    actions+=`<div class="flex items-stretch border border-gray-700">
+      ${["story","release"].map(mo=>`
+        <button class="grp-order px-3 py-1.5 text-[10px] font-black uppercase tracking-widest transition-colors
+                 ${mode===mo?"bg-indigo-600 text-white":"bg-gray-900 text-gray-400 hover:text-white"}"
+                data-order="${mo}">${mo==="story"?"Story order":"Release order"}</button>`).join("")}
+    </div>`;
+  }
+  if(isGroup){
+    actions+=`<button onclick="openGroupAdd()" class="px-3 py-1.5 border border-gray-700 bg-gray-900
+                text-gray-400 hover:text-white text-[10px] font-black uppercase tracking-widest transition-colors">+ Add title</button>`;
+  }
+  act.innerHTML=actions;
+  document.getElementById("grpRenameBtn").classList.toggle("hidden", !isGroup);
+
+  document.getElementById("grpList").innerHTML =
+    `<div class="p-2 sm:p-4 space-y-2">${rows.map(_grpRowHtml).join("")}</div>`;
+
+  // Wire rows. `data-row` is the member key or section key; the row objects are
+  // held here so a title containing quotes can never break an inline handler.
+  const byId=new Map(rows.map(r=>[r.id,r]));
+  const el=document.getElementById("grpList");
+  el.querySelectorAll(".grp-open").forEach(n=>{
+    const go=()=>_grpOpenRow(byId.get(n.dataset.row));
+    n.addEventListener("click",go);
+    n.addEventListener("keydown",e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); go(); }});
+  });
+  el.querySelectorAll(".grp-play").forEach(n=>{
+    n.addEventListener("click",e=>{ e.stopPropagation(); _grpPlayRow(byId.get(n.dataset.row)); });
+  });
+  el.querySelectorAll(".grp-order").forEach(n=>{
+    n.addEventListener("click",()=>setGroupOrder(n.dataset.order));
+  });
+}
+
+// Open one row into the page it really belongs to — a member's own episode
+// picker / movie panel, or a section of the show we are already inside.
+function _grpOpenRow(row){
+  if(!row) return;
+  if(row._member){
+    const m=row._member;
+    if(m.sections && m.sections.length>1){
+      // A member that is itself multi-part (a show with its own extras) opens
+      // its own shelf rather than skipping straight past its sections.
+      openGroupPage({kind:"show", seriesKey:m.key, itemId:m.item_ids[0], title:m.title});
+    } else if(m.key.indexOf("series:")===0){
+      openSeriesPage(m.key, m.title);
+    } else {
+      openEpisodePicker(m.item_ids[0], m.title);
+    }
+    return;
+  }
+  const sec=row._section;
+  if(!sec) return;
+  if(grpCtx.seriesKey && grpCtx.seriesKey.indexOf("series:")===0){
+    openSeriesPage(grpCtx.seriesKey, grpData.title||"", sec.key);
+  } else {
+    openEpisodePicker(grpCtx.itemId, grpData.title||"", sec.key);
+  }
+}
+
+function _grpPlayRow(row){
+  if(!row) return;
+  const mode = (row.resume && !row.resume.all_completed && (row.resume.pct||0)>3) ? "resume" : "all";
+  if(row._member){
+    const m=row._member;
+    if(m.key.indexOf("series:")===0) playSeries(m.key, mode);
+    else playSectionOrItem(m.item_ids[0], "", mode, m.title);
+    return;
+  }
+  const sec=row._section;
+  if(!sec) return;
+  if(grpCtx.seriesKey && grpCtx.seriesKey.indexOf("series:")===0){
+    playSeries(grpCtx.seriesKey, mode, sec.key);
+  } else {
+    playSectionOrItem(grpCtx.itemId, sec.key, mode, sec.label);
+  }
+}
+
+async function setGroupOrder(mode){
+  if(!grpCtx || grpCtx.kind!=="group" || !grpData) return;
+  if((grpData.order||"story")===mode) return;
+  grpData.order=mode;
+  renderGroupPage();                       // optimistic — the sort is server-side
+  try{
+    await fetch(`/api/library/groups/${encodeURIComponent(grpData.id)}`,{
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({order:mode}),
+    });
+  }catch(_){}
+  // The group id changes when an auto group is materialised by its first edit.
+  const gs=await _libFetchGroups();
+  const still=(gs.groups||[]).find(g=>g.collection_id===grpData.collection_id) ;
+  if(still) grpCtx={...grpCtx, id:still.id};
+  await refreshGroupPage();
+}
+
+// Attaching a title by hand is not a nicety — it is the only way a SHOW joins a
+// franchise. TMDb has `belongs_to_collection` for films and nothing at all for
+// television, and the titles don't help either: "Andor" and "The Mandalorian"
+// share no words with "Star Wars". So the films group themselves and the shows
+// are pointed at the shelf.
+function openGroupAdd(){
+  if(!grpCtx || grpCtx.kind!=="group" || !grpData) return;
+  const have=new Set((grpData.members||[]).map(m=>m.key));
+  // Candidates: one row per show/film in the library this group hasn't claimed.
+  const seen=new Map();
+  (window._libCache||[]).forEach(it=>{
+    if(have.has(it.series_key) || seen.has(it.series_key)) return;
+    seen.set(it.series_key, {
+      key: it.series_key,
+      title: (it.series||"").trim() || it.title || "",
+      kind: it.tmdb_kind || "",
+    });
+  });
+  const rows=[...seen.values()].sort((a,b)=>a.title.localeCompare(b.title));
+  const addList=rows.length
+    ? rows.map(r=>`<label class="flex items-center gap-2 px-5 py-2 hover:bg-gray-800 cursor-pointer border-b border-gray-800">
+          <input type="checkbox" class="grp-add-chk accent-indigo-500" value="${escHtml(r.key)}"/>
+          <span class="text-xs text-gray-200 truncate flex-1 min-w-0">${escHtml(r.title)}</span>
+          ${r.kind?`<span class="text-[9px] text-gray-600 uppercase tracking-widest flex-shrink-0">${escHtml(r.kind==="movie"?"Film":"Series")}</span>`:""}
+        </label>`).join("")
+    : `<p class="text-gray-600 text-xs text-center py-8">Everything in your library is already in this collection.</p>`;
+  const inList=(grpData.members||[]).map(m=>
+    `<div class="flex items-center gap-2 px-5 py-2 border-b border-gray-800">
+       <span class="text-xs text-gray-400 truncate flex-1 min-w-0">${escHtml(m.title)}</span>
+       <button class="grp-rm text-[10px] font-black uppercase tracking-widest text-red-400 hover:text-red-300 flex-shrink-0"
+               data-key="${escHtml(m.key)}">Remove</button>
+     </div>`).join("");
+
+  document.getElementById("grpEditTitle").textContent = `Titles in ${grpData.name}`;
+  document.getElementById("grpEditBody").innerHTML =
+    `<div class="px-5 py-2 text-[10px] font-black uppercase tracking-widest text-gray-500 bg-gray-950">In this collection</div>
+     ${inList}
+     <div class="px-5 py-2 text-[10px] font-black uppercase tracking-widest text-gray-500 bg-gray-950">Add to this collection</div>
+     ${addList}`;
+  document.getElementById("groupEditModal").classList.remove("hidden");
+
+  document.querySelectorAll("#grpEditBody .grp-rm").forEach(b=>{
+    b.addEventListener("click",()=>_grpEditMembers({remove:[b.dataset.key]}));
+  });
+  const apply=document.getElementById("grpAddApply");
+  apply.onclick=()=>{
+    const add=[...document.querySelectorAll("#grpEditBody .grp-add-chk")]
+      .filter(c=>c.checked).map(c=>c.value);
+    if(!add.length){ closeGroupEdit(); return; }
+    _grpEditMembers({add});
+  };
+}
+
+function closeGroupEdit(){
+  document.getElementById("groupEditModal").classList.add("hidden");
+}
+
+async function _grpEditMembers(body){
+  if(!grpData) return;
+  try{
+    const r=await fetch(`/api/library/groups/${encodeURIComponent(grpData.id)}`,{
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify(body),
+    });
+    if(!r.ok) throw 0;
+  }catch(_){ showAlert("Could not change this collection.","error"); return; }
+  closeGroupEdit();
+  // An auto group materialises as a manual one on its first edit, taking a new
+  // id with it — so re-find the shelf by its collection before reloading it.
+  const gs=await _libFetchGroups();
+  const still=(gs.groups||[]).find(g=>
+    (grpData.collection_id && g.collection_id===grpData.collection_id) || g.name===grpData.name);
+  if(still) grpCtx={...grpCtx, id:still.id};
+  await refreshGroupPage();
+  loadLibrary();
+}
+
+async function renameGroup(){
+  if(!grpCtx || grpCtx.kind!=="group" || !grpData) return;
+  const name=prompt("Group name", grpData.name||"");
+  if(name===null) return;
+  const clean=name.trim();
+  if(!clean || clean===grpData.name) return;
+  try{
+    const r=await fetch(`/api/library/groups/${encodeURIComponent(grpData.id)}`,{
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({name:clean}),
+    });
+    if(!r.ok) throw 0;
+  }catch(_){ showAlert("Could not rename that group.","error"); return; }
+  const gs=await _libFetchGroups();
+  const still=(gs.groups||[]).find(g=>g.name===clean);
+  if(still) grpCtx={...grpCtx, id:still.id};
+  await refreshGroupPage();
+  loadLibrary();
+}
+
+// A franchise tile. Stands in for every member tile it claims, so the grid
+// shows one "Star Wars" rather than nine films and six shows scattered through
+// it alphabetically.
+function _libGroupTileHtml(g, isCard){
+  const done = g.count>0 && g.watched>=g.count;
+  const started = g.watched>0 && !done;
+  const pct = g.count?Math.round(g.watched/g.count*100):0;
+  const bits=[`${g.member_count} title${g.member_count===1?"":"s"}`];
+  if(g.count) bits.push(`${g.count} episode${g.count===1?"":"s"}`);
+  if(started||done) bits.push(`${g.watched}/${g.count} watched`);
+  const poster=g.poster_path?`${libGroupsImgBase}/w342${g.poster_path}`:"";
+  const idAttr=escHtml(g.id), nmAttr=escHtml(g.name);
+  const accent=done?"border-l-green-800":started?"border-l-indigo-700":"border-l-indigo-900";
+  if(isCard){
+    return `<div class="lib-group-open cursor-pointer bg-gray-900 border border-gray-800 hover:border-gray-700 transition-colors"
+                 role="button" tabindex="0" data-group-id="${idAttr}" data-group-name="${nmAttr}">
+      <div class="relative aspect-[2/3] bg-gray-950 overflow-hidden">
+        ${poster
+          ? `<img src="${escHtml(poster)}" alt="" class="w-full h-full object-cover" loading="lazy"/>`
+          : `<div class="w-full h-full flex items-center justify-center">
+               <svg class="w-8 h-8 text-gray-700" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M4 6h16M4 12h16M4 18h16"/>
+               </svg>
+             </div>`}
+        <div class="absolute top-0 left-0 text-[9px] px-1.5 py-0.5 bg-indigo-700 text-white font-black uppercase tracking-widest">Collection</div>
+        ${g.count?`<div class="absolute bottom-0 left-0 right-0 bg-gray-800 h-0.5">
+            <div class="${done?"bg-green-600":"bg-indigo-500"} h-0.5" style="width:${pct}%"></div>
+          </div>`:""}
+      </div>
+      <div class="p-2">
+        <div class="text-xs font-black uppercase tracking-wide text-gray-100 leading-snug truncate">${escHtml(g.name)}</div>
+        <div class="text-[10px] text-gray-600 mt-0.5 truncate">${escHtml(bits.join(" \u00b7 "))}</div>
+      </div>
+    </div>`;
+  }
+  return `<div class="mb-6"><div class="space-y-2">
+    <div class="bg-gray-900 border border-gray-800 border-l-4 ${accent} p-3">
+      <div class="lib-group-open cursor-pointer" role="button" tabindex="0"
+           data-group-id="${idAttr}" data-group-name="${nmAttr}">
+        <div class="flex items-center gap-2 mb-0.5">
+          <span class="text-[9px] px-1 py-0.5 bg-indigo-900/60 text-indigo-300 border border-indigo-800 uppercase tracking-widest flex-shrink-0">Collection</span>
+          <p class="text-sm font-black uppercase tracking-wide text-gray-100 leading-snug flex-1 min-w-0 truncate">${escHtml(g.name)}</p>
+        </div>
+        <div class="text-[11px] text-gray-500 uppercase tracking-wide">${escHtml(bits.join(" \u00b7 "))}</div>
+      </div>
+      <div class="lib-card-actions flex items-center gap-2 flex-wrap mt-2.5">
+        <button class="lib-group-open flex-1 min-h-[40px] bg-gray-800 hover:bg-gray-700 border border-gray-700
+                       text-gray-300 hover:text-white text-xs font-black uppercase tracking-wide px-3 transition-colors"
+                data-group-id="${idAttr}" data-group-name="${nmAttr}">Open collection</button>
+      </div>
+    </div>
+  </div></div>`;
+}
+
+let libGroupsImgBase = "/api/metadata/img";
+
 function renderLibrary(items){
   const el=document.getElementById("libraryContent");
 
@@ -7275,10 +7887,24 @@ function renderLibrary(items){
     </div>`;
   }
 
+  // A franchise stands in for its members: pull every claimed item out of the
+  // grid first, so "Star Wars" appears once instead of its nine films appearing
+  // separately. Hidden-view rendering is left alone — that list is about
+  // per-item visibility, and folding it into shelves would hide the very
+  // controls the user came there to use.
+  const showGroups = !effectiveShowHidden && libGroups.length>0;
+  const claimed = showGroups ? libGroupedKeys : new Set();
+  const gridItems = claimed.size
+    ? renderItems.filter(i=>!claimed.has(i.series_key))
+    : renderItems;
+  const activeGroups = showGroups
+    ? libGroups.filter(g=>g.members.some(m=>renderItems.some(i=>i.series_key===m.key)))
+    : [];
+
   // Group by series. Multi-file items without a series name fall back to the
   // torrent title so the series header is always visible.
   const groups=new Map();
-  renderItems.forEach(item=>{
+  gridItems.forEach(item=>{
     const key=item.series||"\x00"+item.id;
     const label=item.series||(item.file_count>1?item.title:"");
     if(!groups.has(key)) groups.set(key,{label,items:[]});
@@ -7291,6 +7917,7 @@ function renderLibrary(items){
   // no action exists in only one view.
   const isCard = libViewMode==="card";
   if(isCard) html+=`<div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-2 items-start">`;
+  activeGroups.forEach(g=>{ html+=_libGroupTileHtml(g, isCard); });
 
   groups.forEach(({label,items:gItems})=>{
     // A real series with multiple items (e.g. episodes downloaded individually)
@@ -7324,16 +7951,27 @@ function renderLibrary(items){
   el.querySelectorAll(".lib-restart-btn").forEach(btn=>{
     btn.addEventListener("click",()=>playLibraryWithChooser(btn.dataset.itemId,[btn.dataset.path],0,""));
   });
+  // Franchise tiles → the shelf.
+  el.querySelectorAll(".lib-group-open").forEach(tile=>{
+    const open=()=>openGroupPage({kind:"group", id:tile.dataset.groupId,
+                                  title:tile.dataset.groupName||""});
+    tile.addEventListener("click",open);
+    tile.addEventListener("keydown",e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); open(); }});
+  });
   // Wire the clickable tile (title/meta) → info page. Same data-attr pattern so a
   // title with quotes can't break an inline onclick.
+  // A show with more than one section (Attack on Titan: the main run plus Junior
+  // High, the films and the OADs) opens its shelf instead of dropping the viewer
+  // into one flat 131-file list. A plain one-run show goes straight to the
+  // episode picker exactly as before.
   el.querySelectorAll(".lib-tile-open").forEach(tile=>{
-    const open=()=>openEpisodePicker(tile.dataset.itemId, tile.dataset.title||"");
+    const open=()=>_libOpenItem(tile.dataset.itemId, tile.dataset.title||"");
     tile.addEventListener("click",open);
     tile.addEventListener("keydown",e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); open(); }});
   });
   // Merged-show tiles → merged episode page / series play.
   el.querySelectorAll(".lib-show-open").forEach(tile=>{
-    const open=()=>openSeriesPage(tile.dataset.seriesKey, tile.dataset.title||"");
+    const open=()=>_libOpenSeries(tile.dataset.seriesKey, tile.dataset.title||"");
     tile.addEventListener("click",open);
     tile.addEventListener("keydown",e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); open(); }});
   });
@@ -7346,6 +7984,25 @@ function renderLibrary(items){
     if(document.getElementById(`dl-files-${id}`)) showDownloadFiles(id);
     else expandedDownloads.delete(id);
   });
+}
+
+// Where a library tile actually leads. One section → the episode picker, as it
+// always did. More than one → the shelf, so the spin-off and the films are
+// choices rather than things you fall into at the end of season four.
+function _libOpenItem(itemId, title){
+  const it=(window._libCache||[]).find(x=>x.id===itemId);
+  if(it && (it.sections||[]).length>1){
+    openGroupPage({kind:"show", seriesKey:it.series_key, itemId, title});
+  } else {
+    openEpisodePicker(itemId, title);
+  }
+}
+
+function _libOpenSeries(seriesKey, title){
+  const members=(window._libCache||[]).filter(x=>x.series_key===seriesKey);
+  const multi=members.some(m=>(m.sections||[]).length>1);
+  if(multi) openGroupPage({kind:"show", seriesKey, itemId:(members[0]||{}).id, title});
+  else openSeriesPage(seriesKey, title);
 }
 
 // "Continue" — auto-selects best file and position and starts VLC playback on
@@ -7933,12 +8590,13 @@ async function queuePlayFile(itemId,filePath){
 }
 
 // ── Episode Page (full-screen Netflix-style) ───────────────────────────────
-async function openEpisodePicker(itemId, title){
+async function openEpisodePicker(itemId, title, section){
   // Backwards-compatible name; under the hood we render the full-screen page.
   epItemId=itemId;
   epSeriesKey=null; epFileItem={};   // single-item open — clear any series mode
   epFiles=[]; epChecked=new Set();
   epMetadata=null; epMetaImgBase=""; epCurrentSeason=0; epSeasonList=[]; epIsMovie=false;
+  epSection=section||"";
 
   document.getElementById("episodePage").classList.remove("hidden");
   document.body.style.overflow="hidden";  // lock background scroll
@@ -7970,6 +8628,9 @@ async function openEpisodePicker(itemId, title){
   epOndemandOnly=!!d.ondemand_only;
   epOndemandLocked=!!d.ondemand_only_locked;
   epHlsAvailable=d.hls_available!==false;
+  // Narrow to one section BEFORE anything reads epFiles — the season tabs, the
+  // default-season pick and the movie/list decision all derive from it.
+  if(section) _applySection(d.sections, section);
   epFiles.forEach(f=>{ if(!f.progress?.completed) epChecked.add(f.path); });
 
   // Stream-prep status: tells the per-row Prep buttons which files are
@@ -8015,10 +8676,11 @@ async function openEpisodePicker(itemId, title){
 // several single-episode items). Reuses the same renderers as a single item —
 // they're file-list-driven — but sources a merged, item-tagged file list from
 // /api/library/series/{key} so play/resume/next can span the items.
-async function openSeriesPage(seriesKey, title){
+async function openSeriesPage(seriesKey, title, section){
   epItemId=null; epSeriesKey=seriesKey; epFileItem={};
   epFiles=[]; epChecked=new Set();
   epMetadata=null; epMetaImgBase=""; epCurrentSeason=0; epSeasonList=[]; epIsMovie=false;
+  epSection=section||"";
 
   document.getElementById("episodePage").classList.remove("hidden");
   document.body.style.overflow="hidden";
@@ -8046,11 +8708,13 @@ async function openSeriesPage(seriesKey, title){
   epHlsAvailable=d.hls_available!==false;
   epMetadata=d.metadata||null; epMetaImgBase=d.img_base||"";
   _epSeriesResume=d.resume||null;
+  // One section of the merged show (its spin-off, its films, its specials).
+  if(section){ _applySection(d.sections, section); _epSeriesResume=null; }
 
   _epRebuildSeasonList();
   epCurrentSeason = pickDefaultSeason();
-  epIsMovie=false;
-  _epApplyMovieChrome(false);
+  epIsMovie = !!section && epFiles.length===1;
+  _epApplyMovieChrome(epIsMovie);
   // The bottom "Download selected" ZIP is a per-item endpoint — hide it in the
   // merged view (per-episode download buttons on each row still work).
   const _dlSel=document.getElementById("epDownloadSelBtn");
