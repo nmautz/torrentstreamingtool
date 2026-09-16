@@ -7397,6 +7397,10 @@ async function playSectionOrItem(itemId, section, mode, label){
 // and no franchise, their tile still opens the episode picker directly.
 
 let grpCtx = null;          // {kind:"group"|"show", id|seriesKey, itemId}
+// "Show not downloaded" on a collection page. Per viewer, remembered; on by
+// default, matching how a show's missing seasons and episodes appear by default.
+let grpShowMissing = true;
+try{ grpShowMissing = localStorage.getItem("streamlink_grp_missing")!=="0"; }catch(_){}
 let grpData = null;         // last payload rendered
 
 function closeGroupPage(){
@@ -7425,7 +7429,7 @@ async function openGroupPage(spec){
 
   const pid = profile.id ? `profile_id=${encodeURIComponent(profile.id)}` : "";
   const url = spec.kind==="group"
-    ? `/api/library/group/${encodeURIComponent(spec.id)}?${pid}`
+    ? `/api/library/group/${encodeURIComponent(spec.id)}?${pid}&include_missing=${(grpShowMissing&&missingContentEnabled)?1:0}`
     : `/api/library/series/${encodeURIComponent(spec.seriesKey)}?${pid}`;
   let d=null;
   try{ const r=await fetch(url); if(r.ok) d=await r.json(); }catch(_){}
@@ -7518,7 +7522,144 @@ function _grpMemberRows(){
     playable: m.file_count>0,
     resume: m.resume,
     _member: m,
+    _sort: {movie: m.kind==="movie", story: +m.story_index||0, date: m.date||""},
   }));
+}
+
+// Films in the collection this library doesn't hold. Upcoming ones (no release
+// yet) only arrive here when the admin chose to show unaired content, and get no
+// Get button — there is nothing to find.
+function _grpMissingRows(){
+  if(!(grpShowMissing && missingContentEnabled)) return [];
+  return (grpData.missing||[]).map(f=>({
+    id: `missing:${f.tmdb_id}`,
+    title: f.title,
+    poster_path: f.poster_path,
+    overview: f.overview,
+    year: (f.release_date||"").slice(0,4),
+    badge: f.story_index ? `EP ${_roman(f.story_index)}` : "",
+    runtime: f.runtime||0,
+    count: 0, watched: 0,
+    _missing: f,
+    _sort: {movie: true, story: +f.story_index||0, date: f.release_date||"9999"},
+  }));
+}
+
+// Mirror of the backend's _member_sort_key, so owned and missing films interleave
+// in one order: films first (story number, then unnumbered by date — or all by
+// date in release mode), then shows by first air date.
+function _grpSortRows(rows, mode){
+  const key=r=>{
+    const st=r._sort||{movie:false, story:0, date:""};
+    const date=st.date||"9999";
+    if(mode==="story" && st.story) return [st.movie?1:2, 0, st.story, date];
+    return [st.movie?1:2, 1, 0, date];
+  };
+  return rows.slice().sort((a,b)=>{
+    const ka=key(a), kb=key(b);
+    for(let i=0;i<ka.length;i++){ if(ka[i]<kb[i]) return -1; if(ka[i]>kb[i]) return 1; }
+    return 0;
+  });
+}
+
+function _grpMissingRowHtml(row){
+  const f=row._missing;
+  const base=(grpData&&grpData.img_base)||"";
+  const poster=_grpImg(base, f.poster_path, "w342");
+  const bits=[row.year, "Film", row.runtime?`${row.runtime} min`:"",
+              f.upcoming?"Upcoming":"Not downloaded"].filter(Boolean).join(" \u00b7 ");
+  const pending=_grpFilmQueued.has(f.tmdb_id);
+  const actions=f.upcoming ? "" : pending
+    ? `<span class="flex-1 min-h-[34px] flex items-center justify-center text-[11px] font-black uppercase tracking-wide text-yellow-400 border border-yellow-900 bg-yellow-950/30">Queued</span>`
+    : `<button class="grp-get flex-[1.2] min-h-[34px] bg-indigo-600 hover:bg-indigo-500 text-white text-[11px] font-black uppercase tracking-wide px-2 transition-colors"
+               data-tmdb="${f.tmdb_id}"><svg class="ic" aria-hidden="true"><use href="#i-down"/></svg> Get</button>
+       ${SIMPLE?"":`<button class="grp-choose flex-1 min-h-[34px] bg-gray-800 hover:bg-gray-700 border border-gray-700 text-gray-300 hover:text-white text-[11px] font-black uppercase tracking-wide px-2 transition-colors"
+               data-tmdb="${f.tmdb_id}">Choose</button>`}`;
+  return `<div class="grp-row grp-missing flex items-stretch gap-3 p-2 sm:p-3 bg-gray-900/50 border border-dashed border-gray-800 border-l-4 border-l-gray-800">
+    <div class="flex-shrink-0 w-16 sm:w-20 bg-gray-950 border border-gray-800 overflow-hidden flex items-center justify-center">
+      ${poster?`<img src="${escHtml(poster)}" alt="" class="w-full h-full object-cover opacity-40 grayscale" loading="lazy"/>`:""}
+    </div>
+    <div class="min-w-0 flex-1 flex flex-col">
+      <div class="flex items-center gap-2 min-w-0">
+        ${row.badge?`<span class="text-[9px] px-1 py-0.5 bg-gray-800 text-gray-500 border border-gray-700 uppercase tracking-widest flex-shrink-0">${escHtml(row.badge)}</span>`:""}
+        <p class="text-sm font-black uppercase tracking-wide text-gray-400 leading-snug truncate">${escHtml(row.title)}</p>
+      </div>
+      <div class="text-[11px] ${f.upcoming?"text-sky-500":"text-gray-600"} uppercase tracking-wide mt-0.5">${escHtml(bits)}</div>
+      ${row.overview?`<div class="text-[11px] text-gray-700 mt-1 leading-snug" style="display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden;">${escHtml(row.overview)}</div>`:""}
+      ${actions?`<div class="flex items-center gap-2 mt-2">${actions}</div>`:""}
+    </div>
+  </div>`;
+}
+
+// Films Get has queued this session that the collection still reports missing —
+// the item exists at once, but the shelf re-reads before it is bound, and a
+// second press must never start a second copy.
+const _grpFilmQueued = new Set();
+
+// One press: search for the film, take the release the auto-picker would, queue
+// it bound to its TMDb entry (so it lands on this shelf). The search page's Get
+// does the same thing, but against that page's live state; this is the detached
+// form, because nothing about the search page is open here.
+async function grpGetFilm(tmdbId, btn){
+  if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
+  const f=((grpData&&grpData.missing)||[]).find(x=>x.tmdb_id===+tmdbId);
+  if(!f) return;
+  await withInflight(`grp_get_${f.tmdb_id}`, btn, async () => {
+    const year=(f.release_date||"").slice(0,4);
+    const pid=`&profile_id=${encodeURIComponent(profile.id)}`;
+    const search=async q=>{
+      try{
+        const r=await fetch(`/api/search?q=${encodeURIComponent(q)}${year?`&year=${year}`:""}${pid}`);
+        if(!r.ok) return [];
+        const d=await r.json(); const out=[];
+        (d.groups||[]).forEach(g=>(g.results||[]).forEach(x=>{ if(x.magnet && x.kind!=="episode") out.push(x); }));
+        return out;
+      }catch(_){ return []; }
+    };
+    let results=await search(f.title);
+    if(f.original_title && f.original_title!==f.title && !results.some(x=>(x.rel||0)>=1)){
+      results=results.concat(await search(f.original_title));
+    }
+    // Only the strongest relevance tier is a candidate. A collection is the worst
+    // case for a seeder sort: every sibling film shares the title words, and the
+    // year mismatch is what demotes them (see _title_relevance).
+    const best=results.reduce((m,x)=>Math.max(m, typeof x.rel==="number"?x.rel:0), 0);
+    const cands=results.filter(x=>(typeof x.rel==="number"?x.rel:0) >= Math.max(0.7, best-0.125));
+    const src=cands.length ? _ssAutoPick(cands, _ssParseBulkFilters()) : null;
+    if(!src){ showAlert(`Couldn't find ${f.title} anywhere right now — try again in a few minutes.`,"warn"); return; }
+    let res=null;
+    try{
+      const r=await fetch("/api/library/download",{
+        method:"POST", headers:{"Content-Type":"application/json"},
+        body:JSON.stringify({magnet:src.magnet, title:src.title, series:"", season:0, episode:0,
+                             save_path:"", profile_id:profile.id, admin_only:false,
+                             tmdb_id:f.tmdb_id, tmdb_kind:"movie"}),
+      });
+      res=await r.json().catch(()=>null);
+      if(!r.ok){ showAlert((res&&res.detail)||"Download failed.","error"); return; }
+    }catch(_){ showAlert("Download failed.","error"); return; }
+    _grpFilmQueued.add(f.tmdb_id);
+    // Bind it now rather than on first open, so it joins the shelf properly.
+    if(res&&res.item_id) fetch(`/api/library/${res.item_id}/metadata`).catch(()=>{});
+    showAlert(res&&res.duplicate
+      ? `${f.title} is already in your library.`
+      : `Downloading ${f.title}.`, res&&res.duplicate?"warn":"success");
+    await refreshGroupPage();
+    loadLibrary();
+  });
+}
+
+function grpChooseFilm(tmdbId){
+  const f=((grpData&&grpData.missing)||[]).find(x=>x.tmdb_id===+tmdbId);
+  if(!f) return;
+  openSearchShowFromTmdb({id:f.tmdb_id, kind:"movie", title:f.title,
+                          year:(f.release_date||"").slice(0,4)});
+}
+
+function setGroupShowMissing(on){
+  grpShowMissing=!!on;
+  try{ localStorage.setItem("streamlink_grp_missing", on?"1":"0"); }catch(_){}
+  refreshGroupPage();
 }
 
 // Sections of one show → rows. The main run is always first (the backend orders
@@ -7563,7 +7704,11 @@ function renderGroupPage(){
   document.getElementById("grpHeaderTitle").textContent = title;
 
   const base = grpData.img_base||"";
-  const rows = isGroup ? _grpMemberRows() : _grpSectionRows();
+  const owned = isGroup ? _grpMemberRows() : _grpSectionRows();
+  const missingRows = isGroup ? _grpMissingRows() : [];
+  // The films we don't have take their place in the saga rather than trailing
+  // after it — Episode II belongs between I and IV whether or not it is on disk.
+  const rows = isGroup ? _grpSortRows(owned.concat(missingRows), grpData.order||"story") : owned;
   const backdrop = _grpImg(base,
     grpData.backdrop_path || (grpData.metadata||{}).backdrop_path
       || (rows.find(r=>r.poster_path)||{}).backdrop_path || "", "w1280");
@@ -7573,7 +7718,11 @@ function renderGroupPage(){
   // Meta line: how much there is, and how much of it has been seen.
   const count = rows.reduce((n,r)=>n+r.count,0);
   const watched = rows.reduce((n,r)=>n+r.watched,0);
-  const bits=[`${rows.length} ${isGroup?"title":"section"}${rows.length===1?"":"s"}`];
+  const bits=[`${owned.length} ${isGroup?"title":"section"}${owned.length===1?"":"s"}`];
+  if(missingRows.length){
+    const getable=missingRows.filter(r=>!r._missing.upcoming).length;
+    if(getable) bits.push(`${getable} not downloaded`);
+  }
   if(count) bits.push(`${count} episode${count===1?"":"s"}`);
   if(watched) bits.push(`${watched}/${count} watched`);
   document.getElementById("grpMetaLine").textContent = bits.join(" \u00b7 ");
@@ -7582,7 +7731,7 @@ function renderGroupPage(){
   // Harry Potter has none, so offering it there would be a lie (see _story_index).
   const act=document.getElementById("grpActions");
   let actions="";
-  if(isGroup && grpData.has_story_order){
+  if(isGroup && (grpData.has_story_order || missingRows.some(r=>r._missing.story_index))){
     const mode=grpData.order||"story";
     actions+=`<div class="flex items-stretch border border-gray-700">
       ${["story","release"].map(mo=>`
@@ -7590,6 +7739,15 @@ function renderGroupPage(){
                  ${mode===mo?"bg-indigo-600 text-white":"bg-gray-900 text-gray-400 hover:text-white"}"
                 data-order="${mo}">${mo==="story"?"Story order":"Release order"}</button>`).join("")}
     </div>`;
+  }
+  // Only a shelf backed by a TMDb collection knows what it is missing; a purely
+  // hand-built one (a few shows put together) has no list to compare against.
+  if(isGroup && grpData.collection_id && missingContentEnabled){
+    actions+=`<label class="flex items-center gap-2 px-3 py-1.5 border border-gray-700 bg-gray-900 cursor-pointer select-none
+                     text-[10px] font-black uppercase tracking-widest ${grpShowMissing?"text-white":"text-gray-400 hover:text-white"}">
+      <input id="grpMissingToggle" type="checkbox" class="accent-indigo-500" ${grpShowMissing?"checked":""}/>
+      Show not downloaded
+    </label>`;
   }
   if(isGroup){
     actions+=`<button onclick="openGroupAdd()" class="px-3 py-1.5 border border-gray-700 bg-gray-900
@@ -7599,7 +7757,9 @@ function renderGroupPage(){
   document.getElementById("grpRenameBtn").classList.toggle("hidden", !isGroup);
 
   document.getElementById("grpList").innerHTML =
-    `<div class="p-2 sm:p-4 space-y-2">${rows.map(_grpRowHtml).join("")}</div>`;
+    `<div class="p-2 sm:p-4 space-y-2">${rows.map(r=>r._missing?_grpMissingRowHtml(r):_grpRowHtml(r)).join("")}</div>
+     ${(isGroup && grpShowMissing && grpData.missing_error)
+       ?`<p class="text-[11px] text-gray-600 text-center pb-4">Couldn't reach TMDb to list the films you don't have yet.</p>`:""}`;
 
   // Wire rows. `data-row` is the member key or section key; the row objects are
   // held here so a title containing quotes can never break an inline handler.
@@ -7617,6 +7777,14 @@ function renderGroupPage(){
   // from `el` found nothing, so the buttons rendered but never responded.
   act.querySelectorAll(".grp-order").forEach(n=>{
     n.addEventListener("click",()=>setGroupOrder(n.dataset.order));
+  });
+  const mt=document.getElementById("grpMissingToggle");
+  if(mt) mt.addEventListener("change",()=>setGroupShowMissing(mt.checked));
+  el.querySelectorAll(".grp-get").forEach(n=>{
+    n.addEventListener("click",()=>grpGetFilm(n.dataset.tmdb, n));
+  });
+  el.querySelectorAll(".grp-choose").forEach(n=>{
+    n.addEventListener("click",()=>grpChooseFilm(n.dataset.tmdb));
   });
 }
 
@@ -23355,6 +23523,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">15.0.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">15.1.0</div>
 </body>
 </html>

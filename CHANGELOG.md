@@ -1,5 +1,29 @@
 # Changelog
 
+## [15.1.0] — 2026-09-16
+**A collection shows the films you don't have yet, one press from downloading.**
+
+A collection page backed by a TMDb collection now has a **Show not downloaded** toggle
+(remembered per viewer, on by default). With it on, every film in the collection that this
+library doesn't hold is listed in its place in the saga — Episode II between I and IV, not
+trailing after — greyed, with **Get** (search, auto-pick the best release, queue it) and, for
+Full profiles, **Choose** (open the search page for that film). Toggled off, the page shows
+only what is downloaded.
+
+* `GET /api/library/group/{id}?include_missing=1` adds `missing[]`. The collection's film
+  list comes from TMDb `/collection/{id}` plus a details call per film — that is where Star
+  Wars keeps its "Episode N" numbers — cached in memory for 12 h, and only fetched when a
+  viewer has the toggle on.
+* "Missing" is measured against the whole library, not just the shelf, and follows the
+  existing admin policy for missing content: off hides the toggle entirely, and unreleased
+  films are hidden unless "show upcoming" is on (then they list as Upcoming, with no Get).
+* Get only considers the top relevance tier of results. A collection is the worst case for a
+  seeder sort — every sibling film shares the title words — and the release-year mismatch is
+  what demotes them.
+* A film queued from the shelf counts as owned and joins the shelf immediately, before its
+  metadata is fetched: its queued TMDb id is checked, and the cached collection list places
+  it. Previously the film would have read as missing (offering Get again) until opened.
+
 ## [15.0.1] — 2026-09-16
 **The Story / Release order toggle on a collection page did nothing.**
 

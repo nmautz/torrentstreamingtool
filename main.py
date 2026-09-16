@@ -3366,14 +3366,100 @@ def _spawn_section_fetch(item_id: str) -> None:
 
 GROUP_ORDER_MODES = ("story", "release")
 
+# A TMDb collection's full film list, so a shelf can show the films this box does
+# NOT have. In memory on purpose: it is cheap to rebuild, a collection changes
+# only when a new film is announced, and nothing else reads it. Keyed by
+# collection id → {"at": epoch, "parts": [...]}.
+_collection_parts_cache: dict = {}
+_collection_parts_locks: dict = {}
+_COLLECTION_TTL_SEC = 12 * 3600
+
+
+async def _tmdb_collection_parts(collection_id: int) -> Optional[list]:
+    """Every film in a TMDb collection, with the story number each one carries.
+
+    One `/collection/{id}` call gives the list, but not `alternative_titles`, which
+    is where Star Wars keeps "Episode IV" (see _story_index) — so each part costs a
+    details call too. That is why this is cached and only asked for when a viewer
+    actually has "Show not downloaded" on. None = TMDb unreachable or no key."""
+    cid = int(collection_id or 0)
+    if cid <= 0 or not await _tmdb_effective_key():
+        return None
+    hit = _collection_parts_cache.get(cid)
+    if hit and time.time() - hit["at"] < _COLLECTION_TTL_SEC:
+        return hit["parts"]
+    lock = _collection_parts_locks.setdefault(cid, asyncio.Lock())
+    async with lock:
+        hit = _collection_parts_cache.get(cid)
+        if hit and time.time() - hit["at"] < _COLLECTION_TTL_SEC:
+            return hit["parts"]
+        coll = await _tmdb_get(f"/collection/{cid}")
+        if not coll:
+            return hit["parts"] if hit else None
+        parts = []
+        for part in coll.get("parts") or []:
+            mid = int(part.get("id") or 0)
+            if not mid:
+                continue
+            det = await _tmdb_get(f"/movie/{mid}",
+                                  {"append_to_response": "alternative_titles"}) or {}
+            alts = [a.get("title") or "" for a in
+                    (det.get("alternative_titles") or {}).get("titles", []) or []]
+            parts.append({
+                "tmdb_id":      mid,
+                "title":        part.get("title") or det.get("title") or "",
+                "original_title": part.get("original_title") or "",
+                "release_date": part.get("release_date") or det.get("release_date") or "",
+                "poster_path":  part.get("poster_path") or "",
+                "backdrop_path": part.get("backdrop_path") or "",
+                "overview":     part.get("overview") or "",
+                "vote_average": part.get("vote_average") or 0,
+                "runtime":      det.get("runtime") or 0,
+                "story_index":  _story_index(part.get("title") or "",
+                                             part.get("original_title") or "", *alts),
+            })
+        _collection_parts_cache[cid] = {"at": time.time(), "parts": parts}
+        return parts
+
+
+def _cached_collection_for_movie(movie_id: int) -> int:
+    """Collection id a film belongs to, from the parts cache only (no network)."""
+    mid = int(movie_id or 0)
+    if not mid:
+        return 0
+    for cid, hit in _collection_parts_cache.items():
+        if any(pt["tmdb_id"] == mid for pt in hit["parts"]):
+            return cid
+    return 0
+
+
+def _item_movie_tmdb_id(item: dict) -> int:
+    """The TMDb film an item IS — its resolved binding, or, for a download queued a
+    moment ago whose metadata has not been fetched yet, the id it was queued with.
+    Without the fallback a film fetched from a shelf would still read as missing
+    (and offer Get again) until someone happened to open it."""
+    meta = item.get("metadata") or {}
+    if meta.get("tmdb_kind") == "movie" and meta.get("tmdb_id"):
+        return int(meta["tmdb_id"])
+    pick = item.get("tmdb_pick") or {}
+    if pick.get("kind") == "movie" and pick.get("id"):
+        return int(pick["id"])
+    return 0
+
 
 def _collection_of(item: dict) -> dict:
     """TMDb collection this item's film belongs to, or {}."""
     meta = item.get("metadata") or {}
-    if meta.get("tmdb_kind") != "movie":
-        return {}
-    coll = meta.get("collection") or {}
-    return coll if int(coll.get("id") or 0) > 0 else {}
+    coll = meta.get("collection") or {} if meta.get("tmdb_kind") == "movie" else {}
+    if int(coll.get("id") or 0) > 0:
+        return coll
+    # Queued from a shelf, metadata not fetched yet: the parts cache already knows
+    # which collection this film belongs to, so it joins its shelf immediately.
+    if not meta:
+        cid = _cached_collection_for_movie(_item_movie_tmdb_id(item))
+        if cid:
+            return {"id": cid, "name": "", "poster_path": "", "backdrop_path": ""}
+    return {}
 
 
 def _member_key(item: dict) -> str:
@@ -3480,7 +3566,9 @@ def _group_member_entry(items: list, profile_id: str) -> dict:
     title = (head.get("series") or "").strip() or head.get("title", "")
     secs = _section_hints(items, files, profile_id, title)
     sec_meta = meta.get("sections") or {}
-    kind = meta.get("tmdb_kind") or ("movie" if len(files) == 1 else "tv")
+    kind = meta.get("tmdb_kind") or (
+        "movie" if (len(files) <= 1 or (head.get("tmdb_pick") or {}).get("kind") == "movie")
+        else "tv")
     counted = [s for s in secs if s["counted"]]
     return {
         "key":         _member_key(head),
@@ -11041,6 +11129,38 @@ def _group_payload(lib: dict, group: dict, visible: list, profile_id: str) -> di
     }
 
 
+async def _group_missing(lib: dict, group: dict, entries: list) -> dict:
+    """Films in the group's TMDb collection that this library does not hold.
+
+    Measured against the WHOLE library, not just the shelf's members — a film
+    that is here but was never grouped is still not "missing". Unreleased films
+    follow the same admin policy as unaired episodes (settings.missing_content):
+    hidden, or listed as Upcoming with nothing to get."""
+    cid = int(group.get("collection_id") or 0)
+    if not cid:
+        return {"missing": [], "missing_supported": False}
+    cfg = (lib.get("settings") or {}).get("missing_content") or {}
+    if cfg.get("enabled", True) is False:
+        return {"missing": [], "missing_supported": False}
+    parts = await _tmdb_collection_parts(cid)
+    if parts is None:
+        return {"missing": [], "missing_supported": True, "missing_error": "unavailable"}
+    have = {_item_movie_tmdb_id(it) for it in lib["items"]} - {0}
+    have |= {int(e.get("tmdb_id") or 0) for e in entries} - {0}
+    today = datetime.now(timezone.utc).date().isoformat()
+    show_unaired = bool(cfg.get("show_unaired", False))
+    missing = []
+    for pt in parts:
+        if pt["tmdb_id"] in have:
+            continue
+        rd = pt.get("release_date") or ""
+        upcoming = (not rd) or rd > today
+        if upcoming and not show_unaired:
+            continue
+        missing.append({**pt, "upcoming": upcoming})
+    return {"missing": missing, "missing_supported": True}
+
+
 @app.get("/api/library/groups")
 async def get_library_groups(request: Request, profile_id: str = "") -> JSONResponse:
     """Every franchise group that applies to this caller's library — TMDb film
@@ -11060,15 +11180,20 @@ async def get_library_groups(request: Request, profile_id: str = "") -> JSONResp
 
 @app.get("/api/library/group/{group_id:path}")
 async def get_library_group(request: Request, group_id: str,
-                            profile_id: str = "") -> JSONResponse:
-    """One group, with every member resolved — what the group page renders."""
+                            profile_id: str = "", include_missing: int = 0) -> JSONResponse:
+    """One group, with every member resolved — what the group page renders.
+    `include_missing=1` adds the collection's films this library lacks (see
+    _group_missing); off by default because the first call per collection costs
+    one TMDb round trip per film."""
     lib = await get_library()
     visible = _visible_items(request, lib, profile_id)
     group = next((g for g in _build_groups(lib, visible) if g["id"] == group_id), None)
     if not group:
         raise HTTPException(404, "Group not found.")
-    return JSONResponse({**_group_payload(lib, group, visible, profile_id),
-                         "img_base": LOCAL_IMG_BASE})
+    payload = _group_payload(lib, group, visible, profile_id)
+    if include_missing:
+        payload.update(await _group_missing(lib, group, payload["members"]))
+    return JSONResponse({**payload, "img_base": LOCAL_IMG_BASE})
 
 
 @app.post("/api/library/groups")

@@ -376,7 +376,15 @@ One full-screen "shelf" serves two shapes: a **franchise** (`openGroupPage({kind
 page (`_grpOpenRow`) or play it (`_grpPlayRow`); the shelf never renders episodes itself.
 Franchise-only chrome: Story/Release toggle (`setGroupOrder`, shown only when
 `has_story_order`), rename (`renameGroup`), and "+ Add title" (`openGroupAdd` →
-`#groupEditModal`, `_grpEditMembers`).
+`#groupEditModal`, `_grpEditMembers`). **Show not downloaded** (15.1.0, `grpShowMissing`,
+localStorage `streamlink_grp_missing`, default on; shown only for a group with a
+`collection_id` while `missingContentEnabled`) fetches with `include_missing=1`;
+`_grpMissingRows` rows are merged with the owned rows by `_grpSortRows` (a JS mirror of
+`_member_sort_key`) and drawn by `_grpMissingRowHtml`. **Get** → `grpGetFilm`: a detached
+movie search (`/api/search?q=title&year=`), top relevance tier only, `_ssAutoPick` with the
+bulk filters, `POST /api/library/download` with `tmdb_id`/`tmdb_kind:"movie"`, then pokes
+`/metadata` so it binds at once; `_grpFilmQueued` blocks a second press. **Choose** →
+`openSearchShowFromTmdb` (Full profiles only).
 
 Library grid: `loadLibrary` also calls `_libFetchGroups` (`libGroups`, `libGroupedKeys`);
 `renderLibrary` drops claimed tiles and emits `_libGroupTileHtml` per group (not in the Hidden
