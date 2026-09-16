@@ -2208,6 +2208,35 @@
   </div>
 </div>
 
+<!-- Not-out-yet warning. The layout does the arguing: Cancel is the big,
+     coloured, full-width target; "Download anyway" is small grey text underneath,
+     and only exists for a profile with the content-lock permission. -->
+<div id="unreleasedModal"
+  class="hidden fixed inset-0 z-[70] bg-black/70
+         flex items-end sm:items-center justify-center sm:px-4 sm:py-6">
+  <div class="bg-gray-900 w-full sm:max-w-md flex flex-col fade-in border-t-[3px] border-amber-500">
+    <div class="px-5 pt-5 pb-4">
+      <div class="flex items-center gap-2 text-amber-400">
+        <svg class="ic w-5 h-5" aria-hidden="true"><use href="#i-warn"/></svg>
+        <h3 class="text-sm font-black uppercase tracking-widest">Not out yet</h3>
+      </div>
+      <p id="unrelHead" class="mt-3 text-lg font-black uppercase tracking-wide text-gray-100 leading-snug"></p>
+      <p id="unrelWhen" class="mt-1 text-xs font-black uppercase tracking-widest text-amber-400"></p>
+      <p class="mt-3 text-sm text-gray-400 leading-relaxed">Anything posted before it comes out is almost
+        always fake &mdash; often a program disguised as the video. Wait until it has
+        been released, then download it.</p>
+    </div>
+    <div class="px-5 pb-5 flex flex-col gap-3">
+      <button id="unrelCancel"
+        class="w-full min-h-[52px] bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-black uppercase tracking-widest transition-colors">Cancel download</button>
+      <button id="unrelOverride"
+        class="hidden self-center px-2 py-1 text-[11px] text-gray-500 hover:text-gray-300 transition-colors">Download anyway</button>
+      <p id="unrelNoOverride"
+        class="hidden text-center text-[11px] text-gray-600">Only a profile with content-lock permission can download something before it's released.</p>
+    </div>
+  </div>
+</div>
+
 <div id="metaFixModal"
   class="hidden fixed inset-0 z-[60] bg-black/60
          flex items-end sm:items-center justify-center sm:px-4 sm:py-6">
@@ -7567,7 +7596,7 @@ function _grpMissingRowHtml(row){
   const base=(grpData&&grpData.img_base)||"";
   const poster=_grpImg(base, f.poster_path, "w342");
   const bits=[row.year, "Film", row.runtime?`${row.runtime} min`:"",
-              f.upcoming?"Upcoming":"Not downloaded"].filter(Boolean).join(" \u00b7 ");
+              f.upcoming?_airInfo(f.release_date,"Releases").label:"Not downloaded"].filter(Boolean).join(" \u00b7 ");
   const pending=_grpFilmQueued.has(f.tmdb_id);
   const actions=f.upcoming ? "" : pending
     ? `<span class="flex-1 min-h-[34px] flex items-center justify-center text-[11px] font-black uppercase tracking-wide text-yellow-400 border border-yellow-900 bg-yellow-950/30">Queued</span>`
@@ -7629,14 +7658,12 @@ async function grpGetFilm(tmdbId, btn){
     if(!src){ showAlert(`Couldn't find ${f.title} anywhere right now — try again in a few minutes.`,"warn"); return; }
     let res=null;
     try{
-      const r=await fetch("/api/library/download",{
-        method:"POST", headers:{"Content-Type":"application/json"},
-        body:JSON.stringify({magnet:src.magnet, title:src.title, series:"", season:0, episode:0,
+      const r=await postLibraryDownload({magnet:src.magnet, title:src.title, series:"", season:0, episode:0,
                              save_path:"", profile_id:profile.id, admin_only:false,
-                             tmdb_id:f.tmdb_id, tmdb_kind:"movie"}),
-      });
+                             tmdb_id:f.tmdb_id, tmdb_kind:"movie"});
+      if(r.cancelled) return;
       res=await r.json().catch(()=>null);
-      if(!r.ok){ showAlert((res&&res.detail)||"Download failed.","error"); return; }
+      if(!r.ok){ showAlert(_errDetail(res,"Download failed."),"error"); return; }
     }catch(_){ showAlert("Download failed.","error"); return; }
     _grpFilmQueued.add(f.tmdb_id);
     // Bind it now rather than on first open, so it joins the shelf properly.
@@ -9668,13 +9695,98 @@ function _tmdbSeasonEpisodes(meta, season){
   return (s && Array.isArray(s.episodes)) ? s.episodes : [];
 }
 
-// True when an episode hasn't aired yet — a future air date, or none at all
-// (TMDb carries announced-but-unscheduled episodes with an empty air_date).
+// True when an episode isn't out yet — none announced, or dated today or later.
+// TMDb dates are calendar days with no time: an episode dated TODAY airs this
+// evening, and the old `midnight < now` test called it aired from 00:00 — which
+// is exactly the window a fake "S29E01" sits in. Matches the server's
+// _unreleased_gate, which refuses the download through the air date.
 function _tmdbEpUnaired(te){
-  const d=((te&&te.air_date)||"").trim();
-  if(!d) return true;
-  const t=Date.parse(d+"T00:00:00");
-  return isNaN(t) ? true : t>Date.now();
+  return !_airInfo((te&&te.air_date)||"").out;
+}
+
+function _localISODate(d){
+  return `${d.getFullYear()}-${pad2(d.getMonth()+1)}-${pad2(d.getDate())}`;
+}
+
+// {out, label} for a TMDb air/release date. `label` is short and badge-sized.
+function _airInfo(date, verb){
+  const v=verb||"Airs";
+  const d=(date||"").trim();
+  if(!d) return {out:false, label:`${v} TBA`};
+  const now=new Date(), today=_localISODate(now);
+  if(d<today) return {out:true, label:""};
+  if(d===today) return {out:false, label:`${v} today`};
+  const tm=new Date(now.getFullYear(), now.getMonth(), now.getDate()+1);
+  if(d===_localISODate(tm)) return {out:false, label:`${v} tomorrow`};
+  const [y,m,dd]=d.split("-").map(Number);
+  const dt=new Date(y,(m||1)-1,dd||1);
+  const opts={weekday:"short", month:"short", day:"numeric"};
+  if(y!==now.getFullYear()) opts.year="numeric";
+  return {out:false, label:`${v} ${dt.toLocaleDateString(undefined, opts)}`};
+}
+
+// The release-date chip. Amber, square, uppercase — the same family as the other
+// warning chips, and deliberately not green: a row with sources that isn't out
+// yet is the most dangerous row on the page.
+function _releaseBadge(date, verb){
+  const a=_airInfo(date, verb);
+  if(a.out) return "";
+  return `<span class="text-[9px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-amber-950/70 text-amber-400 border border-amber-900 whitespace-nowrap"
+               title="Not released yet. Anything posted before release is almost always fake.">${escHtml(a.label)}</span>`;
+}
+
+// Show the not-out-yet warning. Resolves true only if an allowed profile chose
+// "Download anyway"; every other way out of the dialog is a cancel.
+function _unreleasedPrompt(info){
+  return new Promise(resolve=>{
+    const modal=document.getElementById("unreleasedModal");
+    document.getElementById("unrelHead").textContent=info.title||"This";
+    const when=(info.label||"").replace(/^./, c=>c.toUpperCase());
+    document.getElementById("unrelWhen").textContent=when;
+    const ov=document.getElementById("unrelOverride");
+    const no=document.getElementById("unrelNoOverride");
+    ov.classList.toggle("hidden", !info.can_override);
+    no.classList.toggle("hidden", !!info.can_override);
+    const done=v=>{
+      modal.classList.add("hidden");
+      modal.onclick=null; ov.onclick=null;
+      document.getElementById("unrelCancel").onclick=null;
+      resolve(v);
+    };
+    document.getElementById("unrelCancel").onclick=()=>done(false);
+    ov.onclick=()=>done(true);
+    modal.onclick=e=>{ if(e.target===modal) done(false); };
+    modal.classList.remove("hidden");
+    document.getElementById("unrelCancel").focus();
+  });
+}
+
+// Readable text from an error payload whose `detail` may be a string or an object.
+function _errDetail(e, fallback){
+  const d=e&&e.detail;
+  if(typeof d==="string") return d;
+  if(d&&typeof d==="object"&&d.title) return `${d.title} ${d.label||""}`.trim();
+  return fallback||"Failed.";
+}
+
+// Every library download goes through here. The server refuses anything TMDb says
+// isn't out yet (409 `unreleased`); this turns that into the warning dialog and,
+// for an allowed profile who insists, re-sends with `allow_unreleased`.
+// Returns the final Response, or `{ok:false, cancelled:true}` when the user backed
+// out, or `{ok:false, unreleased:true, info}` for a silent (bulk) caller.
+async function postLibraryDownload(body, opts={}){
+  const send=b=>fetch("/api/library/download",{
+    method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(b),
+  });
+  const r=await send(body);
+  if(r.status!==409) return r;
+  const e=await r.clone().json().catch(()=>null);
+  const info=e&&e.detail;
+  if(!info || info.code!=="unreleased") return r;
+  if(opts.silent) return {ok:false, unreleased:true, info};
+  const go=await _unreleasedPrompt(info);
+  if(!go) return {ok:false, cancelled:true, info};
+  return send({...body, allow_unreleased:true});
 }
 
 // TMDb episodes of `season` that `have` (a Set of episode numbers) doesn't cover.
@@ -9951,7 +10063,7 @@ function _epMissingCardHtml(season, te){
   const badge=upcoming
     ? `<span class="text-[10px] text-gray-500 font-bold uppercase tracking-widest flex items-center gap-1"
              title="TMDb lists this episode but it hasn't aired yet.">
-         <span class="w-1.5 h-1.5 ${dot}"></span>Upcoming${air?` · ${escHtml(air)}`:""}</span>`
+         <span class="w-1.5 h-1.5 ${dot}"></span></span>${_releaseBadge(air)}`
     : `<span class="text-[10px] text-orange-400 font-bold uppercase tracking-widest flex items-center gap-1"
              title="This episode exists but isn't on this box.">
          <span class="w-1.5 h-1.5 ${dot}"></span>Not downloaded</span>`;
@@ -11665,16 +11777,17 @@ async function submitDownload(){
         const allChecked=checked.length===visCbs.length;
         body.default_visible_profiles=allChecked?[]:checked;
       }
-      if(_libPickerOpen && _libPrepData){
+      const prepared=_libPickerOpen && _libPrepData;
+      if(prepared){
         const cbs=document.querySelectorAll(".dl-file-cb");
         body.selected_file_indices=Array.from(cbs).filter(c=>c.checked).map(c=>parseInt(c.dataset.index));
         body.torrent_hash=_libPrepData.hash;
-        _libPrepData=null; _libPickerOpen=false; // consumed — don't cancel on close
       }
-      r=await fetch("/api/library/download",{
-        method:"POST",headers:{"Content-Type":"application/json"},
-        body:JSON.stringify(body),
-      });
+      r=await postLibraryDownload(body);
+      // Backed out of the not-out-yet warning: leave the dialog as it was. The
+      // prepared torrent stays owned by it, so closing it still cancels that.
+      if(r.cancelled) return;
+      if(prepared && r.ok){ _libPrepData=null; _libPickerOpen=false; } // consumed — don't cancel on close
     }
     if(r.ok){
       const res=await r.json().catch(()=>({}));
@@ -11688,7 +11801,7 @@ async function submitDownload(){
       switchTab("library");
     } else {
       const e=await r.json().catch(()=>({detail:"Unknown error"}));
-      showAlert(e.detail||"Failed.","error");
+      showAlert(_errDetail(e,"Failed."),"error");
     }
   } finally {
     _markLoading(btn, false);
@@ -13782,7 +13895,9 @@ function _ssEpRowHtml(e){
   const miss=(_ssAudioPref!=="any"&&!_ssAudioMatch(best))
     ?`<span class="text-[9px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-red-950/70 text-red-400 whitespace-nowrap">${_ssAudioPref==="eng"?"No Eng audio":"Dub only"}</span>`:"";
   const own=_ssOwnedBadge(e.season,e.episode);
-  return `<div class="w-full flex items-stretch${own?" bg-emerald-950/20 border-l-2 border-l-emerald-800":""}">
+  const te=_tmdbSeasonEpisodes(_ssMeta,e.season).find(x=>+x.episode===+e.episode);
+  const rel=te?_releaseBadge(te.air_date):"";
+  return `<div class="w-full flex items-stretch${own?" bg-emerald-950/20 border-l-2 border-l-emerald-800":rel?" border-l-2 border-l-amber-700":""}">
     <button onclick="ssOpenSourceSheet(${e.season},${e.episode})"
       class="flex-1 min-w-0 text-left px-3 sm:px-5 py-3 hover:bg-gray-800/50 transition-colors flex items-center gap-3">
       <div class="text-[11px] font-mono font-bold text-indigo-400 w-14 flex-shrink-0">${code}</div>
@@ -13794,7 +13909,7 @@ function _ssEpRowHtml(e){
         <p class="text-[11px] text-gray-500 flex items-center gap-1.5 flex-wrap">
           ${_availHtml(best.seeders)} ·
           ${escHtml(best.size_human)} · ${e.sources.length} source${e.sources.length>1?"s":""}
-          ${shealth}${badge}${miss}${_dvRiskBadge(best)}
+          ${rel}${shealth}${badge}${miss}${_dvRiskBadge(best)}
         </p>
       </div>
       <svg class="w-4 h-4 text-gray-600 flex-shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -13810,17 +13925,33 @@ function _ssEpRowHtml(e){
 
 // Stream-now for an episode row: plays the preference-best source immediately via
 // the Search-tab stream pipeline (sequential buffer → VLC), no library save.
-function ssPlayEpisode(season,episode,btn){
+// Streaming isn't gated by the server (the stream endpoints carry no show or
+// episode to check), so the warning is asked here, from the same TMDb data the
+// row's badge came from.
+async function _ssConfirmOut(season, episode){
+  const te=_tmdbSeasonEpisodes(_ssMeta,season).find(x=>+x.episode===+episode);
+  if(!te) return true;
+  const a=_airInfo(te.air_date);
+  if(a.out) return true;
+  return _unreleasedPrompt({
+    title:`${(_ssGroup&&_ssGroup.title)||""} S${pad2(season)}E${pad2(episode)}`.trim(),
+    label:a.label, can_override:!!(profile&&profile.elevated&&_profileToken),
+  });
+}
+
+async function ssPlayEpisode(season,episode,btn){
   const e=_ssEpisodes.find(x=>x.season===season&&x.episode===episode);
   if(!e||!e.sources.length) return;
+  if(!await _ssConfirmOut(season,episode)) return;
   const best=_ssPreferredSource(e.sources);
   openStreamPicker(best.magnet,best.title,btn,{series:_ssGroup&&_ssGroup.title,season,episode,seeders:best.seeders,size:best.size});
 }
 
 // Stream-now for a specific source inside the per-episode source sheet.
-function ssPlaySource(season,episode,i,btn){
+async function ssPlaySource(season,episode,i,btn){
   const e=_ssEpisodes.find(x=>x.season===season&&x.episode===episode);
   if(!e||!e.sources[i]) return;
+  if(!await _ssConfirmOut(season,episode)) return;
   const s=e.sources[i];
   openStreamPicker(s.magnet,s.title,btn,{series:_ssGroup&&_ssGroup.title,season,episode,seeders:s.seeders,size:s.size});
 }
@@ -13862,7 +13993,11 @@ function _ssMissingRowHtml(season, episode, name){
     <div class="text-[11px] font-mono font-bold text-gray-600 w-14 flex-shrink-0">${code}</div>
     <div class="min-w-0 flex-1">
       <p class="text-sm text-gray-400 truncate">${name?escHtml(name):`Episode ${episode}`}</p>
-      <p class="text-[11px] text-gray-600 uppercase tracking-wide">No source found</p>
+      <p class="text-[11px] text-gray-600 uppercase tracking-wide flex items-center gap-1.5 flex-wrap">${(()=>{
+        const te=_tmdbSeasonEpisodes(_ssMeta,season).find(x=>+x.episode===+episode);
+        const rb=te?_releaseBadge(te.air_date):"";
+        return rb||"No source found";
+      })()}</p>
     </div>
     <button onclick="ssSearchEpisode(${season},${episode})" ${busy?"disabled":""}
       class="text-[11px] px-2.5 py-1.5 flex-shrink-0 ${busy?"bg-gray-800 text-gray-500":"bg-gray-800 hover:bg-indigo-700 text-gray-300 hover:text-white"} uppercase tracking-wide transition-colors flex items-center gap-1">
@@ -14208,12 +14343,12 @@ async function _ssDownloadOne(src, season, episode, opts={}){
               // The show the user picked. A detached background run may outlive
               // the open page, so the caller can pass its own snapshot.
               ...((opts.tmdb!==undefined)?opts.tmdb:_ssTmdbBinding())};
-  const r=await fetch("/api/library/download",{
-    method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(body),
-  });
+  const r=await postLibraryDownload(body, {silent:!!opts.silent});
+  if(r.cancelled) return false;
+  if(r.unreleased) return {unreleased:true};
   if(!r.ok){
     const err=await r.json().catch(()=>({detail:"Failed"}));
-    if(!opts.silent) showAlert(err.detail||"Download failed.","error");
+    if(!opts.silent) showAlert(_errDetail(err,"Download failed."),"error");
     return false;
   }
   // The server dedupes by info-hash and hands back the item already backing it
@@ -14881,7 +15016,9 @@ async function _bgStartDownloads(ctx, ctl, report, jobs, note="", opts={}){
       unsourced.length?"warn":"success");
     return;
   }
-  let started=0, dup=0; const failed=[];
+  // Episodes the server refused as not out yet. A background run never prompts —
+  // it skips them and says so.
+  let started=0, dup=0; const failed=[], notOut=[];
   for(let i=0;i<jobs.length;i++){
     if(ctl.cancel) break;
     const j=jobs[i];
@@ -14890,7 +15027,8 @@ async function _bgStartDownloads(ctx, ctl, report, jobs, note="", opts={}){
     const done=await _ssDownloadOne(j.src, j.season, j.episode,
                                     {silent:true, series:ctx.title, locked:ctx.locked,
                                      tmdb:ctx.tmdb});
-    if(!done) failed.push(_ssEpCode(j.season,j.episode));
+    if(done && done.unreleased) notOut.push(_ssEpCode(j.season,j.episode));
+    else if(!done) failed.push(_ssEpCode(j.season,j.episode));
     else if(done.duplicate) dup++;
     else started++;
     await new Promise(r=>setTimeout(r,250));
@@ -14902,6 +15040,7 @@ async function _bgStartDownloads(ctx, ctl, report, jobs, note="", opts={}){
   // as a duplicate and nothing breaks, but "Queued 20/20" for twenty no-ops is a
   // lie the user will only catch by counting rows in the library.
   if(dup) bits.push(`${dup} ${dup===1?"was":"were"} already downloading`);
+  if(notOut.length) bits.push(`skipped ${_ssEpList(notOut)} (not out yet)`);
   if(unsourced.length) bits.push(`no source found for ${_ssEpList(unsourced)}`);
   if(failed.length) bits.push(`could not start ${_ssEpList(failed)}`);
   if(note) bits.push(note);
@@ -23523,6 +23662,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">15.1.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">15.2.0</div>
 </body>
 </html>

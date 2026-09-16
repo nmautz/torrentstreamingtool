@@ -400,6 +400,16 @@ looks for them). A Movies section hangs each file's film binding on `f.film` and
 makes it `epIsMovie`. **Guards:** `_epApplyMetadata` and `_epTopUpSeasons` must not overwrite
 `epMetadata` while `epSection` is set — see GOTCHAS.
 
+### Not-out-yet releases (15.2.0)
+
+`_airInfo(date, verb)` → `{out, label}` and `_releaseBadge(date)` (amber chip) mark unreleased
+episodes/films: `_ssEpRowHtml`, `_ssMissingRowHtml`, `_epMissingCardHtml`, collection missing
+films. **All** library downloads go through `postLibraryDownload(body, {silent})`: on a 409
+`unreleased` it shows `#unreleasedModal` via `_unreleasedPrompt(info)` (big Cancel; small
+"Download anyway" only when `info.can_override`) and resends with `allow_unreleased`. Silent
+callers (background runs) get `{unreleased:true}` and report the skip. `_errDetail` renders an
+object `detail`. Stream-now rows ask via `_ssConfirmOut`.
+
 ### Stream to Device
 
 All Play surfaces (`epPlay`, `epPlayFrom`, the `lib-restart-btn` listener, and —

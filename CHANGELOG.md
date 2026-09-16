@@ -1,5 +1,31 @@
 # Changelog
 
+## [15.2.0] — 2026-09-16
+**Not-out-yet episodes carry their release date, and downloading one takes a deliberate override.**
+
+The 15.1.1 fake — "South Park S29E01 … NTb", a lone `.exe` posted the morning of the day the
+episode aired — was downloadable with one press. Now:
+
+* **Badge.** Episode rows on the search page (with or without sources), missing-episode rows in
+  the library, and not-yet-released films on a collection page show an amber chip:
+  **Airs today / Airs tomorrow / Airs Wed, Sep 30 / Airs TBA** ("Releases …" for films).
+* **Server gate.** `POST /api/library/download` looks the release up (`_unreleased_gate`: the
+  TMDb binding sent with the request, else the series' library binding, else the title's
+  `SxxExx`) and answers **409 `unreleased`** for an episode dated today or later, a season pack
+  whose last episode hasn't aired, or a film releasing today or later. `allow_unreleased: true`
+  overrides it **only** for a PIN-verified elevated profile (the content-lock permission) or an
+  admin session; anyone else gets **403**. Unknown (no binding, numbering it can't place)
+  never blocks.
+* **Warning dialog.** Every download funnels through `postLibraryDownload`, which turns the 409
+  into a "Not out yet" dialog: a big full-width **Cancel download**, and — only for a profile
+  that may override — a small grey **Download anyway** underneath. Others see why they can't.
+  Background season runs never prompt; they skip those episodes and list them as "not out yet".
+* **Stream-now** from an episode row asks the same question in the UI (the stream endpoints
+  carry no show or episode for the server to check).
+* **Fixed:** `_tmdbEpUnaired` counted an episode dated today as aired from midnight — the exact
+  window a pre-air fake sits in. "Not out" now runs through the air date on both client and
+  server; downloads open the next day.
+
 ## [15.1.1] — 2026-09-16
 **A download with no playable video was marked "ready" and then vanished from view.**
 

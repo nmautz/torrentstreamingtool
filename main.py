@@ -10305,6 +10305,10 @@ class DownloadReq(BaseModel):
     # Classic search / a pasted magnet, which still fall back to the guess.
     tmdb_id: int = 0
     tmdb_kind: str = ""             # "tv" | "movie"
+    # Download it even though TMDb says it isn't out yet. Honoured only for a
+    # PIN-verified elevated profile (the content-lock permission) — see
+    # _unreleased_gate.
+    allow_unreleased: bool = False
 
 
 class VisibilityReq(BaseModel):
@@ -12439,10 +12443,149 @@ async def move_library_status(item_id: str, request: Request) -> JSONResponse:
     return JSONResponse(st)
 
 
+# ── Not-yet-released gate ────────────────────────────────────────────────────
+# A release posted under the name of an episode that hasn't aired is, as a rule,
+# not that episode. The one that prompted this: "South Park S29E01 South America
+# 1080p WEB-DL x265 NTb", on the morning of the day it aired, was a single .exe.
+# It downloaded, was marked ready with no files, and sat on disk.
+#
+# TMDb dates are calendar days with no time, and an episode dated today airs this
+# evening — so "not out yet" runs THROUGH the air date (box-local), and a download
+# is allowed from the next day. That costs a same-day anime simulcast a day for an
+# un-elevated profile; an elevated one can override.
+
+_air_cache: dict = {}          # (tv_id, season) → (epoch, episodes list)
+_AIR_CACHE_SEC = 6 * 3600
+
+
+def _today_local() -> str:
+    return datetime.now().date().isoformat()
+
+
+def _air_label(date: str, today: str) -> str:
+    if not date:
+        return "air date not announced"
+    if date == today:
+        return "airs today"
+    try:
+        d = datetime.fromisoformat(date).date()
+        t = datetime.fromisoformat(today).date()
+        if (d - t).days == 1:
+            return "airs tomorrow"
+        return "airs " + d.strftime("%a %b ") + str(d.day) + (f", {d.year}" if d.year != t.year else "")
+    except ValueError:
+        return f"airs {date}"
+
+
+async def _season_air_dates(lib: dict, tv_id: int, season: int) -> Optional[list]:
+    """TMDb episode list (with air dates) for one season: the library's own cache
+    when some item already holds it, else a TMDb call, cached in memory."""
+    for it in lib["items"]:
+        meta = it.get("metadata") or {}
+        if meta.get("tmdb_kind") == "tv" and int(meta.get("tmdb_id") or 0) == tv_id:
+            eps = ((meta.get("seasons") or {}).get(str(season)) or {}).get("episodes")
+            if eps:
+                return eps
+    key = (tv_id, season)
+    hit = _air_cache.get(key)
+    if hit and time.time() - hit[0] < _AIR_CACHE_SEC:
+        return hit[1]
+    if not await _tmdb_effective_key():
+        return None
+    got = await _tmdb_fetch_seasons(tv_id, [season])
+    eps = (got.get(str(season)) or {}).get("episodes")
+    if eps is None:
+        return hit[1] if hit else None
+    _air_cache[key] = (time.time(), eps)
+    return eps
+
+
+async def _unreleased_gate(lib: dict, req: "DownloadReq") -> Optional[dict]:
+    """What this download is, if TMDb says it isn't out yet; None when it is out,
+    or when there isn't enough to tell (no TMDb binding, numbering we can't place)
+    — unknown never blocks."""
+    kind = (req.tmdb_kind or "").lower()
+    tid = int(req.tmdb_id or 0)
+    season, episode = int(req.season or 0), int(req.episode or 0)
+    if not season and not episode:
+        season, episode = parse_season_episode(req.title or "")
+    series = (req.series or "").strip().lower()
+    if not tid and series:
+        for it in lib["items"]:
+            meta = it.get("metadata") or {}
+            if ((it.get("series") or "").strip().lower() == series
+                    and meta.get("tmdb_kind") == "tv" and meta.get("tmdb_id")):
+                tid, kind = int(meta["tmdb_id"]), "tv"
+                break
+    if not tid:
+        return None
+    today = _today_local()
+
+    if kind == "movie":
+        meta = next((it.get("metadata") for it in lib["items"]
+                     if (it.get("metadata") or {}).get("tmdb_kind") == "movie"
+                     and int((it.get("metadata") or {}).get("tmdb_id") or 0) == tid), None)
+        date = (meta or {}).get("release_date") if meta else None
+        if date is None:
+            det = await _tmdb_get(f"/movie/{tid}") if await _tmdb_effective_key() else None
+            if not det:
+                return None
+            date = det.get("release_date") or ""
+            title = det.get("title") or req.title
+        else:
+            title = (meta or {}).get("title") or req.title
+        if date and date < today:
+            return None
+        return {"kind": "movie", "title": title, "air_date": date,
+                "label": _air_label(date, today).replace("airs", "releases", 1)}
+
+    if kind not in ("", "tv") or season <= 0:
+        return None
+    eps = await _season_air_dates(lib, tid, season)
+    if not eps:
+        return None
+    show = req.series or ""
+    if episode > 0:
+        ep = next((e for e in eps if int(e.get("episode") or 0) == episode), None)
+        if ep is None:
+            return None          # numbering we can't place (absolute, specials) — don't guess
+        date = (ep.get("air_date") or "").strip()
+        if date and date < today:
+            return None
+        return {"kind": "episode", "title": f"{show} S{season:02d}E{episode:02d}".strip(),
+                "season": season, "episode": episode, "air_date": date,
+                "label": _air_label(date, today)}
+    # A season pack: not out until the season's last episode is.
+    last = max(eps, key=lambda e: int(e.get("episode") or 0))
+    date = (last.get("air_date") or "").strip()
+    if date and date < today:
+        return None
+    return {"kind": "season", "title": f"{show} Season {season}".strip(), "season": season,
+            "air_date": date, "label": "finishes airing" + _air_label(date, today)[4:]
+            if date else "air dates not announced"}
+
+
 @app.post("/api/library/download")
 async def library_download(request: Request, req: DownloadReq) -> JSONResponse:
     if not state.vpn_secure:
         raise HTTPException(403, "VPN not connected — download blocked.")
+    # Not out yet → refuse unless an elevated profile explicitly overrides. The
+    # 409 carries what the UI needs for its warning; see _unreleased_gate.
+    _snap = await get_library()
+    try:
+        _gate = await _unreleased_gate(_snap, req)
+    except Exception:
+        log.exception("unreleased gate failed; allowing download")
+        _gate = None
+    if _gate:
+        _can = _is_elevated(request, _snap, req.profile_id)
+        if not req.allow_unreleased:
+            raise HTTPException(409, {"code": "unreleased", "can_override": _can, **_gate})
+        if not _can:
+            raise HTTPException(403, {"code": "unreleased_forbidden", "can_override": False,
+                                      **_gate})
+        log.warning("Unreleased download overridden by elevated profile %s: %s (%s)",
+                    req.profile_id, _gate.get("title"), req.title)
     # Refuse a link that cannot possibly be added, rather than minting a library
     # item for it. A junk `magnet` used to sail through and become a permanent
     # row stuck in `status: "error"` with an EMPTY error string — a broken entry

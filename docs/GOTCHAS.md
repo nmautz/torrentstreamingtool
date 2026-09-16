@@ -1293,6 +1293,17 @@ lookup). Unguarded, Junior High kept its hero title but lost every episode title
 Titan's. Both now check `epSection` — the top-up returns, and `_epApplyMetadata` re-applies the
 section over the fresh `metadata.sections` map instead.
 
+### "Not out yet" runs THROUGH the air date
+
+TMDb air dates are calendar days with no time. An episode dated today airs this evening, so a
+`Date.parse(date) < now` test calls it aired from midnight — precisely when a fake pre-release
+is sitting on the indexers (South Park S29E01, a lone `.exe`, the morning it aired). Both
+`_tmdbEpUnaired`/`_airInfo` (client) and `_unreleased_gate` (server) treat `air_date >= today`
+as not out, box/viewer-local. Trade-off: a same-day anime simulcast is held a day for
+un-elevated profiles. The gate is enforced on `POST /api/library/download` only — the stream
+endpoints receive just a magnet and title, so stream-now asks in the UI (`_ssConfirmOut`) and
+is not server-enforced.
+
 ### A torrent can finish with no video in it — never mark that "ready"
 
 `_all_nonskip_complete` looks at **every** file qBit lists; `build_file_list` keeps only
