@@ -1,5 +1,22 @@
 # Changelog
 
+## [15.1.1] — 2026-09-16
+**A download with no playable video was marked "ready" and then vanished from view.**
+
+A "South Park S29E01" download — an episode that had not aired yet, so almost certainly a
+fake release — finished, was marked **ready** with an empty file list, and appeared nowhere:
+no episode row, no error, no badge. The ready gate (`_all_nonskip_complete`) counts every file
+in the torrent, while the library keeps only video files (`build_file_list`), so a torrent
+with no video passed one and emptied the other. Once `ready`, the monitor never polled it again.
+
+* A finished torrent with no playable video now becomes an **error** naming what it actually
+  contains and suggesting it may be fake, instead of an invisible empty `ready`.
+* The ready gate also waits for qBit's `.!qB` incomplete marker to be renamed away — the same
+  empty-file-list outcome was reachable in the instant between 100 % and the rename.
+* `_repair_empty_ready_items` runs in the download monitor and fixes items already in this
+  state: it rebuilds the file list from qBit when a video is there, or converts the item to the
+  error above when the fetched torrent has none. Throttled to once per 2 min per item.
+
 ## [15.1.0] — 2026-09-16
 **A collection shows the films you don't have yet, one press from downloading.**
 

@@ -1293,6 +1293,16 @@ lookup). Unguarded, Junior High kept its hero title but lost every episode title
 Titan's. Both now check `epSection` — the top-up returns, and `_epApplyMetadata` re-applies the
 section over the fresh `metadata.sections` map instead.
 
+### A torrent can finish with no video in it — never mark that "ready"
+
+`_all_nonskip_complete` looks at **every** file qBit lists; `build_file_list` keeps only
+`VIDEO_EXTS`. A fake release (typical for an episode that hasn't aired: an `.exe`, `.lnk`,
+archive) satisfies the first and empties the second, and the item used to flip to `ready`
+with `files: []` — invisible in the UI, and never polled again because the monitor only
+tracks `downloading`. Same outcome in the instant qBit reports 100 % before renaming
+`x.mkv.!qB` → `x.mkv`. Both are now gated (the `.!qB` check, and "no video ⇒ error"), and
+`_repair_empty_ready_items` heals items already stuck that way.
+
 ### TV has no `belongs_to_collection` — shows join a franchise by hand
 
 Films auto-group from TMDb's `belongs_to_collection`. Nothing in TMDb links *Andor* or *The

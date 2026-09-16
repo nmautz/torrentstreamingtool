@@ -4801,6 +4801,9 @@ def _analyzable_files(item: dict) -> list[dict]:
             if _effective_file_mode(cfg, f.get("path", "")) != "skip"]
 
 
+_QBIT_INCOMPLETE_EXT = ".!qB"
+
+
 def _all_nonskip_complete(item: dict, qfiles: list, save_path: str) -> bool:
     """True iff every non-skip file in the torrent is fully downloaded (and there is
     at least one). The ready/fingerprint gate: a partial selection flips ready once
@@ -4819,6 +4822,12 @@ def _all_nonskip_complete(item: dict, qfiles: list, save_path: str) -> bool:
         if full in compressed_paths:
             continue
         if qf.get("progress", 0.0) < 0.999:
+            return False
+        # qBit reports 100 % a moment BEFORE it renames `x.mkv.!qB` to `x.mkv`. In
+        # that window the file list (video extensions only) holds nothing, so
+        # flipping ready here minted a "ready" item with no files at all — which
+        # the monitor then never looked at again. Wait for the rename.
+        if qf.get("name", "").endswith(_QBIT_INCOMPLETE_EXT):
             return False
     return saw
 
@@ -8151,20 +8160,80 @@ async def video_probe_backfill() -> None:
         log.warning("Colour-signalling backfill aborted: %s", exc)
 
 
+_empty_ready_checked: dict = {}      # item id → last repair attempt (epoch)
+_EMPTY_READY_RETRY_SEC = 120
+
+
+async def _repair_empty_ready_items(lib: dict) -> list:
+    """Rebuild the file list of any `ready` torrent item that has none.
+
+    The ready transition used to fire in the instant between qBit reporting 100 %
+    and renaming `x.mkv.!qB` → `x.mkv`, so the item was marked ready with an empty
+    file list — no episode row, no play button, no sign the download had happened
+    — and, not being `downloading` any more, it was never polled again. Such items
+    already exist in libraries, so this also repairs them. Mutates `lib` in place
+    and returns the items it fixed. Throttled per item, so an item whose torrent
+    really has no video isn't polled every 5 s."""
+    now = time.time()
+    fixed = []
+    for item in lib["items"]:
+        if item.get("status") != "ready" or item.get("files") or not item.get("torrent_hash"):
+            continue
+        if now - _empty_ready_checked.get(item["id"], 0) < _EMPTY_READY_RETRY_SEC:
+            continue
+        _empty_ready_checked[item["id"]] = now
+        h = item["torrent_hash"]
+        info = await qbit_info(h)
+        if not info:
+            continue
+        qfiles = await qbit_files(h)
+        new_files = build_file_list(qfiles, info.get("save_path", settings.qbit_download_path))
+        names = [q.get("name", "") for q in qfiles[:6]]
+        if not new_files:
+            done = bool(qfiles) and all(
+                q.get("progress", 0.0) >= 0.999
+                and not q.get("name", "").endswith(_QBIT_INCOMPLETE_EXT) for q in qfiles)
+            log.warning("Ready item %r has no video files; qBit lists %s",
+                        item.get("title", ""), names)
+            if done:
+                # Fully fetched and still nothing playable: a fake or a non-video
+                # release (typically posted under the name of an episode that
+                # hasn't aired). Surface it as an error with what it actually
+                # contains, instead of an empty "ready" nobody can see into.
+                shown = ", ".join(Path(n).name for n in names[:4])
+                item["status"] = "error"
+                item["error"] = ("This download finished but contains no playable video "
+                                 f"file ({shown}). It may be a fake release - delete it.")
+                fixed.append(item)
+                await broadcast("library_update", {"item_id": item["id"], "status": "error",
+                                                   "message": item["error"]})
+            continue
+        item["files"] = new_files
+        item["size_bytes"] = sum(f["size_bytes"] for f in new_files)
+        log.info("Repaired empty ready item %r: %d file(s) from qBit (%s)",
+                 item.get("title", ""), len(new_files), names)
+        _empty_ready_checked.pop(item["id"], None)
+        fixed.append(item)
+        await broadcast("library_update", {"item_id": item["id"], "status": "ready"})
+        _spawn_bg(_probe_item_video_async(item["id"]))
+    return fixed
+
+
 async def library_download_monitor() -> None:
     """Poll qBit every 5 s for pending library downloads and mark them complete."""
     while True:
         await asyncio.sleep(5)
         try:
             lib = await get_library()
+            repaired = await _repair_empty_ready_items(lib)
             pending = [it for it in lib["items"] if it.get("status") == "downloading"]
             state.downloading_count = len(pending)
             # The visible count excludes admin-locked items so a non-elevated
             # viewer's download badge never reveals hidden content is fetching.
             state.downloading_count_visible = sum(1 for it in pending if not it.get("admin_only"))
-            if not pending:
+            if not pending and not repaired:
                 continue
-            changed = False
+            changed = bool(repaired)
             for item in pending:
                 h = item.get("torrent_hash")
                 if not h:
@@ -8215,6 +8284,23 @@ async def library_download_monitor() -> None:
                         state.downloading_count_visible = max(0, state.downloading_count_visible - 1)
                     changed = True
                     await broadcast("library_update", {"item_id": item["id"], "status": "error"})
+                elif nonskip_done and not new_files:
+                    # Finished, and nothing in it is a video we can play (a sample-
+                    # only release, an archive, a fake). Say so, rather than showing
+                    # a "ready" item that opens onto an empty episode list.
+                    names = ", ".join(Path(q.get("name", "")).name for q in qfiles[:4])
+                    item["status"] = "error"
+                    item["error"] = ("This download finished but contains no playable video "
+                                     f"file ({names}). It may be a fake release - delete it.")
+                    item.pop("stalled_since", None)
+                    log.warning("Download %s finished with no video files: %s",
+                                item.get("title", ""), names)
+                    state.downloading_count = max(0, state.downloading_count - 1)
+                    if not item.get("admin_only"):
+                        state.downloading_count_visible = max(0, state.downloading_count_visible - 1)
+                    changed = True
+                    await broadcast("library_update", {"item_id": item["id"], "status": "error",
+                                                       "message": item["error"]})
                 elif nonskip_done:
                     item["status"] = "ready"
                     item.pop("download_source", None)   # settled — nothing to re-add
@@ -8327,7 +8413,7 @@ async def library_download_monitor() -> None:
                 #
                 # An item that vanished mid-tick stays vanished: skipping it is what
                 # stops the monitor resurrecting a download the user just deleted.
-                touched = {it["id"]: it for it in pending}
+                touched = {it["id"]: it for it in pending + repaired}
                 async with mutate_library() as fresh:
                     by_id = {it["id"]: it for it in fresh["items"]}
                     for iid, mutated in touched.items():
