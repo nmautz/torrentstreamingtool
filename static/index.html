@@ -8740,6 +8740,12 @@ async function _epTopUpSeasons(stillOpen, title){
   // A movie has no seasons to top up, and a cached non-TV entry must never be
   // overwritten by the fuzzy title lookup below.
   if(epMetadata && epMetadata.tmdb_kind!=="tv") return;
+  // Nor may it run with a SECTION open: it would look up the parent show and
+  // assign that over the section's own binding, putting Attack on Titan's
+  // poster and episode titles on Junior High. A section's episode list arrives
+  // complete with the section (see _fetch_section_metadata) — there is nothing
+  // to top up.
+  if(epSection) return;
   // What we need episode lists for: the TMDb inventory, floored at the seasons we
   // actually hold files in (an older cache carries no inventory, and a merged
   // series' member metadata only ever covered that member's own seasons).
@@ -8815,6 +8821,18 @@ async function _epApplyMetadata(itemId, title, respPromise){
   }catch(_){}
   if(epItemId!==itemId || !m) return;
   if(m.enabled){
+    // A section carries its OWN binding (Junior High is a different show); the
+    // item-level metadata arriving late must not overwrite it. Take the image
+    // base — that is shared — and re-apply the section on top of the fresh
+    // sections map, which may only now have resolved.
+    if(epSection){
+      epMetaImgBase=m.img_base||epMetaImgBase;
+      const secs=((m.metadata||{}).sections)||{};
+      const sec=secs[epSection];
+      if(sec){ _applySection([{key:epSection, label:sec.title||"", meta:sec}], epSection); }
+      renderEpHero(epHeroTitle||title); renderEpSeasonTabs(); renderEpList();
+      return;
+    }
     epMetadata=m.metadata||null;
     epMetaImgBase=m.img_base||"";
   }
