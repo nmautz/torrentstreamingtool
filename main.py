@@ -4806,9 +4806,10 @@ def _resume_anchor(files: list, fp_for, last_file: str = "") -> Optional[int]:
     season watched" gives twenty-five episodes the identical timestamp — and any
     resume in that same second sees a flat field. Picking the first match there
     sent the viewer back to episode 1 immediately after they marked the season
-    watched. So among the files sharing the newest timestamp: take the LAST
-    completed one (a batch mark-watched — the anchor is the furthest point
-    reached), else the FIRST (a batch reset — the anchor is the beginning).
+    watched. So when the clock cannot separate them, separate them by how far
+    the viewer actually got: the LAST completed file, else the LAST one they are
+    genuinely part-way into, else the FIRST (a batch reset stamps every file at
+    position 0, and the anchor for that is the beginning).
     """
     best_at = ""
     for f in files:
@@ -4819,7 +4820,11 @@ def _resume_anchor(files: list, fp_for, last_file: str = "") -> Optional[int]:
         tied = [i for i, f in enumerate(files)
                 if (fp_for(f) or {}).get("updated_at", "") == best_at]
         done = [i for i in tied if (fp_for(files[i]) or {}).get("completed")]
-        return done[-1] if done else tied[0]
+        if done:
+            return done[-1]
+        started = [i for i in tied
+                   if (fp_for(files[i]) or {}).get("position_sec", 0) > 5]
+        return started[-1] if started else tied[0]
     if last_file:
         for i, f in enumerate(files):
             if f.get("path", "") == last_file:
@@ -4925,10 +4930,21 @@ def _section_hints(items: list, files: list, profile_id: str,
 def _pick_active_section(sections: list) -> Optional[dict]:
     """The section whose Resume the show-level button should offer: the most
     recently played one, else the first with something left to watch, else the
-    main run. Never Extras unless it is genuinely all there is."""
+    main run. Never Extras unless it is genuinely all there is.
+
+    Sections tie on `last_at` for the same reason files do — one-second
+    timestamps, and a batch write stamps a whole section at once (see
+    `_resume_anchor`). A plain `max` then returns whichever section happens to
+    come first, which is the main run by construction. So rank by engagement
+    before position: a section the viewer is mid-episode in beats one whose
+    files merely carry the same timestamp."""
     played = [s for s in sections if s.get("last_at")]
     if played:
-        return max(played, key=lambda s: s["last_at"])
+        def rank(s):
+            r = s.get("resume") or {}
+            mid = 1 if (r.get("position_sec", 0) > 5 and not r.get("all_completed")) else 0
+            return (s["last_at"], mid, s.get("watched", 0))
+        return max(played, key=rank)
     for s in sections:
         if s["counted"] and s["watched"] < s["count"]:
             return s
