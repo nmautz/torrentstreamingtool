@@ -326,7 +326,8 @@ position never moved, and their next Play restarted the episode from the top.**
 `/files` playlist expansion, `_lpAutoSkipPrefs`, and the `force_vlc` fallback. The
 heartbeat reports it so the server pins `state.library_profile_id` via
 `_set_playback_owner`; `stop()`'s final flush and the "who's watching" chip follow from
-that. It is cleared by `lpStop`, so a play started *on* this browser is always the
+that. Both `open` paths (`_tv_local_start_play` and `POST /api/tv-local/open`) go through
+`_set_playback_owner` too — pinning the id alone left the chip's name/colour blank. It is cleared by `lpStop`, so a play started *on* this browser is always the
 signed-in profile's.
 
 The same `open` command carries the **server-resolved playlist** (`files`, `items`,

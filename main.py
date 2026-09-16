@@ -15252,7 +15252,8 @@ async def tv_local_state(req: TvLocalStateReq) -> JSONResponse:
     # it — the page reports that one. Everything server-side that attributes
     # playback reads this: stop()'s final progress flush, the "who's watching"
     # chip, and the resume hint the NEXT play resolves from.
-    if req.profile_id and req.profile_id != state.library_profile_id:
+    if req.profile_id and (req.profile_id != state.library_profile_id
+                           or not state.library_profile_name):
         await _set_playback_owner(req.profile_id)
     # Smart Skip: the page owns detection on this surface (it has the playhead;
     # vlc_progress_tracker has no VLC to poll here), so its offer is authoritative
@@ -15351,7 +15352,11 @@ async def _tv_local_start_play(item: dict, playlist: list, seek_sec, req,
     state.active_title = item.get("title") or Path(playlist[0]).name
     state.library_item_id = item["id"]
     state.library_current_file = playlist[0]
-    state.library_profile_id = req.profile_id
+    # Via the helper, not a raw assignment: it also snapshots the profile's
+    # name/colour, which the "who's watching" chip renders. Setting only the id
+    # left that chip blank for the whole of an on-device TV play (the VLC path
+    # sets all three).
+    await _set_playback_owner(req.profile_id)
     asyncio.create_task(_tv_local_open_pump({
         "action":        "open",
         "item_id":       item["id"],
@@ -15398,6 +15403,12 @@ async def tv_local_open(req: TvLocalOpenReq) -> JSONResponse:
     state.tv_local_file_path = req.file_path
     state.tv_local_playback = "buffering"
     state.stream_status = "buffering"
+    state.library_item_id = req.item_id
+    state.library_current_file = req.file_path
+    if req.profile_id:
+        # The switching viewer owns the continued playback, exactly as they would
+        # have owned it on VLC. The stop() above cleared the previous owner.
+        await _set_playback_owner(req.profile_id)
     asyncio.create_task(_tv_local_open_pump({
         "action":     "open",
         "item_id":    req.item_id,
