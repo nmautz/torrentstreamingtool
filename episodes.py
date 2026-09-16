@@ -447,3 +447,98 @@ def sort_key(f: dict) -> tuple:
     season = int(f.get("season", 0) or 0)
     return (season or 9999, f.get("bucket") or "",
             int(f.get("episode", 0) or 0) or 9999, f.get("name") or "")
+
+
+# ── Sections ─────────────────────────────────────────────────────────────────
+# A `bucket` already records that a file sits outside the numbered run, but the
+# UI (and, more importantly, *progress*) treated the whole show as one flat
+# ordered list: finishing S04 rolled straight on into the creditless openings,
+# and a Junior High episode left half-watched became the show's resume point.
+#
+# A **section** is that bucket promoted to a first-class unit — its own resume
+# point, its own watched count, its own metadata binding. The main run is always
+# section `main`; every other section is one bucket. Pure and derivable, so no
+# migration is needed: the same files produce the same sections on every load.
+
+SECTION_MAIN = "main"
+
+# Generic bucket words name part of the PARENT show (its specials, its films).
+# Anything else is a folder someone named after a different title — a spin-off
+# with its own TMDb entry, e.g. "Attack On Titan Junior High".
+_SECTION_KINDS: dict[str, str] = {
+    "Specials": "specials",
+    "OVA":      "specials",
+    "OAD":      "specials",
+    "ONA":      "specials",
+    "Movies":   "movies",
+    "Extras":   "extras",
+}
+
+# Main first, then the parent show's own content (its specials, then its films),
+# then a spin-off series, and throwaway Extras last. Drives section ordering
+# everywhere — the library tile, the group page, Play All.
+_KIND_ORDER: dict[str, int] = {
+    "main": 0, "specials": 1, "movies": 2, "spinoff": 3, "extras": 9,
+}
+
+#: Sections whose episodes count toward the show's overall watched total and are
+#: swept up by a show-level Play All. Creditless openings are not content.
+COUNTED_KINDS = frozenset({"main", "specials", "movies", "spinoff"})
+
+
+def section_kind(bucket: str) -> str:
+    """Which kind of section a bucket label denotes. "" (no bucket) is the main
+    run — including the season-0-with-no-bucket case that absolute-numbered
+    anime lands in, which IS the numbered run and must never be split off."""
+    if not bucket:
+        return "main"
+    return _SECTION_KINDS.get(bucket, "spinoff")
+
+
+def section_key(f: dict) -> str:
+    """Stable per-file section key. Used to scope progress, so it must not drift
+    between loads: it is derived from the bucket label the attribution pass
+    already persisted, never from anything re-parsed per call."""
+    bucket = f.get("bucket") or ""
+    return SECTION_MAIN if not bucket else bucket.strip().lower()
+
+
+def section_label(key: str, bucket: str, show_title: str = "") -> str:
+    """Human name for a section. The main run is named after the show when we
+    know the show's name, so a group page reads "Attack on Titan / Junior High /
+    Movies" rather than "Main Series / Junior High / Movies"."""
+    if key == SECTION_MAIN:
+        return show_title.strip() or "Main Series"
+    return bucket
+
+
+def sections_for(files: list[dict], show_title: str = "") -> list[dict]:
+    """Partition a show's files into ordered sections.
+
+    Returns ``[{key, label, kind, bucket, files, count, counted}]`` with the main
+    run first and Extras last. Files inside each section keep canonical
+    `sort_key` order, so a section's list is directly playable.
+    """
+    by_key: dict[str, dict] = {}
+    for f in files:
+        key = section_key(f)
+        bucket = f.get("bucket") or ""
+        sec = by_key.get(key)
+        if sec is None:
+            kind = section_kind(bucket)
+            sec = by_key[key] = {
+                "key":     key,
+                "label":   section_label(key, bucket, show_title),
+                "kind":    kind,
+                "bucket":  bucket,
+                "counted": kind in COUNTED_KINDS,
+                "files":   [],
+            }
+        sec["files"].append(f)
+
+    out = list(by_key.values())
+    for sec in out:
+        sec["files"].sort(key=sort_key)
+        sec["count"] = len(sec["files"])
+    out.sort(key=lambda s: (_KIND_ORDER.get(s["kind"], 5), s["label"].lower()))
+    return out

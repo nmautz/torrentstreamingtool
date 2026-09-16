@@ -2836,10 +2836,19 @@ async def _tmdb_fetch_movie(movie_id: int) -> dict:
         {"append_to_response": "alternative_titles,videos,release_dates"}) or {}
     akas = _tmdb_akas((details.get("alternative_titles") or {}).get("titles", []),
                       details.get("title") or "", details.get("original_title") or "")
+    # TMDb's own franchise link. This is what auto-groups Harry Potter's eight
+    # films and the Star Wars saga into one tile with no configuration at all —
+    # it comes free on the details call we already make. TV has no equivalent
+    # field, which is why a show joins a group by hand. See _collection_key.
+    coll = details.get("belongs_to_collection") or {}
     return {
         "tmdb_id":       movie_id,
         "tmdb_kind":     "movie",
         **_movie_release_flags(details),
+        "collection":    {"id": int(coll.get("id") or 0),
+                          "name": coll.get("name") or "",
+                          "poster_path": coll.get("poster_path") or "",
+                          "backdrop_path": coll.get("backdrop_path") or ""} if coll else {},
         "title":         details.get("title") or "",
         "original_language": details.get("original_language") or "",
         "original_title": details.get("original_title") or "",
@@ -3048,6 +3057,257 @@ async def _fetch_item_metadata(item_id: str, force: bool = False,
         # keep rendering for every client even if the internet later drops.
         _tmdb_bg(_prefetch_metadata_images(data))
         return data
+
+
+# ── Section metadata ───────────────────────────────────────────────────────
+# A show's sections are not all the same work, so they are not all the same
+# lookup. "Attack On Titan Junior High" is a DIFFERENT SHOW with its own TMDb
+# entry (tv 63510) and its own 12 episodes; the Movies folder is four separate
+# films, each with its own poster; the OAD folder is part of the parent show's
+# season 0; and Extras is eight creditless openings that TMDb has never heard of.
+# Binding all four to the parent show (which is what happened before) gave the
+# spin-off the parent's poster and none of its episode titles.
+#
+# Results are cached under `metadata.sections[<section key>]` and pinned once a
+# user corrects one, exactly like the item-level cache.
+
+#: A section binding the user set by hand is never re-resolved automatically.
+_SECTION_PINNED = ("manual", "custom")
+
+
+def _section_search_title(bucket: str, show_title: str = "") -> str:
+    """The query for a spin-off folder. The folder name is usually the whole
+    title already ("Attack On Titan Junior High"); when it is only a suffix
+    ("Junior High") the parent's name is prepended so the search has a chance."""
+    b = (bucket or "").strip()
+    if not b:
+        return ""
+    show = (show_title or "").strip()
+    if show and show.lower() not in b.lower():
+        return f"{show} {b}"
+    return b
+
+
+def _movie_file_query(f: dict, show_title: str = "") -> str:
+    """A searchable film title from a file inside a Movies folder.
+
+    "[Anime Time] Attack on Titan Movie  01 - Guren no Yumiya.mkv" has to become
+    "Attack on Titan Guren no Yumiya" — TMDb matches the Japanese subtitle via
+    its alternative titles, but only once the release tags and the "Movie 01"
+    ordinal are gone."""
+    stem = Path(f.get("name", "") or f.get("path", "")).stem
+    q = episodes._clean(stem)
+    # Drop the "Movie 01 -" / "Film 2:" ordinal that names the file's place in
+    # the folder rather than anything about the film.
+    q = re.sub(r"\b(?:movie|film|part)\s*\d{1,2}\s*[-:.]?\s*", " ", q, flags=re.I)
+    q = re.sub(r"^\s*\d{1,2}\s*[-:.]\s*", " ", q)
+    q = re.sub(r"\s+", " ", q).strip(" -:.")
+    show = (show_title or "").strip()
+    if show and q and show.lower() not in q.lower():
+        q = f"{show} {q}"
+    return q or show
+
+
+def _slim_tv_section(data: dict, episodes_list: list) -> dict:
+    """Trim a full TV metadata blob down to what a section row needs. The section
+    cache sits inside the parent item's metadata, which is re-read on every
+    library load — so it carries artwork and episode text, not season inventories."""
+    return {
+        "tmdb_id":       data.get("tmdb_id") or 0,
+        "tmdb_kind":     "tv",
+        "title":         data.get("title") or "",
+        "overview":      data.get("overview") or "",
+        "poster_path":   data.get("poster_path") or "",
+        "backdrop_path": data.get("backdrop_path") or "",
+        "first_air_date": data.get("first_air_date") or "",
+        "vote_average":  data.get("vote_average") or 0,
+        "genres":        data.get("genres") or [],
+        "trailer":       data.get("trailer") or "",
+        "episodes":      episodes_list,
+    }
+
+
+async def _resolve_spinoff_section(sec: dict, show_title: str) -> Optional[dict]:
+    """A named folder that is really its own show — search TMDb for it and take
+    its episode list. Bound only on a confident title match, so a folder named
+    after a release group can't drag in an unrelated series."""
+    query = _section_search_title(sec.get("bucket", ""), show_title)
+    if not query:
+        return None
+    res = await _tmdb_get("/search/tv", {"query": query, "include_adult": "false"})
+    results = (res or {}).get("results", []) or []
+    if not results:
+        return None
+    pick = _tmdb_pick_tv(query, results)
+    if not pick:
+        return None
+    # Tier 0 means the titles share nothing beyond stopwords. Leave it unbound
+    # rather than labelling a spin-off with somebody else's show.
+    name = pick.get("name") or pick.get("original_name") or ""
+    if _tmdb_match_tier(query, name) <= 0:
+        return None
+    data = await _tmdb_fetch_tv(int(pick["id"]), [1])
+    eps = ((data.get("seasons") or {}).get("1") or {}).get("episodes") or []
+    return {**_slim_tv_section(data, eps), "source": "tmdb", "kind": "spinoff"}
+
+
+async def _resolve_specials_section(sec: dict, parent: dict) -> Optional[dict]:
+    """Specials / OAD / OVA / ONA — part of the PARENT show's season 0.
+
+    Season 0 is a grab-bag: Attack on Titan's holds 37 entries covering OADs,
+    recaps and Junior High shorts, while the OAD folder on disk holds 8. Binding
+    by position into that would caption every file wrongly, so episode titles are
+    attached only when a run of season-0 entries actually lines up with what we
+    have — first the whole season, then the entries whose names mention this
+    bucket. Failing both, the section still gets the parent's artwork, just no
+    per-episode text. A wrong title is worse than no title."""
+    pid = parent.get("tmdb_id")
+    if not pid:
+        return None
+    fetched = await _tmdb_fetch_seasons(int(pid), [0])
+    eps = (fetched.get("0") or {}).get("episodes") or []
+    n = len(sec.get("files") or [])
+    bound = []
+    if eps and n:
+        word = (sec.get("bucket") or "").lower()
+        named = [e for e in eps if word and word in (e.get("name", "") or "").lower()]
+        if len(eps) == n:
+            bound = eps
+        elif len(named) == n:
+            bound = named
+    return {
+        "tmdb_id":       int(pid),
+        "tmdb_kind":     "tv",
+        "parent_season": 0,
+        "title":         sec.get("bucket") or "Specials",
+        "overview":      "",
+        "poster_path":   parent.get("poster_path") or "",
+        "backdrop_path": parent.get("backdrop_path") or "",
+        "episodes":      bound,
+        "source":        "tmdb",
+        "kind":          "specials",
+    }
+
+
+async def _resolve_movies_section(sec: dict, show_title: str) -> Optional[dict]:
+    """A Movies folder — every file is its own film, so every file gets its own
+    TMDb binding, keyed by path. That is what lets each one open the full
+    movie-details page instead of a bare numbered row."""
+    out: dict = {}
+    for f in (sec.get("files") or [])[:40]:
+        query = _movie_file_query(f, show_title)
+        if not query:
+            continue
+        res = await _tmdb_get("/search/movie",
+                              {"query": query, "include_adult": "false"})
+        results = (res or {}).get("results", []) or []
+        if not results:
+            continue
+        pick = _tmdb_pick_movie(query, results)
+        if not pick:
+            continue
+        data = await _tmdb_fetch_movie(int(pick["id"]))
+        out[f.get("path", "")] = {
+            "tmdb_id":      data.get("tmdb_id") or 0,
+            "tmdb_kind":    "movie",
+            "title":        data.get("title") or "",
+            "overview":     data.get("overview") or "",
+            "poster_path":  data.get("poster_path") or "",
+            "backdrop_path": data.get("backdrop_path") or "",
+            "release_date": data.get("release_date") or "",
+            "vote_average": data.get("vote_average") or 0,
+            "runtime":      data.get("runtime") or 0,
+            "genres":       data.get("genres") or [],
+            "trailer":      data.get("trailer") or "",
+            "collection":   data.get("collection") or {},
+        }
+    if not out:
+        return None
+    return {"source": "tmdb", "kind": "movies", "title": sec.get("bucket") or "Movies",
+            "files": out}
+
+
+async def _fetch_section_metadata(item_id: str, force: bool = False) -> dict:
+    """Resolve and cache TMDb metadata for each of an item's sections.
+
+    Runs AFTER the item's own metadata (it needs the parent binding for the
+    specials case) and writes into `metadata.sections`. Cheap on the common path:
+    a show with one section does nothing at all, and a resolved section is never
+    looked up twice unless `force`."""
+    if not await _tmdb_effective_key():
+        return {}
+    lock = _tmdb_fetch_locks.setdefault(f"sec:{item_id}", asyncio.Lock())
+    async with lock:
+        lib = await get_library()
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        if not item:
+            return {}
+        parent = item.get("metadata") or {}
+        files = item.get("files") or []
+        secs = episodes.sections_for(files, item.get("series", ""))
+        if len(secs) <= 1:
+            return parent.get("sections") or {}
+
+        cached = dict(parent.get("sections") or {})
+        resolved = dict(cached)
+        for sec in secs:
+            key, kind = sec["key"], sec["kind"]
+            if kind in ("main", "extras"):
+                # The main run IS the item's own metadata, and creditless
+                # openings have no TMDb entry to find. Mark Extras so we never
+                # search for it again.
+                if kind == "extras":
+                    resolved.setdefault(key, {"source": "none", "kind": "extras",
+                                              "title": sec["label"]})
+                continue
+            have = cached.get(key) or {}
+            if have.get("source") in _SECTION_PINNED and not force:
+                continue
+            if have.get("source") and not force:
+                continue
+            try:
+                if kind == "spinoff":
+                    got = await _resolve_spinoff_section(sec, item.get("series", ""))
+                elif kind == "specials":
+                    got = await _resolve_specials_section(sec, parent)
+                elif kind == "movies":
+                    got = await _resolve_movies_section(sec, item.get("series", ""))
+                else:
+                    got = None
+            except Exception:
+                log.exception("section metadata failed for %s / %s", item_id, key)
+                got = None
+            # Stamp even a miss, so a section TMDb genuinely doesn't know about
+            # isn't re-searched on every single library open.
+            resolved[key] = got or {"source": "none", "kind": kind,
+                                    "title": sec["label"]}
+
+        if resolved == cached:
+            return cached
+        async with mutate_library() as lib2:
+            it2 = next((x for x in lib2["items"] if x["id"] == item_id), None)
+            if it2 and it2.get("metadata"):
+                it2["metadata"]["sections"] = resolved
+        for blob in resolved.values():
+            if blob.get("source") == "none":
+                continue
+            _tmdb_bg(_prefetch_metadata_images(blob))
+            for mv in (blob.get("files") or {}).values():
+                _tmdb_bg(_prefetch_metadata_images(mv))
+        return resolved
+
+
+def _spawn_section_fetch(item_id: str) -> None:
+    """Fire the section resolve in the background. Never awaited by a request —
+    the sections render from filenames until it lands, then a `metadata_update`
+    SSE event repaints them."""
+    async def _run() -> None:
+        try:
+            if await _fetch_section_metadata(item_id):
+                await broadcast("metadata_update", {"item_id": item_id})
+        except Exception:
+            log.exception("section metadata fetch failed for %s", item_id)
+    _tmdb_bg(_run())
 
 
 def _assert_item_visible(request: Request, lib: dict, item: dict,
@@ -4320,79 +4580,208 @@ async def _set_playback_owner(profile_id: Optional[str], lib: Optional[dict] = N
     state.library_profile_color = (prof or {}).get("color", "") or ""
 
 
-def find_resume_hint(item: dict, profile_id: str) -> Optional[dict]:
-    """Return the best file+position to resume for a profile, or None."""
-    if not profile_id:
-        return None
-    files = item.get("files", [])
+# ── Resume ───────────────────────────────────────────────────────────────────────
+# ONE resume algorithm, used by every caller. There used to be two — an item-level
+# one that followed `last_file` forward, and a merged-series one that picked the
+# most-recently-touched unfinished file anywhere in the show — and they disagreed,
+# which is why the Resume button could offer one episode and play another. Worse,
+# neither was section-aware: Attack on Titan's resume landed on **Junior High
+# ep 2** because a half-watched spin-off episode outranked the main run.
+#
+# The rules, in one place:
+#   * Resume is computed **per section** (episodes.sections_for). A section never
+#     resumes into another one — finishing S04 does not roll on into Extras.
+#   * Within a section it follows the viewer FORWARD from their anchor (the file
+#     they last had open), never backwards to an episode they deliberately
+#     skipped, and steps past it once it is completed.
+#   * The show-level hint is simply its most-recently-played section's hint, so
+#     the tile's Resume button and the play it triggers are one computation.
+
+
+def _resume_anchor(files: list, fp_for, last_file: str = "") -> Optional[int]:
+    """Index of the file the viewer last had open in this list, or None.
+
+    The anchor is whichever file carries the newest ``updated_at`` — data every
+    progress write already produces, and the only signal available across a
+    merged series whose members each keep their own ``last_file``. A stored
+    ``last_file`` still wins when it names a file in this list that has no
+    progress yet (started, then stopped inside the 5 s save window)."""
+    best, best_at = None, ""
+    for i, f in enumerate(files):
+        at = (fp_for(f) or {}).get("updated_at", "")
+        if at and at > best_at:
+            best, best_at = i, at
+    if best is None and last_file:
+        for i, f in enumerate(files):
+            if f.get("path", "") == last_file:
+                return i
+    return best
+
+
+def _resume_from_files(files: list, fp_for, last_file: str = "",
+                       extra: Optional[dict] = None) -> Optional[dict]:
+    """Best file+position to resume within one ordered list of files."""
     if not files:
         return None
-    prof = item.get("progress", {}).get(profile_id, {})
-    file_progs = prof.get("file_progress", {})
-    last_file = prof.get("last_file")
+    extra = extra or {}
 
-    def _hint_for(f: dict) -> dict:
+    def _hint(f: dict, *, all_completed: bool = False) -> dict:
         path = f.get("path", "")
-        fp = file_progs.get(path, {})
+        fp = {} if all_completed else (fp_for(f) or {})
         pos = fp.get("position_sec", 0)
         dur = fp.get("duration_sec", 0)
         return {
+            "item_id": f.get("item_id", ""),
             "file_path": path,
             "episode_name": f.get("name", Path(path).name),
             "position_sec": pos,
             "duration_sec": dur,
-            "pct": round(pos / dur * 100, 1) if dur else 0,
-            # Whether this item's last play (for this profile) was Shuffle Play, so
-            # Resume can offer to keep shuffling. Ephemeral playback state is gone by
-            # now; this preference is what survives the stop. See set_shuffle_pref.
-            "shuffle": bool(prof.get("shuffle")),
-            "shuffle_scope": prof.get("shuffle_scope", "") or "",
+            "pct": round(pos / dur * 100, 1) if dur else (100 if all_completed else 0),
+            **({"all_completed": True} if all_completed else {}),
+            **extra,
         }
 
-    paths = [f.get("path", "") for f in files]
+    idx = _resume_anchor(files, fp_for, last_file)
+    if idx is not None:
+        anchor = fp_for(files[idx]) or {}
+        # Still mid-episode → resume the anchor itself.
+        if not anchor.get("completed") and anchor.get("position_sec", 0) > 5:
+            return _hint(files[idx])
+        # Finished it (or barely started) → first un-completed at/after it. Skip
+        # the anchor only when it is actually completed.
+        for f in files[idx + 1 if anchor.get("completed") else idx:]:
+            if not (fp_for(f) or {}).get("completed"):
+                return _hint(f)
+        # Nothing left ahead — fall through so a genuinely skipped earlier
+        # episode (or the all-completed rewatch) is still surfaced.
 
-    # Continue forward from whatever the viewer last played, never backwards to an
-    # earlier episode they skipped. If they watched ep6 (skipping ep5) and stopped
-    # partway, resume ep6; once ep6 is finished, advance to ep7 — not back to ep5.
-    if last_file and last_file in paths:
-        idx = paths.index(last_file)
-        lf = file_progs.get(last_file, {})
-        # Still mid-episode → resume the last-watched file itself.
-        if not lf.get("completed") and lf.get("position_sec", 0) > 5:
-            return _hint_for(files[idx])
-        # Finished it (or barely started) → first un-completed episode at/after it.
-        # Skip the last file only when it's actually completed.
-        start = idx + 1 if lf.get("completed") else idx
-        for f in files[start:]:
-            if not file_progs.get(f.get("path", ""), {}).get("completed"):
-                return _hint_for(f)
-        # Nothing left ahead — fall through to the global scan so a genuinely
-        # skipped earlier episode (or the all-completed rewatch) is surfaced.
-
-    # Walk files in order — return first that isn't completed
     for f in files:
-        if not file_progs.get(f.get("path", ""), {}).get("completed"):
-            return _hint_for(f)
+        if not (fp_for(f) or {}).get("completed"):
+            return _hint(f)
 
-    # All completed — point back to first so user can rewatch
-    f = files[0]
+    return _hint(files[0], all_completed=True)
+
+
+def _progress_for(items: list, profile_id: str):
+    """``(fp_for, last_file)`` — a per-file progress lookup that works for a
+    single item and for a merged series alike, plus the newest ``last_file``
+    among the members. Files must carry ``item_id`` when more than one item is
+    passed (see ``_merged_series_files``)."""
+    by_item = {it.get("id", ""): it.get("progress", {}).get(profile_id, {}) for it in items}
+    single = by_item.get(items[0].get("id", ""), {}) if len(items) == 1 else None
+
+    def fp_for(f: dict) -> dict:
+        prof = single if single is not None else by_item.get(f.get("item_id", ""), {})
+        return (prof or {}).get("file_progress", {}).get(f.get("path", ""), {})
+
+    last_file, last_at = "", ""
+    for prof in by_item.values():
+        lf = (prof or {}).get("last_file", "")
+        if not lf:
+            continue
+        at = ((prof.get("file_progress", {}) or {}).get(lf, {}) or {}).get("updated_at", "")
+        if not last_file or at > last_at:
+            last_file, last_at = lf, at
+    return fp_for, last_file
+
+
+def _section_hints(items: list, files: list, profile_id: str,
+                   show_title: str = "") -> list:
+    """Every section of a show with its own independent resume hint and watched
+    count. Ordered main-first, Extras last (episodes.sections_for)."""
+    if profile_id and items:
+        fp_for, last_file = _progress_for(items, profile_id)
+    else:
+        fp_for, last_file = (lambda f: {}), ""
+    out = []
+    for sec in episodes.sections_for(files, show_title):
+        sec_files = sec["files"]
+        watched = sum(1 for f in sec_files if (fp_for(f) or {}).get("completed"))
+        newest = max(((fp_for(f) or {}).get("updated_at", "") for f in sec_files),
+                     default="")
+        out.append({
+            "key":     sec["key"],
+            "label":   sec["label"],
+            "kind":    sec["kind"],
+            "bucket":  sec["bucket"],
+            "counted": sec["counted"],
+            "count":   sec["count"],
+            "watched": watched,
+            "last_at": newest,
+            "resume":  _resume_from_files(sec_files, fp_for, last_file) if profile_id else None,
+        })
+    return out
+
+
+def _pick_active_section(sections: list) -> Optional[dict]:
+    """The section whose Resume the show-level button should offer: the most
+    recently played one, else the first with something left to watch, else the
+    main run. Never Extras unless it is genuinely all there is."""
+    played = [s for s in sections if s.get("last_at")]
+    if played:
+        return max(played, key=lambda s: s["last_at"])
+    for s in sections:
+        if s["counted"] and s["watched"] < s["count"]:
+            return s
+    return next((s for s in sections if s["counted"]), sections[0] if sections else None)
+
+
+def find_resume_hint(item: dict, profile_id: str) -> Optional[dict]:
+    """Best file+position to resume one item, scoped to its active section."""
+    if not profile_id or not item.get("files"):
+        return None
+    prof = item.get("progress", {}).get(profile_id, {})
+    sections = _section_hints([item], item["files"], profile_id, item.get("series", ""))
+    active = _pick_active_section(sections)
+    hint = (active or {}).get("resume")
+    if not hint:
+        return None
     return {
-        "file_path": f.get("path", ""),
-        "episode_name": f.get("name", ""),
-        "position_sec": 0,
-        "duration_sec": 0,
-        "pct": 100,
-        "all_completed": True,
+        **hint,
+        "section": active["key"],
+        "section_label": active["label"],
+        # Whether this item's last play (for this profile) was Shuffle Play, so
+        # Resume can offer to keep shuffling. Ephemeral playback state is gone by
+        # now; this preference is what survives the stop. See set_shuffle_pref.
         "shuffle": bool(prof.get("shuffle")),
         "shuffle_scope": prof.get("shuffle_scope", "") or "",
     }
 
 
-def _merged_series_files(items: list[dict]) -> list[dict]:
+def _section_summary(sec: dict, meta: Optional[dict] = None) -> dict:
+    """A section without its file list — what the grid and the group page need to
+    render a row (name, how much of it there is, how far in the viewer got), plus
+    its own cached TMDb binding when one has resolved. `meta` is the parent
+    item's `metadata.sections` map; see _fetch_section_metadata."""
+    out = {k: sec[k] for k in
+           ("key", "label", "kind", "bucket", "counted", "count", "watched", "resume")}
+    blob = (meta or {}).get(sec["key"]) or {}
+    if blob.get("source") and blob.get("source") != "none":
+        # The section's own title wins over the folder name — "Attack on Titan:
+        # Junior High" rather than the release's "Attack On Titan Junior High".
+        out["label"] = blob.get("title") or out["label"]
+        out["meta"] = blob
+    return out
+
+
+def _files_in_section(files: list, section: str) -> list:
+    """The files of one section, in canonical order.
+
+    A playlist built from a resume hint has to stop at its own section's edge.
+    The flat file list runs main → spin-off → Extras → Movies → OAD, so resuming
+    Junior High ep 2 and slicing to the end used to queue up the creditless
+    openings and the compilation films behind it."""
+    if not section:
+        return list(files)
+    return sorted((f for f in files if episodes.section_key(f) == section),
+                  key=episodes.sort_key)
+
+
+def _merged_series_files(items: list) -> list:
     """Flatten every member item's files into one (season, episode)-ordered list,
     tagging each file with its owning ``item_id`` — the join key that lets the
     merged-series UI drive play/prep/progress against the right item."""
-    out: list[dict] = []
+    out = []
     for it in items:
         iid = it.get("id", "")
         for f in it.get("files", []):
@@ -4403,58 +4792,23 @@ def _merged_series_files(items: list[dict]) -> list[dict]:
     return out
 
 
-def find_series_resume_hint(items: list[dict], profile_id: str) -> Optional[dict]:
+def find_series_resume_hint(items: list, profile_id: str) -> Optional[dict]:
     """Series-level resume across a show whose episodes live in separate items.
-    Picks the most-recently-updated non-completed episode (so "continue watching"
-    lands on whatever the viewer last had open), else the first unwatched episode
-    in order, else the first episode (all-completed rewatch). Returns a hint that
-    also carries the owning ``item_id`` so the caller knows which item to seek."""
-    if not profile_id:
+    Identical rules to ``find_resume_hint`` — the same function, in fact — with
+    the owning ``item_id`` carried on the hint so the caller knows which item to
+    seek."""
+    if not profile_id or not items:
         return None
     files = _merged_series_files(items)
     if not files:
         return None
-    prog_by_item = {
-        it.get("id", ""): it.get("progress", {}).get(profile_id, {}).get("file_progress", {})
-        for it in items
-    }
-
-    def _fp(f):
-        return prog_by_item.get(f.get("item_id", ""), {}).get(f.get("path", ""), {})
-
-    def _hint(f, *, all_completed=False):
-        fp = _fp(f)
-        pos = 0 if all_completed else fp.get("position_sec", 0)
-        dur = 0 if all_completed else fp.get("duration_sec", 0)
-        return {
-            "item_id": f.get("item_id", ""),
-            "file_path": f.get("path", ""),
-            "episode_name": f.get("name", Path(f.get("path", "")).name),
-            "position_sec": pos,
-            "duration_sec": dur,
-            "pct": round(pos / dur * 100, 1) if dur else (100 if all_completed else 0),
-            **({"all_completed": True} if all_completed else {}),
-        }
-
-    # Most-recently-touched un-finished episode.
-    best = None
-    best_at = ""
-    for f in files:
-        fp = _fp(f)
-        if fp and not fp.get("completed") and fp.get("position_sec", 0) > 5:
-            at = fp.get("updated_at", "")
-            if best is None or at > best_at:
-                best, best_at = f, at
-    if best is not None:
-        return _hint(best)
-
-    # First unwatched in order.
-    for f in files:
-        if not _fp(f).get("completed"):
-            return _hint(f)
-
-    # Everything watched → rewatch from the top.
-    return _hint(files[0], all_completed=True)
+    title = next((it.get("series") for it in items if (it.get("series") or "").strip()), "")
+    sections = _section_hints(items, files, profile_id, title)
+    active = _pick_active_section(sections)
+    hint = (active or {}).get("resume")
+    if not hint:
+        return None
+    return {**hint, "section": active["key"], "section_label": active["label"]}
 
 
 # ── Track Preference Helpers ──────────────────────────────────────────────────
@@ -10032,6 +10386,13 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
             continue
         files = it.get("files", [])
         resume = find_resume_hint(it, profile_id) if profile_id else None
+        # Sections, but only when there IS more than one — a plain show (Hacks,
+        # Futurama) has a single main run and must keep opening straight to its
+        # episode picker, so the grid needs no section payload for it at all.
+        secs = _section_hints([it], files, profile_id, it.get("series", ""))
+        sec_meta = (it.get("metadata") or {}).get("sections") or {}
+        sections = ([_section_summary(s, sec_meta) for s in secs]
+                    if len(secs) > 1 else [])
         # Slim "first_file" so single-file UI affordances (e.g. the On Device
         # button) know the path without fetching /files. Cheap: 1 file × 2 keys.
         first_file = None
@@ -10064,6 +10425,9 @@ async def list_library(request: Request, profile_id: str = "") -> JSONResponse:
             "torrent_hash": it.get("torrent_hash", ""),
             "series_key": _series_key(it),   # groups same-series items into one show tile
             "resume": resume,
+            # Empty for an ordinary one-run show; non-empty means this tile opens
+            # the group page instead of the episode picker. See _section_summary.
+            "sections": sections,
             "first_file": first_file,
             "hidden": _item_hidden_for_profile(it, profile_id),
             **{f"skip_{k}": v for k, v in _item_skip_summary(it).items()},  # skip_status, skip_affected, skip_total
@@ -10426,6 +10790,16 @@ async def get_series_files(request: Request, series_key: str,
     meta_item = next((it for it in members if it.get("metadata")), None)
     meta = meta_item.get("metadata") if meta_item else None
     resume = find_series_resume_hint(members, profile_id) if profile_id else None
+    # Sections of the merged show, each with its own resume + watched count, so
+    # the group page can render them without recomputing anything client-side.
+    sec_meta = (meta or {}).get("sections") or {}
+    sections = [_section_summary(s, sec_meta)
+                for s in _section_hints(members, files, profile_id, title)]
+    # Resolve any section that has never been looked up (Junior High is a show in
+    # its own right, the Movies folder is four separate films). Background — this
+    # response renders from filenames and a `metadata_update` repaints it.
+    if meta_item is not None and len(sections) > 1:
+        _spawn_section_fetch(meta_item["id"])
 
     # A merged series never touches the per-item /metadata endpoint, so its
     # members' caches would never pick up the season inventory the missing-
@@ -10445,6 +10819,7 @@ async def get_series_files(request: Request, series_key: str,
         "item_ids": [it["id"] for it in members],
         "files": files,
         "resume": resume,
+        "sections": sections,
         "metadata": meta,
         "img_base": LOCAL_IMG_BASE,
         "hls_available": HLS_AVAILABLE,
@@ -10490,6 +10865,12 @@ async def get_item_metadata(request: Request, item_id: str,
         # in the background so absolute episode numbers get corrected. See
         # _nudge_metadata_health.
         _nudge_metadata_health(item)
+
+    # Once the item itself is bound, resolve its sections (a spin-off folder is
+    # its own show; a Movies folder is separate films). Only for a multi-section
+    # item, and only in the background — see _fetch_section_metadata.
+    if cached and key_present and len(episodes.sections_for(item.get("files") or [])) > 1:
+        _spawn_section_fetch(item_id)
 
     return JSONResponse({
         "enabled":  key_present,
@@ -12319,8 +12700,11 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     if not playlist:
         hint = find_resume_hint(item, req.profile_id)
         if hint and hint.get("file_path"):
-            # Build playlist starting from the resume file
-            all_paths = [f["path"] for f in item.get("files", [])]
+            # Build the playlist starting from the resume file — and only within
+            # that file's own section, so continuing a spin-off (or the specials)
+            # doesn't queue the rest of the show behind it. See _files_in_section.
+            all_paths = [f["path"] for f in
+                         _files_in_section(item.get("files", []), hint.get("section", ""))]
             try:
                 start_idx = all_paths.index(hint["file_path"])
                 playlist = all_paths[start_idx:]

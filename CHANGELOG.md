@@ -1,5 +1,67 @@
 # Changelog
 
+## [15.0.0] — 2026-09-16
+**A show is not one flat list, and Resume had been treating it as one.**
+
+Attack on Titan arrives as a single 131-file item: four seasons, a twelve-episode spin-off
+(*Junior High*), four compilation films, eight OADs and eighteen creditless openings. Every
+one of those files sat in the same ordered list, so finishing S04E30 rolled straight on into
+the creditless openings, and a half-watched *Junior High* episode became **the whole show's
+resume point** — which is exactly what the live library was doing: Nathan's Attack on Titan
+Resume button offered *Junior High ep 2*.
+
+**Sections.** The `bucket` label the attribution pass already writes is now a first-class
+unit. `episodes.sections_for()` partitions a show into ordered sections — the main run
+always first, `Extras` always last — and each one carries its own resume point, its own
+watched count and its own TMDb binding. Nothing is persisted for it and no migration runs:
+the same files produce the same sections on every load.
+
+**One resume algorithm.** There were two, and they disagreed — which is why the Resume
+button could offer one episode and play another. `find_resume_hint` followed `last_file`
+forward through an item; `find_series_resume_hint` ignored `last_file` entirely and took the
+most-recently-touched unfinished file anywhere in the show, so finishing an episode cleanly
+dropped a merged series back to the earliest gap in its history. Both are now the same
+function over the same rules:
+
+* resume is computed **per section**, and a section never resumes into another one;
+* within a section it moves **forward** from the file the viewer last had open, never back
+  to an episode they deliberately skipped, and steps past that file once it is completed;
+* the show-level hint is its most-recently-played section's hint — so the button's label and
+  the play it triggers are one computation, not two.
+
+The anchor is the newest `updated_at` among the section's files, which is the only signal
+that exists across a merged series whose members each keep their own `last_file` (a stored
+`last_file` still wins for a file with no progress yet — started, then stopped inside the
+5 s save window).
+
+**Playback stops at the section edge too.** `/api/library/{id}/play` built its playlist by
+slicing the item's flat file list from the resume file to the end, so continuing *Junior
+High* queued the creditless openings and the compilation films behind it.
+
+**Extras never count.** A section's episodes roll up into the show's watched total unless
+it is the `Extras` bucket, so eighteen creditless openings no longer keep a finished show
+looking unfinished.
+
+**Per-section metadata.** A section is no longer captioned with its parent's binding:
+
+* a named spin-off folder is searched for as its own show — *Attack On Titan Junior High*
+  resolves to TMDb tv `63510` with its own poster, overview and twelve episode titles;
+* every file in a `Movies` folder gets its **own** film binding, so each opens the full
+  movie-details page (the four AoT films resolve even from their Japanese subtitles —
+  *Guren no Yumiya* → *Crimson Bow and Arrow*);
+* `Specials`/`OAD`/`OVA`/`ONA` bind to the parent's season 0, but attach episode titles
+  **only when a run of season-0 entries actually lines up with what is on disk**. Attack on
+  Titan's season 0 holds 37 entries against 8 files on disk; captioning by position would
+  have been wrong on every row, and a wrong title is worse than no title;
+* `Extras` is stamped as unresolvable so it is never searched for twice.
+
+Bindings are cached under `metadata.sections`, resolved in the background, and pinned once a
+user corrects one — the same rules the item-level cache already follows.
+
+**Movie collections.** `_tmdb_fetch_movie` now keeps TMDb's `belongs_to_collection`, which
+comes free on a call we already make. It is what auto-groups a film set with no
+configuration at all.
+
 ## [14.3.1] — 2026-09-15
 **A delete that Windows refused reported success anyway.**
 
