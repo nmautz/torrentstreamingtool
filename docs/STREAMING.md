@@ -293,8 +293,9 @@ Two more are implemented differently but reach the same place:
   within-run episode advance, which would undo a mid-film adjustment. Cap first, then
   clamped to 100, matching the rule above.
 - **Night Mode.** A VLC audio filter can't reach a `<video>`, so the page builds the
-  equivalent in Web Audio: `<video>` → `MediaElementAudioSource` → `DynamicsCompressor` →
-  makeup `Gain` → out, with a bypass path for off (`_lpNightSync` in
+  equivalent in Web Audio: `<video>` → `MediaElementAudioSource` → pre `Gain` →
+  `DynamicsCompressor` → makeup `Gain` → volume `Gain` → out, with a bypass path for off
+  (`_lpNightSync` in
   `static/index.html`). The compressor settings are **derived from** `NIGHT_MODE_PRESETS`
   server-side by `_night_mode_webaudio` and served on `GET /api/settings/night-mode` as
   `webaudio`, so Medium sounds like Medium on both surfaces and there is exactly one set
@@ -311,6 +312,12 @@ Two more are implemented differently but reach the same place:
   inside the iOS app, where playback can hand off to a native `AVPlayer` that a Web Audio
   graph on the WKWebView element has no part in. It applies to **any** on-device
   playback, phones included, not only the kiosk.
+
+  Two corrections keep it at VLC's loudness and under the volume control (15.2.1, see
+  GOTCHAS § "A browser compressor sits *after* the element's volume"): the pre/volume
+  gains move the element's volume from in front of the compressor to behind it
+  (`_lpNightVolSync`, on `volumechange`), and the node's own built-in makeup gain is
+  measured offline per preset (`_lpNightAutoMakeup`) and divided out of the makeup gain.
 
 ### Who a play belongs to
 

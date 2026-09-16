@@ -3435,6 +3435,25 @@ The compressor numbers are **derived from `NIGHT_MODE_PRESETS` server-side**
 JS. That dict is already mirrored by hand into `run.py` and `watchdog.py`; a fourth copy
 in another language would have drifted within a release.
 
+### A browser compressor sits *after* the element's volume, and brings its own makeup gain
+
+Two traps in that same graph, both found only by listening (15.2.1 — "night mode is very
+loud and ignores the volume slider"), both measured in headless Edge with an `AnalyserNode`:
+
+- **The element's volume is applied at the `MediaElementAudioSource`, i.e. before the
+  compressor.** So the compressor undoes it: slider 100 → 25 (−12 dB) moved loud content by
+  about 2 dB. VLC applies volume *after* its audio filters. Fix: while routed through the
+  compressor, a pre-gain of `1/volume` cancels the element's volume and a post-gain of
+  `volume` re-applies it at the end (`_lpNightVolSync`, on `volumechange`; volume 0 → pre 1,
+  post 0). Firefox also applies element volume at the source; if an engine ever didn't, this
+  would over-boost at low volume — re-measure before trusting it on a new engine.
+- **`DynamicsCompressorNode` has hidden automatic makeup gain** — Blink/WebKit apply
+  `(1/fullRangeGain)^0.6`, +11.4 dB for the Medium preset, and it can't be switched off.
+  Adding VLC's `--compressor-makeup-gain` (+10 dB) on top made quiet passages ~+21 dB. The
+  page renders a −60 dBFS tone through the preset in an `OfflineAudioContext` once
+  (`_lpNightAutoMakeup`), and divides the measured factor out of the makeup gain, so the
+  total matches VLC on whatever engine is playing.
+
 ### Mirroring state to a second client means the first can render it twice
 
 Once the kiosk's skip offer reaches `state.skip_offer`, the kiosk — which is a dashboard

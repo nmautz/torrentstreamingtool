@@ -1,5 +1,20 @@
 # Changelog
 
+## [15.2.1] — 2026-09-16
+**Night mode on the on-device player was far too loud and ignored the volume slider.**
+
+Measured in Chromium, the engine the kiosk runs:
+
+* **Too loud.** `DynamicsCompressorNode` applies its own automatic makeup gain (+11.4 dB for
+  Medium) that cannot be turned off, and the page stacked VLC's +10 dB on top of it — quiet
+  passages came out ~+21 dB instead of VLC's +10. The node's built-in gain is now measured
+  once per preset in an `OfflineAudioContext` and divided out (`_lpNightAutoMakeup`).
+* **Volume did nothing.** The browser applies the element's volume *before* the Web Audio
+  graph, so the compressor levelled it straight back up: slider 100 → 25 moved loud content
+  by ~2 dB. The graph now cancels the element volume ahead of the compressor and re-applies it
+  after (`_lpNightVolSync`), the same order as VLC. Slider 100 → 25 is now exactly 25 %.
+* VLC playback was unaffected.
+
 ## [15.2.0] — 2026-09-16
 **Not-out-yet episodes carry their release date, and downloading one takes a deliberate override.**
 

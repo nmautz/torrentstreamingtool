@@ -21422,8 +21422,21 @@ function lpToggleMute() {
 // it is the `compressor` audio filter, set at launch. A browser <video> can't
 // take a VLC filter, so this surface builds the equivalent in Web Audio:
 //
-//     <video> ──▶ MediaElementAudioSource ──▶ DynamicsCompressor ──▶ makeup Gain ──▶ out
-//                                          └────────── bypass ──────────────────┘
+//     <video> ──▶ Source ──▶ pre Gain ──▶ Compressor ──▶ makeup Gain ──▶ vol Gain ──▶ out
+//                       └──────────────────── bypass ────────────────────────────┘
+//
+// Volume has to move to the END of the chain. The browser applies the element's
+// own volume at the source, i.e. BEFORE the compressor — which then levels it
+// straight back up (measured in Chromium: slider 100→25, a 12 dB cut, moved loud
+// content by ~2 dB). VLC applies volume after its filters. So while routed, `pre`
+// divides the element volume back out and `vol` re-applies it after compression
+// (_lpNightVolSync, on every volumechange).
+//
+// DynamicsCompressorNode also carries its OWN automatic makeup gain (Blink/WebKit:
+// (1/fullRangeGain)^0.6 — +11.4 dB for Medium). Stacking VLC's makeup on top of it
+// doubled the boost to ~+21 dB. The node's makeup is measured once per preset
+// offline (_lpNightAutoMakeup) and divided out of the makeup Gain, so the total
+// below threshold equals VLC's --compressor-makeup-gain.
 //
 // The compressor settings are DERIVED FROM THE VLC PRESETS server-side
 // (_night_mode_webaudio in main.py) and fetched from /api/settings/night-mode, so
@@ -21444,6 +21457,8 @@ function lpToggleMute() {
 // (background / external display), which a Web Audio graph on the WKWebView
 // element has no part in. See docs/STREAMING.md § 2b.
 let _lpNightCtx = null, _lpNightSrc = null, _lpNightComp = null, _lpNightGain = null;
+let _lpNightPre = null, _lpNightVol = null;
+let _lpNightAutoCache = {};   // "threshold|ratio|knee" → the node's built-in makeup (linear)
 let _lpNightPresets = null;   // {preset: {threshold, ratio, knee, attack, release, makeup_gain}}
 let _lpNightRouted = null;    // true = through the compressor, false = bypassed, null = not built
 let _lpNightSyncing = false;  // re-entrancy guard — _lpNightSync awaits, and its callers are frequent
@@ -21480,16 +21495,21 @@ async function _lpNightBuild() {
     if (ctx.state !== "running") { try { await ctx.resume(); } catch (_) {} }
     if (ctx.state !== "running") { try { ctx.close(); } catch (_) {} return false; }
     _lpNightSrc  = ctx.createMediaElementSource(v);
+    _lpNightPre  = ctx.createGain();
     _lpNightComp = ctx.createDynamicsCompressor();
     _lpNightGain = ctx.createGain();
+    _lpNightVol  = ctx.createGain();
+    _lpNightPre.connect(_lpNightComp);
     _lpNightComp.connect(_lpNightGain);
+    _lpNightGain.connect(_lpNightVol);
     _lpNightCtx  = ctx;
   } catch (e) {
     console.warn("[night] Web Audio unavailable — night mode stays off on this device", e);
     try { if (ctx) ctx.close(); } catch (_) {}
-    _lpNightCtx = _lpNightSrc = _lpNightComp = _lpNightGain = null;
+    _lpNightCtx = _lpNightSrc = _lpNightComp = _lpNightGain = _lpNightPre = _lpNightVol = null;
     return false;
   }
+  v.addEventListener("volumechange", _lpNightVolSync);
   // A context that suspends later (tab throttling, an OS audio-route change)
   // would take the film's audio with it, since the element now plays through it.
   _lpNightCtx.addEventListener("statechange", () => {
@@ -21503,14 +21523,66 @@ async function _lpNightBuild() {
 function _lpNightRoute(through) {
   if (!_lpNightCtx) return;
   try { _lpNightSrc.disconnect(); } catch (_) {}
-  try { _lpNightGain.disconnect(); } catch (_) {}
+  try { _lpNightVol.disconnect(); } catch (_) {}
   if (through) {
-    _lpNightSrc.connect(_lpNightComp);
-    _lpNightGain.connect(_lpNightCtx.destination);
+    _lpNightSrc.connect(_lpNightPre);
+    _lpNightVol.connect(_lpNightCtx.destination);
   } else {
     _lpNightSrc.connect(_lpNightCtx.destination);
   }
   _lpNightRouted = !!through;
+  _lpNightVolSync();
+}
+
+// Move the element's volume from in front of the compressor to behind it (see the
+// block comment above). Bypassed, the element's own volume is already correct, so
+// both gains sit at unity. Mute needs no handling: the source is silent when muted.
+function _lpNightVolSync() {
+  if (!_lpNightCtx) return;
+  const v = document.getElementById("lpVideo");
+  const vol = v ? Math.max(0, Math.min(1, Number(v.volume) || 0)) : 1;
+  let pre = 1, post = 1;
+  if (_lpNightRouted) {
+    // At (near) zero there is nothing to undo, and 1/vol would blow up.
+    if (vol < 0.001) { pre = 1; post = 0; } else { pre = 1 / vol; post = vol; }
+  }
+  const now = _lpNightCtx.currentTime;
+  _lpNightPre.gain.cancelScheduledValues(now);
+  _lpNightVol.gain.cancelScheduledValues(now);
+  _lpNightPre.gain.setValueAtTime(pre, now);
+  _lpNightVol.gain.setValueAtTime(post, now);
+}
+
+// The DynamicsCompressorNode's built-in makeup gain for these settings, as a linear
+// multiplier. Measured rather than computed from Blink's formula so it is right on
+// whichever engine is playing: a tone far below threshold passes through with only
+// that makeup applied. Cached per threshold/ratio/knee; 1 (no correction) on failure.
+async function _lpNightAutoMakeup(prm) {
+  const key = `${prm.threshold}|${prm.ratio}|${prm.knee}`;
+  if (_lpNightAutoCache[key]) return _lpNightAutoCache[key];
+  let gain = 1;
+  try {
+    const OAC = window.OfflineAudioContext || window.webkitOfflineAudioContext;
+    const sr = 48000, len = Math.round(sr * 0.5), amp = 0.001;   // −60 dBFS
+    const oc = new OAC(1, len, sr);
+    const osc = oc.createOscillator(); osc.frequency.value = 440;
+    const lvl = oc.createGain(); lvl.gain.value = amp;
+    const c = oc.createDynamicsCompressor();
+    c.threshold.value = prm.threshold; c.ratio.value = prm.ratio; c.knee.value = prm.knee;
+    c.attack.value = prm.attack; c.release.value = prm.release;
+    osc.connect(lvl); lvl.connect(c); c.connect(oc.destination);
+    osc.start();
+    const buf = await oc.startRendering();
+    const d = buf.getChannelData(0);
+    let s = 0; const from = Math.round(len * 0.6);
+    for (let i = from; i < len; i++) s += d[i] * d[i];
+    const measured = Math.sqrt(s / (len - from)) / (amp / Math.SQRT2);
+    if (isFinite(measured) && measured > 0.5 && measured < 100) gain = measured;
+  } catch (e) {
+    console.warn("[night] couldn't measure the compressor's built-in makeup gain", e);
+  }
+  _lpNightAutoCache[key] = gain;
+  return gain;
 }
 
 // Bring the graph in line with app.vlc_night_mode / app.vlc_night_mode_preset.
@@ -21530,6 +21602,7 @@ async function _lpNightSync() {
     if (!_lpNightPresets) await _lpNightLoadPresets();
     const prm = _lpNightParams();
     if (!prm) return;                       // host didn't answer — leave audio alone
+    const auto = await _lpNightAutoMakeup(prm);
     if (!_lpNightCtx && !(await _lpNightBuild())) return;
     const now = _lpNightCtx.currentTime;
     const c = _lpNightComp;
@@ -21540,7 +21613,8 @@ async function _lpNightSync() {
     c.release.setValueAtTime(prm.release, now);
     // Ramp the makeup gain rather than stepping it — a preset change mid-scene
     // should not click.
-    _lpNightGain.gain.setTargetAtTime(prm.makeup_gain, now, 0.05);
+    // Net of the node's own built-in makeup, so the total equals VLC's.
+    _lpNightGain.gain.setTargetAtTime(prm.makeup_gain / auto, now, 0.05);
     if (_lpNightRouted !== true) _lpNightRoute(true);
   } finally {
     _lpNightSyncing = false;
@@ -23662,6 +23736,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">15.2.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">15.2.1</div>
 </body>
 </html>
