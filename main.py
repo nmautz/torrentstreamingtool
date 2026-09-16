@@ -17,6 +17,7 @@ import shlex
 import shutil
 import signal
 import socket
+import stat
 import itertools
 import struct
 import subprocess
@@ -11772,6 +11773,73 @@ async def set_file_schedule(item_id: str, req: FileScheduleReq) -> JSONResponse:
     return JSONResponse({"ok": True, "updated": len(req.file_paths), "mode": mode})
 
 
+def _file_holders(src: Path) -> list[str]:
+    """Name the processes holding `src` open, for a delete that Windows refused.
+
+    Windows will not unlink a file another process has open, and the error it
+    raises (WinError 32) names no culprit — which left "delete did nothing" with
+    no way to find out why. psutil can answer it, so a failed delete tells the
+    user *which* program to close instead of failing silently.
+
+    Best-effort by design: `open_files()` raises on processes we can't inspect,
+    and is slow enough that this is only ever called on the failure path.
+    """
+    target = str(src).casefold()
+    names: list[str] = []
+    for proc in psutil.process_iter(["name"]):
+        try:
+            for of in proc.open_files():
+                if of.path.casefold() == target:
+                    nm = proc.info.get("name") or f"pid {proc.pid}"
+                    if nm not in names:
+                        names.append(nm)
+                    break
+        except (psutil.AccessDenied, psutil.NoSuchProcess, OSError):
+            continue
+    return names
+
+
+async def _unlink_resilient(src: Path, attempts: int = 5) -> Optional[str]:
+    """Delete one file, riding out the window where Windows still refuses to.
+
+    Returns None once the file is gone, else a human-readable reason.
+
+    Two Windows-only failures POSIX never raises, both recoverable:
+      * **WinError 32** — another process holds the handle. qBittorrent and
+        ffmpeg do release theirs shortly after we drop the file to priority 0 /
+        tear a prep job down, so a short backoff usually wins.
+      * **WinError 5** — the read-only attribute, which is ours to clear.
+
+    Anything still failing after the backoff is reported, never swallowed: a
+    silent `except OSError: pass` here is what made a failed delete look like a
+    successful one (the row vanished from the UI while the bytes stayed on disk).
+    """
+    delay = 0.25
+    last = ""
+    for attempt in range(attempts):
+        try:
+            await asyncio.to_thread(src.unlink)
+            return None
+        except FileNotFoundError:
+            return None            # already gone — the outcome we wanted
+        except PermissionError as exc:
+            last = str(exc)
+            # Clear a read-only attribute once; harmless when that wasn't the cause.
+            try:
+                await asyncio.to_thread(os.chmod, src, stat.S_IWRITE)
+            except OSError:
+                pass
+        except OSError as exc:
+            last = str(exc)
+        if attempt < attempts - 1:
+            await asyncio.sleep(delay)
+            delay *= 2
+    holders = await asyncio.to_thread(_file_holders, src)
+    if holders:
+        last = f"{last} (open in {', '.join(holders)})" if last else f"open in {', '.join(holders)}"
+    return last or "unknown error"
+
+
 @app.post("/api/library/{item_id}/delete-files")
 async def delete_item_files(request: Request, item_id: str,
                             req: DeleteFilesReq) -> JSONResponse:
@@ -11804,6 +11872,11 @@ async def delete_item_files(request: Request, item_id: str,
         #    stops writing to them before we remove the bytes (no recreate-mid-delete).
         dl = item.setdefault("download", {"mode": "now", "files": {}})
         files = dl.setdefault("files", {})
+        # Remember each file's prior schedule so a delete that FAILS can put it
+        # back. A skip mark on a file still sitting on disk is the worst of both
+        # worlds — qBit won't refetch it and the bytes were never freed — so the
+        # mark is only allowed to stand for files we actually removed.
+        prior_modes: dict[str, Optional[str]] = {p: files.get(p) for p in targets}
         for p in targets:
             files[p] = "skip"
         await _apply_item_schedule(item, lib)
@@ -11830,6 +11903,7 @@ async def delete_item_files(request: Request, item_id: str,
     #    has stopped writing to these paths before we get here.
     freed = 0
     deleted = 0
+    failed: list[dict] = []
     for p in targets:
         src = Path(p)
         # Resolve the co-located bundle dir BEFORE unlinking — its key derives from
@@ -11840,19 +11914,47 @@ async def delete_item_files(request: Request, item_id: str,
                 bundle_dir = _offline_cache_dir(src)
         except OSError:
             pass
+
         try:
             existed = src.exists()
-            await asyncio.to_thread(src.unlink, missing_ok=True)
-            if existed:
-                freed += sizes.get(p, 0)
-                deleted += 1
         except OSError:
-            pass
+            existed = False
+        if not existed:
+            continue                      # nothing to free; leave the skip mark
+        err = await _unlink_resilient(src)
+        if err:
+            # Report it. This used to be `except OSError: pass`, so a file Windows
+            # refused to unlink (held open by qBittorrent, VLC or an ffmpeg prep
+            # job) left the row marked deleted in the UI with the bytes still on
+            # disk — a bulk delete would drop one episode and silently keep another.
+            log.warning("delete-files: could not remove %s — %s", p, err)
+            failed.append({"name": src.name, "path": p, "reason": err})
+            continue
+        freed += sizes.get(p, 0)
+        deleted += 1
+        # Only purge the bundle once its source is really gone — a file that
+        # survived the delete still needs the prepped copy it already had.
         try:
             if bundle_dir and bundle_dir.exists():
                 await asyncio.to_thread(shutil.rmtree, bundle_dir, ignore_errors=True)
         except OSError:
             pass
+
+    # Put back the schedule of everything we failed to delete, so the library
+    # stops claiming a file is gone while it is still on disk.
+    if failed:
+        async with mutate_library() as lib:
+            item = next((it for it in lib["items"] if it["id"] == item_id), None)
+            if item:
+                files = item.setdefault("download", {}).setdefault("files", {})
+                for entry in failed:
+                    prev = prior_modes.get(entry["path"])
+                    if prev is None:
+                        files.pop(entry["path"], None)
+                    else:
+                        files[entry["path"]] = prev
+                await _apply_item_schedule(item, lib)
+                item_status = item.get("status", item_status)
 
     await broadcast("library_update", {"item_id": item_id, "status": item_status})
     return JSONResponse({
@@ -11860,6 +11962,9 @@ async def delete_item_files(request: Request, item_id: str,
         # Compressed files we refused to delete (not re-downloadable). The UI surfaces
         # this so the user knows why nothing happened for those rows.
         "blocked": [Path(p).name for p in blocked],
+        # Files Windows would not let go of, each with the reason (and the process
+        # holding them, when psutil could name it). Never empty-and-silent again.
+        "failed": failed,
     })
 
 

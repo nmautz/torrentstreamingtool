@@ -3357,6 +3357,35 @@ tiles stacked over the film. `renderSkipOffer` no-ops in `TV_MODE` for that reas
 family as the "To TV" button the kiosk was offering itself: **the page that is the TV must
 opt out of the affordances aimed at the TV.**
 
+### On Windows, `unlink` fails on a file another process has open — so never swallow it
+
+POSIX lets you unlink a file that is still open; the directory entry goes and the bytes
+follow when the last handle closes. **Windows refuses outright** with `WinError 32` ("being
+used by another process"), and refuses a read-only file with `WinError 5`. Any delete path
+written with POSIX instincts will therefore fail on the primary target — and if it catches
+`OSError` broadly, fail *invisibly*.
+
+`/api/library/{id}/delete-files` did exactly that: an `except OSError: pass` around the
+unlink. The endpoint marks each file `skip` **first** (so qBit drops it to priority 0 and
+won't refetch) and then removes the bytes, so a swallowed unlink left the file in the worst
+reachable state — qBit will never re-download it, and the space was never freed — while the
+response still said `200 {"ok":true}`. Selecting two episodes and pressing Delete could drop
+one, keep the other, and report success for both; the survivor looked like a UI bug.
+
+Three rules for any delete on this platform:
+
+1. **Report the failure.** Return which paths failed and why. `psutil.Process.open_files()`
+   can name the process still holding the handle, which turns "delete did nothing" into
+   "still open in qbittorrent.exe" — worth the cost, since it only runs on the failure path.
+2. **Retry before giving up.** qBittorrent and ffmpeg release handles shortly after a
+   priority drop or a job teardown, so a short backoff wins most races. Clear the read-only
+   attribute once while you are there.
+3. **Don't commit the bookkeeping until the bytes are actually gone.** Capture the prior
+   state up front and roll it back for whatever survived, and purge derived artifacts (the
+   HLS bundle) only for files that really went.
+
+The same instinct applies to `shutil.rmtree` and to anything that renames over a live file.
+
 - [BACKEND.md](BACKEND.md) — invariants enforced by `main.py`
 - [DAEMON_WATCHDOG.md](DAEMON_WATCHDOG.md) — VPN guard at the process level
 - [ANALYZER.md](ANALYZER.md) — Smart Skip algorithm details and fallback chain

@@ -10050,6 +10050,7 @@ async function epDeleteFiles(paths, btn){
   if(!confirm(`Delete ${n} file${n>1?"s":""} from the host to free space?\n\nThe bytes are removed from disk but the ${n>1?"episodes stay":"title stays"} re-downloadable — a Download button reappears so you can fetch ${n>1?"them":"it"} again later.`)) return;
   await withInflight("ep_delete", btn, async () => {
     let deleted=0, blocked=0, freed=0, failed=false;
+    const stuck=[];   // files the host refused to unlink (held open by another process)
     for(const [itemId,ps] of byItem){
       try{
         const r=await fetch(`/api/library/${itemId}/delete-files`,{
@@ -10059,12 +10060,21 @@ async function epDeleteFiles(paths, btn){
         if(!r.ok){ failed=true; continue; }
         const d=await r.json().catch(()=>({}));
         deleted+=d.deleted||0; blocked+=(d.blocked||[]).length; freed+=d.freed_bytes||0;
+        for(const f of (d.failed||[])) stuck.push(f);
       }catch(_){ failed=true; }
     }
     if(blocked) showAlert(`${blocked} compressed file(s) skipped — they're no longer torrent-backed and can't be re-downloaded. Remove the whole item to delete them.`,"warn");
+    // A file the host couldn't unlink is still on disk. Say so — this used to be
+    // swallowed server-side, so a 2-episode delete that only freed one reported
+    // plain success and the surviving episode looked like a UI glitch.
+    if(stuck.length){
+      const who=stuck.map(f=>(/open in (.+?)\)?$/.exec(f.reason||"")||[])[1]).filter(Boolean);
+      const by=who.length?` — still open in ${[...new Set(who)].join(", ")}`:" — still in use on the host";
+      showAlert(`Couldn't delete ${stuck.length} file${stuck.length>1?"s":""}${by}. Stop playback and try again.`,"error");
+    }
     if(deleted) showAlert(`Deleted ${deleted} file${deleted>1?"s":""}${freed?` — freed ${_fmtBytes(freed)}`:""}.`,"success");
     else if(failed) showAlert("Delete failed.","error");
-    else if(!blocked) showAlert("Nothing to delete.","warn");
+    else if(!blocked && !stuck.length) showAlert("Nothing to delete.","warn");
     await refreshEpFiles();
     loadLibrary();   // card meta / badges update too
   });
@@ -22605,6 +22615,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">14.3.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">14.3.1</div>
 </body>
 </html>

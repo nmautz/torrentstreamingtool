@@ -1,5 +1,38 @@
 # Changelog
 
+## [14.3.1] — 2026-09-15
+**A delete that Windows refused reported success anyway.**
+
+Selecting two episodes and pressing Delete could remove one and silently leave the other
+on disk. The surviving episode still vanished from the row's "downloaded" state and qBit
+still showed it as *Do not download*, so it looked like a UI glitch — while the bytes it
+was supposed to free were never freed.
+
+`/api/library/{id}/delete-files` marks each target `skip` (so qBit drops it to priority 0
+and won't refetch), then unlinks it. The unlink sat inside a bare `except OSError: pass`.
+On Windows — the primary target — unlinking a file another process holds open fails with
+**WinError 32**, and a read-only file fails with **WinError 5**. Both were swallowed: the
+endpoint returned `200 {"ok":true}` with the failure invisible, having already committed
+the `skip` mark. That left the file in the worst of both states — qBit would no longer
+refetch it, and the disk space was never reclaimed.
+
+Three things changed:
+
+- **The failure is reported, never swallowed.** A refused unlink is logged and returned in
+  a new `failed[]` on the response, each entry carrying the reason. When `psutil` can
+  identify the process still holding the handle, the reason names it, so "delete did
+  nothing" becomes "still open in qbittorrent.exe".
+- **It retries before giving up.** `_unlink_resilient` backs off over ~4 s and clears a
+  read-only attribute once — enough for qBittorrent or an ffmpeg prep job to release a
+  handle it was about to drop anyway.
+- **A failed delete no longer lies about the file.** The prior download schedule is
+  captured up front and restored for every path that survived, so a file still on disk
+  stops being marked `skip`. Its HLS bundle is now purged only when its source is actually
+  gone.
+
+The dashboard surfaces this instead of reporting plain success: a stuck file raises
+"Couldn't delete N files — still open in …", naming the holder where known.
+
 ## [14.3.0] — 2026-09-15
 **On-device playback became the TV, but it never learned who was watching.**
 
