@@ -2214,7 +2214,7 @@
 <div id="unreleasedModal"
   class="hidden fixed inset-0 z-[70] bg-black/70
          flex items-end sm:items-center justify-center sm:px-4 sm:py-6">
-  <div class="bg-gray-900 w-full sm:max-w-md flex flex-col fade-in border-t-[3px] border-amber-500">
+  <div class="bg-gray-900 w-full sm:max-w-md flex flex-col fade-in border-t-[3px] border-amber-500 max-h-[92vh] overflow-y-auto">
     <div class="px-5 pt-5 pb-4">
       <div class="flex items-center gap-2 text-amber-400">
         <svg class="ic w-5 h-5" aria-hidden="true"><use href="#i-warn"/></svg>
@@ -2230,6 +2230,9 @@
       <div id="unrelInspect" class="hidden mt-4"></div>
     </div>
     <div class="px-5 pb-5 flex flex-col gap-3">
+      <!-- Contents-check actions: "Keep checking other sources" / "Download this". -->
+      <button id="unrelPrimary"
+        class="hidden w-full min-h-[52px] bg-green-700 hover:bg-green-600 text-white text-sm font-black uppercase tracking-widest transition-colors disabled:opacity-40"></button>
       <button id="unrelCancel"
         class="w-full min-h-[52px] bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-black uppercase tracking-widest transition-colors">Cancel download</button>
       <button id="unrelOverride"
@@ -7663,7 +7666,7 @@ async function grpGetFilm(tmdbId, btn){
     try{
       const r=await postLibraryDownload({magnet:src.magnet, title:src.title, series:"", season:0, episode:0,
                              save_path:"", profile_id:profile.id, admin_only:false,
-                             tmdb_id:f.tmdb_id, tmdb_kind:"movie"});
+                             tmdb_id:f.tmdb_id, tmdb_kind:"movie"}, {alternatives:cands});
       if(r.cancelled) return;
       res=await r.json().catch(()=>null);
       if(!r.ok){ showAlert(_errDetail(res,"Download failed."),"error"); return; }
@@ -9738,14 +9741,18 @@ function _releaseBadge(date, verb){
                title="Not released yet. Anything posted before release is almost always fake.">${escHtml(a.label)}</span>`;
 }
 
-// Show the not-out-yet warning. Resolves true only if an allowed profile chose
-// "Download anyway"; every other way out of the dialog is a cancel.
+// Show the not-out-yet warning. Resolves false (cancelled), true (download the
+// original), or a source object `{magnet, title, …}` the user confirmed instead.
 //
 // With `magnet`, "Download anyway" doesn't close the dialog straight away: it asks
-// the server what the torrent actually contains (POST /api/torrent/inspect). No
-// video → the dialog says so, lists what IS in there, and the download is off the
-// table. Couldn't tell (no peers, indexer down) → say so, and a second press
-// downloads without the check.
+// the server what the torrent actually contains (POST /api/torrent/inspect).
+//   · Has a video → resolves true.
+//   · No video → says so and lists what IS in there. With `alternatives` (the other
+//     sources for the same release) it offers to keep checking them, three at a
+//     time, best-seeded first; the first one with a video is shown for the user to
+//     confirm, and Keep checking moves on past it.
+//   · Couldn't tell (no peers, indexer down) → says why; a second press downloads
+//     without the check.
 function _unreleasedPrompt(info){
   return new Promise(resolve=>{
     const modal=document.getElementById("unreleasedModal");
@@ -9755,22 +9762,118 @@ function _unreleasedPrompt(info){
     const ov=document.getElementById("unrelOverride");
     const no=document.getElementById("unrelNoOverride");
     const cancel=document.getElementById("unrelCancel");
+    const primary=document.getElementById("unrelPrimary");
     const box=document.getElementById("unrelInspect");
     ov.classList.toggle("hidden", !info.can_override);
     no.classList.toggle("hidden", !!info.can_override);
     ov.textContent="Download anyway"; ov.disabled=false;
     cancel.textContent="Cancel download";
+    primary.classList.add("hidden"); primary.onclick=null;
     box.classList.add("hidden"); box.innerHTML="";
-    let checking=false, unchecked=false;
+    let checking=false, unchecked=false, closed=false;
+    const scan={running:false, queue:[], found:[], log:[], active:0, total:0};
     const done=v=>{
+      closed=true; scan.running=false;
       modal.classList.add("hidden");
-      modal.onclick=null; ov.onclick=null; cancel.onclick=null;
+      modal.onclick=null; ov.onclick=null; cancel.onclick=null; primary.onclick=null;
       resolve(v);
     };
     const note=(html, tone)=>{
-      box.className=`mt-4 px-3 py-3 border-l-4 ${tone==="bad"?"border-red-600 bg-red-950/40":tone==="wait"?"border-gray-600 bg-gray-800/60":"border-amber-600 bg-amber-950/30"}`;
+      box.className=`mt-4 px-3 py-3 border-l-4 ${tone==="bad"?"border-red-600 bg-red-950/40":tone==="good"?"border-green-600 bg-green-950/30":tone==="wait"?"border-gray-600 bg-gray-800/60":"border-amber-600 bg-amber-950/30"}`;
       box.innerHTML=html;
     };
+    const inspect=async magnet=>{
+      try{
+        const r=await fetch("/api/torrent/inspect",{method:"POST", headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({magnet, profile_id:(profile&&profile.id)||""})});
+        return r.ok?await r.json():{known:false, reason:_errDetail(await r.json().catch(()=>null), `HTTP ${r.status}`)};
+      }catch(_){ return {known:false, reason:"the server couldn't be reached"}; }
+    };
+    const fileList=res=>{
+      const files=res.files||[];
+      const rows=files.map(f=>`<li class="flex justify-between gap-3"><span class="truncate">${escHtml(f.name)}</span><span class="flex-shrink-0 text-gray-500">${fmtSize(f.size)}</span></li>`).join("");
+      const more=res.file_count>files.length?`<li class="text-gray-600">+ ${res.file_count-files.length} more</li>`:"";
+      return `<ul class="mt-2 space-y-0.5 text-[11px] text-gray-400 font-mono">${rows}${more}</ul>`;
+    };
+    const cap=s=>(s||"").replace(/^./, c=>c.toUpperCase());
+
+    // Other sources worth checking: not the one just checked, one per magnet,
+    // best-seeded first.
+    const seen=new Set([info.magnet]);
+    const alts=(info.alternatives||[]).filter(s=>s&&s.magnet&&!seen.has(s.magnet)&&(seen.add(s.magnet),true))
+      .sort((a,b)=>(+b.seeders||0)-(+a.seeders||0));
+
+    const logHtml=()=>scan.log.length?`<ul class="mt-2 space-y-0.5 text-[11px] font-mono">${scan.log.map(l=>
+      `<li class="flex justify-between gap-3"><span class="truncate text-gray-400">${escHtml(l.title)}</span><span class="flex-shrink-0 ${l.tone}">${l.label}</span></li>`).join("")}</ul>`:"";
+
+    const showScanning=()=>{
+      const checked=scan.total-scan.queue.length-scan.active;
+      note(`<p class="text-xs font-black uppercase tracking-widest text-gray-300">Checking other sources&hellip; ${checked} of ${scan.total}</p>
+            <p class="mt-1 text-[11px] text-gray-500">Sources that don't answer take up to 30 seconds each.</p>${logHtml()}`, "wait");
+      primary.classList.add("hidden");
+      cancel.textContent="Cancel";
+    };
+    const showFound=()=>{
+      const {src,res}=scan.found[0];
+      const bits=[(+src.seeders>=0)?`${src.seeders} seeders`:"", fmtSize(res.total_size||src.size||0),
+                  `${res.video_count} video${res.video_count===1?"":"s"}`].filter(Boolean).join(" · ");
+      note(`<p class="text-xs font-black uppercase tracking-widest text-green-400">Found one with a video</p>
+            <p class="mt-2 text-sm font-bold text-gray-100 break-words">${escHtml(src.title||"")}</p>
+            <p class="mt-1 text-[11px] font-black uppercase tracking-widest text-gray-500">${bits}</p>
+            ${fileList(res)}
+            <p class="mt-2 text-[11px] text-gray-500">Check the file names look right. It still hasn't officially come out.</p>`, "good");
+      primary.textContent="Download this";
+      primary.disabled=false;
+      primary.classList.remove("hidden");
+      primary.onclick=()=>done(src);
+      const left=scan.queue.length+scan.active+scan.found.length-1;
+      ov.classList.toggle("hidden", left<=0);
+      ov.textContent="Keep checking";
+      ov.disabled=false;
+      ov.onclick=()=>{ scan.found.shift(); resumeScan(); };
+      cancel.textContent="Cancel";
+    };
+    const showExhausted=()=>{
+      note(`<p class="text-xs font-black uppercase tracking-widest text-red-400">No source has a video</p>
+            <p class="mt-1 text-sm text-gray-300">Checked ${scan.total+1} source${scan.total?"s":""}; none has a real video. Wait until it has come out, then search again.</p>${logHtml()}`, "bad");
+      primary.classList.add("hidden");
+      ov.classList.add("hidden");
+      cancel.textContent="Close";
+    };
+    const settle=()=>{
+      if(closed) return;
+      if(scan.found.length) return showFound();
+      if(scan.queue.length||scan.active) return showScanning();
+      showExhausted();
+    };
+    const worker=async()=>{
+      while(scan.running && !closed && scan.queue.length && !scan.found.length){
+        const src=scan.queue.shift();
+        scan.active++;
+        const res=await inspect(src.magnet);
+        scan.active--;
+        if(closed) return;
+        if(res.known && res.has_video){
+          scan.found.push({src,res});
+          scan.log.push({title:src.title, label:"video", tone:"text-green-400"});
+        } else if(res.known){
+          scan.log.push({title:src.title, label:"no video", tone:"text-red-400"});
+        } else {
+          scan.log.push({title:src.title, label:"no answer", tone:"text-gray-500"});
+        }
+        settle();
+      }
+    };
+    const resumeScan=()=>{
+      ov.classList.add("hidden");
+      scan.running=true;
+      if(scan.found.length) return settle();
+      if(!scan.queue.length && !scan.active) return settle();
+      showScanning();
+      const n=Math.max(0, Math.min(3, scan.queue.length)-scan.active);
+      for(let i=0;i<n;i++) worker();
+    };
+
     cancel.onclick=()=>done(false);
     ov.onclick=async()=>{
       if(!info.magnet || unchecked) return done(true);
@@ -9778,33 +9881,35 @@ function _unreleasedPrompt(info){
       checking=true; ov.disabled=true;
       note(`<p class="text-xs font-black uppercase tracking-widest text-gray-300">Checking what's inside the torrent&hellip;</p>
             <p class="mt-1 text-[11px] text-gray-500">This can take up to 30 seconds.</p>`, "wait");
-      let res=null;
-      try{
-        const r=await fetch("/api/torrent/inspect",{method:"POST", headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({magnet:info.magnet, profile_id:(profile&&profile.id)||""})});
-        res=r.ok?await r.json():{known:false, reason:_errDetail(await r.json().catch(()=>null), `HTTP ${r.status}`)};
-      }catch(_){ res={known:false, reason:"the server couldn't be reached"}; }
+      const res=await inspect(info.magnet);
       checking=false; ov.disabled=false;
-      if(modal.classList.contains("hidden")) return;   // cancelled while checking
+      if(closed) return;
       if(res.known && res.has_video) return done(true);
       if(res.known){
-        const rows=(res.files||[]).map(f=>`<li class="flex justify-between gap-3"><span class="truncate">${escHtml(f.name)}</span><span class="flex-shrink-0 text-gray-500">${fmtSize(f.size)}</span></li>`).join("");
-        const more=res.file_count>(res.files||[]).length?`<li class="text-gray-600">+ ${res.file_count-(res.files||[]).length} more</li>`:"";
         note(`<p class="text-xs font-black uppercase tracking-widest text-red-400">No video in this torrent</p>
               <p class="mt-1 text-sm text-gray-300">It has ${res.file_count} file${res.file_count===1?"":"s"} and none of them is a video, so it's fake. Don't download it.</p>
-              <ul class="mt-2 space-y-0.5 text-[11px] text-gray-400 font-mono">${rows}${more}</ul>`, "bad");
+              ${fileList(res)}`, "bad");
         ov.classList.add("hidden");
-        cancel.textContent="Close";
+        if(alts.length){
+          scan.queue=alts.slice(); scan.total=alts.length;
+          primary.textContent=`Keep checking other sources (${alts.length})`;
+          primary.disabled=false;
+          primary.classList.remove("hidden");
+          primary.onclick=()=>{ primary.onclick=null; resumeScan(); };
+          cancel.textContent="Cancel";
+        } else {
+          cancel.textContent="Close";
+        }
         return;
       }
       unchecked=true;
       note(`<p class="text-xs font-black uppercase tracking-widest text-amber-400">Couldn't check the contents</p>
-            <p class="mt-1 text-sm text-gray-300">${escHtml((res.reason||"unknown error").replace(/^./, c=>c.toUpperCase()))}. It may still be fake.</p>`, "warn");
+            <p class="mt-1 text-sm text-gray-300">${escHtml(cap(res.reason||"unknown error"))}. It may still be fake.</p>`, "warn");
       ov.textContent="Download without checking";
     };
     modal.onclick=e=>{ if(e.target===modal) done(false); };
     modal.classList.remove("hidden");
-    document.getElementById("unrelCancel").focus();
+    cancel.focus();
   });
 }
 
@@ -9821,6 +9926,9 @@ function _errDetail(e, fallback){
 // for an allowed profile who insists, re-sends with `allow_unreleased`.
 // Returns the final Response, or `{ok:false, cancelled:true}` when the user backed
 // out, or `{ok:false, unreleased:true, info}` for a silent (bulk) caller.
+// `opts.alternatives` = the other sources for the same release; if the chosen one
+// turns out to hold no video, the dialog can check those and the user may confirm
+// one instead — then that source is what gets downloaded (`r.source` says which).
 async function postLibraryDownload(body, opts={}){
   const send=b=>fetch("/api/library/download",{
     method:"POST", headers:{"Content-Type":"application/json"}, body:JSON.stringify(b),
@@ -9831,9 +9939,15 @@ async function postLibraryDownload(body, opts={}){
   const info=e&&e.detail;
   if(!info || info.code!=="unreleased") return r;
   if(opts.silent) return {ok:false, unreleased:true, info};
-  const go=await _unreleasedPrompt({...info, magnet:body.magnet||""});
+  const go=await _unreleasedPrompt({...info, magnet:body.magnet||"", alternatives:opts.alternatives||[]});
   if(!go) return {ok:false, cancelled:true, info};
-  return send({...body, allow_unreleased:true});
+  if(go===true) return send({...body, allow_unreleased:true});
+  // A different source: a torrent prepared for the original (hash + file picks)
+  // doesn't apply to it.
+  const {torrent_hash, selected_file_indices, ...rest}=body;
+  const r2=await send({...rest, magnet:go.magnet, title:go.title||body.title, allow_unreleased:true});
+  r2.source=go;
+  return r2;
 }
 
 // TMDb episodes of `season` that `have` (a Set of episode numbers) doesn't cover.
@@ -13975,6 +14089,8 @@ function _ssEpRowHtml(e){
 // Streaming isn't gated by the server (the stream endpoints carry no show or
 // episode to check), so the warning is asked here, from the same TMDb data the
 // row's badge came from.
+// Resolves false, true (play the source asked about), or another source the
+// user confirmed after the first turned out to hold no video.
 async function _ssConfirmOut(season, episode, magnet){
   const te=_tmdbSeasonEpisodes(_ssMeta,season).find(x=>+x.episode===+episode);
   if(!te) return true;
@@ -13983,15 +14099,17 @@ async function _ssConfirmOut(season, episode, magnet){
   return _unreleasedPrompt({
     title:`${(_ssGroup&&_ssGroup.title)||""} S${pad2(season)}E${pad2(episode)}`.trim(),
     label:a.label, can_override:!!(profile&&profile.elevated&&_profileToken),
-    magnet:magnet||"",
+    magnet:magnet||"", alternatives:_ssAlternativeSources(season, episode),
   });
 }
 
 async function ssPlayEpisode(season,episode,btn){
   const e=_ssEpisodes.find(x=>x.season===season&&x.episode===episode);
   if(!e||!e.sources.length) return;
-  const best=_ssPreferredSource(e.sources);
-  if(!await _ssConfirmOut(season,episode,best.magnet)) return;
+  let best=_ssPreferredSource(e.sources);
+  const go=await _ssConfirmOut(season,episode,best.magnet);
+  if(!go) return;
+  if(go!==true) best=go;
   openStreamPicker(best.magnet,best.title,btn,{series:_ssGroup&&_ssGroup.title,season,episode,seeders:best.seeders,size:best.size});
 }
 
@@ -13999,8 +14117,10 @@ async function ssPlayEpisode(season,episode,btn){
 async function ssPlaySource(season,episode,i,btn){
   const e=_ssEpisodes.find(x=>x.season===season&&x.episode===episode);
   if(!e||!e.sources[i]) return;
-  const s=e.sources[i];
-  if(!await _ssConfirmOut(season,episode,s.magnet)) return;
+  let s=e.sources[i];
+  const go=await _ssConfirmOut(season,episode,s.magnet);
+  if(!go) return;
+  if(go!==true) s=go;
   openStreamPicker(s.magnet,s.title,btn,{series:_ssGroup&&_ssGroup.title,season,episode,seeders:s.seeders,size:s.size});
 }
 
@@ -14379,6 +14499,18 @@ function ssPickSource(season,episode,i){
 
 // Fire a single-episode download tagged with the show's series so all episodes
 // of the show cohere into one library entry (Phase 4).
+// Every source the open show page has for the same release as (season, episode):
+// the episode's sources, a season's packs, or — for a film — the movie results.
+// The not-out-yet dialog checks these when the picked source turns out fake.
+function _ssAlternativeSources(season, episode){
+  if(+episode>0){
+    const e=_ssEpisodes.find(x=>x.season===+season&&x.episode===+episode);
+    return (e&&e.sources)||[];
+  }
+  if(+season>0) return _ssPacksForSeason(+season)||[];
+  return _ssPacks||[];
+}
+
 async function _ssDownloadOne(src, season, episode, opts={}){
   // `series`/`locked` are overridable so a detached background run can queue
   // downloads for a show the user has since navigated away from (_ssGroup is
@@ -14391,7 +14523,8 @@ async function _ssDownloadOne(src, season, episode, opts={}){
               // The show the user picked. A detached background run may outlive
               // the open page, so the caller can pass its own snapshot.
               ...((opts.tmdb!==undefined)?opts.tmdb:_ssTmdbBinding())};
-  const r=await postLibraryDownload(body, {silent:!!opts.silent});
+  const r=await postLibraryDownload(body, {silent:!!opts.silent,
+                                          alternatives:opts.silent?[]:_ssAlternativeSources(season, episode)});
   if(r.cancelled) return false;
   if(r.unreleased) return {unreleased:true};
   if(!r.ok){
@@ -23784,6 +23917,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">15.3.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">15.4.0</div>
 </body>
 </html>

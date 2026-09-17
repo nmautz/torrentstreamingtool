@@ -417,6 +417,20 @@ video → resolves true. No video → red note with the file list, the override 
 Cancel relabelled Close (resolves false). Unknown → amber note with the reason, and the button
 becomes "Download without checking" (the next press resolves true).
 
+**Keep checking other sources (15.4.0).** `_unreleasedPrompt` now resolves `false`, `true`, or
+a **source object** the user confirmed instead. Given `info.alternatives` (other sources for the
+same release), a no-video result offers **Keep checking other sources (N)** in `#unrelPrimary`:
+the alternatives (deduped by magnet, seeders desc) are inspected by up to 3 concurrent workers,
+with a live per-source log (video / no video / no answer) and Cancel. The first source with a
+video stops the scan and is shown (title, seeders, size, file list) with **Download this**
+(resolves that source) and **Keep checking** (skips it; results already in flight are kept).
+Nothing left → "No source has a video". Alternatives come from `_ssAlternativeSources(season,
+episode)` (episode sources / season packs / movie results) for `_ssDownloadOne` and stream-now,
+and from the candidate list for a collection film. `postLibraryDownload(body, {alternatives})`
+sends the confirmed source's `magnet`/`title` (dropping `torrent_hash`/`selected_file_indices`,
+which belonged to the original) and tags the response `r.source`. The search-tab download
+dialog passes no alternatives.
+
 ### Stream to Device
 
 All Play surfaces (`epPlay`, `epPlayFrom`, the `lib-restart-btn` listener, and —

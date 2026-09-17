@@ -1,5 +1,17 @@
 # Changelog
 
+## [15.4.0] — 2026-09-16
+**When the torrent you picked is fake, keep checking the other sources until one has a video.**
+
+After "Download anyway" finds no video, the not-out-yet dialog offers **Keep checking other
+sources (N)**. It checks the other sources for the same episode, season pack or film, three at a
+time and best-seeded first, listing each result as it lands (video / no video / no answer), with
+**Cancel** at any point. The first source with a real video is shown with its name, seeders,
+size and file list so it can be checked, and only **Download this** starts it; **Keep checking**
+skips it and carries on. If none has a video, the dialog says so.
+
+Works from show pages (episodes, season packs, films), stream-now rows and collection films.
+
 ## [15.3.0] — 2026-09-16
 **"Download anyway" on something not out yet checks the torrent for a video first.**
 
