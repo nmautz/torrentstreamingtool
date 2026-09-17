@@ -13,8 +13,9 @@ seconds, then the idle background video. Three separate faults, all on the same 
   seek table, and parked at `state=stopped, length=0`. `qbit_first_last_piece_prio` had been
   *asking* qBittorrent for that piece early since 11.x, but nothing ever **waited** for it to
   arrive, and at 1% of an 800 MB file it usually hasn't. New `wait_for_tail_piece()` polls
-  `pieceStates` for the file's `piece_range[1]` and holds the handoff (≤40 s) until the tail
-  is really there. Both `/api/library/play-now`/`stream-file` and the transient
+  `pieceStates` for the file's `piece_range[1]` and holds the handoff (≤15 s — short, because
+  a front-index file opens fine without the tail and every second here is dead time) until the
+  tail is really there. Both `/api/library/play-now`/`stream-file` and the transient
   `stream_pipeline` now gate on it.
 * **A VLC that had not started yet was treated as one that had finished.** `status.json`
   reports "never opened" and "playlist ran out" identically (`stopped`, `length=0`), and

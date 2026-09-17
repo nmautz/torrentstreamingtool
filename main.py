@@ -2043,9 +2043,13 @@ async def qbit_piece_states(h: str) -> list:
 
 
 # How long to wait for a streamed file's LAST piece before handing off to VLC
-# anyway. Bounded: on a slow swarm the head is more useful than no playback at
-# all, and a container with its index at the front plays fine without the tail.
-_TAIL_PIECE_WAIT_SEC = 40.0
+# anyway. Deliberately short: plenty of files (anything with its index at the
+# FRONT) open perfectly without the tail, so every second spent here is dead
+# time on the common case — measured at ~40 s of pure delay on a 1.1 GB x265
+# episode that VLC then opened without the tail ever arriving. The rebuffer
+# guard's retry loop, not this gate, is what makes streaming reliable; this
+# just skips a handoff that is visibly doomed when the data happens to be there.
+_TAIL_PIECE_WAIT_SEC = 15.0
 
 
 async def wait_for_tail_piece(h: str, target: dict, timeout: float = _TAIL_PIECE_WAIT_SEC) -> bool:
