@@ -9834,8 +9834,12 @@ function _unreleasedPrompt(info){
       cancel.textContent="Cancel";
     };
     const showExhausted=()=>{
+      const silent=scan.log.filter(l=>l.label==="no answer").length;
+      const why=silent
+        ? `None had a video; ${silent} didn't answer in time, so they couldn't be checked. Wait until it has come out, then search again.`
+        : `None of the ${scan.total+1} sources has a real video. Wait until it has come out, then search again.`;
       note(`<p class="text-xs font-black uppercase tracking-widest text-red-400">No source has a video</p>
-            <p class="mt-1 text-sm text-gray-300">Checked ${scan.total+1} source${scan.total?"s":""}; none has a real video. Wait until it has come out, then search again.</p>${logHtml()}`, "bad");
+            <p class="mt-1 text-sm text-gray-300">${why}</p>${logHtml()}`, "bad");
       primary.classList.add("hidden");
       ov.classList.add("hidden");
       cancel.textContent="Close";
