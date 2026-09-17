@@ -1218,6 +1218,23 @@ class AppState:
     # app still believed something was playing. Two in a row (~6 s) is the
     # end-of-media signal; one can be a track change or a seek landing.
     vlc_stopped_ticks: int = 0
+    # Monotonic stamp of the most recent `in_play` handoff, and whether VLC has
+    # been observed actually playing since it. Together they separate "the media
+    # ENDED" from "VLC hasn't OPENED it yet" — two states that look identical in
+    # `status.json` (both report `stopped` with length 0). Without them the
+    # end-of-media detector credited a slow demuxer spin-up as a finished film
+    # ~6 s after the handoff and handed the screen back to the idle background
+    # video. See `_handle_playback_ended` / `background_video_loop`.
+    vlc_handoff_at: float = 0.0
+    vlc_ever_played: bool = False
+    # Absolute path of the configured idle background video while it is on
+    # screen. `vlc_progress_tracker` reads VLC's current URI every 2 s and used
+    # to adopt it as `library_current_file` unconditionally — during a stream's
+    # buffer wait that is still the BACKGROUND video, so the tracker wrote the
+    # bg clip's position into the viewer's watch history and left every
+    # `library_current_file`-guarded step (resume seek, track prefs) comparing
+    # against the wrong file. See GOTCHAS.md.
+    background_video_path: str = ""
     downloading_count: int = 0                            # active library downloads (ALL, incl. admin-only — drives host-busy/idle gating)
     downloading_count_visible: int = 0                    # active downloads a non-elevated viewer may know about (excludes admin_only) — drives the user-facing badge
     play_when_ready_item_id: Optional[str] = None        # auto-play this item on download complete
@@ -2014,6 +2031,58 @@ async def qbit_files(h: str) -> list:
     return r.json() if (r and r.status_code == 200) else []
 
 
+async def qbit_piece_states(h: str) -> list:
+    """Per-piece download state for a torrent: 0 = missing, 1 = requested,
+    2 = on disk. Indexed by piece number, so it pairs with the `piece_range`
+    [first, last] each entry of `qbit_files` carries."""
+    r = await qreq("GET", f"/api/v2/torrents/pieceStates?hash={h}")
+    try:
+        return r.json() if (r and r.status_code == 200) else []
+    except Exception:
+        return []
+
+
+# How long to wait for a streamed file's LAST piece before handing off to VLC
+# anyway. Bounded: on a slow swarm the head is more useful than no playback at
+# all, and a container with its index at the front plays fine without the tail.
+_TAIL_PIECE_WAIT_SEC = 40.0
+
+
+async def wait_for_tail_piece(h: str, target: dict, timeout: float = _TAIL_PIECE_WAIT_SEC) -> bool:
+    """Block until the streamed file's last piece is on disk (or `timeout`).
+
+    `qbit_first_last_piece_prio` asks qBittorrent to fetch that piece early, but
+    asking is not having: at the buffer gate (15 MB / 1 %) of a 800 MB file the
+    tail has usually not landed yet. A container whose index lives at the END —
+    an MP4 with a trailing `moov`, a Matroska with appended Cues — then has no
+    seek table, so VLC opens it, finds nothing to demux, and sits at
+    `state=stopped, length=0`. `_vlc_wait_until_ready` burns its 10 s timeout,
+    playback is claimed optimistically, and the film never starts. That is the
+    failure this waits out, and it is why enabling the priority flag alone did
+    not fix it.
+
+    Returns True when the tail is confirmed on disk. Returns False on timeout OR
+    when qBittorrent doesn't give us enough to judge (no `piece_range`, an empty
+    `pieceStates`) — the caller proceeds either way, because a missing tail is a
+    likely failure, not a certain one.
+    """
+    rng = target.get("piece_range") or []
+    if not (isinstance(rng, list) and len(rng) == 2):
+        return False
+    last_piece = int(rng[1])
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        states = await qbit_piece_states(h)
+        if not states or last_piece >= len(states):
+            return False                      # can't judge — don't stall the play
+        if states[last_piece] == 2:
+            return True
+        await asyncio.sleep(1)
+    log.info("Tail piece %d of the streamed file never arrived within %.0fs — "
+             "handing off to VLC anyway", last_piece, timeout)
+    return False
+
+
 async def qbit_delete(h: str, delete_files: bool = True) -> None:
     await qreq("POST", "/api/v2/torrents/delete",
                 data={"hashes": h, "deleteFiles": "true" if delete_files else "false"})
@@ -2181,11 +2250,16 @@ async def vlc(command: str, **params) -> None:
     try:
         c = _vlc_http()
         if command == "in_play":
+            # Single choke point for "real content is being handed to VLC", so
+            # the end-of-media detector can tell a demuxer that hasn't come up
+            # yet from a playlist that genuinely ran out. (The bg video bypasses
+            # vlc() and posts in_play directly, so it never arms this.)
+            state.vlc_handoff_at = time.monotonic()
+            state.vlc_ever_played = False
             # Real content is taking the screen — the TV UI kiosk (if up) loses
             # it, and every focus assertion may again bring VLC forward. Must
             # happen before the play paths' vlc_focus_and_fullscreen() tasks
-            # run their first tv_ui_active check. (The bg video bypasses vlc()
-            # and posts in_play directly, so it never trips this.)
+            # run their first tv_ui_active check.
             state.tv_ui_active = False
             # The on-device surface loses it too — VLC and the kiosk player must
             # never both be sounding. Tell the page to flush its position and
@@ -7613,6 +7687,29 @@ def _play_handoff_in_flight() -> bool:
             or (state.stream_task is not None and not state.stream_task.done()))
 
 
+# How long VLC is allowed to sit on a handed-off file without ever reporting
+# `playing` before we stop treating it as "still opening". Generous on purpose:
+# a stream-now play hands VLC a file with only the buffer gate on disk, and the
+# demuxer can take a while to come up over a sparse, actively-written file.
+_VLC_OPEN_GRACE_SEC = 45.0
+
+
+def _vlc_open_window_elapsed() -> bool:
+    """False while VLC may still legitimately be opening the current file.
+
+    `status.json` reports a VLC that has not opened its input identically to one
+    that has finished its playlist: `state=stopped`, `length=0`. The difference
+    is history — a finished file was observed *playing* at some point. So a
+    stopped VLC only counts as end-of-media once it has either played since the
+    last handoff or burned the whole open grace without doing so.
+    """
+    if state.vlc_ever_played:
+        return True
+    if not state.vlc_handoff_at:
+        return True          # no handoff recorded (restored session) — old behaviour
+    return (time.monotonic() - state.vlc_handoff_at) >= _VLC_OPEN_GRACE_SEC
+
+
 async def _handle_playback_ended() -> bool:
     """VLC reached the end of its playlist — credit the finished file and return the
     dashboard to idle. Returns True if it actually cleared an active playback.
@@ -7683,6 +7780,22 @@ async def _handle_playback_ended() -> bool:
     return True
 
 
+def _is_background_path(p: str) -> bool:
+    """True when `p` is the configured idle background video.
+
+    Kept as a path compare against `state.background_video_path` (refreshed by
+    the background loop, which reads the setting every tick anyway) so callers
+    on the 2 s progress cadence don't each pay a `get_library()`.
+    """
+    bgp = state.background_video_path
+    if not bgp or not p:
+        return False
+    try:
+        return Path(bgp).resolve() == Path(p).resolve()
+    except Exception:
+        return str(bgp) == str(p)
+
+
 async def _play_background_video() -> bool:
     """Start the configured background video on VLC. Returns True on success.
 
@@ -7698,6 +7811,7 @@ async def _play_background_video() -> bool:
     p = Path(path_str)
     if not p.exists():
         return False
+    state.background_video_path = path_str
     cap = await _global_max_volume()
     # Re-check after the awaits above: a play that started while we were reading
     # the library must not be stomped. Losing that race did more than blank the
@@ -7784,13 +7898,29 @@ async def background_video_loop() -> None:
             if _real_playback_active() and not _play_handoff_in_flight():
                 vs_eof = await vlc_status()
                 if vs_eof is not None and vs_eof.get("state", "") not in ("playing", "paused"):
-                    # Two consecutive stopped polls (~6 s) — one can be a track
-                    # change or a seek landing.
-                    state.vlc_stopped_ticks += 1
-                    if state.vlc_stopped_ticks >= 2:
-                        await _handle_playback_ended()
+                    if not _vlc_open_window_elapsed():
+                        # VLC has been handed the file but has never reported
+                        # playing — it is still opening it, not finished with
+                        # it. A film that ENDED was necessarily playing first,
+                        # so "never played" can only mean the demuxer hasn't
+                        # come up. Streaming a still-downloading file makes that
+                        # slow and routine: `_library_play_launch` gives up
+                        # waiting after 10 s and flips to "playing"
+                        # optimistically, and this detector needed just ~6 s
+                        # more to declare the film over and put the idle
+                        # background video back — the "it says it's playing,
+                        # then reverts to the background video" report.
                         state.vlc_stopped_ticks = 0
+                    else:
+                        # Two consecutive stopped polls (~6 s) — one can be a track
+                        # change or a seek landing.
+                        state.vlc_stopped_ticks += 1
+                        if state.vlc_stopped_ticks >= 2:
+                            await _handle_playback_ended()
+                            state.vlc_stopped_ticks = 0
                 else:
+                    if vs_eof is not None:
+                        state.vlc_ever_played = True
                     state.vlc_stopped_ticks = 0
             else:
                 state.vlc_stopped_ticks = 0
@@ -7807,6 +7937,7 @@ async def background_video_loop() -> None:
                 continue
             lib = await get_library()
             bg = lib.get("settings", {}).get("background_video") or {}
+            state.background_video_path = bg.get("path", "") or ""
             if not bg.get("path") or not bg.get("enabled", True):
                 state.background_playing = False
                 continue
@@ -9611,10 +9742,19 @@ async def vlc_progress_tracker() -> None:
             if dur_sec < 10:
                 continue
 
-            # Resolve which file is playing and look up its skip metadata
+            # Resolve which file is playing and look up its skip metadata.
+            # Only adopt VLC's URI when it is plausibly OUR playback. During a
+            # stream's buffer wait — and in the gap between claiming "playing"
+            # and VLC actually opening the file — VLC is still showing the idle
+            # background video, and adopting that wrote the bg clip's position
+            # into the viewer's watch history and left every
+            # library_current_file-guarded step (resume seek, track prefs,
+            # skip offers) comparing against the wrong file. See GOTCHAS.md.
             current_uri = await vlc_playlist_uri()
             if current_uri and current_uri.startswith("file://"):
-                state.library_current_file = uri_to_path(current_uri)
+                uri_path = uri_to_path(current_uri)
+                if not (state.stream_status == "buffering" or _is_background_path(uri_path)):
+                    state.library_current_file = uri_path
             cur_file = state.library_current_file
 
             # VLC advanced from series_prev_file to a different file on its own
@@ -9895,6 +10035,14 @@ async def stream_pipeline(
         vid = _file_by_index(files, file_index) if file_index is not None else largest_video(files)
         if not vid:
             raise RuntimeError("No recognisable video file found in torrent.")
+
+        # Head is buffered; wait for the file's tail so a trailing-index
+        # container (moov-at-end MP4, Cues-at-end MKV) can actually be demuxed.
+        if float(vid.get("progress", 0) or 0) < 0.999:
+            await broadcast("stream_status", {
+                "status": "buffering", "message": "Fetching the file index…",
+            })
+            await wait_for_tail_piece(h, vid)
 
         info = await qbit_info(h)
         save_path = (info or {}).get("save_path", settings.qbit_download_path)
@@ -13699,6 +13847,9 @@ async def _vlc_wait_until_ready(
     while time.monotonic() < deadline:
         vs = await vlc_status()
         if vs and vs.get("state") in ("playing", "paused") and float(vs.get("length", 0) or 0) > 0:
+            # VLC has the file open — the end-of-media detector may now trust a
+            # later `stopped` to mean "finished" rather than "not started yet".
+            state.vlc_ever_played = True
             if target is None:
                 return True
             uri = await vlc_playlist_uri()
@@ -14010,6 +14161,9 @@ class LibraryStreamFileReq(BaseModel):
 # before resuming after a buffer underrun — a bigger cushion than the initial
 # start gate so a resume doesn't instantly re-stall on a slow link.
 _REBUFFER_AHEAD_SEC = 25.0
+# Fallback margin for a file whose duration VLC never reported: a plain
+# fraction-of-the-file gain, since there is no timeline to measure against.
+_REBUFFER_MIN_GAIN = 0.02
 # The single active rebuffer guard (only one file streams-while-downloading at a
 # time). Replaced/cancelled when a new stream starts or playback stops.
 _rebuffer_guard_task: Optional[asyncio.Task] = None
@@ -14080,7 +14234,19 @@ async def _stream_rebuffer_guard(h: str, path: str) -> None:
                 frozen_ticks += 1
             else:
                 frozen_ticks = 0
-            if not (stopped_mid or frozen_ticks >= 3):
+            #  (c) VLC never opened the file at all: no duration has EVER been
+            #      reported and it is not playing, well past the handoff. The
+            #      usual cause is a trailing container index that still wasn't
+            #      on disk when we handed off (wait_for_tail_piece can time out
+            #      on a slow swarm). Nothing else recovers this — the two
+            #      signatures above both need a known duration — so the play
+            #      would sit "playing" over a dead VLC until the end-of-media
+            #      grace expired and the idle background video took the screen.
+            #      Re-issuing it once more data has landed is what actually
+            #      fixes it, so treat it as an underrun like the others.
+            never_opened = (last_dur <= 0 and vstate not in ("playing", "paused")
+                            and _vlc_open_window_elapsed())
+            if not (stopped_mid or never_opened or frozen_ticks >= 3):
                 continue
             frozen_ticks = 0
 
@@ -14091,6 +14257,11 @@ async def _stream_rebuffer_guard(h: str, path: str) -> None:
             })
             await broadcast("state", state_snapshot())
             # Wait for a comfortable margin ahead of last_pos (or completion).
+            # With no duration ever reported (the never-opened case) there is no
+            # timeline to measure against, so wait on raw progress instead —
+            # plus another go at the tail piece, which is the usual thing
+            # missing — and then simply try the play again.
+            start_frac = frac
             while True:
                 await asyncio.sleep(2)
                 if not _stream_anchor_ok(h, path):
@@ -14098,7 +14269,16 @@ async def _stream_rebuffer_guard(h: str, path: str) -> None:
                 info = await qbit_info(h)
                 if not info:
                     return
-                frac = _frac(await qbit_files(h))
+                qfs = await qbit_files(h)
+                frac = _frac(qfs)
+                if last_dur <= 0:
+                    tgt = next((qf for qf in qfs
+                                if str(Path(sp) / qf.get("name", "")) == path), None)
+                    if tgt is not None:
+                        await wait_for_tail_piece(h, tgt, timeout=20.0)
+                    if frac >= 0.999 or (frac - start_frac) >= _REBUFFER_MIN_GAIN:
+                        break
+                    continue
                 have_sec = frac * last_dur if last_dur else 0.0
                 if frac >= 0.999 or (have_sec - last_pos) >= _REBUFFER_AHEAD_SEC:
                     break
@@ -14214,6 +14394,17 @@ async def _library_stream_file_launch(
                 })
                 if (f_prog >= 0.999 or mb >= settings.buffer_min_mb
                         or pct >= settings.buffer_min_pct):
+                    # The head is buffered; now make sure the file's TAIL is
+                    # readable too, or a trailing-index container hands VLC
+                    # something it cannot demux. See wait_for_tail_piece.
+                    if f_prog < 0.999:
+                        await broadcast("stream_status", {
+                            "status": "buffering",
+                            "message": f"Buffering {first.name}: fetching the index…",
+                            "progress": pct, "downloaded_mb": mb, "total_mb": total_mb,
+                            "dl_speed_bps": state.dl_speed_bps, "ul_speed_bps": state.ul_speed_bps,
+                        })
+                        await wait_for_tail_piece(h, target)
                     break
             await asyncio.sleep(1)
             waited += 1

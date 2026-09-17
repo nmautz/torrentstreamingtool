@@ -760,6 +760,32 @@ It was invisible from the UI because `selectStreamFile` paints an **optimistic**
 
 Rule: any handler that **creates** a library item does the find-or-create inside `mutate_library()`, and only then calls a helper that opens its own transaction. Keep qBit/network round trips above the block (`_lib_lock` is global and non-reentrant), and apply `state` counter bumps (`downloading_count`) after it commits.
 
+### A stopped VLC means "hasn't opened it yet" as often as it means "finished"
+
+`status.json` describes a VLC that never opened its input exactly like one that ran off the end of its playlist: `state=stopped`, `length=0`, `time=0`. Nothing in that snapshot distinguishes them — only **history** does. A file that finished was necessarily *playing* at some point; a file that never opened never was.
+
+This bit twice over on the stream-now path, because `_library_play_launch` claims `playing` **optimistically**: `_vlc_wait_until_ready` polls for 10 s and then flips the status anyway ("the command is already on its way"), so the app routinely asserts playback that VLC has not achieved. `background_video_loop`'s end-of-media detector needed just two more polls (~6 s) to call `_handle_playback_ended`, broadcast **"Finished."**, clear the surface and let the idle background video take the screen — the user-visible "it says it's playing, then reverts to the background video".
+
+`state.vlc_ever_played` + `state.vlc_handoff_at` fix it. The `vlc()` helper arms both on every `in_play` (the single choke point for real content; the bg video posts `in_play` directly and deliberately doesn't arm them), `_vlc_wait_until_ready` sets `vlc_ever_played` the moment VLC reports a real duration, and `_vlc_open_window_elapsed()` gates the detector: a stopped VLC only counts as end-of-media once it has played since the handoff, or burned `_VLC_OPEN_GRACE_SEC` (45 s) without doing so.
+
+If you add a path that hands VLC content without going through `vlc("in_play", …)`, arm those two fields yourself or the detector will treat a slow open as an ended film.
+
+### Sequential + first/last-piece priority is a *request*, not an arrival — wait for the tail
+
+`qbit_first_last_piece_prio` asks qBittorrent to fetch the file's last piece early, which is what makes a trailing-index container streamable: an MP4 with its `moov` atom at the end, or a Matroska with appended Cues, has no seek table until the tail is on disk. VLC opens such a file, finds nothing to demux, and sits at `stopped`/`length=0` forever.
+
+Setting the flag is not the same as having the piece. The buffer gate (`buffer_min_mb` 15 MB / `buffer_min_pct` 1%) only measures the **head**, so at the moment of handoff on an 800 MB file the tail has usually not landed — the flag was enabled in 11.x and the failure kept happening right through to 15.6.1.
+
+`wait_for_tail_piece(h, file)` closes it: read the file's `piece_range` from `/torrents/files`, poll `/torrents/pieceStates` (a flat list indexed by piece; `2` = on disk) for `piece_range[1]`, and hold the handoff until it is there or `_TAIL_PIECE_WAIT_SEC` (40 s) expires. It returns **False** — and the caller proceeds anyway — both on timeout and when qBit gives too little to judge: a missing tail is a likely failure, not a certain one, and a head-only play beats no play on a slow swarm. Verified against qBittorrent 5.1.0.
+
+### `vlc_progress_tracker` must not adopt a URI that isn't this playback's
+
+The tracker resolves "which file is playing" from `vlc_playlist_uri()` every 2 s. It used to assign that straight to `state.library_current_file`. But VLC is showing the **idle background video** for the whole of a stream's buffer wait, and again in the gap between the optimistic `playing` claim and the demuxer actually coming up — so the tracker adopted the bg clip.
+
+The damage was quiet and wider than the stall it accompanied: it saved a resume position for `damn.mp4` under whichever profile started the stream (junk in real watch history), mis-credited that position to the library item on the next file change via the `advanced` branch, and — because `library_current_file` is the guard on the detached resume-seek and `_apply_track_prefs` tasks — meant **saved subtitle/audio preferences were never applied to a stream-now play**, since those bail when `state.library_current_file != expected_file`.
+
+It now skips the adoption while `stream_status == "buffering"` and whenever the URI resolves to the background video (`_is_background_path`, compared against `state.background_video_path`, which `_play_background_video` and the bg loop keep fresh).
+
 ### Streaming a still-downloading file: VLC reads the download head as EOF — a rebuffer guard resumes it
 
 A sequentially-downloading file only has its first N% on disk. When VLC's playhead reaches that downloaded head mid-file it reads it as **EOF** and goes to `stopped`/`ended` (or, on some builds, sits "playing" but frozen at the head) — and **VLC never retries on its own** (the "it fails in VLC and doesn't retry" report). `_stream_rebuffer_guard` (spawned by both `_library_stream_file_launch` and the transient `stream_pipeline`, tracked in the module-level `_rebuffer_guard_task`) watches for either signature, flips the UI to `buffering`, waits until `_REBUFFER_AHEAD_SEC` (25 s) of new data is on disk ahead of the last position, then re-issues `in_play` + seek back to where it ran dry. It self-cancels via `_stream_anchor_ok` (anchored on `state.active_hash` + `state.active_file`, which Stop / a superseding play reset) and exits the moment the file finishes downloading (`progress ≥ 0.999`) — so it never fights a fully-downloaded file's normal EOF/auto-advance. Note the initial start gate is still just `BUFFER_MIN_MB`/`BUFFER_MIN_PCT`, so on a link slower than the bitrate the guard will cycle play→buffer→play — that's correct (you can't play faster than you download), not a bug to "fix" by disabling it.

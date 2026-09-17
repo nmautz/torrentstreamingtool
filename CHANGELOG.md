@@ -1,5 +1,44 @@
 # Changelog
 
+## [15.6.2] — 2026-09-17
+**The other half of the "stream now" failure: playback that was handed to VLC before the
+file could be opened, then written off as finished six seconds later.**
+
+With 15.6.1's 404 fixed, a stream would reach VLC and still die — `playing` for a few
+seconds, then the idle background video. Three separate faults, all on the same path:
+
+* **The handoff happened before the file's index was on disk.** The buffer gate waits for
+  15 MB (or 1%) of the *head*. A container whose index lives at the END — a trailing-`moov`
+  MP4, a Cues-at-end Matroska — is undemuxable without its tail, so VLC opened it, found no
+  seek table, and parked at `state=stopped, length=0`. `qbit_first_last_piece_prio` had been
+  *asking* qBittorrent for that piece early since 11.x, but nothing ever **waited** for it to
+  arrive, and at 1% of an 800 MB file it usually hasn't. New `wait_for_tail_piece()` polls
+  `pieceStates` for the file's `piece_range[1]` and holds the handoff (≤40 s) until the tail
+  is really there. Both `/api/library/play-now`/`stream-file` and the transient
+  `stream_pipeline` now gate on it.
+* **A VLC that had not started yet was treated as one that had finished.** `status.json`
+  reports "never opened" and "playlist ran out" identically (`stopped`, `length=0`), and
+  `_library_play_launch` flips to `playing` optimistically once its 10 s ready-poll times out.
+  The end-of-media detector then needed only two more polls (~6 s) to call
+  `_handle_playback_ended`, broadcast **"Finished."** and hand the screen back to the
+  background video. It now requires VLC to have been *observed playing* since the last
+  `in_play` (`state.vlc_ever_played`), or a 45 s open grace to have elapsed — a film that
+  ended was necessarily playing first.
+* **Nothing retried.** Both rebuffer-guard signatures key off a known duration, so a file VLC
+  never opened fell through every recovery path. The guard now recognises that case and
+  re-issues the play once more data (and another attempt at the tail piece) has landed.
+
+Also fixed on the same path:
+
+* **Streaming wrote the background video into your watch history.** `vlc_progress_tracker`
+  adopted VLC's current URI as `library_current_file` every 2 s unconditionally — but during
+  a stream's buffer wait VLC is still showing the idle clip, so the tracker saved a resume
+  position for `damn.mp4` against whichever profile started the stream, and mis-credited it to
+  the library item on the next file change. It also left every `library_current_file`-guarded
+  step comparing against the wrong file, so **saved subtitle/audio track preferences were
+  never applied to a stream-now play** and a resume seek would silently bail. The tracker now
+  ignores VLC's URI while a handoff is in flight, and never adopts the background video.
+
 ## [15.6.1] — 2026-09-17
 **Stream now actually streams. It had been failing on every source that wasn't already in
 the library — the player flashed "playing" and then dropped straight back to the idle
