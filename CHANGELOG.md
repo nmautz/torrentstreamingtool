@@ -1,5 +1,20 @@
 # Changelog
 
+## [15.6.3] — 2026-09-17
+**Clears the watch-history entries the background video left behind.**
+
+* One-shot startup repair (`_purge_background_video_progress`) for the damage done by the
+  progress-tracker bug fixed in 15.6.2: real profiles were carrying resume markers for the
+  idle background clip, written every 15 s during any stream's buffer wait and credited to a
+  library item on the next file change — which `find_resume_hint` could then pick up.
+* Deliberately narrow — it removes only paths that **are** the configured background video or
+  sit in a `.background` folder. A blanket "drop progress whose path isn't in `item["files"]`"
+  would also bin legitimately-orphaned entries that `_canonical_item_path` still re-maps after
+  a rename or an in-place compress. A profile whose `last_file` pointed at the clip is
+  re-pointed at its most recently updated real file rather than cleared, so Resume survives.
+* Idempotent, and pre-checks outside the write transaction, so after the first run it costs one
+  no-op library read per start instead of rewriting `library.json`.
+
 ## [15.6.2] — 2026-09-17
 **The other half of the "stream now" failure: playback that was handed to VLC before the
 file could be opened, then written off as finished six seconds later.**

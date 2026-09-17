@@ -785,3 +785,23 @@ To restore by hand: stop the service, copy the chosen `library_backups/library-*
 - [BACKEND.md](BACKEND.md) — `AppState` (the in-memory complement to library.json)
 - [ANALYZER.md](ANALYZER.md) — how `skip_data` is generated
 - [API.md](API.md) — endpoints that read/write each section
+
+## One-shot repair: background-video watch history
+
+`_purge_background_video_progress()` runs once from `lifespan` (right after
+`_recover_interrupted_downloads`). Until 15.6.2 `vlc_progress_tracker` adopted VLC's current
+URI as `library_current_file` unconditionally, so during any stream's buffer wait it saved
+progress for the **idle background video** against whichever profile started the stream, and
+`_finalize_stopped_file` credited that position to the library item on the next file change.
+Profiles ended up with resume markers for a file belonging to no item, which `find_resume_hint`
+can surface.
+
+The repair deletes `progress[<profile>].file_progress[<path>]` entries whose path is the
+configured background video or lies in a `.background` folder, and re-points a `last_file` that
+named the clip at the profile's most recently updated remaining file (so Resume keeps working)
+rather than blanking it.
+
+It is intentionally **not** a general "drop progress for paths not in `item["files"]`" sweep:
+`_canonical_item_path` legitimately re-maps stored paths after a rename or an in-place
+compress, and those orphans must survive. It pre-checks outside `mutate_library()` and raises
+`LibraryUnchanged` when nothing matched, so the common case never rewrites `library.json`.

@@ -10117,6 +10117,78 @@ async def _recover_interrupted_downloads() -> None:
         print(f"[download] re-driving {recovered} interrupted download(s) after restart")
 
 
+async def _purge_background_video_progress() -> None:
+    """Delete watch-history entries pointing at the idle background video.
+
+    Until 15.6.2 `vlc_progress_tracker` adopted VLC's current URI as
+    `library_current_file` unconditionally. During a stream's buffer wait VLC is
+    still showing the idle clip, so every 15 s progress save wrote a position for
+    the BACKGROUND video into whichever profile had started the stream — and
+    `_finalize_stopped_file` then credited it to the library item on the next
+    file change. The result is real profiles carrying resume markers for a file
+    that is not part of any item, which `find_resume_hint` can pick up.
+
+    Deliberately narrow: only paths that ARE the configured background video (or
+    live in a `.background` folder) are removed. A blanket "drop progress whose
+    path isn't in item['files']" would also delete legitimately-orphaned entries
+    that `_canonical_item_path` still re-maps after a rename or an in-place
+    compress. Idempotent, so it costs one no-op library read per start after the
+    first run."""
+    try:
+        lib = await get_library()
+    except Exception:
+        return
+    bg_path = (lib.get("settings", {}).get("background_video") or {}).get("path", "")
+
+    def _is_bg(fp: str) -> bool:
+        if not fp:
+            return False
+        try:
+            parts = [x.lower() for x in Path(fp).parts]
+        except Exception:
+            return False
+        if ".background" in parts:
+            return True
+        if not bg_path:
+            return False
+        try:
+            return Path(bg_path).resolve() == Path(fp).resolve()
+        except Exception:
+            return str(bg_path) == str(fp)
+
+    # Cheap pre-check outside the write transaction — the usual case is "nothing
+    # to do", and that shouldn't rewrite a multi-megabyte library.json.
+    if not any(_is_bg(fp)
+               for it in lib.get("items", [])
+               for prof in (it.get("progress") or {}).values()
+               if isinstance(prof, dict)
+               for fp in list((prof.get("file_progress") or {}).keys()) + [prof.get("last_file", "")]):
+        return
+
+    removed = 0
+    async with mutate_library() as wlib:
+        for it in wlib.get("items", []):
+            for prof in (it.get("progress") or {}).values():
+                if not isinstance(prof, dict):
+                    continue
+                fprog = prof.get("file_progress") or {}
+                for fp in [k for k in fprog if _is_bg(k)]:
+                    del fprog[fp]
+                    removed += 1
+                if _is_bg(prof.get("last_file", "")):
+                    # Point `last_file` at whatever real file remains (newest
+                    # first) rather than dropping it, so Resume keeps working.
+                    rest = sorted(fprog.items(),
+                                  key=lambda kv: (kv[1] or {}).get("updated_at", ""),
+                                  reverse=True)
+                    prof["last_file"] = rest[0][0] if rest else ""
+        if not removed:
+            raise LibraryUnchanged
+    log.info("Cleared %d background-video entr%s from watch history "
+             "(pre-15.6.2 progress-tracker bug).", removed,
+             "y" if removed == 1 else "ies")
+
+
 async def library_download_pipeline(
     item_id: str,
     magnet: str,
@@ -10362,6 +10434,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # orphaned in the ongoing list. Must run before the monitor so the hash lands
     # quickly; the monitor then takes over from qBit.
     await _recover_interrupted_downloads()
+
+    # Strip watch-history entries the background video left behind (see below).
+    await _purge_background_video_progress()
 
     # ── Diagnostics tasks ────────────────────────────────────────────────
     # Together these answer the question the 2026-09-13 logs couldn't: was the
