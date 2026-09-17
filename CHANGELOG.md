@@ -1,5 +1,20 @@
 # Changelog
 
+## [15.2.2] — 2026-09-16
+**A power cut could wipe the whole library, silently.**
+
+The box froze during playback and was hard-reset seconds after a progress save. `library.json`
+came back at full size but entirely zero bytes, and the server quietly started with no profiles
+and no content. It had to be carved back off the disk.
+
+* **Saves are flushed to disk** before they replace the old file (`_write_durable`), so a power
+  cut leaves the previous library or the new one, never zeros.
+* **Rolling backups** in `library_backups/`: at most one snapshot every 15 min; the newest 16
+  are kept, plus one per day for 30 days.
+* **A damaged library is never loaded as empty.** It's set aside as
+  `library.corrupt-<time>.json` and the newest good backup restored, logged at CRITICAL. A read
+  blocked by a file lock now errors instead of returning an empty library that would then be saved.
+
 ## [15.2.1] — 2026-09-16
 **Night mode on the on-device player was far too loud and ignored the volume slider.**
 

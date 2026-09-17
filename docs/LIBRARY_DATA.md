@@ -770,6 +770,14 @@ All access goes through `get_library()` / `put_library()` which hold `_lib_lock`
 
 **Writes are atomic** (7.16.3): `_save_lib_raw` writes to `library.json.tmp` then `os.replace`s it over the real file (same directory ⇒ same volume, so the swap is atomic on Windows/NTFS and POSIX). The file is rewritten every ~15 s during playback; the previous in-place `write_text` truncated it first, so a crash / service restart / power cut mid-write left corrupt JSON — and `_load_lib_raw`'s exception fallback then booted with an **empty library** (every profile, watch position, and subtitle pick gone). Keep any future writer on `_save_lib_raw`; never write `LIBRARY_FILE` in place.
 
+**Writes are durable, snapshotted, and never read back as empty** (15.2.2). Atomic alone only survives a *process* crash: on 2026-09-16 a hard reset seconds after a progress save left `library.json` at full size and **every byte zero** (the rename was journaled, the data was still in the OS cache). Three layers now:
+
+- **fsync before replace** — `_write_durable(path, blob)` flushes and `os.fsync`s the temp file before `os.replace`. Use it for any file the user would miss.
+- **Rolling snapshots** — after a successful save, `_maybe_snapshot_library` copies the library into `library_backups/library-YYYYMMDD-HHMMSS.json` at most once per 15 min (`_BACKUP_INTERVAL_S`). Pruned to the newest 16 plus the newest per day for 30 days (~45 files x library size). Empty libraries are never snapshotted.
+- **Recovery on load** — `_load_lib_raw` treats a missing file as a fresh install, retries transient read errors and **raises** if they persist (an empty dict returned inside `mutate_library()` would be saved). A file that doesn't parse goes to `_recover_library`: it is renamed to `library.corrupt-<ts>.json` (never deleted) and the newest parseable snapshot is written back, logged at CRITICAL. With no usable snapshot it starts empty, but the damaged file is already out of the way, so the first save can't overwrite it.
+
+To restore by hand: stop the service, copy the chosen `library_backups/library-*.json` over `library.json`, start it.
+
 ## See also
 
 - [BACKEND.md](BACKEND.md) — `AppState` (the in-memory complement to library.json)

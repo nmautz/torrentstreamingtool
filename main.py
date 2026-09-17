@@ -808,15 +808,163 @@ def _migrate_item(item: dict) -> dict:
     return item
 
 
-def _load_lib_raw() -> dict:
-    if LIBRARY_FILE.exists():
+# ── Library durability ──────────────────────────────────────────────────────
+#
+# 2026-09-16 the box was hard-reset seconds after a progress save and came back
+# with library.json at its full 1.5 MB size and every byte zero — every profile
+# and item gone. temp-file + os.replace is only crash-safe for the *process*: the
+# rename is journaled metadata and reaches disk at once, while the new file's
+# data sits in the OS cache for seconds. Power loss in that window commits a
+# rename pointing at never-written clusters. Three layers, so it can't recur:
+#
+#   1. fsync the temp file before the replace (`_write_durable`).
+#   2. Rolling snapshots in library_backups/ (`_maybe_snapshot_library`).
+#   3. A library that won't parse is never read as empty: it is moved aside to
+#      library.corrupt-<ts>.json and the newest parseable snapshot restored
+#      (`_recover_library`). Before, the silent empty fallback meant the next
+#      save overwrote the damaged file — destroying the evidence and any chance
+#      of carving it back off the disk.
+LIBRARY_BACKUP_DIR = LIBRARY_FILE.parent / "library_backups"
+_BACKUP_INTERVAL_S = 15 * 60      # at most one snapshot per 15 min of writes
+_BACKUP_KEEP_RECENT = 16          # newest 16 kept regardless (~4 h of activity)
+_BACKUP_KEEP_DAILY = 30           # older: newest snapshot per day, 30 days
+_last_library_snapshot = 0.0
+_lib_recover_lock = threading.Lock()
+
+
+def _parse_library_bytes(blob: bytes) -> Optional[dict]:
+    """The library dict, or None if `blob` isn't a well-formed library."""
+    try:
+        raw = json.loads(blob.decode("utf-8"))
+    except Exception:
+        return None
+    if (not isinstance(raw, dict)
+            or not isinstance(raw.get("profiles", []), list)
+            or not isinstance(raw.get("items", []), list)):
+        return None
+    return raw
+
+
+def _write_durable(path: Path, blob: bytes) -> None:
+    """Write `blob` to `path` so a power cut leaves the old or the new file, never zeros.
+
+    Temp file in the same directory (same volume ⇒ atomic replace on NTFS and
+    POSIX), flushed *and fsynced* before the replace. PermissionError propagates
+    so the caller's retry loop can ride out Windows scanner locks.
+    """
+    tmp = path.with_name(path.name + ".tmp")
+    with open(tmp, "wb") as fh:
+        fh.write(blob)
+        fh.flush()
+        os.fsync(fh.fileno())
+    os.replace(tmp, path)
+
+
+def _library_snapshots() -> list[Path]:
+    """Snapshot files, oldest first (names embed a sortable timestamp)."""
+    try:
+        return sorted(LIBRARY_BACKUP_DIR.glob("library-*.json"))
+    except OSError:
+        return []
+
+
+def _maybe_snapshot_library(data: dict, blob: bytes) -> None:
+    """Copy a just-saved library into library_backups/, rate-limited, then prune.
+
+    Never raises: a failed snapshot must not fail the save it follows.
+    """
+    global _last_library_snapshot
+    now = time.time()
+    if now - _last_library_snapshot < _BACKUP_INTERVAL_S:
+        return
+    # An empty library isn't worth a slot — snapshotting one repeatedly would
+    # rotate the real history out of the recent window.
+    if not data.get("profiles") and not data.get("items"):
+        return
+    try:
+        LIBRARY_BACKUP_DIR.mkdir(exist_ok=True)
+        name = "library-" + datetime.now().strftime("%Y%m%d-%H%M%S") + ".json"
+        _write_durable(LIBRARY_BACKUP_DIR / name, blob)
+        _last_library_snapshot = now
+    except OSError as exc:
+        log.warning("library snapshot failed: %s", exc)
+        return
+    snaps = _library_snapshots()
+    keep = set(snaps[-_BACKUP_KEEP_RECENT:])
+    days: set[str] = set()
+    for p in reversed(snaps[:-_BACKUP_KEEP_RECENT]):
+        day = p.name[len("library-"):len("library-") + 8]
+        if day not in days and len(days) < _BACKUP_KEEP_DAILY:
+            days.add(day)
+            keep.add(p)
+    for p in snaps:
+        if p not in keep:
+            try:
+                p.unlink()
+            except OSError:
+                pass
+
+
+def _recover_library() -> Optional[dict]:
+    """library.json exists but won't parse: quarantine it and restore a snapshot.
+
+    Returns the restored library, or None when no snapshot parses (the caller
+    then starts empty — but the damaged file is kept under its corrupt- name,
+    so the empty library's first save can't destroy it).
+    """
+    with _lib_recover_lock:
+        # A concurrent reader may have recovered it while this one waited.
         try:
-            raw = json.loads(LIBRARY_FILE.read_text(encoding="utf-8"))
-            raw["items"] = [_migrate_item(it) for it in raw.get("items", [])]
+            cur = _parse_library_bytes(LIBRARY_FILE.read_bytes())
+        except FileNotFoundError:
+            cur = None
+        if cur is not None:
+            return cur
+        if LIBRARY_FILE.exists():
+            aside = LIBRARY_FILE.with_name(
+                "library.corrupt-" + datetime.now().strftime("%Y%m%d-%H%M%S-%f") + ".json")
+            os.replace(LIBRARY_FILE, aside)
+            log.critical("library.json is unreadable (corrupt or zero-filled) — moved "
+                         "aside to %s", aside.name)
+        for snap in reversed(_library_snapshots()):
+            try:
+                blob = snap.read_bytes()
+            except OSError:
+                continue
+            raw = _parse_library_bytes(blob)
+            if raw is None:
+                continue
+            _write_durable(LIBRARY_FILE, blob)
+            log.critical("library.json restored from snapshot %s (%d profiles, %d items) — "
+                         "changes made after that snapshot are lost",
+                         snap.name, len(raw.get("profiles", [])), len(raw.get("items", [])))
             return raw
-        except Exception:
-            pass
-    return {"profiles": [], "items": []}
+        log.critical("library.json unreadable and no usable snapshot in %s — starting "
+                     "with an EMPTY library", LIBRARY_BACKUP_DIR)
+        return None
+
+
+def _load_lib_raw() -> dict:
+    blob = b""
+    for attempt in range(len(_SAVE_RETRY_DELAYS) + 1):
+        try:
+            blob = LIBRARY_FILE.read_bytes()
+            break
+        except FileNotFoundError:
+            return {"profiles": [], "items": []}      # fresh install
+        except OSError:
+            # A scanner lock is transient. If it persists, raise rather than
+            # return empty: an empty result inside mutate_library() gets SAVED.
+            if attempt == len(_SAVE_RETRY_DELAYS):
+                raise
+            time.sleep(_SAVE_RETRY_DELAYS[attempt])
+    raw = _parse_library_bytes(blob)
+    if raw is None:
+        raw = _recover_library()
+        if raw is None:
+            return {"profiles": [], "items": []}
+    raw["items"] = [_migrate_item(it) for it in raw.get("items", [])]
+    return raw
 
 
 # A transient Windows file-lock costs one library write. Retry rather than lose it.
@@ -836,24 +984,20 @@ _SAVE_RETRY_DELAYS = (0.05, 0.12, 0.25, 0.5, 1.0)   # ~1.9 s total, then give up
 
 
 def _save_lib_raw(data: dict) -> None:
-    # Atomic write (temp file + os.replace, same directory ⇒ same volume, so
-    # the replace is atomic on Windows/NTFS and POSIX alike). library.json is
-    # rewritten every ~15 s during playback; a plain write_text truncated it
-    # first, so a crash / service restart / power cut mid-write left corrupt
-    # JSON — and _load_lib_raw's fallback then started an EMPTY library,
-    # losing every profile, watch position, and subtitle pick.
-    tmp = LIBRARY_FILE.with_name(LIBRARY_FILE.name + ".tmp")
-    blob = json.dumps(data, indent=2, ensure_ascii=False)
+    # Durable atomic write — see "Library durability" above. The replace alone
+    # survives a process crash; the fsync in _write_durable is what survives a
+    # power cut. library.json is rewritten every ~15 s during playback.
+    blob = json.dumps(data, indent=2, ensure_ascii=False).encode("utf-8")
     last: Optional[OSError] = None
     for attempt in range(len(_SAVE_RETRY_DELAYS) + 1):
         try:
             # The temp write is retried too: the previous tick's .tmp can still be
             # held by the same scanner, and failing there loses the write just as
             # completely as failing on the replace.
-            tmp.write_text(blob, encoding="utf-8")
-            os.replace(tmp, LIBRARY_FILE)
+            _write_durable(LIBRARY_FILE, blob)
             if attempt:
                 log.info("library.json write succeeded on attempt %d", attempt + 1)
+            _maybe_snapshot_library(data, blob)
             return
         except PermissionError as exc:      # WinError 5 / 32 both surface here
             last = exc

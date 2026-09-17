@@ -877,6 +877,21 @@ Other `os.replace` sites in the tree (marquee, metadata cache, HLS repair) have 
 exposure; the marquee one swallows all exceptions, which is fine for a cosmetic file and
 would not be for anything the user owns.
 
+### Temp-file + `os.replace` survives a crash, not a power cut — fsync first
+
+`os.replace` commits the rename to the NTFS journal right away, but the temp file's *data* can sit
+in the OS write cache for seconds. A hard reset in that window replays the rename and leaves the
+target at its correct size, **filled with zeros**. That's exactly what happened on 2026-09-16:
+the box froze during playback, was power-cycled ~8 s after a progress save, and `library.json`
+came back as 1,551,813 zero bytes. The old loader swallowed the parse error and returned an
+empty library, so every profile and item vanished with nothing in the log. Any save would then
+have overwritten the evidence. It was carved back off the raw volume from freed clusters of
+older writes.
+
+Rules: fsync the temp file before replacing (`_write_durable`); never turn "unreadable" into
+"empty" for data you then write back (quarantine + restore, `_recover_library`); keep snapshots
+(`library_backups/`). See [LIBRARY_DATA.md § File location](LIBRARY_DATA.md).
+
 ### `fetch` does not throw on 4xx/5xx — `try/catch` is not error handling
 
 The watch-progress save wrapped its POST in `try/catch` and put the offline-stash fallback
