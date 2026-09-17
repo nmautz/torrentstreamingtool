@@ -2,6 +2,7 @@
 
 import asyncio
 import base64
+import copy
 import gzip
 import hashlib
 import html as _html
@@ -14381,52 +14382,66 @@ async def library_play_now(req: PlayNowReq) -> JSONResponse:
         if not info:
             raise HTTPException(504, "Torrent metadata timed out.")
 
-    lib = await get_library()
     # Adopt the transient prepare torrent so Stop's prepare-hash cleanup can't
     # delete it out from under the new library item.
     if state.prepare_hash == h:
         state.prepare_hash = None
 
-    # Reuse a live library item already backing this hash (repeat Play of the
-    # same result) instead of minting a duplicate.
-    item = next((it for it in lib["items"]
-                 if (it.get("torrent_hash") or "").lower() == h
-                 and it.get("status") != "error"), None)
     save_path = info.get("save_path", settings.qbit_download_path)
     qfiles = await qbit_files(h)
     if not qfiles:
         raise HTTPException(504, "Could not read the torrent's file list.")
 
-    if item is None:
-        item = {
-            "id": str(uuid.uuid4()),
-            "title": req.title or "Untitled",
-            "series": req.series,
-            "season": req.season,
-            "episode": req.episode,
-            "files": build_file_list(qfiles, save_path),
-            "size_bytes": info.get("size", 0),
-            "added_at": _now_iso(),
-            "status": "downloading",
-            "torrent_hash": h,
-            "progress": {},
-            "default_visible_profiles": [],
-            "hidden_by_profiles": [],
-            "download": {"mode": "now", "files": {}},
-        }
-        lib["items"].append(item)
-        state.downloading_count += 1
-        if not item.get("admin_only"):
-            state.downloading_count_visible += 1
-    elif not item.get("files"):
-        item["files"] = build_file_list(qfiles, save_path)
-        item["size_bytes"] = info.get("size", 0)
-
-    # Resolve the file the user picked (or the main video for a single-file torrent).
+    # Resolve the file the user picked (or the main video for a single-file
+    # torrent) BEFORE the transaction — no qBit round trips inside `_lib_lock`.
     vid = _file_by_index(qfiles, req.file_index) if req.file_index >= 0 else largest_video(qfiles)
     if not vid:
         raise HTTPException(400, "No playable video file in this download.")
     target_path = str(Path(save_path) / vid.get("name", ""))
+
+    # Find-or-create the backing item **inside a transaction**. This has to be a
+    # real write: `_begin_library_file_stream` below re-reads library.json under
+    # its own `mutate_library()` and 404s on an item that only ever existed in
+    # this handler's dict. Appending to a `get_library()` snapshot and never
+    # persisting it (the shape this had between 11.20.0 and 15.6.1) therefore
+    # failed EVERY play-now on a torrent not already in the library — the UI had
+    # already painted its optimistic "buffering" card, so the 404 read as
+    # "it said it was playing, then dropped back to the idle background video".
+    created = False
+    async with mutate_library() as lib:
+        # Reuse a live library item already backing this hash (repeat Play of the
+        # same result) instead of minting a duplicate.
+        item = next((it for it in lib["items"]
+                     if (it.get("torrent_hash") or "").lower() == h
+                     and it.get("status") != "error"), None)
+        if item is None:
+            item = {
+                "id": str(uuid.uuid4()),
+                "title": req.title or "Untitled",
+                "series": req.series,
+                "season": req.season,
+                "episode": req.episode,
+                "files": build_file_list(qfiles, save_path),
+                "size_bytes": info.get("size", 0),
+                "added_at": _now_iso(),
+                "status": "downloading",
+                "torrent_hash": h,
+                "progress": {},
+                "default_visible_profiles": [],
+                "hidden_by_profiles": [],
+                "download": {"mode": "now", "files": {}},
+            }
+            lib["items"].append(item)
+            created = True
+        elif not item.get("files"):
+            item["files"] = build_file_list(qfiles, save_path)
+            item["size_bytes"] = info.get("size", 0)
+        item = copy.deepcopy(item)     # detach: the lock is released below
+
+    if created:
+        state.downloading_count += 1
+        if not item.get("admin_only"):
+            state.downloading_count_visible += 1
 
     await _begin_library_file_stream(item, target_path, req.profile_id)
     return JSONResponse({"ok": True, "item_id": item["id"]}, status_code=202)

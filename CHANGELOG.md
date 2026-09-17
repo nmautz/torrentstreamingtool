@@ -1,5 +1,28 @@
 # Changelog
 
+## [15.6.1] — 2026-09-17
+**Stream now actually streams. It had been failing on every source that wasn't already in
+the library — the player flashed "playing" and then dropped straight back to the idle
+background video.**
+
+* **"Stream now" 404'd on anything new.** `/api/library/play-now` minted its library item in
+  a **throwaway dict** — it read the library with `get_library()`, appended the new item to
+  that snapshot, and never wrote it back. `_begin_library_file_stream` then opened its own
+  `mutate_library()` transaction, re-read `library.json` from disk, couldn't find the item
+  that had never been saved, and raised `404 Item not found`. Every play-now on a torrent the
+  library didn't already hold failed this way; the handful that "worked" were repeat plays of
+  something already downloaded. Introduced in 11.20.0, when the lost-update fix replaced the
+  old `_begin_library_file_stream(item, lib, …)` signature — which had persisted the caller's
+  `lib` — with a self-contained transaction, and the play-now write went with it.
+* The find-or-create now runs **inside** `mutate_library()`, so the item is on disk before the
+  stream launch looks for it. qBit round trips (file list, video pick) were moved above the
+  transaction so nothing holds `_lib_lock` across the network, and the `downloading_count`
+  bump moved below it so a lost race can't inflate the badge.
+* **Why it looked like "it said it was playing".** `selectStreamFile` paints an optimistic
+  buffering card (and opens the fullscreen controls on mobile) before the round trip, so the
+  404 arrived *after* the UI claimed playback and `_revertOptimistic()` snapped it back to the
+  idle surface — where the TV is showing the background video.
+
 ## [15.6.0] — 2026-09-17
 **Shuffle works on shows held as separate per-episode downloads, and can be turned on
 mid-episode. Collections get their artwork back, plus bulk hide and delete.**
