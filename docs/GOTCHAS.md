@@ -1319,6 +1319,16 @@ un-elevated profiles. The gate is enforced on `POST /api/library/download` only 
 endpoints receive just a magnet and title, so stream-now asks in the UI (`_ssConfirmOut`) and
 is not server-enforced.
 
+### Inspecting a magnet re-adds it — wait for the delete before the download
+
+`/api/torrent/inspect` adds a magnet to qBit just long enough to read its file list, then deletes
+it. qBit's delete is asynchronous, and the download the user then confirms adds **the same
+hash**: qBit answers `Fails.` for a torrent still in the session, `qbit_add_magnet` adopts the
+existing hash, and the item ends up bound to a torrent that is about to vanish. So the inspect
+polls until qBit no longer lists the hash before returning. It also never deletes a torrent qBit
+already had before the call (read in place instead), and deletes through
+`_qbit_delete_transient`, which refuses a hash that backs a library item.
+
 ### A torrent can finish with no video in it — never mark that "ready"
 
 `_all_nonskip_complete` looks at **every** file qBit lists; `build_file_list` keeps only

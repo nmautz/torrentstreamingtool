@@ -408,7 +408,14 @@ films. **All** library downloads go through `postLibraryDownload(body, {silent})
 `unreleased` it shows `#unreleasedModal` via `_unreleasedPrompt(info)` (big Cancel; small
 "Download anyway" only when `info.can_override`) and resends with `allow_unreleased`. Silent
 callers (background runs) get `{unreleased:true}` and report the skip. `_errDetail` renders an
-object `detail`. Stream-now rows ask via `_ssConfirmOut`.
+object `detail`. Stream-now rows ask via `_ssConfirmOut(season, episode, magnet)`.
+
+**Contents check (15.3.0).** When `info.magnet` is set (`postLibraryDownload` passes
+`body.magnet`; `_ssConfirmOut` passes the chosen source), "Download anyway" keeps the dialog
+open and calls `POST /api/torrent/inspect`, showing a checking note in `#unrelInspect`. Has a
+video → resolves true. No video → red note with the file list, the override button hidden,
+Cancel relabelled Close (resolves false). Unknown → amber note with the reason, and the button
+becomes "Download without checking" (the next press resolves true).
 
 ### Stream to Device
 

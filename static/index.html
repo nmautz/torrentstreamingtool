@@ -2225,6 +2225,9 @@
       <p class="mt-3 text-sm text-gray-400 leading-relaxed">Anything posted before it comes out is almost
         always fake &mdash; often a program disguised as the video. Wait until it has
         been released, then download it.</p>
+      <!-- Filled after "Download anyway": the torrent's own file list, checked
+           before the dialog is allowed to close (_unreleasedPrompt). -->
+      <div id="unrelInspect" class="hidden mt-4"></div>
     </div>
     <div class="px-5 pb-5 flex flex-col gap-3">
       <button id="unrelCancel"
@@ -9737,6 +9740,12 @@ function _releaseBadge(date, verb){
 
 // Show the not-out-yet warning. Resolves true only if an allowed profile chose
 // "Download anyway"; every other way out of the dialog is a cancel.
+//
+// With `magnet`, "Download anyway" doesn't close the dialog straight away: it asks
+// the server what the torrent actually contains (POST /api/torrent/inspect). No
+// video → the dialog says so, lists what IS in there, and the download is off the
+// table. Couldn't tell (no peers, indexer down) → say so, and a second press
+// downloads without the check.
 function _unreleasedPrompt(info){
   return new Promise(resolve=>{
     const modal=document.getElementById("unreleasedModal");
@@ -9745,16 +9754,54 @@ function _unreleasedPrompt(info){
     document.getElementById("unrelWhen").textContent=when;
     const ov=document.getElementById("unrelOverride");
     const no=document.getElementById("unrelNoOverride");
+    const cancel=document.getElementById("unrelCancel");
+    const box=document.getElementById("unrelInspect");
     ov.classList.toggle("hidden", !info.can_override);
     no.classList.toggle("hidden", !!info.can_override);
+    ov.textContent="Download anyway"; ov.disabled=false;
+    cancel.textContent="Cancel download";
+    box.classList.add("hidden"); box.innerHTML="";
+    let checking=false, unchecked=false;
     const done=v=>{
       modal.classList.add("hidden");
-      modal.onclick=null; ov.onclick=null;
-      document.getElementById("unrelCancel").onclick=null;
+      modal.onclick=null; ov.onclick=null; cancel.onclick=null;
       resolve(v);
     };
-    document.getElementById("unrelCancel").onclick=()=>done(false);
-    ov.onclick=()=>done(true);
+    const note=(html, tone)=>{
+      box.className=`mt-4 px-3 py-3 border-l-4 ${tone==="bad"?"border-red-600 bg-red-950/40":tone==="wait"?"border-gray-600 bg-gray-800/60":"border-amber-600 bg-amber-950/30"}`;
+      box.innerHTML=html;
+    };
+    cancel.onclick=()=>done(false);
+    ov.onclick=async()=>{
+      if(!info.magnet || unchecked) return done(true);
+      if(checking) return;
+      checking=true; ov.disabled=true;
+      note(`<p class="text-xs font-black uppercase tracking-widest text-gray-300">Checking what's inside the torrent&hellip;</p>
+            <p class="mt-1 text-[11px] text-gray-500">This can take up to 30 seconds.</p>`, "wait");
+      let res=null;
+      try{
+        const r=await fetch("/api/torrent/inspect",{method:"POST", headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({magnet:info.magnet, profile_id:(profile&&profile.id)||""})});
+        res=r.ok?await r.json():{known:false, reason:_errDetail(await r.json().catch(()=>null), `HTTP ${r.status}`)};
+      }catch(_){ res={known:false, reason:"the server couldn't be reached"}; }
+      checking=false; ov.disabled=false;
+      if(modal.classList.contains("hidden")) return;   // cancelled while checking
+      if(res.known && res.has_video) return done(true);
+      if(res.known){
+        const rows=(res.files||[]).map(f=>`<li class="flex justify-between gap-3"><span class="truncate">${escHtml(f.name)}</span><span class="flex-shrink-0 text-gray-500">${fmtSize(f.size)}</span></li>`).join("");
+        const more=res.file_count>(res.files||[]).length?`<li class="text-gray-600">+ ${res.file_count-(res.files||[]).length} more</li>`:"";
+        note(`<p class="text-xs font-black uppercase tracking-widest text-red-400">No video in this torrent</p>
+              <p class="mt-1 text-sm text-gray-300">It has ${res.file_count} file${res.file_count===1?"":"s"} and none of them is a video, so it's fake. Don't download it.</p>
+              <ul class="mt-2 space-y-0.5 text-[11px] text-gray-400 font-mono">${rows}${more}</ul>`, "bad");
+        ov.classList.add("hidden");
+        cancel.textContent="Close";
+        return;
+      }
+      unchecked=true;
+      note(`<p class="text-xs font-black uppercase tracking-widest text-amber-400">Couldn't check the contents</p>
+            <p class="mt-1 text-sm text-gray-300">${escHtml((res.reason||"unknown error").replace(/^./, c=>c.toUpperCase()))}. It may still be fake.</p>`, "warn");
+      ov.textContent="Download without checking";
+    };
     modal.onclick=e=>{ if(e.target===modal) done(false); };
     modal.classList.remove("hidden");
     document.getElementById("unrelCancel").focus();
@@ -9784,7 +9831,7 @@ async function postLibraryDownload(body, opts={}){
   const info=e&&e.detail;
   if(!info || info.code!=="unreleased") return r;
   if(opts.silent) return {ok:false, unreleased:true, info};
-  const go=await _unreleasedPrompt(info);
+  const go=await _unreleasedPrompt({...info, magnet:body.magnet||""});
   if(!go) return {ok:false, cancelled:true, info};
   return send({...body, allow_unreleased:true});
 }
@@ -13928,7 +13975,7 @@ function _ssEpRowHtml(e){
 // Streaming isn't gated by the server (the stream endpoints carry no show or
 // episode to check), so the warning is asked here, from the same TMDb data the
 // row's badge came from.
-async function _ssConfirmOut(season, episode){
+async function _ssConfirmOut(season, episode, magnet){
   const te=_tmdbSeasonEpisodes(_ssMeta,season).find(x=>+x.episode===+episode);
   if(!te) return true;
   const a=_airInfo(te.air_date);
@@ -13936,14 +13983,15 @@ async function _ssConfirmOut(season, episode){
   return _unreleasedPrompt({
     title:`${(_ssGroup&&_ssGroup.title)||""} S${pad2(season)}E${pad2(episode)}`.trim(),
     label:a.label, can_override:!!(profile&&profile.elevated&&_profileToken),
+    magnet:magnet||"",
   });
 }
 
 async function ssPlayEpisode(season,episode,btn){
   const e=_ssEpisodes.find(x=>x.season===season&&x.episode===episode);
   if(!e||!e.sources.length) return;
-  if(!await _ssConfirmOut(season,episode)) return;
   const best=_ssPreferredSource(e.sources);
+  if(!await _ssConfirmOut(season,episode,best.magnet)) return;
   openStreamPicker(best.magnet,best.title,btn,{series:_ssGroup&&_ssGroup.title,season,episode,seeders:best.seeders,size:best.size});
 }
 
@@ -13951,8 +13999,8 @@ async function ssPlayEpisode(season,episode,btn){
 async function ssPlaySource(season,episode,i,btn){
   const e=_ssEpisodes.find(x=>x.season===season&&x.episode===episode);
   if(!e||!e.sources[i]) return;
-  if(!await _ssConfirmOut(season,episode)) return;
   const s=e.sources[i];
+  if(!await _ssConfirmOut(season,episode,s.magnet)) return;
   openStreamPicker(s.magnet,s.title,btn,{series:_ssGroup&&_ssGroup.title,season,episode,seeders:s.seeders,size:s.size});
 }
 
@@ -23736,6 +23784,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">15.2.2</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">15.3.0</div>
 </body>
 </html>

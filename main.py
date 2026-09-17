@@ -12709,6 +12709,171 @@ async def _unreleased_gate(lib: dict, req: "DownloadReq") -> Optional[dict]:
             if date else "air dates not announced"}
 
 
+# ── Torrent inspection (what's actually inside, before downloading) ─────────────
+#
+# A release posted before its episode airs is almost always fake — the 15.1.1
+# case was "South Park S29E01", a lone .exe. The not-out-yet dialog lets an
+# elevated profile download anyway; before it closes, it asks this endpoint for
+# the torrent's file list so "there is no video in this" is said up front rather
+# than discovered after the download finishes (see docs/GOTCHAS.md).
+
+class TorrentInspectReq(BaseModel):
+    magnet: str
+    profile_id: str = ""
+
+
+_INSPECT_META_TIMEOUT_S = 30
+_INSPECT_TAG = "streamlink-inspect"
+
+
+def _bdecode(data: bytes, i: int = 0):
+    """Minimal bencode decoder → (value, next_index). Dict keys stay bytes."""
+    c = data[i:i + 1]
+    if c == b"i":
+        end = data.index(b"e", i)
+        return int(data[i + 1:end]), end + 1
+    if c == b"l":
+        i += 1
+        out = []
+        while data[i:i + 1] != b"e":
+            v, i = _bdecode(data, i)
+            out.append(v)
+        return out, i + 1
+    if c == b"d":
+        i += 1
+        d = {}
+        while data[i:i + 1] != b"e":
+            k, i = _bdecode(data, i)
+            v, i = _bdecode(data, i)
+            d[k] = v
+        return d, i + 1
+    if c.isdigit():
+        colon = data.index(b":", i)
+        n = int(data[i:colon])
+        return data[colon + 1:colon + 1 + n], colon + 1 + n
+    raise ValueError(f"bad bencode at {i}")
+
+
+def _torrent_file_list(blob: bytes) -> list[dict]:
+    """[{name, size}] from .torrent bytes — v1 `files`/`length`, or a v2 `file tree`."""
+    meta, _ = _bdecode(blob)
+    info = meta[b"info"]
+    txt = lambda b: b.decode("utf-8", "replace") if isinstance(b, bytes) else str(b)
+    root = txt(info.get(b"name", b""))
+    if b"files" in info:
+        return [{"name": "/".join([root] + [txt(p) for p in f.get(b"path", [])]),
+                 "size": int(f.get(b"length", 0))} for f in info[b"files"]]
+    if b"length" in info:
+        return [{"name": root, "size": int(info[b"length"])}]
+    out: list[dict] = []
+
+    def walk(node: dict, parts: list[str]) -> None:
+        for k, v in node.items():
+            if k == b"" and isinstance(v, dict):
+                out.append({"name": "/".join(parts), "size": int(v.get(b"length", 0))})
+            elif isinstance(v, dict):
+                walk(v, parts + [txt(k)])
+    walk(info.get(b"file tree", {}), [root])
+    return out
+
+
+async def _inspect_link(url: str) -> tuple[Optional[list[dict]], Optional[str], str]:
+    """Fetch an indexer link. → (files, magnet, reason): the .torrent's file list,
+    or the magnet it redirects to, or neither with a reason."""
+    async with httpx.AsyncClient(timeout=20, follow_redirects=False, verify=False) as c:
+        for _ in range(6):
+            r = await c.get(url)
+            loc = r.headers.get("location", "")
+            if r.is_redirect and loc:
+                if loc.lower().startswith("magnet:"):
+                    return None, loc, ""
+                url = str(httpx.URL(url).join(loc))
+                continue
+            if r.status_code != 200:
+                return None, None, f"the indexer answered HTTP {r.status_code}"
+            try:
+                return _torrent_file_list(r.content), None, ""
+            except Exception:
+                return None, None, "the indexer's link isn't a readable .torrent"
+    return None, None, "the indexer's link redirected too many times"
+
+
+async def _inspect_magnet(magnet: str) -> tuple[Optional[list[dict]], str]:
+    """File list for a magnet via qBit: metadata only, then removed again.
+
+    A torrent qBit already has is read in place and never touched. Otherwise it's
+    added with stopCondition=MetadataReceived (qBit stops it the moment the file
+    list arrives, before any content), read, and deleted — and we wait for the
+    delete to land, because the download that may follow re-adds the same hash
+    and qBit rejects a duplicate of a torrent that's still being removed.
+    """
+    h = extract_hash(magnet)
+    if not h:
+        return None, "the magnet has no info-hash"
+    if await qbit_info(h):
+        return [{"name": f.get("name", ""), "size": f.get("size", 0)}
+                for f in await qbit_files(h)], ""
+    r = await qreq("POST", "/api/v2/torrents/add", data={
+        "urls": magnet, "savepath": settings.qbit_download_path,
+        "stopCondition": "MetadataReceived", "tags": _INSPECT_TAG,
+    })
+    if not r or r.text.strip() != "Ok.":
+        return None, "qBittorrent wouldn't take the magnet"
+    files: list = []
+    try:
+        deadline = time.monotonic() + _INSPECT_META_TIMEOUT_S
+        while time.monotonic() < deadline:
+            files = await qbit_files(h)
+            if files:
+                break
+            await asyncio.sleep(1)
+    finally:
+        await _qbit_delete_transient(h, why="torrent inspect")
+        for _ in range(20):
+            if not await qbit_info(h):
+                break
+            await asyncio.sleep(0.25)
+    if not files:
+        return None, f"no peer sent the file list within {_INSPECT_META_TIMEOUT_S} s"
+    return [{"name": f.get("name", ""), "size": f.get("size", 0)} for f in files], ""
+
+
+@app.post("/api/torrent/inspect")
+async def torrent_inspect(request: Request, req: TorrentInspectReq) -> JSONResponse:
+    # Only reachable from "Download anyway", which only an elevated profile has;
+    # it also puts a torrent into qBit, so hold it to the same bar.
+    if not _is_elevated(request, await get_library(), req.profile_id):
+        raise HTTPException(403, "Requires a PIN-verified elevated profile.")
+    if not state.vpn_secure:
+        raise HTTPException(403, "VPN not connected — can't fetch torrent metadata.")
+    link = (req.magnet or "").strip()
+    files: Optional[list[dict]] = None
+    reason = ""
+    try:
+        if link.lower().startswith(("http://", "https://")):
+            files, magnet, reason = await _inspect_link(link)
+            if files is None and magnet:
+                files, reason = await _inspect_magnet(magnet)
+        elif link.lower().startswith("magnet:"):
+            files, reason = await _inspect_magnet(link)
+        else:
+            reason = "that isn't a torrent link or magnet"
+    except Exception as exc:
+        log.warning("torrent inspect failed for %s: %s", link[:120], exc)
+        files, reason = None, "the file list couldn't be read"
+    if files is None:
+        return JSONResponse({"ok": True, "known": False, "reason": reason})
+    videos = [f for f in files if Path(f["name"]).suffix.lower() in VIDEO_EXTS]
+    biggest = sorted(files, key=lambda f: f["size"], reverse=True)[:8]
+    return JSONResponse({
+        "ok": True, "known": True,
+        "has_video": bool(videos),
+        "file_count": len(files), "video_count": len(videos),
+        "total_size": sum(f["size"] for f in files),
+        "files": [{"name": Path(f["name"]).name, "size": f["size"]} for f in biggest],
+    })
+
+
 @app.post("/api/library/download")
 async def library_download(request: Request, req: DownloadReq) -> JSONResponse:
     if not state.vpn_secure:

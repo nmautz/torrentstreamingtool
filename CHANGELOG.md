@@ -1,5 +1,19 @@
 # Changelog
 
+## [15.3.0] — 2026-09-16
+**"Download anyway" on something not out yet checks the torrent for a video first.**
+
+Before the not-out-yet dialog closes, the server reads the torrent's file list without
+downloading it (`POST /api/torrent/inspect`): straight from the `.torrent` when the result is an
+indexer link, or by adding a magnet to qBittorrent until its metadata arrives and removing it again.
+
+* **No video** → the dialog says so, lists what the torrent really holds (e.g. a lone `.exe`),
+  and the download is cancelled.
+* **Has a video** → the download goes ahead as before.
+* **Couldn't tell** (no peers within 30 s, indexer error) → the dialog says why, and the button
+  becomes **Download without checking**.
+* Works from library downloads and stream-now episode rows.
+
 ## [15.2.2] — 2026-09-16
 **A power cut could wipe the whole library, silently.**
 
