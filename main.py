@@ -13950,7 +13950,20 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     if req.items and len(req.items) == len(req.files):
         _full_map = {p: iid for p, iid in zip(req.files, req.items)}
         state.library_series_map = {p: _full_map[p] for p in playlist if p in _full_map}
-        state.library_series_order = [] if req.shuffle else list(playlist)
+        if req.shuffle:
+            # Shuffle owns navigation via library_shuffle_order — but `/unshuffle`
+            # needs a NATURAL order to fall back to, and `_item_all_paths`' last
+            # resort is the playing *item's* file list, which for a show held as
+            # per-episode torrents is one episode. Leaving a merged-series shuffle
+            # therefore collapsed the queue to the current file and lost prev/next.
+            # Record the same files in canonical order instead of nothing.
+            _by_path = {f["path"]: f for f in _merged_series_files(
+                _items_for_series_key(lib, _series_key(item)))}
+            _nat = sorted((_by_path[p] for p in playlist if p in _by_path),
+                          key=episodes.sort_key)
+            state.library_series_order = [f["path"] for f in _nat] or list(playlist)
+        else:
+            state.library_series_order = list(playlist)
     else:
         state.library_series_map = {}
         state.library_series_order = []
@@ -18002,22 +18015,31 @@ async def library_shuffle() -> JSONResponse:
 
     lib = await get_library()
     paths, owners = _shuffle_pool_for_active(lib)
-    rest = [p for p in paths if p != current and Path(p).exists()]
+    on_disk = [p for p in paths if Path(p).exists()]
+    rest = [p for p in on_disk if p != current]
     if not rest:
         raise HTTPException(400, "Nothing else here to shuffle.")
     random.shuffle(rest)
     order = [current] + rest
+    natural = on_disk if current in on_disk else [current] + on_disk
 
     state.library_shuffle_order = order
     state.library_shuffle_scope = "all"
     state.library_playlist = order
+    # The SAME pool in natural order, recorded as the run's stable order. Without
+    # this, leaving shuffle again strands the viewer: `/unshuffle` rebuilds its
+    # tail from `_item_all_paths`, which falls back to the *playing item's* file
+    # list — one episode, for a show held as per-episode torrents — so the queue
+    # collapsed to the current file and prev/next vanished. The pool this endpoint
+    # just widened is precisely the run to walk back to.
+    state.library_series_order = list(natural)
+    state.library_nav_order = list(natural)
     # A merged-series shuffle can reach episodes the natural-order playlist never
     # contained (everything before the resume point), so the owner map has to be
     # rebuilt over the WHOLE pool — otherwise progress for those lands on the
-    # wrong item. library_series_order stays as it is: it is the stable natural
-    # order /unshuffle walks back to.
+    # wrong item.
     if len(set(owners.values())) > 1:
-        state.library_series_map = {p: owners[p] for p in order if owners.get(p)}
+        state.library_series_map = {p: owners[p] for p in natural if owners.get(p)}
 
     # Same in-place queue rewrite /unshuffle uses — no rebuffer. If VLC's playlist
     # can't be edited, relaunch the shuffled run reseeked to the live position.

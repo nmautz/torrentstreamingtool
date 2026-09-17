@@ -17,8 +17,11 @@ separate items — opens as a *merged series* instead, and shuffle quietly did n
   item the last episode happened to belong to. The preference is stored against every member
   of the series, so it no longer evaporates the moment the shuffle crosses into the next
   episode's item.
-* **Leaving shuffle on the device player** drops back to the whole show's episode order
-  instead of collapsing to the one episode on screen.
+* **Leaving shuffle no longer strands you.** On the device player, Exit Shuffle dropped back to
+  the one episode on screen instead of the whole show's order. On VLC it was worse: a merged
+  series recorded *no* natural order while shuffling, so `/unshuffle` fell back to the playing
+  item's file list — one episode — and the queue collapsed with prev/next gone. Both now walk
+  back to the real run.
 
 **Shuffle during playback** — new. The fullscreen **More** sheet and the device player's gear
 menu each carry a **Shuffle** tile whenever a multi-episode run is playing un-shuffled; it is

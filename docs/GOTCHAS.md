@@ -326,6 +326,16 @@ touching this code:
    offered the prompt — so even a correctly-stored pref was unreachable from the one path a
    merged series actually uses.
 
+4. **Leaving shuffle stranded the viewer.** `/api/library/unshuffle` rebuilds its tail from
+   `_item_all_paths()`, whose last resort is the playing *item's* file list — one episode. A
+   merged-series shuffle deliberately stored `library_series_order = []` ("shuffle owns
+   navigation"), so there was nothing else for it to fall back to and Exit Shuffle collapsed
+   the queue to the current file. Both `/play` (when `req.shuffle`) and `/api/library/shuffle`
+   now record the run's **natural** order in `library_series_order` alongside the random one.
+   `_nav_order` prefers `library_shuffle_order`, so this changes nothing while shuffling — it
+   only gives the way out somewhere to land. **Whenever you set a shuffled order, set the
+   natural one too.**
+
 The rule: **anything that reasons about "this show" must go through `_series_key`, not
 `item_id`.** An item-scoped pool for a per-episode-torrent show has exactly one file in it,
 which reads as "nothing to shuffle" rather than as a bug. `_shuffle_pool_for_active` (server)
