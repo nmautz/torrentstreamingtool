@@ -24,9 +24,23 @@ seconds, then the idle background video. Three separate faults, all on the same 
   background video. It now requires VLC to have been *observed playing* since the last
   `in_play` (`state.vlc_ever_played`), or a 45 s open grace to have elapsed — a film that
   ended was necessarily playing first.
-* **Nothing retried.** Both rebuffer-guard signatures key off a known duration, so a file VLC
-  never opened fell through every recovery path. The guard now recognises that case and
-  re-issues the play once more data (and another attempt at the tail piece) has landed.
+* **Nothing retried, and the UI lied while nothing happened.** Both rebuffer-guard signatures
+  key off a known duration, so a file VLC never opened fell through every recovery path.
+  `_library_play_launch` meanwhile claims `playing` once its 10 s ready-poll times out — right
+  for a complete file on disk, wrong for one whose tail hasn't arrived, because it shows
+  "PLAYING" over a dead screen. The stream path now stays on **buffering** until VLC really
+  opens the file, and the guard re-issues the play (every ~20 s, after waiting for more data)
+  until it does — including one last attempt the moment the download **completes**, which is
+  exactly when a tail-index file first becomes playable and was previously the point at which
+  the guard gave up and left playback dead. If even that fails it says so rather than
+  pretending.
+* `wait_for_tail_piece` is an optimisation, not the guarantee: qBittorrent 5.1.0 returns an
+  **empty** `pieceStates` for some actively-downloading torrents (confirmed live against the
+  box — `pieceHashes` returned all 69 entries for the same torrent). When it can't judge, it
+  lets the play through and the retry loop carries it.
+* The two thresholds are deliberately far apart — the guard retries at 20 s, the end-of-media
+  detector won't give up before 60 s — so the detector can never win the race and throw away a
+  surface that was about to be retried.
 
 Also fixed on the same path:
 

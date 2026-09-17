@@ -2070,6 +2070,12 @@ async def wait_for_tail_piece(h: str, target: dict, timeout: float = _TAIL_PIECE
     if not (isinstance(rng, list) and len(rng) == 2):
         return False
     last_piece = int(rng[1])
+    # `pieceStates` is not dependable mid-download: qBittorrent 5.1.0 returns an
+    # empty list for some actively-downloading torrents (observed live, while
+    # `pieceHashes` for the same torrent returned all 69 entries) and a full
+    # bitfield for others. So this is an optimisation, never the guarantee —
+    # the real safety net is the rebuffer guard re-issuing the play until VLC
+    # actually opens the file.
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         states = await qbit_piece_states(h)
@@ -7688,13 +7694,17 @@ def _play_handoff_in_flight() -> bool:
 
 
 # How long VLC is allowed to sit on a handed-off file without ever reporting
-# `playing` before we stop treating it as "still opening". Generous on purpose:
-# a stream-now play hands VLC a file with only the buffer gate on disk, and the
-# demuxer can take a while to come up over a sparse, actively-written file.
-_VLC_OPEN_GRACE_SEC = 45.0
+# `playing` before we stop treating it as "still opening". Two thresholds, and
+# the gap between them matters: retrying the play is cheap and reversible, so
+# the rebuffer guard has a go early; declaring the media FINISHED throws the
+# surface away, so the end-of-media detector waits much longer. Keep
+# RETRY well below GRACE or the detector wins the race and the idle background
+# video takes the screen out from under a play that was about to be retried.
+_VLC_OPEN_RETRY_SEC = 20.0
+_VLC_OPEN_GRACE_SEC = 60.0
 
 
-def _vlc_open_window_elapsed() -> bool:
+def _vlc_open_window_elapsed(grace: float = _VLC_OPEN_GRACE_SEC) -> bool:
     """False while VLC may still legitimately be opening the current file.
 
     `status.json` reports a VLC that has not opened its input identically to one
@@ -7707,7 +7717,7 @@ def _vlc_open_window_elapsed() -> bool:
         return True
     if not state.vlc_handoff_at:
         return True          # no handoff recorded (restored session) — old behaviour
-    return (time.monotonic() - state.vlc_handoff_at) >= _VLC_OPEN_GRACE_SEC
+    return (time.monotonic() - state.vlc_handoff_at) >= grace
 
 
 async def _handle_playback_ended() -> bool:
@@ -14211,7 +14221,35 @@ async def _stream_rebuffer_guard(h: str, path: str) -> None:
 
             frac = _frac(qfiles)
             if frac >= 0.999:
-                return                       # fully on disk — no more underruns possible
+                # Fully on disk — no more underruns possible. But if VLC never
+                # managed to open this file while it was still arriving, the
+                # download completing is exactly the moment it finally can, and
+                # nothing else would ever retry: the guard is the only retry
+                # path and it is about to exit. Give it one last go before
+                # standing down, or the play stays dead on a file that is now
+                # perfectly playable (the tail-index case, where the missing
+                # piece is the last one to land).
+                if not state.vlc_ever_played and _stream_anchor_ok(h, path):
+                    log.info("Streamed file completed but VLC never opened it — "
+                             "re-issuing playback: %s", path)
+                    await vlc_clear_playlist()
+                    await vlc("in_play", input=uri)
+                    if await _vlc_wait_until_ready(resolved, timeout=20.0):
+                        state.stream_status = "playing"
+                        await broadcast("stream_status", {
+                            "status": "playing", "message": f"Playing: {Path(path).name}",
+                        })
+                        await broadcast("state", state_snapshot())
+                        if not state.tv_ui_active:
+                            asyncio.create_task(vlc_focus_and_fullscreen())
+                    else:
+                        state.stream_status = "error"
+                        await broadcast("stream_status", {
+                            "status": "error",
+                            "message": f"VLC could not play {Path(path).name}.",
+                        })
+                        await broadcast("state", state_snapshot())
+                return
             vs = await vlc_status()
             if not vs:
                 continue
@@ -14245,7 +14283,7 @@ async def _stream_rebuffer_guard(h: str, path: str) -> None:
             #      Re-issuing it once more data has landed is what actually
             #      fixes it, so treat it as an underrun like the others.
             never_opened = (last_dur <= 0 and vstate not in ("playing", "paused")
-                            and _vlc_open_window_elapsed())
+                            and _vlc_open_window_elapsed(_VLC_OPEN_RETRY_SEC))
             if not (stopped_mid or never_opened or frozen_ticks >= 3):
                 continue
             frozen_ticks = 0
@@ -14413,7 +14451,22 @@ async def _library_stream_file_launch(
         # Restore normal (non-sequential) downloading once the file completes.
         asyncio.create_task(_sequential_off_when_complete(h, path))
         await _library_play_launch([path], item_id, profile_id, None, "auto")
-        # Recover from underruns for the rest of the still-downloading file.
+        # `_library_play_launch` claims "playing" once its 10 s ready-poll times
+        # out, on the reasoning that the in_play is already on its way. That is
+        # right for a file sitting complete on disk and wrong here: streaming a
+        # file whose tail hasn't arrived, VLC may not be able to demux it at all
+        # yet, and the claim shows the viewer "PLAYING" over a dead screen while
+        # the end-of-media detector lines up to call it finished. Say buffering —
+        # which is the truth — and let the guard below retry until VLC opens it.
+        if not state.vlc_ever_played and _stream_anchor_ok(h, path):
+            state.stream_status = "buffering"
+            await broadcast("stream_status", {
+                "status": "buffering",
+                "message": f"Buffering {first.name}… waiting for enough of the file",
+            })
+            await broadcast("state", state_snapshot())
+        # Recover from underruns — and from a VLC that never opened the file at
+        # all — for the rest of the still-downloading file.
         _spawn_rebuffer_guard(h, path)
     except asyncio.CancelledError:
         raise

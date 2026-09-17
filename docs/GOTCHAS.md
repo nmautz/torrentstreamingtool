@@ -776,7 +776,18 @@ If you add a path that hands VLC content without going through `vlc("in_play", �
 
 Setting the flag is not the same as having the piece. The buffer gate (`buffer_min_mb` 15 MB / `buffer_min_pct` 1%) only measures the **head**, so at the moment of handoff on an 800 MB file the tail has usually not landed — the flag was enabled in 11.x and the failure kept happening right through to 15.6.1.
 
-`wait_for_tail_piece(h, file)` closes it: read the file's `piece_range` from `/torrents/files`, poll `/torrents/pieceStates` (a flat list indexed by piece; `2` = on disk) for `piece_range[1]`, and hold the handoff until it is there or `_TAIL_PIECE_WAIT_SEC` (40 s) expires. It returns **False** — and the caller proceeds anyway — both on timeout and when qBit gives too little to judge: a missing tail is a likely failure, not a certain one, and a head-only play beats no play on a slow swarm. Verified against qBittorrent 5.1.0.
+`wait_for_tail_piece(h, file)` closes it: read the file's `piece_range` from `/torrents/files`, poll `/torrents/pieceStates` (a flat list indexed by piece; `2` = on disk) for `piece_range[1]`, and hold the handoff until it is there or `_TAIL_PIECE_WAIT_SEC` (40 s) expires. It returns **False** — and the caller proceeds anyway — both on timeout and when qBit gives too little to judge: a missing tail is a likely failure, not a certain one, and a head-only play beats no play on a slow swarm.
+
+**Do not promote this to a guarantee.** `pieceStates` is not dependable mid-download: qBittorrent 5.1.0 returns an **empty list** for some actively-downloading torrents while `pieceHashes` for the same torrent returns every entry (observed live on the box, v5.1.0). Treat it as an optimisation that skips a doomed handoff when the data happens to be there. The thing that actually makes streaming reliable is the retry loop below.
+
+### The stream path must not claim "playing" until VLC has opened the file
+
+`_library_play_launch` flips `stream_status` to `playing` when `_vlc_wait_until_ready` times out after 10 s, reasoning that the `in_play` is already on its way. That optimism is correct for a file sitting complete on disk and wrong for a still-downloading one, where VLC may genuinely not be able to demux it yet: the viewer gets "PLAYING" over a dead screen, and the end-of-media detector lines up behind it to call the film finished.
+
+So `_library_stream_file_launch` checks `state.vlc_ever_played` after the launch returns and drops back to **buffering** when VLC hasn't opened the file — the honest state — leaving `_stream_rebuffer_guard` to re-issue the play (`never_opened` signature, `_VLC_OPEN_RETRY_SEC` = 20 s) after each wait for more data. Two things make that loop terminate correctly:
+
+- **Retry early, give up late.** `_VLC_OPEN_RETRY_SEC` (20 s, the guard) must stay well under `_VLC_OPEN_GRACE_SEC` (60 s, the end-of-media detector), or the detector wins the race and hands the screen to the idle background video out from under a play that was about to be retried. The guard's re-buffer sets `stream_status="buffering"`, which makes `_play_handoff_in_flight()` true and holds the detector off for the rest of the attempt.
+- **Retry once more on completion.** The guard's first act each tick is `if frac >= 0.999: return` — fully downloaded, no more underruns possible. But for a trailing-index container the missing piece is the *last* one to land, so the download completing is precisely the moment VLC can finally open it, and the guard is the only retry path there is. It now re-issues once before standing down, and surfaces a real error if even that fails.
 
 ### `vlc_progress_tracker` must not adopt a URI that isn't this playback's
 
