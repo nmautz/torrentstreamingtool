@@ -1,5 +1,42 @@
 # Changelog
 
+## [15.6.0] — 2026-09-17
+**Shuffle works on shows held as separate per-episode downloads, and can be turned on
+mid-episode. Collections get their artwork back, plus bulk hide and delete.**
+
+Shuffle Play was written for a show that lives in **one** library item (Death Note: one
+torrent, every episode). A show collected an episode at a time — South Park here is fifty-odd
+separate items — opens as a *merged series* instead, and shuffle quietly did nothing on it.
+
+* **The Shuffle button works on a merged series.** `epShuffle()` bailed out when `epItemId`
+  was null, which is exactly what a merged-series page sets it to. Pressing Shuffle on South
+  Park did nothing at all; on Death Note it worked. Every other action on that page already
+  guarded on the series key too.
+* **A shuffle now survives being stopped.** The "Keep shuffling?" prompt is offered when
+  resuming a merged series, and continuing re-shuffles the whole show rather than the single
+  item the last episode happened to belong to. The preference is stored against every member
+  of the series, so it no longer evaporates the moment the shuffle crosses into the next
+  episode's item.
+* **Leaving shuffle on the device player** drops back to the whole show's episode order
+  instead of collapsing to the one episode on screen.
+
+**Shuffle during playback** — new. The fullscreen **More** sheet and the device player's gear
+menu each carry a **Shuffle** tile whenever a multi-episode run is playing un-shuffled; it is
+the mirror of Exit Shuffle. The episode on screen keeps playing untouched and only the queue
+behind it is replaced by a random order over the rest of that section (merged across the
+series' items). `POST /api/library/shuffle`; it relays to the TV kiosk like its counterpart.
+
+**Collections**
+
+* **The poster is back.** A shelf that had been renamed, reordered or otherwise edited became
+  a stored "manual" group, and the TMDb collection's artwork was never copied across — so
+  Star Wars showed a grey placeholder. Artwork is now read off the shelf's own members, which
+  fixes every existing group without a migration and can't go stale.
+* **Bulk hide and delete.** **Select** on a collection page ticks titles (tap anywhere on a
+  row) and hides, restores or deletes them in one go — the same per-item endpoints a single
+  tile uses, over every download behind each title. Delete is PIN-gated exactly as it is on a
+  tile, and dissolving the shelf's last members closes the page.
+
 ## [15.5.0] — 2026-09-16
 **Any profile can download something not out yet, once the check finds a real video.**
 

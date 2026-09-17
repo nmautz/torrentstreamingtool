@@ -1699,6 +1699,27 @@
       <div id="grpActions" class="flex items-center gap-2 flex-wrap mt-3"></div>
     </div>
   </div>
+  <!-- Bulk-action bar for a collection. Hidden until Select is pressed; the
+       actions fan out to the same per-item visibility/delete endpoints a single
+       tile uses, over every item of every selected title. See grpBulkHide. -->
+  <div id="grpBulkBar" class="hidden flex-shrink-0 border-t border-b border-gray-800 bg-gray-900
+                              px-3 sm:px-4 py-2 flex items-center gap-2 flex-wrap">
+    <span id="grpSelCount" class="text-[11px] font-black uppercase tracking-widest text-gray-400"></span>
+    <button onclick="grpSelAll()" class="px-2.5 py-1.5 border border-gray-700 bg-gray-950 text-gray-400
+            hover:text-white text-[10px] font-black uppercase tracking-widest transition-colors">All</button>
+    <button onclick="grpSelNone()" class="px-2.5 py-1.5 border border-gray-700 bg-gray-950 text-gray-400
+            hover:text-white text-[10px] font-black uppercase tracking-widest transition-colors">None</button>
+    <div class="flex-1"></div>
+    <button id="grpBulkHideBtn" onclick="grpBulkHide(this)"
+            class="px-3 py-1.5 border border-gray-700 bg-gray-800 text-gray-200 hover:bg-gray-700
+                   text-[10px] font-black uppercase tracking-widest transition-colors">Hide</button>
+    <button id="grpBulkDelBtn" onclick="grpBulkDelete(this)"
+            class="px-3 py-1.5 border border-red-900 bg-red-950/50 text-red-300 hover:bg-red-900/60
+                   text-[10px] font-black uppercase tracking-widest transition-colors">Delete</button>
+    <button onclick="grpSelectMode(false)"
+            class="px-3 py-1.5 border border-gray-700 bg-gray-950 text-gray-400 hover:text-white
+                   text-[10px] font-black uppercase tracking-widest transition-colors">Done</button>
+  </div>
   <div id="grpList" class="flex-1 overflow-y-auto"></div>
 </div>
 
@@ -3235,6 +3256,21 @@
         <span id="fcTvSurfaceLabel" class="text-sm font-black uppercase tracking-wide">Play on Device</span>
       </button>
 
+      <!-- Shuffle — turn Shuffle Play ON mid-episode. The mirror of Exit Shuffle:
+           the episode on screen keeps playing and only the queue behind it becomes
+           random. Shown only during library playback that is NOT already shuffled
+           (renderPlayer toggles the pair). See POST /api/library/shuffle. -->
+      <button id="fcShuffleBtn" onclick="fcEnterShuffle(this)"
+        title="Shuffle the rest of this show — the current episode keeps playing"
+        class="hidden fc-tile flex-1 border-b border-gray-800 bg-purple-950/20
+               hover:bg-purple-950/50 active:bg-purple-950/70 text-purple-300 transition-colors">
+        <svg class="w-7 h-7 mb-1" fill="none" stroke="currentColor" stroke-width="1.6" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round"
+            d="M4 7h3l10 10h3M4 17h3L17 7h3m0 0l-2.5-2.5M20 7l-2.5 2.5m2.5 10l-2.5-2.5M20 17l-2.5 2.5"/>
+        </svg>
+        <span class="text-sm font-black uppercase tracking-wide">Shuffle</span>
+      </button>
+
       <!-- Exit Shuffle — back to natural episode order without interrupting the
            current episode. Shown only while shuffling (renderPlayer toggles it). -->
       <button id="fcExitShuffleBtn" onclick="fcExitShuffle(this)"
@@ -3702,6 +3738,20 @@
         class="hold-btn flex-shrink-0 text-[10px] font-bold uppercase tracking-wide text-gray-500
                hover:text-fuchsia-300 px-2 py-2 transition-colors">
         Clip last…
+      </button>
+    </div>
+    <!-- Shuffle — turn Shuffle Play on for the rest of this run without breaking
+         the episode on screen. Shown only when this device is playing a queue in
+         natural order; the pair swaps as soon as it is on. See lpEnterShuffle. -->
+    <div id="lpShuffleRow" class="hidden">
+      <button onclick="lpEnterShuffle(this)" title="Shuffle the rest of this show"
+        class="w-full flex items-center justify-center gap-2 bg-purple-800 hover:bg-purple-700
+               text-white text-xs font-black uppercase tracking-wide px-3 py-2 transition-colors">
+        <svg class="w-4 h-4" fill="none" stroke="currentColor" stroke-width="1.6" viewBox="0 0 24 24">
+          <path stroke-linecap="round" stroke-linejoin="round"
+            d="M4 7h3l10 10h3M4 17h3L17 7h3m0 0l-2.5-2.5M20 7l-2.5 2.5m2.5 10l-2.5-2.5M20 17l-2.5 2.5"/>
+        </svg>
+        Shuffle
       </button>
     </div>
     <!-- Exit Shuffle — back to natural episode order. Shown only while this device
@@ -4902,13 +4952,26 @@ function renderPlayer(s){
     });
   }
 
-  // Exit-Shuffle tile (in the fullscreen More sheet) — only while VLC Shuffle Play
-  // is active. library_shuffle is true whenever state.library_shuffle_order is set.
+  // Shuffle / Exit-Shuffle tiles (in the fullscreen More sheet) — exactly one of
+  // the pair shows during library playback, so shuffle is a thing you can turn on
+  // from the player rather than only from the episode page before pressing play.
+  // library_shuffle is true whenever state.library_shuffle_order is set (or the
+  // kiosk reports its own shuffled run).
   const fcExitShuf=document.getElementById("fcExitShuffleBtn");
+  const fcShuf=document.getElementById("fcShuffleBtn");
+  const _inLib=isPlaying&&s.is_library_playback;
+  const shuffling=_inLib&&!!s.library_shuffle;
   if(fcExitShuf){
-    const shuffling=isPlaying&&s.is_library_playback&&!!s.library_shuffle;
     fcExitShuf.classList.toggle("hidden",!shuffling);
     fcExitShuf.classList.toggle("flex",shuffling);
+  }
+  if(fcShuf){
+    // library_nav_count is the length of the whole run — the only count that is
+    // truthful for a show held as one item per episode, where
+    // library_item_file_count reports 1 for every episode of twenty.
+    const canShuffle=_inLib&&!shuffling&&(s.library_nav_count||0)>1;
+    fcShuf.classList.toggle("hidden",!canShuffle);
+    fcShuf.classList.toggle("flex",canShuffle);
   }
 
   // TV surface switch (fullscreen More sheet) — only for library playback on the
@@ -5362,6 +5425,24 @@ function fcCloseMore(){
 // Leave Shuffle Play (TV) — current episode keeps playing; only the upcoming
 // queue flips to natural order. The SSE state event clears app.library_shuffle,
 // which hides the tile. See POST /api/library/unshuffle.
+// Turn Shuffle Play ON from the player. The current episode is untouched; the
+// queue behind it becomes a random order over the rest of this show's section
+// (merged across the series' items). The SSE state event sets app.library_shuffle,
+// which swaps this tile for Exit Shuffle. See POST /api/library/shuffle.
+async function fcEnterShuffle(btn){
+  if(btn) btn.disabled=true;
+  try{
+    const r=await fetch("/api/library/shuffle",{method:"POST"});
+    if(!r.ok){
+      const e=await r.json().catch(()=>({}));
+      showAlert(e.detail||"Couldn't start shuffling.","error");
+    }else{
+      showAlert("Shuffle on — the rest of the show is in random order.","info");
+    }
+  }catch(_){ showAlert("Couldn't start shuffling.","error"); }
+  finally{ if(btn) btn.disabled=false; }
+}
+
 async function fcExitShuffle(btn){
   if(btn) btn.disabled=true;
   try{
@@ -6831,7 +6912,7 @@ function _libShowTileHtml(seriesTitle, gItems){
 // Play (or resume) a merged series on the TV/device — fetches the authoritative
 // merged file list + series resume, then hands the cross-item playlist to the
 // player chooser.
-async function playSeries(seriesKey, mode, section){
+async function playSeries(seriesKey, mode, section, opts){
   if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
   let d;
   try{
@@ -6847,6 +6928,16 @@ async function playSeries(seriesKey, mode, section){
     srcFiles=srcFiles.filter(f=>_fileSection(f)===section);
     const sec=(d.sections||[]).find(x=>x.key===section);
     resume=sec?sec.resume:null;
+  }
+  // "Keep shuffling?" — the same offer a single-item show gets from
+  // resumeLibraryItemWithChooser. A merged series never went through that path,
+  // so a shuffle of a show living as per-episode items ended for good the moment
+  // it was stopped. `noShuffle` is how the prompt's own Normal Order re-enters.
+  if(!(opts&&opts.noShuffle) && mode!=="all" && resume && resume.shuffle){
+    _shuffleResumeCtx={ seriesKey, section:section||"", scope:resume.shuffle_scope||"all",
+                        label:d.title||"", resume, files:srcFiles };
+    document.getElementById("shuffleResumeModal").classList.remove("hidden");
+    return;
   }
   const files=srcFiles.map(f=>f.path);
   const items=srcFiles.map(f=>f.item_id);
@@ -7436,6 +7527,13 @@ let grpCtx = null;          // {kind:"group"|"show", id|seriesKey, itemId}
 let grpShowMissing = true;
 try{ grpShowMissing = localStorage.getItem("streamlink_grp_missing")!=="0"; }catch(_){}
 let grpData = null;         // last payload rendered
+// Bulk-action selection on a collection page. A franchise is the one place where
+// "get rid of all of this" is a single intent — nine Star Wars films were nine
+// trips through the grid — so the shelf carries the hide/delete actions a tile
+// carries, over as many titles as you tick. Member KEYS, resolved to item ids at
+// action time (one title can be many per-episode items).
+let grpSelMode = false;
+let grpSel = new Set();
 
 function closeGroupPage(){
   document.getElementById("groupPage").classList.add("hidden");
@@ -7445,11 +7543,16 @@ function closeGroupPage(){
     document.body.style.overflow="";
   }
   grpCtx=null; grpData=null;
+  grpSelMode=false; grpSel.clear();
+  document.getElementById("grpBulkBar").classList.add("hidden");
 }
 
 // Open the shelf. `spec` is either {kind:"group", id} for a franchise or
 // {kind:"show", seriesKey, itemId, title} for a multi-section show.
 async function openGroupPage(spec){
+  // refreshGroupPage re-opens with the SAME spec object, so a live selection
+  // survives a repaint; navigating to a different shelf drops it.
+  if(grpCtx!==spec){ grpSelMode=false; grpSel.clear(); }
   grpCtx=spec; grpData=null;
   document.getElementById("groupPage").classList.remove("hidden");
   document.body.style.overflow="hidden";
@@ -7504,9 +7607,18 @@ function _grpRowHtml(row){
   const meta = bits.filter(Boolean).join(" \u00b7 ");
   const resumeLabel = row.resume && !row.resume.all_completed && (row.resume.pct||0)>3
     ? "Resume" : (started||done ? "Play" : "Play");
-  return `<div class="grp-row flex items-stretch gap-3 p-2 sm:p-3 bg-gray-900 border border-gray-800
+  // Selectable only in bulk mode, and only for a title that is actually here —
+  // a "not downloaded" row has nothing to hide or delete.
+  const sel = grpSelMode && !!row._member;
+  const picked = sel && grpSel.has(row.id);
+  return `<div class="grp-row flex items-stretch gap-3 p-2 sm:p-3 bg-gray-900 border
+                       ${picked?"border-indigo-600 bg-indigo-950/20":"border-gray-800"}
                        border-l-4 ${done?"border-l-green-800":started?"border-l-indigo-700":"border-l-gray-800"}
                        hover:bg-gray-850 transition-colors">
+    ${sel?`<label class="flex items-center flex-shrink-0 pl-0.5 pr-1 cursor-pointer">
+        <input type="checkbox" class="grp-sel accent-indigo-500 w-4 h-4"
+               data-row="${escHtml(row.id)}" ${picked?"checked":""}/>
+      </label>`:""}
     <div class="grp-open cursor-pointer flex-shrink-0 w-16 sm:w-20 bg-gray-950 border border-gray-800
                 overflow-hidden flex items-center justify-center" role="button" tabindex="0"
          data-row="${escHtml(row.id)}">
@@ -7784,6 +7896,9 @@ function renderGroupPage(){
   if(isGroup){
     actions+=`<button onclick="openGroupAdd()" class="px-3 py-1.5 border border-gray-700 bg-gray-900
                 text-gray-400 hover:text-white text-[10px] font-black uppercase tracking-widest transition-colors">+ Add title</button>`;
+    actions+=`<button onclick="grpSelectMode(${grpSelMode?"false":"true"})"
+                class="px-3 py-1.5 border ${grpSelMode?"border-indigo-600 bg-indigo-950/40 text-indigo-300":"border-gray-700 bg-gray-900 text-gray-400 hover:text-white"}
+                       text-[10px] font-black uppercase tracking-widest transition-colors">${grpSelMode?"Cancel":"Select"}</button>`;
   }
   act.innerHTML=actions;
   document.getElementById("grpRenameBtn").classList.toggle("hidden", !isGroup);
@@ -7798,10 +7913,18 @@ function renderGroupPage(){
   const byId=new Map(rows.map(r=>[r.id,r]));
   const el=document.getElementById("grpList");
   el.querySelectorAll(".grp-open").forEach(n=>{
-    const go=()=>_grpOpenRow(byId.get(n.dataset.row));
+    const row=byId.get(n.dataset.row);
+    // In bulk mode the whole row is the tick target — hunting a 16px checkbox on
+    // a phone is the difference between the feature being usable and not.
+    const go=()=>{ if(grpSelMode && row && row._member) grpSelToggle(row.id);
+                   else _grpOpenRow(row); };
     n.addEventListener("click",go);
     n.addEventListener("keydown",e=>{ if(e.key==="Enter"||e.key===" "){ e.preventDefault(); go(); }});
   });
+  el.querySelectorAll(".grp-sel").forEach(n=>{
+    n.addEventListener("click",e=>{ e.stopPropagation(); grpSelToggle(n.dataset.row); });
+  });
+  _grpRenderBulkBar();
   el.querySelectorAll(".grp-play").forEach(n=>{
     n.addEventListener("click",e=>{ e.stopPropagation(); _grpPlayRow(byId.get(n.dataset.row)); });
   });
@@ -7817,6 +7940,140 @@ function renderGroupPage(){
   });
   el.querySelectorAll(".grp-choose").forEach(n=>{
     n.addEventListener("click",()=>grpChooseFilm(n.dataset.tmdb));
+  });
+}
+
+// ── Collection bulk actions ────────────────────────────────────────────────
+// Hiding or deleting a franchise used to mean finding each of its titles in the
+// grid — and the grid no longer shows them individually, because the shelf
+// stands in for them. So the shelf has to carry the actions. Both fan out to the
+// per-item endpoints a single tile uses; a title that is several per-episode
+// items contributes all of them.
+
+// Every library item id behind the ticked titles.
+function _grpSelItemIds(){
+  const out=[];
+  ((grpData&&grpData.members)||[]).forEach(m=>{
+    if(grpSel.has(m.key)) out.push(...(m.item_ids||[]));
+  });
+  return out;
+}
+
+function grpSelectMode(on){
+  grpSelMode=!!on;
+  if(!grpSelMode) grpSel.clear();
+  renderGroupPage();          // the checkboxes are part of the row template
+}
+
+function grpSelToggle(key){
+  if(!key) return;
+  if(grpSel.has(key)) grpSel.delete(key); else grpSel.add(key);
+  _grpSyncSelUI();
+}
+
+function grpSelAll(){
+  ((grpData&&grpData.members)||[]).forEach(m=>grpSel.add(m.key));
+  _grpSyncSelUI();
+}
+function grpSelNone(){ grpSel.clear(); _grpSyncSelUI(); }
+
+// Repaint the ticks and the bar in place. A full renderGroupPage() would work but
+// throws away the list's scroll position, which on a twelve-film shelf means the
+// row you just ticked jumps off screen.
+function _grpSyncSelUI(){
+  const el=document.getElementById("grpList");
+  if(el) el.querySelectorAll(".grp-sel").forEach(cb=>{
+    const on=grpSel.has(cb.dataset.row);
+    cb.checked=on;
+    const row=cb.closest(".grp-row");
+    if(row){
+      row.classList.toggle("border-indigo-600",on);
+      row.classList.toggle("bg-indigo-950/20",on);
+      row.classList.toggle("border-gray-800",!on);
+    }
+  });
+  _grpRenderBulkBar();
+}
+
+function _grpRenderBulkBar(){
+  const bar=document.getElementById("grpBulkBar");
+  if(!bar) return;
+  const on = grpSelMode && grpCtx && grpCtx.kind==="group";
+  bar.classList.toggle("hidden", !on);
+  if(!on) return;
+  const n=grpSel.size;
+  document.getElementById("grpSelCount").textContent =
+    n ? `${n} title${n===1?"":"s"} selected` : "Tick the titles to act on";
+  const ids=_grpSelItemIds();
+  const byId=new Map((window._libCache||[]).map(it=>[it.id,it]));
+  // All-hidden ⇒ the useful action is putting them back, so say that instead.
+  const allHidden = ids.length>0 && ids.every(id=>(byId.get(id)||{}).hidden);
+  const hb=document.getElementById("grpBulkHideBtn");
+  const db=document.getElementById("grpBulkDelBtn");
+  hb.textContent = allHidden ? "Unhide" : "Hide";
+  [hb,db].forEach(b=>{
+    b.disabled = !n;
+    b.classList.toggle("opacity-40", !n);
+    b.classList.toggle("cursor-not-allowed", !n);
+  });
+}
+
+// Hide (or restore) every ticked title for the signed-in profile.
+async function grpBulkHide(btn){
+  if(!profile.id){ showAlert("Select a profile first.","warn"); return; }
+  const ids=_grpSelItemIds();
+  if(!ids.length) return;
+  const makeHidden = (document.getElementById("grpBulkHideBtn").textContent||"")==="Hide";
+  await withInflight("grp_bulk_hide", btn, async () => {
+    let ok=true;
+    for(const id of ids){
+      try{
+        const r=await fetch(`/api/library/${id}/visibility`,{
+          method:"POST",headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({profile_id:profile.id,hidden:makeHidden}),
+        });
+        if(!r.ok) ok=false;
+      }catch(_){ ok=false; }
+    }
+    grpSel.clear();
+    await loadLibrary();
+    await refreshGroupPage();
+    showAlert(ok
+      ? (makeHidden?"Hidden from your list.":"Restored to your list.")
+      : "Some titles could not be updated.", ok?"success":"error");
+  });
+}
+
+// Delete every ticked title — library rows, torrents and files. The same
+// PIN-gated endpoint a single tile's bin icon uses, so an unelevated profile is
+// refused here exactly as it is there.
+async function grpBulkDelete(btn){
+  const picked=((grpData&&grpData.members)||[]).filter(m=>grpSel.has(m.key));
+  const ids=_grpSelItemIds();
+  if(!ids.length) return;
+  const names=picked.map(m=>m.title).filter(Boolean);
+  const shown=names.slice(0,4).join(", ")+(names.length>4?`, +${names.length-4} more`:"");
+  if(!confirm(`Delete ${picked.length} title${picked.length===1?"":"s"} (${ids.length} download${ids.length===1?"":"s"}) and their files?
+
+${shown}`)) return;
+  await withInflight("grp_bulk_del", btn, async () => {
+    let ok=true, why="";
+    for(const id of ids){
+      try{
+        const r=await fetch(`/api/library/${id}?delete_file=true`,{method:"DELETE"});
+        if(r.ok){ expandedDownloads.delete(id); downloadFilesData.delete(id); }
+        else { ok=false; if(!why){ const e=await r.json().catch(()=>null); why=(e&&e.detail)||""; } }
+      }catch(_){ ok=false; }
+    }
+    grpSel.clear();
+    await loadLibrary();
+    // Deleting a shelf's last members dissolves it — there is nothing to come
+    // back to, so close rather than showing an empty page or a 404.
+    const gs=await _libFetchGroups();
+    const still=(gs.groups||[]).find(g=>g.id===(grpData&&grpData.id));
+    if(still) await refreshGroupPage(); else closeGroupPage();
+    if(!ok) showAlert(why||"Some titles could not be deleted.","error");
+    else showAlert("Deleted.","success");
   });
 }
 
@@ -11474,7 +11731,12 @@ async function epPlay(){
 // Random episode order for the open series; Next/Prev (TV) and on-device both
 // follow the temp order. Asks the viewer whether to draw from unwatched or all.
 function epShuffle(){
-  if(!epItemId) return;
+  // `epSeriesKey` matters as much as `epItemId`: a show whose episodes arrived as
+  // separate per-episode torrents (South Park) opens as a MERGED series, where
+  // epItemId is deliberately null — so an item-only guard made the Shuffle button
+  // silently do nothing on exactly the shows with the most to shuffle. Every
+  // other action on this page already guards on both. See startShuffle.
+  if(!epItemId && !epSeriesKey) return;
   const all=epFiles.map(f=>f.path).filter(Boolean);
   if(all.length<2){ showAlert("Need at least two episodes to shuffle.","warn"); return; }
   const unwatched=epFiles.filter(f=>!f.progress?.completed).length;
@@ -18494,13 +18756,52 @@ function _closeShuffleResume() {
 // User chose "Normal Order" — fall back to the natural-order resume.
 function shuffleResumeNormal() {
   const ctx = _shuffleResumeCtx; _closeShuffleResume();
-  if (ctx) _resumeNormal(ctx.itemId);
+  if (!ctx) return;
+  if (ctx.seriesKey) playSeries(ctx.seriesKey, "resume", ctx.section, {noShuffle: true});
+  else _resumeNormal(ctx.itemId);
 }
 // User chose "Continue Shuffle" — resume the in-progress episode where it stopped
 // and keep shuffling the rest behind it (the live random order is gone on stop).
 function shuffleResumeContinue() {
   const ctx = _shuffleResumeCtx; _closeShuffleResume();
-  if (ctx) startShuffleForItem(ctx.itemId, ctx.scope, ctx.label, ctx.resume);
+  if (!ctx) return;
+  if (ctx.seriesKey) startShuffleForSeries(ctx);
+  else startShuffleForItem(ctx.itemId, ctx.scope, ctx.label, ctx.resume);
+}
+
+// "Continue shuffle" for a MERGED series. Same shape as startShuffleForItem, but
+// it shuffles the item-tagged merged file list playSeries already fetched rather
+// than re-fetching one item's files — which for a show held as per-episode
+// torrents is a pool of exactly one episode.
+async function startShuffleForSeries(ctx) {
+  const files = ctx.files || [];
+  if (!files.length) { showAlert("Nothing to shuffle.", "warn"); return; }
+  let pool = files;
+  if (ctx.scope === "unwatched") {
+    const unwatched = files.filter(f => !f.progress?.completed);
+    pool = unwatched.length >= 2 ? unwatched : files;   // nothing left unwatched → shuffle all
+  }
+  let picked = pool.slice();
+  if (picked.length < 2) picked = files.slice();
+  _shuffleInPlace(picked);
+  // Pin the in-progress episode to the front at its saved position, so continuing
+  // resumes where the viewer stopped instead of on a random fresh episode.
+  let seekTo = 0;
+  const resumeFile = ctx.resume && ctx.resume.file_path;
+  const hasProgress = ctx.resume && ctx.resume.pct > 3 && !ctx.resume.all_completed;
+  if (resumeFile && hasProgress) {
+    const head = files.find(f => f.path === resumeFile);
+    if (head) {
+      picked = picked.filter(f => f.path !== resumeFile);
+      picked.unshift(head);
+      seekTo = ctx.resume.position_sec || 0;
+    }
+  }
+  const paths = picked.map(f => f.path).filter(Boolean);
+  const items = picked.map(f => f.item_id || "");
+  if (!paths.length) { showAlert("Nothing to shuffle.", "warn"); return; }
+  await playLibraryWithChooser(items[0], paths, seekTo,
+                               "Shuffle · " + (ctx.label || ""), true, ctx.scope, items);
 }
 
 // Shuffle a whole item straight from the library row (no episode picker loaded).
@@ -21445,11 +21746,72 @@ function lpToggleOpts() {
   _lpCtlShow();
 }
 
-// Show the gear-menu "Exit Shuffle" row only while this device is playing a
-// shuffled queue. Device shuffle is purely lp.playlist's order (no server state).
+// Show exactly one of the gear-menu shuffle rows while a multi-episode queue is
+// playing here. Device shuffle is purely lp.playlist's order (no server state).
 function _lpRenderExitShuffle() {
-  const row = document.getElementById("lpExitShuffleRow");
-  if (row) row.classList.toggle("hidden", !lp.shuffle);
+  const off = document.getElementById("lpExitShuffleRow");
+  const on  = document.getElementById("lpShuffleRow");
+  if (off) off.classList.toggle("hidden", !lp.shuffle);
+  // Offering "Shuffle" over a single queued file would be a button that can only
+  // fail, so it needs a real run behind it.
+  if (on) on.classList.toggle("hidden", !!lp.shuffle || (lp.playlist || []).length < 2);
+}
+
+// Every episode this device could shuffle over, in natural order, as
+// [{path, item_id, progress}]. Widens past the current item when the queue spans
+// a merged series (a show held as per-episode torrents), because that item's own
+// file list is then one episode long. Falls back to the item's files.
+async function _lpShowFiles() {
+  const pid = encodeURIComponent(_lpProfileId());
+  let own = [], key = "";
+  try {
+    const r = await fetch(`/api/library/${lp.itemId}/files?profile_id=${pid}`);
+    if (r.ok) { const d = await r.json(); own = d.files || []; key = d.series_key || ""; }
+  } catch (_) {}
+  const spansItems = new Set((lp.playlistItems || []).filter(Boolean)).size > 1;
+  if (key.indexOf("series:") === 0 && (spansItems || own.length <= 1)) {
+    try {
+      const r = await fetch(`/api/library/series/${encodeURIComponent(key)}?profile_id=${pid}`);
+      if (r.ok) {
+        const d = await r.json();
+        if ((d.files || []).length) return d.files;
+      }
+    } catch (_) {}
+  }
+  return own.map(f => ({ ...f, item_id: f.item_id || lp.itemId }));
+}
+
+// Enter Shuffle Play on this device mid-episode. The file on screen is untouched —
+// it just becomes entry 0 of a random order over the rest of its section. Mirrors
+// POST /api/library/shuffle, which is the VLC surface's version of this.
+async function lpEnterShuffle(btn) {
+  if (!lp.itemId || lp.shuffle) return;
+  if (btn) btn.disabled = true;
+  try {
+    const cur = lp.playlist[lp.pi];
+    const all = await _lpShowFiles();
+    const curFile = all.find(f => f.path === cur);
+    // Stay inside the current file's own section: a main-run shuffle must not
+    // queue up the spin-off, the films or the creditless openings.
+    const sec = curFile ? _fileSection(curFile) : "";
+    const pool = (sec ? all.filter(f => _fileSection(f) === sec) : all)
+                   .filter(f => f.path && f.path !== cur);
+    if (!pool.length) { showAlert("Nothing else here to shuffle.", "warn"); return; }
+    _shuffleInPlace(pool);
+    const head = curFile || { path: cur, item_id: lp.itemId };
+    const run = [head].concat(pool);
+    lp.playlist      = run.map(f => f.path);
+    lp.playlistItems = run.map(f => f.item_id || lp.itemId);
+    lp.pi = 0;
+    lp.shuffle = true; lp.shuffleScope = "all";
+    setShufflePref(lp.itemId, true, "all");
+    _lpRenderExitShuffle();
+    _lpRenderNavButtons();
+    _lpWarmNextEp();
+    showAlert("Shuffle on — the rest of the show is in random order.", "info");
+  } finally {
+    if (btn) btn.disabled = false;
+  }
 }
 
 // Leave Shuffle Play on this device: re-order the *upcoming* portion of the queue
@@ -21458,18 +21820,15 @@ async function lpExitShuffle(btn) {
   if (!lp.itemId || !lp.shuffle) return;
   if (btn) btn.disabled = true;
   try {
-    let natural = [];
-    try {
-      const r = await fetch(`/api/library/${lp.itemId}/files?profile_id=${encodeURIComponent(_lpProfileId())}`);
-      if (r.ok) natural = ((await r.json()).files || []).map(f => f.path).filter(Boolean);
-    } catch (_) {}
+    // The merged show, not just this item — a shuffled run of a per-episode-torrent
+    // series used to collapse to the one episode on screen when you left shuffle.
+    const all = await _lpShowFiles();
+    const natural = all.map(f => f.path).filter(Boolean);
     const cur = lp.playlist[lp.pi];
     const idx = natural.indexOf(cur);
     if (natural.length && idx >= 0) {
       lp.playlist = natural;
-      // `natural` is one item's file list — keep playlistItems aligned (exiting
-      // shuffle on a merged series drops back to the current item's episodes).
-      lp.playlistItems = natural.map(() => lp.itemId);
+      lp.playlistItems = all.map(f => f.item_id || lp.itemId);
       lp.pi = idx;
     }
     lp.shuffle = false; lp.shuffleScope = "";
@@ -23593,7 +23952,8 @@ function connectSSE(){
       // the file done, so the next tick can't re-show what was just handled.
       if(d.action==="skip_accept"){ if(_tvLocalLive()) lpAcceptSkipOffer(); return; }
       if(d.action==="skip_dismiss"){ if(_tvLocalLive()) lpDismissSkipOffer(); return; }
-      // Exit Shuffle from a phone — the shuffled order is this page's playlist.
+      // Shuffle / Exit Shuffle from a phone — the order is this page's playlist.
+      if(d.action==="shuffle"){ if(_tvLocalLive()) lpEnterShuffle(); return; }
       if(d.action==="unshuffle"){ if(_tvLocalLive()) lpExitShuffle(); return; }
       if(d.action==="audio_track"){ if(_tvLocalLive()) lpSetAudio(Number(d.value)); return; }
       if(d.action==="subtitle_track"){
@@ -23938,6 +24298,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">15.5.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">15.6.0</div>
 </body>
 </html>

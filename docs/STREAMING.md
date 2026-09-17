@@ -369,7 +369,11 @@ Shuffle rides along for the same reason: the shuffled order is the page's own
 `lp.playlist`, so `library_shuffle_order` is empty and the fullscreen **Exit Shuffle**
 tile had no way to know. The heartbeat reports `shuffle`, `state_snapshot`'s
 `library_shuffle` ORs it in, and `POST /api/library/unshuffle` relays `unshuffle` to the
-page (`lpExitShuffle` rebuilds the natural-order tail itself).
+page (`lpExitShuffle` rebuilds the natural-order tail itself). **15.6.0** adds the mirror:
+`POST /api/library/shuffle` relays `shuffle`, and `lpEnterShuffle` reshuffles the tail behind
+the untouched playing file. Both source their episode list from `_lpShowFiles()`, which widens
+to `/api/library/series/{key}` — using the `series_key` now returned by `/files` — when the
+queue spans items, because a show held as per-episode torrents has one file per item.
 
 ### How a play reaches this surface
 

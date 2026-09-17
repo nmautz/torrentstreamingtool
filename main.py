@@ -11,6 +11,7 @@ import logging
 import math
 import os
 import platform
+import random
 import re
 import secrets
 import shlex
@@ -3621,6 +3622,22 @@ def _auto_group_id(collection_id: int) -> str:
     return f"coll:{int(collection_id)}"
 
 
+def _coll_art(by_key: dict, members: list, collection_id: int) -> dict:
+    """The TMDb collection artwork carried by a group's own members, or {}.
+
+    `belongs_to_collection` rides along on every film's metadata, so any member of
+    the shelf already knows the collection's poster and backdrop — no extra TMDb
+    call, and no stored copy to go stale."""
+    if not collection_id:
+        return {}
+    for k in members:
+        for it in by_key.get(k, []):
+            coll = _collection_of(it)
+            if int(coll.get("id") or 0) == collection_id and coll.get("poster_path"):
+                return coll
+    return {}
+
+
 def _build_groups(lib: dict, visible: list) -> list:
     """Every group that applies to the visible items, auto and manual merged.
 
@@ -3649,13 +3666,20 @@ def _build_groups(lib: dict, visible: list) -> list:
         if not members:
             continue
         claimed_members.update(members)
+        # Artwork: a hand-built group stores none, and the one it ABSORBED a TMDb
+        # collection from never copied any across either — which is why "Star Wars
+        # Collection" went from a poster to a grey placeholder the moment anyone
+        # renamed it or flipped its sort order. Read it back off the collection
+        # instead of storing a snapshot, so it is right for every existing group
+        # without a migration, and survives TMDb replacing the image.
+        coll = _coll_art(by_key, members, cid)
         manual.append({
             "id":            g.get("id") or "",
             "name":          g.get("name") or "",
             "source":        "manual",
             "collection_id": cid,
-            "poster_path":   g.get("poster_path") or "",
-            "backdrop_path": g.get("backdrop_path") or "",
+            "poster_path":   g.get("poster_path") or coll.get("poster_path") or "",
+            "backdrop_path": g.get("backdrop_path") or coll.get("backdrop_path") or "",
             "order":         g.get("order") if g.get("order") in GROUP_ORDER_MODES else "story",
             "members":       members,
         })
@@ -5285,7 +5309,16 @@ def find_series_resume_hint(items: list, profile_id: str) -> Optional[dict]:
     hint = (active or {}).get("resume")
     if not hint:
         return None
-    return {**hint, "section": active["key"], "section_label": active["label"]}
+    # Shuffle Play, same as find_resume_hint — but read across the members. The
+    # flag is written to all of them (_set_shuffle_pref), so `any` only matters
+    # for runs recorded before that was true; it costs nothing and heals them.
+    shuffling = any(bool((it.get("progress", {}).get(profile_id) or {}).get("shuffle"))
+                    for it in items)
+    scope = next((str((it.get("progress", {}).get(profile_id) or {}).get("shuffle_scope") or "")
+                  for it in items
+                  if (it.get("progress", {}).get(profile_id) or {}).get("shuffle_scope")), "")
+    return {**hint, "section": active["key"], "section_label": active["label"],
+            "shuffle": shuffling, "shuffle_scope": scope if shuffling else ""}
 
 
 # ── Track Preference Helpers ──────────────────────────────────────────────────
@@ -5336,7 +5369,16 @@ async def _set_shuffle_pref(item_id: str, profile_id: str, shuffle: bool, scope:
     is ephemeral — gone on stop. This per-(item,profile) flag is what survives, so
     Resume / Play All can offer to keep shuffling. `scope` is the last-used pool
     ("all" | "unwatched"), reused verbatim when the user opts to continue. Surfaced
-    on the resume hint by find_resume_hint."""
+    on the resume hint by find_resume_hint.
+
+    Written to EVERY item that shares this one's `_series_key`, not just the one
+    named. A show downloaded as separate per-episode torrents (South Park here is
+    fifty-odd items) shuffles as one merged series, but `/play` only ever names
+    the item that happens to own the first random file — and the shuffle then
+    walks straight out of it. Storing the flag on one member meant the very next
+    episode belonged to an item that had never heard of the shuffle, so Resume
+    offered natural order and the run silently ended. The key groups a single
+    all-episodes item into a bucket of one, so nothing changes for Death Note."""
     if not item_id or not profile_id:
         return
     try:
@@ -5345,9 +5387,10 @@ async def _set_shuffle_pref(item_id: str, profile_id: str, shuffle: bool, scope:
             item = next((it for it in lib["items"] if it["id"] == item_id), None)
             if not item:
                 return
-            prof = item.setdefault("progress", {}).setdefault(profile_id, {})
-            prof["shuffle"] = bool(shuffle)
-            prof["shuffle_scope"] = scope or "" if shuffle else ""
+            for member in _items_for_series_key(lib, _series_key(item)):
+                prof = member.setdefault("progress", {}).setdefault(profile_id, {})
+                prof["shuffle"] = bool(shuffle)
+                prof["shuffle_scope"] = scope or "" if shuffle else ""
             await asyncio.to_thread(_save_lib_raw, lib)
     except Exception:
         pass
@@ -11318,6 +11361,11 @@ async def get_item_files(request: Request, item_id: str,
         "files": out,
         "sections": [_section_summary(s, sec_meta) for s in secs] if len(secs) > 1 else [],
         "item_status": item.get("status", "ready"),
+        # Which merged show this item belongs to. The on-device player needs it to
+        # widen a mid-playback shuffle (or an unshuffle) past the single item it is
+        # currently inside — for a show held as per-episode torrents that item's
+        # file list is one episode long.
+        "series_key": _series_key(item),
         "has_torrent": bool(item.get("torrent_hash")),  # gates the download-scheduling controls
         "download_mode": cfg["mode"],
         "prep_priority_default": prep_cfg["priority_default"],   # item/series-level prep-queue tier (mid default)
@@ -17899,6 +17947,105 @@ async def vlc_next() -> JSONResponse:
 
     state.library_play_task = asyncio.create_task(_vlc_relaunch_playlist(new_tail, Path(next_file).name))
     return JSONResponse({"ok": True}, status_code=202)
+
+
+def _shuffle_pool_for_active(lib: dict) -> tuple:
+    """Every file the live playback could shuffle over, plus path → owning item.
+
+    Scoped two ways. To the current file's own SECTION, so turning shuffle on
+    during the main run can't pull the spin-off, the films or the creditless
+    openings into the queue. And, for a show whose episodes arrived as separate
+    per-episode torrents, to the whole merged series rather than to the one item
+    that happens to hold the episode on screen — for South Park that item holds
+    exactly one file, so an item-scoped pool would have nothing to shuffle.
+    """
+    item = next((it for it in lib["items"] if it["id"] == state.library_item_id), None)
+    if not item:
+        return [], {}
+    members = _items_for_series_key(lib, _series_key(item))
+    files = (_merged_series_files(members) if len(members) > 1
+             else [{**f, "item_id": item["id"]} for f in item.get("files", [])])
+    current = state.library_current_file
+    section = next((episodes.section_key(f) for f in files if f.get("path") == current), "")
+    scoped = _files_in_section(files, section) if section else files
+    paths = [f["path"] for f in scoped if f.get("path")]
+    return paths, {f["path"]: f.get("item_id", "") for f in scoped if f.get("path")}
+
+
+@app.post("/api/library/shuffle")
+async def library_shuffle() -> JSONResponse:
+    """Enter Shuffle Play mid-episode — the exact counterpart of /unshuffle.
+
+    Shuffle used to be a decision you could only make *before* pressing play: the
+    episode picker's Shuffle button, or the Resume prompt. Three taps deep, and
+    unreachable once something was already on screen. This flips it on in place —
+    the episode playing keeps playing, untouched, and only the queue behind it is
+    replaced by a random order over the rest of the section.
+
+    Pool and ordering rules match `startShuffle`: every episode of the section
+    (merged across the series' items), current file pinned to the front so it is
+    never re-queued behind itself. Scope is recorded as "all" — a mid-playback
+    shuffle never asked about unwatched-only, so claiming that scope would make a
+    later Resume offer re-shuffle a pool the viewer never picked."""
+    if state.tv_local_active:
+        # The kiosk owns its queue (lp.playlist) — it reshuffles its own tail and
+        # reports the flag back on its next heartbeat. See lpEnterShuffle.
+        await _tv_local_relay("shuffle")
+        state.tv_local_shuffle = True
+        await broadcast("state", state_snapshot())
+        return JSONResponse({"ok": True}, status_code=202)
+    if state.library_shuffle_order:
+        raise HTTPException(400, "Already shuffling.")
+    current = state.library_current_file
+    if not current:
+        raise HTTPException(400, "No active playback.")
+
+    lib = await get_library()
+    paths, owners = _shuffle_pool_for_active(lib)
+    rest = [p for p in paths if p != current and Path(p).exists()]
+    if not rest:
+        raise HTTPException(400, "Nothing else here to shuffle.")
+    random.shuffle(rest)
+    order = [current] + rest
+
+    state.library_shuffle_order = order
+    state.library_shuffle_scope = "all"
+    state.library_playlist = order
+    # A merged-series shuffle can reach episodes the natural-order playlist never
+    # contained (everything before the resume point), so the owner map has to be
+    # rebuilt over the WHOLE pool — otherwise progress for those lands on the
+    # wrong item. library_series_order stays as it is: it is the stable natural
+    # order /unshuffle walks back to.
+    if len(set(owners.values())) > 1:
+        state.library_series_map = {p: owners[p] for p in order if owners.get(p)}
+
+    # Same in-place queue rewrite /unshuffle uses — no rebuffer. If VLC's playlist
+    # can't be edited, relaunch the shuffled run reseeked to the live position.
+    ok = await _vlc_replace_upcoming(order[1:])
+    if not ok:
+        vs = await vlc_status()
+        try:
+            pos = int(float((vs or {}).get("time", 0) or 0))
+        except (TypeError, ValueError):
+            pos = 0
+        prior = state.library_play_task
+        if prior and not prior.done():
+            prior.cancel()
+        state.library_play_task = asyncio.create_task(
+            _vlc_relaunch_playlist(order, Path(current).name))
+        if pos > 5:
+            async def _reseek() -> None:
+                await asyncio.sleep(0.5)
+                if await _vlc_wait_until_ready(Path(current).resolve(), timeout=10.0):
+                    await vlc("seek", val=str(pos))
+            asyncio.create_task(_reseek())
+
+    if state.library_item_id and state.library_profile_id:
+        asyncio.create_task(_set_shuffle_pref(
+            state.library_item_id, state.library_profile_id, True, "all",
+        ))
+    await broadcast("state", state_snapshot())
+    return JSONResponse({"ok": True, "count": len(order)})
 
 
 @app.post("/api/library/unshuffle")

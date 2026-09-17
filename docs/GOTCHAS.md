@@ -292,13 +292,48 @@ Observed (v11.9.1): the next episode's `in_play` and the background video's `in_
 
 Fix: `_real_playback_active()` (status not idle / YouTube up / a library item set / a live `library_play_task` or `stream_task`) is re-checked inside `_play_background_video()` **after** its awaits and **before** the VLC calls, with no `await` in between. If you add a new caller or a new await to that function, keep the guard as the last thing before VLC.
 
+### A group's artwork must be read, not stored
+
+A franchise shelf found automatically from a TMDb collection carried that collection's poster.
+The first edit of any kind — rename, sort-order flip — *materialises* it as a stored "manual"
+group (`update_library_group`), and nothing ever copied the artwork across, so Star Wars turned
+into a grey placeholder for no visible reason. `_coll_art` now reads `poster_path`/`backdrop_path`
+back off the shelf's own members' `belongs_to_collection` at render time. Read, never snapshotted:
+it costs no TMDb call (the blob already rides on every film's metadata), it repairs every group
+that already lost its artwork with no migration, and it can't go stale when TMDb swaps the image.
+
 ### Leaving Shuffle without a rebuffer — edit the tail, don't `pl_empty`
 
-`/api/library/unshuffle` must swap the upcoming queue from the random tail to natural order while the **current episode keeps playing**. `pl_empty` is out — it drops the playing item and forces a relaunch (rebuffer). `_vlc_replace_upcoming` instead reads `playlist.json`, finds the `current` leaf, `pl_delete`s only the leaves **after** it, then `in_enqueue`s the natural tail. Clearing server state alone is *not* enough: VLC physically auto-advances through its **own** enqueued list at true end-of-file (the credits-skip path re-derives order via `_nav_order`, but bare end-of-file does not), so the stale shuffle tail would still play next unless the queue itself is rewritten. The endpoint keeps a `_vlc_relaunch_playlist`+reseek fallback for when the in-place edit fails, trading a brief rebuffer for guaranteed-correct order.
+`/api/library/unshuffle` (and, since 15.6.0, its mirror `/api/library/shuffle`) must swap the upcoming queue from the random tail to natural order while the **current episode keeps playing**. `pl_empty` is out — it drops the playing item and forces a relaunch (rebuffer). `_vlc_replace_upcoming` instead reads `playlist.json`, finds the `current` leaf, `pl_delete`s only the leaves **after** it, then `in_enqueue`s the natural tail. Clearing server state alone is *not* enough: VLC physically auto-advances through its **own** enqueued list at true end-of-file (the credits-skip path re-derives order via `_nav_order`, but bare end-of-file does not), so the stale shuffle tail would still play next unless the queue itself is rewritten. The endpoint keeps a `_vlc_relaunch_playlist`+reseek fallback for when the in-place edit fails, trading a brief rebuffer for guaranteed-correct order.
+
+### Shuffle assumed one show = one item. A show collected an episode at a time isn't.
+
+Everything about Shuffle Play was written against a library item that holds the whole show
+(Death Note: one torrent, thirty-seven files). A show collected an episode at a time is
+**dozens of separate items** that only become one show through `_series_key`, and that shape
+broke shuffle in three independent places — all fixed in 15.6.0, all worth knowing before
+touching this code:
+
+1. **`epShuffle()` bailed on `!epItemId`.** A merged-series episode page sets `epItemId` to
+   `null` *by design* (`epSeriesKey` identifies it instead); every other action on the page
+   guards on both. So pressing **Shuffle** on South Park did nothing whatsoever, while Death
+   Note worked — the classic "works for me" shape of this bug.
+2. **The shuffle preference was written to one item.** `/play` names only the item owning the
+   first random file, and the shuffle leaves that item on the very next episode. Whichever item
+   the run *ended* in had never heard of the shuffle, so Resume offered natural order.
+   `_set_shuffle_pref` now writes to every member of the `_series_key`.
+3. **The merged-series resume hint didn't carry the flag at all**, and `playSeries` never
+   offered the prompt — so even a correctly-stored pref was unreachable from the one path a
+   merged series actually uses.
+
+The rule: **anything that reasons about "this show" must go through `_series_key`, not
+`item_id`.** An item-scoped pool for a per-episode-torrent show has exactly one file in it,
+which reads as "nothing to shuffle" rather than as a bug. `_shuffle_pool_for_active` (server)
+and `_lpShowFiles` (device) both exist to widen past the item for this reason.
 
 ### Device Shuffle has no server mirror
 
-On-device Shuffle Play is **purely client-side** — `startShuffle` Fisher–Yates-shuffles the paths and they become `lp.playlist` verbatim; the device never reads `state.library_shuffle_order`, and its Next/Prev just walk `lp.playlist`/`lp.pi`. Consequences: (1) leaving shuffle on device (`lpExitShuffle`) is a client-side `lp.playlist` reorder, **not** a call to `/api/library/unshuffle` (that endpoint is VLC-only); (2) the *persisted* shuffle preference is the one thing that crosses the boundary — the device records it via `POST /api/library/{id}/shuffle-pref` (since it has no `/play` round-trip) so Resume's "Resume on shuffle?" offer works regardless of where the last session played. Don't assume `state.library_shuffle_order` reflects device playback — it's always empty for on-device sessions.
+On-device Shuffle Play is **purely client-side** — `startShuffle` Fisher–Yates-shuffles the paths and they become `lp.playlist` verbatim; the device never reads `state.library_shuffle_order`, and its Next/Prev just walk `lp.playlist`/`lp.pi`. Consequences: (1) entering and leaving shuffle on device (`lpEnterShuffle` / `lpExitShuffle`) are client-side `lp.playlist` reorders, **not** calls to `/api/library/shuffle` or `/unshuffle` (those endpoints are VLC-only; they relay `tv_command:shuffle`/`:unshuffle` when the kiosk owns the queue); (2) the *persisted* shuffle preference is the one thing that crosses the boundary — the device records it via `POST /api/library/{id}/shuffle-pref` (since it has no `/play` round-trip) so Resume's "Resume on shuffle?" offer works regardless of where the last session played. Don't assume `state.library_shuffle_order` reflects device playback — it's always empty for on-device sessions.
 
 **Handoff is the one place shuffle state must be re-established explicitly.** A TV↔device handoff slices the *already-shuffled* remaining tail (so the order survives for free), but the destination otherwise has no idea it's a shuffle. Both handoffs therefore thread the **shuffle flag + scope**: `handoffToDevice` → `lpPlay(..., app.library_shuffle, app.library_shuffle_scope)` (the scope comes from `state_snapshot`'s `library_shuffle_scope`, masked to `""` when not shuffling); `lpHandoffToVlc` → `playLibraryFiles(..., lp.shuffle, lp.shuffleScope)` (its `/play` body re-arms `state.library_shuffle_order`). Forget either and the new side plays the right tail *once* but snaps Next/Prev back to natural order, hides Exit Shuffle, and clears the persisted Resume-on-shuffle pref. Also: don't let `lpPlay` expand a 1-file shuffled tail into the natural-order series tail — it's gated on `!shuffle`.
 
