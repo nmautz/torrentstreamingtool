@@ -1,5 +1,20 @@
 # Changelog
 
+## [15.5.0] — 2026-09-16
+**Any profile can download something not out yet, once the check finds a real video.**
+
+With the contents check (15.3.0) and the source scan (15.4.0), a fake can't be downloaded by
+accident, so **Download anyway** on the not-out-yet warning is no longer limited to elevated
+profiles.
+
+* Every profile sees **Download anyway**. It always checks the torrent first; the download only
+  starts when a video is found, or when a confirmed replacement source is chosen.
+* **Skipping the check stays elevated/admin only.** When the check can't tell (no peers answered),
+  elevated profiles get **Download without checking**; everyone else gets **Check again**, plus
+  **Check other sources** when the page has them.
+* Server: `POST /api/library/download` accepts `allow_unreleased` from any profile (no more 403
+  `unreleased_forbidden`), and `POST /api/torrent/inspect` is open to every profile.
+
 ## [15.4.0] — 2026-09-16
 **When the torrent you picked is fake, keep checking the other sources until one has a video.**
 

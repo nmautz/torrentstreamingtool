@@ -1314,8 +1314,10 @@ TMDb air dates are calendar days with no time. An episode dated today airs this 
 `Date.parse(date) < now` test calls it aired from midnight — precisely when a fake pre-release
 is sitting on the indexers (South Park S29E01, a lone `.exe`, the morning it aired). Both
 `_tmdbEpUnaired`/`_airInfo` (client) and `_unreleased_gate` (server) treat `air_date >= today`
-as not out, box/viewer-local. Trade-off: a same-day anime simulcast is held a day for
-un-elevated profiles. The gate is enforced on `POST /api/library/download` only — the stream
+as not out, box/viewer-local. Trade-off: a same-day simulcast needs "Download anyway" and a
+passing contents check (any profile, since 15.5.0). Since 15.5.0 the server accepts the override
+from anyone and trusts the dashboard to have run `/api/torrent/inspect`, so a direct API call can
+skip the check. The gate is enforced on `POST /api/library/download` only — the stream
 endpoints receive just a magnet and title, so stream-now asks in the UI (`_ssConfirmOut`) and
 is not server-enforced.
 

@@ -12840,10 +12840,10 @@ async def _inspect_magnet(magnet: str) -> tuple[Optional[list[dict]], str]:
 
 @app.post("/api/torrent/inspect")
 async def torrent_inspect(request: Request, req: TorrentInspectReq) -> JSONResponse:
-    # Only reachable from "Download anyway", which only an elevated profile has;
-    # it also puts a torrent into qBit, so hold it to the same bar.
-    if not _is_elevated(request, await get_library(), req.profile_id):
-        raise HTTPException(403, "Requires a PIN-verified elevated profile.")
+    # Open to every profile (15.5.0): this check is what lets a non-elevated
+    # profile download something not out yet, so it can't be elevated-only.
+    # It adds a magnet to qBit only until the file list arrives — no more than
+    # any profile's own download does.
     if not state.vpn_secure:
         raise HTTPException(403, "VPN not connected — can't fetch torrent metadata.")
     link = (req.magnet or "").strip()
@@ -12889,12 +12889,13 @@ async def library_download(request: Request, req: DownloadReq) -> JSONResponse:
     if _gate:
         _can = _is_elevated(request, _snap, req.profile_id)
         if not req.allow_unreleased:
+            # `can_override` now means "may download WITHOUT the contents check".
+            # Any profile may override once the dashboard's check has found a video
+            # (15.5.0) — the server trusts the dashboard for that; see
+            # /api/torrent/inspect and _unreleasedPrompt.
             raise HTTPException(409, {"code": "unreleased", "can_override": _can, **_gate})
-        if not _can:
-            raise HTTPException(403, {"code": "unreleased_forbidden", "can_override": False,
-                                      **_gate})
-        log.warning("Unreleased download overridden by elevated profile %s: %s (%s)",
-                    req.profile_id, _gate.get("title"), req.title)
+        log.warning("Unreleased download overridden by profile %s (elevated=%s): %s (%s)",
+                    req.profile_id, _can, _gate.get("title"), req.title)
     # Refuse a link that cannot possibly be added, rather than minting a library
     # item for it. A junk `magnet` used to sail through and become a permanent
     # row stuck in `status: "error"` with an EMPTY error string — a broken entry

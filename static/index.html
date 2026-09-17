@@ -2209,8 +2209,9 @@
 </div>
 
 <!-- Not-out-yet warning. The layout does the arguing: Cancel is the big,
-     coloured, full-width target; "Download anyway" is small grey text underneath,
-     and only exists for a profile with the content-lock permission. -->
+     coloured, full-width target; "Download anyway" is small grey text underneath.
+     Any profile may press it (15.5.0) — it checks the torrent for a video before
+     anything downloads. Only skipping that check needs content-lock permission. -->
 <div id="unreleasedModal"
   class="hidden fixed inset-0 z-[70] bg-black/70
          flex items-end sm:items-center justify-center sm:px-4 sm:py-6">
@@ -2237,8 +2238,6 @@
         class="w-full min-h-[52px] bg-indigo-600 hover:bg-indigo-500 text-white text-sm font-black uppercase tracking-widest transition-colors">Cancel download</button>
       <button id="unrelOverride"
         class="hidden self-center px-2 py-1 text-[11px] text-gray-500 hover:text-gray-300 transition-colors">Download anyway</button>
-      <p id="unrelNoOverride"
-        class="hidden text-center text-[11px] text-gray-600">Only a profile with content-lock permission can download something before it's released.</p>
     </div>
   </div>
 </div>
@@ -9760,12 +9759,12 @@ function _unreleasedPrompt(info){
     const when=(info.label||"").replace(/^./, c=>c.toUpperCase());
     document.getElementById("unrelWhen").textContent=when;
     const ov=document.getElementById("unrelOverride");
-    const no=document.getElementById("unrelNoOverride");
     const cancel=document.getElementById("unrelCancel");
     const primary=document.getElementById("unrelPrimary");
     const box=document.getElementById("unrelInspect");
-    ov.classList.toggle("hidden", !info.can_override);
-    no.classList.toggle("hidden", !!info.can_override);
+    // `can_override` (server: _is_elevated) now only gates downloading WITHOUT a
+    // successful contents check. "Download anyway" itself is for everyone.
+    ov.classList.remove("hidden");
     ov.textContent="Download anyway"; ov.disabled=false;
     cancel.textContent="Cancel download";
     primary.classList.add("hidden"); primary.onclick=null;
@@ -9878,9 +9877,29 @@ function _unreleasedPrompt(info){
       for(let i=0;i<n;i++) worker();
     };
 
+    // Offer the other sources for the same release. False when there are none.
+    const offerScan=label=>{
+      if(!alts.length) return false;
+      scan.queue=alts.slice(); scan.total=alts.length;
+      primary.textContent=`${label} (${alts.length})`;
+      primary.disabled=false;
+      primary.classList.remove("hidden");
+      primary.onclick=()=>{ primary.onclick=null; resumeScan(); };
+      cancel.textContent="Cancel";
+      return true;
+    };
+
     cancel.onclick=()=>done(false);
     ov.onclick=async()=>{
-      if(!info.magnet || unchecked) return done(true);
+      if(unchecked) return done(true);
+      if(!info.magnet){
+        // Nothing to check against. Elevated may go ahead; others can't.
+        if(info.can_override) return done(true);
+        note(`<p class="text-xs font-black uppercase tracking-widest text-amber-400">Can't check this one</p>
+              <p class="mt-1 text-sm text-gray-300">There's no torrent link to look inside, so it can't be confirmed as a real video. Wait until it has come out.</p>`, "warn");
+        ov.classList.add("hidden"); cancel.textContent="Close";
+        return;
+      }
       if(checking) return;
       checking=true; ov.disabled=true;
       note(`<p class="text-xs font-black uppercase tracking-widest text-gray-300">Checking what's inside the torrent&hellip;</p>
@@ -9894,22 +9913,20 @@ function _unreleasedPrompt(info){
               <p class="mt-1 text-sm text-gray-300">It has ${res.file_count} file${res.file_count===1?"":"s"} and none of them is a video, so it's fake. Don't download it.</p>
               ${fileList(res)}`, "bad");
         ov.classList.add("hidden");
-        if(alts.length){
-          scan.queue=alts.slice(); scan.total=alts.length;
-          primary.textContent=`Keep checking other sources (${alts.length})`;
-          primary.disabled=false;
-          primary.classList.remove("hidden");
-          primary.onclick=()=>{ primary.onclick=null; resumeScan(); };
-          cancel.textContent="Cancel";
-        } else {
-          cancel.textContent="Close";
-        }
+        if(!offerScan("Keep checking other sources")) cancel.textContent="Close";
         return;
       }
-      unchecked=true;
+      offerScan("Check other sources");
+      // Couldn't tell. Skipping the check is content-lock permission only;
+      // everyone else can try the check again (peers come and go).
       note(`<p class="text-xs font-black uppercase tracking-widest text-amber-400">Couldn't check the contents</p>
             <p class="mt-1 text-sm text-gray-300">${escHtml(cap(res.reason||"unknown error"))}. It may still be fake.</p>`, "warn");
-      ov.textContent="Download without checking";
+      if(info.can_override){
+        unchecked=true;
+        ov.textContent="Download without checking";
+      } else {
+        ov.textContent="Check again";
+      }
     };
     modal.onclick=e=>{ if(e.target===modal) done(false); };
     modal.classList.remove("hidden");
@@ -23921,6 +23938,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">15.4.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">15.5.0</div>
 </body>
 </html>

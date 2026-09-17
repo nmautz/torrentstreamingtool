@@ -406,7 +406,10 @@ makes it `epIsMovie`. **Guards:** `_epApplyMetadata` and `_epTopUpSeasons` must 
 episodes/films: `_ssEpRowHtml`, `_ssMissingRowHtml`, `_epMissingCardHtml`, collection missing
 films. **All** library downloads go through `postLibraryDownload(body, {silent})`: on a 409
 `unreleased` it shows `#unreleasedModal` via `_unreleasedPrompt(info)` (big Cancel; small
-"Download anyway" only when `info.can_override`) and resends with `allow_unreleased`. Silent
+"Download anyway" for every profile since 15.5.0) and resends with `allow_unreleased`. `info.can_override`
+(elevated) now only unlocks skipping the contents check: "Download without checking" when the
+check can't tell, or going ahead when there's no magnet to check. Others get "Check again" (and
+"Check other sources" when alternatives exist). Silent
 callers (background runs) get `{unreleased:true}` and report the skip. `_errDetail` renders an
 object `detail`. Stream-now rows ask via `_ssConfirmOut(season, episode, magnet)`.
 
