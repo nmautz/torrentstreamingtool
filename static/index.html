@@ -14691,22 +14691,31 @@ function _ssMissingEpisodes(season){
 // query form that last worked for this show goes first (_ssEpFormWin), so a
 // Find-missing sweep pays for the misses once, not once per episode.
 // Absolute-numbered anime (season 1, episode 100+) only has the bare forms.
+// An alias that is another title plus more words ("Mushishi Zoku Shou",
+// "Spy x Family 2nd") is a sequel's name: searching it can only turn up the
+// wrong season, so it's skipped.
 const _ssEpFormWin=new WeakMap();   // _ssGroup → "bare|title" of the last winner
 function _ssEpisodeQueries(season, episode){
-  const seen=new Set(); const titles=[];
-  [_ssQueryTitle(), ..._ssAkaTitles().slice(0,2)].forEach(t=>{
-    const k=(t||"").trim().toLowerCase(); if(!k||seen.has(k)) return; seen.add(k); titles.push(t.trim());
-  });
+  const norm=t=>(t||"").trim().toLowerCase();
+  const all=[_ssQueryTitle(), ..._ssAkaTitles()].map(norm).filter(Boolean);
+  const titles=[];
+  for(const t of [_ssQueryTitle(), ..._ssAkaTitles()]){
+    const k=norm(t);
+    if(!k || titles.some(u=>norm(u)===k)
+          || all.some(v=>k.startsWith(v+" ") || k.startsWith(v+":"))) continue;
+    titles.push(t.trim());
+    if(titles.length===3) break;
+  }
   const code=`S${String(season).padStart(2,"0")}E${String(episode).padStart(2,"0")}`;
   const abs=(season<=1 && episode>=100);
   const forms=[...(abs?[]:titles.map(t=>({t, bare:false, q:`${t} ${code}`}))),
                ...titles.map(t=>({t, bare:true, q:`${t} ${abs?episode:String(episode).padStart(2,"0")}`}))];
-  if(!forms.length) return {forms, titles};
+  if(!forms.length) return forms;
   forms[0].orig=true;   // what this search always asked; the rest are fallbacks
   const win=_ssGroup && _ssEpFormWin.get(_ssGroup);
   const i=win ? forms.findIndex(f=>`${f.bare?1:0}|${f.t}`===win) : -1;
   if(i>0) forms.unshift(...forms.splice(i,1));
-  return {forms, titles};
+  return forms;
 }
 
 // Spawn a targeted follow-up search for one missing episode, merging any matching
@@ -14718,18 +14727,20 @@ async function ssSearchEpisode(season, episode, opts={}){
   if(!opts.silent) _ssRenderBody();
   const grp=_ssGroup;
   const code=`S${String(season).padStart(2,"0")}E${String(episode).padStart(2,"0")}`;
-  const {forms, titles}=_ssEpisodeQueries(season, episode);
-  // Scored against the clean titles, so the number in a bare query doesn't count.
-  const akaParam=`&aka=${encodeURIComponent(titles.join(","))}`;
+  const forms=_ssEpisodeQueries(season, episode);
   let found=[];
   for(const f of forms){
     if(_ssGroup!==grp) break;
-    // The original query keeps its old behaviour. The looser fallbacks must also
-    // match one of the show's titles: "GTO 01" alone would take anything
-    // numbered 01 that shares a word with it.
-    const minRel=f.orig ? -Infinity : 0.7;
+    // The original query keeps its old behaviour. A fallback's results must be
+    // named for the title it searched, scored against that title alone (aka=,
+    // so the number in the query doesn't count). A bare number proves little,
+    // so it needs a near-exact name: at 0.7, "Mushishi 01" kept 21 releases of
+    // the sequel and a special alongside 2 real ones; 0.9 is the squashed-name
+    // floor, which still lets "Mushishi Zoku Shou" through. SxxExx carries its
+    // own evidence, so 0.9 is enough there.
+    const minRel=f.orig ? -Infinity : f.bare ? 0.95 : 0.9;
     try{
-      let url=`/api/search?q=${encodeURIComponent(f.q)}${akaParam}`;
+      let url=`/api/search?q=${encodeURIComponent(f.q)}${f.orig?"":`&aka=${encodeURIComponent(f.t)}`}`;
       if(profile.id) url+=`&profile_id=${encodeURIComponent(profile.id)}`;
       const r=await fetch(url);
       if(r.ok){
