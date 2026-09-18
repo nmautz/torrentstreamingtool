@@ -10319,6 +10319,29 @@ function _animeFacts(meta){
   return id ? (_animeFactsById.get(id)||null) : null;
 }
 
+// Which release pack holds TMDb's SxxExx, or null. `packs` is empty for every
+// show whose release grid and TMDb's agree, so this answers null for most anime
+// and the callers below stay silent — that emptiness is the feature. Ordinary
+// tuple comparison, because a pack spans a season boundary and neither number
+// decides on its own. Mirror of animemap.pack_for.
+function _animePackFor(meta, season, episode){
+  const packs=(_animeFacts(meta)||{}).packs||[];
+  const s=+season, e=+episode;
+  for(const p of packs){
+    const [fs,fe]=p.from, [ts,te]=p.to;
+    if((s>fs || (s===fs && e>=fe)) && (s<ts || (s===ts && e<=te))) return p;
+  }
+  return null;
+}
+
+// The pack a MISSING episode comes in, but only when saying so tells the viewer
+// something they can't see — i.e. the pack isn't the season they're looking at.
+// Season 1's missing episode 12 being "in the season 1 pack" is not news.
+function _animeForeignPack(meta, season, episode){
+  const p=_animePackFor(meta, season, episode);
+  return (p && +p.grid_season !== +season) ? p : null;
+}
+
 // Series-absolute episode number for a TMDb (season, episode), or 0 when the
 // show isn't an anime whose seasons are subdivisions of one continuous run.
 // The mirror of animemap.to_absolute — same cumulative walk over the season
@@ -10607,13 +10630,21 @@ function _epMissingCardHtml(season, te){
   const still=_stillUrl(te.still_path);
   const air=((te.air_date)||"").trim();
   const dot=upcoming?"bg-gray-500":"bg-orange-400";
+  // This show's releases don't cut their seasons where TMDb does, so this
+  // episode is missing from a season pack that is otherwise complete — it ships
+  // in a different one. Say which, rather than leaving "Not downloaded" to read
+  // as "your download is broken". See docs/LIBRARY_DATA.md § Anime season mapping.
+  const pack=upcoming?null:_animeForeignPack(epMetadata, season, epNo);
   const badge=upcoming
     ? `<span class="text-[10px] text-gray-500 font-bold uppercase tracking-widest flex items-center gap-1"
              title="TMDb lists this episode but it hasn't aired yet.">
          <span class="w-1.5 h-1.5 ${dot}"></span></span>${_releaseBadge(air)}`
     : `<span class="text-[10px] text-orange-400 font-bold uppercase tracking-widest flex items-center gap-1"
              title="This episode exists but isn't on this box.">
-         <span class="w-1.5 h-1.5 ${dot}"></span>Not downloaded</span>`;
+         <span class="w-1.5 h-1.5 ${dot}"></span>Not downloaded</span>
+       ${pack?`<span class="text-[10px] text-gray-500 font-bold uppercase tracking-widest"
+             title="TMDb counts this as season ${season}, but releases of this show put it in the ${escHtml(pack.label.toLowerCase())} pack.">
+         In the ${escHtml(pack.label)} pack</span>`:""}`;
   return `<div class="ep-card ep-missing px-2 sm:px-5" data-missing="${season}-${epNo}">
       <div class="ep-still">
         ${still
@@ -10644,12 +10675,19 @@ function _epMissingCardHtml(season, te){
             title="Find the best copy of this episode and start downloading it">
             ${ic("down")} Get
           </button>
-          ${SIMPLE?"":`<button onclick="epFindEpisode(${season},${epNo})"
+          ${SIMPLE?"":(pack
+            ? `<button onclick="epGetPack(${pack.grid_season})"
+            class="h-9 px-2.5 flex items-center gap-1 text-[11px] font-bold uppercase tracking-wide
+                   text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
+            title="Browse the ${escHtml(pack.label.toLowerCase())} packs — one download covers this episode and the rest of the run, at the quality the rest of your library is.">
+            ${ic("search")} ${escHtml(pack.label)} pack
+          </button>`
+            : `<button onclick="epFindEpisode(${season},${epNo})"
             class="h-9 px-2.5 flex items-center gap-1 text-[11px] font-bold uppercase tracking-wide
                    text-gray-500 hover:text-white hover:bg-gray-800 transition-colors"
             title="Browse the available copies and choose one yourself">
             ${ic("search")} Choose
-          </button>`}
+          </button>`)}
         </div>`}
       </div>
     </div>`;
@@ -10868,6 +10906,20 @@ function epReplaceGreen(season, episode){
   if(!c){ showAlert("No metadata for this show - can't search for it.","warn"); return; }
   openSearchShowFromTmdb(c, {season:+season, episode:+episode, replace:true});
 }
+// Open the search show page on the RELEASE's season pack, not TMDb's. For a
+// show whose grids disagree these are different things: Hunter x Hunter's
+// missing S01E59-62 are the first four files of what every group calls "S02",
+// and the pack view of that is the one download that gets them — at the quality
+// the rest of the library is, rather than the lone fansub rip a single-episode
+// hunt turns up. `keepSeason` stops the page snapping the selector back when
+// the release's season isn't one TMDb lists (OSHI NO KO has one TMDb season and
+// three release packs).
+function epGetPack(gridSeason){
+  const c=_epSearchCandidate();
+  if(!c){ showAlert("No metadata for this show — can't search for it.","warn"); return; }
+  openSearchShowFromTmdb(c, {season:+gridSeason, section:"packs", keepSeason:true});
+}
+
 function epFindSeason(season){
   const c=_epSearchCandidate();
   if(!c){ showAlert("No metadata for this show — can't search for it.","warn"); return; }
@@ -11334,22 +11386,38 @@ function renderEpList(){
         </div>`;
     } else if(epSeasonList.length && epCurrentSeason>0 && missingEps.length){
       const n=missingEps.length;
+      // When every gap in this season is really the head of a neighbouring
+      // release pack, name it once here as well as on the rows — and make the
+      // secondary button offer that pack instead of a per-episode hunt, which
+      // on this kind of show turns up a lone fansub rip beside a Blu-ray library.
+      const packs=missingEps.map(te=>_animeForeignPack(epMetadata, epCurrentSeason, +te.episode));
+      const one=(packs.length && packs.every(p=>p && p.grid_season===packs[0].grid_season))
+        ? packs[0] : null;
+      const lo=one?+missingEps[0].episode:0, hi=one?+missingEps[missingEps.length-1].episode:0;
       html += `<div class="px-3 sm:px-5 py-2 bg-amber-950/40 border-b border-amber-900/50 flex items-center justify-between gap-2 flex-wrap">
           <span class="text-[11px] text-amber-300 uppercase tracking-wide flex items-center gap-2">
             <span class="w-2 h-2 bg-amber-400 flex-shrink-0"></span>
-            ${n} episode${n>1?"s":""} not downloaded
+            ${n} episode${n>1?"s":""} not downloaded${one
+              ? ` &middot; <span class="text-amber-500/80 normal-case tracking-normal">${lo===hi?`episode ${lo} is`:`episodes ${lo}–${hi} are`} in the ${escHtml(one.label.toLowerCase())} pack</span>`
+              : ""}
           </span>
           <div class="flex items-center gap-1.5 flex-shrink-0">
-            <button onclick="epGetSeason(${epCurrentSeason},this)"
+            ${one?"":`<button onclick="epGetSeason(${epCurrentSeason},this)"
               class="text-[11px] px-2.5 py-1 bg-amber-700 hover:bg-amber-600 text-white uppercase tracking-wide transition-colors flex items-center gap-1"
               title="Find the best copy of each missing episode and start downloading them">
               ${ic("down")} Get ${n>1?"them":"it"}
-            </button>
-            ${SIMPLE?"":`<button onclick="epFindSeason(${epCurrentSeason})"
+            </button>`}
+            ${SIMPLE?"":(one
+              ? `<button onclick="epGetPack(${one.grid_season})"
+              class="text-[11px] px-2.5 py-1 bg-amber-700 hover:bg-amber-600 text-white uppercase tracking-wide transition-colors flex items-center gap-1"
+              title="Browse the ${escHtml(one.label.toLowerCase())} packs — one download covers these and the rest of the run.">
+              ${ic("search")} ${escHtml(one.label)} pack
+            </button>`
+              : `<button onclick="epFindSeason(${epCurrentSeason})"
               class="text-[11px] px-2 py-1 bg-gray-800 hover:bg-gray-700 text-gray-400 hover:text-gray-200 uppercase tracking-wide transition-colors flex items-center gap-1"
               title="Browse the available copies and choose them yourself">
               ${ic("search")} Choose
-            </button>`}
+            </button>`)}
           </div>
         </div>`;
     }
@@ -13944,7 +14012,12 @@ async function openSearchShowFromTmdb(cand, opts){
         _ssMeta=d.metadata; _ssImgBase=d.img_base||_ssImgBase;
         _noteAnimeFacts(_ssMeta, d.anime);
         const seasons=_ssAllSeasons();
-        if(seasons.length && !seasons.includes(_ssSeason)) _ssSeason=seasons[0];
+        // `keepSeason` callers asked for a season the RELEASES have, which TMDb
+        // may not list at all — snapping to seasons[0] there would quietly send
+        // "get the season 2 pack" to season 1. Search results widen
+        // `_ssAllSeasons` once they land, so the tab appears on its own.
+        if(seasons.length && !seasons.includes(_ssSeason) && !o.keepSeason)
+          _ssSeason=seasons[0];
         _ssRenderHero(); _ssRender();
       }
     }
@@ -13958,7 +14031,10 @@ async function openSearchShowFromTmdb(cand, opts){
   // and sweeps only the numbers the caller says are missing.
   if(_ssGroup===group && o.season && _ssKind!=="movie"){
     const seasons=_ssAllSeasons();
-    if(seasons.includes(+o.season)) _ssSeason=+o.season;
+    // `keepSeason` means the caller named a season the RELEASES have rather
+    // than one TMDb lists, so it can't be required to be in `seasons` yet — the
+    // pack search fired just below is what puts it there.
+    if(o.keepSeason || seasons.includes(+o.season)) _ssSeason=+o.season;
     _ssSection=o.section==="packs"?"packs":"episodes";
     _ssRender();
     if(o.episode)                    ssSearchEpisode(+o.season, +o.episode);
@@ -24880,6 +24956,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.1.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.2.0</div>
 </body>
 </html>

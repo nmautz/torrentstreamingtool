@@ -686,9 +686,24 @@ shows downloaded before it existed. `anime_map_backfill` (a lifespan task, 45 s 
 them once per start: offline, one library write for everything that moved, and a no-op for every
 show the table doesn't cover or that already carries `abs_no`.
 
-The shape is served to the frontend as `anime: {mapped, absolute, total}` on both
-`GET /api/library/{id}/metadata` and `/api/tmdb/lookup` — computed at serve time (`_anime_facts`),
-never stored on `metadata`, because most `metadata` blobs are pinned and would never pick it up.
+The shape is served to the frontend as `anime: {mapped, absolute, total, packs}` on
+`GET /api/library/{id}/metadata`, `/api/tmdb/lookup` and `/api/library/series/{key}` — computed at
+serve time (`_anime_facts`), never stored on `metadata`, because most `metadata` blobs are pinned
+and would never pick it up.
+
+**`packs` (17.2.0)** is `animemap.release_packs` — the season packs the release groups publish,
+expressed as TMDb ranges, and **empty whenever the two grids agree**. That emptiness is the
+feature: Code Geass, Attack on Titan and Demon Slayer say nothing, because their season 2 and
+TMDb's season 2 are the same episodes. Where they disagree, each entry is
+`{grid_season, label, from:[season,episode], to:[season,episode]}` — Hunter x Hunter's season 2
+pack is `from [1,59] to [2,74]`, which is exactly the sentence the episode page needs: *the four
+episodes missing off the end of season 1 are in the season 2 pack.* `animemap.pack_for` (mirrored
+in the frontend as `_animePackFor`) does the lookup by ordinary tuple comparison, because a pack
+spans a season boundary and neither number decides on its own.
+
+Agreement is judged per shape: an absolute run agrees when its windows end exactly where TMDb's
+cumulative counts do, and a cour-mapped show agrees when each TMDb season hosts exactly one cour
+starting at episode 1.
 
 **Sections (15.0.0).** A `bucket` promoted to a first-class unit by
 `episodes.sections_for(files, show_title)` — derived, never persisted, so no migration.

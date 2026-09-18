@@ -2863,14 +2863,21 @@ def _anime_facts(metadata: Optional[dict]) -> Optional[dict]:
                  One Piece). This is what tells the UI to search "059" rather
                  than "S01E59".
       total    — episodes in the run, across TMDb's positive seasons.
+      packs    — the season packs the release groups publish, as TMDb ranges,
+                 and **empty whenever the two grids agree** (most anime). It is
+                 what lets the episode page answer "why is episode 59 missing
+                 from a complete season 1 pack" with "it is in the season 2
+                 pack" instead of leaving the viewer to work it out.
     """
     entries = _anime_entries(metadata)
     if not entries:
         return None
+    all_seasons = (metadata or {}).get("all_seasons") or []
     return {
         "mapped":   True,
         "absolute": animemap.is_absolute_run(entries),
-        "total":    animemap.total_episodes((metadata or {}).get("all_seasons") or []),
+        "total":    animemap.total_episodes(all_seasons),
+        "packs":    animemap.release_packs(entries, all_seasons),
     }
 
 

@@ -141,6 +141,48 @@ eq("hxh total", am.total_episodes(HXH_SEASONS), 148)
 eq("season 0 is not in the run", am.total_episodes(ONK_SEASONS), 35)
 
 
+# ── release_packs: what the groups actually ship, in TMDb slots ──────────────
+# The four episodes the library reports missing off the end of Hunter x Hunter's
+# season 1 are the first four files of the season 2 pack. That sentence is the
+# whole point of this function.
+eq("hxh packs",
+   [(p["grid_season"], p["label"], tuple(p["from"]), tuple(p["to"]))
+    for p in am.release_packs(HXH, HXH_SEASONS)],
+   [(1, "Season 1", (1, 1), (1, 58)),
+    (2, "Season 2", (1, 59), (2, 74)),
+    (3, "Season 3", (3, 1), (3, 12))])
+eq("onk packs",
+   [(p["grid_season"], tuple(p["from"]), tuple(p["to"]))
+    for p in am.release_packs(ONK, ONK_SEASONS)],
+   [(1, (1, 1), (1, 11)), (2, (1, 12), (1, 24)), (3, (1, 25), (1, 35))])
+eq("frieren packs",
+   [(p["grid_season"], tuple(p["from"]), tuple(p["to"]))
+    for p in am.release_packs(FRIEREN, FRIEREN_SEASONS)],
+   [(1, (1, 1), (1, 28)), (2, (1, 29), (1, 39))])
+
+# Silence is the point: nothing to explain on a show whose grids agree.
+eq("code geass says nothing", am.release_packs(GEASS, GEASS_SEASONS), [])
+eq("one piece says nothing", am.release_packs(OP, OP_SEASONS), [])
+eq("no entries, nothing", am.release_packs([], HXH_SEASONS), [])
+eq("no TMDb grid, nothing", am.release_packs(HXH, []), [])
+
+# pack_for: the lookup the episode page does per missing row.
+HXH_PACKS = am.release_packs(HXH, HXH_SEASONS)
+eq("S1E58 is in the season 1 pack",
+   am.pack_for(HXH_PACKS, 1, 58)["grid_season"], 1)
+eq("S1E59 is in the SEASON 2 pack",
+   am.pack_for(HXH_PACKS, 1, 59)["grid_season"], 2)
+eq("so is S1E62", am.pack_for(HXH_PACKS, 1, 62)["grid_season"], 2)
+eq("and S2E01", am.pack_for(HXH_PACKS, 2, 1)["grid_season"], 2)
+eq("S3E01 is the season 3 pack", am.pack_for(HXH_PACKS, 3, 1)["grid_season"], 3)
+eq("off the end", am.pack_for(HXH_PACKS, 3, 13), None)
+eq("no packs, no answer", am.pack_for([], 1, 59), None)
+ONK_PACKS = am.release_packs(ONK, ONK_SEASONS)
+eq("onk S1E11 is pack 1", am.pack_for(ONK_PACKS, 1, 11)["grid_season"], 1)
+eq("onk S1E12 is pack 2", am.pack_for(ONK_PACKS, 1, 12)["grid_season"], 2)
+eq("onk S1E25 is pack 3", am.pack_for(ONK_PACKS, 1, 25)["label"], "Season 3")
+
+
 # ── decode_pack: the real releases ───────────────────────────────────────────
 def ends(pairs):
     return None if pairs is None else (pairs[0], pairs[-1], len(pairs))

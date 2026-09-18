@@ -1,5 +1,23 @@
 # Changelog
 
+## [17.2.0] — 2026-09-18
+**The library now says where a missing anime episode actually is.**
+
+* 17.1.0 put every file on the right slot, but left one honest oddity on screen: Hunter x Hunter's
+  season 1 reads **58 of 62**, because TMDb's season 1 runs to episode 62 and every release group
+  cuts theirs at 58. Nothing was wrong — episodes 59-62 ship in the season 2 pack — but "Not
+  downloaded" on four episodes of a season pack you just finished reads like a broken download.
+* Those rows now say **"In the Season 2 pack"**, and the strip above the list says it once for the
+  whole run: *4 episodes not downloaded · episodes 59-62 are in the season 2 pack*.
+* The button on them offers **that pack** rather than hunting the four episodes one at a time. On
+  this kind of show a single-episode search turns up a lone fansub rip to sit beside a Blu-ray
+  library; the pack is the copy you actually want, and it's one download.
+* **Silent wherever there's nothing to explain.** Only shows whose release grid genuinely disagrees
+  with TMDb's say anything — on this box that's Hunter x Hunter and 【OSHI NO KO】, while Code Geass,
+  Attack on Titan, Death Note, Steins;Gate, Chihayafuru and Vinland Saga carry no note at all.
+* Same treatment for the merged-cour case in reverse: 【OSHI NO KO】's TMDb season 1 holds all three
+  cours, so its episodes 12-24 are labelled as the season 2 pack.
+
 ## [17.1.0] — 2026-09-18
 **Anime seasons finally line up with what the release groups actually publish.**
 

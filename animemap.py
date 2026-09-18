@@ -214,6 +214,98 @@ def total_episodes(all_seasons: Iterable[dict]) -> int:
     return sum(c for _, c in _grid(all_seasons))
 
 
+# ── What the release groups actually ship ────────────────────────────────────
+
+def _tmdb_bounds(all_seasons: Iterable[dict]) -> list[int]:
+    """Cumulative absolute number each TMDb season ends on."""
+    run, out = 0, []
+    for _, count in _grid(all_seasons):
+        run += count
+        out.append(run)
+    return out
+
+
+def _cours(entries: list[dict]) -> list[dict]:
+    """The show's cours as `{grid_season, tmdb_season, offset}`, ordered — only
+    for a show whose entries sit IN a TMDb season (the folded-cour shape)."""
+    out = []
+    for e in entries:
+        grid, season = e.get("grid_season"), e.get("tmdb_season")
+        if not grid or grid <= 0 or season in (None, ABSOLUTE) or season <= 0:
+            continue
+        out.append({"grid_season": grid, "tmdb_season": season,
+                    "offset": int(e.get("tmdb_offset") or 0)})
+    out.sort(key=lambda c: (c["tmdb_season"], c["offset"]))
+    return out
+
+
+def release_packs(entries: list[dict],
+                  all_seasons: Iterable[dict]) -> list[dict]:
+    """The season packs the release groups publish, expressed in TMDb slots.
+
+    `[]` — meaning "nothing worth saying" — whenever the two grids **agree**,
+    which is most anime (Code Geass, Attack on Titan, Demon Slayer): there the
+    release's season 2 and TMDb's season 2 are the same 25 episodes and a note
+    about it would be noise.
+
+    Where they disagree, each entry is
+    `{grid_season, label, from: [season, episode], to: [season, episode]}` —
+    for Hunter x Hunter, the season 2 pack reads `from [1, 59] to [2, 74]`,
+    which is precisely the sentence the episode page needs: *the four episodes
+    missing off the end of season 1 are in the season 2 pack.*
+
+    The UI compares `(season, episode)` pairs against these ranges, so both
+    shapes below land in the same coordinate system and neither caller has to
+    know which shape it is looking at.
+    """
+    counts = dict(_grid(all_seasons))
+    if not counts or not entries:
+        return []
+
+    if is_absolute_run(entries):
+        wins = [w for w in windows(entries) if (w.get("tvdb_season") or 0) > 0]
+        if not wins:
+            return []
+        # Agreement means the packs break exactly where TMDb's seasons do.
+        if [w["end"] for w in wins] == _tmdb_bounds(all_seasons):
+            return []
+        packs = []
+        for w in wins:
+            start, end = from_absolute(w["start"], all_seasons), from_absolute(w["end"], all_seasons)
+            if not start or not end:
+                return []             # a window off the end of TMDb's grid: say nothing
+            packs.append({"grid_season": w["tvdb_season"], "from": list(start), "to": list(end)})
+    else:
+        cours = _cours(entries)
+        # One cour per TMDb season, each starting at episode 1, is agreement.
+        if len(cours) < 2 or all(c["offset"] == 0 for c in cours) and                 len({c["tmdb_season"] for c in cours}) == len(cours):
+            return []
+        packs = []
+        for i, c in enumerate(cours):
+            season, offset = c["tmdb_season"], c["offset"]
+            nxt = cours[i + 1] if i + 1 < len(cours) else None
+            last = (nxt["offset"] if nxt and nxt["tmdb_season"] == season
+                    else counts.get(season, 0))
+            if offset + 1 > last:
+                continue              # an announced cour TMDb hasn't listed yet
+            packs.append({"grid_season": c["grid_season"],
+                          "from": [season, offset + 1], "to": [season, last]})
+
+    for p in packs:
+        p["label"] = f"Season {p['grid_season']}"
+    return packs
+
+
+def pack_for(packs: list[dict], season: int, episode: int) -> Optional[dict]:
+    """Which pack holds TMDb's `SxxExx`, or None. Ordinary tuple comparison —
+    a pack spans a season boundary, so neither number decides on its own."""
+    here = (int(season), int(episode))
+    for p in packs or []:
+        if tuple(p["from"]) <= here <= tuple(p["to"]):
+            return p
+    return None
+
+
 # ── Decoding one pack ────────────────────────────────────────────────────────
 
 def decode_pack(entries: list[dict], all_seasons: Iterable[dict],
