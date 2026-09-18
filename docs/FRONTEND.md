@@ -49,7 +49,7 @@ Metro UI throughout — flat tiles, no rounded corners, bold uppercase typograph
 | 449–480 | Storage paths modal |
 | 482–550 | Episode page (full-screen, Netflix-style — hero / season tabs / episode cards / sticky action bar). Replaced the legacy bottom-sheet modal in Milestone 12 |
 | 552–575 | Stream file picker modal (`/api/stream/prepare` picker) |
-| 577–609 | Subtitle search modal (query box + **language filter** `#subSearchLang`, defaulting to `subtitleDefaultLang`, "All languages" option) |
+| 577–609 | Subtitle search modal (query box + **language filter** `#subSearchLang`, defaulting to `subtitleDefaultLang`, "All languages" option). Serves **both** surfaces: `openSubtitleModal()` with no argument works on whatever the TV is playing, `openSubtitleModal({itemId, filePath, label})` on one library file — the on-device player's **Find** button (`#lpFindSubBtn` → `lpFindSubtitles`) |
 | 611–615 | Global toast (visible from any tab — sits under navbar). `top-24 sm:top-16` because the mobile navbar is two rows. |
 | 618–671 | Navbar (tabs, VPN pill, SSE dot, profile avatar, settings gear). On mobile portrait the row is `flex-wrap`: row 1 = logo + status/profile/settings, row 2 = the three tabs (each `flex-1`, full-width). `sm:` and up collapses back to a single row. `ml-auto` on the right cluster doubles as the desktop spacer. Tab order swaps via `order-3 sm:order-2` on tabs and `order-2 sm:order-3` on the right cluster. |
 | 677–750 | Search tab + Library tab containers |
@@ -196,6 +196,15 @@ On the **TV kiosk** the settings panel is hidden, so the pause has its own entry
 ### Subtitle defaults (per-profile override + search filter)
 
 Profile Settings has a **Subtitles** `<select>` (`#psSubtitles`: Default / On / Off). `openProfileSettings` seeds it from the profile's `subtitles_on` (`true`→On, `false`→Off, null→Default); `saveSubtitlesPref()` POSTs `/api/profiles/{id}/subtitles` with `subtitles_on` = `true`/`false`/`null`. This is just the *preference* — VLC track selection happens server-side in `_apply_subtitle_policy` on the next play (see [GOTCHAS.md](GOTCHAS.md)), so there's no live VLC call here.
+
+`runSubtitleSearch` / `applySubtitle` follow `_subCtx` (the modal's context):
+library routes when it is set, the TV routes when it is not. With an empty query
+the server returns only subtitles it can confirm ARE this episode; results are
+badged **Exact File Match** (hash), **Best Match** (top of the ranking) or
+**Check Episode** (metadata couldn't confirm it). After a download the toast says
+what the timing check did — shifted by N seconds, verified, or "couldn't verify".
+`_lpOnSubtitleAdded` (driven by the `sub_added` relay) re-lists `/subs` and
+selects the new sidecar on whichever surface is playing that file.
 
 The **Find Subtitles** modal's language filter (`#subSearchLang`) is populated from a small common-language list plus `subtitleDefaultLang` (the admin preferred language, carried in every `state` snapshot as `subtitle_default_language`), and defaults to it (or "All languages" when Any). `runSubtitleSearch` passes the selected `lang` to `/api/subtitles/search`; the per-result download still uses each result's own language.
 

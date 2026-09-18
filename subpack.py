@@ -67,7 +67,10 @@ DEFAULT_FPS = 5
 MAX_FRAMES = 6000
 
 MANIFEST_NAME = "manifest.json"
-PACK_VERSION = 1
+# 2 (17.7.0): image packs before this always rendered subtitle stream 0
+# (`_filter_graph` overlaid a bare `[1:s]`), so any pack for a later stream is a
+# duplicate of the first. A manifest below PACK_VERSION is treated as missing.
+PACK_VERSION = 2
 
 _META_RE = re.compile(
     r"pts_time:(?P<t>[0-9.]+).*?"
@@ -217,7 +220,7 @@ def _run(cmd: list[str], cwd: Path) -> subprocess.CompletedProcess:
     )
 
 
-def _filter_graph(kind: str, sub_name: str, has_fonts: bool) -> str:
+def _filter_graph(kind: str, sub_name: str, has_fonts: bool, sub_idx: int = 0) -> str:
     """The render graph: draw subtitles over transparency, drop unchanged
     frames, then TEE the survivors to both the PNG writer and a bounding-box
     detector.
@@ -229,7 +232,11 @@ def _filter_graph(kind: str, sub_name: str, has_fonts: bool) -> str:
     Python.
     """
     if kind == "image":
-        draw = "[0:v][1:s]overlay=format=auto"
+        # `[1:s:<i>]`, not `[1:s]`: the bare form is "the first subtitle stream of
+        # input 1", so EVERY image pack rendered stream 0 whatever was asked for.
+        # A Blu-ray with Signs at :s:0 and Dialogue at :s:1 (most anime) produced
+        # two identical signs-only packs, and the dialogue was unreachable.
+        draw = f"[0:v][1:s:{sub_idx}]overlay=format=auto"
     else:
         fonts = ":fontsdir=fonts" if has_fonts else ""
         # `alpha=1` is LOAD-BEARING. The filter's alpha handling defaults to OFF,
@@ -301,7 +308,7 @@ def render_pack(
     if kind == "image":
         cmd += ["-i", src]          # bitmap subs come straight off the source
     cmd += [
-        "-filter_complex", _filter_graph(kind, sub_name, n_fonts > 0),
+        "-filter_complex", _filter_graph(kind, sub_name, n_fonts > 0, sub_idx),
         "-map", "[img]", "-fps_mode", "vfr", "-frame_pts", "1",
         "-frames:v", str(MAX_FRAMES), "-f", "image2", "c_%d.png",
     ]

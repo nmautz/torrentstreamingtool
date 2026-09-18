@@ -59,6 +59,8 @@ import relquality
 import reltracks
 import stt
 import subpack
+import subsearch
+import subsync
 import tmdbcache
 import updater
 import vpncheck
@@ -1331,6 +1333,7 @@ class AppState:
     stream_focus_sibling_bps: int = 512 * 1024            # settings.stream_focus.sibling_kbps × 1024 — total budget the OTHER torrents share while streaming (0 = no throttle)
     shotscan_current: str = ""                            # basename of the file the shot-boundary credit scan is decoding ("" = idle); surfaced in the admin Activity tab so the most expensive pass in the app is never invisible
     sub_auto_ai_path: str = ""                            # abs path of the AI sidecar currently auto-applied in VLC ("" = none); the upgrade loop watches this and swaps in a real sub when one arrives
+    sub_manual_at: float = 0.0                            # time.time() of the last manual subtitle pick on the TV — a background OpenSubtitles fetch that finishes AFTER this must not override the viewer's choice
     last_activity: float = 0.0                            # time.time() of last user-initiated interaction (drives scheduled-reboot idle check)
     prep_paused: bool = False                             # True ⇒ bulk stream-prep jobs hold (set by the non-admin Pause control / auto-prep falling edge)
     admin_prep_stop: bool = False                         # True ⇒ admin force-prep ("admin" queue) jobs cancel at the gate (set by the admin Stop control). Cleared when a new force-prep batch starts. Independent of prep_paused — force-prep ignores the bulk gate + activity-kill by design
@@ -2552,7 +2555,15 @@ def vlc_file_uri(p: Path) -> str:
     return rp.as_uri()
 
 
-# ── Subtitle Download (OpenSubtitles) ─────────────────────────────────────────
+# ── Subtitle search (OpenSubtitles legacy REST, keyless) ──────────────────
+#
+# The RULES live in two leaf modules, both measured on the eval kit in
+# tests/subs_eval/ (52 library episodes graded against their own embedded
+# English tracks): `subsearch.py` builds the queries, decides which results are
+# really this episode, ranks them, and reads/re-times subtitle files;
+# `subsync.py` aligns a subtitle to the episode's speech and says how sure it
+# is. This block is the I/O around them — HTTP, the daily download budget, the
+# on-disk sidecar and the bundle mirror. See docs/GOTCHAS.md § Subtitle search.
 
 def _opensubtitles_hash(path: Path) -> Optional[str]:
     """Compute the OpenSubtitles movie hash: 64-bit sum of filesize + first 64 KB
@@ -2608,62 +2619,417 @@ async def _current_playback_path() -> Optional[Path]:
     return None
 
 
-def _trim_subtitle_result(s: dict) -> dict:
+
+# ── the download budget ────────────────────────────────────────
+# OpenSubtitles allows ~200 downloads per IP per 24 h. Past that
+# dl.opensubtitles.org answers every link with an HTML page saying the limit is
+# "exceeded", and warns that continuing gets the IP firewalled. So: count what
+# we spend, stop well short, and when the ban page does appear, believe it.
+
+_OS_QUOTA_FILE = Path(__file__).resolve().parent / ".opensubs_quota.json"
+_OS_DAILY_CAP = 150
+_os_quota_lock = asyncio.Lock()
+_os_dl_cache: "dict[str, bytes]" = {}          # link -> bytes, so a retry is free
+
+
+class SubtitleQuotaError(RuntimeError):
+    """The daily download budget is spent, or OpenSubtitles has blocked us."""
+
+
+def _os_quota_read() -> dict:
+    try:
+        d = json.loads(_OS_QUOTA_FILE.read_text())
+    except (OSError, ValueError):
+        d = {}
+    now = time.time()
+    return {"downloads": [t for t in d.get("downloads", []) if now - float(t) < 86400],
+            "blocked_until": float(d.get("blocked_until") or 0)}
+
+
+def _os_quota_write(d: dict) -> None:
+    try:
+        _OS_QUOTA_FILE.write_text(json.dumps(d))
+    except OSError:
+        pass
+
+
+def _os_quota_status() -> dict:
+    d = _os_quota_read()
+    blocked = d["blocked_until"] if d["blocked_until"] > time.time() else 0
+    return {"used": len(d["downloads"]), "limit": _OS_DAILY_CAP, "blocked_until": blocked}
+
+
+async def _os_get_json(url: str) -> list:
+    """One legacy search. Redirects are NOT followed: the API answers any
+    non-canonical path with a 302 to the host `_`, and following that is how the
+    pre-17.7 code turned "your URL is wrong" into "no subtitles exist"."""
+    headers = {"User-Agent": subsearch.USER_AGENT, "X-User-Agent": subsearch.USER_AGENT}
+    try:
+        async with _http_client(timeout=20.0, follow_redirects=False) as c:
+            r = await c.get(url, headers=headers)
+    except Exception as exc:
+        log.info("subtitle search failed (%s): %s", url, exc)
+        return []
+    if r.status_code in (301, 302, 303, 307, 308):
+        log.warning("subtitle search URL was not canonical, OpenSubtitles bounced it: %s", url)
+        return []
+    if r.status_code != 200:
+        return []
+    try:
+        data = r.json()
+    except ValueError:
+        return []
+    return data if isinstance(data, list) else []
+
+
+async def _os_download(link: str) -> bytes:
+    """Fetch one subtitle file, spending a unit of the daily budget."""
+    host = (urlparse(link).hostname or "").lower()
+    if not (host == "opensubtitles.org" or host.endswith(".opensubtitles.org")):
+        raise ValueError("Invalid subtitle source.")
+    hit = _os_dl_cache.get(link)
+    if hit is not None:
+        return hit
+    async with _os_quota_lock:
+        q = _os_quota_read()
+        if q["blocked_until"] > time.time():
+            mins = int((q["blocked_until"] - time.time()) / 60)
+            raise SubtitleQuotaError(
+                f"OpenSubtitles has blocked downloads from this network for another {mins // 60}h{mins % 60:02d}m.")
+        if len(q["downloads"]) >= _OS_DAILY_CAP:
+            raise SubtitleQuotaError(f"Daily subtitle download limit reached ({_OS_DAILY_CAP}).")
+        q["downloads"].append(time.time())
+        _os_quota_write(q)
+    async with _http_client(timeout=30.0, follow_redirects=True) as c:
+        r = await c.get(link, headers={"User-Agent": subsearch.USER_AGENT})
+    body = r.content or b""
+    if b"exceeded" in body[:20000]:
+        q = _os_quota_read()
+        q["blocked_until"] = time.time() + 86400
+        _os_quota_write(q)
+        log.warning("OpenSubtitles download limit hit for this IP — backing off for 24 h")
+        raise SubtitleQuotaError("OpenSubtitles has blocked downloads from this network for 24 hours.")
+    if r.status_code != 200:
+        raise RuntimeError(f"subtitle download failed (HTTP {r.status_code})")
+    if body[:2] == b"\x1f\x8b":                  # gzip magic — the API serves .gz
+        body = gzip.decompress(body)
+    if len(_os_dl_cache) > 24:
+        _os_dl_cache.clear()
+    _os_dl_cache[link] = body
+    return body
+
+
+# ── what we are looking for ────────────────────────────────────
+
+_ffprobe_cache: "dict[tuple, dict]" = {}
+_energy_cache: "dict[tuple, list]" = {}
+
+
+async def _probe_cached(src: Path) -> dict:
+    try:
+        st = src.stat()
+    except OSError:
+        return {}
+    key = (str(src), st.st_size, int(st.st_mtime))
+    hit = _ffprobe_cache.get(key)
+    if hit is None:
+        hit = await asyncio.to_thread(_ffprobe_full, str(src)) or {}
+        if len(_ffprobe_cache) > 64:
+            _ffprobe_cache.clear()
+        _ffprobe_cache[key] = hit
+    return hit
+
+
+async def _imdb_id_for(meta: dict) -> str:
+    """The show/film's IMDb id — what the legacy API searches by. Movies carry it
+    on their TMDb details; TV needs `external_ids` (appended to the details call
+    since 17.7.0, fetched on demand for metadata cached before that)."""
+    if not isinstance(meta, dict):
+        return ""
+    got = str(meta.get("imdb_id") or "").strip()
+    if got:
+        return got
+    tid, kind = meta.get("tmdb_id"), (meta.get("tmdb_kind") or "tv")
+    if not tid or not await _tmdb_effective_key():
+        return ""
+    ext = await _tmdb_get(f"/{kind}/{int(tid)}/external_ids") or {}
+    return str(ext.get("imdb_id") or "")
+
+
+def _is_anime_meta(meta: dict) -> bool:
+    """Anime numbering matters here: the site files a long run by ABSOLUTE
+    episode number whatever TMDb's season split says."""
+    if _anime_facts(meta):
+        return True
+    return ((meta or {}).get("original_language") == "ja"
+            and "Animation" in ((meta or {}).get("genres") or []))
+
+
+def _original_audio_index(info: dict, meta: dict) -> Optional[int]:
+    """Which audio stream the subtitles were timed to — the ORIGINAL language.
+    An English dub speaks at different moments than the Japanese it replaced, so
+    aligning anime subs against the dub aligns them against the wrong thing."""
+    auds = info.get("audios") or []
+    if not auds:
+        return None
+    want = _canon_lang(str((meta or {}).get("original_language") or ""))
+    if want:
+        for a in auds:
+            if _canon_lang(str(a.get("language") or "")) == want:
+                return int(a.get("idx") or 0)
+    for a in auds:
+        if a.get("default"):
+            return int(a.get("idx") or 0)
+    return int(auds[0].get("idx") or 0)
+
+
+async def _subtitle_target(item: dict, fmeta: dict) -> dict:
+    """Everything the search + ranking needs to know about one library file."""
+    src = Path(fmeta.get("path") or "")
+    meta = item.get("metadata") or {}
+    info = await _probe_cached(src)
+    season = int(fmeta.get("season") or 0)
+    episode = int(fmeta.get("episode") or 0)
+    kind = meta.get("tmdb_kind") or ("tv" if episode else "movie")
+    if fmeta.get("bucket"):
+        # Specials / Movies / a spin-off folder: the item's season grid does not
+        # describe this file, so don't claim an episode number for it.
+        season, episode, kind = 0, 0, "movie"
+    duration = float(info.get("duration_sec") or 0) or None
+    size = int(fmeta.get("size_bytes") or 0)
+    file_hash = None
+    try:
+        if src.exists() and src.stat().st_size == size:
+            file_hash = await asyncio.to_thread(_opensubtitles_hash, src)
+    except OSError:
+        pass
     return {
-        "name": s.get("SubFileName") or s.get("MovieReleaseName") or "subtitle",
-        "lang": s.get("ISO639") or "",
-        "lang_name": s.get("LanguageName") or s.get("SubLanguageID") or "Unknown",
-        "downloads": int(s.get("SubDownloadsCount") or 0),
-        "matched_by": s.get("MatchedBy") or "",
-        "release": s.get("MovieReleaseName") or "",
-        "download_link": s.get("SubDownloadLink") or "",
+        "kind":      kind,
+        "imdb":      await _imdb_id_for(meta),
+        "title":     meta.get("title") or item.get("series") or item.get("title") or "",
+        "aka":       (meta.get("aka") or [])[:6],
+        "season":    season if kind == "tv" else None,
+        "episode":   episode if kind == "tv" else None,
+        "abs_no":    int(fmeta.get("abs_no") or 0) or None,
+        "anime":     _is_anime_meta(meta),
+        "duration":  duration,
+        "file_name": fmeta.get("name") or src.name,
+        "size":      size or None,
+        "hash":      file_hash,
+        "audio_idx": _original_audio_index(info, meta),
+        "path":      str(src),
     }
 
 
-async def _opensubtitles_search(
-    file_hash: Optional[str], file_size: Optional[int],
-    query: str, lang: str,
-) -> list[dict]:
-    """Query the keyless rest.opensubtitles.org API by hash and/or text. Hash
-    matches are exact; text matches are a fallback. Results are merged."""
-    headers = {
-        "User-Agent": settings.opensubtitles_user_agent,
-        "X-User-Agent": settings.opensubtitles_user_agent,
+def _loose_target(video: Path) -> dict:
+    """A target for a file the library doesn't know (a transient stream): title
+    and numbering parsed out of the filename, no IMDb id."""
+    season, episode = parse_season_episode(video.name)
+    parsed = parse_torrent_title(video.stem) or {}
+    title = (parsed.get("title") or "").strip()
+    if not title:
+        stem = re.sub(r"[\[\(][^\]\)]*[\]\)]", " ", video.stem).replace(".", " ")
+        title = re.split(r"(?i)\b(s\d{1,2}e\d{1,3}|\d{3,4}p|19\d\d|20\d\d)\b", stem)[0].strip()
+    size = None
+    try:
+        size = video.stat().st_size
+    except OSError:
+        pass
+    return {"kind": "tv" if episode else "movie", "imdb": "", "title": title, "aka": [],
+            "season": season or None, "episode": episode or None, "abs_no": episode or None,
+            "anime": False, "duration": None, "file_name": video.name, "size": size,
+            "hash": None, "audio_idx": None, "path": str(video)}
+
+
+# ── search ──────────────────────────────────────────────────
+
+def _trim_subtitle_result(r: dict) -> dict:
+    """One search result, shaped for the UI."""
+    rel = (r.get("MovieReleaseName") or "").strip()
+    return {
+        "id":            str(r.get("IDSubtitleFile") or ""),
+        "name":          r.get("SubFileName") or rel or "subtitle",
+        "lang":          r.get("ISO639") or "",
+        "lang3":         r.get("SubLanguageID") or "",
+        "lang_name":     r.get("LanguageName") or r.get("SubLanguageID") or "Unknown",
+        "downloads":     int(r.get("SubDownloadsCnt") or 0),
+        "matched_by":    r.get("MatchedBy") or "",
+        "release":       rel,
+        "format":        (r.get("SubFormat") or "").lower(),
+        "hi":            str(r.get("SubHearingImpaired")) == "1",
+        "show":          r.get("MovieName") or "",
+        "season":        int(r.get("SeriesSeason") or 0) or None,
+        "episode":       int(r.get("SeriesEpisode") or 0) or None,
+        "match":         bool(r.get("_match")),
+        "score":         r.get("_score", 0),
+        "download_link": r.get("SubDownloadLink") or "",
     }
-    lang_seg = f"/sublanguageid-{quote(lang)}" if lang else ""
-    urls: list[str] = []
-    if file_hash and file_size:
-        urls.append(
-            f"https://rest.opensubtitles.org/search"
-            f"/moviebytesize-{file_size}/moviehash-{file_hash}{lang_seg}"
-        )
-    if query:
-        urls.append(
-            f"https://rest.opensubtitles.org/search/query-{quote(query)}{lang_seg}"
-        )
+
+
+async def _subtitle_search(target: dict, lang: str, query: str = "") -> list[dict]:
+    """Ranked candidates for `target`. A free-text `query` searches for anything
+    (the user asked for it); otherwise only results whose metadata says they ARE
+    this episode survive — unless that leaves nothing, in which case the near
+    misses come back flagged `match: false` rather than an empty modal."""
+    urls = ([subsearch.free_text_url(query, lang)] if query
+            else subsearch.search_urls(target, lang))
     raw: list[dict] = []
-    async with _http_client(timeout=20.0, follow_redirects=True) as c:
-        for url in urls:
-            try:
-                r = await c.get(url, headers=headers)
-                if r.status_code == 200 and isinstance(r.json(), list):
-                    raw.extend(r.json())
-            except Exception:
-                pass
-    # Dedup by download link, prefer hash matches, then by download count
-    seen: set[str] = set()
-    trimmed: list[dict] = []
-    for s in raw:
-        t = _trim_subtitle_result(s)
-        link = t["download_link"]
-        if not link or link in seen:
+    for u in [u for u in urls if u]:
+        raw.extend(await _os_get_json(u))
+    ranked = subsearch.rank(target, raw, matched_only=not query)
+    if not ranked and not query:
+        ranked = subsearch.rank(target, raw, matched_only=False)
+    return ranked[:40]
+
+
+# ── verify + save ──────────────────────────────────────────
+
+async def _speech_energy_for(target: dict, budget: float) -> list:
+    """Voice-band loudness per 100 ms for the target's video, cached.
+
+    Prefers the HLS bundle's audio rendition when one is built: a few MB of AAC
+    on the same timeline instead of a multi-GB remux, so the decode takes
+    seconds rather than minutes."""
+    src = Path(target["path"])
+    try:
+        st = src.stat()
+    except OSError:
+        return []
+    key = (str(src), st.st_size, target.get("audio_idx"))
+    hit = _energy_cache.get(key)
+    if hit is not None:
+        return hit
+    probe, idx = src, target.get("audio_idx")
+    bundle = _offline_cache_dir(src)
+    if (bundle / "master.m3u8").exists():
+        auds = _read_meta(bundle).get("audios") or []
+        want = auds[idx] if (idx is not None and idx < len(auds)) else None
+        if want and (bundle / str(want.get("playlist") or "")).exists():
+            probe, idx = bundle / str(want["playlist"]), None
+    try:
+        energy = await asyncio.wait_for(
+            asyncio.to_thread(subsync.speech_energy, str(probe), idx), timeout=budget)
+    except Exception as exc:
+        log.info("subtitle alignment: could not read audio for %s (%s)", src.name, exc)
+        return []
+    if len(_energy_cache) > 3:
+        _energy_cache.clear()
+    _energy_cache[key] = energy
+    return energy
+
+
+async def _save_subtitle_file(video: Path, text: str, fmt: str, lang: str,
+                              fn=None) -> tuple[Path, str]:
+    """Write a sidecar next to the video, re-timed through `fn` if given.
+
+    Keeps the file's own format (ASS stays ASS, styling intact) and always writes
+    UTF-8. The pre-17.7 code wrote the raw bytes under a `.srt` name whatever
+    they were — which made cp1252 subs mojibake and ASS files (about half of
+    what the API serves for anime) unreadable to every non-VLC surface."""
+    if fn is not None or fmt == "sub":
+        text, fmt = subsearch.retime(text, fn or (lambda t: t))
+    dest = subsearch.sidecar_name(video, lang, fmt)
+    await asyncio.to_thread(dest.write_text, text, encoding="utf-8")
+    return dest, fmt
+
+
+async def _fetch_subtitle(target: dict, lang: str, *, candidates: list[dict],
+                          auto: bool, max_tries: int = 3,
+                          energy_budget: float = 600.0) -> Optional[dict]:
+    """Download, verify against the episode's speech, correct if needed, save.
+
+    `auto` (the playback fetch) only ever keeps a subtitle the audio VERIFIES —
+    a wrong one is worse than none, so it walks down the ranking and gives up
+    rather than guess. A manual pick is kept either way, flagged unverified.
+    Returns the saved-file info, or None."""
+    video = Path(target["path"])
+    energy: Optional[list] = None
+    for r in candidates[:max_tries]:
+        link = r.get("SubDownloadLink") or ""
+        if not link:
             continue
-        seen.add(link)
-        trimmed.append(t)
-    trimmed.sort(
-        key=lambda t: (0 if t["matched_by"] == "moviehash" else 1, -t["downloads"])
-    )
-    return trimmed[:40]
+        data = await _os_download(link)
+        text = subsearch.decode(data)
+        fmt = subsearch.sniff_format(text)
+        cues = subsearch.parse_cues(text, fps=float(r.get("MovieFPS") or 0) or 23.976)
+        if not fmt or len(cues) < 5:
+            log.info("subtitle candidate %s is not a usable subtitle file", r.get("SubFileName"))
+            continue
+        if energy is None and subsync.available():
+            energy = await _speech_energy_for(target, energy_budget)
+        fit = subsync.align(cues, energy) if energy else None
+        if auto and not (fit and fit["verified"]):
+            log.info("subtitle candidate %s not verified against the audio (conf %s)",
+                     r.get("SubFileName"), (fit or {}).get("conf"))
+            continue
+        code = _canon_lang(r.get("SubLanguageID") or r.get("ISO639") or lang or "und")
+        dest, saved_fmt = await _save_subtitle_file(
+            video, text, fmt, code, subsync.mapper(fit) if (fit and fit["move"]) else None)
+        return {"path": dest, "format": saved_fmt, "lang": code,
+                "verified": bool(fit and fit["verified"]),
+                "conf": (fit or {}).get("conf"),
+                "moved": ({"ratio": fit["ratio"], "offset": fit["offset"]}
+                          if (fit and fit["move"]) else None),
+                "result": _trim_subtitle_result(r)}
+    return None
+
+
+# ── the playback auto-fetch ─────────────────────────────────────
+
+_auto_sub_tried: "dict[str, float]" = {}       # path -> when we last came up empty
+_AUTO_SUB_RETRY = 12 * 3600
+
+
+def _start_auto_subtitle_fetch(video: Path, lang: str) -> None:
+    """Kick off a background subtitle fetch for the file now playing.
+
+    Only for a LIBRARY file: the search is only as good as the episode's
+    identity, and a transient stream has none worth guessing from. Nothing is
+    attached unless the audio verifies the subtitle IS this episode — a wrong
+    subtitle is worse than none — and a file that comes up empty isn't retried
+    for half a day, so a re-watch doesn't spend the download budget again."""
+    item_id, fpath = state.library_item_id, state.library_current_file
+    if not (item_id and fpath and Path(fpath) == video):
+        return
+    last = _auto_sub_tried.get(str(video), 0)
+    if time.time() - last < _AUTO_SUB_RETRY:
+        return
+    _auto_sub_tried[str(video)] = time.time()
+    _spawn_bg(_auto_subtitle_fetch(video, lang, item_id, fpath, time.time()))
+
+
+async def _auto_subtitle_fetch(video: Path, lang: str, item_id: str,
+                               file_path: str, started: float) -> None:
+    try:
+        lib = await get_library()
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        fmeta = next((f for f in (item or {}).get("files", []) if f.get("path") == file_path), None)
+        if not (item and fmeta):
+            return
+        target = await _subtitle_target(item, fmeta)
+        cands = await _subtitle_search(target, lang)
+        cands = [c for c in cands if c.get("_match")]
+        if not cands:
+            return
+        got = await _fetch_subtitle(target, lang, candidates=cands, auto=True)
+        if not got:
+            return
+        _auto_sub_tried.pop(str(video), None)          # found one — nothing to back off from
+        await _mirror_sub_into_bundle(video, got["path"], got["lang"], "OpenSubtitles")
+        await _announce_subtitle(item_id, file_path, got["path"])
+        # Only take the screen if the viewer hasn't chosen a track since, and
+        # this is still what's playing.
+        if state.sub_manual_at > started:
+            return
+        playing = await _current_playback_path()
+        if not playing or Path(playing) != video or state.tv_local_active:
+            return
+        await _attach_subtitle_to_vlc(got["path"], got["lang"], save_pref=False)
+        await broadcast("subtitle_upgraded", {"label": "Found subtitles online"})
+    except SubtitleQuotaError as exc:
+        log.info("auto subtitle fetch skipped: %s", exc)
+    except Exception:
+        log.exception("auto subtitle fetch failed for %s", video.name)
 
 
 # ── TMDb (show / episode metadata) ────────────────────────────────────────────
@@ -3353,7 +3719,11 @@ async def _tmdb_fetch_tv(show_id: int, seasons: Optional[list[int]]) -> dict:
     real (non-zero) season in the show's inventory, read off the same details
     call rather than a second one."""
     details = await _tmdb_get(
-        f"/tv/{show_id}", {"append_to_response": "alternative_titles,videos"}) or {}
+        f"/tv/{show_id}",
+        # `external_ids` rides along for the IMDb id: subtitle search is by IMDb
+        # id (the legacy OpenSubtitles API knows no TMDb), and a separate call
+        # per episode fetch would be one more round trip for one string.
+        {"append_to_response": "alternative_titles,videos,external_ids"}) or {}
     akas = _tmdb_akas((details.get("alternative_titles") or {}).get("results", []),
                       details.get("name") or "", details.get("original_name") or "")
     # The show's FULL season inventory, straight off /tv/{id} — every season TMDb
@@ -3379,6 +3749,7 @@ async def _tmdb_fetch_tv(show_id: int, seasons: Optional[list[int]]) -> dict:
     return {
         "tmdb_id":       show_id,
         "tmdb_kind":     "tv",
+        "imdb_id":       (details.get("external_ids") or {}).get("imdb_id") or "",
         "title":         details.get("name") or "",
         "original_language": details.get("original_language") or "",
         "original_title": details.get("original_name") or "",
@@ -3458,6 +3829,7 @@ async def _tmdb_fetch_movie(movie_id: int) -> dict:
                                       *alt_titles),
         "tmdb_id":       movie_id,
         "tmdb_kind":     "movie",
+        "imdb_id":       details.get("imdb_id") or "",   # subtitle search is by IMDb id
         **_movie_release_flags(details),
         "collection":    {"id": int(coll.get("id") or 0),
                           "name": coll.get("name") or "",
@@ -6440,11 +6812,12 @@ async def _apply_subtitle_policy(lib: dict, profile_id: str, file_path: str,
         await _select(real[0] if real else tracks[0])
         return
 
-    # (b) auto-search OpenSubtitles for the preferred language.
+    # (b) auto-search OpenSubtitles for the preferred language. Fire-and-forget:
+    #     the fetch verifies each candidate against this episode's speech (tens
+    #     of seconds of ffmpeg), so it attaches itself when it lands rather than
+    #     holding up track selection. Falls through to (c)/(d) meanwhile.
     if subs["auto_search"] and pref and video.exists():
-        new_id = await _auto_fetch_subtitle(video, pref)
-        if new_id is not None:
-            return
+        _start_auto_subtitle_fetch(video, pref)
 
     # (c) the viewer chose subs for this series but nothing matched — pick the
     #     least-surprising available track rather than silently reverting to
@@ -21408,6 +21781,7 @@ async def set_subtitle_track(track_id: str) -> JSONResponse:
         raise HTTPException(400, "VLC subtitle track ids are integers.")
     state.current_subtitle_track = track_id
     state.sub_auto_ai_path = ""                    # explicit pick → not auto-AI
+    state.sub_manual_at = time.time()              # …and a late auto-fetch must not undo it
     await vlc("subtitle_track", val=str(track_id))
     if state.library_item_id and state.library_profile_id and state.library_current_file:
         asyncio.create_task(_save_track_pref(
@@ -21465,125 +21839,290 @@ async def _remember_vlc_sub_pick(track_id: int) -> None:
         await _save_series_sub_sel(profile_id, _series_of_item(item), sel)
 
 
+async def _playing_context() -> tuple:
+    """(video, item, file_meta) for whatever surface is playing, or (None, …).
+
+    Covers VLC and the TV kiosk's own player; a library file resolves to its
+    item so the search can use the show's identity, and a transient stream comes
+    back with item/file None."""
+    video = await _current_playback_path()
+    item_id = state.library_item_id
+    fpath = state.library_current_file
+    if state.tv_local_active and state.tv_local_file_path:
+        item_id, fpath = state.tv_local_item_id, state.tv_local_file_path
+        if not video:
+            video = Path(fpath)
+    if not video:
+        return (None, None, None)
+    if item_id and fpath and Path(fpath) == video:
+        lib = await get_library()
+        item = next((it for it in lib["items"] if it["id"] == item_id), None)
+        fmeta = next((f for f in (item or {}).get("files", []) if f.get("path") == fpath), None)
+        if item and fmeta:
+            return (video, item, fmeta)
+    return (video, None, None)
+
+
+async def _effective_sub_lang(lang: str) -> str:
+    """`lang` is an OpenSubtitles 3-letter id, `"all"` for every language, or
+    blank ⇒ the admin's preferred language. Defaulting to the preferred language
+    is what surfaces English instead of burying it under a handful of foreign
+    hits."""
+    sel = (lang or "").strip().lower()
+    if sel == "all":
+        return ""
+    if sel:
+        return sel
+    return _subs_cfg(await get_library())["default_language"]
+
+
+def _subtitle_payload(target: dict, lang: str, ranked: list[dict], query: str) -> dict:
+    return {
+        "file":    target.get("file_name", ""),
+        "lang":    lang,
+        "query":   query,
+        "hash":    target.get("hash"),
+        "target":  {"title": target.get("title"), "season": target.get("season"),
+                    "episode": target.get("episode"), "imdb": target.get("imdb"),
+                    "identified": bool(target.get("imdb") or target.get("hash"))},
+        "quota":   _os_quota_status(),
+        "results": [_trim_subtitle_result(r) for r in ranked],
+    }
+
+
 @app.get("/api/subtitles/search")
 async def search_subtitles(query: str = "", lang: str = "") -> JSONResponse:
-    """Find subtitles for the file VLC is playing — by movie hash (exact) and by
-    name (fallback). `query` overrides the auto-derived name.
+    """Find subtitles for the file the TV is playing.
 
-    `lang` is the OpenSubtitles language filter: a 3-letter code, the literal
-    `"all"` for every language, or blank to fall back to the admin's preferred
-    subtitle language (`settings.subtitles.default_language`). Defaulting to the
-    preferred language is what surfaces English instead of burying it under a
-    handful of foreign hits. The effective filter is echoed back as `lang`."""
-    video = await _current_playback_path()
-    file_hash: Optional[str] = None
-    file_size: Optional[int] = None
-    file_name = ""
-    if video:
-        file_name = video.name
-        file_size = video.stat().st_size
-        file_hash = await asyncio.to_thread(_opensubtitles_hash, video)
-    q = query.strip() or (video.stem if video else "")
-    if not file_hash and not q:
-        raise HTTPException(409, "Nothing is playing and no search query was given.")
-    sel = lang.strip().lower()
-    if sel == "all":
-        sel = ""                                       # explicit all-languages
-    elif not sel:
-        sel = _subs_cfg(await get_library())["default_language"]   # default → preferred
-    results = await _opensubtitles_search(file_hash, file_size, q, sel)
-    return JSONResponse({"file": file_name, "hash": file_hash, "lang": sel, "results": results})
+    With no `query` this searches by the episode's identity (IMDb id + season +
+    episode, plus the file hash and the absolute number for anime) and returns
+    only results that ARE this episode. A `query` searches the site for that text
+    instead, unfiltered — the manual escape hatch."""
+    video, item, fmeta = await _playing_context()
+    if not video:
+        raise HTTPException(409, "Nothing is playing.")
+    sel = await _effective_sub_lang(lang)
+    q = query.strip()
+    target = await _subtitle_target(item, fmeta) if item else _loose_target(video)
+    ranked = await _subtitle_search(target, sel, q)
+    return JSONResponse(_subtitle_payload(target, sel, ranked, q))
 
 
 class SubtitleDownloadReq(BaseModel):
-    download_link: str
+    download_link: str = ""
+    subtitle_id: str = ""
     lang: str = ""
+    query: str = ""
 
 
-async def _download_and_attach_subtitle(
-    video: Path, link: str, lang: str, save_pref: bool = True,
-) -> tuple[Optional[int], Optional[Path]]:
-    """Download an OpenSubtitles .gz/.srt, save it as a sidecar next to `video`,
-    load it into VLC via `addsubtitle`, and select the newly-added track.
-
-    Returns (selected ES ID, saved sidecar path). Shared by the manual download
-    endpoint (`save_pref=True` → persists the pick as a per-file preference) and
-    the playback auto-search (`save_pref=False` → the choice stays a live policy
-    decision, so a later profile/admin subs-off toggle still wins). Raises
-    httpx/OS errors for the caller to map; the auto-search wrapper swallows them.
-    """
-    headers = {"User-Agent": settings.opensubtitles_user_agent}
-    async with _http_client(timeout=30.0, follow_redirects=True) as c:
-        r = await c.get(link, headers=headers)
-    r.raise_for_status()
-    data = r.content
-    if data[:2] == b"\x1f\x8b":       # gzip magic — OpenSubtitles serves .gz
-        data = gzip.decompress(data)
-
-    safe = re.sub(r"[^a-zA-Z]", "", lang)[:5].lower() or "sub"
-    dest = video.with_name(f"{video.stem}.{safe}.srt")
-    n = 2
-    while dest.exists():
-        dest = video.with_name(f"{video.stem}.{safe}.{n}.srt")
-        n += 1
-    dest.write_bytes(data)
-
-    # Load into VLC, then select the newly added subtitle track (highest ES ID).
+async def _attach_subtitle_to_vlc(dest: Path, lang: str, save_pref: bool = True) -> Optional[int]:
+    """Load a sidecar into VLC and select it (the newly added track has the
+    highest ES ID). Returns the selected ES ID."""
     await vlc("addsubtitle", val=str(dest.resolve()))
     await asyncio.sleep(0.6)
-    new_id: Optional[int] = None
     subs = await _vlc_subtitle_tracks()
-    if subs:
-        new_id = max(s["id"] for s in subs)
-        state.current_subtitle_track = new_id
-        state.vlc_sub_meta[new_id] = {
-            "lang": _canon_lang(lang), "ai": False, "path": str(dest)}
-        await vlc("subtitle_track", val=str(new_id))
-        if save_pref and state.library_item_id and state.library_profile_id and state.library_current_file:
-            asyncio.create_task(_save_track_pref(
-                state.library_item_id, state.library_profile_id,
-                state.library_current_file, subtitle=new_id,
-            ))
-            asyncio.create_task(_remember_vlc_sub_pick(new_id))
-    return new_id, dest
-
-
-async def _auto_fetch_subtitle(video: Path, lang: str) -> Optional[int]:
-    """Search OpenSubtitles for a `lang` subtitle for `video` and load the best
-    match into VLC. Best-effort: returns the selected ES ID or None. Used by the
-    playback subtitle-default policy when no preferred-language track is present."""
-    try:
-        file_size = video.stat().st_size
-        file_hash = await asyncio.to_thread(_opensubtitles_hash, video)
-        results = await _opensubtitles_search(file_hash, file_size, video.stem, lang)
-        results = [r for r in results if r.get("download_link")]
-        if not results:
-            return None
-        new_id, _ = await _download_and_attach_subtitle(
-            video, results[0]["download_link"], lang, save_pref=False)
-        return new_id
-    except Exception:
+    if not subs:
         return None
+    new_id = max(s["id"] for s in subs)
+    state.current_subtitle_track = new_id
+    state.sub_auto_ai_path = ""
+    state.vlc_sub_meta[new_id] = {"lang": _canon_lang(lang), "ai": False, "path": str(dest)}
+    await vlc("subtitle_track", val=str(new_id))
+    if save_pref and state.library_item_id and state.library_profile_id and state.library_current_file:
+        asyncio.create_task(_save_track_pref(
+            state.library_item_id, state.library_profile_id,
+            state.library_current_file, subtitle=new_id,
+        ))
+        asyncio.create_task(_remember_vlc_sub_pick(new_id))
+    return new_id
+
+
+async def _mirror_sub_into_bundle(src: Path, sidecar: Path, lang: str, label: str) -> None:
+    """Copy a found subtitle into the file's HLS bundle as `sub_<n>.vtt`.
+
+    Sidecar subs are served from the source file, so they only exist while the
+    phone is online — a downloaded episode would lose the subtitle the viewer
+    just picked. Writing it into the bundle (and into `meta.json`, marked
+    `external`) puts it in the offline download and in the native AVPlayer
+    playlist. Online responses filter `external` entries out, since those
+    surfaces already list the sidecar itself. Best-effort: a bundle that isn't
+    built, or a meta.json we can't parse, just means online-only as before."""
+    bundle = _offline_cache_dir(src)
+    if not (bundle / "master.m3u8").exists():
+        return
+    meta = _read_meta(bundle)
+    if not meta:
+        return
+    subs = list(meta.get("subtitles") or [])
+    if any(str(s.get("sidecar") or "") == sidecar.name for s in subs):
+        return
+    used = set()
+    for s in subs:
+        m = _SUB_VTT_RE.match(str(s.get("file") or ""))
+        if m:
+            used.add(int(m.group(1)))
+    n = next(i for i in range(0, 64) if i not in used)
+    try:
+        vtt = await _sub_to_vtt(sidecar)
+        await asyncio.to_thread((bundle / f"sub_{n}.vtt").write_text, vtt, encoding="utf-8")
+        entry = {"idx": n, "file": f"sub_{n}.vtt", "language": _canon_lang(lang),
+                 "title": label,
+                 "label": _track_label({"language": _canon_lang(lang), "title": label}, label),
+                 "styled": False, "external": True, "sidecar": sidecar.name}
+        if sidecar.suffix.lower() in (".ass", ".ssa"):
+            await asyncio.to_thread(shutil.copyfile, sidecar, bundle / f"sub_{n}.ass")
+            entry["styled"] = True
+            entry["ass_file"] = f"sub_{n}.ass"
+        subs.append(entry)
+        meta["subtitles"] = subs
+        await asyncio.to_thread((bundle / "meta.json").write_text,
+                                json.dumps(meta, indent=1), encoding="utf-8")
+    except Exception as exc:
+        hls_log.info("could not mirror %s into bundle %s: %s", sidecar.name, bundle.name, exc)
+
+
+async def _announce_subtitle(item_id: str, file_path: str, dest: Path) -> None:
+    """Tell the surfaces that a new sidecar exists: the kiosk rebuilds its
+    subtitle list and selects it, dashboards refresh theirs."""
+    await broadcast("tv_command", {"action": "sub_added", "name": dest.name,
+                                   "item_id": item_id, "file_path": file_path})
 
 
 @app.post("/api/subtitles/download")
 async def download_subtitle(req: SubtitleDownloadReq) -> JSONResponse:
-    """Download a chosen subtitle, save it next to the playing video, and load it
-    into VLC as a new (and selected) subtitle track."""
-    link = req.download_link.strip()
-    host = (urlparse(link).hostname or "").lower()
-    if not (host == "opensubtitles.org" or host.endswith(".opensubtitles.org")):
-        raise HTTPException(400, "Invalid subtitle source.")
-    video = await _current_playback_path()
+    """Download a chosen subtitle for what the TV is playing, correct its timing
+    against the episode's speech, save it next to the video and select it."""
+    video, item, fmeta = await _playing_context()
     if not video:
         raise HTTPException(409, "No file is currently playing.")
+    link = (req.download_link or "").strip()
+    sel = await _effective_sub_lang(req.lang)
+    target = await _subtitle_target(item, fmeta) if item else _loose_target(video)
+    cands = await _subtitle_search(target, sel, (req.query or "").strip())
+    pick = [r for r in cands
+            if (link and r.get("SubDownloadLink") == link)
+            or (req.subtitle_id and str(r.get("IDSubtitleFile")) == req.subtitle_id)]
+    if not pick and link:
+        pick = [{"SubDownloadLink": link, "SubLanguageID": req.lang or sel,
+                 "IDSubtitleFile": req.subtitle_id or "", "SubFileName": ""}]
+    if not pick:
+        raise HTTPException(404, "That subtitle is no longer listed.")
     try:
-        new_id, dest = await _download_and_attach_subtitle(video, link, req.lang, save_pref=True)
-    except OSError as e:
-        raise HTTPException(500, f"Could not save subtitle file: {e}")
-    except Exception as e:
-        raise HTTPException(502, f"Subtitle download failed: {e}")
-    return JSONResponse({"ok": True, "saved": dest.name if dest else None, "subtitle_track": new_id})
+        got = await _fetch_subtitle(target, sel, candidates=pick, auto=False,
+                                    max_tries=1, energy_budget=90.0)
+    except SubtitleQuotaError as exc:
+        raise HTTPException(429, str(exc))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except OSError as exc:
+        raise HTTPException(500, f"Could not save subtitle file: {exc}")
+    except Exception as exc:
+        raise HTTPException(502, f"Subtitle download failed: {exc}")
+    if not got:
+        raise HTTPException(502, "That subtitle could not be read.")
+    dest = got["path"]
+    new_id = None
+    if not state.tv_local_active:
+        new_id = await _attach_subtitle_to_vlc(dest, got["lang"])
+    if item and fmeta:
+        await _mirror_sub_into_bundle(Path(fmeta["path"]), dest, got["lang"], "OpenSubtitles")
+        await _announce_subtitle(item["id"], fmeta["path"], dest)
+    return JSONResponse({"ok": True, "saved": dest.name, "subtitle_track": new_id,
+                         "verified": got["verified"], "conf": got["conf"], "moved": got["moved"]})
+
+
+# ── the same thing for a library file, on any surface (phone, tablet, kiosk) ──
+
+@app.get("/api/library/{item_id}/subtitles/search")
+async def library_subtitle_search(request: Request, item_id: str, file_path: str = "",
+                                  lang: str = "", query: str = "",
+                                  profile_id: str = "") -> JSONResponse:
+    """Search subtitles for one library file, whatever is (or isn't) playing.
+    This is what the on-device player's Find Subtitles uses."""
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    _assert_item_visible(request, lib, item, profile_id)
+    fmeta = next((f for f in item.get("files", []) if f.get("path") == file_path), None)
+    if not fmeta:
+        raise HTTPException(404, "File not found in this item.")
+    sel = await _effective_sub_lang(lang)
+    target = await _subtitle_target(item, fmeta)
+    ranked = await _subtitle_search(target, sel, query.strip())
+    return JSONResponse(_subtitle_payload(target, sel, ranked, query.strip()))
+
+
+class LibrarySubFetchReq(BaseModel):
+    file_path: str
+    lang: str = ""
+    subtitle_id: str = ""
+    download_link: str = ""
+    query: str = ""
+    profile_id: str = ""
+
+
+@app.post("/api/library/{item_id}/subtitles/fetch")
+async def library_subtitle_fetch(request: Request, item_id: str,
+                                 req: LibrarySubFetchReq) -> JSONResponse:
+    """Download a subtitle for a library file: verified against the episode's
+    speech, timing-corrected, saved beside the video AND written into the file's
+    HLS bundle so an offline download carries it too.
+
+    With no `subtitle_id`/`download_link` this takes the best ranked candidate,
+    trying the next one when a download turns out not to be a subtitle."""
+    lib = await get_library()
+    item = next((it for it in lib["items"] if it["id"] == item_id), None)
+    if not item:
+        raise HTTPException(404, "Item not found.")
+    _assert_item_visible(request, lib, item, req.profile_id)
+    fmeta = next((f for f in item.get("files", []) if f.get("path") == req.file_path), None)
+    if not fmeta:
+        raise HTTPException(404, "File not found in this item.")
+    src = Path(fmeta["path"])
+    if not src.exists():
+        raise HTTPException(404, "File not on disk.")
+    sel = await _effective_sub_lang(req.lang)
+    target = await _subtitle_target(item, fmeta)
+    cands = await _subtitle_search(target, sel, (req.query or "").strip())
+    if req.subtitle_id or req.download_link:
+        cands = [r for r in cands
+                 if (req.download_link and r.get("SubDownloadLink") == req.download_link)
+                 or (req.subtitle_id and str(r.get("IDSubtitleFile")) == req.subtitle_id)]
+        if not cands and req.download_link:
+            cands = [{"SubDownloadLink": req.download_link, "SubLanguageID": req.lang or sel,
+                      "IDSubtitleFile": req.subtitle_id or "", "SubFileName": ""}]
+        if not cands:
+            raise HTTPException(404, "That subtitle is no longer listed.")
+    if not cands:
+        raise HTTPException(404, "No subtitles found for this episode.")
+    try:
+        got = await _fetch_subtitle(target, sel, candidates=cands, auto=False,
+                                    max_tries=1 if (req.subtitle_id or req.download_link) else 3,
+                                    energy_budget=120.0)
+    except SubtitleQuotaError as exc:
+        raise HTTPException(429, str(exc))
+    except ValueError as exc:
+        raise HTTPException(400, str(exc))
+    except OSError as exc:
+        raise HTTPException(500, f"Could not save subtitle file: {exc}")
+    except Exception as exc:
+        raise HTTPException(502, f"Subtitle download failed: {exc}")
+    if not got:
+        raise HTTPException(502, "No usable subtitle could be downloaded.")
+    dest = got["path"]
+    await _mirror_sub_into_bundle(src, dest, got["lang"], "OpenSubtitles")
+    subs = await asyncio.to_thread(_list_sidecar_subs, src, item_id)
+    # If this file is the one on the TV, put it on screen there too.
+    playing, pitem, pfmeta = await _playing_context()
+    if playing and Path(playing) == src and not state.tv_local_active:
+        await _attach_subtitle_to_vlc(dest, got["lang"])
+    await _announce_subtitle(item_id, req.file_path, dest)
+    return JSONResponse({"ok": True, "saved": dest.name, "verified": got["verified"],
+                         "conf": got["conf"], "moved": got["moved"],
+                         "result": got["result"], "subs": subs,
+                         "select": next((i for i, x in enumerate(subs)
+                                         if x.get("name") == dest.name), None)})
 
 
 @app.get("/api/state")
@@ -29835,6 +30374,14 @@ def _component_status_payload() -> dict:
     }
 
 
+def _bundle_subs_online(meta: dict) -> list:
+    """The bundle's subtitle list for an ONLINE player: without the entries
+    mirrored in from sidecar files (`external`), which those players already
+    list separately via `_list_sidecar_subs`. Offline downloads keep them — the
+    bundle is all they have. See `_mirror_sub_into_bundle`."""
+    return [x for x in (meta.get("subtitles") or []) if not x.get("external")]
+
+
 def _read_meta(out_dir: Path) -> dict:
     try:
         return json.loads((out_dir / "meta.json").read_text())
@@ -29954,7 +30501,7 @@ async def offline_prepare(item_id: str, req: OfflinePrepareReq) -> JSONResponse:
             "duration_sec":      meta.get("duration_sec", 0),
             "videos":            meta.get("videos", []),
             "audios":            meta.get("audios", []),
-            "subtitles":         meta.get("subtitles", []),
+            "subtitles":         _bundle_subs_online(meta),
             "skipped_image_subs": meta.get("skipped_image_subs", []),
             # Embedded fonts for styled ASS subs (libass-wasm). Empty for
             # non-styled / old bundles → the player uses the VTT <track>.
@@ -30363,7 +30910,7 @@ async def offline_job_status(job_id: str) -> JSONResponse:
         out["duration_sec"]      = meta.get("duration_sec", 0)
         out["videos"]            = meta.get("videos", [])
         out["audios"]            = meta.get("audios", [])
-        out["subtitles"]         = meta.get("subtitles", [])
+        out["subtitles"]         = _bundle_subs_online(meta)
         out["skipped_image_subs"] = meta.get("skipped_image_subs", [])
         out["bundle_size_bytes"] = await asyncio.to_thread(_dir_size_bytes, out_dir)
         # Include on-disk sidecars (incl. any generated `.ai.srt`) so the local
@@ -30652,6 +31199,12 @@ def _subpack_state(bundle_dir: Path, cache_key: str, sub_idx: int) -> dict:
             m = json.loads(man.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             m = {}
+        if int(m.get("version") or 1) < subpack.PACK_VERSION:
+            # Built by a renderer whose output we now know to be wrong (see
+            # subpack.PACK_VERSION) — report missing so it rebuilds on next use.
+            m = {}
+        if not m:
+            return {"state": "missing"}
         return {"state": "ready", "images": m.get("images", 0),
                 "cues": len(m.get("cues") or []), "bytes": m.get("bytes", 0),
                 "fonts": m.get("fonts", 0), "truncated": bool(m.get("truncated")),

@@ -1,5 +1,50 @@
 # Changelog
 
+## [17.7.0] — 2026-09-18
+**Subtitle search that finds the right episode, and puts it in sync.**
+
+* **Search actually reaches OpenSubtitles now.** Every search was built from the video's
+  filename, and the legacy API answers any non-canonical URL with a redirect to a dead host
+  — which the code read as "no subtitles exist". Measured on 52 library episodes: the old
+  search found **nothing for all 52**. Searches are now built from the episode's identity
+  (IMDb id + season + episode, the file hash, and the absolute number for anime) in the exact
+  form the API accepts.
+* **Results that aren't this episode are dropped.** A title search for "Death Note" also
+  returns the 2015 drama, *Death Note: New Generation* and *Death of the Pastor's Wife*;
+  "Infernal Affairs" returns its two sequels. Results must match the show (by IMDb id, or by
+  exact show name when there is none) and the episode, and forced-only and split-CD entries
+  are out. What's left is ranked by what predicts a subtitle that fits this file: a subtitle
+  whose last line falls past the end of the video is wrong 96 % of the time, the same source
+  (web vs Blu-ray vs DVD) is the strongest positive, and download count barely matters.
+* **Downloaded subtitles are checked against the episode's own audio, and shifted to match.**
+  The server measures where speech is (ffmpeg band-passes the voice range) and finds the
+  offset — and playback speed, for PAL-timed subtitles — where the subtitle's lines line up
+  with it, with a confidence score. On the eval set this took in-sync results from 103/290 to
+  156/290 while breaking one. The **automatic** fetch at playback keeps a subtitle only when
+  the audio verifies it, and walks down the ranking until one does: a wrong subtitle is worse
+  than none. End to end, per episode: **43 of 52 right and in sync** (5 within a second, 2
+  drifting, 1 wrong, 1 skipped), against 0 before.
+* **Find Subtitles works on phones and tablets, not just the TV.** The on-device player has a
+  Find button; what it downloads is saved beside the video and **written into the episode's
+  offline bundle**, so a subtitle picked on the sofa is there in a download later (and in iOS
+  background playback). Episodes already downloaded to a device need re-downloading to pick
+  one up.
+* **Subtitles are saved in the format they actually are.** About half of what the API serves
+  for anime is ASS, and all of it was being saved as `.srt` — unreadable to every surface but
+  VLC. Styling survives a timing correction, and files are written as UTF-8 (a cp1252
+  subtitle used to come back as mojibake).
+* **Downloads are budgeted.** OpenSubtitles allows about 200 per IP per day and then blocks
+  the IP for 24 hours. The server now counts what it spends (150/day), reuses what it has
+  already fetched, backs off for a day when the block page appears, and says so plainly
+  instead of failing.
+* **Fixed: image-subtitle packs always rendered the first subtitle track.** `subpack.py`
+  overlaid a bare `[1:s]`, so on a Blu-ray with "Signs" first and "Dialogue" second (most
+  anime) both packs were signs-only and the dialogue was unreachable. Packs built before this
+  rebuild themselves.
+* New leaf modules `subsearch.py` (queries, filtering, ranking, subtitle files) and
+  `subsync.py` (speech alignment), with `tests/test_subsearch.py` (47 cases) in `make test`.
+  The evaluation kit that produced every number above is `tests/subs_eval/`.
+
 ## [17.6.0] — 2026-09-18
 **The two loose ends of 17.5.0: episodes already stuck at "unwatched", and offline viewing.**
 

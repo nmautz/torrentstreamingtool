@@ -2408,6 +2408,15 @@ offline, no-HLS host, or the `proxied=1` online session):
 `sub_*.vtt` renditions inside the bundle) work offline, but host-side **sidecar**
 subs (served via `/subtitle?path=`, source-file-dependent) are online-only.
 
+> **Except one (17.7.0).** A subtitle found via Find Subtitles is written into
+> the bundle as the next free `sub_<n>.vtt` (plus `sub_<n>.ass` when styled) and
+> appended to `meta.json`'s `subtitles` with `"external": true` and the sidecar's
+> filename, so it rides along in an offline download and in the native AVPlayer
+> playlist. Online responses filter `external` entries out (`_bundle_subs_online`)
+> because those players list the sidecar itself — without that the track appears
+> twice. A device that downloaded the episode **before** the subtitle was found
+> has to re-download to get it. See `_mirror_sub_into_bundle`.
+
 **Offline progress + auto-sync (M3).** The offline `downloads.html` player now
 captures watch progress (the same `timeupdate`/`pause`/`seeked`/`ended`/`pagehide`
 events the dashboard uses) into the native **`OfflineStore`**

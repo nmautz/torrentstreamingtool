@@ -14,6 +14,7 @@ test:
 	python3 tests/test_animemap.py
 	python3 tests/test_http_clients.py
 	python3 tests/test_watchrule.py
+	python3 tests/test_subsearch.py
 
 clean:
 	rm -rf .venv __pycache__ .env

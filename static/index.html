@@ -3727,6 +3727,12 @@
         class="hidden flex-shrink-0 bg-purple-800 hover:bg-purple-700 text-white text-[10px] font-black uppercase tracking-wide px-2.5 py-1.5 transition-colors">
         AI
       </button>
+      <!-- Find subtitles online for THIS file (17.7.0). Available on every
+           device, not just the TV — the modal takes the file's context. -->
+      <button id="lpFindSubBtn" onclick="lpFindSubtitles()" title="Find subtitles online"
+        class="flex-shrink-0 bg-indigo-800 hover:bg-indigo-700 text-white text-[10px] font-black uppercase tracking-wide px-2.5 py-1.5 transition-colors">
+        Find
+      </button>
     </div>
     <!-- Clip — save & share the last N seconds of on-device playback. Prominent
          30s button + a quieter custom-length sibling. Always available here (the
@@ -16766,11 +16772,20 @@ function _populateSubSearchLangs(){
   sel.dataset.populated="1";
 }
 
-function openSubtitleModal(){
+// Which surface the modal is working for: null = the TV (VLC / kiosk, whatever
+// is playing there), or {itemId, filePath, label} = one library file, which is
+// how the on-device player uses it. The context decides which endpoints the
+// search and the download talk to; everything else is shared.
+let _subCtx = null;
+
+function openSubtitleModal(ctx){
+  _subCtx = ctx || null;
   document.getElementById("subtitleModal").classList.remove("hidden");
   document.getElementById("subSearchQuery").value="";
-  document.getElementById("subModalFile").textContent="";
-  document.getElementById("subGenRow").classList.toggle("hidden", !sttAvailable);
+  document.getElementById("subModalFile").textContent=(_subCtx && _subCtx.label) || "";
+  // AI generation drives VLC, so it belongs to the TV context only — the
+  // on-device player has its own AI button in the track row.
+  document.getElementById("subGenRow").classList.toggle("hidden", !sttAvailable || !!_subCtx);
   _populateSubSearchLangs();
   // Default the filter to the admin's preferred language ("all" if Any).
   document.getElementById("subSearchLang").value = subtitleDefaultLang || "all";
@@ -16848,8 +16863,16 @@ async function runSubtitleSearch(){
   const lang=document.getElementById("subSearchLang")?.value || "";
   const box=document.getElementById("subResults");
   box.innerHTML='<p class="text-xs text-gray-600 uppercase tracking-widest text-center py-6">Searching…</p>';
+  // With no query the server searches by the episode's identity (IMDb id +
+  // season + episode) and returns only subtitles that ARE this episode; typing
+  // a query searches the site for that text instead.
+  const url = _subCtx
+    ? `/api/library/${_subCtx.itemId}/subtitles/search?file_path=${encodeURIComponent(_subCtx.filePath)}`
+      + `&lang=${encodeURIComponent(lang)}&query=${encodeURIComponent(q)}`
+      + (profile && profile.id ? `&profile_id=${encodeURIComponent(profile.id)}` : "")
+    : `/api/subtitles/search?query=${encodeURIComponent(q)}&lang=${encodeURIComponent(lang)}`;
   try{
-    const r=await fetch(`/api/subtitles/search?query=${encodeURIComponent(q)}&lang=${encodeURIComponent(lang)}`);
+    const r=await fetch(url);
     if(!r.ok){
       const e=await r.json().catch(()=>({}));
       box.innerHTML=`<p class="text-xs text-red-400 text-center py-6">${escHtml(e.detail||"Search failed.")}</p>`;
@@ -16859,17 +16882,28 @@ async function runSubtitleSearch(){
     _subResults=d.results||[];
     if(d.file) document.getElementById("subModalFile").textContent=d.file;
     if(!_subResults.length){
-      box.innerHTML='<p class="text-xs text-gray-600 uppercase tracking-widest text-center py-6">No subtitles found.</p>';
+      const why = (d.target && !d.target.identified && !q)
+        ? "Nothing found for this episode. Try typing a title above."
+        : "No subtitles found.";
+      box.innerHTML=`<p class="text-xs text-gray-600 uppercase tracking-widest text-center py-6">${escHtml(why)}</p>`;
       return;
     }
-    box.innerHTML=_subResults.map((s,i)=>{
+    const strays = _subResults.some(x=>!x.match);
+    box.innerHTML=(strays?`<p class="text-[10px] font-bold uppercase tracking-widest text-amber-500 px-1 pb-1">
+        Some of these may be a different episode</p>`:"")
+      + _subResults.map((s,i)=>{
       const exact=s.matched_by==="moviehash";
+      const ep=(s.season&&s.episode)?`S${String(s.season).padStart(2,"0")}E${String(s.episode).padStart(2,"0")}`:"";
       return `<button onclick="applySubtitle(${i})"
         class="w-full text-left bg-gray-800 hover:bg-gray-700 active:bg-gray-600 border-l-2
-               ${exact?"border-green-600":"border-gray-700"} px-3 py-2.5 transition-colors">
-        <div class="flex items-center gap-2">
+               ${exact?"border-green-600":(s.match?"border-indigo-700":"border-amber-700")} px-3 py-2.5 transition-colors">
+        <div class="flex items-center gap-2 flex-wrap">
           <span class="text-[10px] font-black uppercase tracking-wide px-1.5 py-0.5 bg-indigo-900 text-indigo-300 flex-shrink-0">${escHtml(s.lang_name)}</span>
-          ${exact?'<span class="text-[9px] font-black uppercase tracking-widest text-green-500 flex-shrink-0">Exact Match</span>':""}
+          ${exact?'<span class="text-[9px] font-black uppercase tracking-widest text-green-500 flex-shrink-0">Exact File Match</span>':""}
+          ${(!exact&&i===0&&s.match)?'<span class="text-[9px] font-black uppercase tracking-widest text-indigo-400 flex-shrink-0">Best Match</span>':""}
+          ${s.match?"":'<span class="text-[9px] font-black uppercase tracking-widest text-amber-500 flex-shrink-0">Check Episode</span>'}
+          ${s.hi?'<span class="text-[9px] font-black uppercase tracking-widest text-gray-500 flex-shrink-0">SDH</span>':""}
+          ${ep?`<span class="text-[9px] font-mono text-gray-600 flex-shrink-0">${ep}</span>`:""}
           <span class="text-[10px] text-gray-600 ml-auto flex-shrink-0">${s.downloads.toLocaleString()} dl</span>
         </div>
         <div class="text-xs text-gray-300 mt-1 truncate">${escHtml(s.name)}</div>
@@ -16881,14 +16915,30 @@ async function runSubtitleSearch(){
   }
 }
 
+// What the timing check did, in a sentence the viewer can act on.
+function _subFetchMsg(d){
+  if(d.moved){
+    const off=Number(d.moved.offset||0);
+    const speed=(d.moved.ratio&&Math.abs(d.moved.ratio-1)>0.001)?" and its speed corrected":"";
+    return `Subtitles added — shifted ${off>0?"+":""}${off.toFixed(1)}s to match the audio${speed}.`;
+  }
+  if(d.verified) return "Subtitles added — timing checked against the audio.";
+  return "Subtitles added. Couldn't verify the timing — check they line up.";
+}
+
 async function applySubtitle(i){
   const s=_subResults[i]; if(!s) return;
   const box=document.getElementById("subResults");
-  box.innerHTML='<p class="text-xs text-gray-600 uppercase tracking-widest text-center py-6">Downloading subtitle…</p>';
+  const q=document.getElementById("subSearchQuery").value.trim();
+  box.innerHTML='<p class="text-xs text-gray-600 uppercase tracking-widest text-center py-6">Downloading and checking timing…</p>';
+  const url=_subCtx?`/api/library/${_subCtx.itemId}/subtitles/fetch`:"/api/subtitles/download";
+  const body=_subCtx
+    ? {file_path:_subCtx.filePath, subtitle_id:s.id, download_link:s.download_link, lang:s.lang3||s.lang, query:q, profile_id:(profile&&profile.id)||""}
+    : {download_link:s.download_link, subtitle_id:s.id, lang:s.lang3||s.lang, query:q};
   try{
-    const r=await fetch("/api/subtitles/download",{
+    const r=await fetch(url,{
       method:"POST",headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({download_link:s.download_link,lang:s.lang}),
+      body:JSON.stringify(body),
     });
     closeSubtitleModal();
     if(!r.ok){
@@ -16896,8 +16946,14 @@ async function applySubtitle(i){
       showAlert(e.detail||"Subtitle download failed.","error");
       return;
     }
-    showAlert("Subtitle added and selected.","success");
-    loadTracks();
+    const d=await r.json();
+    showAlert(_subFetchMsg(d), d.verified?"success":"info");
+    if(_subCtx){
+      // On-device: swap in the new sidecar and show it without touching the stream.
+      if(d.subs) _lpRebuildSidecars(d.subs, d.select!=null?`sidecar:${d.select}`:null);
+    }else{
+      loadTracks();
+    }
   }catch(_){
     closeSubtitleModal();
     showAlert("Subtitle download failed.","error");
@@ -21558,7 +21614,8 @@ function _lpRenderTrackRows() {
   document.getElementById("lpSubSelect").classList.toggle("hidden", subN === 0);
   document.getElementById("lpQualityRow").classList.toggle("hidden", !qShow);
   document.getElementById("lpAudioRow").classList.toggle("hidden", audN <= 1);
-  document.getElementById("lpSubRow").classList.toggle("hidden", subN === 0 && !canGen);
+  // The Find button is always meaningful, so the row shows for any loaded file.
+  document.getElementById("lpSubRow").classList.toggle("hidden", !lp.itemId);
   // The track row's visibility is owned by the gear toggle (.lp-opts on
   // #localPlayer — see lpToggleOpts), not by track counts: it always carries
   // the Clip row, so the gear button is always meaningful.
@@ -21605,6 +21662,28 @@ async function lpGenerateSubs() {
     _lpRenderTrackRows();
     showAlert(err.message || "Could not start generation.", "error");
   }
+}
+
+// Open Find Subtitles for the file this device is playing. Same modal as the
+// TV's, pointed at a library file instead of "whatever VLC has open".
+function lpFindSubtitles(){
+  if(!lp.itemId || !lp.filePath) return;
+  openSubtitleModal({itemId: lp.itemId, filePath: lp.filePath,
+                     label: (lp.filePath.split(/[\\/]/).pop() || "")});
+}
+
+// A subtitle was downloaded for a file (by this device, the TV, or the playback
+// auto-fetch). If it's the file we're playing, pick it up without reloading.
+async function _lpOnSubtitleAdded(itemId, filePath, name){
+  if(!lp.itemId || lp.itemId !== itemId || lp.filePath !== filePath) return;
+  try{
+    const r = await fetch(`/api/library/${itemId}/subs?file_path=${encodeURIComponent(filePath)}`);
+    if(!r.ok) return;
+    const d = await r.json();
+    const subs = d.subs || [];
+    const i = subs.findIndex(x => x.name === name);
+    _lpRebuildSidecars(subs, i >= 0 ? `sidecar:${i}` : null);
+  }catch(_){}
 }
 
 // Replace the on-disk sidecar <track>s from a fresh `subs` list (e.g. after STT
@@ -24948,10 +25027,15 @@ function connectSSE(){
   es.addEventListener("tv_command",e=>{
     _noteSSEMsg();
     // Backend-relayed remote press for the TV kiosk (the key itself was
-    // suppressed on the host). Only the ?tv=1 kiosk acts on it.
-    if(!TV_MODE) return;
+    // suppressed on the host). Only the ?tv=1 kiosk acts on those — but
+    // `sub_added` is for every surface, so the TV_MODE gate moved inside.
     try{
       const d=JSON.parse(e.data||"{}");
+      // Not a remote press: a subtitle finished downloading for some file. Every
+      // dashboard checks it (not just the kiosk), since any of them may be
+      // playing that file on-device.
+      if(d.action==="sub_added"){ _lpOnSubtitleAdded(d.item_id, d.file_path, d.name); return; }
+      if(!TV_MODE) return;
       if(d.action==="back"){ _tvBack(); return; }
       // Remote transport for on-device TV playback. The host SUPPRESSED these
       // keys (they must not also reach Chrome as media keys and act twice), so
@@ -25328,6 +25412,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.6.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.7.0</div>
 </body>
 </html>

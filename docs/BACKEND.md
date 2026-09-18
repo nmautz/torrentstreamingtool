@@ -15,7 +15,7 @@
 | 263–291 | Admin auth (`_check_admin`, `_require_admin`, `_pin_hash`) |
 | 294–373 | qBittorrent client: `qreq`, `qbit_add_magnet`, `qbit_streaming_mode`, `qbit_info`, `qbit_files`, `qbit_delete`, `_hash_backs_library_item` / `_qbit_delete_transient` (ownership-guarded teardown delete), `qbit_set_file_priority` |
 | 376–448 | VLC client: `vlc()`, `vlc_status`, `vlc_playlist_uri`, `uri_to_path`, `vlc_file_uri` (builds every VLC input MRL; on Windows swaps over-MAX_PATH paths for their 8.3 short form — see [GOTCHAS.md](GOTCHAS.md)) |
-| 450–552 | OpenSubtitles: `_opensubtitles_hash`, `_current_playback_path`, `_opensubtitles_search`. Download/attach + playback auto-search helpers live with the routes: `_download_and_attach_subtitle`, `_auto_fetch_subtitle` |
+| 450–800 | **Subtitle search I/O** around [subsearch.py](../subsearch.py) + [subsync.py](../subsync.py): `_opensubtitles_hash`, `_current_playback_path`; the download budget (`_os_quota_*`, `SubtitleQuotaError`, `_os_get_json`, `_os_download`); the target (`_probe_cached`, `_imdb_id_for`, `_is_anime_meta`, `_original_audio_index`, `_subtitle_target`, `_loose_target`); `_subtitle_search`; verify + save (`_speech_energy_for`, `_save_subtitle_file`, `_fetch_subtitle`); and the playback auto-fetch (`_start_auto_subtitle_fetch`, `_auto_subtitle_fetch`). Attach/mirror/route helpers live with the routes |
 | 555–773 | VLC window control (Windows ctypes / macOS osascript / Linux xdotool): focus, fullscreen, minimize. Windows focus path first minimizes all non-VLC top-level windows so the player owns the screen on TV playback. |
 | 776–847 | VLC restart + `_retry_task` |
 | 793–940 | Utilities: `extract_hash`, `parse_season_episode` (thin wrapper over [episodes.py](../episodes.py)), `build_file_list` (item-level attribution via `episodes.attribute_paths`), `find_resume_hint` |
@@ -38,7 +38,7 @@
 | 2485–2622 | Routes: `/api/stream`, `/api/stop`, `/api/retry` |
 | 2624–2796 | Routes: VLC controls — pause, volume, seek, prev/next |
 | 2799–2874 | Routes: VLC tracks (audio/subtitle) |
-| 2877–2958 | Routes: subtitle search/download (OpenSubtitles) |
+| 2877–3100 | Routes: subtitle search/download for the TV (`/api/subtitles/*`) and for a library file on any device (`/api/library/{id}/subtitles/*`), plus `_playing_context`, `_effective_sub_lang`, `_attach_subtitle_to_vlc`, `_mirror_sub_into_bundle`, `_announce_subtitle` |
 | 2961–3041 | Routes: state, library paths, disk space |
 | 3044–3136 | Routes: library file download (single file + ZIP stream) |
 | 3139–3162 | Route: `/api/events` (SSE) |

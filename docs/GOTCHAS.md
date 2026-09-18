@@ -3401,6 +3401,75 @@ things worth keeping in mind if you touch it:
   `omit_level` retry rung re-runs with no `-level` if the encoder still objects
   — so a bad probe can't permanently wedge a file.
 
+## Subtitle search: four traps, all measured
+
+The numbers here come from `tests/subs_eval/` — 52 library episodes, each graded
+against its own embedded English track. Re-run it before changing a weight in
+`subsearch.py` or a constant in `subsync.py`.
+
+**1. The legacy API's URL is canonical or it is nothing.** `rest.opensubtitles.org`
+answers any non-canonical search path with a **302 to the host `_`**, which every
+HTTP client reports as a connection error — indistinguishable, to the pre-17.7
+code, from "this episode has no subtitles". Canonical means: path params in
+alphabetical order, `imdbid` **zero-padded to 7 digits**, `query` lower-case with
+`+` for spaces and **no apostrophes**. Searching by the raw filename stem (upper
+case, brackets) found **nothing for 52/52** eval targets. `subsearch.legacy_url`
+builds it; `_os_get_json` does **not** follow redirects, so a mistake shows up in
+the log as "not canonical" instead of as an empty result list.
+
+**2. Matching metadata is not matching the episode.** A title search for "Death
+Note" returns the 2015 drama, *Death Note: New Generation* and *Death of the
+Pastor's Wife*; "Infernal Affairs" returns its sequels; a show with no IMDb id
+matches *Chihayafuru: Full Circle* against *Chihayafuru*. Worse, the site's own
+metadata lies: "CG R2 - 01" (Code Geass **season 2**) is filed as S1E1, and
+Futurama's DVD order disagrees with its broadcast order. Filtering fixes the
+first kind; only the audio settles the second — which is why the automatic fetch
+never keeps a subtitle the speech hasn't verified.
+
+**3. A subtitle that says "eng" is not necessarily SRT, or UTF-8.** About half of
+what the API serves for anime is **ASS**; the old code saved every download as
+`<stem>.<lang>.srt` whatever it was, so VLC coped (it sniffs content) and every
+other surface — the phone, the HLS bundle, the browser — got an unreadable file.
+`subsearch.sniff_format` reads the content; `retime` rewrites timestamps **in the
+file's own format**, so an ASS file keeps its positioning, fonts and karaoke. The
+sidecar is tagged `.opensubs.` — **not** `.os.`, which `_parse_sub_lang` would
+read as Ossetian.
+
+**4. ~200 downloads per IP per day, then a 24-hour ban.** Past the cap
+`dl.opensubtitles.org` serves an HTML page saying the limit is "exceeded" and
+warns that continuing gets the IP firewalled. Searching stays fine, so the
+failure looks like "downloads broke". `_os_download` counts what it spends
+(`.opensubs_quota.json`, 150/day), reuses anything already fetched, and on the
+ban page sets a 24 h backoff rather than hammering. **This bit us during
+development**: the eval kit spent the household's allowance and the box couldn't
+download subtitles for a day.
+
+### Aligning to the wrong audio is worse than not aligning
+
+Subtitles are timed to the **original-language** audio. Align anime subs against
+the English dub and every line lands where the dub speaks, not where the subs
+were written — `_original_audio_index` picks the stream matching TMDb's
+`original_language`. Alignment also prefers the file's **HLS bundle audio** when
+one exists: a few MB of AAC on the same timeline, instead of demuxing a 20 GB
+remux for its audio track.
+
+Two guards keep alignment from doing harm: a correction is applied only when the
+fit is confident **and** at least 1 s (`subsync.ACCEPT` / `MOVE`) — nudging an
+already-correct subtitle by 0.4 s is a regression — and a speed change must beat
+1.0× by 25 %, or a PAL guess wins on noise. For the record, `alass` (the usual
+tool for this) was measured on the same 290 candidates and rejected: 132 in sync
+vs 156, while breaking 25 good subtitles vs 1, and it moved some episodes' own
+embedded tracks by 15–45 s.
+
+## A `[1:s]` in an ffmpeg filter graph is "the FIRST subtitle stream"
+
+`subpack.py`'s image branch overlaid `[0:v][1:s]`, so every bitmap pack rendered
+subtitle stream **0** no matter which `sub_idx` was asked for. On a Blu-ray with
+"Signs / Songs" at `:s:0` and "Dialogue" at `:s:1` — the normal anime layout —
+both packs came out signs-only, with the right manifest title on the wrong
+pictures, and the dialogue track was unreachable. The stream-specific form is
+`[1:s:<i>]`. Fixed in 17.7.0; `PACK_VERSION` 2 makes older packs rebuild.
+
 ## See also
 
 ### `pointer-events:none` is not a guard — it only stops a mouse
