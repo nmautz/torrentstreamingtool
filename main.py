@@ -7211,7 +7211,8 @@ async def _stream_throttle_release(keep: Optional[set] = None) -> None:
     state.stream_throttled_count = len(_stream_throttled)
 
 
-# Startup passes for the cap sweep, in seconds from launch. Several, because
+# Gaps between startup passes of the cap sweep, in seconds (~5.5 min in all,
+# cumulative: 0, 20, 65, 155, 335). Several passes, because
 # qBittorrent is still loading its torrents for a minute or two after a reboot
 # (the same trap that makes an immediate `qbit_add_magnet` fail) — one pass sees
 # an empty or partial list and silently releases nothing. The sibling sweep

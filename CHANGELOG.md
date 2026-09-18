@@ -16,7 +16,8 @@
   download started in the first minute after a reboot fail with an empty error). It got an
   empty list, released nothing, and reported success. The reboot test failed identically
   before and after the fix, which is what gave it away.
-* It now runs detached, over several passes across the first three minutes, and bails
+* It now runs detached, over several passes spread across roughly the first five and a half
+  minutes, and bails
   immediately if a real stream starts in the meantime so it can never release a live
   throttle. It is idempotent — a released torrent no longer carries the tag — which is
   what makes repeated passes safe.
