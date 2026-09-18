@@ -3515,6 +3515,27 @@ def _reattribute_item_files(item: dict, metadata: Optional[dict]) -> bool:
     return changed
 
 
+def _resettle_files(item: dict) -> bool:
+    """Re-run passes 2 and 3 after `build_file_list` has rebuilt an item's files.
+
+    `build_file_list` is **pass 1 only** — it re-reads the release's own labels
+    off the filenames, which drops both `abs_no` and any anime remapping built
+    on top of them. The download monitor rebuilds on every 5 s tick, so without
+    this a corrected anime pack flips straight back to the release's numbering
+    and reaches `ready` uncorrected: measured on the box, Hunter x Hunter lost
+    its absolute numbers within one tick of gaining them.
+
+    Deriving it again beats carrying the old values forward (the way the
+    `compressed` marker is), because the decode is a pure function of the
+    release labels the rebuild just produced — a stale `abs_no` carried onto a
+    file list that changed underneath would be worse than none.
+
+    A no-op for an item with no metadata yet; those settle when their metadata
+    first binds.
+    """
+    return _reattribute_item_files(item, item.get("metadata") or {})
+
+
 async def _settle_attribution(lib: dict, item: dict,
                               meta: Optional[dict]) -> Optional[dict]:
     """Run the absolute-numbering pass against `meta`, persist it, and top up the
@@ -9348,6 +9369,7 @@ async def _repair_empty_ready_items(lib: dict) -> list:
                                                    "message": item["error"]})
             continue
         item["files"] = new_files
+        _resettle_files(item)
         item["size_bytes"] = sum(f["size_bytes"] for f in new_files)
         log.info("Repaired empty ready item %r: %d file(s) from qBit (%s)",
                  item.get("title", ""), len(new_files), names)
@@ -10316,6 +10338,7 @@ async def _apply_race_upgrade(item_id: str) -> None:
             cur["torrent_hash"] = hq_hash
             cur["title"] = hq.get("title", "") or cur.get("title", "")
             cur["files"] = new_files
+            _resettle_files(cur)
             cur["size_bytes"] = sum(f.get("size_bytes", 0) for f in new_files)
             cur["download_source"] = {"magnet": hq.get("magnet", ""),
                                       "save_path": save_path}
@@ -10601,6 +10624,7 @@ async def library_download_monitor() -> None:
                         if nf.get("path") in prev_compressed:
                             nf["compressed"] = True
                     item["files"] = new_files
+                    _resettle_files(item)
                     item["size_bytes"] = sum(f["size_bytes"] for f in new_files)
 
                 qstate = info.get("state", "")
@@ -15009,6 +15033,7 @@ async def _commit_item_move(item_id: str, old_files: list[dict],
                 nf = dict(nf, validation=prev["validation"])
             merged.append(nf)
         it["files"] = merged
+        _resettle_files(it)
 
 
 async def _settle_series_move(primary_id: str, snapshot: list[dict], dest: str) -> None:

@@ -126,7 +126,14 @@ Three consequences worth knowing before touching this code:
    Same reason pass 3 skips any season **pass 2** resolved: those numbers are already TMDb slots.
    A fansub batch numbered 059-075 came out of pass 2 as S1E59..S2E13, and pass 3 slid it to S2E9
    before `abs_resolved` was added.
-3. **A gap at a grid boundary is not a gap in a release.** TMDb says HxH S1 has 62 episodes and
+3. **`build_file_list` is pass 1 only, and the download monitor calls it every 5 s.** A rebuild
+   re-reads the release's own labels off the filenames, dropping `abs_no` and the remap with it —
+   measured on the box, a corrected Hunter x Hunter lost its absolute numbers within one tick.
+   Every site that replaces `item["files"]` from a rebuild must call `_resettle_files(item)` after
+   it. Re-deriving beats carrying the values forward the way `compressed` is: the decode is a pure
+   function of the labels the rebuild just produced, and a stale `abs_no` on a file list that
+   changed underneath is worse than none.
+4. **A gap at a grid boundary is not a gap in a release.** TMDb says HxH S1 has 62 episodes and
    every "S01" pack on every indexer stops at 58, so the library will show 59-62 missing until the
    next pack lands. That is honest — you don't have them — but the **Find sources** button must ask
    for the absolute number. Searching `Hunter x Hunter S01E59` returns exactly one thing on any
