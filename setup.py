@@ -567,6 +567,13 @@ def _portable_install_whisper_windows() -> dict:
 
 
 # ── Auto-install whisper.cpp + model (auto-subtitle / STT dep) ─────────────
+# AI subtitles were retired in 17.0.0 — the transcripts were not good enough to
+# offer — so setup no longer downloads ~1.5 GB for a feature that ships
+# disabled. Everything below still works: set this False and unhide the admin
+# card to bring the feature back. See docs/STT.md.
+AI_SUBTITLES_RETIRED = True
+
+
 def install_stt_deps(tools: dict) -> dict:
     """Offer to install whisper.cpp + a multilingual GGML model for the
     auto-subtitle (speech-to-text) feature. No-op if both are already detected.
@@ -575,6 +582,8 @@ def install_stt_deps(tools: dict) -> dict:
     subtitle. It's optional — declining only disables auto/AI subtitles; every
     other feature works without it.
     """
+    if AI_SUBTITLES_RETIRED:
+        return tools
     if tools.get("whisper") and tools.get("whisper_model"):
         return tools
 

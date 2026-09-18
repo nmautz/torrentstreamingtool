@@ -7060,7 +7060,10 @@ def _stt_cfg(lib: dict) -> dict:
     """
     cfg = (lib.get("settings", {}) or {}).get("stt") or {}
     return {
-        "enabled":          bool(cfg.get("enabled", True)),
+        # Retired in 17.0.0 — the transcripts were not good enough to offer.
+        # The engine and its endpoints stay in the tree, off unless an admin
+        # turns them back on (and installs whisper again). See docs/STT.md.
+        "enabled":          bool(cfg.get("enabled", False)),
         "default_language": _subs_cfg(lib)["default_language"],
         "translate":        bool(cfg.get("translate", True)),
     }
@@ -12296,6 +12299,68 @@ async def subtitle_upgrade_loop() -> None:
             pass
 
 
+# ── AI subtitles: retirement cleanup ──────────────────────────────────────────
+AI_SUBS_RETIRED_MARKER = Path(__file__).parent / ".ai_subs_retired"
+
+
+def _sweep_ai_subs_sync(paths: list[str]) -> tuple[int, int]:
+    """Delete every `<stem>.<lang>.ai[.<model>].srt` sidecar next to these files,
+    and the bundled whisper.cpp. Returns (subs removed, bytes freed). Blocking —
+    call it in a thread."""
+    removed = freed = 0
+    seen: set[str] = set()
+    for p in paths:
+        try:
+            src = Path(p)
+            if str(src.parent) in seen and not src.exists():
+                continue
+            seen.add(str(src.parent))
+            for sub, _model in stt._list_ai_subs(src):
+                size = sub.stat().st_size
+                sub.unlink()
+                removed += 1
+                freed += size
+        except OSError:
+            continue
+    whisper_dir = Path(__file__).parent / "tools" / "whisper"
+    if whisper_dir.exists():
+        try:
+            freed += sum(f.stat().st_size for f in whisper_dir.rglob("*") if f.is_file())
+            shutil.rmtree(whisper_dir, ignore_errors=True)
+        except OSError:
+            pass
+    return removed, freed
+
+
+async def _retire_ai_subtitles() -> None:
+    """One-time cleanup for the retired AI-subtitle feature (17.0.0).
+
+    Turns the setting off, deletes the sidecars whisper produced, and removes
+    the bundled whisper.cpp + model (~1.5 GB). A marker file makes it run once
+    per install. Only the artefacts go: `stt.py`, the endpoints and the admin
+    controls stay in the tree, disabled, so this is reversible by installing
+    whisper again and flipping the setting.
+    """
+    if AI_SUBS_RETIRED_MARKER.exists():
+        return
+    try:
+        lib = await get_library()
+        paths = [f.get("path", "") for it in lib.get("items", [])
+                 for f in (it.get("files") or []) if f.get("path")]
+        removed, freed = await asyncio.to_thread(_sweep_ai_subs_sync, paths)
+        if (lib.get("settings", {}) or {}).get("stt", {}).get("enabled") is not False:
+            lib.setdefault("settings", {}).setdefault("stt", {})["enabled"] = False
+            await put_library(lib)
+        AI_SUBS_RETIRED_MARKER.write_text(
+            f"retired {datetime.now().isoformat(timespec='seconds')}; "
+            f"{removed} generated subtitles removed, {freed / 1e9:.2f} GB freed" + chr(10),
+            encoding="utf-8")
+        log.info("AI subtitles retired: %d generated subtitle files removed, %.2f GB freed",
+                 removed, freed / 1e9)
+    except Exception as e:
+        log.warning("AI-subtitle retirement cleanup failed (will retry next start): %s", e)
+
+
 # ── FastAPI App ───────────────────────────────────────────────────────────────
 
 @asynccontextmanager
@@ -12396,6 +12461,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     diag_vitals = asyncio.create_task(diag.vitals_loop())
     diag_probe  = asyncio.create_task(diag.self_probe_loop(port=HTTP_PORT))
 
+    _spawn_bg(_retire_ai_subtitles())
     guard       = asyncio.create_task(vpn_guard())
     broadcaster = asyncio.create_task(stat_broadcaster())
     dl_monitor  = asyncio.create_task(library_download_monitor())

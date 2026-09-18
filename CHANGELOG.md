@@ -1,5 +1,19 @@
 # Changelog
 
+## [17.0.0] — 2026-09-17
+**AI subtitles are retired.**
+
+* The transcripts weren't good enough to put in front of viewers, so the feature is now hidden
+  and off: no Generate-with-AI buttons, no admin card, and nothing generated automatically.
+* **The box cleans itself up on the first start after this update:** every subtitle the feature
+  generated (`*.ai.*.srt`) is deleted, and so is the bundled whisper.cpp and its model — about
+  1.5 GB back. It runs once and leaves a `.ai_subs_retired` note in the app folder saying what it
+  removed.
+* A fresh install no longer downloads whisper at all.
+* **Nothing was deleted from the code.** If you ever want it back, docs/STT.md has the four steps.
+* Real subtitles are unaffected: embedded tracks, sidecar files, and the online search all work
+  exactly as before.
+
 ## [16.6.0] — 2026-09-17
 **Four more ways Find told two versions of a show apart — and the answer on whether a local AI would do it better.**
 

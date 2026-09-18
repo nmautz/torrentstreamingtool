@@ -1479,8 +1479,11 @@
       </div>
     </div>
 
-    <!-- Auto-generated subtitles (speech-to-text) -->
-    <div class="bg-gray-900 border border-gray-800">
+    <!-- Auto-generated subtitles (speech-to-text) — RETIRED in 17.0.0.
+         The transcripts weren't good enough to offer, so the card is hidden and
+         the feature defaults off. Everything behind it still works: unhide this
+         card and reinstall whisper (Components) to bring it back. -->
+    <div class="bg-gray-900 border border-gray-800 hidden">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
         <div class="min-w-0">
           <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Auto-Generated Subtitles (AI)</h2>
@@ -4411,7 +4414,9 @@ async function loadComponents(btn){
 }
 
 function _renderComponents(d){
-  const order = ["ffmpeg","fpcalc","whisper","whisper_model","flaresolverr"];
+  // whisper / whisper_model are left out: AI subtitles are retired (17.0.0), so
+  // the box shouldn't be invited to download a 1.5 GB model for a hidden feature.
+  const order = ["ffmpeg","fpcalc","flaresolverr"];
   const sizes = d.model_sizes || ["base","small","medium"];
   const html = order.map(key=>{
     const c = (d.components || {})[key];

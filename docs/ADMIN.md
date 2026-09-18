@@ -523,7 +523,7 @@ The unified subtitle policy. Controls: **Default Subtitle Language** (the *one* 
 
 #### Auto-Generated Subtitles
 
-STT (whisper.cpp) config — enable toggle, English-translation toggle, and an unavailable banner when whisper isn't installed. The **target language is the unified one set in the Subtitles card** (no separate picker here anymore). See [STT.md](STT.md). `GET`/`POST /api/admin/stt`.
+**Retired in 17.0.0 — this card is hidden** (see [STT.md](STT.md)). STT (whisper.cpp) config — enable toggle, English-translation toggle, and an unavailable banner when whisper isn't installed. The **target language is the unified one set in the Subtitles card** (no separate picker here anymore). See [STT.md](STT.md). `GET`/`POST /api/admin/stt`.
 
 ### 8. Updates
 

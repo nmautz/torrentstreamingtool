@@ -28,7 +28,7 @@ Then do the **manual** things `setup.py` cannot do for you (below): **pick/confi
 | Install VLC, qBittorrent, Mullvad, Jackett | Automatic | via `winget` |
 | Register Jackett as a Windows service | Automatic | UAC prompt — **click Yes** |
 | Install ffmpeg + Chromaprint (Smart Skip) | Automatic | portable zips into `tools\` |
-| Install whisper.cpp + model (AI subtitles) | Automatic (optional) | decline = no AI subtitles |
+| ~~Install whisper.cpp + model (AI subtitles)~~ | Retired in 17.0.0 | no longer downloaded; the feature is hidden and off |
 | Generate `.env` config | Automatic | merges on re-run, never clobbers |
 | Create the download folder | Automatic | |
 | Generate the HTTPS/admin SSL certificate | Automatic | self-signed |

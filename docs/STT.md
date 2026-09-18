@@ -1,4 +1,19 @@
-# Auto-Generated Subtitles (Speech-to-Text)
+# Auto-Generated Subtitles (Speech-to-Text) — RETIRED
+
+> **Retired in 17.0.0.** The transcripts were not good enough to put in front of
+> viewers, so the feature is **off by default and hidden**: the admin card is
+> `hidden`, `setup.py` no longer downloads whisper.cpp (`AI_SUBTITLES_RETIRED`),
+> and a one-time cleanup (`_retire_ai_subtitles` in `main.py`) deletes the
+> generated `*.ai.*.srt` sidecars and `tools/whisper` on first start after the
+> update, guarded by a `.ai_subs_retired` marker file.
+>
+> **Nothing was deleted from the tree** — `stt.py`, the job machinery, the
+> endpoints and the UI actions all still work. To bring it back: set
+> `AI_SUBTITLES_RETIRED = False` in `setup.py` and re-run it (or install whisper
+> from the admin Components card after restoring its rows in `static/admin.html`),
+> un-hide the "Auto-Generated Subtitles (AI)" card in `static/admin.html`, and
+> turn the setting on (`POST /api/admin/stt {"enabled": true}`). The rest of this
+> document describes the feature as built, and stays accurate.
 
 How StreamLink transcribes audio into subtitles for sources that ship none
 usable. Lives across `stt.py` (the whisper.cpp wrapper), `main.py` (trigger +
