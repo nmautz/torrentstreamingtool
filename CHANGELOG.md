@@ -1,5 +1,19 @@
 # Changelog
 
+## [16.3.0] — 2026-09-17
+**Play now on episodes you don't have yet.**
+
+* A missing episode's card in the library (e.g. a South Park season you own nothing from)
+  now has a **Play now** button beside Get. One press finds a copy, picks it the same way
+  Get does (your audio preference and Auto limits, with download racing when that's on),
+  and starts streaming it. It plays while it downloads and stays in your library
+  afterwards, exactly like Play on the search page.
+* It searches for the episode itself first, then the whole season. If the only copy is
+  inside a season pack, the file picker opens on that pack so you can pick the episode
+  (the whole pack is added to the library).
+* The episode page closes once playback starts, so the now-playing card is on screen.
+* Not shown in TV mode, or on episodes that haven't aired yet.
+
 ## [16.2.0] — 2026-09-17
 **Missing-season episode lists on a long show turned up late, often only after you left the page and came back. TMDb responses are now also cached on disk.**
 

@@ -816,6 +816,21 @@ press, without the search screen opening.
   is the difference between one indexer query and one per episode in the season.
 - `epGetSeason` / `epGetEpisode` are the entry points; `epFindSeason` / `epFindEpisode`
   (the old handoff) survive behind a **Choose** button rendered only for Full profiles.
+- **Play now (16.3.0).** A missing episode's card leads with **Play now**
+  (`epPlayEpisode(season, episode, btn)`; hidden in TV mode and on unaired episodes, like
+  the other buttons). Unlike Get, it does **not** run through `_bgRun`: the user is
+  waiting to watch, so it awaits its own searches with the button showing "Finding…". It
+  runs an episode query (`<title> SxxEyy`, or the bare number for absolute-numbered
+  anime), then the season query if that came back empty. It picks with `_bgAutoPick`
+  (audio preference + Auto limits, the same pick Get would make), builds race alternates
+  with `_ssAutoPickRace(eps, filt, {pick, match})`, and hands off to
+  `openStreamPicker(..., {series, season, episode, candidates, closeEp:true})`, the
+  search page's persisting stream-now path (`/api/library/play-now`). `opts.pick` /
+  `opts.match` exist because `_ssAudioMatch` reads the open show page's state, which
+  isn't the library's. If only a season/multi-season **pack** turned up, the picker opens
+  on that pack so the user can pick the episode (the whole pack joins the library, as
+  with `ssPlayPack`). `closeEp` rides into `streamPrepData`, and `selectStreamFile`
+  closes the episode page once a file is chosen, so the now-playing card is on screen.
 
 ### Live download readouts on library cards (14.1.0)
 
