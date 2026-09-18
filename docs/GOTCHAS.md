@@ -2203,6 +2203,16 @@ All metadata endpoints hand out `img_base = "/api/metadata/img"`; the route serv
 
 `_tmdb_match_show` ([main.py](../main.py)) calls `/search/tv` (or `/search/movie` for single-file no-season items **whose name carries no season/episode marker** — see the movie-misbinding rule above) and takes the **first** result. TMDb's search ranks by popularity, so for ambiguous titles ("Monster", "The Office", "It") the match may be the wrong show. Recovery paths: an admin POSTs `/api/library/{id}/metadata/refresh` with `{tmdb_id: <correct>, kind: "tv"|"movie"}`, OR **any user** uses the episode-page "Fix Metadata" control (`/metadata/search` → `/metadata/set`) to pick the right entry or hand-enter custom fields. The result is cached on `item["metadata"]`.
 
+### A stream race outlives everything that asked for it unless it is told (16.3.1)
+
+Found by a user tapping Play now four times in two minutes. Three things were wrong, and each one alone made the next attempt worse:
+
+- **Dropping the torrents doesn't stop the loop.** `DELETE /api/stream/race` deleted the candidates, but the race loop kept polling them: `qbit_info` returned None, and after the 60 s metadata grace it answered a 504 that nobody was waiting for. Worse, when the same magnet was added again meanwhile (the user pressed **Get** on that episode), the orphaned loop found it alive, "won" with it, and set `state.prepare_hash` to a torrent that now backed a library item. Only the stale-prepare guard stopped it from deleting the download. The loop now checks `state.race_gen` every tick, and DELETE, Stop and a new Play now all bump it.
+- **Task cancellation leaked every candidate.** `CancelledError` is a `BaseException`, so the old `except Exception` cleanup never ran when the race was cancelled. `_stream_race_run` cleans up in `finally`.
+- **Never let a race delete or deselect a library-owned torrent.** A candidate magnet can already be downloading as a library item. `lib_hashes` keeps those out of `race_hashes`, out of the loser sweep, and out of the pack file-deselect.
+
+Also: don't put a long race behind a modal. The picker sat on "Finding the fastest of N sources…" for the whole race and read as hung, so people closed it and retried. Play now runs server-side (`/api/library/stream-now`) and the now-playing card shows progress.
+
 ### A missing season's episode list "only appears after leaving and coming back" (16.2.0)
 
 The library page fills in the episode rows of a season you own nothing from with `/api/tmdb/lookup`, which fetches **every** season of the show. That used to be sequential with a fresh HTTPS client per request, so South Park (~28 seasons) took long enough that people gave up. Reopening the page "fixed" it only because the first request had finished in the meantime. Two traps here:

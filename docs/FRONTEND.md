@@ -816,21 +816,21 @@ press, without the search screen opening.
   is the difference between one indexer query and one per episode in the season.
 - `epGetSeason` / `epGetEpisode` are the entry points; `epFindSeason` / `epFindEpisode`
   (the old handoff) survive behind a **Choose** button rendered only for Full profiles.
-- **Play now (16.3.0).** A missing episode's card leads with **Play now**
+- **Play now (16.3.0, reworked 16.3.1).** A missing episode's card leads with **Play now**
   (`epPlayEpisode(season, episode, btn)`; hidden in TV mode and on unaired episodes, like
-  the other buttons). Unlike Get, it does **not** run through `_bgRun`: the user is
-  waiting to watch, so it awaits its own searches with the button showing "Finding…". It
-  runs an episode query (`<title> SxxEyy`, or the bare number for absolute-numbered
-  anime), then the season query if that came back empty. It picks with `_bgAutoPick`
-  (audio preference + Auto limits, the same pick Get would make), builds race alternates
-  with `_ssAutoPickRace(eps, filt, {pick, match})`, and hands off to
-  `openStreamPicker(..., {series, season, episode, candidates, closeEp:true})`, the
-  search page's persisting stream-now path (`/api/library/play-now`). `opts.pick` /
-  `opts.match` exist because `_ssAudioMatch` reads the open show page's state, which
-  isn't the library's. If only a season/multi-season **pack** turned up, the picker opens
-  on that pack so the user can pick the episode (the whole pack joins the library, as
-  with `ssPlayPack`). `closeEp` rides into `streamPrepData`, and `selectStreamFile`
-  closes the episode page once a file is chosen, so the now-playing card is on screen.
+  the other buttons). The button shows "Finding…" while it runs an episode query
+  (`<title> SxxEyy`, or the bare number for absolute-numbered anime), then the season
+  query if that came back empty. It picks with `_bgAutoPick` (audio preference + Auto
+  limits, the same pick Get would make) and builds race alternates with
+  `_ssAutoPickRace(eps, filt, {pick, match})`. `opts.pick` / `opts.match` exist because
+  `_ssAudioMatch` reads the open show page's state, which isn't the library's. When no
+  single-episode copy turns up, the best three seeded season/multi-season **packs**
+  become the candidates instead. Then it closes the episode page, paints
+  `_optimisticBuffering(label)`, and POSTs `/api/library/stream-now`. That returns at once, and
+  the server does the rest (see [API.md](API.md)). **There is no picker:** 16.3.0 routed
+  this through `openStreamPicker`, whose modal sat on "Finding the fastest of N
+  sources…" for the whole race (20-60 s for cold magnets) and then asked which file to
+  play. Users closed it, which abandoned the race.
 
 ### Live download readouts on library cards (14.1.0)
 
@@ -990,7 +990,9 @@ the ordinary `/api/stream/prepare` shape; any failure falls straight back to the
 single-source prepare. A raced winner **skips the `_streamHealthRisky` confirm** — it
 has already proved it delivers by beating two others to the buffer gate, so re-asking
 would be a scary modal about a problem the race just solved. An aborted fetch fires
-`DELETE /api/stream/race`, or the server race runs on to its own 180 s timeout.
+`DELETE /api/stream/race`, which ends the server loop within a second (16.3.1).
+Alternates reporting **0 seeders** are dropped from the race list when the pick itself
+has seeders (16.3.1): they can't win, and a race has only `download_race.size` slots.
 
 **Card chips** (`renderLibraryItem`): `RACING n` while candidates compete, an amber
 `HQ <label> <pct>%` while a better copy is still coming (shown **only once the

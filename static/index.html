@@ -10733,15 +10733,15 @@ function epGetEpisode(season, episode, btn){
 }
 
 // Stream a missing episode right now: find sources for just this episode, pick
-// one the same way Get does (audio preference, Auto limits, raced alternates),
-// and hand it to the search page's stream-now path, which persists it to the
-// library like any other play-now. Waits for the result (unlike Get, which runs
-// detached) because the user is waiting to watch it.
+// one the same way Get does (audio preference, Auto limits), and hand the pick
+// plus its race alternates to POST /api/library/stream-now. The server races
+// them, finds the episode's file (inside a season pack too), and starts it. It
+// answers at once, so the page closes and the now-playing card carries the
+// progress. No picker and no question. Stop cancels it like any other play.
 //
 // Episode query first (one round trip when it hits), then the season query,
-// which finds far more on a long-running show (see ssSearchSeason). If that only
-// turns up a season pack, the pack is offered in the file picker to choose the
-// episode from. Streaming it adds the whole pack to the library, as ssPlayPack does.
+// which finds far more on a long-running show (see ssSearchSeason). Season packs
+// are only raced when no single-episode copy turned up.
 async function epPlayEpisode(season, episode, btn){
   season=+season; episode=+episode;
   if(!app.vpn_secure){ showAlert("VPN not connected — streaming blocked.","error"); return; }
@@ -10765,28 +10765,46 @@ async function epPlayEpisode(season, episode, btn){
   }finally{
     if(btn){ _markLoading(btn, false); btn.innerHTML=html; }
   }
-  const series=ctx.title;
+  const slim=x=>({magnet:x.magnet, title:x.title, size:x.size||0, seeders:x.seeders||0,
+                  dv_risk:!!x.dv_risk, audio:x.audio||""});
+  const uniq=list=>{ const seen=new Set();
+    return list.filter(r=>r.magnet && !seen.has(r.magnet) && seen.add(r.magnet))
+               .sort((a,b)=>(b.seeders||0)-(a.seeders||0)); };
+  let cands=[];
   if(eps.length){
+    eps=uniq(eps);
     const filt=_ssParseBulkFilters();
-    // Deduplicate by magnet (an episode query and a season query can both return one).
-    const seen=new Set();
-    eps=eps.filter(r=>r.magnet && !seen.has(r.magnet) && seen.add(r.magnet))
-           .sort((a,b)=>(b.seeders||0)-(a.seeders||0));
     const pick=_bgAutoPick(ctx, eps, filt);
     const rc=_ssAutoPickRace(eps, filt, {pick, match:s=>_bgAudioMatch(ctx,s)});
-    openStreamPicker(pick.magnet, pick.title, btn, {series, season, episode,
-      seeders:pick.seeders, size:pick.size, candidates:rc.candidates, closeEp:true});
+    cands=rc.candidates.length ? rc.candidates : [slim(pick)];
+  }else if(packs.length){
+    // The server finds the episode's file inside each pack and races on it.
+    const seeded=uniq(packs).filter(p=>(p.seeders||0)>0);
+    cands=(seeded.length?seeded:uniq(packs)).slice(0,3).map(slim);
+  }
+  if(!cands.length){
+    showAlert(`No sources found for ${code} right now. Try Choose to search wider.`,"warn");
     return;
   }
-  if(packs.length){
-    const pack=_bgAutoPick(ctx, packs, {minSeed:0, minBytes:0, maxBytes:Infinity});
-    showAlert(`No single-episode copy of ${code} — pick it from this season pack. `
-             +`The whole pack is added to your library.`,"info");
-    openStreamPicker(pack.magnet, pack.title, btn, {series, seeders:pack.seeders,
-      size:pack.size, closeEp:true});
-    return;
+  const te=_tmdbSeasonEpisodes(epMetadata, season).find(t=>+t.episode===episode);
+  const label=`${ctx.title} ${code}${te&&te.name?` · ${te.name}`:""}`;
+  if(_epPageOpen()) closeEpisodePage();
+  _optimisticBuffering(label, null);
+  try{
+    const r=await fetch("/api/library/stream-now",{
+      method:"POST", headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({candidates:cands, title:label, series:ctx.title,
+                           season, episode, profile_id:profile.id||""}),
+    });
+    if(!r.ok){
+      _revertOptimistic();
+      const e=await r.json().catch(()=>({}));
+      showAlert(e.detail||"Could not start playback.","error");
+    }
+  }catch(_){
+    _revertOptimistic();
+    showAlert("Could not start playback.","error");
   }
-  showAlert(`No sources found for ${code} right now. Try Choose to search wider.`,"warn");
 }
 
 function epFindEpisode(season, episode){
@@ -12464,10 +12482,6 @@ async function selectStreamFile(fileIndex){
     if(!ok) return;
   }
   closeStreamPicker(false); // close without cancelling — we're using this torrent
-  // Started from the library's episode page (Play now on a missing episode):
-  // get it out of the way so the now-playing card is what's on screen, the same
-  // as playing an owned episode does.
-  if(d.closeEp && _epPageOpen()) closeEpisodePage();
   // Paint "buffering" before the round trip. /api/library/play-now can block for
   // a LONG time when the picker's torrent has gone stale: it re-adds the magnet
   // and waits up to 30 s for metadata. The picker closing is the only thing the
@@ -12581,8 +12595,7 @@ async function openStreamPicker(magnet, title, btn, ctx){
 
     streamPrepData={...d, magnet, title,
       series:(ctx&&ctx.series)||"", season:(ctx&&ctx.season)||0, episode:(ctx&&ctx.episode)||0,
-      seeders:(ctx&&ctx.seeders!==undefined)?ctx.seeders:null,
-      closeEp:!!(ctx&&ctx.closeEp)};
+      seeders:(ctx&&ctx.seeders!==undefined)?ctx.seeders:null};
     const videoFiles=d.files.filter(f=>isVideoFile(f.name));
 
     if(videoFiles.length===0){
@@ -15672,7 +15685,11 @@ function _ssAutoPickRace(sources, filt, opts){
   if(hq && _ssRelHeight(hq.title) > _ssRelHeight(pick.title)) push(hq);
   [...pool].sort((a,b)=>((a.dv_risk?1:0)-(b.dv_risk?1:0))||((b.seeders||0)-(a.seeders||0)))
            .forEach(push);
-  return {pick, candidates:out.slice(0,6).map(x=>({
+  // A release reporting no seeders can't win, it only takes a slot from one
+  // that might. Kept only when the pick itself reports none (then nobody's
+  // numbers can be trusted).
+  const live=(pick.seeders||0)>0 ? out.filter(x=>x===pick||(x.seeders||0)>0) : out;
+  return {pick, candidates:live.slice(0,6).map(x=>({
     magnet:x.magnet, title:x.title, size:x.size||0,
     seeders:x.seeders||0, dv_risk:!!x.dv_risk, audio:x.audio||"",
   }))};
@@ -24615,6 +24632,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">16.3.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">16.3.1</div>
 </body>
 </html>

@@ -1266,6 +1266,14 @@ class AppState:
     # bails mid-race. A crash loses this set, which is what the `streamlink-race`
     # qBit tag + the startup sweep exist to catch.
     race_hashes: set = field(default_factory=set)
+    # Bumped to abandon an in-flight stream race: the race loop checks it every
+    # tick. DELETE /api/stream/race used to drop the torrents but leave the loop
+    # polling them until its own timeout, then answer a 504 nobody was waiting for.
+    race_gen: int = 0
+    # The detached "Play now" job (/api/library/stream-now): race the candidates,
+    # then hand the winner to play-now. Cancelled by Stop and by any other play,
+    # so a race that finishes late can never take the screen back.
+    stream_now_task: Optional[asyncio.Task] = None
     # The detached `_finalize_stopped_file` task `stop()` fires. `stop()` clears
     # the playback fields SYNCHRONOUSLY but flushes the outgoing file's final
     # position in the background, so "library_item_id is None" does NOT mean the
@@ -16158,6 +16166,7 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
         ))
 
     # If a prior library play is still mid-handoff, cancel it so we don't race VLC
+    _cancel_stream_now()
     prior = state.library_play_task
     if prior and not prior.done():
         prior.cancel()
@@ -16649,6 +16658,7 @@ async def _begin_library_file_stream(
         ))
     if state.stream_task and not state.stream_task.done():
         state.stream_task.cancel()
+    _cancel_stream_now()
     prior = state.library_play_task
     if prior and not prior.done():
         prior.cancel()
@@ -18016,13 +18026,48 @@ async def stream_race(req: StreamRaceReq) -> JSONResponse:
         raise HTTPException(409, "Download racing is disabled.")
     cands = cands[:cfg["size"]]
 
+    winner = await _stream_race_run(cands, req.season, req.episode)
+    result = [{"index": f.get("index", i), "name": f.get("name", ""),
+               "size_bytes": f.get("size", 0),
+               "size_human": human_size(f.get("size", 0))}
+              for i, f in enumerate(winner["files"])]
+    return JSONResponse({
+        "hash": winner["hash"], "files": result,
+        "magnet": winner["magnet"], "title": winner["title"],
+        "raced": winner["raced"], "beaten": winner["beaten"],
+    })
+
+
+async def _stream_race_run(cands: list, season: int, episode: int,
+                           report=None) -> dict:
+    """The race itself: add every candidate, poll, return the first to clear the
+    buffer gate. Shared by /api/stream/race (the picker) and the library's Play
+    now (`_stream_now_job`).
+
+    Returns `{hash, title, magnet, files, save_path, file, raced, beaten}`.
+    `file` is the `build_file_list` entry for the episode, or None when the
+    winner is a pack nobody could resolve. Raises HTTPException(504) when nothing
+    delivers, 409 when abandoned (`state.race_gen` moved on). Every non-winning
+    torrent is dropped on every exit path, including task cancellation: that
+    is a BaseException, which the old `except Exception` let past, leaking
+    every candidate.
+
+    `report(runners)` replaces the default progress broadcast when given.
+    """
+    gen = state.race_gen
     # Same stale-prepare cleanup /api/stream/prepare does.
     if state.prepare_hash:
         await _qbit_delete_transient(state.prepare_hash, "stale prepare")
         state.prepare_hash = None
 
     save_path = await _auto_save_path()
+    # Torrents that already back a library item (say, the user pressed Get a
+    # minute ago) may join the race, but their file selection is the library's
+    # to manage, never the race's.
+    lib_hashes = {(it.get("torrent_hash") or "").lower()
+                  for it in (await get_library()).get("items", [])}
     runners: list = []
+    winner: Optional[dict] = None
     try:
         for c in cands:
             h = await qbit_add_magnet(c["magnet"], save_path=save_path,
@@ -18036,7 +18081,8 @@ async def stream_race(req: StreamRaceReq) -> JSONResponse:
             # Cleanup from calling these orphans, and what `/api/stop` tears
             # down if the user bails mid-race - a hash that exists in qBit but
             # not here is a leak.
-            state.race_hashes.add(h)
+            if h not in lib_hashes:
+                state.race_hashes.add(h)
             runners.append({"hash": h, "title": c.get("title", ""),
                             "magnet": c["magnet"], "dead": False, "pct": 0.0,
                             "speed": 0, "file": None})
@@ -18047,9 +18093,10 @@ async def stream_race(req: StreamRaceReq) -> JSONResponse:
             raise HTTPException(500, "qBittorrent rejected every candidate.")
 
         started = time.monotonic()
-        winner: Optional[dict] = None
         while time.monotonic() - started < _RACE_STREAM_TIMEOUT:
             await asyncio.sleep(1)
+            if state.race_gen != gen:
+                raise HTTPException(409, "Race cancelled.")
             alive = [r for r in runners if not r["dead"]]
             if not alive:
                 break
@@ -18070,7 +18117,7 @@ async def stream_race(req: StreamRaceReq) -> JSONResponse:
                     continue
                 sp = info.get("save_path", save_path)
                 if r["file"] is None:
-                    picked = _race_stream_pick_file(qfiles, sp, req.season, req.episode)
+                    picked = _race_stream_pick_file(qfiles, sp, season, episode)
                     if picked is None:
                         # Either no video at all (a fake) or a pack we cannot
                         # resolve without the user. Out of the race either way,
@@ -18086,6 +18133,14 @@ async def stream_race(req: StreamRaceReq) -> JSONResponse:
                     r["file"] = picked
                     r["files"] = qfiles
                     r["save_path"] = sp
+                    # A season pack racing for one episode would otherwise fetch
+                    # the pack from the top (it is sequential) and finish last
+                    # every time. Skip the rest for the length of the race; if it
+                    # wins, play-now's schedule pass re-selects the whole pack.
+                    if len(qfiles) > 1 and r["hash"] not in lib_hashes:
+                        others = [q.get("index", i) for i, q in enumerate(qfiles)
+                                  if str(Path(sp) / q.get("name", "")) != picked.get("path")]
+                        await qbit_set_file_priority(r["hash"], others, 0)
                 target = r["file"]
                 qf = next((q for q in qfiles
                            if str(Path(sp) / q.get("name", "")) == target.get("path")), None)
@@ -18105,16 +18160,19 @@ async def stream_race(req: StreamRaceReq) -> JSONResponse:
                     break
             if winner:
                 break
-            # Report the race WITHOUT claiming a playback status: nothing is
-            # buffering for VLC yet, and saying so would leave the dashboard
-            # showing "buffering" if the race ends in a 504 and the caller
-            # falls back to the ordinary picker.
-            await broadcast("stream_status", {
-                "status": state.stream_status,
-                "race": [{"title": r["title"], "pct": r["pct"],
-                          "speed_bps": r["speed"], "dead": r["dead"]}
-                         for r in runners],
-            })
+            if report is not None:
+                await report(runners)
+            else:
+                # Report the race WITHOUT claiming a playback status: nothing is
+                # buffering for VLC yet, and saying so would leave the dashboard
+                # showing "buffering" if the race ends in a 504 and the caller
+                # falls back to the ordinary picker.
+                await broadcast("stream_status", {
+                    "status": state.stream_status,
+                    "race": [{"title": r["title"], "pct": r["pct"],
+                              "speed_bps": r["speed"], "dead": r["dead"]}
+                             for r in runners],
+                })
 
         if winner is None:
             # Nobody cleared the gate. If one of them was a multi-file pack we
@@ -18129,31 +18187,30 @@ async def stream_race(req: StreamRaceReq) -> JSONResponse:
         # iterates it to delete losers.
         state.race_hashes.discard(winner["hash"])
         state.prepare_hash = winner["hash"]
-        for r in runners:
-            if r["hash"] != winner["hash"]:
-                _spawn_bg(_race_stream_drop(r["hash"]))
         files = winner.get("files") or await qbit_files(winner["hash"])
-        result = [{"index": f.get("index", i), "name": f.get("name", ""),
-                   "size_bytes": f.get("size", 0),
-                   "size_human": human_size(f.get("size", 0))}
-                  for i, f in enumerate(files)]
         log.info("[race] stream race won by %r (%d candidates)",
                  winner["title"], len(runners))
-        return JSONResponse({
-            "hash": winner["hash"], "files": result,
-            "magnet": winner["magnet"], "title": winner["title"],
+        return {
+            "hash": winner["hash"], "title": winner["title"],
+            "magnet": winner["magnet"], "files": files,
+            "save_path": winner.get("save_path") or save_path,
+            "file": winner.get("file"),
             "raced": len(runners),
             "beaten": [r["title"] for r in runners if r["hash"] != winner["hash"]],
-        })
+        }
     except HTTPException:
-        for r in runners:
-            _spawn_bg(_race_stream_drop(r["hash"]))
         raise
-    except Exception:
+    except BaseException as e:
+        if not isinstance(e, asyncio.CancelledError):
+            log.exception("[race] stream race failed")
+            raise HTTPException(500, "The source race failed — try again.")
+        raise
+    finally:
         for r in runners:
-            _spawn_bg(_race_stream_drop(r["hash"]))
-        log.exception("[race] stream race failed")
-        raise HTTPException(500, "The source race failed — try again.")
+            if winner is None or r["hash"] != winner["hash"]:
+                if r["hash"] in lib_hashes:
+                    continue     # never delete a torrent the library owns
+                _spawn_bg(_race_stream_drop(r["hash"]))
 
 
 async def _race_stream_drop(h: str) -> None:
@@ -18167,9 +18224,114 @@ async def _race_stream_drop(h: str) -> None:
 @app.delete("/api/stream/race")
 async def stream_race_cancel() -> JSONResponse:
     """Abandon an in-flight stream race (the user backed out of the picker)."""
+    state.race_gen += 1          # the loop sees this within a second and exits
     for h in list(state.race_hashes):
         await _race_stream_drop(h)
     return JSONResponse({"ok": True})
+
+
+class StreamNowReq(BaseModel):
+    # Ordered, best first: the library page's auto-pick, then its race
+    # alternates. Season packs are fine: the race picks the episode inside.
+    candidates: list[dict] = []
+    title: str = ""        # what the now-playing card says while it looks
+    series: str = ""
+    season: int = 0
+    episode: int = 0
+    profile_id: str = ""
+
+
+def _cancel_stream_now() -> None:
+    """Abandon a pending Play now (see `_stream_now_job`). A no-op from inside
+    the job itself, which reaches `_begin_library_file_stream` on success."""
+    t = state.stream_now_task
+    if t is None or t is asyncio.current_task():
+        return
+    if not t.done():
+        t.cancel()
+        state.race_gen += 1
+    state.stream_now_task = None
+
+
+@app.post("/api/library/stream-now")
+async def library_stream_now(req: StreamNowReq) -> JSONResponse:
+    """The library's **Play now** on an episode that isn't on the box: race the
+    candidates, pick the episode's file, and start it, all server-side. Answers
+    202 at once; the dashboard's now-playing card carries the progress.
+
+    Before this, Play now went through the stream picker: a modal that sat on
+    "Finding the fastest of N sources…" for the whole race (commonly 20-60 s
+    for cold magnets, which need their metadata from peers first) and then
+    asked which file to play. Closing it looked like the only way out, which
+    abandoned the race. Here nothing waits on the phone: Stop cancels it, and
+    so does starting anything else."""
+    if not state.vpn_secure:
+        raise HTTPException(403, "VPN not connected — streaming blocked.")
+    cands = [c for c in (req.candidates or []) if (c.get("magnet") or "").strip()]
+    if not cands:
+        raise HTTPException(400, "No candidates supplied.")
+    _cancel_stream_now()
+    state.race_gen += 1          # and any picker race still running
+    # What to put back if this fails. "Buffering" with no torrent behind it is
+    # an earlier Play now we just cancelled, which is nothing to return to.
+    prev = ((state.stream_status, state.active_title)
+            if state.active_hash or state.stream_status != "buffering"
+            else ("idle", None))
+    state.stream_status = "buffering"
+    state.active_title = req.title or req.series or cands[0].get("title", "")
+    await broadcast("stream_status", {"status": "buffering",
+                                      "message": "Finding a source that's ready to play…"})
+    await broadcast("state", state_snapshot())
+    state.stream_now_task = asyncio.create_task(_stream_now_job(req, cands, prev))
+    return JSONResponse({"ok": True}, status_code=202)
+
+
+async def _stream_now_job(req: StreamNowReq, cands: list, prev: tuple) -> None:
+    label = state.active_title
+
+    async def report(runners: list) -> None:
+        live = [r for r in runners if not r["dead"]]
+        best = max((r["pct"] for r in live), default=0.0)
+        n = len(live)
+        msg = (f"Trying {n} sources — best at {best:.1f}%" if n > 1
+               else f"Connecting to peers — {best:.1f}%")
+        await broadcast("stream_status", {"status": "buffering", "message": msg})
+
+    try:
+        cfg = _download_race_cfg(await get_library())
+        pool = cands[:cfg["size"]] if cfg["enabled"] else cands[:1]
+        w = await _stream_race_run(pool, req.season, req.episode, report=report)
+        if w["file"] is None:
+            raise HTTPException(409, f"Couldn't tell which file in {w['title']} is "
+                                     f"this episode. Use Choose to pick it.")
+        sp, target = w["save_path"], w["file"].get("path")
+        idx = next((q.get("index", i) for i, q in enumerate(w["files"])
+                    if str(Path(sp) / q.get("name", "")) == target), -1)
+        # Hand off. From here the normal play path owns the screen, and it must
+        # not cancel THIS task as a "previous play" on its way in.
+        state.stream_now_task = None
+        await library_play_now(PlayNowReq(
+            magnet=w["magnet"], title=w["title"], torrent_hash=w["hash"],
+            file_index=idx, series=req.series, season=req.season,
+            episode=req.episode, profile_id=req.profile_id))
+    except asyncio.CancelledError:
+        raise
+    except Exception as e:
+        detail = e.detail if isinstance(e, HTTPException) else "Couldn't start playback."
+        if not isinstance(e, HTTPException):
+            log.exception("[stream-now] failed")
+        if isinstance(e, HTTPException) and e.status_code == 409 and "cancelled" in str(detail):
+            return               # superseded; whoever did that owns the screen now
+        log.info("[stream-now] %r: %s", label, detail)
+        # Put back whatever the card showed before, unless something newer has
+        # taken it over in the meantime.
+        if state.stream_status == "buffering" and state.active_title == label:
+            state.stream_status, state.active_title = prev
+        await broadcast("stream_status", {"status": "error", "message": str(detail)})
+        await broadcast("state", state_snapshot())
+    finally:
+        if state.stream_now_task is asyncio.current_task():
+            state.stream_now_task = None
 
 
 @app.post("/api/library/prepare")
@@ -19712,6 +19874,8 @@ async def stop() -> JSONResponse:
         state.stream_task.cancel()
     if state.library_play_task and not state.library_play_task.done():
         state.library_play_task.cancel()
+    _cancel_stream_now()
+    state.race_gen += 1
     if _rebuffer_guard_task and not _rebuffer_guard_task.done():
         _rebuffer_guard_task.cancel()
 
@@ -20503,6 +20667,7 @@ async def vlc_prev() -> JSONResponse:
     if not Path(prev_file).exists():
         raise HTTPException(400, f"File not found: {Path(prev_file).name}")
 
+    _cancel_stream_now()
     prior = state.library_play_task
     if prior and not prior.done():
         prior.cancel()
@@ -20571,6 +20736,7 @@ async def vlc_next() -> JSONResponse:
         float((vs_now or {}).get("length", 0) or 0),
     )
 
+    _cancel_stream_now()
     prior = state.library_play_task
     if prior and not prior.done():
         prior.cancel()
@@ -20680,6 +20846,7 @@ async def library_shuffle() -> JSONResponse:
             pos = int(float((vs or {}).get("time", 0) or 0))
         except (TypeError, ValueError):
             pos = 0
+        _cancel_stream_now()
         prior = state.library_play_task
         if prior and not prior.done():
             prior.cancel()
@@ -20737,6 +20904,7 @@ async def library_unshuffle() -> JSONResponse:
             pos = int(float((vs or {}).get("time", 0) or 0))
         except (TypeError, ValueError):
             pos = 0
+        _cancel_stream_now()
         prior = state.library_play_task
         if prior and not prior.done():
             prior.cancel()

@@ -1,5 +1,27 @@
 # Changelog
 
+## [16.3.1] — 2026-09-17
+**Play now on a missing episode sat on "Finding the fastest of 4 sources…" and never seemed to load.**
+
+* **What was happening:** Play now opened the stream picker, which raced several copies
+  before showing anything. A cold magnet first has to get its file list from peers (up to
+  60 s), then buffer, so the picker sat on one line for 20-60 s. Closing it looked like the
+  only way out, and that abandoned the race.
+* **Now there's no picker at all.** Play now finds the sources, closes the episode page, and
+  the now-playing card says "Finding a source that's ready to play…", then
+  "Trying 3 sources — best at 4.2%", then plays. The server does the racing
+  (`POST /api/library/stream-now`), so the phone doesn't have to stay on the page. Stop
+  cancels it, and so does starting anything else.
+* If only a season pack has the episode, the server finds the episode's file inside the pack
+  and plays that (it used to ask you to pick it).
+* **Faster races:** releases with 0 seeders no longer take up race slots (a race has 3), and
+  a season pack in a race now fetches only the episode it's racing for, not the pack from
+  the top.
+* **Race fixes:** closing the picker (search page) now actually stops the race on the server.
+  It used to keep polling deleted torrents for 60 s, and could even adopt a torrent you'd
+  just started downloading with Get. A cancelled race no longer leaks its torrents in
+  qBittorrent, and a race never deletes a torrent that belongs to a library item.
+
 ## [16.3.0] — 2026-09-17
 **Play now on episodes you don't have yet.**
 
