@@ -16443,14 +16443,19 @@ async function _bgStartPack(ctx, ctl, report, pack, season, filt, foreign){
   // someone standing on the season 1 tab — it is the pack their missing
   // episodes live in, which happens to bring a lot more with it. Claiming the
   // season they are looking at would be the confusing half of the truth.
+  // The foreign branch has already named the pack in its own sentence, so it
+  // does NOT repeat `lbl` — "…none of which you already have. season 2,
+  // excellent availability" reads like a stutter.
+  const stats=`${_availLabel(pack.seeders).txt.toLowerCase()} availability, ${pack.size_human}`;
   showAlert(done.duplicate
     ? `That copy is already downloading — nothing new was started.`
     : (foreign
         ? `Downloading the ${foreign.label.toLowerCase()} pack — it holds the missing `
          +`episodes and ${foreign.covers} in total, none of which you already have. `
-        : `Downloading the whole of Season ${season} in one go — `)
-      +`${lbl.toLowerCase()}, ${_availLabel(pack.seeders).txt.toLowerCase()} availability, `
-      +`${pack.size_human}. Switch to Library to track progress.`,
+         +`${stats[0].toUpperCase()}${stats.slice(1)}. `
+        : `Downloading the whole of Season ${season} in one go — `
+         +`${lbl.toLowerCase()}, ${stats}. `)
+      +`Switch to Library to track progress.`,
     done.duplicate?"warn":"success");
   refreshCoverage();
   return true;
@@ -25254,6 +25259,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.4.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.4.1</div>
 </body>
 </html>

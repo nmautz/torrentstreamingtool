@@ -1,5 +1,10 @@
 # Changelog
 
+## [17.4.1] — 2026-09-18
+* The whole-season download toast repeated itself on a neighbouring-pack fetch — "…none of
+  which you already have. **season 2**, excellent availability, 144.7 GB", where the sentence
+  had already named the pack. The foreign branch no longer appends the pack label.
+
 ## [17.4.0] — 2026-09-18
 **The episodes that ship inside a neighbouring group's pack now come from that pack.**
 
