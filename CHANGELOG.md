@@ -1,5 +1,18 @@
 # Changelog
 
+## [16.3.2] — 2026-09-17
+**The now-playing card's status line was always blank while buffering, except on the TV kiosk.**
+
+* The TV kiosk code in `renderPlayer` sat in the middle of an if/else chain, so everywhere
+  else its final branch cleared the status line on every redraw. "Connecting…", the MB
+  count while buffering, and 16.3.1's Play now progress ("Trying 2 sources — best at
+  4.2%") were all wiped as soon as they were drawn.
+* The server's buffering message is now kept on `app.stream_message`, so it survives
+  redraws. The card shows it until real byte counts take over.
+* Measured on the box: Play now on South Park S07E02 closed the page at 3 s and played at
+  78 s. Almost all of that wait was the swarm. The indexer said 14 seeders; qBittorrent
+  found 5, at 1.3 MB/s. The "58 seeder" REMUX for S07E01 had 1 seed and was doing 0 MB/s.
+
 ## [16.3.1] — 2026-09-17
 **Play now on a missing episode sat on "Finding the fastest of 4 sources…" and never seemed to load.**
 

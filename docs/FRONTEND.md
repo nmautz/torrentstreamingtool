@@ -830,7 +830,11 @@ press, without the search screen opening.
   the server does the rest (see [API.md](API.md)). **There is no picker:** 16.3.0 routed
   this through `openStreamPicker`, whose modal sat on "Finding the fastest of N
   sources…" for the whole race (20-60 s for cold magnets) and then asked which file to
-  play. Users closed it, which abandoned the race.
+  play. Users closed it, which abandoned the race. The race's progress
+  ("Trying N sources — best at X%") arrives as `stream_status` messages, which the SSE
+  handler keeps on `app.stream_message`; `renderPlayer` shows it on the status line until
+  byte counts exist (16.3.2; before that, off the TV kiosk the line was blanked on every
+  buffering redraw, see CHANGELOG).
 
 ### Live download readouts on library cards (14.1.0)
 

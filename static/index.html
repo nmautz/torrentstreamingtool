@@ -4802,10 +4802,17 @@ function renderPlayer(s){
   np.textContent=s.active_title||"No active stream";
   np.className=`text-sm font-bold truncate uppercase tracking-wide ${s.active_title?"text-gray-200":"text-gray-500"}`;
 
+  // The status line. The TV-kiosk block below used to sit in the middle of
+  // this chain, so off the kiosk the final `else` blanked the line on every
+  // buffering repaint and no buffering message was ever visible. Before any
+  // byte counts exist (a Play now race), the server's own message is shown.
   if(s.stream_status==="buffering"){
     if(s.total_mb>0) si.textContent=`${s.downloaded_mb.toFixed(1)} MB / ${s.total_mb.toFixed(1)} MB (${s.progress.toFixed(1)}%)`;
-    else si.textContent=s.is_library_playback?"Starting playback…":"Connecting…";
+    else si.textContent=s.stream_message||(s.is_library_playback?"Starting playback…":"Connecting…");
   }
+  else if(isPlaying&&!hasVlcTime&&s.total_mb>0)
+    si.textContent=`${s.downloaded_mb.toFixed(1)} / ${s.total_mb.toFixed(1)} MB`;
+  else if(!isPlaying) si.textContent="";
 
   // TV kiosk: the footer above is display:none, so mirror the buffering state
   // into the fullscreen #tvLoading overlay — _optimisticBuffering calls
@@ -4820,9 +4827,6 @@ function renderPlayer(s){
       document.getElementById("tvLoadingSub").textContent=si.textContent||"Starting playback…";
     }
   }
-  else if(isPlaying&&!hasVlcTime&&s.total_mb>0)
-    si.textContent=`${s.downloaded_mb.toFixed(1)} / ${s.total_mb.toFixed(1)} MB`;
-  else if(!isPlaying) si.textContent="";
 
   // VLC time display — show whenever we have a playback position
   const hasVlcPos=isPlaying&&(s.vlc_time||0)>0;
@@ -8597,6 +8601,7 @@ function _optimisticBuffering(label, itemId){
   // re-opening a fullscreen overlay the user just dismissed.
   const canonical = (itemId && _libraryLabel(itemId)) || label || "";
   app.stream_status = "buffering";
+  app.stream_message = "";
   app.active_title  = label || canonical || "Loading…";
   app.vlc_time     = 0;
   app.vlc_duration = 0;
@@ -24156,6 +24161,9 @@ function connectSSE(){
   es.addEventListener("stream_status",e=>{
     _noteSSEMsg();
     const d=JSON.parse(e.data); app.stream_status=d.status;
+    // Kept for renderPlayer: it repaints the status line from `app`, so a
+    // message written straight into the DOM lasted until the next repaint.
+    app.stream_message=(d.status==="buffering" && d.message) ? d.message : "";
     if(d.progress!==undefined) app.progress=d.progress;
     if(d.downloaded_mb!==undefined) app.downloaded_mb=d.downloaded_mb;
     if(d.total_mb!==undefined) app.total_mb=d.total_mb;
@@ -24632,6 +24640,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">16.3.1</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">16.3.2</div>
 </body>
 </html>
