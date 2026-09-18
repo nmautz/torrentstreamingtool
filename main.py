@@ -9256,6 +9256,49 @@ async def video_probe_backfill() -> None:
         log.warning("Colour-signalling backfill aborted: %s", exc)
 
 
+ANIME_BACKFILL_START_DELAY = 45.0   # after boot; the map fetch/parse is already done by then
+
+
+async def anime_map_backfill() -> None:
+    """Run the anime season pass over items that predate it, once per start.
+
+    New downloads pick it up for free — `_fetch_item_metadata` settles
+    attribution the first time it binds an item. An existing library never
+    re-fetches metadata it already has, so without this sweep a show sits on the
+    numbering it was given before the mapping table existed, and the episode
+    page's absolute numbers are simply absent.
+
+    Offline and cheap: the table is already parsed, the season inventory is on
+    the item, and `remap_slots` is a no-op for every show the table doesn't
+    cover. One library write for everything that moved, so a big library doesn't
+    pay a write per item. Rewinding is not this function's job — a show already
+    carrying `abs_no` is settled and is skipped by the pass itself.
+    """
+    await asyncio.sleep(ANIME_BACKFILL_START_DELAY)
+    try:
+        if not await _anime_map_warm():
+            return                       # no table cached — nothing to apply
+        lib = await get_library()
+        targets = [it["id"] for it in lib["items"]
+                   if (it.get("files") and _anime_entries(it.get("metadata") or {}))]
+        if not targets:
+            return
+        moved = 0
+        async with mutate_library() as lib_w:
+            for item in lib_w["items"]:
+                if item["id"] in targets and _reattribute_item_files(
+                        item, item.get("metadata") or {}):
+                    moved += 1
+            if not moved:
+                raise LibraryUnchanged
+        log.info("Anime season backfill: %d of %d anime item(s) renumbered or "
+                 "stamped with absolute episode numbers.", moved, len(targets))
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        log.warning("Anime season backfill aborted: %s", exc)
+
+
 _empty_ready_checked: dict = {}      # item id → last repair attempt (epoch)
 _EMPTY_READY_RETRY_SEC = 120
 
@@ -12595,6 +12638,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     # once, late (_RACE_SWEEP_DELAY), so it can never kill an add in flight.
     _spawn_bg(_race_orphan_sweep())
     dvbackfill  = asyncio.create_task(video_probe_backfill())
+    animefill   = asyncio.create_task(anime_map_backfill())
     vlc_tracker = asyncio.create_task(vlc_progress_tracker())
     bg_loop     = asyncio.create_task(background_video_loop())
     jackett_mon = asyncio.create_task(jackett_health_monitor())
@@ -12653,7 +12697,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
 
     yield
 
-    for t in (guard, broadcaster, dl_monitor, dvbackfill, vlc_tracker, bg_loop,
+    for t in (guard, broadcaster, dl_monitor, dvbackfill, animefill, vlc_tracker, bg_loop,
               jackett_mon, reboot_loop, autoprep_loop, update_loop, dlsched_loop,
               sysmon_loop, cachepurge_loop, subupgrade_loop, od_reaper_loop,
               maint_loop, shotscan_task, tvui_task, rvol_guard,

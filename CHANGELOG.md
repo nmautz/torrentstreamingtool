@@ -25,6 +25,8 @@
   which is the only release on any indexer with that name. Searching "059" returns the 159-seeder
   Blu-ray batch. Find sources now leads with the absolute number for these shows and doesn't ask for
   the within-season one at all, because it names a different episode.
+* Anime already in your library is swept once on the next start, so it picks this up without you
+  re-downloading or touching anything.
 * An item's admin **Refresh** button re-fetches the mapping table and rewinds the remap before
   re-deriving it, so a mapping corrected upstream can reach files it already moved. Each moved file
   keeps a record of what the release itself called it.

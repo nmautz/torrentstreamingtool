@@ -681,6 +681,11 @@ rip and the 159-seeder Blu-ray batch). The admin **Refresh** button on an item r
 and calls `animemap.reset_files` first, which rewinds to `rel_season`/`rel_episode` so a corrected
 mapping upstream can actually reach files the pass already moved.
 
+An existing library never re-fetches metadata it already has, so nothing would apply the pass to
+shows downloaded before it existed. `anime_map_backfill` (a lifespan task, 45 s after boot) sweeps
+them once per start: offline, one library write for everything that moved, and a no-op for every
+show the table doesn't cover or that already carries `abs_no`.
+
 The shape is served to the frontend as `anime: {mapped, absolute, total}` on both
 `GET /api/library/{id}/metadata` and `/api/tmdb/lookup` — computed at serve time (`_anime_facts`),
 never stored on `metadata`, because most `metadata` blobs are pinned and would never pick it up.
