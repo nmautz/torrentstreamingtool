@@ -124,6 +124,23 @@ Measured live: `Hunter x Hunter S01` returns `Interview With The Vampire S01E05 
 - Richness is **capped at the bucket**. It can reorder two equally-available copies; it can never promote a Low one over a Good one. `pickdiff.py`'s `bucket downgrades` counter asserts this, and a non-zero reading is a comparator bug, not a judgement call.
 - There is **one comparator, not one per call site**. `epPlayEpisode`/`ssPlayEpisode` reach it through `_bgAutoPick`, so this changes *streaming* picks too. Splitting it by call site would be exactly the second implementation `DownloadReq.candidates` ([main.py](../main.py)) warns about — one that "would disagree with the one the user can actually see". `_streamHealth`'s badges and the `_streamHealthRisky` confirm are what handle a slow pick; a private comparator is not.
 
+### Ownership of an anime pack is an ABSOLUTE-number question, never a TMDb-season one (17.4.0)
+
+When a season's missing episodes live inside a neighbouring grid season's pack, `_bgForeignPackScope` decides whether to fetch it by asking whether the pack overlaps any episode already on the box — **in absolute numbers**.
+
+The obvious cheaper test, "do you own any of the TMDb seasons this pack touches", is wrong, and wrong in the direction that silently disables the feature. Hunter x Hunter, live:
+
+```
+grid "Season 2" pack  = TMDb S01E59 -> S02E74  = abs  59-136   (78 eps)
+on disk               = TMDb S01E1-58          = abs   1-58
+TMDb-season test  -> "you own 58 of season 1"  -> REFUSE
+absolute test     -> overlap 0                 -> FETCH
+```
+
+The absolute test is the correct one: that pack duplicates nothing, and fetching it fills season 1's four gaps *and* all seventy-four episodes of season 2 in one download. The season-level test refuses it and leaves the user with an 86 MB one-seeder DUBBED HDTV rip instead.
+
+`_animeAbsNo` (the mirror of `animemap.to_absolute`) is what makes both sides commensurable; without `anime.absolute` the helper returns null and the per-episode fill stands, which is the right fallback for a show whose grids already agree.
+
 ### An absolute-numbered batch is rejected as season coverage — and the evidence says leave it that way
 
 `_packCoversScope` refuses any pack carrying `ep_from` (`One Piece 0001-1071`, `Hunter x Hunter 1-148`): the title numbers episodes on the release group's absolute run, and whether that contains TMDb's season N is not answerable from the title alone.

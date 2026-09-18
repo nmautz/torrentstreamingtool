@@ -10804,16 +10804,27 @@ function _epGetMissing(scope, label, btn, only){
   // belt-and-braces — _epBgCtx already marks every other episode owned when it
   // is set — but it states the intent where a reader will look for it.
   const packFirst = !only && sn>0 && _covSeasonEps(ctx.owned, sn).size===0;
+  // ...and the case where you own MOST of the season but its last few episodes
+  // ship inside a neighbouring group's pack (17.4.0). `_bgForeignPackScope`
+  // refuses unless that pack duplicates nothing already on the box, so this
+  // never contradicts the rule above — see its comment for the arithmetic.
+  const foreign = (!only && sn>0 && !packFirst)
+    ? _bgForeignPackScope(ctx, sn, _epMissingEpisodes(sn).map(te=>+te.episode))
+    : null;
   const started=_bgRun(`${ctx.title} — ${label}`, async(ctl,report)=>{
-    if(packFirst){
-      report(`Looking for a whole Season ${sn}`,
-             "One download beats hunting each episode.", 0.02);
-      await _bgSeasonSearch(ctx, sn);   // fills ctx.packs AND ctx.episodes
+    if(packFirst || foreign){
+      const want=foreign?foreign.gridSeason:sn;
+      report(foreign?`Looking for the ${foreign.label.toLowerCase()} pack`
+                    :`Looking for a whole Season ${sn}`,
+             foreign?`These episodes ship inside it.`
+                    :"One download beats hunting each episode.", 0.02);
+      await _bgSeasonSearch(ctx, want);   // fills ctx.packs AND ctx.episodes
       if(ctl.cancel) return;
-      const pack=_bgBestPackForScope(ctx, sn);
+      const pack=_bgBestPackForScope(ctx, want, filt);
       // A pack that fails to start falls through rather than leaving the user
       // with nothing — the episode results from that same query are in hand.
-      if(pack && await _bgStartPack(ctx, ctl, report, pack, sn, filt)) return;
+      if(pack && await _bgStartPack(ctx, ctl, report, pack,
+                                    foreign?foreign.season:sn, filt, foreign)) return;
     }
     const eps=await _bgEnsureSources(ctx,ctl,report);
     if(!eps) return;
@@ -11439,7 +11450,7 @@ function renderEpList(){
           <div class="flex items-center gap-1.5 flex-shrink-0">
             <button onclick="epGetSeason(${epCurrentSeason},this)"
               class="text-[11px] px-2.5 py-1 bg-amber-700 hover:bg-amber-600 text-white uppercase tracking-wide transition-colors flex items-center gap-1"
-              title="Download the whole season in one copy when a complete one exists, otherwise find each missing episode.">
+              title="${one?`Download the ${escHtml(one.label.toLowerCase())} pack — it holds these episodes and the rest of the run.`:"Download the whole season in one copy when a complete one exists, otherwise find each missing episode."}">
               ${ic("down")} Get ${n>1?"them":"it"}
             </button>
             ${SIMPLE?"":(one
@@ -14549,7 +14560,7 @@ async function ssSimpleGetSeason(season, btn){
         await ssSearchSeason(sn);
         if(_ssGroup!==grp) return;
       }
-      const pack=_ssBestPackForScope(sn);
+      const pack=_ssBestPackForScope(sn, _ssParseBulkFilters());
       if(pack){
         // season on the request (not 0) so the item is series-shaped from the
         // moment it is created, whatever the release name looks like.
@@ -15950,24 +15961,114 @@ function _packCoversScope(p, want, seasons){
   }
   return false;
 }
-function _ssBestPackForScope(want){
+// Pick the best of `cand` under the audio preference, then the Auto-pick size
+// limits. `filt` is OPTIONAL and that is the whole design (17.4.0):
+//
+// * **Unattended one-press** callers (`ssSimpleGetSeason`, `_epGetMissing`) pass
+//   it. Nobody is looking at what gets chosen, so a household that capped
+//   downloads at 40 GB did not mean "except when a whole season is on offer" —
+//   without this, Hunter x Hunter's 144.7 GB Blu-Ray pack won unchallenged over
+//   a 13.2 GB WEB-DL with the same dual audio.
+// * **The bulk sheet's recommendation card** does NOT, and shouldn't: its own
+//   copy has always said the limits apply to Auto only, and the card is a
+//   suggestion the user then confirms in a modal where they can see the size.
+//
+// The cascade mirrors `_ssAutoPickFrom`'s exactly — fits the window, else
+// ignore the window — so a limit steers the choice but can never leave you with
+// no pack when one exists.
+function _bestPackFrom(cand, match, cmp, filt){
+  if(!cand.length) return null;
+  const pref=cand.filter(match);
+  const pool=pref.length?pref:cand;
+  if(filt){
+    const fits=pool.filter(p=>{ const z=p.size||0;
+      return (p.seeders||0)>=filt.minSeed && z>=filt.minBytes && z<=filt.maxBytes; });
+    if(fits.length) return fits.sort(cmp)[0];
+  }
+  return [...pool].sort(cmp)[0];
+}
+function _ssBestPackForScope(want, filt){
   if(want===undefined) want=_ssBulkScope;
   const seasons=_ssSeasonsWithEpisodes();
-  const cand=_ssPacks.filter(p=>_packCoversScope(p, want, seasons));
-  if(!cand.length) return null;
-  const pref=cand.filter(_ssAudioMatch);
-  return (pref.length?pref:cand).sort(_ssPackCmp)[0];
+  return _bestPackFrom(_ssPacks.filter(p=>_packCoversScope(p, want, seasons)),
+                       _ssAudioMatch, _ssPackCmp, filt);
 }
 
 // _ssBestPackForScope against a detached run's snapshot — `ctx.packs` for
 // `_ssPacks`, `ctx.seasons` for the page's season list, `_bgAudioMatch` for the
 // page's audio preference. The library's Get button has no show page open to
 // read any of those from.
-function _bgBestPackForScope(ctx, want){
-  const cand=(ctx.packs||[]).filter(p=>_packCoversScope(p, want, ctx.seasons||[]));
-  if(!cand.length) return null;
-  const pref=cand.filter(s=>_bgAudioMatch(ctx,s));
-  return (pref.length?pref:cand).sort(_bgPackCmp(ctx))[0];
+function _bgBestPackForScope(ctx, want, filt){
+  return _bestPackFrom((ctx.packs||[]).filter(p=>_packCoversScope(p, want, ctx.seasons||[])),
+                       s=>_bgAudioMatch(ctx,s), _bgPackCmp(ctx), filt);
+}
+
+// When every gap in a season lives in a NEIGHBOURING release pack, which grid
+// season to fetch — or null when fetching it would cost more than it is worth.
+//
+// This is the case 17.2.0 described and left manual. Hunter x Hunter's TMDb
+// season 1 runs to episode 62; every release group cuts theirs at 58, so
+// episodes 59-62 ship inside the pack the groups call "Season 2". Hunting them
+// one at a time is what the search actually returns for them: an 86 MB 1-seeder
+// DUBBED HDTV rip, a 219 MB 0-seeder XviD, and nothing at all for the other two
+// — junk to sit beside a Blu-ray library.
+//
+// **The test is overlap with what you already own, in ABSOLUTE numbers**, which
+// is the only grid both sides agree on. TMDb seasons are the wrong unit: that
+// pack spans two of them, and season 1 is 58/62 owned, so a season-level
+// "do you own any of this?" says yes and refuses a download that in fact
+// duplicates nothing. Measured live on the box:
+//
+//     grid "Season 2" pack = abs  59-136   (78 episodes)
+//     owned                = abs   1-58
+//     overlap              = 0            -> fetch it
+//     it fills             = S01 E59-62 (the gaps) + all 74 of S02
+//
+// Returns `{gridSeason, label, absFrom, absTo, season}` — `season` being the
+// TMDb season holding the BULK of the pack, which is what the new item is
+// shaped as (the files are re-slotted across seasons on arrival regardless;
+// see `_bgStartPack`).
+function _bgForeignPackScope(ctx, sn, missing){
+  const meta=ctx&&ctx.meta;
+  const f=_animeFacts(meta);
+  if(!f||!f.absolute||!missing||!missing.length) return null;
+  // Every gap must sit in ONE pack, and that pack must not be this season's own
+  // — otherwise there is nothing to say and nothing to fetch elsewhere.
+  const packs=missing.map(ep=>_animeForeignPack(meta, sn, ep));
+  const one=packs.every(p=>p&&p.grid_season===packs[0].grid_season)?packs[0]:null;
+  if(!one) return null;
+  const absFrom=_animeAbsNo(meta, one.from[0], one.from[1]);
+  const absTo=_animeAbsNo(meta, one.to[0], one.to[1]);
+  if(!absFrom||!absTo||absTo<absFrom) return null;
+  // Overlap test. `_covSeasonEps` counts pending as owned, so a pack already on
+  // its way cannot trigger a second copy of itself either.
+  //
+  // Ascending, and season 0 dropped: the tally below walks the season inventory
+  // cumulatively, exactly as `_animeAbsNo` does, and specials are not part of
+  // the absolute run (`animemap` excludes them too). Out of order or with a 0 in
+  // the list, every absolute number after the first season comes out wrong.
+  const seasons=((ctx.seasons||[]).length?ctx.seasons:[sn])
+    .map(Number).filter(n=>n>0).sort((a,b)=>a-b);
+  for(const s of seasons){
+    for(const ep of _covSeasonEps(ctx.owned, s)){
+      const a=_animeAbsNo(meta, s, ep);
+      if(a&&a>=absFrom&&a<=absTo) return null;   // would re-download something
+    }
+  }
+  // Which TMDb season holds most of it — counted, not guessed, because a pack
+  // that straddles a boundary can lean either way.
+  const tally={};
+  for(let a=absFrom;a<=absTo;a++){
+    let run=0;
+    for(const s of seasons){
+      const n=((meta.all_seasons||[]).find(x=>+x.season===+s)||{}).episode_count||0;
+      if(a<=run+n){ tally[s]=(tally[s]||0)+1; break; }
+      run+=n;
+    }
+  }
+  const bulk=Object.keys(tally).sort((a,b)=>tally[b]-tally[a])[0];
+  return {gridSeason:+one.grid_season, label:one.label, absFrom, absTo,
+          season:+bulk||sn, covers:absTo-absFrom+1};
 }
 
 function ssBulkUsePack(){
@@ -16314,11 +16415,12 @@ async function _bgStartDownloads(ctx, ctl, report, jobs, note="", opts={}){
 // ssSimpleGetSeason's pack branch has raced since 16.0.0 for exactly this
 // reason, and reaching the same pack from the library page without racing would
 // be a difference nobody could see and nobody intended.
-async function _bgStartPack(ctx, ctl, report, pack, season, filt){
+async function _bgStartPack(ctx, ctl, report, pack, season, filt, foreign){
   if(ctl.cancel) return false;
   const lbl=_ssPackLabel(pack);
   report(`Starting download — ${lbl}`, pack.title, 0.95);
-  const pool=(ctx.packs||[]).filter(p=>p===pack||_packCoversScope(p, season, ctx.seasons||[]));
+  const scope=foreign?foreign.gridSeason:season;
+  const pool=(ctx.packs||[]).filter(p=>p===pack||_packCoversScope(p, scope, ctx.seasons||[]));
   const rc=_ssAutoPickRace(pool, filt, {pick:pack, match:s=>_bgAudioMatch(ctx,s)});
   // `season` with episode 0, so the item is series-shaped from the moment it is
   // created whatever the release name looks like. Still right for a pack whose
@@ -16337,11 +16439,18 @@ async function _bgStartPack(ctx, ctl, report, pack, season, filt){
   // the thing _bgStartDownloads goes out of its way to avoid. So the toast below
   // replaces what silence suppresses, and says more than the generic one would.
   if(!done || done.unreleased) return false;
+  // Say what this actually is. A FOREIGN pack is not "the whole of Season 2" to
+  // someone standing on the season 1 tab — it is the pack their missing
+  // episodes live in, which happens to bring a lot more with it. Claiming the
+  // season they are looking at would be the confusing half of the truth.
   showAlert(done.duplicate
-    ? `That whole-season copy is already downloading — nothing new was started.`
-    : `Downloading the whole of Season ${season} in one go — ${lbl.toLowerCase()}, `
-     +`${_availLabel(pack.seeders).txt.toLowerCase()} availability, ${pack.size_human}. `
-     +`Switch to Library to track progress.`,
+    ? `That copy is already downloading — nothing new was started.`
+    : (foreign
+        ? `Downloading the ${foreign.label.toLowerCase()} pack — it holds the missing `
+         +`episodes and ${foreign.covers} in total, none of which you already have. `
+        : `Downloading the whole of Season ${season} in one go — `)
+      +`${lbl.toLowerCase()}, ${_availLabel(pack.seeders).txt.toLowerCase()} availability, `
+      +`${pack.size_human}. Switch to Library to track progress.`,
     done.duplicate?"warn":"success");
   refreshCoverage();
   return true;
@@ -25145,6 +25254,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.3.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.4.0</div>
 </body>
 </html>

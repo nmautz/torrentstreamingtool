@@ -847,7 +847,18 @@ press, without the search screen opening.
   is already on the box; `_covSeasonEps` counts *pending* as owned, so a season already
   mid-download can't trigger a second whole-pack grab. A pack that fails to start falls
   through to the gap fill rather than leaving the user with nothing.
-- **`_bgStartPack(ctx, ctl, report, pack, season, filt)`** is the one-download twin of
+- **Neighbouring-pack fetch (17.4.0).** `_bgForeignPackScope(ctx, sn, missing)` handles the
+  case where you own most of a season but its last few episodes ship inside another grid
+  season's pack (the 17.2.0 "episodes 59-62 are in the season 2 pack" note). It returns the
+  grid season to fetch **only when that pack duplicates nothing already on the box**, tested
+  as an overlap of **absolute** episode numbers — the one grid TMDb and the release groups
+  agree on. Do not re-express this per TMDb season: the pack spans two of them and Hunter x
+  Hunter's season 1 is 58/62 owned, so a season-level ownership test refuses a download that
+  duplicates nothing (pack = abs 59-136, owned = abs 1-58). It also returns the TMDb season
+  holding the **bulk** of the pack, counted rather than guessed, which is what the new item
+  is shaped as. `_covSeasonEps` counts pending, so a pack already on its way can't trigger a
+  second copy of itself.
+- **`_bgStartPack(ctx, ctl, report, pack, season, filt, foreign)`** is the one-download twin of
   `_bgStartDownloads`, and it **races** where that one deliberately doesn't: `_bgStartDownloads`
   abstains because ten episodes × three candidates is thirty torrents at once, which simply
   doesn't apply to a single download. It sends `(pack, season, 0)` — the item is series-shaped
@@ -856,6 +867,16 @@ press, without the search screen opening.
   TMDb's (every long-running anime) is safe to fetch. `silent:true` is **not optional**:
   `_ssDownloadOne`'s loud path ends in `closeSearchShow()` + `switchTab("library")`, which would
   yank the user off the episode page they're standing on.
+- **Auto-pick size limits apply to packs (17.4.0).** `_bestPackFrom(cand, match, cmp, filt)` is
+  the shared tail of `_ssBestPackForScope` / `_bgBestPackForScope`; `filt` is **optional** and
+  that is deliberate. The unattended one-press callers (`ssSimpleGetSeason`, `_epGetMissing`)
+  pass it — nobody is looking, so a household that capped downloads at 40 GB did not mean
+  "except when a whole season is on offer", and without it Hunter x Hunter's 144.7 GB Blu-Ray
+  pack beat a 13.2 GB WEB-DL with the same dual audio. The bulk sheet's recommendation card
+  does **not** pass it and shouldn't: its own copy has always said the limits are for Auto,
+  and it is a suggestion behind a confirm modal that shows the size. The cascade mirrors
+  `_ssAutoPickFrom` — fits the window, else ignore it — so a limit steers the pick but never
+  leaves you with no pack when one exists.
 - Absolute-numbered batches (`ep_from`/`ep_to`, e.g. `Episodes 1-148`) are **still rejected** by
   `_packCoversScope`. Accepting them behind an animemap containment test was built and measured
   with `tests/search_eval/pickdiff.py`: across eleven targets it found no pack the ordinary

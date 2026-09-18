@@ -1,5 +1,32 @@
 # Changelog
 
+## [17.4.0] — 2026-09-18
+**The episodes that ship inside a neighbouring group's pack now come from that pack.**
+
+* **The gap 17.3.0 left open.** Hunter x Hunter's TMDb season 1 runs to episode 62; every
+  release group cuts theirs at 58, so episodes 59-62 ship inside the pack the groups call
+  "Season 2". 17.2.0 named that on screen and 17.3.0 made the button visible again — but
+  pressing it still hunted the four episodes one at a time, and what the indexers actually
+  return for them is an 86 MB one-seeder DUBBED HDTV rip, a 219 MB zero-seeder XviD, and
+  nothing at all for the other two. Junk, next to a Blu-ray library.
+* **Get them now fetches that pack — when it duplicates nothing you already own.** The test
+  is overlap in *absolute* episode numbers, the only grid both sides agree on. TMDb seasons
+  are the wrong unit: that pack spans two of them and season 1 is 58/62 owned, so a
+  season-level "do you own any of this?" says yes and refuses a download that in fact
+  duplicates nothing. On this box: the pack is absolute 59-136, what's on disk is absolute
+  1-58, overlap **zero** — so one download fills season 1's four gaps *and* all
+  seventy-four episodes of season 2, which was empty anyway.
+* **It says what it is.** "The season 2 pack — it holds the missing episodes and 78 in
+  total, none of which you already have", not "the whole of Season 2", which would be the
+  confusing half of the truth to someone standing on the season 1 tab.
+* **Auto-pick size limits now apply to whole-season downloads.** They never did, which is
+  how Hunter x Hunter's 144.7 GB Blu-Ray pack won unchallenged over a 13.2 GB WEB-DL
+  carrying the same dual audio. The cascade is the one per-episode picks already use — best
+  pack that fits the window, else best pack regardless — so a limit steers the choice but
+  can never leave you with no pack when one exists. Applies to the **unattended** one-press
+  paths only; the bulk sheet's recommendation card is a suggestion behind a confirm modal
+  and its own copy has always said the limits are for Auto.
+
 ## [17.3.0] — 2026-09-18
 **"Get them" on a season you own none of now gets the season, not seventy-four separate downloads.**
 
