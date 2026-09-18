@@ -14760,14 +14760,21 @@ function _ssEpisodeQueries(season, episode){
   const abs=(season<=1 && episode>=100);
   // A mapped anime whose TMDb seasons subdivide one continuous run: the only
   // number any release carries is the SERIES-ABSOLUTE one, so ask for that
-  // first and don't ask for the within-season number at all — it names a
-  // different episode. Measured live on Hunter x Hunter S01E59: "S01E59"
-  // returns one 86 MB dubbed HDTV rip with 1 seeder (the only thing on any
-  // indexer under that name), "059" returns the 159-seeder Blu-ray batch.
+  // first, and ask for the within-season number not at all — it names a
+  // different episode.
+  //
+  // Measured live over 20 episodes of 5 absolute-numbered anime (Hunter x
+  // Hunter, One Piece, Naruto Shippuden, Bleach, Fairy Tail), counting only
+  // results that really are the episode asked for: **unpadded 15/20, padded
+  // 12/20**, and where both hit, unpadded's best row is never the worse of the
+  // two (Bleach 33: 13 seeders vs 0). Padded still finds 2 nobody else does, so
+  // it stays — as the fallback, not the lead. `SxxExx` last, and on Hunter x
+  // Hunter's four boundary episodes it found nothing usable for any of them:
+  // one 86 MB 1-seeder dubbed HDTV rip, one dead XviD, and twice nothing at all.
   const absNo=_animeAbsNo(_ssMeta, season, episode);
   const forms=absNo
-    ? [...titles.map(t=>({t, bare:true, abs:absNo, q:`${t} ${String(absNo).padStart(3,"0")}`})),
-       ...titles.map(t=>({t, bare:true, abs:absNo, q:`${t} ${absNo}`})),
+    ? [...titles.map(t=>({t, bare:true, abs:absNo, q:`${t} ${absNo}`})),
+       ...titles.map(t=>({t, bare:true, abs:absNo, q:`${t} ${String(absNo).padStart(3,"0")}`})),
        ...titles.map(t=>({t, bare:false, abs:absNo, q:`${t} ${code}`}))]
     : [...(abs?[]:titles.map(t=>({t, bare:false, q:`${t} ${code}`}))),
        ...titles.map(t=>({t, bare:true, q:`${t} ${abs?episode:String(episode).padStart(2,"0")}`}))];

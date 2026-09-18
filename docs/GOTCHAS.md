@@ -138,7 +138,9 @@ Three consequences worth knowing before touching this code:
    next pack lands. That is honest — you don't have them — but the **Find sources** button must ask
    for the absolute number. Searching `Hunter x Hunter S01E59` returns exactly one thing on any
    indexer: an 86 MB dubbed HDTV rip with 1 seeder. Searching `059` returns the 159-seeder Blu-ray
-   batch. `_animeAbsNo` in the frontend is the mirror of `animemap.to_absolute`; keep them agreeing.
+   batch. Ask for the **unpadded** number first — measured over 20 episodes of 5 absolute-numbered
+   anime it finds 15/20 against padded's 12/20, and is never the worse of the two where both hit.
+   `_animeAbsNo` in the frontend is the mirror of `animemap.to_absolute`; keep them agreeing.
 
 See [LIBRARY_DATA.md](LIBRARY_DATA.md) § Anime season mapping.
 
