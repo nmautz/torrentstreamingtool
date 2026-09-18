@@ -54,6 +54,13 @@ above.** The best (Qwen3-4B, rules-first) matched them at 4 wrong top rows while
 trimming wrong rows further (92.7% vs 90.4% precision), for ~20 s per show on the
 box's GTX 1060 and 2.5 GB of VRAM.
 
+**Qwen3-4B-Thinking**, re-run on the 16 hardest shows with a token cap big enough
+for its reasoning (15,933 generated tokens per show — ~100 s each on an RTX 5070,
+so 8-10 minutes per show on the box's 1060), was the only run to beat the rules on
+anything: one more show found, 86.7% vs 75.7% precision on that subset. Both
+differences trace to `Hunter.x.Hunter.S01E015` — the three-digit episode parse bug
+fixed in 16.6.0, which this data predates. Against the fixed parser it adds nothing.
+
 Two findings worth keeping:
 
 - **Prompt shape beat model size.** Making the model write the show name it saw
@@ -62,5 +69,10 @@ Two findings worth keeping:
   against the 4B's 77% — they say yes too often.
 - **The mistakes were mechanical** — extra words in a name, a wrong year, a
   country tag — which is why rules fixed them for free.
+
+**If you re-run a thinking model, size `--maxtok` for its reasoning.** The first
+attempt used the ordinary cap (~1,050 tokens for a batch of 10), so every answer
+came back empty and the harness scored them all "no" — a 1.9-hour run that
+measured nothing. `bench.py --maxtok 6000 --batch 5` is what worked.
 
 Worth re-testing only for a judgement no rule can express.
