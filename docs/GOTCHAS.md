@@ -103,6 +103,38 @@ Anime results mix audio variants under one show: untagged fansubs (SubsPlease/Er
 - The foreign-language token map is **deliberately conservative** (full words + unambiguous scene tags only — no `GER`/`SPA`/`POR` abbreviations, which collide with title words).
 - In bulk **Auto**, the audio preference outranks *everything* (an episode with any matching source never falls back to another language — that's the whole point); the seeder-floor/size cascade runs inside the matching subset. Episodes with **no** matching source fall back to best-seeded and are **counted in the final toast** ("N had no English-audio source") — silent fallback is the exact surprise this feature exists to kill.
 
+### An anime's `SxxExx` can be authoritative and still wrong — the season grids don't agree
+
+`SxxExx` on the basename is the strongest signal attribution has, and for anime it is routinely a
+statement in a coordinate system TMDb doesn't share. Hunter x Hunter (2011) is one 148-episode run
+that TMDb splits 62 / 74 / 12, iAHD splits 58 / 78 / 12, Netflix splits six ways *with absolute
+numbers inside*, the scene calls one season forever, and the fansub batches don't number seasons at
+all. **iAHD's `S02E01` is episode 59; TMDb's `S02E01` is episode 63.** Nothing in the filename says
+so, and nothing ever will.
+
+Three consequences worth knowing before touching this code:
+
+1. **Don't "fix" it by making `SxxExx` non-authoritative.** That is right for perhaps 1% of shows
+   and catastrophic for the rest. The reconciliation is gated on a show appearing in the Anime-Lists
+   mapping table (`animemap.entries_for` → `[]` for everything else), and that gate is the whole
+   safety story.
+2. **Pass 3 is not idempotent, and cannot be made so.** Its input is release labels and its output
+   is TMDb slots; they are the same two integers. Re-running it over its own output slides an
+   80-episode pack by another four. `abs_no` on the file is the "already decoded" mark — it is
+   written for every file the pass looks at, including the ones it doesn't move, and `build_file_list`
+   drops it along with the remapped numbers when it rebuilds from qBit, so the two never disagree.
+   Same reason pass 3 skips any season **pass 2** resolved: those numbers are already TMDb slots.
+   A fansub batch numbered 059-075 came out of pass 2 as S1E59..S2E13, and pass 3 slid it to S2E9
+   before `abs_resolved` was added.
+3. **A gap at a grid boundary is not a gap in a release.** TMDb says HxH S1 has 62 episodes and
+   every "S01" pack on every indexer stops at 58, so the library will show 59-62 missing until the
+   next pack lands. That is honest — you don't have them — but the **Find sources** button must ask
+   for the absolute number. Searching `Hunter x Hunter S01E59` returns exactly one thing on any
+   indexer: an 86 MB dubbed HDTV rip with 1 seeder. Searching `059` returns the 159-seeder Blu-ray
+   batch. `_animeAbsNo` in the frontend is the mirror of `animemap.to_absolute`; keep them agreeing.
+
+See [LIBRARY_DATA.md](LIBRARY_DATA.md) § Anime season mapping.
+
 ### Size tags ("- 1.85GB", "- 700 MB") were misparsed as absolute episode 1 — hiding YIFY movies from the packs page
 
 `parse_torrent_title` first normalises `._` → spaces, so a YIFY-style `The Matrix (1999) … - 1.85GB -YIFY` became `… - 1 85GB -YIFY`. The absolute-episode heuristic (`_TT_ABS_DASH_RE`, `\s-\s+(\d{1,4})`) then read the `- 1` as **episode 1** → `kind="episode"`. On a **movie** show page (opened from a TMDb movie card) the packs list filters to `kind !== "episode"`, so the misclassified release — often the *highest-seed* one — silently vanished. Fix: `_TT_SIZE_RE` strips size tokens (incl. the dot-split `1 85GB` form) from `norm` **before** structural parsing. Keep the strip ahead of the marker scan; anime absolute-numbering (`One Piece - 1043`, `Attack on Titan - 12`) must still parse as episodes, and they carry no size unit so they're untouched.

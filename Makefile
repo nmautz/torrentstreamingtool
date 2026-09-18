@@ -11,6 +11,7 @@ test:
 	python3 tests/test_relquality.py
 	python3 tests/test_race_rules.py
 	python3 tests/test_tmdbcache.py
+	python3 tests/test_animemap.py
 	python3 tests/test_http_clients.py
 
 clean:

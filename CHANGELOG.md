@@ -1,5 +1,36 @@
 # Changelog
 
+## [17.1.0] — 2026-09-18
+**Anime seasons finally line up with what the release groups actually publish.**
+
+* **The problem, in one show.** Hunter x Hunter (2011) is one continuous 148-episode run. TMDb
+  splits it into 3 seasons of 62 / 74 / 12. No release group uses that split: the Blu-ray group
+  splits 58 / 78 / 12, the Netflix rips split six ways with *absolute* numbers inside, the scene
+  calls the whole thing season 1 forever, and the fansub batches don't number seasons at all. So a
+  perfectly correct `S02E01` on a filename can mean episode 59 or episode 63 depending on who made
+  it — and StreamLink believed the filename.
+* **What that would have cost you.** The 78-file season 2 Blu-ray pack — the obvious next download
+  — would have landed **four episodes out of true across the entire Chimera Ant arc**, with its last
+  four files falling off the end of TMDb's 74-episode season entirely: wrong titles, wrong stills,
+  wrong everything. 【OSHI NO KO】 had the mirror-image problem waiting: TMDb folds all three of its
+  cours into one 35-episode Season 1, so an ordinary "S02" pack names a season TMDb hasn't got.
+* **The fix.** StreamLink now reconciles the two grids against the **Anime-Lists mapping table** (the
+  community data behind Sonarr's and Jellyfin's anime handling — no account, no key, cached on the
+  box and refreshed weekly). A third attribution pass uses it to put each file where TMDb thinks it
+  goes, and records its real series-absolute number. Shows where the grids already agree — Code
+  Geass, Attack on Titan, Demon Slayer — are untouched, as is every non-anime show: the whole thing
+  is gated on the show appearing in that table.
+* **Finding a missing anime episode now asks for the right thing.** Nobody publishes
+  "Hunter x Hunter S01E59" — searching that returns a single 86 MB dubbed HDTV rip with one seeder,
+  which is the only release on any indexer with that name. Searching "059" returns the 159-seeder
+  Blu-ray batch. Find sources now leads with the absolute number for these shows and doesn't ask for
+  the within-season one at all, because it names a different episode.
+* An item's admin **Refresh** button re-fetches the mapping table and rewinds the remap before
+  re-deriving it, so a mapping corrected upstream can reach files it already moved. Each moved file
+  keeps a record of what the release itself called it.
+* No effect on a box with no internet reach to GitHub: with no table cached, every show behaves
+  exactly as it did in 17.0.0.
+
 ## [17.0.0] — 2026-09-17
 **AI subtitles are retired.**
 

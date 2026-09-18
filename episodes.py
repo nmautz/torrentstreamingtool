@@ -23,6 +23,11 @@ So attribution happens in two passes:
    against that season's real episode count and, when they instead line up with
    the cumulative absolute window, subtracts the offset.
 
+3. **Anime season grids** (`animemap.remap_slots`, 17.1.0) — the case neither
+   pass above can reach: an `SxxExx` that is *authoritative and wrong*, because
+   the release counts its seasons on a different grid than TMDb does. It needs
+   an external mapping table and so lives in its own module; see `animemap.py`.
+
 Splitting it this way keeps pass 1 usable at download time (when no metadata
 exists yet) while pass 2 stays a pure function of `(slots, season counts)`.
 
@@ -391,6 +396,11 @@ def resolve_absolute(slots: list[dict], all_seasons: list[dict]) -> bool:
         for sl in group:
             sl["episode"] = int(sl["episode"]) - offset
             sl["abs"] = False
+            # Transient, for the anime pass that runs straight after: these
+            # numbers are now TMDb slots, not the release's own labels, so it
+            # must not read them as labels and shift them a second time. Not
+            # persisted — `abs_no` is what carries the fact across a reload.
+            sl["abs_resolved"] = True
             changed = True
 
     # Case B — no season anywhere in the item, so every number is absolute and
@@ -407,6 +417,7 @@ def resolve_absolute(slots: list[dict], all_seasons: list[dict]) -> bool:
                     sl["season"] = season
                     sl["episode"] = n - offsets[season]
                     sl["abs"] = False
+                    sl["abs_resolved"] = True      # see Case A
                     changed = True
                     break
     return changed
@@ -438,6 +449,21 @@ def apply_slot(file_dict: dict, slot: dict) -> bool:
     elif "abs_episode" in file_dict:
         del file_dict["abs_episode"]
         changed = True
+    # `abs_no` is the series-absolute episode number, written only by the anime
+    # pass (animemap.remap_slots) and only for shows it has a mapping for. It is
+    # additive: a slot that doesn't carry one never clears one, so the ordinary
+    # structural re-runs above can't wipe it.
+    abs_no = int(slot.get("abs_no", 0) or 0)
+    if abs_no and int(file_dict.get("abs_no", 0) or 0) != abs_no:
+        file_dict["abs_no"] = abs_no
+        changed = True
+    # Likewise `rel_season`/`rel_episode` — what the release itself called this
+    # file, kept only where the anime pass moved it (see animemap.reset_files).
+    for key in ("rel_season", "rel_episode"):
+        val = int(slot.get(key, 0) or 0)
+        if val and int(file_dict.get(key, 0) or 0) != val:
+            file_dict[key] = val
+            changed = True
     return changed
 
 

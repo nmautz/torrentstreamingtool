@@ -32,6 +32,9 @@ Downloads/
 # On-disk cache of TMDb API responses (tmdbcache.py)
 .tmdb_cache/
 
+# Cached Anime-Lists season-mapping table (see animemap.py); refetched weekly
+.anime_map/
+
 # User library database (profiles + watch history)
 library.json
 library_backups/

@@ -9221,6 +9221,7 @@ async function openSeriesPage(seriesKey, title, section, filePath){
   epOndemandOnly=!!d.ondemand_only; epOndemandLocked=!!d.ondemand_only_locked;
   epHlsAvailable=d.hls_available!==false;
   epMetadata=d.metadata||null; epMetaImgBase=d.img_base||"";
+  _noteAnimeFacts(epMetadata, d.anime);
   _epSeriesResume=d.resume||null;
   // One section of the merged show (its spin-off, its films, its specials).
   if(section){ _applySection(d.sections, section, filePath); _epSeriesResume=null; }
@@ -9290,6 +9291,7 @@ async function _epTopUpSeasons(stillOpen, title, retried){
     const m=await r.json();
     if(!stillOpen() || !m.metadata) return;
     epMetadata=m.metadata; epMetaImgBase=m.img_base||epMetaImgBase;
+    _noteAnimeFacts(epMetadata, m.anime);
     // The server leaves out a season whose fetch failed rather than caching the
     // gap, so one retry picks up just the stragglers (the rest come off its cache).
     const got=Object.keys(epMetadata.seasons||{}).map(Number).filter(n=>n>0).length;
@@ -9369,6 +9371,7 @@ async function _epApplyMetadata(itemId, title, respPromise){
     }
     epMetadata=m.metadata||null;
     epMetaImgBase=m.img_base||"";
+    _noteAnimeFacts(epMetadata, m.anime);
   }
   if(epMetadata){
     // Metadata may have widened the show beyond what's on disk (seasons we own
@@ -9660,6 +9663,7 @@ async function renameSeries(){
     }
     epMetadata=d.metadata||null;
     if(d.img_base) epMetaImgBase=d.img_base;
+    _noteAnimeFacts(epMetadata, d.anime);
     epHeroTitle=name;
     renderEpHero(name);
     renderEpSeasonTabs();
@@ -9836,6 +9840,7 @@ function _applyMetaResult(d, msg){
   }
   epMetadata=d.metadata||null;
   if(d.img_base) epMetaImgBase=d.img_base;
+  _noteAnimeFacts(epMetadata, d.anime);
   renderEpHero(_epCurrentName());
   renderEpSeasonTabs();
   renderEpList();
@@ -10292,6 +10297,43 @@ async function postLibraryDownload(body, opts={}){
   const r2=await send({...rest, magnet:go.magnet, title:go.title||body.title, allow_unreleased:true});
   r2.source=go;
   return r2;
+}
+
+// ── Anime season mapping ────────────────────────────────────────────────────
+// TMDb's season grid for a long-running anime is one convention among several,
+// and the release groups use the others. The backend reconciles them against
+// the Anime-Lists mapping table (see animemap.py) and reports what it found as
+// `anime: {mapped, absolute, total}` alongside the metadata, from BOTH the
+// per-item endpoint and /api/tmdb/lookup.
+//
+// Kept in one map keyed on TMDb id rather than beside each `epMetadata` /
+// `_ssMeta` assignment, because there are seven of those and they all describe
+// the same handful of shows.
+const _animeFactsById=new Map();
+function _noteAnimeFacts(meta, facts){
+  const id=+((meta||{}).tmdb_id)||0;
+  if(id && facts && facts.mapped) _animeFactsById.set(id, facts);
+}
+function _animeFacts(meta){
+  const id=+((meta||{}).tmdb_id)||0;
+  return id ? (_animeFactsById.get(id)||null) : null;
+}
+
+// Series-absolute episode number for a TMDb (season, episode), or 0 when the
+// show isn't an anime whose seasons are subdivisions of one continuous run.
+// The mirror of animemap.to_absolute — same cumulative walk over the season
+// inventory, so both sides agree on what "episode 59" means.
+function _animeAbsNo(meta, season, episode){
+  const f=_animeFacts(meta);
+  if(!f || !f.absolute || +season<=0 || +episode<=0) return 0;
+  const grid=(meta.all_seasons||[]).map(x=>({n:+x.season||0, c:+x.episode_count||0}))
+                                   .filter(x=>x.n>0 && x.c>0).sort((a,b)=>a.n-b.n);
+  let run=0;
+  for(const s of grid){
+    if(s.n===+season) return +episode<=s.c ? run + +episode : 0;
+    run+=s.c;
+  }
+  return 0;
 }
 
 // TMDb episodes of `season` that `have` (a Set of episode numbers) doesn't cover.
@@ -13835,6 +13877,7 @@ async function openSearchShow(group){
       const d=await r.json();
       if(_ssGroup===group && d.metadata){   // still the open show
         _ssMeta=d.metadata; _ssImgBase=d.img_base||_ssImgBase;
+        _noteAnimeFacts(_ssMeta, d.anime);
         _ssResolveOwned();   // only now is there a TMDb identity to match on
         _ssRenderHero(); _ssRenderBody();
       }
@@ -13899,6 +13942,7 @@ async function openSearchShowFromTmdb(cand, opts){
       const d=await r.json();
       if(_ssGroup===group && d.metadata){
         _ssMeta=d.metadata; _ssImgBase=d.img_base||_ssImgBase;
+        _noteAnimeFacts(_ssMeta, d.anime);
         const seasons=_ssAllSeasons();
         if(seasons.length && !seasons.includes(_ssSeason)) _ssSeason=seasons[0];
         _ssRenderHero(); _ssRender();
@@ -14714,8 +14758,19 @@ function _ssEpisodeQueries(season, episode){
   }
   const code=`S${String(season).padStart(2,"0")}E${String(episode).padStart(2,"0")}`;
   const abs=(season<=1 && episode>=100);
-  const forms=[...(abs?[]:titles.map(t=>({t, bare:false, q:`${t} ${code}`}))),
-               ...titles.map(t=>({t, bare:true, q:`${t} ${abs?episode:String(episode).padStart(2,"0")}`}))];
+  // A mapped anime whose TMDb seasons subdivide one continuous run: the only
+  // number any release carries is the SERIES-ABSOLUTE one, so ask for that
+  // first and don't ask for the within-season number at all — it names a
+  // different episode. Measured live on Hunter x Hunter S01E59: "S01E59"
+  // returns one 86 MB dubbed HDTV rip with 1 seeder (the only thing on any
+  // indexer under that name), "059" returns the 159-seeder Blu-ray batch.
+  const absNo=_animeAbsNo(_ssMeta, season, episode);
+  const forms=absNo
+    ? [...titles.map(t=>({t, bare:true, abs:absNo, q:`${t} ${String(absNo).padStart(3,"0")}`})),
+       ...titles.map(t=>({t, bare:true, abs:absNo, q:`${t} ${absNo}`})),
+       ...titles.map(t=>({t, bare:false, abs:absNo, q:`${t} ${code}`}))]
+    : [...(abs?[]:titles.map(t=>({t, bare:false, q:`${t} ${code}`}))),
+       ...titles.map(t=>({t, bare:true, q:`${t} ${abs?episode:String(episode).padStart(2,"0")}`}))];
   if(!forms.length) return forms;
   forms[0].orig=true;   // what this search always asked; the rest are fallbacks
   const win=_ssGroup && _ssEpFormWin.get(_ssGroup);
@@ -14856,6 +14911,7 @@ async function ssSearchEpisode(season, episode, opts={}){
   if(!opts.silent) _ssRenderBody();
   const grp=_ssGroup;
   const code=`S${String(season).padStart(2,"0")}E${String(episode).padStart(2,"0")}`;
+  const absNo=_animeAbsNo(_ssMeta, season, episode);
   const forms=_ssEpisodeQueries(season, episode);
   let found=[];
   for(const f of forms){
@@ -14870,7 +14926,14 @@ async function ssSearchEpisode(season, episode, opts={}){
       if(r.ok){
         const data=await r.json();
         (data.groups||[]).forEach(g=>(g.results||[]).forEach(res=>{
-          if(res.kind==="episode" && res.season===season && res.episode===episode
+          // An absolute-numbered anime release states the absolute number and
+          // whatever season its own grid uses (the parser files a bare number
+          // under season 1), so matching it on TMDb's (season, episode) would
+          // reject every real source. Match on the absolute number instead.
+          const hit=absNo
+            ? (res.episode===absNo && res.season<=1)
+            : (res.season===season && res.episode===episode);
+          if(res.kind==="episode" && hit
              && _ssEpisodeAccept(res, season)) found.push(res);
         }));
       }
@@ -24810,6 +24873,6 @@ document.addEventListener("DOMContentLoaded",async()=>{
   connectSSE();
 });
 </script>
-<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.0.0</div>
+<div data-ui-version style="position:fixed;bottom:6px;right:8px;font-size:10px;color:rgba(255,255,255,0.25);pointer-events:none;user-select:none;z-index:9999;line-height:1;">17.1.0</div>
 </body>
 </html>

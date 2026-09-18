@@ -50,6 +50,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 import analyzer
+import animemap
 import refiner
 import dvprobe
 import episodes
@@ -2783,6 +2784,109 @@ async def _tmdb_effective_key() -> str:
 TMDB_API_CACHE = Path(__file__).parent / ".tmdb_cache"
 _tmdb_disk = tmdbcache.TmdbCache(TMDB_API_CACHE)
 
+# ── Anime season mapping ────────────────────────────────────────────────────
+#
+# TMDb's season grid for an anime is one convention among five, and the release
+# groups use the others (see animemap.py's header for the Hunter x Hunter table
+# that motivated this). `animemap` holds the community mapping that reconciles
+# them; here we keep the cached copy fresh and hand it to the attribution pass.
+#
+# Everything about it is optional. No table on disk, or a show the table has
+# never heard of, and `entries_for` answers `[]` — which is exactly the
+# pre-17.1.0 behaviour for every show, anime or not.
+ANIME_MAP_CACHE = Path(__file__).parent / ".anime_map"
+_anime_map = animemap.AnimeMap(ANIME_MAP_CACHE)
+# Serialises refreshes and stops a stale table triggering one fetch per caller.
+_anime_map_lock = asyncio.Lock()
+# Set after a failed fetch: don't retry the download on every library load.
+_anime_map_retry_after = 0.0
+_ANIME_MAP_RETRY_BACKOFF = 6 * 3600
+
+
+async def _anime_map_refresh(force: bool = False) -> bool:
+    """Download `anime-list-full.xml` if the cached copy is missing or a week
+    old. Returns True when a new copy was stored.
+
+    Best-effort by design: a failure leaves whatever is already on disk in
+    place, and an empty cache simply means anime attribution behaves like it did
+    before this existed. Never raises, so a caller can fire it and forget it.
+    """
+    global _anime_map_retry_after
+    if not force and not _anime_map.stale():
+        return False
+    if not force and time.monotonic() < _anime_map_retry_after:
+        return False
+    async with _anime_map_lock:
+        if not force and not _anime_map.stale():
+            return False                      # won by another caller
+        try:
+            async with _http_client(timeout=httpx.Timeout(60.0, connect=10.0),
+                                    follow_redirects=True) as c:
+                r = await c.get(animemap.ANIME_LIST_URL)
+            if r.status_code != 200:
+                raise ValueError(f"HTTP {r.status_code}")
+            # `store` validates size and parse before replacing the good copy,
+            # so a captive portal's login page can never blank the table.
+            if not await asyncio.to_thread(_anime_map.store, r.content):
+                raise ValueError(f"rejected {len(r.content)} bytes")
+        except Exception as e:
+            _anime_map_retry_after = time.monotonic() + _ANIME_MAP_RETRY_BACKOFF
+            log.info("Anime season map not refreshed (%s); using the cached copy", e)
+            return False
+    _anime_map_retry_after = 0.0
+    log.info("Anime season map refreshed: %d shows", await _anime_map_warm())
+    return True
+
+
+async def _anime_map_warm() -> int:
+    """Parse the cached table into memory off the event loop, returning how many
+    shows it holds.
+
+    The parse is ~1.7 MB of XML and `AnimeMap.index()` does it lazily on first
+    use — which would otherwise be inside `_reattribute_item_files`, i.e. on the
+    loop, where `diagnostics` would (rightly) report it as lag. Doing it in a
+    thread at startup means every later call is a `stat()`.
+    """
+    return await asyncio.to_thread(lambda: len(_anime_map.index()))
+
+
+def _anime_facts(metadata: Optional[dict]) -> Optional[dict]:
+    """What the UI needs to know about an anime show's numbering, or None for
+    every show the mapping table doesn't cover.
+
+    Computed at serve time rather than stored on `metadata`, because most
+    `metadata` blobs are **pinned** (`source` picked/manual/custom) and would
+    never pick the field up, and because the table is refreshed underneath us.
+
+      absolute — TMDb's seasons are subdivisions of one continuous run, so the
+                 series-absolute number is the real coordinate (Hunter x Hunter,
+                 One Piece). This is what tells the UI to search "059" rather
+                 than "S01E59".
+      total    — episodes in the run, across TMDb's positive seasons.
+    """
+    entries = _anime_entries(metadata)
+    if not entries:
+        return None
+    return {
+        "mapped":   True,
+        "absolute": animemap.is_absolute_run(entries),
+        "total":    animemap.total_episodes((metadata or {}).get("all_seasons") or []),
+    }
+
+
+def _anime_entries(metadata: Optional[dict]) -> list:
+    """The mapping entries for an item's bound show, or `[]`.
+
+    `[]` for every movie, every Western show and every anime the table doesn't
+    cover — which is the gate keeping this whole subsystem off the ordinary
+    path.
+    """
+    if not metadata or metadata.get("tmdb_kind") != "tv":
+        return []
+    tmdb_id = int(metadata.get("tmdb_id") or 0)
+    return _anime_map.entries_for(tmdb_id) if tmdb_id else []
+
+
 # Shared keep-alive client. A fresh AsyncClient per call paid a full TLS
 # handshake every time, which a 28-season show paid 30 times over.
 _tmdb_client: Optional[httpx.AsyncClient] = None
@@ -3370,14 +3474,21 @@ async def _tmdb_fetch_movie(movie_id: int) -> dict:
 
 
 def _reattribute_item_files(item: dict, metadata: Optional[dict]) -> bool:
-    """Second attribution pass: turn series-absolute episode numbers into
-    within-season ones now that TMDb's season inventory is known. In place;
-    returns True if anything changed.
+    """Passes 2 and 3: settle the episode numbers now that TMDb's season
+    inventory is known. In place; returns True if anything changed.
 
-    Anime batches number episodes across the whole run — `…/Season 2/Show - 26.mkv`
-    is S2E01, not S2E26 — which no amount of filename parsing can resolve on its
-    own. Only files the structural pass flagged `abs_episode` are eligible, so a
-    number read off an `SxxExx` (or corrected by hand) is never touched.
+    **Pass 2** (`episodes.resolve_absolute`) turns series-absolute numbers into
+    within-season ones. Anime batches number episodes across the whole run —
+    `…/Season 2/Show - 26.mkv` is S2E01, not S2E26 — which no amount of filename
+    parsing can resolve on its own. Only files the structural pass flagged
+    `abs_episode` are eligible, so a number read off an `SxxExx` (or corrected
+    by hand) is never touched.
+
+    **Pass 3** (`animemap.remap_slots`) handles the case pass 2 deliberately
+    won't: an `SxxExx` that is authoritative and *still* wrong, because the
+    release counts its seasons on a different grid than TMDb does. It runs only
+    for a show the anime mapping table covers, so no Western show can reach it.
+    See docs/LIBRARY_DATA.md § Anime season mapping.
     """
     if not metadata or metadata.get("tmdb_kind") != "tv":
         return False
@@ -3388,8 +3499,13 @@ def _reattribute_item_files(item: dict, metadata: Optional[dict]) -> bool:
     slots = [{"season": int(f.get("season", 0) or 0),
               "episode": int(f.get("episode", 0) or 0),
               "bucket": f.get("bucket", "") or "",
-              "abs": bool(f.get("abs_episode"))} for f in files]
-    if not episodes.resolve_absolute(slots, all_seasons):
+              "abs": bool(f.get("abs_episode")),
+              "abs_no": int(f.get("abs_no", 0) or 0),
+              "rel_season": int(f.get("rel_season", 0) or 0),
+              "rel_episode": int(f.get("rel_episode", 0) or 0)} for f in files]
+    moved = episodes.resolve_absolute(slots, all_seasons)
+    moved |= animemap.remap_slots(slots, all_seasons, _anime_entries(metadata))
+    if not moved:
         return False
     changed = False
     for f, slot in zip(files, slots):
@@ -12490,6 +12606,13 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
     cachepurge_loop = asyncio.create_task(cache_autopurge_loop())
     # Trim the TMDb response cache once per start (old/unused entries only).
     _tmdb_bg(asyncio.to_thread(_tmdb_disk.prune))
+    # Fetch the anime season-mapping table if the cached copy is missing or a
+    # week old. Fire-and-forget: attribution reads whatever is on disk at the
+    # time, and a box that never reaches GitHub simply keeps the old behaviour.
+    _spawn_bg(_anime_map_refresh())
+    # …and parse whatever is already cached, so the first library page doesn't
+    # pay for it on the event loop. No-op when the refresh above just did it.
+    _spawn_bg(_anime_map_warm())
     subupgrade_loop = asyncio.create_task(subtitle_upgrade_loop())
     od_reaper_loop  = asyncio.create_task(_od_reaper())
     maint_loop      = asyncio.create_task(background_maintenance_loop())
@@ -13626,6 +13749,11 @@ async def _build_item_files(item: dict, profile_id: str) -> list[dict]:
             # Non-empty ⇒ the file sits outside the numbered run (Specials,
             # Movies, a spin-off folder); the label to group it under.
             "bucket": f.get("bucket", "") or "",
+            # Series-absolute episode number, present only for a show the anime
+            # season-mapping table covers (animemap.py). It is what an indexer
+            # query for a missing anime episode has to be built from: nobody
+            # publishes "Hunter x Hunter S01E59", plenty publish "059".
+            "abs_no": int(f.get("abs_no", 0) or 0) or None,
             "progress": progress,
             "mode": mode,                               # now | low | mid | high | idle | skip
             "dl_priority": _dl_priority_of(mode),       # low | mid | high — download-order tier (mid default)
@@ -14005,6 +14133,9 @@ async def get_item_metadata(request: Request, item_id: str,
         "img_base": LOCAL_IMG_BASE,
         "metadata": cached or None,
         "pending":  pending,
+        # Present only for a show the anime season-mapping table covers; see
+        # `_anime_facts` and docs/LIBRARY_DATA.md § Anime season mapping.
+        "anime":    _anime_facts(cached),
     })
 
 
@@ -14154,6 +14285,9 @@ async def tmdb_lookup(title: str = "", year: int = 0, kind: str = "",
         "enabled":  key_present,
         "img_base": LOCAL_IMG_BASE,
         "metadata": data,
+        # Same shape as the per-item metadata endpoint: the search show page
+        # needs it to query an anime episode by its absolute number.
+        "anime":    _anime_facts(data),
     })
 
 
@@ -14491,6 +14625,19 @@ async def refresh_item_metadata(item_id: str, request: Request,
     _require_admin(request)
     if not await _tmdb_effective_key():
         raise HTTPException(400, "TMDb API key is not configured.")
+    # Rewind the anime season remap first. That pass is one-shot by design (it
+    # is not idempotent — re-reading its own output as release labels would
+    # slide the numbers again), so Refresh is the only way a corrected mapping,
+    # or a re-bind to a different show, can reach files it already moved. The
+    # refetch below re-derives it from the release's own labels.
+    # Also re-fetch the table itself: a mapping fixed upstream this week is
+    # exactly what someone pressing Refresh on a mis-numbered anime is after.
+    await _anime_map_refresh()
+    async with mutate_library() as lib_w:
+        it = next((x for x in lib_w["items"] if x["id"] == item_id), None)
+        if it is None or not animemap.reset_files(it.get("files") or []):
+            raise LibraryUnchanged
+        (it.get("files") or []).sort(key=episodes.sort_key)
     data = await _fetch_item_metadata(
         item_id,
         force=True,

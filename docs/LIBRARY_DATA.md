@@ -560,6 +560,10 @@ in the `/files` response. See [STREAMING.md](STREAMING.md).
   "episode": 1,
   "bucket": "Extras",                    // optional; set only on season-0 files that sit OUTSIDE the numbered run — the folder they came from ("Specials"/"Movies"/"OAD"/a spin-off's own name). Groups + labels them in the UI
   "abs_episode": true,                   // optional; transient — "this episode number may be series-absolute". Cleared by the TMDb-aware pass, see below
+  "abs_no": 59,                          // optional (17.1.0); series-absolute episode number. Written only by the anime pass, only for a show
+                                         //   the mapping table covers. Doubles as that pass's "this season is settled" mark — see below
+  "rel_season": 2,                       // optional (17.1.0); what the RELEASE called this file, kept only where the anime pass moved it.
+  "rel_episode": 1,                      //   Never read by the decode; it is the record, and what `animemap.reset_files` rewinds to
   "compressed": true,                    // optional; set true when this file was re-encoded IN PLACE by the compression tool — see below
   "compressed_at": "2026-06-25T18:00:00Z", // optional; when the in-place re-encode replaced the original
   "validation": {                        // optional; written by the file validator
@@ -616,10 +620,70 @@ season's real `episode_count`:
 Only files flagged `abs_episode` are ever touched, so a number read off an `SxxExx` — or corrected by
 hand — is safe. The flag is cleared once resolved, making the pass a no-op on every later call.
 
+**Pass 3 — anime season grids (17.1.0)** (`animemap.remap_slots`, same call site). The case pass 2
+deliberately won't touch: an `SxxExx` that is authoritative *and wrong*, because the release counts
+its seasons on a different grid than TMDb does. See § Anime season mapping below. It runs only for a
+show the mapping table covers, so no Western show can reach it, and it never touches a season pass 2
+resolved — those numbers are already TMDb slots, and reading them as release labels would shift them
+a second time.
+
 `_settle_attribution` also **tops up the episode lists for any season the correction reveals**: the
 season list sent to TMDb is derived from the files, so correcting the files can surface seasons whose
 episodes were never fetched (they'd gain a tab but no titles or stills). Bounded to 12 extra seasons
 per call.
+
+### Anime season mapping (17.1.0)
+
+**TMDb's season split for a long-running anime is one convention among several, and the release
+groups use the others.** Hunter x Hunter (2011) is one 148-episode run, and every one of these was
+live on the indexers on 2026-09-18:
+
+| Source | Seasons | `S02E01` means |
+|---|---|---|
+| TMDb | 3 — 62 / 74 / 12 | absolute 63 |
+| iAHD (Blu-ray) | 3 — 58 / 78 / 12 | absolute **59** |
+| ZigZag (Netflix) | 6, numbered **absolute** | its files are `S02E27`…`S02E38` = absolute 27–38 |
+| scene (W4F) | one season, forever | `S01E59` = absolute 59 |
+| sam / Judas / Refrain | none — `- 059`, `(01-148)` | — |
+
+Pass 1 reads all of those numbers correctly. What it cannot know is *which grid they are counted
+on*, and an `SxxExx` is authoritative — so iAHD's 78-file S02 pack lands four episodes out of true
+across the whole Chimera Ant arc, with its last four files falling off the end of a 74-episode
+season. The mismatch runs the other way too: TMDb folds all three cours of 【OSHI NO KO】 into one
+35-episode Season 1, so an ordinary `S02E01` names a season TMDb hasn't got.
+
+Neither AniList nor AniDB answers this alone — AniList *merges* where TMDb splits (one 148-episode
+entry for Hunter x Hunter) and *splits* where TMDb merges (11/13/11 for OSHI NO KO). It is a third
+grid, not an arbiter. What does answer it is **Anime-Lists' `anime-list-full.xml`**, the community
+table behind Sonarr's and Jellyfin's anime handling, which records each AniDB entry's landing place
+on both TVDB and TMDb *with offsets*. [`animemap.py`](../animemap.py) caches it in `.anime_map/`
+(refreshed weekly, best-effort — a box that never reaches GitHub keeps the old behaviour) and reads
+two shapes out of it:
+
+* **An absolute run** (`tmdbseason="a"`) — TMDb's seasons subdivide one continuous run, so the
+  series-absolute number is the real coordinate. The table's `start`/`end` windows are the
+  boundaries the release groups cut their packs on (for HxH: 1-58 / 59-136 / 137-148, i.e. exactly
+  iAHD's split). A pack whose numbers start at 1 is season-local and gets its window's offset added;
+  a pack whose numbers start higher *and* fall outside the window its label claims is already
+  absolute and the label is decoration (ZigZag).
+* **A folded cour** (`tmdboffset`) — the release's season N is a real cour that TMDb merged into a
+  bigger season. OSHI NO KO's S2 is TMDb S1 from episode 12; Frieren's is S1 from episode 29.
+
+Every decode is **all-or-nothing**: if any file would land outside TMDb's grid the whole pack is
+refused, because a half-remapped season is worse than an honestly mislabelled one. Where the two
+grids agree (Code Geass, Attack on Titan, Demon Slayer) nothing moves.
+
+`abs_no` is the settled mark as well as the absolute number — the pass is **not** idempotent
+without one, since re-reading its own output as release labels would shift the numbers again. It is
+also what the missing-episode search needs: no indexer publishes "Hunter x Hunter S01E59", plenty
+publish "059" (measured live, that query is the difference between one 86 MB 1-seeder dubbed HDTV
+rip and the 159-seeder Blu-ray batch). The admin **Refresh** button on an item re-fetches the table
+and calls `animemap.reset_files` first, which rewinds to `rel_season`/`rel_episode` so a corrected
+mapping upstream can actually reach files the pass already moved.
+
+The shape is served to the frontend as `anime: {mapped, absolute, total}` on both
+`GET /api/library/{id}/metadata` and `/api/tmdb/lookup` — computed at serve time (`_anime_facts`),
+never stored on `metadata`, because most `metadata` blobs are pinned and would never pick it up.
 
 **Sections (15.0.0).** A `bucket` promoted to a first-class unit by
 `episodes.sections_for(files, show_title)` — derived, never persisted, so no migration.
