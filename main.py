@@ -7199,34 +7199,57 @@ async def _stream_throttle_release(keep: Optional[set] = None) -> None:
     state.stream_throttled_count = len(_stream_throttled)
 
 
-async def _release_orphan_stream_caps() -> int:
+# Startup passes for the cap sweep, in seconds from launch. Several, because
+# qBittorrent is still loading its torrents for a minute or two after a reboot
+# (the same trap that makes an immediate `qbit_add_magnet` fail) — one pass sees
+# an empty or partial list and silently releases nothing. The sibling sweep
+# `_clear_all_stream_focus` needs no such thing: it only writes library.json,
+# and `download_scheduler_loop` re-applies the result every 15 s regardless.
+# This one talks to qBit and only to qBit, so it has no second chance.
+_STREAM_CAP_SWEEP_PASSES = (0, 20, 45, 90, 180)
+
+
+async def _release_orphan_stream_caps(
+    passes: tuple = _STREAM_CAP_SWEEP_PASSES,
+) -> int:
     """Undo throttles left behind by a crash or a hard restart.
 
-    Runs at startup, when nothing can be playing, so every torrent still
-    carrying a cap tag is by definition a leftover. Without this a reboot
-    mid-stream would leave the box's other downloads permanently limited to a
-    fraction of the link, with no UI anywhere admitting to it."""
-    try:
-        tors = await qbit_info_all()
-    except Exception:
-        tors = None
-    if not tors:
-        return 0
-    n = 0
-    for t in tors:
-        prev = _stream_cap_tag_value(t.get("tags", ""))
-        if prev is None:
-            continue
-        th = (t.get("hash") or "").lower()
+    Runs at startup, when nothing can be playing, so a torrent still carrying a
+    cap tag is by definition a leftover. Without this a reboot mid-stream leaves
+    the box's other downloads permanently limited to a fraction of the link,
+    with no UI anywhere admitting to it.
+
+    Idempotent — a released torrent no longer carries the tag — which is what
+    lets it run repeatedly while qBit finishes coming up."""
+    total = 0
+    for delay in passes:
+        if delay:
+            await asyncio.sleep(delay)
+        # Someone has started watching something: every cap now belongs to the
+        # live path, which owns its own release. Releasing one here would hand
+        # the bandwidth back mid-stream, which is the opposite of the point.
+        if state.stream_focus_hash:
+            break
         try:
-            await qbit_set_torrent_dl_limit(th, prev)
-            await qbit_remove_tags(th, _stream_cap_tag(prev))
-            n += 1
-        except Exception as exc:
-            print(f"[focus] could not release stale cap on {th[:8]}: {exc}")
-    if n:
-        print(f"[focus] released {n} stale download cap(s) left by a restart")
-    return n
+            tors = await qbit_info_all()
+        except Exception:
+            tors = None
+        if not tors:
+            continue
+        for t in tors:
+            prev = _stream_cap_tag_value(t.get("tags", ""))
+            th = (t.get("hash") or "").lower()
+            if prev is None or th in _stream_throttled:
+                continue
+            try:
+                await qbit_set_torrent_dl_limit(th, prev)
+                await qbit_remove_tags(th, _stream_cap_tag(prev))
+                total += 1
+            except Exception as exc:
+                print(f"[focus] could not release stale cap on {th[:8]}: {exc}")
+        if total:
+            print(f"[focus] released {total} stale download cap(s) left by a restart")
+    return total
 
 
 async def _apply_stream_throttle(torrents: Optional[list] = None,
@@ -11778,9 +11801,11 @@ async def _recover_interrupted_downloads() -> None:
     # deselected forever — nothing else ever clears it.
     try:
         await _clear_all_stream_focus()
-        await _release_orphan_stream_caps()
     except Exception as exc:
         print(f"[focus] startup sweep failed: {exc}")
+    # Detached: it deliberately keeps retrying for a few minutes while qBit
+    # finishes loading, and nothing else in startup should wait on that.
+    _spawn_bg(_release_orphan_stream_caps())
     await _recover_races()
 
 

@@ -1,5 +1,22 @@
 # Changelog
 
+## [16.1.2] — 2026-09-17
+**16.1.1's startup sweep ran too early to find anything.**
+
+* The sweep that releases download caps a crash left behind ran once, inline in startup —
+  at which point **qBittorrent is still loading its torrents** (the same trap that makes a
+  download started in the first minute after a reboot fail with an empty error). It got an
+  empty list, released nothing, and reported success. The reboot test failed identically
+  before and after the fix, which is what gave it away.
+* It now runs detached, over several passes across the first three minutes, and bails
+  immediately if a real stream starts in the meantime so it can never release a live
+  throttle. It is idempotent — a released torrent no longer carries the tag — which is
+  what makes repeated passes safe.
+* Worth knowing generally: the sibling sweep for stale *file priorities* never needed this,
+  because it only writes `library.json` and the download scheduler re-applies the result
+  every 15 s. Anything that talks **only** to qBittorrent at startup has no such second
+  chance and has to provide its own.
+
 ## [16.1.1] — 2026-09-17
 **The 16.1.0 throttle leaked across a restart. Found by rebooting the box mid-stream.**
 
