@@ -14145,6 +14145,10 @@ async def get_series_files(request: Request, series_key: str,
         "resume": resume,
         "sections": sections,
         "metadata": meta,
+        # Same shape as the per-item metadata endpoint — the merged episode page
+        # reads its metadata from here, so it has to learn the show's numbering
+        # from here too.
+        "anime": _anime_facts(meta),
         "img_base": LOCAL_IMG_BASE,
         "hls_available": HLS_AVAILABLE,
         "ondemand_only": all(it.get("ondemand_only") for it in members),
