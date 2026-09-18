@@ -702,8 +702,11 @@ in the frontend as `_animePackFor`) does the lookup by ordinary tuple comparison
 spans a season boundary and neither number decides on its own.
 
 Agreement is judged per shape: an absolute run agrees when its windows end exactly where TMDb's
-cumulative counts do, and a cour-mapped show agrees when each TMDb season hosts exactly one cour
-starting at episode 1.
+cumulative counts do, and a cour-mapped show agrees when every cour lands on the TMDb season with
+its own number. **An offset alone is not a disagreement** — Attack on Titan's season 3 aired in
+two parts and TMDb numbers them 1-12 and 13-22 inside one season 3, which is exactly how the
+releases label them. What disagrees is a cour landing on a *different* season, the way
+【OSHI NO KO】's season 2 is TMDb's season 1 from episode 12.
 
 **Sections (15.0.0).** A `bucket` promoted to a first-class unit by
 `episodes.sections_for(files, show_title)` — derived, never persisted, so no migration.

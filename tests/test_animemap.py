@@ -162,6 +162,20 @@ eq("frieren packs",
 
 # Silence is the point: nothing to explain on a show whose grids agree.
 eq("code geass says nothing", am.release_packs(GEASS, GEASS_SEASONS), [])
+# A season that aired in two parts is NOT a disagreement: Attack on Titan's
+# season 3 is 1-12 then 13-22 inside TMDb's season 3, which is how the releases
+# label it too. Only a cour landing on a DIFFERENT season is worth saying.
+AOT = am.parse(b"""<anime-list>
+  <anime anidbid="9541" tvdbid="267440" defaulttvdbseason="1" tmdbtv="1429" tmdbseason="1"/>
+  <anime anidbid="10944" tvdbid="267440" defaulttvdbseason="2" tmdbtv="1429" tmdbseason="2"/>
+  <anime anidbid="13241" tvdbid="267440" defaulttvdbseason="3" tmdbtv="1429" tmdbseason="3"/>
+  <anime anidbid="14444" tvdbid="267440" defaulttvdbseason="3" tmdbtv="1429" tmdbseason="3" tmdboffset="12"/>
+  <anime anidbid="14977" tvdbid="267440" defaulttvdbseason="4" tmdbtv="1429" tmdbseason="4"/>
+  <anime anidbid="16177" tvdbid="267440" defaulttvdbseason="4" tmdbtv="1429" tmdbseason="4" tmdboffset="16"/>
+</anime-list>""")[1429]
+AOT_SEASONS = [{"season": 1, "episode_count": 25}, {"season": 2, "episode_count": 12},
+               {"season": 3, "episode_count": 22}, {"season": 4, "episode_count": 28}]
+eq("a split season says nothing", am.release_packs(AOT, AOT_SEASONS), [])
 eq("one piece says nothing", am.release_packs(OP, OP_SEASONS), [])
 eq("no entries, nothing", am.release_packs([], HXH_SEASONS), [])
 eq("no TMDb grid, nothing", am.release_packs(HXH, []), [])

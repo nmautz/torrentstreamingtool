@@ -14,7 +14,9 @@
   library; the pack is the copy you actually want, and it's one download.
 * **Silent wherever there's nothing to explain.** Only shows whose release grid genuinely disagrees
   with TMDb's say anything — on this box that's Hunter x Hunter and 【OSHI NO KO】, while Code Geass,
-  Attack on Titan, Death Note, Steins;Gate, Chihayafuru and Vinland Saga carry no note at all.
+  Attack on Titan, Death Note, Steins;Gate, Chihayafuru and Vinland Saga carry no note at all. A
+  season that aired in two parts (Attack on Titan's third and fourth) doesn't count as a
+  disagreement — TMDb numbers those straight through, and so do the releases.
 * Same treatment for the merged-cour case in reverse: 【OSHI NO KO】's TMDb season 1 holds all three
   cours, so its episodes 12-24 are labelled as the season 2 pack.
 

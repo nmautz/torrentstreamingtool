@@ -277,8 +277,13 @@ def release_packs(entries: list[dict],
             packs.append({"grid_season": w["tvdb_season"], "from": list(start), "to": list(end)})
     else:
         cours = _cours(entries)
-        # One cour per TMDb season, each starting at episode 1, is agreement.
-        if len(cours) < 2 or all(c["offset"] == 0 for c in cours) and                 len({c["tmdb_season"] for c in cours}) == len(cours):
+        # Agreement is per cour: it lands on the TMDb season with its own
+        # number. An offset alone is NOT a disagreement — Attack on Titan's
+        # season 3 aired in two parts and TMDb numbers them 1-12 and 13-22 in
+        # one season 3, which is exactly how the releases are labelled. What
+        # disagrees is a cour landing on a DIFFERENT season: OSHI NO KO's
+        # season 2 is TMDb's season 1 from episode 12.
+        if len(cours) < 2 or all(c["grid_season"] == c["tmdb_season"] for c in cours):
             return []
         packs = []
         for i, c in enumerate(cours):
