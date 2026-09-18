@@ -1,5 +1,34 @@
 # Changelog
 
+## [16.1.0] — 2026-09-17
+**Playing something that hasn't finished downloading now actually gets the connection.**
+
+* **A season pack streamed from the middle fetched from the beginning.** Pressing play on
+  episode four of a pack set that file to Maximal priority and flipped the torrent
+  sequential — and those two instructions contradict each other. Sequential download
+  walks pieces in index order over everything still selected, and only a priority of
+  *zero* takes a piece out of that walk, so the file-level boost reordered nothing and
+  qBittorrent dutifully started at episode one while the viewer waited. While a file is
+  streamed ahead of its own download, the other unfinished files in the same torrent are
+  now deselected, so "sequential" means "this file, from its head". They come back on the
+  moment it finishes.
+* **Everything else on the box kept downloading at full speed meanwhile.** Play one
+  episode of a season fetched as ten separate downloads and it got roughly a tenth of the
+  link while competing with its own siblings for peers. The other downloads now share a
+  single budget (512 KB/s by default) until the file being watched has finished. A rate
+  limit rather than a pause, because pause/resume belongs to the download scheduler.
+  Racing challengers are exempt — their measured rate is what the race's cull decides on,
+  and capping one would get it killed for looking slow.
+* Both unwind on completion, on Stop, on a superseding play, and on a startup sweep; the
+  priority reconciler additionally self-heals a focus naming a file that has finished or
+  is no longer in the torrent. Deliberately **not** expressed as the `skip` file mode: the
+  ready-gate would then see a one-file item, flip it to `ready` as soon as the watched
+  episode landed, and quietly abandon the rest of the season.
+* New **Admin → System → Priority While Watching** card: the pack behaviour as a toggle,
+  the other-downloads budget as Off / 256 KB/s / 512 KB/s / 1 MB/s / 2 MB/s, and an
+  "Active — N held back" badge so the whole thing isn't invisible. Both ship **on** —
+  an unwatchable stream while nine other episodes saturate the link was the bug.
+
 ## [16.0.1] — 2026-09-17
 **Two faults in 16.0.0's racing, both found by running it on the live box.**
 

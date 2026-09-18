@@ -673,6 +673,27 @@ Fix: `qbit_first_last_piece_prio` (`toggleFirstLastPiecePrio`, a toggle — read
 
 The earlier policy here said the opposite ("fetching the last piece breaks piece-order streaming") — that reasoning was wrong for tail-index containers and was the actual cause of the bug. Don't re-disable it.
 
+### Sequential download ignores file priority — only priority **0** reorders a pack
+
+The two streaming overrides pull in opposite directions on a multi-file torrent. `_begin_library_file_stream` marks the file being played `high` (qBit **7**) *and* flips the torrent sequential — but sequential's piece picker walks pieces in **index order over everything still selected**, and the only value that takes a piece out of that walk is priority **0**. A 7-vs-6 difference reorders nothing. So "play episode four of this season pack" used to mean "fetch the pack from episode one, sequentially, while the viewer waits on a file in the middle" — first/last-piece priority grabbed E04's head and tail so it didn't hang outright, and everything after that came from the front of the torrent.
+
+Fix (16.1.0): **stream focus**. While a file is streamed ahead of its own download, `_reconcile_item_downloads` sets every *unfinished* sibling in the same torrent to 0, so piece-index order and "this file, from its head" become the same thing. Two consequences to respect if you touch this:
+
+- It is routed through `item["stream_focus"]` and the download model, never a raw `filePrio` write — see the single-writer rule below.
+- It is deliberately **not** the `skip` file mode. `_all_nonskip_complete` would then see a one-file item and flip it to `ready` the instant the watched episode landed, silently abandoning the rest of the season. `stream_focus` is invisible to the ready-gate on purpose.
+
+Never *promote* with focus: a file the schedule already said not to fetch (skip / compressed / idle outside the window) stays at 0. Focus reorders what is wanted; it doesn't overrule the user.
+
+### A leaked stream focus strands the rest of a pack at "do not download"
+
+`item["stream_focus"]` is persisted (it has to be — the scheduler re-reads it every 15 s), which means a crash mid-playback leaves it on disk with nine episodes deselected and nothing that would ever clear them. Every path that sets it has an owner that clears it: `_sequential_off_when_complete` on the happy path (**including its two give-up branches** — it `break`s rather than `return`s for exactly this reason), `/api/stop`, a superseding `_begin_library_file_stream` or `play_library_item`, a 2-tick "focused but nothing is playing" guard in the monitor, and `_clear_all_stream_focus()` at startup. On top of all that `_reconcile_item_downloads` self-heals: a focus naming a file that has finished, or that isn't in the torrent at all, is simply not applied. Keep every one of those — the failure is silent and only shows up as "the rest of the season never downloaded".
+
+### Hold sibling downloads back with a rate limit, never a pause
+
+The stream-focus throttle (`_apply_stream_throttle`) caps the *other* downloading torrents while an unfinished file is being watched. It uses per-torrent `setDownloadLimit` rather than pausing them, because `_reconcile_item_downloads` owns pause/resume for scheduled items and would resume anything we paused within 15 s — the two would fight forever. It also records each torrent's previous `dl_limit` in `_stream_throttled` and restores exactly that, so it can never blanket-unlimit a cap the user set (and it skips a torrent whose own limit is already tighter — the throttle may only ever make a sibling *slower*).
+
+**Racing challengers are exempt**, along with `state.race_hashes`, `prepare_hash` and `active_hash`. A challenger's measured rate is precisely what `racerules.should_cull` decides on: throttle one and it looks like the slow candidate and gets killed. This is the same reason the 16.0.0 plan rejected `dlLimit` as a race mitigation.
+
 ### Download-priority tiers use qBit 1/6/7 — and the default tier "mid" is 6, not 1
 
 The three exposed download-priority levels map onto qBit's file-priority tiers in `_file_mode_to_priority`: `low → 1` (Normal), `mid → 6` (High), `high → 7` (Maximal). **`mid` is the default and maps to 6, not 1** — and legacy `now` now reads as `mid` (6) too. This is only ever observable *relative to other files in the same torrent* (qBit orders by priority; an all-equal torrent behaves identically whether every file is 1 or 6), and `_reconcile_item_downloads` still leaves a plain "download now, no per-file overrides" item completely untouched — so nothing changes for un-prioritised torrents. Don't "fix" `mid` back to 1 thinking 6 is a bug: a `mid` vs `low` split must produce a real qBit ordering difference, which 6-vs-1 gives and 1-vs-1 wouldn't. The `download_scheduler_loop` remains the single writer of these priorities (see LIBRARY_DATA.md).
@@ -734,7 +755,7 @@ Stream-now uses sequential. Library downloads do NOT — they should download no
 
 ### The download scheduler is the single writer of scheduled items' file priority + pause
 
-For any item with `download.mode=="idle"` or per-file overrides, `download_scheduler_loop` reconciles qBit **every 15 s** from `library.json → item.download`. So a raw `qbit_set_file_priority` / `qbit_pause` / `qbit_resume` written **outside** `_reconcile_item_downloads` for such an item is reverted on the next tick. If you add a new "boost this file" / "pause this torrent" path, write the **model** (`download.files[path]=…` or `download.mode=…`) and call `_reconcile_item_downloads` — don't poke qBit directly. This is exactly why `queue-play` and `library_download_pipeline` were rewritten to set the model instead of calling `filePrio` (v4.7.0). Plain `mode=="now"` items with no overrides are left untouched (fast path), so unscheduled downloads behave exactly as before.
+For any item with `download.mode=="idle"` or per-file overrides, `download_scheduler_loop` reconciles qBit **every 15 s** from `library.json → item.download`. So a raw `qbit_set_file_priority` / `qbit_pause` / `qbit_resume` written **outside** `_reconcile_item_downloads` for such an item is reverted on the next tick. If you add a new "boost this file" / "pause this torrent" path, write the **model** (`download.files[path]=…`, `download.mode=…` or `item["stream_focus"]`) and call `_reconcile_item_downloads` — don't poke qBit directly. This is exactly why `queue-play` and `library_download_pipeline` were rewritten to set the model instead of calling `filePrio` (v4.7.0). Plain `mode=="now"` items with no overrides are left untouched (fast path), so unscheduled downloads behave exactly as before.
 
 ### A racing item still has exactly ONE `torrent_hash` — the challengers live beside it
 

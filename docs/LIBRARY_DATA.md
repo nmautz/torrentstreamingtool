@@ -57,6 +57,10 @@ The only persistent server-side state. Lives at the project root. Accessed via `
       "quality_ceiling": 1080,          // highest tier the HQ track may aim at; 720 | 1080 | 2160
       "hq_upgrade":      true           // keep a better copy beside the fast one and swap it in when it lands
     },
+    "stream_focus": {                   // what "play this now" does to everything else downloading (admin System tab)
+      "pack_focus":   true,             // deselect the other unfinished files in the SAME torrent while one is streamed. Absent ⇒ true
+      "sibling_kbps": 512               // TOTAL KB/s every OTHER downloading torrent shares meanwhile; 0 | 256 | 512 | 1024 | 2048 (0 = no throttle)
+    },
     "prep_validate": {                  // validate-and-repair source files during bulk/idle prep (admin System tab)
       "mode": "off"                     // "off" | "before" | "after" — deep-decode + remux-repair as prep rides through. Default "off"
     },
@@ -365,6 +369,31 @@ forever and never reach 10 minutes. Because it now outlives the process, the
 monitor additionally ignores it for `_DOWNLOAD_STALL_BOOT_GRACE` (3 min) after
 startup: qBit restarts with the service and deserves a moment to find peers before
 being judged on a stamp written before the reboot.
+
+### `stream_focus` (transient, 16.1.0)
+
+One absolute path — the file of a **multi-file** torrent currently being watched
+ahead of its own download. Written by `_begin_library_file_stream`, read by
+`_reconcile_item_downloads`, which then drops every *unfinished* sibling in that
+torrent to qBit priority 0 and puts the focused file at 7.
+
+It exists because sequential download walks pieces in index order and only
+priority 0 removes a piece from that walk — see
+[GOTCHAS](GOTCHAS.md#sequential-download-ignores-file-priority--only-priority-0-reorders-a-pack).
+It is **persisted** only because the download scheduler re-reads the model every
+15 s; semantically it is transient, and a value that outlives its playback is a
+bug. Three things guarantee it goes away: the owners listed in GOTCHAS clear it,
+`_clear_all_stream_focus()` sweeps it at startup, and the reconciler refuses to
+apply a focus whose file has finished or is no longer in the torrent.
+
+It is deliberately **not** `download.files[path] = "skip"` for the siblings:
+`_all_nonskip_complete` would then see a one-file item and flip it to `ready` as
+soon as the watched episode landed, abandoning the rest of the season. Nothing in
+the ready-gate looks at `stream_focus`.
+
+The in-memory half (`state.stream_focus_item` / `_path` / `_hash`) additionally
+drives the sibling-torrent throttle, which touches qBit only and is never
+persisted.
 
 ### `race` (parallel download race, 16.0.0)
 

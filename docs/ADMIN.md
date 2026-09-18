@@ -229,7 +229,7 @@ For each profile:
 
 ### 7. System
 
-Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Automatic Stream Prep**, **Auto-Prep on Play**, **Show Missing Content**, **Force Stream Prep**, **Validate & Repair on Prep**, **File Validator**, **Storage & Compression**, **Network Adapter**, **VPN Kill Switch**, **Race Download Sources**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
+Controls: **System Health**, **Shut Down Server**, **Reboot Machine**, **Server Logs**, **Scheduled Restart**, **Automatic Stream Prep**, **Auto-Prep on Play**, **Show Missing Content**, **Force Stream Prep**, **Validate & Repair on Prep**, **File Validator**, **Storage & Compression**, **Network Adapter**, **VPN Kill Switch**, **Race Download Sources**, **Priority While Watching**, **Seeding & Bandwidth**, **Subtitles**, **Auto-Generated Subtitles**, and **Optional Components**.
 
 #### System Health
 
@@ -296,6 +296,22 @@ Enums are validated server-side, not coerced: an unrecognised size / cap / ceili
 - `POST /api/admin/download-race` → same shape.
 
 See [BACKEND.md § Parallel download racing](BACKEND.md), [LIBRARY_DATA.md](LIBRARY_DATA.md) § `race`, and [GOTCHAS.md](GOTCHAS.md).
+
+#### Priority While Watching
+
+**Ships on.** Applies only while someone is watching a file that has **not finished downloading** — the Play button on an in-progress item, and Stream Now before the download completes. Once the file is on disk everything returns to normal by itself, and so it does on Stop, on a superseding play, and on a restart.
+
+- **Fetch The Episode You Are Watching First** (default on) — in a season pack, one download holds every episode. Pressing play on episode four used to fetch episode **one** first: the stream turns the torrent sequential, and sequential download walks the pack in order over everything still selected. Marking one file "maximal" doesn't reorder that — only taking the others out of the selection does. With this on, the other unfinished episodes are paused for the duration and resume the moment yours has finished. Turning it off releases any focus already in flight, so a pack in progress goes back to normal ordering immediately rather than at the end of what is being watched.
+- **Slow Other Downloads Down** — Off / 256 KB/s / 512 KB/s / 1 MB/s / 2 MB/s (default 512 KB/s). A **total** shared by every *other* downloading torrent, so ten queued episodes cost the same as one. Implemented as a per-torrent rate limit rather than a pause, because the download scheduler owns pause/resume and the two would fight every 15 s; each torrent's previous limit is recorded and restored exactly, and a tighter limit the user set themselves is left alone. Racing challengers are exempt — a challenger's measured rate is what the race's cull decides on, and throttling one would get it dropped for looking slow.
+
+An **Active** badge on the card header shows when a focus is engaged, with how many torrents are currently held back — everything this card does is otherwise invisible.
+
+`sibling_kbps` is validated server-side, not coerced: anything outside the five choices is a **400**. Both settings live in `library.json → settings.stream_focus` and are mirrored onto `state`.
+
+- `GET /api/admin/stream-focus` → `{pack_focus, sibling_kbps, active, throttled}`
+- `POST /api/admin/stream-focus` → `{pack_focus, sibling_kbps}`.
+
+See [LIBRARY_DATA.md](LIBRARY_DATA.md) § `stream_focus` and [GOTCHAS.md](GOTCHAS.md).
 
 #### Seeding & Bandwidth
 

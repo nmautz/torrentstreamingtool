@@ -1330,6 +1330,37 @@
       </div>
     </div>
 
+    <!-- Stream focus: what "play this now" does to everything else -->
+    <div class="bg-gray-900 border border-gray-800">
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h2 class="text-sm font-black uppercase tracking-wide text-gray-200">Priority While Watching<span class="help-tip" tabindex="0" data-tip="Only applies while you are watching something that has not finished downloading. Once the file is on disk everything goes back to normal by itself — including after a stop, a crash or a restart.">?</span></h2>
+          <p class="text-xs text-gray-500 mt-0.5">Play an episode that is still downloading and it has to compete with everything else on the connection — the other episodes in the same download, and every other download on the box. These two controls hand it the connection until it has finished.</p>
+        </div>
+        <span id="sfActive" class="hidden flex-shrink-0 text-[10px] font-bold uppercase tracking-wide px-2 py-1 border border-emerald-700 bg-emerald-950/40 text-emerald-300">Active</span>
+      </div>
+
+      <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h3 class="text-xs font-black uppercase tracking-wide text-gray-200">Fetch The Episode You Are Watching First</h3>
+          <p class="text-xs text-gray-500 mt-0.5">In a season pack — one download holding every episode — pause the other episodes while you watch one of them, so it downloads from its own beginning instead of the pack's. <strong>Without this, starting episode four fetches episode one first</strong> and you wait for it. The other episodes resume the moment yours has finished.</p>
+        </div>
+        <button id="sfPackBtn" onclick="toggleStreamFocusPack()"
+          class="flex-shrink-0 text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors
+                 bg-gray-800 border-gray-700 text-gray-400 hover:text-white disabled:opacity-50">
+          &hellip;
+        </button>
+      </div>
+
+      <div class="px-5 py-4 flex items-center justify-between gap-3">
+        <div class="min-w-0">
+          <h3 class="text-xs font-black uppercase tracking-wide text-gray-200">Slow Other Downloads Down</h3>
+          <p class="text-xs text-gray-500 mt-0.5">Total speed every <em>other</em> download shares while you watch something unfinished — they split it between them, so ten queued episodes cost the same as one. Lower means your episode buffers sooner and the rest of the queue takes longer. Off leaves them all at full speed.</p>
+        </div>
+        <div id="sfKbpsBtns" class="flex-shrink-0 flex"></div>
+      </div>
+    </div>
+
     <!-- qBittorrent seeding & bandwidth limits -->
     <div class="bg-gray-900 border border-gray-800">
       <div class="px-5 py-4 border-b border-gray-800 flex items-center justify-between gap-3">
@@ -2036,7 +2067,7 @@ function switchTab(tab){
   else                   stopCompressionPolling();
   if(tab==="cleanup")    loadCleanup();
   if(tab==="background") loadBackgroundVideo();
-  if(tab==="system")   { loadNetwork(); loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadMissingContent(); loadDownloadRace(); loadAutoMaint(); loadPrepValidate(); loadVpnKillswitch(); loadForcePrep(); loadFileValidation(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
+  if(tab==="system")   { loadNetwork(); loadScheduledReboot(); loadAutoPrep(); loadPlayPrep(); loadMissingContent(); loadDownloadRace(); loadStreamFocus(); loadAutoMaint(); loadPrepValidate(); loadVpnKillswitch(); loadForcePrep(); loadFileValidation(); loadQbitLimits(); loadSubs(); loadStt(); loadComponents(); loadLogs(); startSysHealthPolling(); }
   else                 { stopSysHealthPolling(); stopForcePrepPolling(); stopFileValidationPolling(); stopFileRepairPolling(); }
   if(tab==="updates")  { _auFormDirty = false; loadAutoupdate(); loadEnvKeys(); if(!_auChangelogLoaded) loadChangelog(); startAutoupdatePolling(); }
   else                 { stopAutoupdatePolling(); }
@@ -2785,6 +2816,90 @@ function toggleDownloadRaceHq(){
   _drSave({..._drCfg, hq_upgrade:on},
           on ? "A better copy will be kept and swapped in when it finishes."
              : "Pure speed race - no second, higher-quality copy.");
+}
+
+// ── Priority while watching (stream focus) ──────────────────────────────────
+let _sfCfg = {pack_focus:true, sibling_kbps:512, active:false, throttled:0};
+const _SF_BTNS = ["sfPackBtn"];
+
+function _sfLabel(kbps){
+  if(!kbps) return "Off";
+  return kbps >= 1024 ? `${kbps/1024} MB/s` : `${kbps} KB/s`;
+}
+
+function _sfRender(){
+  _mcRenderBtn("sfPackBtn", _sfCfg.pack_focus, "On", "Off");
+  const vals = [0,256,512,1024,2048];
+  const el = document.getElementById("sfKbpsBtns");
+  if(el){
+    el.innerHTML = vals.map((v,i)=>{
+      const on = v === _sfCfg.sibling_kbps;
+      return `<button data-v="${v}" class="text-xs font-bold uppercase tracking-wide px-3 py-2 border transition-colors ${
+        on ? "bg-emerald-950 border-emerald-700 text-emerald-300"
+           : "bg-gray-800 border-gray-700 text-gray-400 hover:text-white"
+      } ${i ? "border-l-0" : ""} disabled:opacity-50">${_sfLabel(v)}</button>`;
+    }).join("");
+    Array.from(el.children).forEach(b=>{
+      b.onclick = () => {
+        const v = parseInt(b.dataset.v, 10);
+        _sfSave({pack_focus:_sfCfg.pack_focus, sibling_kbps:v},
+                v ? `Other downloads share ${_sfLabel(v)} while you watch.`
+                  : "Other downloads run at full speed while you watch.");
+      };
+    });
+  }
+  // "Active" means a focus is engaged right now — the single most useful thing
+  // to see on this card, because everything it does is otherwise invisible.
+  const badge = document.getElementById("sfActive");
+  if(badge){
+    badge.classList.toggle("hidden", !_sfCfg.active);
+    badge.textContent = _sfCfg.throttled
+      ? `Active — ${_sfCfg.throttled} held back` : "Active";
+  }
+}
+
+async function loadStreamFocus(){
+  try{
+    const r = await fetch("/api/admin/stream-focus", {headers: authHeader()});
+    if(!r.ok) return;
+    const d = await r.json();
+    _sfCfg = {pack_focus: !!d.pack_focus, sibling_kbps: d.sibling_kbps,
+              active: !!d.active, throttled: d.throttled || 0};
+    _sfRender();
+  }catch(_){}
+}
+
+async function _sfSave(next, okMsg){
+  const btns = _SF_BTNS.map(id=>document.getElementById(id));
+  btns.forEach(b=>{ if(b) b.disabled = true; });
+  try{
+    const r = await fetch("/api/admin/stream-focus",{
+      method:"POST",
+      headers:{...authHeader(), "Content-Type":"application/json"},
+      body: JSON.stringify(next),
+    });
+    if(!r.ok){
+      const d = await r.json().catch(()=>({}));
+      showToast(`Save failed: ${d.detail || r.status}`, true);
+      return;
+    }
+    const d = await r.json();
+    _sfCfg = {pack_focus: !!d.pack_focus, sibling_kbps: d.sibling_kbps,
+              active: !!d.active, throttled: d.throttled || 0};
+    showToast(okMsg);
+  }catch(_){
+    showToast("Save failed.", true);
+  }finally{
+    btns.forEach(b=>{ if(b) b.disabled = false; });
+    _sfRender();
+  }
+}
+
+function toggleStreamFocusPack(){
+  const on = !_sfCfg.pack_focus;
+  _sfSave({pack_focus:on, sibling_kbps:_sfCfg.sibling_kbps},
+          on ? "The episode you are watching is fetched first."
+             : "Season packs download in their own order again.");
 }
 
 function _mcRenderBtn(id, on, onLabel, offLabel){

@@ -1303,6 +1303,21 @@ class AppState:
     missing_content_unaired: bool = False                 # settings.missing_content.show_unaired — render future-dated TMDb episodes as "Upcoming" instead of hiding them
     download_race_enabled: bool = False                   # settings.download_race.enabled — mirrored so the UI knows whether to send candidate shortlists
     download_race_ceiling: int = 1080                     # settings.download_race.quality_ceiling — the HQ track's target tier
+    # ── Stream focus ─────────────────────────────────────────────────────────
+    # Set while VLC is playing a library file that has NOT finished downloading.
+    # Two effects hang off it, both unwound the moment the file completes or
+    # playback stops: the other files in the SAME torrent are deselected (so
+    # sequential order means "this file from its head" instead of "the pack from
+    # episode one"), and every OTHER downloading torrent is throttled. The
+    # authoritative per-item half is persisted as item["stream_focus"] because
+    # the download scheduler is the single writer of file priorities; these
+    # fields are the in-memory anchor for the throttle + the unwind.
+    stream_focus_item: Optional[str] = None               # library item whose file is being streamed ahead of completion
+    stream_focus_path: Optional[str] = None               # …the file itself (abs path)
+    stream_focus_hash: Optional[str] = None               # …and its torrent, the one hash the throttle must never touch
+    stream_throttled_count: int = 0                       # how many other torrents currently carry a stream-focus download limit
+    stream_focus_pack_enabled: bool = True                # settings.stream_focus.pack_focus — mirrored
+    stream_focus_sibling_bps: int = 512 * 1024            # settings.stream_focus.sibling_kbps × 1024 — total budget the OTHER torrents share while streaming (0 = no throttle)
     shotscan_current: str = ""                            # basename of the file the shot-boundary credit scan is decoding ("" = idle); surfaced in the admin Activity tab so the most expensive pass in the app is never invisible
     sub_auto_ai_path: str = ""                            # abs path of the AI sidecar currently auto-applied in VLC ("" = none); the upgrade loop watches this and swaps in a real sub when one arrives
     last_activity: float = 0.0                            # time.time() of last user-initiated interaction (drives scheduled-reboot idle check)
@@ -1650,6 +1665,10 @@ def state_snapshot() -> dict:
         # shortlist for an auto-pick, and what tier the HQ track aims at.
         "download_race": state.download_race_enabled,
         "download_race_ceiling": state.download_race_ceiling,
+        # Stream focus — surfaced so the UI can say "other downloads are held
+        # back while you watch" rather than leaving it as invisible magic.
+        "stream_focus": bool(state.stream_focus_hash),
+        "stream_throttled": state.stream_throttled_count,
         "vlc_time": state.vlc_time,
         "vlc_duration": state.vlc_duration,
         "vlc_volume": state.vlc_volume,
@@ -1999,6 +2018,18 @@ async def qbit_set_file_priority(h: str, indices: list[int], priority: int) -> N
         "POST", "/api/v2/torrents/filePrio",
         data={"hash": h, "id": "|".join(str(i) for i in indices), "priority": str(priority)},
     )
+
+
+async def qbit_set_torrent_dl_limit(h: str, limit_bytes: int) -> None:
+    """Set ONE torrent's download limit in bytes/sec (0 = unlimited).
+
+    Distinct from `qbit_set_speed_limit`, which is qBittorrent's *global* cap.
+    Used by the stream-focus throttle to hold sibling downloads back while a
+    file is being watched before it has finished — deliberately a rate limit
+    rather than a pause, because the download scheduler owns pause/resume for
+    scheduled items and would fight us on the next reconcile."""
+    await qreq("POST", "/api/v2/torrents/setDownloadLimit",
+               data={"hashes": h, "limit": str(max(0, int(limit_bytes)))})
 
 
 async def qbit_streaming_mode(h: str) -> None:
@@ -6717,6 +6748,44 @@ def _download_race_cfg(lib: dict) -> dict:
     }
 
 
+# qBittorrent's download-phase states, as `torrents/info` reports them. Shared
+# by the scheduler's coarse pause gate and the stream-focus throttle so the two
+# can never disagree about what "still downloading" means.
+_QBIT_DL_PAUSED = ("pausedDL", "stoppedDL")
+_QBIT_DL_ACTIVE = ("downloading", "metaDL", "forcedMetaDL", "stalledDL", "forcedDL",
+                   "queuedDL", "checkingDL", "allocating", "checkingResumeData")
+
+# Total bandwidth the OTHER downloads share while a still-downloading file is
+# being watched. A total rather than a per-torrent cap: per-torrent would mean
+# ten sibling episodes eat ten times the number the admin chose.
+_STREAM_SIBLING_KBPS = (0, 256, 512, 1024, 2048)
+# …but never squeeze a sibling below this, or a nearly-done download can sit at
+# a few bytes a second for the length of a film.
+_STREAM_SIBLING_FLOOR_BPS = 32 * 1024
+
+
+def _stream_focus_cfg(lib: dict) -> dict:
+    """Read settings.stream_focus - what "play this now" is allowed to do to
+    everything else that is downloading.
+
+    `pack_focus` deselects the other files inside the SAME torrent while one of
+    them is streamed. Without it, a season pack streamed from episode four
+    fetches from episode one: sequential download walks pieces in index order
+    and only a priority of *zero* takes a piece out of that walk, so the
+    file-level "high" the stream sets does not reorder anything.
+
+    `sibling_kbps` is the total the OTHER downloading torrents share meanwhile
+    (0 turns the throttle off). Both default ON: an unwatchable stream while
+    nine other episodes saturate the link is the bug, not the feature. See
+    docs/GOTCHAS.md."""
+    cfg = (lib.get("settings", {}) or {}).get("stream_focus") or {}
+    kbps = cfg.get("sibling_kbps", 512)
+    return {
+        "pack_focus":   bool(cfg.get("pack_focus", True)),
+        "sibling_kbps": kbps if kbps in _STREAM_SIBLING_KBPS else 512,
+    }
+
+
 _PREP_VALIDATE_MODES = ("off", "before", "after")
 
 
@@ -6954,8 +7023,9 @@ async def _reconcile_item_downloads(item: dict, idle_open: bool) -> bool:
     if not h:
         return False
     cfg = _download_cfg(item)
+    focus = item.get("stream_focus") or ""
     # Plain "download now, no per-file overrides" items are left entirely alone.
-    if cfg["mode"] == "now" and not cfg["files"]:
+    if cfg["mode"] == "now" and not cfg["files"] and not focus:
         return True
     info = await qbit_info(h)
     qfiles = await qbit_files(h)
@@ -6965,6 +7035,21 @@ async def _reconcile_item_downloads(item: dict, idle_open: bool) -> bool:
     # Compressed-in-place files are no longer torrent-backed — force them to priority 0
     # so qBit can never re-fetch and overwrite the smaller re-encoded bytes.
     compressed_paths = {f.get("path", "") for f in item.get("files", []) if _file_is_compressed(f)}
+    # Stream focus (see _stream_focus_cfg): while one file of a multi-file torrent
+    # is being watched ahead of its own download, take every *unfinished* sibling
+    # out of the piece picker entirely. Priority 0 is the only value that does
+    # that — sequential download walks piece index order over whatever is still
+    # selected, so 7-vs-6 changes nothing and the pack would fetch from its first
+    # file while the viewer waits on one in the middle.
+    #
+    # Two self-healing guards, because a stale focus would strand the rest of a
+    # season at "do not download": the path must still name a file in this
+    # torrent, and that file must still be unfinished.
+    focus_on = False
+    if focus:
+        ftarget = next((q for q in qfiles
+                        if str(Path(sp) / q.get("name", "")) == focus), None)
+        focus_on = ftarget is not None and ftarget.get("progress", 0.0) < 0.999
     by_priority: dict[int, list[int]] = {}
     any_active = False
     for i, qf in enumerate(qfiles):
@@ -6974,6 +7059,14 @@ async def _reconcile_item_downloads(item: dict, idle_open: bool) -> bool:
             want = 0
         else:
             want = _file_mode_to_priority(_effective_file_mode(cfg, full), idle_open)
+        # Never *promote* a file the schedule already said not to fetch (skip,
+        # compressed, or idle outside the window) — focus reorders what is
+        # wanted, it does not overrule the user.
+        if focus_on and want > 0:
+            if full == focus:
+                want = 7
+            elif qf.get("progress", 0.0) < 0.999:
+                want = 0
         if want > 0:
             any_active = True
         if qf.get("priority", 1) != want:
@@ -6985,9 +7078,8 @@ async def _reconcile_item_downloads(item: dict, idle_open: bool) -> bool:
     # "downloading" with every file at priority 0 (some qBit builds error/auto-pause
     # that), and an explicit pause is what actually halts tracker churn while idle.
     qstate = info.get("state", "")
-    DL_PAUSED = ("pausedDL", "stoppedDL")
-    DL_ACTIVE = ("downloading", "metaDL", "forcedMetaDL", "stalledDL", "forcedDL",
-                 "queuedDL", "checkingDL", "allocating", "checkingResumeData")
+    DL_PAUSED = _QBIT_DL_PAUSED
+    DL_ACTIVE = _QBIT_DL_ACTIVE
     if any_active and qstate in DL_PAUSED:
         await qbit_resume(h)
     elif not any_active and qstate in DL_ACTIVE:
@@ -7026,6 +7118,159 @@ async def _apply_item_schedule(item: dict, lib: dict) -> bool:
     return idle_open
 
 
+# ── Stream focus ──────────────────────────────────────────────────────────────
+# While VLC is playing a library file that has not finished downloading, that
+# file gets the link. Two effects, one lifecycle:
+#
+#   A. Inside its own torrent — item["stream_focus"] = "<abs path>" makes
+#      _reconcile_item_downloads deselect every unfinished sibling, so
+#      sequential download starts at the head of the file being watched. It is
+#      routed through the download model on purpose: the scheduler is the single
+#      writer of file priorities and a raw filePrio write is reverted within 15 s.
+#      It is deliberately NOT expressed as the "skip" file mode — _all_nonskip_complete
+#      would then see a one-file item, flip it to "ready" the moment the watched
+#      file landed, and silently abandon the rest of the season.
+#
+#   B. Outside it — every other downloading torrent shares _STREAM_SIBLING_KBPS.
+#      A rate limit, not a pause, because pause/resume belongs to the scheduler
+#      and the two would fight every 15 s.
+#
+# Both unwind on: the file completing (_sequential_off_when_complete), /api/stop,
+# a superseding play, and a startup sweep. The unwind is the dangerous half — a
+# leaked focus strands the rest of a pack at "do not download" — so every path
+# that sets it has an owner that clears it, and the reconciler self-heals a
+# stale one anyway.
+
+# hash → the torrent's own dl_limit before we touched it, so releasing restores
+# exactly what was there rather than blanket-unlimiting a cap the user set.
+_stream_throttled: dict[str, int] = {}
+# Consecutive monitor ticks seen with a focus set but nothing actually playing.
+_stream_focus_idle_ticks = 0
+
+
+async def _stream_throttle_release(keep: Optional[set] = None) -> None:
+    """Hand every throttled torrent its own download limit back."""
+    for th, prev in list(_stream_throttled.items()):
+        if keep is not None and th in keep:
+            continue
+        _stream_throttled.pop(th, None)
+        try:
+            await qbit_set_torrent_dl_limit(th, prev)
+        except Exception as exc:
+            print(f"[focus] could not restore dl limit on {th[:8]}: {exc}")
+    state.stream_throttled_count = len(_stream_throttled)
+
+
+async def _apply_stream_throttle(torrents: Optional[list] = None,
+                                 lib: Optional[dict] = None) -> None:
+    """Hold the other downloads back while a file is watched before it finishes.
+
+    Idempotent and safe to call on every tick. The budget is a *total* split
+    across the torrents actually downloading right now, so it doesn't scale with
+    how many episodes happen to be in flight. `torrents` / `lib` let a caller
+    that already has them (the download monitor) avoid re-reading both every
+    5 s — `get_library()` takes `_lib_lock`, which the broadcaster wants too."""
+    target = (state.stream_focus_hash or "").lower()
+    budget = int(state.stream_focus_sibling_bps or 0)
+    if not target or budget <= 0:
+        await _stream_throttle_release()
+        return
+    if torrents is None:
+        torrents = await qbit_info_all()
+    if torrents is None:
+        return          # qBit unreachable — never act on no data
+
+    # Hashes the throttle must not touch. Racing challengers matter most: their
+    # measured rate IS what the cull decides on, and capping one would make it
+    # look like the slow candidate and get it killed.
+    spare = {target}
+    spare |= {x.lower() for x in state.race_hashes if x}
+    for attr in ("prepare_hash", "active_hash"):
+        val = getattr(state, attr, None)
+        if val:
+            spare.add(str(val).lower())
+    try:
+        if lib is None:
+            lib = await get_library()
+        for it in lib.get("items", []):
+            if (it.get("race") or {}).get("state") in ("racing", "upgrading"):
+                spare |= set(_item_all_torrent_hashes(it))
+    except Exception:
+        pass
+
+    live = [t for t in torrents
+            if (t.get("hash") or "").lower() not in spare
+            and t.get("state") in _QBIT_DL_ACTIVE]
+    per = max(_STREAM_SIBLING_FLOOR_BPS, budget // max(1, len(live)))
+    keep: set = set()
+    for t in live:
+        th = (t.get("hash") or "").lower()
+        if not th:
+            continue
+        if th not in _stream_throttled:
+            try:
+                prev = int(t.get("dl_limit", 0) or 0)
+            except (TypeError, ValueError):
+                prev = 0
+            # Only ever make a sibling slower. A tighter limit the user set
+            # themselves is left exactly as it is.
+            if 0 < prev <= per:
+                continue
+            _stream_throttled[th] = prev
+            await qbit_set_torrent_dl_limit(th, per)
+        elif int(t.get("dl_limit", 0) or 0) != per:
+            await qbit_set_torrent_dl_limit(th, per)
+        keep.add(th)
+    await _stream_throttle_release(keep=keep)
+
+
+async def _clear_stream_focus() -> None:
+    """Unwind the live focus: sibling files back on, sibling torrents unthrottled.
+
+    Clears the in-memory anchor FIRST so a monitor tick racing this call cannot
+    re-apply the throttle behind it."""
+    item_id = state.stream_focus_item
+    state.stream_focus_item = None
+    state.stream_focus_path = None
+    state.stream_focus_hash = None
+    touched = None
+    if item_id:
+        async with mutate_library() as lib:
+            it = next((x for x in lib["items"] if x["id"] == item_id), None)
+            if it is not None and it.pop("stream_focus", None):
+                touched = it
+        if touched is not None:
+            # Outside the transaction — this talks to qBit.
+            try:
+                await _reconcile_item_downloads(
+                    touched, await _download_idle_open(await get_library()))
+            except Exception as exc:
+                print(f"[focus] reconcile after clear failed: {exc}")
+    await _stream_throttle_release()
+
+
+async def _clear_all_stream_focus() -> int:
+    """Drop the persisted per-item focus everywhere and put the files back.
+
+    Run at startup and whenever the pack-focus setting is turned off. A crash
+    mid-stream leaves `stream_focus` on disk, and nothing else would ever clear
+    it — the rest of that torrent would stay deselected for good."""
+    touched: list = []
+    async with mutate_library() as lib:
+        for it in lib.get("items", []):
+            if it.pop("stream_focus", None):
+                touched.append(it)
+    for it in touched:
+        try:
+            await _reconcile_item_downloads(
+                it, await _download_idle_open(await get_library()))
+        except Exception as exc:
+            print(f"[focus] reconcile during sweep failed: {exc}")
+    if touched:
+        print(f"[focus] cleared stale stream focus on {len(touched)} item(s)")
+    return len(touched)
+
+
 async def download_scheduler_loop() -> None:
     """Honour per-item download schedules: only fetch 'idle'-scheduled files/torrents
     during the idle/night window (reusing the admin prep windows), and keep 'now'
@@ -7042,7 +7287,8 @@ async def download_scheduler_loop() -> None:
             scheduled = [
                 it for it in lib["items"]
                 if it.get("status") == "downloading" and it.get("torrent_hash")
-                and (_download_cfg(it)["mode"] == "idle" or _download_cfg(it)["files"])
+                and (_download_cfg(it)["mode"] == "idle" or _download_cfg(it)["files"]
+                     or it.get("stream_focus"))
             ]
             for item in scheduled:
                 await _reconcile_item_downloads(item, idle_open)
@@ -9784,6 +10030,7 @@ _monitor_err_at = 0.0
 
 async def library_download_monitor() -> None:
     """Poll qBit every 5 s for pending library downloads and mark them complete."""
+    global _stream_focus_idle_ticks
     while True:
         await asyncio.sleep(5)
         try:
@@ -9804,6 +10051,24 @@ async def library_download_monitor() -> None:
             state.racing_count_visible = sum(
                 1 for it in lib["items"] if not it.get("admin_only")
                 and ((it.get("race") or {}).get("state") in ("racing", "upgrading")))
+            # ── Stream focus upkeep ──────────────────────────────────────────
+            # Free when nothing is focused and nothing is left throttled, which
+            # is the overwhelmingly common case.
+            if state.stream_focus_hash or _stream_throttled:
+                # Last-resort unwind. /api/stop, a superseding play and the
+                # completion watchdog all clear the focus themselves; this
+                # catches the paths that don't go through any of them (VLC hit
+                # the end of the file, the stream errored out). Two ticks so a
+                # momentary rebuffer can't trigger it.
+                if (state.stream_focus_hash
+                        and state.stream_status not in ("playing", "buffering")):
+                    _stream_focus_idle_ticks += 1
+                    if _stream_focus_idle_ticks >= 2:
+                        _stream_focus_idle_ticks = 0
+                        await _clear_stream_focus()
+                else:
+                    _stream_focus_idle_ticks = 0
+                await _apply_stream_throttle(lib=lib)
             if not watch and not repaired:
                 continue
             # One snapshot for every race entry this tick. Six per-hash round
@@ -11436,6 +11701,13 @@ async def _recover_interrupted_downloads() -> None:
         recovered += 1
     if recovered:
         print(f"[download] re-driving {recovered} interrupted download(s) after restart")
+    # Nothing is playing yet, so any persisted stream focus is a leftover from a
+    # crash or a hard restart. Left alone it keeps the rest of those torrents
+    # deselected forever — nothing else ever clears it.
+    try:
+        await _clear_all_stream_focus()
+    except Exception as exc:
+        print(f"[focus] startup sweep failed: {exc}")
     await _recover_races()
 
 
@@ -11805,6 +12077,9 @@ async def lifespan(app: FastAPI) -> AsyncGenerator:
         _dr0 = _download_race_cfg(_lib0)
         state.download_race_enabled = _dr0["enabled"]
         state.download_race_ceiling = _dr0["quality_ceiling"]
+        _sf0 = _stream_focus_cfg(_lib0)
+        state.stream_focus_pack_enabled = _sf0["pack_focus"]
+        state.stream_focus_sibling_bps = _sf0["sibling_kbps"] * 1024
         _ks0 = _vpn_killswitch_cfg(_lib0)
         state.vpn_block_ui = _ks0["block_ui"]
         state.vpn_mode = _ks0["mode"]
@@ -12325,6 +12600,11 @@ class DownloadRaceReq(BaseModel):
     max_items: int = 2                         # concurrent races, box-wide
     quality_ceiling: int = 1080                # the HQ track's target tier (720/1080/2160)
     hq_upgrade: bool = True                    # keep a better copy and swap it in when it lands
+
+
+class StreamFocusReq(BaseModel):
+    pack_focus: bool = True                    # deselect the other files in a pack while one is streamed
+    sibling_kbps: int = 512                    # total KB/s the OTHER downloads share meanwhile (0 = no throttle)
 
 
 class MissingContentReq(BaseModel):
@@ -15548,6 +15828,12 @@ async def play_library_item(item_id: str, req: LibraryPlayReq) -> JSONResponse:
     item = next((it for it in lib["items"] if it["id"] == item_id), None)
     if not item:
         raise HTTPException(404, "Item not found.")
+    # A normal play supersedes any stream-while-downloading focus — this path
+    # plays files that are already on disk and never asked for one. (The
+    # buffer-then-play path reaches VLC through _library_play_launch directly,
+    # not through here, so its own focus is safe.)
+    if state.stream_focus_hash:
+        await _clear_stream_focus()
 
     # Resolve playlist — if caller passed explicit files use those, else auto-select
     playlist = req.files
@@ -15922,17 +16208,23 @@ async def _sequential_off_when_complete(h: str, path: str) -> None:
     flip the torrent's sequential mode AND first/last-piece priority back OFF so
     the rest of a library download proceeds normally (both streaming overrides
     are only suspended while a file is actively streamed ahead of its
-    completion)."""
+    completion).
+
+    Also the owner of the stream focus's unwind on the happy path: the moment
+    the watched file lands, the rest of its torrent comes back on and the other
+    downloads get their bandwidth back. Every exit runs it, including the two
+    give-up branches — a watchdog that quietly returned while a focus was still
+    set would strand the rest of a season pack at "do not download"."""
     try:
         while True:
             await asyncio.sleep(10)
             info = await qbit_info(h)
             if not info:
-                return                       # torrent deleted — nothing to restore
+                break                        # torrent deleted — nothing to restore
             seq_on = bool(info.get("seq_dl", False))
             flp_on = bool(info.get("f_l_piece_prio", False))
             if not seq_on and not flp_on:
-                return                       # already restored (someone else flipped it)
+                break                        # already restored (someone else flipped it)
             qfiles = await qbit_files(h)
             if not qfiles:
                 continue
@@ -15946,11 +16238,18 @@ async def _sequential_off_when_complete(h: str, path: str) -> None:
                 if flp_on:
                     await qreq("POST", "/api/v2/torrents/toggleFirstLastPiecePrio",
                                data={"hashes": h})
-                return
+                break
     except asyncio.CancelledError:
         raise
     except Exception:
         pass
+    # Only if the focus is still OURS. A newer play on another file has already
+    # taken it over, and clearing it here would unwind theirs instead.
+    if state.stream_focus_path == path:
+        try:
+            await _clear_stream_focus()
+        except Exception as exc:
+            print(f"[focus] unwind after completion failed: {exc}")
 
 
 async def _library_stream_file_launch(
@@ -16058,14 +16357,50 @@ async def _begin_library_file_stream(
     item_id = item["id"]
     h = item.get("torrent_hash")
 
+    # ── Stream focus (see the _stream_throttled block) ───────────────────────
+    # Decided BEFORE the transaction, because it needs qBit and `_lib_lock`
+    # holds up the 2 s broadcaster. `focus_path` stays empty when the file is
+    # already complete — there is nothing to prioritise and nothing to hold the
+    # other downloads back for.
+    focus_path, focus_pack = "", False
+    if h:
+        try:
+            _fi = await qbit_info(h)
+            _fq = await qbit_files(h) if _fi else []
+        except Exception:
+            _fi, _fq = None, []
+        if _fi and _fq:
+            _fsp = _fi.get("save_path", settings.qbit_download_path)
+            _ftgt = next((q for q in _fq
+                          if str(Path(_fsp) / q.get("name", "")) == path), None)
+            if _ftgt is not None and _ftgt.get("progress", 0.0) < 0.999:
+                focus_path = path
+                # Only a torrent with OTHER unfinished files has anything to
+                # deselect; a single-file torrent is already in the right order.
+                focus_pack = sum(1 for q in _fq
+                                 if q.get("progress", 0.0) < 0.999) > 1
+    # Whatever was focused before — possibly a different item — is finished with.
+    await _clear_stream_focus()
+
     async with mutate_library() as lib:
         fresh = next((x for x in lib["items"] if x["id"] == item_id), None)
         if fresh is None:
             raise HTTPException(404, "Item not found.")
         dl = fresh.setdefault("download", {"mode": "now", "files": {}})
         dl.setdefault("files", {})[path] = "high"
+        if focus_path and focus_pack and state.stream_focus_pack_enabled:
+            fresh["stream_focus"] = focus_path
+        else:
+            fresh.pop("stream_focus", None)
         await _apply_item_schedule(fresh, lib)   # reconcile priorities + resume + reactivate
         item_status = fresh.get("status", "downloading")
+    if focus_path:
+        state.stream_focus_item = item_id
+        state.stream_focus_path = focus_path
+        state.stream_focus_hash = (h or "").lower() or None
+        # Detached: throttling a dozen siblings is a dozen qBit round trips and
+        # the viewer is waiting on the buffer gate, not on this.
+        asyncio.create_task(_apply_stream_throttle())
     await broadcast("library_update", {"item_id": item_id, "status": item_status})
 
     # Sequential piece order so the beginning of the file arrives first, PLUS
@@ -19235,6 +19570,11 @@ async def stop() -> JSONResponse:
     async def _stop_cleanup(ah: Optional[str], lid: Optional[str], ph: Optional[str],
                             yt: bool, sys_vol_snapshot: Optional[int]) -> None:
         try:
+            # Nothing is being watched any more, so nothing has a claim on the
+            # link: sibling files back on, sibling torrents unthrottled. Done
+            # here rather than inline above because it talks to qBit, and Stop
+            # has to feel instant.
+            await _clear_stream_focus()
             if ah and not lid:
                 await _qbit_delete_transient(ah, "stop")
             if ph:
@@ -22821,6 +23161,47 @@ async def admin_set_download_race(request: Request,
     state.download_race_enabled = cfg["enabled"]
     state.download_race_ceiling = cfg["quality_ceiling"]
     return JSONResponse({"ok": True, **cfg})
+
+
+@app.get("/api/admin/stream-focus")
+async def admin_get_stream_focus(request: Request) -> JSONResponse:
+    """Return the stream-focus policy, plus whether one is engaged right now."""
+    _require_admin(request)
+    return JSONResponse({
+        **_stream_focus_cfg(await get_library()),
+        "active": bool(state.stream_focus_hash),
+        "throttled": state.stream_throttled_count,
+    })
+
+
+@app.post("/api/admin/stream-focus")
+async def admin_set_stream_focus(request: Request,
+                                 body: StreamFocusReq) -> JSONResponse:
+    """Save what "play this now" may do to everything else that is downloading.
+
+    `sibling_kbps` is VALIDATED, not coerced: quietly rounding an unrecognised
+    budget would leave the panel showing a number the server never agreed to.
+    Turning pack focus off releases any focus already in flight, so the rest of
+    a pack starts downloading again immediately rather than at the end of
+    whatever is currently being watched."""
+    _require_admin(request)
+    if body.sibling_kbps not in _STREAM_SIBLING_KBPS:
+        raise HTTPException(
+            400, f"sibling_kbps must be one of {list(_STREAM_SIBLING_KBPS)}.")
+    async with mutate_library() as lib:
+        sf = lib.setdefault("settings", {}).setdefault("stream_focus", {})
+        sf["pack_focus"]   = bool(body.pack_focus)
+        sf["sibling_kbps"] = int(body.sibling_kbps)
+    cfg = _stream_focus_cfg(lib)
+    state.stream_focus_pack_enabled = cfg["pack_focus"]
+    state.stream_focus_sibling_bps = cfg["sibling_kbps"] * 1024
+    if not cfg["pack_focus"]:
+        await _clear_all_stream_focus()
+    # Applies (or releases) against the live stream without waiting for a tick.
+    await _apply_stream_throttle()
+    return JSONResponse({"ok": True, **cfg,
+                         "active": bool(state.stream_focus_hash),
+                         "throttled": state.stream_throttled_count})
 
 
 @app.get("/api/admin/prep-validate")
