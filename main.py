@@ -2044,6 +2044,18 @@ async def qbit_remove_tags(h: str, tags: str) -> None:
                data={"hashes": h, "tags": tags})
 
 
+async def qbit_all_tags() -> list:
+    """Every tag NAME qBittorrent knows, whether or not anything carries it."""
+    r = await qreq("GET", "/api/v2/torrents/tags")
+    return r.json() if (r and r.status_code == 200) else []
+
+
+async def qbit_delete_tags(tags: str) -> None:
+    """Delete tag names outright (removing a tag from a torrent leaves the name
+    behind in qBit's sidebar, so anything that mints tags has to tidy up)."""
+    await qreq("POST", "/api/v2/torrents/deleteTags", data={"tags": tags})
+
+
 async def qbit_streaming_mode(h: str) -> None:
     """Ensure sequential download is on.
 
@@ -7249,7 +7261,34 @@ async def _release_orphan_stream_caps(
                 print(f"[focus] could not release stale cap on {th[:8]}: {exc}")
         if total:
             print(f"[focus] released {total} stale download cap(s) left by a restart")
+    await _prune_stream_cap_tags()
     return total
+
+
+async def _prune_stream_cap_tags() -> None:
+    """Drop cap tag NAMES nothing carries any more.
+
+    Removing a tag from a torrent leaves the name in qBittorrent's sidebar, and
+    the name encodes the previous limit — so over time a box would collect a
+    `streamlink-dlcap-<n>` entry per distinct limit it ever restored. Cheap to
+    tidy once at startup, and never touches a name still in use."""
+    try:
+        names = [t for t in (await qbit_all_tags() or [])
+                 if isinstance(t, str) and t.startswith(_STREAM_CAP_TAG)]
+        if not names:
+            return
+        tors = await qbit_info_all()
+        if tors is None:
+            return          # can't prove a name is unused — leave every one alone
+        live = set()
+        for t in tors:
+            for x in (t.get("tags") or "").split(","):
+                live.add(x.strip())
+        dead = [n for n in names if n not in live]
+        if dead:
+            await qbit_delete_tags(",".join(dead))
+    except Exception as exc:
+        print(f"[focus] could not prune cap tags: {exc}")
 
 
 async def _apply_stream_throttle(torrents: Optional[list] = None,

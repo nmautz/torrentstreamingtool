@@ -1,5 +1,13 @@
 # Changelog
 
+## [16.1.3] — 2026-09-17
+* Tidy-up: removing a tag from a torrent leaves the tag NAME in qBittorrent's sidebar, and
+  the cap tag encodes the previous limit — so a box would slowly collect a
+  `streamlink-dlcap-<n>` entry for every distinct limit it ever restored. The startup sweep
+  now also deletes cap tag names nothing carries any more. It never touches a name still in
+  use, and does nothing at all if qBittorrent is unreachable (it can't prove a name is
+  unused then).
+
 ## [16.1.2] — 2026-09-17
 **16.1.1's startup sweep ran too early to find anything.**
 
