@@ -77,6 +77,9 @@ make test                 # pure unit tests for the leaf modules (no deps, no ve
                           #   python tests/test_race_rules.py
                           #   python tests/test_tmdbcache.py
                           #   python tests/test_http_clients.py
+                          # tests/search_eval/ is the LIVE search-accuracy kit
+                          # (69 hand-labelled shows) - run verify.py against a
+                          # box before trusting a change to episode matching.
                           # tests/race_harness.py is the LIVE integration driver
                           # for download racing - needs a running StreamLink +
                           # qBittorrent and its own magnets file. See its docstring.
